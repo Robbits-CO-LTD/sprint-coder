@@ -30,6 +30,7 @@ import {
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
 import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
+import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
 // Worker task runs one ephemeral, read-only/no-tools turn on a production runtime (Claude/Codex)
@@ -337,6 +338,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       formatPriorTeamConversation(input.priorConversation),
       '',
       `依頼: ${input.content}`,
+      workerCriteriaPrompt(input.doneCriteria ?? []),
     ]
       .filter((line) => line !== '')
       .join('\n');
@@ -376,7 +378,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
           runtimeWorkspace,
           writeScope,
         );
-        const summary = finalText.trim() === '' ? '(空の応答)' : finalText.trim();
+        const report = readWorkerCriteriaReport(finalText, input.doneCriteria);
+        const summary = report.summary;
+        const criteria = report.criteria === undefined ? {} : { criteria: report.criteria };
         const runtimeVerification = {
           name: `worker-runtime:${choice.kind}`,
           outcome: 'pass' as const,
@@ -384,6 +388,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         const writeFailure = workerWriteFailure({
           accessMode: input.accessMode,
           writeCapable: input.worker.writeCapable === true,
+          canDelegate: input.worker.canDelegate === true,
           workspacePath,
           writeScope,
           writes,
@@ -402,13 +407,14 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
                   status: 'succeeded',
                   summary,
                   artifacts: [],
-                  verification: [runtimeVerification],
+                  verification: [runtimeVerification, ...report.verification],
                   risks:
                     writes.denied > 0
                       ? [
                           `書き込みツールの呼び出し${writes.denied}件が拒否されました（反映された書き込みは${writes.committed}件）。`,
                         ]
                       : [],
+                  ...criteria,
                 }
               : {
                   status: 'failed',
@@ -417,8 +423,10 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
                   verification: [
                     runtimeVerification,
                     { name: writeFailure.name, outcome: 'fail', detail: writeFailure.detail },
+                    ...report.verification,
                   ],
                   risks: [writeFailure.detail.slice(0, 500)],
+                  ...criteria,
                 },
           usage: {
             costCents: 0,
@@ -812,17 +820,23 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
 }
 
 /**
- * Why a write execution could not change the Workspace, or null when it could (issue #527).
- * Read-only investigations never fail here, and neither does a write execution that simply made
- * no write call.
+ * Why a write execution did not change the Workspace, or null when it did (issues #527, #550).
+ * Read-only investigations never fail here. A write execution fails when it ran read-only, when
+ * every write it attempted was denied, and when it never attempted a write at all. A Manager is
+ * exempt from the last rule: it may meet a write request through the Workers it delegates to,
+ * whose writes land in their own isolations rather than in its count.
  */
 function workerWriteFailure(input: {
   accessMode: TeamWorkerExecutionInput['accessMode'];
   writeCapable: boolean;
+  canDelegate: boolean;
   workspacePath: string | null;
   writeScope: RuntimeWriteScope;
   writes: WorkerWriteObservation;
-}): { name: 'worker-write-scope' | 'worker-write-denied'; detail: string } | null {
+}): {
+  name: 'worker-write-scope' | 'worker-write-denied' | 'worker-write-not-attempted';
+  detail: string;
+} | null {
   if (input.accessMode !== 'workspace-write') return null;
   if (input.writeScope === 'read-only')
     return {
@@ -837,6 +851,11 @@ function workerWriteFailure(input: {
     return {
       name: 'worker-write-denied',
       detail: `書き込みツールの呼び出し${input.writes.denied}件が拒否され、反映された書き込みは1件もありませんでした。`,
+    };
+  if (input.writes.committed === 0 && input.writes.denied === 0 && !input.canDelegate)
+    return {
+      name: 'worker-write-not-attempted',
+      detail: '書き込みを頼まれましたが、ファイルを1回も書き込まずに終わりました。',
     };
   return null;
 }

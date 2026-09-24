@@ -30,6 +30,7 @@ import {
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
+import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
 
 export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   fallback: TeamWorkerRuntime;
@@ -117,6 +118,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     workspacePath?: string | null;
     workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
+    doneCriteria?: readonly string[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
@@ -161,7 +163,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     if (connection.providerId !== input.worker.modelSelection.requestedProvider)
       throw new Error('Provider Worker Connection does not match its requested Provider');
     const executionId = input.executionId ?? input.envelope.deliveryId;
-    const prompt = workerPrompt(input.worker, input.content, input.priorConversation);
+    const prompt = workerPrompt(
+      input.worker,
+      input.content,
+      input.priorConversation,
+      input.doneCriteria,
+    );
     const inheritedContext = reserveTeamWorkerContext(
       applyWorkerContextInheritance(
         input.worker,
@@ -404,7 +411,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           `External API Manager exceeded ${MAX_PROVIDER_MANAGER_ROUNDS} provider rounds`,
         );
       input.onEvent?.({ type: 'completed' });
-      const summary = output.join('').trim() || '(空の応答)';
+      const report = readWorkerCriteriaReport(output.join(''), input.doneCriteria);
+      const summary = report.summary;
       return {
         claims: {
           deliveryId: input.envelope.deliveryId,
@@ -420,8 +428,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
               name: `worker-runtime:${connection.providerId}:official-api`,
               outcome: 'pass',
             },
+            ...report.verification,
           ],
           risks: [],
+          ...(report.criteria === undefined ? {} : { criteria: report.criteria }),
         },
         usage: {
           costCents: costCents(providerUsage),
@@ -514,6 +524,7 @@ function workerPrompt(
   worker: AgentRecord,
   content: string,
   priorConversation: readonly TeamRuntimeConversationItem[] | undefined,
+  doneCriteria: readonly string[] | undefined,
 ): string {
   return [
     `あなたはチームの「${worker.role}」担当Workerです。`,
@@ -526,6 +537,7 @@ function workerPrompt(
     formatPriorTeamConversation(priorConversation),
     '',
     `依頼: ${content}`,
+    workerCriteriaPrompt(doneCriteria ?? []),
   ]
     .filter((line) => line !== '')
     .join('\n');

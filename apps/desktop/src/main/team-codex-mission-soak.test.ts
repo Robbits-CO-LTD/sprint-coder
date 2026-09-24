@@ -12,6 +12,7 @@ import {
   type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
+import { allCriteriaDone } from './team-worker-criteria';
 import { SqlitePersistenceClient } from './persistence';
 import { CodexRuntimeAdapter, probeCodex } from '../runtime-host/codex-adapter';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -78,6 +79,7 @@ class DirectCodexTeamRuntime implements TeamWorkerRuntime {
     envelope: TeamEnvelope;
     content: string;
     workspacePath?: string | null;
+    doneCriteria?: readonly string[];
     onEvent?: Parameters<TeamWorkerRuntime['execute']>[0]['onEvent'];
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
@@ -227,6 +229,11 @@ class DirectCodexTeamRuntime implements TeamWorkerRuntime {
           artifacts: [],
           verification: [{ name: 'real-codex-soak-managed-command', outcome: 'pass' }],
           risks: [],
+          // This fixture already refused success without a terminal managed command above.
+          criteria: allCriteriaDone(
+            input.doneCriteria,
+            'The managed command reached a terminal state with exit code 0.',
+          ),
         },
         resolution: { resolvedProvider: 'openai', resolvedModel: model },
         usage: {

@@ -38,6 +38,7 @@ import type { TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -286,6 +287,8 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
   readonly stopped: string[] = [];
   spoofClaims = false;
   completionStatus: 'succeeded' | 'failed' | 'partial' = 'succeeded';
+  /** How the Worker reports its task's done criteria (issue #550). */
+  criteriaReport: 'all-done' | 'last-not-done' | 'none' = 'all-done';
 
   async start(_worker: AgentRecord): Promise<{ pid: null }> {
     this.activeStarts += 1;
@@ -299,6 +302,7 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    doneCriteria?: readonly string[];
   }): Promise<WorkerRuntimeResult> {
     return {
       claims: {
@@ -312,6 +316,7 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
         artifacts: [],
         verification: [{ name: 'test-runtime', outcome: 'pass' }],
         risks: [],
+        ...this.reportedCriteria(input),
       },
       usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
     };
@@ -319,6 +324,19 @@ class TestWorkerRuntime implements TeamWorkerRuntime {
 
   async stop(agentId: string): Promise<void> {
     this.stopped.push(agentId);
+  }
+
+  private reportedCriteria(input: {
+    worker: AgentRecord;
+    content: string;
+    doneCriteria?: readonly string[];
+  }): { criteria?: ReturnType<typeof allCriteriaDone> } {
+    if (this.criteriaReport === 'none') return {};
+    const criteria = allCriteriaDone(input.doneCriteria, `${input.worker.role}: ${input.content}`);
+    const last = criteria.at(-1);
+    if (this.criteriaReport === 'last-not-done' && last !== undefined)
+      criteria[criteria.length - 1] = { ...last, status: 'not_done', evidence: 'not finished' };
+    return { criteria };
   }
 }
 
@@ -485,6 +503,7 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
     worker: AgentRecord;
     envelope: TeamEnvelope;
     content: string;
+    doneCriteria?: readonly string[];
   }): Promise<WorkerRuntimeResult> {
     this.contents.push(input.content);
     this.activeExecutions += 1;
@@ -503,6 +522,7 @@ class BlockingWorkerRuntime extends TestWorkerRuntime {
         artifacts: [],
         verification: [{ name: 'blocking-runtime', outcome: 'pass' }],
         risks: [],
+        criteria: allCriteriaDone(input.doneCriteria, `${input.worker.role}: ${input.content}`),
       },
       usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
     };
@@ -558,6 +578,7 @@ class InterruptibleWorkerRuntime extends TestWorkerRuntime {
     envelope: TeamEnvelope;
     content: string;
     priorConversation?: readonly TeamRuntimeConversationItem[];
+    doneCriteria?: readonly string[];
   }): Promise<WorkerRuntimeResult> {
     this.contents.push({ agentId: input.worker.id, content: input.content });
     this.priorConversations.push(input.priorConversation ?? []);
@@ -576,6 +597,7 @@ class InterruptibleWorkerRuntime extends TestWorkerRuntime {
         artifacts: [],
         verification: [{ name: 'interruptible-runtime', outcome: 'pass' }],
         risks: [],
+        criteria: allCriteriaDone(input.doneCriteria, `${input.worker.role}: ${input.content}`),
       },
       usage: { costCents: 1, tokens: 2, timeMs: 3, toolCalls: 4 },
     };
@@ -4440,6 +4462,7 @@ if (runsWithElectronAbi)
             artifacts: [],
             verification: [],
             risks: [],
+            criteria: allCriteriaDone(input.doneCriteria, 'latest instruction completed'),
           },
           usage: { costCents: 0, tokens: 0, timeMs: 0, toolCalls: 0 },
         };
@@ -5313,6 +5336,300 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('completes a read-only investigation with the evidence reported for each criterion', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Per-criterion evidence');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: 'summary that must not become evidence',
+              artifacts: [],
+              verification: [],
+              risks: [],
+              criteria: (input.doneCriteria ?? []).map((criterion) => ({
+                criterion,
+                status: 'done',
+                evidence: `checked ${criterion}`,
+              })),
+            },
+          };
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'investigator',
+        objective: 'investigate',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'investigate both points',
+        doneCriteria: ['cause found', 'fix proposed'],
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+      );
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'completed',
+        doneEvidence: [
+          {
+            criterion: 'cause found',
+            evidence: `${WORKER_SELF_REPORTED_EVIDENCE_PREFIX}checked cause found`,
+          },
+          {
+            criterion: 'fix proposed',
+            evidence: `${WORKER_SELF_REPORTED_EVIDENCE_PREFIX}checked fix proposed`,
+          },
+        ],
+      });
+      persistence.close();
+    });
+
+    it.each([
+      [
+        'reported a criterion not done',
+        'last-not-done',
+        '「old file removed」: 未達と報告されました',
+      ],
+      ['returned no per-criterion report', 'none', '「old file removed」: 報告がありません'],
+    ] as const)(
+      'records a succeeded run whose Worker %s as failed, naming the unmet criterion',
+      async (_label, criteriaReport, unmet) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Unmet done criterion');
+        const runtime = new TestWorkerRuntime();
+        runtime.criteriaReport = criteriaReport;
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reporter',
+          objective: 'report every criterion',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'create and remove',
+          doneCriteria: ['new file created', 'old file removed'],
+        });
+
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
+        const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+        expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+          status: 'failed',
+          doneEvidence: [],
+        });
+        const report = JSON.parse(coordinator.listWorkerReports(task.id, 0).at(-1)!.content) as {
+          status: string;
+          summary: string;
+          verification: { name: string; outcome: string; detail?: string }[];
+        };
+        expect(report.status).toBe('failed');
+        expect(report.summary).toContain(unmet);
+        expect(report.summary).toContain('reporter: create and remove');
+        expect(report.verification).toContainEqual({
+          name: 'worker-done-criteria',
+          outcome: 'fail',
+          detail: expect.stringContaining(unmet),
+        });
+        expect(coordinator.get(task.id)?.workers.find(({ id }) => id === worker.id)?.state).toBe(
+          'failed',
+        );
+        persistence.close();
+      },
+    );
+
+    it('quarantines a write isolation whose Worker left a criterion unmet instead of integrating it', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Unmet write criterion');
+      const runtime = new WorktreeWritingRuntime();
+      runtime.criteriaReport = 'last-not-done';
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write and delete',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the output and delete the old file',
+        doneCriteria: ['worker-output.txt is written', 'old file is deleted'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
+        phase: 'quarantined',
+      });
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'failed', terminalReason: 'worker_reported_failure' },
+      ]);
+      expect(existsSync(join(workspace, 'worker-output.txt'))).toBe(false);
+      const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'failed',
+        doneEvidence: [],
+      });
+      persistence.close();
+    });
+
+    it('fails a direct Worker message whose Worker returned no per-criterion report', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Legacy message without report');
+      const runtime = new TestWorkerRuntime();
+      runtime.criteriaReport = 'none';
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'answer',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'answer now',
+      });
+
+      expect(coordinator.get(task.id)?.workers.find(({ id }) => id === worker.id)?.state).toBe(
+        'failed',
+      );
+      const report = JSON.parse(coordinator.listWorkerReports(task.id, 0).at(-1)!.content) as {
+        status: string;
+        summary: string;
+      };
+      expect(report.status).toBe('failed');
+      expect(report.summary).toContain('報告がありません');
+      persistence.close();
+    });
+
+    it('fails a Graph step whose Worker reported a criterion not done and runs no dependent step', async () => {
+      const persistence = createPersistence();
+      persistence.setRuntime('codex');
+      persistence.setModel('gpt-5.6-terra');
+      const task = persistence.createTask('Graph unmet criterion');
+      const team = persistence.promoteTaskToTeam(task.id);
+      persistence.transitionTeamState(team.id, 'forming');
+      const keys = ['a', 'b'];
+      const workers = keys.map((role) => {
+        const worker = persistence.registerTeamWorker({
+          teamId: team.id,
+          role,
+          objective: role,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+        });
+        persistence.transitionWorkerState(worker.id, 'spawning');
+        persistence.transitionWorkerState(worker.id, 'ready');
+        return worker;
+      });
+      persistence.transitionTeamState(team.id, 'active');
+      const plan: GraphMissionPlan = {
+        mode: 'graph',
+        objective: 'Review',
+        doneCriteria: ['Reviewed'],
+        steps: workers.map((worker, index) => ({
+          key: keys[index]!,
+          nodeId: keys[index]!,
+          workerId: worker.id,
+          objective: worker.role,
+          doneCriteria: ['Reviewed', 'Findings listed'],
+          access: 'read-only',
+          dependsOn: index === 0 ? [] : ['a'],
+          writeClaims: [],
+          resourceClaims: [],
+        })),
+      };
+      const diagram = {
+        schema_version: 2,
+        diagram_type: 'workflow',
+        meta: { title: 'Review' },
+        lanes: [{ id: 'work', label: 'Work' }],
+        nodes: keys.map((id, col) => ({ id, col, lane: 'work', label: id, type: 'backend' })),
+        edges: [{ id: 'ab', from: 'a', to: 'b' }],
+      };
+      const document = nextGraphDocument(task.id, diagram, null, [], [], plan);
+      persistence.saveGraphDocument(document, 0);
+      const context = graphMissionContextFor(persistence, task.id);
+      const runtime = new TestWorkerRuntime();
+      runtime.criteriaReport = 'last-not-done';
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(1);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+
+      const mission = await coordinator.startGraphMission(task.id, async () => ({
+        taskId: task.id,
+        graphId: document.id,
+        renderRevision: 1,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        workspaceDigest: context.workspace.digest,
+        policyEpoch: context.policyEpoch,
+        contextDigest: graphMissionContextDigest(context, new Set(workers.map(({ id }) => id))),
+        consentId: randomUUID(),
+        now: new Date().toISOString(),
+      }));
+      const executionId = persistence.getTeamMission(mission.id).steps[0]!.executionId;
+      await waitFor(
+        () =>
+          persistence
+            .listTeamAttempts(executionId)
+            .some(({ state }) => ['completed', 'failed', 'interrupted'].includes(state)),
+        15_000,
+      );
+      await waitFor(() => scheduler.snapshot().activeCount === 0, 15_000);
+
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(execute.mock.calls[0]![0].doneCriteria).toEqual(['Reviewed', 'Findings listed']);
+      expect(persistence.listTeamAttempts(executionId).map(({ state }) => state)).not.toContain(
+        'completed',
+      );
+      expect(persistence.getTeamExecution(executionId).state).not.toBe('completed');
+      const dispatch = persistence.getTeamExecutionDispatch(executionId);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({ doneEvidence: [] });
+      expect(persistence.getTeamTask(dispatch.teamTaskId).status).not.toBe('completed');
+      expect(persistence.getTeamMission(mission.id).state).not.toBe('completed');
+      persistence.close();
+    });
+
     it('records the Worker runtime error code and diagnostic on the attempt without retrying a billing failure', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Billing failure');
@@ -6084,6 +6401,7 @@ if (runsWithElectronAbi)
               artifacts: [],
               verification: [],
               risks: [],
+              criteria: allCriteriaDone(input.doneCriteria, 'done'),
             },
           };
         },
@@ -6151,6 +6469,7 @@ if (runsWithElectronAbi)
               artifacts: [],
               verification: [],
               risks: [],
+              criteria: allCriteriaDone(input.doneCriteria, 'done'),
             },
           };
         },
@@ -6216,6 +6535,7 @@ if (runsWithElectronAbi)
               artifacts: [],
               verification: [],
               risks: [],
+              criteria: allCriteriaDone(input.doneCriteria, '完了'),
             },
           };
         },

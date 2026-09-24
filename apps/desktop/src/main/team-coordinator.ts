@@ -78,6 +78,13 @@ import type {
 import type { WorkerWorktreeManager } from './worker-worktree';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
+import {
+  allCriteriaDone,
+  judgeWorkerCompletion,
+  type WorkerDoneEvidence,
+} from './team-worker-criteria';
+
+export { WORKER_SELF_REPORTED_EVIDENCE_PREFIX } from './team-worker-criteria';
 
 export type WorkerRuntimeResult = Readonly<{
   claims?: Readonly<{
@@ -221,6 +228,12 @@ export interface TeamWorkerRuntime {
     workspacePath?: string | null;
     workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
+    /**
+     * The task's done criteria (issue #550). A runtime asks the Worker to report each one and
+     * returns that report as `completion.criteria`; Main passes them on every dispatch, and a
+     * completion without the report cannot complete a task that has criteria.
+     */
+    doneCriteria?: readonly string[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult>;
@@ -289,6 +302,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     workspacePath?: string | null;
     workspaceSet?: RuntimeWorkspaceSet;
     priorConversation?: readonly TeamRuntimeConversationItem[];
+    doneCriteria?: readonly string[];
     onEvent?: (event: WorkerActivityEvent) => void;
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
@@ -304,6 +318,7 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
     await waitForE2ETeamWorkerRelease(input.worker.role, input.signal, () =>
       input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() }),
     );
+    const summary = `${input.worker.role}が依頼「${input.content}」を完了しました。`;
     const result = {
       claims: {
         deliveryId: input.envelope.deliveryId,
@@ -312,10 +327,12 @@ export class DeterministicTeamWorkerRuntime implements TeamWorkerRuntime {
       },
       completion: {
         status: 'succeeded',
-        summary: `${input.worker.role}が依頼「${input.content}」を完了しました。`,
+        summary,
         artifacts: [],
         verification: [{ name: 'worker-runtime', outcome: 'pass' }],
         risks: [],
+        // The simulation does every task it is given, so it reports every criterion done.
+        criteria: allCriteriaDone(input.doneCriteria, summary),
       },
       usage: {
         costCents: 0,
@@ -358,23 +375,6 @@ const executionEstimate = Object.freeze({
   timeMs: 60_000,
   toolCalls: 10,
 });
-
-export const WORKER_SELF_REPORTED_EVIDENCE_PREFIX = 'Worker報告（Main未検証）: ';
-
-/**
- * Done evidence from a Worker's own report (issue #527). A failed report proves no criterion, and a
- * successful one is labelled as the Worker's claim, which Main has not checked.
- */
-function workerDoneEvidence(
-  doneCriteria: readonly string[],
-  completion: Pick<WorkerCompletion, 'status' | 'summary'>,
-): { criterion: string; evidence: string }[] {
-  if (completion.status !== 'succeeded') return [];
-  return doneCriteria.map((criterion) => ({
-    criterion,
-    evidence: `${WORKER_SELF_REPORTED_EVIDENCE_PREFIX}${completion.summary}`.slice(0, 4_000),
-  }));
-}
 
 export class TeamCoordinator {
   private readonly graphWorkspaceResumeDigests = new Map<string, string>();
@@ -1417,6 +1417,7 @@ export class TeamCoordinator {
         dispatch.messageSeq,
         execution.instruction.content,
         dispatch.teamTaskId,
+        dispatch.doneCriteria,
         execution.id,
         attemptId,
         worktree?.path ?? isolation?.roots.find((root) => root.role === 'primary')?.isolatedPath,
@@ -1444,7 +1445,7 @@ export class TeamCoordinator {
           result.resolution,
           result.providerUsage,
         );
-      const doneEvidence = workerDoneEvidence(dispatch.doneCriteria, result.value);
+      const doneEvidence = result.doneEvidence;
       let changedFiles = [...result.changedFiles];
       if (result.value.status !== 'succeeded') throw new Error(result.value.summary);
       if (worktree) {
@@ -2722,6 +2723,7 @@ export class TeamCoordinator {
           message.seq,
           input.content,
           teamTask.id,
+          input.doneCriteria,
         );
         this.persistence.transitionTeamMessageState(message.id, 'delivered');
         this.persistence.transitionTeamDelivery({
@@ -2731,7 +2733,7 @@ export class TeamCoordinator {
         });
         this.settleExecution(reservations, completion.usage);
         this.persistWorkerResult(team.id, worker, leader, completion.value);
-        const doneEvidence = workerDoneEvidence(input.doneCriteria, completion.value);
+        const doneEvidence = completion.doneEvidence;
         const report = workerReportSchema.parse({
           status: completion.value.status === 'succeeded' ? 'completed' : 'failed',
           summary: completion.value.summary,
@@ -2921,6 +2923,7 @@ export class TeamCoordinator {
         input.messageSeq,
         content,
         input.teamTaskId,
+        input.doneCriteria,
         input.executionId,
         attempt.id,
         missionWorktree?.path ??
@@ -2958,6 +2961,8 @@ export class TeamCoordinator {
           completion.providerUsage,
         );
       let changedFiles = [...completion.changedFiles];
+      // The status is Main's verdict, so a run that left a criterion unmet is quarantined here
+      // rather than integrated.
       const failedWorkspaceWrite =
         (missionWorktree !== null || executionIsolation !== null) &&
         completion.value.status !== 'succeeded';
@@ -2999,7 +3004,7 @@ export class TeamCoordinator {
           missionWorktree = await this.queueMissionWorktreeIntegration(missionWorktree);
         }
       }
-      const doneEvidence = workerDoneEvidence(input.doneCriteria, completion.value);
+      const doneEvidence = completion.doneEvidence;
       if (executionIsolation !== null) {
         if (failedWorkspaceWrite)
           this.quarantineExecutionIsolation(
@@ -4048,13 +4053,16 @@ export class TeamCoordinator {
     seq: number,
     content: string,
     teamTaskId: string,
+    doneCriteria: readonly string[],
     executionId?: string,
     attemptId?: string,
     workspacePath?: string,
     accessMode: TeamExecutionAccess = 'read-only',
     workspaceSet?: RuntimeWorkspaceSet,
   ): Promise<{
+    /** Already judged against `doneCriteria`: unmet criteria turn a success into a failure. */
     value: WorkerCompletion;
+    doneEvidence: WorkerDoneEvidence[];
     usage: WorkerRuntimeResult['usage'];
     resolution: WorkerRuntimeResult['resolution'];
     providerUsage: WorkerRuntimeResult['providerUsage'];
@@ -4111,6 +4119,7 @@ export class TeamCoordinator {
               ...(workspacePath === undefined ? {} : { workspacePath }),
               ...(workspaceSet === undefined ? {} : { workspaceSet }),
               priorConversation,
+              doneCriteria,
               signal,
               onEvent: (event) => {
                 observe(event);
@@ -4134,8 +4143,15 @@ export class TeamCoordinator {
           stop: () => this.runtime.stop(worker.id),
         });
         assertEnvelopeMatchesClaims(envelope, result.claims ?? {});
+        // Every caller acts on this verdict, so it is taken here, before any of them integrates
+        // a workspace or moves a task, attempt or execution to a terminal state (issue #550).
+        const judged = judgeWorkerCompletion(
+          doneCriteria,
+          workerCompletionSchema.parse(result.completion),
+        );
         return {
-          value: workerCompletionSchema.parse(result.completion),
+          value: judged.completion,
+          doneEvidence: judged.doneEvidence,
           usage: result.usage,
           resolution: result.resolution,
           providerUsage: result.providerUsage,

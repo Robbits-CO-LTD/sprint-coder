@@ -436,6 +436,62 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     ).toContain('この内容を取得し直すためにTeamツールを呼ぶ必要はありません。');
   });
 
+  it('asks an external Worker for a per-criterion report and returns it', async () => {
+    const prompts: string[] = [];
+    const replies = [
+      [
+        '調査しました。',
+        '```json',
+        JSON.stringify({
+          criteria: [
+            { index: 1, status: 'done', evidence: '公式資料で確認' },
+            { index: 2, status: 'not_done', evidence: '比較表は作れませんでした' },
+          ],
+        }),
+        '```',
+      ].join('\n'),
+      '調査しました。',
+    ];
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute(_connection, request) {
+        prompts.push(String(request.messages.at(-1)?.content));
+        yield { type: 'output_delta', text: replies[prompts.length - 1]! };
+        yield { type: 'completed', stopReason: 'completed' };
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+    const input = {
+      worker: providerWorker(),
+      envelope,
+      content: '調査してください',
+      doneCriteria: ['仕様を確認する', '比較表を作る'],
+    };
+
+    const reported = await adapter.execute(input);
+    const unreported = await adapter.execute(input);
+
+    expect(prompts[0]).toContain('依頼: 調査してください');
+    expect(prompts[0]).toContain('1. 仕様を確認する');
+    expect(prompts[0]).toContain('2. 比較表を作る');
+    expect(reported.completion).toMatchObject({
+      status: 'succeeded',
+      summary: '調査しました。',
+      criteria: [
+        { criterion: '仕様を確認する', status: 'done', evidence: '公式資料で確認' },
+        { criterion: '比較表を作る', status: 'not_done', evidence: '比較表は作れませんでした' },
+      ],
+    });
+    expect(unreported.completion).not.toHaveProperty('criteria');
+    expect(unreported.completion).toMatchObject({
+      verification: expect.arrayContaining([
+        expect.objectContaining({ name: 'criteria-report', outcome: 'fail' }),
+      ]),
+    });
+  });
+
   it('enables provider-hosted Web Search for an OpenRouter Team Worker', async () => {
     const openRouterConnection: ProviderConnection = {
       ...connection,

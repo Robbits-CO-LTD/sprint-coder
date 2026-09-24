@@ -1200,6 +1200,23 @@ describe('public contracts', () => {
       }),
     ).toThrow();
     expect(() => workerCompletionSchema.parse({ ...completion, unknown: true })).toThrow();
+    const criteria = [
+      { criterion: 'file created', status: 'done', evidence: 'read it back' },
+      { criterion: 'old file removed', status: 'not_done', evidence: '' },
+    ];
+    expect(workerCompletionSchema.parse({ ...completion, criteria }).criteria).toEqual(criteria);
+    expect(() =>
+      workerCompletionSchema.parse({
+        ...completion,
+        criteria: [{ criterion: 'file created', status: 'partial', evidence: 'x' }],
+      }),
+    ).toThrow();
+    expect(() =>
+      workerCompletionSchema.parse({
+        ...completion,
+        criteria: [{ criterion: 'file created', status: 'done', evidence: 'x', index: 1 }],
+      }),
+    ).toThrow();
   });
 
   it('validates team hire-worker and send-message inputs and rejects out-of-range values', () => {

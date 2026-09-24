@@ -9,6 +9,7 @@ const runtimeHostMock = vi.hoisted(() => ({
   starts: [] as Array<{ kind: 'claude' | 'codex' | 'grok'; args: unknown[] }>,
   waitForExit: vi.fn<(turnId: string) => Promise<void>>(async (_turnId: string) => undefined),
   startSucceeds: true,
+  finalText: '完了',
   beforeComplete: null as ((turnId: string) => void) | null,
   failures: new Map<
     'claude' | 'codex' | 'grok',
@@ -97,7 +98,7 @@ vi.mock('./runtime-host', () => ({
         return false;
       }
       runtimeHostMock.beforeComplete?.(turnId);
-      this.onEvent(taskId, turnId, { type: 'delta', delta: '完了' });
+      this.onEvent(taskId, turnId, { type: 'delta', delta: runtimeHostMock.finalText });
       this.onEvent(taskId, turnId, { type: 'completed' });
       return true;
     }
@@ -132,6 +133,7 @@ import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract
 afterEach(() => {
   runtimeHostMock.failures.clear();
   runtimeHostMock.startSucceeds = true;
+  runtimeHostMock.finalText = '完了';
   runtimeHostMock.beforeComplete = null;
   runtimeHostMock.waitForExit.mockReset();
   runtimeHostMock.waitForExit.mockResolvedValue(undefined);
@@ -1699,6 +1701,13 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     const subject = runtime({ writeScopeFor: () => 'workspace-write' });
     runtimeHostMock.beforeComplete = (turnId) => {
       subject.recordManagedToolDenied(turnId, 'read_file');
+      subject.recordManagedToolResult(turnId, {
+        rootId: 'root-1',
+        path: 'a.txt',
+        sagaId: 'saga-1',
+        kind: 'add',
+        state: 'committed',
+      });
     };
 
     const result = await subject.execute({ ...writeInput, worker: writableWorker() });
@@ -1708,7 +1717,7 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     subject.dispose();
   });
 
-  it('does not fail a read-only investigation or a write execution that attempted no writes', async () => {
+  it('does not fail a read-only investigation that made no write', async () => {
     const investigation = runtime();
     const readResult = await investigation.execute({
       worker: worker(false),
@@ -1717,11 +1726,127 @@ describe('RuntimeHostTeamWorkerRuntime write outcome', () => {
     });
     expect(completionOf(readResult).status).toBe('succeeded');
     investigation.dispose();
+  });
 
+  it('fails a write execution that never attempted a write, whatever the Worker says', async () => {
     const writer = runtime({ writeScopeFor: () => 'workspace-write' });
-    const writeResult = await writer.execute({ ...writeInput, worker: writableWorker() });
-    expect(completionOf(writeResult).status).toBe('succeeded');
-    expect(completionOf(writeResult).risks).toEqual([]);
+    runtimeHostMock.beforeComplete = (turnId) => {
+      // A denied read is not a write attempt.
+      writer.recordManagedToolDenied(turnId, 'read_file');
+    };
+    runtimeHostMock.finalText = [
+      'ファイルを作成しました。',
+      '```json',
+      '{"criteria":[{"index":1,"status":"done","evidence":"作成しました"}]}',
+      '```',
+    ].join('\n');
+
+    const result = await writer.execute({
+      ...writeInput,
+      worker: writableWorker(),
+      doneCriteria: ['result.txt を作成する'],
+    });
+
+    const completion = completionOf(result);
+    expect(completion.status).toBe('failed');
+    expect(completion.verification).toContainEqual({
+      name: 'worker-write-not-attempted',
+      outcome: 'fail',
+      detail: '書き込みを頼まれましたが、ファイルを1回も書き込まずに終わりました。',
+    });
+    expect(completion.summary).toContain('ファイルを1回も書き込まずに終わりました');
+    expect(completion.summary).toContain('ファイルを作成しました。');
     writer.dispose();
+  });
+
+  it('lets a Manager meet a write request through its Workers without writing itself', async () => {
+    const manager = runtime({
+      writeScopeFor: () => 'workspace-write',
+      teamMcpFor: () => ({
+        socketPath: '/tmp/team.sock',
+        token: 'manager-token',
+        guidance: 'manager guidance',
+        toolNames: TEAM_CORE_MCP_TOOL_NAMES,
+      }),
+    });
+
+    const result = await manager.execute({
+      ...writeInput,
+      envelope,
+      worker: { ...worker(true), writeCapable: true },
+    });
+
+    expect(completionOf(result).status).toBe('succeeded');
+    manager.dispose();
+  });
+});
+
+describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
+  const completionOf = (result: { completion: unknown }) =>
+    workerCompletionSchema.parse(result.completion);
+  const doneCriteria = ['答えを見つける', '出典を示す'];
+  const input = {
+    worker: worker(false),
+    envelope: { ...envelope, targetAgentId: 'worker-1' },
+    content: '調査してください',
+    doneCriteria,
+  };
+
+  it('gives the CLI the numbered criteria and the report format', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime();
+
+    await subject.execute(input);
+
+    const prompt = runtimeHostMock.starts[0]?.args[2] as string;
+    expect(prompt).toContain('1. 答えを見つける');
+    expect(prompt).toContain('2. 出典を示す');
+    expect(prompt).toContain('```json');
+    expect(prompt.indexOf('依頼: 調査してください')).toBeLessThan(
+      prompt.indexOf('1. 答えを見つける'),
+    );
+    subject.dispose();
+  });
+
+  it('returns the per-criterion report with the task criteria and a summary without the block', async () => {
+    runtimeHostMock.finalText = [
+      '答えは42です。',
+      '```json',
+      JSON.stringify({
+        criteria: [
+          { index: 1, status: 'done', evidence: 'read_file で確認しました' },
+          { index: 2, status: 'not_done', evidence: '出典が見つかりません' },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.status).toBe('succeeded');
+    expect(completion.summary).toBe('答えは42です。');
+    expect(completion.criteria).toEqual([
+      { criterion: '答えを見つける', status: 'done', evidence: 'read_file で確認しました' },
+      { criterion: '出典を示す', status: 'not_done', evidence: '出典が見つかりません' },
+    ]);
+    expect(completion.verification.map(({ name }) => name)).toEqual(['worker-runtime:claude']);
+    subject.dispose();
+  });
+
+  it('returns no criteria and a failed criteria-report verification for a missing report', async () => {
+    runtimeHostMock.finalText = '全部終わりました。';
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.summary).toBe('全部終わりました。');
+    expect(completion.criteria).toBeUndefined();
+    expect(completion.verification).toContainEqual({
+      name: 'criteria-report',
+      outcome: 'fail',
+      detail: expect.stringContaining('```json'),
+    });
+    subject.dispose();
   });
 });

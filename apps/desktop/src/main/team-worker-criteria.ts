@@ -1,0 +1,216 @@
+import type { WorkerCompletion } from '@sprint-coder/contracts';
+
+// A Worker's success is proven one done criterion at a time (issue #550). Each runtime asks the
+// Worker to end its final answer with a per-criterion report, reads that report strictly, and Main
+// builds done evidence only from the criteria the Worker reported as done. A summary is never
+// copied into evidence, so a Worker that says "the deletion is not done" cannot complete its task.
+
+/** Marks done evidence as the Worker's own claim, which Main has not checked (issue #527). */
+export const WORKER_SELF_REPORTED_EVIDENCE_PREFIX = 'Worker報告（Main未検証）: ';
+
+/** Verification a runtime adds when the Worker's per-criterion report is missing or invalid. */
+export const CRITERIA_REPORT_VERIFICATION = 'criteria-report';
+
+/** Verification Main adds when it records a succeeded run as failed for unmet criteria. */
+export const DONE_CRITERIA_VERIFICATION = 'worker-done-criteria';
+
+export type WorkerCriterionReport = NonNullable<WorkerCompletion['criteria']>[number];
+export type WorkerDoneEvidence = { criterion: string; evidence: string };
+
+const MAX_EVIDENCE_LENGTH = 4_000;
+const MAX_QUOTED_LENGTH = 200;
+
+/**
+ * The numbered done criteria and the report format, appended to a Worker prompt. Empty when the
+ * task has no criteria, which leaves nothing to report.
+ */
+export function workerCriteriaPrompt(doneCriteria: readonly string[]): string {
+  if (doneCriteria.length === 0) return '';
+  const count = doneCriteria.length;
+  const example = [
+    { index: 1, status: 'done', evidence: '何をしてどう確かめたか' },
+    ...(count > 1 ? [{ index: 2, status: 'not_done', evidence: 'できなかった理由' }] : []),
+  ];
+  return [
+    '完了条件（Leaderが決めたものです。番号で報告してください）:',
+    ...doneCriteria.map((criterion, index) => `${index + 1}. ${criterion}`),
+    '',
+    count === 1
+      ? '最終回答の最後に、次の形式の ```json ブロックを1つだけ置き、完了条件1について報告してください。'
+      : `最終回答の最後に、次の形式の \`\`\`json ブロックを1つだけ置き、完了条件の番号1〜${count}をちょうど1回ずつ報告してください。`,
+    '- status: 満たした条件は "done"、満たしていない・確かめられなかった条件は "not_done"',
+    '- evidence: done なら何をしてどう確かめたか、not_done ならできなかった理由（4000文字以内）',
+    '満たしていない条件を "done" と報告しないでください。報告が無い・形式が違う・"not_done" の条件は未達として扱われ、この実行は失敗になります。',
+    '```json',
+    JSON.stringify({ criteria: example }),
+    '```',
+  ].join('\n');
+}
+
+export type WorkerCriteriaReportResult =
+  { ok: true; criteria: WorkerCriterionReport[]; text: string } | { ok: false; reason: string };
+
+/**
+ * Reads the per-criterion report from the last ```json block of a Worker's final answer. Every
+ * criterion number must appear exactly once with a valid status, and a done criterion needs
+ * evidence. Anything else — no block, an unclosed (cut off) block, invalid JSON, an unknown,
+ * duplicate or missing number — is a reason, never a partial report. The criterion text is always
+ * the task's own, whatever the model wrote. `text` is the answer without the report block.
+ */
+export function parseWorkerCriteriaReport(
+  finalText: string,
+  doneCriteria: readonly string[],
+): WorkerCriteriaReportResult {
+  if (doneCriteria.length === 0) return { ok: true, criteria: [], text: finalText.trim() };
+  const fail = (reason: string): WorkerCriteriaReportResult => ({ ok: false, reason });
+  let opening: RegExpExecArray | null = null;
+  for (const match of finalText.matchAll(/```json\b/giu)) opening = match;
+  if (opening === null)
+    return fail('最終回答に完了条件ごとの報告（```json ブロック）がありません。');
+  const bodyStart = opening.index + opening[0].length;
+  const close = finalText.indexOf('```', bodyStart);
+  if (close < 0)
+    return fail(
+      '完了条件ごとの報告の ```json ブロックが閉じられていません（途中で切れています）。',
+    );
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(finalText.slice(bodyStart, close));
+  } catch {
+    return fail('完了条件ごとの報告をJSONとして読み取れません。');
+  }
+  if (!isRecord(parsed) || !Array.isArray(parsed['criteria']))
+    return fail('完了条件ごとの報告に "criteria" の配列がありません。');
+  const count = doneCriteria.length;
+  const reports = new Map<number, WorkerCriterionReport>();
+  for (const entry of parsed['criteria'] as unknown[]) {
+    if (!isRecord(entry)) return fail('完了条件ごとの報告に、オブジェクトでない項目があります。');
+    const index = entry['index'];
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 1 || index > count)
+      return fail(`完了条件ごとの報告に、1〜${count}の番号ではない index があります。`);
+    if (reports.has(index)) return fail(`完了条件${index}の報告が重複しています。`);
+    const status = entry['status'];
+    if (status !== 'done' && status !== 'not_done')
+      return fail(`完了条件${index}の status が "done" でも "not_done" でもありません。`);
+    const evidence = entry['evidence'];
+    if (typeof evidence !== 'string')
+      return fail(`完了条件${index}の evidence が文字列ではありません。`);
+    const trimmed = evidence.trim();
+    if (status === 'done' && trimmed === '')
+      return fail(`完了条件${index}は done ですが、evidence が空です。`);
+    if (trimmed.length > MAX_EVIDENCE_LENGTH)
+      return fail(`完了条件${index}の evidence が${MAX_EVIDENCE_LENGTH}文字を超えています。`);
+    reports.set(index, { criterion: doneCriteria[index - 1]!, status, evidence: trimmed });
+  }
+  const missing = doneCriteria.map((_, index) => index + 1).filter((index) => !reports.has(index));
+  if (missing.length > 0) return fail(`完了条件${missing.join('、')}の報告がありません。`);
+  return {
+    ok: true,
+    criteria: [...reports.entries()].sort(([a], [b]) => a - b).map(([, report]) => report),
+    text: `${finalText.slice(0, opening.index)}${finalText.slice(close + 3)}`.trim(),
+  };
+}
+
+/**
+ * What a runtime puts in its completion from a Worker's final answer: the summary without the
+ * parsed report block, and either the criteria or a failed `criteria-report` verification. With
+ * no `doneCriteria` nothing was asked for, so nothing is read.
+ */
+export function readWorkerCriteriaReport(
+  finalText: string,
+  doneCriteria: readonly string[] | undefined,
+): {
+  summary: string;
+  criteria: WorkerCriterionReport[] | undefined;
+  verification: WorkerCompletion['verification'];
+} {
+  const report =
+    doneCriteria === undefined ? null : parseWorkerCriteriaReport(finalText, doneCriteria);
+  const text = report?.ok === true && report.text !== '' ? report.text : finalText.trim();
+  return {
+    summary: text === '' ? '(空の応答)' : text,
+    criteria: report?.ok === true ? report.criteria : undefined,
+    verification:
+      report === null || report.ok
+        ? []
+        : [{ name: CRITERIA_REPORT_VERIFICATION, outcome: 'fail', detail: report.reason }],
+  };
+}
+
+/** Every criterion reported done with the same evidence; for runtimes that simulate a Worker. */
+export function allCriteriaDone(
+  doneCriteria: readonly string[] | undefined,
+  evidence: string,
+): WorkerCriterionReport[] {
+  return (doneCriteria ?? []).map((criterion) => ({ criterion, status: 'done', evidence }));
+}
+
+/**
+ * Main's verdict on a Worker's completion, taken before any integration or state transition. A
+ * succeeded run keeps its status only when every done criterion was reported done with evidence;
+ * otherwise it is recorded as failed, naming each unmet criterion in its summary and verification,
+ * so a completed task never lacks evidence and a write isolation is never integrated. Evidence is
+ * built only from the criteria reported done, labelled as the Worker's unverified claim.
+ */
+export function judgeWorkerCompletion(
+  doneCriteria: readonly string[],
+  completion: WorkerCompletion,
+): { completion: WorkerCompletion; doneEvidence: WorkerDoneEvidence[] } {
+  // A failed report proves no criterion, whatever it says about each one.
+  if (completion.status !== 'succeeded') return { completion, doneEvidence: [] };
+  const unmet: string[] = [];
+  const doneEvidence: WorkerDoneEvidence[] = [];
+  for (const criterion of new Set(doneCriteria)) {
+    const reports = (completion.criteria ?? []).filter((report) => report.criterion === criterion);
+    const notDone = reports.find(({ status }) => status !== 'done');
+    const evidence = reports[0]?.evidence.trim() ?? '';
+    if (reports.length === 0) unmet.push(`「${clip(criterion)}」: 報告がありません`);
+    else if (notDone !== undefined)
+      unmet.push(
+        `「${clip(criterion)}」: 未達と報告されました${notDone.evidence.trim() === '' ? '' : `（${clip(notDone.evidence.trim())}）`}`,
+      );
+    else if (evidence === '') unmet.push(`「${clip(criterion)}」: 証拠が空です`);
+    else
+      doneEvidence.push({
+        criterion,
+        evidence: `${WORKER_SELF_REPORTED_EVIDENCE_PREFIX}${evidence}`.slice(
+          0,
+          MAX_EVIDENCE_LENGTH,
+        ),
+      });
+  }
+  if (unmet.length === 0) return { completion, doneEvidence };
+  const reportProblem =
+    completion.criteria === undefined
+      ? completion.verification.find(
+          ({ name, outcome }) => name === CRITERIA_REPORT_VERIFICATION && outcome === 'fail',
+        )?.detail
+      : undefined;
+  const headline = `完了条件${unmet.length}件をWorkerが満たしたと報告していないため、失敗として記録しました。`;
+  const detail = [
+    headline,
+    ...(reportProblem === undefined ? [] : [`報告の問題: ${reportProblem}`]),
+    ...unmet.map((line) => `- ${line}`),
+  ].join('\n');
+  return {
+    completion: {
+      ...completion,
+      status: 'failed',
+      summary: `${detail}\n\nWorkerの報告:\n${completion.summary}`.slice(0, 4_000),
+      verification: [
+        ...completion.verification.slice(0, 19),
+        { name: DONE_CRITERIA_VERIFICATION, outcome: 'fail', detail: detail.slice(0, 2_000) },
+      ],
+      risks: [...completion.risks.slice(0, 19), headline],
+    },
+    doneEvidence: [],
+  };
+}
+
+function clip(text: string): string {
+  return text.length <= MAX_QUOTED_LENGTH ? text : `${text.slice(0, MAX_QUOTED_LENGTH)}…`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
