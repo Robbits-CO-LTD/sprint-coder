@@ -31,7 +31,7 @@ lsof -nP -iTCP:5173 -sTCP:LISTEN
 
 ## 2. 実行コマンド
 
-dev server が既に上がっていれば 1 spec は数秒で終わる。上がっていない場合、globalSetup が `npm start` を起動して ready を待つのに最大 90 秒かかる（これは失敗ではない）。
+dev server が既に上がっていれば 1 spec は数秒で終わる。上がっていない場合、globalSetup が `npm start` を起動して ready を最大 240 秒待つ（これは失敗ではない。Forge の `generateAssets` がネイティブのヘルパーを毎回ビルドするため、遅いマシンでは数十秒〜数分かかる）。起動した `npm start` の出力は Playwright の出力フォルダの `dev-server.log`（既定の設定なら `test-results/dev-server.log`）に残る。
 
 ```bash
 # 単一 spec（最頻。まずこれ）
@@ -78,7 +78,7 @@ Playwright の `list` reporter の最終行が判定の一次情報。`N passed`
 | 症状 | 原因 | 対処 |
 |---|---|---|
 | ログに `electron-forge package` が流れ始める / `Packaged app not found` | dev モード指定忘れ | `SPRINT_CODER_E2E_MODE=dev` を付けて再実行 |
-| `Dev server / main build did not become ready within 90000ms` | dev server が上がらない | `lsof -nP -iTCP:5173 -sTCP:LISTEN` で確認、手元で `npm start` が生きているか見る |
+| `Dev server / main build did not become ready within 240000ms` | dev server が上がらない | エラーに続く `Startup phase: ...`（止まった段階）・`Progress: ...`（各条件が整った秒数）・ログ末尾を見る（全文は `dev-server.log`）。`lsof -nP -iTCP:5173 -sTCP:LISTEN` で確認、手元で `npm start` が生きているか見る |
 | 起動直後に全 spec が同じ形で即死 | ビルド壊れ（`.vite/build/index.js` が古い等） | `npm run typecheck` を先に通す |
 
 **(2) 意図的な skip**
