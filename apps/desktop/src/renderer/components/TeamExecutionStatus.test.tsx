@@ -12,7 +12,7 @@ import {
   formatClockTime,
   latestExecutionForWorker,
 } from '../lib/team-execution-display';
-import type { TeamExecutionSummary } from '../types/sprint-coder';
+import type { TeamExecutionIsolation, TeamExecutionSummary } from '../types/sprint-coder';
 
 function execution(overrides: Partial<TeamExecutionSummary> = {}): TeamExecutionSummary {
   return {
@@ -443,6 +443,140 @@ describe('TeamExecutionStatus', () => {
     );
     expect(html).toContain('data-testid="team-worker-resume"');
     expect(html).toContain('Workerを再開');
+  });
+
+  // issue #571: a hand-written renderer type omitted `waiting_integration` from `TeamExecutionIsolation`,
+  // so `isolationPhaseLabel`'s switch compiled clean while dropping this real value — the Repository
+  // row went blank instead of naming the wait. These tests pin the label and the resume gating that
+  // depend on it now that the type is aliased to the正本 schema.
+  describe('isolation phase waiting_integration (issue #571)', () => {
+    function isolationWith(
+      overrides: Partial<TeamExecutionIsolation> = {},
+    ): TeamExecutionIsolation {
+      return {
+        phase: 'waiting_integration',
+        resumeKind: null,
+        repositories: [],
+        roots: [],
+        reason: null,
+        ...overrides,
+      };
+    }
+
+    it('names the wait instead of leaving the Repository row blank, in both views', () => {
+      const row = execution({
+        accessMode: 'workspace-write',
+        isolation: isolationWith({
+          repositories: [
+            {
+              ordinal: 1,
+              repoPath: '/workspace/primary',
+              worktreePath: '/tmp/primary',
+              baseHead: 'a'.repeat(40),
+              workerHead: 'b'.repeat(40),
+              integratedHead: null,
+              state: 'ready',
+              changedFiles: ['a.txt'],
+            },
+          ],
+        }),
+      });
+      for (const variant of ['canvas', 'list'] as const) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus execution={row} variant={variant} />,
+        );
+        expect(html).toContain('data-testid="team-execution-isolation"');
+        expect(html).toContain('0/1 repository統合済み · 統合の順番待ち');
+        // The bug rendered this row's value as nothing at all — assert against that shape directly,
+        // not just for the presence of the label above.
+        expect(html).not.toMatch(/repository統合済み\s*·\s*<\/span>/);
+      }
+    });
+
+    it('shows every正本 isolation phase as a non-blank label (regression net for future phases)', () => {
+      const phases: TeamExecutionIsolation['phase'][] = [
+        'preparing',
+        'running',
+        'finalizing',
+        'waiting_integration',
+        'integrating',
+        'waiting_resume',
+        'completed',
+        'quarantined',
+      ];
+      for (const phase of phases) {
+        const row = execution({
+          accessMode: 'workspace-write',
+          isolation: isolationWith({
+            phase,
+            resumeKind: phase === 'waiting_resume' ? 'worker' : null,
+          }),
+        });
+        const html = renderToStaticMarkup(<TeamExecutionStatus execution={row} variant="list" />);
+        expect(html).not.toMatch(/repository統合済み\s*·\s*<\/span>/);
+      }
+    });
+
+    it('does not offer an integration resume while the execution is still running', () => {
+      const row = execution({ state: 'running', isolation: isolationWith() });
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={row}
+          variant="list"
+          onResume={() => undefined}
+          onResumeIntegration={() => undefined}
+        />,
+      );
+      expect(html).not.toContain('data-testid="team-integration-resume"');
+      expect(html).not.toContain('data-testid="team-worker-resume"');
+    });
+
+    it('offers the standalone integration resume once the execution itself is waiting to resume', () => {
+      const standalone = execution({
+        state: 'waiting_resume',
+        missionId: null,
+        isolation: isolationWith(),
+      });
+      for (const variant of ['canvas', 'list'] as const) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus
+            execution={standalone}
+            variant={variant}
+            onResumeIntegration={() => undefined}
+          />,
+        );
+        expect(html).toContain('data-testid="team-integration-resume"');
+        expect(html).toContain('統合を再開');
+      }
+      // No callback wired: no orphan button.
+      expect(
+        renderToStaticMarkup(<TeamExecutionStatus execution={standalone} variant="list" />),
+      ).not.toContain('data-testid="team-integration-resume"');
+    });
+
+    it('routes the resume to the Mission callback, not the standalone one, once a Mission owns the execution', () => {
+      const missionRow = execution({
+        state: 'waiting_resume',
+        missionId: 'mission-1',
+        isolation: isolationWith(),
+      });
+      // Only the standalone callback wired: a Mission-owned execution must not use it.
+      expect(
+        renderToStaticMarkup(
+          <TeamExecutionStatus
+            execution={missionRow}
+            variant="list"
+            onResumeIntegration={() => undefined}
+          />,
+        ),
+      ).not.toContain('data-testid="team-integration-resume"');
+      // Only the Mission callback wired: the same action appears through it.
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus execution={missionRow} variant="list" onResume={() => undefined} />,
+      );
+      expect(html).toContain('data-testid="team-integration-resume"');
+      expect(html).toContain('統合を再開');
+    });
   });
 
   it.each(Object.entries(EXECUTION_STATE_LABELS))(

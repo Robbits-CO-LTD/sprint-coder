@@ -772,40 +772,10 @@ export type TeamMissionWorktreeSummary = {
   changedFiles: string[];
   reason: string | null;
 };
-export type TeamExecutionIsolation = {
-  phase:
-    | 'preparing'
-    | 'running'
-    | 'finalizing'
-    | 'integrating'
-    | 'waiting_resume'
-    | 'completed'
-    | 'quarantined';
-  resumeKind: 'worker' | 'integration' | null;
-  repositories: Array<{
-    ordinal: number;
-    repoPath: string;
-    worktreePath: string;
-    baseHead: string;
-    workerHead: string | null;
-    integratedHead: string | null;
-    state: 'active' | 'ready' | 'integrated' | 'cleaned' | 'quarantined';
-    changedFiles: string[];
-  }>;
-  roots: Array<{
-    rootId: string;
-    rootLabel: string;
-    role: 'primary' | 'secondary';
-    repositoryOrdinal: number;
-    sourcePath: string;
-    isolatedPath: string;
-    identity: string;
-    mutationKey: string;
-    isolatedIdentity: string | null;
-    isolatedMutationKey: string | null;
-  }>;
-  reason: string | null;
-};
+// Type-only alias to the正本 schema (issue #571): a hand-written copy here previously omitted
+// `waiting_integration` from `phase`, so a switch over this type compiled clean while silently
+// dropping the case a real IPC payload could send.
+export type TeamExecutionIsolation = import('@sprint-coder/contracts').TeamExecutionIsolation;
 export type TeamMissionSummary = import('@sprint-coder/contracts').TeamMissionSummary;
 /** A worktree a Team Worker left on disk, and whether Main lets it be discarded (issue #544). */
 export type TeamRetainedWorktree = import('@sprint-coder/contracts').TeamRetainedWorktree;

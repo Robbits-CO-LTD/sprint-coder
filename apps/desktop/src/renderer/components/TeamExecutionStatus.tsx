@@ -10,10 +10,11 @@ import { describeExecution } from '../lib/team-execution-display';
  * on the Canvas (WorkerNode) and in the List (TeamListView). `variant` only picks a spacing class —
  * both surfaces show the exact same facts, from the exact same helper.
  *
- * Deliberately inert: no buttons, no `tabIndex`, no `<details>`, so it adds nothing to either
- * surface's keyboard order (the Canvas's arrow-key node navigation and the List's focusable
- * `<li>`s are untouched). Every state is carried by words, never by colour alone, and nothing here
- * animates, so `prefers-reduced-motion` has nothing new to suppress.
+ * Adds no `tabIndex` of its own to either surface's keyboard order (the Canvas's arrow-key node
+ * navigation and the List's focusable `<li>`s are untouched) — its own resume `<button>` and
+ * repository `<details>` follow normal tab order instead. Every state is carried by words, never
+ * by colour alone, and nothing here animates, so `prefers-reduced-motion` has nothing new to
+ * suppress.
  *
  * `execution == null` renders nothing at all — a Worker with no persisted execution keeps exactly
  * the display it had before this card existed.
@@ -169,8 +170,19 @@ function isolationResumeAction(
   onResumeMission: (() => void) | undefined,
   onResumeIntegration: (() => void) | undefined,
 ): { label: string; testId: string; onClick: () => void } | null {
+  // Only a Worker actually waiting to resume gets a manual action at all — a running execution
+  // whose isolation is separately queued for integration (`phase === 'waiting_integration'`) shows
+  // that fact as a state label only (issue #571), never a button.
   if (execution.state !== 'waiting_resume') return null;
-  if (execution.isolation?.resumeKind === 'integration') {
+  const isolation = execution.isolation;
+  // `waiting_integration` covers an execution that resumed (e.g. after an app restart) while its
+  // isolation was still queued for integration; the schema's own invariant only ever sets
+  // `resumeKind: 'integration'` while `phase === 'waiting_resume'`, so both must be checked (see
+  // team-coordinator.ts's `resumeExecutionIntegration`, which accepts either).
+  const integrationResume =
+    isolation?.phase === 'waiting_integration' ||
+    (isolation?.phase === 'waiting_resume' && isolation.resumeKind === 'integration');
+  if (integrationResume) {
     const onClick = execution.missionId === null ? onResumeIntegration : onResumeMission;
     return onClick === undefined
       ? null
@@ -192,39 +204,54 @@ function repositoryIntegrated(repository: TeamExecutionIsolation['repositories']
   );
 }
 
-function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
-  switch (isolation.phase) {
-    case 'preparing':
-      return '隔離環境を準備中';
-    case 'running':
-      return '隔離環境で実行中';
-    case 'finalizing':
-      return 'commitを確定中';
-    case 'integrating':
-      return 'repositoryを統合中';
-    case 'waiting_resume':
-      return '再開待ち';
-    case 'completed':
-      return '統合完了';
-    case 'quarantined': {
-      const { repositories } = isolation;
-      // Nothing is left to review once every worktree was removed unchanged (issue #529).
-      if (
-        repositories.length > 0 &&
-        repositories.every(
-          ({ state, integratedHead }) => state === 'cleaned' && integratedHead === null,
-        )
+// Keyed by the正本 `TeamExecutionIsolation['phase']` union (issue #571): a plain `switch` compiles
+// even when it silently drops a case, but an object literal typed as `Record<phase, ...>` does not
+// — omitting a key here, or forgetting one after contracts adds a new phase, is a type error rather
+// than a card that renders blank at runtime.
+const ISOLATION_PHASE_LABEL: Record<
+  TeamExecutionIsolation['phase'],
+  (isolation: TeamExecutionIsolation) => string
+> = {
+  preparing: () => '隔離環境を準備中',
+  running: () => '隔離環境で実行中',
+  finalizing: () => 'commitを確定中',
+  // The execution itself may still be `running` (or have resumed and be `waiting_resume`) while its
+  // isolation sits in this phase — it means the Workspace-wide integration order has not reached
+  // this repository set yet, distinct from `integrating` (its turn has come).
+  waiting_integration: () => '統合の順番待ち',
+  integrating: () => 'repositoryを統合中',
+  waiting_resume: () => '再開待ち',
+  completed: () => '統合完了',
+  quarantined: (isolation) => {
+    const { repositories } = isolation;
+    // Nothing is left to review once every worktree was removed unchanged (issue #529).
+    if (
+      repositories.length > 0 &&
+      repositories.every(
+        ({ state, integratedHead }) => state === 'cleaned' && integratedHead === null,
       )
-        return '片付け済み（統合なし）';
-      // Every change reached the Workspace; only removing a worktree afterwards failed, or the
-      // user has since discarded what was left (issue #544). Nothing unintegrated needs review.
-      if (repositories.length > 0 && repositories.every(repositoryIntegrated))
-        return repositories.some(({ state }) => state === 'quarantined')
-          ? '統合後の片付けに失敗'
-          : '統合・片付け済み';
-      return '隔離して要確認';
-    }
-  }
+    )
+      return '片付け済み（統合なし）';
+    // Every change reached the Workspace; only removing a worktree afterwards failed, or the
+    // user has since discarded what was left (issue #544). Nothing unintegrated needs review.
+    if (repositories.length > 0 && repositories.every(repositoryIntegrated))
+      return repositories.some(({ state }) => state === 'quarantined')
+        ? '統合後の片付けに失敗'
+        : '統合・片付け済み';
+    return '隔離して要確認';
+  },
+};
+
+function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
+  // Widen the lookup for a runtime value the正本 union does not actually admit (e.g. an
+  // unvalidated IPC payload from a mismatched build) — the object above stays fully keyed for the
+  // compile-time exhaustiveness check, this cast only relaxes how it is *read*, so an unrecognized
+  // phase falls back to a safe, non-committal label instead of throwing or rendering blank.
+  const table = ISOLATION_PHASE_LABEL as Record<
+    string,
+    ((isolation: TeamExecutionIsolation) => string) | undefined
+  >;
+  return table[isolation.phase]?.(isolation) ?? '状態を確認してください';
 }
 
 function isolationRepositoryStateLabel(
