@@ -420,6 +420,43 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
   });
 
+  it('does not call discarding a missing worktree record-only while its submodule commits remain (issue #580)', async () => {
+    const goneWithSubmodule = worktree({
+      executionId: 'execution-7',
+      submodules: true,
+      existsOnDisk: false,
+      worktreePath: '/worktrees/worktree-execution-7-1',
+    });
+    const gone = worktree({
+      executionId: 'execution-8',
+      existsOnDisk: false,
+      worktreePath: '/worktrees/worktree-execution-8-1',
+    });
+    api.listRetainedWorktrees.mockResolvedValueOnce({
+      worktrees: [goneWithSubmodule, gone],
+      total: 2,
+    });
+    await renderDialog();
+    const [withSubmodule, plain] = items();
+    expect(withSubmodule!.textContent).toContain(
+      '（フォルダはもうありません。破棄すると、Gitの記録に残っているsubmoduleのコミットも削除されます）',
+    );
+    expect(withSubmodule!.textContent).not.toContain('記録だけを片付けます');
+    expect(plain!.textContent).toContain(
+      '（フォルダはもうありません。破棄すると記録だけを片付けます）',
+    );
+    expect(plain!.textContent).not.toContain('submoduleのコミット');
+
+    // The confirmation gives the submodule warning, and nothing is sent before the user confirms.
+    await click(button(withSubmodule!, 'team-retained-discard'));
+    const confirm = container.querySelector('[data-testid="team-retained-confirm"]');
+    expect(confirm?.hasAttribute('open')).toBe(true);
+    expect(
+      confirm?.querySelector('[data-testid="team-retained-confirm-submodule"]')?.textContent,
+    ).toBe(SUBMODULE_DISCARD_WARNING);
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
+  });
+
   it("keeps the confirmation open with Main's reason when the discard is refused", async () => {
     api.discardRetainedWorktree.mockRejectedValueOnce(
       new Error('Workerの処理（CLI）が終了したことをまだ確認できていないため破棄できません。'),

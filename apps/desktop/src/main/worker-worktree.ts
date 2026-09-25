@@ -1,5 +1,15 @@
 import { execFile } from 'node:child_process';
-import { chmod, lstat, mkdir, readdir, realpath, rmdir, stat, unlink } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  readFile,
+  realpath,
+  rmdir,
+  stat,
+  unlink,
+} from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { safeGitExec } from './safe-git';
 
@@ -432,9 +442,15 @@ export class WorkerWorktreeManager {
   }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    if (!(await pathExists(worktreePath))) {
+      const { outcome } = await this.unregisterMissingWorktree(repoPath, worktreePath);
+      return { outcome };
+    }
     const withoutGit = await this.remainsWithoutGit(worktreePath);
-    if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
+    if (withoutGit === 'empty') {
+      const { outcome } = await this.removeEmptiedWorktree(repoPath, worktreePath);
+      return { outcome };
+    }
     if (withoutGit === 'contents') return { outcome: 'quarantined' };
     const { stdout: statusOutput } = await this.runGit(
       worktreePath,
@@ -463,7 +479,8 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
     const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath))) return this.unregisterWorktree(repoPath, worktreePath);
+    if (!(await pathExists(worktreePath)))
+      return this.unregisterMissingWorktree(repoPath, worktreePath);
     const withoutGit = await this.remainsWithoutGit(worktreePath);
     if (withoutGit === 'empty') return this.removeEmptiedWorktree(repoPath, worktreePath);
     // Git cannot say what these files are, so they never qualify; a discard may remove them.
@@ -489,15 +506,79 @@ export class WorkerWorktreeManager {
    * Finishes a removal that left only the empty folder and its registration, without Git reading
    * the folder. The folder goes only while it is still empty; a Windows lock is waited out as in any
    * removal, and one that outlasts the backoff keeps it `quarantined`. A worktree Git holds locked
-   * keeps its registration.
+   * keeps its registration. So does one whose Git record keeps a submodule store, with its empty
+   * folder, as a worktree whose folder is gone does (issue #580).
    */
   private async removeEmptiedWorktree(
     repoPath: string,
     worktreePath: string,
-  ): Promise<CleanupWorktreeResult> {
+  ): Promise<CleanupUnchangedWorktreeResult> {
     if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
+    if (await this.recordKeepsSubmodules(repoPath, worktreePath))
+      return { outcome: 'quarantined', changed: true };
     if (!(await this.removeEmptyDirectory(worktreePath))) return { outcome: 'quarantined' };
     return this.unregisterWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * The folder is gone, so only the registration is left to remove, unless Git's record of the
+   * worktree keeps a submodule store (issue #580). A Worker's commits inside a submodule live only
+   * there, and without the folder `git worktree remove` deletes the record, store and all, without
+   * the submodule check it makes on a worktree that is on disk. Such a worktree is kept for the
+   * user to discard, and reported `changed` as one kept for a submodule on disk is: it will never
+   * qualify.
+   */
+  private async unregisterMissingWorktree(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<CleanupUnchangedWorktreeResult> {
+    if (await this.recordKeepsSubmodules(repoPath, worktreePath))
+      return { outcome: 'quarantined', changed: true };
+    return this.unregisterWorktree(repoPath, worktreePath);
+  }
+
+  /**
+   * Whether Git's record of the worktree at `worktreePath` (`worktrees/<id>` in the repository's
+   * common Git directory, the one whose `gitdir` file names that path) keeps a submodule store with
+   * anything in it (issue #580). It reads the record rather than the worktree, so it answers once the
+   * folder or its `.git` is gone, when Git can no longer be asked from inside. As in
+   * `containsSubmodules`, whatever this cannot read counts as a store. A record whose `gitdir` file is
+   * missing is one Git skips too, so `git worktree remove` never reaches it.
+   */
+  private async recordKeepsSubmodules(repoPath: string, worktreePath: string): Promise<boolean> {
+    const commonDir = (
+      await this.runGit(repoPath, ['rev-parse', '--git-common-dir'], 'remove_failed')
+    ).stdout.trim();
+    if (commonDir === '') return true;
+    const records = join(resolve(repoPath, commonDir), 'worktrees');
+    let ids: string[];
+    try {
+      ids = await readdir(records);
+    } catch (error) {
+      // No linked worktree has ever been registered, so nothing can be removed either.
+      return !isEnoent(error);
+    }
+    const wanted = await pathKeys(worktreePath);
+    for (const id of ids) {
+      const record = join(records, id);
+      let gitdir: string;
+      try {
+        gitdir = await readFile(join(record, 'gitdir'), 'utf8');
+      } catch (error) {
+        if (isEnoent(error) || errorCode(error) === 'ENOTDIR') continue;
+        return true;
+      }
+      // Git reads `<worktree>/.git`, relative to the record when it is not absolute (Git 2.48+).
+      const written = gitdir.trimEnd().replace(/[\\/]\.git$/u, '');
+      if (written === '') continue;
+      const keys = await pathKeys(isAbsolute(written) ? written : resolve(record, written));
+      if (
+        keys.some((key) => wanted.includes(key)) &&
+        (await directoryHasContent(join(record, 'modules')))
+      )
+        return true;
+    }
+    return false;
   }
 
   /** Removes a directory only while it is empty; false when it stayed (a lock, or new content). */
@@ -538,7 +619,7 @@ export class WorkerWorktreeManager {
     repoPath: string,
     worktreePath: string,
   ): Promise<CleanupUnchangedWorktreeResult> {
-    if (await this.containsSubmodules(worktreePath))
+    if (await this.containsSubmodules(repoPath, worktreePath))
       return { outcome: 'quarantined', changed: true };
     if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
@@ -550,11 +631,14 @@ export class WorkerWorktreeManager {
    * gitlink (mode 160000) in its index has a directory that is not empty. Git itself only counts a
    * populated gitlink; any content counts here.
    */
-  private async containsSubmodules(worktreePath: string): Promise<boolean> {
-    // Without `.git` Git would read another repository: an emptied folder holds nothing, and
-    // contents Git cannot account for count as a possible submodule.
+  private async containsSubmodules(repoPath: string, worktreePath: string): Promise<boolean> {
+    // Without `.git` Git would read another repository: contents Git cannot account for count as a
+    // possible submodule, and an emptied folder holds one only in Git's record of it (issue #580).
     const withoutGit = await this.remainsWithoutGit(worktreePath);
-    if (withoutGit !== null) return withoutGit === 'contents';
+    if (withoutGit !== null)
+      return (
+        withoutGit === 'contents' || (await this.recordKeepsSubmodules(repoPath, worktreePath))
+      );
     const modules = (
       await this.runGit(worktreePath, ['rev-parse', '--git-path', 'modules'], 'remove_failed')
     ).stdout.trim();
@@ -646,13 +730,19 @@ export class WorkerWorktreeManager {
 
   /**
    * Whether a retained worktree holds a submodule, by the same test the automatic cleanup keeps one
-   * with (issue #544). Reads only. A worktree that is gone has none on disk; one this manager cannot
-   * read, or does not own, counts as holding one, so the user is warned rather than reassured.
+   * with (issue #544). Reads only. A worktree whose folder is gone holds one while Git's record of
+   * it keeps a submodule store, which a discard deletes (issue #580); one this manager cannot read,
+   * or does not own, counts as holding one, so the user is warned rather than reassured.
    */
   async hasSubmodules(input: DiscardWorktreeInput): Promise<boolean> {
     try {
       const worktreePath = await this.locateOwnedWorktree(input);
-      return worktreePath !== null && (await this.containsSubmodules(worktreePath));
+      return worktreePath === null
+        ? await this.recordKeepsSubmodules(
+            input.repoPath,
+            this.worktreePathFor(input.worktreeId ?? input.agentId),
+          )
+        : await this.containsSubmodules(input.repoPath, worktreePath);
     } catch {
       return true;
     }
