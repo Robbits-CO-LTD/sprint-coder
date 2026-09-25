@@ -122,11 +122,20 @@ export type WorktreeChangeInspection = Readonly<{
 
 export type CleanupUnchangedWorktreeInput = CleanupWorktreeInput & Readonly<{ baseHead: string }>;
 /**
+ * Why a worktree that may still qualify (no `changed: true`) was kept, for a caller's diagnostic
+ * (issue #588). `locked` is a `git worktree lock` (the user's, or one `git worktree add` left
+ * behind); `busy` is a directory removal or Git worktree removal that a Windows lock (a file held
+ * open) outlasted the retry backoff for. Neither ever names a path.
+ */
+export type CleanupUnchangedKeptReason = 'locked' | 'busy';
+/**
  * `changed: true` marks a worktree kept because its HEAD or status differs from its base: it will
  * never qualify, so a caller need not retry it. A worktree kept for any other reason (a Windows
- * lock that outlasted the backoff) may qualify on a later attempt.
+ * lock that outlasted the backoff) may qualify on a later attempt, and `reason` classifies why it
+ * was kept this time (issue #588).
  */
-export type CleanupUnchangedWorktreeResult = CleanupWorktreeResult & Readonly<{ changed?: true }>;
+export type CleanupUnchangedWorktreeResult = CleanupWorktreeResult &
+  Readonly<{ changed?: true; reason?: CleanupUnchangedKeptReason }>;
 
 export type FinalizeWorktreeInput = Readonly<{
   agentId: string;
@@ -513,10 +522,12 @@ export class WorkerWorktreeManager {
     repoPath: string,
     worktreePath: string,
   ): Promise<CleanupUnchangedWorktreeResult> {
-    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
+    if (await this.isLocked(repoPath, worktreePath))
+      return { outcome: 'quarantined', reason: 'locked' };
     if (await this.recordKeepsSubmodules(repoPath, worktreePath))
       return { outcome: 'quarantined', changed: true };
-    if (!(await this.removeEmptyDirectory(worktreePath))) return { outcome: 'quarantined' };
+    if (!(await this.removeEmptyDirectory(worktreePath)))
+      return { outcome: 'quarantined', reason: 'busy' };
     return this.unregisterWorktree(repoPath, worktreePath);
   }
 
@@ -621,7 +632,8 @@ export class WorkerWorktreeManager {
   ): Promise<CleanupUnchangedWorktreeResult> {
     if (await this.containsSubmodules(repoPath, worktreePath))
       return { outcome: 'quarantined', changed: true };
-    if (await this.isLocked(repoPath, worktreePath)) return { outcome: 'quarantined' };
+    if (await this.isLocked(repoPath, worktreePath))
+      return { outcome: 'quarantined', reason: 'locked' };
     return this.removeRegisteredWorktree(repoPath, worktreePath);
   }
 
@@ -724,8 +736,14 @@ export class WorkerWorktreeManager {
     const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
     if (await this.isLocked(repoPath, ownPath))
       throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
-    if (worktreePath === null) return this.unregisterWorktree(repoPath, ownPath);
-    return this.removeRegisteredWorktree(repoPath, worktreePath);
+    // `reason` classifies why an automatic reclaim kept a worktree (issue #588); a user-confirmed
+    // discard has no such caller, so it is dropped here exactly as `cleanup` drops it.
+    if (worktreePath === null) {
+      const { outcome } = await this.unregisterWorktree(repoPath, ownPath);
+      return { outcome };
+    }
+    const { outcome } = await this.removeRegisteredWorktree(repoPath, worktreePath);
+    return { outcome };
   }
 
   /**
@@ -905,7 +923,7 @@ export class WorkerWorktreeManager {
   private async unregisterWorktree(
     repoPath: string,
     worktreePath: string,
-  ): Promise<CleanupWorktreeResult> {
+  ): Promise<CleanupUnchangedWorktreeResult> {
     const unregister = async (): Promise<CleanupWorktreeResult> => {
       try {
         await this.runGit(repoPath, ['worktree', 'remove', worktreePath], 'remove_failed');
@@ -929,7 +947,7 @@ export class WorkerWorktreeManager {
           if (!isPermissionDenied(retryError)) throw retryError;
         }
       }
-      return { outcome: 'quarantined' };
+      return { outcome: 'quarantined', reason: 'busy' };
     }
   }
 
@@ -942,8 +960,9 @@ export class WorkerWorktreeManager {
   private async removeRegisteredWorktree(
     repoPath: string,
     worktreePath: string,
-  ): Promise<CleanupWorktreeResult> {
-    if (!(await this.removeWorktreeDirectory(worktreePath))) return { outcome: 'quarantined' };
+  ): Promise<CleanupUnchangedWorktreeResult> {
+    if (!(await this.removeWorktreeDirectory(worktreePath)))
+      return { outcome: 'quarantined', reason: 'busy' };
     return this.unregisterWorktree(repoPath, worktreePath);
   }
 

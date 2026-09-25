@@ -5983,7 +5983,14 @@ if (runsWithElectronAbi)
       };
       const { manager } = configureGitWorkspace(persistence, task.id);
       const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
-      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
       const writer = await coordinator.hireWorker({
         taskId: task.id,
         role: 'committing writer',
@@ -6026,8 +6033,265 @@ if (runsWithElectronAbi)
       });
       expect(head.status).toBe(0);
       expect(head.stdout.trim()).not.toBe(repository.baseHead);
+      // A repository kept because it changed is not a reclaim failure (issue #588): it never
+      // qualifies for a retry, so no diagnostic is recorded for it.
+      expect(diagnostics.some(({ event }) => event === 'team.isolation.reclaim_kept')).toBe(false);
       persistence.close();
     }, 55_000);
+
+    it('records once why a Git-locked worktree could not be reclaimed, without changing the original quarantine reason (issue #588)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Locked isolated failure');
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          if (input.workspacePath === undefined || input.workspacePath === null)
+            throw new Error('write step did not receive an isolated worktree');
+          // The worktree is clean and unchanged, but Git itself holds it locked (the user's own
+          // `git worktree lock`, or one left behind by an interrupted `git worktree add`).
+          expect(
+            spawnSync('git', [
+              '-C',
+              input.workspacePath,
+              'worktree',
+              'lock',
+              '--reason',
+              'held during the test',
+              input.workspacePath,
+            ]).status,
+          ).toBe(0);
+          throw new Error('deliberate failure while the worktree is locked');
+        },
+        async stop() {},
+      };
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'locked writer',
+        objective: 'fail while the worktree is locked',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'lock then fail',
+        doneCriteria: ['worktree stays locked'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await expect(cleanupUnchanged.mock.results[0]?.value).resolves.toEqual({
+        outcome: 'quarantined',
+        reason: 'locked',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      const repository = isolation.repositories[0]!;
+      expect(repository.state).toBe('quarantined');
+      expect(existsSync(repository.worktreePath)).toBe(true);
+      const originalReason = isolation.reason;
+      expect(originalReason).toContain('deliberate failure while the worktree is locked');
+      // Removal only failed, so the next launch retries it (issue #545's retry contract).
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).toContain(submission.executionId);
+
+      const reclaimEvents = diagnostics.filter(
+        ({ event }) => event === 'team.isolation.reclaim_kept',
+      );
+      expect(reclaimEvents).toEqual([
+        {
+          event: 'team.isolation.reclaim_kept',
+          taskId: task.id,
+          teamId: persistence.getTeamExecution(submission.executionId).teamId,
+          workerId: writer.id,
+          status: 'retry',
+          result: 'locked',
+        },
+      ]);
+
+      // A retry within the same process (the startup reclaim pass) does not add a second
+      // diagnostic while the same isolation, repository and reason repeat.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 2, 15_000);
+      await expect(cleanupUnchanged.mock.results[1]?.value).resolves.toEqual({
+        outcome: 'quarantined',
+        reason: 'locked',
+      });
+      expect(
+        diagnostics.filter(({ event }) => event === 'team.isolation.reclaim_kept'),
+      ).toHaveLength(1);
+      // The Worker's own failure reason is never overwritten by the retry.
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)!.reason).toBe(
+        originalReason,
+      );
+      persistence.close();
+    }, 45_000);
+
+    it('records once that reclaiming a failed write Worker worktree threw, without changing the original quarantine reason (issue #588)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Reclaim exception diagnostic');
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi
+        .spyOn(manager, 'cleanupUnchanged')
+        .mockRejectedValue(new Error('cleanup exploded'));
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporting writer',
+        objective: 'report failure without edits',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'report failure',
+        doneCriteria: ['worker reports failure'],
+        accessMode: 'workspace-write',
+      });
+
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      const repository = isolation.repositories[0]!;
+      expect(repository.state).toBe('quarantined');
+      expect(existsSync(repository.worktreePath)).toBe(true);
+      const originalReason = isolation.reason;
+      expect(originalReason).toContain('Worker reported failure before integration');
+
+      const reclaimEvents = diagnostics.filter(
+        ({ event }) => event === 'team.isolation.reclaim_kept',
+      );
+      expect(reclaimEvents).toEqual([
+        {
+          event: 'team.isolation.reclaim_kept',
+          taskId: task.id,
+          teamId: persistence.getTeamExecution(submission.executionId).teamId,
+          workerId: writer.id,
+          status: 'retry',
+          result: 'Error',
+        },
+      ]);
+      expect(JSON.stringify(reclaimEvents)).not.toContain('cleanup exploded');
+
+      // A retry within the same process does not add a second diagnostic for the same reason.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 2, 15_000);
+      expect(
+        diagnostics.filter(({ event }) => event === 'team.isolation.reclaim_kept'),
+      ).toHaveLength(1);
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)!.reason).toBe(
+        originalReason,
+      );
+      persistence.close();
+    }, 30_000);
+
+    it('retries the reclaim diagnostic after the sink throws once, then stays deduped for the same reason (issue #588)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Reclaim diagnostic sink recovers');
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi
+        .spyOn(manager, 'cleanupUnchanged')
+        .mockRejectedValue(new Error('cleanup exploded'));
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      let sinkCalls = 0;
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => {
+          // Other lifecycle diagnostics (team.created, team.execution.failed, …) fire first and
+          // are not wrapped by the reclaim's own try/catch, so only the reclaim event itself must
+          // be unreliable here — on its first call (a full disk, a dead log pipe, …).
+          if (event.event !== 'team.isolation.reclaim_kept') return;
+          sinkCalls += 1;
+          if (sinkCalls === 1) throw new Error('diagnostic sink unavailable');
+          diagnostics.push(event);
+        },
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporting writer',
+        objective: 'report failure without edits',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'report failure',
+        doneCriteria: ['worker reports failure'],
+        accessMode: 'workspace-write',
+      });
+
+      // First reclaim attempt: the sink throws, so the reason is not marked reported.
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      await waitFor(() => sinkCalls === 1, 15_000);
+      expect(diagnostics).toHaveLength(0);
+
+      // Second attempt: the sink succeeds this time, so the diagnostic is recorded once.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 2, 15_000);
+      await waitFor(() => sinkCalls === 2, 15_000);
+      expect(diagnostics).toEqual([
+        {
+          event: 'team.isolation.reclaim_kept',
+          taskId: task.id,
+          teamId: persistence.getTeamExecution(submission.executionId).teamId,
+          workerId: writer.id,
+          status: 'retry',
+          result: 'Error',
+        },
+      ]);
+
+      // Third attempt: the same isolation, repository and reason are already marked reported, so
+      // the sink is not called again even though the reclaim itself retries as always.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 3, 15_000);
+      // Nothing more will call the sink after this point in the test, so a short, bounded wait is
+      // the only way to observe that absence rather than a state transition to assert on.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(sinkCalls).toBe(2);
+      expect(diagnostics).toHaveLength(1);
+      persistence.close();
+    }, 45_000);
 
     it('keeps the worktree when the runtime exit was not confirmed', async () => {
       const persistence = createPersistence();
