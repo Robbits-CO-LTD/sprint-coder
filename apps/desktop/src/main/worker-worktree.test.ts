@@ -601,7 +601,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: created.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', reason: 'busy' });
     expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
     expect((await stat(created.path)).isDirectory()).toBe(true);
     expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
@@ -1256,13 +1256,13 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: unchanged.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', reason: 'busy' });
     await expect(lockedRoot.cleanup({ agentId: 'agent-root-clean', repoPath })).resolves.toEqual({
       outcome: 'quarantined',
     });
     await expect(
       lockedRoot.discard({ agentId: 'agent-root-discard', repoPath, path: discarded.path }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', reason: 'busy' });
     for (const root of roots) {
       expect(await readdir(root)).toEqual([]);
       expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(root));
@@ -1274,7 +1274,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: unchanged.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', reason: 'busy' });
     await expect(
       lockedRoot.hasSubmodules({ agentId: 'agent-root-clean', repoPath, path: clean.path }),
     ).resolves.toBe(false);
@@ -1391,7 +1391,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         repoPath,
         baseHead: created.baseHead,
       }),
-    ).resolves.toEqual({ outcome: 'quarantined' });
+    ).resolves.toEqual({ outcome: 'quarantined', reason: 'locked' });
     await expect(
       manager.discard({ agentId: 'agent-git-locked', repoPath, path: created.path }),
     ).rejects.toMatchObject({ code: 'locked' });

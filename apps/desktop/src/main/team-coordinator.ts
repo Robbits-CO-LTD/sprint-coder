@@ -410,6 +410,8 @@ export class TeamCoordinator {
   >();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly executionInterruptions = new Map<string, ExecutionInterruptionControl>();
+  /** `<executionId>:<repositoryOrdinal>:<reason>` keys already reported by `reportReclaimKept`. */
+  private readonly reclaimKeptReasonsReported = new Set<string>();
   private readonly transientWorkerActivity = new Map<
     string,
     { liveOutput: string; reasoningActive: boolean }
@@ -5669,7 +5671,15 @@ export class TeamCoordinator {
             baseHead: repository.baseHead,
           });
           if (result.outcome !== 'removed') {
-            if (result.changed !== true) retryLater = true;
+            if (result.changed !== true) {
+              retryLater = true;
+              this.reportReclaimKept(
+                executionId,
+                agentId,
+                repository.ordinal,
+                result.reason ?? 'unknown',
+              );
+            }
             continue;
           }
           // Re-read after the Git await, so a concurrent update to this isolation is neither
@@ -5689,9 +5699,15 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
           reclaimed = true;
-        } catch {
+        } catch (error) {
           // One repository must not hide the original Worker failure or skip the others.
           retryLater = true;
+          this.reportReclaimKept(
+            executionId,
+            agentId,
+            repository.ordinal,
+            error instanceof Error ? error.name : 'Error',
+          );
         }
       }
       const settled = this.persistence.getTeamExecutionIsolation(executionId) ?? current;
@@ -5700,6 +5716,40 @@ export class TeamCoordinator {
       return reclaimed;
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * Records, once per process, that a repository's worktree could not be reclaimed and stays
+   * queued for a later attempt (issue #588). The isolation's own quarantine reason (the original
+   * Worker failure) is never touched here: this only adds a diagnostic, so a Git lock or a busy
+   * directory that outlives the reclaim does not go unrecorded while the app keeps silently
+   * retrying it. `reason` is a short classification (`cleanupUnchanged`'s own reason, or a thrown
+   * error's `name`) that never carries a worktree path or other detail. The same isolation,
+   * repository and reason report only once per process; a fresh launch (a new Set) may report it
+   * again, and a repository kept because it changed never reaches this method.
+   */
+  private reportReclaimKept(
+    executionId: string,
+    agentId: string,
+    repositoryOrdinal: number,
+    reason: string,
+  ): void {
+    const key = `${executionId}:${repositoryOrdinal}:${reason}`;
+    if (this.reclaimKeptReasonsReported.has(key)) return;
+    this.reclaimKeptReasonsReported.add(key);
+    try {
+      const execution = this.persistence.getTeamExecution(executionId);
+      this.diagnostic?.({
+        event: 'team.isolation.reclaim_kept',
+        taskId: this.persistence.getTeam(execution.teamId).taskId,
+        teamId: execution.teamId,
+        workerId: agentId,
+        status: 'retry',
+        result: reason,
+      });
+    } catch {
+      // Diagnostics are best effort and must not affect the reclaim.
     }
   }
 
