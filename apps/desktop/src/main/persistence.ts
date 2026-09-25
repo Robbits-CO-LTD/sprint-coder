@@ -730,6 +730,8 @@ type TeamExecutionIsolationRow = {
   created_at: string;
   updated_at: string;
 };
+/** How a Team Worker's Edit Saga stands with respect to the Workspace; see `teamIsolationSagaStates`. */
+type TeamIsolationSagaState = 'integrated' | 'sealed' | 'unintegrated';
 type TeamExecutionIsolationCompletionRow = {
   execution_id: string;
   attempt_id: string;
@@ -14136,48 +14138,117 @@ export class SqlitePersistenceClient implements PersistenceClient {
   }
 
   /**
-   * The isolated root of an integrated Team Worker isolation that sealed this Saga, if any.
-   * Nothing is returned for a Saga without a rootId, workspaceKey or rootIdentityDigest. When the
-   * root maps to exactly one repository by ordinal, only that repository's state is checked;
-   * otherwise every repository of the isolation must be integrated or cleaned.
+   * Where each committed Edit Saga a Team Worker sealed in an isolated worktree stands with respect
+   * to the Workspace, for the Leader Turn's completion gate and its displayed diff.
+   *
+   * - `integrated`: the Worker's commit was integrated into the Workspace. The isolation completed
+   *   (issue #516), or it was quarantined after the repository recorded its integrated HEAD, when
+   *   only the worktree cleanup failed (issue #568).
+   * - `sealed`: the Worker's commit was sealed, the isolation is quarantined, and no integration was
+   *   recorded. The Worker most likely stopped before integration, but a merge whose HEAD was never
+   *   written cannot be ruled out, so the Saga is not treated as outside the Workspace.
+   * - `unintegrated`: none of the Worker's changes can have reached the Workspace. Integration needs
+   *   a sealed Worker commit and the repository has none, the isolation is quarantined, and the
+   *   execution failed or was canceled, so nothing can resume it (issue #568).
+   *
+   * Anything else is `null`, a Workspace write: a Saga bound to the Turn's own Workspace root, an
+   * isolation still in progress, a quarantined one whose execution can still resume it (a Graph
+   * Mission does), or a record that does not describe the Saga's binding exactly. A missing or
+   * inconsistent record therefore never takes a criterion away.
    */
-  private findIntegratedTeamIsolationRoot(
+  private teamIsolationSagaStates(
     taskId: string,
-    rootId: string | null,
-    workspaceKey: string | null,
-    rootIdentityDigest: string | null,
-  ): TeamExecutionIsolation['roots'][number] | null {
-    if (rootId === null || workspaceKey === null || rootIdentityDigest === null) return null;
-    const rows = this.db
-      .prepare(
-        `SELECT isolation.* FROM team_execution_isolations isolation
-         INNER JOIN team_executions execution ON execution.id = isolation.execution_id
-         INNER JOIN teams team ON team.id = execution.team_id
-         WHERE team.task_id = ?
-           AND isolation.phase = 'completed'
-         ORDER BY isolation.created_at DESC, isolation.execution_id DESC`,
-      )
-      .all(taskId) as TeamExecutionIsolationRow[];
-    for (const row of rows) {
-      const isolation = toTeamExecutionIsolation(row);
-      const root = isolation.roots.find(
-        (candidate) =>
-          candidate.rootId === rootId &&
-          candidate.isolatedMutationKey === workspaceKey &&
-          candidate.isolatedIdentity === rootIdentityDigest,
-      );
-      if (root === undefined) continue;
-      const matched = isolation.repositories.filter(
-        (repository) => repository.ordinal === root.repositoryOrdinal,
-      );
-      const repositories = matched.length === 1 ? matched : isolation.repositories;
+    turnId: string,
+  ): (saga: EditSagaSnapshot) => TeamIsolationSagaState | null {
+    let loaded:
+      | {
+          turnRoots: ReadonlyMap<string, { workspace_key: string; root_identity_digest: string }>;
+          isolations: readonly {
+            isolation: TeamExecutionIsolationRecord;
+            executionState: string;
+          }[];
+        }
+      | undefined;
+    const load = () => {
+      loaded ??= {
+        turnRoots: new Map(
+          (
+            this.db
+              .prepare(
+                `SELECT root_id, workspace_key, root_identity_digest
+                 FROM turn_workspace_roots WHERE turn_id = ?`,
+              )
+              .all(turnId) as {
+              root_id: string;
+              workspace_key: string;
+              root_identity_digest: string;
+            }[]
+          ).map((row) => [row.root_id, row] as const),
+        ),
+        isolations: (
+          this.db
+            .prepare(
+              `SELECT isolation.*, execution.state AS execution_state
+               FROM team_execution_isolations isolation
+               INNER JOIN team_executions execution ON execution.id = isolation.execution_id
+               INNER JOIN teams team ON team.id = execution.team_id
+               WHERE team.task_id = ?
+                 AND isolation.phase IN ('completed', 'quarantined')
+               ORDER BY isolation.created_at DESC, isolation.execution_id DESC`,
+            )
+            .all(taskId) as (TeamExecutionIsolationRow & { execution_state: string })[]
+        ).flatMap((row) => {
+          // A record that no longer parses was edited outside the app. It vouches for nothing, so
+          // its Sagas stay Workspace writes, and it cannot make the Turn's diff unreadable.
+          try {
+            return [
+              { isolation: toTeamExecutionIsolation(row), executionState: row.execution_state },
+            ];
+          } catch {
+            return [];
+          }
+        }),
+      };
+      return loaded;
+    };
+    return (saga) => {
+      const { rootId, workspaceKey, rootIdentityDigest } = saga;
+      if (rootId === null || workspaceKey === null || rootIdentityDigest === null) return null;
+      const { turnRoots, isolations } = load();
+      const turnRoot = turnRoots.get(rootId);
       if (
-        repositories.length > 0 &&
-        repositories.every((repository) => ['integrated', 'cleaned'].includes(repository.state))
+        turnRoot?.workspace_key === workspaceKey &&
+        turnRoot.root_identity_digest === rootIdentityDigest
       )
-        return root;
-    }
-    return null;
+        return null;
+      for (const { isolation, executionState } of isolations) {
+        const root = isolation.roots.find(
+          (candidate) =>
+            candidate.rootId === rootId &&
+            candidate.isolatedMutationKey === workspaceKey &&
+            candidate.isolatedIdentity === rootIdentityDigest,
+        );
+        if (root === undefined) continue;
+        const matched = isolation.repositories.filter(
+          (repository) => repository.ordinal === root.repositoryOrdinal,
+        );
+        if (isolation.phase === 'completed') {
+          // When the root maps to exactly one repository by ordinal, only that repository's state
+          // is checked; otherwise every repository of the isolation must be integrated or cleaned.
+          const repositories = matched.length === 1 ? matched : isolation.repositories;
+          return repositories.length > 0 &&
+            repositories.every((repository) => ['integrated', 'cleaned'].includes(repository.state))
+            ? 'integrated'
+            : null;
+        }
+        const repository = matched.length === 1 ? matched[0] : undefined;
+        if (repository === undefined) return null;
+        if (repository.integratedHead !== null) return 'integrated';
+        if (repository.workerHead !== null) return 'sealed';
+        return executionState === 'failed' || executionState === 'canceled' ? 'unintegrated' : null;
+      }
+      return null;
+    };
   }
 
   getEffectiveWorkspaceSet(taskId: string): EffectiveWorkspaceSet {
@@ -17757,8 +17828,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
   private getDisplayTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
     const turn = this.getTurn(taskId, turnId);
     if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
-    const workspace = this.readTurnWorkspaceSetForTask(taskId, turnId);
-    if (workspace === null) return this.getTurnDiff(taskId, turnId);
+    const isolationState = this.teamIsolationSagaStates(taskId, turnId);
     const sagas = (
       this.db
         .prepare(
@@ -17767,7 +17837,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
            ORDER BY created_at, id`,
         )
         .all(taskId, turnId) as EditSagaRow[]
-    ).map(toEditSaga);
+    )
+      .map(toEditSaga)
+      // A Worker change whose integration was never recorded is not in the Workspace, so the Turn
+      // does not list it as an edit there (issue #568). The Team view lists the worktree keeping it.
+      .filter((saga) => {
+        const state = isolationState(saga);
+        return state !== 'sealed' && state !== 'unintegrated';
+      });
+    const workspace = this.readTurnWorkspaceSetForTask(taskId, turnId);
+    if (workspace === null) return aggregateTurnDiff(sagas.map((saga) => saga.diff));
     const rootsBySaga = sagas.map((saga) => {
       const rootId = saga.rootId ?? workspace.primaryRootId;
       return {
@@ -18169,9 +18248,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * removed after integration (issue #516). Main records that Saga's verification evidence while
    * the worktree still exists (`verifyTeamExecutionIsolationEditSagaPostImages`). decideCompletion
    * still requires the evidence; a Saga that was not verified records nothing and keeps its
-   * criterion open. A change made to the Workspace outside the Harness after integration (an
-   * editor, a shell) is therefore not detected here; the design leaves it outside Turn completion
-   * (issue #547).
+   * criterion open. That holds as well when only the cleanup after integration failed, or when the
+   * Worker's commit was sealed but its integration never recorded (issue #568). A change made to
+   * the Workspace outside the Harness after integration (an editor, a shell) is therefore not
+   * detected here; the design leaves it outside Turn completion (issue #547).
+   *
+   * A Saga whose Worker isolation ended without committing the Worker's changes never reached the
+   * Workspace, so its verification is not a criterion of the Turn at all (issue #568). Which Sagas
+   * qualify is decided by `teamIsolationSagaStates`, which keeps any doubtful one a Workspace write.
    */
   private verifyEditSagaPostImagesInTransaction(
     taskId: string,
@@ -18181,20 +18265,20 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ): readonly string[] {
     const sagas = observation.sagas;
     const rootIsSealed = this.sealedTurnRootPredicate(taskId, turnId, observation);
+    const isolationState = this.teamIsolationSagaStates(taskId, turnId);
     const failed: string[] = [];
+    const outsideWorkspace = new Set<string>();
     const holds = turnPostImageVerifier(sagas, observation.observe);
     for (const saga of sagas) {
-      // The isolated worktree is gone after integration; re-checking rootIsSealed/holds here would
-      // fail an integrated Turn on paths that no longer exist. The recorded evidence still gates it.
-      if (
-        this.findIntegratedTeamIsolationRoot(
-          taskId,
-          saga.rootId,
-          saga.workspaceKey,
-          saga.rootIdentityDigest,
-        ) !== null
-      )
+      const state = isolationState(saga);
+      if (state === 'unintegrated') {
+        outsideWorkspace.add(`verification:${saga.id}`);
         continue;
+      }
+      // The isolated worktree is not the Turn's Workspace root and is removed after integration;
+      // re-checking rootIsSealed/holds here would fail the Turn on paths outside its Workspace. The
+      // evidence Main recorded before integration still gates it.
+      if (state !== null) continue;
       if (!rootIsSealed(saga) || !holds(saga)) {
         failed.push(`verification:${saga.id}`);
         continue;
@@ -18216,7 +18300,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const open = decideCompletion(
       this.getAcceptanceContract(taskId, turnId),
       this.listEvidenceRecords(taskId, turnId),
-    ).openCriterionIds;
+    ).openCriterionIds.filter((criterionId) => !outsideWorkspace.has(criterionId));
     return Object.freeze([...new Set([...open, ...failed])]);
   }
 
