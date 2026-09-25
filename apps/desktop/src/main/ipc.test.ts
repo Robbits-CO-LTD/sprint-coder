@@ -210,11 +210,12 @@ import {
   ToolBroker,
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
+  type ToolAuthorizer,
 } from './tool-broker';
 import { ToolRegistry, expandAccessPreset } from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
 import { FileRevisionRegistry } from './file-revision';
-import { approvalFactsForTool } from './approval-coordinator';
+import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
@@ -2843,17 +2844,18 @@ describe('Main image attachment dispatch boundary', () => {
      * A Claude/Grok Worker's create_file through Team MCP, on a real ToolBroker whose authorizer
      * holds each call the way a durable Approval Card does. The parent Turn stays active throughout.
      */
-    async function workerWriteAwaitingApproval() {
+    async function workerWriteAwaitingApproval(authorize?: ToolAuthorizer) {
       const registry = new ToolRegistry();
       registry.register(WORKSPACE_CREATE_FILE_TOOL);
       const approvals: Array<(decision: ToolAuthorizationDecision) => void> = [];
       const broker = new ToolBroker(
         registry,
         () => 9,
-        () =>
-          new Promise<ToolAuthorizationDecision>((resolve) => {
-            approvals.push(resolve);
-          }),
+        authorize ??
+          (() =>
+            new Promise<ToolAuthorizationDecision>((resolve) => {
+              approvals.push(resolve);
+            })),
       );
       const execute = vi.fn(async () => ({}));
       broker.registerImplementation({
@@ -2903,7 +2905,7 @@ describe('Main image attachment dispatch boundary', () => {
         );
       const allow = (index: number) =>
         approvals[index]!({ decision: 'allow', reason: 'test_allow', beforeExecute: () => true });
-      return { router, execute, approvals, call, allow };
+      return { router, broker, catalog, execute, approvals, call, allow };
     }
 
     it('writes when the card is allowed while the Worker Turn is still running', async () => {
@@ -2932,6 +2934,161 @@ describe('Main image attachment dispatch boundary', () => {
         'Managed tool catalog digest changed',
       );
       expect(approvals).toHaveLength(1);
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it("cancels only the released Worker's card, without counting it as a denied write (issue #572)", async () => {
+      type Card = {
+        id: string;
+        taskId: string;
+        turnId: string;
+        callId: string;
+        policyEpoch: number;
+        challenge: string;
+        revision: number;
+        state: string;
+        decision: 'allow_once' | 'allow_task' | 'deny' | null;
+      };
+      const cards = new Map<string, Card>();
+      const cancellations: unknown[] = [];
+      const published: { id: string; state: string; event: unknown }[] = [];
+      const coordinator = new ApprovalCoordinator({
+        persistence: {
+          requestApproval: (input) => {
+            const card: Card = {
+              id: input.id,
+              taskId: input.taskId,
+              turnId: input.turnId,
+              callId: input.callId,
+              policyEpoch: input.policyEpoch,
+              challenge: input.challenge,
+              revision: 0,
+              state: 'pending',
+              decision: null,
+            };
+            cards.set(card.id, card);
+            return { approval: card, event: { type: 'approval.requested', approvalId: card.id } };
+          },
+          getApproval: (_taskId, approvalId) => cards.get(approvalId),
+          resolveApproval: (input) => {
+            const card = cards.get(input.approvalId)!;
+            if (card.state !== 'pending') throw new Error('Approval is no longer pending');
+            const resolved = { ...card, state: 'resolved', decision: input.decision, revision: 1 };
+            cards.set(card.id, resolved);
+            return { approval: resolved, event: { type: 'approval.resolved' } };
+          },
+          cancelPendingApprovalForCall: (input) => {
+            cancellations.push(input);
+            const card = cards.get(input.approvalId)!;
+            if (
+              card.taskId !== input.taskId ||
+              card.turnId !== input.turnId ||
+              card.callId !== input.callId
+            )
+              throw new Error('Approval does not belong to this tool call');
+            if (card.state !== 'pending') return null;
+            const canceled = { ...card, state: 'canceled', decision: null, revision: 1 };
+            cards.set(card.id, canceled);
+            return {
+              approval: canceled,
+              event: { type: 'approval.canceled', approvalId: card.id },
+            };
+          },
+        },
+        now: () => '2026-09-26T00:00:00.000Z',
+        expiresAt: () => '2026-09-26T01:00:00.000Z',
+        getCurrentPolicyEpoch: () => 9,
+        isTurnActive: () => true,
+        evaluatePermission: () => 'approval_required',
+        publish: (approval, event) =>
+          published.push({ id: approval.id, state: approval.state, event }),
+      });
+      const { router, broker, catalog, execute, call } = await workerWriteAwaitingApproval(
+        coordinator.authorizeTool.bind(coordinator),
+      );
+      // A second Worker of the same Leader Turn, and a call of the Leader's own.
+      await prepareWorkerManagedCatalog.call(
+        router,
+        'claude',
+        'task-1',
+        'runtime-worker-b',
+        { primaryRootId: null, digest: 'x'.repeat(64), roots: [] },
+        false,
+        'workspace-write',
+      );
+      const writeA = call('call-1');
+      const writeB = createHandlers.call(router).teamMcp(
+        { path: 'b.txt', content: 'hello' },
+        {
+          taskId: 'task-1',
+          turnId: 'runtime-worker-b',
+          callId: 'call-1',
+          toolName: 'create_file',
+          catalogDigest: catalog.digest,
+        },
+      );
+      const leader = broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-parent',
+        callId: 'leader-call',
+        providerName: 'create_file',
+        input: { path: 'c.txt', content: 'hello' },
+      });
+      await vi.waitFor(() => expect(cards.size).toBe(3));
+      // The broker call id a Worker call is bound to, as ipc.ts derives it.
+      const workerCallId = (runtimeTurnId: string) =>
+        `${createHash('sha256').update(runtimeTurnId).digest('hex').slice(0, 16)}:call-1`;
+      const cardOf = (callId: string) =>
+        [...cards.values()].find((card) => card.callId === callId)!;
+      const cardA = cardOf(workerCallId('runtime-worker'));
+      const cardB = cardOf(workerCallId('runtime-worker-b'));
+      const leaderCard = cardOf('leader-call');
+      const recordManagedToolDenied = (
+        router['cliTeamWorkerRuntime'] as { recordManagedToolDenied: ReturnType<typeof vi.fn> }
+      ).recordManagedToolDenied;
+
+      releaseManagedWorkerTurn.call(router, 'runtime-worker');
+
+      await expect(writeA).rejects.toThrow('Team Worker Turn ended');
+      expect(cancellations).toEqual([
+        {
+          taskId: 'task-1',
+          turnId: 'turn-parent',
+          approvalId: cardA.id,
+          callId: workerCallId('runtime-worker'),
+          canceledAt: '2026-09-26T00:00:00.000Z',
+        },
+      ]);
+      expect(cards.get(cardA.id)).toMatchObject({ state: 'canceled', decision: null });
+      expect(cards.get(cardB.id)).toMatchObject({ state: 'pending', decision: null });
+      expect(cards.get(leaderCard.id)).toMatchObject({ state: 'pending', decision: null });
+      expect(published.filter(({ state }) => state === 'canceled')).toEqual([
+        {
+          id: cardA.id,
+          state: 'canceled',
+          event: { type: 'approval.canceled', approvalId: cardA.id },
+        },
+      ]);
+      // Withdrawn because the Worker is gone, which is not the user refusing its write.
+      expect(recordManagedToolDenied).not.toHaveBeenCalled();
+
+      // The cards left behind are decided and released as before.
+      coordinator.resolve({
+        taskId: 'task-1',
+        turnId: 'turn-parent',
+        approvalId: leaderCard.id,
+        decision: 'deny',
+        expectedRevision: 0,
+        challenge: leaderCard.challenge,
+        operationId: 'leader-deny',
+      });
+      releaseManagedWorkerTurn.call(router, 'runtime-worker-b');
+
+      await expect(writeB).rejects.toThrow('Team Worker Turn ended');
+      await expect(leader).rejects.toThrow('Tool authorization deny');
+      expect(cards.get(leaderCard.id)).toMatchObject({ state: 'resolved', decision: 'deny' });
+      expect(cards.get(cardB.id)).toMatchObject({ state: 'canceled', decision: null });
+      expect(recordManagedToolDenied).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
     });
   });

@@ -26,6 +26,12 @@ export type ToolAuthorizationRequest = Readonly<{
   entry: ToolCatalogEntry;
   input: unknown;
 }>;
+/**
+ * Host-only control for one authorization. It is kept apart from the request on purpose: the
+ * request is what approval facts, digests and audit records are built from, and an AbortSignal has
+ * no place in any of them.
+ */
+export type ToolAuthorizationControl = Readonly<{ signal?: AbortSignal }>;
 export type ToolAuthorizationDecision = Readonly<{
   decision: 'allow' | 'deny' | 'approval_required';
   reason: string;
@@ -35,6 +41,7 @@ export type ToolAuthorizationDecision = Readonly<{
 }>;
 export type ToolAuthorizer = (
   request: ToolAuthorizationRequest,
+  control?: ToolAuthorizationControl,
 ) => Promise<ToolAuthorizationDecision> | ToolAuthorizationDecision;
 
 export const managedToolCallStates = [
@@ -211,12 +218,17 @@ export class ToolBroker {
       transition('awaiting_approval');
       let authorization: ToolAuthorizationDecision;
       try {
-        authorization = await this.authorize({
-          context: bound.context,
-          callId: request.callId,
-          entry,
-          input: pinnedInput,
-        });
+        // The signal goes along so a call abandoned while its Approval Card is open withdraws that
+        // card instead of leaving the Turn waiting on it (issue #572).
+        authorization = await this.authorize(
+          {
+            context: bound.context,
+            callId: request.callId,
+            entry,
+            input: pinnedInput,
+          },
+          request.signal === undefined ? undefined : { signal: request.signal },
+        );
       } catch (error) {
         await implementation.authorizationDenied?.(pinnedInput, bound.context);
         throw error;

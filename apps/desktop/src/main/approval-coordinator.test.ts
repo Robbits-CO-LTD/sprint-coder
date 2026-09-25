@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   ToolRegistry,
   createToolDefinition,
@@ -39,6 +39,7 @@ import {
   APPROVAL_EPHEMERAL_EXECUTION_MAX_CHARACTERS,
   approvalSummarySchema,
 } from '@sprint-coder/contracts';
+import { secureLogger } from './secure-logger';
 
 /** Shape-complete approval used only to prove a produced card survives the published contract. */
 const pendingApprovalFixture = {
@@ -166,6 +167,36 @@ class InMemoryApprovalPersistence {
     };
   }
 
+  /** Makes the next cancellations fail as a locked or failing database would. */
+  failCancellation = false;
+
+  cancelPendingApprovalForCall(raw: unknown): {
+    approval: StoredApproval;
+    event: { type: string };
+  } | null {
+    const input = raw as { taskId: string; turnId: string; approvalId: string; callId: string };
+    this.timeline.push(`cancel-attempt:${input.approvalId}`);
+    if (this.failCancellation) throw new Error('CANCEL_WRITE_FAILED');
+    const current = this.approvals.get(input.approvalId);
+    if (
+      current === undefined ||
+      current.taskId !== input.taskId ||
+      current.turnId !== input.turnId ||
+      current.callId !== input.callId
+    )
+      throw new Error('APPROVAL_NOT_FOUND');
+    if (current.state !== 'pending') return null;
+    const canceled = Object.freeze({
+      ...current,
+      state: 'canceled' as const,
+      decision: null,
+      revision: current.revision + 1,
+    });
+    this.approvals.set(current.id, canceled);
+    this.timeline.push(`canceled:${current.id}`);
+    return { approval: canceled, event: { type: 'approval.canceled' } };
+  }
+
   endTurnApprovals(taskId: string, turnId: string, _reason: 'canceled' | 'finished'): string[] {
     const ended: string[] = [];
     for (const approval of this.approvals.values()) {
@@ -230,7 +261,12 @@ function createHarness(input?: {
   evaluatePermission?: (input: {
     capability: Capability;
     request: ToolAuthorizationRequest;
-  }) => ToolAuthorizationDecision | 'allow' | 'deny' | 'approval_required';
+  }) =>
+    | ToolAuthorizationDecision
+    | 'allow'
+    | 'deny'
+    | 'approval_required'
+    | Promise<'approval_required' | 'deny'>;
   revalidateTaskGrant?: (input: {
     capability: Capability;
     request: ToolAuthorizationRequest;
@@ -884,6 +920,319 @@ describe('ApprovalCoordinator', () => {
     await expect(dispatch).resolves.toEqual({ ok: true });
     expect(executions()).toBe(1);
   });
+});
+
+/**
+ * A tool call whose caller is gone — a Team Worker released while its write waits on the card —
+ * must not leave that card pending, or the Turn it belongs to can never finish (issue #572).
+ */
+describe('ApprovalCoordinator cancellation of an aborted call', () => {
+  const released = () => new Error('Team Worker Turn ended before its managed tool call ran');
+
+  function dispatchFetch(
+    broker: ToolBroker,
+    callId: string,
+    origin: string,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId,
+      providerName: 'approval_fetch',
+      input: { origin },
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  it("cancels only the aborted call's card, without a decision, and never runs it", async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const worker = new AbortController();
+    const stopped = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+    const other = dispatchFetch(broker, 'leader-call', 'https://leader.test');
+    await viWaitFor(() => harness.published.length === 2);
+    const workerCard = harness.published.find(({ callId }) => callId === 'worker-call')!;
+    const otherCard = harness.published.find(({ callId }) => callId === 'leader-call')!;
+
+    worker.abort(released());
+    worker.abort(released());
+
+    await expect(stopped).rejects.toThrow('Team Worker Turn ended');
+    expect(harness.persistence.approvals.get(workerCard.id)).toMatchObject({
+      state: 'canceled',
+      decision: null,
+      revision: 1,
+    });
+    expect(harness.persistence.approvals.get(otherCard.id)).toMatchObject({
+      state: 'pending',
+      decision: null,
+      revision: 0,
+    });
+    // Committed, then published, once.
+    expect(
+      harness.persistence.timeline.filter((entry) => entry.endsWith(`:${workerCard.id}`)),
+    ).toEqual([
+      `committed:${workerCard.id}`,
+      `published:${workerCard.id}`,
+      `cancel-attempt:${workerCard.id}`,
+      `canceled:${workerCard.id}`,
+      `published:${workerCard.id}`,
+    ]);
+    expect(harness.published.at(-1)).toMatchObject({ id: workerCard.id, state: 'canceled' });
+    expect(harness.persistence.grants).toEqual([]);
+    expect(executions()).toBe(0);
+
+    harness.coordinator.resolve(resolveCommand(otherCard, 'allow_once'));
+    await expect(other).resolves.toEqual({ ok: true });
+    expect(executions()).toBe(1);
+  });
+
+  it('refuses a late allow once the cancellation committed first', async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const worker = new AbortController();
+    const dispatch = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+    const card = await waitForPublished(harness);
+
+    worker.abort(released());
+    for (const decision of ['allow_once', 'allow_task'] as const)
+      expect(() => harness.coordinator.resolve(resolveCommand(card, decision))).toThrow();
+
+    await expect(dispatch).rejects.toThrow('Team Worker Turn ended');
+    expect(harness.persistence.approvals.get(card.id)).toMatchObject({
+      state: 'canceled',
+      decision: null,
+    });
+    expect(harness.persistence.timeline.some((entry) => entry.startsWith('resolved:'))).toBe(false);
+    expect(harness.persistence.grants).toEqual([]);
+    expect(executions()).toBe(0);
+  });
+
+  it('keeps a decision that committed first and still never runs the aborted call', async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const worker = new AbortController();
+    const dispatch = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+    const card = await waitForPublished(harness);
+
+    harness.coordinator.resolve(resolveCommand(card, 'allow_task'));
+    // Before ToolBroker resumes from the decision.
+    worker.abort(released());
+
+    await expect(dispatch).rejects.toThrow('Team Worker Turn ended');
+    expect(harness.persistence.approvals.get(card.id)).toMatchObject({
+      state: 'resolved',
+      decision: 'allow_task',
+      revision: 1,
+    });
+    expect(harness.persistence.timeline.some((entry) => entry.startsWith('cancel-attempt:'))).toBe(
+      false,
+    );
+    expect(harness.published.filter(({ state }) => state === 'canceled')).toEqual([]);
+    expect(executions()).toBe(0);
+  });
+
+  it('keeps the card pending and refuses every late allow when the cancellation cannot be saved', async () => {
+    const harness = createHarness();
+    harness.persistence.failCancellation = true;
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    try {
+      const { broker, executions } = createBroker(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      broker.startTurn(toolContext, 'mock');
+      const worker = new AbortController();
+      const dispatch = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+      const card = await waitForPublished(harness);
+
+      worker.abort(released());
+
+      // The caller still stops; nothing claims the card is gone.
+      await expect(dispatch).rejects.toThrow('Team Worker Turn ended');
+      expect(harness.persistence.approvals.get(card.id)).toMatchObject({
+        state: 'pending',
+        decision: null,
+        revision: 0,
+      });
+      expect(harness.published.filter(({ state }) => state === 'canceled')).toEqual([]);
+      expect(warn).toHaveBeenCalledOnce();
+      for (const decision of ['allow_once', 'allow_task'] as const)
+        expect(() => harness.coordinator.resolve(resolveCommand(card, decision))).toThrow(
+          'APPROVAL_CANCELED',
+        );
+      expect(harness.persistence.timeline.some((entry) => entry.startsWith('resolved:'))).toBe(
+        false,
+      );
+      expect(harness.persistence.grants).toEqual([]);
+      expect(executions()).toBe(0);
+
+      // The existing Turn end still settles it.
+      harness.coordinator.turnEnded('task-1', 'turn-1', 'finished');
+      expect(harness.persistence.approvals.get(card.id)?.state).toBe('canceled');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('cancels a card whose call was aborted while the card was being raised', async () => {
+    const harness = createHarness();
+    const worker = new AbortController();
+    // Lands after the last abort check and before the listener exists, which never fires it.
+    harness.persistence.hasTaskGrant = () => {
+      worker.abort(released());
+      return false;
+    };
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+
+    await expect(
+      dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal),
+    ).rejects.toThrow('Team Worker Turn ended');
+    const [card] = [...harness.persistence.approvals.values()];
+    expect(card).toMatchObject({ state: 'canceled', decision: null });
+    expect(harness.published.map(({ state }) => state)).toEqual(['pending', 'canceled']);
+    expect(executions()).toBe(0);
+  });
+
+  it('neither evaluates nor raises a card for a call aborted before authorization', async () => {
+    let evaluations = 0;
+    const harness = createHarness({
+      evaluatePermission: () => {
+        evaluations += 1;
+        return 'approval_required';
+      },
+    });
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const gone = new AbortController();
+    gone.abort(released());
+
+    await expect(
+      dispatchFetch(broker, 'early-call', 'https://worker.test', gone.signal),
+    ).rejects.toThrow('Team Worker Turn ended');
+    expect(evaluations).toBe(0);
+    expect(harness.published).toEqual([]);
+    expect(harness.persistence.approvals.size).toBe(0);
+    expect(executions()).toBe(0);
+  });
+
+  it.each(['approval_required', 'deny'] as const)(
+    'ends a call aborted while its permission evaluation returns %s as canceled, with no card',
+    async (outcome) => {
+      let finishEvaluation!: () => void;
+      const evaluating = new Promise<void>((resolve) => {
+        finishEvaluation = resolve;
+      });
+      let evaluations = 0;
+      const harness = createHarness({
+        evaluatePermission: async () => {
+          evaluations += 1;
+          await evaluating;
+          return outcome;
+        },
+      });
+      const { broker, executions } = createBroker(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      broker.startTurn(toolContext, 'mock');
+      const worker = new AbortController();
+      const dispatch = dispatchFetch(
+        broker,
+        'evaluating-call',
+        'https://worker.test',
+        worker.signal,
+      );
+      await viWaitFor(() => evaluations === 1);
+      worker.abort(released());
+      finishEvaluation();
+
+      // The abort, not a policy denial, is what ends it.
+      await expect(dispatch).rejects.toThrow('Team Worker Turn ended');
+      expect(harness.published).toEqual([]);
+      expect(harness.persistence.approvals.size).toBe(0);
+      expect(executions()).toBe(0);
+    },
+  );
+
+  it('cancels the capability card the call waits on and raises no further card', async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+      ['network.fetch', 'provider.egress'],
+    );
+    broker.startTurn(toolContext, 'mock');
+    const worker = new AbortController();
+    const dispatch = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+    const first = await waitForPublished(harness);
+    harness.coordinator.resolve(resolveCommand(first, 'allow_once'));
+    await viWaitFor(() => harness.published.length === 2);
+    const second = harness.published[1]!;
+
+    worker.abort(released());
+
+    await expect(dispatch).rejects.toThrow('Team Worker Turn ended');
+    expect(harness.persistence.approvals.get(first.id)).toMatchObject({
+      state: 'resolved',
+      decision: 'allow_once',
+    });
+    expect(harness.persistence.approvals.get(second.id)).toMatchObject({
+      state: 'canceled',
+      decision: null,
+    });
+    expect(harness.published.map(({ id, state }) => [id, state])).toEqual([
+      [first.id, 'pending'],
+      [second.id, 'pending'],
+      [second.id, 'canceled'],
+    ]);
+    expect(executions()).toBe(0);
+  });
+
+  it.each(['turn end', 'user deny', 'shutdown'] as const)(
+    'leaves a card settled by %s to that path and ignores a later abort',
+    async (path) => {
+      const harness = createHarness();
+      const cancel = vi.spyOn(harness.persistence, 'cancelPendingApprovalForCall');
+      const { broker, executions } = createBroker(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      broker.startTurn(toolContext, 'mock');
+      const worker = new AbortController();
+      const dispatch = dispatchFetch(broker, 'worker-call', 'https://worker.test', worker.signal);
+      const card = await waitForPublished(harness);
+
+      if (path === 'turn end') {
+        harness.endTurn('turn-1');
+        harness.coordinator.turnEnded('task-1', 'turn-1', 'canceled');
+      } else if (path === 'user deny') harness.coordinator.resolve(resolveCommand(card, 'deny'));
+      else harness.coordinator.dispose();
+      worker.abort(released());
+
+      await expect(dispatch).rejects.toThrow('Tool authorization deny');
+      expect(cancel).not.toHaveBeenCalled();
+      expect(harness.persistence.approvals.get(card.id)).toMatchObject(
+        path === 'user deny'
+          ? { state: 'resolved', decision: 'deny' }
+          : path === 'turn end'
+            ? { state: 'canceled', decision: null }
+            : { state: 'pending' },
+      );
+      expect(executions()).toBe(0);
+    },
+  );
 });
 /**
  * `exec_command` spawns with stdin open, so anything written afterwards is part of what the

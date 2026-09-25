@@ -36,6 +36,7 @@ import {
 } from './permission-preset-legacy-rules';
 import { createHash, randomUUID } from 'node:crypto';
 import { ApprovalCoordinator } from './approval-coordinator';
+import { secureLogger } from './secure-logger';
 import {
   createManagedStdinRequest,
   managedStdinApprovalExecution,
@@ -1148,6 +1149,110 @@ function approvalRequest(taskId: string, turnId: string, overrides: Record<strin
     requestedAt: '2026-07-22T12:00:00.000Z',
     ...overrides,
   };
+}
+
+/**
+ * The production approval path of one Leader Turn over real SQLite: ApprovalCoordinator behind a
+ * ToolBroker whose one tool always needs a card. A Worker call carries the signal its release
+ * aborts, as ipc.ts composes it (issue #572).
+ */
+function turnApprovalFixture(persistence: SqlitePersistenceClient, taskId: string, turnId: string) {
+  const published: {
+    approval: ReturnType<SqlitePersistenceClient['getApproval']>;
+    event: { type?: string; approvalId?: string } | undefined;
+  }[] = [];
+  const coordinator = new ApprovalCoordinator({
+    persistence,
+    now: () => '2026-07-22T12:00:00.000Z',
+    expiresAt: () => '2026-07-22T13:00:00.000Z',
+    getCurrentPolicyEpoch: () => 0,
+    isTurnActive: (task, turn) => persistence.getActiveTurnId(task) === turn,
+    evaluatePermission: () => 'approval_required',
+    publish: (approval, event) =>
+      published.push({
+        approval: persistence.getApproval(taskId, approval.id),
+        event: event as { type?: string; approvalId?: string } | undefined,
+      }),
+  });
+  const registry = new ToolRegistry();
+  const definition = createToolDefinition({
+    toolId: createToolId({
+      provider: 'builtin',
+      namespace: 'approval',
+      name: 'call',
+      version: '1',
+    }),
+    providerName: 'approval_call',
+    kind: 'network',
+    schemaVersion: 1,
+    inputSchema: { type: 'object' },
+    outputSchema: { type: 'string' },
+    sideEffect: 'network',
+    risk: 'medium',
+    requiredCapabilities: ['network.fetch'],
+    executionTarget: 'main',
+    implementationKind: 'built-in',
+    priority: 1,
+    workspaceBinding: { kind: 'none' },
+    providerCompatibility: ['mock'],
+  });
+  registry.register(definition);
+  const lifecycle: { callId: string; state: string }[] = [];
+  const broker = new ToolBroker(
+    registry,
+    () => 0,
+    coordinator.authorizeTool.bind(coordinator),
+    ({ callId, state }) => lifecycle.push({ callId, state }),
+  );
+  let executions = 0;
+  broker.registerImplementation({
+    toolId: definition.toolId,
+    implementationKind: 'built-in',
+    execute: () => {
+      executions += 1;
+      return 'ok';
+    },
+  });
+  broker.startTurn({ taskId, turnId, workspaceId: null, policyEpoch: 0 }, 'mock');
+  return {
+    published,
+    lifecycle,
+    executions: () => executions,
+    call: (callId: string, signal?: AbortSignal) =>
+      broker.dispatch({
+        taskId,
+        turnId,
+        callId,
+        providerName: 'approval_call',
+        input: {},
+        ...(signal === undefined ? {} : { signal }),
+      }),
+    cardFor: async (callId: string) => {
+      await expect
+        .poll(() => published.some(({ approval }) => approval.callId === callId))
+        .toBe(true);
+      return published.find(({ approval }) => approval.callId === callId)!.approval;
+    },
+    decide: (
+      card: ReturnType<SqlitePersistenceClient['getApproval']>,
+      decision: 'allow_once' | 'allow_task' | 'deny',
+    ) =>
+      coordinator.resolve({
+        taskId,
+        turnId,
+        approvalId: card.id,
+        decision,
+        expectedRevision: 0,
+        challenge: card.challenge,
+        operationId: randomUUID(),
+      }),
+  };
+}
+
+function canceledApprovalIds(persistence: SqlitePersistenceClient, taskId: string): string[] {
+  return persistence
+    .listEventsAfter(taskId, 0)
+    .flatMap((event) => (event.type === 'approval.canceled' ? [event.approvalId] : []));
 }
 
 if (runsWithElectronAbi)
@@ -8124,6 +8229,357 @@ if (runsWithElectronAbi)
       });
       await expect(dispatch).resolves.toBe('ok');
       expect(executions).toBe(1);
+      persistence.close();
+    });
+
+    it('cancels only the card of its own tool call and resumes the Turn after the last card', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const otherTask = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const otherTurn = startExecutingTurn(persistence, otherTask.id);
+      for (const [id, callId, specDigest] of [
+        ['worker-a', 'worker-a:call-1', 'c'],
+        ['worker-b', 'worker-b:call-1', 'd'],
+        ['leader', 'call-1', 'e'],
+      ] as const)
+        persistence.requestApproval(
+          approvalRequest(task.id, turn.turnId, {
+            id,
+            itemId: `item-${id}`,
+            callId,
+            challenge: `challenge-${id}`,
+            specDigest: specDigest.repeat(64),
+          }),
+        );
+      // Same raw call id in another Task.
+      persistence.requestApproval(
+        approvalRequest(otherTask.id, otherTurn.turnId, {
+          id: 'other-task',
+          callId: 'worker-a:call-1',
+          challenge: 'challenge-other-task',
+        }),
+      );
+      const cancel = (
+        approvalId: string,
+        callId: string,
+        taskId: string = task.id,
+        turnId: string = turn.turnId,
+      ) =>
+        persistence.cancelPendingApprovalForCall({
+          taskId,
+          turnId,
+          approvalId,
+          callId,
+          canceledAt: '2026-07-22T12:01:00.000Z',
+        });
+
+      // Bound to its own call: another call, Turn or Task cannot reach the card.
+      expect(() => cancel('worker-a', 'worker-b:call-1')).toThrow(
+        'Approval does not belong to this tool call',
+      );
+      expect(() => cancel('worker-a', 'worker-a:call-1', otherTask.id)).toThrow(
+        'Approval does not belong to this tool call',
+      );
+      expect(() => cancel('worker-a', 'worker-a:call-1', task.id, otherTurn.turnId)).toThrow(
+        'Approval does not belong to this tool call',
+      );
+      expect(persistence.listPendingApprovals(task.id)).toHaveLength(3);
+
+      expect(cancel('worker-a', 'worker-a:call-1')).toMatchObject({
+        approval: {
+          id: 'worker-a',
+          callId: 'worker-a:call-1',
+          state: 'canceled',
+          decision: null,
+          revision: 1,
+        },
+        event: { type: 'approval.canceled', approvalId: 'worker-a', turnId: turn.turnId },
+      });
+      expect(
+        persistence
+          .listPendingApprovals(task.id)
+          .map(({ id }) => id)
+          .sort(),
+      ).toEqual(['leader', 'worker-b']);
+      expect(persistence.listPendingApprovals(otherTask.id).map(({ id }) => id)).toEqual([
+        'other-task',
+      ]);
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+      // Already terminal: nothing is rewritten and no second event is written.
+      expect(cancel('worker-a', 'worker-a:call-1')).toBeNull();
+      expect(canceledApprovalIds(persistence, task.id)).toEqual(['worker-a']);
+
+      cancel('worker-b', 'worker-b:call-1');
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+      persistence.resolveApproval({
+        taskId: task.id,
+        approvalId: 'leader',
+        expectedTurnId: turn.turnId,
+        expectedRevision: 0,
+        challenge: 'challenge-leader',
+        decision: 'deny',
+        operationId: randomUUID(),
+        decidedAt: '2026-07-22T12:01:00.000Z',
+      });
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('executing');
+      expect(persistence.snapshot(otherTask.id).activeTurn?.stage).toBe('waiting_approval');
+
+      // A cancellation grants nothing.
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT COUNT(*) AS count FROM permission_one_time_permits').get(),
+      ).toEqual({ count: 0 });
+      inspection.close();
+      expect(
+        persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:01:01.000Z'),
+      ).toEqual([]);
+      persistence.close();
+    });
+
+    it('keeps whichever of a cancellation and a user decision commits first', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          id: 'canceled-first',
+          callId: 'worker-a:call-1',
+          challenge: 'challenge-canceled-first',
+        }),
+      );
+      persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, {
+          id: 'decided-first',
+          itemId: 'item-decided-first',
+          callId: 'worker-b:call-1',
+          challenge: 'challenge-decided-first',
+          specDigest: 'd'.repeat(64),
+        }),
+      );
+      const decide = (approvalId: string, decision: 'allow_once' | 'allow_task') =>
+        persistence.resolveApproval({
+          taskId: task.id,
+          approvalId,
+          expectedTurnId: turn.turnId,
+          expectedRevision: 0,
+          challenge: `challenge-${approvalId}`,
+          decision,
+          operationId: randomUUID(),
+          decidedAt: '2026-07-22T12:01:00.000Z',
+          grantExpiresAt: '2026-07-22T13:00:00.000Z',
+        });
+      const cancel = (approvalId: string, callId: string) =>
+        persistence.cancelPendingApprovalForCall({
+          taskId: task.id,
+          turnId: turn.turnId,
+          approvalId,
+          callId,
+          canceledAt: '2026-07-22T12:01:00.000Z',
+        });
+
+      cancel('canceled-first', 'worker-a:call-1');
+      for (const decision of ['allow_once', 'allow_task'] as const)
+        expect(() => decide('canceled-first', decision)).toThrow('Approval is no longer pending');
+      expect(persistence.getApproval(task.id, 'canceled-first')).toMatchObject({
+        state: 'canceled',
+        decision: null,
+        revision: 1,
+      });
+
+      decide('decided-first', 'allow_once');
+      expect(cancel('decided-first', 'worker-b:call-1')).toBeNull();
+      expect(persistence.getApproval(task.id, 'decided-first')).toMatchObject({
+        state: 'resolved',
+        decision: 'allow_once',
+        revision: 1,
+      });
+
+      expect(canceledApprovalIds(persistence, task.id)).toEqual(['canceled-first']);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT approval_id FROM permission_one_time_permits').all(),
+      ).toEqual([{ approval_id: 'decided-first' }]);
+      inspection.close();
+      expect(
+        persistence.listPermissionGrants(task.id, 'leader', '2026-07-22T12:01:01.000Z'),
+      ).toEqual([]);
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('executing');
+      persistence.close();
+    });
+
+    it('rolls a cancellation back whole when its event cannot be written', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      persistence.requestApproval(
+        approvalRequest(task.id, turn.turnId, { callId: 'worker-a:call-1' }),
+      );
+      const writer = persistence as unknown as { appendEvent(event: { type: string }): unknown };
+      const appendEvent = writer.appendEvent.bind(persistence);
+      const append = vi.spyOn(writer, 'appendEvent').mockImplementation((event) => {
+        if (event.type === 'approval.canceled') throw new Error('event append failed');
+        return appendEvent(event);
+      });
+      try {
+        expect(() =>
+          persistence.cancelPendingApprovalForCall({
+            taskId: task.id,
+            turnId: turn.turnId,
+            approvalId: 'approval-1',
+            callId: 'worker-a:call-1',
+            canceledAt: '2026-07-22T12:01:00.000Z',
+          }),
+        ).toThrow('event append failed');
+      } finally {
+        append.mockRestore();
+      }
+
+      // Neither the card nor the Turn moved.
+      expect(persistence.getApproval(task.id, 'approval-1')).toMatchObject({
+        state: 'pending',
+        decision: null,
+        revision: 0,
+      });
+      expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+      expect(canceledApprovalIds(persistence, task.id)).toEqual([]);
+      persistence.close();
+    });
+
+    it("cancels a released Worker call's card end to end and lets the Leader Turn complete", async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const fixture = turnApprovalFixture(persistence, task.id, turn.turnId);
+      const stage = () => persistence.snapshot(task.id).activeTurn?.stage;
+      // As ipc.ts composes it: the Worker runtime's own signal, or the Worker's release.
+      const workerA = new AbortController();
+      const workerB = new AbortController();
+      const writeA = fixture.call(
+        'worker-a:call-1',
+        AbortSignal.any([new AbortController().signal, workerA.signal]),
+      );
+      const writeB = fixture.call(
+        'worker-b:call-1',
+        AbortSignal.any([new AbortController().signal, workerB.signal]),
+      );
+      const leaderCall = fixture.call('leader:call-1');
+      const cardA = await fixture.cardFor('worker-a:call-1');
+      const cardB = await fixture.cardFor('worker-b:call-1');
+      const leaderCard = await fixture.cardFor('leader:call-1');
+      expect(stage()).toBe('waiting_approval');
+
+      workerA.abort(new Error('Team Worker Turn ended before its managed tool call ran'));
+
+      await expect(writeA).rejects.toThrow('Team Worker Turn ended');
+      expect(persistence.getApproval(task.id, cardA.id)).toMatchObject({
+        state: 'canceled',
+        decision: null,
+        revision: 1,
+      });
+      expect(fixture.published.at(-1)?.event).toMatchObject({
+        type: 'approval.canceled',
+        approvalId: cardA.id,
+      });
+      // The other Worker's card and the Leader's own stay pending, so the Turn still waits.
+      expect(
+        persistence
+          .listPendingApprovals(task.id)
+          .map(({ id }) => id)
+          .sort(),
+      ).toEqual([cardB.id, leaderCard.id].sort());
+      expect(stage()).toBe('waiting_approval');
+
+      fixture.decide(leaderCard, 'allow_once');
+      // Results return in call order, so the Leader's arrives after Worker B's call ends.
+      await expect.poll(() => fixture.executions()).toBe(1);
+      // One card still open: the Leader Turn can neither synthesize nor complete yet.
+      expect(stage()).toBe('waiting_approval');
+      expect(() => persistence.changeStage(task.id, turn.turnId, 'synthesizing')).toThrow();
+
+      workerB.abort(new Error('Team Worker Turn ended before its managed tool call ran'));
+
+      await expect(writeB).rejects.toThrow('Team Worker Turn ended');
+      await expect(leaderCall).resolves.toBe('ok');
+      expect(stage()).toBe('executing');
+      persistence.changeStage(task.id, turn.turnId, 'synthesizing');
+      expect(persistence.completeTurn(task.id, turn.turnId, 'completed')).toMatchObject({
+        type: 'turn.completed',
+        state: 'completed',
+      });
+
+      expect(fixture.executions()).toBe(1);
+      expect(canceledApprovalIds(persistence, task.id)).toEqual([cardA.id, cardB.id]);
+      // The canceled calls end canceled, not denied, and leave no permit or grant.
+      for (const callId of ['worker-a:call-1', 'worker-b:call-1'])
+        expect(
+          fixture.lifecycle.filter((event) => event.callId === callId).map(({ state }) => state),
+        ).toEqual(['requested', 'prepared', 'awaiting_approval', 'canceled']);
+      const inspection = new Database(path, { readonly: true });
+      expect(
+        inspection.prepare('SELECT approval_id FROM permission_one_time_permits').all(),
+      ).toEqual([{ approval_id: leaderCard.id }]);
+      expect(inspection.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual({
+        count: 0,
+      });
+      inspection.close();
+      persistence.close();
+    });
+
+    it('keeps the card pending and refuses a late allow when the cancellation cannot be saved', async () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const fixture = turnApprovalFixture(persistence, task.id, turn.turnId);
+      const worker = new AbortController();
+      const write = fixture.call('worker-a:call-1', worker.signal);
+      const card = await fixture.cardFor('worker-a:call-1');
+      const cancel = vi
+        .spyOn(persistence, 'cancelPendingApprovalForCall')
+        .mockImplementation(() => {
+          throw new Error('database is locked');
+        });
+      const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+      try {
+        worker.abort(new Error('Team Worker Turn ended before its managed tool call ran'));
+
+        // The Worker call still stops, and nothing claims the card is gone.
+        await expect(write).rejects.toThrow('Team Worker Turn ended');
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(warn).toHaveBeenCalledOnce();
+        expect(persistence.getApproval(task.id, card.id)).toMatchObject({
+          state: 'pending',
+          decision: null,
+          revision: 0,
+        });
+        expect(persistence.snapshot(task.id).activeTurn?.stage).toBe('waiting_approval');
+        expect(
+          fixture.published.filter(({ event }) => event?.type === 'approval.canceled'),
+        ).toEqual([]);
+        // A late allow on the card left behind mints nothing for the call that is gone.
+        for (const decision of ['allow_once', 'allow_task'] as const)
+          expect(() => fixture.decide(card, decision)).toThrow('APPROVAL_CANCELED');
+        expect(persistence.getApproval(task.id, card.id)).toMatchObject({ state: 'pending' });
+        const inspection = new Database(path, { readonly: true });
+        expect(
+          inspection.prepare('SELECT COUNT(*) AS count FROM permission_one_time_permits').get(),
+        ).toEqual({ count: 0 });
+        expect(inspection.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual(
+          { count: 0 },
+        );
+        inspection.close();
+        expect(fixture.executions()).toBe(0);
+      } finally {
+        cancel.mockRestore();
+        warn.mockRestore();
+      }
+
+      // The existing Turn cancellation still settles the card.
+      persistence.cancelTurn(task.id, turn.turnId);
+      expect(persistence.getApproval(task.id, card.id)).toMatchObject({
+        state: 'canceled',
+        decision: null,
+      });
       persistence.close();
     });
 
