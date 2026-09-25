@@ -17,7 +17,7 @@ import {
   symlink,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import {
   WorkerWorktreeManager,
@@ -1098,6 +1098,141 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       outcome: 'quarantined',
     });
     expect((await git(['--git-dir', store, 'cat-file', '-t', storedCommit])).trim()).toBe('commit');
+  });
+
+  it.each(['deleted', 'emptied'] as const)(
+    'keeps a worktree whose folder was %s by hand while Git’s record of it holds a Worker commit in a submodule, until a discard (issue #580)',
+    async (left) => {
+      const { repoPath, manager } = await fixture();
+      const source = await submoduleSource();
+      const created = await manager.create({ agentId: 'agent-gone-submodule', repoPath });
+      await git(['-C', created.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+      const sub = join(created.path, 'sub');
+      await git(['-C', sub, ...TEST_IDENTITY, 'commit', '-q', '--allow-empty', '-m', 'worker']);
+      const workerCommit = (await git(['-C', sub, 'rev-parse', 'HEAD'])).trim();
+      const store = resolve(
+        created.path,
+        (await git(['-C', created.path, 'rev-parse', '--git-path', 'modules'])).trim(),
+      );
+      // The store's configured work tree is in the folder, so Git is handed one that exists.
+      const storeHoldsWorkerCommit = async () =>
+        expect(
+          (
+            await git([
+              '--git-dir',
+              join(store, 'sub'),
+              '--work-tree',
+              store,
+              'cat-file',
+              '-t',
+              workerCommit,
+            ])
+          ).trim(),
+        ).toBe('commit');
+      // The folder goes by hand, or only everything in it: the store stays in Git's record alone.
+      if (left === 'deleted') await rm(created.path, { recursive: true, force: true });
+      else
+        for (const name of await readdir(created.path))
+          await rm(join(created.path, name), { recursive: true, force: true });
+      await storeHoldsWorkerCommit();
+      const input = { agentId: 'agent-gone-submodule', repoPath };
+
+      // The list says there is a submodule, so the discard confirmation warns about it...
+      await expect(manager.hasSubmodules({ ...input, path: created.path })).resolves.toBe(true);
+      // ...and no automatic cleanup unregisters it. The reclaim never retries it either.
+      await expect(manager.cleanup(input)).resolves.toEqual({ outcome: 'quarantined' });
+      await expect(
+        manager.cleanupUnchanged({ ...input, baseHead: created.baseHead }),
+      ).resolves.toEqual({ outcome: 'quarantined', changed: true });
+      await storeHoldsWorkerCommit();
+      expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
+
+      // A discard the user confirmed removes it, the record and its store with it.
+      await expect(manager.discard({ ...input, path: created.path })).resolves.toEqual({
+        outcome: 'removed',
+      });
+      await expect(lstat(store)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(lstat(created.path)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await registeredWorktrees(repoPath)).not.toContain(await samePathKey(created.path));
+    },
+  );
+
+  it.each(['cleanup', 'cleanupUnchanged', 'discard'] as const)(
+    '%s unregisters a missing worktree whose own record keeps no submodule store, whatever another record keeps (issue #580)',
+    async (method) => {
+      const { repoPath, manager } = await fixture();
+      const source = await submoduleSource();
+      const created = await manager.create({ agentId: 'agent-gone-plain', repoPath });
+      // An empty store holds nothing to lose.
+      const record = resolve(
+        created.path,
+        (await git(['-C', created.path, 'rev-parse', '--git-dir'])).trim(),
+      );
+      await mkdir(join(record, 'modules'));
+      // The user's own worktree on an unplugged drive keeps a submodule store in its record.
+      const userRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-user-worktree-'));
+      cleanupRoots.push(userRoot);
+      const userWorktree = join(userRoot, 'on-unplugged-drive');
+      await git(['-C', repoPath, 'worktree', 'add', '-q', '--detach', userWorktree]);
+      await git(['-C', userWorktree, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+      const userStore = resolve(
+        userWorktree,
+        (await git(['-C', userWorktree, 'rev-parse', '--git-path', 'modules'])).trim(),
+      );
+      await rm(created.path, { recursive: true, force: true });
+      await rm(userWorktree, { recursive: true, force: true });
+      const input = { agentId: 'agent-gone-plain', repoPath };
+
+      await expect(manager.hasSubmodules({ ...input, path: created.path })).resolves.toBe(false);
+      const result =
+        method === 'cleanup'
+          ? await manager.cleanup(input)
+          : method === 'cleanupUnchanged'
+            ? await manager.cleanupUnchanged({ ...input, baseHead: created.baseHead })
+            : await manager.discard({ ...input, path: created.path });
+
+      expect(result).toEqual({ outcome: 'removed' });
+      await expect(lstat(record)).rejects.toMatchObject({ code: 'ENOENT' });
+      const registered = await registeredWorktrees(repoPath);
+      expect(registered).not.toContain(await samePathKey(created.path));
+      expect(registered).toContain(await samePathKey(userWorktree));
+      expect(await readdir(userStore)).toEqual(['sub']);
+    },
+  );
+
+  it('finds a missing worktree’s record by a relative `gitdir`, and counts a store it cannot list as holding work (issue #580)', async () => {
+    const { repoPath, manager } = await fixture();
+    const source = await submoduleSource();
+    const recordOf = async (path: string) =>
+      resolve(path, (await git(['-C', path, 'rev-parse', '--git-dir'])).trim());
+
+    // Git 2.48 and later can write the worktree's path relative to its record.
+    const linked = await manager.create({ agentId: 'agent-gone-relative', repoPath });
+    await git(['-C', linked.path, ...SUBMODULE_CLONE, 'submodule', 'add', '-q', source, 'sub']);
+    const linkedRecord = await recordOf(linked.path);
+    await writeFile(
+      join(linkedRecord, 'gitdir'),
+      `${relative(linkedRecord, join(linked.path, '.git')).split(sep).join('/')}\n`,
+    );
+    // A `modules` that is not a directory cannot be listed, so it counts as a store.
+    const unlisted = await manager.create({ agentId: 'agent-gone-unlisted', repoPath });
+    const unlistedRecord = await recordOf(unlisted.path);
+    await writeFile(join(unlistedRecord, 'modules'), '');
+    await rm(linked.path, { recursive: true, force: true });
+    await rm(unlisted.path, { recursive: true, force: true });
+
+    for (const [agentId, path, record] of [
+      ['agent-gone-relative', linked.path, linkedRecord],
+      ['agent-gone-unlisted', unlisted.path, unlistedRecord],
+    ] as const) {
+      await expect(manager.hasSubmodules({ agentId, repoPath, path })).resolves.toBe(true);
+      await expect(manager.cleanup({ agentId, repoPath })).resolves.toEqual({
+        outcome: 'quarantined',
+      });
+      // Git's record stays, with whatever its `modules` holds.
+      await expect(lstat(join(record, 'modules'))).resolves.toBeDefined();
+    }
+    expect(await readdir(join(linkedRecord, 'modules'))).toEqual(['sub']);
   });
 
   it('finishes a removal that left only the locked root folder, without asking Git about it (issue #544)', async () => {

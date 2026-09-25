@@ -11,7 +11,7 @@ import {
 } from 'node:fs';
 import { chmod, lstat, readdir, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
@@ -2040,6 +2040,140 @@ if (runsWithElectronAbi)
       expect(kept.reason).not.toMatch(/Isolation repositories|Completed isolation|"code"/);
       persistence.close();
     }, 40_000);
+
+    it('keeps an integrated worktree deleted by hand while its submodule store holds a Worker commit, and lists it for a discard (issue #580)', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-gone-submodule-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Missing worktree with a submodule store');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new PausedCleanupManager({ worktreesRoot }),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'submodule writer',
+        objective: 'leave a submodule commit in the worktree',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const { executionId } = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write before the folder is deleted',
+        doneCriteria: ['output integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecutionIsolation(executionId)?.phase === 'completed',
+        15_000,
+      );
+      const worktreePath =
+        persistence.getTeamExecutionIsolation(executionId)!.repositories[0]!.worktreePath;
+      // A commit inside a submodule lives only in the worktree's own submodule store.
+      const git = (...args: string[]) =>
+        spawnSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', ...args], {
+          encoding: 'utf8',
+        });
+      const source = mkdtempSync(join(tmpdir(), 'sprint-coder-team-submodule-source-'));
+      cleanup.push(source);
+      const sub = join(worktreePath, 'sub');
+      for (const args of [
+        ['init', '-q', source],
+        ['-C', source, 'commit', '-q', '--allow-empty', '-m', 'source'],
+        [
+          '-C',
+          worktreePath,
+          '-c',
+          'protocol.file.allow=always',
+          '-c',
+          'core.autocrlf=false',
+          'submodule',
+          'add',
+          '-q',
+          source,
+          'sub',
+        ],
+        ['-C', sub, 'commit', '-q', '--allow-empty', '-m', 'worker commit in submodule'],
+      ])
+        expect(git(...args).status).toBe(0);
+      const workerCommit = git('-C', sub, 'rev-parse', 'HEAD').stdout.trim();
+      const store = resolve(
+        worktreePath,
+        git('-C', worktreePath, 'rev-parse', '--git-path', 'modules').stdout.trim(),
+      );
+      // The store's configured work tree is in the deleted folder, so Git is handed one that exists.
+      const storeHoldsWorkerCommit = () =>
+        git(
+          '--git-dir',
+          join(store, 'sub'),
+          '--work-tree',
+          store,
+          'cat-file',
+          '-t',
+          workerCommit,
+        ).stdout.trim() === 'commit';
+      // The user deletes the folder by hand before a later launch finishes the cleanup.
+      rmSync(worktreePath, { recursive: true, force: true });
+      expect(storeHoldsWorkerCommit()).toBe(true);
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('gone-submodule-restart', '2026-08-08T10:00:00.000Z');
+      const recovered = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        new WorkerWorktreeManager({ worktreesRoot }),
+      );
+      recovered.recoverOnStartup();
+      await waitFor(
+        () => persistence.getTeamExecutionIsolation(executionId)?.phase === 'quarantined',
+        15_000,
+      );
+      // The cleanup keeps the registration and its store, and says why in words.
+      const kept = persistence.getTeamExecutionIsolation(executionId)!;
+      expect(kept.repositories).toMatchObject([
+        { state: 'quarantined', integratedHead: gitHead(workspace) },
+      ]);
+      expect(kept.reason).toContain('統合したworktreeを片付けられませんでした');
+      expect(storeHoldsWorkerCommit()).toBe(true);
+      const registered = () =>
+        git('-C', workspace, 'worktree', 'list', '--porcelain')
+          .stdout.split(/\r?\n/)
+          .filter((line) => line.startsWith('worktree ')).length;
+      expect(registered()).toBe(2);
+      // The list reports the submodule, so the discard confirmation gives its strong warning.
+      await expect(recovered.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [
+          {
+            executionId,
+            integration: 'confirmed',
+            submodules: true,
+            existsOnDisk: false,
+            discardable: true,
+          },
+        ],
+      });
+
+      // A discard the user confirmed removes the registration, store and all.
+      await expect(recovered.discardRetainedWorktree(task.id, executionId, 1)).resolves.toEqual({
+        worktrees: [],
+        total: 0,
+      });
+      expect(existsSync(store)).toBe(false);
+      expect(registered()).toBe(1);
+      expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+        phase: 'quarantined',
+        repositories: [{ state: 'cleaned' }],
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    }, 45_000);
 
     it.each([
       { failure: 'a file held open', code: 'EBUSY' },
