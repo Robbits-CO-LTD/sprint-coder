@@ -82,7 +82,7 @@ export function parseWorkerCriteriaReport(
 ): WorkerCriteriaReportResult {
   if (doneCriteria.length === 0) return { ok: true, criteria: [], text: finalText.trim() };
   const fail = (reason: string): WorkerCriteriaReportResult => ({ ok: false, reason });
-  const block = lastJsonBlock(finalText);
+  const block = lastJsonBlock(finalText, reportFrom);
   if (block === null) return fail('最終回答に完了条件ごとの報告（```json ブロック）がありません。');
   if (block.bodyEnd === null || block.end === null)
     return fail(
@@ -156,7 +156,7 @@ export function readWorkerCriteriaReport(
     doneCriteria === undefined
       ? null
       : parseWorkerCriteriaReport(finalText, doneCriteria, options.reportFrom);
-  const block = report === null ? null : lastJsonBlock(finalText);
+  const block = report === null ? null : lastJsonBlock(finalText, options.reportFrom);
   // An unreadable report block is left out too: why it could not be read is in the verification.
   // Any other JSON block is part of the answer, such as a file the Worker was asked to produce.
   const withoutReport =
@@ -294,6 +294,8 @@ function failWorkerCompletion(
   };
 }
 
+const JSON_FENCE_OPEN = /^[ \t]{0,3}```json\b([^\r\n]*)/imu;
+
 /**
  * Where the last ```json block of a Worker answer starts, where its body ends and where the block
  * ends, if it is closed. A fence starts a line, after at most three spaces of indent (a block in a
@@ -301,14 +303,31 @@ function failWorkerCompletion(
  * start a line and close the block early. Two closings that do not stand on their own line are
  * also taken: a one-line block (```json {...}```) closed by the ``` that ends its line, and a ```
  * written right after the JSON that ends the whole answer.
+ *
+ * `reportFrom` is where the text after the Worker's last tool call begins (0 without a tool call).
+ * A Claude or Grok adapter does not put a newline between a Turn's utterances, so the report can
+ * start exactly there without starting an actual line (issue #585); that position is treated as a
+ * line start too, but no other mid-line "```json" is. A real line start already covers `reportFrom
+ * === 0`, so it is not given this treatment again.
  */
 function lastJsonBlock(
   finalText: string,
+  reportFrom = 0,
 ): { start: number; bodyStart: number; bodyEnd: number | null; end: number | null } | null {
   let opening: RegExpExecArray | null = null;
-  for (const match of finalText.matchAll(/^[ \t]{0,3}```json\b([^\r\n]*)/gimu)) opening = match;
+  let start = -1;
+  for (const match of finalText.matchAll(/^[ \t]{0,3}```json\b([^\r\n]*)/gimu)) {
+    opening = match;
+    start = match.index;
+  }
+  if (reportFrom > 0 && reportFrom <= finalText.length && reportFrom >= start) {
+    const atReportFrom = JSON_FENCE_OPEN.exec(finalText.slice(reportFrom));
+    if (atReportFrom !== null) {
+      opening = atReportFrom;
+      start = reportFrom;
+    }
+  }
   if (opening === null) return null;
-  const start = opening.index;
   const lineEnd = start + opening[0].length;
   const rest = opening[1]!.trimEnd();
   const bodyStart = lineEnd - opening[1]!.length;
