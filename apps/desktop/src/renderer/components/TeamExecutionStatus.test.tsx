@@ -166,6 +166,12 @@ describe('describeExecution', () => {
       describeExecution(execution({ terminalReason: 'worker_reported_failure' }))
         .terminalReasonLabel,
     ).toBe('Workerが失敗を報告');
+    // Main's own write check (requireWorkspaceWrite) overriding a reported success is a distinct
+    // reason from a Worker reporting failure itself (issue #584).
+    expect(
+      describeExecution(execution({ terminalReason: 'workspace_write_unverified' }))
+        .terminalReasonLabel,
+    ).toBe('書き込みを確認できず失敗');
     // Existing translation kept as-is (see the module comment on why this one is not renamed).
     expect(
       describeExecution(execution({ terminalReason: 'stop_unconfirmed' })).terminalReasonLabel,
