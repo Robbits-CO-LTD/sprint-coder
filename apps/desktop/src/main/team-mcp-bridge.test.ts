@@ -54,6 +54,20 @@ function isExpectedWindowsPipeClose(error: Error & { code?: string }): boolean {
   return process.platform === 'win32' && ['EPIPE', 'ECONNRESET'].includes(error.code ?? '');
 }
 
+/** Upper bound for a roundTrip that must receive its framed response. A healthy response still
+ * resolves as soon as its line arrives, so this only bounds how long a broken bridge takes to fail.
+ * On Windows every request crosses the PowerShell named-pipe broker, which keeps one pending pipe
+ * listener and creates the next one only after an accept; concurrent clients therefore queue, and
+ * on a loaded runner the slowest of four exceeded the 300ms default (CI run 36172446329). 5s
+ * matches the bridge's default authentication deadline, by which it closes any connection whose
+ * request it has not handled yet. The tools called here answer right after that handling, except
+ * the Leader report wait, which answers within one 500ms poll once no Worker is busy.
+ *
+ * Tests that expect the bridge to close without responding keep their short grace: it must stay
+ * well below that authentication deadline, or a missing immediate rejection would be masked by
+ * the deadline's own close. */
+const RESPONSE_TIMEOUT_MS = 5_000;
+
 /** Sends one line and collects every line the server writes back before the socket closes (or a
  * short grace period elapses with no more data), then closes the connection. */
 function roundTrip(
@@ -86,8 +100,8 @@ function roundTrip(
         lines.push(buffer.slice(0, index));
         buffer = buffer.slice(index + 1);
         // Every request in this suite has exactly one response. Resolve as soon as that framed
-        // response arrives instead of relying on a 300ms grace window, which is too short under
-        // parallel Windows CI load and can produce an empty `lines` array.
+        // response arrives instead of waiting out the grace window; callers that expect a response
+        // pass RESPONSE_TIMEOUT_MS so a slow runner does not end with an empty `lines` array.
         socket.destroy();
         finish();
         return;
@@ -161,11 +175,15 @@ describe('TeamMcpBridge', () => {
       managedToolCatalogDigest: 'a'.repeat(64),
     });
 
-    const authentication = await roundTrip(socketPath as string, {
-      token,
-      tool: '__authenticate__',
-      args: {},
-    });
+    const authentication = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(authentication.lines[0] as string)).toMatchObject({
       ok: true,
       result: {
@@ -175,11 +193,15 @@ describe('TeamMcpBridge', () => {
       },
     });
 
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: 'read_file',
-      args: { path: 'README.md' },
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'read_file',
+        args: { path: 'README.md' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(response.lines[0] as string)).toMatchObject({
       ok: true,
       result: { input: { path: 'README.md' } },
@@ -434,11 +456,15 @@ socket.once('error', (error) => {
       allowTeamTools: false,
     });
 
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: '__authenticate__',
-      args: {},
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(JSON.parse(response.lines[0] as string)).toMatchObject({
       ok: true,
@@ -463,11 +489,15 @@ socket.once('error', (error) => {
       allowedTools: WORKER_TEAM_MCP_TOOL_NAMES,
     });
 
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: '__authenticate__',
-      args: {},
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     const result = JSON.parse(response.lines[0] as string).result as {
       allowedTools: string[];
@@ -569,11 +599,15 @@ socket.once('error', (error) => {
     const token = TeamMcpBridge.generateToken();
     bridge.register('turn-1', { taskId: 'task-1', token });
 
-    const { lines, closed } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_stop_worker',
-      args: { workerId: 'worker-1' },
-    });
+    const { lines, closed } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_stop_worker',
+        args: { workerId: 'worker-1' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(closed).toBe(false);
     expect(lines).toHaveLength(1);
     const response = JSON.parse(lines[0] as string) as {
@@ -599,11 +633,15 @@ socket.once('error', (error) => {
       allowedTools: ['team_send_message', 'team_get_status'],
     });
 
-    const { lines, closed } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_hire_worker',
-      args: { role: 'unauthorized', objective: 'escalate privileges' },
-    });
+    const { lines, closed } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_hire_worker',
+        args: { role: 'unauthorized', objective: 'escalate privileges' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(closed).toBe(false);
     expect(JSON.parse(lines[0] as string)).toMatchObject({
@@ -627,11 +665,15 @@ socket.once('error', (error) => {
       allowedTools: ['team_hire_worker', 'team_get_status'],
     });
 
-    const { lines } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_hire_worker',
-      args: { role: 'unauthorized', objective: 'exploit a missing role' },
-    });
+    const { lines } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_hire_worker',
+        args: { role: 'unauthorized', objective: 'exploit a missing role' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(JSON.parse(lines[0] as string)).toMatchObject({
       ok: false,
@@ -664,11 +706,15 @@ socket.once('error', (error) => {
       initialWaitCursor: 7,
     });
 
-    await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_wait_reports',
-      args: {},
-    });
+    await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_wait_reports',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
   });
@@ -692,11 +738,15 @@ socket.once('error', (error) => {
     const socketPath = await bridge.ensureStarted();
     const deniedToken = TeamMcpBridge.generateToken();
     bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
-    const denied = await roundTrip(socketPath as string, {
-      token: deniedToken,
-      tool: 'skill_draft_create',
-      args: { kind: 'chat', skillId: 'reviewer', files: [] },
-    });
+    const denied = await roundTrip(
+      socketPath as string,
+      {
+        token: deniedToken,
+        tool: 'skill_draft_create',
+        args: { kind: 'chat', skillId: 'reviewer', files: [] },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
 
     const allowedToken = TeamMcpBridge.generateToken();
@@ -705,11 +755,15 @@ socket.once('error', (error) => {
       token: allowedToken,
       allowSkillDrafts: true,
     });
-    const allowed = await roundTrip(socketPath as string, {
-      token: allowedToken,
-      tool: 'skill_draft_create',
-      args: { kind: 'chat', skillId: 'reviewer', files: [{ path: 'SKILL.md', content: 'x' }] },
-    });
+    const allowed = await roundTrip(
+      socketPath as string,
+      {
+        token: allowedToken,
+        tool: 'skill_draft_create',
+        args: { kind: 'chat', skillId: 'reviewer', files: [{ path: 'SKILL.md', content: 'x' }] },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
       ok: true,
       result: {
@@ -876,11 +930,15 @@ socket.once('error', (error) => {
       skillImportUserText: 'Claude の skill は import しないで',
     });
 
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: 'skill_import_read',
-      args: { cli: 'claude', skillId: 'skill' },
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'skill_import_read',
+        args: { cli: 'claude', skillId: 'skill' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(JSON.parse(response.lines[0] as string)).toMatchObject({ ok: false });
     expect(readImportSkillSource).not.toHaveBeenCalled();
@@ -900,11 +958,15 @@ socket.once('error', (error) => {
     const socketPath = await bridge.ensureStarted();
     const deniedToken = TeamMcpBridge.generateToken();
     bridge.register('turn-denied', { taskId: 'task-1', token: deniedToken });
-    const denied = await roundTrip(socketPath as string, {
-      token: deniedToken,
-      tool: 'project_memory_remember',
-      args: { content: 'stable fact' },
-    });
+    const denied = await roundTrip(
+      socketPath as string,
+      {
+        token: deniedToken,
+        tool: 'project_memory_remember',
+        args: { content: 'stable fact' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(denied.lines[0] as string)).toMatchObject({ ok: false });
 
     const allowedToken = TeamMcpBridge.generateToken();
@@ -914,11 +976,15 @@ socket.once('error', (error) => {
       allowProjectMemory: true,
       allowTeamTools: false,
     });
-    const allowed = await roundTrip(socketPath as string, {
-      token: allowedToken,
-      tool: 'project_memory_remember',
-      args: { content: 'stable fact' },
-    });
+    const allowed = await roundTrip(
+      socketPath as string,
+      {
+        token: allowedToken,
+        tool: 'project_memory_remember',
+        args: { content: 'stable fact' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
       ok: true,
       result: { queued: true },
@@ -941,11 +1007,15 @@ socket.once('error', (error) => {
       allowSkillDrafts: true,
       allowTeamTools: false,
     });
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_stop_worker',
-      args: { workerId: 'worker-1' },
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_stop_worker',
+        args: { workerId: 'worker-1' },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(response.lines[0] as string)).toMatchObject({ ok: false });
     expect(coordinator.stopWorker).not.toHaveBeenCalled();
   });
@@ -969,11 +1039,15 @@ socket.once('error', (error) => {
     const token = TeamMcpBridge.generateToken();
     bridge.register('turn-models', { taskId: 'task-trusted', token });
 
-    const { lines } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_list_models',
-      args: { capabilities: ['reasoning'], limit: 20 },
-    });
+    const { lines } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_list_models',
+        args: { capabilities: ['reasoning'], limit: 20 },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
 
     expect(JSON.parse(lines[0] as string)).toMatchObject({
       ok: true,
@@ -1001,11 +1075,15 @@ socket.once('error', (error) => {
       contextOwner: { type: 'team_execution', id: 'parent-execution-1' },
     });
 
-    const { lines } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_assign_task',
-      args: { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
-    });
+    const { lines } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_assign_task',
+        args: { workerId: 'worker-1', objective: '実装する', doneCriteria: ['完了'] },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(lines[0] as string)).toMatchObject({
       ok: true,
       result: { executionId: 'execution-1', state: 'queued' },
@@ -1022,16 +1100,20 @@ socket.once('error', (error) => {
       { type: 'team_execution', id: 'parent-execution-1' },
     );
 
-    const blockedWrite = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_assign_task',
-      args: {
-        workerId: 'worker-1',
-        objective: '書き込む',
-        doneCriteria: ['完了'],
-        access: 'workspace-write',
+    const blockedWrite = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_assign_task',
+        args: {
+          workerId: 'worker-1',
+          objective: '書き込む',
+          doneCriteria: ['完了'],
+          access: 'workspace-write',
+        },
       },
-    });
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(blockedWrite.lines[0] as string)).toMatchObject({
       ok: true,
       result: { ok: false, message: expect.stringContaining('read-only') },
@@ -1099,11 +1181,15 @@ socket.once('error', (error) => {
     const token = TeamMcpBridge.generateToken();
     bridge.register('turn-1', { taskId: 'task-1', token });
 
-    const { lines, closed } = await roundTrip(socketPath as string, {
-      token,
-      tool: 'team_not_a_real_tool',
-      args: {},
-    });
+    const { lines, closed } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_not_a_real_tool',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(closed).toBe(false);
     const response = JSON.parse(lines[0] as string) as { ok: false; error: string };
     expect(response.ok).toBe(false);
@@ -1130,11 +1216,15 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
     expect(socketPath).not.toBeNull();
     const token = TeamMcpBridge.generateToken();
     bridge.register('turn-windows', { taskId: 'task-windows', token });
-    const response = await roundTrip(socketPath as string, {
-      token,
-      tool: '__authenticate__',
-      args: {},
-    });
+    const response = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
       expect.objectContaining({
         ok: true,
@@ -1154,11 +1244,15 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
     bridge.register('turn-windows-reconnect', { taskId: 'task-windows', token });
 
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      const response = await roundTrip(socketPath as string, {
-        token,
-        tool: '__authenticate__',
-        args: {},
-      });
+      const response = await roundTrip(
+        socketPath as string,
+        {
+          token,
+          tool: '__authenticate__',
+          args: {},
+        },
+        RESPONSE_TIMEOUT_MS,
+      );
       expect(response.lines.map((line) => JSON.parse(line))).toContainEqual(
         expect.objectContaining({
           ok: true,
@@ -1166,7 +1260,7 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         }),
       );
     }
-  });
+  }, 60_000);
 
   it('accepts a Leader and three Workers concurrently', async () => {
     const bridge = new TeamMcpBridge(
@@ -1187,11 +1281,15 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
 
     const responses = await Promise.all(
       registrations.map((token) =>
-        roundTrip(socketPath as string, {
-          token,
-          tool: '__authenticate__',
-          args: {},
-        }),
+        roundTrip(
+          socketPath as string,
+          {
+            token,
+            tool: '__authenticate__',
+            args: {},
+          },
+          RESPONSE_TIMEOUT_MS,
+        ),
       ),
     );
     for (const response of responses)
@@ -1288,11 +1386,15 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
     expect(secondSocketPath).not.toBe(firstSocketPath);
     const token = TeamMcpBridge.generateToken();
     bridge.register('turn-windows-restarted', { taskId: 'task-windows', token });
-    const response = await roundTrip(secondSocketPath as string, {
-      token,
-      tool: '__authenticate__',
-      args: {},
-    });
+    const response = await roundTrip(
+      secondSocketPath as string,
+      {
+        token,
+        tool: '__authenticate__',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(response.lines[0] as string)).toMatchObject({
       ok: true,
       result: { authenticated: true },
@@ -1391,14 +1493,18 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
         tool: 'team_wait_reports',
         args: {},
       },
-      1_000,
+      RESPONSE_TIMEOUT_MS,
     );
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const workerRead = await roundTrip(socketPath as string, {
-      token: workerToken,
-      tool: 'team_read_messages',
-      args: {},
-    });
+    const workerRead = await roundTrip(
+      socketPath as string,
+      {
+        token: workerToken,
+        tool: 'team_read_messages',
+        args: {},
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
     expect(JSON.parse(workerRead.lines[0] as string)).toMatchObject({
       ok: true,
       result: { ok: true, messages: [] },
