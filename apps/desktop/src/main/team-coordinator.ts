@@ -1625,7 +1625,12 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       } else {
-        if (
+        // A Turn whose process-tree exit went unconfirmed has already left its runtime, so a stop
+        // would return without stopping anything (issue #556). The direct path's rule decides it:
+        // only a refusal before this execution started anything is a confirmed stop.
+        if (error instanceof WorkerRuntimeExitUnconfirmedError && !runtimeStopConfirmed(error))
+          runtimeSettled = false;
+        else if (
           !runtimeSettled &&
           !(error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed')
         ) {
@@ -1636,6 +1641,8 @@ export class TeamCoordinator {
             runtimeSettled = false;
           }
         }
+        if (runtimeSettled && !this.graphWorkerStopConfirmed(worker.id, execution.id))
+          runtimeSettled = false;
         this.persistence.interruptGraphStep({
           missionId: graph.missionId,
           stepKey,
@@ -1741,8 +1748,12 @@ export class TeamCoordinator {
             ))
       )
         throw new Error('Graph workspace Worker is still active');
-      if (owners.some((owner) => owner.attemptId !== null))
+      if (owners.some((owner) => owner.attemptId !== null)) {
         await this.runtime.stop(execution.assigneeAgentId);
+        // The reservation stays quarantined, so no other step takes its resources meanwhile.
+        if (!this.graphWorkerStopConfirmed(execution.assigneeAgentId, execution.id))
+          throw new Error('Graph Worker stop is unconfirmed');
+      }
       if (preserved) {
         const review = await this.inspectGraphWorkspace(taskId, missionId, stepKey);
         if (review.digest !== workspaceReviewDigest)
@@ -1845,6 +1856,8 @@ export class TeamCoordinator {
               )
                 throw new Error('Graph Worker is active in another step');
               await this.runtime.stop(execution.assigneeAgentId);
+              if (!this.graphWorkerStopConfirmed(execution.assigneeAgentId, execution.id))
+                throw new Error('Graph Worker stop is unconfirmed');
             }
             for (const owner of owners.owners)
               this.persistence.releaseGraphResources({
@@ -2227,6 +2240,16 @@ export class TeamCoordinator {
         image.changedFiles.map((path) => ({ repository: image.repository, path })),
       ),
     };
+  }
+
+  /**
+   * Whether a Graph step's Worker counts as stopped once its Turn or a stop of it returned, so its
+   * reservation may be released as `attempt-stopped` (issue #556). A returned stop proves nothing
+   * while the runtime still counts a Turn of this execution as possibly running: a Turn whose exit
+   * went unconfirmed has already left the runtime, so the stop returned without stopping it.
+   */
+  private graphWorkerStopConfirmed(agentId: string, executionId: string): boolean {
+    return this.runtime.hasUnsettledTurn?.(agentId, executionId) !== true;
   }
 
   /**
@@ -2924,9 +2947,25 @@ export class TeamCoordinator {
       owners.some((owner) => this.persistence.getGraphIntegrationHold(owner.id)?.integrationActive)
     )
       throw new Error('Graph integration stop is unconfirmed');
-    if (owners.some((owner) => owner.attemptId !== null))
+    let stopped = true;
+    if (owners.some((owner) => owner.attemptId !== null)) {
       await this.runtime.stop(execution.assigneeAgentId);
+      stopped = this.graphWorkerStopConfirmed(execution.assigneeAgentId, execution.id);
+    }
     this.executionScheduler.cancelQueued(execution.id);
+    if (!stopped) {
+      // Like a running step whose stop is unconfirmed, the step is not canceled: it waits to resume
+      // and keeps its reservation until its Worker's exit is confirmed.
+      this.graphScheduledExecutions.delete(execution.id);
+      const waiting = this.persistence.transitionTeamExecution({
+        executionId: execution.id,
+        to: 'waiting_resume',
+        now: this.isoNow(),
+      });
+      this.executionScheduler.notifyReadinessChanged();
+      this.emit(this.persistence.getTeam(execution.teamId).taskId, execution.teamId);
+      return { executionId: waiting.id, state: waiting.state };
+    }
     const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
     for (const owner of owners)
       this.persistence.releaseGraphResources({

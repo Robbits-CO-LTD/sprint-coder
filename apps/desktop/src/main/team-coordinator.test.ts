@@ -7806,7 +7806,11 @@ if (runsWithElectronAbi)
 
       expect(executeCount).toBe(1);
       const attempts = persistence.listTeamAttempts(executionId);
-      expect(attempts).toHaveLength(1);
+      expect(attempts).toEqual([expect.objectContaining({ state: 'interrupted' })]);
+      // The CLI may still be running, so its step keeps the reservation (issue #556).
+      expect(persistence.listGraphResourceReservations(mission.id)).toEqual([
+        expect.objectContaining({ executionId, state: 'quarantined' }),
+      ]);
       expect(persistence.getTeamAttemptFailureDiagnostic(attempts[0]!.id)).toMatchObject({
         runtimeKind: 'grok',
         runtimeTurnId: 'runtime-turn-graph',
