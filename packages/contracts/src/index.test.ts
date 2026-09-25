@@ -996,6 +996,23 @@ describe('public contracts', () => {
     expect(() =>
       teamExecutionSummarySchema.parse({ ...execution, queueReason: 'provider_guess' }),
     ).toThrow();
+    // What Main last found about a kept worktree's integration (issue #579): only a checked result.
+    expect(teamExecutionSummarySchema.parse(execution)).not.toHaveProperty(
+      'retainedWorktreeIntegrations',
+    );
+    const retainedWorktreeIntegrations = [{ repositoryOrdinal: 1, integration: 'unconfirmed' }];
+    expect(
+      teamExecutionSummarySchema.parse({ ...execution, retainedWorktreeIntegrations })
+        .retainedWorktreeIntegrations,
+    ).toEqual(retainedWorktreeIntegrations);
+    for (const invalid of [
+      [{ repositoryOrdinal: 1, integration: 'none' }],
+      [{ repositoryOrdinal: 0, integration: 'confirmed' }],
+      [{ repositoryOrdinal: 1, integration: 'confirmed', integratedHead: 'a'.repeat(40) }],
+    ])
+      expect(() =>
+        teamExecutionSummarySchema.parse({ ...execution, retainedWorktreeIntegrations: invalid }),
+      ).toThrow();
   });
 
   it('seals Team isolation root bindings and completion state', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { retainedWorktreeStateLabel } from './TeamRetainedWorktrees';
 import {
   EXECUTION_STATE_LABELS,
   QUEUE_REASON_LABELS,
@@ -354,7 +355,7 @@ describe('TeamExecutionStatus', () => {
     expect(partlyIntegrated).toContain('片付け済み（統合なし）');
   });
 
-  it('counts an integrated worktree whose cleanup failed as integrated and says the cleanup failed (issue #544)', () => {
+  describe('integrated worktrees kept on disk', () => {
     const repository = {
       ordinal: 1,
       repoPath: '/workspace/primary',
@@ -363,8 +364,15 @@ describe('TeamExecutionStatus', () => {
       workerHead: 'b'.repeat(40),
       changedFiles: ['primary.txt'],
     };
+    // Main checked every kept worktree and found its integrated commit in the Workspace unless
+    // `retainedWorktreeIntegrations` says otherwise.
     const row = (
       repositories: NonNullable<TeamExecutionSummary['isolation']>['repositories'],
+      retainedWorktreeIntegrations: NonNullable<
+        TeamExecutionSummary['retainedWorktreeIntegrations']
+      > = repositories
+        .filter(({ state, integratedHead }) => state === 'quarantined' && integratedHead !== null)
+        .map(({ ordinal }) => ({ repositoryOrdinal: ordinal, integration: 'confirmed' as const })),
     ): TeamExecutionSummary =>
       execution({
         accessMode: 'workspace-write',
@@ -376,44 +384,108 @@ describe('TeamExecutionStatus', () => {
           roots: [],
           reason: 'Integrated repository worktree remained dirty during cleanup',
         },
+        retainedWorktreeIntegrations,
       });
-    const cleanupFailed = row([
-      { ...repository, integratedHead: 'e'.repeat(40), state: 'quarantined' },
-      { ...repository, ordinal: 2, integratedHead: 'f'.repeat(40), state: 'cleaned' },
-    ]);
-    for (const variant of ['canvas', 'list'] as const) {
-      const html = renderToStaticMarkup(
-        <TeamExecutionStatus execution={cleanupFailed} variant={variant} />,
+
+    it('counts an integrated worktree whose cleanup failed as integrated and says the cleanup failed (issue #544)', () => {
+      const cleanupFailed = row([
+        { ...repository, integratedHead: 'e'.repeat(40), state: 'quarantined' },
+        { ...repository, ordinal: 2, integratedHead: 'f'.repeat(40), state: 'cleaned' },
+      ]);
+      for (const variant of ['canvas', 'list'] as const) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus execution={cleanupFailed} variant={variant} />,
+        );
+        expect(html).toContain('2/2 repository統合済み · 統合後の片付けに失敗');
+        expect(html).toContain('統合済み（片付けに失敗）');
+        expect(html).not.toContain('隔離して要確認');
+        expect(html).not.toContain('隔離済み');
+      }
+
+      // Once the user discards what was left, nothing is waiting on a cleanup any more.
+      const discarded = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={row([{ ...repository, integratedHead: 'e'.repeat(40), state: 'cleaned' }])}
+          variant="list"
+        />,
       );
-      expect(html).toContain('2/2 repository統合済み · 統合後の片付けに失敗');
-      expect(html).toContain('統合済み（片付けに失敗）');
-      expect(html).not.toContain('隔離して要確認');
-      expect(html).not.toContain('隔離済み');
-    }
+      expect(discarded).toContain('1/1 repository統合済み · 統合・片付け済み');
+      expect(discarded).not.toContain('片付けに失敗');
 
-    // Once the user discards what was left, nothing is waiting on a cleanup any more.
-    const discarded = renderToStaticMarkup(
-      <TeamExecutionStatus
-        execution={row([{ ...repository, integratedHead: 'e'.repeat(40), state: 'cleaned' }])}
-        variant="list"
-      />,
-    );
-    expect(discarded).toContain('1/1 repository統合済み · 統合・片付け済み');
-    expect(discarded).not.toContain('片付けに失敗');
+      // A kept worktree that never integrated still needs review, next to one that did.
+      const mixed = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={row([
+            { ...repository, integratedHead: 'e'.repeat(40), state: 'quarantined' },
+            { ...repository, ordinal: 2, integratedHead: null, state: 'quarantined' },
+          ])}
+          variant="list"
+        />,
+      );
+      expect(mixed).toContain('1/2 repository統合済み · 隔離して要確認');
+      expect(mixed).toContain('統合済み（片付けに失敗）');
+      expect(mixed).toContain('隔離済み');
+    });
 
-    // A kept worktree that never integrated still needs review, next to one that did.
-    const mixed = renderToStaticMarkup(
-      <TeamExecutionStatus
-        execution={row([
-          { ...repository, integratedHead: 'e'.repeat(40), state: 'quarantined' },
-          { ...repository, ordinal: 2, integratedHead: null, state: 'quarantined' },
-        ])}
-        variant="list"
-      />,
-    );
-    expect(mixed).toContain('1/2 repository統合済み · 隔離して要確認');
-    expect(mixed).toContain('統合済み（片付けに失敗）');
-    expect(mixed).toContain('隔離済み');
+    it('does not call a kept worktree integrated until Main found its commit in the Workspace, as the list says (issue #579)', () => {
+      const kept = { ...repository, integratedHead: 'e'.repeat(40), state: 'quarantined' as const };
+      // What the retained worktree list says about the same repository, past its execution state.
+      const listed = (integration: 'confirmed' | 'unconfirmed') =>
+        retainedWorktreeStateLabel({
+          executionState: 'completed',
+          integration,
+          submodules: false,
+        }).replace(`${EXECUTION_STATE_LABELS.completed} · `, '');
+      expect(listed('confirmed')).toBe('統合済み（片付けに失敗）');
+      expect(listed('unconfirmed')).toBe('統合を確認できません（Workspaceの履歴に見つかりません）');
+      // The record keeps the integrated HEAD, but the Workspace history no longer has it (e.g. a
+      // failed revalidation quarantined it): the card says what the retained worktree list says.
+      const unconfirmed = row([kept], [{ repositoryOrdinal: 1, integration: 'unconfirmed' }]);
+      for (const variant of ['canvas', 'list'] as const) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus execution={unconfirmed} variant={variant} />,
+        );
+        expect(html).toContain('0/1 repository統合済み · 統合を確認できません');
+        expect(html).toContain(listed('unconfirmed'));
+        expect(html).not.toContain('統合済み（片付けに失敗）');
+        expect(html).not.toContain('統合後の片付けに失敗');
+      }
+      // A confirmed one is named exactly as the list names it.
+      const confirmed = renderToStaticMarkup(
+        <TeamExecutionStatus execution={row([kept])} variant="list" />,
+      );
+      expect(confirmed).toContain('1/1 repository統合済み · 統合後の片付けに失敗');
+      expect(confirmed).toContain(listed('confirmed'));
+
+      // Main has not checked it yet: neither integrated nor missing, only being checked.
+      const { retainedWorktreeIntegrations: _unchecked, ...withoutChecks } = row([kept]);
+      for (const checking of [row([kept], []), withoutChecks]) {
+        const html = renderToStaticMarkup(
+          <TeamExecutionStatus execution={checking} variant="list" />,
+        );
+        expect(html).toContain('0/1 repository統合済み · 統合を確認中');
+        expect(html).not.toContain('統合済み（片付けに失敗）');
+        expect(html).not.toContain('統合を確認できません');
+      }
+
+      // One kept worktree confirmed and one not: only the confirmed one counts, and the heading
+      // does not claim the cleanup was all that failed.
+      const mixed = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={row(
+            [kept, { ...kept, ordinal: 2, integratedHead: 'f'.repeat(40) }],
+            [
+              { repositoryOrdinal: 1, integration: 'confirmed' },
+              { repositoryOrdinal: 2, integration: 'unconfirmed' },
+            ],
+          )}
+          variant="list"
+        />,
+      );
+      expect(mixed).toContain('1/2 repository統合済み · 統合を確認できません');
+      expect(mixed).toContain('統合済み（片付けに失敗）');
+      expect(mixed).toContain('統合を確認できません（Workspaceの履歴に見つかりません）');
+    });
   });
 
   it('routes standalone integration and Worker resumes to distinct labeled actions', () => {

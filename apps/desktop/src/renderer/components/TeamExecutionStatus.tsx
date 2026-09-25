@@ -4,6 +4,7 @@ import type {
   TeamMissionWorktreeSummary,
 } from '../types/sprint-coder';
 import { describeExecution } from '../lib/team-execution-display';
+import { RETAINED_WORKTREE_INTEGRATION_LABELS } from '../lib/team-retained-worktrees';
 
 /**
  * Team Activity Card (Core C1b): the persisted execution row behind a Worker, rendered identically
@@ -35,9 +36,14 @@ export function TeamExecutionStatus({
   if (execution === null) return null;
   const display = describeExecution(execution);
   const isolation = execution.isolation ?? null;
+  const integrationOf = (repository: IsolationRepository) =>
+    repositoryIntegration(execution, repository);
   // Only repositories that recorded an integrated HEAD count. A failed or canceled Worker's
-  // unchanged worktree is also `cleaned` (issue #529), but it integrated nothing.
-  const integratedRepositories = isolation?.repositories.filter(repositoryIntegrated).length ?? 0;
+  // unchanged worktree is also `cleaned` (issue #529), but it integrated nothing. A kept worktree
+  // counts only once Main found that HEAD in the Workspace (issue #579).
+  const integratedRepositories =
+    isolation?.repositories.filter((repository) => integrationOf(repository) === 'integrated')
+      .length ?? 0;
   const resume = isolationResumeAction(execution, onResume, onResumeIntegration);
 
   return (
@@ -111,7 +117,7 @@ export function TeamExecutionStatus({
             <span className="team-exec-key">Repository</span>
             <span className="team-exec-value">
               {integratedRepositories}/{isolation.repositories.length} repository統合済み ·{' '}
-              {isolationPhaseLabel(isolation)}
+              {isolationPhaseLabel(isolation, integrationOf)}
             </span>
           </p>
           <details className="team-exec-repositories">
@@ -121,8 +127,8 @@ export function TeamExecutionStatus({
                 <p className="team-exec-row" key={repository.ordinal}>
                   <span className="team-exec-key">Repo {repository.ordinal}</span>
                   <span className="team-exec-value">
-                    {isolationRepositoryStateLabel(repository)} · {repository.changedFiles.length}
-                    件変更
+                    {isolationRepositoryStateLabel(repository, integrationOf(repository))} ·{' '}
+                    {repository.changedFiles.length}件変更
                   </span>
                 </p>
               ))}
@@ -193,15 +199,30 @@ function isolationResumeAction(
     : null;
 }
 
-function repositoryIntegrated(repository: TeamExecutionIsolation['repositories'][number]): boolean {
-  // A repository whose worktree cleanup failed after it integrated keeps its integrated HEAD while
-  // it is quarantined (issue #544): its change is in the Workspace, so it counts as integrated.
-  return (
-    (repository.state === 'integrated' ||
-      repository.state === 'cleaned' ||
-      repository.state === 'quarantined') &&
-    repository.integratedHead !== null
+type IsolationRepository = TeamExecutionIsolation['repositories'][number];
+
+/**
+ * How far a repository's change is known to be in the Workspace. A repository whose worktree was
+ * kept after it integrated (`quarantined`, issue #544) keeps its integrated HEAD in the record even
+ * when the Workspace no longer has that commit (a failed revalidation quarantines it as it is). So
+ * it is `integrated` only once Main found the commit in the Workspace's current history, the same
+ * check and result the retained worktree list shows (issue #579), and `checking` until Main has
+ * checked it.
+ */
+type RepositoryIntegration = 'none' | 'integrated' | 'unconfirmed' | 'checking';
+
+function repositoryIntegration(
+  execution: TeamExecutionSummary,
+  repository: IsolationRepository,
+): RepositoryIntegration {
+  if (repository.integratedHead === null) return 'none';
+  if (repository.state === 'integrated' || repository.state === 'cleaned') return 'integrated';
+  if (repository.state !== 'quarantined') return 'none';
+  const checked = execution.retainedWorktreeIntegrations?.find(
+    ({ repositoryOrdinal }) => repositoryOrdinal === repository.ordinal,
   );
+  if (checked === undefined) return 'checking';
+  return checked.integration === 'confirmed' ? 'integrated' : 'unconfirmed';
 }
 
 // Keyed by the canonical contracts `TeamExecutionIsolation['phase']` union (issue #571): a plain `switch` compiles
@@ -210,7 +231,10 @@ function repositoryIntegrated(repository: TeamExecutionIsolation['repositories']
 // than a card that renders blank at runtime.
 const ISOLATION_PHASE_LABEL: Record<
   TeamExecutionIsolation['phase'],
-  (isolation: TeamExecutionIsolation) => string
+  (
+    isolation: TeamExecutionIsolation,
+    integrationOf: (repository: IsolationRepository) => RepositoryIntegration,
+  ) => string
 > = {
   preparing: () => '隔離環境を準備中',
   running: () => '隔離環境で実行中',
@@ -222,7 +246,7 @@ const ISOLATION_PHASE_LABEL: Record<
   integrating: () => 'repositoryを統合中',
   waiting_resume: () => '再開待ち',
   completed: () => '統合完了',
-  quarantined: (isolation) => {
+  quarantined: (isolation, integrationOf) => {
     const { repositories } = isolation;
     // Nothing is left to review once every worktree was removed unchanged (issue #529).
     if (
@@ -232,30 +256,51 @@ const ISOLATION_PHASE_LABEL: Record<
       )
     )
       return '片付け済み（統合なし）';
+    const integrations = repositories.map(integrationOf);
     // Every change reached the Workspace; only removing a worktree afterwards failed, or the
     // user has since discarded what was left (issue #544). Nothing unintegrated needs review.
-    if (repositories.length > 0 && repositories.every(repositoryIntegrated))
+    if (
+      repositories.length > 0 &&
+      integrations.every((integration) => integration === 'integrated')
+    )
       return repositories.some(({ state }) => state === 'quarantined')
         ? '統合後の片付けに失敗'
         : '統合・片付け済み';
+    // Every repository recorded an integration, but Main did not find a kept worktree's commit in
+    // the Workspace, or has not checked it yet (issue #579), so the card does not claim it.
+    if (repositories.length > 0 && !integrations.includes('none'))
+      return integrations.includes('unconfirmed') ? '統合を確認できません' : '統合を確認中';
     return '隔離して要確認';
   },
 };
 
-function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
+function isolationPhaseLabel(
+  isolation: TeamExecutionIsolation,
+  integrationOf: (repository: IsolationRepository) => RepositoryIntegration,
+): string {
   // Widen the lookup for a runtime value the canonical contracts union does not actually admit (e.g. an
   // unvalidated IPC payload from a mismatched build) — the object above stays fully keyed for the
   // compile-time exhaustiveness check, this cast only relaxes how it is *read*, so an unrecognized
   // phase falls back to a safe, non-committal label instead of throwing or rendering blank.
   const table = ISOLATION_PHASE_LABEL as Record<
     string,
-    ((isolation: TeamExecutionIsolation) => string) | undefined
+    (typeof ISOLATION_PHASE_LABEL)[TeamExecutionIsolation['phase']] | undefined
   >;
-  return table[isolation.phase]?.(isolation) ?? '状態を確認してください';
+  return table[isolation.phase]?.(isolation, integrationOf) ?? '状態を確認してください';
 }
 
+// A kept worktree (issue #544) is named by what Main found in the Workspace (issue #579), in the
+// same words the retained worktree list uses.
+const QUARANTINED_REPOSITORY_LABEL: Record<RepositoryIntegration, string> = {
+  none: '隔離済み',
+  integrated: RETAINED_WORKTREE_INTEGRATION_LABELS.confirmed,
+  unconfirmed: RETAINED_WORKTREE_INTEGRATION_LABELS.unconfirmed,
+  checking: '統合を確認中',
+};
+
 function isolationRepositoryStateLabel(
-  repository: TeamExecutionIsolation['repositories'][number],
+  repository: IsolationRepository,
+  integration: RepositoryIntegration,
 ): string {
   switch (repository.state) {
     case 'active':
@@ -267,8 +312,7 @@ function isolationRepositoryStateLabel(
     case 'cleaned':
       return repository.integratedHead === null ? '片付け済み（統合なし）' : '統合・片付け済み';
     case 'quarantined':
-      // Integrated, then kept on disk only because removing its worktree failed (issue #544).
-      return repository.integratedHead === null ? '隔離済み' : '統合済み（片付けに失敗）';
+      return QUARANTINED_REPOSITORY_LABEL[integration];
   }
 }
 
