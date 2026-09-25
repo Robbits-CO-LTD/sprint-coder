@@ -772,7 +772,7 @@ export type TeamMissionWorktreeSummary = {
   changedFiles: string[];
   reason: string | null;
 };
-// Type-only alias to the正本 schema (issue #571): a hand-written copy here previously omitted
+// Type-only alias to the canonical contracts schema (issue #571): a hand-written copy here previously omitted
 // `waiting_integration` from `phase`, so a switch over this type compiled clean while silently
 // dropping the case a real IPC payload could send.
 export type TeamExecutionIsolation = import('@sprint-coder/contracts').TeamExecutionIsolation;

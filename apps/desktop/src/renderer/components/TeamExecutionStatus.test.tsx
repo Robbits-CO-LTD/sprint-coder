@@ -448,7 +448,7 @@ describe('TeamExecutionStatus', () => {
   // issue #571: a hand-written renderer type omitted `waiting_integration` from `TeamExecutionIsolation`,
   // so `isolationPhaseLabel`'s switch compiled clean while dropping this real value — the Repository
   // row went blank instead of naming the wait. These tests pin the label and the resume gating that
-  // depend on it now that the type is aliased to the正本 schema.
+  // depend on it now that the type is aliased to the canonical contracts schema.
   describe('isolation phase waiting_integration (issue #571)', () => {
     function isolationWith(
       overrides: Partial<TeamExecutionIsolation> = {},
@@ -493,7 +493,7 @@ describe('TeamExecutionStatus', () => {
       }
     });
 
-    it('shows every正本 isolation phase as a non-blank label (regression net for future phases)', () => {
+    it('shows every canonical contracts isolation phase as a non-blank label (regression net for future phases)', () => {
       const phases: TeamExecutionIsolation['phase'][] = [
         'preparing',
         'running',

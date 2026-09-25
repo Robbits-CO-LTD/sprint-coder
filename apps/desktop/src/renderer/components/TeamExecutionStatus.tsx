@@ -204,7 +204,7 @@ function repositoryIntegrated(repository: TeamExecutionIsolation['repositories']
   );
 }
 
-// Keyed by the正本 `TeamExecutionIsolation['phase']` union (issue #571): a plain `switch` compiles
+// Keyed by the canonical contracts `TeamExecutionIsolation['phase']` union (issue #571): a plain `switch` compiles
 // even when it silently drops a case, but an object literal typed as `Record<phase, ...>` does not
 // — omitting a key here, or forgetting one after contracts adds a new phase, is a type error rather
 // than a card that renders blank at runtime.
@@ -243,7 +243,7 @@ const ISOLATION_PHASE_LABEL: Record<
 };
 
 function isolationPhaseLabel(isolation: TeamExecutionIsolation): string {
-  // Widen the lookup for a runtime value the正本 union does not actually admit (e.g. an
+  // Widen the lookup for a runtime value the canonical contracts union does not actually admit (e.g. an
   // unvalidated IPC payload from a mismatched build) — the object above stays fully keyed for the
   // compile-time exhaustiveness check, this cast only relaxes how it is *read*, so an unrecognized
   // phase falls back to a safe, non-committal label instead of throwing or rendering blank.
