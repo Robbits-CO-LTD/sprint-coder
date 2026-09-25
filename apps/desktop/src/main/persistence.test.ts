@@ -3809,6 +3809,129 @@ if (runsWithElectronAbi)
       }
     });
 
+    it('leaves an unintegrated Worker change out of the files the context reminder says the Turn changed (issue #568)', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'running',
+        repositoryState: 'active',
+        recordVerification: false,
+      });
+      try {
+        quarantineIsolatedWorkerEdit(fixture, { heads: 'none', execution: 'failed' });
+        const leader = await commitLeaderWorkspaceEdit(fixture);
+        // The reminder restated after a compaction tells the Leader not to redo work on these paths,
+        // so a Worker change that never reached the Workspace must not be listed among them.
+        const reminder = (
+          fixture.persistence as unknown as {
+            liveStateForReminder(
+              taskId: string,
+              turnId: string,
+            ): { touchedPaths?: readonly string[] };
+          }
+        ).liveStateForReminder(fixture.taskId, fixture.turnId);
+        expect(reminder.touchedPaths).toEqual([leader.workspaceFile]);
+        expect(
+          fixture.persistence.getTurnDiff(fixture.taskId, fixture.turnId).map(({ path }) => path),
+        ).toEqual([leader.workspaceFile]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
+    it('classifies a Worker Saga by the repository its root maps to in a multi-repository isolation (issue #568)', async () => {
+      const fixture = await commitIsolatedWorkerEdit({
+        phase: 'running',
+        repositoryState: 'active',
+        recordVerification: true,
+      });
+      try {
+        const { persistence, executionId } = fixture;
+        const isolation = persistence.getTeamExecutionIsolation(executionId);
+        const sagaRoot = isolation?.roots[0];
+        const sagaRepository = isolation?.repositories[0];
+        if (sagaRoot === undefined || sagaRepository === undefined)
+          throw new Error('isolation missing');
+        // Integration takes the Primary repository last, so an integration that fails on it leaves
+        // the Secondary repository integrated and the Primary one, which holds this Saga, only sealed.
+        const secondary = {
+          ordinal: 1,
+          repoPath: join(dirname(fixture.path), 'issue-568-secondary-repository'),
+          worktreePath: join(dirname(fixture.path), 'issue-568-secondary-worktree'),
+          baseHead: 'a'.repeat(40),
+          workerHead: 'd'.repeat(40),
+          integratedHead: null,
+          state: 'ready' as const,
+          changedFiles: ['secondary.txt'],
+        };
+        const primary = {
+          ...sagaRepository,
+          ordinal: 2,
+          workerHead: 'b'.repeat(40),
+          state: 'ready' as const,
+        };
+        persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: 'finalizing',
+          repositories: [secondary, primary],
+          roots: [
+            { ...sagaRoot, repositoryOrdinal: 2 },
+            {
+              rootId: 'issue-568-secondary-root',
+              rootLabel: 'secondary',
+              role: 'secondary',
+              repositoryOrdinal: 1,
+              sourcePath: secondary.repoPath,
+              isolatedPath: secondary.worktreePath,
+              identity: '1'.repeat(64),
+              mutationKey: '2'.repeat(64),
+              isolatedIdentity: '3'.repeat(64),
+              isolatedMutationKey: '4'.repeat(64),
+            },
+          ],
+          now: '2026-07-23T00:00:05.000Z',
+        });
+        persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: 'waiting_integration',
+          now: '2026-07-23T00:00:05.500Z',
+        });
+        persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: 'integrating',
+          repositories: [
+            { ...secondary, integratedHead: 'e'.repeat(40), state: 'integrated' },
+            primary,
+          ],
+          now: '2026-07-23T00:00:06.000Z',
+        });
+        const integrating = persistence.getTeamExecutionIsolation(executionId);
+        if (integrating === null) throw new Error('isolation missing');
+        persistence.updateTeamExecutionIsolation({
+          executionId,
+          phase: 'quarantined',
+          repositories: integrating.repositories.map((repository) => ({
+            ...repository,
+            state: 'quarantined' as const,
+          })),
+          reason: 'Repository integration failed',
+          now: '2026-07-23T00:00:07.000Z',
+        });
+        const now = '2026-07-23T00:00:09.000Z';
+        persistence.transitionTeamExecution({
+          executionId,
+          to: 'queued',
+          queueReason: 'global_concurrency',
+          now,
+        });
+        persistence.transitionTeamExecution({ executionId, to: 'running', now });
+        persistence.transitionTeamExecution({ executionId, to: 'failed', now });
+        // Sealed, not integrated: judged by its pre-integration evidence and not listed as an edit
+        // in the Workspace, whatever the other repository of the isolation recorded.
+        expect(turnDiffPaths(completeLeaderTurn(fixture))).toEqual([]);
+      } finally {
+        fixture.persistence.close();
+      }
+    });
+
     artifactIt(
       'keeps the criterion open when a committed post-image no longer matches on disk',
       async () => {

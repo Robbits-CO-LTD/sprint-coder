@@ -17810,26 +17810,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return toEditSaga(row);
   }
 
+  /** The Turn's Workspace diff, the same edits `getDisplayTurnDiff` lists, without root labels. */
   getTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
-    const turn = this.getTurn(taskId, turnId);
-    if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
-    const sagas = (
-      this.db
-        .prepare(
-          `SELECT * FROM edit_sagas
-           WHERE task_id = ? AND turn_id = ?
-           ORDER BY created_at, id`,
-        )
-        .all(taskId, turnId) as EditSagaRow[]
-    ).map(toEditSaga);
-    return aggregateTurnDiff(sagas.map((saga) => saga.diff));
+    return aggregateTurnDiff(this.listWorkspaceTurnSagas(taskId, turnId).map((saga) => saga.diff));
   }
 
-  private getDisplayTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
+  /**
+   * The Turn's Edit Sagas whose changes can be in the Workspace, oldest first. The one place that
+   * decides which edits a Turn reports as made there: its displayed diff and the files the context
+   * reminder says it changed. A Worker change whose integration was never recorded is not in the
+   * Workspace, so the Turn does not report it (issue #568); the Team view lists the worktree keeping
+   * it. The completion gate classifies the same Sagas through `teamIsolationSagaStates` as well.
+   */
+  private listWorkspaceTurnSagas(taskId: string, turnId: string): EditSagaSnapshot[] {
     const turn = this.getTurn(taskId, turnId);
     if (turn.task_id !== taskId) throw new NotFoundError('Turn not found');
     const isolationState = this.teamIsolationSagaStates(taskId, turnId);
-    const sagas = (
+    return (
       this.db
         .prepare(
           `SELECT * FROM edit_sagas
@@ -17839,12 +17836,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
         .all(taskId, turnId) as EditSagaRow[]
     )
       .map(toEditSaga)
-      // A Worker change whose integration was never recorded is not in the Workspace, so the Turn
-      // does not list it as an edit there (issue #568). The Team view lists the worktree keeping it.
       .filter((saga) => {
         const state = isolationState(saga);
         return state !== 'sealed' && state !== 'unintegrated';
       });
+  }
+
+  private getDisplayTurnDiff(taskId: string, turnId: string): readonly TurnDiffEntry[] {
+    const sagas = this.listWorkspaceTurnSagas(taskId, turnId);
     const workspace = this.readTurnWorkspaceSetForTask(taskId, turnId);
     if (workspace === null) return aggregateTurnDiff(sagas.map((saga) => saga.diff));
     const rootsBySaga = sagas.map((saga) => {
