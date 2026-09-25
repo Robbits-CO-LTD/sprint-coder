@@ -5491,7 +5491,8 @@ export class IpcRouter {
     if (worker === undefined) return;
     this.managedWorkerTurn.delete(runtimeTurnId);
     // A call still waiting on its Approval Card must not write once the Worker is gone, even if the
-    // card is allowed later while the parent Turn goes on (issue #525).
+    // card is allowed later while the parent Turn goes on (issue #525). The abort also cancels that
+    // call's card, so the parent Turn is not left waiting on it (issue #572).
     worker.released.abort(new Error('Team Worker Turn ended before its managed tool call ran'));
     if (
       !authorizationTurnIsActive(

@@ -8,9 +8,18 @@ import type {
   ExecutionSpec,
 } from '@sprint-coder/domain';
 import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
-import type { ToolAuthorizationDecision, ToolAuthorizationRequest } from './tool-broker';
-import type { ApprovalRequestInput, ApprovalResolutionInput } from './persistence';
+import type {
+  ToolAuthorizationControl,
+  ToolAuthorizationDecision,
+  ToolAuthorizationRequest,
+} from './tool-broker';
+import type {
+  ApprovalCallCancellationInput,
+  ApprovalRequestInput,
+  ApprovalResolutionInput,
+} from './persistence';
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
+import { secureLogger } from './secure-logger';
 import {
   providerDisclosureAuthorizationFacts,
   workspaceToolAuthorizationGuard,
@@ -55,6 +64,9 @@ type ApprovalPersistencePort = {
     policyEpoch: number,
     invalidatedAt: string,
   ) => { approval: ApprovalLike; event?: unknown }[];
+  cancelPendingApprovalForCall(
+    input: ApprovalCallCancellationInput,
+  ): { approval: ApprovalLike; event?: unknown } | null;
   endTurnApprovals?: (taskId: string, turnId: string, reason: 'canceled' | 'finished') => string[];
   hasTaskGrant?: (input: unknown) => boolean;
   saveTaskGrant?: (input: unknown) => void;
@@ -84,13 +96,26 @@ type ResolveCommand = {
   operationId: string;
 };
 
+type WaiterSettler = {
+  resolve: (decision: ToolAuthorizationDecision) => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+};
+
 type Waiter = {
   taskId: string;
   turnId: string;
   requestDigest: string;
   request: ToolAuthorizationRequest;
   capability: Capability;
-  resolvers: ((decision: ToolAuthorizationDecision) => void)[];
+  settlers: WaiterSettler[];
+  /**
+   * Set when the call waiting on this card was aborted. The waiter outlives that only while the
+   * cancellation is not durable, so a late decision on the still-pending card cannot mint a permit
+   * or grant for a call that is gone.
+   */
+  canceled: boolean;
 };
 
 /** Keep the sandbox profile recorded by an approval identical to the profile used by permission
@@ -139,13 +164,19 @@ export class ApprovalCoordinator {
     },
   ) {}
 
-  async authorizeTool(request: ToolAuthorizationRequest): Promise<ToolAuthorizationDecision> {
+  async authorizeTool(
+    request: ToolAuthorizationRequest,
+    control?: ToolAuthorizationControl,
+  ): Promise<ToolAuthorizationDecision> {
+    const signal = control?.signal;
+    throwIfAborted(signal);
     const required = request.entry.requiredCapabilities;
     if (required.length === 0) return { decision: 'allow', reason: 'no_capability_required' };
 
     const evaluations: Array<{ capability: Capability; decision: ToolAuthorizationDecision }> = [];
     for (const capability of required) {
       const evaluated = await this.options.evaluatePermission({ capability, request });
+      throwIfAborted(signal);
       evaluations.push({ capability, decision: normalizeAuthorization(evaluated) });
     }
     if (evaluations.some(({ decision }) => decision.decision === 'deny'))
@@ -160,7 +191,7 @@ export class ApprovalCoordinator {
       }
       if (evaluation.decision.beforeExecute !== undefined)
         revalidators.push(evaluation.decision.beforeExecute);
-      const decision = await this.requestCapabilityApproval(request, evaluation.capability);
+      const decision = await this.requestCapabilityApproval(request, evaluation.capability, signal);
       if (decision.decision !== 'allow') return decision;
       if (
         approvalDecision !== undefined &&
@@ -190,7 +221,10 @@ export class ApprovalCoordinator {
   private async requestCapabilityApproval(
     request: ToolAuthorizationRequest,
     capability: Capability,
+    signal: AbortSignal | undefined,
   ): Promise<ToolAuthorizationDecision> {
+    // Before a Task grant is reused or a card is raised: an aborted call gets neither.
+    throwIfAborted(signal);
     const requestDigest = digest({
       toolId: request.entry.toolId,
       schemaDigest: request.entry.schemaDigest,
@@ -265,25 +299,102 @@ export class ApprovalCoordinator {
       requestedAt: this.options.now(),
     });
 
-    return new Promise<ToolAuthorizationDecision>((resolve) => {
+    return new Promise<ToolAuthorizationDecision>((resolve, reject) => {
       const persistedId = persisted.approval.id;
+      const settler: WaiterSettler = {
+        resolve,
+        reject,
+        ...(signal === undefined ? {} : { signal }),
+      };
       const existing = this.waiters.get(persistedId);
       if (existing !== undefined) {
         if (existing.requestDigest !== requestDigest) throw new Error('APPROVAL_WAITER_CONFLICT');
-        existing.resolvers.push(resolve);
-        return;
+        if (existing.canceled) {
+          resolve({ decision: 'deny', reason: 'approval_canceled' });
+          return;
+        }
+        this.attachSettler(persistedId, existing, settler);
+      } else {
+        const waiter: Waiter = {
+          taskId: request.context.taskId,
+          turnId: request.context.turnId,
+          requestDigest,
+          request,
+          capability,
+          settlers: [],
+          canceled: false,
+        };
+        this.waiters.set(persistedId, waiter);
+        this.attachSettler(persistedId, waiter, settler);
+        // Persistence commits before this notification; the waiter is installed before Renderer can reply.
+        this.options.publish(persisted.approval, persisted.event);
       }
-      this.waiters.set(persistedId, {
-        taskId: request.context.taskId,
-        turnId: request.context.turnId,
-        requestDigest,
-        request,
-        capability,
-        resolvers: [resolve],
-      });
-      // Persistence commits before this notification; the waiter is installed before Renderer can reply.
-      this.options.publish(persisted.approval, persisted.event);
+      // An abort that landed before the listener existed never fires it.
+      if (signal?.aborted === true) this.cancelForAbortedCall(persistedId);
     });
+  }
+
+  private attachSettler(approvalId: string, waiter: Waiter, settler: WaiterSettler): void {
+    waiter.settlers.push(settler);
+    if (settler.signal === undefined) return;
+    settler.onAbort = () => this.cancelForAbortedCall(approvalId);
+    settler.signal.addEventListener('abort', settler.onAbort, { once: true });
+  }
+
+  /**
+   * The call waiting on this card was aborted — for example a Team Worker released while its write
+   * waited (issue #572). Only this card is canceled, without a decision: no permit or grant is
+   * created, and other calls' cards on the same Turn stay pending. The cancellation commits and is
+   * published before the waiter settles.
+   */
+  private cancelForAbortedCall(approvalId: string): void {
+    const waiter = this.waiters.get(approvalId);
+    if (waiter === undefined || waiter.canceled) return;
+    // Marked before anything is attempted, so from here no decision can reach this call.
+    waiter.canceled = true;
+    let canceled: { approval: ApprovalLike; event?: unknown } | null;
+    try {
+      canceled = this.options.persistence.cancelPendingApprovalForCall({
+        taskId: waiter.taskId,
+        turnId: waiter.turnId,
+        approvalId,
+        callId: waiter.request.callId,
+        canceledAt: this.options.now(),
+      });
+    } catch (error) {
+      // Nothing durable changed: the card is still pending and the Turn still waits, and neither is
+      // reported otherwise. The waiter stays behind marked canceled, so a late allow cannot grant
+      // the call; Turn end, a policy change or restart recovery settles the card.
+      secureLogger.warn(
+        'The approval card of an aborted tool call could not be canceled',
+        { approvalId, error },
+        { taskId: waiter.taskId, turnId: waiter.turnId },
+      );
+      this.settleCanceled(waiter);
+      return;
+    }
+    this.waiters.delete(approvalId);
+    if (canceled !== null) {
+      try {
+        this.options.publish(canceled.approval, canceled.event);
+      } catch (error) {
+        secureLogger.warn(
+          'The cancellation of an approval card could not be published',
+          { approvalId, error },
+          { taskId: waiter.taskId, turnId: waiter.turnId },
+        );
+      }
+    }
+    this.settleCanceled(waiter);
+  }
+
+  private settleCanceled(waiter: Waiter): void {
+    for (const settler of waiter.settlers.splice(0)) {
+      detachSettler(settler);
+      // Canceled, not denied: the caller that aborted sees its own abort, not a user refusal.
+      if (settler.signal?.aborted === true) settler.reject(abortReason(settler.signal));
+      else settler.resolve({ decision: 'deny', reason: 'approval_canceled' });
+    }
   }
 
   resolve(command: ResolveCommand): ApprovalLike {
@@ -291,6 +402,9 @@ export class ApprovalCoordinator {
     if (current === undefined) throw new Error('APPROVAL_NOT_FOUND');
     if (current.turnId !== command.turnId) throw new Error('APPROVAL_TASK_OR_TURN_MISMATCH');
     const waiter = this.waiters.get(command.approvalId);
+    // Its call was aborted and the card could not be canceled durably. Recording a decision now
+    // would mint a permit or grant for a call that no longer exists.
+    if (waiter?.canceled === true) throw new Error('APPROVAL_CANCELED');
     const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
     if (userInputRequest) {
       const choices = (waiter.request.input as { choices?: unknown }).choices;
@@ -449,8 +563,26 @@ export class ApprovalCoordinator {
     const waiter = this.waiters.get(id);
     if (waiter === undefined) return;
     this.waiters.delete(id);
-    for (const resolve of waiter.resolvers) resolve(decision);
+    for (const settler of waiter.settlers.splice(0)) {
+      detachSettler(settler);
+      settler.resolve(decision);
+    }
   }
+}
+
+function detachSettler(settler: WaiterSettler): void {
+  if (settler.signal !== undefined && settler.onAbort !== undefined)
+    settler.signal.removeEventListener('abort', settler.onAbort);
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Tool authorization was canceled');
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted === true) throw abortReason(signal);
 }
 
 function normalizeAuthorization(

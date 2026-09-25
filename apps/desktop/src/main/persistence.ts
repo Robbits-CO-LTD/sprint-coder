@@ -4653,6 +4653,15 @@ export type ApprovalPersistenceResult = {
   oneTimePermitToken?: string;
 };
 
+/** Withdraws the card of one tool call whose caller is gone. `callId` is the broker call id. */
+export type ApprovalCallCancellationInput = {
+  taskId: string;
+  turnId: string;
+  approvalId: string;
+  callId: string;
+  canceledAt: string;
+};
+
 export type CommandOutputRecord = Readonly<{
   seq: number;
   stream: 'stdout' | 'stderr';
@@ -5762,6 +5771,9 @@ export interface PersistenceClient {
     policyEpoch: number,
     invalidatedAt: string,
   ): ApprovalPersistenceResult[];
+  cancelPendingApprovalForCall(
+    input: ApprovalCallCancellationInput,
+  ): ApprovalPersistenceResult | null;
   recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void;
   recordManagedTurnPlan(input: {
     taskId: string;
@@ -16348,6 +16360,50 @@ export class SqlitePersistenceClient implements PersistenceClient {
         results.push({ approval, event });
       }
       return results;
+    })();
+  }
+
+  /**
+   * Cancels the one pending card of a tool call whose caller is gone — for example a Team Worker
+   * released while its write waited on the card (issue #572). No decision is recorded and nothing is
+   * granted. Only this card changes, and the Turn resumes only when no other card is pending.
+   *
+   * Returns null when the card already reached a terminal state: a decision that committed first
+   * stays as it was recorded, and no second event is written.
+   */
+  cancelPendingApprovalForCall(
+    input: ApprovalCallCancellationInput,
+  ): ApprovalPersistenceResult | null {
+    return this.db.transaction(() => {
+      const row = this.getApprovalRow(input.approvalId);
+      if (
+        row.task_id !== input.taskId ||
+        row.turn_id !== input.turnId ||
+        row.runtime_call_id !== input.callId
+      )
+        throw new Error('Approval does not belong to this tool call');
+      if (row.state !== 'pending') return null;
+      const updated = this.db
+        .prepare(
+          `UPDATE approvals SET state = 'canceled', decision = NULL, revision = revision + 1,
+            resolved_at = ? WHERE id = ? AND state = 'pending' AND revision = ?`,
+        )
+        .run(new Date(input.canceledAt).toISOString(), row.id, row.revision);
+      if (updated.changes !== 1) return null;
+      this.resumeTurnAfterApproval(row.task_id, row.turn_id);
+      const approval = this.getApprovalWithChallenge(
+        row.task_id,
+        row.id,
+        this.challengeForApproval(row.task_id, row.id),
+      );
+      const event = this.appendEvent({
+        type: 'approval.canceled',
+        taskId: row.task_id,
+        turnId: row.turn_id,
+        approvalId: row.id,
+        approval: toApprovalAuditSummary(approval),
+      });
+      return { approval, event };
     })();
   }
 
