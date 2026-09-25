@@ -9,10 +9,11 @@ import {
   existsSync,
   linkSync,
   lstatSync,
+  realpathSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { basename, join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -38,6 +39,12 @@ import {
 import { workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
+import { managedLocalConnection } from './managed-local-provider-runtime';
+import {
+  MANAGED_LOCAL_FIXTURE_SELECTION,
+  managedLocalTeamWorkerRuntime,
+} from './managed-local-team-worker-fixture';
+import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -792,6 +799,135 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         });
         expect(f.persistence.getTeamExecution(executionId).state).toBe('completed');
         expect(readFileSync(join(workspace, 'a.ts'), 'utf8')).toBe('written by the Worker\n');
+        f.persistence.close();
+      },
+      gitScenarioTimeout,
+    );
+    it(
+      'runs a task-Workspace WRITE step of a Managed Local Worker in its legacy worktree and integrates it (issue #570)',
+      async () => {
+        const f = fixture(undefined, true);
+        f.persistence.createProviderConnection(managedLocalConnection());
+        const workspace = join(dirname(f.path), 'workspace');
+        mkdirSync(workspace);
+        writeFileSync(join(workspace, 'a.ts'), 'before\n');
+        for (const args of [
+          ['init', '-q', workspace],
+          ['-C', workspace, 'add', 'a.ts'],
+          [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ],
+        ])
+          expect(spawnSync('git', args).status).toBe(0);
+        const binding = await workspaceMutationBinding(workspace);
+        f.persistence.setWorkspaceBinding(f.task.id, {
+          path: binding.canonicalPath,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        });
+        const writer = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: 'managed-local',
+          objective: 'managed-local',
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: true,
+          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        });
+        f.persistence.transitionWorkerState(writer.id, 'spawning');
+        f.persistence.transitionWorkerState(writer.id, 'ready');
+        const plan = structuredClone(f.plan);
+        plan.steps[0]!.workerId = writer.id;
+        const context = graphMissionContextFor(f.persistence, f.task.id);
+        plan.steps[0]!.access = 'workspace-write';
+        plan.steps[0]!.writeClaims = [
+          { rootId: context.workspace.primaryRootId!, path: 'managed.ts', semanticKeys: [] },
+        ];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        // Step b is read-only and has no Connection, so it runs on the fallback.
+        const managedLocal = managedLocalTeamWorkerRuntime({
+          fallback: new DeterministicTeamWorkerRuntime(),
+          writePath: 'managed.ts',
+        });
+        const scheduler = new TeamExecutionScheduler(1);
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          managedLocal.runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+          undefined,
+          undefined,
+          new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') }),
+        );
+        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+          ...f.input,
+          renderRevision: initial.renderRevision,
+          semanticRevision: initial.semanticRevision,
+          semanticDigest: initial.semanticDigest,
+          workspaceDigest: context.workspace.digest,
+          policyEpoch: context.policyEpoch,
+          contextDigest: graphMissionContextDigest(
+            context,
+            new Set(plan.steps.map(({ workerId }) => workerId)),
+          ),
+        }));
+        const executionId = mission.steps[0]!.executionId;
+        await vi.waitFor(
+          () =>
+            expect(['completed', 'failed', 'interrupted']).toContain(
+              f.persistence.listTeamAttempts(executionId).at(-1)?.state,
+            ),
+          { timeout: gitCheckpointTimeout },
+        );
+        expect(
+          f.persistence.listTeamAttempts(executionId).map(({ state }) => state),
+          JSON.stringify(
+            f.persistence.getTeamSnapshot(f.team.id).agents.find(({ id }) => id === writer.id)
+              ?.currentActivity,
+          ),
+        ).toEqual(['completed']);
+        await vi.waitFor(
+          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+          { timeout: gitCheckpointTimeout },
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+
+        // Its worktree was the one-root Workspace of the step, handed over with a writing tool.
+        const worktree = f.persistence.getTeamMissionWorktree(executionId)!;
+        expect(managedLocal.sessions).toHaveLength(1);
+        const [session] = managedLocal.sessions;
+        expect(session).toMatchObject({
+          workerId: writer.id,
+          writeCapable: true,
+          tools: ['read_file', 'create_file'],
+        });
+        const [root] = session!.workspaceSet.roots;
+        expect(session!.workspaceSet.roots).toHaveLength(1);
+        expect(root).toMatchObject({ role: 'primary', label: basename(worktree.path) });
+        expect(dirname(root!.path)).toBe(realpathSync.native(dirname(worktree.path)));
+        expect(session!.workspaceSet).toEqual(runtimeWorkspaceSetFromLegacyPath(root!.path));
+        expect(managedLocal.toolCalls).toEqual([
+          { workerId: writer.id, name: 'create_file', file: join(root!.path, 'managed.ts') },
+        ]);
+        // The write reached the Workspace through integration only.
+        expect(worktree).toMatchObject({ changedFiles: ['managed.ts'] });
+        expect(readFileSync(join(workspace, 'managed.ts'), 'utf8')).toBe(
+          'written by the Managed Local Worker\n',
+        );
+        expect(
+          spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+        ).toBe('');
         f.persistence.close();
       },
       gitScenarioTimeout,

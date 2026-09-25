@@ -144,7 +144,7 @@ import {
   WorkerRuntimeFailureError,
   runtimeStopConfirmed,
 } from './team-coordinator';
-import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
+import type { RuntimeTeamMcpOption, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from '../runtime-host/protocol';
 import { TEAM_CORE_MCP_TOOL_NAMES } from '../runtime-host/team-mcp-tool-contract';
 
@@ -1302,6 +1302,82 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     expect(runtimeHostMock.starts[0]?.args[2]).toContain(
       '隔離root: primary=/isolated/primary, secondary=/isolated/secondary',
     );
+  });
+
+  it('runs a legacy Mission worktree handed over with its one-root set as it runs the path alone (issue #570)', async () => {
+    const run = async (workspaceSet?: RuntimeWorkspaceSet) => {
+      runtimeHostMock.starts.length = 0;
+      const catalogFor = vi.fn((..._args: unknown[]) => ({ tools: [] }));
+      const writeScopeFor = vi.fn(
+        (_worker: AgentRecord, _path: string | null) => 'workspace-write' as const,
+      );
+      const authorizeEgress = vi.fn((..._args: unknown[]) => true);
+      await runtime({ catalogFor, writeScopeFor, authorizeEgress }).execute({
+        worker: { ...worker(false), writeCapable: true },
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        executionId: 'execution-legacy-1',
+        content: '実装する',
+        accessMode: 'workspace-write',
+        workspacePath: '/isolated/worktree',
+        ...(workspaceSet === undefined ? {} : { workspaceSet }),
+      });
+      const start = runtimeHostMock.starts[0]!.args;
+      return {
+        catalog: catalogFor.mock.calls[0]!.slice(3, 6),
+        writeScopePath: writeScopeFor.mock.calls[0]![1],
+        egressRoots: authorizeEgress.mock.calls[0]![5],
+        workspace: start[3],
+        writeScope: start[9],
+        prompt: start[2] as string,
+      };
+    };
+
+    const pathOnly = await run();
+    const withSet = await run(runtimeWorkspaceSetFromLegacyPath('/isolated/worktree'));
+
+    // The same Workspace, write scope and egress roots reach Main's catalog, the policy and the
+    // egress gate.
+    expect(withSet.catalog).toEqual(pathOnly.catalog);
+    expect(withSet.catalog[2]).toBe('workspace-write');
+    expect(withSet.egressRoots).toEqual(pathOnly.egressRoots);
+    expect(withSet.writeScope).toBe(pathOnly.writeScope);
+    expect(withSet.writeScopePath).not.toBeNull();
+    // The Runtime Host derives this very set from the path it used to be given.
+    expect(pathOnly.workspace).toBe('/isolated/worktree');
+    expect(withSet.workspace).toEqual(runtimeWorkspaceSetFromLegacyPath('/isolated/worktree'));
+    // The instruction only gains the line naming that root.
+    expect(withSet.prompt.replace(/\n隔離root: [^\n]*/u, '')).toBe(pathOnly.prompt);
+  });
+
+  it('runs a direct message read-only over the Task root set Main hands a Worker hired write-capable (issue #570)', async () => {
+    runtimeHostMock.starts.length = 0;
+    const catalogFor = vi.fn((..._args: unknown[]) => ({ tools: [] }));
+    const writeScopeFor = vi.fn(() => 'workspace-write' as const);
+    const taskRoots: RuntimeWorkspaceSet = {
+      primaryRootId: 'root-task',
+      roots: [{ rootId: 'root-task', path: '/workspace', label: 'workspace', role: 'primary' }],
+      digest: 'c'.repeat(64),
+    };
+
+    const result = await runtime({ catalogFor, writeScopeFor }).execute({
+      // Main hands a direct message's Worker over read-only (issue #570).
+      worker: { ...worker(false), writeCapable: false },
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      content: '読んで報告する',
+      accessMode: 'read-only',
+      workspaceSet: taskRoots,
+    });
+
+    expect(writeScopeFor).not.toHaveBeenCalled();
+    expect(catalogFor.mock.calls[0]!.slice(3, 6)).toEqual([
+      taskRoots,
+      expect.objectContaining({ id: 'worker-1', writeCapable: false }),
+      'read-only',
+    ]);
+    expect(runtimeHostMock.starts[0]?.args[3]).toEqual(taskRoots);
+    expect(runtimeHostMock.starts[0]?.args[9]).toBe('read-only');
+    expect(runtimeHostMock.starts[0]?.args[2]).toContain('Workspace書き込み: 禁止（読み取り専用）');
+    expect(result.completion).toMatchObject({ status: 'succeeded' });
   });
 
   it('reserves every sealed Project item and binds context lookup to the durable execution', async () => {

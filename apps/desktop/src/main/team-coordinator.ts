@@ -86,7 +86,11 @@ import type {
 import { WorktreeError, type WorkerWorktreeManager } from './worker-worktree';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import { RetainedWorktreeError, retainedWorktreeBlockedReason } from './team-retained-worktrees';
-import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import {
+  runtimeWorkspaceSetFromLegacyPath,
+  type RuntimeFailureDiagnostic,
+  type RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 import type { ApprovalWaitObserver } from './tool-broker';
 import {
@@ -1508,7 +1512,8 @@ export class TeamCoordinator {
         isolation
           ? this.runtimeWorkspaceForIsolation(isolation)
           : worktree
-            ? undefined
+            ? // As for a sequential Mission's legacy worktree (issue #570).
+              runtimeWorkspaceSetFromLegacyPath(worktree.path)
             : this.runtimeWorkspaceForTask(graph.taskId),
       );
       runtimeSettled = true;
@@ -3121,6 +3126,9 @@ export class TeamCoordinator {
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
   ): Promise<TeamMessageSummary> {
     return this.enqueue(input.taskId, async () => {
+      // The Task Workspace handed over below is verified as an assignment's is, and before the Team
+      // is read, so nothing below awaits between its checks and the Worker turning busy.
+      await this.verifyWorkspace?.(input.taskId);
       const team = this.persistence.getTeamByTask(input.taskId);
       if (team === null || team.state !== 'active') throw new Error('Team must be active');
       const snapshot = this.persistence.getTeamSnapshot(team.id);
@@ -3130,6 +3138,13 @@ export class TeamCoordinator {
       );
       if (leader === undefined || worker === undefined) throw new Error('Worker not found');
       if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
+      // A direct message has no execution whose access could let it write, so it runs as a
+      // read-only assignment does: on the Task Workspace, by a Worker that may not write whatever
+      // it was hired able to do. A runtime that reads only the root set and the Worker's
+      // capability (Managed Local) otherwise has no Workspace to read, or is asked to write
+      // without one (issue #570). The stored Worker keeps its capability for later assignments.
+      const workspaceSet = this.runtimeWorkspaceForTask(input.taskId);
+      const readOnlyWorker = { ...worker, writeCapable: false };
       const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
       assertTeamMessageRate({
         recentCount: this.persistence.countRecentTeamMessages(team.id, since),
@@ -3179,12 +3194,17 @@ export class TeamCoordinator {
         const dispatched = await this.dispatchWithRetry(
           team.id,
           leader,
-          worker,
+          readOnlyWorker,
           message.id,
           message.seq,
           input.content,
           teamTask.id,
           [],
+          undefined,
+          undefined,
+          undefined,
+          'read-only',
+          workspaceSet,
         );
         const confirmed = confirmWorkerReport(input.doneCriteria, dispatched.value);
         const completion = {
@@ -3398,9 +3418,12 @@ export class TeamCoordinator {
         execution.accessMode,
         executionIsolation !== null
           ? this.runtimeWorkspaceForIsolation(executionIsolation)
-          : missionWorktree === null
-            ? this.runtimeWorkspaceForTask(input.taskId)
-            : undefined,
+          : missionWorktree !== null
+            ? // The one-root set the CLI runtime already derives from the worktree path, so a
+              // runtime that reads only the root set (Managed Local) works in the same worktree
+              // instead of having no Workspace at all (issue #570).
+              runtimeWorkspaceSetFromLegacyPath(missionWorktree.path)
+            : this.runtimeWorkspaceForTask(input.taskId),
       );
       if (this.executionInterruptions.has(input.executionId)) {
         this.releaseReservations(reservations);
