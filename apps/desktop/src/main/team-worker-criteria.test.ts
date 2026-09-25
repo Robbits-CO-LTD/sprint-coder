@@ -248,6 +248,19 @@ describe('parseWorkerCriteriaReport', () => {
         reason: expect.stringContaining('```json ブロック）がありません'),
       });
     });
+
+    it('still reads a real line-start block after reportFrom when reportFrom itself is not a fence', () => {
+      // reportFrom points at the newline right before the fence, not at "```json" itself, so the
+      // reportFrom-anchored check (JSON_FENCE_OPEN, which must only match at the very start of the
+      // slice) finds nothing there; the ordinary line-start scan still finds and uses the real
+      // block a moment later, exactly as before this file added reportFrom handling.
+      const before = '確認します。';
+      const text = answer(report, before);
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'], before.length)).toMatchObject({
+        ok: true,
+        criteria: [{ criterion: '答えを見つける', status: 'done', evidence: '確認済み' }],
+      });
+    });
   });
 
   it('rejects a report block followed by more text, as it is not the final report', () => {

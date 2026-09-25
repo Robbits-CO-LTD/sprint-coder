@@ -294,7 +294,12 @@ function failWorkerCompletion(
   };
 }
 
-const JSON_FENCE_OPEN = /^[ \t]{0,3}```json\b([^\r\n]*)/imu;
+// No `m` flag: `^` must match only the very start of the sliced string (the reportFrom position
+// itself), never a line start further into the slice. With `m` this would also match a real line
+// start elsewhere in the slice, giving a match whose index is not 0 while the caller still treats
+// `reportFrom` as its position — a mismatch that happens to be masked today by the `reportFrom >=
+// start` check below, but should not depend on that check to stay correct (issue #585 review).
+const JSON_FENCE_OPEN = /^[ \t]{0,3}```json\b([^\r\n]*)/iu;
 
 /**
  * Where the last ```json block of a Worker answer starts, where its body ends and where the block
