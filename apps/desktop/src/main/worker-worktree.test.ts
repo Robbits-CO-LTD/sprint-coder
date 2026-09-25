@@ -1262,7 +1262,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     });
     await expect(
       lockedRoot.discard({ agentId: 'agent-root-discard', repoPath, path: discarded.path }),
-    ).resolves.toEqual({ outcome: 'quarantined', reason: 'busy' });
+    ).resolves.toEqual({ outcome: 'quarantined' });
     for (const root of roots) {
       expect(await readdir(root)).toEqual([]);
       expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(root));

@@ -736,8 +736,14 @@ export class WorkerWorktreeManager {
     const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
     if (await this.isLocked(repoPath, ownPath))
       throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
-    if (worktreePath === null) return this.unregisterWorktree(repoPath, ownPath);
-    return this.removeRegisteredWorktree(repoPath, worktreePath);
+    // `reason` classifies why an automatic reclaim kept a worktree (issue #588); a user-confirmed
+    // discard has no such caller, so it is dropped here exactly as `cleanup` drops it.
+    if (worktreePath === null) {
+      const { outcome } = await this.unregisterWorktree(repoPath, ownPath);
+      return { outcome };
+    }
+    const { outcome } = await this.removeRegisteredWorktree(repoPath, worktreePath);
+    return { outcome };
   }
 
   /**
