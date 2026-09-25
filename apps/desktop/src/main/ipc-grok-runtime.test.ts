@@ -74,6 +74,7 @@ function createHarness() {
         { id: model, displayName: model },
       ],
     })),
+    refreshCapabilityProbe: vi.fn(async (): Promise<unknown> => undefined),
     start: vi.fn<RuntimeHostClient['start']>(),
     cancel: vi.fn(async () => undefined),
   });
@@ -288,6 +289,39 @@ describe('Grok CLI Main routing', () => {
       });
     }
     expect(invalidModelUserMessage('grok')).toContain('Grok CLI');
+  });
+
+  it('detects every CLI again on request so a Grok missed at startup becomes selectable (issue #581)', async () => {
+    const { router, handlers, codex, claude, grok } = createHarness();
+    router.register();
+    grok.probe.mockResolvedValue({ available: true, readiness: 'unavailable', models: [] });
+    expect(await handlers.get(IPC_CHANNELS.settingsGetRuntime)!({})).toMatchObject({
+      grokReadiness: 'unavailable',
+      models: [],
+    });
+    grok.refreshCapabilityProbe.mockImplementation(async () => {
+      grok.probe.mockResolvedValue({
+        available: true,
+        readiness: 'ready',
+        models: [
+          { id: 'auto', displayName: 'Auto' },
+          { id: 'grok-test', displayName: 'grok-test' },
+        ],
+      });
+      return grok.probe();
+    });
+    await expect(
+      handlers.get(IPC_CHANNELS.settingsRefreshRuntimeDetection)!({}),
+    ).resolves.toBeUndefined();
+    for (const host of [codex, claude, grok])
+      expect(host.refreshCapabilityProbe).toHaveBeenCalledOnce();
+    expect(await handlers.get(IPC_CHANNELS.settingsGetRuntime)!({})).toMatchObject({
+      codexReadiness: 'ready',
+      claudeReadiness: 'ready',
+      grokReadiness: 'ready',
+      model: 'grok-test',
+      models: [{ id: 'auto' }, { id: 'grok-test' }],
+    });
   });
 
   it('adopts Grok when it is the only ready CLI and selects its own host', async () => {

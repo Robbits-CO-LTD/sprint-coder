@@ -6078,6 +6078,7 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.appGetInfo]: emptyPayloadSchema,
   [IPC_CHANNELS.runtimeFailureDiagnosticGet]: runtimeFailureDiagnosticQuerySchema,
   [IPC_CHANNELS.settingsGetRuntime]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsRefreshRuntimeDetection]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetRuntime]: runtimeSetInputSchema,
   [IPC_CHANNELS.settingsSetModel]: runtimeModelSetInputSchema,
   [IPC_CHANNELS.settingsSetEffort]: runtimeEffortSetInputSchema,

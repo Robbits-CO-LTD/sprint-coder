@@ -6,6 +6,7 @@ import type {
   ProviderProfile,
   ProviderVerificationStatus,
 } from '@sprint-coder/contracts';
+import { useAppStore } from '../store/appStore';
 import { ChevronDown, Eye, EyeOff, Plus, RefreshCw, X } from './icons';
 import { ModelAuthorIcon } from './ModelAuthorIcon';
 
@@ -38,6 +39,15 @@ async function loadConnections(api: ProvidersApi): Promise<ProviderConnectionVie
 async function loadProfiles(api: ProvidersApi): Promise<ProviderProfile[]> {
   if (typeof api.listProfiles !== 'function') return [];
   return api.listProfiles();
+}
+
+/** Detects the built-in CLIs again (issue #581), then reloads the runtime state that the model
+ * list and the CLI status read. A Main/Preload without that IPC keeps the list-only reload. */
+async function redetectCliRuntimes(): Promise<void> {
+  const settings = window.sprintCoder?.settings;
+  if (typeof settings?.refreshRuntimeDetection !== 'function') return;
+  await settings.refreshRuntimeDetection();
+  await useAppStore.getState().loadRuntime();
 }
 
 /** The runtime check keeps an older Main/Preload usable: it offers no control rather than a save
@@ -84,6 +94,8 @@ export const VERIFICATION_TONE: Record<ProviderVerificationStatus, string> = {
 export const LIST_ERROR = '接続一覧を取得できませんでした。再読み込みしてください。';
 export const CREATE_ERROR = '接続を追加できませんでした。入力内容を確認してください。';
 export const VERIFY_ERROR = '検証を実行できませんでした。時間をおいて再試行してください。';
+export const CLI_REDETECT_ERROR =
+  '組み込みCLIの検出をやり直せませんでした。時間をおいて再読み込みしてください。';
 // A Profile listing failure is not fatal: the fixed Providers below still work, so this is a
 // warning beside the picker rather than the section's error alert.
 export const PROFILE_LIST_WARNING =
@@ -1117,7 +1129,9 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     void refresh();
   }, [active, connections, loadFailed, loading, supported]);
 
-  async function refresh(): Promise<void> {
+  /** `redetectCli` only for the explicit reload button: detection starts CLI processes, so opening
+   * the section or adding a Connection does not repeat it. */
+  async function refresh(redetectCli = false): Promise<void> {
     const api = providerApi();
     if (api === null) {
       setSupported(false);
@@ -1130,9 +1144,10 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     setProfilesFailed(false);
     // Settled independently: a Profile listing that fails must not take the fixed official
     // Providers down with it, and neither list may be waited on by the other.
-    const [connectionResult, profileResult] = await Promise.allSettled([
+    const [connectionResult, profileResult, detectionResult] = await Promise.allSettled([
       loadConnections(api),
       loadProfiles(api),
+      redetectCli ? redetectCliRuntimes() : Promise.resolve(),
     ]);
     // A response from a superseded reload — or one that lands after this section is gone — is
     // dropped whole, so it can never overwrite the newer state that replaced it.
@@ -1152,6 +1167,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     if (connectionResult.status === 'fulfilled') {
       setConnections(connectionResult.value);
       setStatus(`${connectionResult.value.length}件の接続を読み込みました。`);
+      if (detectionResult.status === 'rejected') setError(CLI_REDETECT_ERROR);
     } else {
       setError(LIST_ERROR);
       setLoadFailed(true);
@@ -1304,7 +1320,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
           <button
             type="button"
             className="settings-secondary-button"
-            onClick={() => void refresh()}
+            onClick={() => void refresh(true)}
             disabled={busy || !supported}
           >
             <RefreshCw size={13} />

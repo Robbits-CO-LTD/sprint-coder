@@ -2763,6 +2763,19 @@ export class IpcRouter {
       },
     );
     this.handle(
+      IPC_CHANNELS.settingsRefreshRuntimeDetection,
+      emptyPayloadSchema,
+      z.undefined(),
+      async () => {
+        // Each Runtime Host otherwise detects its CLI once, when it starts (issue #581).
+        await Promise.all([
+          this.codexRuntime.refreshCapabilityProbe(),
+          this.claudeRuntime.refreshCapabilityProbe(),
+          this.grokRuntime.refreshCapabilityProbe(),
+        ]);
+      },
+    );
+    this.handle(
       IPC_CHANNELS.settingsGetTeamModelResearch,
       emptyPayloadSchema,
       teamModelResearchSettingsSchema,

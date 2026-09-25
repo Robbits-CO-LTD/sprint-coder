@@ -1071,6 +1071,8 @@ const api: SprintCoderApi = {
         runtimeSettingsSchema,
         taskId === undefined ? {} : { taskId },
       ),
+    refreshRuntimeDetection: () =>
+      invoke(IPC_CHANNELS.settingsRefreshRuntimeDetection, emptyPayloadSchema, z.undefined(), {}),
     setRuntime: (kind, taskId) =>
       invoke(
         IPC_CHANNELS.settingsSetRuntime,
