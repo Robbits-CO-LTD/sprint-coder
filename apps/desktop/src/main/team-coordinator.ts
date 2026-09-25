@@ -5433,36 +5433,89 @@ export class TeamCoordinator {
     });
   }
 
+  /**
+   * Removes each worktree of an isolation after its changes were integrated (or, from a canceled
+   * preflight, after it was quarantined). Every repository is tried, and one whose worktree stays on
+   * disk does not stop the others (issue #569): Windows refuses to delete a file another process
+   * holds open (Explorer, a terminal, an editor, antivirus), and a worktree changed after
+   * integration is never removed. Once all were tried, the isolation and only the repositories left
+   * are quarantined in one write, since a completed isolation must have every repository integrated
+   * or cleaned. Each keeps its integrated HEAD, so the Team screen shows its change as integrated and
+   * lists the worktree to inspect or discard (issue #544), and the reason says so in Japanese. A crash
+   * before that write leaves the repository integrated in a completed isolation, as before, which
+   * the startup recovery retries while the execution's completion is still saved.
+   *
+   * Nothing is thrown: the Worker's result and the integration are already recorded, and callers
+   * go on to report them.
+   */
   private async cleanupIntegratedExecutionIsolation(
     isolation: TeamExecutionIsolationRecord,
     agentId: string,
   ): Promise<void> {
-    if (this.worktreeManager === undefined) return;
-    let current = isolation;
-    for (const repository of current.repositories) {
-      try {
-        const result = await this.worktreeManager.cleanup({
-          agentId,
-          worktreeId: isolationWorktreeId(current.executionId, repository.ordinal),
-          repoPath: repository.repoPath,
-        });
-        current = this.persistence.updateTeamExecutionIsolation({
-          executionId: current.executionId,
-          phase: current.phase,
-          repositories: replaceIsolationRepository(current.repositories, repository.ordinal, {
-            ...repository,
-            state: result.outcome === 'removed' ? 'cleaned' : 'quarantined',
+    const worktreeManager = this.worktreeManager;
+    if (worktreeManager === undefined) return;
+    try {
+      const kept = new Map<number, string>();
+      for (const repository of isolation.repositories) {
+        if (repository.state === 'cleaned') continue;
+        let removed: boolean;
+        try {
+          removed =
+            (
+              await worktreeManager.cleanup({
+                agentId,
+                worktreeId: isolationWorktreeId(isolation.executionId, repository.ordinal),
+                repoPath: repository.repoPath,
+              })
+            ).outcome === 'removed';
+          if (!removed) kept.set(repository.ordinal, INTEGRATED_WORKTREE_KEPT);
+        } catch (error) {
+          removed = false;
+          kept.set(repository.ordinal, integratedWorktreeCleanupError(error));
+        }
+        if (!removed) continue;
+        // Re-read after the Git await, so a concurrent update to this isolation is not reverted.
+        const latest = this.persistence.getTeamExecutionIsolation(isolation.executionId);
+        const latestRepository = latest?.repositories.find(
+          ({ ordinal }) => ordinal === repository.ordinal,
+        );
+        if (latest === null || latestRepository === undefined) return;
+        if (latestRepository.state === 'cleaned') continue;
+        this.persistence.updateTeamExecutionIsolation({
+          executionId: latest.executionId,
+          phase: latest.phase,
+          repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
+            ...latestRepository,
+            state: 'cleaned',
           }),
-          reason:
-            result.outcome === 'removed'
-              ? current.reason
-              : 'Integrated repository worktree remained dirty during cleanup',
           now: this.isoNow(),
         });
-      } catch (error) {
-        this.quarantineExecutionIsolation(current.executionId, error);
-        return;
       }
+      if (kept.size === 0) return;
+      const latest = this.persistence.getTeamExecutionIsolation(isolation.executionId);
+      if (latest === null) return;
+      const left = latest.repositories.filter(
+        ({ ordinal, state }) => kept.has(ordinal) && state !== 'cleaned',
+      );
+      if (left.length === 0) return;
+      // A canceled preflight never integrated, so its own quarantine reason stays.
+      const integrated = left.find(({ integratedHead }) => integratedHead !== null);
+      this.persistence.updateTeamExecutionIsolation({
+        executionId: latest.executionId,
+        phase: 'quarantined',
+        repositories: latest.repositories.map((repository) =>
+          left.includes(repository) ? { ...repository, state: 'quarantined' } : repository,
+        ),
+        resumeKind: null,
+        reason:
+          integrated === undefined
+            ? latest.reason
+            : integratedWorktreeCleanupReason(kept.get(integrated.ordinal)!),
+        now: this.isoNow(),
+      });
+    } catch {
+      // Only recording the cleanup failed. The integration stands and the worktree stays on disk; an
+      // exception here would turn the finished Worker into a failed one.
     }
   }
 
@@ -6087,6 +6140,33 @@ function isolationWorktreeId(executionId: string, repositoryOrdinal: number): st
 }
 
 const RETAINED_WORKTREE_UNMANAGED = 'この環境ではWorkerのworktreeを管理できません。';
+
+/**
+ * Why a cleanup kept a worktree without an error: a file in it stayed locked through the Windows
+ * backoff, or the worktree changed after integration (Git locks and submodules are rarer).
+ */
+const INTEGRATED_WORKTREE_KEPT =
+  'worktreeのファイルを別のプロセスが開いているか、統合の後にworktreeが変更されています';
+
+/**
+ * What stopped a cleanup that threw, for the user. A Git or file system error keeps its own words,
+ * which name the file or command; anything else is an internal fault whose message says nothing to
+ * the user.
+ */
+function integratedWorktreeCleanupError(error: unknown): string {
+  if (!(error instanceof WorktreeError) || error.code === 'invalid_input')
+    return 'worktreeの削除中に予期しないエラーが発生しました';
+  const detail = error.message.replace(/\s+/gu, ' ').trim().slice(0, 500);
+  return detail === '' ? 'worktreeの削除中にエラーが発生しました' : `削除中のエラー: ${detail}`;
+}
+
+/**
+ * The isolation's reason once an integrated repository's worktree stayed on disk (issue #569). The
+ * change is already in the Workspace; the worktree is listed on the Team screen (issue #544).
+ */
+function integratedWorktreeCleanupReason(cause: string): string {
+  return `統合したworktreeを片付けられませんでした（${cause}）。変更はWorkspaceに統合済みです。Team画面の「残っているworktree」から確認・破棄できます。`;
+}
 
 /** Runs a Git step on a retained worktree, reporting its failure to the user in Japanese. */
 async function retainedWorktreeGit<T>(failure: string, run: () => Promise<T>): Promise<T> {

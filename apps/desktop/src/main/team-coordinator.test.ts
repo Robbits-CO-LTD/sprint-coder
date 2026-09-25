@@ -1,4 +1,4 @@
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   existsSync,
@@ -9,8 +9,9 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { chmod, lstat, readdir, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
@@ -46,7 +47,7 @@ import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
-import { WorkerWorktreeManager, WorktreeError } from './worker-worktree';
+import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
@@ -483,6 +484,154 @@ class PausedCleanupManager extends WorkerWorktreeManager {
   override async cleanup(): Promise<never> {
     return new Promise<never>(() => undefined);
   }
+}
+
+/**
+ * The removal's file system calls, except that deleting a file `fails` names throws `code`: EBUSY
+ * is what Windows reports while another process holds the file open (issue #569).
+ */
+function failingUnlinkFs(fails: (path: string) => boolean, code: string): TreeRemovalFs {
+  return {
+    lstat: (path) => lstat(path),
+    readdir: (path) => readdir(path),
+    unlink: async (path) => {
+      if (fails(path))
+        throw Object.assign(new Error(`${code}: operation failed, unlink '${path}'`), { code });
+      await unlink(path);
+    },
+    rmdir: (path) => rmdir(path),
+    chmod: (path, mode) => chmod(path, mode),
+  };
+}
+
+/** Writes both roots, then notes the worktree of repository 1 and lets the test act on it. */
+class FirstRepositoryNotingRuntime extends MultiRootWritingRuntime {
+  firstWorktree: string | null = null;
+
+  constructor(
+    private readonly persistence: SqlitePersistenceClient,
+    private readonly onFirstWorktree: (worktreePath: string) => Promise<void> = async () =>
+      undefined,
+  ) {
+    super();
+  }
+
+  override async execute(input: Parameters<MultiRootWritingRuntime['execute']>[0]) {
+    const result = await super.execute(input);
+    const first = this.persistence
+      .listTeamExecutionIsolations()
+      .at(-1)
+      ?.repositories.find(({ ordinal }) => ordinal === 1);
+    if (first === undefined) throw new Error('write step has no isolated repository 1');
+    this.firstWorktree = first.worktreePath;
+    await this.onFirstWorktree(first.worktreePath);
+    return result;
+  }
+}
+
+/**
+ * Opens `path` from another process the way Explorer or an editor does, sharing it for reading
+ * only, so Windows refuses to delete it until `release` (issue #569).
+ */
+async function holdFileOpen(path: string): Promise<{ release(): Promise<void> }> {
+  const powershell = join(
+    process.env.SystemRoot ?? 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe',
+  );
+  const holder = spawn(
+    powershell,
+    [
+      '-NoProfile',
+      '-NonInteractive',
+      '-Command',
+      "$file = [System.IO.File]::Open($env:SPRINT_CODER_HELD_FILE, 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('held'); [void][Console]::In.ReadLine(); $file.Dispose()",
+    ],
+    {
+      env: { ...process.env, SPRINT_CODER_HELD_FILE: path },
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    },
+  );
+  const exited = new Promise<void>((resolve) => holder.once('exit', () => resolve()));
+  await new Promise<void>((resolve, reject) => {
+    let output = '';
+    let errors = '';
+    holder.stdout.on('data', (chunk) => {
+      output += String(chunk);
+      if (output.includes('held')) resolve();
+    });
+    holder.stderr.on('data', (chunk) => (errors += String(chunk)));
+    holder.once('error', reject);
+    holder.once('exit', (code) =>
+      reject(new Error(`File holder exited (${code}) before opening ${path}: ${errors}`)),
+    );
+  });
+  return {
+    async release() {
+      holder.stdin.end();
+      const stopped = await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 10_000)),
+      ]);
+      if (!stopped) {
+        holder.kill();
+        await exited;
+      }
+    },
+  };
+}
+
+/** Two Git repositories as the Primary and Secondary folders of one Project, with a Task on it. */
+function configureTwoRepositoryTask(
+  persistence: SqlitePersistenceClient,
+  name: string,
+): { taskId: string; worktreesRoot: string } {
+  const repositories = ['primary', 'secondary'].map((label) => {
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), `sprint-coder-team-${label}-`)));
+    cleanup.push(repo);
+    expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+    writeFileSync(join(repo, 'README.md'), `${label}\n`);
+    expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+    expect(
+      spawnSync('git', [
+        '-C',
+        repo,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '-q',
+        '-m',
+        'base',
+      ]).status,
+    ).toBe(0);
+    return { repo, label };
+  });
+  const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+  cleanup.push(worktreesRoot);
+  const project = persistence.createProject({
+    name,
+    folders: repositories.map(({ repo, label }, index) => ({
+      id: randomUUID(),
+      path: repo,
+      canonicalPath: repo,
+      label,
+      role: index === 0 ? ('primary' as const) : ('secondary' as const),
+      workspaceKey: String(index + 7).repeat(64),
+      rootIdentityDigest: String(index + 3).repeat(64),
+    })),
+  });
+  return { taskId: persistence.createTask(name, false, project.id).id, worktreesRoot };
+}
+
+function gitHead(repo: string): string {
+  const head = spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  expect(head.status).toBe(0);
+  return head.stdout.trim();
 }
 
 class CrashAfterFirstWorktreeManager extends WorkerWorktreeManager {
@@ -1880,8 +2029,241 @@ if (runsWithElectronAbi)
       expect(readFileSync(join(worktreePath, 'post-integration-evidence.txt'), 'utf8')).toBe(
         'do not delete\n',
       );
+      // The kept worktree stays integrated and says why in words, not as a validation error
+      // (issue #569).
+      const kept = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(kept.repositories).toMatchObject([
+        { state: 'quarantined', integratedHead: expect.stringMatching(/^[0-9a-f]{40,64}$/) },
+      ]);
+      expect(kept.reason).toContain('統合したworktreeを片付けられませんでした');
+      expect(kept.reason).not.toMatch(/Isolation repositories|Completed isolation|"code"/);
       persistence.close();
     });
+
+    it.each([
+      { failure: 'a file held open', code: 'EBUSY' },
+      { failure: 'a removal error', code: 'EIO' },
+    ] as const)(
+      'keeps only the integrated worktree $failure keeps on disk and still cleans the other repository (issue #569)',
+      async ({ code }) => {
+        const persistence = createPersistence();
+        const { taskId, worktreesRoot } = configureTwoRepositoryTask(
+          persistence,
+          `Integrated cleanup ${code}`,
+        );
+        const runtime = new FirstRepositoryNotingRuntime(persistence);
+        let held = true;
+        const delays: number[] = [];
+        // Everything is real Git except that Windows refuses to delete README.md in repository 1's
+        // worktree, as it does while Explorer, a terminal or an editor holds the file open.
+        const manager = new WorkerWorktreeManager({
+          worktreesRoot,
+          platform: 'win32',
+          delay: async (milliseconds) => void delays.push(milliseconds),
+          treeRemovalFs: failingUnlinkFs(
+            (path) =>
+              held &&
+              runtime.firstWorktree !== null &&
+              basename(path) === 'README.md' &&
+              basename(dirname(path)) === basename(runtime.firstWorktree),
+            code,
+          ),
+        });
+        const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+        const writer = await coordinator.hireWorker({
+          taskId,
+          role: 'writer',
+          objective: 'write both repositories',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const submission = await coordinator.assignTask({
+          taskId,
+          targetAgentId: writer.id,
+          content: 'write both repositories',
+          doneCriteria: ['both repositories integrated'],
+          accessMode: 'workspace-write',
+        });
+        const { executionId } = submission;
+        await waitFor(
+          () =>
+            coordinator.get(taskId)?.workers.find(({ id }) => id === writer.id)?.state === 'done',
+          20_000,
+        );
+
+        // The Worker's result and both integrations stand.
+        expect(persistence.getTeamExecution(executionId).state).toBe('completed');
+        expect(persistence.getTeamExecutionIsolationCompletion(executionId)).toBeNull();
+        const isolation = persistence.getTeamExecutionIsolation(executionId)!;
+        const first = isolation.repositories.find(({ ordinal }) => ordinal === 1)!;
+        const second = isolation.repositories.find(({ ordinal }) => ordinal === 2)!;
+        for (const repository of [first, second]) {
+          expect(repository.integratedHead).toBe(gitHead(repository.repoPath));
+          expect(existsSync(join(repository.repoPath, 'worker-output.txt'))).toBe(true);
+        }
+        // Only repository 1 stays, quarantined with the isolation; repository 2 was still cleaned.
+        expect(isolation).toMatchObject({ phase: 'quarantined', resumeKind: null });
+        expect(first.state).toBe('quarantined');
+        expect(second.state).toBe('cleaned');
+        expect(existsSync(first.worktreePath)).toBe(true);
+        expect(existsSync(second.worktreePath)).toBe(false);
+        expect(isolation.reason).toContain('統合したworktreeを片付けられませんでした');
+        expect(isolation.reason).not.toMatch(/Isolation repositories|Completed isolation|"code"/);
+        if (code === 'EBUSY') {
+          // The Windows lock was waited out through the whole backoff before the worktree stayed.
+          expect(delays).toEqual([100, 200, 400, 800, 1_600, 3_200]);
+          expect(isolation.reason).toContain('別のプロセス');
+        } else expect(isolation.reason).toContain(code);
+
+        // The Team screen lists the kept worktree as integrated, and it can be discarded there.
+        await expect(coordinator.listRetainedWorktrees(taskId)).resolves.toMatchObject({
+          total: 1,
+          worktrees: [
+            {
+              executionId,
+              repositoryOrdinal: 1,
+              integratedHead: first.integratedHead,
+              integration: 'confirmed',
+              reason: isolation.reason,
+              executionState: 'completed',
+              existsOnDisk: true,
+              discardable: true,
+            },
+          ],
+        });
+        held = false;
+        await expect(coordinator.discardRetainedWorktree(taskId, executionId, 1)).resolves.toEqual({
+          worktrees: [],
+          total: 0,
+        });
+        expect(existsSync(first.worktreePath)).toBe(false);
+        expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+          phase: 'quarantined',
+          repositories: expect.arrayContaining([
+            expect.objectContaining({ ordinal: 1, state: 'cleaned' }),
+            expect.objectContaining({ ordinal: 2, state: 'cleaned' }),
+          ]),
+        });
+        persistence.close();
+      },
+      45_000,
+    );
+
+    it.skipIf(process.platform !== 'win32')(
+      'keeps the integrated worktree whose file another process holds open and cleans the other repository (issue #569)',
+      async () => {
+        const persistence = createPersistence();
+        const { taskId, worktreesRoot } = configureTwoRepositoryTask(
+          persistence,
+          'Integrated cleanup with a file held open',
+        );
+        const holders: Array<{ release(): Promise<void> }> = [];
+        // The Worker leaves README.md in repository 1's worktree open in another process.
+        const runtime = new FirstRepositoryNotingRuntime(persistence, async (worktreePath) => {
+          holders.push(await holdFileOpen(join(worktreePath, 'README.md')));
+        });
+        try {
+          const coordinator = coordinatorWithWorktrees(
+            persistence,
+            runtime,
+            new WorkerWorktreeManager({ worktreesRoot, delay: async () => undefined }),
+          );
+          const writer = await coordinator.hireWorker({
+            taskId,
+            role: 'writer',
+            objective: 'write both repositories',
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          });
+          const { executionId } = await coordinator.assignTask({
+            taskId,
+            targetAgentId: writer.id,
+            content: 'write both repositories',
+            doneCriteria: ['both repositories integrated'],
+            accessMode: 'workspace-write',
+          });
+          // A cold PowerShell start on a busy Windows runner can take many seconds.
+          await waitFor(
+            () =>
+              coordinator.get(taskId)?.workers.find(({ id }) => id === writer.id)?.state === 'done',
+            60_000,
+          );
+          expect(holders).toHaveLength(1);
+          expect(persistence.getTeamExecution(executionId).state).toBe('completed');
+          const isolation = persistence.getTeamExecutionIsolation(executionId)!;
+          expect(isolation.phase).toBe('quarantined');
+          expect(isolation.reason).toContain('統合したworktreeを片付けられませんでした');
+          expect(isolation.reason).not.toMatch(/Isolation repositories|Completed isolation/);
+          const first = isolation.repositories.find(({ ordinal }) => ordinal === 1)!;
+          const second = isolation.repositories.find(({ ordinal }) => ordinal === 2)!;
+          expect(first).toMatchObject({
+            state: 'quarantined',
+            integratedHead: gitHead(first.repoPath),
+          });
+          expect(second).toMatchObject({
+            state: 'cleaned',
+            integratedHead: gitHead(second.repoPath),
+          });
+          expect(existsSync(join(first.worktreePath, 'README.md'))).toBe(true);
+          expect(existsSync(second.worktreePath)).toBe(false);
+
+          await holders.pop()!.release();
+          await expect(
+            coordinator.discardRetainedWorktree(taskId, executionId, 1),
+          ).resolves.toEqual({ worktrees: [], total: 0 });
+          expect(existsSync(first.worktreePath)).toBe(false);
+          persistence.close();
+        } finally {
+          for (const holder of holders) await holder.release();
+        }
+      },
+      90_000,
+    );
+
+    it('keeps the Worker result when recording a failed integrated cleanup fails too (issue #569)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Integrated cleanup record failure');
+      const runtime = new WorktreeWritingRuntime();
+      const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot,
+        platform: 'win32',
+        delay: async () => undefined,
+        treeRemovalFs: failingUnlinkFs((path) => basename(path) === 'worker-output.txt', 'EBUSY'),
+      });
+      const update = persistence.updateTeamExecutionIsolation.bind(persistence);
+      vi.spyOn(persistence, 'updateTeamExecutionIsolation').mockImplementation((input) => {
+        if (input.phase === 'quarantined')
+          throw new Error('simulated database failure while recording the cleanup');
+        return update(input);
+      });
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write the Workspace',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write the Workspace',
+        doneCriteria: ['output integrated'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () =>
+          coordinator.get(task.id)?.workers.find(({ id }) => id === writer.id)?.state === 'done',
+        20_000,
+      );
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'completed' },
+      ]);
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      persistence.close();
+    }, 30_000);
 
     it('runs three same-repository writers concurrently and integrates three FIFO commits', async () => {
       const persistence = createPersistence();
