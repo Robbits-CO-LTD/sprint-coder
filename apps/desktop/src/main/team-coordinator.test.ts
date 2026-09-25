@@ -7765,6 +7765,156 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 60_000);
 
+    it('credits a Worker’s write only to the Manager execution that was running when it was assigned, across rate-limit waits', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Rate-limited Manager');
+      const { workspace, manager: worktrees } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, new TestWorkerRuntime(), worktrees);
+      const team = persistence.promoteTaskToTeam(task.id);
+      const manager = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: 'Manager',
+          objective: 'delegate the write',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        },
+        team.leaderAgentId,
+        { maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false },
+      );
+      const writer = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: 'Writer',
+          objective: 'write the output',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        },
+        manager.id,
+      );
+      const other = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Other',
+        objective: 'work alongside',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const now = () => new Date().toISOString();
+      const assign = (assigneeAgentId: string, createdByAgentId: string) =>
+        persistence.createTeamExecution({
+          teamId: team.id,
+          assigneeAgentId,
+          createdByAgentId,
+          instruction: 'write the output',
+          accessMode: 'workspace-write',
+          now: now(),
+        }).id;
+      const start = (executionId: string) => {
+        persistence.transitionTeamExecution({
+          executionId,
+          to: 'queued',
+          now: now(),
+          queueReason: 'global_concurrency',
+        });
+        persistence.transitionTeamExecution({ executionId, to: 'running', now: now() });
+        const attempt = persistence.createTeamAttempt(executionId, now());
+        persistence.transitionTeamAttempt({ attemptId: attempt.id, to: 'running', now: now() });
+        return attempt.id;
+      };
+      const writeByWorker = () => {
+        const child = assign(writer.id, manager.id);
+        const attemptId = start(child);
+        persistence.transitionTeamAttempt({ attemptId, to: 'completed', now: now() });
+        persistence.transitionTeamExecution({ executionId: child, to: 'completed', now: now() });
+      };
+      // Main's verdict on a Manager run that reports done but left its own worktree unchanged.
+      const internals = coordinator as unknown as {
+        requireWorkspaceWrite(
+          dispatched: { value: unknown; doneEvidence: unknown[]; simulated: boolean },
+          input: {
+            worker: typeof manager;
+            accessMode: 'workspace-write';
+            executionId: string;
+            worktree: { baseHead: string };
+            isolation: null;
+          },
+        ): Promise<{ value: { status: string; verification: { name: string }[] } }>;
+      };
+      // Each Manager run's own worktree, prepared before it starts and left unchanged.
+      const baseHeads = new Map<string, string>();
+      const prepare = async (executionId: string) => {
+        const created = await worktrees.create({
+          agentId: manager.id,
+          worktreeId: executionId,
+          repoPath: workspace,
+        });
+        baseHeads.set(executionId, created.baseHead);
+      };
+      const verdict = async (executionId: string) => {
+        const judged = await internals.requireWorkspaceWrite(
+          {
+            value: {
+              status: 'succeeded',
+              summary: 'done',
+              artifacts: [],
+              verification: [],
+              risks: [],
+            },
+            doneEvidence: [],
+            simulated: false,
+          },
+          {
+            worker: manager,
+            accessMode: 'workspace-write',
+            executionId,
+            worktree: { baseHead: baseHeads.get(executionId)! },
+            isolation: null,
+          },
+        );
+        return judged.value;
+      };
+
+      // More than one page (500) of earlier activity, so Main reads the log past its first page.
+      for (let index = 0; index < 600; index += 1)
+        persistence.recordTeamV2Activity({
+          teamId: team.id,
+          type: 'worker_reported',
+          subjectAgentId: other.id,
+          payload: {},
+          now: now(),
+        });
+      // The Manager runs A, which waits out a rate limit with its Attempt open.
+      const first = assign(manager.id, team.leaderAgentId);
+      await prepare(first);
+      const firstAttempt = start(first);
+      persistence.recordTeamAttemptRateLimited(firstAttempt, now());
+      // Meanwhile it runs B, which has its Worker write. Every public path refuses a second
+      // execution for a Worker with one pending (assignTask, assignMission, a Graph Mission), so the
+      // rows are written directly: which run assigned a write must not rest on that refusal.
+      const second = assign(manager.id, team.leaderAgentId);
+      await prepare(second);
+      const secondAttempt = start(second);
+      // Another Worker's run starting in between does not change which run the Manager is in.
+      start(assign(other.id, team.leaderAgentId));
+      writeByWorker();
+      expect(await verdict(second)).toMatchObject({ status: 'succeeded' });
+      // B waits out a rate limit too, and A resumes its open Attempt first.
+      persistence.recordTeamAttemptRateLimited(secondAttempt, now());
+      persistence.transitionTeamExecution({ executionId: first, to: 'running', now: now() });
+      persistence.transitionTeamAttempt({ attemptId: firstAttempt, to: 'running', now: now() });
+
+      // B's write is not A's, though it was assigned while A's Attempt was open.
+      const unwritten = await verdict(first);
+      expect(unwritten.status).toBe('failed');
+      expect(unwritten.verification).toContainEqual(
+        expect.objectContaining({ name: 'worker-write-not-attempted' }),
+      );
+      // A write assigned in A's resumed run is A's, though B's Attempt is open too.
+      writeByWorker();
+      expect(await verdict(first)).toMatchObject({ status: 'succeeded' });
+      persistence.close();
+    }, 60_000);
+
     it('integrates a resumed write whose earlier Attempt already wrote, though the resumed one writes nothing', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Resumed write');

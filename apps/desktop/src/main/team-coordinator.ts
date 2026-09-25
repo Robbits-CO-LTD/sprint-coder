@@ -4625,40 +4625,49 @@ export class TeamCoordinator {
   }
 
   /**
-   * Whether a write execution this Manager assigned during `executionId` has completed (issue
-   * #587). No record links a child execution to the execution it was assigned from, so "during" is
-   * read off this execution's Attempts: a child counts when it was assigned while one of them ran,
-   * from the Attempt's start to its finish (or now, for the one still running). The scheduler never
-   * runs two executions of one Worker at once, so the Attempts of the Manager's other executions
-   * (an earlier Mission step, a previous Turn's assignment) never overlap these, and their children
-   * fall outside. Children assigned by an earlier Attempt of this execution (a resume or a steer)
-   * count, as that Attempt's own writes would. A real (not simulated) write child completes only
-   * after passing this same check itself.
+   * Whether a write execution this Manager assigned while running `executionId` has completed
+   * (issue #587). No record links a child execution to the execution it was assigned from, so Main
+   * replays the Team's activity log, whose `seq` orders every event in the Team. A Manager assigns a
+   * write only while running a write execution (a Manager outside one may delegate reads only), and
+   * each run starts with an `attempt_started` of its Attempt, the run that resumes after a
+   * rate-limit wait included. So a child counts when the Manager's last `attempt_started` before
+   * the child's `task_assigned` is this execution's. Attempt times cannot say this: an execution
+   * waiting out a rate limit keeps its Attempt open and frees the Manager for another execution.
+   * Children assigned by an earlier Attempt of this execution (a resume or a steer) count, as that
+   * Attempt's own writes would. A real (not simulated) write child completes only after passing
+   * this same check itself.
    */
   private completedDelegatedWrite(managerId: string, executionId: string): boolean {
-    const runs = this.persistence
-      .listTeamAttempts(executionId)
-      .flatMap(({ startedAt, finishedAt }) =>
-        startedAt === null
-          ? []
-          : [
-              {
-                from: Date.parse(startedAt),
-                to: finishedAt === null ? Number.POSITIVE_INFINITY : Date.parse(finishedAt),
-              },
-            ],
-      );
     const { teamId } = this.persistence.getTeamExecution(executionId);
-    return this.persistence.listTeamExecutions(teamId).some((child) => {
-      if (
-        child.createdByAgentId !== managerId ||
-        child.accessMode !== 'workspace-write' ||
-        child.state !== 'completed'
-      )
-        return false;
-      const assignedAt = Date.parse(child.assignedAt);
-      return runs.some(({ from, to }) => assignedAt >= from && assignedAt <= to);
-    });
+    const children = new Set(
+      this.persistence
+        .listTeamExecutions(teamId)
+        .filter(
+          (child) =>
+            child.createdByAgentId === managerId &&
+            child.accessMode === 'workspace-write' &&
+            child.state === 'completed',
+        )
+        .map(({ id }) => id),
+    );
+    if (children.size === 0) return false;
+    // The execution whose run the Manager last started at this point of the log.
+    let running: string | null = null;
+    for (let afterSeq = 0; ;) {
+      const page = this.persistence.listTeamV2Activity(teamId, afterSeq, ACTIVITY_REPLAY_PAGE);
+      for (const activity of page) {
+        if (activity.type === 'attempt_started' && activity.subjectAgentId === managerId)
+          running = activity.executionId;
+        else if (
+          activity.type === 'task_assigned' &&
+          running === executionId &&
+          children.has(activity.executionId ?? '')
+        )
+          return true;
+      }
+      if (page.length < ACTIVITY_REPLAY_PAGE) return false;
+      afterSeq = page.at(-1)!.seq;
+    }
   }
 
   private persistWorkerResult(
@@ -6354,6 +6363,9 @@ function workerResultMessageContent(completion: WorkerCompletion): string {
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
   return `${executionId}-${repositoryOrdinal}`;
 }
+
+/** The largest page `listTeamV2Activity` returns, used to replay a Team's activity log. */
+const ACTIVITY_REPLAY_PAGE = 500;
 
 const RETAINED_WORKTREE_UNMANAGED = 'この環境ではWorkerのworktreeを管理できません。';
 
