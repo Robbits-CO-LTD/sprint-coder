@@ -1301,14 +1301,14 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => runtime.contents.length === 1);
+      await waitFor(() => runtime.contents.length === 1, 15_000);
       let mission = persistence.getTeamMission(assigned.id);
       expect(
         mission.steps.map(({ executionId }) => persistence.getTeamExecution(executionId).state),
       ).toEqual(['running', 'assigned']);
 
       runtime.releases.shift()?.();
-      await waitFor(() => runtime.contents.length === 2);
+      await waitFor(() => runtime.contents.length === 2, 15_000);
       mission = persistence.getTeamMission(assigned.id);
       expect(mission.steps[0]?.checkpoint).toMatchObject({
         summary: expect.stringContaining('inspect the workspace'),
@@ -1332,7 +1332,7 @@ if (runsWithElectronAbi)
         inconsistencies: [],
       });
       persistence.close();
-    });
+    }, 55_000);
 
     it('runs a write step in an isolated worktree and integrates one clean commit', async () => {
       const persistence = createPersistence();
@@ -1463,7 +1463,7 @@ if (runsWithElectronAbi)
       });
       expect(persistence.getTeamMissionWorktree(submission.executionId)).toBeNull();
       persistence.close();
-    });
+    }, 40_000);
 
     it('verifies Worker Edit Sagas while the isolated worktree still exists, before integration', async () => {
       const persistence = createPersistence();
@@ -1533,7 +1533,7 @@ if (runsWithElectronAbi)
       });
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
       persistence.close();
-    });
+    }, 40_000);
 
     it('integrates a Worker isolation even when its Edit Sagas are left unverified', async () => {
       const persistence = createPersistence();
@@ -1595,7 +1595,7 @@ if (runsWithElectronAbi)
         },
       ]);
       persistence.close();
-    });
+    }, 40_000);
 
     it('integrates a Worker isolation when verifying its Edit Sagas throws', async () => {
       const persistence = createPersistence();
@@ -1661,7 +1661,7 @@ if (runsWithElectronAbi)
       ]);
       expect(JSON.stringify(isolationEvents)).not.toContain('verification observer failed');
       persistence.close();
-    });
+    }, 40_000);
 
     it('restarts a steered writable execution without quarantining its reusable isolation', async () => {
       const persistence = createPersistence();
@@ -1691,12 +1691,13 @@ if (runsWithElectronAbi)
         doneCriteria: ['runtime completes'],
         accessMode: 'workspace-write',
       });
-      await waitFor(() => runtime.contents.length === 1);
+      await waitFor(() => runtime.contents.length === 1, 15_000);
       await coordinator.steerExecution(task.id, submission.executionId, 'revised');
       await waitFor(
         () =>
           runtime.contents.length === 2 ||
           persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
       );
       expect(runtime.contents).toHaveLength(2);
       expect(persistence.getTeamExecutionIsolation(submission.executionId)?.phase).toBe('running');
@@ -1714,7 +1715,7 @@ if (runsWithElectronAbi)
       );
       expect(readFileSync(join(workspace, 'steered.txt'), 'utf8')).toBe('first\n');
       persistence.close();
-    });
+    }, 70_000);
 
     it('retries a rate-limited writable execution within its existing isolation', async () => {
       const persistence = createPersistence();
@@ -1762,7 +1763,7 @@ if (runsWithElectronAbi)
         15_000,
       );
       persistence.close();
-    });
+    }, 40_000);
 
     it('rejects a late interruption instead of hanging while integration is finishing', async () => {
       const persistence = createPersistence();
@@ -1789,7 +1790,7 @@ if (runsWithElectronAbi)
         doneCriteria: ['done'],
         accessMode: 'workspace-write',
       });
-      await waitFor(() => scheduler.jobs.length === 1);
+      await waitFor(() => scheduler.jobs.length === 1, 15_000);
       let failure = '';
       void coordinator.cancelExecution(task.id, submission.executionId).catch((error: Error) => {
         failure = error.message;
@@ -1913,7 +1914,7 @@ if (runsWithElectronAbi)
       );
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
       persistence.close();
-    });
+    }, 55_000);
 
     it('reclaims a clean integrated app-owned worktree after restart', async () => {
       const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-cleanup-restart-'));
@@ -1975,7 +1976,7 @@ if (runsWithElectronAbi)
       });
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
       persistence.close();
-    });
+    }, 40_000);
 
     it('keeps a dirty integrated worktree as restart evidence', async () => {
       const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-dirty-restart-'));
@@ -2038,7 +2039,7 @@ if (runsWithElectronAbi)
       expect(kept.reason).toContain('統合したworktreeを片付けられませんでした');
       expect(kept.reason).not.toMatch(/Isolation repositories|Completed isolation|"code"/);
       persistence.close();
-    });
+    }, 40_000);
 
     it.each([
       { failure: 'a file held open', code: 'EBUSY' },
@@ -2397,7 +2398,7 @@ if (runsWithElectronAbi)
         );
       }
 
-      await waitFor(() => runtime.activeExecutions === 3 && runtime.releases.length === 3);
+      await waitFor(() => runtime.activeExecutions === 3 && runtime.releases.length === 3, 15_000);
       expect(runtime.maxActiveExecutions).toBe(3);
       expect(new Set(runtime.worktreePaths).size).toBe(3);
       expect(
@@ -2442,7 +2443,7 @@ if (runsWithElectronAbi)
         ),
       ).toEqual(['cleaned', 'cleaned', 'cleaned']);
       persistence.close();
-    });
+    }, 55_000);
 
     it('preserves a conflicting Worker worktree and pauses only that integration', async () => {
       const persistence = createPersistence();
@@ -2473,7 +2474,7 @@ if (runsWithElectronAbi)
           }),
         );
 
-      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2, 15_000);
       runtime.releases.shift()?.();
       await waitFor(
         () =>
@@ -2512,7 +2513,7 @@ if (runsWithElectronAbi)
         '',
       );
       persistence.close();
-    });
+    }, 55_000);
 
     it.each(['legacy', 'project'] as const)(
       'serializes legacy Mission and Project integration with %s arriving first',
@@ -2614,7 +2615,7 @@ if (runsWithElectronAbi)
             },
           ],
         });
-        await waitFor(() => runtime.releases.length === 1);
+        await waitFor(() => runtime.releases.length === 1, 15_000);
         const projectExecution = await coordinator.assignTask({
           taskId: projectTask.id,
           targetAgentId: projectWriter.id,
@@ -2622,7 +2623,10 @@ if (runsWithElectronAbi)
           doneCriteria: ['project.txt exists'],
           accessMode: 'workspace-write',
         });
-        await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+        await waitFor(
+          () => runtime.activeExecutions === 2 && runtime.releases.length === 2,
+          15_000,
+        );
         const legacyExecutionId = mission.steps[0]!.executionId;
         expect(persistence.getTeamExecutionIsolation(legacyExecutionId)).toBeNull();
         expect(persistence.getTeamMissionWorktree(legacyExecutionId)?.state).toBe('active');
@@ -2633,12 +2637,13 @@ if (runsWithElectronAbi)
         const executionIds = [legacyExecutionId, projectExecution.executionId];
         try {
           runtime.releases[firstIndex]!();
-          await waitFor(() => integrationCalls.mock.calls.length === 1);
+          await waitFor(() => integrationCalls.mock.calls.length === 1, 15_000);
           runtime.releases[1 - firstIndex]!();
           await waitFor(
             () =>
               scheduler.snapshot().queuedExecutionIds.length === 1 ||
               integrationCalls.mock.calls.length === 2,
+            15_000,
           );
           expect(scheduler.snapshot()).toEqual({
             activeExecutionIds: [executionIds[firstIndex]],
@@ -2669,6 +2674,7 @@ if (runsWithElectronAbi)
             persistence.getTeamExecutionIsolation(projectExecution.executionId)?.repositories[0]
               ?.state === 'cleaned' &&
             persistence.getTeamMissionWorktree(legacyExecutionId)?.state === 'cleaned',
+          15_000,
         );
         persistence.close();
       },
@@ -2761,7 +2767,7 @@ if (runsWithElectronAbi)
         doneCriteria: ['first completes'],
         accessMode: 'workspace-write',
       });
-      await waitFor(() => runtime.releases.length === 1);
+      await waitFor(() => runtime.releases.length === 1, 15_000);
       const second = await coordinator.assignTask({
         taskId: secondTask.id,
         targetAgentId: secondWorker.id,
@@ -2769,7 +2775,7 @@ if (runsWithElectronAbi)
         doneCriteria: ['second overlaps'],
         accessMode: 'workspace-write',
       });
-      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2);
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2, 15_000);
       expect(new Set(runtime.contents)).toEqual(new Set(['first write', 'second write']));
       expect(persistence.getTeamExecutionIsolation(first.executionId)).toMatchObject({
         phase: 'running',
@@ -2795,7 +2801,7 @@ if (runsWithElectronAbi)
       );
       expect(manager.maxActiveIntegrations).toBe(1);
       persistence.close();
-    });
+    }, 55_000);
 
     it('terminalizes and quarantines a deterministic worktree after a crash in preparing', async () => {
       const persistence = createPersistence();
@@ -2864,7 +2870,7 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'failed');
+      await waitFor(() => persistence.getTeamMission(mission.id).state === 'failed', 15_000);
       const executionId = mission.steps[0]!.executionId;
       const preparing = persistence.getTeamExecutionIsolation(executionId);
       expect(preparing).toMatchObject({
@@ -3032,7 +3038,7 @@ if (runsWithElectronAbi)
         ).toBe('');
       }
       persistence.close();
-    });
+    }, 30_000);
 
     it('resumes only remaining repository integrations without rerunning the Worker', async () => {
       const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-team-resume-db-'));
@@ -3213,7 +3219,7 @@ if (runsWithElectronAbi)
         }).stdout,
       ).toBe('3\n');
       persistence.close();
-    });
+    }, 45_000);
 
     it('makes a failed multi-repository Worker terminal instead of offering a broken resume', async () => {
       const persistence = createPersistence();
@@ -3521,7 +3527,7 @@ if (runsWithElectronAbi)
       expect(readFileSync(join(firstRoot, 'worker-output.txt'), 'utf8')).toBe('test1\n');
       expect(readFileSync(join(secondRoot, 'worker-output.txt'), 'utf8')).toBe('test2\n');
       persistence.close();
-    });
+    }, 30_000);
 
     it('quarantines a failed write result and integrates it only after manual resume', async () => {
       const persistence = createPersistence();
@@ -3604,7 +3610,7 @@ if (runsWithElectronAbi)
         }).stdout.trim(),
       ).toBe('2');
       persistence.close();
-    });
+    }, 30_000);
 
     it('preserves both sides and waits for resume when the primary workspace changes', async () => {
       const persistence = createPersistence();
@@ -3660,7 +3666,7 @@ if (runsWithElectronAbi)
         }).stdout,
       ).toBe('base\n');
       persistence.close();
-    });
+    }, 30_000);
 
     it('resumes idempotently when the app stops after Git integration but before checkpointing', async () => {
       const persistence = createPersistence();
@@ -3702,7 +3708,10 @@ if (runsWithElectronAbi)
           },
         ],
       });
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        15_000,
+      );
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
       expect(persistence.getTeamMissionWorktree(mission.steps[0]!.executionId)).toMatchObject({
         state: 'quarantined',
@@ -3734,7 +3743,7 @@ if (runsWithElectronAbi)
       ]);
       expect(persistence.checkTeamIntegrity()).toEqual({ sqlite: 'ok', inconsistencies: [] });
       persistence.close();
-    });
+    }, 30_000);
 
     it('keeps a failed write step for manual resume and creates a fresh manual Attempt', async () => {
       const persistence = createPersistence();
@@ -3770,7 +3779,10 @@ if (runsWithElectronAbi)
         ],
       });
 
-      await waitFor(() => persistence.getTeamMission(mission.id).state === 'waiting_resume');
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        15_000,
+      );
       const firstExecutionId = mission.steps[0]!.executionId;
       expect(runtime.executeCount).toBe(1);
       expect(persistence.getTeamExecution(firstExecutionId).state).toBe('waiting_resume');
@@ -3792,7 +3804,7 @@ if (runsWithElectronAbi)
         inconsistencies: [],
       });
       persistence.close();
-    });
+    }, 40_000);
 
     it('pauses the next Mission step when the workspace changed after its checkpoint', async () => {
       const persistence = createPersistence();
@@ -5205,7 +5217,7 @@ if (runsWithElectronAbi)
         { terminalReason: 'user_canceled' },
       ]);
       persistence.close();
-    }, 30_000);
+    }, 40_000);
 
     it('keeps the isolated worktree when a canceled write execution cannot confirm its runtime exit', async () => {
       const persistence = createPersistence();
@@ -5316,7 +5328,7 @@ if (runsWithElectronAbi)
           .map(({ executionId }) => executionId),
       ).not.toContain(submission.executionId);
       persistence.close();
-    }, 30_000);
+    }, 40_000);
 
     it('quarantines rather than removes the worktree of a steered write execution canceled before its re-dispatch', async () => {
       const persistence = createPersistence();
@@ -5384,7 +5396,7 @@ if (runsWithElectronAbi)
       expect(existsSync(isolation.repositories[0]!.worktreePath)).toBe(true);
       expect(remove).not.toHaveBeenCalled();
       persistence.close();
-    }, 30_000);
+    }, 55_000);
 
     it('quarantines a canceled write whose integration waits to resume and reclaims only its unchanged repository (issue #589)', async () => {
       const persistence = createPersistence();
@@ -5575,7 +5587,7 @@ if (runsWithElectronAbi)
         ],
       });
       persistence.close();
-    }, 45_000);
+    }, 55_000);
 
     it('quarantines a write interrupted by an app restart when it is canceled and keeps its worktree (issue #589)', async () => {
       const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-cancel-restart-'));
@@ -5881,7 +5893,7 @@ if (runsWithElectronAbi)
       expect(head.status).toBe(0);
       expect(head.stdout.trim()).not.toBe(repository.baseHead);
       persistence.close();
-    }, 30_000);
+    }, 55_000);
 
     it('keeps the worktree when the runtime exit was not confirmed', async () => {
       const persistence = createPersistence();
@@ -6200,7 +6212,7 @@ if (runsWithElectronAbi)
         ]);
       }
       persistence.close();
-    }, 45_000);
+    }, 55_000);
 
     it('keeps what changed during the Git step and treats a worktree reclaimed meanwhile as discarded (issue #544)', async () => {
       const persistence = createPersistence();
@@ -6379,7 +6391,7 @@ if (runsWithElectronAbi)
         persistence.getTeamExecutionIsolation(failed.executionId)!.repositories[0]!.state,
       ).toBe('quarantined');
       persistence.close();
-    }, 30_000);
+    }, 40_000);
 
     it('keeps the worktree of a Mission step that is still waiting to resume (issue #544)', async () => {
       const persistence = createPersistence();
@@ -6641,7 +6653,7 @@ if (runsWithElectronAbi)
         repositories: [{ state: 'quarantined' }],
       });
       persistence.close();
-    }, 30_000);
+    }, 55_000);
 
     it('persists a terminal, identity-bound report when a scheduled runtime fails', async () => {
       const persistence = createPersistence();
@@ -7192,7 +7204,7 @@ if (runsWithElectronAbi)
         { ordinal: 2, state: 'completed', startReason: 'manual_resume' },
       ]);
       persistence.close();
-    });
+    }, 40_000);
 
     it('leaves per-criterion reports out of a Worker result too large for a Team message', async () => {
       const persistence = createPersistence();
@@ -7347,7 +7359,7 @@ if (runsWithElectronAbi)
       expect(persistence.getTeamTask(dispatch.teamTaskId).status).not.toBe('completed');
       expect(persistence.getTeamMission(mission.id).state).not.toBe('completed');
       persistence.close();
-    });
+    }, 40_000);
 
     it('records the Worker runtime error code and diagnostic on the attempt without retrying a billing failure', async () => {
       const persistence = createPersistence();
@@ -7802,7 +7814,7 @@ if (runsWithElectronAbi)
         diagnostic: { failureStage: 'billing_error', httpStatus: 402 },
       });
       persistence.close();
-    });
+    }, 40_000);
 
     it('terminalizes Task, Execution, and Delivery when preflight fails before an Attempt starts', async () => {
       const persistence = createPersistence();

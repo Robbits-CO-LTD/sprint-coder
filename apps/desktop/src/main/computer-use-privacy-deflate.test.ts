@@ -384,30 +384,54 @@ describe('DEFLATE structural validation', () => {
     const stream = deflateSync(incompressible(23, 16 * 1024 * 1024, true), {
       dictionary: DICTIONARY,
     });
-    // Only the walks are timed. Building these fixtures is slower than reading them and would
-    // otherwise decide this assertion on a loaded runner.
-    const started = performance.now();
+    // Each input is judged against its own floor, not a shared wall-clock ceiling (issue #576): on
+    // a busy CI runner or a Windows box under other load, the walk still does the same amount of
+    // work, it is just handed fewer time slices to do it in. A wall-clock budget cannot tell that
+    // apart from a real regression and times out even though nothing is slower. process.cpuUsage()
+    // reports the CPU time this process actually spent, which scheduling contention does not
+    // inflate, so a floor on it stays put under load while a genuine algorithmic regression - an
+    // O(n) walk turning quadratic multiplies cost by the block count, not by a constant factor -
+    // still blows straight through it. CPU time was chosen over simply widening the ceiling
+    // (rejected: it would only make the runner wait longer without telling load and regression
+    // apart) and is measured per input, not summed, because the three shapes cost very different
+    // amounts of CPU per byte and a shared budget would let a regression in the cheap ones hide in
+    // the expensive one's headroom.
+    const cpuMsSince = (start: NodeJS.CpuUsage): number => {
+      const spent = process.cpuUsage(start);
+      return (spent.user + spent.system) / 1000;
+    };
+    const mibPerSecond = (bytes: number, ms: number) => bytes / 1024 / 1024 / (ms / 1000);
+
+    const uniformStarted = process.cpuUsage();
     for (const fill of uniform) expect(reads(fill, MAX_WINDOW_BYTES)).toBe('look-alike');
-    const uniformMs = performance.now() - started;
-    const chainStarted = performance.now();
+    const uniformRate = mibPerSecond(16 * 1024 * 1024, cpuMsSince(uniformStarted));
+
+    const chainStarted = process.cpuUsage();
     expect(reads(chain, MAX_WINDOW_BYTES)).toBe('written-stream');
-    const chainMs = performance.now() - chainStarted;
-    const streamStarted = performance.now();
+    const chainRate = mibPerSecond(chain.length, cpuMsSince(chainStarted));
+
+    const streamStarted = process.cpuUsage();
     expect(reads(...body(stream))).toBe('written-stream');
-    const streamMs = performance.now() - streamStarted;
-    const walkedMs = performance.now() - started;
-    const rate = (bytes: number, ms: number) => +(bytes / 1024 / 1024 / (ms / 1000)).toFixed(1);
+    const streamRate = mibPerSecond(stream.length, cpuMsSince(streamStarted));
+
     console.info(
       JSON.stringify({
-        uniformFillMiBPerSecond: rate(16 * 1024 * 1024, uniformMs),
-        minimalBlockChainMiBPerSecond: rate(chain.length, chainMs),
-        realStreamMiBPerSecond: rate(stream.length, streamMs),
-        walkedMs: Math.round(walkedMs),
+        uniformFillCpuMiBPerSecond: +uniformRate.toFixed(1),
+        minimalBlockChainCpuMiBPerSecond: +chainRate.toFixed(1),
+        realStreamCpuMiBPerSecond: +streamRate.toFixed(1),
       }),
     );
-    // 40MiB of body, over the slowest inputs there are. The shared budget stops one file's
-    // inspection at 32MiB, so this covers what a whole inspection can ask for.
-    expect(walkedMs).toBeLessThan(8000);
+    // Floors sit far below what a healthy walk measures here (an idle box reads roughly
+    // 90-160 MiB/s uniform, 4-5 MiB/s chain, 23-30 MiB/s stream - the chain is slowest by design,
+    // since it buys the most header work a valid stream can), wide enough that ordinary
+    // per-machine and cache-contention variance never trips them, but still tight enough that an
+    // O(n) walk turning quadratic - which multiplies its cost by the input's block count rather
+    // than by a small constant factor - blows straight through them (verified with a mutation that
+    // adds per-block busy-work while preparing #576's fix; not kept here since it exists only to
+    // make this test fail on purpose).
+    expect(uniformRate).toBeGreaterThan(15);
+    expect(chainRate).toBeGreaterThan(1);
+    expect(streamRate).toBeGreaterThan(5);
   });
 });
 
