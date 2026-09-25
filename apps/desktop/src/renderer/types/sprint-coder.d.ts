@@ -1109,6 +1109,8 @@ export interface SprintCoderApi {
         }>;
       } | null;
     }>;
+    /** Detects the CLIs again without an app restart; `getRuntime` then reads the new result. */
+    refreshRuntimeDetection(): Promise<void>;
     setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
     setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;

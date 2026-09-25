@@ -6796,6 +6796,9 @@ export interface SprintCoderApi {
   };
   settings: {
     getRuntime(taskId?: string): Promise<RuntimeSettings>;
+    /** Detects the Codex, Claude and Grok CLIs again without an app restart. Resolves once the
+     * new detection has settled; `getRuntime` then reads it. */
+    refreshRuntimeDetection(): Promise<void>;
     setRuntime(kind: RuntimeKind, taskId?: string): Promise<void>;
     setModel(model: string, taskId?: string): Promise<void>;
     setEffort(effort: ClaudeEffort): Promise<void>;
@@ -7017,6 +7020,7 @@ export const IPC_CHANNELS = {
   workspaceGetEffective: 'sprint-coder:workspace:get-effective',
   workspaceSelect: 'sprint-coder:workspace:select',
   settingsGetRuntime: 'sprint-coder:settings:get-runtime',
+  settingsRefreshRuntimeDetection: 'sprint-coder:settings:refresh-runtime-detection',
   settingsSetRuntime: 'sprint-coder:settings:set-runtime',
   settingsSetModel: 'sprint-coder:settings:set-model',
   settingsSetEffort: 'sprint-coder:settings:set-effort',

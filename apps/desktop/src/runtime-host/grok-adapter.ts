@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import desktopPackage from '../../package.json';
+import { removeTreeWithoutFollowingLinks } from '../main/worker-worktree';
 import { GrokAcpClient, GrokRpcError, grokRecord } from './grok-acp';
 import { GROK_AGENT_PROFILE, grokEnvironment, prepareGrokIsolation } from './grok-isolation';
 import { resolveGrokCommandCandidates } from './grok-command';
@@ -43,6 +44,8 @@ export type GrokProbe = {
   version?: string;
   cli?: ResolvedCliCommand;
   models: CodexModelOption[];
+  /** The probe CLI's exit could not be confirmed. `readiness` is still what the CLI answered. */
+  stopUnconfirmed?: true;
 };
 const MODEL_SOURCE = 'https://docs.x.ai/build/cli/headless-scripting';
 const capability = (value: boolean) => ({
@@ -128,9 +131,86 @@ const INITIALIZE = {
   clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
 };
 
+type GrokProbeLeftover = Readonly<{
+  child: ChildProcessWithoutNullStreams;
+  directory: string;
+  environment: NodeJS.ProcessEnv;
+}>;
+
+/**
+ * Capability probes whose CLI exit could not be confirmed (issue #581). Only the isolation that
+ * each probe created itself is remembered, so another app instance's or a running Turn's
+ * `sprint-coder-grok-*` directory is never a candidate. A directory is removed, without following
+ * links, only after its own process is confirmed stopped: when that process exits, or at a later
+ * detection.
+ */
+export class GrokProbeLeftovers {
+  private readonly entries = new Set<GrokProbeLeftover>();
+  private running: Promise<void> | null = null;
+  private rerun = false;
+
+  get size(): number {
+    return this.entries.size;
+  }
+
+  keep(leftover: GrokProbeLeftover): void {
+    this.entries.add(leftover);
+    const { child } = leftover;
+    if (child.exitCode !== null || child.signalCode !== null) void this.reclaim();
+    else child.once('exit', () => void this.reclaim());
+  }
+
+  /** Settles after every remembered probe has been checked once more. Never rejects. */
+  reclaim(): Promise<void> {
+    if (this.running !== null) {
+      this.rerun = true;
+      return this.running;
+    }
+    this.running = this.sweep().finally(() => {
+      this.running = null;
+    });
+    return this.running;
+  }
+
+  private async sweep(): Promise<void> {
+    do {
+      this.rerun = false;
+      for (const leftover of [...this.entries]) {
+        if (!(await grokProbeStopped(leftover))) continue;
+        try {
+          await removeTreeWithoutFollowingLinks(leftover.directory);
+          this.entries.delete(leftover);
+        } catch {
+          // Windows can hold a handle briefly after exit; the next detection tries again.
+        }
+      }
+    } while (this.rerun);
+  }
+}
+
+export const grokProbeLeftovers = new GrokProbeLeftovers();
+
+/** The probe's own stop confirmation, without signaling a root that has already exited: by then
+ * its PID may belong to an unrelated process. */
+async function grokProbeStopped(leftover: GrokProbeLeftover): Promise<boolean> {
+  const { child } = leftover;
+  if (child.exitCode === null && child.signalCode === null)
+    return terminateRuntimeProcessTree(child, leftover.environment).catch(() => false);
+  // Windows confirms a stop by the root's exit alone (process-tree.ts). On POSIX the probe leads
+  // its own process group (`detached`), and that group must also be empty.
+  if (process.platform === 'win32' || child.pid === undefined) return true;
+  try {
+    process.kill(-child.pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
 export async function probeGrok(
   command = 'grok',
   source: Readonly<NodeJS.ProcessEnv> = process.env,
+  leftovers: GrokProbeLeftovers = grokProbeLeftovers,
 ): Promise<GrokProbe> {
   if (source['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1')
     return {
@@ -139,6 +219,9 @@ export async function probeGrok(
       version: 'e2e-fixture',
       models: [AUTO, { ...AUTO, id: 'grok-fixture', displayName: 'Grok fixture' }],
     };
+  // A later detection is the next chance to confirm that an earlier probe's CLI has stopped. It
+  // runs beside this probe so it cannot outrun the hello budget (probe-budget.ts).
+  void leftovers.reclaim();
   const missing: GrokProbe = { available: false, readiness: 'unavailable', models: [] };
   const cli = await probeCliCommandCandidates({
     kind: 'grok',
@@ -149,6 +232,7 @@ export async function probeGrok(
   if (cli === null) return missing;
   const installed = { available: true, version: cli.version, cli, models: [AUTO] };
   let report: GrokProbe;
+  let stopUnconfirmed: true | undefined;
   let isolation: ReturnType<typeof prepareGrokIsolation> | undefined;
   let child: ChildProcessWithoutNullStreams | undefined;
   let rpc: GrokAcpClient | undefined;
@@ -185,13 +269,22 @@ export async function probeGrok(
     };
   } finally {
     rpc?.close();
-    const stopped =
+    const environment = grokEnvironment(source);
+    if (
       child === undefined ||
-      (await terminateRuntimeProcessTree(child, grokEnvironment(source)).catch(() => false));
-    if (stopped) cleanupGrokIsolation(isolation);
-    else report = { ...installed, readiness: 'unavailable' };
+      (await terminateRuntimeProcessTree(child, environment).catch(() => false))
+    )
+      cleanupGrokIsolation(isolation);
+    else {
+      // Unlike a Turn's CLI, this one never received a session, MCP servers or a prompt, so an
+      // unconfirmed exit does not make its initialize/authenticate answer wrong (issue #581).
+      // Its own isolation waits for a later stop confirmation instead.
+      stopUnconfirmed = true;
+      if (isolation !== undefined)
+        leftovers.keep({ child, directory: isolation.directory, environment });
+    }
   }
-  return report;
+  return stopUnconfirmed ? { ...report, stopUnconfirmed } : report;
 }
 
 export function assertGrokToolInventory(

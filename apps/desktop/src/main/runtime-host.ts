@@ -44,6 +44,7 @@ import {
   RuntimeStartAcceptanceDeadline,
 } from './runtime-start-acceptance-deadline';
 import { compilePromptGuidance, injectPromptGuidance, type PromptAgent } from './prompt-context';
+import { secureLogger } from './secure-logger';
 
 type ActiveTurn = {
   taskId: string;
@@ -663,6 +664,14 @@ export class RuntimeHostClient {
                 ...(raw.codexCli === undefined ? {} : { cli: raw.codexCli }),
               };
       this.recordCapabilityState(instanceId, report);
+      // The probe CLI answered but its exit was not confirmed (issue #581). The answer stands;
+      // the Runtime Host keeps that probe's isolation until it can confirm the stop.
+      if (this.kind === 'grok' && raw.grokProbeStopUnconfirmed === true)
+        secureLogger.warn(
+          'Grok CLI capability probe exit was not confirmed',
+          { readiness: report.readiness },
+          { event: 'runtime.probe.stop_unconfirmed', runtime: 'grok', status: report.readiness },
+        );
       this.resolveProbe?.(report);
       this.resolveProbe = null;
       this.expectedProbeOperationId = null;
@@ -980,7 +989,9 @@ export class RuntimeHostClient {
     });
   }
 
-  private refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
+  /** Re-sends hello so the Runtime Host detects its CLI again without an app restart. Joins a
+   * probe already in flight, and stays unavailable while this host is quarantined. */
+  refreshCapabilityProbe(): Promise<RuntimeCapabilityReport> {
     if (this.disposed || this.quarantined)
       return Promise.resolve({ available: false, readiness: 'unavailable', models: [] });
     if (this.process === null) return this.probe();

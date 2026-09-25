@@ -57,6 +57,7 @@ import {
   type RuntimeImageAttachmentManifestEntry,
 } from '../runtime-host/protocol';
 import { RuntimeHostClient } from './runtime-host';
+import { secureLogger } from './secure-logger';
 
 function emitReadyHello(
   index: number,
@@ -157,6 +158,66 @@ describe('RuntimeHostClient Grok capability', () => {
         readiness: 'unavailable',
         models: [],
       });
+      client.dispose();
+    },
+  );
+
+  it('keeps the answered readiness when the probe could not confirm its CLI exit, and records one diagnostic (issue #581)', async () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, 'grok');
+    const models = [{ id: 'grok-4.7', displayName: 'Grok 4.7', description: 'test' }];
+    emitReadyHello(0, true, 'hello', {
+      grokAvailable: true,
+      grokReadiness: 'ready',
+      grokModels: models,
+      grokProbeStopUnconfirmed: true,
+    });
+    await expect(client.probe()).resolves.toEqual({ available: true, readiness: 'ready', models });
+    // A duplicate hello is ignored and does not add a second record.
+    emitReadyHello(0, false, 'hello', {
+      grokAvailable: true,
+      grokReadiness: 'ready',
+      grokModels: models,
+      grokProbeStopUnconfirmed: true,
+    });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith(
+      expect.any(String),
+      { readiness: 'ready' },
+      expect.objectContaining({ event: 'runtime.probe.stop_unconfirmed', runtime: 'grok' }),
+    );
+    client.dispose();
+  });
+
+  it.each(['grok', 'codex', 'claude'] as const)(
+    'detects the %s CLI again on request without restarting its host (issue #581)',
+    async (kind) => {
+      const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, kind);
+      const fields = (readiness: string, models: unknown[]) =>
+        kind === 'codex'
+          ? { codexAvailable: true, codexReadiness: readiness, codexModels: models }
+          : kind === 'claude'
+            ? { claudeAvailable: true, claudeReadiness: readiness, claudeModels: models }
+            : { grokAvailable: true, grokReadiness: readiness, grokModels: models };
+      const models = [{ id: `${kind}-model`, displayName: 'Model', description: 'test' }];
+      emitReadyHello(0, true, 'hello', fields('unavailable', []));
+      await expect(client.probe()).resolves.toMatchObject({ readiness: 'unavailable' });
+
+      const refreshed = client.refreshCapabilityProbe();
+      const operationId = await pendingRefreshOperationId(client);
+      await vi.waitFor(() =>
+        expect(electronMock.children[0]!.messages).toContainEqual(
+          expect.objectContaining({ type: 'hello', operationId }),
+        ),
+      );
+      emitReadyHello(0, false, operationId, fields('ready', models));
+      await expect(refreshed).resolves.toEqual({ available: true, readiness: 'ready', models });
+      await expect(client.probe()).resolves.toEqual({
+        available: true,
+        readiness: 'ready',
+        models,
+      });
+      expect(electronMock.fork).toHaveBeenCalledOnce();
       client.dispose();
     },
   );

@@ -449,6 +449,9 @@ async function probeAndSendCapability(operationId: string): Promise<void> {
             grokModels: probe.models,
             ...(probe.version === undefined ? {} : { grokVersion: probe.version }),
             ...(probe.cli === undefined ? {} : { grokCli: probe.cli }),
+            ...('stopUnconfirmed' in probe && probe.stopUnconfirmed === true
+              ? { grokProbeStopUnconfirmed: true as const }
+              : {}),
           }
         : {
             codexAvailable: probe.available,
@@ -546,6 +549,7 @@ function send(
         | 'claudeModels'
         | 'grokVersion'
         | 'grokCli'
+        | 'grokProbeStopUnconfirmed'
       > &
         Required<
           Pick<

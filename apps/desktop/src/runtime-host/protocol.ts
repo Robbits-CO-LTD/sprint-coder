@@ -348,6 +348,8 @@ export type RuntimeToMainEnvelope =
       grokVersion?: string;
       grokCli?: ResolvedCliCommand;
       grokModels?: CodexModelOption[];
+      /** The Grok probe could not confirm its CLI's exit; Main records one diagnostic for it. */
+      grokProbeStopUnconfirmed?: true;
     })
   | (EnvelopeBase & {
       type: 'images_prepared';
@@ -845,7 +847,8 @@ export function isRuntimeToMainEnvelope(value: unknown): value is RuntimeToMainE
           'grokModels' in value &&
           Array.isArray(value.grokModels) &&
           value.grokModels.length <= 32 &&
-          value.grokModels.every((model) => codexModelOptionSchema.safeParse(model).success)))
+          value.grokModels.every((model) => codexModelOptionSchema.safeParse(model).success))) &&
+      (!('grokProbeStopUnconfirmed' in value) || value.grokProbeStopUnconfirmed === true)
     );
   if (value.type === 'images_prepared')
     return (

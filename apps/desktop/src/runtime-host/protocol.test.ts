@@ -488,9 +488,15 @@ describe('Runtime Host protocol', () => {
       { grokVersion: 'grok 1.0.0\n/private/request' },
       { grokVersion: 'grok 1.0.0 (' + 'a'.repeat(128) + ')' },
       { grokCli: { ...grok.grokCli, capabilities: ['invalid-capability'] } },
+      { grokProbeStopUnconfirmed: false },
+      { grokProbeStopUnconfirmed: 'true' },
     ]) {
       expect(isRuntimeToMainEnvelope({ ...legacy, ...grok, ...invalid })).toBe(false);
     }
+    // Issue #581: the probe's stop uncertainty travels beside, not instead of, its readiness.
+    expect(isRuntimeToMainEnvelope({ ...legacy, ...grok, grokProbeStopUnconfirmed: true })).toBe(
+      true,
+    );
   });
 
   it('accepts catalog-defined Codex effort levels including ultra', () => {
