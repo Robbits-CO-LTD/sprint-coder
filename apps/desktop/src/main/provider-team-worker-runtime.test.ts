@@ -14,6 +14,7 @@ import {
 } from './provider-team-worker-runtime';
 import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError } from './tool-broker';
+import { WorkspacePatchRejection } from './workspace-patch-tool';
 
 const connection: ProviderConnection = {
   id: 'openai:primary',
@@ -1308,38 +1309,93 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     ]);
   });
 
+  // Issue #574: a Workspace tool failure that is neither a write's policy denial nor a stop
+  // request no longer ends the whole execution. It goes back to the model as a tool error, the
+  // same conversion the Leader uses (providerWorkspaceToolFailure), so the model can retry.
+  it('returns a denied read to the model as a tool error and lets it go on', async () => {
+    const labels: string[] = [];
+    const { adapter, requests, toolMessages, release } = managedLocalWorker({
+      toolRounds: [['read_file']],
+      executeTool: async () => {
+        throw denied();
+      },
+    });
+
+    const result = await adapter.execute({
+      ...execution(),
+      onEvent: (event) => {
+        if (event.type === 'activity') labels.push(event.label);
+      },
+    });
+
+    // The model saw the denial and went on to its final answer, instead of the execution failing.
+    expect(requests).toHaveLength(2);
+    expect(toolMessages()).toEqual([
+      expect.objectContaining({ toolName: 'read_file', content: deniedToolMessage }),
+    ]);
+    // read_file is not a Workspace write tool, so its label is a failure, not a "denied" write.
+    expect(labels).toContain('read_fileは失敗しました');
+    const completion = workerCompletionSchema.parse(result.completion);
+    // A denied read never counts as a write denial (issue #552's counting is unchanged): it does
+    // not fail a write execution.
+    expect(completion.status).toBe('succeeded');
+    expect(completion.risks).toEqual([]);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('returns a rejected patch to the model as a tool error and lets it go on', async () => {
+    const error = new WorkspacePatchRejection('anchor did not match the current file content');
+    const { adapter, requests, toolMessages, release } = managedLocalWorker({
+      toolRounds: [['apply_patch']],
+      executeTool: async () => {
+        throw error;
+      },
+    });
+
+    const result = await adapter.execute(execution());
+
+    expect(requests).toHaveLength(2);
+    expect(toolMessages()).toEqual([
+      expect.objectContaining({
+        toolName: 'apply_patch',
+        content:
+          '{"ok":false,"error":{"code":"PATCH_REJECTED","message":"anchor did not match the current file content"}}',
+      }),
+    ]);
+    const completion = workerCompletionSchema.parse(result.completion);
+    // A rejected patch is not a policy denial either, so it does not count against the write
+    // outcome (issue #552's counting is unchanged): only a write tool's authorization denial does.
+    expect(completion.status).toBe('succeeded');
+    expect(completion.risks).toEqual([]);
+    expect(release).toHaveBeenCalledOnce();
+  });
+
   it.each([
-    ['a denied non-write tool', 'read_file', denied],
-    ['a write tool failing for another reason', 'create_file', () => new Error('patch rejected')],
-  ] as const)('still ends the execution on %s', async (_label, tool, failure) => {
-    const error = failure();
-    const { adapter, requests, release } = managedLocalWorker({
-      toolRounds: [[tool]],
-      executeTool: async () => {
-        throw error;
-      },
-    });
+    ['a write denied', 'create_file', denied],
+    ['a denied read', 'read_file', denied],
+    [
+      'a rejected patch',
+      'apply_patch',
+      () => new WorkspacePatchRejection('anchor did not match the current file content'),
+    ],
+  ] as const)(
+    'still ends the execution on %s while the Worker is being stopped',
+    async (_label, tool, failure) => {
+      const stop = new AbortController();
+      const error = failure();
+      const { adapter, requests, release } = managedLocalWorker({
+        toolRounds: [[tool]],
+        executeTool: async () => {
+          stop.abort();
+          throw error;
+        },
+      });
 
-    await expect(adapter.execute(execution())).rejects.toBe(error);
-    expect(requests).toHaveLength(1);
-    expect(release).toHaveBeenCalledOnce();
-  });
-
-  it('ends the execution on a write denied while it is being stopped', async () => {
-    const stop = new AbortController();
-    const error = denied();
-    const { adapter, requests, release } = managedLocalWorker({
-      toolRounds: [['create_file']],
-      executeTool: async () => {
-        stop.abort();
-        throw error;
-      },
-    });
-
-    await expect(adapter.execute({ ...execution(), signal: stop.signal })).rejects.toBe(error);
-    expect(requests).toHaveLength(1);
-    expect(release).toHaveBeenCalledOnce();
-  });
+      await expect(adapter.execute({ ...execution(), signal: stop.signal })).rejects.toBe(error);
+      expect(requests).toHaveLength(1);
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
 
   it("binds the execution's approval-wait observer to its managed tool session (issue #573)", async () => {
     const { adapter, prepare } = managedLocalWorker({

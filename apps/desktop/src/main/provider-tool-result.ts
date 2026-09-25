@@ -1,5 +1,13 @@
 import { redactSecrets } from './secret-redactor';
 import { assessProviderDisclosure } from './provider-disclosure-classifier';
+import { ToolAuthorizationDeniedError } from './tool-broker';
+import { WorkspaceToolRejection } from './provider-workspace-tools';
+import { WorkspacePatchRejection } from './workspace-patch-tool';
+import { CommandRunnerError } from './command-runner';
+import { ManagedStdinRejection } from './managed-command-stdin';
+import { SkillSettingsError } from './skill-settings-service';
+import { clipPublicMessage } from './zod-issue-message';
+import { secureLogger } from './secure-logger';
 
 export function formatProviderToolResult(
   providerId: string,
@@ -62,6 +70,35 @@ export function redactProviderCommandFailure(
       outputRedacted: true,
     }),
   );
+}
+
+/**
+ * The Leader's conversion from a Workspace managed-tool failure to a tool error the model can act
+ * on and go on from. Shared with the Managed Local Worker (issue #574), so a Worker's read denial,
+ * rejected patch, or other Workspace tool failure is told to its model in the same words the Leader
+ * uses, instead of ending the Worker's whole execution.
+ */
+export function providerWorkspaceToolFailure(error: unknown): string {
+  if (error instanceof ToolAuthorizationDeniedError)
+    return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
+  if (error instanceof WorkspaceToolRejection)
+    return providerToolErrorContent(error.code, error.message);
+  if (error instanceof WorkspacePatchRejection)
+    return providerToolErrorContent('PATCH_REJECTED', error.message);
+  if (error instanceof CommandRunnerError)
+    return providerToolErrorContent(error.code, error.message);
+  // The stdin cap has to reach the model verbatim: the message tells it how to split the write so
+  // it can retry instead of seeing an opaque failure (Issue #473).
+  if (error instanceof ManagedStdinRejection)
+    return providerToolErrorContent(error.code, error.message);
+  if (error instanceof SkillSettingsError)
+    return providerToolErrorContent(error.code, clipPublicMessage(error.message));
+  secureLogger.error('Provider workspace tool execution failed', { error });
+  return providerToolErrorContent('TOOL_EXECUTION_FAILED', 'Workspace tool execution failed');
+}
+
+export function providerToolErrorContent(code: string, message: string): string {
+  return redactSecrets(JSON.stringify({ ok: false, error: { code, message } }));
 }
 
 function isOllamaCommand(providerId: string, toolName: string): boolean {
