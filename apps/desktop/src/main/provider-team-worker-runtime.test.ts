@@ -1140,6 +1140,19 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       runtime,
     });
     const release = vi.fn();
+    const prepare = vi.fn<NonNullable<ProviderTeamWorkerRuntimeDeps['prepareManagedTools']>>(
+      async () => ({
+        tools: (
+          options.tools ?? ['create_file', 'create_directory', 'apply_patch', 'read_file']
+        ).map((name) => ({
+          name,
+          description: name,
+          inputSchema: { type: 'object' },
+        })),
+        execute: (name: string) => options.executeTool(name),
+        release,
+      }),
+    );
     const adapter = new ProviderAwareTeamWorkerRuntime({
       fallback: { start: vi.fn(), execute: vi.fn(), stop: vi.fn() },
       verification: {
@@ -1156,22 +1169,12 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       workerGuidance: 'Use workspace tools.',
       workerTools: [],
       managedToolsConnectionId: managedConnection.id,
-      prepareManagedTools: async () => ({
-        tools: (
-          options.tools ?? ['create_file', 'create_directory', 'apply_patch', 'read_file']
-        ).map((name) => ({
-          name,
-          description: name,
-          inputSchema: { type: 'object' },
-        })),
-        execute: (name) => options.executeTool(name),
-        release,
-      }),
+      prepareManagedTools: prepare,
       executeManagerTool: vi.fn(),
     });
     const toolMessages = () =>
       (requests.at(-1)?.messages ?? []).filter(({ role }) => role === 'tool');
-    return { adapter, requests, release, toolMessages };
+    return { adapter, requests, release, toolMessages, prepare };
   }
 
   const execution = (
@@ -1336,6 +1339,22 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     await expect(adapter.execute({ ...execution(), signal: stop.signal })).rejects.toBe(error);
     expect(requests).toHaveLength(1);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("binds the execution's approval-wait observer to its managed tool session (issue #573)", async () => {
+    const { adapter, prepare } = managedLocalWorker({
+      toolRounds: [['create_file']],
+      executeTool: async () => committed('a.txt'),
+    });
+    const onApprovalWait = () => () => undefined;
+
+    await adapter.execute({ ...execution(), onApprovalWait });
+
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0]![0]).toMatchObject({
+      executionId: 'managed-execution',
+      onApprovalWait,
+    });
   });
 
   it('fails a write execution whose write-capable Worker was handed no write tool, as the CLI does for a read-only run', async () => {

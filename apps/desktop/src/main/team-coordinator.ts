@@ -88,6 +88,7 @@ import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import { RetainedWorktreeError, retainedWorktreeBlockedReason } from './team-retained-worktrees';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
+import type { ApprovalWaitObserver } from './tool-broker';
 import {
   allCriteriaDone,
   confirmWorkerReport,
@@ -253,6 +254,12 @@ export interface TeamWorkerRuntime {
      */
     doneCriteria?: readonly string[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    /**
+     * Main calls it when one of this execution's managed tool calls starts waiting on the user's
+     * Approval Card, and calls what it returns once that wait ends (issue #573). The runtime hands
+     * it to Main's managed tool session for the execution; it never reaches the model.
+     */
+    onApprovalWait?: ApprovalWaitObserver;
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult>;
   stop(agentId: string): Promise<void>;
@@ -4607,7 +4614,7 @@ export class TeamCoordinator {
         this.persistence.transitionTeamTask(teamTaskId, 'running', this.isoNow());
         let lastProgressWriteMs = 0;
         const result = await executeWithWatchdog({
-          execute: (observe, signal) =>
+          execute: (observe, signal, onApprovalWait) =>
             this.runtime.execute({
               worker,
               envelope,
@@ -4619,6 +4626,7 @@ export class TeamCoordinator {
               priorConversation,
               doneCriteria,
               signal,
+              onApprovalWait,
               onEvent: (event) => {
                 observe(event);
                 if (event.type === 'fileChange')
@@ -6332,18 +6340,39 @@ export function runtimeStopConfirmed(error: unknown): boolean {
   );
 }
 
+/**
+ * Runs a Worker step under three deadlines: a heartbeat lease, an idle budget that only meaningful
+ * progress refills, and a hard deadline for the whole step.
+ *
+ * While a managed tool call of the step waits on the user's Approval Card, the idle clock stands
+ * still (issue #573): that time is the user's, not the Worker's lack of progress, and once every
+ * such wait has ended the clock goes on with the budget it had left. The heartbeat lease and the
+ * hard deadline keep running through a wait, so a runtime that dies while a card is open is still
+ * caught, and a step whose card is never answered still ends at its hard deadline.
+ */
 export function executeWithWatchdog<T>(input: {
-  execute(observe: (event: WorkerActivityEvent) => void, signal: AbortSignal): Promise<T>;
+  execute(
+    observe: (event: WorkerActivityEvent) => void,
+    signal: AbortSignal,
+    onApprovalWait: ApprovalWaitObserver,
+  ): Promise<T>;
   hardTimeoutMs: number;
   stop(): Promise<void>;
 }): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const controller = new AbortController();
-    let expired = false;
+    // Set once the step settled or a deadline expired. Nothing that arrives after that, such as a
+    // late event or the end of an approval wait, starts a timer again.
+    let settled = false;
     let heartbeatTimer: NodeJS.Timeout | undefined;
     let idleTimer: NodeJS.Timeout | undefined;
     const heartbeatTimeoutMs = Math.min(WORKER_HEARTBEAT_TIMEOUT_MS, input.hardTimeoutMs);
     const idleTimeoutMs = Math.min(WORKER_IDLE_TIMEOUT_MS, input.hardTimeoutMs);
+    // Approval waits still open. While there is one, `idleTimer` is stopped and `idleRemainingMs`
+    // holds the idle budget the clock goes on with; otherwise `idleDeadline` is when it runs out.
+    let approvalWaits = 0;
+    let idleDeadline = 0;
+    let idleRemainingMs = idleTimeoutMs;
     const clearTimers = (): void => {
       clearTimeout(hardTimer);
       if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
@@ -6353,8 +6382,8 @@ export function executeWithWatchdog<T>(input: {
       code: 'heartbeat_timeout' | 'idle_timeout' | 'hard_timeout',
       message: string,
     ): void => {
-      if (expired) return;
-      expired = true;
+      if (settled) return;
+      settled = true;
       clearTimers();
       controller.abort(new WorkerRuntimeControlError(code, message));
       void input.stop().then(
@@ -6370,37 +6399,67 @@ export function executeWithWatchdog<T>(input: {
       );
     };
     const resetHeartbeat = (): void => {
+      if (settled) return;
       if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
       heartbeatTimer = setTimeout(
         () => expire('heartbeat_timeout', 'Worker heartbeat timed out'),
         heartbeatTimeoutMs,
       );
     };
-    const resetProgress = (): void => {
-      resetHeartbeat();
+    const startIdleClock = (budgetMs: number): void => {
       if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleDeadline = performance.now() + budgetMs;
       idleTimer = setTimeout(
         () => expire('idle_timeout', 'Worker made no meaningful progress'),
-        idleTimeoutMs,
+        budgetMs,
       );
+    };
+    const resetProgress = (): void => {
+      if (settled) return;
+      resetHeartbeat();
+      // Progress made while a card waits refills the budget; the clock starts once the wait ends.
+      if (approvalWaits > 0) idleRemainingMs = idleTimeoutMs;
+      else startIdleClock(idleTimeoutMs);
+    };
+    const onApprovalWait = (): (() => void) => {
+      if (settled) return () => undefined;
+      approvalWaits += 1;
+      if (approvalWaits === 1) {
+        idleRemainingMs = Math.max(0, idleDeadline - performance.now());
+        if (idleTimer !== undefined) clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
+      let ended = false;
+      return () => {
+        if (ended) return;
+        ended = true;
+        approvalWaits -= 1;
+        if (approvalWaits === 0 && !settled) startIdleClock(idleRemainingMs);
+      };
     };
     resetProgress();
     const hardTimer = setTimeout(
       () => expire('hard_timeout', 'Worker step reached its hard deadline'),
       input.hardTimeoutMs,
     );
-    const promise = input.execute((event) => {
-      if (event.type === 'heartbeat') resetHeartbeat();
-      else resetProgress();
-    }, controller.signal);
+    const promise = input.execute(
+      (event) => {
+        if (event.type === 'heartbeat') resetHeartbeat();
+        else resetProgress();
+      },
+      controller.signal,
+      onApprovalWait,
+    );
     void promise.then(
       (value) => {
-        if (expired) return;
+        if (settled) return;
+        settled = true;
         clearTimers();
         resolve(value);
       },
       (error: unknown) => {
-        if (expired) return;
+        if (settled) return;
+        settled = true;
         clearTimers();
         reject(error);
       },

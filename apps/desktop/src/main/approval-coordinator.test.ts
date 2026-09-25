@@ -18,6 +18,7 @@ import {
 } from './approval-coordinator';
 import {
   ToolBroker,
+  type ApprovalWaitObserver,
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
 } from './tool-broker';
@@ -1234,6 +1235,178 @@ describe('ApprovalCoordinator cancellation of an aborted call', () => {
     },
   );
 });
+
+/**
+ * A Team Worker's watchdog stops its idle clock only while one of its calls waits on the user's
+ * card (issue #573), so only a pending card may start a wait, and every way the card settles
+ * must end it.
+ */
+describe('ApprovalCoordinator approval wait observer', () => {
+  function observedWaits() {
+    const waits = { begun: 0, ended: 0 };
+    const observe: ApprovalWaitObserver = () => {
+      waits.begun += 1;
+      return () => {
+        waits.ended += 1;
+      };
+    };
+    return { waits, observe };
+  }
+
+  function dispatchObserved(
+    broker: ToolBroker,
+    callId: string,
+    observe: ApprovalWaitObserver,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    return broker.dispatch({
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      callId,
+      providerName: 'approval_fetch',
+      input: { origin: 'https://worker.test' },
+      onApprovalWait: observe,
+      ...(signal === undefined ? {} : { signal }),
+    });
+  }
+
+  it.each(['allow', 'deny', 'call abort', 'turn end', 'policy change', 'shutdown'] as const)(
+    'waits from the pending card until %s settles it',
+    async (path) => {
+      const harness = createHarness();
+      const { broker, executions } = createBroker(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      broker.startTurn(toolContext, 'mock');
+      const worker = new AbortController();
+      const { waits, observe } = observedWaits();
+      const dispatch = dispatchObserved(broker, 'worker-call', observe, worker.signal).then(
+        () => 'executed',
+        () => 'refused',
+      );
+      const card = await waitForPublished(harness);
+      expect(waits).toEqual({ begun: 1, ended: 0 });
+
+      if (path === 'allow') harness.coordinator.resolve(resolveCommand(card, 'allow_once'));
+      else if (path === 'deny') harness.coordinator.resolve(resolveCommand(card, 'deny'));
+      else if (path === 'call abort') worker.abort(new Error('Worker released'));
+      else if (path === 'turn end') {
+        harness.endTurn('turn-1');
+        harness.coordinator.turnEnded('task-1', 'turn-1', 'canceled');
+      } else if (path === 'policy change') harness.coordinator.policyEpochChanged('task-1', 8);
+      else harness.coordinator.dispose();
+
+      expect(await dispatch).toBe(path === 'allow' ? 'executed' : 'refused');
+      expect(waits).toEqual({ begun: 1, ended: 1 });
+      expect(executions()).toBe(path === 'allow' ? 1 : 0);
+    },
+  );
+
+  it('starts one wait per capability card, each ending before the next card comes up', async () => {
+    const harness = createHarness();
+    const { broker } = createBroker(harness.coordinator.authorizeTool.bind(harness.coordinator), [
+      'network.fetch',
+      'provider.egress',
+    ]);
+    broker.startTurn(toolContext, 'mock');
+    const { waits, observe } = observedWaits();
+    const dispatch = dispatchObserved(broker, 'worker-call', observe);
+
+    const first = await waitForPublished(harness);
+    expect(waits).toEqual({ begun: 1, ended: 0 });
+    harness.coordinator.resolve(resolveCommand(first, 'allow_once'));
+    await viWaitFor(() => harness.published.length === 2);
+    expect(waits).toEqual({ begun: 2, ended: 1 });
+    harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'allow_once'));
+
+    await expect(dispatch).resolves.toEqual({ ok: true });
+    expect(waits).toEqual({ begun: 2, ended: 2 });
+  });
+
+  const policyAllow: ToolAuthorizationDecision = {
+    decision: 'allow',
+    reason: 'policy_allow',
+    beforeExecute: () => true,
+  };
+
+  it.each([
+    ['a policy allow', policyAllow, 'executed'],
+    ['a policy deny', 'deny', 'refused'],
+  ] as const)(
+    'never starts a wait for a call that %s decides without a card',
+    async (_label, evaluated, outcome) => {
+      const harness = createHarness({ evaluatePermission: () => evaluated });
+      const { broker } = createBroker(harness.coordinator.authorizeTool.bind(harness.coordinator));
+      broker.startTurn(toolContext, 'mock');
+      const { waits, observe } = observedWaits();
+
+      const result = await dispatchObserved(broker, 'worker-call', observe).then(
+        () => 'executed',
+        () => 'refused',
+      );
+
+      expect(result).toBe(outcome);
+      expect(harness.published).toEqual([]);
+      expect(waits).toEqual({ begun: 0, ended: 0 });
+    },
+  );
+
+  it('never starts a wait for a call a Task grant allows or whose Turn already ended', async () => {
+    const harness = createHarness();
+    const { broker, executions } = createBroker(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    broker.startTurn(toolContext, 'mock');
+    const granting = dispatchObserved(broker, 'granting-call', observedWaits().observe);
+    harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_task'));
+    await expect(granting).resolves.toEqual({ ok: true });
+
+    const reused = observedWaits();
+    await expect(dispatchObserved(broker, 'reused-call', reused.observe)).resolves.toEqual({
+      ok: true,
+    });
+    expect(reused.waits).toEqual({ begun: 0, ended: 0 });
+
+    harness.persistence.grants.length = 0;
+    harness.endTurn('turn-1');
+    const ended = observedWaits();
+    await expect(dispatchObserved(broker, 'late-call', ended.observe)).rejects.toThrow(
+      'Tool authorization deny',
+    );
+    expect(ended.waits).toEqual({ begun: 0, ended: 0 });
+    expect(harness.published).toHaveLength(1);
+    expect(executions()).toBe(2);
+  });
+
+  it('decides the card the same way when the observer throws', async () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    try {
+      const harness = createHarness();
+      const { broker, executions } = createBroker(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      broker.startTurn(toolContext, 'mock');
+      const throwingEnd = dispatchObserved(broker, 'end-throws', () => () => {
+        throw new Error('observer end failed');
+      });
+      harness.coordinator.resolve(resolveCommand(await waitForPublished(harness), 'allow_once'));
+      await expect(throwingEnd).resolves.toEqual({ ok: true });
+
+      const throwingBegin = dispatchObserved(broker, 'begin-throws', () => {
+        throw new Error('observer begin failed');
+      });
+      await viWaitFor(() => harness.published.length === 2);
+      harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+      await expect(throwingBegin).rejects.toThrow('Tool authorization deny');
+
+      expect(executions()).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 /**
  * `exec_command` spawns with stdin open, so anything written afterwards is part of what the
  * approved command actually does. The write is approved on its own card, and that card has to
