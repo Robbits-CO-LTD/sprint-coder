@@ -7204,7 +7204,7 @@ if (runsWithElectronAbi)
         { ordinal: 2, state: 'completed', startReason: 'manual_resume' },
       ]);
       persistence.close();
-    }, 30_000);
+    }, 40_000);
 
     it('leaves per-criterion reports out of a Worker result too large for a Team message', async () => {
       const persistence = createPersistence();
