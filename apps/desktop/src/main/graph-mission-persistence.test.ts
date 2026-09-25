@@ -530,9 +530,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         f.persistence.close();
       }
     });
-    it(
-      'fails a WRITE step whose worktree did not change, whatever its Worker reported, and integrates nothing',
-      async () => {
+    it.each([
+      ['Worker', false],
+      // A Manager that assigned nothing wrote nothing either (issue #587).
+      ['Manager', true],
+    ] as const)(
+      'fails a WRITE step whose worktree did not change, whatever its %s reported, and integrates nothing',
+      async (_label, asManager) => {
         const f = fixture(undefined, true);
         const workspace = join(dirname(f.path), 'workspace');
         mkdirSync(workspace);
@@ -559,8 +563,27 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           workspaceKey: binding.workspaceKey,
           rootIdentityDigest: binding.rootIdentityDigest,
         });
-        const context = graphMissionContextFor(f.persistence, f.task.id);
         const plan = structuredClone(f.plan);
+        if (asManager) {
+          const manager = f.persistence.registerTeamWorker({
+            teamId: f.team.id,
+            role: 'manager',
+            objective: 'manager',
+            contextInheritancePolicy: 'summary',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+            writeCapable: true,
+            canDelegate: true,
+            managerPolicy: {
+              maxDirectChildren: 2,
+              maxDelegationDepth: 2,
+              allowManagerChildren: false,
+            },
+          });
+          f.persistence.transitionWorkerState(manager.id, 'spawning');
+          f.persistence.transitionWorkerState(manager.id, 'ready');
+          plan.steps[0]!.workerId = manager.id;
+        }
+        const context = graphMissionContextFor(f.persistence, f.task.id);
         plan.steps[0]!.access = 'workspace-write';
         plan.steps[0]!.writeClaims = [
           { rootId: context.workspace.primaryRootId!, path: 'a.ts', semanticKeys: [] },
@@ -596,7 +619,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           policyEpoch: context.policyEpoch,
           contextDigest: graphMissionContextDigest(
             context,
-            new Set(f.workers.map((worker) => worker.id)),
+            new Set(plan.steps.map(({ workerId }) => workerId)),
           ),
         }));
         const executionId = mission.steps[0]!.executionId;
@@ -610,13 +633,165 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
 
         expect(execute).toHaveBeenCalledTimes(1);
+        expect(execute.mock.calls[0]![0].worker.canDelegate).toBe(asManager);
         const writer = f.persistence
           .getTeamSnapshot(f.persistence.getTeamByTask(f.task.id)!.id)
-          .agents.find(({ id }) => id === f.workers[0]!.id);
+          .agents.find(({ id }) => id === plan.steps[0]!.workerId);
         expect(writer?.currentActivity).toContain('ファイルが1つも変わらないまま');
         expect(f.persistence.getTeamExecution(executionId).state).not.toBe('completed');
         expect(f.persistence.getTeamMission(mission.id).state).not.toBe('completed');
         expect(readFileSync(join(workspace, 'a.ts'), 'utf8')).toBe('before\n');
+        f.persistence.close();
+      },
+      gitScenarioTimeout,
+    );
+    it(
+      'completes a WRITE step whose Manager had its Worker write, though the Manager wrote nothing',
+      async () => {
+        const f = fixture(undefined, true);
+        const workspace = join(dirname(f.path), 'workspace');
+        mkdirSync(workspace);
+        writeFileSync(join(workspace, 'a.ts'), 'before\n');
+        for (const args of [
+          ['init', '-q', workspace],
+          ['-C', workspace, 'add', 'a.ts'],
+          [
+            '-C',
+            workspace,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-qm',
+            'base',
+          ],
+        ])
+          expect(spawnSync('git', args).status).toBe(0);
+        const binding = await workspaceMutationBinding(workspace);
+        f.persistence.setWorkspaceBinding(f.task.id, {
+          path: binding.canonicalPath,
+          workspaceKey: binding.workspaceKey,
+          rootIdentityDigest: binding.rootIdentityDigest,
+        });
+        const plan = structuredClone(f.plan);
+        const manager = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: 'manager',
+          objective: 'manager',
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: true,
+          canDelegate: true,
+          managerPolicy: {
+            maxDirectChildren: 2,
+            maxDelegationDepth: 2,
+            allowManagerChildren: false,
+          },
+        });
+        f.persistence.transitionWorkerState(manager.id, 'spawning');
+        f.persistence.transitionWorkerState(manager.id, 'ready');
+        const child = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: 'child',
+          objective: 'child',
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: true,
+          parentAgentId: manager.id,
+        });
+        f.persistence.transitionWorkerState(child.id, 'spawning');
+        f.persistence.transitionWorkerState(child.id, 'ready');
+        plan.steps[0]!.workerId = manager.id;
+        const context = graphMissionContextFor(f.persistence, f.task.id);
+        plan.steps[0]!.access = 'workspace-write';
+        plan.steps[0]!.writeClaims = [
+          { rootId: context.workspace.primaryRootId!, path: 'a.ts', semanticKeys: [] },
+        ];
+        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(initial, 1);
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const original = runtime.execute.bind(runtime);
+        let coordinator: TeamCoordinator | null = null;
+        const childExecutions: string[] = [];
+        // The Manager assigns the write to its Worker the way the Team tools do (issue #587) and
+        // waits for it; the Worker writes into its own isolation. Neither is the simulation that
+        // Main exempts from the check.
+        vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+          if (input.worker.canDelegate) {
+            const submission = await coordinator!.assignTaskAs(
+              {
+                taskId: f.task.id,
+                targetAgentId: child.id,
+                content: 'write a.ts',
+                doneCriteria: ['a.ts written'],
+                accessMode: 'workspace-write',
+              },
+              input.worker.id,
+              { type: 'team_execution', id: input.executionId! },
+            );
+            childExecutions.push(submission.executionId);
+            await vi.waitFor(
+              () =>
+                expect(f.persistence.getTeamExecution(submission.executionId).state).toBe(
+                  'completed',
+                ),
+              { timeout: gitCheckpointTimeout },
+            );
+          } else if (input.worker.writeCapable)
+            writeFileSync(join(input.workspacePath!, 'a.ts'), 'written by the Worker\n');
+          const { simulated: _simulated, ...result } = await original(input);
+          return result;
+        });
+        const scheduler = new TeamExecutionScheduler(2);
+        coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+          undefined,
+          undefined,
+          new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') }),
+        );
+        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+          ...f.input,
+          renderRevision: initial.renderRevision,
+          semanticRevision: initial.semanticRevision,
+          semanticDigest: initial.semanticDigest,
+          workspaceDigest: context.workspace.digest,
+          policyEpoch: context.policyEpoch,
+          contextDigest: graphMissionContextDigest(
+            context,
+            new Set(plan.steps.map(({ workerId }) => workerId)),
+          ),
+        }));
+        const executionId = mission.steps[0]!.executionId;
+        await vi.waitFor(
+          () =>
+            expect(['completed', 'failed', 'interrupted']).toContain(
+              f.persistence.listTeamAttempts(executionId).at(-1)?.state,
+            ),
+          { timeout: gitCheckpointTimeout },
+        );
+        expect(f.persistence.listTeamAttempts(executionId).map(({ state }) => state)).toEqual([
+          'completed',
+        ]);
+        await vi.waitFor(
+          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
+          { timeout: gitCheckpointTimeout },
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+
+        expect(childExecutions).toHaveLength(1);
+        expect(f.persistence.getTeamExecution(childExecutions[0]!)).toMatchObject({
+          createdByAgentId: manager.id,
+          accessMode: 'workspace-write',
+          state: 'completed',
+        });
+        expect(f.persistence.getTeamExecution(executionId).state).toBe('completed');
+        expect(readFileSync(join(workspace, 'a.ts'), 'utf8')).toBe('written by the Worker\n');
         f.persistence.close();
       },
       gitScenarioTimeout,
