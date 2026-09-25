@@ -2896,14 +2896,14 @@ export class TeamCoordinator {
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'cancel', null);
       if (execution.state === 'waiting_resume') {
-        const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+        const canceled = await this.cancelWaitingExecution(execution);
         this.cancelMissionRemainder(execution.id);
         this.emit(taskId, team.id);
         return { executionId: canceled.id, state: canceled.state };
       }
       if (!this.executionScheduler.cancelQueued(execution.id))
         throw new Error('Execution is not queued or running');
-      const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      const canceled = await this.cancelWaitingExecution(execution);
       this.cancelMissionRemainder(execution.id);
       this.emit(taskId, team.id);
       return { executionId: canceled.id, state: canceled.state };
@@ -3264,8 +3264,17 @@ export class TeamCoordinator {
             ...input,
             attemptId: attempt.id,
           })
-        )
+        ) {
+          // The runtime call returned, so a canceled Turn (and its CLI process tree) has ended and
+          // an unchanged worktree can go (issue #589). A steered execution is not terminal and keeps
+          // its isolation for the re-run.
+          if (
+            executionIsolation !== null &&
+            (await this.reclaimTerminalExecutionIsolation(input.executionId, worker.id, true))
+          )
+            this.emit(input.taskId, input.teamId);
           return;
+        }
       }
       this.persistence.transitionTeamMessageState(input.messageId, 'delivered');
       this.persistence.transitionTeamDelivery({
@@ -3985,6 +3994,8 @@ export class TeamCoordinator {
           to: 'canceled',
           now: this.isoNow(),
         });
+        // A Turn stopped by an error was quarantined on its way here; one that returned was not.
+        this.quarantineCanceledExecutionIsolation(input.executionId);
         this.cancelMissionRemainder(input.executionId);
         this.executionInterruptions.delete(input.executionId);
         control.resolve({ executionId: canceled.id, state: canceled.state });
@@ -4144,7 +4155,7 @@ export class TeamCoordinator {
         !this.executionScheduler.cancelQueued(execution.id)
       )
         throw new Error('Worker execution is not present in the Scheduler');
-      this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+      await this.cancelWaitingExecution(execution);
       this.cancelMissionRemainder(execution.id);
     }
     if (!stoppedRunningRuntime) await this.runtime.stop(workerId);
@@ -5674,6 +5685,50 @@ export class TeamCoordinator {
     }
   }
 
+  /**
+   * Cancels an execution that is not running: queued, waiting to resume, or not yet admitted. A
+   * write execution's isolation is quarantined too (issue #589), except while the Scheduler holds
+   * the execution in preflight, which quarantines and cleans it up once it sees the cancellation.
+   *
+   * An unchanged worktree is then reclaimed (issue #537) only when the Worker's runtime call is known
+   * to have returned: its result is saved only after that, and no Turn of the execution starts while
+   * the result is kept. Any other waiting execution may be left by an app restart or by a stop Main
+   * could not confirm, so its worktree stays for the user to inspect or discard (issue #544).
+   */
+  private async cancelWaitingExecution(
+    execution: TeamExecutionRecord,
+  ): Promise<TeamExecutionRecord> {
+    const workerReturned =
+      this.persistence.getTeamExecutionIsolationCompletion(execution.id) !== null &&
+      this.runtime.hasUnsettledTurn?.(execution.assigneeAgentId, execution.id) !== true;
+    const canceled = this.persistence.cancelQueuedTeamExecution(execution.id, this.isoNow());
+    if (
+      !this.executionScheduler.isCancellationRequested(execution.id) &&
+      this.quarantineCanceledExecutionIsolation(execution.id) &&
+      workerReturned
+    )
+      await this.reclaimTerminalExecutionIsolation(execution.id, execution.assigneeAgentId, true);
+    return canceled;
+  }
+
+  /**
+   * Quarantines the isolation of a write execution the user canceled (issue #589), so the Team
+   * screen lists its worktrees (issue #544) and a Leader Turn classifies its Edit Sagas by this
+   * record (issue #568) rather than as Workspace writes. Every repository keeps its Worker and
+   * integrated HEADs, so nothing it changed is lost. An isolation that already ended, `quarantined`
+   * or `completed`, keeps its record. A saved Worker result goes: a canceled execution never
+   * integrates it, and the reclaim skips an isolation that still has one. Returns whether the
+   * isolation was quarantined here.
+   */
+  private quarantineCanceledExecutionIsolation(executionId: string): boolean {
+    const isolation = this.persistence.getTeamExecutionIsolation(executionId);
+    if (isolation === null || isolation.phase === 'quarantined' || isolation.phase === 'completed')
+      return false;
+    this.quarantineExecutionIsolation(executionId, USER_CANCELED_ISOLATION_REASON);
+    this.persistence.deleteTeamExecutionIsolationCompletion(executionId);
+    return true;
+  }
+
   private quarantineExecutionIsolation(executionId: string, error: unknown): void {
     const current = this.persistence.getTeamExecutionIsolation(executionId);
     if (current === null || current.phase === 'quarantined') return;
@@ -6163,6 +6218,13 @@ function isolationWorktreeId(executionId: string, repositoryOrdinal: number): st
 }
 
 const RETAINED_WORKTREE_UNMANAGED = 'この環境ではWorkerのworktreeを管理できません。';
+
+/**
+ * The reason an isolation records when the user canceled its write execution (issue #589): the
+ * words the Team screen already shows for the `user_canceled` terminal reason
+ * (`TERMINAL_REASON_LABELS` in renderer/lib/team-execution-display.ts).
+ */
+const USER_CANCELED_ISOLATION_REASON = '利用者がキャンセル';
 
 /**
  * Why a cleanup kept a worktree without an error: a file in it stayed locked through the Windows
