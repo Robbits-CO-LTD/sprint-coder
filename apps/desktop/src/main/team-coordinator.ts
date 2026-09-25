@@ -1625,7 +1625,12 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       } else {
-        if (
+        // A Turn whose process-tree exit went unconfirmed has already left its runtime, so a stop
+        // would return without stopping anything (issue #556). The direct path's rule decides it:
+        // only a refusal before this execution started anything is a confirmed stop.
+        if (error instanceof WorkerRuntimeExitUnconfirmedError && !runtimeStopConfirmed(error))
+          runtimeSettled = false;
+        else if (
           !runtimeSettled &&
           !(error instanceof WorkerRuntimeControlError && error.code === 'stop_unconfirmed')
         ) {
@@ -1636,6 +1641,10 @@ export class TeamCoordinator {
             runtimeSettled = false;
           }
         }
+        // A stop that returned proves nothing while the runtime still counts a Turn of this
+        // execution as possibly running.
+        if (runtimeSettled && this.runtime.hasUnsettledTurn?.(worker.id, execution.id) === true)
+          runtimeSettled = false;
         this.persistence.interruptGraphStep({
           missionId: graph.missionId,
           stepKey,

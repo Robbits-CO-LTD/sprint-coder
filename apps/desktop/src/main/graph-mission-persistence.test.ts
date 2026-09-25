@@ -29,7 +29,12 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { workspaceMutationBinding } from './path-guard';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { WorkerWorktreeManager } from './worker-worktree';
-import { TeamCoordinator, DeterministicTeamWorkerRuntime } from './team-coordinator';
+import {
+  TeamCoordinator,
+  DeterministicTeamWorkerRuntime,
+  WorkerRuntimeExitUnconfirmedError,
+  type TeamWorkerRuntime,
+} from './team-coordinator';
 import { workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
@@ -2671,6 +2676,119 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
       f.persistence.close();
     });
+
+    const unconfirmedExit = () =>
+      new WorkerRuntimeExitUnconfirmedError(
+        'Runtime process tree exit was not confirmed within 30 seconds',
+        { originalError: new Error('runtime failed') },
+      );
+    it.each<[string, () => Error, boolean, 0 | 1, 'quarantined' | 'released']>([
+      ['an unconfirmed Turn exit', unconfirmedExit, false, 0, 'quarantined'],
+      [
+        'an unconfirmed Turn exit the runtime still counts',
+        unconfirmedExit,
+        true,
+        0,
+        'quarantined',
+      ],
+      [
+        'a failed Turn the runtime still counts',
+        () => new Error('runtime failed'),
+        true,
+        1,
+        'quarantined',
+      ],
+      [
+        'a refusal before anything started',
+        () =>
+          new WorkerRuntimeExitUnconfirmedError('previous Turn exit is unconfirmed', {
+            startRefused: true,
+          }),
+        false,
+        1,
+        'released',
+      ],
+      [
+        'a failed Turn whose stop was confirmed',
+        () => new Error('runtime failed'),
+        false,
+        1,
+        'released',
+      ],
+    ])(
+      'keeps a failed graph step resources reserved while its Worker may still run: %s',
+      async (_label, failure, unsettled, stops, reservation) => {
+        const f = fixture();
+        const plan = structuredClone(f.plan);
+        plan.steps[0]!.resourceClaims = [{ scope: 'machine', key: 'shared-db', rootId: null }];
+        const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+        f.persistence.saveGraphDocument(document, 1);
+        const executed: string[] = [];
+        // Like `RuntimeHostTeamWorkerRuntime` after a Turn failed: that Turn has already left the
+        // runtime, so a stop returns without stopping anything (issue #556). Only the runtime's own
+        // record of the Turn says whether its CLI may still be running.
+        const stop = vi.fn(async (_agentId: string) => undefined);
+        const runtime: TeamWorkerRuntime = {
+          async start() {
+            return { pid: null };
+          },
+          async execute(input) {
+            executed.push(input.executionId!);
+            throw failure();
+          },
+          stop,
+          hasUnsettledTurn: (_agentId, executionId) => unsettled && executed.includes(executionId),
+        };
+        const scheduler = new TeamExecutionScheduler(1);
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+        );
+        try {
+          const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+            ...f.input,
+            renderRevision: document.renderRevision,
+            semanticRevision: document.semanticRevision,
+            semanticDigest: document.semanticDigest,
+          }));
+          const executionId = mission.steps[0]!.executionId;
+          await vi.waitFor(() =>
+            expect(f.persistence.getTeamExecution(executionId).state).toBe('waiting_resume'),
+          );
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          expect(executed).toEqual([executionId]);
+          expect(f.persistence.listTeamAttempts(executionId)).toMatchObject([
+            { state: reservation === 'quarantined' ? 'interrupted' : 'failed' },
+          ]);
+          expect(f.persistence.listGraphResourceReservations(mission.id)).toMatchObject([
+            { executionId, state: reservation },
+          ]);
+          // Another Mission's step that needs the same resource gets it only after a confirmed stop.
+          const other = fixture({ persistence: f.persistence, path: f.path });
+          expect(
+            f.persistence.acquireGraphResources({
+              missionId: resourceMission(other).id,
+              stepKey: 'a',
+              expectedGeneration: 1,
+              now,
+            }),
+          ).toMatchObject(
+            reservation === 'quarantined'
+              ? { acquired: false, reason: 'resources' }
+              : { acquired: true },
+          );
+          // No stop is asked for after an unconfirmed exit, since none could confirm it.
+          expect(stop).toHaveBeenCalledTimes(stops);
+        } finally {
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          f.persistence.close();
+        }
+      },
+    );
 
     it('rejects stale interruption ownership and rolls back every row when release fails', () => {
       const f = fixture();
