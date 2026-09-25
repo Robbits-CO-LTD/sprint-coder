@@ -5728,6 +5728,13 @@ export class TeamCoordinator {
    * error's `name`) that never carries a worktree path or other detail. The same isolation,
    * repository and reason report only once per process; a fresh launch (a new Set) may report it
    * again, and a repository kept because it changed never reaches this method.
+   *
+   * The key is marked reported only after the lookups and `this.diagnostic` itself return without
+   * throwing (including when `this.diagnostic` is undefined, which is not an error: the call below
+   * is then a no-op that cannot throw). A failed attempt — a `getTeamExecution`/`getTeam` miss, or
+   * the sink itself throwing — must not be the last word for that reason: the key stays unmarked,
+   * so a later retry with the same isolation, repository and reason tries again instead of being
+   * silently dropped forever by a transient failure here.
    */
   private reportReclaimKept(
     executionId: string,
@@ -5737,7 +5744,6 @@ export class TeamCoordinator {
   ): void {
     const key = `${executionId}:${repositoryOrdinal}:${reason}`;
     if (this.reclaimKeptReasonsReported.has(key)) return;
-    this.reclaimKeptReasonsReported.add(key);
     try {
       const execution = this.persistence.getTeamExecution(executionId);
       this.diagnostic?.({
@@ -5748,6 +5754,7 @@ export class TeamCoordinator {
         status: 'retry',
         result: reason,
       });
+      this.reclaimKeptReasonsReported.add(key);
     } catch {
       // Diagnostics are best effort and must not affect the reclaim.
     }

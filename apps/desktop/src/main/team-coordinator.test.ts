@@ -6216,6 +6216,83 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
+    it('retries the reclaim diagnostic after the sink throws once, then stays deduped for the same reason (issue #588)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Reclaim diagnostic sink recovers');
+      const runtime = new TestWorkerRuntime();
+      runtime.completionStatus = 'failed';
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi
+        .spyOn(manager, 'cleanupUnchanged')
+        .mockRejectedValue(new Error('cleanup exploded'));
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      let sinkCalls = 0;
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        runtime,
+        manager,
+        undefined,
+        (event) => {
+          // Other lifecycle diagnostics (team.created, team.execution.failed, …) fire first and
+          // are not wrapped by the reclaim's own try/catch, so only the reclaim event itself must
+          // be unreliable here — on its first call (a full disk, a dead log pipe, …).
+          if (event.event !== 'team.isolation.reclaim_kept') return;
+          sinkCalls += 1;
+          if (sinkCalls === 1) throw new Error('diagnostic sink unavailable');
+          diagnostics.push(event);
+        },
+      );
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reporting writer',
+        objective: 'report failure without edits',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'report failure',
+        doneCriteria: ['worker reports failure'],
+        accessMode: 'workspace-write',
+      });
+
+      // First reclaim attempt: the sink throws, so the reason is not marked reported.
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 1, 15_000);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        15_000,
+      );
+      await waitFor(() => sinkCalls === 1, 15_000);
+      expect(diagnostics).toHaveLength(0);
+
+      // Second attempt: the sink succeeds this time, so the diagnostic is recorded once.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 2, 15_000);
+      await waitFor(() => sinkCalls === 2, 15_000);
+      expect(diagnostics).toEqual([
+        {
+          event: 'team.isolation.reclaim_kept',
+          taskId: task.id,
+          teamId: persistence.getTeamExecution(submission.executionId).teamId,
+          workerId: writer.id,
+          status: 'retry',
+          result: 'Error',
+        },
+      ]);
+
+      // Third attempt: the same isolation, repository and reason are already marked reported, so
+      // the sink is not called again even though the reclaim itself retries as always.
+      coordinator.recoverOnStartup();
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 3, 15_000);
+      // Nothing more will call the sink after this point in the test, so a short, bounded wait is
+      // the only way to observe that absence rather than a state transition to assert on.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(sinkCalls).toBe(2);
+      expect(diagnostics).toHaveLength(1);
+      persistence.close();
+    }, 45_000);
+
     it('keeps the worktree when the runtime exit was not confirmed', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Unconfirmed isolated exit');
