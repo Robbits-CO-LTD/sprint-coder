@@ -365,6 +365,94 @@ class WorktreeWritingRuntime extends TestWorkerRuntime {
   }
 }
 
+/**
+ * A Manager that meets its request by assigning work to its Worker the way the Team tools do,
+ * waiting for that execution to end, and a Worker that writes into its isolation unless
+ * `childWrites` is off (issue #587). Each Manager execution takes the next entry of `delegations`:
+ * the access of the execution it assigns, or `null` to assign nothing.
+ */
+class DelegatingManagerRuntime extends TestWorkerRuntime {
+  coordinator: TeamCoordinator | null = null;
+  persistence: SqlitePersistenceClient | null = null;
+  taskId = '';
+  childId = '';
+  childWrites = true;
+  readonly delegations: Array<'read-only' | 'workspace-write' | null> = [];
+  readonly childExecutionIds: string[] = [];
+
+  override async execute(input: {
+    worker: AgentRecord;
+    envelope: TeamEnvelope;
+    content: string;
+    executionId?: string;
+    workspacePath?: string | null;
+    doneCriteria?: readonly string[];
+  }): Promise<WorkerRuntimeResult> {
+    if (input.worker.canDelegate) {
+      const accessMode = this.delegations.shift() ?? null;
+      if (accessMode !== null) {
+        const child = await this.coordinator!.assignTaskAs(
+          {
+            taskId: this.taskId,
+            targetAgentId: this.childId,
+            content: 'write the output',
+            doneCriteria: ['worker-output.txt is written'],
+            accessMode,
+          },
+          input.worker.id,
+          { type: 'team_execution', id: input.executionId! },
+        );
+        this.childExecutionIds.push(child.executionId);
+        await waitFor(
+          () =>
+            ['completed', 'failed'].includes(
+              this.persistence!.getTeamExecution(child.executionId).state,
+            ),
+          15_000,
+        );
+      }
+    } else if (input.worker.writeCapable && this.childWrites) {
+      if (input.workspacePath === undefined || input.workspacePath === null)
+        throw new Error('write execution did not receive an isolated worktree');
+      writeFileSync(join(input.workspacePath, 'worker-output.txt'), 'written by the Worker\n');
+    }
+    return super.execute(input);
+  }
+}
+
+/** A write-capable Manager with one write-capable Worker under it, run by a DelegatingManagerRuntime. */
+async function delegatingManagerTeam(title: string) {
+  const persistence = createPersistence();
+  const task = persistence.createTask(title);
+  const { workspace, manager: worktrees } = configureGitWorkspace(persistence, task.id);
+  const runtime = new DelegatingManagerRuntime();
+  const coordinator = coordinatorWithWorktrees(persistence, runtime, worktrees);
+  const team = persistence.promoteTaskToTeam(task.id);
+  const manager = await coordinator.hireWorkerAs(
+    {
+      taskId: task.id,
+      role: 'Manager',
+      objective: 'delegate the write',
+      contextInheritancePolicy: 'none',
+      writeCapable: true,
+    },
+    team.leaderAgentId,
+    { maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false },
+  );
+  const worker = await coordinator.hireWorkerAs(
+    {
+      taskId: task.id,
+      role: 'Writer',
+      objective: 'write the output',
+      contextInheritancePolicy: 'none',
+      writeCapable: true,
+    },
+    manager.id,
+  );
+  Object.assign(runtime, { coordinator, persistence, taskId: task.id, childId: worker.id });
+  return { persistence, task, workspace, runtime, coordinator, manager };
+}
+
 class MultiRootWritingRuntime extends TestWorkerRuntime {
   readonly workspaceSets: RuntimeWorkspaceSet[] = [];
   readonly allWorkspaceSets: RuntimeWorkspaceSet[] = [];
@@ -7517,23 +7605,10 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('lets a Manager meet a write request through its Workers without writing itself', async () => {
-      const persistence = createPersistence();
-      const task = persistence.createTask('Delegating Manager');
-      const { manager: worktrees } = configureGitWorkspace(persistence, task.id);
-      const coordinator = coordinatorWithWorktrees(persistence, new TestWorkerRuntime(), worktrees);
-      const team = persistence.promoteTaskToTeam(task.id);
-      const manager = await coordinator.hireWorkerAs(
-        {
-          taskId: task.id,
-          role: 'Manager',
-          objective: 'delegate the write',
-          contextInheritancePolicy: 'none',
-          writeCapable: true,
-        },
-        team.leaderAgentId,
-        { maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false },
-      );
+    it('lets a Manager meet a write request through the write its Worker completed, without writing itself', async () => {
+      const { persistence, task, workspace, runtime, coordinator, manager } =
+        await delegatingManagerTeam('Delegating Manager');
+      runtime.delegations.push('workspace-write');
 
       const submission = await coordinator.assignTask({
         taskId: task.id,
@@ -7542,13 +7617,153 @@ if (runsWithElectronAbi)
         doneCriteria: ['output written by a Worker'],
         accessMode: 'workspace-write',
       });
-
       await waitFor(
-        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
-        15_000,
+        () =>
+          ['completed', 'failed'].includes(
+            persistence.getTeamExecution(submission.executionId).state,
+          ),
+        30_000,
+      );
+
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
+      expect(runtime.childExecutionIds).toHaveLength(1);
+      expect(persistence.getTeamExecution(runtime.childExecutionIds[0]!)).toMatchObject({
+        createdByAgentId: manager.id,
+        accessMode: 'workspace-write',
+        state: 'completed',
+      });
+      // The Manager's own isolation stayed unchanged: the write in the workspace is its Worker's.
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+        'written by the Worker\n',
       );
       persistence.close();
-    });
+    }, 60_000);
+
+    it.each([
+      // A Manager whose Team tools were missing cannot assign anything, so it ends here too.
+      ['assigns nothing', null, true],
+      ['only has its Worker read', 'read-only', true],
+      ['has its Worker write nothing', 'workspace-write', false],
+    ] as const)(
+      'fails a Manager’s write request when it %s and writes nothing itself',
+      async (_label, delegation, childWrites) => {
+        const { persistence, task, workspace, runtime, coordinator, manager } =
+          await delegatingManagerTeam('Manager without a write');
+        runtime.delegations.push(delegation);
+        runtime.childWrites = childWrites;
+
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: manager.id,
+          content: 'have your Worker write the output',
+          doneCriteria: ['output written by a Worker'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(
+          () =>
+            ['completed', 'failed'].includes(
+              persistence.getTeamExecution(submission.executionId).state,
+            ),
+          30_000,
+        );
+
+        expect(persistence.getTeamExecution(submission.executionId).state).toBe('failed');
+        expect(runtime.childExecutionIds).toHaveLength(delegation === null ? 0 : 1);
+        const report = JSON.parse(coordinator.listWorkerReports(task.id, 0).at(-1)!.content) as {
+          status: string;
+          summary: string;
+          verification: { name: string; outcome: string }[];
+        };
+        expect(report.status).toBe('failed');
+        expect(report.summary).toContain('ファイルが1つも変わらないまま');
+        expect(report.verification).toContainEqual(
+          expect.objectContaining({ name: 'worker-write-not-attempted', outcome: 'fail' }),
+        );
+        expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+        const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
+        expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+          status: 'failed',
+          doneEvidence: [],
+        });
+        expect(existsSync(join(workspace, 'worker-output.txt'))).toBe(false);
+        persistence.close();
+      },
+      60_000,
+    );
+
+    it('does not count a write its Worker completed for an earlier execution of the Manager', async () => {
+      const { persistence, task, workspace, runtime, coordinator, manager } =
+        await delegatingManagerTeam('Earlier delegation');
+      // The first step has the Worker write; the second claims a write and assigns nothing.
+      runtime.delegations.push('workspace-write', null);
+
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write through the Worker, then claim another write',
+        doneCriteria: ['both writes are integrated'],
+        steps: [
+          {
+            workerId: manager.id,
+            objective: 'have your Worker write the output',
+            doneCriteria: ['output written by a Worker'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: manager.id,
+            objective: 'write the follow-up',
+            doneCriteria: ['follow-up written'],
+            access: 'workspace-write',
+          },
+        ],
+      });
+      await waitFor(
+        () =>
+          ['waiting_resume', 'completed', 'failed'].includes(
+            persistence.getTeamMission(mission.id).state,
+          ),
+        40_000,
+      );
+
+      const [first, second] = persistence
+        .getTeamMission(mission.id)
+        .steps.map(({ executionId }) => executionId);
+      expect(persistence.getTeamExecution(first!).state).toBe('completed');
+      expect(runtime.childExecutionIds).toHaveLength(1);
+      expect(persistence.getTeamExecution(runtime.childExecutionIds[0]!)).toMatchObject({
+        createdByAgentId: manager.id,
+        accessMode: 'workspace-write',
+        state: 'completed',
+      });
+      expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
+      expect(persistence.listTeamAttempts(second!)).toMatchObject([
+        { state: 'failed', terminalReason: 'worker_reported_failure' },
+      ]);
+      const dispatch = persistence.getTeamExecutionDispatch(second!);
+      expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
+        status: 'failed',
+        doneEvidence: [],
+      });
+      // A step waiting to resume is not a terminal report yet, so its result is read directly.
+      const result = persistence
+        .getTeamSnapshot(persistence.getTeamByTask(task.id)!.id)
+        .messages.filter(
+          ({ executionId, sourceAgentId }) =>
+            executionId === second && sourceAgentId === manager.id,
+        )
+        .at(-1)!;
+      const report = JSON.parse(result.content) as {
+        status: string;
+        verification: { name: string; outcome: string }[];
+      };
+      expect(report.status).toBe('failed');
+      expect(report.verification).toContainEqual(
+        expect.objectContaining({ name: 'worker-write-not-attempted', outcome: 'fail' }),
+      );
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+        'written by the Worker\n',
+      );
+      persistence.close();
+    }, 60_000);
 
     it('integrates a resumed write whose earlier Attempt already wrote, though the resumed one writes nothing', async () => {
       const persistence = createPersistence();

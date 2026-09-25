@@ -4574,9 +4574,10 @@ export class TeamCoordinator {
    * A write execution whose isolation Main finds unchanged from its base did not write, whatever
    * it reported (issue #550). Main reads the isolation itself, so what an earlier Attempt of the
    * same execution left there (a resume or a steer reuses it) counts as written. Called once the
-   * runtime returned and before anything is integrated or saved. A Manager is exempt: it may meet
-   * the request through the Workers it delegates to, whose writes land in their own isolations. So
-   * is the simulation, which writes nothing. A write execution with nothing Main can read fails.
+   * runtime returned and before anything is integrated or saved. A Manager may instead meet the
+   * request through the Workers it delegates to, whose writes land in their own isolations, but
+   * only when one of those writes completed (issue #587). The simulation is exempt, since it writes
+   * nothing. A write execution with nothing Main can read fails.
    */
   private async requireWorkspaceWrite<
     T extends { value: WorkerCompletion; doneEvidence: WorkerDoneEvidence[]; simulated: boolean },
@@ -4593,7 +4594,6 @@ export class TeamCoordinator {
     if (
       dispatched.value.status !== 'succeeded' ||
       input.accessMode !== 'workspace-write' ||
-      input.worker.canDelegate ||
       dispatched.simulated
     )
       return dispatched;
@@ -4616,7 +4616,49 @@ export class TeamCoordinator {
     for (const worktree of worktrees)
       if (await this.worktreeManager.hasChangesFromBase({ agentId: input.worker.id, ...worktree }))
         return dispatched;
+    if (
+      input.worker.canDelegate &&
+      this.completedDelegatedWrite(input.worker.id, input.executionId)
+    )
+      return dispatched;
     return { ...dispatched, value: workerWriteNotAttempted(dispatched.value), doneEvidence: [] };
+  }
+
+  /**
+   * Whether a write execution this Manager assigned during `executionId` has completed (issue
+   * #587). No record links a child execution to the execution it was assigned from, so "during" is
+   * read off this execution's Attempts: a child counts when it was assigned while one of them ran,
+   * from the Attempt's start to its finish (or now, for the one still running). The scheduler never
+   * runs two executions of one Worker at once, so the Attempts of the Manager's other executions
+   * (an earlier Mission step, a previous Turn's assignment) never overlap these, and their children
+   * fall outside. Children assigned by an earlier Attempt of this execution (a resume or a steer)
+   * count, as that Attempt's own writes would. A real (not simulated) write child completes only
+   * after passing this same check itself.
+   */
+  private completedDelegatedWrite(managerId: string, executionId: string): boolean {
+    const runs = this.persistence
+      .listTeamAttempts(executionId)
+      .flatMap(({ startedAt, finishedAt }) =>
+        startedAt === null
+          ? []
+          : [
+              {
+                from: Date.parse(startedAt),
+                to: finishedAt === null ? Number.POSITIVE_INFINITY : Date.parse(finishedAt),
+              },
+            ],
+      );
+    const { teamId } = this.persistence.getTeamExecution(executionId);
+    return this.persistence.listTeamExecutions(teamId).some((child) => {
+      if (
+        child.createdByAgentId !== managerId ||
+        child.accessMode !== 'workspace-write' ||
+        child.state !== 'completed'
+      )
+        return false;
+      const assignedAt = Date.parse(child.assignedAt);
+      return runs.some(({ from, to }) => assignedAt >= from && assignedAt <= to);
+    });
   }
 
   private persistWorkerResult(
