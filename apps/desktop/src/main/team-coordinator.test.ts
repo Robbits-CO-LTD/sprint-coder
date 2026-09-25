@@ -5386,6 +5386,340 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 30_000);
 
+    it('quarantines a canceled write whose integration waits to resume and reclaims only its unchanged repository (issue #589)', async () => {
+      const persistence = createPersistence();
+      const { taskId, worktreesRoot } = configureTwoRepositoryTask(
+        persistence,
+        'Cancel a write waiting to resume its integration',
+      );
+      // The Secondary repository is integrated first and fails, so neither repository is integrated.
+      const coordinator = coordinatorWithWorktrees(
+        persistence,
+        new PrimaryRootWritingRuntime(),
+        new FailRepositoryOnceManager({ worktreesRoot }, 1),
+      );
+      const writer = await coordinator.hireWorker({
+        taskId,
+        role: 'paused writer',
+        objective: 'write only the Primary folder',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId,
+        targetAgentId: writer.id,
+        content: 'write and wait for the integration',
+        doneCriteria: ['the integration waits to resume'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'waiting_resume',
+        15_000,
+      );
+      const waiting = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(waiting).toMatchObject({
+        phase: 'waiting_resume',
+        resumeKind: 'integration',
+        repositories: [{ state: 'ready' }, { state: 'ready' }],
+      });
+      expect(
+        persistence.getTeamExecutionIsolationCompletion(submission.executionId),
+      ).not.toBeNull();
+      const primaryOrdinal = waiting.roots.find(
+        ({ role }) => role === 'primary',
+      )!.repositoryOrdinal;
+      const primary = waiting.repositories.find(({ ordinal }) => ordinal === primaryOrdinal)!;
+      const secondary = waiting.repositories.find(({ ordinal }) => ordinal !== primaryOrdinal)!;
+      expect(primary.workerHead).not.toBe(primary.baseHead);
+      expect(secondary.workerHead).toBe(secondary.baseHead);
+
+      await expect(
+        coordinator.cancelExecution(taskId, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+
+      // The Worker's call had returned before the integration, so the unchanged Secondary worktree
+      // is reclaimed. The Primary one keeps the Worker's sealed commit for the user.
+      const canceled = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(canceled).toMatchObject({
+        phase: 'quarantined',
+        resumeKind: null,
+        reason: '利用者がキャンセル',
+      });
+      expect(canceled.repositories).toEqual(
+        waiting.repositories.map((repository) => ({
+          ...repository,
+          state: repository.ordinal === primaryOrdinal ? 'quarantined' : 'cleaned',
+        })),
+      );
+      expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(existsSync(secondary.worktreePath)).toBe(false);
+      expect(gitHead(primary.worktreePath)).toBe(primary.workerHead);
+      expect(existsSync(join(primary.repoPath, 'worker-output.txt'))).toBe(false);
+      await expect(coordinator.listRetainedWorktrees(taskId)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [
+          {
+            executionId: submission.executionId,
+            repositoryOrdinal: primaryOrdinal,
+            workerHead: primary.workerHead,
+            integratedHead: null,
+            integration: 'none',
+            reason: '利用者がキャンセル',
+            executionState: 'canceled',
+            existsOnDisk: true,
+            discardable: true,
+          },
+        ],
+      });
+      await expect(
+        coordinator.inspectRetainedWorktree(taskId, submission.executionId, primaryOrdinal),
+      ).resolves.toMatchObject({ head: primary.workerHead, commitsSinceBase: 1 });
+      await expect(
+        coordinator.discardRetainedWorktree(taskId, submission.executionId, primaryOrdinal),
+      ).resolves.toEqual({ worktrees: [], total: 0 });
+      expect(existsSync(primary.worktreePath)).toBe(false);
+      persistence.close();
+    }, 45_000);
+
+    it('quarantines a canceled write whose Worker call returns normally and reclaims it when unchanged (issue #589)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Cancel writes whose Worker call returns');
+      // The stop lets the running call return its result instead of rejecting it.
+      class ReturningOnStopRuntime extends InterruptibleWorkerRuntime {
+        override async stop(agentId: string): Promise<void> {
+          this.complete(agentId);
+        }
+      }
+      const runtime = new ReturningOnStopRuntime();
+      const execute = runtime.execute.bind(runtime);
+      vi.spyOn(runtime, 'execute').mockImplementation(async (input) => {
+        const { workspacePath } = input as { workspacePath?: string | null };
+        if (input.worker.role === 'editing writer' && workspacePath)
+          writeFileSync(join(workspacePath, 'kept.txt'), 'kept work\n');
+        return execute(input);
+      });
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const cleanupUnchanged = vi.spyOn(manager, 'cleanupUnchanged');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      // Both are hired first: a Team whose every Worker has finished takes no new one.
+      const writers = [];
+      for (const role of ['editing writer', 'idle writer'])
+        writers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: 'be canceled while running',
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        );
+      const executions: string[] = [];
+      for (const writer of writers) {
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: writer.id,
+          content: 'run until canceled',
+          doneCriteria: ['execution is canceled'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(() => runtime.contents.length === executions.length + 1, 15_000);
+        await expect(
+          coordinator.cancelExecution(task.id, submission.executionId),
+        ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+        executions.push(submission.executionId);
+      }
+      const [edited, idle] = executions as [string, string];
+
+      // The reclaim after the returned call removes only the worktree the Worker left unchanged.
+      await waitFor(
+        () => persistence.getTeamExecutionIsolation(idle)?.repositories[0]?.state === 'cleaned',
+        15_000,
+      );
+      await waitFor(() => cleanupUnchanged.mock.calls.length === 2, 15_000);
+      const editedReclaim = cleanupUnchanged.mock.calls.findIndex(
+        ([input]) => input.worktreeId === `${edited}-1`,
+      );
+      await expect(cleanupUnchanged.mock.results[editedReclaim]?.value).resolves.toEqual({
+        outcome: 'quarantined',
+        changed: true,
+      });
+      for (const executionId of executions) {
+        expect(persistence.getTeamExecution(executionId).state).toBe('canceled');
+        expect(persistence.listTeamAttempts(executionId)).toMatchObject([
+          { state: 'canceled', terminalReason: 'user_canceled' },
+        ]);
+        expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+          phase: 'quarantined',
+          resumeKind: null,
+          reason: '利用者がキャンセル',
+        });
+      }
+      expect(
+        existsSync(persistence.getTeamExecutionIsolation(idle)!.repositories[0]!.worktreePath),
+      ).toBe(false);
+      const kept = persistence.getTeamExecutionIsolation(edited)!.repositories[0]!;
+      expect(kept).toMatchObject({ state: 'quarantined', workerHead: null, integratedHead: null });
+      expect(readFileSync(join(kept.worktreePath, 'kept.txt'), 'utf8')).toBe('kept work\n');
+      expect(existsSync(join(workspace, 'kept.txt'))).toBe(false);
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [
+          {
+            executionId: edited,
+            workerHead: null,
+            integration: 'none',
+            reason: '利用者がキャンセル',
+            executionState: 'canceled',
+            discardable: true,
+          },
+        ],
+      });
+      persistence.close();
+    }, 45_000);
+
+    it('quarantines a write interrupted by an app restart when it is canceled and keeps its worktree (issue #589)', async () => {
+      const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-cancel-restart-'));
+      cleanup.push(databaseDirectory);
+      const databasePath = join(databaseDirectory, 'test.sqlite3');
+      let persistence = new SqlitePersistenceClient(databasePath);
+      const task = persistence.createTask('Cancel a write interrupted by a restart');
+      const { workspace, worktreesRoot, manager } = configureGitWorkspace(persistence, task.id);
+      const runtime = new InterruptibleWorkerRuntime();
+      writeInWorkspace(runtime, 'kept.txt');
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'interrupted writer',
+        objective: 'be interrupted by a restart',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write before the restart',
+        doneCriteria: ['execution is canceled after the restart'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(() => runtime.contents.length === 1, 15_000);
+      persistence.close();
+
+      persistence = new SqlitePersistenceClient(databasePath);
+      persistence.initializeMutationRecovery('cancel-restart', '2026-09-25T10:00:00.000Z');
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('waiting_resume');
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)?.phase).toBe('running');
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { state: 'interrupted', terminalReason: 'app_restart' },
+      ]);
+      const restartManager = new WorkerWorktreeManager({ worktreesRoot });
+      const cleanupUnchanged = vi.spyOn(restartManager, 'cleanupUnchanged');
+      const restarted = coordinatorWithWorktrees(
+        persistence,
+        new TestWorkerRuntime(),
+        restartManager,
+      );
+      restarted.recoverOnStartup();
+
+      await expect(
+        restarted.cancelExecution(task.id, submission.executionId),
+      ).resolves.toMatchObject({ executionId: submission.executionId, state: 'canceled' });
+
+      // Nothing confirmed that the Worker CLI the previous app ran has stopped, so nothing is reclaimed.
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        resumeKind: null,
+        reason: '利用者がキャンセル',
+        repositories: [{ state: 'quarantined', workerHead: null, integratedHead: null }],
+      });
+      expect(existsSync(join(isolation.repositories[0]!.worktreePath, 'kept.txt'))).toBe(true);
+      expect(existsSync(join(workspace, 'kept.txt'))).toBe(false);
+      expect(cleanupUnchanged).not.toHaveBeenCalled();
+      expect(
+        persistence
+          .listReclaimConfirmedTeamExecutionIsolations()
+          .map(({ executionId }) => executionId),
+      ).not.toContain(submission.executionId);
+      await expect(restarted.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [
+          {
+            executionId: submission.executionId,
+            reason: '利用者がキャンセル',
+            executionState: 'canceled',
+            discardable: true,
+          },
+        ],
+      });
+      persistence.close();
+    }, 45_000);
+
+    it('quarantines the isolation of a write whose Worker is stopped while it waits to retry a rate limit (issue #589)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Stop a write waiting to retry');
+      class RateLimitedWriter extends TestWorkerRuntime {
+        calls = 0;
+        override async execute(input: {
+          worker: AgentRecord;
+          envelope: TeamEnvelope;
+          content: string;
+          workspacePath?: string | null;
+        }): Promise<WorkerRuntimeResult> {
+          this.calls += 1;
+          if (input.workspacePath)
+            writeFileSync(join(input.workspacePath, 'kept.txt'), 'kept work\n');
+          throw new ProviderRateLimitedError('fixture rate limit', 60_000);
+        }
+      }
+      const runtime = new RateLimitedWriter();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'rate-limited writer',
+        objective: 'wait for a retry',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: writer.id,
+        content: 'write and hit a rate limit',
+        doneCriteria: ['execution is canceled while waiting'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'waiting_rate_limit',
+        15_000,
+      );
+      expect(persistence.getTeamExecutionIsolation(submission.executionId)?.phase).toBe('running');
+
+      await coordinator.stopWorker(task.id, writer.id);
+
+      expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
+      expect(runtime.calls).toBe(1);
+      const isolation = persistence.getTeamExecutionIsolation(submission.executionId)!;
+      expect(isolation).toMatchObject({
+        phase: 'quarantined',
+        resumeKind: null,
+        reason: '利用者がキャンセル',
+        repositories: [{ state: 'quarantined', workerHead: null, integratedHead: null }],
+      });
+      expect(existsSync(join(isolation.repositories[0]!.worktreePath, 'kept.txt'))).toBe(true);
+      expect(existsSync(join(workspace, 'kept.txt'))).toBe(false);
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [
+          {
+            executionId: submission.executionId,
+            executionState: 'canceled',
+            discardable: true,
+          },
+        ],
+      });
+      persistence.close();
+    }, 45_000);
+
     it('reclaims an unchanged isolated worktree after a write Worker runtime failure', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Failed unchanged isolated write');
