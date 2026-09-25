@@ -12,7 +12,11 @@ import {
   groupActivitiesByMessage,
   orderedActivities,
 } from '../lib/team-activity-display';
-import { BUILTIN_CONNECTION_LABELS, QUEUE_REASON_LABELS } from '../lib/team-execution-display';
+import {
+  BUILTIN_CONNECTION_LABELS,
+  QUEUE_REASON_LABELS,
+  TERMINAL_REASON_LABELS,
+} from '../lib/team-execution-display';
 import type { ChatMessage, TeamActivitySummary, WorkerSummary } from '../types/sprint-coder';
 
 let nextSeq = 0;
@@ -167,11 +171,13 @@ describe('activity supplements', () => {
       activity({
         type: 'attempt_finished',
         status: 'failed',
-        terminalReason: 'tool_error',
+        terminalReason: 'worker_reported_failure',
         attemptOrdinal: 2,
       }),
     );
-    expect(full.detailLabel).toBe('試行 2回目 · 状態 failed · 終了理由 tool_error');
+    expect(full.detailLabel).toBe(
+      `試行 2回目 · 状態 failed · 終了理由 ${TERMINAL_REASON_LABELS.worker_reported_failure}`,
+    );
 
     const bare = describeActivity(
       activity({
@@ -188,6 +194,25 @@ describe('activity supplements', () => {
   it('treats attempt ordinal 0 as a real ordinal and empty strings as absent', () => {
     expect(describeActivity(activity({ attemptOrdinal: 0 })).details).toContain('試行 0回目');
     expect(describeActivity(activity({ status: '', terminalReason: '' })).details).toEqual([]);
+  });
+
+  it('uses the same Japanese wording as the Worker execution card for every known terminal reason (issue #583)', () => {
+    for (const reason of Object.keys(
+      TERMINAL_REASON_LABELS,
+    ) as (keyof typeof TERMINAL_REASON_LABELS)[]) {
+      const display = describeActivity(
+        activity({ type: 'attempt_finished', terminalReason: reason }),
+      );
+      expect(display.details).toContain(`終了理由 ${TERMINAL_REASON_LABELS[reason]}`);
+    }
+    expect(Object.keys(TERMINAL_REASON_LABELS)).toHaveLength(11);
+  });
+
+  it('falls back to the raw code for an unknown terminal reason, e.g. a Graph Mission free-text reason (issue #583)', () => {
+    const display = describeActivity(
+      activity({ type: 'attempt_finished', terminalReason: 'some future runtime error message' }),
+    );
+    expect(display.details).toContain('終了理由 some future runtime error message');
   });
 });
 

@@ -8,6 +8,7 @@ import {
   BUILTIN_CONNECTION_LABELS,
   QUEUE_REASON_LABELS,
   formatClockTime,
+  terminalReasonLabel,
 } from './team-execution-display';
 
 // Display facts for the persisted Team activity log (Core C2b), rendered as history cards inside
@@ -298,7 +299,9 @@ export function activityDetails(activity: TeamActivitySummary): string[] {
   if (queueReason !== null) details.push(`待機理由 ${queueReason}`);
   if (activity.status != null && activity.status !== '') details.push(`状態 ${activity.status}`);
   if (activity.terminalReason != null && activity.terminalReason !== '') {
-    details.push(`終了理由 ${activity.terminalReason}`);
+    // Same wording as the Worker execution card (Core C1b, issue #551/#584): known codes render
+    // in Japanese, an unrecognized value (e.g. a Graph Mission free-text reason) is shown verbatim.
+    details.push(`終了理由 ${terminalReasonLabel(activity.terminalReason)}`);
   }
   // The hire is where the model choice is MADE, so it is the row that explains it. Every later row
   // for the same Worker would only restate what its card and its execution card already show, and
