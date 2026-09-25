@@ -59,26 +59,34 @@ export function writeScopeLabel(accessMode: TeamExecutionSummary['accessMode']):
 }
 
 /**
- * Main が team_executions/team_attempts の terminal_reason に書く値の日本語ラベル（issue #551）。
- * 出どころ（file:line、apps/desktop/src/main 配下）:
+ * Main が team_executions/team_attempts の terminal_reason に書く値の日本語ラベル（issue #551、
+ * #584）。出どころ（file:line、apps/desktop/src/main 配下）:
  *  - 'heartbeat_timeout' / 'idle_timeout' / 'hard_timeout': team-coordinator.ts の
- *    WorkerRuntimeControlErrorCode（163-168行）。runScheduledExecution の監視タイマーが
- *    expire(code, message) で送出し（5690, 5698, 5704行）、失敗経路で error.code がそのまま
- *    terminalReason になる（3337-3341行）。
- *  - 'runtime_failure': 上と同じ失敗経路のデフォルト（3341, 3587行）で、WorkerRuntimeControlError
- *    でも ProviderRateLimitedError でもない実行時エラー全般。
- *  - 'user_canceled': ユーザーからの通常キャンセル（handleRequestedInterruption、3650行、
+ *    WorkerRuntimeControlErrorCode（172-178行）。runScheduledExecution の監視タイマーが
+ *    expire(code, message) で送出し（6270, 6278, 6284行）、失敗経路で error.code がそのまま
+ *    terminalReason になる（3695-3706行）。
+ *  - 'runtime_failure': 上と同じ失敗経路のデフォルト（3695-3706行、3951行）で、
+ *    WorkerRuntimeControlError でも ProviderRateLimitedError でもない実行時エラー全般。
+ *  - 'user_canceled': ユーザーからの通常キャンセル（handleRequestedInterruption、4015行、
  *    control.kind !== 'steer' のとき）。
- *  - 'stop_unconfirmed': WorkerRuntimeControlErrorCode の1値（168行）。プロセス終了を確認できずに
+ *  - 'stop_unconfirmed': WorkerRuntimeControlErrorCode の1値（178行）。プロセス終了を確認できずに
  *    強制停止したとき。既存の訳（強制停止）をそのまま維持する。
- *  - 'worker_reported_failure': team-coordinator.ts 3148行。Worker自身が失敗を報告した通常完了経路。
- *  - 'rate_limited': team-coordinator.ts 3340行。ProviderRateLimitedError による失敗。
- *  - 'steered': team-coordinator.ts 3650行。修正指示（team_steer_execution）による中断。
- *  - 'app_restart': persistence.ts 12377/12459行。アプリ再起動からの復元時に未確定のまま終了扱いに
- *    した実行の起点。
- * Graph Mission の中断（persistence.ts の interruptGraphStep、team-coordinator.ts 1551/1593/1616行）
- * は呼び出し元のエラーメッセージをそのまま terminalReason にするため固定値ではなく、辞書に無い値
- * として下のフォールバック（コードのまま表示）に落ちる — 挙動は変えていない。
+ *  - 'worker_reported_failure': team-coordinator.ts 3506-3510行。書き込みを頼まれた実行で、
+ *    completion.value.verification に Main の 'worker-write-not-attempted' 検証（issue #550の
+ *    requireWorkspaceWrite、4600行台）が無いまま失敗した通常完了経路 — Worker自身が failed を
+ *    返した場合と、judgeWorkerCompletion/confirmWorkerReport（team-worker-criteria.ts）が
+ *    Worker自身の完了条件報告（未達・欠落）をそのまま反映した場合の両方を含む。
+ *  - 'workspace_write_unverified': team-coordinator.ts 3506-3510行。同じ経路のうち、
+ *    requireWorkspaceWrite が作業場所の変更なしを確かめて 'succeeded' を 'failed' へ差し替えた
+ *    場合（issue #584）。Worker は完了条件を満たしたと報告しても、Mainの検証で上書きされる。
+ *  - 'rate_limited': team-coordinator.ts 3701行。ProviderRateLimitedError による失敗。
+ *  - 'steered': team-coordinator.ts 4015行。修正指示（team_steer_execution）による中断。
+ *  - 'app_restart': persistence.ts 12389/12471行。アプリ再起動からの復元時に未確定のまま終了扱い
+ *    にした実行の起点。
+ * Graph Mission の中断（persistence.ts の interruptGraphStep、team-coordinator.ts 1500行が投げた
+ * Errorを1649行のcatchが受けてreasonにする）は呼び出し元のエラーメッセージをそのまま terminalReason
+ * にするため固定値ではなく、辞書に無い値として下のフォールバック（コードのまま表示）に落ちる —
+ * 'workspace_write_unverified' を新設した今も、この経路は自由記述のままで挙動を変えていない。
  */
 export const TERMINAL_REASON_LABELS: Readonly<Record<string, string>> = {
   heartbeat_timeout: 'Workerの応答が途絶えたため停止',
@@ -88,6 +96,7 @@ export const TERMINAL_REASON_LABELS: Readonly<Record<string, string>> = {
   user_canceled: '利用者がキャンセル',
   stop_unconfirmed: '強制停止',
   worker_reported_failure: 'Workerが失敗を報告',
+  workspace_write_unverified: '書き込みを確認できず失敗',
   rate_limited: 'レート制限で停止',
   steered: '修正指示により中断',
   app_restart: 'アプリ再起動で中断',

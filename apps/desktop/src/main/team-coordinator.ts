@@ -92,6 +92,7 @@ import {
   allCriteriaDone,
   confirmWorkerReport,
   judgeWorkerCompletion,
+  WRITE_NOT_ATTEMPTED_VERIFICATION,
   workerWriteNotAttempted,
   type WorkerDoneEvidence,
 } from './team-worker-criteria';
@@ -3344,6 +3345,13 @@ export class TeamCoordinator {
       const failedWorkspaceWrite =
         (missionWorktree !== null || executionIsolation !== null) &&
         completion.value.status !== 'succeeded';
+      // requireWorkspaceWrite is the only step that turns a Worker's own 'succeeded' into 'failed'
+      // by checking the workspace itself (issue #584): every other failure — a genuine runtime
+      // failure, or judgeWorkerCompletion/confirmWorkerReport relaying what the Worker's own report
+      // said (or omitted) — is the Worker's report, not Main's independent check.
+      const unverifiedWorkspaceWrite = completion.value.verification.some(
+        ({ name, outcome }) => name === WRITE_NOT_ATTEMPTED_VERIFICATION && outcome === 'fail',
+      );
       // Legacy single-worktree failures can be rerun in a fresh Attempt. A Project isolation seals
       // every repository as quarantined, so presenting that state as resumable would strand the
       // execution: preparation cannot safely reactivate those worktrees and there is no successful
@@ -3495,7 +3503,11 @@ export class TeamCoordinator {
           attemptId: attempt.id,
           to: failedWorkspaceWrite ? 'failed' : 'completed',
           now: this.isoNow(),
-          terminalReason: failedWorkspaceWrite ? 'worker_reported_failure' : null,
+          terminalReason: failedWorkspaceWrite
+            ? unverifiedWorkspaceWrite
+              ? 'workspace_write_unverified'
+              : 'worker_reported_failure'
+            : null,
         });
         this.persistence.transitionTeamExecution({
           executionId: input.executionId,

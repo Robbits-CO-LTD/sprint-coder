@@ -7558,8 +7558,10 @@ if (runsWithElectronAbi)
         expect.objectContaining({ name: 'worker-write-not-attempted', outcome: 'fail' }),
       );
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      // Main's own write check overrode the Worker's reported success, which is a distinct
+      // terminal reason from a Worker that reported failure itself (issue #584).
       expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
-        { state: 'failed', terminalReason: 'worker_reported_failure' },
+        { state: 'failed', terminalReason: 'workspace_write_unverified' },
       ]);
       const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
       expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
@@ -7680,6 +7682,11 @@ if (runsWithElectronAbi)
           expect.objectContaining({ name: 'worker-write-not-attempted', outcome: 'fail' }),
         );
         expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+        // Main's own write check overrode the reported/claimed success, which is a distinct
+        // terminal reason from a Worker that reported failure itself (issue #584).
+        expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+          { state: 'failed', terminalReason: 'workspace_write_unverified' },
+        ]);
         const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
         expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
           status: 'failed',
@@ -7735,8 +7742,10 @@ if (runsWithElectronAbi)
         state: 'completed',
       });
       expect(persistence.getTeamMission(mission.id).state).toBe('waiting_resume');
+      // Main's own write check overrode the Worker's reported success, which is a distinct
+      // terminal reason from a Worker that reported failure itself (issue #584).
       expect(persistence.listTeamAttempts(second!)).toMatchObject([
-        { state: 'failed', terminalReason: 'worker_reported_failure' },
+        { state: 'failed', terminalReason: 'workspace_write_unverified' },
       ]);
       const dispatch = persistence.getTeamExecutionDispatch(second!);
       expect(persistence.getTeamTask(dispatch.teamTaskId)).toMatchObject({
