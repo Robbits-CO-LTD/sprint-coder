@@ -600,6 +600,25 @@ export class TeamCoordinator {
   }
 
   /**
+   * When each Worker of the Task's Team was stopped, from every `worker_stopped` in the Team's
+   * activity log (issue #586). The whole log is read, because the Team detail carries only its
+   * latest activities. A Worker Main stopped while recovering from a restart has no such record.
+   */
+  listWorkerStops(taskId: string): readonly { agentId: string; stoppedAt: string }[] {
+    const team = this.persistence.getTeamByTask(taskId);
+    if (team === null) return [];
+    const stops: { agentId: string; stoppedAt: string }[] = [];
+    for (let afterSeq = 0; ;) {
+      const page = this.persistence.listTeamV2Activity(team.id, afterSeq, ACTIVITY_REPLAY_PAGE);
+      for (const { type, subjectAgentId, recordedAt } of page)
+        if (type === 'worker_stopped' && subjectAgentId !== null)
+          stops.push({ agentId: subjectAgentId, stoppedAt: recordedAt });
+      if (page.length < ACTIVITY_REPLAY_PAGE) return stops;
+      afterSeq = page.at(-1)!.seq;
+    }
+  }
+
+  /**
    * その Task の今の Access preset（issue #551）。team_assign_task/team_assign_mission の割り当て
    * 結果に、workspace-write を頼んだときの書き込みの確認のされ方を添えるために読む。Task が存在
    * しない呼び出し（未知の taskId）では undefined を返し、呼び出し側はその部分を書かない。
