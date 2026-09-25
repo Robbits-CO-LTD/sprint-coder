@@ -37,6 +37,7 @@ import {
 } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
 import { redactSecrets } from './secret-redactor';
+import { providerWorkspaceToolFailure } from './provider-tool-result';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
 import { providerMessagesForEgressPolicy } from './provider-egress';
@@ -428,7 +429,9 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             at: new Date().toISOString(),
           });
           let toolResult: string;
-          let deniedCall = false;
+          // 'ok' shows the completed label; 'denied' and 'failed' both show the model went on past
+          // a tool failure, just with the write-denial wording kept exactly as before (issue #552).
+          let toolOutcome: 'ok' | 'denied' | 'failed' = 'ok';
           if (managedToolSession?.tools.some(({ name }) => name === toolCall.name)) {
             try {
               const result = await managedToolSession.execute(
@@ -439,23 +442,34 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
               if (isCommittedManagedWrite(result)) writes.committed += 1;
               toolResult = JSON.stringify(result ?? null);
             } catch (error) {
-              // A Workspace write that policy denied goes back to the model as a tool error, as
-              // it does for the CLI Worker, so it can go on; the outcome then counts the denial.
-              // Any other failure still ends the execution.
+              // A stop request still ends the execution, as it always has: #572's cancellation of a
+              // pending approval wait aborts this same controller before the call below settles, so
+              // this check also covers that path.
+              if (controller.signal.aborted) throw error;
               if (
-                controller.signal.aborted ||
-                !(error instanceof ToolAuthorizationDeniedError) ||
-                !WORKSPACE_WRITE_TOOL_NAMES.has(toolCall.name)
-              )
-                throw error;
-              writes.denied += 1;
-              deniedCall = true;
-              toolResult = redactSecrets(
-                JSON.stringify({
-                  ok: false,
-                  error: { code: 'PERMISSION_DENIED', message: error.authorization.reason },
-                }),
-              );
+                error instanceof ToolAuthorizationDeniedError &&
+                WORKSPACE_WRITE_TOOL_NAMES.has(toolCall.name)
+              ) {
+                // A Workspace write that policy denied goes back to the model as a tool error, as
+                // it does for the CLI Worker, so it can go on; the outcome then counts the denial.
+                // This counting is unchanged from before (issue #552).
+                writes.denied += 1;
+                toolOutcome = 'denied';
+                toolResult = redactSecrets(
+                  JSON.stringify({
+                    ok: false,
+                    error: { code: 'PERMISSION_DENIED', message: error.authorization.reason },
+                  }),
+                );
+              } else {
+                // Every other Workspace tool failure — a denied read, a rejected patch (issue
+                // #574), and so on — goes back to the model as a tool error with the same
+                // conversion the Leader uses (providerWorkspaceToolFailure), so the model can retry
+                // instead of the whole execution failing. It does not count as a write denial: only
+                // a write tool's policy denial does (issue #552).
+                toolOutcome = 'failed';
+                toolResult = providerWorkspaceToolFailure(error);
+              }
             }
           } else
             toolResult = JSON.stringify(
@@ -471,7 +485,12 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           input.onEvent?.({
             type: 'activity',
             phase: 'executing',
-            label: deniedCall ? `${toolCall.name}は拒否されました` : `${toolCall.name}の実行完了`,
+            label:
+              toolOutcome === 'denied'
+                ? `${toolCall.name}は拒否されました`
+                : toolOutcome === 'failed'
+                  ? `${toolCall.name}は失敗しました`
+                  : `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
           streamBudget.consumeToolResult(toolResult);

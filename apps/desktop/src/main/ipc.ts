@@ -62,8 +62,6 @@ import {
   workspacePermissionResourceFromGuard,
   type PathGuard,
 } from './path-guard';
-import { CommandRunnerError } from './command-runner';
-import { ManagedStdinRejection } from './managed-command-stdin';
 import { configureApprovalDigestKey } from './approval-digest-key';
 import { isComputerUseUiActivationKind } from '../computer-use-activation';
 import { pathComparisonKey } from '../path-comparison';
@@ -685,8 +683,13 @@ import {
 import { ReasoningBatcher } from './reasoning-batcher';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
-import { createStreamingSecretRedactor, redactSecrets } from './secret-redactor';
-import { formatProviderToolResult, redactProviderCommandFailure } from './provider-tool-result';
+import { createStreamingSecretRedactor } from './secret-redactor';
+import {
+  formatProviderToolResult,
+  redactProviderCommandFailure,
+  providerToolErrorContent,
+  providerWorkspaceToolFailure,
+} from './provider-tool-result';
 import { secureLogger } from './secure-logger';
 import { createGraphToolBoundary } from './graph-tools';
 import {
@@ -774,12 +777,11 @@ import {
   PROVIDER_WORKSPACE_GUIDANCE,
   providerWorkspaceGuidance,
   ManagedCodingHarness,
-  WorkspaceToolRejection,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
-import { WorkspacePatchRejection, type WorkspacePatchDeps } from './workspace-patch-tool';
+import { type WorkspacePatchDeps } from './workspace-patch-tool';
 import { workspaceWriteLimitsOf } from './workspace-write-limits';
 import { probeSandboxRunner, type SandboxRunnerCapability } from './sandbox-runner';
 import {
@@ -10428,28 +10430,11 @@ export function shouldRetryEmptyOllamaToolRound(input: {
   );
 }
 
-export function providerWorkspaceToolFailure(error: unknown): string {
-  if (error instanceof ToolAuthorizationDeniedError)
-    return providerToolErrorContent('PERMISSION_DENIED', error.authorization.reason);
-  if (error instanceof WorkspaceToolRejection)
-    return providerToolErrorContent(error.code, error.message);
-  if (error instanceof WorkspacePatchRejection)
-    return providerToolErrorContent('PATCH_REJECTED', error.message);
-  if (error instanceof CommandRunnerError)
-    return providerToolErrorContent(error.code, error.message);
-  // The stdin cap has to reach the model verbatim: the message tells it how to split the write so
-  // it can retry instead of seeing an opaque failure (Issue #473).
-  if (error instanceof ManagedStdinRejection)
-    return providerToolErrorContent(error.code, error.message);
-  if (error instanceof SkillSettingsError)
-    return providerToolErrorContent(error.code, clipPublicMessage(error.message));
-  secureLogger.error('Provider workspace tool execution failed', { error });
-  return providerToolErrorContent('TOOL_EXECUTION_FAILED', 'Workspace tool execution failed');
-}
-
-function providerToolErrorContent(code: string, message: string): string {
-  return redactSecrets(JSON.stringify({ ok: false, error: { code, message } }));
-}
+// providerWorkspaceToolFailure and providerToolErrorContent moved to ./provider-tool-result
+// (issue #574), so the Managed Local Worker can share the same conversion without importing this
+// module (which itself imports ProviderAwareTeamWorkerRuntime from provider-team-worker-runtime.ts).
+// Re-exported here so existing importers of './ipc' are unaffected.
+export { providerWorkspaceToolFailure };
 
 export function isCommittedProviderWorkspaceChange(result: unknown): result is Readonly<{
   rootId: string;
