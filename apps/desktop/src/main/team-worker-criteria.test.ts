@@ -206,6 +206,63 @@ describe('parseWorkerCriteriaReport', () => {
     });
   });
 
+  describe('a report starting right where the last tool call ends, with no newline (issue #585)', () => {
+    const report = { criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] };
+    const json = JSON.stringify(report);
+
+    it.each([
+      ['a one-line block', `確認します。\`\`\`json ${json}\`\`\``],
+      ['a multi-line block', ['確認します。```json', json, '```'].join('\n')],
+    ])(
+      'reads %s that starts right after reportFrom, unbroken by a preceding newline',
+      (_label, text) => {
+        const reportFrom = '確認します。'.length;
+        expect(parseWorkerCriteriaReport(text, ['答えを見つける'], reportFrom)).toMatchObject({
+          ok: true,
+          criteria: [{ criterion: '答えを見つける', status: 'done', evidence: '確認済み' }],
+          text: '確認します。',
+        });
+      },
+    );
+
+    it('does not take a ```json that starts mid-line at a position other than reportFrom', () => {
+      // The fence sits right after "文中に", which is not where the Worker's last tool call ends
+      // (reportFrom here is 0, as if no tool had run), so it must stay ordinary text, not a report.
+      const text = `文中に\`\`\`json${json}\`\`\`のような文があります。`;
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'], 0)).toEqual({
+        ok: false,
+        reason: expect.stringContaining('```json ブロック）がありません'),
+      });
+    });
+
+    it('does not take a ```json embedded mid-line just because reportFrom points elsewhere', () => {
+      // The fence embedded in `before` is not at reportFrom (which points to the start of `after`,
+      // itself ordinary text with no fence), so only the reportFrom position is ever treated as a
+      // line start — a mid-line fence elsewhere in the text is not retroactively picked up.
+      const before = `文中に\`\`\`json${json}\`\`\`のような文があります。`;
+      const after = '追加の説明です。';
+      expect(
+        parseWorkerCriteriaReport(`${before}${after}`, ['答えを見つける'], before.length),
+      ).toEqual({
+        ok: false,
+        reason: expect.stringContaining('```json ブロック）がありません'),
+      });
+    });
+
+    it('still reads a real line-start block after reportFrom when reportFrom itself is not a fence', () => {
+      // reportFrom points at the newline right before the fence, not at "```json" itself, so the
+      // reportFrom-anchored check (JSON_FENCE_OPEN, which must only match at the very start of the
+      // slice) finds nothing there; the ordinary line-start scan still finds and uses the real
+      // block a moment later, exactly as before this file added reportFrom handling.
+      const before = '確認します。';
+      const text = answer(report, before);
+      expect(parseWorkerCriteriaReport(text, ['答えを見つける'], before.length)).toMatchObject({
+        ok: true,
+        criteria: [{ criterion: '答えを見つける', status: 'done', evidence: '確認済み' }],
+      });
+    });
+  });
+
   it('rejects a report block followed by more text, as it is not the final report', () => {
     const done = answer({ criteria: [{ index: 1, status: 'done', evidence: '確認済み' }] });
     const parsed = parseWorkerCriteriaReport(`${done}\n未完了です。`, ['答えを見つける']);
@@ -320,6 +377,25 @@ describe('readWorkerCriteriaReport', () => {
     );
     expect(report).toEqual({
       summary: '調べました。',
+      criteria: [{ criterion: '答えを見つける', status: 'done', evidence: '確認済み' }],
+      verification: [],
+    });
+  });
+
+  it('reads the report when it starts right after reportFrom with no newline (issue #585)', () => {
+    // Claude and Grok adapters do not put a newline between the Worker's utterances, so the text
+    // after the last tool call can start straight with "```json". `lastJsonBlock` must use the
+    // same reportFrom-anchored start as `parseWorkerCriteriaReport` here, or the two would disagree
+    // on which block is the report.
+    const before = '確認します。';
+    const text = `${before}\`\`\`json\n${JSON.stringify({
+      criteria: [{ index: 1, status: 'done', evidence: '確認済み' }],
+    })}\n\`\`\``;
+    const report = readWorkerCriteriaReport(text, ['答えを見つける'], {
+      reportFrom: before.length,
+    });
+    expect(report).toEqual({
+      summary: before,
       criteria: [{ criterion: '答えを見つける', status: 'done', evidence: '確認済み' }],
       verification: [],
     });

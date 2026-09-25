@@ -2156,6 +2156,24 @@ describe('RuntimeHostTeamWorkerRuntime done criteria report', () => {
     subject.dispose();
   });
 
+  it('takes the criteria from a report that starts right after the last tool call with no newline (issue #585)', async () => {
+    // The Claude and Grok adapters do not insert a newline between a Turn's utterances, so a
+    // report block written immediately after the last tool call can start mid-"line": the delta
+    // right after the tool call begins straight with "```json", unlike the Codex-shaped Turn above.
+    runtimeHostMock.stream = [
+      { type: 'delta', delta: '確認します。' },
+      toolCall,
+      { type: 'delta', delta: allDone },
+    ];
+    const subject = runtime();
+
+    const completion = completionOf(await subject.execute(input));
+
+    expect(completion.criteria).toHaveLength(2);
+    expect(completion.summary).toBe('確認します。');
+    subject.dispose();
+  });
+
   it('takes the criteria from a Codex-shaped Turn whose final message holds the report', async () => {
     // Codex sends each agentMessage as its own item, joined by a blank line, and reports tool and
     // command items as they start and finish.
