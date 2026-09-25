@@ -4743,16 +4743,9 @@ export class TeamCoordinator {
 
   /**
    * Whether a write execution this Manager assigned while running `executionId` has completed
-   * (issue #587). No record links a child execution to the execution it was assigned from, so Main
-   * replays the Team's activity log, whose `seq` orders every event in the Team. A Manager assigns a
-   * write only while running a write execution (a Manager outside one may delegate reads only), and
-   * each run starts with an `attempt_started` of its Attempt, the run that resumes after a
-   * rate-limit wait included. So a child counts when the Manager's last `attempt_started` before
-   * the child's `task_assigned` is this execution's. Attempt times cannot say this: an execution
-   * waiting out a rate limit keeps its Attempt open and frees the Manager for another execution.
-   * Children assigned by an earlier Attempt of this execution (a resume or a steer) count, as that
-   * Attempt's own writes would. A real (not simulated) write child completes only after passing
-   * this same check itself.
+   * (issue #587). Children assigned by an earlier Attempt of this execution (a resume or a steer)
+   * count, as that Attempt's own writes would. A real (not simulated) write child completes only
+   * after passing this same check itself.
    */
   private completedDelegatedWrite(managerId: string, executionId: string): boolean {
     const { teamId } = this.persistence.getTeamExecution(executionId);
@@ -4768,6 +4761,29 @@ export class TeamCoordinator {
         .map(({ id }) => id),
     );
     if (children.size === 0) return false;
+    return (
+      this.findManagerAssignment(teamId, managerId, (child, running) =>
+        running === executionId && children.has(child) ? true : undefined,
+      ) ?? false
+    );
+  }
+
+  /**
+   * Calls `visit` with each execution `managerId` assigned, in order, and the execution the Manager
+   * was running when it assigned it, until `visit` returns a value (issue #587). No record links a
+   * child execution to the execution it was assigned from, so Main replays the Team's activity log,
+   * whose `seq` orders every event in the Team. A Manager assigns a write only while running a
+   * write execution (a Manager outside one may delegate reads only), and each run starts with an
+   * `attempt_started` of its Attempt, the run that resumes after a rate-limit wait included. So the
+   * execution a child was assigned from is the one whose `attempt_started` the Manager last had
+   * before the child's `task_assigned`. Attempt times cannot say this: an execution waiting out a
+   * rate limit keeps its Attempt open and frees the Manager for another execution.
+   */
+  private findManagerAssignment<T>(
+    teamId: string,
+    managerId: string,
+    visit: (child: string, running: string | null) => T | undefined,
+  ): T | undefined {
     // The execution whose run the Manager last started at this point of the log.
     let running: string | null = null;
     for (let afterSeq = 0; ;) {
@@ -4777,14 +4793,41 @@ export class TeamCoordinator {
           running = activity.executionId;
         else if (
           activity.type === 'task_assigned' &&
-          running === executionId &&
-          children.has(activity.executionId ?? '')
-        )
-          return true;
+          activity.actorAgentId === managerId &&
+          activity.executionId !== null
+        ) {
+          const found = visit(activity.executionId, running);
+          if (found !== undefined) return found;
+        }
       }
-      if (page.length < ACTIVITY_REPLAY_PAGE) return false;
+      if (page.length < ACTIVITY_REPLAY_PAGE) return undefined;
       afterSeq = page.at(-1)!.seq;
     }
+  }
+
+  /**
+   * The Graph step execution whose agreed write scope binds `executionId`'s changes (issue #606):
+   * its own when it is a Graph step. Otherwise, when a Manager assigned it, the scope of the
+   * execution that Manager was running at the time, up through nested Managers, since a step's
+   * Manager may have its Workers write for the step through `team_assign_task` or
+   * `team_assign_mission`. null when no Graph step assigned the work, directly or through Managers.
+   */
+  private graphScopeExecutionId(executionId: string): string | null {
+    const visited = new Set<string>();
+    for (let current: string | null = executionId; current !== null;) {
+      if (visited.has(current)) return null;
+      visited.add(current);
+      if (this.persistence.getTeamMissionForExecution(current)?.mode === 'graph') return current;
+      const child: string = current;
+      const { teamId, createdByAgentId } = this.persistence.getTeamExecution(child);
+      // A Leader runs no Attempt, so nothing it assigned is found in the log.
+      if (this.persistence.getTeam(teamId).leaderAgentId === createdByAgentId) return null;
+      current =
+        this.findManagerAssignment<string | null>(teamId, createdByAgentId, (assigned, running) =>
+          assigned === child ? running : undefined,
+        ) ?? null;
+    }
+    return null;
   }
 
   private persistWorkerResult(
@@ -5558,11 +5601,18 @@ export class TeamCoordinator {
     return integrated;
   }
 
+  /**
+   * Holds `workExecutionId`'s sealed changes unless they are all within the agreed write scope of the
+   * Graph step that owns the work (`graphScopeExecutionId`), whose resource ownership and consent
+   * must still be current. A Manager's Worker is held once that step has ended, since no running
+   * step's agreement covers its writes any more.
+   */
   private async assertGraphIntegrationScope(
-    executionId: string,
+    workExecutionId: string,
     repositories: readonly { repoPath: string; baseHead: string; workerHead: string | null }[],
   ): Promise<void> {
-    if (this.persistence.getTeamMissionForExecution(executionId)?.mode !== 'graph') return;
+    const executionId = this.graphScopeExecutionId(workExecutionId);
+    if (executionId === null) return;
     if (!this.worktreeManager) throw new Error('Graph worktree manager is unavailable');
     const readOwner = () => {
       const mission = this.persistence.getTeamMissionForExecution(executionId);
