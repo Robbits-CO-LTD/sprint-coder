@@ -9231,7 +9231,8 @@ export class IpcRouter {
       teamRequired,
       teamRequired
         ? countRequiredTeamWorkers(
-            this.teamCoordinator.get(taskId)?.workers ?? [],
+            this.teamCoordinator.get(taskId),
+            this.teamCoordinator.listWorkerStops(taskId),
             this.persistence.getTurnCreatedAt(taskId, turnId),
           )
         : 0,
@@ -9353,7 +9354,8 @@ export class IpcRouter {
       teamRequired,
       teamRequired
         ? countRequiredTeamWorkers(
-            this.teamCoordinator.get(taskId)?.workers ?? [],
+            this.teamCoordinator.get(taskId),
+            this.teamCoordinator.listWorkerStops(taskId),
             this.persistence.getTurnCreatedAt(taskId, turnId),
           )
         : 0,
@@ -9982,19 +9984,36 @@ export function shouldFailRequiredTeamTurn(teamRequired: boolean, workerCount: n
 
 /**
  * Counts the Workers a required Team Turn can point to as proof it hired a Worker (issue #197's
- * anti-fallback guard). A Worker the user dismissed (`state === 'stopped'`) mid-Turn still counts
- * when it was hired during *this* Leader Turn — dismissal is not the same as never having hired
- * anyone. A Worker stopped in an earlier Turn (hired before this Turn started) does not count, so
- * it cannot carry a later required Turn that never hired anyone of its own.
+ * anti-fallback guard). A Worker that is not stopped counts. A Worker the user dismissed
+ * (`state === 'stopped'`) still counts when a persisted record puts it in *this* Leader Turn, at
+ * or after the Turn's creation: it was hired then (its `createdAt`, issue #543), it was assigned an
+ * execution then (the execution's `assignedAt`), or it was stopped then (its `worker_stopped` in
+ * the Team activity log, `workerStops`), as when a Worker hired in an earlier Turn is assigned
+ * here and dismissed while it runs (issue #586). Dismissal is not the same as never having hired
+ * anyone. A Worker hired, assigned and stopped only in earlier Turns does not count, so it cannot
+ * carry a later required Turn that never hired or assigned anyone of its own.
  */
 export function countRequiredTeamWorkers(
-  workers: readonly { kind: string; state: string; createdAt: string }[],
+  team: {
+    readonly workers: readonly { id: string; kind: string; state: string; createdAt: string }[];
+    readonly executions: readonly { assigneeAgentId: string; assignedAt: string }[];
+  } | null,
+  workerStops: readonly { agentId: string; stoppedAt: string }[],
   leaderTurnCreatedAt: string,
 ): number {
+  if (team === null) return 0;
   const turnCreatedAtMs = Date.parse(leaderTurnCreatedAt);
-  return workers.filter(
-    ({ kind, state, createdAt }) =>
-      kind === 'worker' && (state !== 'stopped' || Date.parse(createdAt) >= turnCreatedAtMs),
+  const duringTurn = (recordedAt: string): boolean => Date.parse(recordedAt) >= turnCreatedAtMs;
+  const assignedOrStoppedDuringTurn = new Set([
+    ...team.executions
+      .filter(({ assignedAt }) => duringTurn(assignedAt))
+      .map(({ assigneeAgentId }) => assigneeAgentId),
+    ...workerStops.filter(({ stoppedAt }) => duringTurn(stoppedAt)).map(({ agentId }) => agentId),
+  ]);
+  return team.workers.filter(
+    ({ id, kind, state, createdAt }) =>
+      kind === 'worker' &&
+      (state !== 'stopped' || duringTurn(createdAt) || assignedOrStoppedDuringTurn.has(id)),
   ).length;
 }
 

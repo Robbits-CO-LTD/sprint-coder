@@ -5137,24 +5137,44 @@ describe('Provider Team completion and model errors', () => {
 
   it('counts a Worker the user dismissed mid-Turn as proof this Turn hired one (issue #543)', () => {
     const leaderTurnCreatedAt = '2026-01-01T00:00:10.000Z';
+    const workersOnly = (
+      workers: { id: string; kind: string; state: string; createdAt: string }[],
+    ) => ({ workers, executions: [] });
 
     // AC1: the Turn's only Worker was hired during this Turn, then the user dismissed it
     // (state -> 'stopped') before the Leader finished. It still counts.
     expect(
       countRequiredTeamWorkers(
-        [{ kind: 'worker', state: 'stopped', createdAt: '2026-01-01T00:00:20.000Z' }],
+        workersOnly([
+          {
+            id: 'worker-1',
+            kind: 'worker',
+            state: 'stopped',
+            createdAt: '2026-01-01T00:00:20.000Z',
+          },
+        ]),
+        [],
         leaderTurnCreatedAt,
       ),
     ).toBe(1);
 
     // AC2: no Worker was ever hired for this Turn -> still 0, still fails closed.
-    expect(countRequiredTeamWorkers([], leaderTurnCreatedAt)).toBe(0);
+    expect(countRequiredTeamWorkers(workersOnly([]), [], leaderTurnCreatedAt)).toBe(0);
+    expect(countRequiredTeamWorkers(null, [], leaderTurnCreatedAt)).toBe(0);
 
     // AC3: a Worker hired and stopped in an *earlier* Turn (createdAt before this Turn even
     // started) must not carry a later required Turn that hired nobody of its own.
     expect(
       countRequiredTeamWorkers(
-        [{ kind: 'worker', state: 'stopped', createdAt: '2026-01-01T00:00:00.000Z' }],
+        workersOnly([
+          {
+            id: 'worker-1',
+            kind: 'worker',
+            state: 'stopped',
+            createdAt: '2026-01-01T00:00:00.000Z',
+          },
+        ]),
+        [{ agentId: 'worker-1', stoppedAt: '2026-01-01T00:00:05.000Z' }],
         leaderTurnCreatedAt,
       ),
     ).toBe(0);
@@ -5162,7 +5182,10 @@ describe('Provider Team completion and model errors', () => {
     // A live (non-stopped) Worker from an earlier Turn still counts, as before #543.
     expect(
       countRequiredTeamWorkers(
-        [{ kind: 'worker', state: 'ready', createdAt: '2026-01-01T00:00:00.000Z' }],
+        workersOnly([
+          { id: 'worker-1', kind: 'worker', state: 'ready', createdAt: '2026-01-01T00:00:00.000Z' },
+        ]),
+        [],
         leaderTurnCreatedAt,
       ),
     ).toBe(1);
@@ -5170,10 +5193,117 @@ describe('Provider Team completion and model errors', () => {
     // Non-worker kinds (e.g. the Leader itself) are never counted.
     expect(
       countRequiredTeamWorkers(
-        [{ kind: 'leader', state: 'ready', createdAt: '2026-01-01T00:00:20.000Z' }],
+        workersOnly([
+          { id: 'leader-1', kind: 'leader', state: 'ready', createdAt: '2026-01-01T00:00:20.000Z' },
+        ]),
+        [],
         leaderTurnCreatedAt,
       ),
     ).toBe(0);
+  });
+
+  it('counts an earlier Turn Worker assigned or stopped during this Turn (issue #586)', () => {
+    const leaderTurnCreatedAt = '2026-01-01T00:00:10.000Z';
+    // Hired in the previous Turn and dismissed by the user since.
+    const earlierWorker = {
+      id: 'worker-1',
+      kind: 'worker',
+      state: 'stopped',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    };
+
+    // This Turn assigned the earlier Turn's only Worker, and the user dismissed it while it ran:
+    // the execution it was assigned in this Turn is the proof (its `worker_stopped` is left out
+    // here so the assignment alone is shown to count).
+    expect(
+      countRequiredTeamWorkers(
+        {
+          workers: [earlierWorker],
+          executions: [{ assigneeAgentId: 'worker-1', assignedAt: '2026-01-01T00:00:20.000Z' }],
+        },
+        [],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(1);
+
+    // Dismissed during this Turn without being assigned in it: it was a live Worker, which counts,
+    // when this Turn started, and dismissing it mid-Turn does not take that away.
+    expect(
+      countRequiredTeamWorkers(
+        { workers: [earlierWorker], executions: [] },
+        [{ agentId: 'worker-1', stoppedAt: '2026-01-01T00:00:30.000Z' }],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(1);
+
+    // #197 is kept: hired, assigned and stopped only before this Turn -> this Turn hired and
+    // assigned no one, and nothing was stopped in it.
+    expect(
+      countRequiredTeamWorkers(
+        {
+          workers: [earlierWorker],
+          executions: [{ assigneeAgentId: 'worker-1', assignedAt: '2026-01-01T00:00:03.000Z' }],
+        },
+        [{ agentId: 'worker-1', stoppedAt: '2026-01-01T00:00:05.000Z' }],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(0);
+
+    // An earlier Turn Worker simply left in the Team (no assignment or stop in this Turn) is
+    // counted exactly as before: live counts, stopped does not.
+    expect(
+      countRequiredTeamWorkers(
+        { workers: [{ ...earlierWorker, state: 'ready' }], executions: [] },
+        [],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(1);
+    expect(
+      countRequiredTeamWorkers(
+        { workers: [earlierWorker], executions: [] },
+        [],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(0);
+
+    // Another Agent's assignment or stop in this Turn is not proof for this stopped Worker, and a
+    // Leader is never counted even when it was assigned or stopped in this Turn.
+    expect(
+      countRequiredTeamWorkers(
+        {
+          workers: [
+            earlierWorker,
+            {
+              id: 'leader-1',
+              kind: 'leader',
+              state: 'stopped',
+              createdAt: earlierWorker.createdAt,
+            },
+          ],
+          executions: [
+            { assigneeAgentId: 'worker-2', assignedAt: '2026-01-01T00:00:20.000Z' },
+            { assigneeAgentId: 'leader-1', assignedAt: '2026-01-01T00:00:20.000Z' },
+          ],
+        },
+        [
+          { agentId: 'worker-2', stoppedAt: '2026-01-01T00:00:30.000Z' },
+          { agentId: 'leader-1', stoppedAt: '2026-01-01T00:00:30.000Z' },
+        ],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(0);
+
+    // A record stamped exactly at the Turn's creation belongs to this Turn, as for hires (#543).
+    expect(
+      countRequiredTeamWorkers(
+        {
+          workers: [earlierWorker],
+          executions: [{ assigneeAgentId: 'worker-1', assignedAt: leaderTurnCreatedAt }],
+        },
+        [],
+        leaderTurnCreatedAt,
+      ),
+    ).toBe(1);
   });
 
   it('classifies missing required Workers as a policy failure, not a runtime protocol error', () => {
@@ -5192,7 +5322,10 @@ describe('Provider Team completion and model errors', () => {
     const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
     const publish = vi.fn();
     const fakeRouter = {
-      teamCoordinator: { get: () => ({ workers: [] }) },
+      teamCoordinator: {
+        get: () => ({ workers: [], executions: [] }),
+        listWorkerStops: () => [],
+      },
       persistence: {
         recordTurnProviderUsage: vi.fn(),
         appendDelta,
@@ -5261,8 +5394,17 @@ describe('Provider Team completion and model errors', () => {
     const fakeRouter = {
       teamCoordinator: {
         get: () => ({
-          workers: [{ kind: 'worker', state: 'stopped', createdAt: '2026-01-01T00:00:20.000Z' }],
+          workers: [
+            {
+              id: 'worker-543',
+              kind: 'worker',
+              state: 'stopped',
+              createdAt: '2026-01-01T00:00:20.000Z',
+            },
+          ],
+          executions: [],
         }),
+        listWorkerStops: () => [],
       },
       persistence: {
         recordTurnProviderUsage: vi.fn(),
@@ -5302,6 +5444,84 @@ describe('Provider Team completion and model errors', () => {
     expect(appendDelta).not.toHaveBeenCalled();
   });
 
+  it('does not fail a Provider Team Turn that assigned an earlier Turn Worker the user then dismissed (issue #586)', async () => {
+    const finishAndAdvance = vi.fn();
+    const appendDelta = vi.fn(() => ({ type: 'message.delta' }));
+    const publish = vi.fn();
+    // The only Worker was hired in the previous Turn, then assigned in this one (created at
+    // 00:00:10) and dismissed while it ran.
+    let executions = [{ assigneeAgentId: 'worker-586', assignedAt: '2026-01-01T00:00:20.000Z' }];
+    let workerStops = [{ agentId: 'worker-586', stoppedAt: '2026-01-01T00:00:30.000Z' }];
+    const listWorkerStops = vi.fn(() => workerStops);
+    const fakeRouter = {
+      teamCoordinator: {
+        get: () => ({
+          workers: [
+            {
+              id: 'worker-586',
+              kind: 'worker',
+              state: 'stopped',
+              createdAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          executions,
+        }),
+        listWorkerStops,
+      },
+      persistence: {
+        recordTurnProviderUsage: vi.fn(),
+        appendDelta,
+        getTurnCreatedAt: vi.fn(() => '2026-01-01T00:00:10.000Z'),
+      },
+      mailbox: { run: async (_taskId: string, action: () => unknown) => action() },
+      turnRuntimes: new Map([['turn-586', 'provider']]),
+      finishAndAdvance,
+      publish,
+    };
+    const completeProviderTeamTurn = Reflect.get(
+      IpcRouter.prototype,
+      'completeProviderTeamTurn',
+    ) as (
+      this: typeof fakeRouter,
+      taskId: string,
+      turnId: string,
+      input: string,
+      messageId: string,
+      synthesizing: boolean,
+      usage: undefined,
+    ) => Promise<'completed' | 'failed'>;
+    const complete = () =>
+      completeProviderTeamTurn.call(
+        fakeRouter,
+        'task-586',
+        'turn-586',
+        'Teamで続きを進めてください',
+        'message-586',
+        true,
+        undefined,
+      );
+
+    await expect(complete()).resolves.toBe('completed');
+    expect(finishAndAdvance).toHaveBeenLastCalledWith('task-586', 'turn-586', 'completed');
+    expect(appendDelta).not.toHaveBeenCalled();
+    expect(listWorkerStops).toHaveBeenCalledWith('task-586');
+    expect(fakeRouter.persistence.getTurnCreatedAt).toHaveBeenCalledWith('task-586', 'turn-586');
+
+    // #197 is kept: the same Worker assigned and stopped only in the previous Turn, and nobody
+    // hired or assigned in this one, still fails the required Turn closed.
+    finishAndAdvance.mockClear();
+    executions = [{ assigneeAgentId: 'worker-586', assignedAt: '2026-01-01T00:00:03.000Z' }];
+    workerStops = [{ agentId: 'worker-586', stoppedAt: '2026-01-01T00:00:05.000Z' }];
+    await expect(complete()).resolves.toBe('failed');
+    expect(appendDelta).toHaveBeenCalledWith(
+      'task-586',
+      'turn-586',
+      'message-586',
+      expect.stringContaining('Team MCP Workerが1名も作成されませんでした'),
+    );
+    expect(finishAndAdvance).toHaveBeenLastCalledWith('task-586', 'turn-586', 'failed');
+  });
+
   it('enters Provider synthesis only at the final tool-free boundary', async () => {
     const changeStage = vi.fn(() => ({ type: 'stage.changed' }));
     const publish = vi.fn();
@@ -5329,7 +5549,10 @@ describe('Provider Team completion and model errors', () => {
     const teamRequiredTurns = new Set<string>();
     const fakeRouter = {
       teamRequiredTurns,
-      teamCoordinator: { get: () => ({ workers: [] }) },
+      teamCoordinator: {
+        get: () => ({ workers: [], executions: [] }),
+        listWorkerStops: () => [],
+      },
       persistence: { getTurnCreatedAt: vi.fn(() => '2024-01-01T00:00:00.000Z') },
       resolvedModelByTurn: new Map<string, string>(),
       finishAndAdvance,
@@ -5403,8 +5626,17 @@ describe('Provider Team completion and model errors', () => {
       teamRequiredTurns,
       teamCoordinator: {
         get: () => ({
-          workers: [{ kind: 'worker', state: 'stopped', createdAt: '2026-01-01T00:00:20.000Z' }],
+          workers: [
+            {
+              id: 'worker-543',
+              kind: 'worker',
+              state: 'stopped',
+              createdAt: '2026-01-01T00:00:20.000Z',
+            },
+          ],
+          executions: [],
         }),
+        listWorkerStops: () => [],
       },
       persistence: { getTurnCreatedAt: vi.fn(() => '2026-01-01T00:00:10.000Z') },
       resolvedModelByTurn: new Map<string, string>(),
@@ -5445,7 +5677,15 @@ describe('Provider Team completion and model errors', () => {
     // started) must still fail the Turn closed — it is not proof this Turn hired anyone (AC3).
     finishAndAdvance.mockClear();
     fakeRouter.teamCoordinator.get = () => ({
-      workers: [{ kind: 'worker', state: 'stopped', createdAt: '2026-01-01T00:00:00.000Z' }],
+      workers: [
+        {
+          id: 'worker-543',
+          kind: 'worker',
+          state: 'stopped',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      executions: [],
     });
     await expect(
       completeCanonicalTeamTurn.call(
@@ -5463,6 +5703,96 @@ describe('Provider Team completion and model errors', () => {
       'task-543',
       'turn-543',
       expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+    );
+  });
+
+  it('does not fail a canonical Team Turn that assigned an earlier Turn Worker the user then dismissed (issue #586)', async () => {
+    const finishAndAdvance = vi.fn();
+    const handleRuntimeFailure = vi.fn();
+    // The only Worker was hired in the previous Turn; this Turn was created at 00:00:10.
+    let executions: { assigneeAgentId: string; assignedAt: string }[] = [
+      { assigneeAgentId: 'worker-586', assignedAt: '2026-01-01T00:00:20.000Z' },
+    ];
+    let workerStops = [{ agentId: 'worker-586', stoppedAt: '2026-01-01T00:00:30.000Z' }];
+    const listWorkerStops = vi.fn(() => workerStops);
+    const fakeRouter = {
+      teamRequiredTurns: new Set<string>(['turn-586']),
+      teamCoordinator: {
+        get: () => ({
+          workers: [
+            {
+              id: 'worker-586',
+              kind: 'worker',
+              state: 'stopped',
+              createdAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          executions,
+        }),
+        listWorkerStops,
+      },
+      persistence: { getTurnCreatedAt: vi.fn(() => '2026-01-01T00:00:10.000Z') },
+      resolvedModelByTurn: new Map<string, string>(),
+      finishAndAdvance,
+      handleRuntimeFailure,
+    };
+    const completeCanonicalTeamTurn = Reflect.get(
+      IpcRouter.prototype,
+      'completeCanonicalTeamTurn',
+    ) as (
+      this: typeof fakeRouter,
+      kind: 'codex' | 'claude',
+      taskId: string,
+      turnId: string,
+      resolvedModel: string | undefined,
+      finalText: string | undefined,
+    ) => Promise<'completed' | 'failed'>;
+    const complete = () =>
+      completeCanonicalTeamTurn.call(
+        fakeRouter,
+        'claude',
+        'task-586',
+        'turn-586',
+        undefined,
+        '続きの結果',
+      );
+
+    // Assigned in this Turn and dismissed while it ran.
+    await expect(complete()).resolves.toBe('completed');
+    expect(finishAndAdvance).toHaveBeenLastCalledWith(
+      'task-586',
+      'turn-586',
+      'completed',
+      '続きの結果',
+    );
+    expect(listWorkerStops).toHaveBeenCalledWith('task-586');
+
+    // Dismissed in this Turn without being assigned in it: the stop record alone is the proof.
+    finishAndAdvance.mockClear();
+    executions = [];
+    await expect(complete()).resolves.toBe('completed');
+    expect(finishAndAdvance).toHaveBeenLastCalledWith(
+      'task-586',
+      'turn-586',
+      'completed',
+      '続きの結果',
+    );
+    expect(handleRuntimeFailure).not.toHaveBeenCalled();
+
+    // #197 is kept: neither hired, assigned nor stopped in this Turn -> fails closed as before.
+    finishAndAdvance.mockClear();
+    executions = [{ assigneeAgentId: 'worker-586', assignedAt: '2026-01-01T00:00:03.000Z' }];
+    workerStops = [{ agentId: 'worker-586', stoppedAt: '2026-01-01T00:00:05.000Z' }];
+    await expect(complete()).resolves.toBe('failed');
+    expect(finishAndAdvance).not.toHaveBeenCalled();
+    expect(handleRuntimeFailure).toHaveBeenCalledWith(
+      'claude',
+      'task-586',
+      'turn-586',
+      expect.objectContaining({
+        code: 'RUNTIME_FAILED',
+        userMessage: expect.stringContaining('Team MCP Workerが1名も作成されませんでした'),
+      }),
     );
   });
 });

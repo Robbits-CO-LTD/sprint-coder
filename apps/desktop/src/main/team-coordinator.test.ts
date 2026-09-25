@@ -22,6 +22,7 @@ import type {
   TeamSnapshot,
 } from './persistence';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
+import { countRequiredTeamWorkers } from './ipc';
 import {
   DeterministicTeamWorkerRuntime,
   TeamCoordinator,
@@ -5333,6 +5334,73 @@ if (runsWithElectronAbi)
       expect(runtime.stopped).toEqual([worker.id]);
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
+      persistence.close();
+    });
+
+    it('counts an earlier Turn Worker this Turn assigned and the user dismissed mid-run from persisted records (issue #586)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Dismiss an earlier Turn Worker mid-run');
+      const runtime = new InterruptibleWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      // Every record compared here is stamped with the millisecond clock; keep the phases apart.
+      const nextMillisecond = () => new Promise((resolve) => setTimeout(resolve, 5));
+      const completeTurn = (turnId: string) => {
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, turnId, stage);
+        persistence.completeTurn(task.id, turnId, 'completed');
+      };
+      const requiredTurnWorkerCount = (turnId: string) =>
+        countRequiredTeamWorkers(
+          coordinator.get(task.id),
+          coordinator.listWorkerStops(task.id),
+          persistence.getTurnCreatedAt(task.id, turnId),
+        );
+
+      // The previous Turn hires the only Worker and ends with it ready in the active Team.
+      const previousTurn = persistence.startTurn(task.id, 'Teamで調査の準備をしてください');
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: '調査',
+        objective: '続きを調べる',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      completeTurn(previousTurn.turnId);
+      await nextMillisecond();
+
+      // This Turn assigns that Worker, and the user dismisses it while it runs.
+      const turn = persistence.startTurn(task.id, 'Teamで続きを進めてください');
+      await nextMillisecond();
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: '続きを調べてください',
+        doneCriteria: ['結果を報告する'],
+      });
+      await waitFor(() => runtime.contents.length === 1);
+      await expect(coordinator.stopWorker(task.id, worker.id)).resolves.toMatchObject({
+        id: worker.id,
+        state: 'stopped',
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'canceled',
+      );
+
+      const turnCreatedAt = Date.parse(persistence.getTurnCreatedAt(task.id, turn.turnId));
+      expect(Date.parse(worker.createdAt)).toBeLessThan(turnCreatedAt);
+      expect(
+        Date.parse(persistence.getTeamExecution(submission.executionId).assignedAt),
+      ).toBeGreaterThanOrEqual(turnCreatedAt);
+      const stops = coordinator.listWorkerStops(task.id);
+      expect(stops).toEqual([{ agentId: worker.id, stoppedAt: expect.any(String) }]);
+      expect(Date.parse(stops[0]!.stoppedAt)).toBeGreaterThanOrEqual(turnCreatedAt);
+      expect(requiredTurnWorkerCount(turn.turnId)).toBe(1);
+      completeTurn(turn.turnId);
+      await nextMillisecond();
+
+      // The next Turn neither hires, assigns nor stops anyone, so it has no Worker (#197).
+      const nextTurn = persistence.startTurn(task.id, 'Teamで結果をまとめてください');
+      expect(requiredTurnWorkerCount(nextTurn.turnId)).toBe(0);
       persistence.close();
     });
 
