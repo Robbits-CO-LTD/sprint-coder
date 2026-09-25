@@ -50,7 +50,16 @@ import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integr
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
-import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import { managedLocalConnection } from './managed-local-provider-runtime';
+import {
+  MANAGED_LOCAL_FIXTURE_SELECTION,
+  managedLocalTeamWorkerRuntime,
+} from './managed-local-team-worker-fixture';
+import {
+  runtimeWorkspaceSetFromLegacyPath,
+  type RuntimeFailureDiagnostic,
+  type RuntimeWorkspaceSet,
+} from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -363,6 +372,39 @@ class WorktreeWritingRuntime extends TestWorkerRuntime {
         throw new Error('write step did not receive an isolated worktree');
       writeFileSync(join(input.workspacePath, 'worker-output.txt'), 'isolated\n');
     }
+    return super.execute(input);
+  }
+}
+
+/**
+ * WorktreeWritingRuntime in the CLI runtime's place, recording what each execution was handed:
+ * with the one-root set the CLI runtime derives from a worktree path itself, read while that
+ * worktree still exists (issue #570).
+ */
+class HandedWorkspaceRecordingRuntime extends WorktreeWritingRuntime {
+  readonly handed: Array<{
+    workerId: string;
+    writeCapable: boolean;
+    accessMode: string | undefined;
+    workspacePath: string | null | undefined;
+    workspaceSet: RuntimeWorkspaceSet | undefined;
+    derivedFromPath: RuntimeWorkspaceSet | undefined;
+  }> = [];
+
+  override async execute(
+    input: Parameters<TeamWorkerRuntime['execute']>[0],
+  ): Promise<WorkerRuntimeResult> {
+    this.handed.push({
+      workerId: input.worker.id,
+      writeCapable: input.worker.writeCapable,
+      accessMode: input.accessMode,
+      workspacePath: input.workspacePath,
+      workspaceSet: input.workspaceSet,
+      derivedFromPath:
+        typeof input.workspacePath === 'string'
+          ? runtimeWorkspaceSetFromLegacyPath(input.workspacePath)
+          : undefined,
+    });
     return super.execute(input);
   }
 }
@@ -1746,6 +1788,276 @@ if (runsWithElectronAbi)
       });
       persistence.close();
     });
+
+    it('runs a direct message to a write-capable Managed Local or CLI Worker read-only over the Task Workspace (issue #570)', async () => {
+      const persistence = createPersistence();
+      persistence.createProviderConnection(managedLocalConnection());
+      const task = persistence.createTask('Managed Local direct message');
+      const { workspace } = configureGitWorkspace(persistence, task.id);
+      const cli = new HandedWorkspaceRecordingRuntime();
+      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
+      const coordinator = new TeamCoordinator(persistence, managedLocal.runtime);
+      const managedWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Managed Local reader',
+        objective: 'read the Workspace',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      });
+      const cliWorker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'CLI reader',
+        objective: 'read the Workspace',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const taskRoots = persistence
+        .getEffectiveWorkspaceSet(task.id)
+        .roots.map(({ rootId, path, role }) => ({ rootId, path, role }));
+
+      const managedReply = await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: managedWorker.id,
+        content: 'README.mdを読んで内容を報告してください',
+      });
+      // Main's catalog handed the Managed Local Worker the Task Workspace, reading tools only.
+      expect(managedLocal.sessions).toEqual([
+        expect.objectContaining({
+          workerId: managedWorker.id,
+          writeCapable: false,
+          workspaceSet: expect.objectContaining({
+            roots: taskRoots.map((root) => expect.objectContaining(root)),
+          }),
+          tools: ['read_file'],
+        }),
+      ]);
+      expect(managedLocal.toolCalls).toEqual([
+        {
+          workerId: managedWorker.id,
+          name: 'read_file',
+          file: join(taskRoots[0]!.path, 'README.md'),
+        },
+      ]);
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+
+      const cliReply = await coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: cliWorker.id,
+        content: 'README.mdを読んで内容を報告してください',
+      });
+      // The CLI Worker is handed the same: read-only, on the same roots.
+      expect(cli.handed).toEqual([
+        expect.objectContaining({
+          workerId: cliWorker.id,
+          writeCapable: false,
+          accessMode: 'read-only',
+          workspacePath: undefined,
+          workspaceSet: expect.objectContaining({
+            roots: taskRoots.map((root) => expect.objectContaining(root)),
+          }),
+        }),
+      ]);
+      expect([managedReply.state, cliReply.state]).toEqual(['delivered', 'delivered']);
+      const snapshot = persistence.getTeamSnapshot(managedWorker.teamId);
+      // Each Worker finished its read, and keeps the capability it was hired with.
+      for (const worker of [managedWorker, cliWorker])
+        expect(snapshot.agents.find(({ id }) => id === worker.id)).toMatchObject({
+          state: 'done',
+          writeCapable: true,
+        });
+      for (const reply of [managedReply, cliReply])
+        expect(snapshot.deliveries.find(({ messageId }) => messageId === reply.id)?.state).toBe(
+          'acked',
+        );
+      expect(
+        snapshot.messages.some(
+          ({ sourceAgentId, content }) =>
+            sourceAgentId === managedWorker.id &&
+            content.includes('Managed Localの作業を終えました'),
+        ),
+      ).toBe(true);
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+      persistence.close();
+    });
+
+    it('refuses a direct message whose Task Workspace fails verification before recording anything (issue #570)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Unverified direct message');
+      configureGitWorkspace(persistence, task.id);
+      const runtime = new HandedWorkspaceRecordingRuntime();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          throw new Error('Turn Workspace root identity changed');
+        },
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'read the Workspace',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const before = persistence.getTeamSnapshot(worker.teamId);
+      const budgets = persistence.getTeamBudgetStatus(worker.teamId);
+
+      await expect(
+        coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'README.mdを読んで内容を報告してください',
+        }),
+      ).rejects.toThrow('Turn Workspace root identity changed');
+
+      const after = persistence.getTeamSnapshot(worker.teamId);
+      expect(runtime.handed).toEqual([]);
+      expect(after.messages).toEqual(before.messages);
+      expect(after.deliveries).toEqual(before.deliveries);
+      expect(after.agents.find(({ id }) => id === worker.id)?.state).toBe('ready');
+      expect(persistence.getTeamBudgetStatus(worker.teamId)).toEqual(budgets);
+      persistence.close();
+    });
+
+    it('runs a legacy Mission write step of a Managed Local Worker in its worktree and integrates it, as it does a CLI Worker (issue #570)', async () => {
+      const persistence = createPersistence();
+      persistence.createProviderConnection(managedLocalConnection());
+      const task = persistence.createTask('Managed Local legacy Mission');
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const cli = new HandedWorkspaceRecordingRuntime();
+      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
+      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
+      const managedWriter = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Managed Local writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      });
+      const cliWriter = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'CLI writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+
+      const assigned = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write through both runtimes',
+        doneCriteria: ['both outputs are integrated'],
+        steps: [
+          {
+            workerId: managedWriter.id,
+            objective: 'create managed-output.txt',
+            doneCriteria: ['managed-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: cliWriter.id,
+            objective: 'create worker-output.txt',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+        ],
+      });
+      // Two write steps, each through a real Git worktree and integration. A timeout falls through to
+      // the state dump below rather than hiding where the Mission stopped.
+      await waitFor(
+        () =>
+          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
+            persistence.getTeamMission(assigned.id).state,
+          ),
+        60_000,
+      ).catch(() => undefined);
+
+      const mission = persistence.getTeamMission(assigned.id);
+      const worktrees = mission.steps.map(({ executionId }) =>
+        persistence.getTeamMissionWorktree(executionId),
+      );
+      const state = {
+        missionState: mission.state,
+        executions: mission.steps.map(({ executionId }) =>
+          persistence.getTeamExecution(executionId),
+        ),
+        worktrees,
+        agents: persistence.getTeamSnapshot(managedWriter.teamId).agents,
+      };
+      expect(mission.state, JSON.stringify(state, null, 2)).toBe('completed');
+      // The Managed Local Worker was handed its worktree as the one-root Workspace, with a writing
+      // tool, and wrote there.
+      expect(managedLocal.sessions).toHaveLength(1);
+      const [session] = managedLocal.sessions;
+      expect(session).toMatchObject({
+        workerId: managedWriter.id,
+        writeCapable: true,
+        tools: ['read_file', 'create_file'],
+      });
+      const [root] = session!.workspaceSet.roots;
+      expect(session!.workspaceSet.roots).toHaveLength(1);
+      expect(root).toMatchObject({ role: 'primary', label: basename(worktrees[0]!.path) });
+      expect(dirname(root!.path)).toBe(realpathSync.native(dirname(worktrees[0]!.path)));
+      expect(session!.workspaceSet).toEqual(runtimeWorkspaceSetFromLegacyPath(root!.path));
+      expect(managedLocal.toolCalls).toEqual([
+        {
+          workerId: managedWriter.id,
+          name: 'create_file',
+          file: join(root!.path, 'managed-output.txt'),
+        },
+      ]);
+      // The CLI Worker is still handed its worktree path, now with the very set it derives from it.
+      expect(cli.handed).toHaveLength(1);
+      expect(cli.handed[0]).toMatchObject({
+        workerId: cliWriter.id,
+        writeCapable: true,
+        accessMode: 'workspace-write',
+        workspacePath: worktrees[1]!.path,
+      });
+      expect(cli.handed[0]!.workspaceSet).toEqual(cli.handed[0]!.derivedFromPath);
+      // Both writes reached the Workspace only through integration.
+      expect(readFileSync(join(workspace, 'managed-output.txt'), 'utf8')).toBe(
+        'written by the Managed Local Worker\n',
+      );
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-2', '--pretty=%s'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe(
+        `Sprint Coder Mission ${assigned.id} step 2\nSprint Coder Mission ${assigned.id} step 1\n`,
+      );
+      // The last worktree is cleaned up after the Mission completes.
+      await waitFor(
+        () =>
+          mission.steps.every(
+            ({ executionId }) =>
+              persistence.getTeamMissionWorktree(executionId)?.state === 'cleaned',
+          ),
+        15_000,
+      );
+      expect(
+        mission.steps.map(({ executionId }) => persistence.getTeamMissionWorktree(executionId)),
+      ).toEqual([
+        expect.objectContaining({ changedFiles: ['managed-output.txt'] }),
+        expect.objectContaining({ changedFiles: ['worker-output.txt'] }),
+      ]);
+      persistence.close();
+    }, 120_000);
 
     it('runs an explicitly workspace-write standalone assignment inside isolation', async () => {
       const persistence = createPersistence();
