@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Folder, RefreshCw, Trash, X } from './icons';
 import { EXECUTION_STATE_LABELS } from '../lib/team-execution-display';
-import { retainedWorktreesKey } from '../lib/team-retained-worktrees';
+import {
+  RETAINED_WORKTREE_INTEGRATION_LABELS,
+  retainedWorktreesKey,
+} from '../lib/team-retained-worktrees';
 import type {
   TeamDetail,
   TeamRetainedWorktree,
@@ -100,8 +103,7 @@ export function retainedWorktreeStateLabel(
 ): string {
   const integration = {
     none: '未統合（変更を保持）',
-    confirmed: '統合済み（片付けに失敗）',
-    unconfirmed: '統合を確認できません（Workspaceの履歴に見つかりません）',
+    ...RETAINED_WORKTREE_INTEGRATION_LABELS,
   }[worktree.integration];
   return `${EXECUTION_STATE_LABELS[worktree.executionState]} · ${integration}${
     worktree.submodules ? ' · submoduleあり' : ''

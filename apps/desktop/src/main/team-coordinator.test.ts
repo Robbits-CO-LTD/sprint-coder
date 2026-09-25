@@ -6672,10 +6672,21 @@ if (runsWithElectronAbi)
           repositories: [{ ...integratedRepository, integratedHead, state: 'quarantined' }],
           now: new Date().toISOString(),
         });
+      // The Worker card reads the same result from the Team detail (issue #579), and building the
+      // detail again does not ask Git again.
+      const headContains = vi.spyOn(manager, 'headContains');
+      const cardIntegrations = () =>
+        coordinator.get(task.id)?.executions.find(({ id }) => id === finished.executionId)
+          ?.retainedWorktreeIntegrations;
       retain(integratedRepository.integratedHead!);
+      published.length = 0;
       expect((await coordinator.listRetainedWorktrees(task.id)).worktrees).toMatchObject([
         { executionId: finished.executionId, integration: 'confirmed', existsOnDisk: false },
       ]);
+      expect(published).toContain(task.id);
+      expect(cardIntegrations()).toEqual([{ repositoryOrdinal: 1, integration: 'confirmed' }]);
+      expect(cardIntegrations()).toEqual([{ repositoryOrdinal: 1, integration: 'confirmed' }]);
+      expect(headContains).toHaveBeenCalledTimes(1);
       const sideCommit = spawnSync(
         'git',
         ['-C', workspace, 'commit-tree', 'HEAD^{tree}', '-m', 'side'],
@@ -6696,7 +6707,19 @@ if (runsWithElectronAbi)
         expect((await coordinator.listRetainedWorktrees(task.id)).worktrees).toMatchObject([
           { executionId: finished.executionId, integration: 'unconfirmed' },
         ]);
+        expect(cardIntegrations()).toEqual([{ repositoryOrdinal: 1, integration: 'unconfirmed' }]);
       }
+
+      // A kept worktree nobody checked yet is not called integrated: the detail leaves it out,
+      // checks it once in the background, and publishes the Team with the result.
+      retain(integratedRepository.integratedHead!);
+      headContains.mockClear();
+      published.length = 0;
+      expect(cardIntegrations()).toEqual([]);
+      expect(cardIntegrations()).toEqual([]);
+      await waitFor(() => published.includes(task.id), 15_000);
+      expect(cardIntegrations()).toEqual([{ repositoryOrdinal: 1, integration: 'confirmed' }]);
+      expect(headContains).toHaveBeenCalledTimes(1);
       persistence.close();
     }, 55_000);
 

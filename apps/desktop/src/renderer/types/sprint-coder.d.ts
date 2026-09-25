@@ -708,6 +708,12 @@ export type TeamExecutionSummary = {
   missionStepCount: number | null;
   worktree: TeamMissionWorktreeSummary | null;
   isolation: TeamExecutionIsolation | null;
+  /** Whether Main last found a kept worktree's integrated commit in the Workspace, as the retained
+   * worktree list shows it (issue #579). No entry: not checked yet. */
+  retainedWorktreeIntegrations?: {
+    repositoryOrdinal: number;
+    integration: 'confirmed' | 'unconfirmed';
+  }[];
   assignedAt: string;
   queuedAt: string | null;
   startedAt: string | null;

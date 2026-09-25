@@ -699,6 +699,24 @@ export const teamExecutionSummarySchema = z
     missionStepCount: z.number().int().min(2).max(12).nullable(),
     worktree: teamMissionWorktreeSummarySchema.nullable().default(null),
     isolation: teamExecutionIsolationSchema.nullable().default(null),
+    /**
+     * For each isolation repository kept on disk after it recorded an integration (`quarantined`
+     * with an integrated HEAD): whether Main last found that commit in its repository's current
+     * history. It is the same check, and the same result, as the retained worktree list's
+     * `integration` (issue #579). A repository Main has not checked yet has no entry, and the field
+     * is left out when no repository is such a worktree.
+     */
+    retainedWorktreeIntegrations: z
+      .array(
+        z
+          .object({
+            repositoryOrdinal: z.number().int().min(1).max(16),
+            integration: z.enum(['confirmed', 'unconfirmed']),
+          })
+          .strict(),
+      )
+      .max(16)
+      .optional(),
     assignedAt: timestampSchema,
     queuedAt: timestampSchema.nullable(),
     startedAt: timestampSchema.nullable(),

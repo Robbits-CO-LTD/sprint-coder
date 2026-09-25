@@ -413,6 +413,20 @@ export class TeamCoordinator {
   private readonly executionInterruptions = new Map<string, ExecutionInterruptionControl>();
   /** `<executionId>:<repositoryOrdinal>:<reason>` keys already reported by `reportReclaimKept`. */
   private readonly reclaimKeptReasonsReported = new Set<string>();
+  /**
+   * The latest check of each retained worktree's recorded integration, by its isolation worktree
+   * id (`isolationWorktreeId`, issue #579). The retained worktree list records every check it
+   * makes, and the Team detail reads the latest one (checking one it lacks in the background), so
+   * the Worker card says what the list says without asking Git on every Team update. `seq` orders
+   * checks by when they started.
+   */
+  private readonly retainedWorktreeIntegrations = new Map<
+    string,
+    { integratedHead: string; integration: 'confirmed' | 'unconfirmed'; seq: number }
+  >();
+  /** Keys of the checks the Team detail started that have not finished yet. */
+  private readonly retainedWorktreeIntegrationChecks = new Set<string>();
+  private retainedWorktreeIntegrationSeq = 0;
   private readonly transientWorkerActivity = new Map<
     string,
     { liveOutput: string; reasoningActive: boolean }
@@ -2510,6 +2524,7 @@ export class TeamCoordinator {
     const agents = this.persistence.getTeamSnapshot(team.id).agents;
     const worktrees: TeamRetainedWorktree[] = [];
     let total = 0;
+    let integrationChanged = false;
     for (const execution of this.persistence.listTeamExecutions(team.id)) {
       const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
       if (isolation === null) continue;
@@ -2519,6 +2534,8 @@ export class TeamCoordinator {
         if (worktrees.length >= TEAM_RETAINED_WORKTREE_LIST_LIMIT) continue;
         const blockedReason = this.retainedWorktreeBlockedReason(execution, isolation, repository);
         const role = agents.find(({ id }) => id === execution.assigneeAgentId)?.role.trim() ?? '';
+        const checked = await this.retainedWorktreeIntegration(execution.id, repository);
+        if (checked.changed) integrationChanged = true;
         worktrees.push({
           executionId: execution.id,
           repositoryOrdinal: repository.ordinal,
@@ -2529,7 +2546,7 @@ export class TeamCoordinator {
           baseHead: repository.baseHead,
           workerHead: repository.workerHead,
           integratedHead: repository.integratedHead,
-          integration: await this.retainedWorktreeIntegration(repository),
+          integration: checked.integration,
           submodules: await this.retainedWorktreeSubmodules(execution, repository),
           changedFileCount: repository.changedFiles.length,
           reason: isolation.reason,
@@ -2540,6 +2557,8 @@ export class TeamCoordinator {
         });
       }
     }
+    // The Worker card shows the same result (issue #579), so publish the Team when it changed.
+    if (integrationChanged) this.emit(taskId, team.id);
     return teamRetainedWorktreeListSchema.parse({ worktrees, total });
   }
 
@@ -2703,15 +2722,74 @@ export class TeamCoordinator {
    * checked against the repository's current history (read only): after a failed revalidation the
    * record keeps its integrated HEAD although the Workspace may no longer contain it, and such a
    * worktree may then hold the only copy of the change.
+   *
+   * The result is recorded for the Team detail, which shows the latest check on the Worker card
+   * (issue #579); `changed` says whether this check changed what the card shows. A check that
+   * started before one already recorded, but finished after it, does not replace it.
    */
   private async retainedWorktreeIntegration(
+    executionId: string,
     repository: TeamExecutionIsolation['repositories'][number],
-  ): Promise<TeamRetainedWorktree['integration']> {
-    if (repository.integratedHead === null) return 'none';
-    const contained = await this.worktreeManager
-      ?.headContains(repository.repoPath, repository.integratedHead)
-      .catch(() => false);
-    return contained === true ? 'confirmed' : 'unconfirmed';
+  ): Promise<{ integration: TeamRetainedWorktree['integration']; changed: boolean }> {
+    const { integratedHead } = repository;
+    if (integratedHead === null) return { integration: 'none', changed: false };
+    const seq = ++this.retainedWorktreeIntegrationSeq;
+    let contained = false;
+    try {
+      contained =
+        (await this.worktreeManager?.headContains(repository.repoPath, integratedHead)) === true;
+    } catch {
+      // Git could not tell, which never counts as integrated.
+    }
+    const integration = contained ? 'confirmed' : 'unconfirmed';
+    const key = isolationWorktreeId(executionId, repository.ordinal);
+    const recorded = this.retainedWorktreeIntegrations.get(key);
+    if (recorded !== undefined && recorded.seq > seq) return { integration, changed: false };
+    this.retainedWorktreeIntegrations.set(key, { integratedHead, integration, seq });
+    return {
+      integration,
+      changed: recorded?.integratedHead !== integratedHead || recorded.integration !== integration,
+    };
+  }
+
+  /**
+   * What the Worker card is told about each retained worktree that recorded an integration
+   * (issue #579): the latest check, whether the retained worktree list or this made it. Building
+   * the Team detail never waits on Git: a repository not checked yet for the integrated HEAD it
+   * records now is left out and checked once in the background, and the Team is published again
+   * when that changes what the card shows. Null when no repository is such a worktree.
+   */
+  private retainedWorktreeIntegrationSummary(
+    taskId: string,
+    teamId: string,
+    executionId: string,
+    isolation: TeamExecutionIsolation | null,
+  ): { repositoryOrdinal: number; integration: 'confirmed' | 'unconfirmed' }[] | null {
+    const retained = (isolation?.repositories ?? []).filter(
+      ({ state, integratedHead }) => state === 'quarantined' && integratedHead !== null,
+    );
+    if (retained.length === 0) return null;
+    const checked: { repositoryOrdinal: number; integration: 'confirmed' | 'unconfirmed' }[] = [];
+    for (const repository of retained) {
+      const key = isolationWorktreeId(executionId, repository.ordinal);
+      const recorded = this.retainedWorktreeIntegrations.get(key);
+      if (recorded?.integratedHead === repository.integratedHead) {
+        checked.push({ repositoryOrdinal: repository.ordinal, integration: recorded.integration });
+        continue;
+      }
+      if (this.retainedWorktreeIntegrationChecks.has(key)) continue;
+      this.retainedWorktreeIntegrationChecks.add(key);
+      void this.retainedWorktreeIntegration(executionId, repository).then(({ changed }) => {
+        this.retainedWorktreeIntegrationChecks.delete(key);
+        if (!changed) return;
+        try {
+          this.emit(taskId, teamId);
+        } catch {
+          // The Team is gone, so no card shows the result.
+        }
+      });
+    }
+    return checked;
   }
 
   /**
@@ -4810,6 +4888,13 @@ export class TeamCoordinator {
           const mission = this.persistence.getTeamMissionForExecution(execution.id);
           const missionStep =
             mission?.steps.find(({ executionId }) => executionId === execution.id) ?? null;
+          const isolation = this.executionIsolationSummary(execution.id);
+          const retainedWorktreeIntegrations = this.retainedWorktreeIntegrationSummary(
+            snapshot.team.taskId,
+            teamId,
+            execution.id,
+            isolation,
+          );
           return {
             attemptStartReason: latestAttempt?.startReason ?? null,
             lastProgressAt: latestAttempt?.lastProgressAt ?? null,
@@ -4818,7 +4903,8 @@ export class TeamCoordinator {
             missionStepOrdinal: missionStep?.ordinal ?? null,
             missionStepCount: mission?.steps.length ?? null,
             worktree: this.missionWorktreeSummary(execution.id),
-            isolation: this.executionIsolationSummary(execution.id),
+            isolation,
+            ...(retainedWorktreeIntegrations === null ? {} : { retainedWorktreeIntegrations }),
           };
         })(),
         id: execution.id,
