@@ -1152,8 +1152,9 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
-          await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId);
-          this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
+          // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
+          if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
+            this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
           const worker = this.persistence
             .getTeamSnapshot(team.id)
             .agents.find(({ id }) => id === completion.agentId);
@@ -1563,6 +1564,7 @@ export class TeamCoordinator {
         complete.mission.state === 'completed' ? 'done' : 'waiting',
       );
       if (worktree) await this.cleanupIntegratedMissionWorktree(worktree, worker.id);
+      // A Graph step saves no isolation completion, so a cleanup it could not record is not retried.
       if (isolation) await this.cleanupIntegratedExecutionIsolation(isolation, worker.id);
       if (complete.mission.state === 'completed') {
         for (const agent of this.persistence.getTeamSnapshot(execution.teamId).agents) {
@@ -2357,6 +2359,8 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
+          // A Graph step saves no isolation completion, so a cleanup it could not record is not
+          // retried.
           if (isolation !== null)
             await this.cleanupIntegratedExecutionIsolation(isolation, hold.agentId);
           else if (worktree !== null)
@@ -2447,8 +2451,9 @@ export class TeamCoordinator {
           to: 'completed',
           now: this.isoNow(),
         });
-        await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId);
-        this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
+        // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
+        if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
+          this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
         const worker = this.persistence
           .getTeamSnapshot(team.id)
           .agents.find(({ id }) => id === completion.agentId);
@@ -3393,6 +3398,8 @@ export class TeamCoordinator {
       }
       let nextMissionExecutionId: string | null = null;
       let completedMission = false;
+      // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
+      let cleanupRecorded = true;
       if (mission !== null && completion.value.status === 'succeeded') {
         const checkpointResult = this.persistence.completeTeamMissionStep({
           executionId: input.executionId,
@@ -3422,7 +3429,10 @@ export class TeamCoordinator {
         if (missionWorktree !== null)
           await this.cleanupIntegratedMissionWorktree(missionWorktree, worker.id);
         if (executionIsolation !== null)
-          await this.cleanupIntegratedExecutionIsolation(executionIsolation, worker.id);
+          cleanupRecorded = await this.cleanupIntegratedExecutionIsolation(
+            executionIsolation,
+            worker.id,
+          );
       } else {
         this.persistence.completeTeamTaskWithReport({
           teamTaskId: input.teamTaskId,
@@ -3456,9 +3466,12 @@ export class TeamCoordinator {
           executionIsolation !== null &&
           completion.value.status === 'succeeded'
         )
-          await this.cleanupIntegratedExecutionIsolation(executionIsolation, worker.id);
+          cleanupRecorded = await this.cleanupIntegratedExecutionIsolation(
+            executionIsolation,
+            worker.id,
+          );
       }
-      if (executionIsolation?.phase === 'completed')
+      if (executionIsolation?.phase === 'completed' && cleanupRecorded)
         this.persistence.deleteTeamExecutionIsolationCompletion(input.executionId);
       this.persistWorkerResult(
         input.teamId,
@@ -5441,63 +5454,71 @@ export class TeamCoordinator {
    * integration is never removed. Once all were tried, the isolation and only the repositories left
    * are quarantined in one write, since a completed isolation must have every repository integrated
    * or cleaned. Each keeps its integrated HEAD, so the Team screen shows its change as integrated and
-   * lists the worktree to inspect or discard (issue #544), and the reason says so in Japanese. A crash
-   * before that write leaves the repository integrated in a completed isolation, as before, which
-   * the startup recovery retries while the execution's completion is still saved.
+   * lists the worktree to inspect or discard (issue #544), and the reason says so in Japanese.
    *
    * Nothing is thrown: the Worker's result and the integration are already recorded, and callers
-   * go on to report them.
+   * go on to report them. Returns whether every outcome was recorded. False means a write to the
+   * isolation failed, so it may still say completed with a repository integrated whose worktree was
+   * removed or kept. The caller then keeps the execution's saved completion, as a crash before the
+   * cleanup would, so the startup recovery tries the cleanup again and records it. A Graph Mission
+   * step saves no completion, so nothing retries its cleanup after either.
    */
   private async cleanupIntegratedExecutionIsolation(
     isolation: TeamExecutionIsolationRecord,
     agentId: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const worktreeManager = this.worktreeManager;
-    if (worktreeManager === undefined) return;
-    try {
-      const kept = new Map<number, string>();
-      for (const repository of isolation.repositories) {
-        if (repository.state === 'cleaned') continue;
-        let removed: boolean;
-        try {
-          removed =
-            (
-              await worktreeManager.cleanup({
-                agentId,
-                worktreeId: isolationWorktreeId(isolation.executionId, repository.ordinal),
-                repoPath: repository.repoPath,
-              })
-            ).outcome === 'removed';
-          if (!removed) kept.set(repository.ordinal, INTEGRATED_WORKTREE_KEPT);
-        } catch (error) {
-          removed = false;
-          kept.set(repository.ordinal, integratedWorktreeCleanupError(error));
+    if (worktreeManager === undefined) return true;
+    let recorded = true;
+    const kept = new Map<number, string>();
+    for (const repository of isolation.repositories) {
+      if (repository.state === 'cleaned') continue;
+      try {
+        const { outcome } = await worktreeManager.cleanup({
+          agentId,
+          worktreeId: isolationWorktreeId(isolation.executionId, repository.ordinal),
+          repoPath: repository.repoPath,
+        });
+        if (outcome !== 'removed') {
+          kept.set(repository.ordinal, INTEGRATED_WORKTREE_KEPT);
+          continue;
         }
-        if (!removed) continue;
+      } catch (error) {
+        kept.set(repository.ordinal, integratedWorktreeCleanupError(error));
+        continue;
+      }
+      try {
         // Re-read after the Git await, so a concurrent update to this isolation is not reverted.
         const latest = this.persistence.getTeamExecutionIsolation(isolation.executionId);
         const latestRepository = latest?.repositories.find(
           ({ ordinal }) => ordinal === repository.ordinal,
         );
-        if (latest === null || latestRepository === undefined) return;
-        if (latestRepository.state === 'cleaned') continue;
-        this.persistence.updateTeamExecutionIsolation({
-          executionId: latest.executionId,
-          phase: latest.phase,
-          repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
-            ...latestRepository,
-            state: 'cleaned',
-          }),
-          now: this.isoNow(),
-        });
+        if (
+          latest !== null &&
+          latestRepository !== undefined &&
+          latestRepository.state !== 'cleaned'
+        )
+          this.persistence.updateTeamExecutionIsolation({
+            executionId: latest.executionId,
+            phase: latest.phase,
+            repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
+              ...latestRepository,
+              state: 'cleaned',
+            }),
+            now: this.isoNow(),
+          });
+      } catch {
+        recorded = false;
       }
-      if (kept.size === 0) return;
+    }
+    if (kept.size === 0) return recorded;
+    try {
       const latest = this.persistence.getTeamExecutionIsolation(isolation.executionId);
-      if (latest === null) return;
+      if (latest === null) return recorded;
       const left = latest.repositories.filter(
         ({ ordinal, state }) => kept.has(ordinal) && state !== 'cleaned',
       );
-      if (left.length === 0) return;
+      if (left.length === 0) return recorded;
       // A canceled preflight never integrated, so its own quarantine reason stays.
       const integrated = left.find(({ integratedHead }) => integratedHead !== null);
       this.persistence.updateTeamExecutionIsolation({
@@ -5514,9 +5535,9 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
     } catch {
-      // Only recording the cleanup failed. The integration stands and the worktree stays on disk; an
-      // exception here would turn the finished Worker into a failed one.
+      return false;
     }
+    return recorded;
   }
 
   private async recoverIntegratedWorktreeCleanup(): Promise<void> {
@@ -5539,7 +5560,9 @@ export class TeamCoordinator {
             throw new Error('Recorded worktree path is not owned by Sprint Coder');
         }
         const verified = await this.revalidateIntegratedIsolation(isolation);
-        await this.cleanupIntegratedExecutionIsolation(verified, completion.agentId);
+        // An outcome that could not be recorded keeps the completion, so the next launch retries.
+        if (!(await this.cleanupIntegratedExecutionIsolation(verified, completion.agentId)))
+          continue;
         const current = this.persistence.getTeamExecutionIsolation(isolation.executionId);
         if (current?.repositories.every(({ state }) => state === 'cleaned')) {
           this.persistence.deleteTeamExecutionIsolationCompletion(isolation.executionId);

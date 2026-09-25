@@ -2220,50 +2220,150 @@ if (runsWithElectronAbi)
       90_000,
     );
 
-    it('keeps the Worker result when recording a failed integrated cleanup fails too (issue #569)', async () => {
-      const persistence = createPersistence();
-      const task = persistence.createTask('Integrated cleanup record failure');
-      const runtime = new WorktreeWritingRuntime();
-      const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
-      const manager = new WorkerWorktreeManager({
-        worktreesRoot,
-        platform: 'win32',
-        delay: async () => undefined,
-        treeRemovalFs: failingUnlinkFs((path) => basename(path) === 'worker-output.txt', 'EBUSY'),
-      });
-      const update = persistence.updateTeamExecutionIsolation.bind(persistence);
-      vi.spyOn(persistence, 'updateTeamExecutionIsolation').mockImplementation((input) => {
-        if (input.phase === 'quarantined')
-          throw new Error('simulated database failure while recording the cleanup');
-        return update(input);
-      });
-      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
-      const writer = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'writer',
-        objective: 'write the Workspace',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-      });
-      const submission = await coordinator.assignTask({
-        taskId: task.id,
-        targetAgentId: writer.id,
-        content: 'write the Workspace',
-        doneCriteria: ['output integrated'],
-        accessMode: 'workspace-write',
-      });
-      await waitFor(
-        () =>
-          coordinator.get(task.id)?.workers.find(({ id }) => id === writer.id)?.state === 'done',
-        20_000,
-      );
-      expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
-      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
-        { state: 'completed' },
-      ]);
-      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
-      persistence.close();
-    }, 30_000);
+    it.each([
+      { after: 'a Worker completion', lockedAtLastLaunch: true },
+      { after: 'an integration resume', lockedAtLastLaunch: false },
+    ] as const)(
+      'keeps the completion when recording the cleanup after $after fails, so a later launch retries it (issue #569)',
+      async ({ after, lockedAtLastLaunch }) => {
+        const databaseDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-cleanup-record-'));
+        cleanup.push(databaseDirectory);
+        const databasePath = join(databaseDirectory, 'test.sqlite3');
+        let persistence = new SqlitePersistenceClient(databasePath);
+        const task = persistence.createTask(`Integrated cleanup record failure after ${after}`);
+        const runtime = new WorktreeWritingRuntime();
+        const { workspace, worktreesRoot } = configureGitWorkspace(persistence, task.id);
+        // Windows refuses to delete the first file removal reaches, so the worktree stays whole.
+        const locked = {
+          worktreesRoot,
+          platform: 'win32' as const,
+          delay: async () => undefined,
+          treeRemovalFs: failingUnlinkFs(
+            (file) => dirname(dirname(file)) === worktreesRoot,
+            'EBUSY',
+          ),
+        };
+        // Recording the kept worktree fails, as a full disk or a busy database would make it.
+        let refused = 0;
+        const refuseCleanupRecord = (client: SqlitePersistenceClient) => {
+          const update = client.updateTeamExecutionIsolation.bind(client);
+          vi.spyOn(client, 'updateTeamExecutionIsolation').mockImplementation((input) => {
+            if (
+              input.phase === 'quarantined' &&
+              input.reason?.startsWith('統合したworktreeを片付けられませんでした') === true
+            ) {
+              refused += 1;
+              throw new Error('simulated database failure while recording the cleanup');
+            }
+            return update(input);
+          });
+        };
+        refuseCleanupRecord(persistence);
+        const coordinator = coordinatorWithWorktrees(
+          persistence,
+          runtime,
+          after === 'an integration resume'
+            ? new FailRepositoryOnceManager(locked, 1)
+            : new WorkerWorktreeManager(locked),
+        );
+        const writer = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'writer',
+          objective: 'write the Workspace',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        const { executionId } = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: writer.id,
+          content: 'write the Workspace',
+          doneCriteria: ['output integrated'],
+          accessMode: 'workspace-write',
+        });
+        if (after === 'an integration resume') {
+          await waitFor(
+            () => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+            15_000,
+          );
+          await coordinator.resumeExecutionIntegration(task.id, executionId);
+        } else
+          await waitFor(
+            () =>
+              coordinator.get(task.id)?.workers.find(({ id }) => id === writer.id)?.state ===
+              'done',
+            20_000,
+          );
+        expect(refused).toBe(1);
+        // The Worker's result and the integration stand...
+        expect(persistence.getTeamExecution(executionId).state).toBe('completed');
+        expect(persistence.listTeamAttempts(executionId)).toMatchObject([{ state: 'completed' }]);
+        expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+        // ...and so does the saved completion, which the startup recovery retries the cleanup from.
+        const unrecorded = persistence.getTeamExecutionIsolation(executionId)!;
+        const worktreePath = unrecorded.repositories[0]!.worktreePath;
+        expect(unrecorded).toMatchObject({
+          phase: 'completed',
+          repositories: [{ state: 'integrated', integratedHead: gitHead(workspace) }],
+        });
+        expect(persistence.getTeamExecutionIsolationCompletion(executionId)).not.toBeNull();
+        expect(existsSync(join(worktreePath, 'worker-output.txt'))).toBe(true);
+        persistence.close();
+
+        const launch = (refuse: boolean, manager: WorkerWorktreeManager): TeamCoordinator => {
+          persistence = new SqlitePersistenceClient(databasePath);
+          if (refuse) refuseCleanupRecord(persistence);
+          persistence.initializeMutationRecovery(
+            `cleanup-record-${randomUUID()}`,
+            '2026-08-08T10:00:00.000Z',
+          );
+          const relaunched = coordinatorWithWorktrees(persistence, runtime, manager);
+          relaunched.recoverOnStartup();
+          return relaunched;
+        };
+        // A launch whose recovery cannot record the cleanup either leaves both for the next one.
+        launch(true, new WorkerWorktreeManager(locked));
+        await waitFor(() => refused === 2, 15_000);
+        expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+          phase: 'completed',
+          repositories: [{ state: 'integrated' }],
+        });
+        expect(persistence.getTeamExecutionIsolationCompletion(executionId)).not.toBeNull();
+        persistence.close();
+
+        if (lockedAtLastLaunch) {
+          // Still locked: the recovery records the worktree as kept, in words, and lists it.
+          const recovered = launch(false, new WorkerWorktreeManager(locked));
+          await waitFor(
+            () => persistence.getTeamExecutionIsolation(executionId)?.phase === 'quarantined',
+            15_000,
+          );
+          const kept = persistence.getTeamExecutionIsolation(executionId)!;
+          expect(kept.repositories).toMatchObject([
+            { state: 'quarantined', integratedHead: gitHead(workspace) },
+          ]);
+          expect(kept.reason).toContain('統合したworktreeを片付けられませんでした');
+          expect(existsSync(worktreePath)).toBe(true);
+          await expect(recovered.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+            total: 1,
+            worktrees: [{ executionId, integration: 'confirmed', discardable: true }],
+          });
+        } else {
+          // Released: the recovery removes the worktree and drops the completion.
+          launch(false, new WorkerWorktreeManager({ worktreesRoot }));
+          await waitFor(
+            () => persistence.getTeamExecutionIsolationCompletion(executionId) === null,
+            15_000,
+          );
+          expect(persistence.getTeamExecutionIsolation(executionId)).toMatchObject({
+            phase: 'completed',
+            repositories: [{ state: 'cleaned' }],
+          });
+          expect(existsSync(worktreePath)).toBe(false);
+        }
+        persistence.close();
+      },
+      60_000,
+    );
 
     it('runs three same-repository writers concurrently and integrates three FIFO commits', async () => {
       const persistence = createPersistence();
