@@ -35,7 +35,7 @@ import {
   workerWriteFailure,
   type WorkerWriteObservation,
 } from './team-worker-runtime';
-import { ToolAuthorizationDeniedError } from './tool-broker';
+import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
 import { redactSecrets } from './secret-redactor';
 import { removeSealedGuidancePrefix } from '../runtime-host/execution-payload';
 import { ProviderStreamBudget } from './provider-stream-budget';
@@ -85,6 +85,8 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     worker: AgentRecord;
     executionId: string;
     workspaceSet: RuntimeWorkspaceSet;
+    /** The execution's `onApprovalWait`, bound to this session's tool calls (issue #573). */
+    onApprovalWait?: ApprovalWaitObserver;
   }): Promise<{
     tools: readonly ProviderTool[];
     execute(name: string, input: unknown, signal: AbortSignal): Promise<unknown>;
@@ -137,6 +139,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     priorConversation?: readonly TeamRuntimeConversationItem[];
     doneCriteria?: readonly string[];
     onEvent?: (event: WorkerActivityEvent) => void;
+    onApprovalWait?: ApprovalWaitObserver;
     signal?: AbortSignal;
   }): Promise<WorkerRuntimeResult> {
     if (
@@ -193,6 +196,7 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
             worker: input.worker,
             executionId,
             workspaceSet: input.workspaceSet,
+            ...(input.onApprovalWait === undefined ? {} : { onApprovalWait: input.onApprovalWait }),
           });
     if (input.worker.writeCapable && managedToolSession === undefined)
       throw new Error(

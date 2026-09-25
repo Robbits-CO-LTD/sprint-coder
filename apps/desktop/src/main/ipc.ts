@@ -645,6 +645,7 @@ export function shouldStartNextQueuedAfterCancel(
 import { createEditBaselines, type EditBaselines } from './edit-baseline';
 import {
   ToolAuthorizationDeniedError,
+  type ApprovalWaitObserver,
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
 } from './tool-broker';
@@ -1106,6 +1107,11 @@ export class IpcRouter {
        * ToolBroker は実行前の中断確認で書き込みを実行しない。
        */
       released: AbortController;
+      /**
+       * The Worker execution's watchdog observer (issue #573): each managed tool call of this Turn
+       * that waits on an Approval Card tells it, so the wait does not count as the Worker idling.
+       */
+      onApprovalWait?: ApprovalWaitObserver;
     }>
   >();
   private readonly managedWorkerCall = new Map<
@@ -1455,7 +1461,16 @@ export class IpcRouter {
       },
       availability: this.teamRuntimeAvailability,
       workspaceFor: (taskId) => this.persistence.getWorkspace(taskId),
-      catalogFor: (kind, taskId, runtimeTurnId, workspace, worker, writeScope, executionId) =>
+      catalogFor: (
+        kind,
+        taskId,
+        runtimeTurnId,
+        workspace,
+        worker,
+        writeScope,
+        executionId,
+        onApprovalWait,
+      ) =>
         this.prepareWorkerManagedCatalog(
           kind,
           taskId,
@@ -1464,6 +1479,7 @@ export class IpcRouter {
           worker.canDelegate,
           writeScope,
           executionId,
+          onApprovalWait,
         ),
       authorizeEgress: (kind, taskId, turnId, prompt, context, knownWorkspaceRoots) => {
         const authorize =
@@ -1549,7 +1565,7 @@ export class IpcRouter {
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
       managedToolsConnectionId: MANAGED_LOCAL_CONNECTION_ID,
-      prepareManagedTools: async ({ worker, executionId, workspaceSet }) => {
+      prepareManagedTools: async ({ worker, executionId, workspaceSet, onApprovalWait }) => {
         const modelId = worker.modelSelection.requestedModel;
         if (modelId === null || this.managedLocal === null)
           throw new Error('Managed Local Worker model selection is incomplete');
@@ -1569,6 +1585,7 @@ export class IpcRouter {
           worker.canDelegate,
           worker.writeCapable ? 'workspace-write' : 'read-only',
           executionId,
+          onApprovalWait,
         );
         return {
           tools: providerToolsFromSnapshot(snapshot),
@@ -5443,6 +5460,8 @@ export class IpcRouter {
         // A Worker call also ends with its Worker Turn (issue #525). Team MCP hands this path a
         // signal nothing aborts, and a write can wait on an Approval Card past the Worker's end.
         signal: worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]),
+        // Main's own binding for the Turn, never anything in the call's input (issue #573).
+        ...(worker?.onApprovalWait === undefined ? {} : { onApprovalWait: worker.onApprovalWait }),
       });
     } catch (error) {
       // A policy denial never reaches the result path below. Tell the Worker runtime, so a write
@@ -7384,6 +7403,7 @@ export class IpcRouter {
     canDelegate: boolean,
     writeScope: 'read-only' | 'workspace-write' | 'full',
     executionId?: string,
+    onApprovalWait?: ApprovalWaitObserver,
   ): Promise<ToolCatalogSnapshot> {
     try {
       return await this.buildWorkerManagedCatalog(
@@ -7394,6 +7414,7 @@ export class IpcRouter {
         canDelegate,
         writeScope,
         executionId,
+        onApprovalWait,
       );
     } catch (error) {
       secureLogger.error(
@@ -7419,6 +7440,7 @@ export class IpcRouter {
     canDelegate: boolean,
     writeScope: 'read-only' | 'workspace-write' | 'full',
     executionId?: string,
+    onApprovalWait?: ApprovalWaitObserver,
   ): Promise<ToolCatalogSnapshot> {
     const owner = workerManagedCatalogOwner(
       this.persistence,
@@ -7505,6 +7527,7 @@ export class IpcRouter {
       workspace,
       mutationBindings,
       released: new AbortController(),
+      ...(onApprovalWait === undefined ? {} : { onApprovalWait }),
     });
     return snapshot;
   }

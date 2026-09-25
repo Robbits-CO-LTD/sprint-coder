@@ -32,6 +32,7 @@ import {
 } from '../runtime-host/protocol';
 import { compilePromptGuidance, injectPromptGuidance } from './prompt-context';
 import { readWorkerCriteriaReport, workerCriteriaPrompt } from './team-worker-criteria';
+import type { ApprovalWaitObserver } from './tool-broker';
 import { workerWriteLimitNotice, workspaceWriteLimitsFromTools } from './workspace-write-limits';
 
 // Real Worker execution (Phase 7 follow-up: "Team must work without mocks"). Each dispatched
@@ -87,6 +88,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     writeScope: RuntimeWriteScope,
     /** Present for Team Execution dispatches; Main resolves the owning Mission from it. */
     executionId?: string,
+    /** The execution's `onApprovalWait`, bound to this Turn's managed tool calls (issue #573). */
+    onApprovalWait?: ApprovalWaitObserver,
   ) => unknown | Promise<unknown>;
   /** Provider egress gate; returns false when policy denies the dispatch. */
   authorizeEgress: (
@@ -462,6 +465,7 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
       input.worker,
       writeScope,
       input.executionId,
+      input.onApprovalWait,
     );
     // `catalogFor` has now registered this Turn with Main, so every exit below — including a
     // guidance or serialization throw before the CLI ever starts — must run the release. A Graph

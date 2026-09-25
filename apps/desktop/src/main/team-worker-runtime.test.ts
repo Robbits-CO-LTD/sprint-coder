@@ -1483,6 +1483,28 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     },
   );
 
+  it("binds the execution's approval-wait observer to the Turn whose managed catalog it prepares (issue #573)", async () => {
+    runtimeHostMock.starts.length = 0;
+    const catalogFor = vi.fn((..._args: unknown[]) => ({ tools: [] }));
+    const onApprovalWait = () => () => undefined;
+    const subject = runtime({ catalogFor });
+
+    await subject.execute({
+      worker: worker(false),
+      envelope: { ...envelope, targetAgentId: 'worker-1' },
+      executionId: 'execution-approval-wait',
+      content: '実装する',
+      onApprovalWait,
+    });
+
+    expect(catalogFor).toHaveBeenCalledOnce();
+    const [, , turnId, , , , executionId, observer] = catalogFor.mock.calls[0]!;
+    expect(turnId).toBe(runtimeHostMock.starts[0]?.args[1]);
+    expect(executionId).toBe('execution-approval-wait');
+    expect(observer).toBe(onApprovalWait);
+    subject.dispose();
+  });
+
   it('places the Agent own prior Team conversation before a tool-prohibited final instruction', async () => {
     runtimeHostMock.starts.length = 0;
     const subject = runtime();

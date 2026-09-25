@@ -208,6 +208,7 @@ import { ToolImageBridge } from './tool-image-bridge';
 import {
   ToolAuthorizationDeniedError,
   ToolBroker,
+  type ApprovalWaitObserver,
   type ToolAuthorizationDecision,
   type ToolAuthorizationRequest,
   type ToolAuthorizer,
@@ -2819,6 +2820,7 @@ describe('Main image attachment dispatch boundary', () => {
       canDelegate: boolean,
       writeScope: 'read-only' | 'workspace-write' | 'full',
       executionId?: string,
+      onApprovalWait?: ApprovalWaitObserver,
     ) => Promise<{ digest: string }>;
     const releaseManagedWorkerTurn = Reflect.get(
       IpcRouter.prototype,
@@ -3090,6 +3092,205 @@ describe('Main image attachment dispatch boundary', () => {
       expect(cards.get(cardB.id)).toMatchObject({ state: 'canceled', decision: null });
       expect(recordManagedToolDenied).not.toHaveBeenCalled();
       expect(execute).not.toHaveBeenCalled();
+    });
+
+    it("tells each Worker's watchdog about its own calls' cards only, for CLI and Managed Local Workers (issue #573)", async () => {
+      type Card = { id: string; turnId: string; callId: string; challenge: string; state: string };
+      const cards = new Map<string, Card>();
+      const settle = (id: string, state: string) => {
+        const card = { ...cards.get(id)!, state };
+        cards.set(id, card);
+        return {
+          approval: { ...card, taskId: 'task-1', policyEpoch: 9, revision: 1, decision: null },
+        };
+      };
+      const coordinator = new ApprovalCoordinator({
+        persistence: {
+          requestApproval: (input) => {
+            cards.set(input.id, { ...input, state: 'pending' });
+            return {
+              approval: { ...input, state: 'pending', revision: 0, decision: null },
+            };
+          },
+          getApproval: (_taskId, approvalId) => {
+            const card = cards.get(approvalId);
+            return card === undefined
+              ? undefined
+              : { ...card, taskId: 'task-1', policyEpoch: 9, revision: 0, decision: null };
+          },
+          resolveApproval: (input) => ({
+            ...settle(input.approvalId, 'resolved'),
+            oneTimePermitToken: `permit:${input.approvalId}`,
+          }),
+          cancelPendingApprovalForCall: (input) => settle(input.approvalId, 'canceled'),
+        },
+        now: () => '2026-09-26T00:00:00.000Z',
+        expiresAt: () => '2026-09-26T01:00:00.000Z',
+        getCurrentPolicyEpoch: () => 9,
+        isTurnActive: () => true,
+        // Policy allows a write to auto.txt outright, so that one raises no card.
+        evaluatePermission: ({ request }) =>
+          (request.input as { path?: unknown }).path === 'auto.txt'
+            ? { decision: 'allow', reason: 'policy_allow', beforeExecute: () => true }
+            : 'approval_required',
+        publish: () => undefined,
+      });
+      const { router, broker, execute, call } = await workerWriteAwaitingApproval(
+        coordinator.authorizeTool.bind(coordinator),
+      );
+      const observed = () => {
+        const waits = { begun: 0, ended: 0 };
+        const observe: ApprovalWaitObserver = () => {
+          waits.begun += 1;
+          return () => {
+            waits.ended += 1;
+          };
+        };
+        return { waits, observe };
+      };
+      const cli = observed();
+      const local = observed();
+      const workspace = { primaryRootId: null, digest: 'x'.repeat(64), roots: [] as never[] };
+      // A CLI Worker's Turn, keyed by its runtime Turn id, and a Managed Local Worker's session,
+      // keyed by its execution id, each bound to its own execution's observer.
+      const cliCatalog = await prepareWorkerManagedCatalog.call(
+        router,
+        'codex',
+        'task-1',
+        'runtime-cli',
+        workspace,
+        false,
+        'workspace-write',
+        'execution-cli',
+        cli.observe,
+      );
+      const localCatalog = await prepareWorkerManagedCatalog.call(
+        router,
+        'provider',
+        'task-1',
+        'execution-local',
+        workspace,
+        false,
+        'workspace-write',
+        'execution-local',
+        local.observe,
+      );
+      const handlers = createHandlers.call(router) as unknown as {
+        cliTeam(
+          taskId: string,
+          turnId: string,
+          request: { callId: string; toolName: string; arguments: unknown; catalogDigest: string },
+          signal: AbortSignal,
+        ): Promise<unknown>;
+        teamMcp: ReturnType<typeof createHandlers>['teamMcp'];
+        providerWorker(
+          taskId: string,
+          turnId: string,
+          catalogDigest: string,
+          toolName: string,
+          input: unknown,
+          signal: AbortSignal,
+        ): Promise<unknown>;
+      };
+      const write = (path: string) => ({ path, content: 'hello' });
+      const signal = new AbortController().signal;
+      const cliCall = (callId: string, path: string) =>
+        handlers.cliTeam(
+          'task-1',
+          'runtime-cli',
+          {
+            callId,
+            toolName: 'create_file',
+            arguments: write(path),
+            catalogDigest: cliCatalog.digest,
+          },
+          signal,
+        );
+
+      // A write policy allows raises no card, so nothing waits on the user. Calls of one parent Turn
+      // finish in the order they came, so this one goes first rather than behind the cards.
+      await expect(cliCall('call-auto', 'auto.txt')).resolves.toEqual({});
+      expect(cli.waits).toEqual({ begun: 0, ended: 0 });
+
+      // Each call's outcome is taken as it settles, whatever the order its assertion comes in.
+      const outcome = (pending: Promise<unknown>) =>
+        pending.then(
+          () => 'written',
+          (error: unknown) => (error as Error).message,
+        );
+      // The CLI Turn's calls through the Runtime Host (Codex) and through Team MCP (Claude, Grok).
+      const cliDirect = outcome(cliCall('call-1', 'a.txt'));
+      const cliMcp = outcome(
+        handlers.teamMcp(write('b.txt'), {
+          taskId: 'task-1',
+          turnId: 'runtime-cli',
+          callId: 'call-2',
+          toolName: 'create_file',
+          catalogDigest: cliCatalog.digest,
+        }),
+      );
+      const localWrite = outcome(
+        handlers.providerWorker(
+          'task-1',
+          'execution-local',
+          localCatalog.digest,
+          'create_file',
+          write('c.txt'),
+          signal,
+        ),
+      );
+      // A Worker Turn bound without an observer, and the Leader itself, wait on cards too.
+      const unobserved = outcome(call('call-3'));
+      const leader = outcome(
+        broker.dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-parent',
+          callId: 'leader-call',
+          providerName: 'create_file',
+          input: write('d.txt'),
+        }),
+      );
+      await vi.waitFor(() => expect(cards.size).toBe(5));
+      expect(cli.waits).toEqual({ begun: 2, ended: 0 });
+      expect(local.waits).toEqual({ begun: 1, ended: 0 });
+
+      // A wait ends as soon as its card settles, while the call itself still finishes in turn.
+      const brokerCallId = (runtimeTurnId: string) =>
+        createHash('sha256').update(runtimeTurnId).digest('hex').slice(0, 16);
+      const cardOf = (prefix: string) =>
+        [...cards.values()].find(({ callId }) => callId.startsWith(prefix))!;
+      const decide = (card: Card, decision: 'allow_once' | 'deny') =>
+        coordinator.resolve({
+          taskId: 'task-1',
+          turnId: 'turn-parent',
+          approvalId: card.id,
+          decision,
+          expectedRevision: 0,
+          challenge: card.challenge,
+          operationId: `decide-${card.id}`,
+        });
+
+      decide(cardOf(`${brokerCallId('runtime-cli')}:call-1`), 'allow_once');
+      await vi.waitFor(() => expect(cli.waits).toEqual({ begun: 2, ended: 1 }));
+      expect(await cliDirect).toBe('written');
+
+      // Releasing the Managed Local session withdraws its card (issue #572), ending its wait.
+      releaseManagedWorkerTurn.call(router, 'execution-local');
+      await vi.waitFor(() => expect(local.waits).toEqual({ begun: 1, ended: 1 }));
+      expect(cli.waits).toEqual({ begun: 2, ended: 1 });
+
+      decide(cardOf(`${brokerCallId('runtime-cli')}:call-2`), 'deny');
+      await vi.waitFor(() => expect(cli.waits).toEqual({ begun: 2, ended: 2 }));
+
+      decide(cardOf('leader-call'), 'deny');
+      releaseManagedWorkerTurn.call(router, 'runtime-worker');
+      expect(await cliMcp).toContain('Tool authorization deny');
+      expect(await localWrite).toContain('Team Worker Turn ended');
+      expect(await unobserved).toContain('Team Worker Turn ended');
+      expect(await leader).toContain('Tool authorization deny');
+      expect(cli.waits).toEqual({ begun: 2, ended: 2 });
+      expect(local.waits).toEqual({ begun: 1, ended: 1 });
+      expect(execute).toHaveBeenCalledTimes(2);
     });
   });
 });

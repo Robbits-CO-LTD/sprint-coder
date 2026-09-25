@@ -49,6 +49,7 @@ import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-c
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
+import type { ApprovalWaitObserver } from './tool-broker';
 import type { RuntimeFailureDiagnostic, RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const cleanup: string[] = [];
@@ -904,6 +905,37 @@ class ConfirmedStopWorkerRuntime extends TestWorkerRuntime {
   }
 }
 
+/**
+ * A Worker whose managed tool call waits on an Approval Card nobody answers, while its runtime
+ * keeps heartbeating (issue #573). It stops when its execution is aborted.
+ */
+class ApprovalWaitingWorkerRuntime extends TestWorkerRuntime {
+  waitsBegun = 0;
+  waitsEnded = 0;
+
+  override async execute(input: Parameters<TeamWorkerRuntime['execute']>[0]): Promise<never> {
+    const endWait = input.onApprovalWait?.();
+    if (endWait !== undefined) this.waitsBegun += 1;
+    const heartbeat = (): void =>
+      input.onEvent?.({ type: 'heartbeat', at: new Date().toISOString() });
+    heartbeat();
+    const timer = setInterval(heartbeat, 20);
+    try {
+      return await new Promise<never>((_resolve, reject) => {
+        const stopped = (): void => reject(new Error('Worker execution stopped'));
+        if (input.signal?.aborted === true) stopped();
+        else input.signal?.addEventListener('abort', stopped, { once: true });
+      });
+    } finally {
+      clearInterval(timer);
+      if (endWait !== undefined) {
+        endWait();
+        this.waitsEnded += 1;
+      }
+    }
+  }
+}
+
 class FailOnceWorkerRuntime extends TestWorkerRuntime {
   readonly contents: string[] = [];
   executeCount = 0;
@@ -1114,6 +1146,162 @@ describe('executeWithWatchdog', () => {
     await vi.advanceTimersByTimeAsync(30 * 60_000);
     await rejected;
     expect(stops).toBe(1);
+  });
+
+  describe('while a managed tool call waits on an Approval Card (issue #573)', () => {
+    /** A live runtime that only heartbeats, the way a CLI blocked on a tool result does. */
+    function heartbeatOnly(
+      observe: (event: WorkerActivityEvent) => void,
+      signal: AbortSignal,
+    ): Promise<never> {
+      const timer = setInterval(
+        () => observe({ type: 'heartbeat', at: new Date().toISOString() }),
+        15_000,
+      );
+      signal.addEventListener('abort', () => clearInterval(timer), { once: true });
+      return new Promise<never>(() => undefined);
+    }
+    const progress = (observe: (event: WorkerActivityEvent) => void): void =>
+      observe({ type: 'activity', phase: 'executing', label: 'read_file', at: '' });
+
+    /**
+     * `stop` is called synchronously when a deadline expires, so it tells whether one has; the
+     * rejection says which.
+     */
+    function watch(
+      execute: Parameters<typeof executeWithWatchdog<never>>[0]['execute'],
+      hardTimeoutMs = 60 * 60_000,
+    ) {
+      const stop = vi.fn(async () => undefined);
+      const pending = executeWithWatchdog({ execute, hardTimeoutMs, stop });
+      return { stop, pending, expired: pending.catch((error: unknown) => error) };
+    }
+
+    it('stops the idle clock while the card waits and goes on with the budget it had left', async () => {
+      vi.useFakeTimers();
+      let approvalWait!: ApprovalWaitObserver;
+      const { stop, expired } = watch((observe, signal, onApprovalWait) => {
+        approvalWait = onApprovalWait;
+        return heartbeatOnly(observe, signal);
+      });
+
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      const endWait = approvalWait();
+      // Well past the 15 minute idle limit, all of it waiting on the user.
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(stop).not.toHaveBeenCalled();
+
+      endWait();
+      // The 10 minutes the idle budget had left when the card came up, not a fresh 15.
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+      expect(stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await expired).toMatchObject({ code: 'idle_timeout' });
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('does not idle out a card waiting past 15 minutes, but still ends the step at its 30 minute hard deadline', async () => {
+      vi.useFakeTimers();
+      let endWait!: () => void;
+      const { stop, expired } = watch((observe, signal, onApprovalWait) => {
+        endWait = onApprovalWait();
+        return heartbeatOnly(observe, signal);
+      }, 30 * 60_000);
+
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+      expect(stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(14 * 60_000);
+      expect(await expired).toMatchObject({ code: 'hard_timeout' });
+      expect(stop).toHaveBeenCalledOnce();
+
+      // Stopping the Worker withdraws its card (issue #572); that late end starts no clock.
+      endWait();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('still ends a step whose runtime stops heartbeating while the card waits', async () => {
+      vi.useFakeTimers();
+      const { stop, expired } = watch((_observe, _signal, onApprovalWait) => {
+        onApprovalWait();
+        return new Promise<never>(() => undefined);
+      });
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(await expired).toMatchObject({ code: 'heartbeat_timeout' });
+      expect(stop).toHaveBeenCalledOnce();
+    });
+
+    it('keeps the clock stopped until every open wait has ended, counting each end once', async () => {
+      vi.useFakeTimers();
+      let approvalWait!: ApprovalWaitObserver;
+      const { stop, expired } = watch((observe, signal, onApprovalWait) => {
+        approvalWait = onApprovalWait;
+        return heartbeatOnly(observe, signal);
+      });
+      const endFirst = approvalWait();
+      const endSecond = approvalWait();
+
+      endFirst();
+      endFirst();
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(stop).not.toHaveBeenCalled();
+
+      endSecond();
+      await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+      expect(stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await expired).toMatchObject({ code: 'idle_timeout' });
+    });
+
+    it('refills the budget with progress made while a card waits, and starts the clock only once the wait ends', async () => {
+      vi.useFakeTimers();
+      let approvalWait!: ApprovalWaitObserver;
+      let observeEvent!: (event: WorkerActivityEvent) => void;
+      const { stop, expired } = watch((observe, signal, onApprovalWait) => {
+        approvalWait = onApprovalWait;
+        observeEvent = observe;
+        return heartbeatOnly(observe, signal);
+      });
+
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      const endWait = approvalWait();
+      await vi.advanceTimersByTimeAsync(60_000);
+      // Another call of the step finished meanwhile.
+      progress(observeEvent);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
+      expect(stop).not.toHaveBeenCalled();
+
+      endWait();
+      await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+      expect(stop).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await expired).toMatchObject({ code: 'idle_timeout' });
+    });
+
+    it('starts no timer for a wait that begins or ends after the step settled', async () => {
+      vi.useFakeTimers();
+      let approvalWait!: ApprovalWaitObserver;
+      let finish!: () => void;
+      const stop = vi.fn(async () => undefined);
+      const pending = executeWithWatchdog({
+        execute: (_observe, _signal, onApprovalWait) => {
+          approvalWait = onApprovalWait;
+          return new Promise<string>((resolve) => {
+            finish = () => resolve('done');
+          });
+        },
+        hardTimeoutMs: 30 * 60_000,
+        stop,
+      });
+      const endWait = approvalWait();
+
+      finish();
+      await expect(pending).resolves.toBe('done');
+      endWait();
+      approvalWait()();
+      expect(vi.getTimerCount()).toBe(0);
+      expect(stop).not.toHaveBeenCalled();
+    });
   });
 });
 
@@ -1345,6 +1533,52 @@ if (runsWithElectronAbi)
         { ordinal: 1, state: 'failed', startReason: 'initial' },
         { ordinal: 2, state: 'failed', startReason: 'automatic_retry' },
       ]);
+      persistence.close();
+    });
+
+    it('does not count a Worker waiting on an Approval Card as idle, and ends it at the hard deadline instead (issue #573)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Approval wait');
+      const runtime = new ApprovalWaitingWorkerRuntime();
+      // Every watchdog deadline is this step deadline here. The idle one is set before the hard
+      // one, so it is the one that expires unless the wait on the card stops it.
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        () => undefined,
+        () => new Date(),
+        300,
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'approval worker',
+        objective: 'wait on the card',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'write once the card is allowed',
+        doneCriteria: ['the write is approved'],
+      });
+
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        5_000,
+      );
+
+      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+        { ordinal: 1, state: 'failed', startReason: 'initial', terminalReason: 'hard_timeout' },
+        {
+          ordinal: 2,
+          state: 'failed',
+          startReason: 'automatic_retry',
+          terminalReason: 'hard_timeout',
+        },
+      ]);
+      expect(runtime.waitsBegun).toBe(2);
+      expect(runtime.waitsEnded).toBe(2);
       persistence.close();
     });
 

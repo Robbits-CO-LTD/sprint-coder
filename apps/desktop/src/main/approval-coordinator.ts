@@ -9,6 +9,7 @@ import type {
 } from '@sprint-coder/domain';
 import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
 import type {
+  ApprovalWaitObserver,
   ToolAuthorizationControl,
   ToolAuthorizationDecision,
   ToolAuthorizationRequest,
@@ -191,7 +192,11 @@ export class ApprovalCoordinator {
       }
       if (evaluation.decision.beforeExecute !== undefined)
         revalidators.push(evaluation.decision.beforeExecute);
-      const decision = await this.requestCapabilityApproval(request, evaluation.capability, signal);
+      const decision = await this.requestCapabilityApproval(
+        request,
+        evaluation.capability,
+        control,
+      );
       if (decision.decision !== 'allow') return decision;
       if (
         approvalDecision !== undefined &&
@@ -221,8 +226,9 @@ export class ApprovalCoordinator {
   private async requestCapabilityApproval(
     request: ToolAuthorizationRequest,
     capability: Capability,
-    signal: AbortSignal | undefined,
+    control: ToolAuthorizationControl | undefined,
   ): Promise<ToolAuthorizationDecision> {
+    const signal = control?.signal;
     // Before a Task grant is reused or a card is raised: an aborted call gets neither.
     throwIfAborted(signal);
     const requestDigest = digest({
@@ -299,6 +305,9 @@ export class ApprovalCoordinator {
       requestedAt: this.options.now(),
     });
 
+    // A card is now pending, so the call waits on the user until the card settles, whichever way
+    // it settles (issue #573).
+    const endApprovalWait = beginApprovalWait(control?.onApprovalWait, request);
     return new Promise<ToolAuthorizationDecision>((resolve, reject) => {
       const persistedId = persisted.approval.id;
       const settler: WaiterSettler = {
@@ -331,7 +340,7 @@ export class ApprovalCoordinator {
       }
       // An abort that landed before the listener existed never fires it.
       if (signal?.aborted === true) this.cancelForAbortedCall(persistedId);
-    });
+    }).finally(endApprovalWait);
   }
 
   private attachSettler(approvalId: string, waiter: Waiter, settler: WaiterSettler): void {
@@ -583,6 +592,37 @@ function abortReason(signal: AbortSignal): Error {
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted === true) throw abortReason(signal);
+}
+
+/**
+ * Tells the call's host that it now waits on the user, and returns what ends that wait. The host
+ * only observes: whatever its observer does, including throwing, neither decides nor fails the
+ * approval (issue #573).
+ */
+function beginApprovalWait(
+  observe: ApprovalWaitObserver | undefined,
+  request: ToolAuthorizationRequest,
+): () => void {
+  if (observe === undefined) return () => undefined;
+  const warn = (error: unknown): void =>
+    secureLogger.warn(
+      'The observer of an approval wait failed',
+      { callId: request.callId, error },
+      { taskId: request.context.taskId, turnId: request.context.turnId },
+    );
+  let end: (() => void) | undefined;
+  try {
+    end = observe();
+  } catch (error) {
+    warn(error);
+  }
+  return () => {
+    try {
+      end?.();
+    } catch (error) {
+      warn(error);
+    }
+  };
 }
 
 function normalizeAuthorization(

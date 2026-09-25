@@ -16,7 +16,16 @@ export type ToolDispatchRequest = {
   providerName: string;
   input: unknown;
   signal?: AbortSignal;
+  /** Handed to authorization as `ToolAuthorizationControl.onApprovalWait`. */
+  onApprovalWait?: ApprovalWaitObserver;
 };
+
+/**
+ * Host-only (issue #573). Called when a call starts waiting on the user's Approval Card; the
+ * function it returns is called once that wait ends, however it ends. A Team Worker's watchdog
+ * stops its idle clock in between, since that time is the user's, not the Worker's.
+ */
+export type ApprovalWaitObserver = () => () => void;
 
 type ToolDispatchResultConsumer = (result: unknown) => Promise<unknown> | unknown;
 
@@ -31,7 +40,10 @@ export type ToolAuthorizationRequest = Readonly<{
  * request is what approval facts, digests and audit records are built from, and an AbortSignal has
  * no place in any of them.
  */
-export type ToolAuthorizationControl = Readonly<{ signal?: AbortSignal }>;
+export type ToolAuthorizationControl = Readonly<{
+  signal?: AbortSignal;
+  onApprovalWait?: ApprovalWaitObserver;
+}>;
 export type ToolAuthorizationDecision = Readonly<{
   decision: 'allow' | 'deny' | 'approval_required';
   reason: string;
@@ -219,7 +231,8 @@ export class ToolBroker {
       let authorization: ToolAuthorizationDecision;
       try {
         // The signal goes along so a call abandoned while its Approval Card is open withdraws that
-        // card instead of leaving the Turn waiting on it (issue #572).
+        // card instead of leaving the Turn waiting on it (issue #572). The wait observer lets the
+        // caller tell that wait on the user apart from its own lack of progress (issue #573).
         authorization = await this.authorize(
           {
             context: bound.context,
@@ -227,7 +240,14 @@ export class ToolBroker {
             entry,
             input: pinnedInput,
           },
-          request.signal === undefined ? undefined : { signal: request.signal },
+          request.signal === undefined && request.onApprovalWait === undefined
+            ? undefined
+            : {
+                ...(request.signal === undefined ? {} : { signal: request.signal }),
+                ...(request.onApprovalWait === undefined
+                  ? {}
+                  : { onApprovalWait: request.onApprovalWait }),
+              },
         );
       } catch (error) {
         await implementation.authorizationDenied?.(pinnedInput, bound.context);
