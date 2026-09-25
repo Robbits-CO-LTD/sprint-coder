@@ -361,8 +361,12 @@ export function TeamRetainedWorktreesDialog({
                       <dt>worktree</dt>
                       <dd>
                         {worktree.worktreePath}
+                        {/* Without its folder, Git's record may still keep the submodule store a
+                            discard deletes too (issue #580). */}
                         {!worktree.existsOnDisk &&
-                          '（フォルダはもうありません。破棄すると記録だけを片付けます）'}
+                          (worktree.submodules
+                            ? '（フォルダはもうありません。破棄すると、Gitの記録に残っているsubmoduleのコミットも削除されます）'
+                            : '（フォルダはもうありません。破棄すると記録だけを片付けます）')}
                       </dd>
                     </div>
                   </dl>
