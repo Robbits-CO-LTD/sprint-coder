@@ -149,6 +149,59 @@ describe('Worker isolation worktree egress classification', () => {
 });
 
 describe('provider disclosure classifier', () => {
+  it.each([
+    'See https://github.com/Robbits-CO-LTD/sprint-coder/actions/workflows/ci.yml',
+    'See https://img.shields.io/github/v/release/Robbits-CO-LTD/sprint-coder?include_prereleases&logo=github',
+    'The public identifier `quickBrownFoxJumpsOverLazyDog` is documented here.',
+    'The public identifier `quick_brown_fox_jumps_over_lazy_dog` is documented here.',
+    'The public path `docs/quick-brown-fox-jumps-over-lazy-dog` is documented here.',
+  ])('preserves ordinary document identifiers and public paths (%#)', (content) => {
+    expect(assessProviderDisclosure(content, 'README.md')).toMatchObject({
+      classification: 'safe',
+      redactedContent: content,
+    });
+    expect(assessProviderDisclosure(content).classification).toBe('sensitive');
+    expect(assessProviderEgressDisclosure(content).classification).toBe('sensitive');
+    expect(assessProviderDisclosure(content, 'output.json').classification).toBe('sensitive');
+  });
+  it.each([
+    '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
+    'AbCdEfGhIjKlMnOpQrStUvWxYz',
+    'quickBrownFoxJumpsOverLazyDog123',
+    'quick_brown_fox_jumps_over_lazy_dog=',
+    'sk-proj-abcdefghijklmnopqrstuvwxyz1234',
+    'sk-ant-abcdefghijklmnopqrstuvwxyz1234',
+    ['xoxb', '1234567890', 'abcdefghijklmnopqrstuvwxyz'].join('-'),
+    'glpat-abcdefghijklmnopqrstuvwxyz',
+    'AKIAIOSFODNN7EXAMPLE',
+    'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghijklmnop',
+  ])('does not let document syntax hide secret-like values (%#)', (secret) => {
+    for (const content of [
+      `Read \`${secret}\`.`,
+      `Read \`docs/${secret}\`.`,
+      `See https://example.com/docs/${secret}`,
+      `See https://example.com/docs?value=${secret}`,
+      `See https://example.com/docs#${secret}`,
+      `The identifier \`quickBrownFoxJumpsOverLazyDog\` precedes ${secret}.`,
+    ]) {
+      const result = assessProviderDisclosure(content, 'README.md');
+      expect(result.classification).toBe('sensitive');
+      expect(result.redactedContent).not.toContain(secret);
+      expect(result.preview).not.toContain(secret);
+    }
+  });
+  it.each([
+    'quickBrownFoxJumpsOverLazyDog',
+    'See https://example.com/docs?value=quickBrownFoxJumpsOverLazyDog',
+    'See https://example.com/docs#quickBrownFoxJumpsOverLazyDog',
+    'password="quickBrownFoxJumpsOverLazyDog"',
+    'See https://alice:quickBrownFoxJumpsOverLazyDog@example.com/docs',
+    '-----BEGIN PRIVATE KEY-----\nquickBrownFoxJumpsOverLazyDog\n-----END PRIVATE KEY-----',
+  ])('keeps ambiguous values and credential context sensitive (%#)', (content) => {
+    const result = assessProviderDisclosure(content, 'README.md');
+    expect(result.classification).toBe('sensitive');
+    expect(result.redactedContent).not.toContain('quickBrownFoxJumpsOverLazyDog');
+  });
   it.each(['sha256', 'sha384', 'sha512'])(
     'does not redact a valid %s integrity digest',
     (algorithm) => {

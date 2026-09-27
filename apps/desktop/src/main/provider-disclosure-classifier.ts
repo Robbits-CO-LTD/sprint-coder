@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { basename } from 'node:path';
 import { redactSecrets } from './secret-redactor';
 
-export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v4';
+export const PROVIDER_DISCLOSURE_CLASSIFIER_VERSION = 'provider-disclosure-v5';
 
 export type ProviderDisclosureClassification = 'safe' | 'sensitive' | 'uncertain';
 
@@ -63,8 +63,9 @@ function assessDisclosure(
   if (baselineRedacted !== content) reasons.add('known-secret-pattern');
 
   const contentRootSpans = knownRootSpans(content, knownWorkspaceRoots);
+  const contentDocumentSpans = ordinaryDocumentSpans(content, relativePath);
   const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some((match) =>
-    isSensitiveEntropyCandidate(match[0], match.index, contentRootSpans),
+    isSensitiveEntropyCandidate(match[0], match.index, contentRootSpans, contentDocumentSpans),
   );
   if (highEntropy) reasons.add('high-entropy-value');
 
@@ -86,8 +87,9 @@ function assessDisclosure(
     });
   if (highEntropy) {
     const redactedRootSpans = knownRootSpans(redactedContent, knownWorkspaceRoots);
+    const redactedDocumentSpans = ordinaryDocumentSpans(redactedContent, relativePath);
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate, offset: number) =>
-      isSensitiveEntropyCandidate(candidate, offset, redactedRootSpans)
+      isSensitiveEntropyCandidate(candidate, offset, redactedRootSpans, redactedDocumentSpans)
         ? '[REDACTED_HIGH_ENTROPY]'
         : candidate,
     );
@@ -141,8 +143,65 @@ function isHighEntropyCandidate(candidate: string): boolean {
   return shannonEntropy(candidate) >= 4.25;
 }
 
-/** A Main-issued root occurrence inside the scanned text, bounded by real path separators. */
-type KnownRootSpan = Readonly<{ start: number; end: number }>;
+type TextSpan = Readonly<{ start: number; end: number }>;
+
+function ordinaryIdentifier(value: string): boolean {
+  return (
+    /^(?:[a-z]{3,}|[A-Z][a-z]{2,})(?:[A-Z][a-z]{2,}){2,}$/u.test(value) ||
+    /^[a-z]{3,}(?:_[a-z]{3,}){2,}$/u.test(value) ||
+    /^[a-z]{3,}(?:-[a-z]{3,}){2,}$/u.test(value)
+  );
+}
+
+function ordinaryDocumentPath(value: string): boolean {
+  if (!value.includes('/') || !/^[A-Za-z/._-]+$/u.test(value)) return false;
+  return value
+    .split('/')
+    .every(
+      (segment) =>
+        segment !== '' &&
+        segment
+          .split('.')
+          .every(
+            (name) =>
+              name !== '' &&
+              (!isHighEntropyCandidate(name) || ordinaryIdentifier(name)) &&
+              (ordinaryIdentifier(name) ||
+                name
+                  .split(/[_-]/u)
+                  .every((word) => /^(?:[a-z]+|[A-Z][a-z]+|[A-Z]{2,})$/u.test(word))),
+          ),
+    );
+}
+
+/** File context alone is insufficient: accept only bounded document syntax and naming shapes. */
+function ordinaryDocumentSpans(
+  content: string,
+  relativePath: string | undefined,
+): readonly TextSpan[] {
+  if (relativePath === undefined || !/\.(?:md|markdown|txt)$/iu.test(relativePath)) return [];
+  const spans: TextSpan[] = [];
+  for (const match of content.matchAll(/`([^`\r\n]+)`/gu)) {
+    if (ordinaryIdentifier(match[1]!) || ordinaryDocumentPath(match[1]!))
+      spans.push({ start: match.index + 1, end: match.index + match[0].length - 1 });
+  }
+  for (const match of content.matchAll(/https?:\/\/[^\s<>"'`()[\]]+/gu)) {
+    try {
+      const url = new URL(match[0]);
+      if (url.username || url.password) continue;
+      // Validate the original spelling too; URL normalization must not hide escaped bytes.
+      // Only the host/path is eligible; query and fragment bytes always keep the strict scan.
+      const suffix = match[0].search(/[?#]/u);
+      const prefix = suffix < 0 ? match[0] : match[0].slice(0, suffix);
+      const address = prefix.replace(/^https?:\/\//u, '').replace(/\/$/u, '');
+      if (ordinaryDocumentPath(address))
+        spans.push({ start: match.index, end: match.index + prefix.length });
+    } catch {
+      // Malformed URLs remain subject to the ordinary secret scan.
+    }
+  }
+  return spans;
+}
 
 const ABSOLUTE_ROOT = /^(?:\/|[A-Za-z]:\/)/u;
 /** A root preceded or followed by these is a longer name or another path, not the root itself. */
@@ -162,8 +221,8 @@ function escapeRegExp(value: string): string {
 function knownRootSpans(
   content: string,
   knownWorkspaceRoots: readonly string[],
-): readonly KnownRootSpan[] {
-  const spans: KnownRootSpan[] = [];
+): readonly TextSpan[] {
+  const spans: TextSpan[] = [];
   for (const root of knownWorkspaceRoots) {
     // A caller may hand over a Workspace root that was never materialized as a path. Exempt only
     // what is provably a Main-issued root: anything else yields no span, so the scan runs as if
@@ -190,9 +249,12 @@ function knownRootSpans(
 function isSensitiveEntropyCandidate(
   candidate: string,
   offset: number,
-  rootSpans: readonly KnownRootSpan[],
+  rootSpans: readonly TextSpan[],
+  documentSpans: readonly TextSpan[],
 ): boolean {
   if (!isHighEntropyCandidate(candidate)) return false;
+  if (documentSpans.some((span) => span.start <= offset && span.end >= offset + candidate.length))
+    return false;
   // Only the bytes of a Main-issued root are exempt. What the candidate adds below the root, and
   // every high-entropy value outside one, is rescanned exactly as it would be without any root.
   const end = offset + candidate.length;
