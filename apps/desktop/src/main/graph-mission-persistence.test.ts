@@ -3191,14 +3191,32 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       f.persistence.close();
     });
 
-    it.each([128, 129, 2_000])(
-      'keeps Team details available after a Graph failure reason of %i characters',
-      (length) => {
+    it.each([
+      ...[128, 129, 2_000].map((length) => {
+        const reason = '合意範囲外の変更を保留しました。'.repeat(150).slice(0, length);
+        return {
+          label: `${length} code units`,
+          reason,
+          preview: length <= 128 ? reason : `${reason.slice(0, 127)}…`,
+        };
+      }),
+      {
+        label: 'emoji across preview boundary',
+        reason: `${'あ'.repeat(126)}🛑xx`,
+        preview: `${'あ'.repeat(126)}…`,
+      },
+      {
+        label: 'emoji within preview boundary',
+        reason: `${'あ'.repeat(125)}🛑xx`,
+        preview: `${'あ'.repeat(125)}🛑…`,
+      },
+    ])(
+      'keeps Team details available after a Graph failure reason with $label',
+      ({ reason, preview }) => {
         const f = fixture();
         try {
           const mission = f.persistence.createGraphTeamMission(f.input);
           const run = begin(f, mission.id, 'a');
-          const reason = '合意範囲外の変更を保留しました。'.repeat(150).slice(0, length);
           f.persistence.interruptGraphStep({
             missionId: mission.id,
             stepKey: 'a',
@@ -3215,9 +3233,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
             .get(f.task.id)
             ?.executions.find(({ id }) => id === run.execution.id);
           expect(execution).toMatchObject({ state: 'waiting_resume' });
-          expect(execution?.terminalReason).toBe(
-            length <= 128 ? reason : `${reason.slice(0, 127)}…`,
-          );
+          expect(execution?.terminalReason).toBe(preview);
           expect(f.persistence.getTeamAttempt(run.attempt.id).terminalReason).toBe(reason);
           expect(f.persistence.getTeamMission(mission.id).state).not.toBe('completed');
           expect(f.persistence.getTeamMission(mission.id).steps[0]?.checkpoint).toBeNull();

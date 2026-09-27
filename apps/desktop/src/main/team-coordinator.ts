@@ -5028,7 +5028,7 @@ export class TeamCoordinator {
             // Graph interruptions retain a full reason; the IPC summary is a bounded preview.
             terminalReason:
               terminalReason !== null && terminalReason.length > 128
-                ? `${terminalReason.slice(0, 127)}…`
+                ? `${terminalReason.slice(0, 127).replace(/[\uD800-\uDBFF]$/u, '')}…`
                 : terminalReason,
             missionId: mission?.id ?? null,
             missionStepOrdinal: missionStep?.ordinal ?? null,
