@@ -5428,6 +5428,7 @@ export class IpcRouter {
             providerName: request.toolName,
             input: request.arguments,
             signal,
+            ...(worker === undefined ? {} : { resultOrderScope: worker }),
           },
           (result) =>
             providerImageBridge!.stageToolResult({
@@ -5459,6 +5460,8 @@ export class IpcRouter {
         callId: brokerCallId,
         providerName: request.toolName,
         input: request.arguments,
+        // The validated host binding identifies this runtime; provider arguments cannot pick it.
+        ...(worker === undefined ? {} : { resultOrderScope: worker }),
         // A Worker call also ends with its Worker Turn (issue #525). Team MCP hands this path a
         // signal nothing aborts, and a write can wait on an Approval Card past the Worker's end.
         signal: worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]),
