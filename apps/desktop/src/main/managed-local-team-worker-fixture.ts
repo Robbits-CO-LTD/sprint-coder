@@ -54,6 +54,11 @@ export function managedLocalTeamWorkerRuntime(options: {
   fallback: TeamWorkerRuntime;
   readPath?: string;
   writePath?: string;
+  executeTool?: (request: {
+    name: string;
+    input: unknown;
+    workspaceSet: RuntimeWorkspaceSet;
+  }) => Promise<unknown>;
 }): {
   runtime: ProviderAwareTeamWorkerRuntime;
   sessions: ManagedLocalFixtureSession[];
@@ -138,6 +143,8 @@ export function managedLocalTeamWorkerRuntime(options: {
           const { path, text } = input as { path: string; text?: string };
           const file = join(primary.path, path);
           toolCalls.push({ workerId: worker.id, name, file });
+          if (options.executeTool !== undefined)
+            return options.executeTool({ name, input, workspaceSet });
           if (name === 'read_file') return { text: readFileSync(file, 'utf8') };
           writeFileSync(file, text ?? '', { flag: 'wx' });
           return { rootId: primary.rootId, path, sagaId: `saga:${path}`, state: 'committed' };

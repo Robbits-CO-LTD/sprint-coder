@@ -51,6 +51,10 @@ import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
 import { managedLocalConnection } from './managed-local-provider-runtime';
+import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import { stageEditSagaRequest, type EditSagaSnapshot } from './edit-saga';
+import { FileRevisionRegistry } from './file-revision';
+import { workspaceMutationBinding } from './path-guard';
 import {
   MANAGED_LOCAL_FIXTURE_SELECTION,
   managedLocalTeamWorkerRuntime,
@@ -1931,6 +1935,164 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('admits the real managed create_file Saga from a Task Mission isolation (issue #570)', async () => {
+      const persistence = createPersistence();
+      persistence.createProviderConnection(managedLocalConnection());
+      const task = persistence.createTask('Managed Local durable write binding');
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const turn = persistence.startTurn(task.id, 'Task Mission write');
+      const parentWorkspace = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
+      let prepared: EditSagaSnapshot | undefined;
+      let failure: unknown;
+      const managedLocal = managedLocalTeamWorkerRuntime({
+        fallback: new TestWorkerRuntime(),
+        executeTool: async ({ name, input, workspaceSet }) => {
+          const root = workspaceSet.roots[0]!;
+          const binding = await workspaceMutationBinding(root.path);
+          const workerWorkspace = {
+            ...parentWorkspace,
+            primaryRootId: workspaceSet.primaryRootId,
+            roots: workspaceSet.roots.map((entry) => ({ ...entry, status: 'available' as const })),
+            digest: workspaceSet.digest,
+          };
+          const tools = new ProviderWorkspaceTools({
+            workspaceFor: () => workerWorkspace,
+            rootIdentityFor: () => binding.rootIdentityDigest,
+            mutationBindingFor: () => binding,
+            policyEpochFor: () => 0,
+            authorizer: () => ({ decision: 'allow', reason: 'test approval' }),
+            workspaceEdit: {
+              turnWorkspaceSetFor: () => parentWorkspace,
+              turnRootMutationBindingsFor: () =>
+                persistence.getTurnWorkspaceMutationBindings(turn.turnId),
+              revisions: new FileRevisionRegistry(),
+              policyEpochFor: () => 0,
+              apply: async (request) => {
+                const staged = await stageEditSagaRequest(request);
+                // This test stops before file effects: it exercises the real admission and lease
+                // that the old fixture's direct write skipped, not native file publication.
+                prepared = persistence.prepareEditSaga(staged);
+                const lease = persistence.acquireMutationLease({
+                  rootId: prepared.rootId,
+                  workspaceKey: binding.workspaceKey,
+                  rootIdentityDigest: binding.rootIdentityDigest,
+                  holderInstanceId: 'task-mission-binding-test',
+                  taskId: task.id,
+                  turnId: turn.turnId,
+                  sagaId: prepared.id,
+                  purpose: 'forward',
+                  policyEpoch: 0,
+                  intentDigest: prepared.planDigest,
+                  now: staged.createdAt,
+                  expiresAt: new Date(Date.parse(staged.createdAt) + 60_000).toISOString(),
+                });
+                persistence.releaseMutationLease(lease, staged.createdAt);
+                expect(() =>
+                  persistence.prepareEditSaga({
+                    ...staged,
+                    id: randomUUID(),
+                    operationId: randomUUID(),
+                    rootId: 'unowned-root',
+                  }),
+                ).toThrow('not in the Turn Workspace snapshot');
+                expect(() =>
+                  persistence.prepareEditSaga({
+                    ...staged,
+                    id: randomUUID(),
+                    operationId: randomUUID(),
+                    rootIdentityDigest: 'f'.repeat(64),
+                  }),
+                ).toThrow('workspace binding changed');
+                const otherTask = persistence.createTask('Unrelated Task');
+                const otherTurn = persistence.startTurn(otherTask.id, 'Unrelated Turn');
+                persistence.sealTurnWorkspaceSet(otherTask.id, otherTurn.turnId);
+                expect(() =>
+                  persistence.prepareEditSaga({
+                    ...staged,
+                    id: randomUUID(),
+                    operationId: randomUUID(),
+                    taskId: otherTask.id,
+                    turnId: otherTurn.turnId,
+                  }),
+                ).toThrow('not in the Turn Workspace snapshot');
+                return prepared;
+              },
+            },
+          });
+          const context = {
+            taskId: task.id,
+            turnId: turn.turnId,
+            workspaceId: workerWorkspace.digest,
+            policyEpoch: 0,
+          };
+          tools.startTurn(context, 'provider');
+          try {
+            const args = input as { path: string; text: string };
+            return await tools.broker.dispatch({
+              ...context,
+              callId: randomUUID(),
+              providerName: name,
+              input: { path: args.path, content: args.text },
+            });
+          } catch (error) {
+            failure = error;
+            throw error;
+          } finally {
+            tools.finishTurn(task.id, turn.turnId);
+            await tools.dispose();
+          }
+        },
+      });
+      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Managed Local writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'check durable write binding',
+        doneCriteria: ['write'],
+        steps: [
+          {
+            workerId: worker.id,
+            objective: 'create managed-output.txt',
+            doneCriteria: ['write'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: worker.id,
+            objective: 'read README.md',
+            doneCriteria: ['read'],
+            access: 'read-only',
+          },
+        ],
+      });
+      await waitFor(
+        () =>
+          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
+            persistence.getTeamMission(mission.id).state,
+          ),
+        30_000,
+      );
+      try {
+        expect(failure).toBeUndefined();
+        expect(prepared).toMatchObject({
+          rootId: parentWorkspace.primaryRootId,
+          state: 'prepared',
+        });
+        expect(persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)).toEqual(
+          parentWorkspace,
+        );
+        expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
+      } finally {
+        persistence.close();
+      }
+    }, 45_000);
+
     it('runs a legacy Mission write step of a Managed Local Worker in its worktree and integrates it, as it does a CLI Worker (issue #570)', async () => {
       const persistence = createPersistence();
       persistence.createProviderConnection(managedLocalConnection());
@@ -1985,6 +2147,7 @@ if (runsWithElectronAbi)
       ).catch(() => undefined);
 
       const mission = persistence.getTeamMission(assigned.id);
+      const managedIsolation = persistence.getTeamExecutionIsolation(mission.steps[0]!.executionId);
       const worktrees = mission.steps.map(({ executionId }) =>
         persistence.getTeamMissionWorktree(executionId),
       );
@@ -1997,8 +2160,10 @@ if (runsWithElectronAbi)
         agents: persistence.getTeamSnapshot(managedWriter.teamId).agents,
       };
       expect(mission.state, JSON.stringify(state, null, 2)).toBe('completed');
-      // The Managed Local Worker was handed its worktree as the one-root Workspace, with a writing
-      // tool, and wrote there.
+      // Managed Local needs a durable isolation that Main's Edit Saga can resolve. CLI keeps its
+      // legacy worktree contract; neither runtime writes to the original before integration.
+      expect(worktrees[0]).toBeNull();
+      expect(managedIsolation).not.toBeNull();
       expect(managedLocal.sessions).toHaveLength(1);
       const [session] = managedLocal.sessions;
       expect(session).toMatchObject({
@@ -2008,9 +2173,8 @@ if (runsWithElectronAbi)
       });
       const [root] = session!.workspaceSet.roots;
       expect(session!.workspaceSet.roots).toHaveLength(1);
-      expect(root).toMatchObject({ role: 'primary', label: basename(worktrees[0]!.path) });
-      expect(dirname(root!.path)).toBe(realpathSync.native(dirname(worktrees[0]!.path)));
-      expect(session!.workspaceSet).toEqual(runtimeWorkspaceSetFromLegacyPath(root!.path));
+      expect(root).toMatchObject({ role: 'primary', rootId: task.id });
+      expect(root!.path).toBe(managedIsolation!.roots[0]!.isolatedPath);
       expect(managedLocal.toolCalls).toEqual([
         {
           workerId: managedWriter.id,
@@ -2039,23 +2203,23 @@ if (runsWithElectronAbi)
         spawnSync('git', ['-C', workspace, 'log', '-2', '--pretty=%s'], { encoding: 'utf8' })
           .stdout,
       ).toBe(
-        `Sprint Coder Mission ${assigned.id} step 2\nSprint Coder Mission ${assigned.id} step 1\n`,
+        `Sprint Coder Mission ${assigned.id} step 2\nSprint Coder Mission ${assigned.id} step 1 repository 1\n`,
       );
       // The last worktree is cleaned up after the Mission completes.
       await waitFor(
         () =>
-          mission.steps.every(
-            ({ executionId }) =>
-              persistence.getTeamMissionWorktree(executionId)?.state === 'cleaned',
-          ),
+          persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)?.state === 'cleaned' &&
+          persistence
+            .getTeamExecutionIsolation(mission.steps[0]!.executionId)
+            ?.repositories.every(({ state }) => state === 'cleaned') === true,
         15_000,
       );
-      expect(
-        mission.steps.map(({ executionId }) => persistence.getTeamMissionWorktree(executionId)),
-      ).toEqual([
-        expect.objectContaining({ changedFiles: ['managed-output.txt'] }),
-        expect.objectContaining({ changedFiles: ['worker-output.txt'] }),
-      ]);
+      expect(managedIsolation!.repositories[0]).toMatchObject({
+        changedFiles: ['managed-output.txt'],
+      });
+      expect(persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)).toMatchObject({
+        changedFiles: ['worker-output.txt'],
+      });
       persistence.close();
     }, 120_000);
 

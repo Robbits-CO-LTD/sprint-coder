@@ -92,6 +92,7 @@ import {
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
+import { MANAGED_LOCAL_CONNECTION_ID } from './managed-local-provider-runtime';
 import type { ApprovalWaitObserver } from './tool-broker';
 import {
   allCriteriaDone,
@@ -1445,7 +1446,11 @@ export class TeamCoordinator {
       });
       if (execution.accessMode === 'workspace-write') {
         await this.requireWorkspaceWriteEligibility(graph.taskId);
-        if (this.persistence.getEffectiveWorkspaceSet(graph.taskId).source === 'task')
+        if (
+          this.persistence.getTeamMissionWorktree(execution.id) !== null ||
+          (this.persistence.getEffectiveWorkspaceSet(graph.taskId).source === 'task' &&
+            worker.modelSelection.connectionId !== MANAGED_LOCAL_CONNECTION_ID)
+        )
           worktree = await this.prepareMissionWorktree(graph.taskId, execution.id, worker.id);
         else
           isolation = await this.prepareExecutionIsolation(graph.taskId, execution.id, worker.id);
@@ -3345,7 +3350,14 @@ export class TeamCoordinator {
       if (execution.accessMode === 'workspace-write') {
         const legacyWorktree = this.persistence.getTeamMissionWorktree(input.executionId);
         const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
-        if (legacyWorktree !== null || (workspace.source === 'task' && missionStep !== null))
+        // Managed Local writes use Main's Edit Saga, whose lease and post-image verification need
+        // the durable isolation binding. Preserve an existing legacy worktree on resume.
+        if (
+          legacyWorktree !== null ||
+          (workspace.source === 'task' &&
+            missionStep !== null &&
+            worker.modelSelection.connectionId !== MANAGED_LOCAL_CONNECTION_ID)
+        )
           missionWorktree = await this.prepareMissionWorktree(
             input.taskId,
             input.executionId,
