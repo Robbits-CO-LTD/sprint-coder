@@ -36,3 +36,12 @@ npx playwright test --config playwright.windows.config.ts
 ```
 
 CIは開発モードで起動します。失敗時は `test-results`、`playwright-report`、`windows-e2e.log` を `windows-e2e-<run>-<attempt>` artifactへ保存します。artifactのアップロードだけはテスト失敗後も動きますが、テストの終了コードは保持され、`CI required` は失敗します。
+
+## 起動待ちの記録と切り分け
+
+- globalSetupが起動した `npm start` の出力は `test-results/windows-major-e2e/dev-server.log` に残ります。起動待ちの上限は240秒です（`tests/e2e/helpers.ts` の `DEV_SERVER_READY_TIMEOUT_MS`）。上限が切れたときは、次の3つがエラーに出ます。
+  - `Startup phase: ...`: どの段階で止まっていたか
+  - `Progress: ...`: renderer の開発サーバーと main / preload のビルドが、それぞれ何秒で整ったか
+  - ログの末尾
+- 通ったときも、同じ内訳が `Started our own npm start` の行に出ます。Forge は `generateAssets` で Computer Use のヘルパーを毎回コンパイルするので、遅い runner では Vite より前の段階が長くなります。標準入力が端末でないと `electron-forge start` は工程の表示を止めるため、ログには Forge の工程名が出ません。
+- `firstWindow` で落ちたときは、エラーの `diagnosis:` が原因を分けます。`main-init` はmainが画面の読み込みを始めていない、`renderer-load` は画面の文書かスクリプトが届いていない、`missed-event` は読み込みは済んでいるのにPlaywrightが気づいていない、を表します。mainの出力を含む全文は、そのテストの結果フォルダの `first-window-diagnostics.txt` にあります。

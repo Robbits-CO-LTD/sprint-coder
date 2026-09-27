@@ -109,7 +109,8 @@ Get-Content $env:TEMP\e2e.log -Tail 40
 
 | 症状 | 原因 | 対処 |
 |---|---|---|
-| `Dev server / main build did not become ready within 90000ms` | `npm.cmd start`が終了した、または5173を起動できない | 直前に表示されるexit code / signal / spawn errorを確認し、`npm start`単体でも再現するか切り分ける |
+| `Dev server / main build did not become ready within 240000ms` | `npm.cmd start`が終了した、時間内に終わらなかった、または5173を起動できない | エラーに続く exit code / signal / spawn error と、`Startup phase: ...`（止まった段階）・`Progress: ...`（各条件が整った秒数）・ログ末尾を確認する（全文は出力フォルダの `dev-server.log`）。`npm start`単体でも再現するか切り分ける |
+| `firstWindow: ...` のあとに `diagnosis: main-init` / `renderer-load` / `missed-event` | 1つのspecだけがウィンドウの読み込み待ちで落ちた | `main-init` はmainの初期化、`renderer-load` は画面の文書かスクリプトの配信、`missed-event` はPlaywright側の取りこぼし。mainの出力つきの全文はそのテストの結果フォルダの `first-window-diagnostics.txt` |
 | `Get-NetTCPConnection -LocalPort 5173` が何も返さない | dev server が落ちている | `npm start` を起動し直す |
 | 覚えのない `electron-forge package` が走り出す / 起動が異様に遅い | packaged モードで走っている（環境変数の消し忘れ・未指定） | モードを明示して再実行 |
 | `npm run format:check` が全ファイル未整形と言う | `core.autocrlf=true` で CRLF に変換された | `.gitattributes` が `eol=lf` を指定しているので、clone/checkout し直すか改行を LF に戻す（E2E とは別問題だが Windows で必ず踏む） |

@@ -1,21 +1,39 @@
-import { _electron as electron } from '@playwright/test';
+import { _electron as electron, test } from '@playwright/test';
 import type { ElectronApplication, Page } from '@playwright/test';
 import { flipFuses, FuseV1Options, FuseVersion, getCurrentFuseWire } from '@electron/fuses';
 import type { ChildProcess } from 'node:child_process';
 import { execFileSync, spawn } from 'node:child_process';
 import {
+  closeSync,
   cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { nativeSafeFsMissingExports } from '../../apps/desktop/src/main/native-safe-fs';
+import {
+  diagnoseFirstWindow,
+  formatDevServerFailure,
+  formatFirstWindowReport,
+  formatFirstWindowSummary,
+  readRendererState,
+} from './startup-diagnostics';
+import type {
+  DevServerProgress,
+  FirstWindowSnapshot,
+  MainWindowState,
+  ProbeResult,
+} from './startup-diagnostics';
 
 /**
  * sprint-coder Electron E2E launch helpers.
@@ -377,7 +395,12 @@ async function waitForCondition(
   }
 }
 
-export type DevServerHandle = { alreadyRunning: boolean; proc: ChildProcess | null };
+export type DevServerHandle = {
+  alreadyRunning: boolean;
+  proc: ChildProcess | null;
+  /** When each readiness condition first held, for a dev server started here. */
+  progress?: DevServerProgress;
+};
 
 export type DevServerLaunch = Readonly<{ command: string; args: readonly string[] }>;
 
@@ -394,6 +417,17 @@ export function devServerLaunch(
 }
 
 /**
+ * How long globalSetup waits for `npm start` (electron-forge start) to serve the renderer and
+ * rebuild main/preload. Forge runs the generateAssets hook before Vite, and on Windows that hook
+ * compiles the Computer Use helper with MSVC and runs its pipe check on every start, so the wait
+ * scales with runner CPU speed rather than with the Vite build alone (Issue #608). Over 44
+ * Windows CI runs that passed, it took a median 39.5s and at most 87.1s; on slow runners
+ * compile-bound steps took 5.3-5.7x their median, which puts the worst observed case near 225s.
+ * The condition is polled, so a healthy start does not wait any longer than it did before.
+ */
+export const DEV_SERVER_READY_TIMEOUT_MS = 240_000;
+
+/**
  * Ensures the Vite dev server + main/preload dev build (apps/desktop/.vite/build/index.js) are
  * ready for dev-mode E2E.
  *
@@ -401,8 +435,15 @@ export function devServerLaunch(
  * from a previous run), it is reused untouched — we must never kill or otherwise interfere with
  * an already-running dev instance. Only a dev server WE spawn here is torn down later
  * (see stopDevServer).
+ *
+ * The spawned `npm start` writes its output to `logPath` for the whole run, and the wait records
+ * when each readiness condition first held, so a slow or failed startup can be placed in the
+ * part of `electron-forge start` it was in instead of only reported as a timeout.
  */
-export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServerHandle> {
+export async function ensureDevServerReady(
+  logPath: string,
+  timeoutMs = DEV_SERVER_READY_TIMEOUT_MS,
+): Promise<DevServerHandle> {
   if (await isDevServerUp()) {
     return { alreadyRunning: true, proc: null };
   }
@@ -412,16 +453,26 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
     ? statSync(PRELOAD_BUILD_OUTPUT).mtimeMs
     : 0;
   const launch = devServerLaunch();
-  const proc = spawn(launch.command, launch.args, {
-    cwd: REPO_ROOT,
-    // POSIX uses a process group for teardown. Windows has no negative-PID process-group signal,
-    // and .cmd shims require cmd.exe, so Node explicitly owns that shell PID and stopDevServer
-    // terminates its exact process tree with taskkill /T.
-    detached: process.platform !== 'win32',
-    stdio: 'ignore',
-    env: process.env,
-    windowsHide: true,
-  });
+  mkdirSync(dirname(logPath), { recursive: true });
+  const logFd = openSync(logPath, 'w');
+  let proc: ChildProcess;
+  try {
+    proc = spawn(launch.command, launch.args, {
+      cwd: REPO_ROOT,
+      // POSIX uses a process group for teardown. Windows has no negative-PID process-group
+      // signal, and .cmd shims require cmd.exe, so Node explicitly owns that shell PID and
+      // stopDevServer terminates its exact process tree with taskkill /T.
+      detached: process.platform !== 'win32',
+      // A file descriptor rather than a pipe: the child keeps writing after globalSetup returns,
+      // and nothing in this process has to keep draining it.
+      stdio: ['ignore', logFd, logFd],
+      env: process.env,
+      windowsHide: true,
+    });
+  } finally {
+    // The child holds its own copy of the descriptor.
+    closeSync(logFd);
+  }
   let startupFailure: Error | null = null;
   const onError = (error: Error): void => {
     startupFailure = new Error(`Unable to start ${launch.command}: ${error.message}`, {
@@ -438,22 +489,32 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
   proc.once('exit', onExit);
   proc.unref();
 
+  const startedAt = Date.now();
+  const progress: DevServerProgress = {
+    rendererServer: null,
+    mainBuild: null,
+    preloadBuild: null,
+  };
   try {
     await waitForCondition(async () => {
       if (startupFailure !== null) throw startupFailure;
-      return (
-        (await isDevServerUp()) &&
-        existsSync(MAIN_BUILD_OUTPUT) &&
-        existsSync(PRELOAD_BUILD_OUTPUT) &&
-        statSync(MAIN_BUILD_OUTPUT).mtimeMs > previousMainMtime &&
-        statSync(PRELOAD_BUILD_OUTPUT).mtimeMs > previousPreloadMtime
-      );
+      const current = {
+        rendererServer: await isDevServerUp(),
+        mainBuild: rebuiltSince(MAIN_BUILD_OUTPUT, previousMainMtime),
+        preloadBuild: rebuiltSince(PRELOAD_BUILD_OUTPUT, previousPreloadMtime),
+      };
+      const elapsed = Date.now() - startedAt;
+      for (const key of ['rendererServer', 'mainBuild', 'preloadBuild'] as const)
+        if (current[key] && progress[key] === null) progress[key] = elapsed;
+      return current.rendererServer && current.mainBuild && current.preloadBuild;
     }, timeoutMs);
   } catch (err) {
+    // Stop first: once the tree has exited, everything it printed is in the log.
     stopDevServer({ alreadyRunning: false, proc });
     throw new Error(
       `Dev server / main build did not become ready within ${timeoutMs}ms: ` +
-        `${err instanceof Error ? err.message : String(err)}`,
+        `${err instanceof Error ? err.message : String(err)}\n` +
+        describeDevServerFailure(progress, logPath),
       { cause: err },
     );
   } finally {
@@ -461,7 +522,24 @@ export async function ensureDevServerReady(timeoutMs = 90_000): Promise<DevServe
     proc.off('exit', onExit);
   }
 
-  return { alreadyRunning: false, proc };
+  return { alreadyRunning: false, proc, progress };
+}
+
+function rebuiltSince(path: string, previousMtimeMs: number): boolean {
+  return existsSync(path) && statSync(path).mtimeMs > previousMtimeMs;
+}
+
+function describeDevServerFailure(progress: DevServerProgress, logPath: string): string {
+  let logText = '';
+  let readFailure = '';
+  try {
+    logText = readFileSync(logPath, 'utf8');
+  } catch (error) {
+    readFailure = `\n(the log could not be read: ${
+      error instanceof Error ? error.message : String(error)
+    })`;
+  }
+  return `${formatDevServerFailure(progress, logText, logPath)}${readFailure}`;
 }
 
 /** Tears down only a dev server WE started via ensureDevServerReady — a pre-existing developer
@@ -561,31 +639,138 @@ export async function launchApp(
   };
 
   if (mode === 'packaged') {
-    return electron.launch({ executablePath: findPackagedExecutable(), env });
+    return recordMainProcessOutput(
+      await electron.launch({ executablePath: findPackagedExecutable(), env }),
+    );
   }
 
   // dev mode: run the repo's own Electron binary directly against apps/desktop. The main/preload
   // bundle at apps/desktop/.vite/build/*.js was produced by `npm start` (see
   // ensureDevServerReady) and has MAIN_WINDOW_VITE_DEV_SERVER_URL baked in, so the renderer loads
   // from the already-running Vite dev server rather than the app://bundle production protocol.
-  return electron.launch({
-    executablePath: resolveDevElectronBinary(),
-    args: [DESKTOP_ROOT],
-    env,
-  });
+  return recordMainProcessOutput(
+    await electron.launch({
+      executablePath: resolveDevElectronBinary(),
+      args: [DESKTOP_ROOT],
+      env,
+    }),
+  );
+}
+
+const MAIN_OUTPUT_TAIL_CHARS = 64 * 1024;
+const mainProcessOutput = new WeakMap<ElectronApplication, { text: string }>();
+
+/**
+ * Keeps a bounded tail of the main process's stdout/stderr for failure diagnostics. secureLogger
+ * writes every entry there as well as to the profile's logs/ directory, which each spec deletes
+ * in its `finally`, so this is the copy that survives a failed launch. Output printed before
+ * Playwright hands back the app is not included.
+ */
+function recordMainProcessOutput(app: ElectronApplication): ElectronApplication {
+  const record = { text: '' };
+  const child = app.process();
+  for (const stream of [child.stdout, child.stderr]) {
+    const decoder = new StringDecoder('utf8');
+    stream?.on('data', (chunk: Buffer) => {
+      record.text = (record.text + decoder.write(chunk)).slice(-MAIN_OUTPUT_TAIL_CHARS);
+    });
+  }
+  mainProcessOutput.set(app, record);
+  return app;
 }
 
 export async function firstWindow(
   app: ElectronApplication,
   options: Readonly<{ completeSetup?: boolean }> = {},
 ): Promise<Page> {
-  const page = await app.firstWindow();
-  await page.waitForLoadState('domcontentloaded');
+  let page: Page | null = null;
+  try {
+    page = await app.firstWindow();
+    await page.waitForLoadState('domcontentloaded');
+  } catch (error) {
+    throw await describeFirstWindowFailure(app, page, error);
+  }
   // A fresh isolated profile always starts on onboarding. Feature specs should exercise the main
   // shell by default; the setup-wizard spec is the single explicit opt-out. Keeping this at the
   // shared window boundary prevents new specs from silently timing out behind onboarding.
   if (options.completeSetup !== false) await completeSetupForFeatureTest(page);
   return page;
+}
+
+const FIRST_WINDOW_PROBE_TIMEOUT_MS = 5_000;
+
+async function settleWithin<T>(promise: Promise<T>, timeoutMs: number): Promise<ProbeResult<T>> {
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<ProbeResult<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ status: 'timeout' }), timeoutMs);
+  });
+  try {
+    return await Promise.race([
+      // Handles a late rejection too, so abandoning the probe never leaves it unhandled.
+      promise.then(
+        (value): ProbeResult<T> => ({ status: 'fulfilled', value }),
+        (error: unknown): ProbeResult<T> => ({
+          status: 'rejected',
+          reason: error instanceof Error ? error.message : String(error),
+        }),
+      ),
+      timedOut,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A `firstWindow` timeout alone cannot say whether main was still initializing before it loaded
+ * the renderer, the renderer was still loading or waiting on its scripts, or Playwright missed
+ * DOMContentLoaded (Issue #608). Ask both processes, keep the answer and main's output with the
+ * test's results, and name the cause in the error. The message keeps the `firstWindow` prefix
+ * that failure triage keys on.
+ */
+async function describeFirstWindowFailure(
+  app: ElectronApplication,
+  page: Page | null,
+  error: unknown,
+): Promise<Error> {
+  const [mainWindows, renderer] = await Promise.all([
+    settleWithin(
+      app.evaluate(({ BrowserWindow }): MainWindowState[] =>
+        BrowserWindow.getAllWindows().map((window) => ({
+          url: window.webContents.getURL(),
+          loading: window.webContents.isLoading(),
+        })),
+      ),
+      FIRST_WINDOW_PROBE_TIMEOUT_MS,
+    ),
+    page === null
+      ? Promise.resolve(null)
+      : settleWithin(page.evaluate(readRendererState), FIRST_WINDOW_PROBE_TIMEOUT_MS),
+  ]);
+  const snapshot: FirstWindowSnapshot = {
+    windowReported: page !== null,
+    mainWindows,
+    rendererUrl: page?.url() ?? null,
+    renderer,
+  };
+  const summary = formatFirstWindowSummary(snapshot, diagnoseFirstWindow(snapshot));
+  let reportLocation = '';
+  try {
+    const reportPath = test.info().outputPath('first-window-diagnostics.txt');
+    writeFileSync(
+      reportPath,
+      `${formatFirstWindowReport(summary, mainProcessOutput.get(app)?.text ?? '')}\n`,
+    );
+    reportLocation = `\nfull report: ${reportPath}`;
+  } catch {
+    // Outside a running test there is no output directory; the error below still names the cause.
+  }
+  const original = error instanceof Error ? error : new Error(String(error));
+  const described = new Error(`firstWindow: ${original.message}\n${summary}${reportLocation}`, {
+    cause: error,
+  });
+  described.name = original.name;
+  return described;
 }
 
 /** Gives the current Task a real Project root without exercising Project-picker UI in specs whose

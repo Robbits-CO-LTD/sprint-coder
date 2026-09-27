@@ -1,3 +1,4 @@
+import type { FullConfig } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import {
@@ -13,6 +14,7 @@ import {
   warnAboutUnbuiltDevNativePrerequisites,
 } from './helpers';
 import type { DevServerHandle } from './helpers';
+import { formatDevServerProgress } from './startup-diagnostics';
 
 /**
  * Prepares whichever launch mode resolveE2EMode() selects (see tests/e2e/helpers.ts):
@@ -62,7 +64,7 @@ function packageFresh(): void {
   console.log('[e2e globalSetup] Packaging complete.');
 }
 
-export default async function globalSetup(): Promise<() => Promise<void>> {
+export default async function globalSetup(config: FullConfig): Promise<() => Promise<void>> {
   const mode = resolveE2EMode();
   console.log(`[e2e globalSetup] mode=${mode}`);
 
@@ -82,16 +84,26 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
     };
   }
 
-  // Surfaced before the dev server starts: a missing native layer otherwise costs 90s of startup
-  // and then reads as a product bug in whichever specs depend on it.
+  // Surfaced before the dev server starts: a missing native layer otherwise costs the whole
+  // startup budget and then reads as a product bug in whichever specs depend on it.
   warnAboutUnbuiltDevNativePrerequisites();
 
+  // Playwright empties the output directory before globalSetup runs, so the log belongs to this
+  // run, and CI uploads it with the rest of test-results.
+  const devServerLog = join(
+    config.projects[0]?.outputDir ?? join(REPO_ROOT, 'test-results'),
+    'dev-server.log',
+  );
   console.log('[e2e globalSetup] Ensuring dev server + main/preload dev build are ready...');
-  const devServer: DevServerHandle = await ensureDevServerReady(90_000);
+  const devServer: DevServerHandle = await ensureDevServerReady(devServerLog);
   console.log(
     devServer.alreadyRunning
       ? '[e2e globalSetup] Reusing an already-running dev server (not touching it).'
-      : '[e2e globalSetup] Started our own `npm start` in the background.',
+      : '[e2e globalSetup] Started our own `npm start` in the background' +
+          (devServer.progress === undefined
+            ? ''
+            : `: ${formatDevServerProgress(devServer.progress)}`) +
+          ` (output: ${devServerLog}).`,
   );
 
   return async () => {
