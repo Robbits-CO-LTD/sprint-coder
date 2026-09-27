@@ -5011,6 +5011,7 @@ export class TeamCoordinator {
       executions: executions.map((execution) => ({
         ...(() => {
           const latestAttempt = this.persistence.listTeamAttempts(execution.id).at(-1) ?? null;
+          const terminalReason = latestAttempt?.terminalReason ?? null;
           const mission = this.persistence.getTeamMissionForExecution(execution.id);
           const missionStep =
             mission?.steps.find(({ executionId }) => executionId === execution.id) ?? null;
@@ -5024,7 +5025,11 @@ export class TeamCoordinator {
           return {
             attemptStartReason: latestAttempt?.startReason ?? null,
             lastProgressAt: latestAttempt?.lastProgressAt ?? null,
-            terminalReason: latestAttempt?.terminalReason ?? null,
+            // Graph interruptions retain a full reason; the IPC summary is a bounded preview.
+            terminalReason:
+              terminalReason !== null && terminalReason.length > 128
+                ? `${terminalReason.slice(0, 127)}…`
+                : terminalReason,
             missionId: mission?.id ?? null,
             missionStepOrdinal: missionStep?.ordinal ?? null,
             missionStepCount: mission?.steps.length ?? null,
