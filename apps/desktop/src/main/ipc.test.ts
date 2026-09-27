@@ -213,7 +213,12 @@ import {
   type ToolAuthorizationRequest,
   type ToolAuthorizer,
 } from './tool-broker';
-import { ToolRegistry, expandAccessPreset } from '@sprint-coder/domain';
+import {
+  ToolRegistry,
+  createToolDefinition,
+  createToolId,
+  expandAccessPreset,
+} from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
 import { FileRevisionRegistry } from './file-revision';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
@@ -2910,6 +2915,201 @@ describe('Main image attachment dispatch boundary', () => {
       return { router, broker, catalog, execute, approvals, call, allow };
     }
 
+    it.each(['cli', 'provider', 'mcp'] as const)(
+      'returns nested %s Worker results while retaining the parent authority and capability ceiling',
+      async (kind) => {
+        const registry = new ToolRegistry();
+        const definition = (name: string) =>
+          createToolDefinition({
+            toolId: createToolId({ provider: 'builtin', namespace: 'nested', name, version: '1' }),
+            providerName: name,
+            kind: 'search',
+            schemaVersion: 1,
+            inputSchema: {
+              type: 'object',
+              properties: { phase: { type: 'string' } },
+              required: ['phase'],
+              additionalProperties: false,
+            },
+            outputSchema: { type: 'object' },
+            sideEffect: 'none',
+            risk: 'low',
+            requiredCapabilities: [],
+            executionTarget: 'main',
+            implementationKind: 'built-in',
+            priority: 10,
+            workspaceBinding: { kind: 'none' },
+            providerCompatibility: ['provider'],
+          });
+        const parent = definition('parent');
+        const child = definition('update_plan');
+        registry.register(parent);
+        registry.register(child);
+        const authorize = vi.fn<ToolAuthorizer>(({ context, input }) => {
+          expect(context.turnId).toBe('turn-parent');
+          return (input as { phase: string }).phase === 'denied'
+            ? { decision: 'deny', reason: 'policy_denied' }
+            : { decision: 'allow', reason: 'test_allow' };
+        });
+        const broker = new ToolBroker(registry, () => 9, authorize);
+        const executeChild = vi.fn((input: unknown) => input);
+        broker.registerImplementation({
+          toolId: parent.toolId,
+          implementationKind: 'built-in',
+          execute: async () => {
+            await expect(call('denied')).rejects.toThrow('policy_denied');
+            return await call('recovered');
+          },
+        });
+        broker.registerImplementation({
+          toolId: child.toolId,
+          implementationKind: 'built-in',
+          execute: executeChild,
+        });
+        broker.startTurn(
+          { taskId: 'task-1', turnId: 'turn-parent', workspaceId: null, policyEpoch: 9 },
+          'provider',
+        );
+        const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+        Object.assign(router, {
+          managedWorkerTurn: new Map(),
+          managedWorkerCall: new Map(),
+          managedCodingHarness: { broker },
+          cliTeamWorkerRuntime: {
+            recordManagedToolDenied: vi.fn(),
+            recordManagedToolResult: vi.fn(),
+          },
+          persistence: {
+            getActiveTurnId: () => 'turn-parent',
+            getTeamMissionForExecution: () => null,
+            readTurnWorkspaceSetForTask: () => null,
+            getPermissionPolicy: () => ({ policyEpoch: 9 }),
+          },
+        });
+        const catalog = await prepareWorkerManagedCatalog.call(
+          router,
+          'provider',
+          'task-1',
+          'worker-runtime',
+          { primaryRootId: null, digest: 'x'.repeat(64), roots: [] },
+          false,
+          'read-only',
+        );
+        const handlers = createHandlers.call(router) as ReturnType<typeof createHandlers> & {
+          cliTeam(
+            taskId: string,
+            turnId: string,
+            request: {
+              callId: string;
+              toolName: string;
+              arguments: unknown;
+              catalogDigest: string;
+              resultOrderScope?: object;
+            },
+            signal: AbortSignal,
+          ): Promise<unknown>;
+          providerWorker(
+            taskId: string,
+            turnId: string,
+            digest: string,
+            name: string,
+            input: unknown,
+            signal: AbortSignal,
+          ): Promise<unknown>;
+        };
+        const signal = new AbortController().signal;
+        const dispatchSpy = vi.spyOn(broker, 'dispatch');
+        const workerBinding = (router['managedWorkerTurn'] as Map<string, object>).get(
+          'worker-runtime',
+        );
+        const call = (phase: string): Promise<unknown> =>
+          kind === 'provider'
+            ? handlers.providerWorker(
+                'task-1',
+                'worker-runtime',
+                catalog.digest,
+                'update_plan',
+                { phase },
+                signal,
+              )
+            : kind === 'cli'
+              ? handlers.cliTeam(
+                  'task-1',
+                  'worker-runtime',
+                  {
+                    callId: phase,
+                    toolName: 'update_plan',
+                    arguments: { phase },
+                    catalogDigest: catalog.digest,
+                    resultOrderScope: {},
+                  },
+                  signal,
+                )
+              : handlers.teamMcp(
+                  { phase },
+                  {
+                    taskId: 'task-1',
+                    turnId: 'worker-runtime',
+                    callId: phase,
+                    toolName: 'update_plan',
+                    catalogDigest: catalog.digest,
+                  },
+                );
+        let result: unknown;
+        const pending = broker
+          .dispatch({
+            taskId: 'task-1',
+            turnId: 'turn-parent',
+            callId: 'parent',
+            providerName: 'parent',
+            input: { phase: 'parent' },
+          })
+          .then((value) => (result = value));
+        await vi.waitFor(() => expect(result).toEqual({ phase: 'recovered' }));
+        await pending;
+        expect(executeChild).toHaveBeenCalledTimes(1);
+        const childCalls = dispatchSpy.mock.calls.filter(
+          ([request]) => request.providerName === 'update_plan',
+        );
+        expect(childCalls).toHaveLength(2);
+        for (const [request] of childCalls) expect(request.resultOrderScope).toBe(workerBinding);
+        const requestsBefore = authorize.mock.calls.length;
+        await expect(
+          handlers.providerWorker(
+            'other-task',
+            'worker-runtime',
+            catalog.digest,
+            'update_plan',
+            { phase: 'forged' },
+            signal,
+          ),
+        ).rejects.toThrow('task binding');
+        await expect(
+          handlers.providerWorker(
+            'task-1',
+            'worker-runtime',
+            'stale',
+            'update_plan',
+            { phase: 'forged' },
+            signal,
+          ),
+        ).rejects.toThrow('capability ceiling');
+        await expect(
+          handlers.providerWorker(
+            'task-1',
+            'worker-runtime',
+            catalog.digest,
+            'parent',
+            { phase: 'forged' },
+            signal,
+          ),
+        ).rejects.toThrow('capability ceiling');
+        releaseManagedWorkerTurn.call(router, 'worker-runtime');
+        await expect(async () => await call('late')).rejects.toThrow();
+        expect(authorize).toHaveBeenCalledTimes(requestsBefore);
+      },
+    );
+
     it('writes when the card is allowed while the Worker Turn is still running', async () => {
       const { execute, approvals, call, allow } = await workerWriteAwaitingApproval();
 
@@ -3036,6 +3236,8 @@ describe('Main image attachment dispatch boundary', () => {
         providerName: 'create_file',
         input: { path: 'c.txt', content: 'hello' },
       });
+      // Independent runtime results can now reject before another Worker's result is observed.
+      const leaderDenied = expect(leader).rejects.toThrow('Tool authorization deny');
       await vi.waitFor(() => expect(cards.size).toBe(3));
       // The broker call id a Worker call is bound to, as ipc.ts derives it.
       const workerCallId = (runtimeTurnId: string) =>
@@ -3087,7 +3289,7 @@ describe('Main image attachment dispatch boundary', () => {
       releaseManagedWorkerTurn.call(router, 'runtime-worker-b');
 
       await expect(writeB).rejects.toThrow('Team Worker Turn ended');
-      await expect(leader).rejects.toThrow('Tool authorization deny');
+      await leaderDenied;
       expect(cards.get(leaderCard.id)).toMatchObject({ state: 'resolved', decision: 'deny' });
       expect(cards.get(cardB.id)).toMatchObject({ state: 'canceled', decision: null });
       expect(recordManagedToolDenied).not.toHaveBeenCalled();

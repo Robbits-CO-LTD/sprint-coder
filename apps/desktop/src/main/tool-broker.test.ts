@@ -75,6 +75,136 @@ const context: ToolExecutionContext = {
 };
 
 describe('Main ToolBroker', () => {
+  it('delivers nested Worker denial and recovery without waiting on its parent result', async () => {
+    const { registry, echo } = createRegistry();
+    const worker = {};
+    const audit: Array<{ callId: string; ordinal: number; turnId: string }> = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      ({ input, context: owner }) => {
+        expect(owner).toEqual(context);
+        return (input as { text: string }).text === 'denied'
+          ? { decision: 'deny', reason: 'protected_resource' }
+          : { decision: 'allow', reason: 'test_allow' };
+      },
+      (event) => {
+        if (event.state === 'requested') audit.push(event);
+      },
+    );
+    const dispatch = (text: string, resultOrderScope?: object) =>
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: text,
+        providerName: 'mock_echo',
+        input: { text },
+        ...(resultOrderScope === undefined ? {} : { resultOrderScope }),
+      });
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        if ((input as { text: string }).text !== 'parent') return input;
+        await expect(dispatch('denied', worker)).rejects.toThrow('protected_resource');
+        return await dispatch('recovered', worker);
+      },
+    });
+    broker.startTurn(context, 'mock');
+    let result: unknown;
+    const pending = dispatch('parent').then((value) => (result = value));
+    await vi.waitFor(() => expect(result).toEqual({ text: 'recovered' }));
+    await pending;
+    expect(audit.map(({ callId, ordinal, turnId }) => ({ callId, ordinal, turnId }))).toEqual([
+      { callId: 'parent', ordinal: 1, turnId: context.turnId },
+      { callId: 'denied', ordinal: 2, turnId: context.turnId },
+      { callId: 'recovered', ordinal: 3, turnId: context.turnId },
+    ]);
+  });
+
+  it('orders results within each Worker while other Workers and the Leader can finish', async () => {
+    const { registry, echo } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizePure);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => {
+        if ((input as { text: string }).text === 'a-first') await gate;
+        return input;
+      },
+    });
+    broker.startTurn(context, 'mock');
+    const returned: string[] = [];
+    const dispatch = (text: string, resultOrderScope?: object) =>
+      broker
+        .dispatch({
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId: text,
+          providerName: 'mock_echo',
+          input: { text },
+          ...(resultOrderScope === undefined ? {} : { resultOrderScope }),
+        })
+        .then(() => returned.push(text));
+    const workerA = {};
+    const first = dispatch('a-first', workerA);
+    const second = dispatch('a-second', workerA);
+    const independent = [dispatch('b-first', {}), dispatch('leader')];
+    try {
+      await vi.waitFor(() => expect(returned).toEqual(['b-first', 'leader']));
+    } finally {
+      release();
+    }
+    await Promise.all([first, second, ...independent]);
+    expect(returned).toEqual(['b-first', 'leader', 'a-first', 'a-second']);
+  });
+
+  it('keeps conflicting resource claims shared across Worker result scopes', async () => {
+    const { registry, echo } = createRegistry();
+    const broker = new ToolBroker(registry, () => 3, authorizePure);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const started: string[] = [];
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      resourceClaims: () => [{ key: 'shared-file', mode: 'write' }],
+      execute: async (input) => {
+        const text = (input as { text: string }).text;
+        started.push(text);
+        if (text === 'first') await gate;
+        return input;
+      },
+    });
+    broker.startTurn(context, 'mock');
+    const dispatch = (text: string) =>
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: text,
+        providerName: 'mock_echo',
+        input: { text },
+        resultOrderScope: {},
+      });
+    const first = dispatch('first');
+    const second = dispatch('second');
+    try {
+      await vi.waitFor(() => expect(started).toEqual(['first']));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(started).toEqual(['first']);
+    } finally {
+      release();
+    }
+    await Promise.all([first, second]);
+    expect(started).toEqual(['first', 'second']);
+  });
+
   it.each(['requested', 'failed'] as const)(
     'unblocks later results when lifecycle recording throws at %s',
     async (failureState) => {

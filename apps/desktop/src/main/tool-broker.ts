@@ -18,6 +18,8 @@ export type ToolDispatchRequest = {
   signal?: AbortSignal;
   /** Handed to authorization as `ToolAuthorizationControl.onApprovalWait`. */
   onApprovalWait?: ApprovalWaitObserver;
+  /** Host-owned runtime identity; separates delivery order without changing Turn authority. */
+  resultOrderScope?: object;
 };
 
 /**
@@ -94,6 +96,7 @@ type BoundTurn = {
   claimedCallIds: Set<string>;
   gate: ToolResourceGate;
   resultGate: OrderedToolResultGate;
+  scopedResultGates: WeakMap<object, OrderedToolResultGate>;
   nextOrdinal: number;
 };
 
@@ -151,6 +154,7 @@ export class ToolBroker {
       claimedCallIds: new Set(),
       gate: new ToolResourceGate(8),
       resultGate: new OrderedToolResultGate(),
+      scopedResultGates: new WeakMap(),
       nextOrdinal: 0,
     });
     return snapshot;
@@ -182,6 +186,15 @@ export class ToolBroker {
     if (bound.claimedCallIds.has(request.callId)) throw new Error('Duplicate tool call id');
     bound.claimedCallIds.add(request.callId);
     const ordinal = ++bound.nextOrdinal;
+    let resultGate = bound.resultGate;
+    if (request.resultOrderScope !== undefined) {
+      const scoped = bound.scopedResultGates.get(request.resultOrderScope);
+      resultGate = scoped ?? new OrderedToolResultGate();
+      if (scoped === undefined) bound.scopedResultGates.set(request.resultOrderScope, resultGate);
+    }
+    // A parent tool can await a Worker. The Worker's result must not await that parent's result,
+    // while audit ordinals and resource arbitration still belong to the shared parent Turn.
+    const resultOrdinal = resultGate.reserve();
     let terminal = false;
     let resultGateStarted = false;
     const transition = (state: ManagedToolCallState): void => {
@@ -327,7 +340,7 @@ export class ToolBroker {
         throw new Error('Tool output exceeded the pinned output limit');
       if (resultConsumer !== undefined) {
         resultGateStarted = true;
-        await bound.resultGate.complete(ordinal);
+        await resultGate.complete(resultOrdinal);
         if (request.signal?.aborted) throw abortError(request.signal);
       }
       if (
@@ -344,7 +357,7 @@ export class ToolBroker {
       if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
       throw error;
     } finally {
-      if (!resultGateStarted) await bound.resultGate.complete(ordinal);
+      if (!resultGateStarted) await resultGate.complete(resultOrdinal);
     }
   }
 }
@@ -466,9 +479,14 @@ function normalizeResourceClaims(
 }
 
 class OrderedToolResultGate {
+  private issuedOrdinal = 0;
   private nextOrdinal = 1;
   private readonly completed = new Map<number, () => void>();
   private drainScheduled = false;
+
+  reserve(): number {
+    return ++this.issuedOrdinal;
+  }
 
   complete(ordinal: number): Promise<void> {
     if (!Number.isInteger(ordinal) || ordinal < this.nextOrdinal)
