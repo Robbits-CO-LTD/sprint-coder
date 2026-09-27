@@ -652,6 +652,107 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       },
       gitScenarioTimeout,
     );
+    it.each([
+      ['steer', 'outside', 'write', false, false],
+      ['resume', 'outside', 'write', false, false],
+      ['resume', 'outside', 'later-write', false, false],
+      ['steer', 'same', 'write', false, true],
+      ['resume', 'same', 'write', false, true],
+      ['steer', 'outside', 'read', false, true],
+      ['resume', 'outside', 'read', false, true],
+      ['steer', 'outside', 'write', true, true],
+      ['resume', 'outside', 'write', true, true],
+    ] as const)(
+      'bounds Manager %s by Graph scope: %s / %s / Leader=%s (issue #613)',
+      async (operation, scope, access, asLeader, allowed) => {
+        const f = fixture(undefined, true);
+        const manager = f.workers[0]!;
+        const child = f.workers[1]!;
+        const graph = await writeMission(f, join(dirname(f.path), 'workspace'), ['allowed.ts']);
+        if (scope === 'same') begin(f, graph.mission.id, 'a', graph.acquisition.writeFootprints);
+        // Outside work predates the Graph attempt. Same-scope work is assigned during it; the
+        // ordered assignment log, not a changed instruction, determines the child's Graph owner.
+        const earlier = f.persistence.createTeamMission({
+          teamId: f.team.id,
+          createdByAgentId: manager.id,
+          objective: 'earlier work',
+          doneCriteria: ['written'],
+          steps: [0, 1].map((index) => ({
+            workerId: child.id,
+            objective: 'earlier instruction',
+            doneCriteria: ['written'],
+            access:
+              (access === 'write' && index === 0) || (access === 'later-write' && index === 1)
+                ? ('workspace-write' as const)
+                : ('read-only' as const),
+          })),
+          now,
+        });
+        const target = earlier.steps[0]!.executionId;
+        f.persistence.transitionTeamExecution({
+          executionId: target,
+          to: operation === 'resume' ? 'waiting_resume' : 'queued',
+          ...(operation === 'steer' ? { queueReason: 'global_concurrency' as const } : {}),
+          now,
+        });
+        if (operation === 'resume') {
+          f.persistence.transitionTeamMission(earlier.id, 'running', now);
+          f.persistence.transitionTeamMission(earlier.id, 'waiting_resume', now);
+        }
+        if (scope === 'outside') begin(f, graph.mission.id, 'a', graph.acquisition.writeFootprints);
+        const scheduler = new TeamExecutionScheduler(1);
+        const submit = vi.spyOn(scheduler, 'submit').mockImplementation(() => {});
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+        );
+        const before = f.persistence.getTeamExecution(target);
+        const missionBefore = f.persistence.getTeamMission(earlier.id);
+        try {
+          const action =
+            operation === 'steer'
+              ? coordinator.steerExecution(
+                  f.task.id,
+                  target,
+                  'write outside.ts',
+                  asLeader ? null : manager.id,
+                  'workspace-write',
+                )
+              : coordinator.resumeMission(
+                  f.task.id,
+                  earlier.id,
+                  asLeader ? null : manager.id,
+                  'workspace-write',
+                );
+          if (allowed) {
+            await expect(action).resolves.toBeDefined();
+            expect(f.persistence.getTeamExecution(target).state).toBe('queued');
+            if (operation === 'steer')
+              expect(f.persistence.getTeamExecution(target).instruction.revision).toBe(
+                before.instruction.revision + 1,
+              );
+            else expect(submit).toHaveBeenCalledOnce();
+          } else {
+            await expect(action).rejects.toThrow(
+              'Graph Manager cannot change work from another Graph scope',
+            );
+            expect(f.persistence.getTeamExecution(target)).toEqual(before);
+            expect(f.persistence.getTeamMission(earlier.id)).toEqual(missionBefore);
+            expect(submit).not.toHaveBeenCalled();
+          }
+          expect(execute).not.toHaveBeenCalled();
+        } finally {
+          f.persistence.close();
+        }
+      },
+      gitScenarioTimeout,
+    );
     /**
      * A Graph write step claiming `a.ts` and `b.ts`, run by a Manager that has its Workers write the
      * way the Team tools do (issues #587, #606), and waits for them. The Manager writes nothing
