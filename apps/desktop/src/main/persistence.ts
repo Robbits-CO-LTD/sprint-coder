@@ -12366,6 +12366,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   recoverInterruptedTeamExecutions(now: string): number {
     return this.db.transaction(() => {
+      // These session Turns are terminal, so interruptActiveTurns cannot cancel their cards.
+      // No Worker from the previous application instance can receive a new approval decision.
+      const graphApprovals = this.db
+        .prepare(
+          `SELECT DISTINCT a.task_id, a.turn_id FROM approvals AS a
+           JOIN team_missions AS m ON a.turn_id = (? || m.id)
+           JOIN teams AS t ON t.id = m.team_id
+           WHERE a.state = 'pending' AND m.mode = 'graph' AND t.task_id = a.task_id`,
+        )
+        .all(GRAPH_MISSION_SESSION_TURN_PREFIX) as { task_id: string; turn_id: string }[];
+      for (const approval of graphApprovals)
+        this.cancelPendingApprovals(approval.task_id, approval.turn_id, now);
       this.db
         .prepare(
           "UPDATE team_graph_resource_reservations SET state='quarantined' WHERE state IN ('reserved','active')",
@@ -16201,7 +16213,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         );
       }
       const turn = this.getTurn(input.taskId, input.turnId);
+      // Graph session Turns deliberately stay terminal so the chat composer remains available.
+      // ApprovalCoordinator still requires a live host-owned Worker; additionally bind this
+      // persistence exception to an actual Graph attempt in the same Task, never just a prefix.
+      const graphSession =
+        turn.state === 'completed' &&
+        input.turnId.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX) &&
+        this.db
+          .prepare(
+            `SELECT 1 FROM team_missions AS m
+             JOIN teams AS t ON t.id = m.team_id
+             JOIN team_graph_mission_steps AS s ON s.mission_id = m.id
+             JOIN team_executions AS e ON e.id = s.execution_id
+             JOIN team_attempts AS a ON a.execution_id = e.id
+             WHERE m.id = ? AND t.task_id = ? AND m.mode = 'graph'
+               AND m.state = 'running'
+               AND e.state = 'running' AND a.state = 'running'
+             LIMIT 1`,
+          )
+          .get(input.turnId.slice(GRAPH_MISSION_SESSION_TURN_PREFIX.length), input.taskId) !==
+          undefined;
       if (
+        !graphSession &&
         turn.state !== 'executing' &&
         turn.state !== 'planning' &&
         turn.state !== 'waiting_approval'
@@ -16254,7 +16287,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         );
       // Parallel tools each need their own approval. An existing pending card already
       // put the Turn in this state; only the last resolved card may resume it.
-      if (turn.state !== 'waiting_approval') {
+      if (!graphSession && turn.state !== 'waiting_approval') {
         transitionTurn(turn.state, 'waiting_approval');
         this.updateTurn(input.turnId, 'waiting_approval');
       }
