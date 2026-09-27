@@ -110,6 +110,7 @@ async function harness(
     digest: 'a'.repeat(64),
   };
   const authorizationGuards: unknown[] = [];
+  const disclosureFacts: ReturnType<typeof providerDisclosureAuthorizationFacts>[] = [];
   const rootIdentity = options.project
     ? (await workspaceMutationBinding(root)).rootIdentityDigest
     : undefined;
@@ -119,6 +120,7 @@ async function harness(
     policyEpochFor: () => 1,
     authorizer: (request) => {
       authorizationGuards.push(workspaceToolAuthorizationGuard(request.input));
+      disclosureFacts.push(providerDisclosureAuthorizationFacts(request.input));
       return {
         decision: 'allow',
         reason: 'test',
@@ -133,7 +135,7 @@ async function harness(
     policyEpoch: 1,
   } as const;
   const snapshot = tools.startTurn(context, 'ollama');
-  return { root, tools, context, snapshot, authorizationGuards };
+  return { root, tools, context, snapshot, authorizationGuards, disclosureFacts };
 }
 
 describe('Provider workspace read tools', () => {
@@ -966,6 +968,61 @@ describe('Provider workspace read tools', () => {
         input: { path: 'notes.txt' },
       }),
     ).resolves.toMatchObject({ content: 'password=[REDACTED]\n' });
+  });
+
+  it('preserves document identifiers through read_file without requesting extra disclosure', async () => {
+    const { root, tools, context, disclosureFacts } = await harness();
+    const content =
+      'See https://github.com/Robbits-CO-LTD/sprint-coder/actions/workflows/ci.yml\n' +
+      'The identifier `quickBrownFoxJumpsOverLazyDog` is documented here.\n';
+    await writeFile(join(root, 'README.md'), content);
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'ordinary-document',
+        providerName: 'read_file',
+        input: { path: 'README.md' },
+      }),
+    ).resolves.toMatchObject({ content });
+    expect(disclosureFacts).toEqual([undefined]);
+
+    const secret = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+    await writeFile(join(root, 'secret-notes.md'), `${content}\n\`${secret}\``);
+    const result = await tools.broker.dispatch({
+      ...context,
+      callId: 'secret-document',
+      providerName: 'read_file',
+      input: { path: 'secret-notes.md' },
+    });
+    expect(result).toMatchObject({ content: expect.stringContaining('[REDACTED_HIGH_ENTROPY]') });
+    expect(JSON.stringify(result)).not.toContain(secret);
+    expect(disclosureFacts.at(-1)).toMatchObject({
+      providerId: 'ollama',
+      classification: 'sensitive',
+      classifierVersion: 'provider-disclosure-v5',
+      canonicalPath: expect.stringContaining('secret-notes.md'),
+      sourceDigest: expect.any(String),
+      disclosedDigest: expect.any(String),
+    });
+  });
+
+  it('rejects document contents changed after disclosure preparation', async () => {
+    const { root, tools, context } = await harness({
+      beforeExecute: (path) => {
+        writeFileSync(join(path, 'README.md'), 'password=hunter2\n');
+        return true;
+      },
+    });
+    await writeFile(join(root, 'README.md'), 'The identifier `quickBrownFoxJumpsOverLazyDog`.\n');
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'changed-document',
+        providerName: 'read_file',
+        input: { path: 'README.md' },
+      }),
+      // The existing path guard detects this mutation before the disclosure comparison can run.
+    ).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
   });
 
   it('presents only a bounded redacted disclosure preview to the authorizer', async () => {

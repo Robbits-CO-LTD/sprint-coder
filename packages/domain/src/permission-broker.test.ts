@@ -1014,6 +1014,38 @@ describe('access preset expansion', () => {
       ).toMatchObject({ decision: 'approval_required', reason: 'approval_policy_ask' });
     });
 
+    it('does not reuse a v4 exact disclosure grant for v5 with the same content digests', () => {
+      const oldSet = disclosureCeiling(disclosureResource).entries[0]!.resourceSet;
+      const updated = { ...disclosureResource, classifierVersion: 'provider-disclosure-v5' };
+      expect(resourceContains(oldSet, disclosureResource)).toBe(true);
+      expect(resourceContains(oldSet, updated)).toBe(false);
+      const oldRequest = disclosureRequestFor(disclosureResource);
+      const grant = createSessionGrant({
+        id: 'disclosure-v4-grant',
+        subjectId: oldRequest.subjectId,
+        capability: 'workspace.read',
+        resourceSet: oldSet,
+        operations: ['read'],
+        scope: 'task',
+        expiresAt: '2026-07-22T12:05:00.000Z',
+        policyEpoch: 4,
+        providerEgress: ['none'],
+        sandboxProfiles: ['read-only'],
+      });
+      const policy = { ...disclosurePolicy('auto', disclosureResource), rememberedGrants: [grant] };
+      expect(evaluatePermissionPolicy({ request: oldRequest, policy, now: NOW })).toMatchObject({
+        decision: 'allow',
+        reason: 'remembered_grant',
+      });
+      expect(
+        evaluatePermissionPolicy({
+          request: disclosureRequestFor(updated),
+          policy: { ...disclosurePolicy('auto', updated), rememberedGrants: [grant] },
+          now: NOW,
+        }),
+      ).toMatchObject({ decision: 'approval_required' });
+    });
+
     // The disclosure resource carries the guard's path classification precisely so the immutable
     // deny cannot be bypassed by routing a protected file through the disclosure lane.
     it('denies a protected path under every preset, disclosure lane included', () => {
