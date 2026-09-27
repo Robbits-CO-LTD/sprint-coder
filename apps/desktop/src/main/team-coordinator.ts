@@ -1143,6 +1143,16 @@ export class TeamCoordinator {
         mission.steps.some(({ access }) => access === 'workspace-write')
       )
         throw new Error('read-only execution cannot resume a workspace-write Mission');
+      this.assertManagerGraphScope(
+        team.id,
+        requesterAgentId,
+        mission.steps
+          .filter(
+            ({ ordinal, access }) =>
+              ordinal >= mission.currentStepOrdinal && access === 'workspace-write',
+          )
+          .map(({ executionId }) => executionId),
+      );
       const step = mission.steps.find(({ ordinal }) => ordinal === mission.currentStepOrdinal);
       if (step === undefined) throw new Error('Current Mission step not found');
       const execution = this.persistence.getTeamExecution(step.executionId);
@@ -2994,6 +3004,11 @@ export class TeamCoordinator {
         execution.accessMode === 'workspace-write'
       )
         throw new Error('read-only execution cannot steer a workspace-write execution');
+      this.assertManagerGraphScope(
+        team.id,
+        requesterAgentId,
+        execution.accessMode === 'workspace-write' ? [execution.id] : [],
+      );
       if (execution.state === 'running')
         return this.interruptRunningExecution(execution, 'steer', instruction);
       if (
@@ -4825,6 +4840,24 @@ export class TeamCoordinator {
       }
       if (page.length < ACTIVITY_REPLAY_PAGE) return undefined;
       afterSeq = page.at(-1)!.seq;
+    }
+  }
+
+  /** Assignment ancestry survives steer/resume; changing the instruction cannot widen its scope. */
+  private assertManagerGraphScope(
+    teamId: string,
+    requesterAgentId: string | null,
+    writableExecutionIds: readonly string[],
+  ): void {
+    if (requesterAgentId === null || writableExecutionIds.length === 0) return;
+    for (const execution of this.persistence.listTeamExecutions(teamId)) {
+      if (execution.assigneeAgentId !== requesterAgentId || execution.state !== 'running') continue;
+      const scope = this.graphScopeExecutionId(execution.id);
+      if (
+        scope !== null &&
+        writableExecutionIds.some((id) => this.graphScopeExecutionId(id) !== scope)
+      )
+        throw new Error('Graph Manager cannot change work from another Graph scope');
     }
   }
 
