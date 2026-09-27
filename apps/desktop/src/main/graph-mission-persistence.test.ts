@@ -18,7 +18,10 @@ import { randomUUID, createHash } from 'node:crypto';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
-import { SqlitePersistenceClient } from './persistence';
+import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
+import { SqlitePersistenceClient, type ApprovalRequestInput } from './persistence';
+import { ApprovalCoordinator } from './approval-coordinator';
+import { ToolBroker } from './tool-broker';
 import { nextGraphDocument } from './graph-document';
 import {
   graphMissionContextFor,
@@ -36,7 +39,7 @@ import {
   WorkerRuntimeExitUnconfirmedError,
   type TeamWorkerRuntime,
 } from './team-coordinator';
-import { workerManagedCatalogOwner } from './ipc';
+import { authorizationTurnIsActive, workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
 import { managedLocalConnection } from './managed-local-provider-runtime';
@@ -2144,6 +2147,358 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       } finally {
         const reopened = new SqlitePersistenceClient(f.path);
         expect(reopened.getTeamMission(mission.id).mode).toBe('graph');
+        reopened.close();
+      }
+    });
+
+    function graphTurnState(f: ReturnType<typeof fixture>, turnId: string): string {
+      const db = new Database(f.path, { readonly: true });
+      try {
+        return (db.prepare('SELECT state FROM turns WHERE id = ?').get(turnId) as { state: string })
+          .state;
+      } finally {
+        db.close();
+      }
+    }
+
+    function graphApproval(taskId: string, turnId: string): ApprovalRequestInput {
+      const id = randomUUID();
+      return {
+        id,
+        taskId,
+        turnId,
+        itemId: id,
+        callId: id,
+        runtimeInstanceId: `runtime:${turnId}`,
+        subjectId: 'tool:builtin:provider-workspace:read@1',
+        providerName: 'read_file',
+        toolId: 'builtin:provider-workspace:read@1',
+        toolCatalogDigest: 'a'.repeat(64),
+        schemaDigest: 'b'.repeat(64),
+        specDigest: 'c'.repeat(64),
+        policyEpoch: 0,
+        capability: 'workspace.read',
+        resource: { kind: 'path-prefix', canonicalPath: '/workspace' },
+        operation: 'read',
+        providerEgress: 'none',
+        sandboxProfile: 'read-only',
+        risk: 'low',
+        reasonUntrusted: 'Read fixture',
+        display: { target: 'README.md', impact: 'read', execution: 'Read README.md' },
+        challenge: randomUUID(),
+        requestedAt: now,
+        expiresAt: '2026-09-11T01:00:00.000Z',
+      };
+    }
+
+    it('keeps Graph session approval cards independent of the chat Turn state', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      begin(f, mission.id, 'a');
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      try {
+        const first = f.persistence.requestApproval(graphApproval(f.task.id, turnId)).approval;
+        const second = f.persistence.requestApproval(graphApproval(f.task.id, turnId)).approval;
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+        expect(f.persistence.listPendingApprovals(f.task.id)).toHaveLength(2);
+        const resolved = f.persistence.resolveApproval({
+          taskId: f.task.id,
+          approvalId: first.id,
+          expectedTurnId: turnId,
+          expectedRevision: first.revision,
+          challenge: first.challenge,
+          decision: 'allow_once',
+          operationId: randomUUID(),
+          decidedAt: now,
+        });
+        expect(resolved.approval.decision).toBe('allow_once');
+        expect(resolved.oneTimePermitToken).toBeDefined();
+        expect(
+          f.persistence.consumePermissionOneTimeToken(
+            f.task.id,
+            resolved.oneTimePermitToken!,
+            0,
+            now,
+            {
+              approvalId: first.id,
+              turnId,
+              callId: first.callId,
+              subjectId: first.subjectId,
+              specDigest: first.specDigest,
+            },
+          ),
+        ).toBe(true);
+        expect(
+          f.persistence.consumePermissionOneTimeToken(
+            f.task.id,
+            resolved.oneTimePermitToken!,
+            0,
+            now,
+          ),
+        ).toBe(false);
+        expect(f.persistence.listPendingApprovals(f.task.id).map((card) => card.id)).toEqual([
+          second.id,
+        ]);
+        f.persistence.cancelPendingApprovalForCall({
+          taskId: f.task.id,
+          turnId,
+          approvalId: second.id,
+          callId: second.callId,
+          canceledAt: now,
+        });
+        expect(f.persistence.listPendingApprovals(f.task.id)).toHaveLength(0);
+        expect(f.persistence.getApproval(f.task.id, second.id)).toMatchObject({
+          state: 'canceled',
+          decision: null,
+        });
+        expect(() =>
+          f.persistence.resolveApproval({
+            taskId: f.task.id,
+            approvalId: second.id,
+            expectedTurnId: turnId,
+            expectedRevision: second.revision,
+            challenge: second.challenge,
+            decision: 'allow_once',
+            operationId: randomUUID(),
+            decidedAt: now,
+          }),
+        ).toThrow('no longer pending');
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('admits Graph session approvals only while a real attempt is running', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      try {
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+        const run = begin(f, mission.id, 'a');
+        const stale = graphApproval(f.task.id, turnId);
+        expect(() => f.persistence.requestApproval({ ...stale, policyEpoch: 1 })).toThrow(
+          'policy epoch is stale',
+        );
+        const otherTask = f.persistence.createTask('Other task');
+        expect(() => f.persistence.requestApproval(graphApproval(otherTask.id, turnId))).toThrow();
+        f.persistence.interruptGraphStep({
+          missionId: mission.id,
+          stepKey: 'a',
+          generation: 1,
+          reservationId: run.reservation.id,
+          attemptId: run.attempt.id,
+          outcome: 'failed',
+          reason: 'Stopped fixture',
+          confirmation: { kind: 'attempt-stopped', attemptId: run.attempt.id },
+          now,
+        });
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+        expect(f.persistence.listPendingApprovals(f.task.id)).toHaveLength(0);
+        expect(graphTurnState(f, turnId)).toBe('completed');
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('keeps a real chat independent of Graph session approvals and refuses its terminal state', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      begin(f, mission.id, 'a');
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      try {
+        const card = f.persistence.requestApproval(graphApproval(f.task.id, turnId)).approval;
+        const chat = f.persistence.startTurn(f.task.id, 'Read the progress');
+        for (const stage of ['understanding', 'planning', 'executing'] as const)
+          f.persistence.changeStage(f.task.id, chat.turnId, stage);
+        f.persistence.resolveApproval({
+          taskId: f.task.id,
+          approvalId: card.id,
+          expectedTurnId: turnId,
+          expectedRevision: card.revision,
+          challenge: card.challenge,
+          decision: 'deny',
+          operationId: randomUUID(),
+          decidedAt: now,
+        });
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBe(chat.turnId);
+        expect(graphTurnState(f, chat.turnId)).toBe('executing');
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        f.persistence.changeStage(f.task.id, chat.turnId, 'synthesizing');
+        f.persistence.completeTurn(f.task.id, chat.turnId, 'completed');
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, chat.turnId))).toThrow(
+          'not eligible',
+        );
+        // The Graph remains live, but cannot lend that exception to an unrelated chat Turn.
+        expect(f.persistence.getTeamMission(mission.id).state).toBe('running');
+        f.persistence.transitionTeamMission(mission.id, 'canceled', now);
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('cancels Graph session approval on Worker release through the real approval coordinator', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      begin(f, mission.id, 'a');
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      const owners = new Map([
+        ['worker', { taskId: f.task.id, parentTurnId: turnId }],
+        ['sibling', { taskId: f.task.id, parentTurnId: turnId }],
+      ]);
+      const released = new AbortController();
+      const coordinator = new ApprovalCoordinator({
+        persistence: f.persistence,
+        now: () => now,
+        expiresAt: () => '2026-09-11T01:00:00.000Z',
+        getCurrentPolicyEpoch: () => 0,
+        isTurnActive: (task, turn) => authorizationTurnIsActive(null, task, turn, owners.values()),
+        evaluatePermission: () => 'approval_required',
+        publish: () => {},
+      });
+      const registry = new ToolRegistry();
+      const definition = createToolDefinition({
+        toolId: createToolId({
+          provider: 'builtin',
+          namespace: 'approval',
+          name: 'graph',
+          version: '1',
+        }),
+        providerName: 'graph_approval_fixture',
+        kind: 'network',
+        schemaVersion: 1,
+        inputSchema: { type: 'object' },
+        outputSchema: { type: 'string' },
+        sideEffect: 'network',
+        risk: 'medium',
+        requiredCapabilities: ['network.fetch'],
+        executionTarget: 'main',
+        implementationKind: 'built-in',
+        priority: 1,
+        workspaceBinding: { kind: 'none' },
+        providerCompatibility: ['mock'],
+      });
+      registry.register(definition);
+      const broker = new ToolBroker(
+        registry,
+        () => 0,
+        coordinator.authorizeTool.bind(coordinator),
+        () => {},
+      );
+      const execute = vi.fn(() => 'ok');
+      broker.registerImplementation({
+        toolId: definition.toolId,
+        implementationKind: 'built-in',
+        execute,
+      });
+      broker.startTurn({ taskId: f.task.id, turnId, workspaceId: null, policyEpoch: 0 }, 'mock');
+      const call = broker.dispatch({
+        taskId: f.task.id,
+        turnId,
+        callId: 'graph-call',
+        providerName: definition.providerName,
+        input: {},
+        signal: released.signal,
+      });
+      const rejected = expect(call).rejects.toThrow();
+      try {
+        await vi.waitFor(() =>
+          expect(f.persistence.listPendingApprovals(f.task.id)).toHaveLength(1),
+        );
+        const card = f.persistence.listPendingApprovals(f.task.id)[0]!;
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+        owners.delete('worker');
+        released.abort(new Error('Worker released'));
+        await rejected;
+        expect(authorizationTurnIsActive(null, f.task.id, turnId, owners.values())).toBe(true);
+        expect(f.persistence.getApproval(f.task.id, card.id)).toMatchObject({
+          state: 'canceled',
+          decision: null,
+        });
+        expect(() =>
+          coordinator.resolve({
+            taskId: f.task.id,
+            turnId,
+            approvalId: card.id,
+            decision: 'allow_once',
+            expectedRevision: card.revision,
+            challenge: card.challenge,
+            operationId: randomUUID(),
+          }),
+        ).toThrow();
+        expect(execute).not.toHaveBeenCalled();
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        const db = new Database(f.path, { readonly: true });
+        try {
+          expect(
+            db.prepare('SELECT COUNT(*) AS count FROM permission_one_time_permits').get(),
+          ).toEqual({ count: 0 });
+          expect(db.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual({
+            count: 0,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        owners.clear();
+        released.abort();
+        await rejected;
+        f.persistence.close();
+      }
+    });
+
+    it('cancels stale Graph session approvals during restart recovery without granting access', () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      begin(f, mission.id, 'a');
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      const card = f.persistence.requestApproval(graphApproval(f.task.id, turnId)).approval;
+      f.persistence.close();
+      const reopened = new SqlitePersistenceClient(f.path);
+      try {
+        reopened.recoverInterruptedTeamExecutions(now);
+        expect(reopened.getApproval(f.task.id, card.id)).toMatchObject({
+          state: 'canceled',
+          decision: null,
+          revision: 1,
+        });
+        expect(reopened.listPendingApprovals(f.task.id)).toEqual([]);
+        expect(() =>
+          reopened.resolveApproval({
+            taskId: f.task.id,
+            approvalId: card.id,
+            expectedTurnId: turnId,
+            expectedRevision: card.revision,
+            challenge: card.challenge,
+            decision: 'allow_task',
+            operationId: randomUUID(),
+            decidedAt: now,
+          }),
+        ).toThrow('no longer pending');
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        expect(reopened.getActiveTurnId(f.task.id)).toBeNull();
+        expect(reopened.getTeamMission(mission.id).state).toBe('waiting_resume');
+        const db = new Database(f.path, { readonly: true });
+        try {
+          expect(
+            db.prepare('SELECT COUNT(*) AS count FROM permission_one_time_permits').get(),
+          ).toEqual({ count: 0 });
+          expect(db.prepare('SELECT COUNT(*) AS count FROM permission_grants').get()).toEqual({
+            count: 0,
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
         reopened.close();
       }
     });
