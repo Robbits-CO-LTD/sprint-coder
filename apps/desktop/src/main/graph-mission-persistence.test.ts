@@ -2124,7 +2124,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       }
     });
 
-    it('never mints an acceptance contract for the Mission session Turn on startup', () => {
+    it('keeps one acceptance contract from the recorded Graph Mission objective across restarts', () => {
       const f = fixture();
       const mission = f.persistence.createGraphTeamMission(f.input);
       const sessionTurnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
@@ -2137,11 +2137,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         return rows.length;
       };
       try {
+        expect(f.persistence.getAcceptanceContract(f.task.id, sessionTurnId).objective).toBe(
+          mission.objective,
+        );
         f.persistence.close();
-        // The session Turn is anchored to a `system` notice, not a user objective. Backfilling it
-        // would append a fresh, meaningless contract revision on every single app start.
+        // The system notice is never used as an objective on restart.
         for (let start = 0; start < 2; start += 1) new SqlitePersistenceClient(f.path).close();
-        expect(contractsFor(sessionTurnId)).toBe(0);
+        expect(contractsFor(sessionTurnId)).toBe(1);
       } finally {
         const reopened = new SqlitePersistenceClient(f.path);
         expect(reopened.getTeamMission(mission.id).mode).toBe('graph');
@@ -2234,6 +2236,9 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
         expect(graphTurnState(f, turnId)).toBe('completed');
         expect(f.persistence.readTurnWorkspaceSetForTask(f.task.id, turnId)?.roots).toHaveLength(1);
+        expect(f.persistence.getAcceptanceContract(f.task.id, turnId).objective).toBe(
+          mission.objective,
+        );
         expect(
           workerManagedCatalogOwner(
             f.persistence,
@@ -2244,6 +2249,28 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         ).toBe(turnId);
       } finally {
         f.persistence.close();
+      }
+    });
+
+    it('restores a missing contract for an existing sequential Mission session', () => {
+      const f = fixture();
+      const mission = sequentialMission(f);
+      const turnId = f.persistence.ensureSequentialMissionSessionTurn(f.task.id, mission.id);
+      f.persistence.close();
+      const database = new Database(f.path);
+      database.prepare('DELETE FROM acceptance_contracts WHERE turn_id = ?').run(turnId);
+      database.close();
+      const reopened = new SqlitePersistenceClient(f.path);
+      try {
+        expect(() => reopened.getAcceptanceContract(f.task.id, turnId)).toThrow(
+          'Acceptance Contract not found',
+        );
+        expect(reopened.ensureSequentialMissionSessionTurn(f.task.id, mission.id)).toBe(turnId);
+        expect(reopened.getAcceptanceContract(f.task.id, turnId).objective).toBe(mission.objective);
+        expect(reopened.ensureSequentialMissionSessionTurn(f.task.id, mission.id)).toBe(turnId);
+        expect(reopened.getAcceptanceContract(f.task.id, turnId).revision).toBe(1);
+      } finally {
+        reopened.close();
       }
     });
 
@@ -2315,7 +2342,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
               db
                 .prepare('SELECT COUNT(*) AS count FROM acceptance_contracts WHERE turn_id = ?')
                 .get(turnId),
-            ).toEqual({ count: 0 });
+            ).toEqual({ count: 1 });
           } finally {
             db.close();
           }

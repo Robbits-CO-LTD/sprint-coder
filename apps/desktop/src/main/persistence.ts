@@ -7773,9 +7773,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY turns.created_at, turns.id`,
       )
       .all() as { id: string; task_id: string; created_at: string; content: string }[];
-    // A Mission session Turn has no user objective to accept — its anchor is a `system`
-    // notice — so a contract minted from that notice would be a new, meaningless acceptance
-    // record on every single startup. The Mission's own steps carry the acceptance criteria.
+    // Mission session Turns are anchored to `system` notices, not user objectives. Their
+    // Acceptance Contracts are seeded from the recorded Mission instead of this backfill.
     const turns = anchoredTurns.filter(
       ({ id }) =>
         !id.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX) &&
@@ -11773,17 +11772,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
   ensureGraphMissionSessionTurn(taskId: string, missionId: string): string {
     const turnId = `${GRAPH_MISSION_SESSION_TURN_PREFIX}${missionId}`;
     return this.db.transaction(() => {
+      const mission = this.getTeamMission(missionId);
+      if (mission.mode !== 'graph') throw new Error('Mission session Turns are graph-only');
+      if (this.getTeam(mission.teamId).taskId !== taskId)
+        throw new Error('Graph Mission session Turn Task mismatch');
       const existing = this.db.prepare('SELECT task_id FROM turns WHERE id = ?').get(turnId) as
         { task_id: string } | undefined;
       if (existing !== undefined) {
         if (existing.task_id !== taskId)
           throw new Error('Graph Mission session Turn is bound to another Task');
+        this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
         return turnId;
       }
-      const mission = this.getTeamMission(missionId);
-      if (mission.mode !== 'graph') throw new Error('Mission session Turns are graph-only');
-      if (this.getTeam(mission.teamId).taskId !== taskId)
-        throw new Error('Graph Mission session Turn Task mismatch');
       const now = new Date().toISOString();
       const messageId = randomUUID();
       this.db
@@ -11799,6 +11799,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
            ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
         )
         .run(turnId, taskId, messageId, now, now);
+      this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
       return turnId;
     })();
   }
@@ -11819,6 +11820,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           throw new Error('Sequential Mission session Turn is bound to another Task');
         if (this.readTurnWorkspaceSetForTask(taskId, turnId) === null)
           throw new Error('Sequential Mission session Turn has no Workspace snapshot');
+        this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
         return turnId;
       }
       const now = new Date().toISOString();
@@ -11837,8 +11839,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(turnId, taskId, messageId, now, now);
       this.sealTurnWorkspaceSet(taskId, turnId);
+      this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
       return turnId;
     })();
+  }
+
+  private ensureMissionSessionAcceptanceContract(
+    taskId: string,
+    turnId: string,
+    mission: TeamMissionRecord,
+  ): void {
+    const existing = this.db
+      .prepare('SELECT 1 FROM acceptance_contracts WHERE task_id = ? AND turn_id = ? LIMIT 1')
+      .get(taskId, turnId);
+    if (existing !== undefined) return;
+    this.insertAcceptanceContract(
+      createInitialAcceptanceContract({
+        taskId,
+        turnId,
+        objective: mission.objective,
+        createdAt: mission.createdAt,
+      }),
+    );
   }
 
   recordTeamMissionWorktree(input: {
