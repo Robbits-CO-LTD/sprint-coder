@@ -334,6 +334,7 @@ import {
   toApprovalAuditSummary,
   toApprovalSummary,
   GRAPH_MISSION_SESSION_TURN_PREFIX,
+  TEAM_MISSION_SESSION_TURN_PREFIX,
 } from './persistence';
 import {
   AcceptanceEvidenceMissingError,
@@ -942,13 +943,16 @@ export function isGraphMissionSessionTurn(turnId: string): boolean {
   return turnId.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX);
 }
 
+function isMissionSessionTurn(turnId: string): boolean {
+  return isGraphMissionSessionTurn(turnId) || turnId.startsWith(TEAM_MISSION_SESSION_TURN_PREFIX);
+}
+
 /**
  * Where a managed Worker catalog hangs its parent Harness session.
  *
- * A Team Worker dispatched from chat borrows the Leader's active Turn. A Graph Mission has no
- * chat Turn at all — it starts from a trusted control after the plan is agreed — so its Workers
- * bind to one durable session Turn owned by the Mission, shared by every step and Attempt in it.
- * Anything that is not a graph Mission keeps the original rule: no active parent Turn, no catalog.
+ * A direct Team Worker borrows the Leader's active Turn. A recorded Mission owns a durable
+ * session Turn so its Workers can finish after the Leader's chat Turn and across later steps.
+ * Without a Mission, no active parent Turn still means no catalog.
  */
 export function workerManagedCatalogOwner(
   persistence: Pick<
@@ -957,6 +961,8 @@ export function workerManagedCatalogOwner(
     | 'getTeamMissionForExecution'
     | 'getGraphTeamMission'
     | 'ensureGraphMissionSessionTurn'
+    | 'ensureSequentialMissionSessionTurn'
+    | 'getEffectiveWorkspaceSet'
     | 'readTurnWorkspaceSetForTask'
     | 'getPermissionPolicy'
   >,
@@ -982,6 +988,26 @@ export function workerManagedCatalogOwner(
         agreement: graph.contextDigest,
       }),
       policyEpoch: context.policyEpoch,
+    });
+  }
+  if (mission?.mode === 'sequential') {
+    if (
+      mission.state !== 'running' ||
+      mission.steps[mission.currentStepOrdinal - 1]?.executionId !== executionId
+    )
+      throw new Error('Sequential Mission Worker is not on the current running step');
+    const parentTurnId = persistence.ensureSequentialMissionSessionTurn(taskId, mission.id);
+    const sealed = persistence.readTurnWorkspaceSetForTask(taskId, parentTurnId);
+    if (sealed === null || persistence.getEffectiveWorkspaceSet(taskId).digest !== sealed.digest)
+      throw new Error('Sequential Mission Workspace snapshot changed');
+    return Object.freeze({
+      parentTurnId,
+      workspaceId: digestCanonical({
+        source: 'team-mission',
+        missionId: mission.id,
+        workspace: sealed.digest,
+      }),
+      policyEpoch: persistence.getPermissionPolicy(taskId).policyEpoch,
     });
   }
   const parentTurnId = persistence.getActiveTurnId(taskId);
@@ -5530,7 +5556,7 @@ export class IpcRouter {
       // A Mission session Turn belongs to no chat Turn, so nothing else would ever close it. Drop
       // it once its last Worker is gone — completion, failure, cancel and restart recovery all
       // arrive here — and let the next step or manual resume start a fresh one.
-      if (isGraphMissionSessionTurn(worker.parentTurnId))
+      if (isMissionSessionTurn(worker.parentTurnId))
         this.managedCodingHarness.finishTurn(worker.taskId, worker.parentTurnId);
     }
   }

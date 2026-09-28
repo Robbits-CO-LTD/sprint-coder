@@ -872,6 +872,7 @@ type GraphResourceRow = {
 };
 /** Namespace for the session Turn a Graph Mission owns; never a chat Turn id. */
 export const GRAPH_MISSION_SESSION_TURN_PREFIX = 'graph-mission:';
+export const TEAM_MISSION_SESSION_TURN_PREFIX = 'team-mission:';
 export const teamV2ActivityTypes = [
   'worker_hired',
   'task_assigned',
@@ -5320,6 +5321,7 @@ export interface PersistenceClient {
   listTeamMissions(teamId: string): readonly TeamMissionRecord[];
   getTeamMissionForExecution(executionId: string): TeamMissionRecord | null;
   ensureGraphMissionSessionTurn(taskId: string, missionId: string): string;
+  ensureSequentialMissionSessionTurn(taskId: string, missionId: string): string;
   recordTeamMissionWorktree(input: {
     executionId: string;
     agentId: string;
@@ -7771,11 +7773,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY turns.created_at, turns.id`,
       )
       .all() as { id: string; task_id: string; created_at: string; content: string }[];
-    // A Graph Mission session Turn has no user objective to accept — its anchor is a `system`
+    // A Mission session Turn has no user objective to accept — its anchor is a `system`
     // notice — so a contract minted from that notice would be a new, meaningless acceptance
     // record on every single startup. The Mission's own steps carry the acceptance criteria.
     const turns = anchoredTurns.filter(
-      ({ id }) => !id.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX),
+      ({ id }) =>
+        !id.startsWith(GRAPH_MISSION_SESSION_TURN_PREFIX) &&
+        !id.startsWith(TEAM_MISSION_SESSION_TURN_PREFIX),
     );
     this.db.transaction(() => {
       for (const turn of turns) {
@@ -11799,6 +11803,44 @@ export class SqlitePersistenceClient implements PersistenceClient {
     })();
   }
 
+  /** A recorded sequential Mission keeps its Worker tools alive beyond the Leader's chat Turn. */
+  ensureSequentialMissionSessionTurn(taskId: string, missionId: string): string {
+    const turnId = `${TEAM_MISSION_SESSION_TURN_PREFIX}${missionId}`;
+    return this.db.transaction(() => {
+      const mission = this.getTeamMission(missionId);
+      if (mission.mode !== 'sequential')
+        throw new Error('Mission session Turn requires sequential mode');
+      if (this.getTeam(mission.teamId).taskId !== taskId)
+        throw new Error('Sequential Mission session Turn Task mismatch');
+      const existing = this.db.prepare('SELECT task_id FROM turns WHERE id = ?').get(turnId) as
+        { task_id: string } | undefined;
+      if (existing !== undefined) {
+        if (existing.task_id !== taskId)
+          throw new Error('Sequential Mission session Turn is bound to another Task');
+        if (this.readTurnWorkspaceSetForTask(taskId, turnId) === null)
+          throw new Error('Sequential Mission session Turn has no Workspace snapshot');
+        return turnId;
+      }
+      const now = new Date().toISOString();
+      const messageId = randomUUID();
+      this.db
+        .prepare(
+          `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+           VALUES (?, ?, ?, 'system', ?, ?)`,
+        )
+        .run(messageId, taskId, turnId, 'Team Missionの工程をWorkerへ割り当てました。', now);
+      this.db
+        .prepare(
+          `INSERT INTO turns(
+             id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+           ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
+        )
+        .run(turnId, taskId, messageId, now, now);
+      this.sealTurnWorkspaceSet(taskId, turnId);
+      return turnId;
+    })();
+  }
+
   recordTeamMissionWorktree(input: {
     executionId: string;
     agentId: string;
@@ -12368,15 +12410,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return this.db.transaction(() => {
       // These session Turns are terminal, so interruptActiveTurns cannot cancel their cards.
       // No Worker from the previous application instance can receive a new approval decision.
-      const graphApprovals = this.db
+      const missionApprovals = this.db
         .prepare(
           `SELECT DISTINCT a.task_id, a.turn_id FROM approvals AS a
            JOIN team_missions AS m ON a.turn_id = (? || m.id)
            JOIN teams AS t ON t.id = m.team_id
-           WHERE a.state = 'pending' AND m.mode = 'graph' AND t.task_id = a.task_id`,
+           WHERE a.state = 'pending' AND m.mode = 'graph' AND t.task_id = a.task_id
+           UNION
+           SELECT DISTINCT a.task_id, a.turn_id FROM approvals AS a
+           JOIN team_missions AS m ON a.turn_id = (? || m.id)
+           JOIN teams AS t ON t.id = m.team_id
+           WHERE a.state = 'pending' AND m.mode = 'sequential' AND t.task_id = a.task_id`,
         )
-        .all(GRAPH_MISSION_SESSION_TURN_PREFIX) as { task_id: string; turn_id: string }[];
-      for (const approval of graphApprovals)
+        .all(GRAPH_MISSION_SESSION_TURN_PREFIX, TEAM_MISSION_SESSION_TURN_PREFIX) as {
+        task_id: string;
+        turn_id: string;
+      }[];
+      for (const approval of missionApprovals)
         this.cancelPendingApprovals(approval.task_id, approval.turn_id, now);
       this.db
         .prepare(
@@ -16233,8 +16283,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
           )
           .get(input.turnId.slice(GRAPH_MISSION_SESSION_TURN_PREFIX.length), input.taskId) !==
           undefined;
+      const sequentialSession =
+        turn.state === 'completed' &&
+        input.turnId.startsWith(TEAM_MISSION_SESSION_TURN_PREFIX) &&
+        this.db
+          .prepare(
+            `SELECT 1 FROM team_missions AS m
+             JOIN teams AS t ON t.id = m.team_id
+             JOIN team_mission_steps AS s ON s.mission_id = m.id
+             JOIN team_executions AS e ON e.id = s.execution_id
+             JOIN team_attempts AS a ON a.execution_id = e.id
+             WHERE m.id = ? AND t.task_id = ? AND m.mode = 'sequential'
+               AND m.state = 'running' AND s.ordinal = m.current_step_ordinal
+               AND e.state = 'running' AND a.state = 'running'
+             LIMIT 1`,
+          )
+          .get(input.turnId.slice(TEAM_MISSION_SESSION_TURN_PREFIX.length), input.taskId) !==
+          undefined;
       if (
         !graphSession &&
+        !sequentialSession &&
         turn.state !== 'executing' &&
         turn.state !== 'planning' &&
         turn.state !== 'waiting_approval'
@@ -16287,7 +16355,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         );
       // Parallel tools each need their own approval. An existing pending card already
       // put the Turn in this state; only the last resolved card may resume it.
-      if (!graphSession && turn.state !== 'waiting_approval') {
+      if (!graphSession && !sequentialSession && turn.state !== 'waiting_approval') {
         transitionTurn(turn.state, 'waiting_approval');
         this.updateTurn(input.turnId, 'waiting_approval');
       }

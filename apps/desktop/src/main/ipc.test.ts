@@ -2612,11 +2612,13 @@ describe('Main image attachment dispatch boundary', () => {
       workspace: { digest: 'w'.repeat(64) },
       policyEpoch: 7,
     })) as unknown as Parameters<typeof workerManagedCatalogOwner>[1];
-    const basePersistence: Record<string, () => unknown> = {
+    const basePersistence: Record<string, (...args: unknown[]) => unknown> = {
       getActiveTurnId: () => null,
       getTeamMissionForExecution: () => null,
       getGraphTeamMission: () => null,
       ensureGraphMissionSessionTurn: () => 'graph-mission:mission-1',
+      ensureSequentialMissionSessionTurn: () => 'team-mission:mission-1',
+      getEffectiveWorkspaceSet: () => ({ digest: 'w'.repeat(64) }),
       readTurnWorkspaceSetForTask: () => null,
       getPermissionPolicy: () => ({ policyEpoch: 3 }),
     };
@@ -2666,17 +2668,81 @@ describe('Main image attachment dispatch boundary', () => {
       expect(second).toEqual(first);
     });
 
-    it('still refuses a sequential Team Worker that has no active parent Turn', () => {
+    it('keeps sequential Mission steps on their own session after the chat Turn completes', () => {
+      const ensureSequentialMissionSessionTurn = vi.fn(() => 'team-mission:mission-1');
+      const persistence = persistenceFor({
+        getTeamMissionForExecution: (executionId: unknown) =>
+          ({
+            id: 'mission-1',
+            mode: 'sequential',
+            state: 'running',
+            currentStepOrdinal: executionId === 'execution-1' ? 1 : 2,
+            steps: [{ executionId: 'execution-1' }, { executionId: 'execution-2' }],
+          }) as never,
+        ensureSequentialMissionSessionTurn,
+        readTurnWorkspaceSetForTask: () => ({ digest: 'w'.repeat(64) }) as never,
+      });
+      const first = workerManagedCatalogOwner(
+        persistence,
+        graphMissionContextForStub,
+        'task-1',
+        'execution-1',
+      );
+      const second = workerManagedCatalogOwner(
+        persistence,
+        graphMissionContextForStub,
+        'task-1',
+        'execution-2',
+      );
+      expect(ensureSequentialMissionSessionTurn).toHaveBeenCalledTimes(2);
+      expect(first.parentTurnId).toBe('team-mission:mission-1');
+      expect(second).toEqual(first);
+      expect(first.workspaceId).toMatch(/^[0-9a-f]{64}$/);
+      expect(first.policyEpoch).toBe(3);
+    });
+
+    it('rejects an old or stopped sequential Mission step before binding its catalog', () => {
+      const ensureSequentialMissionSessionTurn = vi.fn();
+      const mission = {
+        id: 'mission-1',
+        mode: 'sequential',
+        state: 'running',
+        currentStepOrdinal: 2,
+        steps: [{ executionId: 'execution-1' }, { executionId: 'execution-2' }],
+      };
+      const persistence = persistenceFor({
+        getTeamMissionForExecution: () => mission as never,
+        ensureSequentialMissionSessionTurn,
+      });
       expect(() =>
-        workerManagedCatalogOwner(
-          persistenceFor({
-            getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'sequential' }) as never,
-          }),
-          graphMissionContextForStub,
-          'task-1',
-          'execution-1',
-        ),
-      ).toThrow('no active parent Turn');
+        workerManagedCatalogOwner(persistence, graphMissionContextForStub, 'task-1', 'execution-1'),
+      ).toThrow('not on the current running step');
+      mission.state = 'completed';
+      expect(() =>
+        workerManagedCatalogOwner(persistence, graphMissionContextForStub, 'task-1', 'execution-2'),
+      ).toThrow('not on the current running step');
+      expect(ensureSequentialMissionSessionTurn).not.toHaveBeenCalled();
+    });
+
+    it('rejects a changed Task Workspace after the Mission session was sealed', () => {
+      const persistence = persistenceFor({
+        getTeamMissionForExecution: () =>
+          ({
+            id: 'mission-1',
+            mode: 'sequential',
+            state: 'running',
+            currentStepOrdinal: 1,
+            steps: [{ executionId: 'execution-1' }],
+          }) as never,
+        readTurnWorkspaceSetForTask: () => ({ digest: 'old' }) as never,
+        getEffectiveWorkspaceSet: () => ({ digest: 'new' }) as never,
+      });
+      expect(() =>
+        workerManagedCatalogOwner(persistence, graphMissionContextForStub, 'task-1', 'execution-1'),
+      ).toThrow('Workspace snapshot changed');
+    });
+
+    it('still refuses a direct Team Worker without a Mission or active chat Turn', () => {
       expect(() =>
         workerManagedCatalogOwner(
           persistenceFor({}),
@@ -2687,16 +2753,15 @@ describe('Main image attachment dispatch boundary', () => {
       ).toThrow('no active parent Turn');
     });
 
-    it('keeps the chat Turn binding when one is active', () => {
+    it('keeps the chat Turn binding for a direct Worker when one is active', () => {
       const owner = workerManagedCatalogOwner(
         persistenceFor({
           getActiveTurnId: () => 'turn-active',
-          getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'sequential' }) as never,
           readTurnWorkspaceSetForTask: () => ({ digest: 'd'.repeat(64) }) as never,
         }),
         graphMissionContextForStub,
         'task-1',
-        'execution-1',
+        undefined,
       );
 
       expect(owner).toEqual({
@@ -2708,7 +2773,7 @@ describe('Main image attachment dispatch boundary', () => {
     });
   });
 
-  describe('Mission session Turn lifecycle across graph steps', () => {
+  describe('Mission session Turn lifecycle across steps', () => {
     const prepareWorkerManagedCatalog = Reflect.get(
       IpcRouter.prototype,
       'prepareWorkerManagedCatalog',
@@ -2727,7 +2792,7 @@ describe('Main image attachment dispatch boundary', () => {
       'releaseManagedWorkerTurn',
     ) as (this: unknown, runtimeTurnId: string) => void;
 
-    it('shares one session Turn across steps and reopens it only after the last Worker', async () => {
+    it('shares one Graph session Turn across steps and reopens it only after the last Worker', async () => {
       const missionTurnId = 'graph-mission:mission-1';
       const started = new Map<string, { revision: number; workspaceId: string | null }>();
       const startTurn = vi.fn((input: { taskId: string; turnId: string; workspaceId: string }) => {
@@ -2760,6 +2825,8 @@ describe('Main image attachment dispatch boundary', () => {
           getTeamMissionForExecution: () => ({ id: 'mission-1', mode: 'graph' }),
           getGraphTeamMission: () => ({ contextDigest: 'c'.repeat(64) }),
           ensureGraphMissionSessionTurn: () => missionTurnId,
+          ensureSequentialMissionSessionTurn: () => missionTurnId,
+          readTurnWorkspaceSetForTask: () => ({ digest: 'w'.repeat(64) }),
           getTeamByTask: () => null,
           getEffectiveWorkspaceSet: () => ({ source: 'none', roots: [], digest: 'w'.repeat(64) }),
           getEffectiveWorkspaceRootIdentities: () => [],
@@ -2809,6 +2876,28 @@ describe('Main image attachment dispatch boundary', () => {
       await prepare('runtime-c', 'execution-c');
       expect(startTurn).toHaveBeenCalledTimes(2);
       expect(startTurn.mock.calls[1]![0]).toMatchObject({ turnId: missionTurnId });
+    });
+
+    it('closes a sequential Mission broker only after its last Worker releases', () => {
+      const finishTurn = vi.fn();
+      const turnEnded = vi.fn();
+      const parentTurnId = 'team-mission:mission-1';
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        managedWorkerTurn: new Map([
+          ['worker-a', { taskId: 'task-1', parentTurnId, released: new AbortController() }],
+          ['worker-b', { taskId: 'task-1', parentTurnId, released: new AbortController() }],
+        ]),
+        persistence: { getActiveTurnId: () => null },
+        approvalCoordinator: { turnEnded },
+        computerUseController: { turnEnded: vi.fn() },
+        managedCodingHarness: { finishTurn },
+      });
+      releaseManagedWorkerTurn.call(router, 'worker-a');
+      expect(finishTurn).not.toHaveBeenCalled();
+      releaseManagedWorkerTurn.call(router, 'worker-b');
+      expect(turnEnded).toHaveBeenCalledWith('task-1', parentTurnId, 'finished');
+      expect(finishTurn).toHaveBeenCalledWith('task-1', parentTurnId);
     });
   });
 
