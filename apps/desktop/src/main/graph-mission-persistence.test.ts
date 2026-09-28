@@ -2151,6 +2151,82 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       }
     });
 
+    function graphMissionWithWorkspace(f: ReturnType<typeof fixture>) {
+      const workspace = join(dirname(f.path), 'graph-session-workspace');
+      mkdirSync(workspace);
+      f.persistence.setWorkspace(f.task.id, workspace);
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const mission = f.persistence.createGraphTeamMission({
+        ...f.input,
+        workspaceDigest: context.workspace.digest,
+        contextDigest: graphMissionContextDigest(
+          context,
+          new Set(f.workers.map((worker) => worker.id)),
+        ),
+      });
+      return { mission, context };
+    }
+
+    it('seals the agreed Workspace for a Graph Mission session Turn', () => {
+      const f = fixture();
+      try {
+        const { mission, context } = graphMissionWithWorkspace(f);
+        const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+        expect(f.persistence.readTurnWorkspaceSetForTask(f.task.id, turnId)).toEqual(
+          context.workspace,
+        );
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('restores a legacy Graph Mission session snapshot only for the agreed Workspace', () => {
+      const f = fixture();
+      const { mission, context } = graphMissionWithWorkspace(f);
+      const turnId = f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id);
+      f.persistence.close();
+      const db = new Database(f.path);
+      try {
+        db.prepare('DELETE FROM turn_workspace_roots WHERE turn_id = ?').run(turnId);
+        db.prepare('DELETE FROM turn_workspace_sets WHERE turn_id = ?').run(turnId);
+      } finally {
+        db.close();
+      }
+      const reopened = new SqlitePersistenceClient(f.path);
+      try {
+        expect(reopened.readTurnWorkspaceSetForTask(f.task.id, turnId)).toBeNull();
+        expect(reopened.ensureGraphMissionSessionTurn(f.task.id, mission.id)).toBe(turnId);
+        expect(reopened.readTurnWorkspaceSetForTask(f.task.id, turnId)).toEqual(context.workspace);
+      } finally {
+        reopened.close();
+      }
+    });
+
+    it('refuses a Graph Mission session when its agreed Workspace has changed', () => {
+      const f = fixture();
+      try {
+        const { mission } = graphMissionWithWorkspace(f);
+        const changedWorkspace = join(dirname(f.path), 'other-graph-session-workspace');
+        mkdirSync(changedWorkspace);
+        f.persistence.setWorkspace(f.task.id, changedWorkspace);
+        expect(() => f.persistence.ensureGraphMissionSessionTurn(f.task.id, mission.id)).toThrow(
+          'Graph Mission Workspace snapshot changed',
+        );
+        const db = new Database(f.path, { readonly: true });
+        try {
+          expect(
+            db
+              .prepare('SELECT COUNT(*) AS count FROM turns WHERE id = ?')
+              .get(`graph-mission:${mission.id}`),
+          ).toEqual({ count: 0 });
+        } finally {
+          db.close();
+        }
+      } finally {
+        f.persistence.close();
+      }
+    });
+
     function graphTurnState(f: ReturnType<typeof fixture>, turnId: string): string {
       const db = new Database(f.path, { readonly: true });
       try {
