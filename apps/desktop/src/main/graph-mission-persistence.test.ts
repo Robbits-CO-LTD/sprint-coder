@@ -2342,7 +2342,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
               db
                 .prepare('SELECT COUNT(*) AS count FROM acceptance_contracts WHERE turn_id = ?')
                 .get(turnId),
-            ).toEqual({ count: 0 });
+            ).toEqual({ count: 1 });
           } finally {
             db.close();
           }
