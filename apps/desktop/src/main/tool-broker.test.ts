@@ -75,6 +75,76 @@ const context: ToolExecutionContext = {
 };
 
 describe('Main ToolBroker', () => {
+  it('continues audit ordinals after a persisted Mission session is rebound', async () => {
+    const { registry, echo } = createRegistry();
+    const requested: number[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      (event) => {
+        if (event.state === 'requested') requested.push(event.ordinal);
+      },
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => input,
+    });
+    broker.startTurn(context, 'mock');
+    await broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'first-step',
+      providerName: 'mock_echo',
+      input: { text: 'first' },
+    });
+    broker.finishTurn(context.taskId, context.turnId);
+    broker.startTurn(context, 'mock', undefined, 1);
+    await broker.dispatch({
+      taskId: context.taskId,
+      turnId: context.turnId,
+      callId: 'second-step',
+      providerName: 'mock_echo',
+      input: { text: 'second' },
+    });
+    expect(requested).toEqual([1, 2]);
+  });
+
+  it('preserves the requested audit failure instead of writing a terminal state without a row', async () => {
+    const { registry, echo } = createRegistry();
+    const states: string[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizePure,
+      (event) => {
+        states.push(event.state);
+        if (event.state === 'requested')
+          throw new Error(
+            'UNIQUE constraint failed: managed_tool_calls.turn_id, managed_tool_calls.ordinal',
+          );
+        throw new Error('Managed tool lifecycle must start requested');
+      },
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      execute: async (input) => input,
+    });
+    broker.startTurn(context, 'mock');
+    await expect(
+      broker.dispatch({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'collision',
+        providerName: 'mock_echo',
+        input: { text: 'collision' },
+      }),
+    ).rejects.toThrow('UNIQUE constraint failed');
+    expect(states).toEqual(['requested']);
+  });
+
   it('delivers nested Worker denial and recovery without waiting on its parent result', async () => {
     const { registry, echo } = createRegistry();
     const worker = {};

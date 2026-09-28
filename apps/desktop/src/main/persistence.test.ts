@@ -9538,6 +9538,41 @@ if (runsWithElectronAbi)
       compromised.close();
     });
 
+    it('reads the last durable managed tool ordinal after reopening a Turn', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask();
+      const started = startExecutingTurn(persistence, task.id);
+      expect(persistence.readManagedToolLastOrdinal(task.id, started.turnId)).toBe(0);
+      for (const ordinal of [1, 2])
+        persistence.recordManagedToolLifecycle({
+          taskId: task.id,
+          turnId: started.turnId,
+          callId: `managed-call-${ordinal}`,
+          ordinal,
+          providerName: 'read_file',
+          catalogDigest: 'd'.repeat(64),
+          state: 'requested',
+          occurredAt: new Date(Date.UTC(2026, 7, 18, 0, 0, ordinal)).toISOString(),
+        });
+      expect(() =>
+        persistence.recordManagedToolLifecycle({
+          taskId: task.id,
+          turnId: started.turnId,
+          callId: 'next-step-with-reset-ordinal',
+          ordinal: 1,
+          providerName: 'read_file',
+          catalogDigest: 'd'.repeat(64),
+          state: 'requested',
+          occurredAt: '2026-08-18T00:01:00.000Z',
+        }),
+      ).toThrow('UNIQUE constraint failed: managed_tool_calls.turn_id, managed_tool_calls.ordinal');
+      expect(persistence.readManagedToolLastOrdinal(task.id, started.turnId)).toBe(2);
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.readManagedToolLastOrdinal(task.id, started.turnId)).toBe(2);
+      reopened.close();
+    });
+
     it('persists the canonical managed tool lifecycle and rejects invalid transitions', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

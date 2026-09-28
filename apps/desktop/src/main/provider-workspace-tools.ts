@@ -401,6 +401,7 @@ type WorkspaceToolDeps = Readonly<{
 }>;
 
 export type ManagedHarnessTurnOptions = Readonly<{
+  initialOrdinal?: number;
   projectMemory?: boolean;
   skillDrafts?: boolean;
   skillActivation?: boolean;
@@ -719,10 +720,12 @@ export class ManagedCodingHarness {
               ? []
               : [SKILL_ACTIVATE_TOOL.toolId]),
           ];
-    const snapshot = this.broker.startTurn(context, providerId, [
-      ...managedToolIds,
-      ...computerTargetToolIds,
-    ]);
+    const snapshot = this.broker.startTurn(
+      context,
+      providerId,
+      [...managedToolIds, ...computerTargetToolIds],
+      options.initialOrdinal,
+    );
     const key = JSON.stringify([context.taskId, context.turnId]);
     this.providersByTurn.set(key, providerId);
     this.auxiliaryByTurn.set(key, {
