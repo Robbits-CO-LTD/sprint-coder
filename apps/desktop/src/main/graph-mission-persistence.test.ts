@@ -165,6 +165,25 @@ function resourceMission(f: ReturnType<typeof fixture>, key = 'shared-db') {
     semanticDigest: document.semanticDigest,
   });
 }
+function nextGraphMission(f: ReturnType<typeof fixture>) {
+  const previous = f.persistence.getGraphDocument(f.task.id)!;
+  const plan = { ...structuredClone(f.plan), objective: 'Second review' };
+  const document = nextGraphDocument(f.task.id, f.diagram, previous, [], [], plan);
+  f.persistence.saveGraphDocument(document, previous.renderRevision);
+  const context = graphMissionContextFor(f.persistence, f.task.id);
+  return f.persistence.createGraphTeamMission({
+    ...f.input,
+    graphId: document.id,
+    renderRevision: document.renderRevision,
+    semanticRevision: document.semanticRevision,
+    semanticDigest: document.semanticDigest,
+    workspaceDigest: context.workspace.digest,
+    policyEpoch: context.policyEpoch,
+    contextDigest: graphMissionContextDigest(context, new Set(f.workers.map(({ id }) => id))),
+    consentId: randomUUID(),
+    now: '2026-09-11T00:00:01.000Z',
+  });
+}
 function reserve(
   f: ReturnType<typeof fixture>,
   missionId: string,
@@ -4256,6 +4275,78 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           true,
         );
         expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('active');
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('does not let a terminal Mission with quarantined history block stopping a later Mission (issue #628)', async () => {
+      const f = fixture();
+      const previous = f.persistence.createGraphTeamMission(f.input);
+      const run = begin(f, previous.id, 'a');
+      f.persistence.interruptGraphStep({
+        missionId: previous.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: run.reservation.id,
+        attemptId: run.attempt.id,
+        outcome: 'failed',
+        reason: 'historical unconfirmed stop',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      f.persistence.cancelQueuedTeamExecution(run.execution.id, now);
+      f.persistence.cancelQueuedTeamExecution(previous.steps[1]!.executionId, now);
+      f.persistence.transitionTeamMission(previous.id, 'failed', now);
+      const current = nextGraphMission(f);
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        expect(f.persistence.listGraphResourceReservations(previous.id)[0]?.state).toBe(
+          'quarantined',
+        );
+        const detail = await coordinator.stopAll(f.task.id);
+        expect(detail.team.state).toBe('completed');
+        expect(f.persistence.getTeamMission(previous.id).state).toBe('failed');
+        expect(f.persistence.getTeamMission(current.id).state).toBe('canceled');
+        expect(f.persistence.listGraphResourceReservations(previous.id)[0]?.state).toBe(
+          'quarantined',
+        );
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('settles a safe Mission even when another Mission cannot confirm Worker stop (issue #628)', async () => {
+      const f = fixture();
+      const safe = f.persistence.createGraphTeamMission(f.input);
+      for (const step of safe.steps) f.persistence.cancelQueuedTeamExecution(step.executionId, now);
+      const blocked = nextGraphMission(f);
+      const run = begin(f, blocked.id, 'a');
+      f.persistence.interruptGraphStep({
+        missionId: blocked.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: run.reservation.id,
+        attemptId: run.attempt.id,
+        outcome: 'failed',
+        reason: 'second Mission stop unconfirmed',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      class UnsettledRuntime extends DeterministicTeamWorkerRuntime {
+        hasUnsettledTurn(_agentId: string, executionId: string) {
+          return executionId === run.execution.id;
+        }
+      }
+      const coordinator = new TeamCoordinator(f.persistence, new UnsettledRuntime());
+      try {
+        expect(f.persistence.getTeamMission(safe.id).state).toBe('queued');
+        await expect(coordinator.stopAll(f.task.id)).rejects.toThrow(
+          'Graph Worker stop is unconfirmed',
+        );
+        expect(f.persistence.getTeamMission(safe.id).state).toBe('canceled');
+        expect(f.persistence.getTeamMission(blocked.id).state).not.toBe('canceled');
+        expect(f.persistence.getTeam(blocked.teamId).state).toBe('active');
       } finally {
         f.persistence.close();
       }

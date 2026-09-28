@@ -4321,7 +4321,11 @@ export class TeamCoordinator {
       for (const worker of workers) await this.cancelWorkerExecutions(team.id, worker.id);
       const graphMissions = this.persistence
         .listTeamMissions(team.id)
-        .filter((mission) => mission.mode === 'graph');
+        .filter(
+          (mission) =>
+            mission.mode === 'graph' &&
+            !['completed', 'failed', 'canceled'].includes(mission.state),
+        );
       for (const mission of graphMissions) {
         if (
           mission.steps.some(
@@ -4341,11 +4345,9 @@ export class TeamCoordinator {
           )
         )
           throw new Error('Graph resources remain active');
+        // A single step's cancel must leave independent branches runnable; only Team stop owns this state.
+        this.persistence.transitionTeamMission(mission.id, 'canceled', this.isoNow());
       }
-      // A single step's cancel must leave independent branches runnable; only Team stop owns this state.
-      for (const mission of graphMissions)
-        if (!['completed', 'failed', 'canceled'].includes(mission.state))
-          this.persistence.transitionTeamMission(mission.id, 'canceled', this.isoNow());
       for (const worker of workers) {
         if (!['done', 'failed', 'stopped'].includes(worker.state))
           this.persistence.transitionWorkerState(worker.id, 'stopped');
