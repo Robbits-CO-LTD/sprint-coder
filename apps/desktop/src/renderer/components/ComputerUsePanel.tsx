@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   bindComputerUseMaximumMode,
   bindComputerUsePolicyLanguage,
@@ -1183,22 +1183,44 @@ export function ComputerUseSessionRail({
   onApproval: (decision: 'allow_once' | 'allow_plan' | 'deny') => void;
 }) {
   const localStopButtonRef = useRef<HTMLButtonElement>(null);
-  const approvalButtonRef = useRef<HTMLButtonElement>(null);
-  const previousApprovalIdRef = useRef<string | null>(null);
-  const mountedRef = useRef(false);
   const activeStopButtonRef = stopButtonRef ?? localStopButtonRef;
+  const approvalSectionRef = useRef<HTMLElement>(null);
+  const restoreStopFocusRef = useRef(false);
+  const previousApprovalIdRef = useRef(approval?.id ?? null);
   const [now, setNow] = useState(() => Date.now());
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const previousApprovalId = previousApprovalIdRef.current;
-    if (approval !== null && approval.id !== previousApprovalId) {
-      approvalButtonRef.current?.focus({ preventScroll: true });
-    } else if (approval === null && (previousApprovalId !== null || !mountedRef.current)) {
-      activeStopButtonRef.current?.focus({ preventScroll: true });
-    }
     previousApprovalIdRef.current = approval?.id ?? null;
-    mountedRef.current = true;
-  }, [activeStopButtonRef, approval]);
+    if (
+      previousApprovalId !== null &&
+      previousApprovalId !== approval?.id &&
+      restoreStopFocusRef.current &&
+      document.hasFocus() &&
+      document.activeElement === document.body
+    ) {
+      activeStopButtonRef.current?.focus();
+      restoreStopFocusRef.current = false;
+    }
+    if (approval === null) {
+      if (
+        restoreStopFocusRef.current &&
+        document.hasFocus() &&
+        document.activeElement === document.body
+      )
+        activeStopButtonRef.current?.focus();
+      restoreStopFocusRef.current = false;
+      return;
+    }
+    const handleFocus = (event: FocusEvent) => {
+      restoreStopFocusRef.current =
+        approvalSectionRef.current?.contains(event.target as Node) ?? false;
+    };
+    document.addEventListener('focusin', handleFocus);
+    return () => {
+      document.removeEventListener('focusin', handleFocus);
+    };
+  }, [approval, activeStopButtonRef]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -1260,7 +1282,13 @@ export function ComputerUseSessionRail({
         ) : null}
       </div>
       {approval === null ? null : (
-        <section className="computer-use-approval" aria-labelledby="computer-use-approval-title">
+        <section
+          key={approval.id}
+          ref={approvalSectionRef}
+          className="computer-use-approval"
+          aria-labelledby="computer-use-approval-title"
+          aria-live="polite"
+        >
           <div>
             <span className="computer-use-eyebrow">ACTION CHECK</span>
             <h3 id="computer-use-approval-title">{approval.actionLabel}</h3>
@@ -1281,7 +1309,6 @@ export function ComputerUseSessionRail({
           <div className="computer-use-approval__actions">
             {approval.allowedDecisions.includes('allow_once') ? (
               <button
-                ref={approvalButtonRef}
                 type="button"
                 data-computer-use-activation="approval"
                 data-computer-use-intent={approval.activationIntents?.allow_once}

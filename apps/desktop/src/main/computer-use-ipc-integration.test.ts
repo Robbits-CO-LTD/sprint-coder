@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
   computerAppProfileSchema,
+  computerAppGrantRequestSchema,
   computerUseAvailabilitySchema,
   computerAppGrantResolveInputSchema,
   computerStartToolOutputSchema,
@@ -14,6 +15,8 @@ import {
   computerUseProfileRegisterInputSchema,
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
+  computerUseApprovalSchema,
+  type ComputerUseSessionStatus,
   type ProviderModel,
 } from '@sprint-coder/contracts';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
@@ -318,6 +321,108 @@ function captureComputerUseHandlers(): {
 }
 
 describe('Computer Use Main IPC integration', () => {
+  it('announces an asynchronous action approval without taking keyboard focus', async () => {
+    const fixture = captureComputerUseHandlers();
+    let visible = false;
+    const window = {
+      isDestroyed: vi.fn(() => false),
+      isVisible: vi.fn(() => visible),
+      show: vi.fn(),
+      showInactive: vi.fn(() => {
+        visible = true;
+      }),
+      focus: vi.fn(),
+      flashFrame: vi.fn(),
+      webContents: { isDestroyed: vi.fn(() => false), send: vi.fn() },
+    };
+    Object.assign(fixture.router, {
+      window,
+      computerUsePendingApprovalBySession: new Map(),
+      computerUsePendingGrantRequestIds: new Set(),
+      computerUseAttentionFlashing: false,
+      computerUseSessionByTask: new Map(),
+    });
+    const status = computerUseSessionStatusSchema.parse({
+      ...(await fixture.controller.start!()),
+      state: 'awaiting_approval',
+    });
+
+    const router = fixture.router as unknown as {
+      publishComputerUseStatus(status: ComputerUseSessionStatus): void;
+      publishComputerUseApproval(approval: unknown): void;
+      publishComputerUseGrantRequest(request: unknown): void;
+    };
+    router.publishComputerUseStatus(status);
+    const approval = computerUseApprovalSchema.parse({
+      id: 'approval-1',
+      sessionId: status.sessionId,
+      taskId: status.taskId,
+      actionType: 'invoke',
+      actionDigest: 'a'.repeat(64),
+      targetLabel: '保存',
+      preview: '',
+      risk: 'medium',
+      policyEpoch: 0,
+      observationRevision: 0,
+      eligibleForPlan: false,
+      allowedDecisions: ['allow_once', 'deny'],
+      state: 'pending',
+      decision: null,
+      revision: 0,
+      challenge: 'challenge-1',
+      createdAt: '2026-08-29T12:00:00.000Z',
+      expiresAt: '2026-08-29T13:00:00.000Z',
+    });
+    router.publishComputerUseApproval(approval);
+
+    expect(window.showInactive).toHaveBeenCalledOnce();
+    expect(window.flashFrame).toHaveBeenCalledWith(true);
+    expect(window.show).not.toHaveBeenCalled();
+    expect(window.focus).not.toHaveBeenCalled();
+    expect(window.webContents.send).toHaveBeenCalledWith(
+      IPC_CHANNELS.computerUseStatusEvent,
+      expect.objectContaining({ state: 'awaiting_approval' }),
+    );
+    const grantRequest = computerAppGrantRequestSchema.parse({
+      id: 'request-1',
+      taskId: status.taskId,
+      kind: 'app-grant',
+      state: 'pending',
+      revision: 1,
+      decision: null,
+      noticeCode: null,
+      verified: {
+        platform: 'darwin',
+        identityKind: 'verified-signed',
+        publisher: 'TEAMID1234',
+        appId: 'com.example.notes',
+        maxMode: 'full_access_app',
+      },
+      untrustedAppName: 'Notes',
+      untrustedReason: null,
+      providerEgressModelId: null,
+      allowedDecisions: ['deny'],
+      activationIntents: {},
+      expiresAt: '2026-08-29T13:00:00.000Z',
+    });
+    router.publishComputerUseGrantRequest(grantRequest);
+    router.publishComputerUseApproval({
+      ...approval,
+      state: 'resolved',
+      decision: 'deny',
+      revision: 1,
+      decidedAt: '2026-08-29T12:01:00.000Z',
+    });
+    expect(window.flashFrame).toHaveBeenLastCalledWith(true);
+    router.publishComputerUseGrantRequest({
+      ...grantRequest,
+      state: 'resolved',
+      decision: 'deny',
+      revision: 2,
+    });
+    expect(window.flashFrame).toHaveBeenLastCalledWith(false);
+  });
+
   it('requires an available exact catalog model while allowing unknown multimodal capability', () => {
     const model = {
       connectionId: 'connection-1',

@@ -1,9 +1,9 @@
 # ADR: Computer Use v2 — AI 主導のターゲット選択と deny-list 適格性
 
-- Status: Draft（設計レビュー前）
+- Status: Draft（Q1〜Q3 は決定済み。S4 の安全境界は再設計・再レビュー中）
 - Date: 2026-09-19
 - Issue: #500（Refs #333, #387, #484, #489, #498）
-- 置き換え対象: `tasks/designs/adr-computer-use-desktop-v1.md`（V1 ADR。本 ADR が Accepted になった時点で「V1 の positive allow-list と native picker の節」を superseded 扱いにする。パッケージ・署名・manifest・framing の節は V1 のまま有効）
+- 置き換え対象: `tasks/designs/adr-computer-use-desktop-v1.md`（V1 ADR。V2 の設計を Accepted にしても V1 経路は維持する。S8 の実機受入・移行・復旧条件を満たして旧 picker を撤去した時点で「V1 の positive allow-list と native picker の節」を superseded 扱いにする。パッケージ・署名・manifest・framing の節は引き続き有効）
 
 ## 改訂履歴
 
@@ -271,7 +271,7 @@ V1 の 3 モードの意味は変えない。
 **policy language は mode の根拠から外す（D3 / D11）。** V1 は「アプリが自称する UI 言語」（macOS は対象アプリ自身の `AppleLanguages` prefs、`computer_use_macos.mm:572-590`／Windows は `GetFileMUIPath`、`computer_use_windows_host.cc:819-843`）で `full_access_app` を決めていた。これは**対象アプリ側が制御できる値**であり、full access の唯一のゲートにするには弱い。v2 では静的な言語属性ではなく、**そのラウンドの観測テキストに危険面分類器を実際に適用できたか**という実行時の事実に置き換える。
 
 - 分類器を適用できたラウンド: 通常どおり。危険面に当たれば §3.5 / §3.6 / §3.7 の interlock。
-- 分類器を適用できなかったラウンド（対応外の言語、テキストが取れない、AX/UIA が欠落、lexicon 版不一致）: **危険操作クラスだけを一律 fail-closed**（拒否または user takeover）。通常の操作は確認なしで続く。
+- 分類器を適用できなかったラウンド（対応外の言語、テキストが取れない、AX/UIA が欠落、lexicon 版不一致）: 危険面・実行トリガに**該当しないと確認できない入力は fail-closed**（拒否または user takeover）。「分類不能」を `ordinary` と見なさない。`wait`・観測と、対象・効果を別の方法で安全と確認できる操作だけを続ける。ブラウザの視覚クリックも S7 の精度改善までは、この確認を省かない。
 - この規則は **macOS / Windows で同一**（受入れ条件「同じ挙動」）。
 
 | クラス                            | identity                        | 付与する `maximumMode`                                                                | 根拠                                                                                                                        |
@@ -414,11 +414,11 @@ type UnavailableTarget = {
 - ボタン（D14）: **「今回だけ許可」と「今後も許可（確認しない）」を同じ大きさで横に並べる**（どちらも primary でも secondary でもない同格）。恒久側の文言に結果を明示する（「今後このアプリでは確認しません」）。3 つ目に「拒否」。
 - **カードはフォーカスを取らない（2026-09-21、D14 の「既定フォーカス」を撤回）**。カードはモデルの都合で非同期に現れ、押せば本物の権限が出る。「入力欄にキャレットがあるときだけ避ける」では足りない: ユーザーが**別のアプリで**タイプしている最中にカードが出てウィンドウが前面に来れば、そのキーストロークは trusted activation としてボタンに届く。到達は Tab かクリックという明示的な操作に限り、存在は polite な live region（`role="status"` + `aria-live="polite"`）で知らせる。
 - **Main はキーボードフォーカスも奪わない**。隠れていれば `showInactive()` で出し、`flashFrame()` で注意を促す（macOS は Dock バウンス、Windows / Linux はタスクバー点滅）。`focus()` は使わない。
-  - _既知の未対応_: セッション中の操作承認（`ComputerUsePanel` の `awaiting_approval`）は今も許可ボタンへフォーカスし、Main も `show()` + `focus()` している。同じ露出があるが V1 からの既存挙動なので、この PR では変更しない（別途対応が要る）。
+  - _S3b 時点の既知の未対応・S4 では解消必須_: セッション中の操作承認（`ComputerUsePanel` の `awaiting_approval`）は許可ボタンへフォーカスし、Main も `show()` + `focus()` していた。S4 の E2/E3 と危険な確定操作にこの経路を流用する前に、操作承認カードも非自動フォーカス化し、Main は `showInactive()` + `flashFrame()` に変更する。ユーザーが明示的に Tab またはクリックで到達しない限り承認できないことを回帰テストで確認する。
 - **拒否されたアプリは、その Task の中では再要求できない**（`computer_request_access` は `access_request_denied_in_task` で即座に失敗）。Task をまたげば再要求できる。
 - 設定画面に、アプリごとの **AI の要求回数 / ユーザーの拒否回数 / 最終使用日**を表示する（承認疲労と、しつこく要求するアプリの可視化）。
 - **記録先（2026-09-21）**: grant 行を持つアプリは `computer_app_grants` のカウンタ、持たないアプリは新テーブル `computer_app_access_requests`（主キー = platform + grant_identity_digest + task_id、`tasks` への FK は `ON DELETE CASCADE`）。同じ表が「この Task では拒否済み」と「Task あたりの要求数」も答える。**MAC は付けない** — この表の値はどれも許可を与える方向には効かず、偽造しても「許可しない」が増えるだけだから。設定画面では grant にならなかったアプリを別の一覧として出す。
-- **カードのフォーカス（2026-09-21）**: 既定フォーカスは「今回だけ許可」だが、**ユーザーが入力中（input / textarea / contenteditable にキャレットがある）ならフォーカスを奪わない**。カードは予告なく現れ、Main はウィンドウを前面に出すので、書きかけのメッセージの次の Space / Enter が承認になってはいけない。その場合はカードの role / label による読み上げに任せ、ユーザーが Tab で到達する。
+- **カードのフォーカス（2026-09-21 改訂履歴 9 が正）**: 承認ボタンには既定フォーカスを置かない。Main は `showInactive()` と `flashFrame()` で知らせ、入力中の別アプリからキーボードフォーカスを奪わない。カードには polite な live region を付け、ユーザーが明示的に Tab またはクリックで承認ボタンへ到達する。
 - 承認は trusted user activation を消費する（`computer-use-activation.ts` に `kind: 'app-grant'` を追加）。モデル出力・画面の文章では絶対に承認できない。
 - **未解決の app-grant カードは同時に 1 枚まで**。2 枚目の要求は `access_request_pending` で拒否する。
 
@@ -605,6 +605,8 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 | S8  | S2+S3+S4+S5 完了                                                                                                                                                                         | 2 ステップ オンボーディングと native picker の撤去                                                                  | `ComputerUsePanel.tsx`、`useComputerUse.tsx`、`computer-use-controller.ts`（`pickApplication` / `registerProfileFromActivation` 削除）、mm / cc の picker 実装削除、`computer-use-activation.ts` の `'application'` 削除 | S〜M | 既存 panel テストの置き換え                                                                                                                 | ❌                                                                                                                                     |
 | S9  | S8 完了                                                                                                                                                                                  | 受入れ（schema-v3 gate）の journey 更新                                                                             | 受入れ生成器・journey 定義                                                                                                                                                                                               | M    | —                                                                                                                                           | ❌ 最後                                                                                                                                |
 
+**S4 行の必須変更・テスト補足**: 上表の native/host/protocol に加え、`computer-use-controller.ts` の横断列挙・Main 独立 deny・grant 照合、セッション中操作承認 UI の非自動フォーカス化、build manifest と Main/native handshake の mode・版照合を同じ S4 の安全境界へ含める。型/契約テスト、V1/V2 flag 行列、未登録アプリの無承認開始拒否、E1〜E5 と分類不能時の拒否、承認カードのフォーカス・ticket の使い回し拒否を通すまで V2 入力を解放しない。
+
 **S4 / S5 で D1（実行トリガ interlock）を同じ PR に入れる理由**: S4/S5 が入った瞬間に「任意の署名済みアプリが `full_access_app`」になる。実行トリガ interlock を S7 まで先送りすると、flag が ON の期間、ブラウザのダウンロード UI や Finder 経由で任意コード実行への経路が開いたままになる。穴を開けてから塞ぐのではなく、開ける PR で塞ぐ。
 
 ### feature flag
@@ -620,23 +622,37 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 - 環境変数は **より厳しい側へ倒す方向にだけ**使える。`SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST=1` は v2 ビルドでも allow-list に落とせるが、v1 ビルドを env で deny-list に上げることはできない。
 - **開発中の切り替え方法**: モードは build 時に決まるので、`npm run prepare:desktop` 相当のビルドスクリプトに `--eligibility=v1|v2` を受け取らせ、native と Main を**同じ値で同時にビルド**する（片方だけ切り替えると fail closed になり、それが正しい挙動）。S1〜S3 は適格性に触れないので `v1-allowlist` のままで開発でき、S4 以降のみ `v2-denylist` ビルドが要る。CI は両モードをビルドして、モード不一致が fail closed になることをテストする。
 
+### S4 の実装契約（2026-09-29 の着手前レビューを反映）
+
+S4 は macOS native だけで完結しない。`computer-use-controller.ts` の列挙・開始、native host、manifest と handshake、grant 照合を同じ安全境界として変更する。以下の契約と拒否テストが揃うまで、新しい候補へ入力する経路は公開しない。
+
+1. **モードと V1 の隔離**: build 既定は `v1-allowlist`。`v1` build は V2 flag が ON でも新しい native 横断列挙と未登録アプリの開始を拒否する。`v2-denylist` build でも V2 flag が OFF または `FORCE_V1_ALLOWLIST=1` なら、旧パネルの列挙・開始・観測・入力前再検証は V1 allow-list を通る。flag ON の agent 経路だけが V2 判定を使う。セッション作成時に経路を束縛し、モデル・Renderer・環境変数から強い経路へ変更できない。native と Main の両方が build mode / ruleset / classifier / lexicon の版を照合し、manifest・handshake の欠落や不一致は capability を閉じる。CI は全組合せで拒否と V1 回帰を確認する。
+2. **横断列挙と許可**: native は実際に起動中のプロセスと標準ウィンドウだけから候補を作り、検証済み identity、対象ウィンドウの面判定、process generation を一体で返す。Main は同じ検証済み属性から独立に deny し、Finder はアプリ全体でなく標準ファイルブラウザウィンドウだけを許可する。候補の内部 profile 化は native 由来の事実だけで行い、行の作成自体は grant や egress consent を与えない。既存 profile の `remember` は AI 開始の根拠にしない。token は Task/Turn、policy epoch、identity、process generation、window、profile revision に束縛し、承認表示時・クリック時・開始時に再取得する。一覧の Provider 送信は §6.4 の独立した同意を先に通す。
+3. **動的 identity**: 署名済み候補は列挙時だけでなく承認・開始・観測・入力直前と直後に、実行中 PID の動的コード署名、実行ファイルの正規化パス、プロセス世代を照合する。ディスク上の `SecStaticCodeCheckValidity` だけで実行中 PID を認証した扱いにしない。未署名候補は実行中 PID の実体と実行ファイル digest を完全一致で束縛し、毎操作 `supervised` とする。取得失敗・差し替え・helper/XPC への主体変更は拒否する。
+4. **操作単位の承認**: native は入力前に action・対象要素・祖先・ウィンドウ面を分類する副作用のない preflight を行い、`ordinary` / `single_use_approval` / `blocked` / `takeover` の固定結果だけを Main に返す。E1/E4/E5 と分類不能な危険操作には承認を出さず拒否または takeover。E2/E3 と §3.5 の高リスク確定操作は、同じ session、action、対象、観測 revision、cancel epoch、process generation、ruleset 版へ束縛した一回限りの preflight ticket に対し、Main が trusted activation の承認を取る。既存のセッション中操作承認カードを使う場合も、承認ボタンとウィンドウの自動フォーカスを S4 で解消し、明示的な Tab またはクリックだけを承認の入口にする。bounded plan grant と `full_access_app` でこの単発承認を省略しない。native は dispatch 直前に全条件を再分類・再照合し、ticket を一度だけ消費する。承認中に Stop、focus、geometry、identity、観測、Task/Turn が変わったら入力せず ticket を破棄する。
+5. **Finder と視覚入力**: Finder の `invoke`、Enter、ダブルクリック、視覚クリック、メニュー、ドラッグが「開く」や委譲を起こす可能性を持つ。安全な対象ファイル名・拡張子・祖先チェーンと効果を取得できない入力経路は許可しない。Finder の実機で各経路の AX 対象と効果を観察し、E1/E3 の正負テストを通してから該当操作を解放する。実機で証明できない経路は S4 で拒否を維持する。
+
 ---
 
-## 10. 未確定事項（オーナーに確認）
+## 10. オーナー決定と実装前の残件
 
-敵対的レビュー反映で、旧 Q1（Finder の粒度）と旧 Q2（UI 言語）は設計上の結論が出たため削除した（それぞれ §3.6 / §4）。残るのは次の 3 点。
+敵対的レビュー反映で、旧 Q1（Finder の粒度）と旧 Q2（UI 言語）は設計上の結論が出たため削除した（それぞれ §3.6 / §4）。2026-09-29、オーナーが #500 の進行と残る判断を委任したため、次の Q1〜Q3 は ADR の推奨を採用した。これは実装・実機検証が PASS したという意味ではない。
 
-**Q1. 「アプリの許可は初回だけ」でも、操作の途中で確認が出る場面が 3 種類ある。これは決定 2 の範囲内か**
+**Q1. 決定: アプリ許可は初回だけ。危険な操作・supervised 上限クラスは別の安全境界として扱う。**
 (a) 実行可能ファイルを開く・ダウンロードを開く・Finder / Explorer の「開く」（§3.6）、(b) 送金・購入確定・権限付与の確定ボタン（§3.5）、(c) IDE・ランチャ・オートメーション系（VS Code / Raycast / Shortcuts 等、§4 の supervised 上限クラス）。
-_推奨_: このまま採用する。(a)(b) は「アプリの許可」ではなく「その 1 操作の許可」であり、許可のやり直しは発生しない。(c) だけは 1 操作ずつ確認が続くので、体感が変わる点を確認したい。
+決定: (a)(b) の単発承認と (c) の操作ごとの確認を採用する。アプリ許可を再要求するものではない。実行可能ファイル・インストーラ・shell 面・資格情報欄は単発承認も出さず拒否する。native が危険操作を完全に分類・再検証できない場合も入力せず takeover にする。S4 では native の分類結果と同じ action への一回限りの承認を束縛する契約を実装前に確定する。
 
-**Q2. 未署名 / ad-hoc 署名アプリをどう扱うか**
+**Q2. 決定: 未署名 / ad-hoc 署名アプリは digest 完全一致の supervised に限る。**
 本人確認ができないので「差し替えられていないこと」を実行ファイル digest でしか保証できない。
-_推奨_: 操作可だが `supervised`、grant は digest 完全一致に束縛（更新のたびに再確認）。代替案は「操作不可」（安全だが個人開発アプリ・社内ツールが全滅）と「`observe_only`」（観測だけなら安全だが用途が限られる）。
+決定: 実行中の実体と実行ファイル digest を検証できるときだけ候補にし、毎操作を `supervised`、grant を digest 完全一致に束縛する。更新・差し替え・identity 不一致時は再確認し、digest やプロセス実体を検証できないときは操作不可。署名済みアプリの包括許可へ昇格させない。
 
-**Q3. 使っていない grant を自動失効させるか**
+**Q3. 決定: 未使用日数だけでは grant を自動失効させない。**
 grant はグローバル・無期限を推奨（§6.5）だが、1 度使っただけのアプリの許可が何年も残る。
-_推奨_: 自動失効させない。代わりに設定画面へ最終使用日・要求回数・拒否回数・アプリ更新日時を出して、ユーザーが判断できるようにする（§6.1 / §6.2.1）。180 日で自動失効させる案もあるが、「以後聞かない」という決定 2 の体感を損なう。
+決定: 180 日等の期限は設けず、最終使用日・要求回数・拒否回数・アプリ更新日時を設定画面で確認できるようにする。ユーザーによる取り消し、署名者・実体の変更、未署名バイナリの digest 変更、禁止 ruleset への該当、MAC 不一致では従来どおり失効する。
+
+**V1 終了判断**: S4/S5 では V2 flag を既定 OFF とし、V1 の利用経路を残す。S8 の picker / 登録 UI 撤去は、V2 の macOS・Windows それぞれで同一版の境界契約と製品経路の preflight、対象成果物の実機受入、最新 head の必須レビュー/CI、flag OFF と移行後の復旧方法を確認してから行う。未達なら S8 は開始せず、V1 を残す。期限だけで V1 を終了しない。
+
+**S4 の設計レビュー残件**: 2026-09-29 の独立した着手前レビューは、native dispatch 直前に分かる E2/E3 を Main の単発承認へ安全に返す契約、V2 build で flag OFF の V1 allow-list を維持する経路、Main の横断列挙と独立 deny、実行中 pid の動的署名検証、mode/ruleset の manifest・handshake 一致、Finder の視覚クリック/キー操作を分類する実機根拠が不足すると判定した。これらは S4 の権限拡大より前に設計と拒否テストを固め、再レビューを受ける。分類不能な候補・操作は許可しない。
 
 ---
 
