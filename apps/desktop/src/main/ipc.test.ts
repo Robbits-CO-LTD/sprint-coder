@@ -2795,15 +2795,22 @@ describe('Main image attachment dispatch boundary', () => {
     it('shares one Graph session Turn across steps and reopens it only after the last Worker', async () => {
       const missionTurnId = 'graph-mission:mission-1';
       const started = new Map<string, { revision: number; workspaceId: string | null }>();
-      const startTurn = vi.fn((input: { taskId: string; turnId: string; workspaceId: string }) => {
-        const snapshot = { revision: started.size + 1, workspaceId: input.workspaceId };
-        started.set(`${input.taskId}:${input.turnId}`, snapshot);
-        return { ...snapshot, entries: [] };
-      });
+      const startTurn = vi.fn(
+        (
+          input: { taskId: string; turnId: string; workspaceId: string },
+          _kind: string,
+          _options?: { initialOrdinal: number },
+        ) => {
+          const snapshot = { revision: started.size + 1, workspaceId: input.workspaceId };
+          started.set(`${input.taskId}:${input.turnId}`, snapshot);
+          return { ...snapshot, entries: [] };
+        },
+      );
       const finishTurn = vi.fn((taskId: string, turnId: string) => {
         started.delete(`${taskId}:${turnId}`);
       });
       const turnEnded = vi.fn();
+      let lastOrdinal = 0;
       const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
       Object.assign(router, {
         managedWorkerTurn: new Map(),
@@ -2831,6 +2838,7 @@ describe('Main image attachment dispatch boundary', () => {
           getEffectiveWorkspaceSet: () => ({ source: 'none', roots: [], digest: 'w'.repeat(64) }),
           getEffectiveWorkspaceRootIdentities: () => [],
           getPermissionPolicy: () => ({ policyEpoch: 9 }),
+          readManagedToolLastOrdinal: () => lastOrdinal,
           listTeamExecutions: () => [],
         },
       });
@@ -2857,6 +2865,7 @@ describe('Main image attachment dispatch boundary', () => {
         turnId: missionTurnId,
         policyEpoch: 9,
       });
+      expect(startTurn.mock.calls[0]![2]).toEqual({ initialOrdinal: 0 });
       expect(
         [...(router['managedWorkerTurn'] as Map<string, { parentTurnId: string }>).values()].map(
           ({ parentTurnId }) => parentTurnId,
@@ -2873,9 +2882,11 @@ describe('Main image attachment dispatch boundary', () => {
 
       // The next step of the same Mission starts a fresh session Turn rather than reusing a
       // finished one.
+      lastOrdinal = 2;
       await prepare('runtime-c', 'execution-c');
       expect(startTurn).toHaveBeenCalledTimes(2);
       expect(startTurn.mock.calls[1]![0]).toMatchObject({ turnId: missionTurnId });
+      expect(startTurn.mock.calls[1]![2]).toEqual({ initialOrdinal: 2 });
     });
 
     it('closes a sequential Mission broker only after its last Worker releases', () => {
@@ -2898,6 +2909,76 @@ describe('Main image attachment dispatch boundary', () => {
       releaseManagedWorkerTurn.call(router, 'worker-b');
       expect(turnEnded).toHaveBeenCalledWith('task-1', parentTurnId, 'finished');
       expect(finishTurn).toHaveBeenCalledWith('task-1', parentTurnId);
+    });
+
+    it('reopens a sequential Mission catalog after its prior step without reusing audit ordinals', async () => {
+      const missionTurnId = 'team-mission:mission-1';
+      const started = new Map<string, { revision: number; entries: never[] }>();
+      const startTurn = vi.fn(
+        (_context: unknown, _kind: string, _options: { initialOrdinal: number }) => {
+          const snapshot = { revision: 1, entries: [] as never[] };
+          started.set(missionTurnId, snapshot);
+          return snapshot;
+        },
+      );
+      const finishTurn = vi.fn(() => started.delete(missionTurnId));
+      const mission = {
+        id: 'mission-1',
+        mode: 'sequential',
+        state: 'running',
+        currentStepOrdinal: 1,
+        steps: [{ executionId: 'execution-a' }, { executionId: 'execution-b' }],
+      };
+      let lastOrdinal = 0;
+      const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+      Object.assign(router, {
+        managedWorkerTurn: new Map(),
+        approvalCoordinator: { turnEnded: vi.fn() },
+        computerUseController: { turnEnded: vi.fn() },
+        managedCodingHarness: {
+          broker: { getTurnSnapshot: () => started.get(missionTurnId) },
+          startTurn,
+          finishTurn,
+        },
+        persistence: {
+          getActiveTurnId: () => null,
+          getTeamMissionForExecution: () => mission,
+          ensureSequentialMissionSessionTurn: () => missionTurnId,
+          readTurnWorkspaceSetForTask: () => ({ digest: 'w'.repeat(64) }),
+          getEffectiveWorkspaceSet: () => ({ source: 'none', roots: [], digest: 'w'.repeat(64) }),
+          getEffectiveWorkspaceRootIdentities: () => [],
+          getPermissionPolicy: () => ({ policyEpoch: 9 }),
+          readManagedToolLastOrdinal: () => lastOrdinal,
+          listTeamExecutions: () => [],
+        },
+      });
+      const workspace = { primaryRootId: null, digest: 'x'.repeat(64), roots: [] as never[] };
+      await prepareWorkerManagedCatalog.call(
+        router,
+        'provider',
+        'task-1',
+        'runtime-a',
+        workspace,
+        false,
+        'read-only',
+        'execution-a',
+      );
+      expect(startTurn.mock.calls[0]![2]).toEqual({ initialOrdinal: 0 });
+      releaseManagedWorkerTurn.call(router, 'runtime-a');
+      mission.currentStepOrdinal = 2;
+      lastOrdinal = 2;
+      await prepareWorkerManagedCatalog.call(
+        router,
+        'provider',
+        'task-1',
+        'runtime-b',
+        workspace,
+        false,
+        'read-only',
+        'execution-b',
+      );
+      expect(startTurn.mock.calls[1]![2]).toEqual({ initialOrdinal: 2 });
+      releaseManagedWorkerTurn.call(router, 'runtime-b');
     });
   });
 

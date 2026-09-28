@@ -5777,6 +5777,7 @@ export interface PersistenceClient {
     input: ApprovalCallCancellationInput,
   ): ApprovalPersistenceResult | null;
   recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void;
+  readManagedToolLastOrdinal(taskId: string, turnId: string): number;
   recordManagedTurnPlan(input: {
     taskId: string;
     turnId: string;
@@ -16825,6 +16826,16 @@ export class SqlitePersistenceClient implements PersistenceClient {
         ? undefined
         : this.recordAutoPermissionDecision(autoDecision);
     })();
+  }
+
+  readManagedToolLastOrdinal(taskId: string, turnId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(ordinal), 0) AS last_ordinal
+         FROM managed_tool_calls WHERE task_id = ? AND turn_id = ?`,
+      )
+      .get(taskId, turnId) as { last_ordinal: number };
+    return row.last_ordinal;
   }
 
   recordManagedToolLifecycle(event: ManagedToolLifecycleEvent): void {

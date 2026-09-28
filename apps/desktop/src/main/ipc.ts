@@ -7528,6 +7528,11 @@ export class IpcRouter {
           policyEpoch: owner.policyEpoch,
         },
         kind,
+        {
+          initialOrdinal: isMissionSessionTurn(parentTurnId)
+            ? this.persistence.readManagedToolLastOrdinal(taskId, parentTurnId)
+            : 0,
+        },
       );
     // Role-bound Team communication stays on the authenticated MCP adapter. The common coding
     // snapshot has no requester-agent field, so exposing team_* here would execute with Leader

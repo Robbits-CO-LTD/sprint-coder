@@ -127,8 +127,15 @@ export class ToolBroker {
     context: ToolExecutionContext,
     providerId: string,
     availableToolIds?: readonly ToolId[],
+    initialOrdinal = 0,
   ): ToolCatalogSnapshot {
     validateContext(context);
+    if (
+      !Number.isSafeInteger(initialOrdinal) ||
+      initialOrdinal < 0 ||
+      initialOrdinal >= Number.MAX_SAFE_INTEGER
+    )
+      throw new Error('Invalid initial managed tool ordinal');
     if (this.getCurrentPolicyEpoch(context.taskId) !== context.policyEpoch)
       throw new Error('Cannot bind a Tool catalog to a stale policy epoch');
     const key = turnKey(context.taskId, context.turnId);
@@ -155,7 +162,7 @@ export class ToolBroker {
       gate: new ToolResourceGate(8),
       resultGate: new OrderedToolResultGate(),
       scopedResultGates: new WeakMap(),
-      nextOrdinal: 0,
+      nextOrdinal: initialOrdinal,
     });
     return snapshot;
   }
@@ -196,6 +203,7 @@ export class ToolBroker {
     // while audit ordinals and resource arbitration still belong to the shared parent Turn.
     const resultOrdinal = resultGate.reserve();
     let terminal = false;
+    let requestedRecorded = false;
     let resultGateStarted = false;
     const transition = (state: ManagedToolCallState): void => {
       this.lifecycle?.({
@@ -213,6 +221,7 @@ export class ToolBroker {
     };
     try {
       transition('requested');
+      requestedRecorded = true;
       if (this.getCurrentPolicyEpoch(request.taskId) !== bound.context.policyEpoch)
         throw new Error('Tool dispatch rejected because the policy epoch changed');
       const entry = bound.snapshot.entries.find(
@@ -354,7 +363,8 @@ export class ToolBroker {
       else transition('succeeded');
       return output;
     } catch (error) {
-      if (!terminal) transition(request.signal?.aborted ? 'canceled' : 'failed');
+      if (!terminal && requestedRecorded)
+        transition(request.signal?.aborted ? 'canceled' : 'failed');
       throw error;
     } finally {
       if (!resultGateStarted) await resultGate.complete(resultOrdinal);
