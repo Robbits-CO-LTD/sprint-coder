@@ -710,5 +710,6 @@ S4 の下限は native deny/面/実行トリガの正負ケース、Main の tok
 - セッション中の操作承認が非同期に出た際、Main の `show()+focus()` と Renderer の許可ボタン `focus()` が外部のキーボード入力を奪うことをコードと RED テストで確認した。
 - Main は非同期承認を `showInactive()+flashFrame()` で知らせ、両種の承認が解決した時点で点滅を解除。Renderer はカード出現時にフォーカスを奪わず、カード内にフォーカスがあった場合のみ消滅・承認 ID 変更時に停止へ戻す。
 - 独立差分レビューの 3 件（承認後のフォーカス喪失、点滅残り、承認 A→B でボタンを再利用）を修正。対象テスト 53 件 PASS、desktop 型検査 PASS。変更 TS と ADR の Prettier は PASS、`tasks/todo.md` は変更前から形式警告あり。最終型・lint・差分レビューは継続中。
+- 準備用 PR #631 を作成し、#500 を `implementing` に更新。最新 main へ rebase した head で対象 53 件と型検査は PASS。CI の Linux shard で破棄処理テストが新規 Set の fixture 未初期化を検出したためテスト準備を修正し、直接関連する 56 件を再確認して PASS。修正版 head の CI・review は未完了。
 
 ---
