@@ -1097,6 +1097,8 @@ export class IpcRouter {
   private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
   private readonly computerUseStatusBySession = new Map<string, ComputerUseSessionStatus>();
   private readonly computerUsePendingApprovalBySession = new Map<string, ComputerUseApproval>();
+  private readonly computerUsePendingGrantRequestIds = new Set<string>();
+  private computerUseAttentionFlashing = false;
   private readonly computerUseApprovalSessionById = new Map<string, string>();
   private readonly computerUseSessionByTask = new Map<string, string>();
   private readonly computerUseQuickStartLatches = new Map<string, ComputerUseQuickStartLatch>();
@@ -4933,6 +4935,19 @@ export class IpcRouter {
       this.computerUseStatusBySession.get(approval.sessionId) ??
       this.computerUseController.getStatus(approval.sessionId);
     if (status !== null && status !== undefined) this.publishComputerUseStatus(status);
+    this.refreshComputerUseApprovalAttention();
+  }
+
+  private refreshComputerUseApprovalAttention(): void {
+    if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+    const pending =
+      this.computerUsePendingApprovalBySession.size > 0 ||
+      this.computerUsePendingGrantRequestIds.size > 0;
+    if (pending && !this.window.isVisible()) this.window.showInactive();
+    if (pending !== this.computerUseAttentionFlashing) {
+      this.window.flashFrame(pending);
+      this.computerUseAttentionFlashing = pending;
+    }
   }
 
   /**
@@ -4954,10 +4969,9 @@ export class IpcRouter {
     // the keystroke a user was aiming at whatever they were doing lands on this window instead, and
     // that keystroke is a genuine trusted activation. So the window is shown inactive and asks for
     // attention — a flashing taskbar entry, a bouncing Dock icon — and the person comes to it.
-    if (parsed.data.state === 'pending') {
-      if (!this.window.isVisible()) this.window.showInactive();
-      this.window.flashFrame(true);
-    } else this.window.flashFrame(false);
+    if (parsed.data.state === 'pending') this.computerUsePendingGrantRequestIds.add(parsed.data.id);
+    else this.computerUsePendingGrantRequestIds.delete(parsed.data.id);
+    this.refreshComputerUseApprovalAttention();
     this.window.webContents.send(IPC_CHANNELS.computerUseGrantRequestEvent, parsed.data);
   }
 
@@ -5114,13 +5128,10 @@ export class IpcRouter {
           this.computerUseApprovalSessionById.delete(approvalId);
     } else this.computerUseSessionByTask.set(published.taskId, published.sessionId);
     if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-    // Approval requires the user to act in Sprint Coder. A paused session can instead represent
-    // an explicit user-takeover boundary (secure field, payment, file picker, or OS prompt), in
-    // which case the controlled application must remain foreground for the user to continue there.
-    if (published.state === 'awaiting_approval') {
-      this.window.show();
-      this.window.focus();
-    }
+    // An approval can arrive while the user is typing in another application. Show the card without
+    // moving keyboard focus, so an in-flight Space or Enter cannot activate its approval button.
+    // A paused session can represent user takeover, so it does not surface this window.
+    this.refreshComputerUseApprovalAttention();
     this.window.webContents.send(IPC_CHANNELS.computerUseStatusEvent, published);
   }
 
@@ -5144,6 +5155,7 @@ export class IpcRouter {
     this.computerUseEmergencySessionId = null;
     this.computerUseSessionByTask.clear();
     this.computerUsePendingApprovalBySession.clear();
+    this.computerUsePendingGrantRequestIds.clear();
     this.computerUseApprovalSessionById.clear();
     this.computerUseStatusBySession.clear();
     this.computerUseQuickStartLatches.clear();

@@ -95,6 +95,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
     'attachmentCapabilityByTurn',
   ])
     state[key] = new Map();
+  state['computerUsePendingGrantRequestIds'] = new Set();
   for (const key of [
     'computerUseController',
     'computerUseActivationGate',
