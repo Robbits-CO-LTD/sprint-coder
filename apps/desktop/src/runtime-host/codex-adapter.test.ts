@@ -1114,11 +1114,25 @@ describe('Codex runtime probe', () => {
     expect(args).toContain(
       `mcp_servers.team.enabled_tools=${JSON.stringify(TEAM_CORE_MCP_TOOL_NAMES)}`,
     );
-    expect(args).toContain('mcp_servers.team.default_tools_approval_mode="approve"');
+    expect(args).toContain('mcp_servers.team.default_tools_approval_mode="prompt"');
+    for (const name of TEAM_CORE_MCP_TOOL_NAMES)
+      expect(args).toContain(`mcp_servers.team.tools.${name}.approval_mode="approve"`);
     expect(args).toContain('mcp_servers.team.env_vars=["TEAM_BRIDGE_SOCKET","TEAM_BRIDGE_TOKEN"]');
     expect(args).not.toContain('features.tool_search_always_defer_mcp_tools=false');
     expect(args.join(' ')).not.toContain('turn-token');
     expect(args.slice(0, 3)).toEqual(['app-server', '--listen', 'stdio://']);
+  });
+
+  it('does not auto-approve native Project memory or Skill Draft calls', () => {
+    const args = buildCodexArgs('auto', undefined, {
+      command: 'node',
+      scriptPath: '/tmp/team-mcp-server.cjs',
+      toolNames: ['project_memory_remember', 'skill_draft_create', 'team_get_status'],
+    });
+    expect(args).toContain('mcp_servers.team.default_tools_approval_mode="prompt"');
+    expect(args).toContain('mcp_servers.team.tools.team_get_status.approval_mode="approve"');
+    expect(args.join(' ')).not.toContain('tools.project_memory_remember.approval_mode="approve"');
+    expect(args.join(' ')).not.toContain('tools.skill_draft_create.approval_mode="approve"');
   });
 
   it('requires the pinned Team MCP server and every enabled tool in app-server inventory', () => {

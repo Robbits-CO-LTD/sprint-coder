@@ -217,6 +217,109 @@ describe('TeamMcpBridge', () => {
     );
   });
 
+  it('dispatches both auxiliary names through the managed executor, never native callbacks', async () => {
+    const createSkillDraft = vi.fn(async () => ({ unsafe: true }));
+    const queueCandidate = vi.fn(async () => ({ unsafe: true }));
+    const executeManaged = vi.fn(async (_input: unknown, context: { toolName: string }) => ({
+      managed: context.toolName,
+    }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      createSkillDraft,
+      queueCandidate,
+      undefined,
+      undefined,
+      executeManaged,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    const digest = 'a'.repeat(64);
+    bridge.register('turn-auxiliary', {
+      taskId: 'task-1',
+      token,
+      allowSkillDrafts: true,
+      allowProjectMemory: true,
+      allowTeamTools: false,
+      managedTools: ['project_memory_remember', 'skill_draft_create'].map((name) => ({
+        name,
+        description: name,
+        inputSchema: { type: 'object' },
+      })),
+      managedToolCatalogDigest: digest,
+    });
+    for (const tool of ['project_memory_remember', 'skill_draft_create']) {
+      const response = await roundTrip(
+        socketPath as string,
+        { token, tool, args: { marker: tool } },
+        RESPONSE_TIMEOUT_MS,
+      );
+      expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+        ok: true,
+        result: { managed: tool },
+      });
+    }
+    expect(executeManaged).toHaveBeenCalledTimes(2);
+    expect(executeManaged).toHaveBeenCalledWith(
+      { marker: 'project_memory_remember' },
+      expect.objectContaining({
+        taskId: 'task-1',
+        turnId: 'turn-auxiliary',
+        toolName: 'project_memory_remember',
+        catalogDigest: digest,
+      }),
+    );
+    expect(createSkillDraft).not.toHaveBeenCalled();
+    expect(queueCandidate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'catalog digest', digest: false, executor: true },
+    { name: 'managed executor', digest: true, executor: false },
+  ])('rejects an auxiliary call without its $name', async ({ digest, executor }) => {
+    const nativeCandidate = vi.fn(async () => ({ unsafe: true }));
+    const executeManaged = vi.fn(async () => ({ managed: true }));
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      nativeCandidate,
+      undefined,
+      undefined,
+      executor ? executeManaged : undefined,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-incomplete-auxiliary', {
+      taskId: 'task-1',
+      token,
+      allowProjectMemory: true,
+      allowTeamTools: false,
+      managedTools: [
+        {
+          name: 'project_memory_remember',
+          description: 'Project memory',
+          inputSchema: { type: 'object' },
+        },
+      ],
+      ...(digest ? { managedToolCatalogDigest: 'a'.repeat(64) } : {}),
+    });
+    const response = await roundTrip(
+      socketPath as string,
+      { token, tool: 'project_memory_remember', args: { content: 'synthetic' } },
+      RESPONSE_TIMEOUT_MS,
+    );
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({ ok: false });
+    expect(executeManaged).not.toHaveBeenCalled();
+    expect(nativeCandidate).not.toHaveBeenCalled();
+  });
+
   it('waits within the authentication deadline for a delayed runtime process binding', async () => {
     const coordinator = fakeCoordinator();
     const bridge = new ProductionTeamMcpBridge(coordinator, testSocketPath(), 1_000);
@@ -719,7 +822,7 @@ socket.once('error', (error) => {
     expect(listWorkerReports).toHaveBeenCalledWith('task-1', 7, undefined);
   });
 
-  it('allows Draft creation only for a turn explicitly bound to skill-creator', async () => {
+  it('rejects an unmanaged Draft even for a turn bound to skill-creator', async () => {
     const createSkillDraft = vi.fn(async (input: unknown) => ({
       id: 'draft-1',
       skillId: 'reviewer',
@@ -755,7 +858,7 @@ socket.once('error', (error) => {
       token: allowedToken,
       allowSkillDrafts: true,
     });
-    const allowed = await roundTrip(
+    const unmanaged = await roundTrip(
       socketPath as string,
       {
         token: allowedToken,
@@ -764,16 +867,8 @@ socket.once('error', (error) => {
       },
       RESPONSE_TIMEOUT_MS,
     );
-    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
-      ok: true,
-      result: {
-        id: 'draft-1',
-        skillId: 'reviewer',
-        kind: 'chat',
-        files: [{ path: 'SKILL.md', content: 'x' }],
-      },
-    });
-    expect(createSkillDraft).toHaveBeenCalledOnce();
+    expect(JSON.parse(unmanaged.lines[0] as string)).toMatchObject({ ok: false });
+    expect(createSkillDraft).not.toHaveBeenCalled();
   });
 
   it.skip('allows prepared Skill installation only for a turn explicitly bound to import-skill', async () => {
@@ -944,7 +1039,7 @@ socket.once('error', (error) => {
     expect(readImportSkillSource).not.toHaveBeenCalled();
   });
 
-  it('allows Project memory candidates only for an explicitly eligible Leader turn', async () => {
+  it('rejects unmanaged Project memory even for an eligible Leader turn', async () => {
     const queueCandidate = vi.fn(async () => ({ queued: true }));
     const bridge = new TeamMcpBridge(
       fakeCoordinator(),
@@ -976,7 +1071,7 @@ socket.once('error', (error) => {
       allowProjectMemory: true,
       allowTeamTools: false,
     });
-    const allowed = await roundTrip(
+    const unmanaged = await roundTrip(
       socketPath as string,
       {
         token: allowedToken,
@@ -985,14 +1080,8 @@ socket.once('error', (error) => {
       },
       RESPONSE_TIMEOUT_MS,
     );
-    expect(JSON.parse(allowed.lines[0] as string)).toMatchObject({
-      ok: true,
-      result: { queued: true },
-    });
-    expect(queueCandidate).toHaveBeenCalledWith(
-      { content: 'stable fact' },
-      { taskId: 'task-1', turnId: 'turn-allowed' },
-    );
+    expect(JSON.parse(unmanaged.lines[0] as string)).toMatchObject({ ok: false });
+    expect(queueCandidate).not.toHaveBeenCalled();
   });
 
   it('does not expose Team tools to a Skill Creator-only turn', async () => {
