@@ -26,6 +26,19 @@
 
 ---
 
+## Issue #577 — 権限説明を現行実装へ合わせる（2026-09-29）
+
+対象は `Robbits-CO-LTD/sprint-coder` の #577、base は `origin/main`。残るbug #585/#571/#549は実機・外部条件待ちとして維持する。OPEN PR は0件、#500のPR #631は別担当がMERGED済み。#577の文書2件と本記録だけを変更し、権限判定・設定・DB・APIは変更しない。
+
+- [x] Issue本文・全コメント・添付0/0、現行コード、既存計画、PRと作業ツリーを確認する。
+- [x] 要求由来ceilingと実際の拒否・安全設定・Worker制限を2文書へ反映する。
+- [ ] 差分・Markdown・相互参照・現行コードを照合し、独立レビューを受ける（差分とコード照合はPASS、独立レビュー待ち）。
+- [ ] PR、最新headの必須CI、指摘対応、マージとIssue closeoutを読戻す。
+
+前提監査: 第一仮説は「文書の実装済み保証を訂正すれば足りる」。`ipc.ts`と`provider-egress.ts`は要求からceilingを構成し、`permission.ts`のceiling照合は存在するため、保護全体が無いとは書かない。`team-coordinator.ts`の委任数制限は別経路である。反証として変更対象外の認可経路やWorkerの実制限が失われる記述が無いか確認する。
+
+検証: `git diff --check` PASS。2文書の該当記述、`permission-broker.ts`のdeny/allow展開、`team-coordinator.ts`の委任制限、Workerの管理ツール/書込み範囲を照合してAC-1〜3とINV-1〜2を確認した。Prettierの全文チェックは変更前の3ファイルもFAILするため、このIssueで無関係な全文整形はしない。Jevのplan/review助言は各1通信でESCALATE（試験対応とsecurity/regressionの不確実性）であり、合否には算入しない。
+
 # Issue #122 Slice D — Download manager・model store（2026-08-23）
 
 ### 計画
