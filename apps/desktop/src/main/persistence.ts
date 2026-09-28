@@ -11776,29 +11776,33 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (mission.mode !== 'graph') throw new Error('Mission session Turns are graph-only');
       if (this.getTeam(mission.teamId).taskId !== taskId)
         throw new Error('Graph Mission session Turn Task mismatch');
+      const graph = this.getGraphTeamMission(missionId);
+      if (graph === null || this.getEffectiveWorkspaceSet(taskId).digest !== graph.workspaceDigest)
+        throw new Error('Graph Mission Workspace snapshot changed');
       const existing = this.db.prepare('SELECT task_id FROM turns WHERE id = ?').get(turnId) as
         { task_id: string } | undefined;
       if (existing !== undefined) {
         if (existing.task_id !== taskId)
           throw new Error('Graph Mission session Turn is bound to another Task');
-        this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
-        return turnId;
+      } else {
+        const now = new Date().toISOString();
+        const messageId = randomUUID();
+        this.db
+          .prepare(
+            `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
+             VALUES (?, ?, ?, 'system', ?, ?)`,
+          )
+          .run(messageId, taskId, turnId, 'Graph Missionの工程をWorkerへ割り当てました。', now);
+        this.db
+          .prepare(
+            `INSERT INTO turns(
+               id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
+             ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
+          )
+          .run(turnId, taskId, messageId, now, now);
       }
-      const now = new Date().toISOString();
-      const messageId = randomUUID();
-      this.db
-        .prepare(
-          `INSERT INTO messages(id, task_id, turn_id, author, content, created_at)
-           VALUES (?, ?, ?, 'system', ?, ?)`,
-        )
-        .run(messageId, taskId, turnId, 'Graph Missionの工程をWorkerへ割り当てました。', now);
-      this.db
-        .prepare(
-          `INSERT INTO turns(
-             id, task_id, user_message_id, state, seq, runtime_kind, model, created_at, updated_at
-           ) VALUES (?, ?, ?, 'completed', 0, 'mock', 'auto', ?, ?)`,
-        )
-        .run(turnId, taskId, messageId, now, now);
+      if (this.sealTurnWorkspaceSet(taskId, turnId).digest !== graph.workspaceDigest)
+        throw new Error('Graph Mission Workspace snapshot changed');
       this.ensureMissionSessionAcceptanceContract(taskId, turnId, mission);
       return turnId;
     })();
