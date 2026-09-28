@@ -46,6 +46,7 @@ import {
   MANAGED_LOCAL_FIXTURE_SELECTION,
   managedLocalTeamWorkerRuntime,
 } from './managed-local-team-worker-fixture';
+import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -1025,9 +1026,9 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       },
       gitScenarioTimeout,
     );
-    it(
-      'runs a task-Workspace WRITE step of a Managed Local Worker in a durable isolation and integrates it (issue #570)',
-      async () => {
+    it.each([false, true])(
+      'runs a task-Workspace WRITE step of a Managed Local Worker in a durable isolation and integrates it, resume=%s (issue #570)',
+      async (resume) => {
         const f = fixture(undefined, true);
         f.persistence.createProviderConnection(managedLocalConnection());
         const workspace = join(dirname(f.path), 'workspace');
@@ -1055,6 +1056,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           workspaceKey: binding.workspaceKey,
           rootIdentityDigest: binding.rootIdentityDigest,
         });
+        if (resume) await installNativeGraphObserver(f.persistence, dirname(f.path));
         const writer = f.persistence.registerTeamWorker({
           teamId: f.team.id,
           role: 'managed-local',
@@ -1080,6 +1082,16 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           fallback: new DeterministicTeamWorkerRuntime(),
           writePath: 'managed.ts',
         });
+        let firstWorkspaceSet: RuntimeWorkspaceSet | undefined;
+        if (resume) {
+          const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
+          vi.spyOn(managedLocal.runtime, 'execute')
+            .mockImplementationOnce(async (input) => {
+              firstWorkspaceSet = input.workspaceSet;
+              throw new Error('Controlled failure after Graph isolation preparation');
+            })
+            .mockImplementation((input) => execute(input));
+        }
         const scheduler = new TeamExecutionScheduler(1);
         const coordinator = new TeamCoordinator(
           f.persistence,
@@ -1105,10 +1117,30 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           ),
         }));
         const executionId = mission.steps[0]!.executionId;
+        if (resume) {
+          await vi.waitFor(
+            () => expect(f.persistence.getTeamExecution(executionId).state).toBe('waiting_resume'),
+            { timeout: gitCheckpointTimeout },
+          );
+          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+          const preserved = f.persistence.getTeamExecutionIsolation(executionId)!;
+          expect(preserved.phase).toBe('quarantined');
+          expect(firstWorkspaceSet?.roots[0]?.path).toBe(preserved.roots[0]!.isolatedPath);
+          expect(existsSync(join(workspace, 'managed.ts'))).toBe(false);
+          const review = await coordinator.reviewGraphPreservedWorkspace(
+            f.task.id,
+            mission.id,
+            'a',
+          );
+          await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
+          expect(f.persistence.getTeamExecutionIsolation(executionId)?.roots).toEqual(
+            preserved.roots,
+          );
+        }
         await vi.waitFor(
           () =>
-            expect(['completed', 'failed', 'interrupted']).toContain(
-              f.persistence.listTeamAttempts(executionId).at(-1)?.state,
+            expect(f.persistence.listTeamAttempts(executionId).map(({ state }) => state)).toEqual(
+              resume ? ['failed', 'completed'] : ['completed'],
             ),
           { timeout: gitCheckpointTimeout },
         );
@@ -1118,14 +1150,14 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
             f.persistence.getTeamSnapshot(f.team.id).agents.find(({ id }) => id === writer.id)
               ?.currentActivity,
           ),
-        ).toEqual(['completed']);
+        ).toEqual(resume ? ['failed', 'completed'] : ['completed']);
         await vi.waitFor(
           () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
           { timeout: gitCheckpointTimeout },
         );
         await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
 
-        // Its worktree was the one-root Workspace of the step, handed over with a writing tool.
+        // The step received its durable isolated root with the Managed Local writing tool.
         const isolation = f.persistence.getTeamExecutionIsolation(executionId)!;
         expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
         expect(managedLocal.sessions).toHaveLength(1);
@@ -1139,6 +1171,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         expect(session!.workspaceSet.roots).toHaveLength(1);
         expect(root).toMatchObject({ role: 'primary', rootId: context.workspace.primaryRootId });
         expect(root!.path).toBe(isolation.roots[0]!.isolatedPath);
+        if (resume) expect(session!.workspaceSet).toEqual(firstWorkspaceSet);
         expect(managedLocal.toolCalls).toEqual([
           { workerId: writer.id, name: 'create_file', file: join(root!.path, 'managed.ts') },
         ]);
