@@ -435,8 +435,7 @@ describe('Computer Use onboarding interaction', () => {
     item.container.remove();
   });
 
-  it('does not steal keyboard focus when an approval appears or resolves', async () => {
-    const hasFocus = vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+  it('moves focus to the approval action and back to Stop when the card resolves', async () => {
     const container = document.createElement('div');
     document.body.append(container);
     const root = createRoot(container);
@@ -473,9 +472,7 @@ describe('Computer Use onboarding interaction', () => {
         />,
       ),
     );
-    const composer = document.createElement('textarea');
-    document.body.append(composer);
-    composer.focus();
+    const stop = required(container.querySelector<HTMLButtonElement>('.computer-use-stop'));
     await act(async () =>
       root.render(
         <ComputerUseSessionRail
@@ -487,8 +484,7 @@ describe('Computer Use onboarding interaction', () => {
         />,
       ),
     );
-    expect(document.activeElement).toBe(composer);
-    expect(container.querySelector('.computer-use-approval')).not.toBeNull();
+    expect(document.activeElement?.textContent?.trim()).toBe('今回のみ許可');
 
     await act(async () =>
       root.render(
@@ -501,66 +497,9 @@ describe('Computer Use onboarding interaction', () => {
         />,
       ),
     );
-    expect(document.activeElement).toBe(composer);
-    await act(async () =>
-      root.render(
-        <ComputerUseSessionRail
-          session={session}
-          approval={approval}
-          stopping={false}
-          onStop={() => {}}
-          onApproval={() => {}}
-        />,
-      ),
-    );
-    const approvalButton = container.querySelector<HTMLButtonElement>(
-      '.computer-use-approval button',
-    );
-    expect(approvalButton).not.toBeNull();
-    approvalButton?.focus();
-    await act(async () =>
-      root.render(
-        <ComputerUseSessionRail
-          session={session}
-          approval={null}
-          stopping={false}
-          onStop={() => {}}
-          onApproval={() => {}}
-        />,
-      ),
-    );
-    expect(document.activeElement).toBe(container.querySelector('.computer-use-stop'));
-    await act(async () =>
-      root.render(
-        <ComputerUseSessionRail
-          session={session}
-          approval={approval}
-          stopping={false}
-          onStop={() => {}}
-          onApproval={() => {}}
-        />,
-      ),
-    );
-    container.querySelector<HTMLButtonElement>('.computer-use-approval button')?.focus();
-    await act(async () =>
-      root.render(
-        <ComputerUseSessionRail
-          session={session}
-          approval={{ ...approval, id: 'approval-2' }}
-          stopping={false}
-          onStop={() => {}}
-          onApproval={() => {}}
-        />,
-      ),
-    );
-    expect(document.activeElement).toBe(container.querySelector('.computer-use-stop'));
-    expect(
-      container.querySelector('.computer-use-approval')?.contains(document.activeElement),
-    ).toBe(false);
+    expect(document.activeElement).toBe(stop);
     await act(async () => root.unmount());
     container.remove();
-    composer.remove();
-    hasFocus.mockRestore();
   });
 });
 
