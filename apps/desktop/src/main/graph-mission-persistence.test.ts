@@ -2189,6 +2189,145 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       };
     }
 
+    function sequentialMission(f: ReturnType<typeof fixture>) {
+      return f.persistence.createTeamMission({
+        teamId: f.team.id,
+        createdByAgentId: f.team.leaderAgentId,
+        objective: 'Sequential work',
+        doneCriteria: ['Both steps completed'],
+        steps: f.workers.map((worker) => ({
+          workerId: worker.id,
+          objective: worker.role,
+          doneCriteria: ['Done'],
+          access: 'read-only' as const,
+        })),
+        now,
+      });
+    }
+
+    it('seals a Task-owned sequential Mission session and refuses another Task or mode', async () => {
+      const f = fixture();
+      const graph = f.persistence.createGraphTeamMission(f.input);
+      const workspace = join(dirname(f.path), 'sequential-workspace');
+      mkdirSync(workspace);
+      const binding = await workspaceMutationBinding(workspace);
+      f.persistence.setWorkspaceBinding(f.task.id, {
+        path: binding.canonicalPath,
+        workspaceKey: binding.workspaceKey,
+        rootIdentityDigest: binding.rootIdentityDigest,
+      });
+      const mission = sequentialMission(f);
+      f.persistence.transitionTeamMission(mission.id, 'running', now);
+      const otherTask = f.persistence.createTask('Other Task');
+      try {
+        expect(() =>
+          f.persistence.ensureSequentialMissionSessionTurn(otherTask.id, mission.id),
+        ).toThrow('Task mismatch');
+        expect(() => f.persistence.ensureSequentialMissionSessionTurn(f.task.id, graph.id)).toThrow(
+          'sequential mode',
+        );
+        const turnId = f.persistence.ensureSequentialMissionSessionTurn(f.task.id, mission.id);
+        expect(turnId).toBe(`team-mission:${mission.id}`);
+        expect(f.persistence.ensureSequentialMissionSessionTurn(f.task.id, mission.id)).toBe(
+          turnId,
+        );
+        expect(f.persistence.getActiveTurnId(f.task.id)).toBeNull();
+        expect(graphTurnState(f, turnId)).toBe('completed');
+        expect(f.persistence.readTurnWorkspaceSetForTask(f.task.id, turnId)?.roots).toHaveLength(1);
+        expect(
+          workerManagedCatalogOwner(
+            f.persistence,
+            (taskId) => graphMissionContextFor(f.persistence, taskId),
+            f.task.id,
+            mission.steps[0]!.executionId,
+          ).parentTurnId,
+        ).toBe(turnId);
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('allows sequential session approval only for its current running attempt, then cancels it on restart', () => {
+      const f = fixture();
+      const mission = sequentialMission(f);
+      const turnId = f.persistence.ensureSequentialMissionSessionTurn(f.task.id, mission.id);
+      try {
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+        f.persistence.transitionTeamMission(mission.id, 'running', now);
+        const executionId = mission.steps[0]!.executionId;
+        f.persistence.transitionTeamExecution({
+          executionId,
+          to: 'queued',
+          queueReason: 'global_concurrency',
+          now,
+        });
+        f.persistence.transitionTeamExecution({ executionId, to: 'running', now });
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+        const attempt = f.persistence.createTeamAttempt(executionId, now);
+        f.persistence.transitionTeamAttempt({ attemptId: attempt.id, to: 'running', now });
+        const otherTask = f.persistence.createTask('Unrelated approval requester');
+        expect(() => f.persistence.requestApproval(graphApproval(otherTask.id, turnId))).toThrow();
+        expect(() =>
+          f.persistence.requestApproval({
+            ...graphApproval(f.task.id, turnId),
+            policyEpoch: 1,
+          }),
+        ).toThrow('policy epoch is stale');
+        const card = f.persistence.requestApproval(graphApproval(f.task.id, turnId)).approval;
+        expect(card.state).toBe('pending');
+        f.persistence.transitionTeamAttempt({
+          attemptId: attempt.id,
+          to: 'failed',
+          terminalReason: 'fixture_stop',
+          now,
+        });
+        expect(() => f.persistence.requestApproval(graphApproval(f.task.id, turnId))).toThrow(
+          'not eligible',
+        );
+        f.persistence.close();
+        const reopened = new SqlitePersistenceClient(f.path);
+        try {
+          reopened.recoverInterruptedTeamExecutions(now);
+          expect(reopened.getApproval(f.task.id, card.id)).toMatchObject({
+            state: 'canceled',
+            decision: null,
+          });
+          expect(reopened.listPendingApprovals(f.task.id)).toEqual([]);
+          expect(() =>
+            reopened.resolveApproval({
+              taskId: f.task.id,
+              approvalId: card.id,
+              expectedTurnId: turnId,
+              expectedRevision: card.revision,
+              challenge: card.challenge,
+              decision: 'allow_once',
+              operationId: randomUUID(),
+              decidedAt: now,
+            }),
+          ).toThrow('no longer pending');
+          const db = new Database(f.path, { readonly: true });
+          try {
+            expect(
+              db
+                .prepare('SELECT COUNT(*) AS count FROM acceptance_contracts WHERE turn_id = ?')
+                .get(turnId),
+            ).toEqual({ count: 0 });
+          } finally {
+            db.close();
+          }
+        } finally {
+          reopened.close();
+        }
+      } finally {
+        // The first client is already closed before restart; close is idempotent.
+        f.persistence.close();
+      }
+    });
+
     it('keeps Graph session approval cards independent of the chat Turn state', () => {
       const f = fixture();
       const mission = f.persistence.createGraphTeamMission(f.input);
