@@ -165,6 +165,25 @@ function resourceMission(f: ReturnType<typeof fixture>, key = 'shared-db') {
     semanticDigest: document.semanticDigest,
   });
 }
+function nextGraphMission(f: ReturnType<typeof fixture>) {
+  const previous = f.persistence.getGraphDocument(f.task.id)!;
+  const plan = { ...structuredClone(f.plan), objective: 'Second review' };
+  const document = nextGraphDocument(f.task.id, f.diagram, previous, [], [], plan);
+  f.persistence.saveGraphDocument(document, previous.renderRevision);
+  const context = graphMissionContextFor(f.persistence, f.task.id);
+  return f.persistence.createGraphTeamMission({
+    ...f.input,
+    graphId: document.id,
+    renderRevision: document.renderRevision,
+    semanticRevision: document.semanticRevision,
+    semanticDigest: document.semanticDigest,
+    workspaceDigest: context.workspace.digest,
+    policyEpoch: context.policyEpoch,
+    contextDigest: graphMissionContextDigest(context, new Set(f.workers.map(({ id }) => id))),
+    consentId: randomUUID(),
+    now: '2026-09-11T00:00:01.000Z',
+  });
+}
 function reserve(
   f: ReturnType<typeof fixture>,
   missionId: string,
@@ -4182,6 +4201,154 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         expect(g.executed).toEqual([g.executionId]);
       } finally {
         await g.close();
+      }
+    });
+
+    it('cancels a Graph Mission after stopping every Worker while preserving a completed step (issue #628)', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const writer = begin(f, mission.id, 'a');
+      f.persistence.completeGraphStep(completion(mission.id, 'a', writer));
+      const reader = begin(f, mission.id, 'b');
+      f.persistence.interruptGraphStep({
+        missionId: mission.id,
+        stepKey: 'b',
+        generation: 1,
+        reservationId: reader.reservation.id,
+        attemptId: reader.attempt.id,
+        outcome: 'failed',
+        reason: 'fixture interruption before Team stop',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        expect(f.persistence.getTeamExecution(writer.execution.id).state).toBe('completed');
+        expect(f.persistence.getTeamExecution(reader.execution.id).state).toBe('waiting_resume');
+        const detail = await coordinator.stopAll(f.task.id);
+        expect(detail.team.state).toBe('completed');
+        expect(f.persistence.getTeamExecution(writer.execution.id).state).toBe('completed');
+        expect(f.persistence.getTeamExecution(reader.execution.id).state).toBe('canceled');
+        expect(f.persistence.getTeamMission(mission.id).state).toBe('canceled');
+        expect(
+          f.persistence
+            .listGraphResourceReservations(mission.id)
+            .every(({ state }) => state === 'released'),
+        ).toBe(true);
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('does not finish a Team or Graph Mission while a stopped Worker may still be running (issue #628)', async () => {
+      const g = await unconfirmedExitGraph();
+      const missionStateBeforeStop = g.f.persistence.getTeamMission(g.mission.id).state;
+      try {
+        await expect(g.coordinator.stopAll(g.f.task.id)).rejects.toThrow(
+          'Graph Worker stop is unconfirmed',
+        );
+        expect(g.f.persistence.getTeam(g.mission.teamId).state).toBe('active');
+        expect(g.f.persistence.getTeamMission(g.mission.id).state).toBe(missionStateBeforeStop);
+        expect(g.f.persistence.getTeamExecution(g.executionId).state).toBe('waiting_resume');
+        expect(g.reservations()).toEqual(['quarantined']);
+      } finally {
+        await g.close();
+      }
+    });
+
+    it('does not finish a Team while a Graph integration hold still owns resources (issue #628)', async () => {
+      const { f, a, run } = await sealedWriteFixture();
+      const hold = f.persistence.holdGraphIntegration({
+        ...completion(a.mission.id, 'a', run),
+        reason: 'Waiting integration',
+      });
+      f.persistence.prepareGraphIntegrationResume(hold.reservationId, now);
+      f.persistence.transitionTeamExecution({ executionId: run.execution.id, to: 'canceled', now });
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        await expect(coordinator.stopAll(f.task.id)).rejects.toThrow(
+          'Graph resources remain active',
+        );
+        expect(f.persistence.getTeam(a.mission.teamId).state).toBe('active');
+        expect(f.persistence.getTeamMission(a.mission.id).state).toBe('running');
+        expect(f.persistence.getGraphIntegrationHold(hold.reservationId)?.integrationActive).toBe(
+          true,
+        );
+        expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('active');
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('does not let a terminal Mission with quarantined history block stopping a later Mission (issue #628)', async () => {
+      const f = fixture();
+      const previous = f.persistence.createGraphTeamMission(f.input);
+      const run = begin(f, previous.id, 'a');
+      f.persistence.interruptGraphStep({
+        missionId: previous.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: run.reservation.id,
+        attemptId: run.attempt.id,
+        outcome: 'failed',
+        reason: 'historical unconfirmed stop',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      f.persistence.cancelQueuedTeamExecution(run.execution.id, now);
+      f.persistence.cancelQueuedTeamExecution(previous.steps[1]!.executionId, now);
+      f.persistence.transitionTeamMission(previous.id, 'failed', now);
+      const current = nextGraphMission(f);
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        expect(f.persistence.listGraphResourceReservations(previous.id)[0]?.state).toBe(
+          'quarantined',
+        );
+        const detail = await coordinator.stopAll(f.task.id);
+        expect(detail.team.state).toBe('completed');
+        expect(f.persistence.getTeamMission(previous.id).state).toBe('failed');
+        expect(f.persistence.getTeamMission(current.id).state).toBe('canceled');
+        expect(f.persistence.listGraphResourceReservations(previous.id)[0]?.state).toBe(
+          'quarantined',
+        );
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('settles a safe Mission even when another Mission cannot confirm Worker stop (issue #628)', async () => {
+      const f = fixture();
+      const safe = f.persistence.createGraphTeamMission(f.input);
+      for (const step of safe.steps) f.persistence.cancelQueuedTeamExecution(step.executionId, now);
+      const blocked = nextGraphMission(f);
+      const run = begin(f, blocked.id, 'a');
+      f.persistence.interruptGraphStep({
+        missionId: blocked.id,
+        stepKey: 'a',
+        generation: 1,
+        reservationId: run.reservation.id,
+        attemptId: run.attempt.id,
+        outcome: 'failed',
+        reason: 'second Mission stop unconfirmed',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      class UnsettledRuntime extends DeterministicTeamWorkerRuntime {
+        hasUnsettledTurn(_agentId: string, executionId: string) {
+          return executionId === run.execution.id;
+        }
+      }
+      const coordinator = new TeamCoordinator(f.persistence, new UnsettledRuntime());
+      try {
+        expect(f.persistence.getTeamMission(safe.id).state).toBe('queued');
+        await expect(coordinator.stopAll(f.task.id)).rejects.toThrow(
+          'Graph Worker stop is unconfirmed',
+        );
+        expect(f.persistence.getTeamMission(safe.id).state).toBe('canceled');
+        expect(f.persistence.getTeamMission(blocked.id).state).not.toBe('canceled');
+        expect(f.persistence.getTeam(blocked.teamId).state).toBe('active');
+      } finally {
+        f.persistence.close();
       }
     });
 
