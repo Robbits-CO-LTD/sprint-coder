@@ -4185,6 +4185,82 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       }
     });
 
+    it('cancels a Graph Mission after stopping every Worker while preserving a completed step (issue #628)', async () => {
+      const f = fixture();
+      const mission = f.persistence.createGraphTeamMission(f.input);
+      const writer = begin(f, mission.id, 'a');
+      f.persistence.completeGraphStep(completion(mission.id, 'a', writer));
+      const reader = begin(f, mission.id, 'b');
+      f.persistence.interruptGraphStep({
+        missionId: mission.id,
+        stepKey: 'b',
+        generation: 1,
+        reservationId: reader.reservation.id,
+        attemptId: reader.attempt.id,
+        outcome: 'failed',
+        reason: 'fixture interruption before Team stop',
+        confirmation: { kind: 'unconfirmed' },
+        now,
+      });
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        expect(f.persistence.getTeamExecution(writer.execution.id).state).toBe('completed');
+        expect(f.persistence.getTeamExecution(reader.execution.id).state).toBe('waiting_resume');
+        const detail = await coordinator.stopAll(f.task.id);
+        expect(detail.team.state).toBe('completed');
+        expect(f.persistence.getTeamExecution(writer.execution.id).state).toBe('completed');
+        expect(f.persistence.getTeamExecution(reader.execution.id).state).toBe('canceled');
+        expect(f.persistence.getTeamMission(mission.id).state).toBe('canceled');
+        expect(
+          f.persistence
+            .listGraphResourceReservations(mission.id)
+            .every(({ state }) => state === 'released'),
+        ).toBe(true);
+      } finally {
+        f.persistence.close();
+      }
+    });
+
+    it('does not finish a Team or Graph Mission while a stopped Worker may still be running (issue #628)', async () => {
+      const g = await unconfirmedExitGraph();
+      const missionStateBeforeStop = g.f.persistence.getTeamMission(g.mission.id).state;
+      try {
+        await expect(g.coordinator.stopAll(g.f.task.id)).rejects.toThrow(
+          'Graph Worker stop is unconfirmed',
+        );
+        expect(g.f.persistence.getTeam(g.mission.teamId).state).toBe('active');
+        expect(g.f.persistence.getTeamMission(g.mission.id).state).toBe(missionStateBeforeStop);
+        expect(g.f.persistence.getTeamExecution(g.executionId).state).toBe('waiting_resume');
+        expect(g.reservations()).toEqual(['quarantined']);
+      } finally {
+        await g.close();
+      }
+    });
+
+    it('does not finish a Team while a Graph integration hold still owns resources (issue #628)', async () => {
+      const { f, a, run } = await sealedWriteFixture();
+      const hold = f.persistence.holdGraphIntegration({
+        ...completion(a.mission.id, 'a', run),
+        reason: 'Waiting integration',
+      });
+      f.persistence.prepareGraphIntegrationResume(hold.reservationId, now);
+      f.persistence.transitionTeamExecution({ executionId: run.execution.id, to: 'canceled', now });
+      const coordinator = new TeamCoordinator(f.persistence, new DeterministicTeamWorkerRuntime());
+      try {
+        await expect(coordinator.stopAll(f.task.id)).rejects.toThrow(
+          'Graph resources remain active',
+        );
+        expect(f.persistence.getTeam(a.mission.teamId).state).toBe('active');
+        expect(f.persistence.getTeamMission(a.mission.id).state).toBe('running');
+        expect(f.persistence.getGraphIntegrationHold(hold.reservationId)?.integrationActive).toBe(
+          true,
+        );
+        expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('active');
+      } finally {
+        f.persistence.close();
+      }
+    });
+
     it('rejects stale interruption ownership and rolls back every row when release fails', () => {
       const f = fixture();
       const mission = resourceMission(f);
