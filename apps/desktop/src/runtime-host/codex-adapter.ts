@@ -40,7 +40,7 @@ import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
 import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
-import type { TeamMcpToolName } from './team-mcp-tool-contract';
+import { TEAM_CORE_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -1313,7 +1313,12 @@ export function buildCodexArgs(
           '-c',
           `mcp_servers.team.enabled_tools=${JSON.stringify(teamMcp.toolNames)}`,
           '-c',
-          'mcp_servers.team.default_tools_approval_mode="approve"',
+          // Native auxiliary calls cannot surface a Sprint Coder Approval Card. Require the
+          // managed client-origin route while preserving direct Team core calls.
+          'mcp_servers.team.default_tools_approval_mode="prompt"',
+          ...teamMcp.toolNames
+            .filter((name) => TEAM_CORE_MCP_TOOL_NAMES.some((core) => core === name))
+            .flatMap((name) => ['-c', `mcp_servers.team.tools.${name}.approval_mode="approve"`]),
           '-c',
           'mcp_servers.team.startup_timeout_sec=10',
           '-c',

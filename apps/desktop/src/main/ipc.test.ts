@@ -202,6 +202,7 @@ import { SPRINT_CODER_IDENTITY_PROMPT } from './context-ledger';
 import { SkillSettingsError } from './skill-settings-service';
 import { CommandRunner, CommandRunnerError, prepareExecutionSpec } from './command-runner';
 import { ManagedCodingHarness } from './provider-workspace-tools';
+import type { RuntimeTeamMcpOption } from '../runtime-host/protocol';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { workspaceMutationBinding } from './path-guard';
 import { ToolImageBridge } from './tool-image-bridge';
@@ -389,6 +390,7 @@ describe('Main runtime failure diagnostics', () => {
       finishAndAdvance,
     });
     return {
+      router,
       probe: router as unknown as {
         handleRuntimeFailure(
           kind: 'codex' | 'grok',
@@ -519,6 +521,59 @@ describe('Main runtime failure diagnostics', () => {
       expect.objectContaining({ diagnosticId: 'diagnostic-late-protocol' }),
     );
   });
+
+  it.each(['missing catalog entry', 'rejected bridge attachment'] as const)(
+    'terminalizes a Codex Turn when auxiliary MCP binding has a %s',
+    async (failure) => {
+      const harness = createRuntimeFailureHarness();
+      const effect = vi.fn(async () => ({ queued: true }));
+      const managed = new ManagedCodingHarness({
+        workspaceFor: () => null,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 1,
+        authorizer: () => ({ decision: 'allow', reason: 'synthetic', beforeExecute: () => true }),
+        auxiliary: {
+          queueProjectMemory: effect,
+          createSkillDraft: effect,
+          activateSkill: effect,
+        },
+      });
+      const snapshot = managed.startTurn(
+        { taskId: 'task-protocol', turnId: 'turn-protocol', workspaceId: null, policyEpoch: 1 },
+        'codex',
+        failure === 'missing catalog entry' ? {} : { projectMemory: true },
+      );
+      const unregister = vi.fn();
+      const attachManagedTools = vi.fn(() => false);
+      Object.assign(harness.router, { teamMcpBridge: { unregister, attachManagedTools } });
+      const bind = Reflect.get(IpcRouter.prototype, 'bindCodexAuxiliaryMcpTools') as (
+        this: typeof harness.router,
+        taskId: string,
+        turnId: string,
+        teamMcp: RuntimeTeamMcpOption,
+        catalog: typeof snapshot,
+      ) => RuntimeTeamMcpOption | null;
+      const teamMcp: RuntimeTeamMcpOption = {
+        socketPath: 'synthetic-socket',
+        token: 'synthetic-token',
+        guidance: '',
+        toolNames: ['project_memory_remember'],
+      };
+      expect(
+        bind.call(harness.router, 'task-protocol', 'turn-protocol', teamMcp, snapshot),
+      ).toBeNull();
+      expect(unregister).toHaveBeenCalledWith('turn-protocol');
+      expect(attachManagedTools).toHaveBeenCalledTimes(failure === 'missing catalog entry' ? 0 : 1);
+      await vi.waitFor(() => expect(harness.finishAndAdvance).toHaveBeenCalledOnce());
+      expect(harness.finishAndAdvance).toHaveBeenCalledWith(
+        'task-protocol',
+        'turn-protocol',
+        'failed',
+      );
+      expect(effect).not.toHaveBeenCalled();
+      await managed.dispose();
+    },
+  );
 });
 
 describe('built-in subscription model capabilities', () => {
@@ -2980,6 +3035,116 @@ describe('Main image attachment dispatch boundary', () => {
       expect(startTurn.mock.calls[1]![2]).toEqual({ initialOrdinal: 2 });
       releaseManagedWorkerTurn.call(router, 'runtime-b');
     });
+  });
+
+  it('binds Codex Leader auxiliary MCP tools to the same managed catalog and rejects incomplete binding', async () => {
+    const memory = vi.fn(async () => ({ queued: true }));
+    const draft = vi.fn(async () => ({ draft: true }));
+    let allow = false;
+    const authorize = vi.fn<ToolAuthorizer>(() =>
+      allow
+        ? { decision: 'allow', reason: 'synthetic_allow', beforeExecute: () => true }
+        : { decision: 'deny', reason: 'synthetic_deny' },
+    );
+    const harness = new ManagedCodingHarness({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: authorize,
+      auxiliary: {
+        queueProjectMemory: memory,
+        createSkillDraft: draft,
+        activateSkill: async () => ({ instructions: 'synthetic' }),
+      },
+    });
+    const context = { taskId: 'task-533', turnId: 'turn-533', workspaceId: null, policyEpoch: 1 };
+    const snapshot = harness.startTurn(context, 'codex', {
+      projectMemory: true,
+      skillDrafts: true,
+    });
+    const attachManagedTools = vi.fn(() => true);
+    const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+    Object.assign(router, {
+      teamMcpBridge: { attachManagedTools },
+      managedWorkerTurn: new Map(),
+      managedWorkerCall: new Map(),
+      managedCodingHarness: harness,
+      persistence: { readTurnWorkspaceSetForTask: () => null },
+    });
+    const attach = Reflect.get(IpcRouter.prototype, 'attachCodexAuxiliaryMcpTools') as (
+      this: typeof router,
+      turnId: string,
+      teamMcp: RuntimeTeamMcpOption,
+      catalog: typeof snapshot,
+    ) => RuntimeTeamMcpOption;
+    const teamMcp: RuntimeTeamMcpOption = {
+      socketPath: 'synthetic-socket',
+      token: 'synthetic-token',
+      guidance: '',
+      toolNames: ['project_memory_remember', 'skill_draft_create', 'team_get_status'],
+    };
+    const attached = attach.call(router, context.turnId, teamMcp, snapshot);
+    expect(attached.managedTools?.map(({ name }) => name)).toEqual([
+      'project_memory_remember',
+      'skill_draft_create',
+    ]);
+    expect(attached.toolCatalogDigest).toBe(snapshot.digest);
+    expect(attachManagedTools).toHaveBeenCalledWith(
+      context.turnId,
+      attached.managedTools,
+      snapshot.digest,
+    );
+    const coreOnly = { ...teamMcp, toolNames: ['team_get_status'] as const };
+    expect(attach.call(router, context.turnId, coreOnly, snapshot)).toBe(coreOnly);
+    expect(attachManagedTools).toHaveBeenCalledTimes(1);
+
+    const handlers = Reflect.get(
+      IpcRouter.prototype,
+      'createGenericManagedRuntimeToolHandlers',
+    ) as (this: typeof router) => {
+      teamMcp(
+        input: unknown,
+        binding: {
+          taskId: string;
+          turnId: string;
+          callId: string;
+          toolName: string;
+          catalogDigest: string;
+        },
+      ): Promise<unknown>;
+    };
+    const call = (toolName: string, catalogDigest: string, callId: string, input: unknown) =>
+      Promise.resolve().then(() =>
+        handlers.call(router).teamMcp(input, {
+          taskId: context.taskId,
+          turnId: context.turnId,
+          callId,
+          toolName,
+          catalogDigest,
+        }),
+      );
+    await expect(
+      call('project_memory_remember', '0'.repeat(64), 'stale', { content: 'synthetic' }),
+    ).rejects.toThrow('Managed tool catalog digest changed');
+    await expect(
+      call('project_memory_remember', snapshot.digest, 'denied', { content: 'synthetic' }),
+    ).rejects.toThrow('synthetic_deny');
+    expect(memory).not.toHaveBeenCalled();
+    allow = true;
+    await expect(
+      call('skill_draft_create', snapshot.digest, 'allowed', {
+        kind: 'chat',
+        skillId: 'synthetic',
+        files: [{ path: 'SKILL.md', content: 'synthetic' }],
+      }),
+    ).resolves.toEqual({ draft: true });
+    expect(draft).toHaveBeenCalledOnce();
+    expect(authorize).toHaveBeenCalledTimes(2);
+    attachManagedTools.mockReturnValue(false);
+    expect(() => attach.call(router, context.turnId, teamMcp, snapshot)).toThrow(
+      'Codex auxiliary MCP registration is unavailable',
+    );
+    await harness.dispose();
   });
 
   describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {

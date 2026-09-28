@@ -287,6 +287,61 @@ describe('Provider workspace read tools', () => {
     await tools.dispose();
   });
 
+  it.each([
+    { name: 'project_memory_remember', input: { content: 'synthetic fact' } },
+    {
+      name: 'skill_draft_create',
+      input: { kind: 'chat', skillId: 'synthetic', files: [{ path: 'SKILL.md', content: 'x' }] },
+    },
+  ])(
+    'authorizes $name through the Turn broker and rejects revoked or stale policy',
+    async ({ name, input }) => {
+      const effect = vi.fn(async () => ({ accepted: true }));
+      let policyEpoch = 1;
+      let decision: 'allow' | 'deny' = 'deny';
+      let executionValid = true;
+      const authorizer = vi.fn(() => ({
+        decision,
+        reason: decision === 'allow' ? 'test_allow' : 'test_revoke',
+        beforeExecute: () => executionValid,
+      }));
+      const tools = new ProviderWorkspaceTools({
+        workspaceFor: () => null,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => policyEpoch,
+        authorizer,
+        auxiliary: { queueProjectMemory: effect, createSkillDraft: effect, activateSkill: effect },
+      });
+      const context = {
+        taskId: 'task-aux-policy',
+        turnId: 'turn-aux-policy',
+        workspaceId: null,
+        policyEpoch: 1,
+      } as const;
+      const snapshot = tools.startTurn(context, 'codex', {
+        projectMemory: true,
+        skillDrafts: true,
+      });
+      expect(snapshot.entries.map(({ providerName }) => providerName)).toContain(name);
+      const call = (callId: string) =>
+        tools.broker.dispatch({ ...context, callId, providerName: name, input });
+      await expect(call('denied')).rejects.toThrow();
+      expect(effect).not.toHaveBeenCalled();
+      decision = 'allow';
+      await expect(call('allowed')).resolves.toEqual({ accepted: true });
+      expect(effect).toHaveBeenCalledTimes(1);
+      executionValid = false;
+      await expect(call('revalidated-deny')).rejects.toThrow();
+      expect(effect).toHaveBeenCalledTimes(1);
+      executionValid = true;
+      policyEpoch = 2;
+      await expect(call('stale-policy')).rejects.toThrow('policy epoch changed');
+      expect(effect).toHaveBeenCalledTimes(1);
+      expect(authorizer).toHaveBeenCalledTimes(3);
+      await tools.dispose();
+    },
+  );
+
   it('omits command tools until the OS sandbox probe succeeds', async () => {
     const { tools, context } = await harness();
     const disposeSessions = vi.spyOn(ManagedCommandSessions.prototype, 'dispose');

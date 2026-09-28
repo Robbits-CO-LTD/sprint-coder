@@ -761,6 +761,8 @@ import {
   type TeamMcpRegistration,
 } from './team-mcp-bridge';
 import {
+  PROJECT_MEMORY_MCP_TOOL_NAMES,
+  SKILL_DRAFT_MCP_TOOL_NAMES,
   TEAM_CORE_MCP_TOOL_NAMES,
   WORKER_TEAM_MCP_TOOL_NAMES,
   teamMcpToolNamesForCapabilities,
@@ -6719,6 +6721,16 @@ export class IpcRouter {
         }),
       },
     );
+    if (kind === 'codex' && teamMcp !== undefined) {
+      const boundMcp = this.bindCodexAuxiliaryMcpTools(
+        taskId,
+        started.turnId,
+        teamMcp,
+        toolCatalogSnapshot,
+      );
+      if (boundMcp === null) return;
+      teamMcp = boundMcp;
+    }
     if ((kind === 'claude' || kind === 'grok') && toolCatalogSnapshot.entries.length > 0) {
       const managedTools = providerToolsFromSnapshot(toolCatalogSnapshot);
       if (teamMcp === undefined)
@@ -7383,6 +7395,45 @@ export class IpcRouter {
       managedTools,
       toolCatalogDigest,
     };
+  }
+
+  private bindCodexAuxiliaryMcpTools(
+    taskId: string,
+    turnId: string,
+    teamMcp: RuntimeTeamMcpOption,
+    snapshot: ToolCatalogSnapshot,
+  ): RuntimeTeamMcpOption | null {
+    try {
+      return this.attachCodexAuxiliaryMcpTools(turnId, teamMcp, snapshot);
+    } catch {
+      this.teamMcpBridge.unregister(turnId);
+      this.handleRuntimeFailure('codex', taskId, turnId, {
+        code: 'RUNTIME_FAILED',
+        userMessage: 'Codex補助ツールの安全な登録に失敗しました。',
+        retryable: true,
+      });
+      return null;
+    }
+  }
+
+  private attachCodexAuxiliaryMcpTools(
+    turnId: string,
+    teamMcp: RuntimeTeamMcpOption,
+    snapshot: ToolCatalogSnapshot,
+  ): RuntimeTeamMcpOption {
+    const auxiliaryNames = teamMcp.toolNames.filter(
+      (name) => name === PROJECT_MEMORY_MCP_TOOL_NAMES[0] || name === SKILL_DRAFT_MCP_TOOL_NAMES[0],
+    );
+    if (auxiliaryNames.length === 0) return teamMcp;
+    const managedTools = providerToolsFromSnapshot(snapshot).filter(({ name }) =>
+      auxiliaryNames.some((allowed) => allowed === name),
+    );
+    if (
+      managedTools.length !== auxiliaryNames.length ||
+      !this.teamMcpBridge.attachManagedTools(turnId, managedTools, snapshot.digest)
+    )
+      throw new Error('Codex auxiliary MCP registration is unavailable');
+    return { ...teamMcp, managedTools, toolCatalogDigest: snapshot.digest };
   }
 
   private async queueProjectMemoryCandidate(

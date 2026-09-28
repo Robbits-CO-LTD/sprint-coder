@@ -303,11 +303,11 @@ export class TeamMcpBridge {
     private readonly listModelCandidates?: NonNullable<
       ExecuteTeamToolOptions['listModelCandidates']
     >,
-    private readonly createSkillDraft?: (
+    private readonly _legacyCreateSkillDraft?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
-    private readonly queueProjectMemoryCandidate?: (
+    private readonly _legacyQueueProjectMemoryCandidate?: (
       input: unknown,
       context: { taskId: string; turnId: string },
     ) => Promise<unknown>,
@@ -742,6 +742,13 @@ export class TeamMcpBridge {
     const registration = peerRegistration;
     try {
       const managedTool = registration.managedTools?.find(({ name }) => name === request.tool);
+      // These side effects must never fall back to the native callbacks when a Turn omits its
+      // managed catalog. The ToolBroker is the sole authorization boundary for both names.
+      if (
+        managedTool === undefined &&
+        (request.tool === 'project_memory_remember' || request.tool === 'skill_draft_create')
+      )
+        throw new Error('Managed auxiliary tool is unavailable');
       const allowedTools = new Set<string>(teamMcpToolNamesForCapabilities(registration));
       if (managedTool === undefined && !allowedTools.has(request.tool))
         throw new Error('Tool is not allowed for this Team MCP role');
@@ -774,107 +781,72 @@ export class TeamMcpBridge {
                 toolName: managedTool.name,
                 catalogDigest: registration.managedToolCatalogDigest,
               })
-          : request.tool === 'project_memory_remember'
-            ? await this.executeProjectMemoryTool(turnId, registration, request.args)
-            : request.tool === 'skill_draft_create'
-              ? await this.executeSkillDraftTool(turnId, registration, request.args)
-              : registration.allowTeamTools === false
-                ? (() => {
-                    throw new Error('Team tools are not available for this Turn');
-                  })()
-                : await executeTeamTool(
-                    this.coordinator,
-                    registration.taskId,
-                    request.tool,
-                    request.args,
-                    {
-                      ...(registration.requesterAgentId === undefined
-                        ? {}
-                        : { requesterAgentId: registration.requesterAgentId }),
-                      ...(registration.accessCeiling === undefined
-                        ? {}
-                        : { accessCeiling: registration.accessCeiling }),
-                      ...(registration.contextOwner === undefined
-                        ? {}
-                        : { contextOwner: registration.contextOwner }),
-                      longPoll:
-                        request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
-                      waitReportsCursor: {
-                        read: () => registration.waitCursor,
-                        advance: (seq) => {
-                          registration.waitCursor = seq;
-                        },
-                      },
-                      ...(this.listModelCandidates === undefined
-                        ? {}
-                        : { listModelCandidates: this.listModelCandidates }),
-                      modelCatalogAudit: {
-                        wasQueried: () => registration.modelCatalogQueried,
-                        markQueried: () => {
-                          registration.modelCatalogQueried = true;
-                        },
-                      },
-                      ...(registration.requireModelResearch === true
-                        ? {
-                            modelResearchAudit: {
-                              required: true,
-                              record: (input: {
-                                modelSelection: {
-                                  connectionId: string | null;
-                                  requestedProvider: string | null;
-                                  requestedModel: string | null;
-                                };
-                              }) => {
-                                registration.researchedModels.add(
-                                  modelSelectionKey(input.modelSelection),
-                                );
-                              },
-                              hasEvidence: (selection: {
-                                connectionId: string | null;
-                                requestedProvider: string | null;
-                                requestedModel: string | null;
-                              }) => registration.researchedModels.has(modelSelectionKey(selection)),
-                            },
-                          }
-                        : {}),
+          : registration.allowTeamTools === false
+            ? (() => {
+                throw new Error('Team tools are not available for this Turn');
+              })()
+            : await executeTeamTool(
+                this.coordinator,
+                registration.taskId,
+                request.tool,
+                request.args,
+                {
+                  ...(registration.requesterAgentId === undefined
+                    ? {}
+                    : { requesterAgentId: registration.requesterAgentId }),
+                  ...(registration.accessCeiling === undefined
+                    ? {}
+                    : { accessCeiling: registration.accessCeiling }),
+                  ...(registration.contextOwner === undefined
+                    ? {}
+                    : { contextOwner: registration.contextOwner }),
+                  longPoll:
+                    request.tool === 'team_wait_reports' || request.tool === 'team_wait_events',
+                  waitReportsCursor: {
+                    read: () => registration.waitCursor,
+                    advance: (seq) => {
+                      registration.waitCursor = seq;
                     },
-                  );
+                  },
+                  ...(this.listModelCandidates === undefined
+                    ? {}
+                    : { listModelCandidates: this.listModelCandidates }),
+                  modelCatalogAudit: {
+                    wasQueried: () => registration.modelCatalogQueried,
+                    markQueried: () => {
+                      registration.modelCatalogQueried = true;
+                    },
+                  },
+                  ...(registration.requireModelResearch === true
+                    ? {
+                        modelResearchAudit: {
+                          required: true,
+                          record: (input: {
+                            modelSelection: {
+                              connectionId: string | null;
+                              requestedProvider: string | null;
+                              requestedModel: string | null;
+                            };
+                          }) => {
+                            registration.researchedModels.add(
+                              modelSelectionKey(input.modelSelection),
+                            );
+                          },
+                          hasEvidence: (selection: {
+                            connectionId: string | null;
+                            requestedProvider: string | null;
+                            requestedModel: string | null;
+                          }) => registration.researchedModels.has(modelSelectionKey(selection)),
+                        },
+                      }
+                    : {}),
+                },
+              );
       respond({ ok: true, result });
     } catch (error) {
       respond({ ok: false, error: error instanceof Error ? error.message : String(error) });
     }
     void turnId;
-  }
-
-  private async executeSkillDraftTool(
-    turnId: string,
-    registration: Registered,
-    input: unknown,
-  ): Promise<unknown> {
-    if (
-      registration.allowSkillDrafts !== true ||
-      registration.requesterAgentId !== undefined ||
-      this.createSkillDraft === undefined
-    )
-      throw new Error('skill_draft_create is not available for this Turn');
-    return this.createSkillDraft(input, { taskId: registration.taskId, turnId });
-  }
-
-  private async executeProjectMemoryTool(
-    turnId: string,
-    registration: Registered,
-    input: unknown,
-  ): Promise<unknown> {
-    if (
-      registration.allowProjectMemory !== true ||
-      registration.requesterAgentId !== undefined ||
-      this.queueProjectMemoryCandidate === undefined
-    )
-      throw new Error('project_memory_remember is not available for this Turn');
-    return this.queueProjectMemoryCandidate(input, {
-      taskId: registration.taskId,
-      turnId,
-    });
   }
 
   /** Constant-time token compare: every registered token is compared with `timingSafeEqual`
