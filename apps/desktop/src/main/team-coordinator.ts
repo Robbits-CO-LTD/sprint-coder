@@ -2783,7 +2783,7 @@ export class TeamCoordinator {
         ({ ordinal }) => ordinal === repository.ordinal,
       );
       if (latest !== null && latestRepository?.state === 'quarantined')
-        this.persistence.updateTeamExecutionIsolation({
+        this.updateExecutionIsolation({
           executionId: execution.id,
           phase: latest.phase,
           repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
@@ -5349,7 +5349,7 @@ export class TeamCoordinator {
           repoPath: repository.repoPath,
           baseRef: repository.baseHead,
         });
-      return this.persistence.updateTeamExecutionIsolation({
+      return this.updateExecutionIsolation({
         executionId,
         phase: 'running',
         roots: await bindIsolatedMutationRoots(existing.roots),
@@ -5421,6 +5421,7 @@ export class TeamCoordinator {
       roots: rootRecords,
       now: this.isoNow(),
     });
+    this.notifyExecutionIsolationChanged(executionId);
     for (const repository of recorded.repositories)
       await this.ensurePreflightWorktreeCreated(executionId, {
         agentId,
@@ -5428,7 +5429,7 @@ export class TeamCoordinator {
         repoPath: repository.repoPath,
         baseRef: repository.baseHead,
       });
-    return this.persistence.updateTeamExecutionIsolation({
+    return this.updateExecutionIsolation({
       executionId: recorded.executionId,
       phase: 'running',
       roots: await bindIsolatedMutationRoots(recorded.roots),
@@ -5520,7 +5521,7 @@ export class TeamCoordinator {
       throw new Error('Mission worktree manager is unavailable');
     let isolation = input.isolation;
     try {
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'finalizing',
         resumeKind: null,
@@ -5535,7 +5536,7 @@ export class TeamCoordinator {
           baseHead: repository.baseHead,
           commitMessage: `Sprint Coder Mission ${input.missionId} step ${input.stepOrdinal} repository ${repository.ordinal}`,
         });
-        isolation = this.persistence.updateTeamExecutionIsolation({
+        isolation = this.updateExecutionIsolation({
           executionId: isolation.executionId,
           phase: 'finalizing',
           repositories: replaceIsolationRepository(isolation.repositories, repository.ordinal, {
@@ -5574,7 +5575,7 @@ export class TeamCoordinator {
           error instanceof Error ? error.name : 'Error',
         );
       }
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_integration',
         resumeKind: null,
@@ -5583,7 +5584,7 @@ export class TeamCoordinator {
       });
     } catch (error) {
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_resume',
         resumeKind: 'integration',
@@ -5596,6 +5597,30 @@ export class TeamCoordinator {
       isolation,
       changedFiles: this.isolationChangedFiles(isolation),
     };
+  }
+
+  /**
+   * Records an isolation change and tells the Team screen (issue #635). The Repository row shows the
+   * isolation phase, and the screen only refreshes on a Team update, so a Worker that starts waiting
+   * for another Worker's integration or begins integrating stayed on its old phase until the screen
+   * was reopened. Nothing in this coordinator wraps these writes in a persistence transaction, so
+   * each one is committed before the notice goes out.
+   */
+  private updateExecutionIsolation(
+    input: Parameters<PersistenceClient['updateTeamExecutionIsolation']>[0],
+  ): TeamExecutionIsolationRecord {
+    const updated = this.persistence.updateTeamExecutionIsolation(input);
+    this.notifyExecutionIsolationChanged(input.executionId);
+    return updated;
+  }
+
+  private notifyExecutionIsolationChanged(executionId: string): void {
+    try {
+      const execution = this.persistence.getTeamExecution(executionId);
+      this.emit(this.persistence.getTeam(execution.teamId).taskId, execution.teamId);
+    } catch {
+      // A screen notice is best effort and must not change the isolation write or its caller.
+    }
   }
 
   private reportIsolationVerification(
@@ -5633,7 +5658,7 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       await this.assertGraphIntegrationScope(isolation.executionId, isolation.repositories);
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'integrating',
         resumeKind: null,
@@ -5669,7 +5694,7 @@ export class TeamCoordinator {
                 baseHead: repository.baseHead,
                 workerHead: repository.workerHead,
               });
-        isolation = this.persistence.updateTeamExecutionIsolation({
+        isolation = this.updateExecutionIsolation({
           executionId: isolation.executionId,
           phase: 'integrating',
           repositories: replaceIsolationRepository(isolation.repositories, repository.ordinal, {
@@ -5683,7 +5708,7 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       }
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'completed',
         resumeKind: null,
@@ -5692,7 +5717,7 @@ export class TeamCoordinator {
       });
     } catch (error) {
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
-      isolation = this.persistence.updateTeamExecutionIsolation({
+      isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_resume',
         resumeKind: 'integration',
@@ -5882,7 +5907,7 @@ export class TeamCoordinator {
       return initial;
     } catch (error) {
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
-      const waiting = this.persistence.updateTeamExecutionIsolation({
+      const waiting = this.updateExecutionIsolation({
         executionId: initial.executionId,
         phase: 'waiting_resume',
         resumeKind: 'integration',
@@ -5965,7 +5990,7 @@ export class TeamCoordinator {
           latestRepository !== undefined &&
           latestRepository.state !== 'cleaned'
         )
-          this.persistence.updateTeamExecutionIsolation({
+          this.updateExecutionIsolation({
             executionId: latest.executionId,
             phase: latest.phase,
             repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
@@ -5988,7 +6013,7 @@ export class TeamCoordinator {
       if (left.length === 0) return recorded;
       // A canceled preflight never integrated, so its own quarantine reason stays.
       const integrated = left.find(({ integratedHead }) => integratedHead !== null);
-      this.persistence.updateTeamExecutionIsolation({
+      this.updateExecutionIsolation({
         executionId: latest.executionId,
         phase: 'quarantined',
         repositories: latest.repositories.map((repository) =>
@@ -6104,7 +6129,7 @@ export class TeamCoordinator {
             return reclaimed;
           const latestRepository =
             latest.repositories.find(({ ordinal }) => ordinal === repository.ordinal) ?? repository;
-          current = this.persistence.updateTeamExecutionIsolation({
+          current = this.updateExecutionIsolation({
             executionId,
             phase: 'quarantined',
             repositories: replaceIsolationRepository(latest.repositories, repository.ordinal, {
@@ -6245,7 +6270,7 @@ export class TeamCoordinator {
     if (current === null || current.phase === 'quarantined') return;
     this.persistence.releaseTeamIntegrationRootLeases(executionId);
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
-    this.persistence.updateTeamExecutionIsolation({
+    this.updateExecutionIsolation({
       executionId,
       phase: 'quarantined',
       repositories: current.repositories.map((repository) => ({
