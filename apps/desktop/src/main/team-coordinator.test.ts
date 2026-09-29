@@ -40,7 +40,7 @@ import {
   type WorkerRuntimeResult,
   type WorkerActivityEvent,
 } from './team-coordinator';
-import type { GraphMissionPlan } from '@sprint-coder/contracts';
+import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import type { TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
@@ -3375,6 +3375,96 @@ if (runsWithElectronAbi)
             persistence.getTeamExecutionIsolation(executionId)?.repositories[0]?.state,
         ),
       ).toEqual(['cleaned', 'cleaned', 'cleaned']);
+      persistence.close();
+    }, 55_000);
+
+    it('publishes a Team update when a same-repository writer starts waiting for and running integration (issue #635)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Isolation phase notices');
+      const runtime = new BlockingDistinctFileRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      let releaseIntegration!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseIntegration = resolve;
+      });
+      const integrate = manager.integrate.bind(manager);
+      vi.spyOn(manager, 'integrate').mockImplementation(async (input) => {
+        await barrier;
+        return integrate(input);
+      });
+      const published: TeamDetail[] = [];
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        (_taskId, detail) => published.push(detail),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        manager,
+      );
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const name of ['alpha', 'bravo']) {
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: name,
+          objective: `write ${name}`,
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: name,
+            doneCriteria: [`${name}.txt is integrated`],
+            accessMode: 'workspace-write',
+          }),
+        );
+      }
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2, 15_000);
+      const phasesIn = (detail: TeamDetail): string[] =>
+        detail.executions.map(({ isolation }) => isolation?.phase ?? 'none').sort();
+      try {
+        // Nothing but the isolation changes here: the first Worker's integration is held open, so
+        // the screen only learns of `integrating` and `waiting_integration` from these notices.
+        for (const release of runtime.releases.splice(0)) release();
+        await waitFor(
+          () =>
+            submissions.some(
+              ({ executionId }) =>
+                persistence.getTeamExecutionIsolation(executionId)?.phase === 'integrating',
+            ) &&
+            submissions.some(
+              ({ executionId }) =>
+                persistence.getTeamExecutionIsolation(executionId)?.phase === 'waiting_integration',
+            ),
+          15_000,
+        );
+        expect(
+          published.some((detail) => phasesIn(detail).join() === 'integrating,waiting_integration'),
+        ).toBe(true);
+      } finally {
+        releaseIntegration();
+      }
+      await waitFor(
+        () =>
+          submissions.every(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        15_000,
+      );
+      expect(published.some((detail) => phasesIn(detail).includes('completed'))).toBe(true);
+      await waitFor(
+        () =>
+          submissions.every(
+            ({ executionId }) =>
+              persistence.getTeamExecutionIsolation(executionId)?.repositories[0]?.state ===
+              'cleaned',
+          ),
+        15_000,
+      );
       persistence.close();
     }, 55_000);
 
