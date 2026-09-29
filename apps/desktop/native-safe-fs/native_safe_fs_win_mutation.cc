@@ -904,6 +904,38 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
   return true;
 }
 
+// Whether re-creating this file in its parent gives it the same access control: an unprotected
+// DACL made only of inherited entries, owned by the current user. An undone delete re-creates the
+// file from its bytes, so a file with its own access control would come back readable by others.
+bool SecurityIsRecreatable(HANDLE file) {
+  DWORD flags = 0;
+  if (!GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
+    return false;
+  if ((flags & FILE_PERSISTENT_ACLS) == 0) return true;
+  PSID owner = nullptr;
+  PACL dacl = nullptr;
+  PSECURITY_DESCRIPTOR raw = nullptr;
+  if (GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                      &owner, nullptr, &dacl, nullptr, &raw) != ERROR_SUCCESS)
+    return false;
+  const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  std::vector<unsigned char> user_storage;
+  PSID user = nullptr;
+  if (!GetSecurityDescriptorControl(raw, &control, &revision) ||
+      (control & SE_DACL_PROTECTED) != 0 || dacl == nullptr || owner == nullptr ||
+      !ProcessUserSid(&user_storage, &user) || !EqualSid(owner, user))
+    return false;
+  for (DWORD index = 0; index < dacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(dacl, index, &ace) ||
+        (static_cast<ACE_HEADER*>(ace)->AceFlags & INHERITED_ACE) == 0)
+      return false;
+  }
+  return true;
+}
+
 bool StoreFence(HANDLE lock, uint64_t fence) {
   const std::string text = std::to_string(fence);
   LARGE_INTEGER start{};
@@ -1036,7 +1068,7 @@ bool FlushPinned(const PinnedDirectory& first, const PinnedDirectory* second, Fa
 // no-replace rename of a held, re-verified file into an absent name.
 bool ApplyMove(const std::shared_ptr<MutationSession>& session,
                const std::vector<std::wstring>& from, const EndpointRevision& expected,
-               const std::vector<std::wstring>& to, Failure* failure) {
+               const std::vector<std::wstring>& to, bool recreatable_only, Failure* failure) {
   PinnedDirectory from_parent, to_parent;
   if (!PinDirectoryPath(session->root.get(), ParentOf(from), true, &from_parent) ||
       !PinDirectoryPath(session->root.get(), ParentOf(to), true, &to_parent))
@@ -1047,6 +1079,30 @@ bool ApplyMove(const std::shared_ptr<MutationSession>& session,
           EndpointResult::kPresent ||
       !SameRevision(held_revision, expected))
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs effect changed before kernel call");
+  if (recreatable_only) {
+    // READ_CONTROL is outside share-mode checks, so this reads the held object's own descriptor.
+    HANDLE raw = INVALID_HANDLE_VALUE;
+    FileFacts held_facts, security_facts;
+    const bool readable =
+        OpenRelative(from_parent.get(), from.back(),
+                     READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE, kObserveShare, FILE_OPEN,
+                     FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) >= 0;
+    const OwnedHandle security(readable ? raw : nullptr);
+    if (!readable || !QueryFacts(held.get(), &held_facts) ||
+        !QueryFacts(security.get(), &security_facts) || !SameObject(held_facts, security_facts) ||
+        !SecurityIsRecreatable(security.get()))
+      // UTF-8 for "This file has its own access control, so Windows cannot delete it", which the
+      // model and the user read as the reason.
+      return Fail(failure, "UNSAFE_PATH",
+                  "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1"
+                  "\xe3\x82\xa4""\xe3\x83\xab""\xe3\x81\xaf""\xe7\x8b\xac"
+                  "\xe8\x87\xaa""\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf"
+                  "\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6""\xe5\xbe\xa1"
+                  "\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f"
+                  "\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf"
+                  "\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d"
+                  "\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93");
+  }
   if (ProbeName(to_parent.get(), to.back()) != EndpointResult::kAbsent)
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs effect target is not absent");
   if (!SessionCurrent(session))
@@ -1628,11 +1684,14 @@ napi_value WindowsMutationApplyIntentEffect(napi_env env, napi_callback_info inf
   else if (before.phase != SwapPhase::kNone)
     applied = Fail(&failure, "UNSAFE_PATH", "NativeSafeFs effect precondition changed");
   else if (input.kind == "add")
-    applied = ApplyMove(session, input.auxiliary, input.expected_auxiliary, input.source, &failure);
+    applied = ApplyMove(session, input.auxiliary, input.expected_auxiliary, input.source, false,
+                        &failure);
   else if (input.kind == "delete")
-    applied = ApplyMove(session, input.source, input.expected_source, input.auxiliary, &failure);
+    applied = ApplyMove(session, input.source, input.expected_source, input.auxiliary, true,
+                        &failure);
   else
-    applied = ApplyMove(session, input.source, input.expected_source, input.destination, &failure);
+    applied = ApplyMove(session, input.source, input.expected_source, input.destination, false,
+                        &failure);
   if (!applied) return ThrowFailure(env, failure);
   IntentView after;
   if (!ObserveIntentView(session, input.source, destination, auxiliary, &after, &failure))

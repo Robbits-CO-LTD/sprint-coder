@@ -325,6 +325,33 @@ function buildRequest(input: {
   });
 }
 
+/**
+ * Windows only: a file's DACL as SDDL. `ownerOnly` first replaces it with a protected DACL that
+ * grants the current user alone.
+ */
+async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
+  const script = [
+    '$path = $env:SPRINT_CODER_DACL_PATH',
+    "if ($env:SPRINT_CODER_DACL_OWNER_ONLY -eq '1') {",
+    '  $acl = Get-Acl -LiteralPath $path',
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '  $acl.SetSecurityDescriptorSddlForm("D:P(A;;FA;;;$user)", "Access")',
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '}',
+    '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      SPRINT_CODER_DACL_PATH: path,
+      SPRINT_CODER_DACL_OWNER_ONLY: ownerOnly ? '1' : '',
+    },
+  });
+  if (result.status !== 0) throw new Error(`Get-Acl failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
 async function expectMissing(path: string): Promise<void> {
   await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
 }
@@ -401,6 +428,74 @@ if (runsWithElectronAbi) {
       expect(saga).toMatchObject({ state: 'committed', recovery: null });
       expect(verification).toMatchObject({ decision: 'complete' });
       await expect(readFile(operation.canonicalPath, 'utf8')).resolves.toBe('WINDOWS_ADD');
+    });
+
+    it('restores updated, renamed and deleted files under their original access control', async () => {
+      const env = await fixture('windows-compensate-acl');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      // Owner-only protected DACLs on the updated and renamed files; the identity digests the plan
+      // sealed do not depend on them. A delete of such a file is refused (native-safe-fs.test.ts),
+      // so the deleted file keeps the DACL it inherits, which re-creating it reproduces.
+      const restoredPaths = {
+        update: paths.updatePath,
+        rename: paths.renameSrcPath,
+        delete: paths.deletePath,
+      };
+      const original: Record<string, string> = {};
+      for (const [kind, path] of Object.entries(restoredPaths))
+        original[kind] = await windowsDacl(path, kind !== 'delete');
+      expect(original['delete']).toMatch(/^D:AI\(/);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        {
+          hit(point) {
+            if (point.kind === 'beforeFinalize')
+              throw new Error('deterministic finalize failure injected by test');
+          },
+        },
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-compensate-acl'),
+      );
+
+      const result = await executor.apply(
+        buildRequest({
+          id: 'saga-windows-compensate-acl',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'op-windows-compensate-acl',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+
+      expect(result.state).toBe('restored');
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+      const restored: Record<string, string> = {};
+      for (const [kind, path] of Object.entries(restoredPaths))
+        restored[kind] = await windowsDacl(path);
+      expect(restored).toEqual(original);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
     });
 
     // Windows has no atomic exchange: an update is three no-replace renames. A process that dies

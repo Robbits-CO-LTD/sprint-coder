@@ -819,6 +819,36 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it('refuses to delete a file whose own access control an undone delete could not restore', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '851' });
+      for (const [index, replace] of (['owner-only', 'null'] as const).entries()) {
+        const sourcePath = join(input.workspace, `own-acl-${index}.txt`);
+        await writeFile(sourcePath, 'own access control\n');
+        const dacl = await windowsDacl(sourcePath, replace);
+        const previous = await revision(sourcePath);
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [`own-acl-${index}.txt`],
+          expectedSource: previous,
+          id: `intent-own-acl-${index}`,
+          nonce: String(index + 8).repeat(32),
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+          message: 'このファイルは独自のアクセス制御を持つため、Windows では削除できません',
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(revision(sourcePath)).resolves.toEqual(previous);
+        await expect(windowsDacl(sourcePath)).resolves.toBe(dacl);
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
     it('refuses to stage an update whose source has a NULL DACL', async () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'null-dacl.txt');
