@@ -104,6 +104,9 @@ export type DiscardWorktreeInput = CleanupWorktreeInput &
     path: string;
   }>;
 
+/** A read-only list observation; only `unlocked` permits the UI to offer discard. */
+export type WorktreeLockState = 'locked' | 'unlocked' | 'unknown';
+
 export type InspectWorktreeChangesInput = DiscardWorktreeInput &
   Readonly<{
     baseHead: string;
@@ -678,21 +681,75 @@ export class WorkerWorktreeManager {
    * worktree's `.git` is already gone.
    */
   private async isLocked(repoPath: string, worktreePath: string): Promise<boolean> {
-    const listed = (
-      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
-    ).stdout;
+    const lockedPaths = await this.readLockedWorktreePaths(repoPath);
     const wanted = await pathKeys(worktreePath);
-    let current: string | null = null;
-    for (const line of listed.split('\0')) {
-      if (line.startsWith('worktree ')) {
-        current = line.slice('worktree '.length);
-        continue;
-      }
-      if (current === null || (line !== 'locked' && !line.startsWith('locked '))) continue;
-      const keys = await pathKeys(current);
+    for (const path of lockedPaths) {
+      const keys = await pathKeys(path);
       if (keys.some((key) => wanted.includes(key))) return true;
     }
     return false;
+  }
+
+  /** Observe the visible retained worktrees without changing a Git lock or caching it for discard. */
+  async observeRetainedWorktreeLocks(
+    inputs: readonly DiscardWorktreeInput[],
+  ): Promise<WorktreeLockState[]> {
+    const states: WorktreeLockState[] = inputs.map(() => 'unknown');
+    const byRepository = new Map<string, { index: number; path: string }[]>();
+    for (const [index, input] of inputs.entries()) {
+      try {
+        const found = await this.locateOwnedWorktree(input);
+        const path = found ?? this.worktreePathFor(input.worktreeId ?? input.agentId);
+        const entries = byRepository.get(input.repoPath) ?? [];
+        entries.push({ index, path });
+        byRepository.set(input.repoPath, entries);
+      } catch {
+        // A moved, linked, or unowned directory is never reported as unlocked.
+      }
+    }
+    for (const [repoPath, entries] of byRepository) {
+      try {
+        const lockedPaths = await this.readLockedWorktreePaths(repoPath);
+        const lockedKeys = await Promise.all(lockedPaths.map((path) => pathKeys(path)));
+        for (const entry of entries) {
+          const wanted = await pathKeys(entry.path);
+          states[entry.index] = lockedKeys.some((keys) => keys.some((key) => wanted.includes(key)))
+            ? 'locked'
+            : 'unlocked';
+        }
+      } catch {
+        // Failed or malformed Git output leaves only this repository's rows unknown.
+      }
+    }
+    return states;
+  }
+
+  private async readLockedWorktreePaths(repoPath: string): Promise<string[]> {
+    const listed = (
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+    ).stdout;
+    if (!listed.endsWith('\0') || listed.includes('\ufffd'))
+      throw new WorktreeError('remove_failed', 'Git worktree list is incomplete');
+    const lockedPaths: string[] = [];
+    let current: string | null = null;
+    let sawWorktree = false;
+    for (const line of listed.split('\0')) {
+      if (line === '') {
+        current = null;
+      } else if (line.startsWith('worktree ')) {
+        const path = line.slice('worktree '.length);
+        if (current !== null || !isAbsolute(path))
+          throw new WorktreeError('remove_failed', 'Git worktree list is malformed');
+        current = path;
+        sawWorktree = true;
+      } else if (current === null) {
+        throw new WorktreeError('remove_failed', 'Git worktree list is malformed');
+      } else if (line === 'locked' || line.startsWith('locked ')) {
+        lockedPaths.push(current);
+      }
+    }
+    if (!sawWorktree) throw new WorktreeError('remove_failed', 'Git worktree list is empty');
+    return lockedPaths;
   }
 
   /**

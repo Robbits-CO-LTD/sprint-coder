@@ -256,6 +256,37 @@ describe('TeamRetainedWorktreesDialog (issue #544)', () => {
     expect(discard.getAttribute('aria-describedby')).toBe(reason?.id);
   });
 
+  it('disables discard for a Git lock or unknown lock state until a fresh list clears it (issue #578)', async () => {
+    const locked = worktree({
+      discardable: false,
+      blockedReason:
+        'このworktreeはGitでロックされているため破棄できません。ロックを解除した後に一覧を更新してください。',
+    });
+    const unknown = worktree({
+      executionId: 'execution-lock-unknown',
+      worktreePath: '/worktrees/worktree-execution-lock-unknown-1',
+      discardable: false,
+      blockedReason:
+        'Gitのロック状態を確認できないため、ここからは破棄できません。一覧を更新して確認してください。',
+    });
+    api.listRetainedWorktrees
+      .mockResolvedValueOnce({ worktrees: [locked, unknown], total: 2 })
+      .mockResolvedValueOnce({ worktrees: [failed], total: 1 });
+    await renderDialog();
+    for (const item of items()) {
+      expect(button(item, 'team-retained-discard').disabled).toBe(true);
+      expect(
+        item.querySelector('[data-testid="team-retained-blocked-reason"]')?.textContent,
+      ).toContain('一覧を更新');
+    }
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
+    await click(
+      container.querySelector<HTMLButtonElement>('[data-testid="team-retained-refresh"]')!,
+    );
+    expect(button(items()[0]!, 'team-retained-discard').disabled).toBe(false);
+    expect(api.discardRetainedWorktree).not.toHaveBeenCalled();
+  });
+
   it('shows the current changes and opens the folder on request', async () => {
     await renderDialog();
     const [first] = items();

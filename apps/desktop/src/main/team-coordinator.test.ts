@@ -7570,6 +7570,16 @@ if (runsWithElectronAbi)
           spawnSync('git', ['-C', locked.repoPath, 'worktree', action, locked.worktreePath]).status,
         ).toBe(0);
       lockFirst('lock');
+      const lockedList = await coordinator.listRetainedWorktrees(task.id);
+      expect(lockedList).toMatchObject({
+        total: 2,
+        worktrees: [
+          { executionId: first, discardable: false },
+          { executionId: second, discardable: true },
+        ],
+      });
+      expect(lockedList.worktrees[0]!.blockedReason).toContain('Gitでロックされている');
+      expect(lockedList.worktrees[0]!.blockedReason).not.toContain(locked.worktreePath);
       await expect(coordinator.discardRetainedWorktree(task.id, first, 1)).rejects.toThrow(
         'このworktreeはGitでロックされているため破棄できません。',
       );
@@ -7578,6 +7588,25 @@ if (runsWithElectronAbi)
         'quarantined',
       );
       lockFirst('unlock');
+      expect((await coordinator.listRetainedWorktrees(task.id)).worktrees[0]).toMatchObject({
+        executionId: first,
+        discardable: true,
+        blockedReason: null,
+      });
+      const observeLocks = manager.observeRetainedWorktreeLocks.bind(manager);
+      const observing = vi
+        .spyOn(manager, 'observeRetainedWorktreeLocks')
+        .mockImplementationOnce(async (inputs) => {
+          const states = await observeLocks(inputs);
+          noteRepository(first, { state: 'cleaned' });
+          return states;
+        });
+      await expect(coordinator.listRetainedWorktrees(task.id)).resolves.toMatchObject({
+        total: 1,
+        worktrees: [{ executionId: second }],
+      });
+      observing.mockRestore();
+      noteRepository(first, { state: 'quarantined' });
 
       // Something else records a fact on the same repository while Git removes the worktree.
       vi.spyOn(manager, 'discard').mockImplementationOnce(async (input) => {

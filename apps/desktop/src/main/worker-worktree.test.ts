@@ -383,6 +383,65 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect(await registeredWorktrees(repoPath)).toContain(await samePathKey(created.path));
   });
 
+  it('observes Git locks once per repository and treats an unreadable or unowned row as unknown (issue #578)', async () => {
+    const { repoPath, worktreesRoot, manager } = await fixture();
+    const first = await manager.create({ agentId: 'lock-first', repoPath });
+    const second = await manager.create({ agentId: 'lock-second', repoPath });
+    const { repoPath: otherRepo } = await makeRepo();
+    cleanupRoots.push(otherRepo);
+    const third = await manager.create({ agentId: 'lock-third', repoPath: otherRepo });
+    await git(['-C', repoPath, 'worktree', 'lock', '--reason', 'kept by user', first.path]);
+    let listCalls = 0;
+    const observer = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        if (args.includes('worktree') && args.includes('list')) listCalls += 1;
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+          maxBuffer: options.maxBuffer,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    const inputs = [
+      { agentId: 'lock-first', repoPath, path: first.path },
+      { agentId: 'lock-second', repoPath, path: second.path },
+      { agentId: 'lock-second', repoPath, path: first.path },
+      { agentId: 'lock-third', repoPath: otherRepo, path: third.path },
+    ];
+    await expect(observer.observeRetainedWorktreeLocks(inputs)).resolves.toEqual([
+      'locked',
+      'unlocked',
+      'unknown',
+      'unlocked',
+    ]);
+    expect(listCalls).toBe(2);
+    await git(['-C', repoPath, 'worktree', 'unlock', first.path]);
+    await expect(observer.observeRetainedWorktreeLocks(inputs.slice(0, 2))).resolves.toEqual([
+      'unlocked',
+      'unlocked',
+    ]);
+    const unreadable = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async () => {
+        throw new Error('Git is unavailable');
+      },
+    });
+    await expect(unreadable.observeRetainedWorktreeLocks(inputs.slice(0, 2))).resolves.toEqual([
+      'unknown',
+      'unknown',
+    ]);
+    const malformed = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async () => ({ stdout: 'worktree without a terminator', stderr: '' }),
+    });
+    await expect(malformed.observeRetainedWorktreeLocks(inputs.slice(0, 2))).resolves.toEqual([
+      'unknown',
+      'unknown',
+    ]);
+  });
+
   it('retries temporary Windows access denial with exponential backoff', async () => {
     const { repoPath, worktreesRoot, manager } = await fixture();
     await manager.create({ agentId: 'agent-retry', repoPath });
