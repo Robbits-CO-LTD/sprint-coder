@@ -42,16 +42,20 @@ export function removeTreeWithoutFollowingLinksSync(
   root: string,
   fs: SyncTreeRemovalFs = nodeSyncTreeRemovalFs,
 ): void {
-  removeEntry(root, fs);
+  removeEntry(root, fs, false);
 }
 
-function removeEntry(path: string, fs: SyncTreeRemovalFs): void {
+function removeEntry(path: string, fs: SyncTreeRemovalFs, listed: boolean): void {
   let entry: ReturnType<SyncTreeRemovalFs['lstat']>;
   try {
     entry = fs.lstat(path);
   } catch (error) {
-    if (isEnoent(error)) return;
-    throw error;
+    if (!isEnoent(error)) throw error;
+    // A name its folder still lists but `lstat` cannot find is a junction whose target is gone
+    // (`lstat` follows the kinds it does not recognize). `rmdir` removes a directory junction
+    // itself, and at most an empty real directory, never any contents.
+    if (listed) ignoreMissing(() => fs.rmdir(path));
+    return;
   }
   if (entry.isSymbolicLink()) return removeLink(path, fs);
   if (!entry.isDirectory()) return removeFile(path, fs);
@@ -63,7 +67,7 @@ function removeEntry(path: string, fs: SyncTreeRemovalFs): void {
     if (isEnoent(error)) return;
     throw error;
   }
-  for (const name of names) removeEntry(join(path, name), fs);
+  for (const name of names) removeEntry(join(path, name), fs, true);
   ignoreMissing(() => {
     try {
       fs.rmdir(path);

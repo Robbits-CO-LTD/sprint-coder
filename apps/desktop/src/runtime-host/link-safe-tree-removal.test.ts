@@ -56,6 +56,28 @@ function codedError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
 }
 
+/**
+ * A junction at `link` to `target` spelled as `\\?\Volume{GUID}\...`, which an account without
+ * administrator rights can create and `lstat` does not report as a link. False when it cannot be.
+ */
+function createVolumeGuidJunction(link: string, target: string): boolean {
+  const resolvedTarget = realpathSync.native(target);
+  try {
+    const volume = execFileSync('mountvol', [parse(resolvedTarget).root, '/L'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim();
+    const volumeTarget = volume + resolvedTarget.slice(parse(resolvedTarget).root.length);
+    execFileSync('cmd', ['/d', '/c', 'mklink', '/J', link, volumeTarget], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** `rmdir` removes a junction itself, never what it points at. */
 function removeJunctionItself(link: string): void {
   try {
@@ -247,21 +269,7 @@ describe('removeTreeWithoutFollowingLinksSync', () => {
       const target = join(root, 'turn');
       mkdirSync(target);
       const link = join(target, 'linked');
-      const resolvedOutside = realpathSync.native(outside);
-      try {
-        // `\\?\Volume{GUID}\`: an account without administrator rights can create this junction.
-        const volume = execFileSync('mountvol', [parse(resolvedOutside).root, '/L'], {
-          encoding: 'utf8',
-          windowsHide: true,
-        }).trim();
-        const volumeTarget = volume + resolvedOutside.slice(parse(resolvedOutside).root.length);
-        execFileSync('cmd', ['/d', '/c', 'mklink', '/J', link, volumeTarget], {
-          stdio: 'ignore',
-          windowsHide: true,
-        });
-      } catch {
-        return context.skip();
-      }
+      if (!createVolumeGuidJunction(link, outside)) return context.skip();
       try {
         removeTreeWithoutFollowingLinksSync(target);
 
@@ -273,6 +281,58 @@ describe('removeTreeWithoutFollowingLinksSync', () => {
       }
     },
   );
+
+  it.runIf(process.platform === 'win32')(
+    'removes a volume GUID junction whose target is gone, and the root with it',
+    (context) => {
+      const root = testRoot();
+      const gone = join(root, 'gone');
+      mkdirSync(gone);
+      const target = join(root, 'turn');
+      mkdirSync(target);
+      const link = join(target, 'linked');
+      if (!createVolumeGuidJunction(link, gone)) return context.skip();
+      rmdirSync(gone);
+      try {
+        removeTreeWithoutFollowingLinksSync(target);
+
+        expect(existsSync(target)).toBe(false);
+      } finally {
+        removeJunctionItself(link);
+      }
+    },
+  );
+
+  it('removes a listed entry that lstat cannot find with rmdir, then the root', () => {
+    const root = testRoot();
+    const target = join(root, 'turn');
+    const dangling = join(target, 'dangling');
+    mkdirSync(dangling, { recursive: true });
+    const rmdir = vi.fn((path: string) => rmdirSync(path));
+    // What a junction whose `\\?\Volume{GUID}\` target is gone looks like: lstat follows it.
+    const { fs } = recordingFs({
+      lstat: (path) => {
+        if (path === dangling) throw codedError('ENOENT');
+        return lstatSync(path);
+      },
+      rmdir,
+    });
+
+    removeTreeWithoutFollowingLinksSync(target, fs);
+
+    expect(rmdir.mock.calls).toEqual([[dangling], [target]]);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it('does not touch a root that is already gone', () => {
+    const root = testRoot();
+    const { fs } = recordingFs();
+
+    removeTreeWithoutFollowingLinksSync(join(root, 'never-created'), fs);
+
+    expect(fs.rmdir).not.toHaveBeenCalled();
+    expect(fs.unlink).not.toHaveBeenCalled();
+  });
 
   it('never descends into a link even when unlinking it is refused', () => {
     const root = testRoot();
