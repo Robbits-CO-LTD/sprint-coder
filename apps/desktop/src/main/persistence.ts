@@ -24617,7 +24617,7 @@ function nativeMutationTransitionAlreadyApplied(
 
 // The mode a newly added file is sealed with. Windows cannot store 0600 on the file, and Node/libuv
 // report 0o100666 for a writable file there, so a restarted process must be able to observe it.
-const NATIVE_ADDED_FILE_MODE = process.platform === 'win32' ? 0o100666 : 0o100600;
+export const NATIVE_ADDED_FILE_MODE = process.platform === 'win32' ? 0o100666 : 0o100600;
 
 function expectedNativeMutationArtifact(
   operation: JournaledPatchOperation,

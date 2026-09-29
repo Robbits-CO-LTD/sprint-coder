@@ -1,7 +1,7 @@
-// Windows の NativeSafeFs アドオンは常に mutationScope='add-only'・directoryOwnership=false を返す
-// (native-safe-fs-win-mutation.cc)。そのため Windows では、書き込み可能な Team Worker でも新しい
-// ファイルの作成しかできず、既存ファイルの編集・削除やフォルダの作成ができない（Issue #542）。この
-// 制限そのものを直す対応は別Issue（#559）に分け、ここでは Worker の指示文と割り当て結果へその制限
+// Windows の NativeSafeFs アドオンも、#559 から POSIX と同じく mutationScope='full'・
+// directoryOwnership='workspace-probed' を返す（native_safe_fs_win_mutation.cc）。それより弱い能力を
+// 申告するアドオンでは、書き込み可能な Team Worker でも新しいファイルの作成しかできず、既存ファイルの
+// 編集・削除やフォルダの作成ができない（Issue #542）。ここでは Worker の指示文と割り当て結果へその制限
 // を日本語で伝えるための純粋関数だけを置く。
 
 /** Worker が実際にできる Workspace 書き込み操作。両方 true なら制限は無い。 */
