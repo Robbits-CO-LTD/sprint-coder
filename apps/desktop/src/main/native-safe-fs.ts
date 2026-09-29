@@ -222,6 +222,9 @@ type RawObserveInput = RawJournalBinding &
 
 type RawStageInput = RawJournalBinding &
   Readonly<{
+    kind: NativeMutationIntentSnapshot['kind'];
+    sourceSegments?: readonly string[];
+    expectedSource?: NativeMutationIntentSnapshot['expectedSource'];
     parentSegments: readonly string[];
     leafName: string;
     expectedContentHash: string;
@@ -498,6 +501,11 @@ export function loadNativeSafeFs(
         const observation = await addon!.stageIntentArtifact(
           Object.freeze({
             ...journalBinding(session, parsed),
+            kind: parsed.kind,
+            // An update's staged bytes take the access control of the revision they replace.
+            ...(parsed.kind === 'update'
+              ? { sourceSegments: parsed.sourceSegments, expectedSource: parsed.expectedSource }
+              : {}),
             parentSegments: parsed.temp.parentSegments,
             leafName: parsed.temp.leafName,
             expectedContentHash: parsed.temp.expectedContentHash,

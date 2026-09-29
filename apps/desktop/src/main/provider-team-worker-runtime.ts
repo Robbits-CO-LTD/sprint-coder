@@ -210,8 +210,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
     const writable =
       managedToolSession?.tools.some(({ name }) => WORKSPACE_WRITE_TOOL_NAMES.has(name)) === true;
     // Managed Local's actual write limits come from the same tool names handed to the model — the
-    // Windows NativeSafeFs add-only limit (Issue #542) applies here exactly as it does to the CLI
-    // Workers registered through provider-workspace-tools.ts.
+    // add-only limit of an addon that advertises a weaker capability (Issue #542) applies here
+    // exactly as it does to the CLI Workers registered through provider-workspace-tools.ts.
     const writeLimitNotice = writable
       ? workerWriteLimitNotice(
           workspaceWriteLimitsFromTools((managedToolSession?.tools ?? []).map((tool) => tool.name)),

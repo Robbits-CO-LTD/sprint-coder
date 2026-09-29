@@ -331,6 +331,34 @@ async function stageNativeIntent(
   return transitionNativeMutationIntent(pending, { state: 'aux_observed', auxObservation });
 }
 
+/**
+ * Windows only: reads (and optionally first replaces) a file's DACL as SDDL, `D:` part only.
+ * `owner-only` protects the DACL and grants the current user alone; `null` installs a NULL DACL.
+ */
+async function windowsDacl(path: string, replace?: 'owner-only' | 'null'): Promise<string> {
+  const script = [
+    '$path = $env:SPRINT_CODER_DACL_PATH',
+    '$acl = Get-Acl -LiteralPath $path',
+    "if ($env:SPRINT_CODER_DACL_REPLACE -eq 'owner-only') {",
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '  $acl.SetSecurityDescriptorSddlForm("D:P(A;;FA;;;$user)", "Access")',
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    "} elseif ($env:SPRINT_CODER_DACL_REPLACE -eq 'null') {",
+    "  $acl.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL', 'Access')",
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '}',
+    '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
+  ].join('\n');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    env: {
+      ...process.env,
+      SPRINT_CODER_DACL_PATH: path,
+      SPRINT_CODER_DACL_REPLACE: replace ?? '',
+    },
+  });
+  return stdout.trim();
+}
+
 /** Names the native boundary reserves for its own staged, parked or quarantined entries. */
 async function reservedLeaves(directory: string): Promise<string[]> {
   return (await readdir(directory)).filter((name) => name.startsWith('.sprint-coder-'));
@@ -749,6 +777,104 @@ describe('NativeSafeFs authority boundary', () => {
         await boundary.closeSession(session);
       }
     });
+
+    it('stages and publishes an update under the access control of the revision it replaces', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '848' });
+      // An owner-only protected DACL, and one inherited from the Workspace like any user file.
+      for (const [index, restrict] of [true, false].entries()) {
+        const sourcePath = join(input.workspace, `acl-${index}.txt`);
+        await writeFile(sourcePath, 'acl before\n');
+        const dacl = await windowsDacl(sourcePath, restrict ? 'owner-only' : undefined);
+        if (restrict) expect(dacl).toMatch(/^D:P[A-Z]*\(A;;FA;;;S-[0-9-]+\)$/);
+        else expect(dacl).not.toMatch(/^D:P/);
+        const previous = await revision(sourcePath);
+        const replacement = Buffer.from('acl after\n');
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: [`acl-${index}.txt`],
+          expectedSource: previous,
+          artifactBytes: replacement,
+          id: `intent-acl-${index}`,
+          nonce: String(index + 6).repeat(32),
+        });
+        intent = await stageNativeIntent(boundary, session, intent, replacement);
+        const stagedPath = join(input.workspace, intent.temp!.leafName);
+        await expect(windowsDacl(stagedPath)).resolves.toBe(dacl);
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        const effect = await boundary.applyIntentEffect(session, intent);
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+        await expect(windowsDacl(sourcePath)).resolves.toBe(dacl);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        await boundary.cleanupIntentAuxiliary(session, intent);
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to stage an update whose source has a NULL DACL', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'null-dacl.txt');
+      await writeFile(sourcePath, 'null dacl before\n');
+      // .NET renders a NULL DACL (full access for everyone) as an empty access section.
+      await expect(windowsDacl(sourcePath, 'null')).resolves.toBe('');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '849' });
+      const replacement = Buffer.from('must not be staged\n');
+      const intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['null-dacl.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+
+      await expect(stageNativeIntent(boundary, session, intent, replacement)).rejects.toMatchObject(
+        { code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>,
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('null dacl before\n');
+      await boundary.closeSession(session);
+    });
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'returns a directory that gained a child during its quarantine rename to its own name',
+      async () => {
+        const input = await fixture();
+        const boundary = fixtureBoundary(input, nativeSafeFsTestAddonPath());
+        const session = await boundary.openSession({ ...input, fence: '850' });
+        const ownership = directoryOwnership('9');
+        const directoryPath = join(input.workspace, 'raced');
+        const created = await boundary.createDirectory(session, ['raced'], ownership);
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['raced'],
+          created.identityDigest,
+          ownership,
+        );
+        // The test build creates this child after the emptiness check, before the rename.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_RACE_QUARANTINE_CHILD'] = 'late.txt';
+        try {
+          await expect(
+            boundary.removeDirectory(session, ['raced'], created.identityDigest),
+          ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_RACE_QUARANTINE_CHILD'];
+        }
+        await expect(readdir(directoryPath)).resolves.toEqual(['late.txt']);
+        await expect(readFile(join(directoryPath, 'late.txt'), 'utf8')).resolves.toBe('raced');
+        await expect(boundary.observeDirectory(session, ['raced'])).resolves.toEqual(created);
+        await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+        await boundary.closeSession(session);
+      },
+    );
 
     it('rejects an externally modified or substituted update source and preserves both revisions', async () => {
       const input = await fixture();
@@ -1215,6 +1341,7 @@ describe('NativeSafeFs authority boundary', () => {
             intentDigest: '1'.repeat(64),
             recordDigest: '2'.repeat(64),
             revision: 1,
+            kind: 'add',
             parentSegments: [],
             leafName: 'visible.txt',
             expectedContentHash: createHash('sha256').update(bytes).digest('hex'),

@@ -1,6 +1,7 @@
 #include "native_safe_fs_win_mutation.h"
 
 #include <windows.h>
+#include <aclapi.h>
 #include <wincrypt.h>
 #include <winternl.h>
 
@@ -335,9 +336,10 @@ NtSetInformationFileFn ResolveNtSetInformationFile() {
 }
 
 // Opens `name` relative to `parent` without following a reparse point. An empty name reopens
-// `parent` itself with the requested access and sharing.
+// `parent` itself with the requested access and sharing. `security` applies only to a creation.
 NTSTATUS OpenRelative(HANDLE parent, const std::wstring& name, ACCESS_MASK access, ULONG share,
-                      ULONG disposition, ULONG options, ULONG attributes, HANDLE* output) {
+                      ULONG disposition, ULONG options, ULONG attributes, HANDLE* output,
+                      PSECURITY_DESCRIPTOR security = nullptr) {
   NtCreateFileFn create_file = ResolveNtCreateFile();
   if (create_file == nullptr) return static_cast<NTSTATUS>(0xC0000002L);
   UNICODE_STRING unicode{};
@@ -345,7 +347,7 @@ NTSTATUS OpenRelative(HANDLE parent, const std::wstring& name, ACCESS_MASK acces
   unicode.Length = static_cast<USHORT>(name.size() * sizeof(wchar_t));
   unicode.MaximumLength = unicode.Length;
   OBJECT_ATTRIBUTES object{};
-  InitializeObjectAttributes(&object, &unicode, OBJ_CASE_INSENSITIVE, parent, nullptr);
+  InitializeObjectAttributes(&object, &unicode, OBJ_CASE_INSENSITIVE, parent, security);
   IO_STATUS_BLOCK status{};
   return create_file(output, access, &object, &status, nullptr, attributes, share, disposition,
                      options | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, nullptr, 0);
@@ -834,6 +836,74 @@ bool DeleteHeld(HANDLE handle, DWORD* error) {
   return false;
 }
 
+bool ProcessUserSid(std::vector<unsigned char>* storage, PSID* sid) {
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  OwnedHandle owned(token);
+  DWORD size = 0;
+  GetTokenInformation(token, TokenUser, nullptr, 0, &size);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return false;
+  storage->resize(size);
+  if (!GetTokenInformation(token, TokenUser, storage->data(), size, &size)) return false;
+  *sid = reinterpret_cast<TOKEN_USER*>(storage->data())->User.Sid;
+  return true;
+}
+
+// The access control a staged update carries over from the revision it replaces, so its new bytes
+// are never readable by anyone the previous revision excluded (the POSIX backend keeps the mode).
+// Same rules as ReplaceFileWithBackup: a volume without persistent ACLs has nothing to carry, a
+// NULL DACL is never copied, the protection flag is preserved, and a current-user owner is kept.
+struct CarriedSecurity {
+  bool applies = false;
+  PSECURITY_DESCRIPTOR source = nullptr;
+  PACL dacl = nullptr;
+  PSID owner = nullptr;
+  SECURITY_INFORMATION information = 0;
+  SECURITY_DESCRIPTOR creation{};
+  std::vector<unsigned char> user_storage;
+  CarriedSecurity() = default;
+  CarriedSecurity(const CarriedSecurity&) = delete;
+  CarriedSecurity& operator=(const CarriedSecurity&) = delete;
+  ~CarriedSecurity() {
+    if (source != nullptr) LocalFree(source);
+  }
+};
+
+bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
+  DWORD flags = 0;
+  if (!GetVolumeInformationByHandleW(source, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
+    return false;
+  if ((flags & FILE_PERSISTENT_ACLS) == 0) return true;
+  PSID owner = nullptr;
+  if (GetSecurityInfo(source, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                      &owner, nullptr, &output->dacl, nullptr, &output->source) != ERROR_SUCCESS)
+    return false;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  // A NULL DACL grants full access to everyone. Never copy that fail-open state onto staged data.
+  if (!GetSecurityDescriptorControl(output->source, &control, &revision) || output->dacl == nullptr)
+    return false;
+  const SECURITY_DESCRIPTOR_CONTROL carried = control & (SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED);
+  output->information = DACL_SECURITY_INFORMATION | ((control & SE_DACL_PROTECTED) != 0
+                                                         ? PROTECTED_DACL_SECURITY_INFORMATION
+                                                         : UNPROTECTED_DACL_SECURITY_INFORMATION);
+  PSID user = nullptr;
+  if (!ProcessUserSid(&output->user_storage, &user)) return false;
+  if (owner != nullptr && EqualSid(owner, user)) {
+    output->owner = owner;
+    output->information |= OWNER_SECURITY_INFORMATION;
+  }
+  if (!InitializeSecurityDescriptor(&output->creation, SECURITY_DESCRIPTOR_REVISION) ||
+      !SetSecurityDescriptorDacl(&output->creation, TRUE, output->dacl, FALSE) ||
+      (output->owner != nullptr &&
+       !SetSecurityDescriptorOwner(&output->creation, output->owner, FALSE)) ||
+      !SetSecurityDescriptorControl(&output->creation, SE_DACL_PROTECTED | SE_DACL_AUTO_INHERITED,
+                                    carried))
+    return false;
+  output->applies = true;
+  return true;
+}
+
 bool StoreFence(HANDLE lock, uint64_t fence) {
   const std::string text = std::to_string(fence);
   LARGE_INTEGER start{};
@@ -1206,6 +1276,25 @@ bool ReadExpectedIdentity(napi_env env, napi_value input, std::string* identity)
   return NamedString(env, input, "expectedIdentityDigest", identity) && IsLowerHex(*identity, 64);
 }
 
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+// Test builds only: stands in for another process that creates and closes a child in a directory
+// between the removal's emptiness check and its quarantine rename.
+void TestRaceChildBeforeQuarantine(HANDLE directory) {
+  wchar_t name[128]{};
+  const DWORD length =
+      GetEnvironmentVariableW(L"SPRINT_CODER_NATIVE_SAFE_FS_RACE_QUARANTINE_CHILD", name, 128);
+  if (length == 0 || length >= 128) return;
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  if (OpenRelative(directory, std::wstring(name, length), FILE_WRITE_DATA | SYNCHRONIZE,
+                   kObserveShare, FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL,
+                   &raw) < 0)
+    return;
+  DWORD written = 0;
+  WriteFile(raw, "raced", 5, &written, nullptr);
+  CloseHandle(raw);
+}
+#endif
+
 // Removes a directory this call created and still holds, together with its marker. Anything else
 // it finds inside keeps the directory where it is.
 void DiscardStagingDirectory(HANDLE directory, const std::wstring& marker_leaf,
@@ -1405,12 +1494,20 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
   bool is_buffer = false;
   void* bytes = nullptr;
   size_t length = 0;
-  std::vector<std::wstring> parents;
-  std::string leaf_utf8, expected_hash;
+  std::vector<std::wstring> parents, source;
+  std::string kind, leaf_utf8, expected_hash;
   uint32_t expected_size = 0, expected_mode = 0;
+  EndpointRevision expected_source;
   if (napi_is_buffer(env, argv[1], &is_buffer) != napi_ok || !is_buffer ||
       napi_get_buffer_info(env, argv[1], &bytes, &length) != napi_ok ||
+      !NamedString(env, argv[0], "kind", &kind) || (kind != "add" && kind != "update") ||
+      // An update stages beside the revision it replaces, which it must name and seal.
+      (kind == "update" &&
+       (!ReadSegments(env, argv[0], "sourceSegments", false, &source) ||
+        !ReadExpectation(env, argv[0], "expectedSource", &expected_source) ||
+        !expected_source.present)) ||
       !ReadSegments(env, argv[0], "parentSegments", true, &parents) ||
+      (kind == "update" && ParentOf(source) != parents) ||
       !NamedString(env, argv[0], "leafName", &leaf_utf8) ||
       !NamedString(env, argv[0], "expectedContentHash", &expected_hash) ||
       !IsLowerHex(expected_hash, 64) ||
@@ -1428,13 +1525,36 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
   PinnedDirectory parent;
   if (!PinDirectoryPath(session->root.get(), parents, true, &parent))
     return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs staging parent is unsafe");
+  // A new file inherits from its parent. An update's bytes are created under the access control of
+  // the revision they replace, before any of them is written, or not at all.
+  CarriedSecurity carried;
+  if (kind == "update") {
+    HANDLE source_raw = INVALID_HANDLE_VALUE;
+    if (OpenRelative(parent.get(), source.back(),
+                     FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+                     kObserveShare, FILE_OPEN, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL,
+                     &source_raw) < 0)
+      return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source is not observable");
+    OwnedHandle source_handle(source_raw);
+    EndpointRevision source_revision;
+    if (!ObserveHandle(source_handle.get(), &source_revision))
+      return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source is unsafe");
+    ApplyObservedMode(*session, &source_revision);
+    if (!SameRevision(source_revision, expected_source))
+      return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source changed before staging");
+    if (!CaptureSourceSecurity(source_handle.get(), &carried))
+      return ThrowFailure(env, "UNSAFE_PATH",
+                          "NativeSafeFs cannot carry the update source access control");
+  }
   if (!SessionCurrent(session))
     return ThrowFailure(env, "STALE_SESSION", "NativeSafeFs session was invalidated before staging");
   HANDLE raw = INVALID_HANDLE_VALUE;
   const NTSTATUS status = OpenRelative(
       parent.get(), leaf, FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES |
-                              FILE_WRITE_ATTRIBUTES | DELETE | SYNCHRONIZE,
-      FILE_SHARE_READ, FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw);
+                              FILE_WRITE_ATTRIBUTES | DELETE | READ_CONTROL | WRITE_DAC |
+                              (carried.owner != nullptr ? WRITE_OWNER : 0) | SYNCHRONIZE,
+      FILE_SHARE_READ, FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw,
+      carried.applies ? &carried.creation : nullptr);
   if (status == kStatusObjectNameCollision)
     return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs staging artifact already exists");
   if (status < 0)
@@ -1445,6 +1565,12 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
     DeleteHeld(file.get(), &error);
     return ThrowFailure(env, code, message);
   };
+  // Re-applied through the handle like ReplaceFileWithBackup, so an unprotected DACL takes its
+  // inherited entries from the shared parent exactly as the source did.
+  if (carried.applies &&
+      SetSecurityInfo(file.get(), SE_FILE_OBJECT, carried.information, carried.owner, nullptr,
+                      carried.dacl, nullptr) != ERROR_SUCCESS)
+    return discard("UNSAFE_PATH", "NativeSafeFs cannot carry the update source access control");
   DWORD written = 0;
   if ((length > 0 &&
        (!WriteFile(file.get(), bytes, static_cast<DWORD>(length), &written, nullptr) ||
@@ -1795,42 +1921,59 @@ napi_value WindowsMutationRemoveDirectory(napi_env env, napi_callback_info info)
     return ThrowFailure(env, "UNSAFE_PATH", "Directory parent changed");
   const std::wstring quarantine_leaf =
       L".sprint-coder-rmdir-" + AsciiToWide(expected_identity.substr(0, 32));
-  const auto owned_empty = [&](const HeldDirectory& directory) {
+  const auto owned = [&](const HeldDirectory& directory) {
     std::string token, identity;
     return ReadOwnershipToken(directory.handle.get(), &token) &&
            OwnedDirectoryIdentityDigest(directory.facts, token, &identity) &&
-           identity == expected_identity &&
-           ListContents(directory.handle.get(), std::wstring()) == DirectoryContents::kEmpty;
+           identity == expected_identity;
   };
+  const auto empty = [](const HeldDirectory& directory) {
+    return ListContents(directory.handle.get(), std::wstring()) == DirectoryContents::kEmpty;
+  };
+  // Holds the owned directory itself from here on: first under its name, then in quarantine.
   HeldDirectory target;
   const EndpointResult result =
       HoldDirectory(parent.get(), segments.back(), DELETE, kPinShare, &target);
   if (result == EndpointResult::kPresent) {
-    if (!owned_empty(target))
+    if (!owned(target) || !empty(target))
       return ThrowFailure(env, "UNSAFE_PATH",
                           "NativeSafeFs directory ownership changed before removal");
     if (!SessionCurrent(session))
       return ThrowFailure(env, "STALE_SESSION",
                           "NativeSafeFs session was invalidated before directory removal");
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+    TestRaceChildBeforeQuarantine(target.handle.get());
+#endif
     const NTSTATUS status = MoveHandleNoReplace(target.handle.get(), parent.get(), quarantine_leaf);
     Failure failure;
     if (status < 0) {
       MoveFailure(status, &failure);
       return ThrowFailure(env, failure);
     }
-  } else if (result != EndpointResult::kAbsent) {
+  } else if (result == EndpointResult::kAbsent) {
+    // A previous authorized attempt may already have quarantined the directory.
+    const EndpointResult quarantine =
+        HoldDirectory(parent.get(), quarantine_leaf, DELETE, kPinShare, &target);
+    if (quarantine == EndpointResult::kAbsent)
+      return ThrowFailure(env, "NATIVE_FAILURE", "NativeSafeFs directory quarantine is missing");
+    if (quarantine != EndpointResult::kPresent || !owned(target))
+      return ThrowFailure(env, "UNSAFE_PATH", "Directory identity changed during quarantine");
+  } else {
     return ThrowFailure(env, "UNSAFE_PATH",
                         "NativeSafeFs directory identity changed before removal");
   }
-  // Absent: a previous authorized attempt may already have quarantined the directory.
-  target.handle.reset();
-  HeldDirectory quarantined;
-  const EndpointResult quarantine =
-      HoldDirectory(parent.get(), quarantine_leaf, 0, kPinShare, &quarantined);
-  if (quarantine == EndpointResult::kAbsent)
-    return ThrowFailure(env, "NATIVE_FAILURE", "NativeSafeFs directory quarantine is missing");
-  if (quarantine != EndpointResult::kPresent || !owned_empty(quarantined))
-    return ThrowFailure(env, "UNSAFE_PATH", "Directory identity changed during quarantine");
+  // Holding the handle does not stop another process from creating a child between the emptiness
+  // check and the rename. Whatever arrived goes back, inside the same directory object, to the name
+  // it was created under; a name taken in the meantime keeps it in quarantine, never deleted.
+  if (!empty(target)) {
+    const NTSTATUS restored = MoveHandleNoReplace(target.handle.get(), parent.get(), segments.back());
+    FlushFileBuffers(parent.get());
+    return ThrowFailure(env, "UNSAFE_PATH",
+                        restored >= 0 ? "NativeSafeFs directory gained contents during quarantine "
+                                        "and was restored to its name"
+                                      : "NativeSafeFs directory gained contents during quarantine "
+                                        "and stays quarantined because its name is taken");
+  }
   if (!FlushFileBuffers(parent.get()))
     return ThrowFailure(env, "NATIVE_FAILURE", "NativeSafeFs removed directory parent flush failed");
   return MakeUndefined(env);

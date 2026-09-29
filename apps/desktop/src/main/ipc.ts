@@ -1650,9 +1650,10 @@ export class IpcRouter {
           modelCatalogAudit,
         }),
     });
-    // Windows NativeSafeFs always reports add-only mutation (Issue #542): derived once here from
-    // the same workspaceEdit wiring index.ts builds, so team-tools.ts can tell an assigning
-    // Leader/Manager what a workspace-write Worker actually cannot do, without recomputing it.
+    // An addon that advertises a weaker capability than full mutation leaves Workers add-only
+    // (Issue #542): derived once here from the same workspaceEdit wiring index.ts builds, so
+    // team-tools.ts can tell an assigning Leader/Manager what a workspace-write Worker actually
+    // cannot do, without recomputing it.
     const workspaceWriteLimits = workspaceWriteLimitsOf(workspaceEdit);
     this.teamCoordinator = new TeamCoordinator(
       persistence,

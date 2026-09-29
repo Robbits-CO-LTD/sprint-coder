@@ -61,8 +61,9 @@ function cannotList(limits: WorkspaceWriteLimits, joiner: 'と' | 'や'): string
   return cannot.join(joiner);
 }
 
-// The Windows reason is stated only for the add-only limit the Windows NativeSafeFs actually has;
-// any other combination gets the general reason rather than a claim about new files only.
+// The Windows reason is stated only for the add-only limit, which an addon that advertises a
+// weaker capability than full leaves; any other combination gets the general reason rather than a
+// claim about new files only.
 function writeLimitReason(limits: WorkspaceWriteLimits, platform: NodeJS.Platform): string {
   return platform === 'win32' && !limits.editExisting && !limits.createDirectory
     ? 'Windows では、安全に書き込める操作が今は新しいファイルの作成に限られるため'
