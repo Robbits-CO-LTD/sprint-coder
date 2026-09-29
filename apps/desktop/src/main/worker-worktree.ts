@@ -1511,8 +1511,12 @@ async function removeEntry(
   try {
     entry = await fs.lstat(path);
   } catch (error) {
-    if (isEnoent(error)) return;
-    throw error;
+    if (!isEnoent(error)) throw error;
+    // A name its folder still lists but `lstat` cannot find is a junction whose target is gone
+    // (`lstat` follows the kinds it does not recognize). `rmdir` removes a directory junction
+    // itself, and at most an empty real directory, never any contents.
+    if (realParent !== undefined) await ignoreMissing(() => fs.rmdir(path));
+    return;
   }
   if (entry.isSymbolicLink()) return removeLink(path, fs);
   if (!entry.isDirectory()) return removeFile(path, fs);

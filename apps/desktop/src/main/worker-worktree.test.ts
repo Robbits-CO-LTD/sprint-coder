@@ -842,21 +842,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       cleanupRoots.push(root);
       await mkdir(join(root, 'nested'));
       const link = join(root, 'nested', 'linked-out');
-      const resolvedOutside = await realpath(outside);
-      const volumeRoot = parse(resolvedOutside).root;
-      try {
-        // `\\?\Volume{GUID}\`: an account without administrator rights can create this junction,
-        // and lstat reports it as a directory, not a link.
-        const volume = (
-          await execFileAsync('mountvol', [volumeRoot, '/L'], { windowsHide: true })
-        ).stdout.trim();
-        const volumeTarget = volume + resolvedOutside.slice(volumeRoot.length);
-        await execFileAsync('cmd', ['/d', '/c', 'mklink', '/J', link, volumeTarget], {
-          windowsHide: true,
-        });
-      } catch {
-        return context.skip();
-      }
+      if (!(await volumeJunction(link, outside))) return context.skip();
       try {
         await removeTreeWithoutFollowingLinks(root);
 
@@ -864,6 +850,29 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         await expectOutsideIntact(outside);
       } finally {
         // The recursive removal after each test would not recognize this junction either.
+        await rmdir(link).catch(() => undefined);
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'removes a junction to a volume GUID path whose target is gone (issue #641)',
+    async (context) => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-tree-removal-'));
+      cleanupRoots.push(root);
+      const target = join(root, 'target');
+      await mkdir(target);
+      const link = join(root, 'tree', 'linked-out');
+      await mkdir(dirname(link));
+      if (!(await volumeJunction(link, target))) return context.skip();
+      // lstat follows this kind of junction, so it reports the name its folder lists as missing.
+      await rmdir(target);
+
+      try {
+        await removeTreeWithoutFollowingLinks(join(root, 'tree'));
+
+        await expect(lstat(join(root, 'tree'))).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
         await rmdir(link).catch(() => undefined);
       }
     },
@@ -975,6 +984,44 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       await removeTreeWithoutFollowingLinks(root, fs);
 
       expect(calls).toEqual([`unlink ${root}`, `rmdir ${root}`]);
+    });
+
+    it('removes a listed name that lstat cannot find with rmdir alone, and nothing for a missing root', async () => {
+      const calls: string[] = [];
+      const missing = (path: string) =>
+        Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
+      const fs: TreeRemovalFs = {
+        lstat: async (path) => {
+          // A junction whose target is gone: lstat follows it, although its folder lists it.
+          if (path === disguised) throw missing(path);
+          return { isDirectory: () => true, isSymbolicLink: () => false };
+        },
+        readdir: async (path) => {
+          calls.push(`readdir ${path}`);
+          return path === root ? ['nested'] : ['disguised'];
+        },
+        realpath: async (path) => path,
+        unlink: async (path) => {
+          calls.push(`unlink ${path}`);
+        },
+        rmdir: async (path) => {
+          calls.push(`rmdir ${path}`);
+        },
+        chmod: async (path) => {
+          calls.push(`chmod ${path}`);
+        },
+      };
+
+      await removeTreeWithoutFollowingLinks(root, fs);
+      await removeTreeWithoutFollowingLinks(disguised, fs);
+
+      expect(calls).toEqual([
+        `readdir ${root}`,
+        `readdir ${nested}`,
+        `rmdir ${disguised}`,
+        `rmdir ${nested}`,
+        `rmdir ${root}`,
+      ]);
     });
 
     it('stops without reading a directory whose location cannot be resolved', async () => {
@@ -2055,6 +2102,29 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     await writeFile(join(outside, 'precious.txt'), 'precious\n');
     await writeFile(join(outside, 'sub', 'deep.txt'), 'deep\n');
     return outside;
+  }
+
+  /**
+   * Makes `link` a junction to `target` spelled `\\?\Volume{GUID}\...`: an account without
+   * administrator rights can create it, and lstat reports it as a directory, not a link. False
+   * when this machine cannot create one.
+   */
+  async function volumeJunction(link: string, target: string): Promise<boolean> {
+    try {
+      const resolved = await realpath(target);
+      const volumeRoot = parse(resolved).root;
+      const volume = (
+        await execFileAsync('mountvol', [volumeRoot, '/L'], { windowsHide: true })
+      ).stdout.trim();
+      await execFileAsync(
+        'cmd',
+        ['/d', '/c', 'mklink', '/J', link, volume + resolved.slice(volumeRoot.length)],
+        { windowsHide: true },
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async function expectOutsideIntact(outside: string): Promise<void> {
