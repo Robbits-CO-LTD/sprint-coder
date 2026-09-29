@@ -7,7 +7,13 @@ import type {
   ResourceSet,
   ExecutionSpec,
 } from '@sprint-coder/domain';
-import { executionSpecDigest, validateExecutionSpec } from '@sprint-coder/domain';
+import {
+  PROJECT_MEMORY_RESOURCE_PREFIX,
+  SKILL_DRAFT_RESOURCE_PREFIX,
+  executionSpecDigest,
+  requiresPerCallHumanApproval,
+  validateExecutionSpec,
+} from '@sprint-coder/domain';
 import type {
   ApprovalWaitObserver,
   ToolAuthorizationControl,
@@ -22,6 +28,7 @@ import type {
 import { pathGuardIdentityDigest, workspacePermissionResourceFromGuard } from './path-guard';
 import { secureLogger } from './secure-logger';
 import {
+  projectMemoryAuthorizationFacts,
   providerDisclosureAuthorizationFacts,
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
@@ -40,6 +47,7 @@ type ApprovalLike = {
   turnId: string;
   callId: string;
   policyEpoch: number;
+  capability?: Capability;
   challenge: string;
   revision: number;
   state: string;
@@ -173,6 +181,26 @@ export class ApprovalCoordinator {
     throwIfAborted(signal);
     const required = request.entry.requiredCapabilities;
     if (required.length === 0) return { decision: 'allow', reason: 'no_capability_required' };
+    // A per-call approval is only as good as what its card shows (Issue #546). A call whose subject
+    // cannot be bound, or whose content the card could not show in full, is refused before any
+    // card exists: there would be nothing the person could meaningfully approve. The reason reaches
+    // the model as its tool error, so it says what to change; it names no content, and the
+    // diagnostic log keeps it because nothing has been evaluated or audited yet.
+    for (const capability of required) {
+      if (!requiresPerCallHumanApproval(capability)) continue;
+      const subject = perCallApprovalSubject(request, capability);
+      const reason =
+        subject === null
+          ? 'per_call_approval_subject_unbound'
+          : perCallApprovalUndisplayableReason(subject);
+      if (reason === undefined) continue;
+      secureLogger.warn(
+        'A per-call approval was refused before its card was raised',
+        { toolName: request.entry.providerName, capability, callId: request.callId, reason },
+        { taskId: request.context.taskId, turnId: request.context.turnId },
+      );
+      return { decision: 'deny', reason };
+    }
 
     const evaluations: Array<{ capability: Capability; decision: ToolAuthorizationDecision }> = [];
     for (const capability of required) {
@@ -186,7 +214,12 @@ export class ApprovalCoordinator {
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
     for (const evaluation of evaluations) {
-      if (evaluation.decision.decision === 'allow') {
+      // The policy engine never allows a per-call capability, and if it ever did, the person would
+      // still be asked: only their decision on this call's card covers this call.
+      if (
+        evaluation.decision.decision === 'allow' &&
+        !requiresPerCallHumanApproval(evaluation.capability)
+      ) {
         revalidators.push(evaluation.decision.beforeExecute ?? (() => false));
         continue;
       }
@@ -238,7 +271,13 @@ export class ApprovalCoordinator {
       capability,
       policyEpoch: request.context.policyEpoch,
     });
+    const perCall = requiresPerCallHumanApproval(capability);
+    const perCallSubject = perCall ? perCallApprovalSubject(request, capability) : undefined;
+    if (perCallSubject === null)
+      return { decision: 'deny', reason: 'per_call_approval_subject_unbound' };
+    // A per-call capability never reuses a Task grant, including one left by an earlier version.
     if (
+      !perCall &&
       this.options.persistence.hasTaskGrant?.({
         taskId: request.context.taskId,
         requestDigest,
@@ -294,9 +333,9 @@ export class ApprovalCoordinator {
       risk: request.entry.risk,
       reasonUntrusted: `Tool ${request.entry.providerName} requests ${capability}`,
       display: {
-        target: displayTarget(request.input),
+        target: perCallSubject?.label ?? displayTarget(request.input),
         impact: request.entry.sideEffect,
-        execution: safeApprovalExecution(request),
+        execution: perCallSubject?.execution ?? safeApprovalExecution(request),
       },
       ...ephemeralApprovalExecution(request),
       challenge,
@@ -414,6 +453,14 @@ export class ApprovalCoordinator {
     // Its call was aborted and the card could not be canceled durably. Recording a decision now
     // would mint a permit or grant for a call that no longer exists.
     if (waiter?.canceled === true) throw new Error('APPROVAL_CANCELED');
+    // Approved one call at a time (Issue #546). Refused before anything is recorded, whether or not
+    // this process still holds the waiter, so no Task grant can come out of such a card.
+    if (
+      command.decision === 'allow_task' &&
+      ((waiter !== undefined && requiresPerCallHumanApproval(waiter.capability)) ||
+        (current.capability !== undefined && requiresPerCallHumanApproval(current.capability)))
+    )
+      throw new Error('APPROVAL_DECISION_NOT_ALLOWED');
     const userInputRequest = waiter?.request.entry.providerName === 'request_user_input';
     if (userInputRequest) {
       const choices = (waiter.request.input as { choices?: unknown }).choices;
@@ -660,6 +707,22 @@ export function approvalFactsForTool(
   operation: PermissionOperation;
 } {
   const operation = operationFor(capability);
+  if (requiresPerCallHumanApproval(capability)) {
+    // An unbound subject gets a target the policy engine rejects, so it can never be approved.
+    const subject = perCallApprovalSubject(request, capability);
+    const target = subject?.target ?? 'per-call-approval:unbound';
+    return {
+      subjectId: `tool:${request.entry.toolId}`,
+      specDigest: digest({
+        toolId: request.entry.toolId,
+        capability,
+        subject: subject?.specInput ?? null,
+      }),
+      resourceSet: { kind: 'external-exact', target },
+      resource: { kind: 'external', target },
+      operation,
+    };
+  }
   const disclosure = providerDisclosureAuthorizationFacts(request.input);
   const workspaceGuards = workspaceToolAuthorizationGuards(
     request.input,
@@ -752,6 +815,134 @@ export function approvalFactsForTool(
     resource,
     operation,
   };
+}
+
+/**
+ * What one per-call approval is about (Issue #546): the resource it binds, the card's target line,
+ * the exact content the card shows, and what the approval digest covers.
+ *
+ * The Project comes from the prepared input, which Main resolved from the Turn's sealed context;
+ * the Task comes from the trusted execution context. Neither is read from the model's arguments.
+ * Null means the call does not carry what its capability needs.
+ */
+type PerCallApprovalSubject = Readonly<{
+  target: string;
+  label: string;
+  execution: string;
+  /** Every text the card shows as it is: the target line and the content being approved. */
+  shown: readonly string[];
+  specInput: unknown;
+}>;
+
+function perCallApprovalSubject(
+  request: ToolAuthorizationRequest,
+  capability: Capability,
+): PerCallApprovalSubject | null {
+  if (capability === 'project.memory.write') {
+    const memory = projectMemoryAuthorizationFacts(request.input);
+    if (request.entry.providerName !== 'project_memory_remember' || memory === undefined)
+      return null;
+    return {
+      target: `${PROJECT_MEMORY_RESOURCE_PREFIX}${memory.projectId}`,
+      label: `Project「${memory.projectName}」のメモリ`,
+      execution: stableStringify({
+        projectId: memory.projectId,
+        projectName: memory.projectName,
+        content: memory.content,
+      }),
+      shown: [memory.projectName, memory.content],
+      specInput: { projectId: memory.projectId, content: memory.content },
+    };
+  }
+  if (capability === 'skill.draft.write') {
+    const draft = skillDraftApprovalInput(request.input);
+    if (request.entry.providerName !== 'skill_draft_create' || draft === null) return null;
+    return {
+      target: `${SKILL_DRAFT_RESOURCE_PREFIX}${request.context.taskId}`,
+      label: `Skill「${draft.skillId}」の下書き`,
+      execution: stableStringify(draft),
+      shown: [
+        draft.kind,
+        draft.skillId,
+        ...draft.files.flatMap(({ path, content }) => [path, content]),
+      ],
+      specInput: { taskId: request.context.taskId, draft },
+    };
+  }
+  return null;
+}
+
+function skillDraftApprovalInput(input: unknown): {
+  kind: string;
+  skillId: string;
+  files: { path: string; content: string }[];
+} | null {
+  if (typeof input !== 'object' || input === null) return null;
+  const record = input as Record<string, unknown>;
+  const files = record['files'];
+  if (
+    typeof record['kind'] !== 'string' ||
+    typeof record['skillId'] !== 'string' ||
+    !Array.isArray(files) ||
+    files.length === 0 ||
+    !files.every(
+      (file) =>
+        typeof file === 'object' &&
+        file !== null &&
+        typeof (file as Record<string, unknown>)['path'] === 'string' &&
+        typeof (file as Record<string, unknown>)['content'] === 'string',
+    )
+  )
+    return null;
+  return {
+    kind: record['kind'],
+    skillId: record['skillId'],
+    files: (files as { path: string; content: string }[]).map(({ path, content }) => ({
+      path,
+      content,
+    })),
+  };
+}
+
+/**
+ * Mirrors the bounds persistence keeps an approval display within: anything longer would reach the
+ * card cut short.
+ */
+const APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS = 500;
+const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
+/**
+ * Characters the card would not show as themselves, so the person would approve text they did not
+ * read. Control characters (other than tab, line feed, and carriage return) and format characters
+ * draw as nothing or reorder what is drawn; line and paragraph separators, private-use, and
+ * unassigned codepoints have no reliable glyph.
+ *
+ * `\p{Cf}` rather than a hand-picked list, for the reason `computerUseUntrustedTextSchemaOf` in the
+ * contracts gives: the Unicode Tag block (U+E0000-U+E007F) spells a whole sentence in invisible
+ * codepoints, which would then sit in Project memory and be read by every later Turn, and a single
+ * U+200B inside a token is enough to hide it from the secret scanner. ZWJ is a format character, so
+ * an emoji joined by it is refused, which is accepted.
+ *
+ * Unlike the contracts, combining marks as a whole stay allowed, since NFD Japanese depends on them.
+ * The ones that never draw are refused through Unicode's Default_Ignorable_Code_Point rather than a
+ * list of names, which kept missing some (the Khmer inherent vowels U+17B4 and U+17B5, for one):
+ * each hides a token from the secret scanner as U+200B does, and a run of variation selectors
+ * carries one byte apiece. Only the two a card needs to draw are allowed, and only where they draw
+ * something. U+FE0E or U+FE0F must follow an emoji and choose its form, and after a keycap base
+ * (0-9, #, *) only as part of a keycap with U+20E3; anywhere else it draws nothing, so it could
+ * split a secret or carry one bit per character. One ideographic variation selector may follow a
+ * Han character, which Japanese names need. Either repeated, or out of those places, is refused.
+ */
+const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
+  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}|(?![\uFE0E\uFE0F\u{E0100}-\u{E01EF}])\p{Default_Ignorable_Code_Point}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Emoji})[\uFE0E\uFE0F]|(?<=[0-9#*])[\uFE0E\uFE0F](?!\u20E3)|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
+
+function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
+  if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
+    return `approval_content_not_displayable: the approval card target is longer than ${APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS} characters`;
+  if (subject.execution.length > APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS)
+    return `approval_content_not_displayable: the approval card shows at most ${APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS} characters of serialized content, including every file path and content`;
+  if (subject.shown.some((text) => APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.test(text)))
+    return 'approval_content_not_displayable: the content contains invisible control or format characters (for example zero-width, bidirectional, or Unicode Tag characters) that the approval card cannot show';
+  return undefined;
 }
 
 function displayTarget(input: unknown): string {

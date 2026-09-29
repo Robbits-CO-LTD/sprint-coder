@@ -563,6 +563,56 @@ describe('Main PermissionBroker', () => {
     expect(result).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
   });
 
+  it.each([
+    ['project.memory.write', 'project-memory:project-1'],
+    ['skill.draft.write', 'skill-draft:task-1'],
+  ] as const)(
+    'refuses a revoked %s before anyone is asked about it (Issue #546)',
+    (capability, target) => {
+      const { broker } = fixture(undefined, [capability]);
+      const perCallRequest: PermissionRequest = {
+        taskId: 'task-1',
+        subjectId: `tool:${capability}`,
+        capability,
+        resource: { kind: 'external', target },
+        operation: 'write',
+        providerEgress: 'none',
+        sandboxProfile: 'read-only',
+        executionSpecDigest: EXECUTION_DIGEST,
+        reviewerInputDigest: 'c'.repeat(64),
+        risk: 'medium',
+      };
+      const perCallCeiling: CapabilityCeiling = {
+        entries: [
+          {
+            capability,
+            resourceSet: { kind: 'external-exact', target },
+            operations: ['write'],
+            expiresAt: '2026-07-22T13:00:00.000Z',
+            providerEgress: ['none'],
+            sandboxProfiles: ['read-only'],
+          },
+        ],
+        maxWorkerDepth: 0,
+        maxConcurrentWorkers: 0,
+      };
+      const result = broker.preview({
+        taskId: 'task-1',
+        request: perCallRequest,
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: perCallCeiling,
+          modeCeiling: perCallCeiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+      });
+
+      expect(result).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
+    },
+  );
+
   it('keeps an epoch notification durable when delivery fails and retries it later', async () => {
     let fail = true;
     const { broker, pending } = fixture(() => {
