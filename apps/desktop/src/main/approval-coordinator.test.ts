@@ -1220,6 +1220,13 @@ describe('ApprovalCoordinator per-call approval of Project memory and Skill Draf
         ['a Hangul choseong filler', 'Use\u115Fpnpm'],
         ['a Khmer inherent vowel AQ', 'pass\u17B4word=synthetic-value'],
         ['a Khmer inherent vowel AA', 'pass\u17B5word=synthetic-value'],
+        // An emoji variation selector that follows no emoji draws nothing.
+        ['an emoji-form selector inside a word', 'pass\uFE0Fword=synthetic-value'],
+        ['a text-form selector inside a word', 'pass\uFE0Eword=synthetic-value'],
+        ['an emoji-form selector at the start', '\uFE0FUse pnpm for installs'],
+        ['selectors toggled on each letter', 'a\uFE0Eb\uFE0Fc\uFE0Ed\uFE0F'],
+        ['a keycap base with no keycap', 'step 1\uFE0F done'],
+        ['a hash with no keycap', 'tag #\uFE0F done'],
       ] as const
     ).map(([name, content]) => ({
       name: `a memory with ${name}`,
@@ -1289,6 +1296,9 @@ describe('ApprovalCoordinator per-call approval of Project memory and Skill Draf
       name: 'a Han character with one ideographic variation selector',
       content: '葛\u{E0100}城市の担当',
     },
+    { name: 'emoji in emoji form', content: 'Stars \u2B50\uFE0F and \u00A9\uFE0F notices' },
+    { name: 'an emoji in text form', content: 'Be kind \u263A\uFE0E' },
+    { name: 'keycaps', content: 'Order: 1\uFE0F\u20E3 #\uFE0F\u20E3 *\uFE0F\u20E3' },
   ])('still shows a card for $name', async ({ content }) => {
     const harness = createHarness();
     const { tools, call } = createAuxiliaryTools(

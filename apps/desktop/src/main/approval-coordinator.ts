@@ -927,12 +927,13 @@ const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
  * list of names, which kept missing some (the Khmer inherent vowels U+17B4 and U+17B5, for one):
  * each hides a token from the secret scanner as U+200B does, and a run of variation selectors
  * carries one byte apiece. Only the two a card needs to draw are allowed, and only where they draw
- * something: one U+FE0E or U+FE0F choosing an emoji or text form, and one ideographic variation
- * selector after a Han character, which Japanese names need. Either repeated, or an ideographic
- * selector after anything else, is refused.
+ * something. U+FE0E or U+FE0F must follow an emoji and choose its form, and after a keycap base
+ * (0-9, #, *) only as part of a keycap with U+20E3; anywhere else it draws nothing, so it could
+ * split a secret or carry one bit per character. One ideographic variation selector may follow a
+ * Han character, which Japanese names need. Either repeated, or out of those places, is refused.
  */
 const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
-  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}|(?![\uFE0E\uFE0F\u{E0100}-\u{E01EF}])\p{Default_Ignorable_Code_Point}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
+  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}|(?![\uFE0E\uFE0F\u{E0100}-\u{E01EF}])\p{Default_Ignorable_Code_Point}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Emoji})[\uFE0E\uFE0F]|(?<=[0-9#*])[\uFE0E\uFE0F](?!\u20E3)|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
 
 function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
   if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
