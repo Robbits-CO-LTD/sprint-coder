@@ -288,6 +288,39 @@ function crashAfterNativeCall(native: NativeSafeFs, method: keyof NativeSafeFs):
   }) as NativeSafeFs;
 }
 
+/**
+ * Scripts the native preflight of the forward update: each call takes the next answer ('crash'
+ * dies as the process would before answering, 'refuse' refuses), and calls past the script ask the
+ * real addon. `calls` counts the forward update preflights, so a refused step asked about again
+ * during compensation, when the preflight would now allow it, shows up as another call.
+ */
+function scriptForwardUpdatePreflight(
+  native: NativeSafeFs,
+  script: readonly ('crash' | 'refuse')[],
+): { native: NativeSafeFs; calls: () => number } {
+  let calls = 0;
+  const preflight = native.preflightIntentEffect;
+  if (preflight === undefined) throw new Error('Native preflight is not available');
+  const scripted: NativeSafeFs = Object.freeze({
+    ...native,
+    preflightIntentEffect: async (
+      ...args: Parameters<NonNullable<NativeSafeFs['preflightIntentEffect']>>
+    ) => {
+      const [, seed] = args;
+      if (seed.direction !== 'forward' || seed.kind !== 'update')
+        return Reflect.apply(preflight, native, args);
+      const answer = script[calls];
+      calls += 1;
+      if (answer === 'crash')
+        throw new EditSagaCrashError('simulated process crash before the preflight answered');
+      if (answer === 'refuse')
+        return Object.freeze({ allowed: false as const, reason: 'refused by the test preflight' });
+      return Reflect.apply(preflight, native, args);
+    },
+  });
+  return { native: scripted, calls: () => calls };
+}
+
 async function preparePersistence(env: Fixture) {
   const persistence = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
   const task = persistence.createTask();
@@ -1582,6 +1615,190 @@ if (runsWithElectronAbi) {
 
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
+    });
+
+    // The preflight refuses the update the first time and would allow it the second time: the
+    // Saga must restore the earlier add without asking about the refused update again, because a
+    // forward intent prepared while compensating is stale and would quarantine the Workspace.
+    it('restores the earlier steps without re-running a step the preflight refused', async () => {
+      const env = await fixture('refused-once');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const scripted = scriptForwardUpdatePreflight(native, ['refuse']);
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native: scripted.native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'refused-once-instance'),
+      );
+      const request = buildRequest({
+        id: 'saga-refused-once',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-refused-once',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+
+      await expect(executor.apply(request)).rejects.toMatchObject({
+        name: 'EditEffectRefusedError',
+        message: 'refused by the test preflight',
+      });
+      const saga = persistence.getEditSaga(request.id);
+      expect(saga).toMatchObject({ state: 'restored', recovery: null });
+      expect(saga.steps.map((step) => step.state)).toEqual([
+        'restored',
+        'restored',
+        'pending',
+        'pending',
+      ]);
+      expect(scripted.calls()).toBe(1);
+      expect(persistence.getNativeMutationIntent('nmi-forward-1-saga-refused-once')).toMatchObject({
+        state: 'completed',
+      });
+      expect(() => persistence.getNativeMutationIntent('nmi-forward-2-saga-refused-once')).toThrow(
+        'Native mutation intent not found',
+      );
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      await expectMissing(paths.addPath);
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expectMissing(paths.renameDstPath);
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
+    it('restores the earlier steps when the preflight refuses the step a restart resumes', async () => {
+      const env = await fixture('refused-on-resume');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      // The process dies after journaling the update as effect_pending, before its preflight
+      // answered; after the restart the preflight refuses once and would then allow.
+      const scripted = scriptForwardUpdatePreflight(native, ['crash', 'refuse']);
+      const firstSessions = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const request = buildRequest({
+        id: 'saga-refused-on-resume',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-refused-on-resume',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native: scripted.native,
+            journal: persistence,
+            artifacts,
+            resolveSession: firstSessions.resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'refused-on-resume-1'),
+        ).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga(request.id).steps.map((step) => step.state)).toEqual([
+        'effect_observed',
+        'effect_pending',
+        'pending',
+        'pending',
+      ]);
+      await Promise.all(
+        [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+      const startupQuarantines = reopened.initializeMutationRecovery(
+        'refused-on-resume-2',
+        new Date().toISOString(),
+      );
+      const secondSessions = makeResolveSession(native, env);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const releasedFences = new Map<string, number>();
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        new NativeSafeFsEditEffectBoundary({
+          native: scripted.native,
+          journal: reopened,
+          artifacts: reopenedArtifacts,
+          resolveSession: secondSessions.resolveSession,
+        }),
+        reopenedArtifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(
+          reopened,
+          'refused-on-resume-2',
+          undefined,
+          undefined,
+          async (lease) => {
+            const active = secondSessions.sessions.get(lease.fence);
+            if (active !== undefined) await native.closeSession(active);
+            releasedFences.set(lease.workspaceKey, lease.fence);
+          },
+        ),
+      );
+      await reconcileStartupNativeMutations({
+        journal: reopened,
+        recoverSaga: (sagaId) => executor.recover(sagaId),
+        reconcileEditSagas: () => executor.reconcileAll(),
+        startupQuarantines,
+        releasedFences,
+        now: () => new Date().toISOString(),
+      });
+
+      const saga = reopened.getEditSaga(request.id);
+      expect(saga).toMatchObject({ state: 'restored', recovery: null });
+      expect(saga.steps.map((step) => step.state)).toEqual([
+        'restored',
+        'restored',
+        'pending',
+        'pending',
+      ]);
+      expect(scripted.calls()).toBe(2);
+      expect(() =>
+        reopened.getNativeMutationIntent('nmi-forward-2-saga-refused-on-resume'),
+      ).toThrow('Native mutation intent not found');
+      expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+      await expectMissing(paths.addPath);
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+      expect(reopened.startTurn(task.id, 'continued after the refused resume')).toBeDefined();
+      reopened.close();
     });
 
     it('recovers a workspace-bound prepared Saga under a recovery lease', async () => {

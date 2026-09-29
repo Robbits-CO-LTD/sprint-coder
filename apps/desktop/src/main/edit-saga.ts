@@ -749,7 +749,10 @@ export class EditSagaExecutor {
         );
       } catch (error) {
         if (error instanceof EditSagaCrashError) throw error;
-        if (error instanceof EditEffectRefusedError && refusal !== undefined) refusal.error = error;
+        if (error instanceof EditEffectRefusedError) {
+          this.journalRefusedStep(saga, step.ordinal);
+          if (refusal !== undefined) refusal.error = error;
+        }
         return this.compensate(id, errorMessage(error), lease);
       }
     }
@@ -785,8 +788,10 @@ export class EditSagaExecutor {
         try {
           observation = await this.boundary.resume(step, 'forward', this.leaseAccess(lease, saga));
         } catch (error) {
-          if (error instanceof EditEffectRefusedError)
+          if (error instanceof EditEffectRefusedError) {
+            this.journalRefusedStep(saga, step.ordinal);
             return this.compensate(id, errorMessage(error), lease);
+          }
           throw error;
         }
       } else if (step.operation.kind === 'mkdir') {
@@ -846,14 +851,8 @@ export class EditSagaExecutor {
             );
             step = stepAt(saga, step.ordinal);
           } catch (error) {
-            // Refused before any effect of the step was journaled: there is nothing to undo.
             if (error instanceof EditEffectRefusedError) {
-              saga = this.updateStep(
-                saga,
-                step.ordinal,
-                (value) => ({ ...value, state: 'restored' }),
-                'compensating',
-              );
+              saga = this.journalRefusedStep(saga, step.ordinal);
               continue;
             }
             return this.requireRecovery(
@@ -1026,6 +1025,20 @@ export class EditSagaExecutor {
       }
     }
     return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
+  }
+
+  /**
+   * Journals a step whose boundary refused it before journaling any effect of it as never applied
+   * (`restored`). Compensation then skips it and undoes only the earlier steps: asking the boundary
+   * about it again could get the step executed while the Saga is compensating.
+   */
+  private journalRefusedStep(saga: EditSagaSnapshot, ordinal: number): EditSagaSnapshot {
+    return this.updateStep(
+      saga,
+      ordinal,
+      (value) => ({ ...value, state: 'restored' }),
+      'compensating',
+    );
   }
 
   private updateStep(
