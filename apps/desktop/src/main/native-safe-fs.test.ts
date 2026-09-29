@@ -379,6 +379,35 @@ async function windowsDacl(path: string, replace?: string): Promise<string> {
   return stdout.trim();
 }
 
+type WindowsParsedDacl = {
+  protected: boolean;
+  entries: { type: string; flags: number; mask: number; sid: string }[];
+  user: string;
+};
+
+/**
+ * Windows only: parses a DACL's SDDL with every SID resolved to its `S-` form, next to the current
+ * user's SID. SDDL renders well-known SIDs as aliases (the built-in Administrator a CI job runs as
+ * is `LA`), so tests compare these SIDs instead of matching the SDDL text.
+ */
+async function windowsParsedDacl(sddl: string): Promise<WindowsParsedDacl> {
+  const script = [
+    '$sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
+    '$entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
+    '  [ordered]@{ type = $ace.AceType.ToString(); flags = [int]$ace.AceFlags;',
+    '    mask = $ace.AccessMask; sid = $ace.SecurityIdentifier.Value }',
+    '})',
+    '$protected = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    'ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{',
+    '  protected = (($sd.ControlFlags -band $protected) -ne 0); entries = $entries;',
+    '  user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value })',
+  ].join('\n');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    env: windowsPowerShellEnv({ SPRINT_CODER_DACL_SDDL: sddl }),
+  });
+  return JSON.parse(stdout) as WindowsParsedDacl;
+}
+
 /** Windows only: gives a file one extended attribute through NtSetEaFile. */
 async function windowsSetExtendedAttribute(path: string): Promise<void> {
   const script = [
@@ -846,8 +875,15 @@ describe('NativeSafeFs authority boundary', () => {
         const sourcePath = join(input.workspace, `acl-${index}.txt`);
         await writeFile(sourcePath, 'acl before\n');
         const dacl = await windowsDacl(sourcePath, restrict ? 'owner-only' : undefined);
-        if (restrict) expect(dacl).toMatch(/^D:P[A-Z]*\(A;;FA;;;S-[0-9-]+\)$/);
-        else expect(dacl).not.toMatch(/^D:P/);
+        const parsed = await windowsParsedDacl(dacl);
+        if (restrict)
+          expect(parsed).toEqual({
+            protected: true,
+            // FA (FILE_ALL_ACCESS) for the current user alone, with no inheritance flags.
+            entries: [{ type: 'AccessAllowed', flags: 0, mask: 0x1f01ff, sid: parsed.user }],
+            user: expect.stringMatching(/^S-1-/),
+          });
+        else expect(parsed.protected).toBe(false);
         const previous = await revision(sourcePath);
         const replacement = Buffer.from('acl after\n');
         let intent = nativeIntent({
