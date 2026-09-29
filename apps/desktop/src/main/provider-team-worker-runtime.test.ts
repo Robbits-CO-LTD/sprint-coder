@@ -12,6 +12,7 @@ import {
   ProviderAwareTeamWorkerRuntime,
   type ProviderTeamWorkerRuntimeDeps,
 } from './provider-team-worker-runtime';
+import type { WorkerActivityEvent } from './team-coordinator';
 import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError } from './tool-broker';
 import { WorkspacePatchRejection } from './workspace-patch-tool';
@@ -1396,6 +1397,162 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
       expect(release).toHaveBeenCalledOnce();
     },
   );
+
+  describe('file changes of committed writes (issue #575)', () => {
+    /** The activity labels and file changes an execution reported, in order. */
+    const recorder = () => {
+      const events: (string | { path: string; kind: string }[])[] = [];
+      const onEvent = (event: WorkerActivityEvent) => {
+        if (event.type === 'activity') events.push(event.label);
+        if (event.type === 'fileChange') events.push(event.changes);
+      };
+      return { events, onEvent };
+    };
+    const executingLabel = (tool: string) => `Workerが${tool}を実行中`;
+
+    it('reports each committed write once, after its completed activity, as the CLI Worker does', async () => {
+      const batch = {
+        rootId: 'root-1',
+        paths: ['b.txt', 'c.txt', 'dir'],
+        sagaId: 'saga:batch',
+        state: 'committed',
+        operations: 3,
+        changes: [
+          { path: 'b.txt', kind: 'update' },
+          { path: 'c.txt', kind: 'delete' },
+        ],
+      };
+      const { adapter } = managedLocalWorker({
+        toolRounds: [['create_file'], ['apply_patch']],
+        executeTool: async (name) => (name === 'create_file' ? committed('a.txt') : batch),
+      });
+      const { events, onEvent } = recorder();
+
+      await adapter.execute({ ...execution(), onEvent });
+
+      expect(events).toEqual([
+        'Providerで依頼を処理中',
+        executingLabel('create_file'),
+        'create_fileの実行完了',
+        [{ path: 'a.txt', kind: 'add' }],
+        executingLabel('apply_patch'),
+        'apply_patchの実行完了',
+        [
+          { path: 'b.txt', kind: 'update' },
+          { path: 'c.txt', kind: 'delete' },
+        ],
+      ]);
+    });
+
+    it.each([
+      ['a read', 'read_file', async () => ({ rootId: 'root-1', path: 'a.txt', content: 'x' })],
+      [
+        'a write that did not commit',
+        'create_file',
+        async () => ({ ...committed('a.txt'), state: 'rolled_back' }),
+      ],
+      [
+        'a result without a Saga',
+        'create_file',
+        async () => ({ path: 'a.txt', kind: 'add', state: 'committed' }),
+      ],
+      [
+        'a committed result of an unknown shape',
+        'create_file',
+        async () => ({
+          sagaId: 'saga:x',
+          state: 'committed',
+          changes: [
+            { path: 'a.txt', kind: 'rename' },
+            { path: '', kind: 'add' },
+          ],
+        }),
+      ],
+      [
+        'a committed directory creation',
+        'create_directory',
+        async () => ({
+          rootId: 'root-1',
+          path: 'dir',
+          sagaId: 'saga:dir',
+          state: 'committed',
+          kind: 'mkdir',
+        }),
+      ],
+      [
+        'a denied write',
+        'create_file',
+        async () => {
+          throw denied();
+        },
+      ],
+      [
+        'a rejected patch',
+        'apply_patch',
+        async () => {
+          throw new WorkspacePatchRejection('anchor did not match');
+        },
+      ],
+    ] as const)('reports no file change for %s', async (_label, tool, executeTool) => {
+      const { adapter } = managedLocalWorker({ toolRounds: [[tool]], executeTool });
+      const { events, onEvent } = recorder();
+
+      await adapter.execute({ ...execution(), onEvent });
+
+      expect(events.filter((event) => typeof event !== 'string')).toEqual([]);
+    });
+
+    it('keeps a write that committed as the Worker was being stopped, and starts no further call', async () => {
+      const stop = new AbortController();
+      const executeTool = vi.fn(async () => {
+        stop.abort();
+        return committed('a.txt');
+      });
+      const { adapter, requests, release } = managedLocalWorker({
+        toolRounds: [['create_file', 'apply_patch']],
+        executeTool,
+      });
+      const { events, onEvent } = recorder();
+
+      await expect(
+        adapter.execute({ ...execution(), signal: stop.signal, onEvent }),
+      ).rejects.toThrow();
+
+      expect(events).toEqual([
+        'Providerで依頼を処理中',
+        executingLabel('create_file'),
+        'create_fileの実行完了',
+        [{ path: 'a.txt', kind: 'add' }],
+      ]);
+      expect(executeTool).toHaveBeenCalledOnce();
+      expect(requests).toHaveLength(1);
+      expect(release).toHaveBeenCalledOnce();
+    });
+
+    it('does not hand the model a failed write when reporting the committed one throws', async () => {
+      const reportFailure = new Error('file change could not be recorded');
+      const { adapter, requests, release } = managedLocalWorker({
+        toolRounds: [['create_file']],
+        executeTool: async () => committed('a.txt'),
+      });
+      const labels: string[] = [];
+
+      await expect(
+        adapter.execute({
+          ...execution(),
+          onEvent: (event) => {
+            if (event.type === 'activity') labels.push(event.label);
+            if (event.type === 'fileChange') throw reportFailure;
+          },
+        }),
+      ).rejects.toBe(reportFailure);
+
+      // The execution ends instead of asking the model again, which could repeat the write.
+      expect(requests).toHaveLength(1);
+      expect(labels).not.toContain('create_fileは失敗しました');
+      expect(release).toHaveBeenCalledOnce();
+    });
+  });
 
   it("binds the execution's approval-wait observer to its managed tool session (issue #573)", async () => {
     const { adapter, prepare } = managedLocalWorker({

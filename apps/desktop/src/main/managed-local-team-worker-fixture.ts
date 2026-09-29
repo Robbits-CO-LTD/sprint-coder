@@ -147,7 +147,14 @@ export function managedLocalTeamWorkerRuntime(options: {
             return options.executeTool({ name, input, workspaceSet });
           if (name === 'read_file') return { text: readFileSync(file, 'utf8') };
           writeFileSync(file, text ?? '', { flag: 'wx' });
-          return { rootId: primary.rootId, path, sagaId: `saga:${path}`, state: 'committed' };
+          // Shaped as the real create_file result (`workspace-patch-tool.ts`), `kind` included.
+          return {
+            rootId: primary.rootId,
+            path,
+            sagaId: `saga:${path}`,
+            state: 'committed',
+            kind: 'add',
+          };
         },
         release: () => undefined,
       };
