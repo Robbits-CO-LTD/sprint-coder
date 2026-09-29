@@ -617,6 +617,12 @@ describe('Claude Turn temporary folders', () => {
     expect(await readdir(turn.temporary)).toEqual([]);
     expect(await readdir(turn.outside)).toEqual(['keep.txt']);
     expect(await readFile(join(turn.outside, 'keep.txt'), 'utf8')).toBe('keep');
+    // The Node that runs this suite in CI does not follow a junction in a recursive rmSync, so
+    // only the removal the adapter chose shows that it cannot follow one in Electron either.
+    for (const name of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(
+        join(turn.temporary, name),
+      );
   });
 
   it('removes them without following a junction after a Stop', async () => {
@@ -627,6 +633,10 @@ describe('Claude Turn temporary folders', () => {
     expect(turn.exited).toHaveBeenCalledWith(1, true);
     expect(await readdir(turn.temporary)).toEqual([]);
     expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    for (const name of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(
+        join(turn.temporary, name),
+      );
   });
 
   it('still reports the Runtime failure when removing them fails, and keeps them', async () => {

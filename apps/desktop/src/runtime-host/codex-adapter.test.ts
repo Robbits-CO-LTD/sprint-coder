@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import type * as ChildProcessModule from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { symlinkSync } from 'node:fs';
+import { readdirSync, symlinkSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1581,12 +1581,15 @@ describe('Codex Turn temporary folders', () => {
       signalCode: null,
       pid: undefined,
     });
+    const owned: string[] = [];
     processMock.spawn.mockImplementationOnce(
       (
         _command: string,
         _args: readonly string[],
         options: { cwd: string; env: NodeJS.ProcessEnv },
       ) => {
+        for (const parent of [temporary, isolation])
+          owned.push(...readdirSync(parent).map((name) => join(parent, name)));
         for (const directory of [options.cwd, options.env['CODEX_HOME']!, options.env['HOME']!])
           symlinkSync(outside, join(directory, 'linked'), directoryLinkType);
         return child;
@@ -1601,7 +1604,8 @@ describe('Codex Turn temporary folders', () => {
       child.exitCode = code;
       child.emit('close', code);
     };
-    return { adapter, close, failed, exited, temporary, isolation, outside };
+    expect(owned).toHaveLength(2);
+    return { adapter, close, failed, exited, temporary, isolation, outside, owned };
   }
 
   it('removes them without following a junction the CLI left inside when the CLI exits', async () => {
@@ -1617,6 +1621,10 @@ describe('Codex Turn temporary folders', () => {
     expect(await readdir(turn.isolation)).toEqual([]);
     expect(await readdir(turn.outside)).toEqual(['keep.txt']);
     expect(await readFile(join(turn.outside, 'keep.txt'), 'utf8')).toBe('keep');
+    // The Node that runs this suite in CI does not follow a junction in a recursive rmSync, so
+    // only the removal the adapter chose shows that it cannot follow one in Electron either.
+    for (const path of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(path);
   });
 
   it('removes them without following a junction after a Stop', async () => {
@@ -1628,6 +1636,8 @@ describe('Codex Turn temporary folders', () => {
     expect(await readdir(turn.temporary)).toEqual([]);
     expect(await readdir(turn.isolation)).toEqual([]);
     expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    for (const path of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(path);
   });
 
   it('still reports the Runtime failure when removing them fails, and keeps them', async () => {

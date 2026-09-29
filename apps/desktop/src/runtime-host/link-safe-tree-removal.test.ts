@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -6,11 +7,13 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
+  rmdirSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { removeTreeWithoutFollowingLinks } from '../main/worker-worktree';
 import {
@@ -53,6 +56,15 @@ function codedError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(code), { code });
 }
 
+/** `rmdir` removes a junction itself, never what it points at. */
+function removeJunctionItself(link: string): void {
+  try {
+    rmdirSync(link);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+}
+
 function recordingFs(overrides: Partial<SyncTreeRemovalFs> = {}) {
   const calls: string[] = [];
   const fs: SyncTreeRemovalFs = {
@@ -61,6 +73,7 @@ function recordingFs(overrides: Partial<SyncTreeRemovalFs> = {}) {
       calls.push(`readdir ${path}`);
       return readdirSync(path);
     },
+    realpath: (path) => realpathSync.native(path),
     unlink: vi.fn(),
     rmdir: vi.fn(),
     chmod: vi.fn(),
@@ -169,6 +182,97 @@ describe('removeTreeWithoutFollowingLinksSync', () => {
 
     expect(existsSync(target)).toBe(false);
   });
+
+  it('treats a directory that resolves elsewhere as a link and never reads it', () => {
+    const root = testRoot();
+    const outside = outsideTarget(root);
+    const target = join(root, 'turn');
+    const disguised = join(target, 'disguised');
+    mkdirSync(disguised, { recursive: true });
+    writeFileSync(join(disguised, 'inside.txt'), 'x');
+    // What a junction to a `\\?\Volume{GUID}\` path looks like: lstat reports a directory.
+    const { fs, calls } = recordingFs({
+      realpath: (path) => (path === disguised ? outside : realpathSync.native(path)),
+    });
+
+    removeTreeWithoutFollowingLinksSync(target, fs);
+
+    expect(calls).toEqual([`readdir ${target}`]);
+    expect(fs.unlink).toHaveBeenCalledWith(disguised);
+    expect(fs.unlink).not.toHaveBeenCalledWith(join(disguised, 'inside.txt'));
+    expect(fs.rmdir).toHaveBeenCalledTimes(1);
+    expect(fs.rmdir).toHaveBeenCalledWith(target);
+  });
+
+  it('removes only the root itself when the root resolves elsewhere', () => {
+    const root = testRoot();
+    const outside = outsideTarget(root);
+    const target = join(root, 'turn');
+    mkdirSync(target);
+    const { fs, calls } = recordingFs({
+      realpath: (path) => (path === target ? outside : realpathSync.native(path)),
+    });
+
+    removeTreeWithoutFollowingLinksSync(target, fs);
+
+    expect(calls).toEqual([]);
+    expect(fs.unlink).toHaveBeenCalledWith(target);
+    expect(fs.rmdir).not.toHaveBeenCalled();
+  });
+
+  it('stops without reading a directory whose location cannot be resolved', () => {
+    const root = testRoot();
+    const target = join(root, 'turn');
+    mkdirSync(join(target, 'folder'), { recursive: true });
+    const denied = codedError('EACCES');
+    const { fs, calls } = recordingFs({
+      realpath: (path) => {
+        if (path === join(target, 'folder')) throw denied;
+        return realpathSync.native(path);
+      },
+    });
+
+    expect(() => removeTreeWithoutFollowingLinksSync(target, fs)).toThrow(denied);
+
+    expect(calls).toEqual([`readdir ${target}`]);
+    expect(fs.unlink).not.toHaveBeenCalled();
+    expect(fs.rmdir).not.toHaveBeenCalled();
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'removes a junction to a volume GUID path itself and leaves what it points at',
+    (context) => {
+      const root = testRoot();
+      const outside = outsideTarget(root);
+      const target = join(root, 'turn');
+      mkdirSync(target);
+      const link = join(target, 'linked');
+      const resolvedOutside = realpathSync.native(outside);
+      try {
+        // `\\?\Volume{GUID}\`: an account without administrator rights can create this junction.
+        const volume = execFileSync('mountvol', [parse(resolvedOutside).root, '/L'], {
+          encoding: 'utf8',
+          windowsHide: true,
+        }).trim();
+        const volumeTarget = volume + resolvedOutside.slice(parse(resolvedOutside).root.length);
+        execFileSync('cmd', ['/d', '/c', 'mklink', '/J', link, volumeTarget], {
+          stdio: 'ignore',
+          windowsHide: true,
+        });
+      } catch {
+        return context.skip();
+      }
+      try {
+        removeTreeWithoutFollowingLinksSync(target);
+
+        expect(existsSync(target)).toBe(false);
+        expectOutsideUntouched(outside);
+      } finally {
+        // Main's removal below does not recognize this junction either; take it out by itself.
+        removeJunctionItself(link);
+      }
+    },
+  );
 
   it('never descends into a link even when unlinking it is refused', () => {
     const root = testRoot();

@@ -1,5 +1,5 @@
-import { chmodSync, lstatSync, readdirSync, rmdirSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { chmodSync, lstatSync, readdirSync, realpathSync, rmdirSync, unlinkSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * The file system calls `removeTreeWithoutFollowingLinksSync` makes. Tests replace them to make a
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 export type SyncTreeRemovalFs = Readonly<{
   lstat(path: string): Readonly<{ isDirectory(): boolean; isSymbolicLink(): boolean }>;
   readdir(path: string): string[];
+  realpath(path: string): string;
   unlink(path: string): void;
   rmdir(path: string): void;
   chmod(path: string, mode: number): void;
@@ -16,6 +17,7 @@ export type SyncTreeRemovalFs = Readonly<{
 const nodeSyncTreeRemovalFs: SyncTreeRemovalFs = Object.freeze({
   lstat: (path: string) => lstatSync(path),
   readdir: (path: string) => readdirSync(path),
+  realpath: (path: string) => realpathSync.native(path),
   unlink: (path: string) => unlinkSync(path),
   rmdir: (path: string) => rmdirSync(path),
   chmod: (path: string, mode: number) => chmodSync(path, mode),
@@ -30,9 +32,11 @@ const nodeSyncTreeRemovalFs: SyncTreeRemovalFs = Object.freeze({
  *
  * Every entry is examined with `lstat`: a link, including a junction (which `lstat` reports as a
  * link and not a directory), is removed by itself and what it points at is left alone. Only a real
- * directory is descended into. An entry that is already gone counts as removed, so a removal that
- * stopped part way can simply run again. Any other error stops the removal and reaches the caller
- * unchanged; there is no fallback to a recursive removal.
+ * directory is descended into: `lstat` does not report every junction as a link (libuv only
+ * recognizes one whose target starts with a drive letter, not `\\?\Volume{GUID}\...`), so a
+ * directory must also resolve to itself before its entries are read. An entry that is already gone
+ * counts as removed, so a removal that stopped part way can simply run again. Any other error stops
+ * the removal and reaches the caller unchanged; there is no fallback to a recursive removal.
  */
 export function removeTreeWithoutFollowingLinksSync(
   root: string,
@@ -51,6 +55,7 @@ function removeEntry(path: string, fs: SyncTreeRemovalFs): void {
   }
   if (entry.isSymbolicLink()) return removeLink(path, fs);
   if (!entry.isDirectory()) return removeFile(path, fs);
+  if (!resolvesToItself(path, fs)) return removeLink(path, fs);
   let names: string[];
   try {
     names = fs.readdir(path);
@@ -69,6 +74,26 @@ function removeEntry(path: string, fs: SyncTreeRemovalFs): void {
       fs.rmdir(path);
     }
   });
+}
+
+/**
+ * Whether `path` is where it resolves to, compared with its parent resolved the same way so that
+ * links or short (8.3) names above the root do not matter. A path that no longer resolves is
+ * treated as a link, which the caller removes by itself or counts as already removed.
+ */
+function resolvesToItself(path: string, fs: SyncTreeRemovalFs): boolean {
+  let resolved: string;
+  let expected: string;
+  try {
+    resolved = fs.realpath(path);
+    expected = join(fs.realpath(dirname(path)), basename(path));
+  } catch (error) {
+    if (isEnoent(error)) return false;
+    throw error;
+  }
+  return process.platform === 'win32'
+    ? resolved.toLowerCase() === expected.toLowerCase()
+    : resolved === expected;
 }
 
 /** The link itself: `unlink` removes a file link, and `rmdir` a directory link or junction. */
