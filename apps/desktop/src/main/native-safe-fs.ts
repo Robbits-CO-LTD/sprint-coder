@@ -47,6 +47,20 @@ export type NativeSafeFsProbe = Readonly<{
   unavailableReason: string | null;
 }>;
 
+/**
+ * Which managed edit tools a probed backend can carry. `apply_patch` needs every journaled
+ * mutation kind, `create_directory` needs directory ownership the backend proved per Workspace; a
+ * backend that advertises less keeps both unpublished for Main and every Team Worker alike.
+ */
+export function nativeWorkspaceEditSupport(
+  probe: NativeSafeFsProbe,
+): Readonly<{ supportsPatch: boolean; createDirectory: boolean }> {
+  return Object.freeze({
+    supportsPatch: probe.capabilities.mutationScope === 'full',
+    createDirectory: probe.capabilities.directoryOwnership === 'workspace-probed',
+  });
+}
+
 export type NativeSafeFsSession = Readonly<{
   id: string;
   rootId: string;

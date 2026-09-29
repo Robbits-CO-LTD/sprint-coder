@@ -24,6 +24,7 @@ import { GraphRenderService } from './graph-render';
 import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
+  nativeWorkspaceEditSupport,
   prepareNativeSafeFsLockDirectory,
   NativeSafeFsError,
   type NativeSafeFs,
@@ -765,15 +766,15 @@ async function wireEditSagaRecovery(
       releasedFences: releasedRecoveryFences,
       now: () => new Date().toISOString(),
     });
-    const fullMutation = probe.capabilities.mutationScope === 'full';
+    const editSupport = nativeWorkspaceEditSupport(probe);
     return {
       turnWorkspaceSetFor: (taskId, turnId) =>
         persistence.readTurnWorkspaceSetForTask(taskId, turnId),
       turnRootMutationBindingsFor: (turnId) => persistence.getTurnWorkspaceMutationBindings(turnId),
       revisions: new FileRevisionRegistry(),
       apply: (request) => executor.apply(request),
-      supportsPatch: fullMutation,
-      ...(probe.capabilities.directoryOwnership === 'workspace-probed'
+      supportsPatch: editSupport.supportsPatch,
+      ...(editSupport.createDirectory
         ? {
             createDirectory: ({ taskId, turnId, rootId, path, guard, boundary }) =>
               executeWorkspaceCreateDirectory(

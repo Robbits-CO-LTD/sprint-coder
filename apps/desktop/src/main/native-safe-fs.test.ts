@@ -27,6 +27,7 @@ import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
   nativeSafeFsAddonPath,
+  nativeWorkspaceEditSupport,
   prepareNativeSafeFsLockDirectory,
   resolveNativeSafeFsAddonLocation,
 } from './native-safe-fs';
@@ -430,6 +431,11 @@ describe('NativeSafeFs authority boundary', () => {
           mutationScope: 'full',
           directoryOwnership: 'workspace-probed',
         },
+      });
+      // Main publishes apply_patch and create_directory from exactly this mapping.
+      expect(nativeWorkspaceEditSupport(await boundary.probe())).toEqual({
+        supportsPatch: true,
+        createDirectory: true,
       });
     });
 

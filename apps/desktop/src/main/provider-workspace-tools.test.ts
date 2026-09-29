@@ -37,6 +37,7 @@ import { REQUEST_USER_INPUT_TOOL, commandToolTruncated } from './default-tools';
 import { normalizeTrustedWindowsCmdArgv } from './command-runner';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
+import { nativeWorkspaceEditSupport, type NativeSafeFsProbe } from './native-safe-fs';
 import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
@@ -657,6 +658,120 @@ describe('Provider workspace read tools', () => {
     expect(names).not.toContain('apply_patch');
     expect(names).not.toContain('create_directory');
   });
+
+  it.each([
+    ['full', 'workspace-probed', true],
+    ['add-only', false, false],
+  ] as const)(
+    'publishes apply_patch and create_directory to Main and Worker calls only for a %s / %s backend',
+    async (mutationScope, directoryOwnership, published) => {
+      const parentRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-capability-parent-'));
+      const workerRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-capability-worker-'));
+      roots.push(parentRoot, workerRoot);
+      const makeWorkspace = (path: string, digest: string): EffectiveWorkspaceSet => ({
+        source: 'task',
+        projectId: null,
+        primaryRootId: 'root-a',
+        roots: [
+          { rootId: 'root-a', path, label: 'Workspace', role: 'primary', status: 'available' },
+        ],
+        digest,
+      });
+      const parent = makeWorkspace(parentRoot, '3'.repeat(64));
+      const worker = makeWorkspace(workerRoot, '4'.repeat(64));
+      const binding = await workspaceMutationBinding(workerRoot);
+      const probe: NativeSafeFsProbe = {
+        available: true,
+        apiVersion: 1,
+        platform: process.platform,
+        capabilities: {
+          rootSession: true,
+          workspaceLock: true,
+          durableFence: true,
+          synchronousInvalidation: true,
+          mutation: true,
+          mutationScope,
+          directoryOwnership,
+        },
+        unavailableReason: null,
+      };
+      // The same mapping index.ts applies to the live probe.
+      const support = nativeWorkspaceEditSupport(probe);
+      expect(support).toEqual({ supportsPatch: published, createDirectory: published });
+      const created: { path: string; workspace: string | undefined }[] = [];
+      const workerCall = (callId: string | undefined) => callId?.startsWith('worker-') === true;
+      const tools = new ProviderWorkspaceTools({
+        workspaceFor: (_taskId, _turnId, callId) => (workerCall(callId) ? worker : parent),
+        rootIdentityFor: () => undefined,
+        mutationBindingFor: (_turnId, _rootId, callId) =>
+          workerCall(callId) ? binding : undefined,
+        policyEpochFor: () => 4,
+        authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+        workspaceEdit: {
+          turnWorkspaceSetFor: () => parent,
+          turnRootMutationBindingsFor: () => new Map(),
+          revisions: new FileRevisionRegistry(),
+          apply: async () => {
+            throw new Error('not used');
+          },
+          supportsPatch: support.supportsPatch,
+          ...(support.createDirectory
+            ? {
+                createDirectory: async ({ path, boundary }) => {
+                  created.push({ path, workspace: boundary?.workspace.digest });
+                  return {
+                    rootId: 'root-a',
+                    path,
+                    sagaId: 'capability-saga',
+                    state: 'committed' as const,
+                    kind: 'mkdir' as const,
+                  };
+                },
+              }
+            : {}),
+          policyEpochFor: () => 4,
+        },
+      });
+      const context = {
+        taskId: 'task-capability',
+        turnId: 'turn-capability',
+        workspaceId: parent.digest,
+        policyEpoch: 4,
+      } as const;
+      const names = providerToolsFromSnapshot(tools.startTurn(context, 'codex')).map(
+        ({ name }) => name,
+      );
+
+      // Main: the catalog every Turn (and, filtered by write scope, every Worker) is built from.
+      expect(names.includes('apply_patch')).toBe(published);
+      expect(names.includes('create_directory')).toBe(published);
+      expect(names).toContain('create_file');
+      // Worker: calls bound to the Worker's isolated Workspace reach the same tools.
+      const mkdir = tools.broker.dispatch({
+        ...context,
+        callId: 'worker-mkdir',
+        providerName: 'create_directory',
+        input: { path: 'worker-directory' },
+      });
+      const patch = tools.broker.dispatch({
+        ...context,
+        callId: 'worker-patch',
+        providerName: 'apply_patch',
+        input: {},
+      });
+      if (published) {
+        await expect(mkdir).resolves.toMatchObject({ state: 'committed', kind: 'mkdir' });
+        expect(created).toEqual([{ path: 'worker-directory', workspace: worker.digest }]);
+        // Published: the empty input reaches apply_patch's pinned schema instead of the catalog gate.
+        await expect(patch).rejects.toThrow('Tool input does not match the pinned');
+      } else {
+        await expect(mkdir).rejects.toThrow('Tool name is not present in the Turn catalog');
+        await expect(patch).rejects.toThrow('Tool name is not present in the Turn catalog');
+        expect(created).toEqual([]);
+      }
+      await tools.dispose();
+    },
+  );
 
   it('states the high-impact and honesty constraints in the Provider system guidance', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);
