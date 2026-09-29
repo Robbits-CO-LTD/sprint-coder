@@ -1,7 +1,11 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import type * as ChildProcessModule from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { readdirSync, symlinkSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import {
   ClaudeRuntimeAdapter,
   buildClaudeArgs,
@@ -15,11 +19,34 @@ import {
 } from './claude-adapter';
 import { ClaudeRateLimitError } from './claude-normalizer';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
+import * as removal from './link-safe-tree-removal';
+import * as nodeCommand from './team-mcp-node-command';
+
+// Real processes still start unless a test hands the adapter a fake child.
+const processMock = vi.hoisted(() => ({ spawn: null as unknown as Mock }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof ChildProcessModule>();
+  processMock.spawn = vi.fn(original.spawn);
+  return { ...original, spawn: processMock.spawn };
+});
+// The real link-safe removal and Node resolution run unless a test makes them fail.
+vi.mock('./link-safe-tree-removal', async (importOriginal) => {
+  const actual = await importOriginal<typeof removal>();
+  return {
+    ...actual,
+    removeTreeWithoutFollowingLinksSync: vi.fn(actual.removeTreeWithoutFollowingLinksSync),
+  };
+});
+vi.mock('./team-mcp-node-command', async (importOriginal) => {
+  const actual = await importOriginal<typeof nodeCommand>();
+  return { ...actual, teamMcpNodeCommand: vi.fn(actual.teamMcpNodeCommand) };
+});
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -480,6 +507,187 @@ describe('Claude runtime probe', () => {
   it('passes through the input unchanged when there is no context to attach', () => {
     expect(buildClaudePrompt('plain input', [])).toBe('plain input');
   });
+});
+
+describe('Claude Turn temporary folders', () => {
+  // Electron's Node follows a Windows junction in a recursive rmSync (#582); POSIX has no junction.
+  const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+  async function fixture() {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-claude-link-cleanup-'));
+    temporaryRoots.push(root);
+    const temporary = join(root, 'tmp');
+    const outside = join(root, 'outside');
+    const skill = join(root, 'skill');
+    await mkdir(temporary);
+    await mkdir(outside);
+    await mkdir(skill);
+    await writeFile(join(outside, 'keep.txt'), 'keep');
+    await writeFile(
+      join(skill, 'SKILL.md'),
+      '---\nname: reviewer\ndescription: Review\n---\nReview.',
+    );
+    vi.stubEnv('TEMP', temporary);
+    vi.stubEnv('TMP', temporary);
+    vi.stubEnv('TMPDIR', temporary);
+    // No real Claude settings are read while ambient Skill names are discovered.
+    vi.stubEnv('HOME', join(root, 'no-home'));
+    vi.stubEnv('USERPROFILE', join(root, 'no-home'));
+    vi.stubEnv('CLAUDE_CONFIG_DIR', join(root, 'no-claude-config'));
+    return { temporary, outside, skill };
+  }
+
+  /**
+   * A Team Turn without a Workspace and with one selected native Skill, so it owns a cwd, an MCP
+   * settings folder and a Skill plugin folder.
+   */
+  function start(turnId: string, skill: string) {
+    const adapter = new ClaudeRuntimeAdapter(2_000);
+    const failed = vi.fn();
+    const exited = vi.fn();
+    adapter.start(
+      turnId,
+      'test',
+      [],
+      vi.fn(),
+      null,
+      'auto',
+      vi.fn(),
+      failed,
+      exited,
+      {
+        socketPath: 'synthetic-unused-socket',
+        token: 'synthetic-unused-token',
+        guidance: '',
+        toolNames: [],
+      },
+      undefined,
+      'read-only',
+      [
+        {
+          name: 'reviewer',
+          path: skill,
+          profile: 'claude-native',
+          runtimeSupport: 'full',
+          activationPolicy: 'manual',
+          selected: true,
+        },
+      ],
+    );
+    return { adapter, failed, exited };
+  }
+
+  /** The same Turn, whose CLI leaves a link to `outside` in each folder the Turn owns. */
+  async function startLinkingTurn(turnId: string) {
+    const { temporary, outside, skill } = await fixture();
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null,
+      pid: undefined,
+    });
+    const owned: string[] = [];
+    processMock.spawn.mockImplementationOnce(() => {
+      for (const name of readdirSync(temporary)) {
+        owned.push(name);
+        symlinkSync(outside, join(temporary, name, 'linked'), directoryLinkType);
+      }
+      return child;
+    });
+    const turn = start(turnId, skill);
+    expect(owned).toHaveLength(3);
+    const close = (code: number) => {
+      child.exitCode = code;
+      child.emit('close', code);
+    };
+    return { ...turn, close, temporary, outside, owned };
+  }
+
+  it('removes them without following a junction the CLI left inside when the CLI exits', async () => {
+    const turn = await startLinkingTurn('link-cleanup-exit');
+    turn.close(1);
+
+    expect(turn.exited).toHaveBeenCalledWith(1, false);
+    expect(turn.failed).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+      expect.objectContaining({ failureStage: 'abnormal_exit' }),
+    );
+    expect(await readdir(turn.temporary)).toEqual([]);
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    expect(await readFile(join(turn.outside, 'keep.txt'), 'utf8')).toBe('keep');
+    // The Node that runs this suite in CI does not follow a junction in a recursive rmSync, so
+    // only the removal the adapter chose shows that it cannot follow one in Electron either.
+    for (const name of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(
+        join(turn.temporary, name),
+      );
+  });
+
+  it('removes them without following a junction after a Stop', async () => {
+    const turn = await startLinkingTurn('link-cleanup-stop');
+    await turn.adapter.cancel('link-cleanup-stop');
+    turn.close(1);
+
+    expect(turn.exited).toHaveBeenCalledWith(1, true);
+    expect(await readdir(turn.temporary)).toEqual([]);
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    for (const name of turn.owned)
+      expect(removal.removeTreeWithoutFollowingLinksSync).toHaveBeenCalledWith(
+        join(turn.temporary, name),
+      );
+  });
+
+  it('still reports the Runtime failure when removing them fails, and keeps them', async () => {
+    const turn = await startLinkingTurn('link-cleanup-failure');
+    vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockImplementation(() => {
+      throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    });
+    try {
+      turn.close(1);
+    } finally {
+      vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockReset();
+    }
+
+    expect(turn.exited).toHaveBeenCalledWith(1, false);
+    expect(turn.failed).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+      expect.objectContaining({ failureStage: 'abnormal_exit' }),
+    );
+    // No fallback removal ran: the folders stay for a later diagnosis.
+    expect((await readdir(turn.temporary)).sort()).toEqual([...turn.owned].sort());
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    // The links left behind go with the real removal, before the recursive test cleanup.
+    removal.removeTreeWithoutFollowingLinksSync(turn.temporary);
+  });
+
+  it.each([false, true])(
+    'reports a startup failure when Node is missing and removes what it staged (removal fails: %s)',
+    async (removalFails) => {
+      const { temporary, skill } = await fixture();
+      vi.mocked(nodeCommand.teamMcpNodeCommand).mockImplementationOnce(() => {
+        throw new Error('bundled Node.js is missing');
+      });
+      if (removalFails)
+        vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockImplementation(() => {
+          throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+        });
+      const spawnCalls = processMock.spawn.mock.calls.length;
+      try {
+        const turn = start(`link-cleanup-startup-${removalFails}`, skill);
+        expect(processMock.spawn).toHaveBeenCalledTimes(spawnCalls);
+        expect(turn.failed).toHaveBeenCalledWith(
+          expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+          expect.objectContaining({ failureStage: 'startup_error' }),
+        );
+      } finally {
+        vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockReset();
+      }
+      // The cwd and the Skill plugin folder were staged before Node was resolved.
+      expect(await readdir(temporary)).toHaveLength(removalFails ? 2 : 0);
+    },
+  );
 });
 
 describe('Claude runtime errors', () => {

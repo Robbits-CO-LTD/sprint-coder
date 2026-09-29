@@ -9,7 +9,6 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -42,6 +41,7 @@ import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { TEAM_CORE_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
 import {
@@ -262,7 +262,7 @@ export class CodexRuntimeAdapter {
       for (const path of [temporaryDirectory, teamMcpDirectory, skillIsolationDirectory]) {
         if (path === null) continue;
         try {
-          rmSync(path, { recursive: true, force: true });
+          removeTreeWithoutFollowingLinksSync(path);
         } catch {
           // Cleanup failure must not hide the Runtime failure that triggered it.
         }
