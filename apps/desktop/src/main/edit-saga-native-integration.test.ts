@@ -395,6 +395,46 @@ async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
   return result.stdout.trim();
 }
 
+/** One DACL entry: `flags` without INHERITED_ACE, which `inherited` carries. */
+type WindowsAce = { type: string; flags: number; inherited: boolean; mask: number; sid: string };
+
+/**
+ * A DACL as what grants access: whether it is protected and its entries (null for a NULL DACL),
+ * with every SID in its `S-` form. The other control flags, such as SE_DACL_AUTO_INHERITED (`AI`),
+ * and SDDL's SID aliases depend on how the descriptor was written and on who runs the test, not on
+ * who can access the file, so tests compare this instead of the SDDL text.
+ */
+type WindowsAccess = { protected: boolean; entries: WindowsAce[] | null };
+
+/** Windows only: `windowsDacl`, returned as the access it grants (see `WindowsAccess`). */
+async function windowsAccess(path: string, ownerOnly = false): Promise<WindowsAccess> {
+  const script = [
+    '$protected = $false',
+    '$entries = $null',
+    'if ($env:SPRINT_CODER_DACL_SDDL) {',
+    '  $sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
+    '  $flag = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    '  $protected = ($sd.ControlFlags -band $flag) -ne 0',
+    '  if ($null -ne $sd.DiscretionaryAcl) {',
+    '    $entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
+    '      $aceFlags = [int]$ace.AceFlags',
+    '      [ordered]@{ type = $ace.AceType.ToString(); flags = $aceFlags -band 0xEF;',
+    '        inherited = ($aceFlags -band 0x10) -ne 0; mask = $ace.AccessMask;',
+    '        sid = $ace.SecurityIdentifier.Value }',
+    '    })',
+    '  }',
+    '}',
+    'ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{',
+    '  protected = $protected; entries = $entries })',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: windowsPowerShellEnv({ SPRINT_CODER_DACL_SDDL: await windowsDacl(path, ownerOnly) }),
+  });
+  if (result.status !== 0) throw new Error(`parsing the DACL failed: ${result.stderr}`);
+  return JSON.parse(result.stdout) as WindowsAccess;
+}
+
 /**
  * Windows only: writes a DACL through SetFileSecurityW, which stores it as given, so a protected
  * DACL keeps entries flagged as inherited (what a re-application through SetSecurityInfo drops).
@@ -557,10 +597,12 @@ if (runsWithElectronAbi) {
         rename: paths.renameSrcPath,
         delete: paths.deletePath,
       };
-      const original: Record<string, string> = {};
+      const original: Record<string, WindowsAccess> = {};
       for (const [kind, path] of Object.entries(restoredPaths))
-        original[kind] = await windowsDacl(path, kind !== 'delete');
-      expect(original['delete']).toMatch(/^D:AI\(/);
+        original[kind] = await windowsAccess(path, kind !== 'delete');
+      // The deleted file keeps only what it inherited from the Workspace.
+      expect(original['delete']!.protected).toBe(false);
+      expect(original['delete']!.entries!.every((entry) => entry.inherited)).toBe(true);
       const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
         await preparePersistence(env);
       const artifacts = await EditArtifactStore.open({
@@ -601,9 +643,9 @@ if (runsWithElectronAbi) {
       await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
       await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
       await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
-      const restored: Record<string, string> = {};
+      const restored: Record<string, WindowsAccess> = {};
       for (const [kind, path] of Object.entries(restoredPaths))
-        restored[kind] = await windowsDacl(path);
+        restored[kind] = await windowsAccess(path);
       expect(restored).toEqual(original);
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
@@ -625,7 +667,7 @@ if (runsWithElectronAbi) {
         const ownPath = join(env.workspace, 'own-acl.txt');
         await writeFile(keptPath, 'UPDATE_BEFORE', { mode: 0o600 });
         await writeFile(ownPath, 'OWN_ACL', { mode: 0o600 });
-        const ownDacl = await windowsDacl(ownPath, true);
+        const ownAccess = await windowsAccess(ownPath, true);
         const operations: PreparedPatchOperation[] = [];
         if (withUpdate)
           operations.push(
@@ -704,7 +746,7 @@ if (runsWithElectronAbi) {
         });
         await expect(readFile(keptPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
         await expect(readFile(ownPath, 'utf8')).resolves.toBe('OWN_ACL');
-        await expect(windowsDacl(ownPath)).resolves.toBe(ownDacl);
+        await expect(windowsAccess(ownPath)).resolves.toEqual(ownAccess);
         // No intent was journaled for the refused step, so nothing is left to recover.
         expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
         expect(
@@ -733,10 +775,15 @@ if (runsWithElectronAbi) {
       await writeFile(mixedPath, 'UPDATE_BEFORE', { mode: 0o600 });
       windowsSetRawDacl(protectedPath, 'D:PAI(A;ID;FA;;;{user})(A;ID;FR;;;BU)');
       spawnSync('icacls.exe', [mixedPath, '/grant', '*S-1-5-32-545:(R)']);
-      const protectedDacl = await windowsDacl(protectedPath);
-      const mixedDacl = await windowsDacl(mixedPath);
-      expect(protectedDacl).toMatch(/^D:P[A-Z]*\(A;ID;/);
-      expect(mixedDacl).toMatch(/^D:AI\(A;;[^)]*;BU\)\(A;ID;/);
+      const protectedAccess = await windowsAccess(protectedPath);
+      const mixedAccess = await windowsAccess(mixedPath);
+      expect(protectedAccess.protected).toBe(true);
+      expect(protectedAccess.entries!.every((entry) => entry.inherited)).toBe(true);
+      // One explicit entry for BUILTIN\Users ahead of those inherited from the Workspace.
+      expect(mixedAccess.protected).toBe(false);
+      expect(mixedAccess.entries![0]).toMatchObject({ inherited: false, sid: 'S-1-5-32-545' });
+      expect(mixedAccess.entries!.length).toBeGreaterThan(1);
+      expect(mixedAccess.entries!.slice(1).every((entry) => entry.inherited)).toBe(true);
       const operation = async (path: string, name: string) =>
         Object.freeze({
           kind: 'update' as const,
@@ -796,12 +843,16 @@ if (runsWithElectronAbi) {
       await expect(readFile(mixedPath, 'utf8')).resolves.toBe('UPDATE_AFTER');
       // A protected re-application keeps every entry and drops only where it came from. Get-Acl
       // prints explicit entries in canonical order, so compare protection and the set of entries.
-      const access = (sddl: string) => ({
-        protected: sddl.startsWith('D:P'),
-        entries: (sddl.match(/\([^)]*\)/g) ?? []).map((ace) => ace.replace(';ID;', ';;')).sort(),
+      const withoutOrigin = (access: WindowsAccess) => ({
+        protected: access.protected,
+        entries: (access.entries ?? [])
+          .map(({ inherited: _inherited, ...entry }) => JSON.stringify(entry))
+          .sort(),
       });
-      expect(access(await windowsDacl(protectedPath))).toEqual(access(protectedDacl));
-      await expect(windowsDacl(mixedPath)).resolves.toBe(mixedDacl);
+      expect(withoutOrigin(await windowsAccess(protectedPath))).toEqual(
+        withoutOrigin(protectedAccess),
+      );
+      await expect(windowsAccess(mixedPath)).resolves.toEqual(mixedAccess);
       expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
@@ -921,7 +972,7 @@ if (runsWithElectronAbi) {
       const movedPath = join(env.workspace, 'moved.txt');
       await writeFile(join(strict, 'moved.txt'), 'UPDATE_BEFORE', { mode: 0o600 });
       await rename(join(strict, 'moved.txt'), movedPath);
-      const movedDacl = await windowsDacl(movedPath);
+      const movedAccess = await windowsAccess(movedPath);
       const operation = Object.freeze({
         kind: 'update' as const,
         path: 'moved.txt',
@@ -971,7 +1022,7 @@ if (runsWithElectronAbi) {
       });
       expect(persistence.getEditSaga(request.id)).toMatchObject({ state: 'restored' });
       await expect(readFile(movedPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
-      await expect(windowsDacl(movedPath)).resolves.toBe(movedDacl);
+      await expect(windowsAccess(movedPath)).resolves.toEqual(movedAccess);
       expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
       expect(
         (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),

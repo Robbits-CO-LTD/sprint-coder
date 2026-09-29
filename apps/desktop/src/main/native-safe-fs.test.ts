@@ -379,11 +379,17 @@ async function windowsDacl(path: string, replace?: string): Promise<string> {
   return stdout.trim();
 }
 
-type WindowsParsedDacl = {
-  protected: boolean;
-  entries: { type: string; flags: number; mask: number; sid: string }[];
-  user: string;
-};
+/** One DACL entry: `flags` without INHERITED_ACE, which `inherited` carries. */
+type WindowsAce = { type: string; flags: number; inherited: boolean; mask: number; sid: string };
+
+/**
+ * A DACL as what grants access: whether it is protected and its entries (null for a NULL DACL).
+ * The other control flags, such as SE_DACL_AUTO_INHERITED (`AI`), are left out: whether they are
+ * set depends on how the descriptor was written, not on who can access the file.
+ */
+type WindowsAccess = { protected: boolean; entries: WindowsAce[] | null };
+
+type WindowsParsedDacl = WindowsAccess & { user: string };
 
 /**
  * Windows only: parses a DACL's SDDL with every SID resolved to its `S-` form, next to the current
@@ -392,20 +398,35 @@ type WindowsParsedDacl = {
  */
 async function windowsParsedDacl(sddl: string): Promise<WindowsParsedDacl> {
   const script = [
-    '$sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
-    '$entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
-    '  [ordered]@{ type = $ace.AceType.ToString(); flags = [int]$ace.AceFlags;',
-    '    mask = $ace.AccessMask; sid = $ace.SecurityIdentifier.Value }',
-    '})',
-    '$protected = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    '$protected = $false',
+    '$entries = $null',
+    'if ($env:SPRINT_CODER_DACL_SDDL) {',
+    '  $sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
+    '  $flag = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    '  $protected = ($sd.ControlFlags -band $flag) -ne 0',
+    '  if ($null -ne $sd.DiscretionaryAcl) {',
+    '    $entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
+    '      $aceFlags = [int]$ace.AceFlags',
+    '      [ordered]@{ type = $ace.AceType.ToString(); flags = $aceFlags -band 0xEF;',
+    '        inherited = ($aceFlags -band 0x10) -ne 0; mask = $ace.AccessMask;',
+    '        sid = $ace.SecurityIdentifier.Value }',
+    '    })',
+    '  }',
+    '}',
     'ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{',
-    '  protected = (($sd.ControlFlags -band $protected) -ne 0); entries = $entries;',
+    '  protected = $protected; entries = $entries;',
     '  user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value })',
   ].join('\n');
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
     env: windowsPowerShellEnv({ SPRINT_CODER_DACL_SDDL: sddl }),
   });
   return JSON.parse(stdout) as WindowsParsedDacl;
+}
+
+/** Windows only: `windowsDacl`, returned as the access it grants (see `WindowsAccess`). */
+async function windowsAccess(path: string, replace?: string): Promise<WindowsAccess> {
+  const { user: _user, ...access } = await windowsParsedDacl(await windowsDacl(path, replace));
+  return access;
 }
 
 /** Windows only: gives a file one extended attribute through NtSetEaFile. */
@@ -874,16 +895,19 @@ describe('NativeSafeFs authority boundary', () => {
       for (const [index, restrict] of [true, false].entries()) {
         const sourcePath = join(input.workspace, `acl-${index}.txt`);
         await writeFile(sourcePath, 'acl before\n');
-        const dacl = await windowsDacl(sourcePath, restrict ? 'owner-only' : undefined);
-        const parsed = await windowsParsedDacl(dacl);
+        const { user, ...access } = await windowsParsedDacl(
+          await windowsDacl(sourcePath, restrict ? 'owner-only' : undefined),
+        );
+        expect(user).toMatch(/^S-1-/);
         if (restrict)
-          expect(parsed).toEqual({
+          expect(access).toEqual({
             protected: true,
             // FA (FILE_ALL_ACCESS) for the current user alone, with no inheritance flags.
-            entries: [{ type: 'AccessAllowed', flags: 0, mask: 0x1f01ff, sid: parsed.user }],
-            user: expect.stringMatching(/^S-1-/),
+            entries: [
+              { type: 'AccessAllowed', flags: 0, inherited: false, mask: 0x1f01ff, sid: user },
+            ],
           });
-        else expect(parsed.protected).toBe(false);
+        else expect(access.protected).toBe(false);
         const previous = await revision(sourcePath);
         const replacement = Buffer.from('acl after\n');
         let intent = nativeIntent({
@@ -897,12 +921,13 @@ describe('NativeSafeFs authority boundary', () => {
         });
         intent = await stageNativeIntent(boundary, session, intent, replacement);
         const stagedPath = join(input.workspace, intent.temp!.leafName);
-        await expect(windowsDacl(stagedPath)).resolves.toBe(dacl);
+        // Entries are compared with their inherited flag, so inheritance carries over too.
+        await expect(windowsAccess(stagedPath)).resolves.toEqual(access);
         intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
 
         const effect = await boundary.applyIntentEffect(session, intent);
         await expect(readFile(sourcePath)).resolves.toEqual(replacement);
-        await expect(windowsDacl(sourcePath)).resolves.toBe(dacl);
+        await expect(windowsAccess(sourcePath)).resolves.toEqual(access);
         intent = transitionNativeMutationIntent(intent, {
           state: 'effect_observed',
           effectObservation: effect,
@@ -921,7 +946,7 @@ describe('NativeSafeFs authority boundary', () => {
       for (const [index, replace] of (['owner-only', 'null'] as const).entries()) {
         const sourcePath = join(input.workspace, `own-acl-${index}.txt`);
         await writeFile(sourcePath, 'own access control\n');
-        const dacl = await windowsDacl(sourcePath, replace);
+        const access = await windowsAccess(sourcePath, replace);
         const previous = await revision(sourcePath);
         let intent = nativeIntent({
           session,
@@ -942,7 +967,7 @@ describe('NativeSafeFs authority boundary', () => {
           message: ACCESS_CONTROL_REFUSAL,
         } satisfies Partial<NativeSafeFsError>);
         await expect(revision(sourcePath)).resolves.toEqual(previous);
-        await expect(windowsDacl(sourcePath)).resolves.toBe(dacl);
+        await expect(windowsAccess(sourcePath)).resolves.toEqual(access);
       }
       await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
       await boundary.closeSession(session);
@@ -1019,7 +1044,7 @@ describe('NativeSafeFs authority boundary', () => {
       });
       intent = await stageNativeIntent(boundary, session, intent, replacement);
       intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
-      const tightened = await windowsDacl(sourcePath, 'owner-only');
+      const tightened = await windowsAccess(sourcePath, 'owner-only');
 
       await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
         code: 'EFFECT_REFUSED',
@@ -1027,7 +1052,7 @@ describe('NativeSafeFs authority boundary', () => {
       } satisfies Partial<NativeSafeFsError>);
       await expect(revision(sourcePath)).resolves.toEqual(previous);
       await expect(readFile(sourcePath, 'utf8')).resolves.toBe('tightened before\n');
-      await expect(windowsDacl(sourcePath)).resolves.toBe(tightened);
+      await expect(windowsAccess(sourcePath)).resolves.toEqual(tightened);
       await boundary.closeSession(session);
     });
 
@@ -1040,8 +1065,8 @@ describe('NativeSafeFs authority boundary', () => {
       // A same-volume move keeps the descriptor, including what it inherited in `strict`.
       await rename(join(strict, 'moved.txt'), join(input.workspace, 'moved.txt'));
       await writeFile(join(input.workspace, 'native.txt'), 'native bytes\n');
-      const movedDacl = await windowsDacl(join(input.workspace, 'moved.txt'));
-      expect(movedDacl).not.toBe(await windowsDacl(join(input.workspace, 'native.txt')));
+      const movedAccess = await windowsAccess(join(input.workspace, 'moved.txt'));
+      expect(movedAccess).not.toEqual(await windowsAccess(join(input.workspace, 'native.txt')));
       const boundary = mutationBoundary(fixtureBoundary(input));
       const session = await boundary.openSession({ ...input, fence: '854' });
       for (const [index, [name, allowed]] of (
@@ -1072,7 +1097,7 @@ describe('NativeSafeFs authority boundary', () => {
             code: 'EFFECT_REFUSED',
           } satisfies Partial<NativeSafeFsError>);
           await expect(revision(join(input.workspace, name))).resolves.toEqual(previous);
-          await expect(windowsDacl(join(input.workspace, name))).resolves.toBe(movedDacl);
+          await expect(windowsAccess(join(input.workspace, name))).resolves.toEqual(movedAccess);
         }
       }
       await boundary.closeSession(session);
@@ -1197,7 +1222,7 @@ describe('NativeSafeFs authority boundary', () => {
       await writeFile(join(strict, 'moved.txt'), 'moved before\n');
       await rename(join(strict, 'moved.txt'), join(input.workspace, 'moved.txt'));
       const sourcePath = join(input.workspace, 'moved.txt');
-      const movedDacl = await windowsDacl(sourcePath);
+      const movedAccess = await windowsAccess(sourcePath);
       const boundary = mutationBoundary(fixtureBoundary(input));
       const session = await boundary.openSession({ ...input, fence: '856' });
       const replacement = Buffer.from('must not be written\n');
@@ -1221,7 +1246,7 @@ describe('NativeSafeFs authority boundary', () => {
       );
       await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
       await expect(readFile(sourcePath, 'utf8')).resolves.toBe('moved before\n');
-      await expect(windowsDacl(sourcePath)).resolves.toBe(movedDacl);
+      await expect(windowsAccess(sourcePath)).resolves.toEqual(movedAccess);
       await boundary.closeSession(session);
     });
 
@@ -1508,8 +1533,11 @@ describe('NativeSafeFs authority boundary', () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'null-dacl.txt');
       await writeFile(sourcePath, 'null dacl before\n');
-      // .NET renders a NULL DACL (full access for everyone) as an empty access section.
-      await expect(windowsDacl(sourcePath, 'null')).resolves.toBe('');
+      // A NULL DACL: full access for everyone, with no entries at all.
+      await expect(windowsAccess(sourcePath, 'null')).resolves.toEqual({
+        protected: false,
+        entries: null,
+      });
       const boundary = mutationBoundary(fixtureBoundary(input));
       const session = await boundary.openSession({ ...input, fence: '849' });
       const replacement = Buffer.from('must not be staged\n');
