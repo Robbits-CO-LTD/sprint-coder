@@ -218,7 +218,9 @@ import {
   ToolRegistry,
   createToolDefinition,
   createToolId,
+  evaluatePermissionPolicy,
   expandAccessPreset,
+  type AccessPreset,
 } from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
 import { FileRevisionRegistry } from './file-revision';
@@ -533,6 +535,7 @@ describe('Main runtime failure diagnostics', () => {
         policyEpochFor: () => 1,
         authorizer: () => ({ decision: 'allow', reason: 'synthetic', beforeExecute: () => true }),
         auxiliary: {
+          projectMemoryTarget: () => ({ projectId: 'project-protocol', projectName: 'Synthetic' }),
           queueProjectMemory: effect,
           createSkillDraft: effect,
           activateSkill: effect,
@@ -3052,6 +3055,7 @@ describe('Main image attachment dispatch boundary', () => {
       policyEpochFor: () => 1,
       authorizer: authorize,
       auxiliary: {
+        projectMemoryTarget: () => ({ projectId: 'project-533', projectName: 'Synthetic' }),
         queueProjectMemory: memory,
         createSkillDraft: draft,
         activateSkill: async () => ({ instructions: 'synthetic' }),
@@ -3130,6 +3134,11 @@ describe('Main image attachment dispatch boundary', () => {
       call('project_memory_remember', snapshot.digest, 'denied', { content: 'synthetic' }),
     ).rejects.toThrow('synthetic_deny');
     expect(memory).not.toHaveBeenCalled();
+    // The native MCP call reaches the same broker, which authorizes it as the Project memory
+    // capability rather than external.open (Issue #546).
+    expect(authorize.mock.calls[0]![0].entry.requiredCapabilities).toEqual([
+      'project.memory.write',
+    ]);
     allow = true;
     await expect(
       call('skill_draft_create', snapshot.digest, 'allowed', {
@@ -3140,12 +3149,105 @@ describe('Main image attachment dispatch boundary', () => {
     ).resolves.toEqual({ draft: true });
     expect(draft).toHaveBeenCalledOnce();
     expect(authorize).toHaveBeenCalledTimes(2);
+    expect(authorize.mock.calls[1]![0].entry.requiredCapabilities).toEqual(['skill.draft.write']);
     attachManagedTools.mockReturnValue(false);
     expect(() => attach.call(router, context.turnId, teamMcp, snapshot)).toThrow(
       'Codex auxiliary MCP registration is unavailable',
     );
     await harness.dispose();
   });
+
+  it.each(['ask', 'auto', 'full'] as const)(
+    'asks the person about Project memory and Skill Drafts under %s, never the Auto reviewer (Issue #546)',
+    async (preset: AccessPreset) => {
+      const captured: ToolAuthorizationRequest[] = [];
+      const harness = new ManagedCodingHarness({
+        workspaceFor: () => null,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 1,
+        authorizer: (request) => {
+          captured.push(request);
+          return { decision: 'deny', reason: 'captured' };
+        },
+        auxiliary: {
+          projectMemoryTarget: () => ({ projectId: 'project-546', projectName: 'Synthetic' }),
+          queueProjectMemory: async () => ({ queued: true }),
+          createSkillDraft: async () => ({ draft: true }),
+          activateSkill: async () => ({ instructions: 'unused' }),
+        },
+      });
+      const context = { taskId: 'task-546', turnId: 'turn-546', workspaceId: null, policyEpoch: 1 };
+      harness.startTurn(context, 'codex', { projectMemory: true, skillDrafts: true });
+      for (const [callId, providerName, input] of [
+        ['memory', 'project_memory_remember', { content: 'Use pnpm for installs' }],
+        [
+          'draft',
+          'skill_draft_create',
+          { kind: 'chat', skillId: 'synthetic', files: [{ path: 'SKILL.md', content: 'x' }] },
+        ],
+      ] as const)
+        await harness.broker
+          .dispatch({ ...context, callId, providerName, input })
+          .catch(() => undefined);
+      expect(captured).toHaveLength(2);
+
+      const review = vi.fn();
+      const autoDecisions: unknown[] = [];
+      const router = Object.create(IpcRouter.prototype) as {
+        evaluateToolPermission(
+          request: ToolAuthorizationRequest,
+          capability: string,
+        ): Promise<{ decision: string; reason: string }>;
+      };
+      const expanded = expandAccessPreset(preset);
+      Object.assign(router, {
+        managedWorkerCall: new Map(),
+        autoReviewer: { review },
+        publish: () => undefined,
+        permissionBroker: {
+          getPolicy: () => ({ preset, policyEpoch: 1 }),
+          // The Task's preset as the real broker merges it around the lane's own base policy.
+          preview: (input: {
+            request: Parameters<typeof evaluatePermissionPolicy>[0]['request'];
+            basePolicy: Omit<
+              Parameters<typeof evaluatePermissionPolicy>[0]['policy'],
+              'rememberedGrants' | 'allowRules' | 'approvalPolicy' | 'policyEpoch'
+            >;
+            now: string;
+          }) =>
+            evaluatePermissionPolicy({
+              request: input.request,
+              now: input.now,
+              policy: {
+                ...input.basePolicy,
+                rememberedGrants: [],
+                allowRules: expanded.allowRules,
+                immutableDeny: expanded.immutableDeny ?? [],
+                approvalPolicy: expanded.approvalPolicy,
+                ...(expanded.approvalReason === undefined
+                  ? {}
+                  : { approvalReason: expanded.approvalReason }),
+                policyEpoch: 1,
+              },
+            }),
+          commitEvaluation: (_input: unknown, _evaluation: unknown, autoDecision: unknown) => {
+            autoDecisions.push(autoDecision);
+            return undefined;
+          },
+        },
+      });
+      for (const request of captured)
+        await expect(
+          router.evaluateToolPermission(request, request.entry.requiredCapabilities[0]!),
+        ).resolves.toMatchObject({
+          decision: 'approval_required',
+          reason: 'per_call_human_approval_required',
+        });
+      expect(review).not.toHaveBeenCalled();
+      expect(autoDecisions).toEqual([undefined, undefined]);
+      await harness.dispose();
+    },
+  );
 
   describe('Worker write waiting on an Approval Card when its Worker Turn ends (issue #525)', () => {
     const prepareWorkerManagedCatalog = Reflect.get(

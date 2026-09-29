@@ -988,15 +988,6 @@ napi_value CloseOwnedJob(napi_env env, napi_callback_info info) {
   return result;
 }
 
-napi_value Unsupported(napi_env env, napi_callback_info) {
-  napi_value error;
-  napi_create_error(env, nullptr,
-                    MakeString(env, "NativeSafeFs Windows backend is not available"), &error);
-  napi_set_named_property(env, error, "code", MakeString(env, "UNSUPPORTED_PLATFORM"));
-  napi_throw(env, error);
-  return nullptr;
-}
-
 napi_value Probe(napi_env env, napi_callback_info) {
   napi_value result;
   napi_create_object(env, &result);
@@ -1389,20 +1380,18 @@ napi_value ObserveSealedPostImage(napi_env env, napi_callback_info info) {
       ReadCrypto content;
       if (!content.digest(bytes.data(), static_cast<DWORD>(bytes.size()), &content_hash))
         return ReadFailure(env, "NATIVE_FAILURE", "Cannot hash sealed endpoint bytes");
-      // Match the Windows mutation identity formula, including creation time.
-      const std::string identity = std::to_string(before.dwVolumeSerialNumber) + ":" +
-          std::to_string((static_cast<uint64_t>(before.nFileIndexHigh) << 32) | before.nFileIndexLow) + ":" +
-          std::to_string((static_cast<uint64_t>(before.ftCreationTime.dwHighDateTime) << 32) |
-                         before.ftCreationTime.dwLowDateTime);
-      ReadCrypto identity_hash;
-      if (!identity_hash.digest(reinterpret_cast<const BYTE*>(identity.data()),
-                                static_cast<DWORD>(identity.size()), &identity_digest))
+      // Match the Windows mutation identity formula (and Main's Node-derived file revisions).
+      if (!WindowsNativeFileIdentityDigest(
+              before.dwVolumeSerialNumber,
+              (static_cast<uint64_t>(before.nFileIndexHigh) << 32) | before.nFileIndexLow,
+              before.dwFileAttributes, before.nNumberOfLinks, &identity_digest))
         return ReadFailure(env, "NATIVE_FAILURE", "Cannot hash sealed endpoint identity");
       BY_HANDLE_FILE_INFORMATION after{};
       FILE_BASIC_INFO basic_after{};
       if (!GetFileInformationByHandle(endpoint.get(), &after) ||
           !GetFileInformationByHandleEx(endpoint.get(), FileBasicInfo, &basic_after, sizeof(basic_after)) ||
-          after.nNumberOfLinks != 1 || before.nFileSizeHigh != after.nFileSizeHigh ||
+          after.nNumberOfLinks != 1 || before.dwFileAttributes != after.dwFileAttributes ||
+          before.nFileSizeHigh != after.nFileSizeHigh ||
           before.nFileSizeLow != after.nFileSizeLow ||
           basic_before.ChangeTime.QuadPart != basic_after.ChangeTime.QuadPart ||
           basic_before.LastWriteTime.QuadPart != basic_after.LastWriteTime.QuadPart)
@@ -1448,25 +1437,30 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr, napi_default, nullptr},
       {"observeIntent", nullptr, WindowsMutationObserveIntent, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"preflightIntentEffect", nullptr, WindowsMutationPreflightIntentEffect, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
       {"stageIntentArtifact", nullptr, WindowsMutationStageIntentArtifact, nullptr, nullptr,
        nullptr, napi_default, nullptr},
       {"applyIntentEffect", nullptr, WindowsMutationApplyIntentEffect, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"cleanupIntentAuxiliary", nullptr, WindowsMutationCleanupIntentAuxiliary, nullptr, nullptr,
        nullptr, napi_default, nullptr},
-      {"observeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"observeDirectory", nullptr, WindowsMutationObserveDirectory, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
       {"openReadSession", nullptr, OpenReadSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"closeReadSession", nullptr, CloseReadSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"observeSealedPostImage", nullptr, ObserveSealedPostImage, nullptr, nullptr, nullptr, napi_default,
        nullptr},
-      {"createDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"inspectDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
-      {"cleanupDirectoryOwnership", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
-      {"removeDirectory", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"cleanupDirectoryRemoval", nullptr, Unsupported, nullptr, nullptr, nullptr, napi_default,
-       nullptr},
+      {"createDirectory", nullptr, WindowsMutationCreateDirectory, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"inspectDirectoryOwnership", nullptr, WindowsMutationInspectDirectoryOwnership, nullptr,
+       nullptr, nullptr, napi_default, nullptr},
+      {"cleanupDirectoryOwnership", nullptr, WindowsMutationCleanupDirectoryOwnership, nullptr,
+       nullptr, nullptr, napi_default, nullptr},
+      {"removeDirectory", nullptr, WindowsMutationRemoveDirectory, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"cleanupDirectoryRemoval", nullptr, WindowsMutationCleanupDirectoryRemoval, nullptr,
+       nullptr, nullptr, napi_default, nullptr},
       {"closeSession", nullptr, WindowsMutationCloseSession, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"assignProcessToOwnedJob", nullptr, AssignProcessToOwnedJob, nullptr, nullptr, nullptr,

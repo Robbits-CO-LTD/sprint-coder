@@ -12,9 +12,32 @@ export const capabilities = [
   'provider.egress',
   'computer.observe',
   'computer.control',
+  'project.memory.write',
+  'skill.draft.write',
 ] as const;
 
 export type Capability = (typeof capabilities)[number];
+
+/**
+ * Capabilities a person approves one call at a time, under every access preset (Issue #546).
+ *
+ * Adding to a Project's memory and creating a Skill Draft each leave something behind that later
+ * Turns read, so neither is covered by a preset allow, a remembered or Task grant, or the Auto
+ * reviewer. A deny still wins: these are asked about only after every deny stage has passed.
+ */
+export const PER_CALL_HUMAN_APPROVAL_CAPABILITIES = [
+  'project.memory.write',
+  'skill.draft.write',
+] as const satisfies readonly Capability[];
+
+export function requiresPerCallHumanApproval(capability: Capability): boolean {
+  return (PER_CALL_HUMAN_APPROVAL_CAPABILITIES as readonly Capability[]).includes(capability);
+}
+
+/** Resource target prefixes for the per-call capabilities. Main owns the value after the colon. */
+export const PROJECT_MEMORY_RESOURCE_PREFIX = 'project-memory:';
+export const SKILL_DRAFT_RESOURCE_PREFIX = 'skill-draft:';
+
 export type PermissionOperation =
   'read' | 'write' | 'execute' | 'fetch' | 'open' | 'use' | 'egress' | 'observe' | 'control';
 export type ProviderEgress = 'none' | 'trusted-local' | 'trusted-remote' | 'untrusted-remote';
@@ -583,6 +606,9 @@ export function createSessionGrant(grant: SessionGrant): SessionGrant {
     throw new Error('Computer grants require an app, window, session, or revision binding');
   if (grant.capability === 'shell.execute' && grant.executionSpecDigest === undefined)
     throw new Error('Shell grants require an exact execution digest');
+  // Approved one call at a time (Issue #546): nothing may be written down that covers the next one.
+  if (requiresPerCallHumanApproval(grant.capability) && grant.scope !== 'once')
+    throw new Error('Project memory and Skill Draft grants must be per call');
   return Object.freeze({
     ...grant,
     resourceSet: cloneResourceSet(grant.resourceSet),
@@ -654,6 +680,17 @@ export function evaluatePermissionPolicy(input: {
     sandboxRank(policy.sandbox.profile) < sandboxRank(request.sandboxProfile)
   )
     return evaluation('deny', 'sandbox_infeasible', policy.policyEpoch, trace);
+
+  // Every deny stage has passed; nothing after this point may stand in for the person (Issue #546).
+  if (requiresPerCallHumanApproval(request.capability)) {
+    trace.push('approval-policy');
+    return evaluation(
+      'approval_required',
+      'per_call_human_approval_required',
+      policy.policyEpoch,
+      trace,
+    );
+  }
 
   trace.push('remembered-grant');
   const rememberedGrant = policy.rememberedGrants.find((grant) =>
@@ -796,6 +833,8 @@ function requestFactsValid(request: PermissionRequest): boolean {
     'provider.egress': 'egress',
     'computer.observe': 'observe',
     'computer.control': 'control',
+    'project.memory.write': 'write',
+    'skill.draft.write': 'write',
   };
   if (request.operation !== expectedOperation[request.capability]) return false;
   if (request.capability !== 'provider.egress' && request.providerEgress !== 'none') return false;
@@ -902,6 +941,18 @@ function requestFactsValid(request: PermissionRequest): boolean {
     if (request.resource.taskId.length === 0 || request.resource.taskId !== request.taskId)
       return false;
   }
+  if (request.capability === 'project.memory.write')
+    return (
+      request.resource.kind === 'external' &&
+      request.resource.target.startsWith(PROJECT_MEMORY_RESOURCE_PREFIX) &&
+      request.resource.target.length > PROJECT_MEMORY_RESOURCE_PREFIX.length
+    );
+  // A Skill Draft belongs to the Task that created it, never to another one.
+  if (request.capability === 'skill.draft.write')
+    return (
+      request.resource.kind === 'external' &&
+      request.resource.target === `${SKILL_DRAFT_RESOURCE_PREFIX}${request.taskId}`
+    );
   const resourceMatchesCapability =
     request.capability === 'workspace.read' || request.capability === 'workspace.write'
       ? request.resource.kind === 'workspace-path' ||

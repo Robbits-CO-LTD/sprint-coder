@@ -13,7 +13,11 @@ import {
   WORKSPACE_PATCH_TOOL,
   type WorkspacePatchDeps,
 } from './workspace-patch-tool';
-import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
+import {
+  EditEffectRefusedError,
+  type EditSagaApplyRequest,
+  type EditSagaSnapshot,
+} from './edit-saga';
 import { createPathGuard, workspaceMutationBinding } from './path-guard';
 
 const roots: string[] = [];
@@ -526,6 +530,48 @@ describe('what the model is told when a patch is rejected', () => {
     ).catch((error: unknown) => error);
     expect((failure as Error).message).toContain('return input + 1;');
     expect((failure as Error).message).toContain('verbatim');
+  });
+
+  it('tells the model why the Saga refused a change it could not undo, for a patch and a batch', async () => {
+    const { deps, patchWriteGuard, patchReadGuard } = await harness();
+    const reason = 'このファイルは独自のアクセス制御を持つため、Windows では削除できません';
+    const refusing = {
+      ...deps,
+      apply: async () => {
+        throw new EditEffectRefusedError(reason);
+      },
+    };
+    const single = await executeWorkspacePatch(
+      { path: 'src/a.txt', edits: [{ oldText: '}', newText: '};' }] },
+      context,
+      refusing,
+      patchWriteGuard,
+      patchReadGuard,
+    ).catch((error: unknown) => error);
+    expect(single).toBeInstanceOf(WorkspacePatchRejection);
+    expect((single as Error).message).toBe(reason);
+    const revision = await deps.revisions.readGuarded({
+      owner: context,
+      guard: patchReadGuard,
+      policyEpoch: 1,
+    });
+    const batch = await executeWorkspacePatchBatch(
+      {
+        operations: [
+          {
+            kind: 'update',
+            path: 'src/a.txt',
+            revision: revision.reference,
+            edits: [{ oldText: 'return input + 1', newText: 'return input + 2' }],
+          },
+        ],
+      },
+      context,
+      refusing,
+      [patchWriteGuard],
+    ).catch((error: unknown) => error);
+    expect(batch).toBeInstanceOf(WorkspacePatchRejection);
+    expect((batch as Error).message).toBe(reason);
   });
 
   it('does not run the Saga for a patch that failed validation', async () => {

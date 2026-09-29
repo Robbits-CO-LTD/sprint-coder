@@ -21,20 +21,23 @@ import {
   type EffectiveWorkspaceSet,
 } from '@sprint-coder/contracts';
 import {
+  PROJECT_MEMORY_TOOL,
   PROVIDER_WORKSPACE_GUIDANCE,
   SKILL_DRAFT_TOOL,
   providerWorkspaceGuidance,
   ProviderWorkspaceTools,
+  projectMemoryAuthorizationFacts,
   providerDisclosureAuthorizationFacts,
   providerToolsFromSnapshot,
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
 } from './provider-workspace-tools';
 import { FileRevisionRegistry } from './file-revision';
-import { commandToolTruncated } from './default-tools';
+import { REQUEST_USER_INPUT_TOOL, commandToolTruncated } from './default-tools';
 import { normalizeTrustedWindowsCmdArgv } from './command-runner';
 import { approvalFactsForTool } from './approval-coordinator';
 import { workspaceMutationBinding } from './path-guard';
+import { nativeWorkspaceEditSupport, type NativeSafeFsProbe } from './native-safe-fs';
 import { ManagedCommandSessions } from './managed-command-sessions';
 
 const roots: string[] = [];
@@ -236,6 +239,7 @@ describe('Provider workspace read tools', () => {
       policyEpochFor: () => 1,
       authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
       auxiliary: {
+        projectMemoryTarget: () => ({ projectId: 'project-aux', projectName: 'Synthetic' }),
         queueProjectMemory: async () => {
           calls.push('memory');
           return { queued: true };
@@ -310,7 +314,12 @@ describe('Provider workspace read tools', () => {
         rootIdentityFor: () => undefined,
         policyEpochFor: () => policyEpoch,
         authorizer,
-        auxiliary: { queueProjectMemory: effect, createSkillDraft: effect, activateSkill: effect },
+        auxiliary: {
+          projectMemoryTarget: () => ({ projectId: 'project-aux', projectName: 'Synthetic' }),
+          queueProjectMemory: effect,
+          createSkillDraft: effect,
+          activateSkill: effect,
+        },
       });
       const context = {
         taskId: 'task-aux-policy',
@@ -341,6 +350,104 @@ describe('Provider workspace read tools', () => {
       await tools.dispose();
     },
   );
+
+  it('gives Project memory and Skill Drafts their own capabilities and leaves request_user_input alone', () => {
+    // Issue #546: neither is an external.open any more, so no external.open rule or grant reaches them.
+    expect(PROJECT_MEMORY_TOOL.requiredCapabilities).toEqual(['project.memory.write']);
+    expect(SKILL_DRAFT_TOOL.requiredCapabilities).toEqual(['skill.draft.write']);
+    expect(REQUEST_USER_INPUT_TOOL.requiredCapabilities).toEqual(['external.open']);
+  });
+
+  it('prepares a Project memory from the trusted Project and validated content before authorization', async () => {
+    const queued: unknown[] = [];
+    const authorized: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        authorized.push(request.input);
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      auxiliary: {
+        projectMemoryTarget: () => ({
+          projectId: 'project-trusted',
+          projectName: 'Trusted Project',
+        }),
+        queueProjectMemory: async (input, _context, target) => {
+          queued.push({ input, target });
+          return { queued: true };
+        },
+        createSkillDraft: async () => ({ draft: true }),
+        activateSkill: async () => ({ instructions: 'unused' }),
+      },
+    });
+    const context = {
+      taskId: 'task-memory-prepare',
+      turnId: 'turn-memory-prepare',
+      workspaceId: null,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex', { projectMemory: true });
+
+    await tools.broker.dispatch({
+      ...context,
+      callId: 'memory-1',
+      providerName: 'project_memory_remember',
+      input: { content: '  Use pnpm for installs  ' },
+    });
+    // The card is built from what was prepared: the Project the Turn belongs to, and the trimmed
+    // content that will actually be kept.
+    expect(projectMemoryAuthorizationFacts(authorized[0])).toEqual({
+      content: 'Use pnpm for installs',
+      projectId: 'project-trusted',
+      projectName: 'Trusted Project',
+    });
+    expect(projectMemoryAuthorizationFacts({ ...(authorized[0] as object) })).toBeUndefined();
+    expect(queued).toEqual([
+      { input: { content: 'Use pnpm for installs' }, target: { projectId: 'project-trusted' } },
+    ]);
+
+    // Content that could never be kept is refused before any approval could be asked for.
+    await expect(
+      tools.broker.dispatch({
+        ...context,
+        callId: 'memory-secret',
+        providerName: 'project_memory_remember',
+        input: { content: 'password=synthetic-value' },
+      }),
+    ).rejects.toThrow();
+    // No Project, no memory, and again nothing to approve.
+    const noProject = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request) => {
+        authorized.push(request.input);
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      auxiliary: {
+        projectMemoryTarget: () => {
+          throw new Error('Projectに所属しないTurnではProject Memoryを利用できません');
+        },
+        queueProjectMemory: async () => ({ queued: true }),
+        createSkillDraft: async () => ({ draft: true }),
+        activateSkill: async () => ({ instructions: 'unused' }),
+      },
+    });
+    noProject.startTurn(context, 'codex', { projectMemory: true });
+    await expect(
+      noProject.broker.dispatch({
+        ...context,
+        callId: 'memory-no-project',
+        providerName: 'project_memory_remember',
+        input: { content: 'synthetic' },
+      }),
+    ).rejects.toThrow('Projectに所属しない');
+    expect(authorized).toHaveLength(1);
+    expect(queued).toHaveLength(1);
+    await Promise.all([tools.dispose(), noProject.dispose()]);
+  });
 
   it('omits command tools until the OS sandbox probe succeeds', async () => {
     const { tools, context } = await harness();
@@ -551,6 +658,120 @@ describe('Provider workspace read tools', () => {
     expect(names).not.toContain('apply_patch');
     expect(names).not.toContain('create_directory');
   });
+
+  it.each([
+    ['full', 'workspace-probed', true],
+    ['add-only', false, false],
+  ] as const)(
+    'publishes apply_patch and create_directory to Main and Worker calls only for a %s / %s backend',
+    async (mutationScope, directoryOwnership, published) => {
+      const parentRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-capability-parent-'));
+      const workerRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-provider-capability-worker-'));
+      roots.push(parentRoot, workerRoot);
+      const makeWorkspace = (path: string, digest: string): EffectiveWorkspaceSet => ({
+        source: 'task',
+        projectId: null,
+        primaryRootId: 'root-a',
+        roots: [
+          { rootId: 'root-a', path, label: 'Workspace', role: 'primary', status: 'available' },
+        ],
+        digest,
+      });
+      const parent = makeWorkspace(parentRoot, '3'.repeat(64));
+      const worker = makeWorkspace(workerRoot, '4'.repeat(64));
+      const binding = await workspaceMutationBinding(workerRoot);
+      const probe: NativeSafeFsProbe = {
+        available: true,
+        apiVersion: 1,
+        platform: process.platform,
+        capabilities: {
+          rootSession: true,
+          workspaceLock: true,
+          durableFence: true,
+          synchronousInvalidation: true,
+          mutation: true,
+          mutationScope,
+          directoryOwnership,
+        },
+        unavailableReason: null,
+      };
+      // The same mapping index.ts applies to the live probe.
+      const support = nativeWorkspaceEditSupport(probe);
+      expect(support).toEqual({ supportsPatch: published, createDirectory: published });
+      const created: { path: string; workspace: string | undefined }[] = [];
+      const workerCall = (callId: string | undefined) => callId?.startsWith('worker-') === true;
+      const tools = new ProviderWorkspaceTools({
+        workspaceFor: (_taskId, _turnId, callId) => (workerCall(callId) ? worker : parent),
+        rootIdentityFor: () => undefined,
+        mutationBindingFor: (_turnId, _rootId, callId) =>
+          workerCall(callId) ? binding : undefined,
+        policyEpochFor: () => 4,
+        authorizer: () => ({ decision: 'allow', reason: 'test', beforeExecute: () => true }),
+        workspaceEdit: {
+          turnWorkspaceSetFor: () => parent,
+          turnRootMutationBindingsFor: () => new Map(),
+          revisions: new FileRevisionRegistry(),
+          apply: async () => {
+            throw new Error('not used');
+          },
+          supportsPatch: support.supportsPatch,
+          ...(support.createDirectory
+            ? {
+                createDirectory: async ({ path, boundary }) => {
+                  created.push({ path, workspace: boundary?.workspace.digest });
+                  return {
+                    rootId: 'root-a',
+                    path,
+                    sagaId: 'capability-saga',
+                    state: 'committed' as const,
+                    kind: 'mkdir' as const,
+                  };
+                },
+              }
+            : {}),
+          policyEpochFor: () => 4,
+        },
+      });
+      const context = {
+        taskId: 'task-capability',
+        turnId: 'turn-capability',
+        workspaceId: parent.digest,
+        policyEpoch: 4,
+      } as const;
+      const names = providerToolsFromSnapshot(tools.startTurn(context, 'codex')).map(
+        ({ name }) => name,
+      );
+
+      // Main: the catalog every Turn (and, filtered by write scope, every Worker) is built from.
+      expect(names.includes('apply_patch')).toBe(published);
+      expect(names.includes('create_directory')).toBe(published);
+      expect(names).toContain('create_file');
+      // Worker: calls bound to the Worker's isolated Workspace reach the same tools.
+      const mkdir = tools.broker.dispatch({
+        ...context,
+        callId: 'worker-mkdir',
+        providerName: 'create_directory',
+        input: { path: 'worker-directory' },
+      });
+      const patch = tools.broker.dispatch({
+        ...context,
+        callId: 'worker-patch',
+        providerName: 'apply_patch',
+        input: {},
+      });
+      if (published) {
+        await expect(mkdir).resolves.toMatchObject({ state: 'committed', kind: 'mkdir' });
+        expect(created).toEqual([{ path: 'worker-directory', workspace: worker.digest }]);
+        // Published: the empty input reaches apply_patch's pinned schema instead of the catalog gate.
+        await expect(patch).rejects.toThrow('Tool input does not match the pinned');
+      } else {
+        await expect(mkdir).rejects.toThrow('Tool name is not present in the Turn catalog');
+        await expect(patch).rejects.toThrow('Tool name is not present in the Turn catalog');
+        expect(created).toEqual([]);
+      }
+      await tools.dispose();
+    },
+  );
 
   it('states the high-impact and honesty constraints in the Provider system guidance', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);

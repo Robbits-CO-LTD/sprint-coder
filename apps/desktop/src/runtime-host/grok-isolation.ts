@@ -1,7 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { environmentValue } from './cli-command-resolution';
+import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 
 // Auth stays owned by the official CLI, including its refresh lock. Do not copy OAuth refresh
 // tokens into per-turn homes: refresh-token rotation would strand the original installation.
@@ -33,10 +34,14 @@ export function prepareGrokIsolation(source: Readonly<NodeJS.ProcessEnv> = proce
       directory,
       cwd,
       environment,
-      cleanup: () => rmSync(directory, { recursive: true, force: true }),
+      cleanup: () => removeTreeWithoutFollowingLinksSync(directory),
     };
   } catch (error) {
-    rmSync(directory, { recursive: true, force: true });
+    try {
+      removeTreeWithoutFollowingLinksSync(directory);
+    } catch {
+      // Cleanup failure must not hide the preparation failure that triggered it.
+    }
     throw error;
   }
 }

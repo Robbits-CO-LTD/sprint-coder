@@ -24615,6 +24615,10 @@ function nativeMutationTransitionAlreadyApplied(
   return true;
 }
 
+// The mode a newly added file is sealed with. Windows cannot store 0600 on the file, and Node/libuv
+// report 0o100666 for a writable file there, so a restarted process must be able to observe it.
+export const NATIVE_ADDED_FILE_MODE = process.platform === 'win32' ? 0o100666 : 0o100600;
+
 function expectedNativeMutationArtifact(
   operation: JournaledPatchOperation,
   direction: NativeMutationIntentSnapshot['direction'],
@@ -24635,7 +24639,7 @@ function expectedNativeMutationArtifact(
         size: reference.size,
         expectedMode:
           operation.kind === 'add' && direction === 'forward'
-            ? 0o100600
+            ? NATIVE_ADDED_FILE_MODE
             : (operation.preRevision?.mode ?? failNativeMutationBinding()),
       };
 }
@@ -24700,7 +24704,7 @@ export function expectedNativeMutationBinding(
                 identityDigest: compensationSource.revision.identityDigest,
                 contentHash: compensationSource.revision.contentHash,
                 size: compensationSource.revision.size,
-                mode: operation.preRevision?.mode ?? 0o100600,
+                mode: operation.preRevision?.mode ?? NATIVE_ADDED_FILE_MODE,
                 nlink: 1 as const,
               } as const);
   return {

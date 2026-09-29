@@ -6,7 +6,11 @@ import {
   type FileRevisionReference,
   type FileRevisionRegistry,
 } from './file-revision';
-import type { EditSagaApplyRequest, EditSagaSnapshot } from './edit-saga';
+import {
+  EditEffectRefusedError,
+  type EditSagaApplyRequest,
+  type EditSagaSnapshot,
+} from './edit-saga';
 import {
   PatchValidationError,
   prepareStructuredPatch,
@@ -231,6 +235,20 @@ export class WorkspacePatchRejection extends Error {
   }
 }
 
+// A step the Edit Saga refused before changing anything leaves the whole patch unapplied; its reason
+// goes back to the model as a rejected patch it can act on.
+async function applyPatchSaga(
+  deps: WorkspacePatchDeps,
+  request: EditSagaApplyRequest,
+): Promise<EditSagaSnapshot> {
+  try {
+    return await deps.apply(request);
+  } catch (error) {
+    if (error instanceof EditEffectRefusedError) throw new WorkspacePatchRejection(error.message);
+    throw error;
+  }
+}
+
 export async function executeWorkspacePatch(
   input: unknown,
   context: WorkspacePatchContext,
@@ -301,7 +319,7 @@ export async function executeWorkspacePatch(
   }
   assertApprovedPatchTarget(plan, approvedGuard, 'update');
 
-  const saga = await deps.apply({
+  const saga = await applyPatchSaga(deps, {
     id: (deps.newId ?? randomUUID)(),
     taskId: context.taskId,
     turnId: context.turnId,
@@ -370,7 +388,7 @@ export async function executeWorkspacePatchBatch(
     operations: request.operations,
   });
   assertApprovedBatchTargets(plan, approvedGuards);
-  const saga = await deps.apply({
+  const saga = await applyPatchSaga(deps, {
     id: (deps.newId ?? randomUUID)(),
     taskId: context.taskId,
     turnId: context.turnId,

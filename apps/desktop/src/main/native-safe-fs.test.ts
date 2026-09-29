@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readdir,
   readFile,
   realpath,
   rename,
@@ -26,6 +27,7 @@ import {
   loadNativeSafeFs,
   nativeSafeFsAddonLocation,
   nativeSafeFsAddonPath,
+  nativeWorkspaceEditSupport,
   prepareNativeSafeFsLockDirectory,
   resolveNativeSafeFsAddonLocation,
 } from './native-safe-fs';
@@ -236,6 +238,10 @@ type MutationTestBoundary = NativeSafeFs &
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
     ): Promise<Readonly<{ state: 'absent' }>>;
+    preflightIntentEffect(
+      session: NativeSafeFsSession,
+      seed: NativeMutationIntentSnapshot,
+    ): Promise<Readonly<{ allowed: true } | { allowed: false; reason: string }>>;
   }>;
 
 function mutationBoundary(boundary: NativeSafeFs): MutationTestBoundary {
@@ -276,6 +282,8 @@ function nativeIntent(input: {
   destinationSegments?: readonly string[] | null;
   expectedSource: NativeMutationEndpointExpectation;
   artifactBytes?: Buffer;
+  id?: string;
+  nonce?: string;
 }): NativeMutationIntentSnapshot {
   const artifactBytes = input.artifactBytes ?? null;
   const expectedMode =
@@ -286,7 +294,7 @@ function nativeIntent(input: {
         : 0o100600;
   return createNativeMutationIntentSnapshot(
     createNativeMutationIntentSeed({
-      id: `intent-${input.kind}`,
+      id: input.id ?? `intent-${input.kind}`,
       sagaId: 'saga-native-safe-fs',
       ordinal: 1,
       direction: 'forward',
@@ -312,7 +320,7 @@ function nativeIntent(input: {
             },
       createdAt: '2026-07-23T00:00:00.000Z',
     }),
-    'a'.repeat(32),
+    input.nonce ?? 'a'.repeat(32),
   );
 }
 
@@ -325,6 +333,172 @@ async function stageNativeIntent(
   const pending = transitionNativeMutationIntent(intent, { state: 'aux_pending' });
   const auxObservation = await boundary.stageIntentArtifact(session, pending, bytes);
   return transitionNativeMutationIntent(pending, { state: 'aux_observed', auxObservation });
+}
+
+/**
+ * The environment for a Windows PowerShell 5.1 child. A PSModulePath inherited from a PowerShell 7
+ * parent (a CI step, a pwsh terminal) points 5.1 at modules it cannot load, so Get-Acl and Set-Acl
+ * fail with CouldNotAutoloadMatchingModule; without it, 5.1 uses its own module path.
+ */
+function windowsPowerShellEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  return env;
+}
+
+/**
+ * Windows only: reads (and optionally first replaces) a file's DACL as SDDL, `D:` part only.
+ * `owner-only` protects the DACL and grants the current user alone; `null` installs a NULL DACL;
+ * any other value is an SDDL access section in which `{user}` stands for the current user's SID.
+ */
+async function windowsDacl(path: string, replace?: string): Promise<string> {
+  const script = [
+    '$path = $env:SPRINT_CODER_DACL_PATH',
+    '$acl = Get-Acl -LiteralPath $path',
+    "if ($env:SPRINT_CODER_DACL_REPLACE -eq 'owner-only') {",
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '  $acl.SetSecurityDescriptorSddlForm("D:P(A;;FA;;;$user)", "Access")',
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    "} elseif ($env:SPRINT_CODER_DACL_REPLACE -eq 'null') {",
+    "  $acl.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL', 'Access')",
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '} elseif ($env:SPRINT_CODER_DACL_REPLACE) {',
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "  $sddl = $env:SPRINT_CODER_DACL_REPLACE.Replace('{user}', $user)",
+    '  $acl.SetSecurityDescriptorSddlForm($sddl, "Access")',
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '}',
+    '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
+  ].join('\n');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    env: windowsPowerShellEnv({
+      SPRINT_CODER_DACL_PATH: path,
+      SPRINT_CODER_DACL_REPLACE: replace ?? '',
+    }),
+  });
+  return stdout.trim();
+}
+
+/** One DACL entry: `flags` without INHERITED_ACE, which `inherited` carries. */
+type WindowsAce = { type: string; flags: number; inherited: boolean; mask: number; sid: string };
+
+/**
+ * A DACL as what grants access: whether it is protected and its entries (null for a NULL DACL).
+ * The other control flags, such as SE_DACL_AUTO_INHERITED (`AI`), are left out: whether they are
+ * set depends on how the descriptor was written, not on who can access the file.
+ */
+type WindowsAccess = { protected: boolean; entries: WindowsAce[] | null };
+
+type WindowsParsedDacl = WindowsAccess & { user: string };
+
+/**
+ * Windows only: parses a DACL's SDDL with every SID resolved to its `S-` form, next to the current
+ * user's SID. SDDL renders well-known SIDs as aliases (the built-in Administrator a CI job runs as
+ * is `LA`), so tests compare these SIDs instead of matching the SDDL text.
+ */
+async function windowsParsedDacl(sddl: string): Promise<WindowsParsedDacl> {
+  const script = [
+    '$protected = $false',
+    '$entries = $null',
+    'if ($env:SPRINT_CODER_DACL_SDDL) {',
+    '  $sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
+    '  $flag = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    '  $protected = ($sd.ControlFlags -band $flag) -ne 0',
+    '  if ($null -ne $sd.DiscretionaryAcl) {',
+    '    $entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
+    '      $aceFlags = [int]$ace.AceFlags',
+    '      [ordered]@{ type = $ace.AceType.ToString(); flags = $aceFlags -band 0xEF;',
+    '        inherited = ($aceFlags -band 0x10) -ne 0; mask = $ace.AccessMask;',
+    '        sid = $ace.SecurityIdentifier.Value }',
+    '    })',
+    '  }',
+    '}',
+    'ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{',
+    '  protected = $protected; entries = $entries;',
+    '  user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value })',
+  ].join('\n');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    env: windowsPowerShellEnv({ SPRINT_CODER_DACL_SDDL: sddl }),
+  });
+  return JSON.parse(stdout) as WindowsParsedDacl;
+}
+
+/** Windows only: `windowsDacl`, returned as the access it grants (see `WindowsAccess`). */
+async function windowsAccess(path: string, replace?: string): Promise<WindowsAccess> {
+  const { user: _user, ...access } = await windowsParsedDacl(await windowsDacl(path, replace));
+  return access;
+}
+
+/** Windows only: gives a file one extended attribute through NtSetEaFile. */
+async function windowsSetExtendedAttribute(path: string): Promise<void> {
+  const script = [
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices; using Microsoft.Win32.SafeHandles;',
+    'public static class Ea {',
+    '  [StructLayout(LayoutKind.Sequential)] public struct Io { public IntPtr Status; public IntPtr Information; }',
+    '  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    '  public static extern SafeFileHandle CreateFileW(string n, uint a, uint s, IntPtr sa, uint d, uint f, IntPtr t);',
+    '  [DllImport("ntdll.dll")] public static extern int NtSetEaFile(SafeFileHandle h, out Io io, byte[] b, int l);',
+    '}',
+    '"@',
+    '$h = [Ea]::CreateFileW($env:SPRINT_CODER_EA_PATH, 0x10, 7, [IntPtr]::Zero, 3, 0, [IntPtr]::Zero)',
+    '$name = [Text.Encoding]::ASCII.GetBytes("SPRINTCODER")',
+    '$value = [Text.Encoding]::ASCII.GetBytes("kept")',
+    '$buffer = New-Object byte[] (8 + $name.Length + 1 + $value.Length)',
+    '$buffer[5] = $name.Length',
+    '[BitConverter]::GetBytes([uint16]$value.Length).CopyTo($buffer, 6)',
+    '$name.CopyTo($buffer, 8)',
+    '$value.CopyTo($buffer, 9 + $name.Length)',
+    '$io = New-Object Ea+Io',
+    '$status = [Ea]::NtSetEaFile($h, [ref]$io, $buffer, $buffer.Length)',
+    '$h.Close()',
+    'if ($status -ne 0) { throw "NtSetEaFile failed: $status" }',
+  ].join('\n');
+  await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
+    env: windowsPowerShellEnv({ SPRINT_CODER_EA_PATH: path }),
+  });
+}
+
+const ACCESS_CONTROL_REFUSAL =
+  'このファイルは独自のアクセス制御を持つため、Windows では削除できません';
+const STREAMS_REFUSAL =
+  'このファイルは追加のデータストリームを持つため、Windows では更新・削除できません';
+const ACCESS_CONTROL_UPDATE_REFUSAL =
+  'このファイルのアクセス制御は引き継げないため、Windows では更新できません';
+const ACCESS_CONTROL_CHANGED_REFUSAL =
+  'このファイルのアクセス制御が更新の途中で変わったため、Windows では更新できません';
+
+/** Names the native boundary reserves for its own staged, parked or quarantined entries. */
+async function reservedLeaves(directory: string): Promise<string[]> {
+  return (await readdir(directory)).filter((name) => name.startsWith('.sprint-coder-'));
+}
+
+function directoryOwnership(digit: string): { markerLeafName: string; token: string } {
+  const token = digit.repeat(64);
+  return { markerLeafName: `.sprint-coder-mkdir-${token.slice(0, 32)}`, token };
+}
+
+/** The raw addon payload NativeSafeFs.applyIntentEffect sends for an `effect_pending` intent. */
+function rawEffectInput(
+  session: NativeSafeFsSession,
+  intent: NativeMutationIntentSnapshot,
+): Record<string, unknown> {
+  const auxiliary = intent.temp ?? intent.tombstone;
+  return {
+    sessionId: session.id,
+    intentId: intent.id,
+    intentDigest: intent.intentDigest,
+    recordDigest: intent.recordDigest,
+    revision: intent.revision,
+    kind: intent.kind,
+    sourceSegments: intent.sourceSegments,
+    destinationSegments: intent.destinationSegments,
+    auxiliarySegments:
+      auxiliary === null ? null : [...auxiliary.parentSegments, auxiliary.leafName],
+    expectedSource: intent.expectedSource,
+    expectedDestination: intent.expectedDestination,
+    expectedAuxiliary: intent.temp === null ? { state: 'absent' } : intent.auxObservation,
+  };
 }
 
 describe('NativeSafeFs authority boundary', () => {
@@ -384,16 +558,21 @@ describe('NativeSafeFs authority boundary', () => {
     });
   });
 
-  describe.runIf(process.platform === 'win32')('Windows add-only backend', () => {
-    it('publishes only the proven native file-add mutation scope', async () => {
+  describe.runIf(process.platform === 'win32')('Windows backend', () => {
+    it('publishes the full mutation scope and workspace-probed directory ownership', async () => {
       const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
       await expect(boundary.probe()).resolves.toMatchObject({
         available: true,
         capabilities: {
           mutation: true,
-          mutationScope: 'add-only',
-          directoryOwnership: false,
+          mutationScope: 'full',
+          directoryOwnership: 'workspace-probed',
         },
+      });
+      // Main publishes apply_patch and create_directory from exactly this mapping.
+      expect(nativeWorkspaceEditSupport(await boundary.probe())).toEqual({
+        supportsPatch: true,
+        createDirectory: true,
       });
     });
 
@@ -430,6 +609,96 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it('observes an intent sealed under an earlier session after a restart', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'restart.txt');
+      await writeFile(sourcePath, 'restart before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('restart after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const first = await boundary.openSession({ ...input, fence: '845' });
+      let intent = nativeIntent({
+        session: first,
+        kind: 'update',
+        sourceSegments: ['restart.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, first, intent, replacement);
+      await boundary.closeSession(first);
+      const second = await boundary.openSession({ ...input, fence: '846' });
+      const raw = require(nativeSafeFsAddonPath()) as {
+        observeIntent(input: Record<string, unknown>): unknown;
+      };
+
+      expect(
+        raw.observeIntent({
+          sessionId: second.id,
+          intentId: intent.id,
+          intentDigest: intent.intentDigest,
+          recordDigest: intent.recordDigest,
+          revision: intent.revision,
+          sourceSegments: intent.sourceSegments,
+          destinationSegments: null,
+          auxiliarySegments: [intent.temp!.leafName],
+        }),
+      ).toEqual({
+        source: previous,
+        destination: { state: 'absent' },
+        auxiliary: intent.auxObservation,
+      });
+      await boundary.closeSession(second);
+    });
+
+    it('observes any digest of an intent id but binds stage and apply to the first one', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'bound.txt');
+      await writeFile(sourcePath, 'bound before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('bound after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '847' });
+      const sealed = (nonce: string) =>
+        nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: ['bound.txt'],
+          expectedSource: previous,
+          artifactBytes: replacement,
+          id: 'intent-bound',
+          nonce,
+        });
+      const first = await stageNativeIntent(boundary, session, sealed('a'.repeat(32)), replacement);
+      const other = sealed('b'.repeat(32));
+      expect(other.intentDigest).not.toBe(first.intentDigest);
+
+      // Observation is read-only, so a second digest for the same id is simply observed.
+      await expect(boundary.observeIntent(session, other)).resolves.toMatchObject({
+        source: previous,
+        auxiliary: { state: 'absent' },
+      });
+      const pending = transitionNativeMutationIntent(other, { state: 'aux_pending' });
+      await expect(
+        boundary.stageIntentArtifact(session, pending, replacement),
+      ).rejects.toMatchObject({ code: 'STALE_FENCE' } satisfies Partial<NativeSafeFsError>);
+      const effectPending = transitionNativeMutationIntent(
+        transitionNativeMutationIntent(pending, {
+          state: 'aux_observed',
+          auxObservation: first.auxObservation!,
+        }),
+        { state: 'effect_pending' },
+      );
+      await expect(boundary.applyIntentEffect(session, effectPending)).rejects.toMatchObject({
+        code: 'STALE_FENCE',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(revision(sourcePath)).resolves.toEqual(previous);
+      await expect(readFile(join(input.workspace, first.temp!.leafName))).resolves.toEqual(
+        replacement,
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([first.temp!.leafName]);
+      await boundary.closeSession(session);
+    });
+
     it('keeps an externally created destination and the staged artifact on collision', async () => {
       const input = await fixture();
       const bytes = Buffer.from('staged windows add\n');
@@ -456,31 +725,1322 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
-    it('rejects an update intent before mutation while the add-only scope is active', async () => {
+    it('applies two journaled updates and keeps each displaced revision until cleanup', async () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'existing.txt');
-      const original = Buffer.from('original windows bytes\n');
-      const replacement = Buffer.from('replacement windows bytes\n');
-      await writeFile(sourcePath, original);
+      await writeFile(sourcePath, 'first windows bytes\n');
       const boundary = mutationBoundary(fixtureBoundary(input));
       const session = await boundary.openSession({ ...input, fence: '825' });
+      for (const [index, next] of ['second windows bytes\n', 'third windows bytes\n'].entries()) {
+        const previous = await revision(sourcePath);
+        const replacement = Buffer.from(next);
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: ['existing.txt'],
+          expectedSource: previous,
+          artifactBytes: replacement,
+          id: `intent-update-${index}`,
+          nonce: String(index).repeat(32),
+        });
+        intent = await stageNativeIntent(boundary, session, intent, replacement);
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        const effect = await boundary.applyIntentEffect(session, intent);
+        expect(effect).toEqual({
+          source: intent.auxObservation,
+          destination: { state: 'absent' },
+          auxiliary: previous,
+        });
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+        // Main's Node-derived revision of the new bytes is the one the native effect sealed.
+        await expect(revision(sourcePath)).resolves.toEqual(intent.auxObservation);
+        const auxiliaryPath = join(input.workspace, intent.temp!.leafName);
+        await expect(revision(auxiliaryPath)).resolves.toEqual(previous);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        await expect(boundary.cleanupIntentAuxiliary(session, intent)).resolves.toEqual({
+          state: 'absent',
+        });
+        await expect(readFile(auxiliaryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('moves two journaled deletes to their exact tombstones and cleans them', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '829' });
+      for (const [index, name] of ['delete-a.txt', 'delete-b.txt'].entries()) {
+        const sourcePath = join(input.workspace, name);
+        await writeFile(sourcePath, `windows delete ${index}\n`);
+        const previous = await revision(sourcePath);
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [name],
+          expectedSource: previous,
+          id: `intent-delete-${index}`,
+          nonce: String(index + 2).repeat(32),
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        const effect = await boundary.applyIntentEffect(session, intent);
+        expect(effect).toEqual({
+          source: { state: 'absent' },
+          destination: { state: 'absent' },
+          auxiliary: previous,
+        });
+        await expect(readFile(sourcePath)).rejects.toMatchObject({ code: 'ENOENT' });
+        const tombstonePath = join(input.workspace, intent.tombstone!.leafName);
+        await expect(revision(tombstonePath)).resolves.toEqual(previous);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        await expect(boundary.cleanupIntentAuxiliary(session, intent)).resolves.toEqual({
+          state: 'absent',
+        });
+        await expect(readFile(tombstonePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('renames within and across parents without replacing a destination', async () => {
+      const input = await fixture();
+      await mkdir(join(input.workspace, 'nested'));
+      await writeFile(join(input.workspace, 'rename-a.txt'), 'windows rename bytes\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '831' });
+      const moves: readonly (readonly [string[], string[]])[] = [
+        [['rename-a.txt'], ['rename-b.txt']],
+        [['rename-b.txt'], ['nested', 'rename-c.txt']],
+      ];
+      for (const [index, [from, to]] of moves.entries()) {
+        const previous = await revision(join(input.workspace, ...from));
+        let intent = nativeIntent({
+          session,
+          kind: 'rename',
+          sourceSegments: from,
+          destinationSegments: to,
+          expectedSource: previous,
+          id: `intent-rename-${index}`,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        const effect = await boundary.applyIntentEffect(session, intent);
+        expect(effect).toEqual({
+          source: { state: 'absent' },
+          destination: previous,
+          auxiliary: { state: 'absent' },
+        });
+        await expect(readFile(join(input.workspace, ...from))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        await expect(revision(join(input.workspace, ...to))).resolves.toEqual(previous);
+      }
+      await boundary.closeSession(session);
+    });
+
+    it('updates a read-only file and keeps the read-only mode on both revisions', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'read-only.txt');
+      await writeFile(sourcePath, 'read-only before\n');
+      await chmod(sourcePath, 0o444);
+      const previous = await revision(sourcePath);
+      expect(previous.mode).toBe(0o100444);
+      const replacement = Buffer.from('read-only after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '832' });
       let intent = nativeIntent({
         session,
         kind: 'update',
-        sourceSegments: ['existing.txt'],
+        sourceSegments: ['read-only.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      try {
+        const effect = await boundary.applyIntentEffect(session, intent);
+        expect(effect.auxiliary).toEqual(previous);
+        await expect(revision(sourcePath)).resolves.toEqual(intent.auxObservation);
+        await expect(revision(sourcePath)).resolves.toMatchObject({ mode: 0o100444 });
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        await expect(boundary.cleanupIntentAuxiliary(session, intent)).resolves.toEqual({
+          state: 'absent',
+        });
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+      } finally {
+        await chmod(sourcePath, 0o666);
+        await boundary.closeSession(session);
+      }
+    });
+
+    it('stages and publishes an update under the access control of the revision it replaces', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '848' });
+      // An owner-only protected DACL, and one inherited from the Workspace like any user file.
+      for (const [index, restrict] of [true, false].entries()) {
+        const sourcePath = join(input.workspace, `acl-${index}.txt`);
+        await writeFile(sourcePath, 'acl before\n');
+        const { user, ...access } = await windowsParsedDacl(
+          await windowsDacl(sourcePath, restrict ? 'owner-only' : undefined),
+        );
+        expect(user).toMatch(/^S-1-/);
+        if (restrict)
+          expect(access).toEqual({
+            protected: true,
+            // FA (FILE_ALL_ACCESS) for the current user alone, with no inheritance flags.
+            entries: [
+              { type: 'AccessAllowed', flags: 0, inherited: false, mask: 0x1f01ff, sid: user },
+            ],
+          });
+        else expect(access.protected).toBe(false);
+        const previous = await revision(sourcePath);
+        const replacement = Buffer.from('acl after\n');
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: [`acl-${index}.txt`],
+          expectedSource: previous,
+          artifactBytes: replacement,
+          id: `intent-acl-${index}`,
+          nonce: String(index + 6).repeat(32),
+        });
+        intent = await stageNativeIntent(boundary, session, intent, replacement);
+        const stagedPath = join(input.workspace, intent.temp!.leafName);
+        // Entries are compared with their inherited flag, so inheritance carries over too.
+        await expect(windowsAccess(stagedPath)).resolves.toEqual(access);
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        const effect = await boundary.applyIntentEffect(session, intent);
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+        await expect(windowsAccess(sourcePath)).resolves.toEqual(access);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        await boundary.cleanupIntentAuxiliary(session, intent);
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to delete a file whose own access control an undone delete could not restore', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '851' });
+      for (const [index, replace] of (['owner-only', 'null'] as const).entries()) {
+        const sourcePath = join(input.workspace, `own-acl-${index}.txt`);
+        await writeFile(sourcePath, 'own access control\n');
+        const access = await windowsAccess(sourcePath, replace);
+        const previous = await revision(sourcePath);
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [`own-acl-${index}.txt`],
+          expectedSource: previous,
+          id: `intent-own-acl-${index}`,
+          nonce: String(index + 8).repeat(32),
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: ACCESS_CONTROL_REFUSAL,
+        });
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'EFFECT_REFUSED',
+          message: ACCESS_CONTROL_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(revision(sourcePath)).resolves.toEqual(previous);
+        await expect(windowsAccess(sourcePath)).resolves.toEqual(access);
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'compares a deleted file owner with the owner a re-created file would get',
+      async () => {
+        const input = await fixture();
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '852' });
+        const { stdout } = await execFileAsync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-Command',
+            '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+          ],
+          { env: windowsPowerShellEnv() },
+        );
+        // BUILTIN\Administrators: what an elevated token gives every file it creates.
+        const defaultOwners = [
+          ['S-1-5-32-544', 'refused'],
+          [stdout.trim(), 'deleted'],
+        ] as const;
+        for (const [index, [defaultOwner, outcome]] of defaultOwners.entries()) {
+          const sourcePath = join(input.workspace, `owner-${index}.txt`);
+          await writeFile(sourcePath, 'owned by the user\n');
+          const previous = await revision(sourcePath);
+          let intent = nativeIntent({
+            session,
+            kind: 'delete',
+            sourceSegments: [`owner-${index}.txt`],
+            expectedSource: previous,
+            id: `intent-owner-${index}`,
+            nonce: String(index + 4).repeat(32),
+          });
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'] = defaultOwner;
+          try {
+            if (outcome === 'refused') {
+              await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+                code: 'EFFECT_REFUSED',
+              } satisfies Partial<NativeSafeFsError>);
+              await expect(revision(sourcePath)).resolves.toEqual(previous);
+            } else {
+              await expect(boundary.applyIntentEffect(session, intent)).resolves.toMatchObject({
+                source: { state: 'absent' },
+                auxiliary: previous,
+              });
+            }
+          } finally {
+            delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'];
+          }
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
+    it('refuses to publish an update whose source access control changed after staging', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'tightened.txt');
+      await writeFile(sourcePath, 'tightened before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('must not land\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '853' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['tightened.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const tightened = await windowsAccess(sourcePath, 'owner-only');
+
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'EFFECT_REFUSED',
+        message: ACCESS_CONTROL_CHANGED_REFUSAL,
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(revision(sourcePath)).resolves.toEqual(previous);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('tightened before\n');
+      await expect(windowsAccess(sourcePath)).resolves.toEqual(tightened);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to delete a file that kept entries inherited from a stricter directory', async () => {
+      const input = await fixture();
+      const strict = join(input.workspace, 'strict');
+      await mkdir(strict);
+      await windowsDacl(strict, 'D:P(A;OICI;FA;;;{user})');
+      await writeFile(join(strict, 'moved.txt'), 'moved bytes\n');
+      // A same-volume move keeps the descriptor, including what it inherited in `strict`.
+      await rename(join(strict, 'moved.txt'), join(input.workspace, 'moved.txt'));
+      await writeFile(join(input.workspace, 'native.txt'), 'native bytes\n');
+      const movedAccess = await windowsAccess(join(input.workspace, 'moved.txt'));
+      expect(movedAccess).not.toEqual(await windowsAccess(join(input.workspace, 'native.txt')));
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '854' });
+      for (const [index, [name, allowed]] of (
+        [
+          ['moved.txt', false],
+          ['native.txt', true],
+        ] as const
+      ).entries()) {
+        const previous = await revision(join(input.workspace, name));
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [name],
+          expectedSource: previous,
+          id: `intent-inherited-${index}`,
+          nonce: String(index + 2).repeat(32),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual(
+          allowed ? { allowed: true } : { allowed: false, reason: ACCESS_CONTROL_REFUSAL },
+        );
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+        if (allowed) {
+          await expect(boundary.applyIntentEffect(session, intent)).resolves.toMatchObject({
+            source: { state: 'absent' },
+          });
+        } else {
+          await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+            code: 'EFFECT_REFUSED',
+          } satisfies Partial<NativeSafeFsError>);
+          await expect(revision(join(input.workspace, name))).resolves.toEqual(previous);
+          await expect(windowsAccess(join(input.workspace, name))).resolves.toEqual(movedAccess);
+        }
+      }
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to update or delete a file with named streams and keeps them through a rename', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '855' });
+      // The owned directory's own ownership stream belongs to the directory, not to its files.
+      const ownership = directoryOwnership('7');
+      await boundary.createDirectory(session, ['owned'], ownership);
+      const streams = ['metadata', 'Zone.Identifier'];
+      const addStreams = async (name: string) => {
+        for (const stream of streams)
+          await writeFile(
+            join(input.workspace, 'owned', `${name}:${stream}`),
+            `${stream} of ${name}`,
+          );
+      };
+      for (const name of ['update.txt', 'delete.txt', 'rename.txt'])
+        await writeFile(join(input.workspace, 'owned', name), `${name} bytes\n`);
+      const replacement = Buffer.from('must not land\n');
+      let update = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['owned', 'update.txt'],
+        expectedSource: await revision(join(input.workspace, 'owned', 'update.txt')),
+        artifactBytes: replacement,
+        id: 'intent-stream-update',
+      });
+      // Staged while it had none; the streams arrive before the effect.
+      update = await stageNativeIntent(boundary, session, update, replacement);
+      for (const name of ['update.txt', 'delete.txt', 'rename.txt']) await addStreams(name);
+      let remove = nativeIntent({
+        session,
+        kind: 'delete',
+        sourceSegments: ['owned', 'delete.txt'],
+        expectedSource: await revision(join(input.workspace, 'owned', 'delete.txt')),
+        id: 'intent-stream-delete',
+        nonce: 'b'.repeat(32),
+      });
+      for (const intent of [update, remove])
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: STREAMS_REFUSAL,
+        });
+      // Staging refuses before writing, and the apply step refuses on its own, before anything moves.
+      await expect(
+        boundary.stageIntentArtifact(
+          session,
+          transitionNativeMutationIntent(
+            nativeIntent({
+              session,
+              kind: 'update',
+              sourceSegments: ['owned', 'update.txt'],
+              expectedSource: await revision(join(input.workspace, 'owned', 'update.txt')),
+              artifactBytes: replacement,
+              id: 'intent-stream-update-late',
+              nonce: 'c'.repeat(32),
+            }),
+            { state: 'aux_pending' },
+          ),
+          replacement,
+        ),
+      ).rejects.toMatchObject({
+        code: 'EFFECT_REFUSED',
+        message: STREAMS_REFUSAL,
+      } satisfies Partial<NativeSafeFsError>);
+      update = transitionNativeMutationIntent(update, { state: 'effect_pending' });
+      remove = transitionNativeMutationIntent(remove, { state: 'effect_pending' });
+      for (const intent of [update, remove])
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'EFFECT_REFUSED',
+          message: STREAMS_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>);
+      const previous = await revision(join(input.workspace, 'owned', 'rename.txt'));
+      let move = nativeIntent({
+        session,
+        kind: 'rename',
+        sourceSegments: ['owned', 'rename.txt'],
+        destinationSegments: ['owned', 'renamed.txt'],
+        expectedSource: previous,
+        id: 'intent-stream-rename',
+      });
+      move = transitionNativeMutationIntent(move, { state: 'effect_pending' });
+      await expect(boundary.applyIntentEffect(session, move)).resolves.toMatchObject({
+        destination: previous,
+      });
+      for (const [name, file] of [
+        ['update.txt', 'update.txt'],
+        ['delete.txt', 'delete.txt'],
+        ['rename.txt', 'renamed.txt'],
+      ] as const) {
+        const path = join(input.workspace, 'owned', file);
+        await expect(readFile(path, 'utf8')).resolves.toBe(`${name} bytes\n`);
+        for (const stream of streams)
+          await expect(readFile(`${path}:${stream}`, 'utf8')).resolves.toBe(`${stream} of ${name}`);
+      }
+      // A plain file in the same owned directory is not affected by the directory's stream.
+      await writeFile(join(input.workspace, 'owned', 'plain.txt'), 'plain\n');
+      await expect(
+        boundary.preflightIntentEffect(
+          session,
+          nativeIntent({
+            session,
+            kind: 'delete',
+            sourceSegments: ['owned', 'plain.txt'],
+            expectedSource: await revision(join(input.workspace, 'owned', 'plain.txt')),
+            id: 'intent-stream-plain',
+          }),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await boundary.closeSession(session);
+    });
+
+    it('refuses before staging an update whose inherited access control the parent would change', async () => {
+      const input = await fixture();
+      const strict = join(input.workspace, 'strict');
+      await mkdir(strict);
+      await windowsDacl(strict, 'D:P(A;OICI;FA;;;{user})');
+      await writeFile(join(strict, 'moved.txt'), 'moved before\n');
+      await rename(join(strict, 'moved.txt'), join(input.workspace, 'moved.txt'));
+      const sourcePath = join(input.workspace, 'moved.txt');
+      const movedAccess = await windowsAccess(sourcePath);
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '856' });
+      const replacement = Buffer.from('must not be written\n');
+      const intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['moved.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+
+      await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+        allowed: false,
+        reason: ACCESS_CONTROL_UPDATE_REFUSAL,
+      });
+      await expect(stageNativeIntent(boundary, session, intent, replacement)).rejects.toMatchObject(
+        {
+          code: 'EFFECT_REFUSED',
+          message: ACCESS_CONTROL_UPDATE_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>,
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('moved before\n');
+      await expect(windowsAccess(sourcePath)).resolves.toEqual(movedAccess);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to update or delete a file with an explicit integrity label or extended attributes', async () => {
+      const input = await fixture();
+      const labelled = join(input.workspace, 'labelled.txt');
+      const attributed = join(input.workspace, 'attributed.txt');
+      await writeFile(labelled, 'labelled\n');
+      await writeFile(attributed, 'attributed\n');
+      await execFileAsync('icacls.exe', [labelled, '/setintegritylevel', 'Low']);
+      await windowsSetExtendedAttribute(attributed);
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '857' });
+      const cases = [
+        [
+          'labelled.txt',
+          'このファイルは独自の整合性レベルを持つため、Windows では更新・削除できません',
+        ],
+        ['attributed.txt', 'このファイルは拡張属性を持つため、Windows では更新・削除できません'],
+      ] as const;
+      for (const [index, [name, reason]] of cases.entries()) {
+        const previous = await revision(join(input.workspace, name));
+        for (const kind of ['update', 'delete'] as const) {
+          const intent = nativeIntent({
+            session,
+            kind,
+            sourceSegments: [name],
+            expectedSource: previous,
+            ...(kind === 'update' ? { artifactBytes: Buffer.from('must not land\n') } : {}),
+            id: `intent-attribute-${index}-${kind}`,
+          });
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: false,
+            reason,
+          });
+          const pending = transitionNativeMutationIntent(
+            intent,
+            kind === 'update' ? { state: 'aux_pending' } : { state: 'effect_pending' },
+          );
+          await expect(
+            kind === 'update'
+              ? boundary.stageIntentArtifact(session, pending, Buffer.from('must not land\n'))
+              : boundary.applyIntentEffect(session, pending),
+          ).rejects.toMatchObject({ code: 'EFFECT_REFUSED', message: reason });
+        }
+        await expect(revision(join(input.workspace, name))).resolves.toEqual(previous);
+      }
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to delete a hidden file and keeps the hidden attribute through an update', async () => {
+      const input = await fixture();
+      const hiddenPath = join(input.workspace, 'hidden.txt');
+      await writeFile(hiddenPath, 'hidden before\n');
+      await execFileAsync('attrib.exe', ['+h', hiddenPath]);
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '858' });
+      const previous = await revision(hiddenPath);
+      await expect(
+        boundary.preflightIntentEffect(
+          session,
+          nativeIntent({
+            session,
+            kind: 'delete',
+            sourceSegments: ['hidden.txt'],
+            expectedSource: previous,
+            id: 'intent-hidden-delete',
+          }),
+        ),
+      ).resolves.toEqual({
+        allowed: false,
+        reason: 'このファイルは隠しまたはシステム属性を持つため、Windows では削除できません',
+      });
+      const replacement = Buffer.from('hidden after\n');
+      let update = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['hidden.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+        id: 'intent-hidden-update',
+      });
+      await expect(boundary.preflightIntentEffect(session, update)).resolves.toEqual({
+        allowed: true,
+      });
+      update = await stageNativeIntent(boundary, session, update, replacement);
+      update = transitionNativeMutationIntent(update, { state: 'effect_pending' });
+      await boundary.applyIntentEffect(session, update);
+      await expect(readFile(hiddenPath)).resolves.toEqual(replacement);
+      const { stdout } = await execFileAsync('attrib.exe', [hiddenPath]);
+      expect(stdout.slice(0, stdout.indexOf(hiddenPath))).toContain('H');
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to remove an owned directory that holds a stream of its own, before and after quarantine', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '859' });
+      const reason =
+        'このフォルダは追加のデータストリームまたは拡張属性を持つため、Windows では削除できません';
+      const ownership = directoryOwnership('6');
+      const directoryPath = join(input.workspace, 'made');
+      const created = await boundary.createDirectory(session, ['made'], ownership);
+      await boundary.cleanupDirectoryOwnership(
+        session,
+        ['made'],
+        created.identityDigest,
+        ownership,
+      );
+      await writeFile(`${directoryPath}:metadata`, 'directory metadata');
+
+      await expect(
+        boundary.removeDirectory(session, ['made'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'EFFECT_REFUSED', message: reason });
+      await expect(readFile(`${directoryPath}:metadata`, 'utf8')).resolves.toBe(
+        'directory metadata',
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+
+      // Written after the directory was quarantined: the cleanup refuses to delete it.
+      const second = directoryOwnership('5');
+      const other = await boundary.createDirectory(session, ['other'], second);
+      await boundary.cleanupDirectoryOwnership(session, ['other'], other.identityDigest, second);
+      await boundary.removeDirectory(session, ['other'], other.identityDigest);
+      const quarantine = join(
+        input.workspace,
+        `.sprint-coder-rmdir-${other.identityDigest.slice(0, 32)}`,
+      );
+      await writeFile(`${quarantine}:metadata`, 'late metadata');
+      await expect(
+        boundary.cleanupDirectoryRemoval(session, ['other'], other.identityDigest),
+      ).rejects.toMatchObject({ code: 'EFFECT_REFUSED', message: reason });
+      await expect(readFile(`${quarantine}:metadata`, 'utf8')).resolves.toBe('late metadata');
+      await boundary.closeSession(session);
+    });
+
+    it('keeps a tombstone or displaced revision that gained a stream before its cleanup', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '860' });
+      await writeFile(join(input.workspace, 'deleted.txt'), 'deleted bytes\n');
+      await writeFile(join(input.workspace, 'updated.txt'), 'updated before\n');
+      const replacement = Buffer.from('updated after\n');
+      let remove = nativeIntent({
+        session,
+        kind: 'delete',
+        sourceSegments: ['deleted.txt'],
+        expectedSource: await revision(join(input.workspace, 'deleted.txt')),
+        id: 'intent-late-stream-delete',
+        nonce: 'd'.repeat(32),
+      });
+      let update = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['updated.txt'],
+        expectedSource: await revision(join(input.workspace, 'updated.txt')),
+        artifactBytes: replacement,
+        id: 'intent-late-stream-update',
+        nonce: 'e'.repeat(32),
+      });
+      remove = transitionNativeMutationIntent(remove, { state: 'effect_pending' });
+      update = await stageNativeIntent(boundary, session, update, replacement);
+      update = transitionNativeMutationIntent(update, { state: 'effect_pending' });
+      for (let intent of [remove, update]) {
+        const effect = await boundary.applyIntentEffect(session, intent);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        // The process stops here; the auxiliary gains a stream before the cleanup resumes.
+        const auxiliary = join(input.workspace, (intent.tombstone ?? intent.temp)!.leafName);
+        await writeFile(`${auxiliary}:metadata`, 'late metadata');
+        await expect(boundary.cleanupIntentAuxiliary(session, intent)).rejects.toMatchObject({
+          code: 'EFFECT_REFUSED',
+          message: STREAMS_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(readFile(`${auxiliary}:metadata`, 'utf8')).resolves.toBe('late metadata');
+      }
+      await boundary.closeSession(session);
+    });
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'resolves CREATOR OWNER to the staged owner when the default owner is another SID',
+      async () => {
+        const input = await fixture();
+        const parent = join(input.workspace, 'creator');
+        await mkdir(parent);
+        await windowsDacl(parent, 'D:P(A;OICI;FA;;;{user})(A;OICIIO;FA;;;CO)');
+        const sourcePath = join(parent, 'owned.txt');
+        await writeFile(sourcePath, 'creator before\n');
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '861' });
+        const replacement = Buffer.from('creator after\n');
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: ['creator', 'owned.txt'],
+          expectedSource: await revision(sourcePath),
+          artifactBytes: replacement,
+        });
+        // An elevated token's default owner: the user-owned source keeps the user as its owner.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'] = 'S-1-5-32-544';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, replacement);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          await boundary.applyIntentEffect(session, intent);
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'];
+        }
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'treats a volume without named streams or extended attributes as having none',
+      async () => {
+        const input = await fixture();
+        const sourcePath = join(input.workspace, 'plain-volume.txt');
+        await writeFile(sourcePath, 'plain volume\n');
+        await writeFile(`${sourcePath}:metadata`, 'only on NTFS');
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '862' });
+        const intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: ['plain-volume.txt'],
+          expectedSource: await revision(sourcePath),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: STREAMS_REFUSAL,
+        });
+        // FILE_NAMED_STREAMS | FILE_SUPPORTS_EXTENDED_ATTRIBUTES cleared, as on FAT or exFAT.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'] = '840000';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'];
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'treats a volume without persistent ACLs as having no integrity labels',
+      async () => {
+        const input = await fixture();
+        const sourcePath = join(input.workspace, 'labelled-volume.txt');
+        await writeFile(sourcePath, 'labelled volume\n');
+        await execFileAsync('icacls.exe', [sourcePath, '/setintegritylevel', 'Low']);
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '863' });
+        const intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: ['labelled-volume.txt'],
+          expectedSource: await revision(sourcePath),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toMatchObject({
+          allowed: false,
+        });
+        // FILE_PERSISTENT_ACLS cleared, as on FAT or exFAT.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'] = '8';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'];
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
+    it('refuses to stage an update whose source has a NULL DACL', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'null-dacl.txt');
+      await writeFile(sourcePath, 'null dacl before\n');
+      // A NULL DACL: full access for everyone, with no entries at all.
+      await expect(windowsAccess(sourcePath, 'null')).resolves.toEqual({
+        protected: false,
+        entries: null,
+      });
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '849' });
+      const replacement = Buffer.from('must not be staged\n');
+      const intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['null-dacl.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+
+      await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+        allowed: false,
+        reason: ACCESS_CONTROL_UPDATE_REFUSAL,
+      });
+      await expect(stageNativeIntent(boundary, session, intent, replacement)).rejects.toMatchObject(
+        {
+          code: 'EFFECT_REFUSED',
+          message: ACCESS_CONTROL_UPDATE_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>,
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('null dacl before\n');
+      await boundary.closeSession(session);
+    });
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'returns a directory that gained a child during its quarantine rename to its own name',
+      async () => {
+        const input = await fixture();
+        const boundary = fixtureBoundary(input, nativeSafeFsTestAddonPath());
+        const session = await boundary.openSession({ ...input, fence: '850' });
+        const ownership = directoryOwnership('9');
+        const directoryPath = join(input.workspace, 'raced');
+        const created = await boundary.createDirectory(session, ['raced'], ownership);
+        await boundary.cleanupDirectoryOwnership(
+          session,
+          ['raced'],
+          created.identityDigest,
+          ownership,
+        );
+        // The test build creates this child after the emptiness check, before the rename.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_RACE_QUARANTINE_CHILD'] = 'late.txt';
+        try {
+          await expect(
+            boundary.removeDirectory(session, ['raced'], created.identityDigest),
+          ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_RACE_QUARANTINE_CHILD'];
+        }
+        await expect(readdir(directoryPath)).resolves.toEqual(['late.txt']);
+        await expect(readFile(join(directoryPath, 'late.txt'), 'utf8')).resolves.toBe('raced');
+        await expect(boundary.observeDirectory(session, ['raced'])).resolves.toEqual(created);
+        await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+        await boundary.closeSession(session);
+      },
+    );
+
+    it('rejects an externally modified or substituted update source and preserves both revisions', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '833' });
+      const drifts: readonly (readonly [string, (path: string) => Promise<void>])[] = [
+        ['modified.txt', (path) => writeFile(path, 'external windows write\n')],
+        // Same bytes under a new file identity is still a different file.
+        [
+          'substituted.txt',
+          async (path) => {
+            await rm(path);
+            await writeFile(path, 'original windows bytes\n');
+          },
+        ],
+      ];
+      for (const [index, [name, drift]] of drifts.entries()) {
+        const sourcePath = join(input.workspace, name);
+        await writeFile(sourcePath, 'original windows bytes\n');
+        const replacement = Buffer.from('replacement windows bytes\n');
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: [name],
+          expectedSource: await revision(sourcePath),
+          artifactBytes: replacement,
+          id: `intent-drift-${index}`,
+          nonce: String(index + 4).repeat(32),
+        });
+        intent = await stageNativeIntent(boundary, session, intent, replacement);
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+        await drift(sourcePath);
+        const drifted = await revision(sourcePath);
+
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(revision(sourcePath)).resolves.toEqual(drifted);
+        await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
+          replacement,
+        );
+      }
+      await boundary.closeSession(session);
+    });
+
+    it('refuses a source that gained a second hard link without changing either name', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'linked.txt');
+      const outsidePath = join(input.root, 'outside-link.txt');
+      await writeFile(sourcePath, 'protected windows bytes\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '834' });
+      const replacement = Buffer.from('must not land\n');
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['linked.txt'],
         expectedSource: await revision(sourcePath),
         artifactBytes: replacement,
       });
       intent = await stageNativeIntent(boundary, session, intent, replacement);
       intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      await link(sourcePath, outsidePath);
 
-      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
-        code: 'UNSUPPORTED_PLATFORM',
+      await expect(boundary.observeIntent(session, intent)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
       } satisfies Partial<NativeSafeFsError>);
-      await expect(readFile(sourcePath)).resolves.toEqual(original);
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(outsidePath, 'utf8')).resolves.toBe('protected windows bytes\n');
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('protected windows bytes\n');
+      await boundary.closeSession(session);
+    });
+
+    it('refuses a junction parent without touching the directory it points to', async () => {
+      const input = await fixture();
+      const outside = join(input.root, 'outside');
+      await mkdir(outside);
+      await writeFile(join(outside, 'target.txt'), 'outside windows bytes\n');
+      const expectedSource = await revision(join(outside, 'target.txt'));
+      const junction = join(input.workspace, 'linked');
+      await symlink(outside, junction, 'junction');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '835' });
+      try {
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: ['linked', 'target.txt'],
+          expectedSource,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+        await expect(boundary.observeIntent(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(
+          boundary.createDirectory(session, ['linked', 'made'], directoryOwnership('c')),
+        ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+        await expect(revision(join(outside, 'target.txt'))).resolves.toEqual(expectedSource);
+        await expect(readdir(outside)).resolves.toEqual(['target.txt']);
+      } finally {
+        await boundary.closeSession(session);
+        // Remove only the link; the directory it points to belongs to the fixture root.
+        await rmdir(junction);
+      }
+    });
+
+    it('rejects rename and delete targets that appear after the intent was sealed', async () => {
+      const input = await fixture();
+      await writeFile(join(input.workspace, 'rename-src.txt'), 'rename windows bytes\n');
+      await writeFile(join(input.workspace, 'delete-src.txt'), 'delete windows bytes\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '836' });
+      let rename = nativeIntent({
+        session,
+        kind: 'rename',
+        sourceSegments: ['rename-src.txt'],
+        destinationSegments: ['rename-dst.txt'],
+        expectedSource: await revision(join(input.workspace, 'rename-src.txt')),
+      });
+      rename = transitionNativeMutationIntent(rename, { state: 'effect_pending' });
+      let remove = nativeIntent({
+        session,
+        kind: 'delete',
+        sourceSegments: ['delete-src.txt'],
+        expectedSource: await revision(join(input.workspace, 'delete-src.txt')),
+      });
+      remove = transitionNativeMutationIntent(remove, { state: 'effect_pending' });
+      await writeFile(join(input.workspace, 'rename-dst.txt'), 'external windows write\n');
+      await writeFile(join(input.workspace, remove.tombstone!.leafName), 'squatter bytes\n');
+
+      for (const intent of [rename, remove])
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(join(input.workspace, 'rename-src.txt'), 'utf8')).resolves.toBe(
+        'rename windows bytes\n',
+      );
+      await expect(readFile(join(input.workspace, 'rename-dst.txt'), 'utf8')).resolves.toBe(
+        'external windows write\n',
+      );
+      await expect(readFile(join(input.workspace, 'delete-src.txt'), 'utf8')).resolves.toBe(
+        'delete windows bytes\n',
+      );
+      await expect(
+        readFile(join(input.workspace, remove.tombstone!.leafName), 'utf8'),
+      ).resolves.toBe('squatter bytes\n');
+      await boundary.closeSession(session);
+    });
+
+    it('does not update a source another handle is writing', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'busy.txt');
+      await writeFile(sourcePath, 'busy windows bytes\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '837' });
+      const replacement = Buffer.from('must not land\n');
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['busy.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const writer = await open(sourcePath, 'r+');
+      try {
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'UNSAFE_PATH',
+        } satisfies Partial<NativeSafeFsError>);
+      } finally {
+        await writer.close();
+      }
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('busy windows bytes\n');
+      await boundary.closeSession(session);
+    });
+
+    it('never applies an effect or cleanup through an invalidated session', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'stale.txt');
+      await writeFile(sourcePath, 'stale windows bytes\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '838' });
+      const replacement = Buffer.from('must not land\n');
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['stale.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const raw = require(nativeSafeFsAddonPath()) as {
+        applyIntentEffect(input: Record<string, unknown>): unknown;
+        createDirectory(input: Record<string, unknown>): unknown;
+      };
+      boundary.invalidateWorkspace(input.workspaceKey, '838');
+
+      expect(() => raw.applyIntentEffect(rawEffectInput(session, intent))).toThrow(
+        expect.objectContaining({ code: 'STALE_SESSION' }),
+      );
+      const ownership = directoryOwnership('b');
+      expect(() =>
+        raw.createDirectory({
+          sessionId: session.id,
+          pathSegments: ['stale-directory'],
+          markerLeafName: ownership.markerLeafName,
+          ownershipToken: ownership.token,
+        }),
+      ).toThrow(expect.objectContaining({ code: 'STALE_SESSION' }));
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('stale windows bytes\n');
       await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
         replacement,
       );
+      await expect(lstat(join(input.workspace, 'stale-directory'))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
+    });
+
+    it('resumes an update interrupted after parking the previous revision', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'interrupted.txt');
+      await writeFile(sourcePath, 'before interruption\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('after interruption\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '839' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['interrupted.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      // A process that died after the first of the three renames.
+      await rename(sourcePath, join(input.workspace, `.sprint-coder-swap-${'a'.repeat(32)}`));
+
+      await expect(boundary.observeIntent(session, intent)).resolves.toEqual({
+        source: previous,
+        destination: { state: 'absent' },
+        auxiliary: intent.auxObservation,
+      });
+      const effect = await boundary.applyIntentEffect(session, intent);
+      expect(effect).toEqual({
+        source: intent.auxObservation,
+        destination: { state: 'absent' },
+        auxiliary: previous,
+      });
+      intent = transitionNativeMutationIntent(intent, {
+        state: 'effect_observed',
+        effectObservation: effect,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+      await boundary.cleanupIntentAuxiliary(session, intent);
+      await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('completes an update interrupted after publishing the staged artifact', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'published.txt');
+      await writeFile(sourcePath, 'before publication\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('after publication\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '840' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['published.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      // A process that died after the second rename: new bytes published, old ones parked.
+      const swapPath = join(input.workspace, `.sprint-coder-swap-${'a'.repeat(32)}`);
+      await rename(sourcePath, swapPath);
+      await rename(join(input.workspace, intent.temp!.leafName), sourcePath);
+
+      const observed = await boundary.observeIntent(session, intent);
+      expect(observed).toEqual({
+        source: intent.auxObservation,
+        destination: { state: 'absent' },
+        auxiliary: previous,
+      });
+      intent = transitionNativeMutationIntent(intent, {
+        state: 'effect_observed',
+        effectObservation: observed,
+      });
+      intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+      await expect(boundary.cleanupIntentAuxiliary(session, intent)).resolves.toEqual({
+        state: 'absent',
+      });
+      await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+      await expect(readFile(swapPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses an ambiguous swap name instead of resolving it to either revision', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'ambiguous.txt');
+      await writeFile(sourcePath, 'ambiguous before\n');
+      const replacement = Buffer.from('ambiguous after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '841' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['ambiguous.txt'],
+        expectedSource: await revision(sourcePath),
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const swapPath = join(input.workspace, `.sprint-coder-swap-${'a'.repeat(32)}`);
+      await writeFile(swapPath, 'planted swap bytes\n');
+
+      await expect(boundary.observeIntent(session, intent)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'UNSAFE_PATH',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('ambiguous before\n');
+      await expect(readFile(swapPath, 'utf8')).resolves.toBe('planted swap bytes\n');
+      await expect(readFile(join(input.workspace, intent.temp!.leafName))).resolves.toEqual(
+        replacement,
+      );
+      await boundary.closeSession(session);
+    });
+
+    it('creates, inspects, releases and removes an owned directory', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '842' });
+      const ownership = directoryOwnership('d');
+      const directoryPath = join(input.workspace, 'made');
+
+      const created = await boundary.createDirectory(session, ['made'], ownership);
+      expect(created).toEqual({
+        state: 'present',
+        identityDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['made'], ownership),
+      ).resolves.toEqual(created);
+      await expect(readdir(directoryPath)).resolves.toEqual([ownership.markerLeafName]);
+      await expect(boundary.observeDirectory(session, ['made'])).resolves.toEqual(created);
+      await boundary.cleanupDirectoryOwnership(
+        session,
+        ['made'],
+        created.identityDigest,
+        ownership,
+      );
+      await expect(readdir(directoryPath)).resolves.toEqual([]);
+      // The durable ownership proof outlives the visible marker.
+      await expect(boundary.observeDirectory(session, ['made'])).resolves.toEqual(created);
+
+      await boundary.removeDirectory(session, ['made'], created.identityDigest);
+      await expect(lstat(directoryPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await boundary.cleanupDirectoryRemoval(session, ['made'], created.identityDigest);
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await expect(boundary.observeDirectory(session, ['made'])).resolves.toEqual({
+        state: 'absent',
+      });
+      await boundary.closeSession(session);
+    });
+
+    it('never claims or removes a directory it did not create', async () => {
+      const input = await fixture();
+      const existing = join(input.workspace, 'existing');
+      await mkdir(existing);
+      await writeFile(join(existing, 'keep.txt'), 'user windows bytes\n');
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '843' });
+      const ownership = directoryOwnership('e');
+
+      await expect(
+        boundary.createDirectory(session, ['existing'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['existing'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      const observed = await boundary.observeDirectory(session, ['existing']);
+      if (observed.state !== 'present') throw new Error('existing directory was not observed');
+      await expect(
+        boundary.removeDirectory(session, ['existing'], observed.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(readdir(existing)).resolves.toEqual(['keep.txt']);
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses a foreign token, a tampered marker and contents added after creation', async () => {
+      const input = await fixture();
+      const boundary = fixtureBoundary(input);
+      const session = await boundary.openSession({ ...input, fence: '844' });
+      const ownership = directoryOwnership('f');
+      const foreign = directoryOwnership('0');
+      const directoryPath = join(input.workspace, 'made');
+      const markerPath = join(directoryPath, ownership.markerLeafName);
+      const created = await boundary.createDirectory(session, ['made'], ownership);
+
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['made'], foreign),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(
+        boundary.cleanupDirectoryOwnership(session, ['made'], created.identityDigest, foreign),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await writeFile(markerPath, '1'.repeat(64));
+      await expect(
+        boundary.inspectDirectoryOwnership(session, ['made'], ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(
+        boundary.cleanupDirectoryOwnership(session, ['made'], created.identityDigest, ownership),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(readFile(markerPath, 'utf8')).resolves.toBe('1'.repeat(64));
+
+      await writeFile(markerPath, ownership.token);
+      await boundary.cleanupDirectoryOwnership(
+        session,
+        ['made'],
+        created.identityDigest,
+        ownership,
+      );
+      await writeFile(join(directoryPath, 'user.txt'), 'user windows bytes\n');
+      await expect(
+        boundary.removeDirectory(session, ['made'], created.identityDigest),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await rm(join(directoryPath, 'user.txt'));
+      await expect(
+        boundary.removeDirectory(session, ['made'], '2'.repeat(64)),
+      ).rejects.toMatchObject({ code: 'UNSAFE_PATH' } satisfies Partial<NativeSafeFsError>);
+      await expect(readdir(directoryPath)).resolves.toEqual([]);
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([]);
       await boundary.closeSession(session);
     });
 
@@ -501,6 +2061,7 @@ describe('NativeSafeFs authority boundary', () => {
             intentDigest: '1'.repeat(64),
             recordDigest: '2'.repeat(64),
             revision: 1,
+            kind: 'add',
             parentSegments: [],
             leafName: 'visible.txt',
             expectedContentHash: createHash('sha256').update(bytes).digest('hex'),
@@ -549,7 +2110,7 @@ describe('NativeSafeFs authority boundary', () => {
           expectedDestination: intent.expectedDestination,
           expectedAuxiliary: intent.auxObservation,
         }),
-      ).toThrow(expect.objectContaining({ code: 'UNSUPPORTED_PLATFORM' }));
+      ).toThrow(expect.objectContaining({ code: 'INVALID_INPUT' }));
       await expect(readFile(join(input.workspace, 'shape-target.txt'))).rejects.toMatchObject({
         code: 'ENOENT',
       });
