@@ -90,7 +90,7 @@ try {
 
   if (-not $SkipBuild) {
     $actualNodeVersion = (node -p 'process.versions.node').Trim()
-    if ($actualNodeVersion -ne '22.23.2') { throw "Node 22.23.2 is required, got $actualNodeVersion." }
+    if ($actualNodeVersion -ne '22.23.3') { throw "Node 22.23.3 is required, got $actualNodeVersion." }
 
     $previousRelease = $env:SPRINT_CODER_RELEASE
     $previousThumbprint = $env:SPRINT_CODER_WINDOWS_CERTIFICATE_SHA1

@@ -100,13 +100,13 @@ const packagerWindowsSign =
           await signWindowsFiles({ files: [file], ...windowsSign });
         },
       };
-const BUNDLED_NODE_VERSION = '22.23.2';
-const BUNDLED_NODE_SHA256 = '0D0F5E39F9F3D9587BC19F73EAB3C2C9C4903FD02D6DBF9C853DD81B3D95FAD4';
+const BUNDLED_NODE_VERSION = '22.23.3';
+const BUNDLED_NODE_SHA256 = '9C9245166B4A8E182E0B797DA9C20136117FF24368EAFF1FEC8343A123C8DB0E';
 const BUNDLED_NODE_SIGNER_SUBJECT =
   'CN=OpenJS Foundation, O=OpenJS Foundation, L=San Francisco, S=California, C=US';
 const BUNDLED_NODE_SIGNER_ISSUER =
-  'CN=Microsoft ID Verified CS AOC CA 03, O=Microsoft Corporation, C=US';
-const BUNDLED_NODE_SIGNER_THUMBPRINT = '01A4F6F4AA2524CECF7A926DCD0BAA64B4956CF0';
+  'CN=Microsoft ID Verified CS EOC CA 03, O=Microsoft Corporation, C=US';
+const BUNDLED_NODE_SIGNER_THUMBPRINT = '5A2C440219B027EF812E24A1E15F671D7CD379DE';
 const MAC_TEAM_IDENTIFIER_PATTERN = /^[A-Z0-9]{10}$/u;
 
 function computerUseRepositorySourceCommit(): string {
