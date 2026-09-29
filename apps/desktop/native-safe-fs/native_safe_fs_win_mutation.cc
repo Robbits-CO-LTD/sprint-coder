@@ -881,10 +881,32 @@ bool ProcessDefaultOwnerSid(std::vector<unsigned char>* storage, PSID* sid) {
   return true;
 }
 
+// What the volume under a handle supports. Test builds can clear flags to stand in for a volume
+// without named streams, extended attributes or persistent ACLs (FAT, exFAT, a Dev Drive).
+bool VolumeFlags(HANDLE handle, DWORD* flags) {
+  if (!GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, nullptr, flags, nullptr, 0))
+    return false;
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  wchar_t text[16]{};
+  const DWORD length =
+      GetEnvironmentVariableW(L"SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR", text, 16);
+  if (length > 0 && length < 16) *flags &= ~static_cast<DWORD>(wcstoul(text, nullptr, 16));
+#endif
+  return true;
+}
+
+bool PersistentAcls(HANDLE handle, bool* persistent) {
+  DWORD flags = 0;
+  if (!VolumeFlags(handle, &flags)) return false;
+  *persistent = (flags & FILE_PERSISTENT_ACLS) != 0;
+  return true;
+}
+
 // The access control a staged update carries over from the revision it replaces, so its new bytes
 // are never readable by anyone the previous revision excluded (the POSIX backend keeps the mode).
 // Same rules as ReplaceFileWithBackup: a volume without persistent ACLs has nothing to carry, a
 // NULL DACL is never copied, the protection flag is preserved, and a current-user owner is kept.
+// PredictStagedSecurity below states what this produces; every check compares against that.
 struct CarriedSecurity {
   bool applies = false;
   PSECURITY_DESCRIPTOR source = nullptr;
@@ -902,10 +924,9 @@ struct CarriedSecurity {
 };
 
 bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
-  DWORD flags = 0;
-  if (!GetVolumeInformationByHandleW(source, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
-    return false;
-  if ((flags & FILE_PERSISTENT_ACLS) == 0) return true;
+  bool persistent = false;
+  if (!PersistentAcls(source, &persistent)) return false;
+  if (!persistent) return true;
   PSID owner = nullptr;
   if (GetSecurityInfo(source, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
                       &owner, nullptr, &output->dacl, nullptr, &output->source) != ERROR_SUCCESS)
@@ -947,7 +968,8 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
 // unprivileged process cannot even read). UTF-8 for, in order: additional data streams, extended
 // attributes, encryption, an explicit integrity label, its own access control (delete), access
 // control that cannot be carried (update), access control changed during the update, hidden or
-// system attributes (delete), and a directory holding streams or extended attributes.
+// system attributes (delete), a directory holding streams or extended attributes, and a file
+// owned by someone else (update).
 constexpr char kStreamsRefusal[] =
     "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
     "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x83\x87""\xe3\x83\xbc"
@@ -1005,6 +1027,12 @@ constexpr char kHiddenSystemRefusal[] =
     "\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81"
     "Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7"
     "\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kOwnerUpdateRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe6\x89\x80""\xe6\x9c\x89""\xe8\x80\x85""\xe3\x81\x8c""\xe7\x95\xb0"
+    "\xe3\x81\xaa""\xe3\x82\x8b""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows "
+    "\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x81\xa7""\xe3\x81\x8d"
+    "\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
 constexpr char kDirectoryDataRefusal[] =
     "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa9""\xe3\x83\xab""\xe3\x83\x80"
     "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x83\x87""\xe3\x83\xbc"
@@ -1021,8 +1049,15 @@ constexpr wchar_t kOwnershipStreamEntry[] = L":sprint-coder.mkdir-owner:$DATA";
 
 // Whether the object carries a data stream besides its unnamed one (and, for a directory, its
 // ownership stream). An update writes only the unnamed stream and an undone delete re-creates only
-// that, so a named stream (metadata, a Zone.Identifier) would be lost.
+// that, so a named stream (metadata, a Zone.Identifier) would be lost. A volume without named
+// streams has none; on one that has them, a failed query is refused like a stream.
 bool HasNamedDataStreams(HANDLE object, const wchar_t* allowed, bool* named) {
+  DWORD flags = 0;
+  if (!VolumeFlags(object, &flags)) return false;
+  if ((flags & FILE_NAMED_STREAMS) == 0) {
+    *named = false;
+    return true;
+  }
   std::vector<uint64_t> buffer(512);
   while (!GetFileInformationByHandleEx(object, FileStreamInfo, buffer.data(),
                                        static_cast<DWORD>(buffer.size() * sizeof(uint64_t)))) {
@@ -1049,7 +1084,14 @@ bool HasNamedDataStreams(HANDLE object, const wchar_t* allowed, bool* named) {
 }
 
 // Extended attributes (including WSL metadata) are not copied by either the stage or a re-create.
+// A volume without them has none.
 bool HasExtendedAttributes(HANDLE object, bool* present) {
+  DWORD flags = 0;
+  if (!VolumeFlags(object, &flags)) return false;
+  if ((flags & FILE_SUPPORTS_EXTENDED_ATTRIBUTES) == 0) {
+    *present = false;
+    return true;
+  }
   static const auto query = reinterpret_cast<NtQueryInformationFileFn>(
       GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
   if (query == nullptr) return false;
@@ -1064,7 +1106,18 @@ bool HasExtendedAttributes(HANDLE object, bool* present) {
   return true;
 }
 
-bool SameDacl(PACL left, PACL right) {
+// Data a delete or discard would destroy along with the object, or nullptr: a named stream or
+// extended attributes nobody approved. The directory's own ownership stream is `allowed`.
+const char* UnapprovedDataReason(HANDLE object, const wchar_t* allowed = nullptr) {
+  bool present = true;
+  if (!HasNamedDataStreams(object, allowed, &present) || present) return kStreamsRefusal;
+  if (!HasExtendedAttributes(object, &present) || present) return kExtendedAttributesRefusal;
+  return nullptr;
+}
+
+// Whether two DACLs grant the same access: the same entries in the same order. The inherited flag
+// only records where an entry came from, which a protected re-application does not keep.
+bool SameAccess(PACL left, PACL right) {
   if (left == nullptr || right == nullptr || left->AceCount != right->AceCount) return false;
   for (DWORD index = 0; index < left->AceCount; ++index) {
     void* first = nullptr;
@@ -1072,14 +1125,17 @@ bool SameDacl(PACL left, PACL right) {
     if (!GetAce(left, index, &first) || !GetAce(right, index, &second)) return false;
     const auto* first_header = static_cast<ACE_HEADER*>(first);
     const auto* second_header = static_cast<ACE_HEADER*>(second);
-    if (first_header->AceSize != second_header->AceSize ||
-        std::memcmp(first, second, first_header->AceSize) != 0)
+    if (first_header->AceType != second_header->AceType ||
+        first_header->AceSize != second_header->AceSize ||
+        (first_header->AceFlags & ~INHERITED_ACE) != (second_header->AceFlags & ~INHERITED_ACE) ||
+        std::memcmp(first_header + 1, second_header + 1,
+                    first_header->AceSize - sizeof(ACE_HEADER)) != 0)
       return false;
   }
   return true;
 }
 
-// A DACL together with its protection, the part of a descriptor an update must carry unchanged.
+// A DACL together with its protection and owner, as a file carries them.
 struct DaclFacts {
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   PACL dacl = nullptr;
@@ -1105,14 +1161,6 @@ bool ReadDacl(HANDLE handle, SECURITY_INFORMATION extra, DaclFacts* output) {
   return true;
 }
 
-bool PersistentAcls(HANDLE handle, bool* persistent) {
-  DWORD flags = 0;
-  if (!GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
-    return false;
-  *persistent = (flags & FILE_PERSISTENT_ACLS) != 0;
-  return true;
-}
-
 // An explicit integrity label is lost by both a stage and a re-create; one inherited from the
 // parent is given to the new file again.
 bool HasExplicitIntegrityLabel(HANDLE object, bool* labelled) {
@@ -1134,10 +1182,50 @@ bool HasExplicitIntegrityLabel(HANDLE object, bool* labelled) {
   return true;
 }
 
-// The DACL a file created in `parent` now gets: its inheritable entries, after `explicit_dacl`
-// (the entries of the file's own) when there are any. This is what an undone delete re-creates
-// (no explicit entries) and what an unprotected DACL re-applied to a staged update becomes.
-bool DaclCreatedIn(HANDLE parent, PACL explicit_dacl, PACL actual, bool* same) {
+// The owner, DACL and protection a new file gets: what a staged update is given, or what an undone
+// delete re-creates. One prediction, compared against by the preflight, by staging before it
+// writes, and by the apply step before it publishes, so the three can never disagree.
+struct PredictedSecurity {
+  bool applies = false;
+  bool protected_dacl = false;
+  std::vector<uint64_t> dacl_storage;
+  PACL dacl = nullptr;
+  std::vector<unsigned char> owner_storage;
+  PSID owner = nullptr;
+};
+
+bool CopySidInto(PSID sid, std::vector<unsigned char>* storage, PSID* output) {
+  storage->resize(GetLengthSid(sid));
+  if (!CopySid(static_cast<DWORD>(storage->size()), storage->data(), sid)) return false;
+  *output = storage->data();
+  return true;
+}
+
+// Copies `dacl`, keeping only the entries `keep` selects and clearing their inherited flag when
+// `strip_inherited` is set.
+bool CopyAcl(PACL dacl, bool (*keep)(const ACE_HEADER*), bool strip_inherited,
+             std::vector<uint64_t>* storage, PACL* output) {
+  storage->assign(dacl->AclSize / sizeof(uint64_t) + 1, 0);
+  auto* acl = reinterpret_cast<PACL>(storage->data());
+  if (!InitializeAcl(acl, dacl->AclSize, dacl->AclRevision)) return false;
+  for (DWORD index = 0; index < dacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(dacl, index, &ace)) return false;
+    const auto* header = static_cast<ACE_HEADER*>(ace);
+    if (!keep(header)) continue;
+    std::vector<uint8_t> entry(static_cast<const uint8_t*>(ace),
+                               static_cast<const uint8_t*>(ace) + header->AceSize);
+    if (strip_inherited) reinterpret_cast<ACE_HEADER*>(entry.data())->AceFlags &= ~INHERITED_ACE;
+    if (!AddAce(acl, dacl->AclRevision, MAXDWORD, entry.data(), header->AceSize)) return false;
+  }
+  *output = acl;
+  return true;
+}
+
+// The DACL a file created in `parent` with owner `owner` and its own `explicit_dacl` (nullptr for
+// none) gets: the explicit entries, then what the parent passes down, CREATOR OWNER resolved to
+// `owner`.
+bool InheritIn(HANDLE parent, PSID owner, PACL explicit_dacl, PredictedSecurity* output) {
   HANDLE raw = INVALID_HANDLE_VALUE;
   // READ_CONTROL is outside share-mode checks, so this reopens the pinned parent itself.
   if (OpenRelative(parent, std::wstring(), READ_CONTROL | SYNCHRONIZE, kObserveShare, FILE_OPEN,
@@ -1152,9 +1240,9 @@ bool DaclCreatedIn(HANDLE parent, PACL explicit_dacl, PACL actual, bool* same) {
     return false;
   const std::unique_ptr<void, decltype(&LocalFree)> parent_descriptor(parent_raw, &LocalFree);
   SECURITY_DESCRIPTOR creator{};
-  if (explicit_dacl != nullptr &&
-      (!InitializeSecurityDescriptor(&creator, SECURITY_DESCRIPTOR_REVISION) ||
-       !SetSecurityDescriptorDacl(&creator, TRUE, explicit_dacl, FALSE)))
+  if (!InitializeSecurityDescriptor(&creator, SECURITY_DESCRIPTOR_REVISION) ||
+      !SetSecurityDescriptorOwner(&creator, owner, FALSE) ||
+      (explicit_dacl != nullptr && !SetSecurityDescriptorDacl(&creator, TRUE, explicit_dacl, FALSE)))
     return false;
   HANDLE token_raw = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_raw)) return false;
@@ -1162,8 +1250,7 @@ bool DaclCreatedIn(HANDLE parent, PACL explicit_dacl, PACL actual, bool* same) {
   GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE,
                           FILE_ALL_ACCESS};
   PSECURITY_DESCRIPTOR created = nullptr;
-  if (!CreatePrivateObjectSecurityEx(parent_raw, explicit_dacl == nullptr ? nullptr : &creator,
-                                     &created, nullptr, FALSE,
+  if (!CreatePrivateObjectSecurityEx(parent_raw, &creator, &created, nullptr, FALSE,
                                      SEF_DACL_AUTO_INHERIT | SEF_AVOID_PRIVILEGE_CHECK |
                                          SEF_AVOID_OWNER_CHECK,
                                      token.get(), &mapping))
@@ -1171,77 +1258,112 @@ bool DaclCreatedIn(HANDLE parent, PACL explicit_dacl, PACL actual, bool* same) {
   BOOL present = FALSE;
   BOOL defaulted = FALSE;
   PACL created_dacl = nullptr;
-  const bool read = GetSecurityDescriptorDacl(created, &present, &created_dacl, &defaulted);
-  *same = read && present && SameDacl(actual, created_dacl);
+  const bool copied =
+      GetSecurityDescriptorDacl(created, &present, &created_dacl, &defaulted) && present &&
+      created_dacl != nullptr &&
+      CopyAcl(
+          created_dacl, [](const ACE_HEADER*) { return true; }, false, &output->dacl_storage,
+          &output->dacl);
   DestroyPrivateObjectSecurity(&created);
-  return read;
+  return copied;
 }
 
-// The entries of `dacl` that are the file's own rather than inherited, in their order.
-bool ExplicitEntries(PACL dacl, std::vector<uint64_t>* storage, PACL* output) {
-  storage->assign(dacl->AclSize / sizeof(uint64_t) + 1, 0);
-  auto* acl = reinterpret_cast<PACL>(storage->data());
-  if (!InitializeAcl(acl, dacl->AclSize, dacl->AclRevision)) return false;
-  for (DWORD index = 0; index < dacl->AceCount; ++index) {
-    void* ace = nullptr;
-    if (!GetAce(dacl, index, &ace)) return false;
-    const auto* header = static_cast<ACE_HEADER*>(ace);
-    if ((header->AceFlags & INHERITED_ACE) == 0 &&
-        !AddAce(acl, dacl->AclRevision, MAXDWORD, ace, header->AceSize))
-      return false;
-  }
-  *output = acl;
-  return true;
-}
-
-// Whether the file's access control survives the effect: a delete re-creates the file owned by the
-// process's default owner with only what `parent` passes down now; an update's staged copy keeps a
-// protected DACL as is, re-derives the inherited part of an unprotected one from `parent`, and is
-// owned by the user or the default owner.
-bool AccessControlSurvives(bool deleting, HANDLE security, HANDLE parent) {
+// What CaptureSourceSecurity and the protected or unprotected re-application give a staged update
+// of `source`: owned by the user when the source is, otherwise by the default owner; a protected
+// DACL as it stands without the inherited flags, an unprotected one as its own entries plus what
+// the current parent passes down. A reason is returned instead when that cannot match the source.
+const char* PredictStagedSecurity(HANDLE source, HANDLE parent, PredictedSecurity* output) {
   bool persistent = false;
-  if (!PersistentAcls(security, &persistent)) return false;
-  if (!persistent) return true;
+  if (!PersistentAcls(source, &persistent)) return kAccessControlUpdateRefusal;
+  if (!persistent) return nullptr;
   DaclFacts actual;
-  std::vector<unsigned char> default_owner_storage, user_storage;
-  PSID default_owner = nullptr;
+  std::vector<unsigned char> user_storage, default_owner_storage;
   PSID user = nullptr;
-  // A NULL DACL (full access for everyone) is never carried and never re-created.
-  if (!ReadDacl(security, OWNER_SECURITY_INFORMATION, &actual) || actual.dacl == nullptr ||
-      actual.owner == nullptr || !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
-      !ProcessUserSid(&user_storage, &user))
-    return false;
-  if (deleting) {
-    bool same = false;
-    return !actual.protected_dacl && EqualSid(actual.owner, default_owner) &&
-           DaclCreatedIn(parent, nullptr, actual.dacl, &same) && same;
-  }
-  if (!EqualSid(actual.owner, user) && !EqualSid(actual.owner, default_owner)) return false;
-  if (actual.protected_dacl) return true;
+  PSID default_owner = nullptr;
+  // A NULL DACL (full access for everyone) is never carried.
+  if (!ReadDacl(source, OWNER_SECURITY_INFORMATION, &actual) || actual.dacl == nullptr ||
+      actual.owner == nullptr || !ProcessUserSid(&user_storage, &user) ||
+      !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner))
+    return kAccessControlUpdateRefusal;
+  // Handing a file owned by someone else (an Administrators-owned one, say) to the user would let
+  // the user rewrite its DACL, so such an update is refused rather than carried.
+  if (!EqualSid(actual.owner, user) && !EqualSid(actual.owner, default_owner))
+    return kOwnerUpdateRefusal;
+  if (!CopySidInto(actual.owner, &output->owner_storage, &output->owner))
+    return kAccessControlUpdateRefusal;
+  output->applies = true;
+  output->protected_dacl = actual.protected_dacl;
+  if (actual.protected_dacl)
+    return CopyAcl(
+               actual.dacl, [](const ACE_HEADER*) { return true; }, true, &output->dacl_storage,
+               &output->dacl)
+               ? nullptr
+               : kAccessControlUpdateRefusal;
   std::vector<uint64_t> explicit_storage;
   PACL explicit_dacl = nullptr;
-  bool same = false;
-  return ExplicitEntries(actual.dacl, &explicit_storage, &explicit_dacl) &&
-         DaclCreatedIn(parent, explicit_dacl, actual.dacl, &same) && same;
+  return CopyAcl(
+             actual.dacl,
+             [](const ACE_HEADER* header) { return (header->AceFlags & INHERITED_ACE) == 0; },
+             false, &explicit_storage, &explicit_dacl) &&
+                 InheritIn(parent, output->owner, explicit_dacl, output)
+             ? nullptr
+             : kAccessControlUpdateRefusal;
+}
+
+// What an undone delete re-creates in `parent`: owned by the default owner, with only what the
+// parent passes down.
+bool PredictRecreatedSecurity(HANDLE parent, PredictedSecurity* output) {
+  std::vector<unsigned char> default_owner_storage;
+  PSID default_owner = nullptr;
+  if (!ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
+      !CopySidInto(default_owner, &output->owner_storage, &output->owner))
+    return false;
+  output->applies = true;
+  output->protected_dacl = false;
+  return InheritIn(parent, output->owner, nullptr, output);
+}
+
+// Whether a file's owner, DACL and protection are the predicted ones.
+bool MatchesPrediction(HANDLE file, const PredictedSecurity& prediction) {
+  if (!prediction.applies) return true;
+  DaclFacts actual;
+  return ReadDacl(file, OWNER_SECURITY_INFORMATION, &actual) && actual.dacl != nullptr &&
+         actual.owner != nullptr && EqualSid(actual.owner, prediction.owner) &&
+         actual.protected_dacl == prediction.protected_dacl &&
+         SameAccess(actual.dacl, prediction.dacl);
+}
+
+// The access-control part of the refusal: whether the source keeps its owner and DACL through the
+// effect. `prediction` receives what a staged update must be given.
+const char* AccessControlReason(bool deleting, HANDLE security, HANDLE parent,
+                                PredictedSecurity* prediction) {
+  if (!deleting) {
+    if (const char* reason = PredictStagedSecurity(security, parent, prediction)) return reason;
+    return MatchesPrediction(security, *prediction) ? nullptr : kAccessControlUpdateRefusal;
+  }
+  bool persistent = false;
+  if (!PersistentAcls(security, &persistent)) return kAccessControlRefusal;
+  if (!persistent) return nullptr;
+  return PredictRecreatedSecurity(parent, prediction) && MatchesPrediction(security, *prediction)
+             ? nullptr
+             : kAccessControlRefusal;
 }
 
 // Why an update or delete of this file could not be undone exactly, or nullptr. `content` reads
 // the streams and extended attributes, `security` (READ_CONTROL, the same object) the
-// descriptor, `parent` is pinned.
-const char* IrreversibleEffectReason(bool deleting, HANDLE content, HANDLE security,
-                                     HANDLE parent) {
-  bool present = true;
-  if (!HasNamedDataStreams(content, nullptr, &present) || present) return kStreamsRefusal;
-  if (!HasExtendedAttributes(content, &present) || present) return kExtendedAttributesRefusal;
+// descriptor, `parent` is pinned. `prediction`, when given, receives the staged update's security.
+const char* IrreversibleEffectReason(bool deleting, HANDLE content, HANDLE security, HANDLE parent,
+                                     PredictedSecurity* prediction = nullptr) {
+  if (const char* reason = UnapprovedDataReason(content)) return reason;
   FileFacts facts;
+  bool labelled = true;
   if (!QueryFacts(content, &facts) || (facts.attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0)
     return kEncryptionRefusal;
-  if (!HasExplicitIntegrityLabel(security, &present) || present) return kIntegrityLabelRefusal;
+  if (!HasExplicitIntegrityLabel(security, &labelled) || labelled) return kIntegrityLabelRefusal;
   if (deleting && (facts.attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0)
     return kHiddenSystemRefusal;
-  if (!AccessControlSurvives(deleting, security, parent))
-    return deleting ? kAccessControlRefusal : kAccessControlUpdateRefusal;
-  return nullptr;
+  PredictedSecurity local;
+  return AccessControlReason(deleting, security, parent, prediction == nullptr ? &local : prediction);
 }
 
 // Attributes a staged update carries over from the revision it replaces (READONLY follows the
@@ -1252,19 +1374,7 @@ constexpr DWORD kCarriedAttributes =
 // Whether a directory holds data of its own that removing it would destroy: a named stream other
 // than its ownership stream, or extended attributes.
 bool DirectoryCarriesData(HANDLE directory) {
-  bool present = true;
-  return !HasNamedDataStreams(directory, kOwnershipStreamEntry, &present) || present ||
-         !HasExtendedAttributes(directory, &present) || present;
-}
-
-// Whether two files carry the same DACL, protection included.
-bool SameAccessControl(HANDLE first, HANDLE second) {
-  bool persistent = false;
-  if (!PersistentAcls(first, &persistent)) return false;
-  if (!persistent) return true;
-  DaclFacts left, right;
-  return ReadDacl(first, 0, &left) && ReadDacl(second, 0, &right) &&
-         left.protected_dacl == right.protected_dacl && SameDacl(left.dacl, right.dacl);
+  return UnapprovedDataReason(directory, kOwnershipStreamEntry) != nullptr;
 }
 
 // Opens the descriptor of a held endpoint for reading and proves it is the same object.
@@ -1469,13 +1579,15 @@ bool ApplyUpdate(const std::shared_ptr<MutationSession>& session, const EffectIn
   // Once the previous revision is parked, something has moved, so a resumed update never answers
   // EFFECT_REFUSED.
   OwnedHandle previous_security, staged_security;
+  PredictedSecurity prediction;
   const char* reason =
       !OpenHeldSecurity(parent.get(), resuming ? swap_leaf : source_leaf, previous.get(),
                         &previous_security) ||
               !OpenHeldSecurity(parent.get(), auxiliary_leaf, staged.get(), &staged_security)
           ? kAccessControlChangedRefusal
-          : IrreversibleEffectReason(false, previous.get(), previous_security.get(), parent.get());
-  if (reason == nullptr && !SameAccessControl(previous_security.get(), staged_security.get()))
+          : IrreversibleEffectReason(false, previous.get(), previous_security.get(), parent.get(),
+                                     &prediction);
+  if (reason == nullptr && !MatchesPrediction(staged_security.get(), prediction))
     reason = kAccessControlChangedRefusal;
   if (reason != nullptr) return Fail(failure, resuming ? "UNSAFE_PATH" : "EFFECT_REFUSED", reason);
   if (ProbeName(parent.get(), resuming ? source_leaf : swap_leaf) != EndpointResult::kAbsent)
@@ -1702,10 +1814,12 @@ void DiscardStagingDirectory(HANDLE directory, const std::wstring& marker_leaf,
   std::string marker_token;
   OwnedHandle marker;
   DWORD error = 0;
-  if (HoldMarker(directory, marker_leaf, true, &marker_token, &marker) && marker_token == token)
+  if (HoldMarker(directory, marker_leaf, true, &marker_token, &marker) && marker_token == token &&
+      UnapprovedDataReason(marker.get()) == nullptr)
     DeleteHeld(marker.get(), &error);
   marker.reset();
-  if (ListContents(directory, marker_leaf) == DirectoryContents::kEmpty)
+  if (ListContents(directory, marker_leaf) == DirectoryContents::kEmpty &&
+      !DirectoryCarriesData(directory))
     DeleteHeld(directory, &error);
 }
 
@@ -1969,6 +2083,7 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
   // A new file inherits from its parent. An update's bytes are created under the access control of
   // the revision they replace, before any of them is written, or not at all.
   CarriedSecurity carried;
+  PredictedSecurity prediction;
   OwnedHandle source_handle;
   DWORD carried_attributes = 0;
   if (kind == "update") {
@@ -1988,7 +2103,8 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
     // The preflight's refusals again, before a single byte of the new revision exists: encrypted
     // or labelled content, for one, must never be written out as a plain staged copy.
     if (const char* reason = IrreversibleEffectReason(false, source_handle.get(),
-                                                      source_handle.get(), parent.get()))
+                                                      source_handle.get(), parent.get(),
+                                                      &prediction))
       return ThrowFailure(env, "EFFECT_REFUSED", reason);
     FileFacts source_facts;
     if (!QueryFacts(source_handle.get(), &source_facts))
@@ -2012,9 +2128,11 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
   if (status < 0)
     return ThrowFailure(env, "NATIVE_FAILURE", "NativeSafeFs staging artifact could not be created");
   OwnedHandle file(raw);
+  // Discards the artifact this call created, unless something else wrote a stream or extended
+  // attributes onto it meanwhile: that stays, like any data nobody approved.
   const auto discard = [&](const char* code, const char* message) {
     DWORD error = 0;
-    DeleteHeld(file.get(), &error);
+    if (UnapprovedDataReason(file.get()) == nullptr) DeleteHeld(file.get(), &error);
     return ThrowFailure(env, code, message);
   };
   // Re-applied through the handle like ReplaceFileWithBackup, so an unprotected DACL takes its
@@ -2024,7 +2142,7 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
                       carried.dacl, nullptr) != ERROR_SUCCESS)
     return discard("UNSAFE_PATH", "NativeSafeFs cannot carry the update source access control");
   // Nothing is written until the staged file demonstrably has the source's access control.
-  if (source_handle && !SameAccessControl(file.get(), source_handle.get()))
+  if (source_handle && !MatchesPrediction(file.get(), prediction))
     return discard("EFFECT_REFUSED", kAccessControlUpdateRefusal);
   DWORD written = 0;
   if ((length > 0 &&
@@ -2142,6 +2260,10 @@ napi_value WindowsMutationCleanupIntentAuxiliary(napi_env env, napi_callback_inf
     return ThrowFailure(env, "STALE_SESSION", "NativeSafeFs session was invalidated before cleanup");
   DWORD error = 0;
   OwnedHandle& target = parked ? parked_handle : auxiliary_handle;
+  // An intent resumed after a restart runs no preflight, and the auxiliary may have gained a
+  // stream or extended attributes since the effect; deleting it would destroy them.
+  if (const char* reason = UnapprovedDataReason(target.get()))
+    return ThrowFailure(env, "EFFECT_REFUSED", reason);
   if (!DeleteHeld(target.get(), &error))
     return ThrowFailure(env, "NATIVE_FAILURE", "NativeSafeFs auxiliary cleanup failed");
   target.reset();
@@ -2356,6 +2478,8 @@ napi_value WindowsMutationCleanupDirectoryOwnership(napi_env env, napi_callback_
   if (!SessionCurrent(session))
     return ThrowFailure(env, "STALE_SESSION",
                         "NativeSafeFs session was invalidated before marker cleanup");
+  if (const char* reason = UnapprovedDataReason(marker.get()))
+    return ThrowFailure(env, "EFFECT_REFUSED", reason);
   DWORD error = 0;
   if (!DeleteHeld(marker.get(), &error))
     return ThrowFailure(env, "NATIVE_FAILURE", "cleanup mkdir ownership marker failed");

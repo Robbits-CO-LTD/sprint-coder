@@ -352,6 +352,34 @@ async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
   return result.stdout.trim();
 }
 
+/**
+ * Windows only: writes a DACL through SetFileSecurityW, which stores it as given, so a protected
+ * DACL keeps entries flagged as inherited (what a re-application through SetSecurityInfo drops).
+ */
+function windowsSetRawDacl(path: string, sddl: string): void {
+  const script = [
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class RawSd {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    '  public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint r, out IntPtr sd, IntPtr size);',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    '  public static extern bool SetFileSecurityW(string f, uint info, IntPtr sd);',
+    '}',
+    '"@',
+    '$user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "$sddl = $env:SPRINT_CODER_RAW_SDDL.Replace('{user}', $user)",
+    '$sd = [IntPtr]::Zero',
+    'if (-not [RawSd]::ConvertStringSecurityDescriptorToSecurityDescriptorW($sddl, 1, [ref]$sd, [IntPtr]::Zero)) { throw "convert" }',
+    'if (-not [RawSd]::SetFileSecurityW($env:SPRINT_CODER_RAW_PATH, 4, $sd)) { throw "set" }',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: { ...process.env, SPRINT_CODER_RAW_PATH: path, SPRINT_CODER_RAW_SDDL: sddl },
+  });
+  if (result.status !== 0) throw new Error(`SetFileSecurityW failed: ${result.stderr}`);
+}
+
 function currentUserSid(): string {
   const result = spawnSync(
     'powershell.exe',
@@ -617,6 +645,93 @@ if (runsWithElectronAbi) {
         reopened.close();
       },
     );
+
+    it('commits updates whose protected DACL has inherited-flagged entries or mixes explicit and inherited ones', async () => {
+      const env = await fixture('windows-carried-dacl-kinds');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const protectedPath = join(env.workspace, 'protected.txt');
+      const mixedPath = join(env.workspace, 'mixed.txt');
+      await writeFile(protectedPath, 'UPDATE_BEFORE', { mode: 0o600 });
+      await writeFile(mixedPath, 'UPDATE_BEFORE', { mode: 0o600 });
+      windowsSetRawDacl(protectedPath, 'D:PAI(A;ID;FA;;;{user})(A;ID;FR;;;BU)');
+      spawnSync('icacls.exe', [mixedPath, '/grant', '*S-1-5-32-545:(R)']);
+      const protectedDacl = await windowsDacl(protectedPath);
+      const mixedDacl = await windowsDacl(mixedPath);
+      expect(protectedDacl).toMatch(/^D:P[A-Z]*\(A;ID;/);
+      expect(mixedDacl).toMatch(/^D:AI\(A;;[^)]*;BU\)\(A;ID;/);
+      const operation = async (path: string, name: string) =>
+        Object.freeze({
+          kind: 'update' as const,
+          path: name,
+          canonicalPath: path,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: `token-${name}`,
+          preRevision: await fileRevision(path),
+          preImage: 'UPDATE_BEFORE',
+          postImage: 'UPDATE_AFTER',
+          preHash: hash('UPDATE_BEFORE'),
+          postHash: hash('UPDATE_AFTER'),
+        });
+      const facts = {
+        version: 1 as const,
+        policyEpoch: 0,
+        operations: Object.freeze([
+          await operation(protectedPath, 'protected.txt'),
+          await operation(mixedPath, 'mixed.txt'),
+        ]),
+      };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-carried-dacl-kinds'),
+      );
+
+      // The preflight passes both, and staging produces exactly what it predicted.
+      const saga = await executor.apply(
+        buildRequest({
+          id: 'saga-windows-carried-dacl-kinds',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'op-windows-carried-dacl-kinds',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+      expect(saga).toMatchObject({ state: 'committed', recovery: null });
+      await expect(readFile(protectedPath, 'utf8')).resolves.toBe('UPDATE_AFTER');
+      await expect(readFile(mixedPath, 'utf8')).resolves.toBe('UPDATE_AFTER');
+      // A protected re-application keeps every entry and drops only where it came from. Get-Acl
+      // prints explicit entries in canonical order, so compare protection and the set of entries.
+      const access = (sddl: string) => ({
+        protected: sddl.startsWith('D:P'),
+        entries: (sddl.match(/\([^)]*\)/g) ?? []).map((ace) => ace.replace(';ID;', ';;')).sort(),
+      });
+      expect(access(await windowsDacl(protectedPath))).toEqual(access(protectedDacl));
+      await expect(windowsDacl(mixedPath)).resolves.toBe(mixedDacl);
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
 
     it('leaves a patch unapplied when Windows refuses to update a file moved in from a stricter directory', async () => {
       const env = await fixture('windows-refused-moved-update');

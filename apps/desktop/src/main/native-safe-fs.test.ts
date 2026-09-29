@@ -1309,6 +1309,120 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it('keeps a tombstone or displaced revision that gained a stream before its cleanup', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '860' });
+      await writeFile(join(input.workspace, 'deleted.txt'), 'deleted bytes\n');
+      await writeFile(join(input.workspace, 'updated.txt'), 'updated before\n');
+      const replacement = Buffer.from('updated after\n');
+      let remove = nativeIntent({
+        session,
+        kind: 'delete',
+        sourceSegments: ['deleted.txt'],
+        expectedSource: await revision(join(input.workspace, 'deleted.txt')),
+        id: 'intent-late-stream-delete',
+        nonce: 'd'.repeat(32),
+      });
+      let update = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['updated.txt'],
+        expectedSource: await revision(join(input.workspace, 'updated.txt')),
+        artifactBytes: replacement,
+        id: 'intent-late-stream-update',
+        nonce: 'e'.repeat(32),
+      });
+      remove = transitionNativeMutationIntent(remove, { state: 'effect_pending' });
+      update = await stageNativeIntent(boundary, session, update, replacement);
+      update = transitionNativeMutationIntent(update, { state: 'effect_pending' });
+      for (let intent of [remove, update]) {
+        const effect = await boundary.applyIntentEffect(session, intent);
+        intent = transitionNativeMutationIntent(intent, {
+          state: 'effect_observed',
+          effectObservation: effect,
+        });
+        intent = transitionNativeMutationIntent(intent, { state: 'cleanup_pending' });
+        // The process stops here; the auxiliary gains a stream before the cleanup resumes.
+        const auxiliary = join(input.workspace, (intent.tombstone ?? intent.temp)!.leafName);
+        await writeFile(`${auxiliary}:metadata`, 'late metadata');
+        await expect(boundary.cleanupIntentAuxiliary(session, intent)).rejects.toMatchObject({
+          code: 'EFFECT_REFUSED',
+          message: STREAMS_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>);
+        await expect(readFile(`${auxiliary}:metadata`, 'utf8')).resolves.toBe('late metadata');
+      }
+      await boundary.closeSession(session);
+    });
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'resolves CREATOR OWNER to the staged owner when the default owner is another SID',
+      async () => {
+        const input = await fixture();
+        const parent = join(input.workspace, 'creator');
+        await mkdir(parent);
+        await windowsDacl(parent, 'D:P(A;OICI;FA;;;{user})(A;OICIIO;FA;;;CO)');
+        const sourcePath = join(parent, 'owned.txt');
+        await writeFile(sourcePath, 'creator before\n');
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '861' });
+        const replacement = Buffer.from('creator after\n');
+        let intent = nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: ['creator', 'owned.txt'],
+          expectedSource: await revision(sourcePath),
+          artifactBytes: replacement,
+        });
+        // An elevated token's default owner: the user-owned source keeps the user as its owner.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'] = 'S-1-5-32-544';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+          intent = await stageNativeIntent(boundary, session, intent, replacement);
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          await boundary.applyIntentEffect(session, intent);
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'];
+        }
+        await expect(readFile(sourcePath)).resolves.toEqual(replacement);
+        await boundary.closeSession(session);
+      },
+    );
+
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'treats a volume without named streams or extended attributes as having none',
+      async () => {
+        const input = await fixture();
+        const sourcePath = join(input.workspace, 'plain-volume.txt');
+        await writeFile(sourcePath, 'plain volume\n');
+        await writeFile(`${sourcePath}:metadata`, 'only on NTFS');
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '862' });
+        const intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: ['plain-volume.txt'],
+          expectedSource: await revision(sourcePath),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: STREAMS_REFUSAL,
+        });
+        // FILE_NAMED_STREAMS | FILE_SUPPORTS_EXTENDED_ATTRIBUTES cleared, as on FAT or exFAT.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'] = '840000';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'];
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
     it('refuses to stage an update whose source has a NULL DACL', async () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'null-dacl.txt');
