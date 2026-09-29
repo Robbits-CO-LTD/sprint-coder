@@ -423,6 +423,11 @@ export class TeamCoordinator {
   >();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly executionInterruptions = new Map<string, ExecutionInterruptionControl>();
+  /**
+   * The files a runtime reported changing before `dispatchWithRetry` threw, keyed by the error it
+   * threw, so the failure report still lists what the Worker committed (issue #575).
+   */
+  private readonly dispatchFailureChangedFiles = new WeakMap<Error, readonly string[]>();
   /** `<executionId>:<repositoryOrdinal>:<reason>` keys already reported by `reportReclaimKept`. */
   private readonly reclaimKeptReasonsReported = new Set<string>();
   /**
@@ -3918,7 +3923,14 @@ export class TeamCoordinator {
         status: 'failed',
         summary: failureSummary,
         findings: [],
-        changedFiles: [],
+        // What the runtime reported changing before it failed: a committed write stays in the
+        // quarantined isolation, so the report lists it as a returned failed completion's does.
+        changedFiles:
+          error instanceof Error
+            ? (this.dispatchFailureChangedFiles.get(error) ?? [])
+                .filter((path) => path.length <= 1_024)
+                .slice(0, 200)
+            : [],
         artifacts: [],
         verification: failureCompletion.verification,
         risks: failureCompletion.risks,
@@ -4740,6 +4752,7 @@ export class TeamCoordinator {
     changedFiles: readonly string[];
   }> {
     let lastError: unknown;
+    let lastChangedFiles: readonly string[] = [];
     for (let attempt = 1; attempt <= 1; attempt += 1) {
       if (attempt === 1) {
         const message = this.persistence
@@ -4772,8 +4785,8 @@ export class TeamCoordinator {
         worker.id,
         seq,
       );
+      const changedFiles = new Set<string>();
       try {
-        const changedFiles = new Set<string>();
         // Enter running before invoking the runtime so adapters that do not emit the optional
         // accepted event still follow the durable task lifecycle. An accepted event is then an
         // idempotent acknowledgement, not the only source of truth for execution start.
@@ -4832,6 +4845,7 @@ export class TeamCoordinator {
         };
       } catch (error) {
         lastError = error;
+        lastChangedFiles = [...changedFiles];
         // A deliberate steer/cancel stops the current Runtime call. That is an execution-control
         // outcome, not a transport timeout; let handleRequestedInterruption settle delivery with
         // the correct steer (acked) or cancel (failed) semantics.
@@ -4850,7 +4864,10 @@ export class TeamCoordinator {
         break;
       }
     }
-    throw lastError instanceof Error ? lastError : new Error('Worker delivery failed');
+    const failure = lastError instanceof Error ? lastError : new Error('Worker delivery failed');
+    if (lastChangedFiles.length > 0)
+      this.dispatchFailureChangedFiles.set(failure, lastChangedFiles);
+    throw failure;
   }
 
   /**

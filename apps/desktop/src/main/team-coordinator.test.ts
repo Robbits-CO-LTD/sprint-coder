@@ -2295,6 +2295,81 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 60_000);
 
+    it.each(['Managed Local', 'CLI'] as const)(
+      'keeps the file a %s Worker committed in the report of a run whose runtime then threw (issue #575)',
+      async (kind) => {
+        const persistence = createPersistence();
+        persistence.createProviderConnection(managedLocalConnection());
+        const task = persistence.createTask(`${kind} write then runtime failure`);
+        const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+        const runtimeFailure = new Error('the runtime failed after the write committed');
+        // A CLI Worker's committed write reaches Main as the fileChange its runtime sends
+        // (recordManagedToolResult); the runtime then fails.
+        const cli = new (class extends TestWorkerRuntime {
+          override async execute(
+            input: Parameters<TeamWorkerRuntime['execute']>[0],
+          ): Promise<WorkerRuntimeResult> {
+            writeFileSync(join(input.workspacePath!, 'managed-output.txt'), 'written\n');
+            input.onEvent?.({
+              type: 'fileChange',
+              changes: [{ path: 'managed-output.txt', kind: 'add' }],
+            });
+            throw runtimeFailure;
+          }
+        })();
+        const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
+        // The Managed Local Worker writes through the real runtime and managed tool; only then
+        // does its runtime call fail. (The CLI fallback throws by itself.)
+        const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
+        vi.spyOn(managedLocal.runtime, 'execute').mockImplementation(async (input) => {
+          await execute(input);
+          throw runtimeFailure;
+        });
+        const complete = vi.spyOn(persistence, 'completeTeamTaskWithReport');
+        const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
+        const writer = await coordinator.hireWorker({
+          taskId: task.id,
+          role: `${kind} writer`,
+          objective: 'write in isolation',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+          ...(kind === 'Managed Local' ? { modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION } : {}),
+        });
+
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: writer.id,
+          content: 'managed-output.txtを作ってください',
+          doneCriteria: ['managed-output.txt exists'],
+          accessMode: 'workspace-write',
+        });
+        await waitFor(
+          () =>
+            persistence.getTeamExecution(submission.executionId).state === 'failed' &&
+            persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'quarantined',
+          30_000,
+        );
+
+        expect(managedLocal.toolCalls).toHaveLength(kind === 'Managed Local' ? 1 : 0);
+        // A write Worker's failed run is not requeued; its report lists the committed file.
+        expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
+          { state: 'failed', terminalReason: 'runtime_failure' },
+        ]);
+        const reports = complete.mock.calls
+          .map(([input]) => input)
+          .filter(({ agentId }) => agentId === writer.id);
+        expect(reports).toHaveLength(1);
+        expect(reports[0]!.report).toMatchObject({
+          status: 'failed',
+          summary: runtimeFailure.message,
+          changedFiles: ['managed-output.txt'],
+        });
+        expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
+        persistence.close();
+      },
+      60_000,
+    );
+
     it('runs an explicitly workspace-write standalone assignment inside isolation', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Standalone writable execution');
