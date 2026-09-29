@@ -1218,6 +1218,8 @@ describe('ApprovalCoordinator per-call approval of Project memory and Skill Draf
         ['two emoji variation selectors in a row', 'ok \u2764\uFE0F\uFE0F'],
         ['a Hangul filler', 'Use\u3164pnpm'],
         ['a Hangul choseong filler', 'Use\u115Fpnpm'],
+        ['a Khmer inherent vowel AQ', 'pass\u17B4word=synthetic-value'],
+        ['a Khmer inherent vowel AA', 'pass\u17B5word=synthetic-value'],
       ] as const
     ).map(([name, content]) => ({
       name: `a memory with ${name}`,
