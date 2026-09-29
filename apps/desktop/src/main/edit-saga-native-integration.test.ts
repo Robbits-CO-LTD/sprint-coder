@@ -18,6 +18,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -329,7 +330,7 @@ async function expectMissing(path: string): Promise<void> {
 }
 
 if (runsWithElectronAbi) {
-  describe.runIf(process.platform === 'win32')('Windows add-only EditSaga integration', () => {
+  describe.runIf(process.platform === 'win32')('Windows EditSaga integration', () => {
     it('commits an add through the real native boundary', async () => {
       const env = await fixture('windows-add');
       const native = loadNativeSafeFs({
@@ -401,9 +402,115 @@ if (runsWithElectronAbi) {
       expect(verification).toMatchObject({ decision: 'complete' });
       await expect(readFile(operation.canonicalPath, 'utf8')).resolves.toBe('WINDOWS_ADD');
     });
+
+    // Windows has no atomic exchange: an update is three no-replace renames. A process that dies
+    // between them must neither report success nor strand the displaced revision.
+    it.each(['after parking the previous revision', 'after publishing the staged artifact'])(
+      'converges an update whose process died %s',
+      async (point) => {
+        const env = await fixture(`windows-interrupted-${point.split(' ')[1]}`);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const firstSessions = makeResolveSession(native, env);
+        const { path, plan } = await buildUpdatePatch(env.workspace);
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const request = buildRequest({
+          id: `saga-interrupted-${point.split(' ')[1]}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: `op-interrupted-${point.split(' ')[1]}`,
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        });
+        // Reproduces the renames the native update performs up to the crash point, then dies.
+        const dying = Object.freeze({
+          ...native,
+          applyIntentEffect: async (_session: NativeSafeFsSession, intent: { temp: unknown }) => {
+            const temp = intent.temp as { leafName: string };
+            const nonce = temp.leafName.slice('.sprint-coder-temp-'.length);
+            await rename(path, join(env.workspace, `.sprint-coder-swap-${nonce}`));
+            if (point === 'after publishing the staged artifact')
+              await rename(join(env.workspace, temp.leafName), path);
+            throw new EditSagaCrashError(`simulated process crash ${point}`);
+          },
+        }) as NativeSafeFs;
+        await expect(
+          new EditSagaExecutor(
+            new PersistenceEditSagaStore(persistence),
+            new NativeSafeFsEditEffectBoundary({
+              native: dying,
+              journal: persistence,
+              artifacts,
+              resolveSession: firstSessions.resolveSession,
+            }),
+            artifacts,
+            undefined,
+            new SqliteEditSagaLeaseGuard(persistence, `interrupted-${point.split(' ')[1]}-1`),
+          ).apply(request),
+        ).rejects.toBeInstanceOf(EditSagaCrashError);
+        expect(persistence.getEditSaga(request.id)).toMatchObject({ state: 'applying' });
+        await Promise.all(
+          [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+        );
+        persistence.close();
+
+        const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+        const instance = `interrupted-${point.split(' ')[1]}-2`;
+        const startupQuarantines = reopened.initializeMutationRecovery(
+          instance,
+          new Date().toISOString(),
+        );
+        const secondSessions = makeResolveSession(native, env);
+        const reopenedArtifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const releasedFences = new Map<string, number>();
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(reopened),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: reopened,
+            artifacts: reopenedArtifacts,
+            resolveSession: secondSessions.resolveSession,
+          }),
+          reopenedArtifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(reopened, instance, undefined, undefined, async (lease) => {
+            const active = secondSessions.sessions.get(lease.fence);
+            if (active !== undefined) await native.closeSession(active);
+            releasedFences.set(lease.workspaceKey, lease.fence);
+          }),
+        );
+        await reconcileStartupNativeMutations({
+          journal: reopened,
+          recoverSaga: (sagaId) => executor.recover(sagaId),
+          reconcileEditSagas: () => executor.reconcileAll(),
+          startupQuarantines,
+          releasedFences,
+          now: () => new Date().toISOString(),
+        });
+
+        await expect(readFile(path, 'utf8')).resolves.toBe('UPDATE_AFTER');
+        expect(reopened.getEditSaga(request.id)).toMatchObject({ state: 'committed' });
+        expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        reopened.close();
+      },
+    );
   });
 
-  describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
+  describe('EditSagaExecutor native integration', () => {
     it('runs the Provider create_directory call through the durable Saga to a terminal intent', async () => {
       const env = await fixture('mkdir');
       const native = loadNativeSafeFs({

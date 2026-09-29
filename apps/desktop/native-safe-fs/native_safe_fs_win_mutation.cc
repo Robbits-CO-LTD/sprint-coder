@@ -701,17 +701,35 @@ bool SessionCurrent(const std::shared_ptr<MutationSession>& session) {
          session->fence > minimum_fences[session->workspace_key];
 }
 
-bool BindJournal(napi_env env, napi_value input, MutationSession* session) {
-  std::string id, intent_digest, record_digest;
-  uint32_t revision = 0;
-  if (!NamedString(env, input, "intentId", &id) || id.size() > 200 ||
-      !NamedString(env, input, "intentDigest", &intent_digest) ||
-      !IsLowerHex(intent_digest, 64) ||
-      !NamedString(env, input, "recordDigest", &record_digest) ||
-      !IsLowerHex(record_digest, 64) || !NamedUint32(env, input, "revision", &revision)) {
+bool ReadJournalBinding(napi_env env, napi_value input, std::string* id,
+                        std::string* intent_digest, std::string* record_digest,
+                        uint32_t* revision) {
+  if (!NamedString(env, input, "intentId", id) || id->size() > 200 ||
+      !NamedString(env, input, "intentDigest", intent_digest) ||
+      !IsLowerHex(*intent_digest, 64) ||
+      !NamedString(env, input, "recordDigest", record_digest) ||
+      !IsLowerHex(*record_digest, 64) || !NamedUint32(env, input, "revision", revision)) {
     ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs journal binding");
     return false;
   }
+  return true;
+}
+
+// Observation is read-only, so like the POSIX backend it validates the binding's form without
+// recording it: a restarted process may observe an intent sealed under another session or nonce.
+bool ValidateJournalBinding(napi_env env, napi_value input) {
+  std::string id, intent_digest, record_digest;
+  uint32_t revision = 0;
+  return ReadJournalBinding(env, input, &id, &intent_digest, &record_digest, &revision);
+}
+
+// Every path that can write (stage, apply, cleanup) binds the intent to the session and refuses a
+// changed digest or an older revision.
+bool BindJournal(napi_env env, napi_value input, MutationSession* session) {
+  std::string id, intent_digest, record_digest;
+  uint32_t revision = 0;
+  if (!ReadJournalBinding(env, input, &id, &intent_digest, &record_digest, &revision))
+    return false;
   auto found = session->journals.find(id);
   if (found == session->journals.end()) {
     session->journals.emplace(id, JournalState{intent_digest, record_digest, revision});
@@ -1360,7 +1378,7 @@ napi_value WindowsMutationObserveIntent(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1)
     return ThrowFailure(env, "INVALID_INPUT", "observeIntent requires one input object");
   auto session = SessionFor(env, argv[0]);
-  if (!session || !BindJournal(env, argv[0], session.get())) return nullptr;
+  if (!session || !ValidateJournalBinding(env, argv[0])) return nullptr;
   std::vector<std::wstring> source, destination, auxiliary;
   bool destination_null = false, auxiliary_null = false;
   if (!ReadSegments(env, argv[0], "sourceSegments", false, &source))

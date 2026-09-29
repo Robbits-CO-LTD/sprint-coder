@@ -181,16 +181,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         ? { state: 'pre', observation }
         : { state: 'post', observation };
     }
-    const id = this.intentId(token.sagaId, step.ordinal, 'forward');
-    let intent: NativeMutationIntentSnapshot | null = null;
-    if (process.platform === 'win32') {
-      try {
-        intent = this.journal.getNativeMutationIntent?.(id) ?? null;
-      } catch {
-        // A pre-effect observation has no durable intent yet.
-      }
-    }
-    intent ??= createNativeMutationIntentSnapshot(
+    const intent = createNativeMutationIntentSnapshot(
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
     );

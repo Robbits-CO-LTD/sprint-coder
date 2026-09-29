@@ -466,6 +466,96 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it('observes an intent sealed under an earlier session after a restart', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'restart.txt');
+      await writeFile(sourcePath, 'restart before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('restart after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const first = await boundary.openSession({ ...input, fence: '845' });
+      let intent = nativeIntent({
+        session: first,
+        kind: 'update',
+        sourceSegments: ['restart.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, first, intent, replacement);
+      await boundary.closeSession(first);
+      const second = await boundary.openSession({ ...input, fence: '846' });
+      const raw = require(nativeSafeFsAddonPath()) as {
+        observeIntent(input: Record<string, unknown>): unknown;
+      };
+
+      expect(
+        raw.observeIntent({
+          sessionId: second.id,
+          intentId: intent.id,
+          intentDigest: intent.intentDigest,
+          recordDigest: intent.recordDigest,
+          revision: intent.revision,
+          sourceSegments: intent.sourceSegments,
+          destinationSegments: null,
+          auxiliarySegments: [intent.temp!.leafName],
+        }),
+      ).toEqual({
+        source: previous,
+        destination: { state: 'absent' },
+        auxiliary: intent.auxObservation,
+      });
+      await boundary.closeSession(second);
+    });
+
+    it('observes any digest of an intent id but binds stage and apply to the first one', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'bound.txt');
+      await writeFile(sourcePath, 'bound before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('bound after\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '847' });
+      const sealed = (nonce: string) =>
+        nativeIntent({
+          session,
+          kind: 'update',
+          sourceSegments: ['bound.txt'],
+          expectedSource: previous,
+          artifactBytes: replacement,
+          id: 'intent-bound',
+          nonce,
+        });
+      const first = await stageNativeIntent(boundary, session, sealed('a'.repeat(32)), replacement);
+      const other = sealed('b'.repeat(32));
+      expect(other.intentDigest).not.toBe(first.intentDigest);
+
+      // Observation is read-only, so a second digest for the same id is simply observed.
+      await expect(boundary.observeIntent(session, other)).resolves.toMatchObject({
+        source: previous,
+        auxiliary: { state: 'absent' },
+      });
+      const pending = transitionNativeMutationIntent(other, { state: 'aux_pending' });
+      await expect(
+        boundary.stageIntentArtifact(session, pending, replacement),
+      ).rejects.toMatchObject({ code: 'STALE_FENCE' } satisfies Partial<NativeSafeFsError>);
+      const effectPending = transitionNativeMutationIntent(
+        transitionNativeMutationIntent(pending, {
+          state: 'aux_observed',
+          auxObservation: first.auxObservation!,
+        }),
+        { state: 'effect_pending' },
+      );
+      await expect(boundary.applyIntentEffect(session, effectPending)).rejects.toMatchObject({
+        code: 'STALE_FENCE',
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(revision(sourcePath)).resolves.toEqual(previous);
+      await expect(readFile(join(input.workspace, first.temp!.leafName))).resolves.toEqual(
+        replacement,
+      );
+      await expect(reservedLeaves(input.workspace)).resolves.toEqual([first.temp!.leafName]);
+      await boundary.closeSession(session);
+    });
+
     it('keeps an externally created destination and the staged artifact on collision', async () => {
       const input = await fixture();
       const bytes = Buffer.from('staged windows add\n');
