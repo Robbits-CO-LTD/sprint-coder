@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <aclapi.h>
+#include <sddl.h>
 #include <wincrypt.h>
 #include <winternl.h>
 
@@ -849,6 +850,37 @@ bool ProcessUserSid(std::vector<unsigned char>* storage, PSID* sid) {
   return true;
 }
 
+// The owner every file this process creates receives by default. An elevated token defaults to
+// BUILTIN\Administrators rather than to the user.
+bool ProcessDefaultOwnerSid(std::vector<unsigned char>* storage, PSID* sid) {
+#if defined(SPRINT_CODER_NATIVE_SAFE_FS_TESTING)
+  // Test builds only: stands in for a token whose default owner is another SID (an elevated one).
+  wchar_t text[256]{};
+  const DWORD length =
+      GetEnvironmentVariableW(L"SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID", text, 256);
+  if (length > 0 && length < 256) {
+    PSID converted = nullptr;
+    if (!ConvertStringSidToSidW(text, &converted)) return false;
+    storage->resize(GetLengthSid(converted));
+    const bool copied =
+        CopySid(static_cast<DWORD>(storage->size()), storage->data(), converted) != FALSE;
+    LocalFree(converted);
+    *sid = storage->data();
+    return copied;
+  }
+#endif
+  HANDLE token = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+  OwnedHandle owned(token);
+  DWORD size = 0;
+  GetTokenInformation(token, TokenOwner, nullptr, 0, &size);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return false;
+  storage->resize(size);
+  if (!GetTokenInformation(token, TokenOwner, storage->data(), size, &size)) return false;
+  *sid = reinterpret_cast<TOKEN_OWNER*>(storage->data())->Owner;
+  return true;
+}
+
 // The access control a staged update carries over from the revision it replaces, so its new bytes
 // are never readable by anyone the previous revision excluded (the POSIX backend keeps the mode).
 // Same rules as ReplaceFileWithBackup: a volume without persistent ACLs has nothing to carry, a
@@ -887,6 +919,8 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
   output->information = DACL_SECURITY_INFORMATION | ((control & SE_DACL_PROTECTED) != 0
                                                          ? PROTECTED_DACL_SECURITY_INFORMATION
                                                          : UNPROTECTED_DACL_SECURITY_INFORMATION);
+  // Like ReplaceFileWithBackup, compare with the token user: the owner is assigned explicitly here,
+  // the user SID is always assignable, and a source owned by the default owner gets it anyway.
   PSID user = nullptr;
   if (!ProcessUserSid(&output->user_storage, &user)) return false;
   if (owner != nullptr && EqualSid(owner, user)) {
@@ -905,8 +939,9 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
 }
 
 // Whether re-creating this file in its parent gives it the same access control: an unprotected
-// DACL made only of inherited entries, owned by the current user. An undone delete re-creates the
-// file from its bytes, so a file with its own access control would come back readable by others.
+// DACL made only of inherited entries, owned by the process's default owner (what the re-created
+// file gets). An undone delete re-creates the file from its bytes, so a file with its own access
+// control would come back readable by others.
 bool SecurityIsRecreatable(HANDLE file) {
   DWORD flags = 0;
   if (!GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
@@ -921,11 +956,12 @@ bool SecurityIsRecreatable(HANDLE file) {
   const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   DWORD revision = 0;
-  std::vector<unsigned char> user_storage;
-  PSID user = nullptr;
+  std::vector<unsigned char> default_owner_storage;
+  PSID default_owner = nullptr;
   if (!GetSecurityDescriptorControl(raw, &control, &revision) ||
       (control & SE_DACL_PROTECTED) != 0 || dacl == nullptr || owner == nullptr ||
-      !ProcessUserSid(&user_storage, &user) || !EqualSid(owner, user))
+      !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
+      !EqualSid(owner, default_owner))
     return false;
   for (DWORD index = 0; index < dacl->AceCount; ++index) {
     void* ace = nullptr;

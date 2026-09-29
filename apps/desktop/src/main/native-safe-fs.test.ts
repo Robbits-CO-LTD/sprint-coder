@@ -849,6 +849,56 @@ describe('NativeSafeFs authority boundary', () => {
       await boundary.closeSession(session);
     });
 
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'compares a deleted file owner with the owner a re-created file would get',
+      async () => {
+        const input = await fixture();
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '852' });
+        const { stdout } = await execFileAsync('powershell.exe', [
+          '-NoProfile',
+          '-Command',
+          '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+        ]);
+        // BUILTIN\Administrators: what an elevated token gives every file it creates.
+        const defaultOwners = [
+          ['S-1-5-32-544', 'refused'],
+          [stdout.trim(), 'deleted'],
+        ] as const;
+        for (const [index, [defaultOwner, outcome]] of defaultOwners.entries()) {
+          const sourcePath = join(input.workspace, `owner-${index}.txt`);
+          await writeFile(sourcePath, 'owned by the user\n');
+          const previous = await revision(sourcePath);
+          let intent = nativeIntent({
+            session,
+            kind: 'delete',
+            sourceSegments: [`owner-${index}.txt`],
+            expectedSource: previous,
+            id: `intent-owner-${index}`,
+            nonce: String(index + 4).repeat(32),
+          });
+          intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+          process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'] = defaultOwner;
+          try {
+            if (outcome === 'refused') {
+              await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+                code: 'UNSAFE_PATH',
+              } satisfies Partial<NativeSafeFsError>);
+              await expect(revision(sourcePath)).resolves.toEqual(previous);
+            } else {
+              await expect(boundary.applyIntentEffect(session, intent)).resolves.toMatchObject({
+                source: { state: 'absent' },
+                auxiliary: previous,
+              });
+            }
+          } finally {
+            delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_TOKEN_OWNER_SID'];
+          }
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
     it('refuses to stage an update whose source has a NULL DACL', async () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'null-dacl.txt');
