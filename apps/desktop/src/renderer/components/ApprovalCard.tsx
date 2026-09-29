@@ -35,7 +35,12 @@ export function ApprovalCard({
   const userInput =
     approval.toolName === 'request_user_input' ? parseUserInput(approval.execution) : null;
   const stdinNote = standardInputNote(approval);
-  const allowDisabled = busy || liveDetailMissing || perCallContentMissing;
+  // A per-call approval covers everything it keeps, so it cannot be allowed while part of the
+  // content is folded away: the rest of a long memory, or a later file of a draft, is exactly where
+  // something unread would sit. Deny stays available throughout.
+  const perCallContentCollapsed = perCall !== null && executionIsLong && !executionExpanded;
+  const allowDisabled =
+    busy || liveDetailMissing || perCallContentMissing || perCallContentCollapsed;
 
   useEffect(() => {
     cardRef.current?.focus({ preventScroll: true });
@@ -88,6 +93,11 @@ export function ApprovalCard({
       {perCallContentMissing ? (
         <p className="approval-card__warning" role="alert" data-testid="approval-content-withheld">
           内容を表示できないため許可できません。拒否してください。
+        </p>
+      ) : null}
+      {perCallContentCollapsed ? (
+        <p className="approval-card__warning" role="note" data-testid="approval-expand-to-allow">
+          内容をすべて表示すると、許可できるようになります。
         </p>
       ) : null}
       <dl className="approval-card__facts">

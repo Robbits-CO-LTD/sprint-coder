@@ -1205,6 +1205,25 @@ describe('ApprovalCoordinator per-call approval of Project memory and Skill Draf
       kind: 'memory' as const,
       input: { content: `Use pn${character}pm for installs` },
     })),
+    // Marks that never draw: each hides a secret from the scanner, and a run of variation selectors
+    // carries one byte apiece.
+    ...(
+      [
+        ['a combining grapheme joiner', 'pass\u034Fword=synthetic-value'],
+        ['a variation selector', 'pass\uFE00word=synthetic-value'],
+        ['an ideographic variation selector', 'pass\u{E0100}word=synthetic-value'],
+        ['a Mongolian variation selector', 'pass\u180Bword=synthetic-value'],
+        ['ideographic variation selectors after ASCII', 'data\u{E0100}\u{E0101}\u{E0102}'],
+        ['two ideographic variation selectors after a Han character', '葛\u{E0100}\u{E0101}城'],
+        ['two emoji variation selectors in a row', 'ok \u2764\uFE0F\uFE0F'],
+        ['a Hangul filler', 'Use\u3164pnpm'],
+        ['a Hangul choseong filler', 'Use\u115Fpnpm'],
+      ] as const
+    ).map(([name, content]) => ({
+      name: `a memory with ${name}`,
+      kind: 'memory' as const,
+      input: { content },
+    })),
   ] as const)('refuses $name before any card exists', async ({ kind, input }) => {
     const harness = createHarness();
     const { tools, effects, call } = createAuxiliaryTools(
@@ -1263,6 +1282,10 @@ describe('ApprovalCoordinator per-call approval of Project memory and Skill Draf
     {
       name: 'an emoji with a variation selector',
       content: 'Keep the release notes friendly \u2764\ufe0f',
+    },
+    {
+      name: 'a Han character with one ideographic variation selector',
+      content: '葛\u{E0100}城市の担当',
     },
   ])('still shows a card for $name', async ({ content }) => {
     const harness = createHarness();

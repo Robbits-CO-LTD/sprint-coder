@@ -919,12 +919,19 @@ const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
  * `\p{Cf}` rather than a hand-picked list, for the reason `computerUseUntrustedTextSchemaOf` in the
  * contracts gives: the Unicode Tag block (U+E0000-U+E007F) spells a whole sentence in invisible
  * codepoints, which would then sit in Project memory and be read by every later Turn, and a single
- * U+200B inside a token is enough to hide it from the secret scanner. Combining marks stay allowed:
- * NFD Japanese and emoji with U+FE0F depend on them. ZWJ is a format character, so an emoji joined
- * by it is refused, which is accepted.
+ * U+200B inside a token is enough to hide it from the secret scanner. ZWJ is a format character, so
+ * an emoji joined by it is refused, which is accepted.
+ *
+ * Unlike the contracts, combining marks stay allowed, since NFD Japanese depends on them. The marks
+ * that never draw are refused by name instead: the grapheme joiner, the variation selectors, the
+ * Mongolian ones, and the Hangul fillers the contracts also name. Each hides a token from the
+ * secret scanner as U+200B does, and a run of variation selectors carries one byte apiece. Only the
+ * uses that draw something are kept: one U+FE0E or U+FE0F choosing an emoji or text form, and one
+ * ideographic variation selector after a Han character, which Japanese names need. Either repeated,
+ * or an ideographic selector after anything else, is refused.
  */
 const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
-  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}/u;
+  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\u034F\uFE00-\uFE0D\u180B-\u180D\u180F\u115F\u1160\u3164\uFFA0]|(?![\t\n\r])\p{Cc}|(?<=[\uFE00-\uFE0F\u{E0100}-\u{E01EF}])[\uFE0E\uFE0F]|(?<!\p{Script=Han})[\u{E0100}-\u{E01EF}]/u;
 
 function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
   if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
