@@ -597,10 +597,13 @@ if (runsWithElectronAbi) {
         rename: paths.renameSrcPath,
         delete: paths.deletePath,
       };
+      // Whatever a runner adds to the files it creates, the deleted one starts with only what it
+      // inherits from the Workspace.
+      const reset = spawnSync('icacls.exe', [paths.deletePath, '/reset'], { encoding: 'utf8' });
+      expect(reset.status, reset.stderr).toBe(0);
       const original: Record<string, WindowsAccess> = {};
       for (const [kind, path] of Object.entries(restoredPaths))
         original[kind] = await windowsAccess(path, kind !== 'delete');
-      // The deleted file keeps only what it inherited from the Workspace.
       expect(original['delete']!.protected).toBe(false);
       expect(original['delete']!.entries!.every((entry) => entry.inherited)).toBe(true);
       const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
@@ -769,25 +772,48 @@ if (runsWithElectronAbi) {
         lockDirectoryPath: env.locks,
       });
       const { resolveSession, sessions } = makeResolveSession(native, env);
-      const protectedPath = join(env.workspace, 'protected.txt');
-      const mixedPath = join(env.workspace, 'mixed.txt');
+      // Every DACL here is written as the test decides, so neither the runner's default access
+      // control nor how icacls rewrites a DACL shapes them: a protected folder passes down full
+      // access for the user and SYSTEM to the two files below it.
+      const carried = join(env.workspace, 'carried');
+      await mkdir(carried);
+      windowsSetRawDacl(carried, 'D:PAI(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)');
+      const protectedPath = join(carried, 'protected.txt');
+      const mixedPath = join(carried, 'mixed.txt');
       await writeFile(protectedPath, 'UPDATE_BEFORE', { mode: 0o600 });
       await writeFile(mixedPath, 'UPDATE_BEFORE', { mode: 0o600 });
+      // Protected, with its entries still flagged as inherited.
       windowsSetRawDacl(protectedPath, 'D:PAI(A;ID;FA;;;{user})(A;ID;FR;;;BU)');
-      spawnSync('icacls.exe', [mixedPath, '/grant', '*S-1-5-32-545:(R)']);
+      // One explicit entry for BUILTIN\Users ahead of the two `carried` passes down.
+      windowsSetRawDacl(mixedPath, 'D:AI(A;;FR;;;BU)(A;ID;FA;;;{user})(A;ID;FA;;;SY)');
+      const user = currentUserSid();
+      const entry = (inherited: boolean, mask: number, sid: string) => ({
+        type: 'AccessAllowed',
+        flags: 0,
+        inherited,
+        mask,
+        sid,
+      });
+      const fullAccess = 0x1f01ff;
+      const readAccess = 0x120089;
       const protectedAccess = await windowsAccess(protectedPath);
       const mixedAccess = await windowsAccess(mixedPath);
-      expect(protectedAccess.protected).toBe(true);
-      expect(protectedAccess.entries!.every((entry) => entry.inherited)).toBe(true);
-      // One explicit entry for BUILTIN\Users ahead of those inherited from the Workspace.
-      expect(mixedAccess.protected).toBe(false);
-      expect(mixedAccess.entries![0]).toMatchObject({ inherited: false, sid: 'S-1-5-32-545' });
-      expect(mixedAccess.entries!.length).toBeGreaterThan(1);
-      expect(mixedAccess.entries!.slice(1).every((entry) => entry.inherited)).toBe(true);
+      expect(protectedAccess).toEqual({
+        protected: true,
+        entries: [entry(true, fullAccess, user), entry(true, readAccess, 'S-1-5-32-545')],
+      });
+      expect(mixedAccess).toEqual({
+        protected: false,
+        entries: [
+          entry(false, readAccess, 'S-1-5-32-545'),
+          entry(true, fullAccess, user),
+          entry(true, fullAccess, 'S-1-5-18'),
+        ],
+      });
       const operation = async (path: string, name: string) =>
         Object.freeze({
           kind: 'update' as const,
-          path: name,
+          path: `carried/${name}`,
           canonicalPath: path,
           destination: null,
           canonicalDestination: null,
