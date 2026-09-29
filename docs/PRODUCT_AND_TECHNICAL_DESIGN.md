@@ -140,7 +140,7 @@ Team MVPからは高度なmessage branching、Task pin/archiveの高度化、Min
 - FR-TEAM-13: LeaderはWorkerへ指示、追加質問、停止、再開、終了を送れる。
 - FR-TEAM-14: Worker間の直接通信はMVPでは禁止し、Leader経由に限定する。
 - FR-TEAM-15: Canvas上の状態と時系列の通信履歴を相互に辿れる。
-- FR-TEAM-16: WorkerのcapabilityはLeaderおよびTeam policyを上限とし、spawn時に権限を拡大できない。
+- FR-TEAM-16: WorkerのcapabilityをLeaderおよびTeam policyの範囲に収めることを設計要件とする。現行製品はTeamの委任制限、Workerのツールカタログと書込み範囲、個別ツールの拒否・承認で制限する。統一したparent capability ceilingによる非拡大保証は未接続（12.1参照）。
 - FR-TEAM-17: write-capable WorkerはGit repositoryでは専用worktreeをdefault候補とする。
 - FR-TEAM-18: Worker completionはstatus、summary、artifacts、verification、unresolved risksを持つstructured envelopeとする。
 - FR-TEAM-19: CanvasはAgentThread/Worker/Deliveryのprojectionであり、orchestrationの正本にしない。
@@ -630,12 +630,12 @@ Turnの完了判定は、commit済みEdit Sagaのpost-imageを完了時に読み
 
 2026-08-01時点で、Inspectorパネルとその専用UI（ライブ本文、差分、手動編集、Project Context表示）は製品から削除した。ユーザーに見せるファイル変更の正本はTimelineの`files.changed`カードである。Main側のtransient file-edit channelとworkspace read/save IPCは既存Runtimeとの互換性のため現状維持するが、現行rendererからは利用しない。
 
-Policy evaluation order:
+Domainのpolicy evaluatorにおける評価順序（現行製品から渡すceilingの意味は後述）:
 
 1. managed administrator deny。
 2. project/user deny。
-3. parent/Team capability ceiling。
-4. Plan/read-only mode ceiling。
+3. parent capability ceilingの入力。
+4. mode capability ceilingの入力。
 5. OS sandbox feasibility。
 6. exact remembered grant。
 7. narrow allow rule。
@@ -645,7 +645,9 @@ Policy evaluation order:
 
 denyは常にallowより強く、allowやauto reviewerはsandbox ceilingを変更できない。Shell ruleはparseした全segmentへ同じ評価を適用する。単純prefix allow、parse不能なcommand、subshell/command substitutionは自動許可しない。
 
-Capability ceilingは文字列集合ではなく、`{ capability, resourceSet, operation, expiresAt, providerEgress, sandboxProfile }` のlatticeとして評価する。Workerはspawn時のparent snapshotとpolicyEpochを持ち、ambientなsession grantを継承しない。親の権限取消し・縮小時は子、background activity、未実行outboxを停止して再評価する。最大深度と同時Worker数もceilingに含める。
+`packages/domain/src/permission.ts`には、capability、resource set、operation、期限、provider egress、sandbox profileを持つceilingの照合と、子のceilingを親の部分集合にする`spawnChild`がある。ただし現行製品のツール権限評価では、`ipc.ts`と`provider-egress.ts`が要求そのものから作ったentryをparent/modeの両ceilingへ渡す。この2つは独立した親・モードの上限としては判定を狭めない。管理者・project/userのdeny、安全設定から展開したallowと承認方針、OS sandbox、Workerのツールカタログと書込み範囲は別の実効境界として残る。Teamの委任深さは`team-coordinator.ts`、同時実行数は`team-execution-scheduler.ts`の別の検査で制限する。
+
+現行製品でも権限取消し時にはpolicyEpochを更新し、旧epochのbackground activityをcancel扱いにしてcompletionをquarantineし、Computer Useとmanaged coding harnessへ変更を通知する。親の権限snapshotから子のceilingを生成してambientなgrantを継承させず、親の権限縮小時に子Workerの停止と未実行outboxの再評価まで連動させる一体の仕組みは将来の設計である。Domainの`spawnChild`は子のremembered grantを空にするが、現行製品のWorker生成経路からは呼ばれない。Teamが保存する`parentCapabilityCeiling`の深さ・人数と、個別ツール評価へ渡すceilingを同じ強制機構とみなさない。
 
 Auto reviewerは権限境界の代替ではなく、狭いapproval routingである。入力はimmutable ExecutionSpec、policy facts、deterministic risk featuresだけとし、conversation transcriptやtool outputを指示として渡さない。Runtime由来の理由はuntrusted quoteとして分離する。reviewerはno-tools/no-network、一request一decision、`allow once`だけを返せ、high-risk category、schema failure、timeout、model failureはdenyへ倒す。prompt template、model/version、input digest、decisionを監査する。
 

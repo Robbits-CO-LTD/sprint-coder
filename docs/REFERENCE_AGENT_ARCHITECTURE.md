@@ -405,12 +405,12 @@ type AgentEnvelope<T> = {
 
 ## 10. Permission evaluation pipeline
 
-評価順序:
+Domainのpolicy evaluatorにおける評価順序（現行製品から渡すceilingの意味は後述）:
 
 1. Managed administrator deny。
 2. Project/user deny。
-3. Parent/Team capability ceiling。
-4. Plan/read-only mode ceiling。
+3. Parent capability ceilingの入力。
+4. Mode capability ceilingの入力。
 5. OS sandbox feasibility。
 6. Exact remembered grant。
 7. Narrow allow rule。
@@ -418,7 +418,9 @@ type AgentEnvelope<T> = {
 9. User/auto reviewer decision。
 10. ExecutionSpec digest再検証。
 
-denyは常に勝つ。allowはsandboxを越えない。Capability ceilingはcapabilityだけでなくresource set、operation、expiry、provider egress、sandbox profileのlatticeとし、policyEpoch更新時に子/backgroundを停止して再評価する。ambient grantはchildへ継承しない。Full Accessでもadministrator deny、secret/credential保護、audit、Renderer非特権、provider egress policy、protected resourceへのwrite禁止は残る。
+現行製品のツール権限評価では、`ipc.ts`と`provider-egress.ts`が要求由来の同じentryをParent/Modeの両ceilingへ渡す。Domainのceiling照合は存在するが、この2入力は独立した親・モードの上限としては判定を狭めない。一方、administrator・project/user deny、安全設定から展開したallowと承認方針、OS sandbox、Workerのツールカタログと書込み範囲は別の実効境界である。Teamの委任深さは`team-coordinator.ts`、同時実行数は`team-execution-scheduler.ts`の別の検査で制限する。Full Accessでもadministrator deny、secret/credential保護、audit、Renderer非特権、provider egress policy、protected resourceへのwrite禁止は残る。
+
+現行製品でも権限取消し時にはpolicyEpochを更新し、旧epochのbackground activityをcancel扱いにしてcompletionをquarantineし、Computer Useとmanaged coding harnessへ変更を通知する。Capability、resource set、operation、expiry、provider egress、sandbox profileのlattice、spawn時の親snapshotからの子ceiling生成とambient grantの非継承、親の権限縮小時の子Worker停止と未実行outbox再評価を一体として製品に適用することは将来の設計である。Domainの`spawnChild`は子のremembered grantを空にするが、現行製品のWorker生成経路では使われない。保存される`parentCapabilityCeiling`と個別ツール評価のceilingを同じ強制機構とみなさない。
 
 Tool Brokerはproviderへの推論通信を制御しない。`provider.egress`をnetwork toolと分け、送信fragment分類、provider trust/data residency、sensitive scan、最大bytesをpolicy化する。local-only Taskはremote providerを拒否する。
 
@@ -430,7 +432,7 @@ Worker spawn input:
 
 - objectiveとacceptance criteria。
 - role/agent type。
-- capability ceiling。
+- capability ceiling（設計上の入力。現行製品ではTeamの委任制限、Workerのツールカタログ・書込み範囲、個別ツールのdeny・承認を別経路で適用し、親ceilingは個別ツール評価へ接続していない）。
 - context inheritance policy: none、summary、selected items、full fork。
 - isolation: shared/read-only、worktree、external。
 - budget: tokens、cost、wall time、tool calls。
