@@ -938,11 +938,16 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
   return true;
 }
 
-// Refusals of an effect the Edit Saga could not undo exactly. Each is decided before any byte
-// changes; the native code EFFECT_REFUSED tells the boundary nothing moved. UTF-8 for:
-// "This file has additional data streams, so Windows cannot update or delete it",
-// "This file has its own access control, so Windows cannot delete it", and
-// "This file's access control changed during the update, so Windows cannot update it".
+// Refusals of an effect the Edit Saga could not undo exactly: what a file or directory holds
+// beyond its unnamed data that an update's staged copy or an undone delete's re-created file would
+// not get back. Each is decided read-only before the intent is journaled (the preflight), and again
+// on the held objects before any byte changes; EFFECT_REFUSED tells the boundary nothing moved.
+// Not refused, because it affects neither content, access nor confidentiality: timestamps,
+// compression, sparseness, the object id, NOT_CONTENT_INDEXED on a delete, audit ACEs (which an
+// unprivileged process cannot even read). UTF-8 for, in order: additional data streams, extended
+// attributes, encryption, an explicit integrity label, its own access control (delete), access
+// control that cannot be carried (update), access control changed during the update, hidden or
+// system attributes (delete), and a directory holding streams or extended attributes.
 constexpr char kStreamsRefusal[] =
     "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
     "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x83\x87""\xe3\x83\xbc"
@@ -951,6 +956,26 @@ constexpr char kStreamsRefusal[] =
     "Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb"
     "\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b"
     "\xe3\x82\x93";
+constexpr char kExtendedAttributesRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe6\x8b\xa1""\xe5\xbc\xb5""\xe5\xb1\x9e""\xe6\x80\xa7""\xe3\x82\x92"
+    "\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows "
+    "\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb""\xe5\x89\x8a"
+    "\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kEncryptionRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe6\x9a\x97""\xe5\x8f\xb7""\xe5\x8c\x96""\xe3\x81\x95""\xe3\x82\x8c"
+    "\xe3\x81\xa6""\xe3\x81\x84""\xe3\x82\x8b""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81"
+    "Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb"
+    "\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b"
+    "\xe3\x82\x93";
+constexpr char kIntegrityLabelRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe7\x8b\xac""\xe8\x87\xaa""\xe3\x81\xae""\xe6\x95\xb4""\xe5\x90\x88"
+    "\xe6\x80\xa7""\xe3\x83\xac""\xe3\x83\x99""\xe3\x83\xab""\xe3\x82\x92""\xe6\x8c\x81"
+    "\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7"
+    "\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb""\xe5\x89\x8a""\xe9\x99\xa4"
+    "\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
 constexpr char kAccessControlRefusal[] =
     "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
     "\xe3\x81\xaf""\xe7\x8b\xac""\xe8\x87\xaa""\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf"
@@ -958,6 +983,13 @@ constexpr char kAccessControlRefusal[] =
     "\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7"
     "\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe"
     "\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kAccessControlUpdateRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf""\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6"
+    "\xe5\xbe\xa1""\xe3\x81\xaf""\xe5\xbc\x95""\xe3\x81\x8d""\xe7\xb6\x99""\xe3\x81\x92"
+    "\xe3\x81\xaa""\xe3\x81\x84""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows "
+    "\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x81\xa7""\xe3\x81\x8d"
+    "\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
 constexpr char kAccessControlChangedRefusal[] =
     "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
     "\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf""\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6"
@@ -966,13 +998,33 @@ constexpr char kAccessControlChangedRefusal[] =
     "\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf"
     "\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b"
     "\xe3\x82\x93";
+constexpr char kHiddenSystemRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe9\x9a\xa0""\xe3\x81\x97""\xe3\x81\xbe""\xe3\x81\x9f""\xe3\x81\xaf"
+    "\xe3\x82\xb7""\xe3\x82\xb9""\xe3\x83\x86""\xe3\x83\xa0""\xe5\xb1\x9e""\xe6\x80\xa7"
+    "\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81"
+    "Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7"
+    "\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kDirectoryDataRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa9""\xe3\x83\xab""\xe3\x83\x80"
+    "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x83\x87""\xe3\x83\xbc"
+    "\xe3\x82\xbf""\xe3\x82\xb9""\xe3\x83\x88""\xe3\x83\xaa""\xe3\x83\xbc""\xe3\x83\xa0"
+    "\xe3\x81\xbe""\xe3\x81\x9f""\xe3\x81\xaf""\xe6\x8b\xa1""\xe5\xbc\xb5""\xe5\xb1\x9e"
+    "\xe6\x80\xa7""\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81"
+    "\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4"
+    "\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
 
-// Whether the file carries any data stream besides its unnamed one. An update writes only the
-// unnamed stream and an undone delete re-creates only that, so a named stream (metadata, a
-// Zone.Identifier) would be lost.
-bool HasNamedDataStreams(HANDLE file, bool* named) {
+using NtQueryInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG,
+                                                  FILE_INFORMATION_CLASS);
+constexpr int kFileEaInformationClass = 7;
+constexpr wchar_t kOwnershipStreamEntry[] = L":sprint-coder.mkdir-owner:$DATA";
+
+// Whether the object carries a data stream besides its unnamed one (and, for a directory, its
+// ownership stream). An update writes only the unnamed stream and an undone delete re-creates only
+// that, so a named stream (metadata, a Zone.Identifier) would be lost.
+bool HasNamedDataStreams(HANDLE object, const wchar_t* allowed, bool* named) {
   std::vector<uint64_t> buffer(512);
-  while (!GetFileInformationByHandleEx(file, FileStreamInfo, buffer.data(),
+  while (!GetFileInformationByHandleEx(object, FileStreamInfo, buffer.data(),
                                        static_cast<DWORD>(buffer.size() * sizeof(uint64_t)))) {
     const DWORD error = GetLastError();
     if (error == ERROR_HANDLE_EOF) {
@@ -985,13 +1037,30 @@ bool HasNamedDataStreams(HANDLE file, bool* named) {
   for (auto* entry = reinterpret_cast<FILE_STREAM_INFO*>(buffer.data());;
        entry = reinterpret_cast<FILE_STREAM_INFO*>(reinterpret_cast<uint8_t*>(entry) +
                                                    entry->NextEntryOffset)) {
-    if (std::wstring(entry->StreamName, entry->StreamNameLength / sizeof(wchar_t)) != L"::$DATA") {
+    const std::wstring name(entry->StreamName, entry->StreamNameLength / sizeof(wchar_t));
+    if (name != L"::$DATA" && (allowed == nullptr || name != allowed)) {
       *named = true;
       return true;
     }
     if (entry->NextEntryOffset == 0) break;
   }
   *named = false;
+  return true;
+}
+
+// Extended attributes (including WSL metadata) are not copied by either the stage or a re-create.
+bool HasExtendedAttributes(HANDLE object, bool* present) {
+  static const auto query = reinterpret_cast<NtQueryInformationFileFn>(
+      GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationFile"));
+  if (query == nullptr) return false;
+  struct {
+    ULONG EaSize;
+  } information{};
+  IO_STATUS_BLOCK status{};
+  if (query(object, &status, &information, sizeof(information),
+            static_cast<FILE_INFORMATION_CLASS>(kFileEaInformationClass)) < 0)
+    return false;
+  *present = information.EaSize != 0;
   return true;
 }
 
@@ -1044,24 +1113,33 @@ bool PersistentAcls(HANDLE handle, bool* persistent) {
   return true;
 }
 
-// Whether re-creating this file in `parent` gives it the same access control: owned by the
-// process's default owner, with exactly the DACL the parent's inheritable entries give a new file
-// now. A file moved in from a stricter directory keeps entries inherited there, which a re-created
-// copy would not get back.
-bool SecurityIsRecreatable(HANDLE file, HANDLE parent) {
-  bool persistent = false;
-  if (!PersistentAcls(file, &persistent)) return false;
-  if (!persistent) return true;
-  DaclFacts actual;
-  std::vector<unsigned char> default_owner_storage;
-  PSID default_owner = nullptr;
-  if (!ReadDacl(file, OWNER_SECURITY_INFORMATION, &actual) || actual.dacl == nullptr ||
-      actual.protected_dacl || actual.owner == nullptr ||
-      !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
-      !EqualSid(actual.owner, default_owner))
+// An explicit integrity label is lost by both a stage and a re-create; one inherited from the
+// parent is given to the new file again.
+bool HasExplicitIntegrityLabel(HANDLE object, bool* labelled) {
+  PACL sacl = nullptr;
+  PSECURITY_DESCRIPTOR raw = nullptr;
+  if (GetSecurityInfo(object, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
+                      nullptr, &sacl, &raw) != ERROR_SUCCESS)
     return false;
-  // READ_CONTROL is outside share-mode checks, so this reopens the pinned parent itself.
+  const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
+  *labelled = false;
+  for (DWORD index = 0; sacl != nullptr && index < sacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(sacl, index, &ace)) return false;
+    const auto* header = static_cast<ACE_HEADER*>(ace);
+    if (header->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE &&
+        (header->AceFlags & INHERITED_ACE) == 0)
+      *labelled = true;
+  }
+  return true;
+}
+
+// The DACL a file created in `parent` now gets: its inheritable entries, after `explicit_dacl`
+// (the entries of the file's own) when there are any. This is what an undone delete re-creates
+// (no explicit entries) and what an unprotected DACL re-applied to a staged update becomes.
+bool DaclCreatedIn(HANDLE parent, PACL explicit_dacl, PACL actual, bool* same) {
   HANDLE raw = INVALID_HANDLE_VALUE;
+  // READ_CONTROL is outside share-mode checks, so this reopens the pinned parent itself.
   if (OpenRelative(parent, std::wstring(), READ_CONTROL | SYNCHRONIZE, kObserveShare, FILE_OPEN,
                    FILE_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) < 0)
     return false;
@@ -1073,13 +1151,19 @@ bool SecurityIsRecreatable(HANDLE file, HANDLE parent) {
                       nullptr, nullptr, nullptr, nullptr, &parent_raw) != ERROR_SUCCESS)
     return false;
   const std::unique_ptr<void, decltype(&LocalFree)> parent_descriptor(parent_raw, &LocalFree);
+  SECURITY_DESCRIPTOR creator{};
+  if (explicit_dacl != nullptr &&
+      (!InitializeSecurityDescriptor(&creator, SECURITY_DESCRIPTOR_REVISION) ||
+       !SetSecurityDescriptorDacl(&creator, TRUE, explicit_dacl, FALSE)))
+    return false;
   HANDLE token_raw = nullptr;
   if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_raw)) return false;
   const OwnedHandle token(token_raw);
   GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE,
                           FILE_ALL_ACCESS};
   PSECURITY_DESCRIPTOR created = nullptr;
-  if (!CreatePrivateObjectSecurityEx(parent_raw, nullptr, &created, nullptr, FALSE,
+  if (!CreatePrivateObjectSecurityEx(parent_raw, explicit_dacl == nullptr ? nullptr : &creator,
+                                     &created, nullptr, FALSE,
                                      SEF_DACL_AUTO_INHERIT | SEF_AVOID_PRIVILEGE_CHECK |
                                          SEF_AVOID_OWNER_CHECK,
                                      token.get(), &mapping))
@@ -1087,20 +1171,90 @@ bool SecurityIsRecreatable(HANDLE file, HANDLE parent) {
   BOOL present = FALSE;
   BOOL defaulted = FALSE;
   PACL created_dacl = nullptr;
-  const bool same = GetSecurityDescriptorDacl(created, &present, &created_dacl, &defaulted) &&
-                    present && SameDacl(actual.dacl, created_dacl);
+  const bool read = GetSecurityDescriptorDacl(created, &present, &created_dacl, &defaulted);
+  *same = read && present && SameDacl(actual, created_dacl);
   DestroyPrivateObjectSecurity(&created);
-  return same;
+  return read;
+}
+
+// The entries of `dacl` that are the file's own rather than inherited, in their order.
+bool ExplicitEntries(PACL dacl, std::vector<uint64_t>* storage, PACL* output) {
+  storage->assign(dacl->AclSize / sizeof(uint64_t) + 1, 0);
+  auto* acl = reinterpret_cast<PACL>(storage->data());
+  if (!InitializeAcl(acl, dacl->AclSize, dacl->AclRevision)) return false;
+  for (DWORD index = 0; index < dacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(dacl, index, &ace)) return false;
+    const auto* header = static_cast<ACE_HEADER*>(ace);
+    if ((header->AceFlags & INHERITED_ACE) == 0 &&
+        !AddAce(acl, dacl->AclRevision, MAXDWORD, ace, header->AceSize))
+      return false;
+  }
+  *output = acl;
+  return true;
+}
+
+// Whether the file's access control survives the effect: a delete re-creates the file owned by the
+// process's default owner with only what `parent` passes down now; an update's staged copy keeps a
+// protected DACL as is, re-derives the inherited part of an unprotected one from `parent`, and is
+// owned by the user or the default owner.
+bool AccessControlSurvives(bool deleting, HANDLE security, HANDLE parent) {
+  bool persistent = false;
+  if (!PersistentAcls(security, &persistent)) return false;
+  if (!persistent) return true;
+  DaclFacts actual;
+  std::vector<unsigned char> default_owner_storage, user_storage;
+  PSID default_owner = nullptr;
+  PSID user = nullptr;
+  // A NULL DACL (full access for everyone) is never carried and never re-created.
+  if (!ReadDacl(security, OWNER_SECURITY_INFORMATION, &actual) || actual.dacl == nullptr ||
+      actual.owner == nullptr || !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
+      !ProcessUserSid(&user_storage, &user))
+    return false;
+  if (deleting) {
+    bool same = false;
+    return !actual.protected_dacl && EqualSid(actual.owner, default_owner) &&
+           DaclCreatedIn(parent, nullptr, actual.dacl, &same) && same;
+  }
+  if (!EqualSid(actual.owner, user) && !EqualSid(actual.owner, default_owner)) return false;
+  if (actual.protected_dacl) return true;
+  std::vector<uint64_t> explicit_storage;
+  PACL explicit_dacl = nullptr;
+  bool same = false;
+  return ExplicitEntries(actual.dacl, &explicit_storage, &explicit_dacl) &&
+         DaclCreatedIn(parent, explicit_dacl, actual.dacl, &same) && same;
 }
 
 // Why an update or delete of this file could not be undone exactly, or nullptr. `content` reads
-// the streams, `security` (READ_CONTROL, the same object) the descriptor, `parent` is pinned.
+// the streams and extended attributes, `security` (READ_CONTROL, the same object) the
+// descriptor, `parent` is pinned.
 const char* IrreversibleEffectReason(bool deleting, HANDLE content, HANDLE security,
                                      HANDLE parent) {
-  bool named = true;
-  if (!HasNamedDataStreams(content, &named) || named) return kStreamsRefusal;
-  if (deleting && !SecurityIsRecreatable(security, parent)) return kAccessControlRefusal;
+  bool present = true;
+  if (!HasNamedDataStreams(content, nullptr, &present) || present) return kStreamsRefusal;
+  if (!HasExtendedAttributes(content, &present) || present) return kExtendedAttributesRefusal;
+  FileFacts facts;
+  if (!QueryFacts(content, &facts) || (facts.attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0)
+    return kEncryptionRefusal;
+  if (!HasExplicitIntegrityLabel(security, &present) || present) return kIntegrityLabelRefusal;
+  if (deleting && (facts.attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0)
+    return kHiddenSystemRefusal;
+  if (!AccessControlSurvives(deleting, security, parent))
+    return deleting ? kAccessControlRefusal : kAccessControlUpdateRefusal;
   return nullptr;
+}
+
+// Attributes a staged update carries over from the revision it replaces (READONLY follows the
+// sealed mode instead).
+constexpr DWORD kCarriedAttributes =
+    FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+
+// Whether a directory holds data of its own that removing it would destroy: a named stream other
+// than its ownership stream, or extended attributes.
+bool DirectoryCarriesData(HANDLE directory) {
+  bool present = true;
+  return !HasNamedDataStreams(directory, kOwnershipStreamEntry, &present) || present ||
+         !HasExtendedAttributes(directory, &present) || present;
 }
 
 // Whether two files carry the same DACL, protection included.
@@ -1815,6 +1969,8 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
   // A new file inherits from its parent. An update's bytes are created under the access control of
   // the revision they replace, before any of them is written, or not at all.
   CarriedSecurity carried;
+  OwnedHandle source_handle;
+  DWORD carried_attributes = 0;
   if (kind == "update") {
     HANDLE source_raw = INVALID_HANDLE_VALUE;
     if (OpenRelative(parent.get(), source.back(),
@@ -1822,13 +1978,22 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
                      kObserveShare, FILE_OPEN, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL,
                      &source_raw) < 0)
       return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source is not observable");
-    OwnedHandle source_handle(source_raw);
+    source_handle.reset(source_raw);
     EndpointRevision source_revision;
     if (!ObserveHandle(source_handle.get(), &source_revision))
       return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source is unsafe");
     ApplyObservedMode(*session, &source_revision);
     if (!SameRevision(source_revision, expected_source))
       return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source changed before staging");
+    // The preflight's refusals again, before a single byte of the new revision exists: encrypted
+    // or labelled content, for one, must never be written out as a plain staged copy.
+    if (const char* reason = IrreversibleEffectReason(false, source_handle.get(),
+                                                      source_handle.get(), parent.get()))
+      return ThrowFailure(env, "EFFECT_REFUSED", reason);
+    FileFacts source_facts;
+    if (!QueryFacts(source_handle.get(), &source_facts))
+      return ThrowFailure(env, "UNSAFE_PATH", "NativeSafeFs update source is unsafe");
+    carried_attributes = source_facts.attributes & kCarriedAttributes;
     if (!CaptureSourceSecurity(source_handle.get(), &carried))
       return ThrowFailure(env, "UNSAFE_PATH",
                           "NativeSafeFs cannot carry the update source access control");
@@ -1858,20 +2023,26 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
       SetSecurityInfo(file.get(), SE_FILE_OBJECT, carried.information, carried.owner, nullptr,
                       carried.dacl, nullptr) != ERROR_SUCCESS)
     return discard("UNSAFE_PATH", "NativeSafeFs cannot carry the update source access control");
+  // Nothing is written until the staged file demonstrably has the source's access control.
+  if (source_handle && !SameAccessControl(file.get(), source_handle.get()))
+    return discard("EFFECT_REFUSED", kAccessControlUpdateRefusal);
   DWORD written = 0;
   if ((length > 0 &&
        (!WriteFile(file.get(), bytes, static_cast<DWORD>(length), &written, nullptr) ||
         written != length)) ||
       !FlushFileBuffers(file.get()))
     return discard("NATIVE_FAILURE", "NativeSafeFs staging artifact write failed");
-  // A mode without write permission is the one Windows attribute a POSIX mode maps to.
-  if ((expected_mode & 0222) == 0) {
+  // A mode without write permission is the one Windows attribute a POSIX mode maps to; an update
+  // also keeps the hidden, system and not-indexed attributes of the revision it replaces.
+  const DWORD added_attributes =
+      carried_attributes | ((expected_mode & 0222) == 0 ? FILE_ATTRIBUTE_READONLY : 0);
+  if (added_attributes != 0) {
     FILE_BASIC_INFO basic{};
     if (!GetFileInformationByHandleEx(file.get(), FileBasicInfo, &basic, sizeof(basic)))
       return discard("NATIVE_FAILURE", "NativeSafeFs staging attributes could not be read");
     FILE_BASIC_INFO update{};
     update.FileAttributes =
-        (basic.FileAttributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_NORMAL)) | FILE_ATTRIBUTE_READONLY;
+        (basic.FileAttributes & ~static_cast<DWORD>(FILE_ATTRIBUTE_NORMAL)) | added_attributes;
     if (!SetFileInformationByHandle(file.get(), FileBasicInfo, &update, sizeof(update)))
       return discard("NATIVE_FAILURE", "NativeSafeFs staging attributes could not be set");
   }
@@ -2228,6 +2399,10 @@ napi_value WindowsMutationRemoveDirectory(napi_env env, napi_callback_info info)
     if (!owned(target) || !empty(target))
       return ThrowFailure(env, "UNSAFE_PATH",
                           "NativeSafeFs directory ownership changed before removal");
+    // Streams or extended attributes written onto the directory itself are not entries, and
+    // removing the directory would destroy them.
+    if (DirectoryCarriesData(target.handle.get()))
+      return ThrowFailure(env, "EFFECT_REFUSED", kDirectoryDataRefusal);
     if (!SessionCurrent(session))
       return ThrowFailure(env, "STALE_SESSION",
                           "NativeSafeFs session was invalidated before directory removal");
@@ -2255,9 +2430,12 @@ napi_value WindowsMutationRemoveDirectory(napi_env env, napi_callback_info info)
   // Holding the handle does not stop another process from creating a child between the emptiness
   // check and the rename. Whatever arrived goes back, inside the same directory object, to the name
   // it was created under; a name taken in the meantime keeps it in quarantine, never deleted.
-  if (!empty(target)) {
+  const bool gained_children = !empty(target);
+  if (gained_children || DirectoryCarriesData(target.handle.get())) {
     const NTSTATUS restored = MoveHandleNoReplace(target.handle.get(), parent.get(), segments.back());
     FlushFileBuffers(parent.get());
+    if (!gained_children && restored >= 0)
+      return ThrowFailure(env, "EFFECT_REFUSED", kDirectoryDataRefusal);
     return ThrowFailure(env, "UNSAFE_PATH",
                         restored >= 0 ? "NativeSafeFs directory gained contents during quarantine "
                                         "and was restored to its name"
@@ -2300,6 +2478,8 @@ napi_value WindowsMutationCleanupDirectoryRemoval(napi_env env, napi_callback_in
       identity != expected_identity ||
       ListContents(quarantined.handle.get(), std::wstring()) != DirectoryContents::kEmpty)
     return ThrowFailure(env, "UNSAFE_PATH", "Directory removal cleanup refused quarantine");
+  if (DirectoryCarriesData(quarantined.handle.get()))
+    return ThrowFailure(env, "EFFECT_REFUSED", kDirectoryDataRefusal);
   if (!SessionCurrent(session))
     return ThrowFailure(env, "STALE_SESSION",
                         "NativeSafeFs session was invalidated before removal cleanup");

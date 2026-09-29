@@ -352,6 +352,15 @@ async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
   return result.stdout.trim();
 }
 
+function currentUserSid(): string {
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
+    { encoding: 'utf8' },
+  );
+  return result.stdout.trim();
+}
+
 async function expectMissing(path: string): Promise<void> {
   await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
 }
@@ -608,6 +617,80 @@ if (runsWithElectronAbi) {
         reopened.close();
       },
     );
+
+    it('leaves a patch unapplied when Windows refuses to update a file moved in from a stricter directory', async () => {
+      const env = await fixture('windows-refused-moved-update');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const strict = join(env.workspace, 'strict');
+      await mkdir(strict);
+      await windowsDacl(strict, true);
+      // Make the protected DACL inheritable so the file created inside takes it as inherited.
+      spawnSync('icacls.exe', [strict, '/grant:r', `*${currentUserSid()}:(OI)(CI)F`]);
+      const movedPath = join(env.workspace, 'moved.txt');
+      await writeFile(join(strict, 'moved.txt'), 'UPDATE_BEFORE', { mode: 0o600 });
+      await rename(join(strict, 'moved.txt'), movedPath);
+      const movedDacl = await windowsDacl(movedPath);
+      const operation = Object.freeze({
+        kind: 'update' as const,
+        path: 'moved.txt',
+        canonicalPath: movedPath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-moved',
+        preRevision: await fileRevision(movedPath),
+        preImage: 'UPDATE_BEFORE',
+        postImage: 'UPDATE_AFTER',
+        preHash: hash('UPDATE_BEFORE'),
+        postHash: hash('UPDATE_AFTER'),
+      });
+      const facts = { version: 1 as const, policyEpoch: 0, operations: Object.freeze([operation]) };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-refused-moved-update'),
+      );
+      const request = buildRequest({
+        id: 'saga-windows-refused-moved-update',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-windows-refused-moved-update',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+
+      await expect(executor.apply(request)).rejects.toMatchObject({
+        name: 'EditEffectRefusedError',
+        message: 'このファイルのアクセス制御は引き継げないため、Windows では更新できません',
+      });
+      expect(persistence.getEditSaga(request.id)).toMatchObject({ state: 'restored' });
+      await expect(readFile(movedPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(windowsDacl(movedPath)).resolves.toBe(movedDacl);
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      expect(
+        (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+      ).toEqual([]);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
 
     // Windows has no atomic exchange: an update is three no-replace renames. A process that dies
     // between them must neither report success nor strand the displaced revision.
