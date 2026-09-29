@@ -1239,8 +1239,9 @@ napi_value WindowsMutationProbeCapabilities(napi_env env) {
   napi_set_named_property(env, capabilities, "durableFence", MakeBoolean(env, true));
   napi_set_named_property(env, capabilities, "synchronousInvalidation", MakeBoolean(env, true));
   napi_set_named_property(env, capabilities, "mutation", MakeBoolean(env, true));
-  napi_set_named_property(env, capabilities, "mutationScope", MakeString(env, "add-only"));
-  napi_set_named_property(env, capabilities, "directoryOwnership", MakeBoolean(env, false));
+  napi_set_named_property(env, capabilities, "mutationScope", MakeString(env, "full"));
+  napi_set_named_property(env, capabilities, "directoryOwnership",
+                          MakeString(env, "workspace-probed"));
   return capabilities;
 }
 

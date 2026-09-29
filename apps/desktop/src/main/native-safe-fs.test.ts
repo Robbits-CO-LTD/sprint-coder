@@ -420,15 +420,15 @@ describe('NativeSafeFs authority boundary', () => {
     });
   });
 
-  describe.runIf(process.platform === 'win32')('Windows add-only backend', () => {
-    it('publishes only the proven native file-add mutation scope', async () => {
+  describe.runIf(process.platform === 'win32')('Windows backend', () => {
+    it('publishes the full mutation scope and workspace-probed directory ownership', async () => {
       const boundary = loadNativeSafeFs({ addonPath: nativeSafeFsAddonPath() });
       await expect(boundary.probe()).resolves.toMatchObject({
         available: true,
         capabilities: {
           mutation: true,
-          mutationScope: 'add-only',
-          directoryOwnership: false,
+          mutationScope: 'full',
+          directoryOwnership: 'workspace-probed',
         },
       });
     });
