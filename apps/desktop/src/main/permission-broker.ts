@@ -362,7 +362,12 @@ export class PermissionBroker {
 
 function operationForCapability(capability: Capability): PermissionOperation {
   if (capability === 'workspace.read' || capability === 'filesystem.external.read') return 'read';
-  if (capability === 'workspace.write' || capability === 'filesystem.external.write')
+  if (
+    capability === 'workspace.write' ||
+    capability === 'filesystem.external.write' ||
+    capability === 'project.memory.write' ||
+    capability === 'skill.draft.write'
+  )
     return 'write';
   if (capability === 'shell.execute') return 'execute';
   if (capability === 'network.fetch') return 'fetch';
