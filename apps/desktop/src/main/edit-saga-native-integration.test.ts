@@ -326,6 +326,17 @@ function buildRequest(input: {
 }
 
 /**
+ * The environment for a Windows PowerShell 5.1 child. A PSModulePath inherited from a PowerShell 7
+ * parent (a CI step, a pwsh terminal) points 5.1 at modules it cannot load, so Get-Acl and Set-Acl
+ * fail with CouldNotAutoloadMatchingModule; without it, 5.1 uses its own module path.
+ */
+function windowsPowerShellEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  return env;
+}
+
+/**
  * Windows only: a file's DACL as SDDL. `ownerOnly` first replaces it with a protected DACL that
  * grants the current user alone.
  */
@@ -342,11 +353,10 @@ async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
   ].join('\n');
   const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
     encoding: 'utf8',
-    env: {
-      ...process.env,
+    env: windowsPowerShellEnv({
       SPRINT_CODER_DACL_PATH: path,
       SPRINT_CODER_DACL_OWNER_ONLY: ownerOnly ? '1' : '',
-    },
+    }),
   });
   if (result.status !== 0) throw new Error(`Get-Acl failed: ${result.stderr}`);
   return result.stdout.trim();
@@ -375,7 +385,7 @@ function windowsSetRawDacl(path: string, sddl: string): void {
   ].join('\n');
   const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
     encoding: 'utf8',
-    env: { ...process.env, SPRINT_CODER_RAW_PATH: path, SPRINT_CODER_RAW_SDDL: sddl },
+    env: windowsPowerShellEnv({ SPRINT_CODER_RAW_PATH: path, SPRINT_CODER_RAW_SDDL: sddl }),
   });
   if (result.status !== 0) throw new Error(`SetFileSecurityW failed: ${result.stderr}`);
 }
@@ -397,7 +407,10 @@ async function holdWithoutShareDelete(path: string): Promise<ReturnType<typeof s
         'Start-Sleep -Seconds 120',
       ].join('; '),
     ],
-    { env: { ...process.env, SPRINT_CODER_HELD_PATH: path }, stdio: ['ignore', 'pipe', 'ignore'] },
+    {
+      env: windowsPowerShellEnv({ SPRINT_CODER_HELD_PATH: path }),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
   );
   await new Promise<void>((resolve, reject) => {
     holder.stdout!.on('data', (chunk: Buffer) => {
@@ -412,7 +425,7 @@ function currentUserSid(): string {
   const result = spawnSync(
     'powershell.exe',
     ['-NoProfile', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
-    { encoding: 'utf8' },
+    { encoding: 'utf8', env: windowsPowerShellEnv() },
   );
   return result.stdout.trim();
 }

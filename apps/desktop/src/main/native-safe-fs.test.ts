@@ -336,6 +336,17 @@ async function stageNativeIntent(
 }
 
 /**
+ * The environment for a Windows PowerShell 5.1 child. A PSModulePath inherited from a PowerShell 7
+ * parent (a CI step, a pwsh terminal) points 5.1 at modules it cannot load, so Get-Acl and Set-Acl
+ * fail with CouldNotAutoloadMatchingModule; without it, 5.1 uses its own module path.
+ */
+function windowsPowerShellEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  return env;
+}
+
+/**
  * Windows only: reads (and optionally first replaces) a file's DACL as SDDL, `D:` part only.
  * `owner-only` protects the DACL and grants the current user alone; `null` installs a NULL DACL;
  * any other value is an SDDL access section in which `{user}` stands for the current user's SID.
@@ -360,11 +371,10 @@ async function windowsDacl(path: string, replace?: string): Promise<string> {
     '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
   ].join('\n');
   const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
-    env: {
-      ...process.env,
+    env: windowsPowerShellEnv({
       SPRINT_CODER_DACL_PATH: path,
       SPRINT_CODER_DACL_REPLACE: replace ?? '',
-    },
+    }),
   });
   return stdout.trim();
 }
@@ -395,7 +405,7 @@ async function windowsSetExtendedAttribute(path: string): Promise<void> {
     'if ($status -ne 0) { throw "NtSetEaFile failed: $status" }',
   ].join('\n');
   await execFileAsync('powershell.exe', ['-NoProfile', '-Command', script], {
-    env: { ...process.env, SPRINT_CODER_EA_PATH: path },
+    env: windowsPowerShellEnv({ SPRINT_CODER_EA_PATH: path }),
   });
 }
 
@@ -908,11 +918,15 @@ describe('NativeSafeFs authority boundary', () => {
         const input = await fixture();
         const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
         const session = await boundary.openSession({ ...input, fence: '852' });
-        const { stdout } = await execFileAsync('powershell.exe', [
-          '-NoProfile',
-          '-Command',
-          '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
-        ]);
+        const { stdout } = await execFileAsync(
+          'powershell.exe',
+          [
+            '-NoProfile',
+            '-Command',
+            '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+          ],
+          { env: windowsPowerShellEnv() },
+        );
         // BUILTIN\Administrators: what an elevated token gives every file it creates.
         const defaultOwners = [
           ['S-1-5-32-544', 'refused'],
