@@ -27,6 +27,7 @@ import {
   applyWorkerContextInheritance,
   canonicalWorkspaceRoots,
   isCommittedManagedWrite,
+  managedResultChanges,
   reserveTeamWorkerContext,
   WORKER_CANNOT_WRITE_NOTICE,
   WORKER_WRITE_APPROVAL_NOTICE,
@@ -432,6 +433,8 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
           // 'ok' shows the completed label; 'denied' and 'failed' both show the model went on past
           // a tool failure, just with the write-denial wording kept exactly as before (issue #552).
           let toolOutcome: 'ok' | 'denied' | 'failed' = 'ok';
+          // The files this call's committed write changed, reported once its activity is shown.
+          let changes: ReturnType<typeof managedResultChanges> = [];
           if (managedToolSession?.tools.some(({ name }) => name === toolCall.name)) {
             try {
               const result = await managedToolSession.execute(
@@ -439,8 +442,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
                 toolCall.input,
                 controller.signal,
               );
-              if (isCommittedManagedWrite(result)) writes.committed += 1;
+              const committed = isCommittedManagedWrite(result);
+              if (committed) writes.committed += 1;
               toolResult = JSON.stringify(result ?? null);
+              if (committed) changes = managedResultChanges(result);
             } catch (error) {
               // A stop request still ends the execution, as it always has: #572's cancellation of a
               // pending approval wait aborts this same controller before the call below settles, so
@@ -493,6 +498,11 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
                   : `${toolCall.name}の実行完了`,
             at: new Date().toISOString(),
           });
+          // The committed write's files, as the CLI Worker reports them (issue #575). Sent after
+          // the completed activity, which would otherwise replace it on the Worker card, and
+          // outside the tool's try/catch: a failure here must not reach the model as a failed
+          // write, which it might then repeat over the one already committed.
+          if (changes.length > 0) input.onEvent?.({ type: 'fileChange', changes });
           streamBudget.consumeToolResult(toolResult);
           messages.push({
             role: 'tool',

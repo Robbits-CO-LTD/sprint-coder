@@ -929,7 +929,11 @@ export function isCommittedManagedWrite(result: unknown): boolean {
   return record['state'] === 'committed' && typeof record['sagaId'] === 'string';
 }
 
-function managedResultChanges(
+/**
+ * The files a managed Workspace tool result says it changed. Shared with the Managed Local Worker
+ * (`provider-team-worker-runtime.ts`), so both runtimes read a result alike (issue #575).
+ */
+export function managedResultChanges(
   result: unknown,
 ): { path: string; kind: 'add' | 'update' | 'delete' }[] {
   if (typeof result !== 'object' || result === null) return [];
