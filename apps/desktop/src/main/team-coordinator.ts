@@ -2569,6 +2569,51 @@ export class TeamCoordinator {
     if (team === null) return { worktrees: [], total: 0 };
     const agents = this.persistence.getTeamSnapshot(team.id).agents;
     const worktrees: TeamRetainedWorktree[] = [];
+    const lockCandidates: {
+      key: string;
+      repoPath: string;
+      worktreePath: string;
+      input: Parameters<WorkerWorktreeManager['discard']>[0];
+    }[] = [];
+    let visibleCount = 0;
+    for (const execution of this.persistence.listTeamExecutions(team.id)) {
+      const isolation = this.persistence.getTeamExecutionIsolation(execution.id);
+      if (isolation === null) continue;
+      for (const repository of isolation.repositories) {
+        if (repository.state !== 'quarantined') continue;
+        if (visibleCount >= TEAM_RETAINED_WORKTREE_LIST_LIMIT) continue;
+        visibleCount += 1;
+        if (this.retainedWorktreeBlockedReason(execution, isolation, repository) !== null) continue;
+        lockCandidates.push({
+          key: isolationWorktreeId(execution.id, repository.ordinal),
+          repoPath: repository.repoPath,
+          worktreePath: repository.worktreePath,
+          input: {
+            agentId: execution.assigneeAgentId,
+            worktreeId: isolationWorktreeId(execution.id, repository.ordinal),
+            repoPath: repository.repoPath,
+            path: repository.worktreePath,
+          },
+        });
+      }
+    }
+    const observed =
+      (await this.worktreeManager?.observeRetainedWorktreeLocks(
+        lockCandidates.map(({ input }) => input),
+      )) ?? [];
+    const locks = new Map(
+      lockCandidates.map(
+        (candidate, index) =>
+          [
+            candidate.key,
+            {
+              repoPath: candidate.repoPath,
+              worktreePath: candidate.worktreePath,
+              state: observed[index] ?? 'unknown',
+            },
+          ] as const,
+      ),
+    );
     let total = 0;
     let integrationChanged = false;
     for (const execution of this.persistence.listTeamExecutions(team.id)) {
@@ -2577,27 +2622,59 @@ export class TeamCoordinator {
       for (const repository of isolation.repositories) {
         if (repository.state !== 'quarantined') continue;
         total += 1;
-        if (worktrees.length >= TEAM_RETAINED_WORKTREE_LIST_LIMIT) continue;
-        const blockedReason = this.retainedWorktreeBlockedReason(execution, isolation, repository);
-        const role = agents.find(({ id }) => id === execution.assigneeAgentId)?.role.trim() ?? '';
+        if (total > TEAM_RETAINED_WORKTREE_LIST_LIMIT) continue;
         const checked = await this.retainedWorktreeIntegration(execution.id, repository);
         if (checked.changed) integrationChanged = true;
+        const submodules = await this.retainedWorktreeSubmodules(execution, repository);
+        const existsOnDisk = await pathPresent(repository.worktreePath);
+        const latestExecution = this.persistence.getTeamExecution(execution.id);
+        const latestIsolation = this.persistence.getTeamExecutionIsolation(execution.id);
+        const latestRepository = latestIsolation?.repositories.find(
+          ({ ordinal }) => ordinal === repository.ordinal,
+        );
+        if (latestIsolation === null || latestRepository?.state !== 'quarantined') continue;
+        const sameTarget =
+          latestExecution.assigneeAgentId === execution.assigneeAgentId &&
+          latestRepository.repoPath === repository.repoPath &&
+          latestRepository.worktreePath === repository.worktreePath &&
+          latestRepository.integratedHead === repository.integratedHead;
+        if (!sameTarget) continue;
+        const staticReason = this.retainedWorktreeBlockedReason(
+          latestExecution,
+          latestIsolation,
+          latestRepository,
+        );
+        const lock = locks.get(isolationWorktreeId(execution.id, repository.ordinal));
+        const lockState =
+          lock?.repoPath === latestRepository.repoPath &&
+          lock.worktreePath === latestRepository.worktreePath
+            ? lock.state
+            : 'unknown';
+        const blockedReason =
+          staticReason ??
+          (lockState === 'locked'
+            ? 'このworktreeはGitでロックされているため破棄できません。ロックを解除した後に一覧を更新してください。'
+            : lockState === 'unknown'
+              ? 'Gitのロック状態を確認できないため、ここからは破棄できません。一覧を更新して確認してください。'
+              : null);
+        const role =
+          agents.find(({ id }) => id === latestExecution.assigneeAgentId)?.role.trim() ?? '';
         worktrees.push({
           executionId: execution.id,
           repositoryOrdinal: repository.ordinal,
-          agentId: execution.assigneeAgentId,
+          agentId: latestExecution.assigneeAgentId,
           role: role === '' ? 'Worker' : role.slice(0, 200),
-          repoPath: repository.repoPath,
-          worktreePath: repository.worktreePath,
-          baseHead: repository.baseHead,
-          workerHead: repository.workerHead,
-          integratedHead: repository.integratedHead,
+          repoPath: latestRepository.repoPath,
+          worktreePath: latestRepository.worktreePath,
+          baseHead: latestRepository.baseHead,
+          workerHead: latestRepository.workerHead,
+          integratedHead: latestRepository.integratedHead,
           integration: checked.integration,
-          submodules: await this.retainedWorktreeSubmodules(execution, repository),
-          changedFileCount: repository.changedFiles.length,
-          reason: isolation.reason,
-          executionState: execution.state,
-          existsOnDisk: await pathPresent(repository.worktreePath),
+          submodules,
+          changedFileCount: latestRepository.changedFiles.length,
+          reason: latestIsolation.reason,
+          executionState: latestExecution.state,
+          existsOnDisk,
           discardable: blockedReason === null,
           blockedReason,
         });
@@ -2605,7 +2682,17 @@ export class TeamCoordinator {
     }
     // The Worker card shows the same result (issue #579), so publish the Team when it changed.
     if (integrationChanged) this.emit(taskId, team.id);
-    return teamRetainedWorktreeListSchema.parse({ worktrees, total });
+    const currentTotal = this.persistence
+      .listTeamExecutions(team.id)
+      .reduce(
+        (count, execution) =>
+          count +
+          (this.persistence
+            .getTeamExecutionIsolation(execution.id)
+            ?.repositories.filter(({ state }) => state === 'quarantined').length ?? 0),
+        0,
+      );
+    return teamRetainedWorktreeListSchema.parse({ worktrees, total: currentTotal });
   }
 
   /** What a retained worktree holds now, read from Git without changing it (issue #544). */

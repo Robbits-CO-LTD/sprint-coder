@@ -32,10 +32,26 @@
 
 - [x] Issue本文・全コメント・添付0/0、現行コード、既存計画、PRと作業ツリーを確認する。
 - [x] 要求由来ceilingと実際の拒否・安全設定・Worker制限を2文書へ反映する。
-- [ ] 差分・Markdown・相互参照・現行コードを照合し、独立レビューを受ける（Grokレビューの指摘2件を文書へ反映。修正版headの再レビュー待ち）。
-- [ ] PR、最新headの必須CI、指摘対応、マージとIssue closeoutを読戻す。
+- [x] 差分・Markdown・相互参照・現行コードを照合し、独立レビューの指摘2件を修正・再レビューした。
+- [x] PR、最新headの必須CI、指摘対応、マージとIssue closeoutを読戻した。
 
 前提監査: 第一仮説は「文書の実装済み保証を訂正すれば足りる」。`ipc.ts`と`provider-egress.ts`は要求からceilingを構成し、`permission.ts`のceiling照合は存在するため、保護全体が無いとは書かない。`team-coordinator.ts`の委任数制限は別経路である。反証として変更対象外の認可経路やWorkerの実制限が失われる記述が無いか確認する。
+
+結果（2026-09-29）: PR #633は最新headのCIと独立レビューを通過し、mainへsquash merge済み。完了根拠コメントを残し、#577の`implemented`と`CLOSED`、`origin/main`のマージコミットを読戻した。
+
+## Issue #578 — 残存worktree一覧のGitロック表示（2026-09-29）
+
+目的: Teamの残存worktree一覧で、Gitにロックされた所有worktreeを最初から破棄不可と示す。対象はMain内部の読取と既存一覧の`discardable`/`blockedReason`、直接関連するテスト。破棄直前のGit再検査、所有境界、UI確認ダイアログを維持する。unlock・force remove・新しいIPC・DB変更・自動更新は行わない。
+
+- [x] Issue本文・計画・現行コード・既存テスト・OPEN PRと作業ツリーを確認する。
+- [x] 同一repoにつき1回の有界なGitロック読取を追加し、失敗・所有不一致はunknownとして拒否する。
+- [x] 一覧で静的拒否理由を優先し、await後に現行記録へ再束縛してロック理由を合成する。
+- [x] 直接関連するGit・Coordinator・UIテスト、型・lintを通し、実機E2Eの可否を判定する（対象ケース・型・lint 0 error PASS。実機は製品UIから決定的に残存状態を作るpreflight未証明でNOT_RUN）。
+- [ ] PRの最新head CI・独立レビュー・指摘対応・mergeとIssue closeoutを読戻す。
+
+前提監査（JP-19）: 第一仮説PASS—不足は一覧のロック観測で、`worker-worktree.ts:isLocked`が破棄直前には拒否する。周辺影響PASS—一覧に既存の非同期Git/ファイル読取があり、古い結果・複数repo・表示上限を扱う。根本と責任PASS—Mainの所有確認済み対象だけをGitへ照会し、Rendererの表示契約だけへ反映する。最小差分PASS—同期の破棄可否ルールと最終削除ガードを変更しない。別経路は実装後に実GitロックとCoordinatorの状態変化で再確認する。
+
+差分監査: `worker-worktree`の既存破棄ガードはGitを毎回読み直し、一覧用cacheを流用しない。Git失敗・不正出力・所有不一致をunknownにし、静的拒否理由を先に表示する。実Gitの2 repositoryでlock/unlockと1回ずつの読取を確認し、Electron ABIのCoordinator結合ケースで一覧→ロック表示→解除回復、観測待ちのcleaned記録を確認。Renderer 11件PASS。worktree全体テストは並列実行時に既存の5秒制限1件がTIMEOUT、同じケースを単独で2.98秒PASS。Jev reviewはESCALATE（data loss 0.11、regression 0.17、scope drift 0.23）だったため、上記の最終削除ガード、別repo失敗分離、表示上限、差分の対象をMainが再確認した。実機E2Eは同じ候補成果物で製品UIから失敗Workerの残存worktreeへ決定的に到達するpreflightが未証明で開始しない。Issueは実機確認までOPENを維持する。
 
 検証: `git diff --check` PASS。2文書の該当記述、`permission-broker.ts`のdeny/allow展開、`team-coordinator.ts`の委任制限、Workerの管理ツール/書込み範囲を照合してAC-1〜3とINV-1〜2を確認した。Prettierの全文チェックは変更前の3ファイルもFAILするため、このIssueで無関係な全文整形はしない。Jevのplan/review助言は各1通信でESCALATE（試験対応とsecurity/regressionの不確実性）であり、合否には算入しない。
 
