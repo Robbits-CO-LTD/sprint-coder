@@ -5,6 +5,7 @@ import { workspaceRootIdentityDigestFor } from './path-guard';
 import {
   parseNativeMutationIntentSnapshot,
   type NativeMutationEffectObservation,
+  type NativeMutationIntentSeed,
   type NativeMutationIntentSnapshot,
   type NativeMutationRevision,
 } from './native-mutation-intent';
@@ -19,7 +20,9 @@ export type NativeSafeFsErrorCode =
   | 'LOCK_BUSY'
   | 'STALE_FENCE'
   | 'STALE_SESSION'
-  | 'NATIVE_FAILURE';
+  | 'NATIVE_FAILURE'
+  // Refused before anything changed: the effect could not be undone exactly on this platform.
+  | 'EFFECT_REFUSED';
 
 export class NativeSafeFsError extends Error {
   constructor(
@@ -138,6 +141,14 @@ export interface NativeSafeFs {
     intent: NativeMutationIntentSnapshot,
     recoveryBinding?: NativeMutationRecoveryExecutionBinding,
   ): Promise<NativeMutationEffectObservation>;
+  /**
+   * Read-only, before an intent is journaled: whether the effect a seed describes could be undone
+   * exactly. A backend without platform limits (POSIX) always allows it.
+   */
+  preflightIntentEffect?(
+    session: NativeSafeFsSession,
+    seed: NativeMutationIntentSeed,
+  ): Promise<NativeEffectPreflight>;
   cleanupIntentAuxiliary(
     session: NativeSafeFsSession,
     intent: NativeMutationIntentSnapshot,
@@ -198,6 +209,9 @@ export interface NativeSafeFs {
   closeSession(session: NativeSafeFsSession): Promise<void>;
 }
 
+export type NativeEffectPreflight =
+  Readonly<{ allowed: true }> | Readonly<{ allowed: false; reason: string }>;
+
 export type NativeDirectoryRevision = Readonly<{
   state: 'present';
   identityDigest: string;
@@ -243,6 +257,13 @@ type RawEffectInput = RawJournalBinding &
     expectedAuxiliary: NativeMutationIntentSnapshot['expectedSource'];
   }>;
 
+type RawPreflightInput = Readonly<{
+  sessionId: string;
+  kind: NativeMutationIntentSnapshot['kind'];
+  sourceSegments: readonly string[];
+  expectedSource: NativeMutationIntentSnapshot['expectedSource'];
+}>;
+
 type RawCleanupInput = RawJournalBinding &
   Readonly<{
     auxiliarySegments: readonly string[];
@@ -263,6 +284,8 @@ type RawAddon = Readonly<{
   observeIntent(input: RawObserveInput): Promise<unknown>;
   stageIntentArtifact(input: RawStageInput, bytes: Buffer): Promise<unknown>;
   applyIntentEffect(input: RawEffectInput): Promise<unknown>;
+  // Windows only; the POSIX backend has no effect it cannot undo.
+  preflightIntentEffect?(input: RawPreflightInput): unknown;
   cleanupIntentAuxiliary(input: RawCleanupInput): Promise<unknown>;
   observeDirectory(input: { sessionId: string; pathSegments: readonly string[] }): unknown;
   openReadSession(input: NativeSafeFsReadSessionInput & { lockDirectoryPath?: string }): unknown;
@@ -557,6 +580,28 @@ export function loadNativeSafeFs(
         );
         assertIssuedSession(issuedSessions, session);
         return parseEffectObservation(observation);
+      } catch (error) {
+        throw mapNativeError(error);
+      }
+    },
+
+    async preflightIntentEffect(
+      session: NativeSafeFsSession,
+      seed: NativeMutationIntentSeed,
+    ): Promise<NativeEffectPreflight> {
+      assertIssuedSession(issuedSessions, session);
+      if (addon?.preflightIntentEffect === undefined) return Object.freeze({ allowed: true });
+      try {
+        const result = addon.preflightIntentEffect(
+          Object.freeze({
+            sessionId: session.id,
+            kind: seed.kind,
+            sourceSegments: Object.freeze([...seed.sourceSegments]),
+            expectedSource: seed.expectedSource,
+          }),
+        );
+        assertIssuedSession(issuedSessions, session);
+        return parsePreflight(result);
       } catch (error) {
         throw mapNativeError(error);
       }
@@ -971,6 +1016,21 @@ function journalBinding(
   });
 }
 
+function parsePreflight(value: unknown): NativeEffectPreflight {
+  if (isRecord(value) && hasExactKeys(value, ['allowed']) && value['allowed'] === true)
+    return Object.freeze({ allowed: true });
+  if (
+    isRecord(value) &&
+    hasExactKeys(value, ['allowed', 'reason']) &&
+    value['allowed'] === false &&
+    typeof value['reason'] === 'string' &&
+    value['reason'].length > 0 &&
+    value['reason'].length <= 200
+  )
+    return Object.freeze({ allowed: false, reason: value['reason'] });
+  throw new Error('Invalid NativeSafeFs effect preflight');
+}
+
 function parseEffectObservation(value: unknown): NativeMutationEffectObservation {
   if (!isRecord(value) || !hasExactKeys(value, ['source', 'destination', 'auxiliary']))
     throw new Error('Invalid NativeSafeFs effect observation');
@@ -1149,6 +1209,7 @@ function isNativeErrorCode(value: unknown): value is NativeSafeFsErrorCode {
     'STALE_FENCE',
     'STALE_SESSION',
     'NATIVE_FAILURE',
+    'EFFECT_REFUSED',
   ].includes(value as string);
 }
 

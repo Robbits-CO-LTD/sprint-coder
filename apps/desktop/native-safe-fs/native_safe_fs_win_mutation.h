@@ -8,6 +8,7 @@
 napi_value WindowsMutationOpenSession(napi_env env, napi_callback_info info);
 napi_value WindowsMutationInvalidateWorkspace(napi_env env, napi_callback_info info);
 napi_value WindowsMutationObserveIntent(napi_env env, napi_callback_info info);
+napi_value WindowsMutationPreflightIntentEffect(napi_env env, napi_callback_info info);
 napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info info);
 napi_value WindowsMutationApplyIntentEffect(napi_env env, napi_callback_info info);
 napi_value WindowsMutationCleanupIntentAuxiliary(napi_env env, napi_callback_info info);

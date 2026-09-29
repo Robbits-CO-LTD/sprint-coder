@@ -498,6 +498,117 @@ if (runsWithElectronAbi) {
       persistence.close();
     });
 
+    it.each([
+      ['after an update it has to undo', true],
+      ['on its own', false],
+    ])(
+      'leaves a patch unapplied when Windows refuses its delete %s',
+      async (_label, withUpdate) => {
+        const env = await fixture(`windows-refused-${withUpdate ? 'batch' : 'single'}`);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const { resolveSession, sessions } = makeResolveSession(native, env);
+        const keptPath = join(env.workspace, 'kept.txt');
+        const ownPath = join(env.workspace, 'own-acl.txt');
+        await writeFile(keptPath, 'UPDATE_BEFORE', { mode: 0o600 });
+        await writeFile(ownPath, 'OWN_ACL', { mode: 0o600 });
+        const ownDacl = await windowsDacl(ownPath, true);
+        const operations: PreparedPatchOperation[] = [];
+        if (withUpdate)
+          operations.push(
+            Object.freeze({
+              kind: 'update' as const,
+              path: 'kept.txt',
+              canonicalPath: keptPath,
+              destination: null,
+              canonicalDestination: null,
+              revisionTokenId: 'token-kept',
+              preRevision: await fileRevision(keptPath),
+              preImage: 'UPDATE_BEFORE',
+              postImage: 'UPDATE_AFTER',
+              preHash: hash('UPDATE_BEFORE'),
+              postHash: hash('UPDATE_AFTER'),
+            }),
+          );
+        operations.push(
+          Object.freeze({
+            kind: 'delete' as const,
+            path: 'own-acl.txt',
+            canonicalPath: ownPath,
+            destination: null,
+            canonicalDestination: null,
+            revisionTokenId: 'token-own-acl',
+            preRevision: await fileRevision(ownPath),
+            preImage: 'OWN_ACL',
+            postImage: null,
+            preHash: hash('OWN_ACL'),
+            postHash: null,
+          }),
+        );
+        const facts = {
+          version: 1 as const,
+          policyEpoch: 0,
+          operations: Object.freeze(operations),
+        };
+        const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const instance = `windows-refused-${withUpdate ? 'batch' : 'single'}`;
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: persistence,
+            artifacts,
+            resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, instance),
+        );
+        const request = buildRequest({
+          id: `saga-${instance}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: `op-${instance}`,
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        });
+
+        // The reason is what apply_patch hands the model as its rejection.
+        await expect(executor.apply(request)).rejects.toMatchObject({
+          name: 'EditEffectRefusedError',
+          message: 'このファイルは独自のアクセス制御を持つため、Windows では削除できません',
+        });
+        expect(persistence.getEditSaga(request.id)).toMatchObject({
+          state: 'restored',
+          recovery: null,
+        });
+        await expect(readFile(keptPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+        await expect(readFile(ownPath, 'utf8')).resolves.toBe('OWN_ACL');
+        await expect(windowsDacl(ownPath)).resolves.toBe(ownDacl);
+        // No intent was journaled for the refused step, so nothing is left to recover.
+        expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        for (const session of sessions.values()) await native.closeSession(session);
+        persistence.close();
+        const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+        expect(
+          reopened.initializeMutationRecovery(`${instance}-2`, new Date().toISOString()),
+        ).toEqual([]);
+        reopened.close();
+      },
+    );
+
     // Windows has no atomic exchange: an update is three no-replace renames. A process that dies
     // between them must neither report success nor strand the displaced revision.
     it.each(['after parking the previous revision', 'after publishing the staged artifact'])(

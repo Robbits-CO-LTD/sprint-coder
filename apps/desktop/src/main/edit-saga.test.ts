@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   aggregateTurnDiff,
+  EditEffectRefusedError,
   EditSagaCrashError,
   EditSagaExecutor,
   InMemoryEditSagaStore,
@@ -357,6 +358,35 @@ describe('EditSagaExecutor', () => {
     expect(boundary.restored).toEqual([1]);
     expect([...boundary.files.values()]).toEqual(['A0', 'B0']);
     expect(store.get(result.id).revision).toBeGreaterThanOrEqual(4);
+  });
+
+  it('restores a Saga whose boundary refused a step before journaling it and reports why', async () => {
+    const store = new InMemoryEditSagaStore();
+    const artifacts = new MemoryArtifacts();
+    // Refuses step 2 when applied and again when compensation resumes it, like a preflight would.
+    class RefusingBoundary extends FakeBoundary {
+      readonly resumed: number[] = [];
+      override async apply(step: EditSagaStep): Promise<OperationObservation> {
+        if (step.ordinal === 2) throw new EditEffectRefusedError('cannot be undone here');
+        return super.apply(step);
+      }
+      async resume(step: EditSagaStep): Promise<OperationObservation> {
+        this.resumed.push(step.ordinal);
+        throw new EditEffectRefusedError('cannot be undone here');
+      }
+    }
+    const boundary = new RefusingBoundary(artifacts);
+    const executor = new EditSagaExecutor(store, boundary, artifacts);
+
+    await expect(executor.apply(request())).rejects.toMatchObject({
+      name: 'EditEffectRefusedError',
+      message: 'cannot be undone here',
+    });
+    expect(store.get('saga-1')).toMatchObject({ state: 'restored', recovery: null });
+    expect(boundary.applied).toEqual([1]);
+    expect(boundary.resumed).toEqual([2]);
+    expect(boundary.restored).toEqual([1]);
+    expect([...boundary.files.values()]).toEqual(['A0', 'B0']);
   });
 
   it('quarantines a crash-unknown effect without replaying or overwriting it', async () => {

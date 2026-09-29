@@ -287,6 +287,19 @@ export class EditSagaCrashError extends Error {
   }
 }
 
+/**
+ * An effect boundary refused a step before journaling any effect for it, because the change could
+ * not be undone exactly (Windows: a file with named streams or its own access control). Nothing of
+ * the step was applied, so compensation restores the Saga instead of quarantining it, and the
+ * message is the reason the caller reports.
+ */
+export class EditEffectRefusedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EditEffectRefusedError';
+  }
+}
+
 export class InMemoryEditSagaStore implements EditSagaStore {
   private readonly sagas = new Map<string, EditSagaSnapshot>();
   private readonly operations = new Map<string, string>();
@@ -582,14 +595,18 @@ export class EditSagaExecutor {
     if (isTerminal(saga.state)) return saga;
     if (saga.state !== 'prepared') return this.recover(saga.id);
     await this.fault?.hit({ kind: 'afterJournalPrepared' });
-    return this.runWithLease(saga, 'forward', async (lease) => {
+    const refusal: { error: EditEffectRefusedError | null } = { error: null };
+    const result = await this.runWithLease(saga, 'forward', async (lease) => {
       try {
         await this.materializeArtifacts(saga, request.plan);
       } catch {
         return this.cleanupArtifacts(this.transitionTerminal(saga, 'restored', []));
       }
-      return this.runForward(saga.id, lease);
+      return this.runForward(saga.id, lease, refusal);
     });
+    // Reported only after the lease is released: the Saga is durably restored and nothing applied.
+    if (refusal.error !== null && result.state === 'restored') throw refusal.error;
+    return result;
   }
 
   async recover(id: string): Promise<EditSagaSnapshot> {
@@ -696,7 +713,11 @@ export class EditSagaExecutor {
       await this.leaseGuard.assertCurrent(lease, saga);
   }
 
-  private async runForward(id: string, lease: unknown | null): Promise<EditSagaSnapshot> {
+  private async runForward(
+    id: string,
+    lease: unknown | null,
+    refusal?: { error: EditEffectRefusedError | null },
+  ): Promise<EditSagaSnapshot> {
     let saga = this.store.get(id);
     for (const currentStep of saga.steps) {
       if (currentStep.state !== 'pending') continue;
@@ -728,6 +749,7 @@ export class EditSagaExecutor {
         );
       } catch (error) {
         if (error instanceof EditSagaCrashError) throw error;
+        if (error instanceof EditEffectRefusedError && refusal !== undefined) refusal.error = error;
         return this.compensate(id, errorMessage(error), lease);
       }
     }
@@ -760,7 +782,13 @@ export class EditSagaExecutor {
       await this.assertLease(lease, saga);
       let observation: OperationObservation;
       if (this.boundary.resume !== undefined) {
-        observation = await this.boundary.resume(step, 'forward', this.leaseAccess(lease, saga));
+        try {
+          observation = await this.boundary.resume(step, 'forward', this.leaseAccess(lease, saga));
+        } catch (error) {
+          if (error instanceof EditEffectRefusedError)
+            return this.compensate(id, errorMessage(error), lease);
+          throw error;
+        }
       } else if (step.operation.kind === 'mkdir') {
         const observed = await this.boundary.observe(step, this.leaseAccess(lease, saga));
         if (observed.state !== 'post')
@@ -818,6 +846,16 @@ export class EditSagaExecutor {
             );
             step = stepAt(saga, step.ordinal);
           } catch (error) {
+            // Refused before any effect of the step was journaled: there is nothing to undo.
+            if (error instanceof EditEffectRefusedError) {
+              saga = this.updateStep(
+                saga,
+                step.ordinal,
+                (value) => ({ ...value, state: 'restored' }),
+                'compensating',
+              );
+              continue;
+            }
             return this.requireRecovery(
               saga,
               'effect_outcome_unknown',

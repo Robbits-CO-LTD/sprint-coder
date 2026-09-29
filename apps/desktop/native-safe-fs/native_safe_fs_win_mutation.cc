@@ -938,37 +938,193 @@ bool CaptureSourceSecurity(HANDLE source, CarriedSecurity* output) {
   return true;
 }
 
-// Whether re-creating this file in its parent gives it the same access control: an unprotected
-// DACL made only of inherited entries, owned by the process's default owner (what the re-created
-// file gets). An undone delete re-creates the file from its bytes, so a file with its own access
-// control would come back readable by others.
-bool SecurityIsRecreatable(HANDLE file) {
-  DWORD flags = 0;
-  if (!GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
-    return false;
-  if ((flags & FILE_PERSISTENT_ACLS) == 0) return true;
-  PSID owner = nullptr;
-  PACL dacl = nullptr;
-  PSECURITY_DESCRIPTOR raw = nullptr;
-  if (GetSecurityInfo(file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                      &owner, nullptr, &dacl, nullptr, &raw) != ERROR_SUCCESS)
-    return false;
-  const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
-  SECURITY_DESCRIPTOR_CONTROL control = 0;
-  DWORD revision = 0;
-  std::vector<unsigned char> default_owner_storage;
-  PSID default_owner = nullptr;
-  if (!GetSecurityDescriptorControl(raw, &control, &revision) ||
-      (control & SE_DACL_PROTECTED) != 0 || dacl == nullptr || owner == nullptr ||
-      !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
-      !EqualSid(owner, default_owner))
-    return false;
-  for (DWORD index = 0; index < dacl->AceCount; ++index) {
-    void* ace = nullptr;
-    if (!GetAce(dacl, index, &ace) ||
-        (static_cast<ACE_HEADER*>(ace)->AceFlags & INHERITED_ACE) == 0)
+// Refusals of an effect the Edit Saga could not undo exactly. Each is decided before any byte
+// changes; the native code EFFECT_REFUSED tells the boundary nothing moved. UTF-8 for:
+// "This file has additional data streams, so Windows cannot update or delete it",
+// "This file has its own access control, so Windows cannot delete it", and
+// "This file's access control changed during the update, so Windows cannot update it".
+constexpr char kStreamsRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x83\x87""\xe3\x83\xbc"
+    "\xe3\x82\xbf""\xe3\x82\xb9""\xe3\x83\x88""\xe3\x83\xaa""\xe3\x83\xbc""\xe3\x83\xa0"
+    "\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81"
+    "Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb"
+    "\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b"
+    "\xe3\x82\x93";
+constexpr char kAccessControlRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe7\x8b\xac""\xe8\x87\xaa""\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf"
+    "\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6""\xe5\xbe\xa1""\xe3\x82\x92""\xe6\x8c\x81"
+    "\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7"
+    "\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe"
+    "\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kAccessControlChangedRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf""\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6"
+    "\xe5\xbe\xa1""\xe3\x81\x8c""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x81\xae""\xe9\x80\x94"
+    "\xe4\xb8\xad""\xe3\x81\xa7""\xe5\xa4\x89""\xe3\x82\x8f""\xe3\x81\xa3""\xe3\x81\x9f"
+    "\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf"
+    "\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b"
+    "\xe3\x82\x93";
+
+// Whether the file carries any data stream besides its unnamed one. An update writes only the
+// unnamed stream and an undone delete re-creates only that, so a named stream (metadata, a
+// Zone.Identifier) would be lost.
+bool HasNamedDataStreams(HANDLE file, bool* named) {
+  std::vector<uint64_t> buffer(512);
+  while (!GetFileInformationByHandleEx(file, FileStreamInfo, buffer.data(),
+                                       static_cast<DWORD>(buffer.size() * sizeof(uint64_t)))) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_HANDLE_EOF) {
+      *named = false;
+      return true;
+    }
+    if (error != ERROR_MORE_DATA || buffer.size() >= 65536) return false;
+    buffer.resize(buffer.size() * 4);
+  }
+  for (auto* entry = reinterpret_cast<FILE_STREAM_INFO*>(buffer.data());;
+       entry = reinterpret_cast<FILE_STREAM_INFO*>(reinterpret_cast<uint8_t*>(entry) +
+                                                   entry->NextEntryOffset)) {
+    if (std::wstring(entry->StreamName, entry->StreamNameLength / sizeof(wchar_t)) != L"::$DATA") {
+      *named = true;
+      return true;
+    }
+    if (entry->NextEntryOffset == 0) break;
+  }
+  *named = false;
+  return true;
+}
+
+bool SameDacl(PACL left, PACL right) {
+  if (left == nullptr || right == nullptr || left->AceCount != right->AceCount) return false;
+  for (DWORD index = 0; index < left->AceCount; ++index) {
+    void* first = nullptr;
+    void* second = nullptr;
+    if (!GetAce(left, index, &first) || !GetAce(right, index, &second)) return false;
+    const auto* first_header = static_cast<ACE_HEADER*>(first);
+    const auto* second_header = static_cast<ACE_HEADER*>(second);
+    if (first_header->AceSize != second_header->AceSize ||
+        std::memcmp(first, second, first_header->AceSize) != 0)
       return false;
   }
+  return true;
+}
+
+// A DACL together with its protection, the part of a descriptor an update must carry unchanged.
+struct DaclFacts {
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  PACL dacl = nullptr;
+  PSID owner = nullptr;
+  bool protected_dacl = false;
+  DaclFacts() = default;
+  DaclFacts(const DaclFacts&) = delete;
+  DaclFacts& operator=(const DaclFacts&) = delete;
+  ~DaclFacts() {
+    if (descriptor != nullptr) LocalFree(descriptor);
+  }
+};
+
+bool ReadDacl(HANDLE handle, SECURITY_INFORMATION extra, DaclFacts* output) {
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  if (GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | extra,
+                      (extra & OWNER_SECURITY_INFORMATION) != 0 ? &output->owner : nullptr,
+                      nullptr, &output->dacl, nullptr, &output->descriptor) != ERROR_SUCCESS ||
+      !GetSecurityDescriptorControl(output->descriptor, &control, &revision))
+    return false;
+  output->protected_dacl = (control & SE_DACL_PROTECTED) != 0;
+  return true;
+}
+
+bool PersistentAcls(HANDLE handle, bool* persistent) {
+  DWORD flags = 0;
+  if (!GetVolumeInformationByHandleW(handle, nullptr, 0, nullptr, nullptr, &flags, nullptr, 0))
+    return false;
+  *persistent = (flags & FILE_PERSISTENT_ACLS) != 0;
+  return true;
+}
+
+// Whether re-creating this file in `parent` gives it the same access control: owned by the
+// process's default owner, with exactly the DACL the parent's inheritable entries give a new file
+// now. A file moved in from a stricter directory keeps entries inherited there, which a re-created
+// copy would not get back.
+bool SecurityIsRecreatable(HANDLE file, HANDLE parent) {
+  bool persistent = false;
+  if (!PersistentAcls(file, &persistent)) return false;
+  if (!persistent) return true;
+  DaclFacts actual;
+  std::vector<unsigned char> default_owner_storage;
+  PSID default_owner = nullptr;
+  if (!ReadDacl(file, OWNER_SECURITY_INFORMATION, &actual) || actual.dacl == nullptr ||
+      actual.protected_dacl || actual.owner == nullptr ||
+      !ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
+      !EqualSid(actual.owner, default_owner))
+    return false;
+  // READ_CONTROL is outside share-mode checks, so this reopens the pinned parent itself.
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  if (OpenRelative(parent, std::wstring(), READ_CONTROL | SYNCHRONIZE, kObserveShare, FILE_OPEN,
+                   FILE_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) < 0)
+    return false;
+  const OwnedHandle parent_security(raw);
+  PSECURITY_DESCRIPTOR parent_raw = nullptr;
+  if (GetSecurityInfo(parent_security.get(), SE_FILE_OBJECT,
+                      OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                          DACL_SECURITY_INFORMATION,
+                      nullptr, nullptr, nullptr, nullptr, &parent_raw) != ERROR_SUCCESS)
+    return false;
+  const std::unique_ptr<void, decltype(&LocalFree)> parent_descriptor(parent_raw, &LocalFree);
+  HANDLE token_raw = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_raw)) return false;
+  const OwnedHandle token(token_raw);
+  GENERIC_MAPPING mapping{FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE,
+                          FILE_ALL_ACCESS};
+  PSECURITY_DESCRIPTOR created = nullptr;
+  if (!CreatePrivateObjectSecurityEx(parent_raw, nullptr, &created, nullptr, FALSE,
+                                     SEF_DACL_AUTO_INHERIT | SEF_AVOID_PRIVILEGE_CHECK |
+                                         SEF_AVOID_OWNER_CHECK,
+                                     token.get(), &mapping))
+    return false;
+  BOOL present = FALSE;
+  BOOL defaulted = FALSE;
+  PACL created_dacl = nullptr;
+  const bool same = GetSecurityDescriptorDacl(created, &present, &created_dacl, &defaulted) &&
+                    present && SameDacl(actual.dacl, created_dacl);
+  DestroyPrivateObjectSecurity(&created);
+  return same;
+}
+
+// Why an update or delete of this file could not be undone exactly, or nullptr. `content` reads
+// the streams, `security` (READ_CONTROL, the same object) the descriptor, `parent` is pinned.
+const char* IrreversibleEffectReason(bool deleting, HANDLE content, HANDLE security,
+                                     HANDLE parent) {
+  bool named = true;
+  if (!HasNamedDataStreams(content, &named) || named) return kStreamsRefusal;
+  if (deleting && !SecurityIsRecreatable(security, parent)) return kAccessControlRefusal;
+  return nullptr;
+}
+
+// Whether two files carry the same DACL, protection included.
+bool SameAccessControl(HANDLE first, HANDLE second) {
+  bool persistent = false;
+  if (!PersistentAcls(first, &persistent)) return false;
+  if (!persistent) return true;
+  DaclFacts left, right;
+  return ReadDacl(first, 0, &left) && ReadDacl(second, 0, &right) &&
+         left.protected_dacl == right.protected_dacl && SameDacl(left.dacl, right.dacl);
+}
+
+// Opens the descriptor of a held endpoint for reading and proves it is the same object.
+bool OpenHeldSecurity(HANDLE parent, const std::wstring& leaf, HANDLE held, OwnedHandle* output) {
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  if (OpenRelative(parent, leaf, READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE, kObserveShare,
+                   FILE_OPEN, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) < 0)
+    return false;
+  OwnedHandle security(raw);
+  FileFacts held_facts, security_facts;
+  if (!QueryFacts(held, &held_facts) || !QueryFacts(security.get(), &security_facts) ||
+      !SameObject(held_facts, security_facts))
+    return false;
+  *output = std::move(security);
   return true;
 }
 
@@ -1104,7 +1260,7 @@ bool FlushPinned(const PinnedDirectory& first, const PinnedDirectory* second, Fa
 // no-replace rename of a held, re-verified file into an absent name.
 bool ApplyMove(const std::shared_ptr<MutationSession>& session,
                const std::vector<std::wstring>& from, const EndpointRevision& expected,
-               const std::vector<std::wstring>& to, bool recreatable_only, Failure* failure) {
+               const std::vector<std::wstring>& to, bool deleting, Failure* failure) {
   PinnedDirectory from_parent, to_parent;
   if (!PinDirectoryPath(session->root.get(), ParentOf(from), true, &from_parent) ||
       !PinDirectoryPath(session->root.get(), ParentOf(to), true, &to_parent))
@@ -1115,29 +1271,13 @@ bool ApplyMove(const std::shared_ptr<MutationSession>& session,
           EndpointResult::kPresent ||
       !SameRevision(held_revision, expected))
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs effect changed before kernel call");
-  if (recreatable_only) {
-    // READ_CONTROL is outside share-mode checks, so this reads the held object's own descriptor.
-    HANDLE raw = INVALID_HANDLE_VALUE;
-    FileFacts held_facts, security_facts;
-    const bool readable =
-        OpenRelative(from_parent.get(), from.back(),
-                     READ_CONTROL | FILE_READ_ATTRIBUTES | SYNCHRONIZE, kObserveShare, FILE_OPEN,
-                     FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) >= 0;
-    const OwnedHandle security(readable ? raw : nullptr);
-    if (!readable || !QueryFacts(held.get(), &held_facts) ||
-        !QueryFacts(security.get(), &security_facts) || !SameObject(held_facts, security_facts) ||
-        !SecurityIsRecreatable(security.get()))
-      // UTF-8 for "This file has its own access control, so Windows cannot delete it", which the
-      // model and the user read as the reason.
-      return Fail(failure, "UNSAFE_PATH",
-                  "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1"
-                  "\xe3\x82\xa4""\xe3\x83\xab""\xe3\x81\xaf""\xe7\x8b\xac"
-                  "\xe8\x87\xaa""\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf"
-                  "\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6""\xe5\xbe\xa1"
-                  "\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f"
-                  "\xe3\x82\x81""\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf"
-                  "\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d"
-                  "\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93");
+  if (deleting) {
+    OwnedHandle security;
+    const char* reason =
+        !OpenHeldSecurity(from_parent.get(), from.back(), held.get(), &security)
+            ? kAccessControlRefusal
+            : IrreversibleEffectReason(true, held.get(), security.get(), from_parent.get());
+    if (reason != nullptr) return Fail(failure, "EFFECT_REFUSED", reason);
   }
   if (ProbeName(to_parent.get(), to.back()) != EndpointResult::kAbsent)
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs effect target is not absent");
@@ -1170,6 +1310,20 @@ bool ApplyUpdate(const std::shared_ptr<MutationSession>& session, const EffectIn
           EndpointResult::kPresent ||
       !SameRevision(staged_revision, input.expected_auxiliary))
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs update endpoints changed before kernel call");
+  // The preflight's checks, repeated on the held objects immediately before the first rename: the
+  // previous revision may have gained a stream or a stricter DACL since it was staged beside.
+  // Once the previous revision is parked, something has moved, so a resumed update never answers
+  // EFFECT_REFUSED.
+  OwnedHandle previous_security, staged_security;
+  const char* reason =
+      !OpenHeldSecurity(parent.get(), resuming ? swap_leaf : source_leaf, previous.get(),
+                        &previous_security) ||
+              !OpenHeldSecurity(parent.get(), auxiliary_leaf, staged.get(), &staged_security)
+          ? kAccessControlChangedRefusal
+          : IrreversibleEffectReason(false, previous.get(), previous_security.get(), parent.get());
+  if (reason == nullptr && !SameAccessControl(previous_security.get(), staged_security.get()))
+    reason = kAccessControlChangedRefusal;
+  if (reason != nullptr) return Fail(failure, resuming ? "UNSAFE_PATH" : "EFFECT_REFUSED", reason);
   if (ProbeName(parent.get(), resuming ? source_leaf : swap_leaf) != EndpointResult::kAbsent)
     return Fail(failure, "UNSAFE_PATH", "NativeSafeFs update swap name is occupied");
   if (!SessionCurrent(session))
@@ -1574,6 +1728,47 @@ napi_value WindowsMutationObserveIntent(napi_env env, napi_callback_info info) {
                          auxiliary_null ? nullptr : &auxiliary, &view, &failure))
     return ThrowFailure(env, failure);
   return EffectValue(env, view.source, view.destination, view.auxiliary);
+}
+
+// Read-only, and called before the Edit Saga journals the intent: whether an update or delete of
+// the sealed source could be undone exactly. A source that is absent, unsafe or no longer the
+// sealed revision is allowed here, because the journaled effect path detects and reports it.
+napi_value WindowsMutationPreflightIntentEffect(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1)
+    return ThrowFailure(env, "INVALID_INPUT", "preflightIntentEffect requires one input object");
+  auto session = SessionFor(env, argv[0]);
+  if (!session) return nullptr;
+  std::string kind;
+  std::vector<std::wstring> source;
+  EndpointRevision expected;
+  if (!NamedString(env, argv[0], "kind", &kind) ||
+      !ReadSegments(env, argv[0], "sourceSegments", false, &source) ||
+      !ReadExpectation(env, argv[0], "expectedSource", &expected))
+    return ThrowFailure(env, "INVALID_INPUT", "Invalid NativeSafeFs effect preflight");
+  napi_value result;
+  napi_create_object(env, &result);
+  const char* reason = nullptr;
+  PinnedDirectory parent;
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  if ((kind == "update" || kind == "delete") && expected.present &&
+      PinDirectoryPath(session->root.get(), ParentOf(source), false, &parent) &&
+      OpenRelative(parent.get(), source.back(),
+                   FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+                   kObserveShare, FILE_OPEN, FILE_NON_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL,
+                   &raw) >= 0) {
+    const OwnedHandle file(raw);
+    EndpointRevision observed;
+    if (ObserveHandle(file.get(), &observed)) {
+      ApplyObservedMode(*session, &observed);
+      if (SameRevision(observed, expected))
+        reason = IrreversibleEffectReason(kind == "delete", file.get(), file.get(), parent.get());
+    }
+  }
+  napi_set_named_property(env, result, "allowed", MakeBoolean(env, reason == nullptr));
+  if (reason != nullptr) napi_set_named_property(env, result, "reason", MakeString(env, reason));
+  return result;
 }
 
 napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info info) {

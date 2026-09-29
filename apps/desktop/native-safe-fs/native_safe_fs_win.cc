@@ -1437,6 +1437,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        nullptr, napi_default, nullptr},
       {"observeIntent", nullptr, WindowsMutationObserveIntent, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"preflightIntentEffect", nullptr, WindowsMutationPreflightIntentEffect, nullptr, nullptr,
+       nullptr, napi_default, nullptr},
       {"stageIntentArtifact", nullptr, WindowsMutationStageIntentArtifact, nullptr, nullptr,
        nullptr, napi_default, nullptr},
       {"applyIntentEffect", nullptr, WindowsMutationApplyIntentEffect, nullptr, nullptr, nullptr,

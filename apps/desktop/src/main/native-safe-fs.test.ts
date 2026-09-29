@@ -238,6 +238,10 @@ type MutationTestBoundary = NativeSafeFs &
       session: NativeSafeFsSession,
       intent: NativeMutationIntentSnapshot,
     ): Promise<Readonly<{ state: 'absent' }>>;
+    preflightIntentEffect(
+      session: NativeSafeFsSession,
+      seed: NativeMutationIntentSnapshot,
+    ): Promise<Readonly<{ allowed: true } | { allowed: false; reason: string }>>;
   }>;
 
 function mutationBoundary(boundary: NativeSafeFs): MutationTestBoundary {
@@ -333,9 +337,10 @@ async function stageNativeIntent(
 
 /**
  * Windows only: reads (and optionally first replaces) a file's DACL as SDDL, `D:` part only.
- * `owner-only` protects the DACL and grants the current user alone; `null` installs a NULL DACL.
+ * `owner-only` protects the DACL and grants the current user alone; `null` installs a NULL DACL;
+ * any other value is an SDDL access section in which `{user}` stands for the current user's SID.
  */
-async function windowsDacl(path: string, replace?: 'owner-only' | 'null'): Promise<string> {
+async function windowsDacl(path: string, replace?: string): Promise<string> {
   const script = [
     '$path = $env:SPRINT_CODER_DACL_PATH',
     '$acl = Get-Acl -LiteralPath $path',
@@ -345,6 +350,11 @@ async function windowsDacl(path: string, replace?: 'owner-only' | 'null'): Promi
     '  Set-Acl -LiteralPath $path -AclObject $acl',
     "} elseif ($env:SPRINT_CODER_DACL_REPLACE -eq 'null') {",
     "  $acl.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL', 'Access')",
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '} elseif ($env:SPRINT_CODER_DACL_REPLACE) {',
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "  $sddl = $env:SPRINT_CODER_DACL_REPLACE.Replace('{user}', $user)",
+    '  $acl.SetSecurityDescriptorSddlForm($sddl, "Access")',
     '  Set-Acl -LiteralPath $path -AclObject $acl',
     '}',
     '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
@@ -358,6 +368,13 @@ async function windowsDacl(path: string, replace?: 'owner-only' | 'null'): Promi
   });
   return stdout.trim();
 }
+
+const ACCESS_CONTROL_REFUSAL =
+  'このファイルは独自のアクセス制御を持つため、Windows では削除できません';
+const STREAMS_REFUSAL =
+  'このファイルは追加のデータストリームを持つため、Windows では更新・削除できません';
+const ACCESS_CONTROL_CHANGED_REFUSAL =
+  'このファイルのアクセス制御が更新の途中で変わったため、Windows では更新できません';
 
 /** Names the native boundary reserves for its own staged, parked or quarantined entries. */
 async function reservedLeaves(directory: string): Promise<string[]> {
@@ -838,9 +855,13 @@ describe('NativeSafeFs authority boundary', () => {
         });
         intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
 
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: ACCESS_CONTROL_REFUSAL,
+        });
         await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
-          code: 'UNSAFE_PATH',
-          message: 'このファイルは独自のアクセス制御を持つため、Windows では削除できません',
+          code: 'EFFECT_REFUSED',
+          message: ACCESS_CONTROL_REFUSAL,
         } satisfies Partial<NativeSafeFsError>);
         await expect(revision(sourcePath)).resolves.toEqual(previous);
         await expect(windowsDacl(sourcePath)).resolves.toBe(dacl);
@@ -882,7 +903,7 @@ describe('NativeSafeFs authority boundary', () => {
           try {
             if (outcome === 'refused') {
               await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
-                code: 'UNSAFE_PATH',
+                code: 'EFFECT_REFUSED',
               } satisfies Partial<NativeSafeFsError>);
               await expect(revision(sourcePath)).resolves.toEqual(previous);
             } else {
@@ -898,6 +919,166 @@ describe('NativeSafeFs authority boundary', () => {
         await boundary.closeSession(session);
       },
     );
+
+    it('refuses to publish an update whose source access control changed after staging', async () => {
+      const input = await fixture();
+      const sourcePath = join(input.workspace, 'tightened.txt');
+      await writeFile(sourcePath, 'tightened before\n');
+      const previous = await revision(sourcePath);
+      const replacement = Buffer.from('must not land\n');
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '853' });
+      let intent = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['tightened.txt'],
+        expectedSource: previous,
+        artifactBytes: replacement,
+      });
+      intent = await stageNativeIntent(boundary, session, intent, replacement);
+      intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+      const tightened = await windowsDacl(sourcePath, 'owner-only');
+
+      await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+        code: 'EFFECT_REFUSED',
+        message: ACCESS_CONTROL_CHANGED_REFUSAL,
+      } satisfies Partial<NativeSafeFsError>);
+      await expect(revision(sourcePath)).resolves.toEqual(previous);
+      await expect(readFile(sourcePath, 'utf8')).resolves.toBe('tightened before\n');
+      await expect(windowsDacl(sourcePath)).resolves.toBe(tightened);
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to delete a file that kept entries inherited from a stricter directory', async () => {
+      const input = await fixture();
+      const strict = join(input.workspace, 'strict');
+      await mkdir(strict);
+      await windowsDacl(strict, 'D:P(A;OICI;FA;;;{user})');
+      await writeFile(join(strict, 'moved.txt'), 'moved bytes\n');
+      // A same-volume move keeps the descriptor, including what it inherited in `strict`.
+      await rename(join(strict, 'moved.txt'), join(input.workspace, 'moved.txt'));
+      await writeFile(join(input.workspace, 'native.txt'), 'native bytes\n');
+      const movedDacl = await windowsDacl(join(input.workspace, 'moved.txt'));
+      expect(movedDacl).not.toBe(await windowsDacl(join(input.workspace, 'native.txt')));
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '854' });
+      for (const [index, [name, allowed]] of (
+        [
+          ['moved.txt', false],
+          ['native.txt', true],
+        ] as const
+      ).entries()) {
+        const previous = await revision(join(input.workspace, name));
+        let intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: [name],
+          expectedSource: previous,
+          id: `intent-inherited-${index}`,
+          nonce: String(index + 2).repeat(32),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual(
+          allowed ? { allowed: true } : { allowed: false, reason: ACCESS_CONTROL_REFUSAL },
+        );
+        intent = transitionNativeMutationIntent(intent, { state: 'effect_pending' });
+        if (allowed) {
+          await expect(boundary.applyIntentEffect(session, intent)).resolves.toMatchObject({
+            source: { state: 'absent' },
+          });
+        } else {
+          await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+            code: 'EFFECT_REFUSED',
+          } satisfies Partial<NativeSafeFsError>);
+          await expect(revision(join(input.workspace, name))).resolves.toEqual(previous);
+          await expect(windowsDacl(join(input.workspace, name))).resolves.toBe(movedDacl);
+        }
+      }
+      await boundary.closeSession(session);
+    });
+
+    it('refuses to update or delete a file with named streams and keeps them through a rename', async () => {
+      const input = await fixture();
+      const boundary = mutationBoundary(fixtureBoundary(input));
+      const session = await boundary.openSession({ ...input, fence: '855' });
+      // The owned directory's own ownership stream belongs to the directory, not to its files.
+      const ownership = directoryOwnership('7');
+      await boundary.createDirectory(session, ['owned'], ownership);
+      const streams = ['metadata', 'Zone.Identifier'];
+      for (const name of ['update.txt', 'delete.txt', 'rename.txt']) {
+        const path = join(input.workspace, 'owned', name);
+        await writeFile(path, `${name} bytes\n`);
+        for (const stream of streams) await writeFile(`${path}:${stream}`, `${stream} of ${name}`);
+      }
+      const replacement = Buffer.from('must not land\n');
+      let update = nativeIntent({
+        session,
+        kind: 'update',
+        sourceSegments: ['owned', 'update.txt'],
+        expectedSource: await revision(join(input.workspace, 'owned', 'update.txt')),
+        artifactBytes: replacement,
+        id: 'intent-stream-update',
+      });
+      let remove = nativeIntent({
+        session,
+        kind: 'delete',
+        sourceSegments: ['owned', 'delete.txt'],
+        expectedSource: await revision(join(input.workspace, 'owned', 'delete.txt')),
+        id: 'intent-stream-delete',
+        nonce: 'b'.repeat(32),
+      });
+      for (const intent of [update, remove])
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+          allowed: false,
+          reason: STREAMS_REFUSAL,
+        });
+      // The apply step refuses on its own too, before anything moves.
+      update = await stageNativeIntent(boundary, session, update, replacement);
+      update = transitionNativeMutationIntent(update, { state: 'effect_pending' });
+      remove = transitionNativeMutationIntent(remove, { state: 'effect_pending' });
+      for (const intent of [update, remove])
+        await expect(boundary.applyIntentEffect(session, intent)).rejects.toMatchObject({
+          code: 'EFFECT_REFUSED',
+          message: STREAMS_REFUSAL,
+        } satisfies Partial<NativeSafeFsError>);
+      const previous = await revision(join(input.workspace, 'owned', 'rename.txt'));
+      let move = nativeIntent({
+        session,
+        kind: 'rename',
+        sourceSegments: ['owned', 'rename.txt'],
+        destinationSegments: ['owned', 'renamed.txt'],
+        expectedSource: previous,
+        id: 'intent-stream-rename',
+      });
+      move = transitionNativeMutationIntent(move, { state: 'effect_pending' });
+      await expect(boundary.applyIntentEffect(session, move)).resolves.toMatchObject({
+        destination: previous,
+      });
+      for (const [name, file] of [
+        ['update.txt', 'update.txt'],
+        ['delete.txt', 'delete.txt'],
+        ['rename.txt', 'renamed.txt'],
+      ] as const) {
+        const path = join(input.workspace, 'owned', file);
+        await expect(readFile(path, 'utf8')).resolves.toBe(`${name} bytes\n`);
+        for (const stream of streams)
+          await expect(readFile(`${path}:${stream}`, 'utf8')).resolves.toBe(`${stream} of ${name}`);
+      }
+      // A plain file in the same owned directory is not affected by the directory's stream.
+      await writeFile(join(input.workspace, 'owned', 'plain.txt'), 'plain\n');
+      await expect(
+        boundary.preflightIntentEffect(
+          session,
+          nativeIntent({
+            session,
+            kind: 'delete',
+            sourceSegments: ['owned', 'plain.txt'],
+            expectedSource: await revision(join(input.workspace, 'owned', 'plain.txt')),
+            id: 'intent-stream-plain',
+          }),
+        ),
+      ).resolves.toEqual({ allowed: true });
+      await boundary.closeSession(session);
+    });
 
     it('refuses to stage an update whose source has a NULL DACL', async () => {
       const input = await fixture();
