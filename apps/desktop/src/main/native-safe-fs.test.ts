@@ -1423,6 +1423,37 @@ describe('NativeSafeFs authority boundary', () => {
       },
     );
 
+    it.runIf(existsSync(nativeSafeFsTestAddonPath()))(
+      'treats a volume without persistent ACLs as having no integrity labels',
+      async () => {
+        const input = await fixture();
+        const sourcePath = join(input.workspace, 'labelled-volume.txt');
+        await writeFile(sourcePath, 'labelled volume\n');
+        await execFileAsync('icacls.exe', [sourcePath, '/setintegritylevel', 'Low']);
+        const boundary = mutationBoundary(fixtureBoundary(input, nativeSafeFsTestAddonPath()));
+        const session = await boundary.openSession({ ...input, fence: '863' });
+        const intent = nativeIntent({
+          session,
+          kind: 'delete',
+          sourceSegments: ['labelled-volume.txt'],
+          expectedSource: await revision(sourcePath),
+        });
+        await expect(boundary.preflightIntentEffect(session, intent)).resolves.toMatchObject({
+          allowed: false,
+        });
+        // FILE_PERSISTENT_ACLS cleared, as on FAT or exFAT.
+        process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'] = '8';
+        try {
+          await expect(boundary.preflightIntentEffect(session, intent)).resolves.toEqual({
+            allowed: true,
+          });
+        } finally {
+          delete process.env['SPRINT_CODER_NATIVE_SAFE_FS_VOLUME_FLAGS_CLEAR'];
+        }
+        await boundary.closeSession(session);
+      },
+    );
+
     it('refuses to stage an update whose source has a NULL DACL', async () => {
       const input = await fixture();
       const sourcePath = join(input.workspace, 'null-dacl.txt');

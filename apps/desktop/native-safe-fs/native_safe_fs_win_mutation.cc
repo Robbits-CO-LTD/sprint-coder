@@ -28,6 +28,7 @@ constexpr NTSTATUS kStatusObjectNameNotFound = static_cast<NTSTATUS>(0xC0000034L
 constexpr NTSTATUS kStatusObjectNameCollision = static_cast<NTSTATUS>(0xC0000035L);
 constexpr NTSTATUS kStatusObjectPathNotFound = static_cast<NTSTATUS>(0xC000003AL);
 constexpr NTSTATUS kStatusSharingViolation = static_cast<NTSTATUS>(0xC0000043L);
+constexpr NTSTATUS kStatusAccessDenied = static_cast<NTSTATUS>(0xC0000022L);
 constexpr NTSTATUS kStatusFileIsADirectory = static_cast<NTSTATUS>(0xC00000BAL);
 constexpr NTSTATUS kStatusNotSupported = static_cast<NTSTATUS>(0xC00000BBL);
 constexpr NTSTATUS kStatusNotSameDevice = static_cast<NTSTATUS>(0xC00000D4L);
@@ -1042,6 +1043,39 @@ constexpr char kDirectoryDataRefusal[] =
     "\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe5\x89\x8a""\xe9\x99\xa4"
     "\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
 
+// UTF-8 for: an integrity level that would change, policy entries (resource attributes, a central
+// access policy) a copy would lose, a file another program holds open, and missing permission to
+// delete or replace it.
+constexpr char kIntegrityLabelCarryRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe6\x95\xb4""\xe5\x90\x88""\xe6\x80\xa7""\xe3\x83\xac""\xe3\x83\x99"
+    "\xe3\x83\xab""\xe3\x82\x92""\xe5\xbc\x95""\xe3\x81\x8d""\xe7\xb6\x99""\xe3\x81\x92"
+    "\xe3\x81\xaa""\xe3\x81\x84""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows "
+    "\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0""\xe3\x83\xbb""\xe5\x89\x8a"
+    "\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kPolicyRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe8\xbf\xbd""\xe5\x8a\xa0""\xe3\x81\xae""\xe3\x82\xa2""\xe3\x82\xaf"
+    "\xe3\x82\xbb""\xe3\x82\xb9""\xe5\x88\xb6""\xe5\xbe\xa1""\xe3\x81\xae""\xe8\xa8\xad"
+    "\xe5\xae\x9a""\xe3\x82\x92""\xe6\x8c\x81""\xe3\x81\xa4""\xe3\x81\x9f""\xe3\x82\x81"
+    "\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe6\x9b\xb4""\xe6\x96\xb0"
+    "\xe3\x83\xbb""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe"
+    "\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kInUseRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x81\xaf""\xe4\xbb\x96""\xe3\x81\xae""\xe3\x83\x97""\xe3\x83\xad""\xe3\x82\xb0"
+    "\xe3\x83\xa9""\xe3\x83\xa0""\xe3\x81\x8c""\xe9\x96\x8b""\xe3\x81\x84""\xe3\x81\xa6"
+    "\xe3\x81\x84""\xe3\x82\x8b""\xe3\x81\x9f""\xe3\x82\x81""\xe3\x80\x81""Windows "
+    "\xe3\x81\xa7""\xe3\x81\xaf""\xe5\xa4\x89""\xe6\x9b\xb4""\xe3\x81\xa7""\xe3\x81\x8d"
+    "\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+constexpr char kNoDeletePermissionRefusal[] =
+    "\xe3\x81\x93""\xe3\x81\xae""\xe3\x83\x95""\xe3\x82\xa1""\xe3\x82\xa4""\xe3\x83\xab"
+    "\xe3\x82\x92""\xe5\x89\x8a""\xe9\x99\xa4""\xe3\x81\xbe""\xe3\x81\x9f""\xe3\x81\xaf"
+    "\xe7\xbd\xae""\xe3\x81\x8d""\xe6\x8f\x9b""\xe3\x81\x88""\xe3\x82\x8b""\xe6\xa8\xa9"
+    "\xe9\x99\x90""\xe3\x81\x8c""\xe3\x81\xaa""\xe3\x81\x84""\xe3\x81\x9f""\xe3\x82\x81"
+    "\xe3\x80\x81""Windows ""\xe3\x81\xa7""\xe3\x81\xaf""\xe5\xa4\x89""\xe6\x9b\xb4"
+    "\xe3\x81\xa7""\xe3\x81\x8d""\xe3\x81\xbe""\xe3\x81\x9b""\xe3\x82\x93";
+
 using NtQueryInformationFileFn = NTSTATUS(NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG,
                                                   FILE_INFORMATION_CLASS);
 constexpr int kFileEaInformationClass = 7;
@@ -1161,23 +1195,99 @@ bool ReadDacl(HANDLE handle, SECURITY_INFORMATION extra, DaclFacts* output) {
   return true;
 }
 
-// An explicit integrity label is lost by both a stage and a re-create; one inherited from the
-// parent is given to the new file again.
-bool HasExplicitIntegrityLabel(HANDLE object, bool* labelled) {
+// The mandatory label in effect on an object: its level SID and policy (no-write-up and so on).
+// None means the implicit Medium level. A volume without persistent ACLs has no labels.
+struct LabelFacts {
+  bool present = false;
+  std::vector<unsigned char> sid;
+  ACCESS_MASK policy = 0;
+};
+
+bool SameLabel(const LabelFacts& left, const LabelFacts& right) {
+  return left.present == right.present &&
+         (!left.present || (left.policy == right.policy && left.sid == right.sid));
+}
+
+// Reads the label in effect and whether it is the object's own (explicit) rather than inherited.
+bool ReadLabel(HANDLE object, LabelFacts* output, bool* explicit_label) {
+  *output = LabelFacts{};
+  *explicit_label = false;
+  bool persistent = false;
+  if (!PersistentAcls(object, &persistent)) return false;
+  if (!persistent) return true;
   PACL sacl = nullptr;
   PSECURITY_DESCRIPTOR raw = nullptr;
   if (GetSecurityInfo(object, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr, nullptr,
                       nullptr, &sacl, &raw) != ERROR_SUCCESS)
     return false;
   const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
-  *labelled = false;
+  for (DWORD index = 0; sacl != nullptr && index < sacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(sacl, index, &ace)) return false;
+    const auto* label = static_cast<SYSTEM_MANDATORY_LABEL_ACE*>(ace);
+    if (label->Header.AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) continue;
+    const PSID sid = reinterpret_cast<PSID>(const_cast<DWORD*>(&label->SidStart));
+    output->present = true;
+    output->policy = label->Mask;
+    output->sid.assign(static_cast<unsigned char*>(sid),
+                       static_cast<unsigned char*>(sid) + GetLengthSid(sid));
+    *explicit_label = (label->Header.AceFlags & INHERITED_ACE) == 0;
+  }
+  return true;
+}
+
+// The label a file created in `parent` now inherits: the parent's label entry when it is marked
+// to pass to files. A file moved in from a labelled directory keeps the label inherited there,
+// which a staged copy or a re-created file would not get back.
+bool InheritedLabelIn(HANDLE parent, LabelFacts* output) {
+  *output = LabelFacts{};
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  // READ_CONTROL is outside share-mode checks, so this reopens the pinned parent itself.
+  if (OpenRelative(parent, std::wstring(), READ_CONTROL | SYNCHRONIZE, kObserveShare, FILE_OPEN,
+                   FILE_DIRECTORY_FILE, FILE_ATTRIBUTE_NORMAL, &raw) < 0)
+    return false;
+  const OwnedHandle parent_security(raw);
+  LabelFacts parent_label;
+  bool explicit_label = false;
+  PACL sacl = nullptr;
+  PSECURITY_DESCRIPTOR descriptor_raw = nullptr;
+  if (!ReadLabel(parent_security.get(), &parent_label, &explicit_label)) return false;
+  if (!parent_label.present) return true;
+  if (GetSecurityInfo(parent_security.get(), SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, nullptr,
+                      nullptr, nullptr, &sacl, &descriptor_raw) != ERROR_SUCCESS)
+    return false;
+  const std::unique_ptr<void, decltype(&LocalFree)> descriptor(descriptor_raw, &LocalFree);
   for (DWORD index = 0; sacl != nullptr && index < sacl->AceCount; ++index) {
     void* ace = nullptr;
     if (!GetAce(sacl, index, &ace)) return false;
     const auto* header = static_cast<ACE_HEADER*>(ace);
     if (header->AceType == SYSTEM_MANDATORY_LABEL_ACE_TYPE &&
-        (header->AceFlags & INHERITED_ACE) == 0)
-      *labelled = true;
+        (header->AceFlags & OBJECT_INHERIT_ACE) != 0)
+      *output = parent_label;
+  }
+  return true;
+}
+
+// Resource attribute and central access policy entries can narrow access, and neither a stage nor
+// a re-create carries them. Audit entries grant nothing and are not readable without privilege.
+bool HasPolicyEntries(HANDLE object, bool* present) {
+  *present = false;
+  bool persistent = false;
+  if (!PersistentAcls(object, &persistent)) return false;
+  if (!persistent) return true;
+  PACL sacl = nullptr;
+  PSECURITY_DESCRIPTOR raw = nullptr;
+  if (GetSecurityInfo(object, SE_FILE_OBJECT,
+                      ATTRIBUTE_SECURITY_INFORMATION | SCOPE_SECURITY_INFORMATION, nullptr,
+                      nullptr, nullptr, &sacl, &raw) != ERROR_SUCCESS)
+    return false;
+  const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, &LocalFree);
+  for (DWORD index = 0; sacl != nullptr && index < sacl->AceCount; ++index) {
+    void* ace = nullptr;
+    if (!GetAce(sacl, index, &ace)) return false;
+    const BYTE type = static_cast<ACE_HEADER*>(ace)->AceType;
+    if (type == SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE || type == SYSTEM_SCOPED_POLICY_ID_ACE_TYPE)
+      *present = true;
   }
   return true;
 }
@@ -1192,6 +1302,7 @@ struct PredictedSecurity {
   PACL dacl = nullptr;
   std::vector<unsigned char> owner_storage;
   PSID owner = nullptr;
+  LabelFacts label;
 };
 
 bool CopySidInto(PSID sid, std::vector<unsigned char>* storage, PSID* output) {
@@ -1291,6 +1402,7 @@ const char* PredictStagedSecurity(HANDLE source, HANDLE parent, PredictedSecurit
     return kOwnerUpdateRefusal;
   if (!CopySidInto(actual.owner, &output->owner_storage, &output->owner))
     return kAccessControlUpdateRefusal;
+  if (!InheritedLabelIn(parent, &output->label)) return kIntegrityLabelCarryRefusal;
   output->applies = true;
   output->protected_dacl = actual.protected_dacl;
   if (actual.protected_dacl)
@@ -1316,11 +1428,20 @@ bool PredictRecreatedSecurity(HANDLE parent, PredictedSecurity* output) {
   std::vector<unsigned char> default_owner_storage;
   PSID default_owner = nullptr;
   if (!ProcessDefaultOwnerSid(&default_owner_storage, &default_owner) ||
-      !CopySidInto(default_owner, &output->owner_storage, &output->owner))
+      !CopySidInto(default_owner, &output->owner_storage, &output->owner) ||
+      !InheritedLabelIn(parent, &output->label))
     return false;
   output->applies = true;
   output->protected_dacl = false;
   return InheritIn(parent, output->owner, nullptr, output);
+}
+
+// Whether the label in effect on a file is the predicted one.
+bool MatchesLabel(HANDLE file, const PredictedSecurity& prediction) {
+  if (!prediction.applies) return true;
+  LabelFacts actual;
+  bool explicit_label = false;
+  return ReadLabel(file, &actual, &explicit_label) && SameLabel(actual, prediction.label);
 }
 
 // Whether a file's owner, DACL and protection are the predicted ones.
@@ -1359,11 +1480,18 @@ const char* IrreversibleEffectReason(bool deleting, HANDLE content, HANDLE secur
   bool labelled = true;
   if (!QueryFacts(content, &facts) || (facts.attributes & FILE_ATTRIBUTE_ENCRYPTED) != 0)
     return kEncryptionRefusal;
-  if (!HasExplicitIntegrityLabel(security, &labelled) || labelled) return kIntegrityLabelRefusal;
+  LabelFacts label;
+  if (!ReadLabel(security, &label, &labelled) || labelled) return kIntegrityLabelRefusal;
+  bool policy = true;
+  if (!HasPolicyEntries(security, &policy) || policy) return kPolicyRefusal;
   if (deleting && (facts.attributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0)
     return kHiddenSystemRefusal;
   PredictedSecurity local;
-  return AccessControlReason(deleting, security, parent, prediction == nullptr ? &local : prediction);
+  PredictedSecurity* predicted = prediction == nullptr ? &local : prediction;
+  if (const char* reason = AccessControlReason(deleting, security, parent, predicted))
+    return reason;
+  return !predicted->applies || SameLabel(label, predicted->label) ? nullptr
+                                                                   : kIntegrityLabelCarryRefusal;
 }
 
 // Attributes a staged update carries over from the revision it replaces (READONLY follows the
@@ -1587,7 +1715,8 @@ bool ApplyUpdate(const std::shared_ptr<MutationSession>& session, const EffectIn
           ? kAccessControlChangedRefusal
           : IrreversibleEffectReason(false, previous.get(), previous_security.get(), parent.get(),
                                      &prediction);
-  if (reason == nullptr && !MatchesPrediction(staged_security.get(), prediction))
+  if (reason == nullptr && (!MatchesPrediction(staged_security.get(), prediction) ||
+                            !MatchesLabel(staged_security.get(), prediction)))
     reason = kAccessControlChangedRefusal;
   if (reason != nullptr) return Fail(failure, resuming ? "UNSAFE_PATH" : "EFFECT_REFUSED", reason);
   if (ProbeName(parent.get(), resuming ? source_leaf : swap_leaf) != EndpointResult::kAbsent)
@@ -1998,9 +2127,32 @@ napi_value WindowsMutationObserveIntent(napi_env env, napi_callback_info info) {
   return EffectValue(env, view.source, view.destination, view.auxiliary);
 }
 
+// Opens the source the way the effect will hold it (DELETE, sharing only reads, briefly retried)
+// and closes it again: a program holding it without FILE_SHARE_DELETE, or missing permission to
+// delete or replace it, is refused here instead of stopping the journaled effect halfway.
+const char* HoldRefusal(HANDLE parent, const std::wstring& leaf) {
+  HANDLE raw = INVALID_HANDLE_VALUE;
+  NTSTATUS status = 0;
+  for (int attempt = 0;; ++attempt) {
+    status = OpenRelative(parent, leaf, FILE_READ_DATA | FILE_READ_ATTRIBUTES | DELETE | SYNCHRONIZE,
+                          FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE,
+                          FILE_ATTRIBUTE_NORMAL, &raw);
+    if (status != kStatusSharingViolation || attempt >= 4) break;
+    Sleep(25);
+  }
+  if (status >= 0) {
+    CloseHandle(raw);
+    return nullptr;
+  }
+  if (status == kStatusSharingViolation) return kInUseRefusal;
+  if (status == kStatusAccessDenied) return kNoDeletePermissionRefusal;
+  return nullptr;
+}
+
 // Read-only, and called before the Edit Saga journals the intent: whether an update or delete of
-// the sealed source could be undone exactly. A source that is absent, unsafe or no longer the
-// sealed revision is allowed here, because the journaled effect path detects and reports it.
+// the sealed source could be undone exactly, and whether an update, delete or rename can hold it.
+// A source that is absent, unsafe or no longer the sealed revision is allowed here, because the
+// journaled effect path detects and reports it.
 napi_value WindowsMutationPreflightIntentEffect(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -2020,7 +2172,7 @@ napi_value WindowsMutationPreflightIntentEffect(napi_env env, napi_callback_info
   const char* reason = nullptr;
   PinnedDirectory parent;
   HANDLE raw = INVALID_HANDLE_VALUE;
-  if ((kind == "update" || kind == "delete") && expected.present &&
+  if ((kind == "update" || kind == "delete" || kind == "rename") && expected.present &&
       PinDirectoryPath(session->root.get(), ParentOf(source), false, &parent) &&
       OpenRelative(parent.get(), source.back(),
                    FILE_READ_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
@@ -2030,8 +2182,11 @@ napi_value WindowsMutationPreflightIntentEffect(napi_env env, napi_callback_info
     EndpointRevision observed;
     if (ObserveHandle(file.get(), &observed)) {
       ApplyObservedMode(*session, &observed);
-      if (SameRevision(observed, expected))
-        reason = IrreversibleEffectReason(kind == "delete", file.get(), file.get(), parent.get());
+      if (SameRevision(observed, expected)) {
+        if (kind != "rename")
+          reason = IrreversibleEffectReason(kind == "delete", file.get(), file.get(), parent.get());
+        if (reason == nullptr) reason = HoldRefusal(parent.get(), source.back());
+      }
     }
   }
   napi_set_named_property(env, result, "allowed", MakeBoolean(env, reason == nullptr));
@@ -2142,7 +2297,8 @@ napi_value WindowsMutationStageIntentArtifact(napi_env env, napi_callback_info i
                       carried.dacl, nullptr) != ERROR_SUCCESS)
     return discard("UNSAFE_PATH", "NativeSafeFs cannot carry the update source access control");
   // Nothing is written until the staged file demonstrably has the source's access control.
-  if (source_handle && !MatchesPrediction(file.get(), prediction))
+  if (source_handle &&
+      (!MatchesPrediction(file.get(), prediction) || !MatchesLabel(file.get(), prediction)))
     return discard("EFFECT_REFUSED", kAccessControlUpdateRefusal);
   DWORD written = 0;
   if ((length > 0 &&

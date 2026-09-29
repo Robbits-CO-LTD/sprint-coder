@@ -9,7 +9,7 @@
 // persistence.test.ts) this file re-spawns itself once under the bundled Electron
 // binary with ELECTRON_RUN_AS_NODE=1 unless it is already running that way.
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmod,
   lstat,
@@ -380,6 +380,34 @@ function windowsSetRawDacl(path: string, sddl: string): void {
   if (result.status !== 0) throw new Error(`SetFileSecurityW failed: ${result.stderr}`);
 }
 
+/**
+ * Windows only: a separate process that opens `path` the way .NET's default FileShare.Read does
+ * (no FILE_SHARE_DELETE) and holds it until killed.
+ */
+async function holdWithoutShareDelete(path: string): Promise<ReturnType<typeof spawn>> {
+  const holder = spawn(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-Command',
+      [
+        "$stream = [IO.File]::Open($env:SPRINT_CODER_HELD_PATH, 'Open', 'Read', 'Read')",
+        "[Console]::Out.WriteLine('held')",
+        '[Console]::Out.Flush()',
+        'Start-Sleep -Seconds 120',
+      ].join('; '),
+    ],
+    { env: { ...process.env, SPRINT_CODER_HELD_PATH: path }, stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  await new Promise<void>((resolve, reject) => {
+    holder.stdout!.on('data', (chunk: Buffer) => {
+      if (chunk.toString().includes('held')) resolve();
+    });
+    holder.once('exit', () => reject(new Error('the holder exited before holding the file')));
+  });
+  return holder;
+}
+
 function currentUserSid(): string {
   const result = spawnSync(
     'powershell.exe',
@@ -732,6 +760,105 @@ if (runsWithElectronAbi) {
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
     });
+
+    it.each([
+      ['an inherited integrity label its new parent would not give', 'label', 'update'],
+      ['an inherited integrity label its new parent would not give', 'label', 'delete'],
+      ['a handle another program holds without FILE_SHARE_DELETE', 'held', 'update'],
+      ['a handle another program holds without FILE_SHARE_DELETE', 'held', 'delete'],
+    ] as const)(
+      'refuses before journaling a file with %s (%s, %s) and restores the Saga',
+      async (_label, condition, kind) => {
+        const instance = `windows-refused-${condition}-${kind}`;
+        const env = await fixture(instance);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const { resolveSession, sessions } = makeResolveSession(native, env);
+        const targetPath = join(env.workspace, 'target.txt');
+        let holder: ReturnType<typeof spawn> | null = null;
+        if (condition === 'label') {
+          const labelled = join(env.workspace, 'labelled');
+          await mkdir(labelled);
+          spawnSync('icacls.exe', [labelled, '/setintegritylevel', '(OI)(CI)Low']);
+          await writeFile(join(labelled, 'target.txt'), 'UPDATE_BEFORE', { mode: 0o600 });
+          // The file keeps the Low label it inherited; its new parent passes none down.
+          await rename(join(labelled, 'target.txt'), targetPath);
+        } else {
+          await writeFile(targetPath, 'UPDATE_BEFORE', { mode: 0o600 });
+          holder = await holdWithoutShareDelete(targetPath);
+        }
+        const operation = Object.freeze({
+          kind,
+          path: 'target.txt',
+          canonicalPath: targetPath,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: 'token-target',
+          preRevision: await fileRevision(targetPath),
+          preImage: 'UPDATE_BEFORE',
+          postImage: kind === 'update' ? 'UPDATE_AFTER' : null,
+          preHash: hash('UPDATE_BEFORE'),
+          postHash: kind === 'update' ? hash('UPDATE_AFTER') : null,
+        });
+        const facts = {
+          version: 1 as const,
+          policyEpoch: 0,
+          operations: Object.freeze([operation]),
+        };
+        const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: persistence,
+            artifacts,
+            resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, instance),
+        );
+        try {
+          await expect(
+            executor.apply(
+              buildRequest({
+                id: `saga-${instance}`,
+                taskId: task.id,
+                turnId: turn.turnId,
+                operationId: `op-${instance}`,
+                plan,
+                workspaceKey,
+                rootIdentityDigest,
+              }),
+            ),
+          ).rejects.toMatchObject({
+            name: 'EditEffectRefusedError',
+            message:
+              condition === 'label'
+                ? 'このファイルは整合性レベルを引き継げないため、Windows では更新・削除できません'
+                : 'このファイルは他のプログラムが開いているため、Windows では変更できません',
+          });
+        } finally {
+          holder?.kill();
+        }
+        expect(persistence.getEditSaga(`saga-${instance}`)).toMatchObject({ state: 'restored' });
+        await expect(readFile(targetPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+        expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        for (const session of sessions.values()) await native.closeSession(session);
+        persistence.close();
+      },
+    );
 
     it('leaves a patch unapplied when Windows refuses to update a file moved in from a stricter directory', async () => {
       const env = await fixture('windows-refused-moved-update');

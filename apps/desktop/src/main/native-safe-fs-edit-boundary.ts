@@ -214,7 +214,10 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       const seed = this.buildSeed(step, token, session, direction);
       // Decided before the intent is journaled, so a refusal leaves no intent to recover and the
       // Saga restores without quarantining the Workspace.
-      if ((seed.kind === 'update' || seed.kind === 'delete') && this.native.preflightIntentEffect) {
+      if (
+        (seed.kind === 'update' || seed.kind === 'delete' || seed.kind === 'rename') &&
+        this.native.preflightIntentEffect
+      ) {
         this.assertSession(session, resolveToken());
         const preflight = await this.native.preflightIntentEffect(session, seed);
         if (!preflight.allowed) throw new EditEffectRefusedError(preflight.reason);
