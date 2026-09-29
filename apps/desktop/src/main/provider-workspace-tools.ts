@@ -10,6 +10,7 @@ import {
   ToolRegistry,
   createToolDefinition,
   createToolId,
+  type Capability,
   type ToolCatalogSnapshot,
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
@@ -70,6 +71,7 @@ import {
 } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { canonicalizeProviderToolImage } from './image-attachment-store';
+import { parseProjectMemoryCandidate } from './project-memory-guidance';
 
 const MAX_LIST_ENTRIES = 500;
 const MAX_READ_BYTES = 4 * 1024 * 1024;
@@ -236,6 +238,7 @@ function auxiliaryTool(
   providerName: string,
   description: string,
   inputSchema: Parameters<typeof createToolDefinition>[0]['inputSchema'],
+  capability: Capability,
 ) {
   return createToolDefinition({
     toolId: createToolId({ provider: 'builtin', namespace: 'auxiliary', name, version: '1' }),
@@ -246,7 +249,7 @@ function auxiliaryTool(
     outputSchema: { type: 'object' },
     sideEffect: 'control',
     risk: 'medium',
-    requiredCapabilities: ['external.open'],
+    requiredCapabilities: [capability],
     executionTarget: 'main',
     implementationKind: 'built-in',
     priority: 10,
@@ -267,12 +270,15 @@ export const PROJECT_MEMORY_TOOL = auxiliaryTool(
     required: ['content'],
     additionalProperties: false,
   },
+  // Each call is approved on its own card under every access preset (Issue #546).
+  'project.memory.write',
 );
 export const SKILL_DRAFT_TOOL = auxiliaryTool(
   'skill-draft-create',
   'skill_draft_create',
   'Create one validated Skill Draft for user review without installing it.',
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
+  'skill.draft.write',
 );
 export const SKILL_ACTIVATE_TOOL = createToolDefinition({
   toolId: createToolId({
@@ -390,7 +396,18 @@ type WorkspaceToolDeps = Readonly<{
     listModelCandidates?: ExecuteTeamToolOptions['listModelCandidates'];
   };
   auxiliary?: Readonly<{
-    queueProjectMemory(input: unknown, context: ToolExecutionContext): Promise<unknown>;
+    /**
+     * The Project a memory from this Turn belongs to, taken from the Turn's sealed context and never
+     * from the model's input. The approval card names it and the queued memory must still match it.
+     */
+    projectMemoryTarget(
+      context: ToolExecutionContext,
+    ): Readonly<{ projectId: string; projectName: string }>;
+    queueProjectMemory(
+      input: unknown,
+      context: ToolExecutionContext,
+      target: Readonly<{ projectId: string }>,
+    ): Promise<unknown>;
     createSkillDraft(input: unknown, context: ToolExecutionContext): Promise<unknown>;
     activateSkill(input: unknown, context: ToolExecutionContext): Promise<unknown>;
   }>;
@@ -450,6 +467,15 @@ type PreparedWorkspaceInput = Readonly<{
 }>;
 
 const issuedPreparedInputs = new WeakSet<object>();
+
+type PreparedProjectMemoryInput = Readonly<{
+  content: string;
+  projectId: string;
+  projectName: string;
+}>;
+
+/** Project memory inputs this module prepared, so approval facts are never read off a lookalike. */
+const issuedProjectMemoryInputs = new WeakSet<object>();
 
 export class ManagedCodingHarness {
   private readonly graphReads = new GraphReadReceipts();
@@ -787,10 +813,31 @@ export class ManagedCodingHarness {
     this.broker.registerImplementation({
       toolId: PROJECT_MEMORY_TOOL.toolId,
       implementationKind: 'built-in',
+      // The content is validated and the Project resolved before the approval card exists, so the
+      // card shows exactly what would be kept, and content that could never be kept (a secret, for
+      // one) is refused without being written into an approval record (Issue #546).
+      prepare: async (input, context) => {
+        if (stateFor(context).options.projectMemory !== true)
+          throw new Error('project_memory_remember is not available for this Turn');
+        const content = parseProjectMemoryCandidate(input);
+        const target = auxiliary.projectMemoryTarget(context);
+        const prepared: PreparedProjectMemoryInput = Object.freeze({
+          content,
+          projectId: target.projectId,
+          projectName: target.projectName,
+        });
+        issuedProjectMemoryInputs.add(prepared);
+        return prepared;
+      },
       execute: (input, context) => {
         if (stateFor(context).options.projectMemory !== true)
           throw new Error('project_memory_remember is not available for this Turn');
-        return auxiliary.queueProjectMemory(input, context);
+        const prepared = projectMemoryAuthorizationFacts(input);
+        if (prepared === undefined)
+          throw new Error('project_memory_remember input was not prepared');
+        return auxiliary.queueProjectMemory({ content: prepared.content }, context, {
+          projectId: prepared.projectId,
+        });
       },
     });
     this.broker.registerImplementation({
@@ -1351,6 +1398,15 @@ export function workspaceToolPermissionGuard(
     guards[0] ??
     workspaceToolAuthorizationGuard(input, operation)
   );
+}
+
+/** The Project and content an approved project_memory_remember call was prepared with. */
+export function projectMemoryAuthorizationFacts(
+  input: unknown,
+): PreparedProjectMemoryInput | undefined {
+  if (typeof input !== 'object' || input === null || !issuedProjectMemoryInputs.has(input))
+    return undefined;
+  return input as PreparedProjectMemoryInput;
 }
 
 export function providerDisclosureAuthorizationFacts(input: unknown):

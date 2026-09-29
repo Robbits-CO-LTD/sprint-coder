@@ -159,7 +159,9 @@ export type Capability =
   | 'network.fetch'
   | 'external.open'
   | 'secret.use'
-  | 'provider.egress';
+  | 'provider.egress'
+  | 'project.memory.write'
+  | 'skill.draft.write';
 export type ApprovalSummary = {
   id: string;
   taskId: string;

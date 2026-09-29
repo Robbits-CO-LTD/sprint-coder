@@ -1661,6 +1661,203 @@ describe('session grants, expiry, and revocation', () => {
   });
 });
 
+/**
+ * Adding to a Project's memory and creating a Skill Draft are asked about on every call, whatever
+ * the preset, and nothing but a deny decides them before the person does (Issue #546).
+ */
+describe('per-call human approval capabilities', () => {
+  const memoryRequest = {
+    taskId: 'task-1',
+    subjectId: 'tool:builtin/auxiliary/project-memory-remember@1',
+    capability: 'project.memory.write',
+    resource: { kind: 'external', target: 'project-memory:project-1' },
+    operation: 'write',
+    providerEgress: 'none',
+    sandboxProfile: 'read-only',
+    executionSpecDigest: EXECUTION_DIGEST,
+    reviewerInputDigest: REVIEWER_INPUT_DIGEST,
+    risk: 'medium',
+  } as PermissionRequest;
+  const draftRequest = {
+    ...memoryRequest,
+    subjectId: 'tool:builtin/auxiliary/skill-draft-create@1',
+    capability: 'skill.draft.write',
+    resource: { kind: 'external', target: 'skill-draft:task-1' },
+  } as PermissionRequest;
+  const ceilingFor = (request: PermissionRequest) => ({
+    entries: [
+      {
+        capability: request.capability,
+        resourceSet: {
+          kind: 'external-exact' as const,
+          target: (request.resource as { target: string }).target,
+        },
+        operations: [request.operation],
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        providerEgress: ['none' as const],
+        sandboxProfiles: ['read-only' as const],
+      },
+    ],
+    maxWorkerDepth: 0,
+    maxConcurrentWorkers: 0,
+  });
+  const policyFor = (request: PermissionRequest, preset: AccessPreset) => {
+    const expanded = expandAccessPreset(preset);
+    return {
+      ...basePolicy(),
+      parentCeiling: ceilingFor(request),
+      modeCeiling: ceilingFor(request),
+      sandbox: { feasible: true, profile: 'read-only' as const },
+      allowRules: expanded.allowRules,
+      immutableDeny: expanded.immutableDeny ?? [],
+      approvalPolicy: expanded.approvalPolicy,
+      ...(expanded.approvalReason === undefined ? {} : { approvalReason: expanded.approvalReason }),
+    };
+  };
+  const cases = [
+    { name: 'Project memory', request: memoryRequest },
+    { name: 'Skill Draft', request: draftRequest },
+  ];
+
+  it.each(cases)(
+    'asks the person about every $name call under Ask, Auto, and Full',
+    ({ request }) => {
+      for (const preset of ['ask', 'auto', 'full'] as const)
+        expect(
+          evaluatePermissionPolicy({ request, policy: policyFor(request, preset), now: NOW }),
+        ).toMatchObject({
+          decision: 'approval_required',
+          reason: 'per_call_human_approval_required',
+        });
+    },
+  );
+
+  it.each(cases)(
+    'lets no allow rule, remembered grant, old external.open grant, or reviewer stand in for the person on a $name call',
+    ({ request }) => {
+      const target = (request.resource as { target: string }).target;
+      // Written into the policy directly: createSessionGrant itself refuses a Task-scoped one.
+      const grant = {
+        id: 'grant-1',
+        subjectId: request.subjectId,
+        capability: request.capability,
+        resourceSet: { kind: 'all' as const },
+        operations: ['write' as const],
+        scope: 'task' as const,
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        policyEpoch: 4,
+        providerEgress: ['none' as const],
+        sandboxProfiles: ['read-only' as const],
+      };
+      const legacyGrant = {
+        ...grant,
+        id: 'grant-legacy',
+        capability: 'external.open' as const,
+        operations: ['open' as const],
+      };
+      const result = evaluatePermissionPolicy({
+        request,
+        policy: {
+          ...policyFor(request, 'full'),
+          rememberedGrants: [grant, legacyGrant],
+          allowRules: [
+            {
+              capability: request.capability,
+              resourceSet: { kind: 'external-exact', target },
+              operations: ['write'],
+              auditReason: 'user_rule',
+            },
+            {
+              capability: 'external.open',
+              resourceSet: { kind: 'all' },
+              operations: ['open'],
+              auditReason: 'preset_full',
+            },
+          ],
+          approvalPolicy: 'auto',
+          reviewerDecision: reviewerAllow(request),
+        },
+        now: NOW,
+      });
+      expect(result).toMatchObject({
+        decision: 'approval_required',
+        reason: 'per_call_human_approval_required',
+      });
+      expect(result.permit).toBeUndefined();
+      expect(result.evaluationTrace).not.toContain('remembered-grant');
+      expect(result.evaluationTrace).not.toContain('reviewer');
+    },
+  );
+
+  it.each(cases)('still lets a deny refuse a $name call before anyone is asked', ({ request }) => {
+    const deny = {
+      capability: request.capability,
+      resourceSet: { kind: 'all' as const },
+      operations: ['write' as const],
+      auditReason: 'capability_revoked',
+    };
+    expect(
+      evaluatePermissionPolicy({
+        request,
+        policy: { ...policyFor(request, 'full'), projectDeny: [deny] },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
+    expect(
+      evaluatePermissionPolicy({
+        request,
+        policy: { ...policyFor(request, 'full'), managedDeny: [deny] },
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
+  });
+
+  it.each([
+    {
+      name: 'a memory without a Project',
+      request: { ...memoryRequest, resource: { kind: 'external', target: 'project-memory:' } },
+    },
+    {
+      name: 'a memory aimed at another resource kind',
+      request: { ...memoryRequest, resource: { kind: 'external', target: 'https://example.test' } },
+    },
+    {
+      name: 'a draft for another Task',
+      request: { ...draftRequest, resource: { kind: 'external', target: 'skill-draft:task-2' } },
+    },
+    { name: 'an open instead of a write', request: { ...memoryRequest, operation: 'open' } },
+  ])('fails closed for $name', ({ request }) => {
+    expect(
+      evaluatePermissionPolicy({
+        request: request as PermissionRequest,
+        policy: policyFor(request as PermissionRequest, 'full'),
+        now: NOW,
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'invalid_request_facts' });
+  });
+
+  it.each(['project.memory.write', 'skill.draft.write'] as const)(
+    'never writes down a %s grant that could cover a later call',
+    (capability) => {
+      const grant = {
+        id: 'grant-1',
+        subjectId: 'tool:synthetic',
+        capability,
+        resourceSet: { kind: 'external-exact' as const, target: 'skill-draft:task-1' },
+        operations: ['write' as const],
+        expiresAt: '2026-07-22T13:00:00.000Z',
+        policyEpoch: 4,
+        providerEgress: ['none' as const],
+        sandboxProfiles: ['read-only' as const],
+      };
+      expect(() => createSessionGrant({ ...grant, scope: 'task' })).toThrow(
+        'Project memory and Skill Draft grants must be per call',
+      );
+      expect(createSessionGrant({ ...grant, scope: 'once' })).toMatchObject({ scope: 'once' });
+    },
+  );
+});
+
 describe('shell segment parsing', () => {
   it('returns every executable segment so a later segment cannot hide behind an allowed prefix', () => {
     const parsed = parseShellSegments(

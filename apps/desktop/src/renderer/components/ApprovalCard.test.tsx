@@ -189,67 +189,115 @@ describe('ApprovalCard standard input wording', () => {
   });
 });
 
-describe('ApprovalCard Project memory wording (Issue #531)', () => {
+describe('ApprovalCard Project memory and Skill Draft approvals (Issue #546)', () => {
   const memoryApproval: ApprovalSummary = {
     ...approval,
     toolName: 'project_memory_remember',
-    reason: 'Tool project_memory_remember requests external.open',
-    target: 'requested resource',
+    reason: 'Tool project_memory_remember requests project.memory.write',
+    target: 'Project「Synthetic」のメモリ',
     impact: 'control',
     risk: 'medium',
-    capability: 'external.open',
-    execution: JSON.stringify({ content: 'Use pnpm for installs' }),
+    capability: 'project.memory.write',
+    execution: JSON.stringify({
+      content: 'Use pnpm for installs',
+      projectId: 'project-1',
+      projectName: 'Synthetic',
+    }),
+  };
+  const draftApproval: ApprovalSummary = {
+    ...memoryApproval,
+    toolName: 'skill_draft_create',
+    reason: 'Tool skill_draft_create requests skill.draft.write',
+    target: 'Skill「release-notes」の下書き',
+    capability: 'skill.draft.write',
+    execution: JSON.stringify({
+      files: [
+        { content: '---\nname: release-notes\n---\nWrite release notes.', path: 'SKILL.md' },
+        { content: 'echo synthetic', path: 'scripts/run.sh' },
+      ],
+      kind: 'chat',
+      skillId: 'release-notes',
+    }),
   };
 
-  it('names the Project memory and the text being saved, and still shows the real capability', () => {
+  it('names the Project and the text being saved, and offers only this-time allow and deny', () => {
     const html = renderToStaticMarkup(
       <ApprovalCard approval={memoryApproval} busy={false} onDecision={() => undefined} />,
     );
     expect(html).toContain('Project メモリに追加');
-    expect(html).toContain('この Project のメモリ');
+    expect(html).toContain('Project「Synthetic」のメモリ');
     expect(html).toContain('この Turn が成功すると追加され、以後の Turn の文脈に入ります');
     expect(html).toContain('保存する内容');
     expect(html).toContain('Use pnpm for installs');
     // The saved text is shown on its own, not as the raw JSON it arrived in.
     expect(html).not.toContain('&quot;content&quot;');
-    expect(html).toContain('external.open');
-    expect(html).not.toContain('requested resource');
+    expect(html).toContain('project.memory.write');
     expect(html).not.toContain('実行の承認が必要です');
-    expect(html).not.toContain('requests external.open');
-    expect(html.match(/<button/g) ?? []).toHaveLength(3);
-    expect(allowButtonsDisabled(html)).toBe(false);
+    expect(html).not.toContain('requests project.memory.write');
+    expect(html).toContain('data-testid="approval-allow-once"');
+    expect(html).toContain('data-testid="approval-deny"');
+    expect(html).not.toContain('data-testid="approval-allow-task"');
+    expect(html).not.toContain('Task中許可');
+    expect(html.match(/<button/g) ?? []).toHaveLength(2);
+    expect(html).toMatch(/data-testid="approval-allow-once"(?![^>]*disabled)/);
   });
 
-  it('keeps the Project memory heading when the execution is not JSON', () => {
+  it('shows every file of the Skill Draft and says it is not installed', () => {
+    const html = renderToStaticMarkup(
+      <ApprovalCard approval={draftApproval} busy={false} onDecision={() => undefined} />,
+    );
+    expect(html).toContain('Skill の下書きを作成');
+    expect(html).toContain('Skill「release-notes」の下書き');
+    expect(html).toContain('インストールはされず');
+    expect(html).toContain('作成する下書き');
+    expect(html).toContain('--- SKILL.md ---');
+    expect(html).toContain('--- scripts/run.sh ---');
+    expect(html).toContain('echo synthetic');
+    expect(html).not.toContain('requested resource');
+    expect(html).not.toContain('data-testid="approval-allow-task"');
+    expect(html.match(/<button/g) ?? []).toHaveLength(2);
+    expect(html).toMatch(/data-testid="approval-allow-once"(?![^>]*disabled)/);
+  });
+
+  it.each([
+    { name: 'memory execution that is not JSON', card: { execution: 'not-json' } },
+    { name: 'memory content that is not a string', card: { execution: '{"content":5}' } },
+    {
+      name: 'draft without files',
+      card: {
+        capability: 'skill.draft.write' as const,
+        execution: JSON.stringify({ kind: 'chat', skillId: 'x', files: [] }),
+      },
+    },
+    {
+      name: 'draft file without content',
+      card: {
+        capability: 'skill.draft.write' as const,
+        execution: JSON.stringify({ kind: 'chat', skillId: 'x', files: [{ path: 'SKILL.md' }] }),
+      },
+    },
+  ])('refuses to offer allow for a $name, and keeps deny available', ({ card }) => {
     const html = renderToStaticMarkup(
       <ApprovalCard
-        approval={{ ...memoryApproval, execution: 'not-json' }}
+        approval={{ ...memoryApproval, ...card }}
         busy={false}
         onDecision={() => undefined}
       />,
     );
-    expect(html).toContain('Project メモリに追加');
-    expect(html).toContain('この Project のメモリ');
-    expect(html).toContain('not-json');
-  });
-
-  it('shows the raw execution when the content is not a string', () => {
-    const raw = JSON.stringify({ content: 5 });
-    const html = renderToStaticMarkup(
-      <ApprovalCard
-        approval={{ ...memoryApproval, execution: raw }}
-        busy={false}
-        onDecision={() => undefined}
-      />,
-    );
-    expect(html).toContain('Project メモリに追加');
-    expect(html).toContain('&quot;content&quot;:5');
+    expect(html).toContain('内容を表示できないため許可できません');
+    expect(html).toMatch(/data-testid="approval-allow-once"[^>]*disabled/);
+    expect(html).not.toContain('data-testid="approval-allow-task"');
+    expect(html).toMatch(/data-testid="approval-deny"(?![^>]*disabled)/);
   });
 
   it('keeps the generic wording when the same tool name asks for another capability', () => {
     const html = renderToStaticMarkup(
       <ApprovalCard
-        approval={{ ...memoryApproval, capability: 'workspace.write' }}
+        approval={{
+          ...memoryApproval,
+          target: 'requested resource',
+          capability: 'workspace.write',
+        }}
         busy={false}
         onDecision={() => undefined}
       />,
@@ -257,9 +305,10 @@ describe('ApprovalCard Project memory wording (Issue #531)', () => {
     expect(html).toContain('実行の承認が必要です');
     expect(html).toContain('requested resource');
     expect(html).not.toContain('Project メモリに追加');
+    expect(html).toContain('data-testid="approval-allow-task"');
   });
 
-  it('leaves a different tool on the generic wording', () => {
+  it('leaves a different tool on external.open with the generic wording and all three choices', () => {
     const html = renderToStaticMarkup(
       <ApprovalCard
         approval={{
@@ -274,5 +323,6 @@ describe('ApprovalCard Project memory wording (Issue #531)', () => {
     );
     expect(html).toContain('実行の承認が必要です');
     expect(html).toContain('requested resource');
+    expect(html.match(/<button/g) ?? []).toHaveLength(3);
   });
 });

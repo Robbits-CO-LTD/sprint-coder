@@ -52,6 +52,8 @@ export const toolCapabilitySchema = z.enum([
   'provider.egress',
   'computer.observe',
   'computer.control',
+  'project.memory.write',
+  'skill.draft.write',
 ]);
 const digestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const toolCatalogEntrySchema = z

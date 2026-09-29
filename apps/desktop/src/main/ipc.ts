@@ -663,6 +663,7 @@ import {
   FULL_PRESET_DISCLOSURE_AUDIT_REASON,
   digestToolCatalogValue,
   permissionRequestFingerprint,
+  requiresPerCallHumanApproval,
   sessionGrantMatchesPermissionRequest,
   toolValueMatchesSchema,
   type Capability,
@@ -1847,7 +1848,9 @@ export class IpcRouter {
           this.publish(this.persistence.recordSkillDraft(context.taskId, context.turnId, draft));
           return draft;
         },
-        queueProjectMemory: (input, context) => this.queueProjectMemoryCandidate(input, context),
+        projectMemoryTarget: (context) => this.projectMemoryTarget(context),
+        queueProjectMemory: (input, context, target) =>
+          this.queueProjectMemoryCandidate(input, context, target.projectId),
         activateSkill: async (input, context) => {
           const parsed = z
             .object({
@@ -6264,7 +6267,9 @@ export class IpcRouter {
     let evaluation = evaluate();
     let reviewerDecision: Awaited<ReturnType<AutoReviewer['review']>> | undefined;
     const preset = this.permissionBroker.getPolicy(request.context.taskId).preset;
-    const autoPreset = preset === 'auto';
+    // A per-call capability is decided by the person on its card under every preset, so the Auto
+    // reviewer is never consulted and no Auto decision is recorded for it (Issue #546).
+    const autoPreset = preset === 'auto' && !requiresPerCallHumanApproval(capability);
     const reviewRequestId = randomUUID();
     if (evaluation.decision === 'approval_required' && autoPreset) {
       reviewerDecision = await this.autoReviewer.review({
@@ -7448,14 +7453,32 @@ export class IpcRouter {
     return { ...teamMcp, managedTools, toolCatalogDigest: snapshot.digest };
   }
 
+  /** The Project this Turn's memory belongs to, from its sealed context (Issue #546). */
+  private projectMemoryTarget(context: { taskId: string; turnId: string }): {
+    projectId: string;
+    projectName: string;
+  } {
+    const manifest = this.persistence.getContextSealManifest('turn', context.turnId);
+    if (manifest.taskId !== context.taskId || manifest.projectId === null)
+      throw new Error('Projectに所属しないTurnではProject Memoryを利用できません');
+    const projectId = manifest.projectId;
+    const project = this.persistence.listProjects().find(({ id }) => id === projectId);
+    if (project === undefined) throw new Error('Project Memoryの対象Projectが見つかりません');
+    return { projectId, projectName: project.name };
+  }
+
   private async queueProjectMemoryCandidate(
     input: unknown,
     context: { taskId: string; turnId: string },
+    expectedProjectId?: string,
   ): Promise<{ queued: true }> {
     const content = parseProjectMemoryCandidate(input);
     const manifest = this.persistence.getContextSealManifest('turn', context.turnId);
     if (manifest.taskId !== context.taskId || manifest.projectId === null)
       throw new Error('Projectに所属しないTurnではProject Memoryを利用できません');
+    // The approval named one Project; a memory is never queued for any other.
+    if (expectedProjectId !== undefined && manifest.projectId !== expectedProjectId)
+      throw new Error('承認したProjectとTurnのProjectが一致しません');
     const pending = appendProjectMemoryCandidate(
       this.pendingProjectMemoriesByTurn.get(context.turnId) ?? [],
       { projectId: manifest.projectId, content },

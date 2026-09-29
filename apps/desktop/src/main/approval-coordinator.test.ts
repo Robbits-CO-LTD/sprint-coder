@@ -927,6 +927,297 @@ describe('ApprovalCoordinator', () => {
  * A tool call whose caller is gone — a Team Worker released while its write waits on the card —
  * must not leave that card pending, or the Turn it belongs to can never finish (issue #572).
  */
+/**
+ * Adding to a Project's memory and creating a Skill Draft are decided by the person on a card for
+ * each call, and never for the rest of the Task (Issue #546).
+ */
+describe('ApprovalCoordinator per-call approval of Project memory and Skill Drafts', () => {
+  const draftInput = {
+    kind: 'chat',
+    skillId: 'release-notes',
+    files: [{ path: 'SKILL.md', content: '---\nname: release-notes\n---\nWrite release notes.' }],
+  };
+  const calls = {
+    memory: {
+      providerName: 'project_memory_remember',
+      capability: 'project.memory.write',
+      input: { content: 'Use pnpm for installs' },
+      target: 'project-memory:project-1',
+      label: 'Project「Synthetic」のメモリ',
+    },
+    draft: {
+      providerName: 'skill_draft_create',
+      capability: 'skill.draft.write',
+      input: draftInput,
+      target: 'skill-draft:task-1',
+      label: 'Skill「release-notes」の下書き',
+    },
+  } as const;
+
+  function createAuxiliaryTools(
+    authorizer: ConstructorParameters<typeof ProviderWorkspaceTools>[0]['authorizer'],
+  ) {
+    const effects: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 7,
+      authorizer,
+      auxiliary: {
+        projectMemoryTarget: () => ({ projectId: 'project-1', projectName: 'Synthetic' }),
+        queueProjectMemory: async (input, _context, target) => {
+          effects.push({ memory: input, target });
+          return { queued: true };
+        },
+        createSkillDraft: async (input) => {
+          effects.push({ draft: input });
+          return { draft: true };
+        },
+        activateSkill: async () => ({ instructions: 'unused' }),
+      },
+    });
+    tools.startTurn(toolContext, 'codex', { projectMemory: true, skillDrafts: true });
+    const call = (kind: keyof typeof calls, callId: string, input: unknown = calls[kind].input) =>
+      tools.broker.dispatch({
+        taskId: toolContext.taskId,
+        turnId: toolContext.turnId,
+        callId,
+        providerName: calls[kind].providerName,
+        input,
+      });
+    return { tools, effects, call };
+  }
+
+  function consumeOnce(harness: ReturnType<typeof createHarness>): Set<string> {
+    const consumed = new Set<string>();
+    Object.assign(harness.persistence, {
+      consumePermissionOneTimeToken: (_taskId: string, token: string) => {
+        if (consumed.has(token)) return false;
+        consumed.add(token);
+        return true;
+      },
+    });
+    return consumed;
+  }
+
+  it.each(['memory', 'draft'] as const)(
+    'asks about a %s on a card that shows its target and content, and never allows it for the Task',
+    async (kind) => {
+      const harness = createHarness();
+      const { tools, effects, call } = createAuxiliaryTools(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      const dispatch = call(kind, `call-${kind}`);
+      const approval = await waitForPublished(harness);
+      const stored = approval as StoredApproval & {
+        capability?: string;
+        resource?: unknown;
+      };
+
+      expect(stored.capability).toBe(calls[kind].capability);
+      expect(stored.capabilities).toEqual([calls[kind].capability]);
+      expect(stored.resource).toEqual({ kind: 'external-exact', target: calls[kind].target });
+      expect(stored.display?.target).toBe(calls[kind].label);
+      const shown = JSON.parse(stored.display!.execution) as Record<string, unknown>;
+      if (kind === 'memory')
+        expect(shown).toEqual({
+          content: 'Use pnpm for installs',
+          projectId: 'project-1',
+          projectName: 'Synthetic',
+        });
+      else expect(shown).toEqual(draftInput);
+
+      expect(() => harness.coordinator.resolve(resolveCommand(approval, 'allow_task'))).toThrow(
+        'APPROVAL_DECISION_NOT_ALLOWED',
+      );
+      expect(harness.persistence.approvals.get(approval.id)?.state).toBe('pending');
+      expect(harness.persistence.grants).toEqual([]);
+      expect(effects).toEqual([]);
+
+      harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+      await expect(dispatch).resolves.toEqual(
+        kind === 'memory' ? { queued: true } : { draft: true },
+      );
+      expect(effects).toEqual([
+        kind === 'memory'
+          ? { memory: { content: 'Use pnpm for installs' }, target: { projectId: 'project-1' } }
+          : { draft: draftInput },
+      ]);
+      await tools.dispose();
+    },
+  );
+
+  it('asks again on every call, even with a Task grant on record or a policy allow', async () => {
+    const harness = createHarness({
+      evaluatePermission: () => ({
+        decision: 'allow',
+        reason: 'stale_allow_rule',
+        beforeExecute: () => true,
+      }),
+    });
+    // As if an earlier version had written a Task grant for exactly this request.
+    harness.persistence.hasTaskGrant = () => true;
+    const { tools, effects, call } = createAuxiliaryTools(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    const first = call('memory', 'call-first');
+    const firstApproval = await waitForPublished(harness);
+    harness.coordinator.resolve(resolveCommand(firstApproval, 'allow_once'));
+    await expect(first).resolves.toEqual({ queued: true });
+
+    const second = call('memory', 'call-second');
+    await viWaitFor(() => harness.published.length === 2);
+    harness.coordinator.resolve(resolveCommand(harness.published[1]!, 'deny'));
+    await expect(second).rejects.toThrow('approval_deny');
+    expect(effects).toHaveLength(1);
+    await tools.dispose();
+  });
+
+  it.each(['deny', 'turn end', 'policy change'] as const)(
+    'has no effect after a %s',
+    async (ending) => {
+      const harness = createHarness();
+      const { tools, effects, call } = createAuxiliaryTools(
+        harness.coordinator.authorizeTool.bind(harness.coordinator),
+      );
+      const dispatch = call('draft', `call-${ending}`);
+      const approval = await waitForPublished(harness);
+      if (ending === 'deny') harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+      if (ending === 'turn end') {
+        harness.endTurn('turn-1');
+        harness.coordinator.turnEnded('task-1', 'turn-1', 'canceled');
+      }
+      if (ending === 'policy change') {
+        harness.setPolicyEpoch(8);
+        expect(() => harness.coordinator.resolve(resolveCommand(approval, 'allow_once'))).toThrow(
+          /POLICY|STALE/,
+        );
+      }
+      await expect(dispatch).rejects.toThrow();
+      expect(effects).toEqual([]);
+      await tools.dispose();
+    },
+  );
+
+  it('spends the one-time permit on the approved call and never again', async () => {
+    const harness = createHarness();
+    consumeOnce(harness);
+    const decisions: ToolAuthorizationDecision[] = [];
+    const { tools, effects, call } = createAuxiliaryTools(async (request, control) => {
+      const decision = await harness.coordinator.authorizeTool(request, control);
+      decisions.push(decision);
+      return decision;
+    });
+    const dispatch = call('memory', 'call-permit');
+    const approval = await waitForPublished(harness);
+    harness.coordinator.resolve(resolveCommand(approval, 'allow_once'));
+    await expect(dispatch).resolves.toEqual({ queued: true });
+    expect(effects).toHaveLength(1);
+    expect(decisions[0]?.beforeExecute?.()).toBe(false);
+    await tools.dispose();
+  });
+
+  it('refuses allow_task on such a card even after this process lost its waiter', async () => {
+    const harness = createHarness();
+    const { tools, effects, call } = createAuxiliaryTools(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    const dispatch = call('memory', 'call-restart');
+    const approval = await waitForPublished(harness);
+    const restarted = new ApprovalCoordinator({
+      persistence: harness.persistence,
+      now: () => NOW,
+      expiresAt: () => EXPIRES_AT,
+      getCurrentPolicyEpoch: () => 7,
+      isTurnActive: () => true,
+      evaluatePermission: () => 'approval_required',
+      publish: () => undefined,
+    });
+    expect(() => restarted.resolve(resolveCommand(approval, 'allow_task'))).toThrow(
+      'APPROVAL_DECISION_NOT_ALLOWED',
+    );
+    expect(harness.persistence.grants).toEqual([]);
+    harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await dispatch.catch(() => undefined);
+    expect(effects).toEqual([]);
+    await tools.dispose();
+  });
+
+  it('binds each approval to its Project and exact content', async () => {
+    const harness = createHarness();
+    const { tools, call } = createAuxiliaryTools(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    const first = call('memory', 'call-content-a', { content: 'Use pnpm for installs' });
+    const second = call('memory', 'call-content-b', { content: 'Use npm for installs' });
+    await viWaitFor(() => harness.published.length === 2);
+    const [a, b] = harness.published as (StoredApproval & { specDigest?: string })[];
+    expect(a!.specDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(a!.specDigest).not.toBe(b!.specDigest);
+    expect(a!.requestDigest).not.toBe(b!.requestDigest);
+    for (const approval of [a!, b!]) harness.coordinator.resolve(resolveCommand(approval, 'deny'));
+    await Promise.allSettled([first, second]);
+    await tools.dispose();
+  });
+
+  it.each([
+    {
+      name: 'a Skill Draft too long to show',
+      kind: 'draft',
+      input: { ...draftInput, files: [{ path: 'SKILL.md', content: 'a'.repeat(100_001) }] },
+    },
+    {
+      name: 'a Skill Draft with a hidden control character',
+      kind: 'draft',
+      input: { ...draftInput, files: [{ path: 'SKILL.md', content: 'run\u0007' }] },
+    },
+    {
+      name: 'a memory whose text a bidi override reorders',
+      kind: 'memory',
+      input: { content: 'safe \u202etxt.exe' },
+    },
+  ] as const)('refuses $name before any card exists', async ({ kind, input }) => {
+    const harness = createHarness();
+    const { tools, effects, call } = createAuxiliaryTools(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    await expect(call(kind, 'call-undisplayable', input)).rejects.toThrow(
+      'approval_content_not_displayable',
+    );
+    expect(harness.published).toEqual([]);
+    expect(harness.persistence.approvals.size).toBe(0);
+    expect(effects).toEqual([]);
+    await tools.dispose();
+  });
+
+  it('refuses a Project memory input that Main did not prepare', async () => {
+    const harness = createHarness();
+    const { tools } = createAuxiliaryTools(
+      harness.coordinator.authorizeTool.bind(harness.coordinator),
+    );
+    const entry = tools.broker
+      .getTurnSnapshot(toolContext.taskId, toolContext.turnId)!
+      .entries.find(({ providerName }) => providerName === 'project_memory_remember')!;
+    // Shaped like a prepared input, but naming a Project of the model's choosing.
+    const lookalike = Object.freeze({
+      content: 'synthetic',
+      projectId: 'project-other',
+      projectName: 'Other',
+    });
+    const request = { context: toolContext, callId: 'call-lookalike', entry, input: lookalike };
+    await expect(harness.coordinator.authorizeTool(request)).resolves.toEqual({
+      decision: 'deny',
+      reason: 'per_call_approval_subject_unbound',
+    });
+    expect(approvalFactsForTool(request, 'project.memory.write').resource).toEqual({
+      kind: 'external',
+      target: 'per-call-approval:unbound',
+    });
+    expect(harness.published).toEqual([]);
+    await tools.dispose();
+  });
+});
+
 describe('ApprovalCoordinator cancellation of an aborted call', () => {
   const released = () => new Error('Team Worker Turn ended before its managed tool call ran');
 
