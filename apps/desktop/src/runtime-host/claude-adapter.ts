@@ -8,7 +8,6 @@ import {
   readFileSync,
   readdirSync,
   mkdtempSync,
-  rmSync,
   statSync,
   writeFileSync,
   type Dirent,
@@ -44,6 +43,7 @@ import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from 
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
 import {
@@ -238,6 +238,16 @@ export class ClaudeRuntimeAdapter {
     let teamMcpDirectory: string | null = null;
     let skillPluginDirectory: string | null = null;
     let nativeSkillInvocation = '';
+    const cleanup = (): void => {
+      for (const path of [temporaryDirectory, teamMcpDirectory, skillPluginDirectory]) {
+        if (path === null) continue;
+        try {
+          removeTreeWithoutFollowingLinksSync(path);
+        } catch {
+          // Cleanup failure must not hide the Runtime failure or Stop result that triggered it.
+        }
+      }
+    };
     const nativeSkills = skills.filter(
       ({ profile, runtimeSupport, selected }) =>
         selected !== false && profile === 'claude-native' && runtimeSupport === 'full',
@@ -262,8 +272,7 @@ export class ClaudeRuntimeAdapter {
       try {
         nodeCommand = teamMcpNodeCommand();
       } catch {
-        if (temporaryDirectory !== null)
-          rmSync(temporaryDirectory, { recursive: true, force: true });
+        cleanup();
         failWithDiagnostic(
           publicError(
             'RUNTIME_FAILED',
@@ -332,12 +341,6 @@ export class ClaudeRuntimeAdapter {
         runtimeProcessStarted?.(child.pid);
         accepted();
       });
-    const cleanup = (): void => {
-      if (temporaryDirectory !== null) rmSync(temporaryDirectory, { recursive: true, force: true });
-      if (teamMcpDirectory !== null) rmSync(teamMcpDirectory, { recursive: true, force: true });
-      if (skillPluginDirectory !== null)
-        rmSync(skillPluginDirectory, { recursive: true, force: true });
-    };
     const control: ActiveProcess = { child, canceled: false, cleanup };
     this.active.set(turnId, control);
     if (teamMcp === undefined) accepted();

@@ -6,16 +6,26 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import * as os from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { GROK_AGENT_PROFILE, grokEnvironment, prepareGrokIsolation } from './grok-isolation';
+import * as removal from './link-safe-tree-removal';
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof os>();
   return { ...actual, tmpdir: vi.fn(actual.tmpdir) };
+});
+// The real link-safe removal runs unless a test makes one call fail.
+vi.mock('./link-safe-tree-removal', async (importOriginal) => {
+  const actual = await importOriginal<typeof removal>();
+  return {
+    ...actual,
+    removeTreeWithoutFollowingLinksSync: vi.fn(actual.removeTreeWithoutFollowingLinksSync),
+  };
 });
 
 const cleanups: Array<() => void> = [];
@@ -127,6 +137,25 @@ describe('Grok isolation', () => {
     expect(existsSync(second.cwd)).toBe(true);
   });
 
+  it('removes links left in the isolated homes and cwd without emptying what they point at', () => {
+    const outside = root();
+    writeFileSync(join(outside, 'keep.txt'), 'keep');
+    const isolation = isolate({ HOME: root() });
+    // A Windows junction is what the recursive rmSync in Electron's Node follows (#582).
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    for (const directory of [
+      isolation.environment['HOME']!,
+      isolation.environment['GROK_HOME']!,
+      isolation.cwd,
+    ])
+      symlinkSync(outside, join(directory, 'linked'), linkType);
+    isolation.cleanup();
+    isolation.cleanup();
+    expect(existsSync(isolation.directory)).toBe(false);
+    expect(readdirSync(outside)).toEqual(['keep.txt']);
+    expect(readFileSync(join(outside, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
   it.each([{ GROK_AUTH_PATH: 'relative/auth.json' }, { GROK_HOME: 'relative-home' }])(
     'rejects relative auth locations and cleans partial staging: %s',
     (override) => {
@@ -138,6 +167,19 @@ describe('Grok isolation', () => {
       expect(readdirSync(temporaryRoot)).toEqual([]);
     },
   );
+
+  it('reports the preparation failure even when removing the partial staging fails', () => {
+    const temporaryRoot = root();
+    vi.mocked(os.tmpdir).mockReturnValue(temporaryRoot);
+    vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    });
+    expect(() =>
+      prepareGrokIsolation({ HOME: temporaryRoot, GROK_AUTH_PATH: 'relative/auth.json' }),
+    ).toThrow('must be absolute');
+    // Nothing else removes it: the staging stays for diagnosis instead of a recursive fallback.
+    expect(readdirSync(temporaryRoot)).toHaveLength(1);
+  });
 
   it.skipIf(process.platform === 'win32')('uses owner-only POSIX permissions', () => {
     const isolation = isolate({ HOME: root() });

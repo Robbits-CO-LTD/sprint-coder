@@ -1,8 +1,12 @@
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import type * as ChildProcessModule from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { symlinkSync } from 'node:fs';
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PassThrough } from 'node:stream';
+import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   CodexAgentMessageBoundary,
@@ -29,12 +33,30 @@ import {
 } from './codex-adapter';
 import { TEAM_CORE_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 import type { RuntimeCanonicalEvent, RuntimeFailureDiagnostic } from './protocol';
+import * as removal from './link-safe-tree-removal';
+
+// Real processes still start unless a test hands the adapter a fake child.
+const processMock = vi.hoisted(() => ({ spawn: null as unknown as Mock }));
+vi.mock('node:child_process', async (importOriginal) => {
+  const original = await importOriginal<typeof ChildProcessModule>();
+  processMock.spawn = vi.fn(original.spawn);
+  return { ...original, spawn: processMock.spawn };
+});
+// The real link-safe removal runs unless a test makes it fail.
+vi.mock('./link-safe-tree-removal', async (importOriginal) => {
+  const actual = await importOriginal<typeof removal>();
+  return {
+    ...actual,
+    removeTreeWithoutFollowingLinksSync: vi.fn(actual.removeTreeWithoutFollowingLinksSync),
+  };
+});
 
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -1529,6 +1551,108 @@ describe('Codex runtime probe', () => {
     expect(prompt).toContain('"source":"background"');
     expect(prompt).toContain('"authority":"none"');
     expect(prompt).toContain('Current user request:\n\ncontinue');
+  });
+});
+
+describe('Codex Turn temporary folders', () => {
+  // Electron's Node follows a Windows junction in a recursive rmSync (#582); POSIX has no junction.
+  const directoryLinkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+  /** A Turn without a Workspace, whose CLI leaves a link to `outside` in each folder it gets. */
+  async function startLinkingTurn(turnId: string) {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-link-cleanup-'));
+    temporaryRoots.push(root);
+    const temporary = join(root, 'tmp');
+    const isolation = join(root, 'isolation');
+    const outside = join(root, 'outside');
+    await mkdir(temporary);
+    await mkdir(outside);
+    await writeFile(join(outside, 'keep.txt'), 'keep');
+    vi.stubEnv('TEMP', temporary);
+    vi.stubEnv('TMP', temporary);
+    vi.stubEnv('TMPDIR', temporary);
+    // No real Codex home is read or copied.
+    vi.stubEnv('CODEX_HOME', join(root, 'no-codex-home'));
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null,
+      pid: undefined,
+    });
+    processMock.spawn.mockImplementationOnce(
+      (
+        _command: string,
+        _args: readonly string[],
+        options: { cwd: string; env: NodeJS.ProcessEnv },
+      ) => {
+        for (const directory of [options.cwd, options.env['CODEX_HOME']!, options.env['HOME']!])
+          symlinkSync(outside, join(directory, 'linked'), directoryLinkType);
+        return child;
+      },
+    );
+    const adapter = new CodexRuntimeAdapter(2_000, 'fixture', [], isolation);
+    const failed = vi.fn();
+    const exited = vi.fn();
+    adapter.start(turnId, 'test', [], vi.fn(), null, 'auto', vi.fn(), failed, exited);
+    expect(processMock.spawn).toHaveBeenCalled();
+    const close = (code: number) => {
+      child.exitCode = code;
+      child.emit('close', code);
+    };
+    return { adapter, close, failed, exited, temporary, isolation, outside };
+  }
+
+  it('removes them without following a junction the CLI left inside when the CLI exits', async () => {
+    const turn = await startLinkingTurn('link-cleanup-exit');
+    turn.close(1);
+
+    expect(turn.exited).toHaveBeenCalledWith(1, false);
+    expect(turn.failed).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+      expect.objectContaining({ failureStage: 'abnormal_exit' }),
+    );
+    expect(await readdir(turn.temporary)).toEqual([]);
+    expect(await readdir(turn.isolation)).toEqual([]);
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    expect(await readFile(join(turn.outside, 'keep.txt'), 'utf8')).toBe('keep');
+  });
+
+  it('removes them without following a junction after a Stop', async () => {
+    const turn = await startLinkingTurn('link-cleanup-stop');
+    await turn.adapter.cancel('link-cleanup-stop');
+    turn.close(1);
+
+    expect(turn.exited).toHaveBeenCalledWith(1, true);
+    expect(await readdir(turn.temporary)).toEqual([]);
+    expect(await readdir(turn.isolation)).toEqual([]);
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+  });
+
+  it('still reports the Runtime failure when removing them fails, and keeps them', async () => {
+    const turn = await startLinkingTurn('link-cleanup-failure');
+    vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockImplementation(() => {
+      throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+    });
+    try {
+      turn.close(1);
+    } finally {
+      vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockReset();
+    }
+
+    expect(turn.exited).toHaveBeenCalledWith(1, false);
+    expect(turn.failed).toHaveBeenCalledWith(
+      expect.objectContaining({ code: 'RUNTIME_FAILED' }),
+      expect.objectContaining({ failureStage: 'abnormal_exit' }),
+    );
+    // No fallback removal ran: the folders stay for a later diagnosis.
+    expect(await readdir(turn.temporary)).toHaveLength(1);
+    expect(await readdir(turn.isolation)).toHaveLength(1);
+    expect(await readdir(turn.outside)).toEqual(['keep.txt']);
+    // The links left behind go with the real removal, before the recursive test cleanup.
+    removal.removeTreeWithoutFollowingLinksSync(turn.temporary);
+    removal.removeTreeWithoutFollowingLinksSync(turn.isolation);
   });
 });
 
