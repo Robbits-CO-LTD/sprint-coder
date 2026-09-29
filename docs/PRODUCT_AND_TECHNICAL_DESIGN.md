@@ -645,9 +645,9 @@ Domainのpolicy evaluatorにおける評価順序（現行製品から渡すceil
 
 denyは常にallowより強く、allowやauto reviewerはsandbox ceilingを変更できない。Shell ruleはparseした全segmentへ同じ評価を適用する。単純prefix allow、parse不能なcommand、subshell/command substitutionは自動許可しない。
 
-`packages/domain/src/permission.ts`には、capability、resource set、operation、期限、provider egress、sandbox profileを持つceilingの照合と、子のceilingを親の部分集合にする`spawnChild`がある。ただし現行製品のツール権限評価では、`ipc.ts`と`provider-egress.ts`が要求そのものから作ったentryをparent/modeの両ceilingへ渡す。この2つは独立した親・モードの上限としては判定を狭めない。管理者・project/userのdeny、安全設定から展開したallowと承認方針、OS sandbox、Workerのツールカタログと書込み範囲は別の実効境界として残る。Teamの委任深さと同時実行数も`team-coordinator.ts`の別の検査で制限する。
+`packages/domain/src/permission.ts`には、capability、resource set、operation、期限、provider egress、sandbox profileを持つceilingの照合と、子のceilingを親の部分集合にする`spawnChild`がある。ただし現行製品のツール権限評価では、`ipc.ts`と`provider-egress.ts`が要求そのものから作ったentryをparent/modeの両ceilingへ渡す。この2つは独立した親・モードの上限としては判定を狭めない。管理者・project/userのdeny、安全設定から展開したallowと承認方針、OS sandbox、Workerのツールカタログと書込み範囲は別の実効境界として残る。Teamの委任深さは`team-coordinator.ts`、同時実行数は`team-execution-scheduler.ts`の別の検査で制限する。
 
-親の権限snapshotとpolicyEpochから子のceilingを生成し、ambientなgrantを継承せず、親の権限取消し・縮小時に子・background activity・未実行outboxを停止して再評価する一体の仕組みは将来の設計である。Domainの`spawnChild`は子のremembered grantを空にするが、現行製品のWorker生成経路からは呼ばれない。Teamが保存する`parentCapabilityCeiling`の深さ・人数と、個別ツール評価へ渡すceilingを同じ強制機構とみなさない。
+現行製品でも権限取消し時にはpolicyEpochを更新し、旧epochのbackground activityをcancel扱いにしてcompletionをquarantineし、Computer Useとmanaged coding harnessへ変更を通知する。親の権限snapshotから子のceilingを生成してambientなgrantを継承させず、親の権限縮小時に子Workerの停止と未実行outboxの再評価まで連動させる一体の仕組みは将来の設計である。Domainの`spawnChild`は子のremembered grantを空にするが、現行製品のWorker生成経路からは呼ばれない。Teamが保存する`parentCapabilityCeiling`の深さ・人数と、個別ツール評価へ渡すceilingを同じ強制機構とみなさない。
 
 Auto reviewerは権限境界の代替ではなく、狭いapproval routingである。入力はimmutable ExecutionSpec、policy facts、deterministic risk featuresだけとし、conversation transcriptやtool outputを指示として渡さない。Runtime由来の理由はuntrusted quoteとして分離する。reviewerはno-tools/no-network、一request一decision、`allow once`だけを返せ、high-risk category、schema failure、timeout、model failureはdenyへ倒す。prompt template、model/version、input digest、decisionを監査する。
 
