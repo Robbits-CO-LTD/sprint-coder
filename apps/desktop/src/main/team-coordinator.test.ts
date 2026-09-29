@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { chmod, lstat, readdir, rmdir, unlink } from 'node:fs/promises';
+import { chmod, lstat, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -630,6 +630,7 @@ function failingUnlinkFs(fails: (path: string) => boolean, code: string): TreeRe
   return {
     lstat: (path) => lstat(path),
     readdir: (path) => readdir(path),
+    realpath: (path) => realpath(path),
     unlink: async (path) => {
       if (fails(path))
         throw Object.assign(new Error(`${code}: operation failed, unlink '${path}'`), { code });

@@ -63,6 +63,7 @@ export type ExecFileImpl = (
 export type TreeRemovalFs = Readonly<{
   lstat(path: string): Promise<Readonly<{ isDirectory(): boolean; isSymbolicLink(): boolean }>>;
   readdir(path: string): Promise<string[]>;
+  realpath(path: string): Promise<string>;
   unlink(path: string): Promise<void>;
   rmdir(path: string): Promise<void>;
   chmod(path: string, mode: number): Promise<void>;
@@ -1469,6 +1470,7 @@ function errorCode(error: unknown): string {
 const nodeTreeRemovalFs: TreeRemovalFs = Object.freeze({
   lstat: (path: string) => lstat(path),
   readdir: (path: string) => readdir(path),
+  realpath: (path: string) => realpath(path),
   unlink: (path: string) => unlink(path),
   rmdir: (path: string) => rmdir(path),
   chmod: (path: string, mode: number) => chmod(path, mode),
@@ -1481,6 +1483,10 @@ const nodeTreeRemovalFs: TreeRemovalFs = Object.freeze({
  * `git worktree remove` nor a recursive `fs.rm` can be trusted with that: on Windows both empty the
  * folder behind a junction (the latter in the Node that Electron ships).
  *
+ * Only a real directory is descended into: `lstat` does not report every junction as a link (libuv
+ * only recognizes one whose target starts with a drive letter, not `\\?\Volume{GUID}\...`), so a
+ * directory must also resolve to itself before its entries are read (issue #641).
+ *
  * An entry that is already gone counts as removed, so a removal that stopped part way, or one that
  * raced another, can simply run again. At the root `.git` goes last, so a removal that stops at a
  * file inside still leaves a worktree Git can read. One that stops only at the root folder itself
@@ -1492,10 +1498,15 @@ export async function removeTreeWithoutFollowingLinks(
   root: string,
   fs: TreeRemovalFs = nodeTreeRemovalFs,
 ): Promise<void> {
-  await removeEntry(root, fs, true);
+  await removeEntry(root, fs, undefined);
 }
 
-async function removeEntry(path: string, fs: TreeRemovalFs, root: boolean): Promise<void> {
+/** `realParent` is where the parent directory resolved to; undefined for the root. */
+async function removeEntry(
+  path: string,
+  fs: TreeRemovalFs,
+  realParent: string | undefined,
+): Promise<void> {
   let entry: Awaited<ReturnType<TreeRemovalFs['lstat']>>;
   try {
     entry = await fs.lstat(path);
@@ -1505,6 +1516,8 @@ async function removeEntry(path: string, fs: TreeRemovalFs, root: boolean): Prom
   }
   if (entry.isSymbolicLink()) return removeLink(path, fs);
   if (!entry.isDirectory()) return removeFile(path, fs);
+  const real = await realDirectory(path, fs, realParent);
+  if (real === undefined) return removeLink(path, fs);
   let names: string[];
   try {
     names = await fs.readdir(path);
@@ -1512,10 +1525,11 @@ async function removeEntry(path: string, fs: TreeRemovalFs, root: boolean): Prom
     if (isEnoent(error)) return;
     throw error;
   }
-  const ordered = root
-    ? [...names.filter((name) => name !== '.git'), ...names.filter((name) => name === '.git')]
-    : names;
-  for (const name of ordered) await removeEntry(join(path, name), fs, false);
+  const ordered =
+    realParent === undefined
+      ? [...names.filter((name) => name !== '.git'), ...names.filter((name) => name === '.git')]
+      : names;
+  for (const name of ordered) await removeEntry(join(path, name), fs, real);
   await ignoreMissing(async () => {
     try {
       await fs.rmdir(path);
@@ -1526,6 +1540,31 @@ async function removeEntry(path: string, fs: TreeRemovalFs, root: boolean): Prom
       await fs.rmdir(path);
     }
   });
+}
+
+/**
+ * Where the directory `path` resolves to, when that is where it is: compared with its parent
+ * resolved the same way, so that links or short (8.3) names above the root do not matter. Undefined
+ * when it resolves elsewhere or no longer resolves; the caller then removes it as a link, or counts
+ * it as already removed.
+ */
+async function realDirectory(
+  path: string,
+  fs: TreeRemovalFs,
+  realParent: string | undefined,
+): Promise<string | undefined> {
+  let real: string;
+  let expected: string;
+  try {
+    real = await fs.realpath(path);
+    expected = join(realParent ?? (await fs.realpath(dirname(path))), basename(path));
+  } catch (error) {
+    if (isEnoent(error)) return undefined;
+    throw error;
+  }
+  const fold = (value: string): string =>
+    process.platform === 'win32' ? value.toLocaleLowerCase('en-US') : value;
+  return fold(real) === fold(expected) ? real : undefined;
 }
 
 /** The link itself: `unlink` removes a file link, and `rmdir` a directory link or junction. */
