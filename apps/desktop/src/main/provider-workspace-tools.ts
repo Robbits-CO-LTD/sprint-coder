@@ -276,7 +276,7 @@ export const PROJECT_MEMORY_TOOL = auxiliaryTool(
 export const SKILL_DRAFT_TOOL = auxiliaryTool(
   'skill-draft-create',
   'skill_draft_create',
-  'Create one validated Skill Draft for user review without installing it.',
+  'Create one validated Skill Draft for user review without installing it. The user approves each draft on a card that shows every file, so all paths and contents together must stay within 100,000 characters and contain no invisible control or format characters.',
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
   'skill.draft.write',
 );

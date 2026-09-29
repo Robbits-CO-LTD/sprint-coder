@@ -183,14 +183,23 @@ export class ApprovalCoordinator {
     if (required.length === 0) return { decision: 'allow', reason: 'no_capability_required' };
     // A per-call approval is only as good as what its card shows (Issue #546). A call whose subject
     // cannot be bound, or whose content the card could not show in full, is refused before any
-    // card exists: there would be nothing the person could meaningfully approve.
+    // card exists: there would be nothing the person could meaningfully approve. The reason reaches
+    // the model as its tool error, so it says what to change; it names no content, and the
+    // diagnostic log keeps it because nothing has been evaluated or audited yet.
     for (const capability of required) {
       if (!requiresPerCallHumanApproval(capability)) continue;
       const subject = perCallApprovalSubject(request, capability);
-      if (subject === null)
-        return { decision: 'deny', reason: 'per_call_approval_subject_unbound' };
-      if (!perCallApprovalDisplayable(subject))
-        return { decision: 'deny', reason: 'approval_content_not_displayable' };
+      const reason =
+        subject === null
+          ? 'per_call_approval_subject_unbound'
+          : perCallApprovalUndisplayableReason(subject);
+      if (reason === undefined) continue;
+      secureLogger.warn(
+        'A per-call approval was refused before its card was raised',
+        { toolName: request.entry.providerName, capability, callId: request.callId, reason },
+        { taskId: request.context.taskId, turnId: request.context.turnId },
+      );
+      return { decision: 'deny', reason };
     }
 
     const evaluations: Array<{ capability: Capability; decision: ToolAuthorizationDecision }> = [];
@@ -897,21 +906,34 @@ function skillDraftApprovalInput(input: unknown): {
 
 /**
  * Mirrors the bounds persistence keeps an approval display within: anything longer would reach the
- * card cut short. A control character draws as nothing, and a bidirectional override or isolate
- * reorders what is drawn, so text carrying either would not read on the card as what gets saved.
+ * card cut short.
  */
 const APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS = 500;
 const APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS = 100_000;
+/**
+ * Characters the card would not show as themselves, so the person would approve text they did not
+ * read. Control characters (other than tab, line feed, and carriage return) and format characters
+ * draw as nothing or reorder what is drawn; line and paragraph separators, private-use, and
+ * unassigned codepoints have no reliable glyph.
+ *
+ * `\p{Cf}` rather than a hand-picked list, for the reason `computerUseUntrustedTextSchemaOf` in the
+ * contracts gives: the Unicode Tag block (U+E0000-U+E007F) spells a whole sentence in invisible
+ * codepoints, which would then sit in Project memory and be read by every later Turn, and a single
+ * U+200B inside a token is enough to hide it from the secret scanner. Combining marks stay allowed:
+ * NFD Japanese and emoji with U+FE0F depend on them. ZWJ is a format character, so an emoji joined
+ * by it is refused, which is accepted.
+ */
 const APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS =
-  // eslint-disable-next-line no-control-regex
-  /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u;
+  /[\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}]|(?![\t\n\r])\p{Cc}/u;
 
-function perCallApprovalDisplayable(subject: PerCallApprovalSubject): boolean {
-  return (
-    subject.label.length <= APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS &&
-    subject.execution.length <= APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS &&
-    !subject.shown.some((text) => APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.test(text))
-  );
+function perCallApprovalUndisplayableReason(subject: PerCallApprovalSubject): string | undefined {
+  if (subject.label.length > APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS)
+    return `approval_content_not_displayable: the approval card target is longer than ${APPROVAL_DISPLAY_TARGET_MAX_CHARACTERS} characters`;
+  if (subject.execution.length > APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS)
+    return `approval_content_not_displayable: the approval card shows at most ${APPROVAL_DISPLAY_EXECUTION_MAX_CHARACTERS} characters of serialized content, including every file path and content`;
+  if (subject.shown.some((text) => APPROVAL_DISPLAY_UNDISPLAYABLE_CHARACTERS.test(text)))
+    return 'approval_content_not_displayable: the content contains invisible control or format characters (for example zero-width, bidirectional, or Unicode Tag characters) that the approval card cannot show';
+  return undefined;
 }
 
 function displayTarget(input: unknown): string {
