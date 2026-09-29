@@ -1,5 +1,19 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import type { GrokProtocolFailureCode } from './protocol';
+
+/**
+ * A Grok ACP failure with a fixed diagnostic code (issue #506). The message is fixed text too:
+ * parser, handler and provider text never reaches a diagnostic.
+ */
+export class GrokProtocolFailure extends Error {
+  constructor(
+    readonly failureCode: GrokProtocolFailureCode,
+    message = 'Invalid Grok ACP stream',
+  ) {
+    super(message);
+  }
+}
 
 export function grokRecord(value: unknown): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
@@ -35,11 +49,13 @@ export class GrokAcpClient {
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
       timer: ReturnType<typeof setTimeout>;
+      onResult: ((result: unknown, frame: number) => void) | undefined;
     }
   >();
   private buffered = '';
   private readonly decoder = new StringDecoder('utf8');
   private bytes = 0;
+  private frames = 0;
   private ended = false;
 
   constructor(
@@ -51,36 +67,79 @@ export class GrokAcpClient {
       if (this.ended) return;
       try {
         this.bytes += chunk.length;
-        if (this.bytes > 64 * 1024 * 1024) throw new Error('Grok output quota exceeded');
+        if (this.bytes > 64 * 1024 * 1024)
+          throw new GrokProtocolFailure('output_quota_exceeded', 'Grok output quota exceeded');
         this.buffered += this.decoder.write(chunk);
         let index: number;
         while ((index = this.buffered.indexOf('\n')) >= 0) {
           const line = this.buffered.slice(0, index);
           this.buffered = this.buffered.slice(index + 1);
-          if (Buffer.byteLength(line) > 1024 * 1024) throw new Error('Grok frame too large');
-          if (line.trim() !== '') this.receive(JSON.parse(line));
+          if (Buffer.byteLength(line) > 1024 * 1024)
+            throw new GrokProtocolFailure('frame_too_large', 'Grok frame too large');
+          if (line.trim() === '') continue;
+          this.frames += 1;
+          let frame: unknown;
+          try {
+            frame = JSON.parse(line);
+          } catch {
+            throw new GrokProtocolFailure('json_parse_failed');
+          }
+          this.receive(frame);
         }
-        if (Buffer.byteLength(this.buffered) > 1024 * 1024) throw new Error('Grok frame too large');
-      } catch {
-        this.abort(new Error('Invalid Grok ACP stream'));
+        if (Buffer.byteLength(this.buffered) > 1024 * 1024)
+          throw new GrokProtocolFailure('frame_too_large', 'Grok frame too large');
+      } catch (error) {
+        // Only a fixed code leaves here; a validation error's own text is dropped.
+        this.abort(
+          error instanceof GrokProtocolFailure ? error : new GrokProtocolFailure('rpc_invalid'),
+        );
       }
     });
-    child.stdin.on('error', () => this.abort(new Error('Grok stdin failed')));
-    child.once('error', () => this.abort(new Error('Grok process failed')));
-    child.once('close', () => this.abort(new Error('Grok process exited')));
+    child.stdin.on('error', () =>
+      this.abort(new GrokProtocolFailure('stdin_failed', 'Grok stdin failed')),
+    );
+    child.once('error', () =>
+      this.abort(new GrokProtocolFailure('process_error', 'Grok process failed')),
+    );
+    child.once('close', () =>
+      this.abort(new GrokProtocolFailure('process_exited', 'Grok process exited')),
+    );
   }
 
-  request(method: string, params: unknown, timeoutMs = 30_000): Promise<unknown> {
-    if (this.ended) return Promise.reject(new Error('Grok transport is closed'));
-    if (this.pending.size >= 128) return Promise.reject(new Error('Too many Grok requests'));
+  /** Non-blank frames delimited so far, including one that then failed to parse. */
+  get receivedFrames(): number {
+    return this.frames;
+  }
+
+  /** Whether bytes after the last newline are still waiting for their terminator. */
+  get partialFrame(): boolean {
+    return this.buffered.slice(this.buffered.lastIndexOf('\n') + 1) !== '';
+  }
+
+  /**
+   * `onResult` sees a successful result with its frame sequence while that frame is parsed, before
+   * later frames of the same chunk and before the returned promise settles.
+   */
+  request(
+    method: string,
+    params: unknown,
+    timeoutMs = 30_000,
+    onResult?: (result: unknown, frame: number) => void,
+  ): Promise<unknown> {
+    if (this.ended)
+      return Promise.reject(
+        new GrokProtocolFailure('transport_closed', 'Grok transport is closed'),
+      );
+    if (this.pending.size >= 128)
+      return Promise.reject(new GrokProtocolFailure('too_many_requests', 'Too many Grok requests'));
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error('Grok request timed out'));
+        reject(new GrokProtocolFailure('request_timeout', 'Grok request timed out'));
       }, timeoutMs);
       timer.unref?.();
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, onResult });
       this.write({ jsonrpc: '2.0', id, method, params });
     });
   }
@@ -94,7 +153,7 @@ export class GrokAcpClient {
     this.ended = true;
     for (const request of this.pending.values()) {
       clearTimeout(request.timer);
-      request.reject(new Error('Grok transport closed'));
+      request.reject(new GrokProtocolFailure('transport_closed', 'Grok transport closed'));
     }
     this.pending.clear();
   }
@@ -132,7 +191,14 @@ export class GrokAcpClient {
           });
         return;
       }
-      this.notify(method, message['params']);
+      try {
+        this.notify(method, message['params']);
+      } catch (error) {
+        // An adapter check keeps its own code; anything else the handler threw is only counted.
+        throw error instanceof GrokProtocolFailure
+          ? error
+          : new GrokProtocolFailure('notification_handler_failed');
+      }
       return;
     }
     const id = message['id'];
@@ -154,8 +220,14 @@ export class GrokAcpClient {
       const code = typeof rpcError['code'] === 'number' ? rpcError['code'] : -32603;
       const classified = classifyGrokRpcFailure(code, rpcError['message'], rpcError['data']);
       pending.reject(new GrokRpcError(code, classified.category, classified.httpStatus));
-    } else if ('result' in message) pending.resolve(message['result']);
-    else pending.reject(new Error('Missing Grok result'));
+    } else if ('result' in message) {
+      try {
+        pending.onResult?.(message['result'], this.frames);
+      } catch {
+        // Observation must never change how the reply settles.
+      }
+      pending.resolve(message['result']);
+    } else pending.reject(new GrokProtocolFailure('rpc_invalid', 'Missing Grok result'));
   }
 }
 

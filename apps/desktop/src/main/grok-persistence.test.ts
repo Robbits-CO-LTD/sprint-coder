@@ -10,6 +10,7 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient } from './persistence';
 import { modelSelectionForRuntime } from './connection-identity';
 import { buildProviderFailureDiagnostic } from './provider-failure-diagnostic';
+import type { GrokProtocolDiagnostic } from '../runtime-host/protocol';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -617,6 +618,91 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1') {
       ).toEqual({ count: 1 });
       expect(after.pragma('foreign_key_check')).toEqual([]);
       after.close();
+    });
+  });
+
+  describe('Grok protocol diagnostic persistence (issue #506)', () => {
+    const grokProtocol: GrokProtocolDiagnostic = {
+      phase: 'prompt',
+      failureCode: 'turn_no_assistant_text',
+      promptResultReceived: true,
+      stopReason: 'end_turn',
+      receivedFrames: 6,
+      promptResultFrame: 6,
+      lastSessionUpdateFrame: 3,
+      lastSessionUpdate: 'available_commands_update',
+      lastMessageChunkFrame: null,
+      assistantTextObserved: false,
+      assistantTextChars: 0,
+      pendingToolCount: 0,
+      partialFrame: false,
+      stopConfirmation: 'confirmed',
+    };
+
+    it('stores grokProtocol for Grok and reads the same value back', () => {
+      const path = databasePath();
+      const persistence = new SqlitePersistenceClient(path);
+      persistence.setRuntime('grok');
+      const turn = seedTurn(persistence, 'grok protocol');
+      const diagnostic = { ...cliDiagnostic('grok', 'protocol_error'), grokProtocol };
+      expect(
+        persistence.recordRuntimeFailureDiagnostic(turn.taskId, turn.turnId, diagnostic),
+      ).toMatchObject({ diagnosticId: diagnostic.diagnosticId, grokProtocol });
+      const codexTurn = seedTurn(persistence, 'codex protocol');
+      expect(() =>
+        persistence.recordRuntimeFailureDiagnostic(codexTurn.taskId, codexTurn.turnId, {
+          ...cliDiagnostic('codex', 'protocol_error'),
+          grokProtocol,
+        }),
+      ).toThrow('Invalid Runtime diagnostic');
+      persistence.close();
+
+      const raw = new Database(path);
+      const saved = raw
+        .prepare('SELECT diagnostic_json FROM runtime_failure_diagnostics WHERE id = ?')
+        .get(diagnostic.diagnosticId) as { diagnostic_json: string };
+      expect(JSON.parse(saved.diagnostic_json).grokProtocol).toEqual(grokProtocol);
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      for (const query of [{ diagnosticId: diagnostic.diagnosticId }, { taskId: turn.taskId }])
+        expect(reopened.getRuntimeFailureDiagnostic(query)).toMatchObject({
+          runtimeKind: 'grok',
+          failureStage: 'protocol_error',
+          grokProtocol,
+        });
+      expect(reopened.getRuntimeFailureDiagnostic({ taskId: codexTurn.taskId })).toBeNull();
+      reopened.close();
+    });
+
+    it('reads a Grok diagnostic saved before grokProtocol existed as it was', () => {
+      const path = databasePath();
+      const persistence = new SqlitePersistenceClient(path);
+      persistence.setRuntime('grok');
+      const turn = seedTurn(persistence, 'legacy grok diagnostic');
+      persistence.close();
+      const legacy = cliDiagnostic('grok', 'protocol_error');
+      const raw = new Database(path);
+      raw
+        .prepare(
+          `INSERT INTO runtime_failure_diagnostics(
+             id, task_id, turn_id, runtime_kind, failure_stage, diagnostic_json, created_at
+           ) VALUES (?, ?, ?, 'grok', 'protocol_error', ?, ?)`,
+        )
+        .run(
+          legacy.diagnosticId,
+          turn.taskId,
+          turn.turnId,
+          JSON.stringify(legacy),
+          legacy.recordedAt,
+        );
+      raw.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      const loaded = reopened.getRuntimeFailureDiagnostic({ diagnosticId: legacy.diagnosticId });
+      expect(loaded).toEqual({ ...legacy, taskId: turn.taskId, turnId: turn.turnId });
+      expect(loaded).not.toHaveProperty('grokProtocol');
+      reopened.close();
     });
   });
 } else {

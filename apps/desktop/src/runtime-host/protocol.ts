@@ -201,6 +201,118 @@ export type ResolvedCliCommand = Readonly<{
   capabilities: readonly string[];
 }>;
 
+/** How far the Grok ACP session got before it failed. */
+export const GROK_PROTOCOL_PHASES = [
+  'initialize',
+  'authenticate',
+  'session',
+  'inventory',
+  'prompt',
+  'stopping',
+] as const;
+export type GrokProtocolPhase = (typeof GROK_PROTOCOL_PHASES)[number];
+
+/** Fixed Grok failure causes. Raw error text never crosses the Runtime boundary. */
+export const GROK_PROTOCOL_FAILURE_CODES = [
+  // Transport (grok-acp.ts)
+  'output_quota_exceeded',
+  'frame_too_large',
+  'json_parse_failed',
+  'rpc_invalid',
+  'notification_handler_failed',
+  'stdin_failed',
+  'process_error',
+  'process_exited',
+  'request_timeout',
+  'too_many_requests',
+  'transport_closed',
+  // RPC errors, by their existing GrokRpcError category
+  'rpc_authentication',
+  'rpc_rate_limit',
+  'rpc_billing',
+  'rpc_other',
+  // Adapter checks (grok-adapter.ts)
+  'initialize_invalid',
+  'session_invalid',
+  'model_binding_failed',
+  'session_mismatch',
+  'session_update_invalid',
+  'inventory_violation',
+  'content_before_inventory',
+  'invalid_tool_identity',
+  'too_many_tools',
+  'startup_quota',
+  'tool_inventory_timeout',
+  'mcp_inventory_invalid',
+  'mcp_inventory_timeout',
+  'prompt_result_invalid',
+  'turn_stop_reason',
+  'turn_pending_tools',
+  'turn_no_assistant_text',
+  'model_mismatch',
+  'stop_unconfirmed',
+  // Progress deadline
+  'first_event_timeout',
+  'idle_timeout',
+  'total_timeout',
+  'unexpected',
+] as const;
+export type GrokProtocolFailureCode = (typeof GROK_PROTOCOL_FAILURE_CODES)[number];
+
+/** ACP stop reasons. Anything else a CLI sends is `other`. */
+export const GROK_STOP_REASONS = [
+  'end_turn',
+  'max_tokens',
+  'max_turn_requests',
+  'refusal',
+  'cancelled',
+  'other',
+] as const;
+export type GrokStopReason = (typeof GROK_STOP_REASONS)[number];
+
+/** ACP `sessionUpdate` kinds. Anything else a CLI sends is `other`. */
+export const GROK_SESSION_UPDATE_KINDS = [
+  'user_message_chunk',
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'available_commands_update',
+  'current_mode_update',
+  'other',
+] as const;
+export type GrokSessionUpdateKind = (typeof GROK_SESSION_UPDATE_KINDS)[number];
+
+/** Frame and character counts cannot exceed the 64 MiB Grok output quota. */
+export const GROK_PROTOCOL_COUNT_MAX = 64 * 1024 * 1024;
+/** The adapter fails once more than 128 tools are pending. */
+export const GROK_PROTOCOL_PENDING_TOOL_MAX = 256;
+
+/**
+ * Grok ACP state captured when the first failure was detected (issue #506). Frames are the
+ * 1-based sequence of non-blank JSONL lines received. Session IDs, tool arguments, notification
+ * names and text are deliberately absent.
+ */
+export type GrokProtocolDiagnostic = Readonly<{
+  phase: GrokProtocolPhase;
+  failureCode: GrokProtocolFailureCode;
+  promptResultReceived: boolean;
+  stopReason: GrokStopReason | null;
+  receivedFrames: number;
+  promptResultFrame: number | null;
+  lastSessionUpdateFrame: number | null;
+  lastSessionUpdate: GrokSessionUpdateKind | null;
+  lastMessageChunkFrame: number | null;
+  assistantTextObserved: boolean;
+  /** UTF-16 length of accepted assistant text, capped at GROK_PROTOCOL_COUNT_MAX. */
+  assistantTextChars: number;
+  pendingToolCount: number;
+  /** Bytes after the last newline were still waiting for their terminator. */
+  partialFrame: boolean;
+  stopConfirmation: 'confirmed' | 'unconfirmed';
+}>;
+
 export type RuntimeFailureDiagnostic = Readonly<{
   version: 1;
   diagnosticId: string;
@@ -208,6 +320,8 @@ export type RuntimeFailureDiagnostic = Readonly<{
   failureStage: RuntimeFailureStage;
   /** Observed Grok HTTP status. Absent unless it was an integer from 100 to 599. */
   httpStatus?: number;
+  /** Grok only. */
+  grokProtocol?: GrokProtocolDiagnostic;
   elapsedMs: number;
   appVersion: string;
   cliVersion: string | null;
@@ -1039,6 +1153,7 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
         'runtimeKind',
         'failureStage',
         'httpStatus',
+        'grokProtocol',
         'elapsedMs',
         'appVersion',
         'cliVersion',
@@ -1067,6 +1182,9 @@ export function isRuntimeFailureDiagnostic(value: unknown): value is RuntimeFail
     (!('httpStatus' in record) ||
       record['httpStatus'] === undefined ||
       isAllowedDiagnosticHttpStatus(record['runtimeKind'], record['httpStatus'])) &&
+    (!('grokProtocol' in record) ||
+      record['grokProtocol'] === undefined ||
+      (record['runtimeKind'] === 'grok' && isGrokProtocolDiagnostic(record['grokProtocol']))) &&
     typeof record['elapsedMs'] === 'number' &&
     Number.isSafeInteger(record['elapsedMs']) &&
     record['elapsedMs'] >= 0 &&
@@ -1164,6 +1282,60 @@ function isCodexIsolationDiagnostic(value: unknown): boolean {
     Number(record['disabledUnexpectedSkillCount']) >= 0 &&
     Number(record['disabledUnexpectedSkillCount']) <= 10_000 &&
     typeof record['verified'] === 'boolean'
+  );
+}
+
+const GROK_PROTOCOL_DIAGNOSTIC_KEYS = [
+  'phase',
+  'failureCode',
+  'promptResultReceived',
+  'stopReason',
+  'receivedFrames',
+  'promptResultFrame',
+  'lastSessionUpdateFrame',
+  'lastSessionUpdate',
+  'lastMessageChunkFrame',
+  'assistantTextObserved',
+  'assistantTextChars',
+  'pendingToolCount',
+  'partialFrame',
+  'stopConfirmation',
+] as const;
+
+function isOneOf(values: readonly string[], value: unknown): boolean {
+  return typeof value === 'string' && values.includes(value);
+}
+
+function isBoundedCount(value: unknown, max: number): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max;
+}
+
+function isGrokProtocolDiagnostic(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const frame = (candidate: unknown): boolean =>
+    candidate === null || isBoundedCount(candidate, GROK_PROTOCOL_COUNT_MAX);
+  // Fields are checked one by one only: a cross-field rule that a producer bug broke would make
+  // Main drop the whole error envelope, losing the failure itself.
+  return (
+    keys.length === GROK_PROTOCOL_DIAGNOSTIC_KEYS.length &&
+    GROK_PROTOCOL_DIAGNOSTIC_KEYS.every((key) => keys.includes(key)) &&
+    isOneOf(GROK_PROTOCOL_PHASES, record['phase']) &&
+    isOneOf(GROK_PROTOCOL_FAILURE_CODES, record['failureCode']) &&
+    typeof record['promptResultReceived'] === 'boolean' &&
+    (record['stopReason'] === null || isOneOf(GROK_STOP_REASONS, record['stopReason'])) &&
+    isBoundedCount(record['receivedFrames'], GROK_PROTOCOL_COUNT_MAX) &&
+    frame(record['promptResultFrame']) &&
+    frame(record['lastSessionUpdateFrame']) &&
+    (record['lastSessionUpdate'] === null ||
+      isOneOf(GROK_SESSION_UPDATE_KINDS, record['lastSessionUpdate'])) &&
+    frame(record['lastMessageChunkFrame']) &&
+    typeof record['assistantTextObserved'] === 'boolean' &&
+    isBoundedCount(record['assistantTextChars'], GROK_PROTOCOL_COUNT_MAX) &&
+    isBoundedCount(record['pendingToolCount'], GROK_PROTOCOL_PENDING_TOOL_MAX) &&
+    typeof record['partialFrame'] === 'boolean' &&
+    isOneOf(['confirmed', 'unconfirmed'], record['stopConfirmation'])
   );
 }
 

@@ -6,7 +6,7 @@ import {
   RuntimeFailureDiagnosticCollector,
   resolveRuntimeFailureDiagnostic,
 } from './runtime-failure-diagnostics';
-import { isRuntimeFailureDiagnostic } from './protocol';
+import { isRuntimeFailureDiagnostic, type GrokProtocolDiagnostic } from './protocol';
 
 describe('resolveRuntimeFailureDiagnostic', () => {
   it('creates a safe protocol-error fallback without retaining untrusted failure details', () => {
@@ -356,5 +356,65 @@ describe('RuntimeFailureDiagnosticCollector', () => {
     expect(isRuntimeFailureDiagnostic(codexDiagnostic)).toBe(true);
     expect(isRuntimeFailureDiagnostic(codex.snapshot('billing_error'))).toBe(false);
     expect(isRuntimeFailureDiagnostic(codex.snapshot('rate_limit'))).toBe(false);
+  });
+});
+
+describe('Grok protocol diagnostic (issue #506)', () => {
+  const grokProtocol: GrokProtocolDiagnostic = {
+    phase: 'prompt',
+    failureCode: 'turn_no_assistant_text',
+    promptResultReceived: true,
+    stopReason: 'end_turn',
+    receivedFrames: 6,
+    promptResultFrame: 6,
+    lastSessionUpdateFrame: 3,
+    lastSessionUpdate: 'available_commands_update',
+    lastMessageChunkFrame: null,
+    assistantTextObserved: false,
+    assistantTextChars: 0,
+    pendingToolCount: 0,
+    partialFrame: false,
+    stopConfirmation: 'confirmed',
+  };
+
+  it('keeps only the first recorded Grok protocol state', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('grok', '0.7.0', 'grok 1.0.0', false);
+    expect(collector.snapshot('protocol_error')).not.toHaveProperty('grokProtocol');
+    collector.recordGrokProtocol(grokProtocol);
+    collector.recordGrokProtocol({
+      ...grokProtocol,
+      failureCode: 'process_exited',
+      receivedFrames: 9,
+    });
+    const diagnostic = collector.snapshot('protocol_error');
+    expect(diagnostic.grokProtocol).toEqual(grokProtocol);
+    expect(isRuntimeFailureDiagnostic(diagnostic)).toBe(true);
+  });
+
+  it.each(['codex', 'claude'] as const)('ignores Grok protocol state on %s', (runtimeKind) => {
+    const collector = new RuntimeFailureDiagnosticCollector(runtimeKind, '0.7.0', null, false);
+    collector.recordGrokProtocol(grokProtocol);
+    const diagnostic = collector.snapshot('protocol_error');
+    expect(diagnostic).not.toHaveProperty('grokProtocol');
+    expect(isRuntimeFailureDiagnostic(diagnostic)).toBe(true);
+  });
+
+  it('keeps grokProtocol when Main resolves an adapter diagnostic', () => {
+    const collector = new RuntimeFailureDiagnosticCollector('grok', '0.7.0', 'grok 1.0.0', false);
+    collector.recordGrokProtocol(grokProtocol);
+    const existing = collector.snapshot('protocol_error', 2_000);
+    for (const errorCode of ['RUNTIME_PROTOCOL_ERROR', 'RUNTIME_STOP_UNCONFIRMED']) {
+      const resolved = resolveRuntimeFailureDiagnostic({
+        errorCode,
+        diagnostic: existing,
+        runtimeKind: 'grok',
+        appVersion: 'ignored',
+        startedAtMs: 1_000,
+        teamMcpEnabled: true,
+        nowMs: 2_000,
+      });
+      expect(resolved).toBe(existing);
+      expect(resolved?.grokProtocol).toEqual(grokProtocol);
+    }
   });
 });
