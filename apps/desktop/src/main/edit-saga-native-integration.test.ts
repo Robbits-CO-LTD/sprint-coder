@@ -9,7 +9,7 @@
 // persistence.test.ts) this file re-spawns itself once under the bundled Electron
 // binary with ELECTRON_RUN_AS_NODE=1 unless it is already running that way.
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   chmod,
   lstat,
@@ -18,6 +18,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   rm,
   writeFile,
 } from 'node:fs/promises';
@@ -287,6 +288,39 @@ function crashAfterNativeCall(native: NativeSafeFs, method: keyof NativeSafeFs):
   }) as NativeSafeFs;
 }
 
+/**
+ * Scripts the native preflight of the forward update: each call takes the next answer ('crash'
+ * dies as the process would before answering, 'refuse' refuses), and calls past the script ask the
+ * real addon. `calls` counts the forward update preflights, so a refused step asked about again
+ * during compensation, when the preflight would now allow it, shows up as another call.
+ */
+function scriptForwardUpdatePreflight(
+  native: NativeSafeFs,
+  script: readonly ('crash' | 'refuse')[],
+): { native: NativeSafeFs; calls: () => number } {
+  let calls = 0;
+  const preflight = native.preflightIntentEffect;
+  if (preflight === undefined) throw new Error('Native preflight is not available');
+  const scripted: NativeSafeFs = Object.freeze({
+    ...native,
+    preflightIntentEffect: async (
+      ...args: Parameters<NonNullable<NativeSafeFs['preflightIntentEffect']>>
+    ) => {
+      const [, seed] = args;
+      if (seed.direction !== 'forward' || seed.kind !== 'update')
+        return Reflect.apply(preflight, native, args);
+      const answer = script[calls];
+      calls += 1;
+      if (answer === 'crash')
+        throw new EditSagaCrashError('simulated process crash before the preflight answered');
+      if (answer === 'refuse')
+        return Object.freeze({ allowed: false as const, reason: 'refused by the test preflight' });
+      return Reflect.apply(preflight, native, args);
+    },
+  });
+  return { native: scripted, calls: () => calls };
+}
+
 async function preparePersistence(env: Fixture) {
   const persistence = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
   const task = persistence.createTask();
@@ -324,12 +358,157 @@ function buildRequest(input: {
   });
 }
 
+/**
+ * The environment for a Windows PowerShell 5.1 child. A PSModulePath inherited from a PowerShell 7
+ * parent (a CI step, a pwsh terminal) points 5.1 at modules it cannot load, so Get-Acl and Set-Acl
+ * fail with CouldNotAutoloadMatchingModule; without it, 5.1 uses its own module path.
+ */
+function windowsPowerShellEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...extra };
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'psmodulepath') delete env[key];
+  return env;
+}
+
+/**
+ * Windows only: a file's DACL as SDDL. `ownerOnly` first replaces it with a protected DACL that
+ * grants the current user alone.
+ */
+async function windowsDacl(path: string, ownerOnly = false): Promise<string> {
+  const script = [
+    '$path = $env:SPRINT_CODER_DACL_PATH',
+    "if ($env:SPRINT_CODER_DACL_OWNER_ONLY -eq '1') {",
+    '  $acl = Get-Acl -LiteralPath $path',
+    '  $user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    '  $acl.SetSecurityDescriptorSddlForm("D:P(A;;FA;;;$user)", "Access")',
+    '  Set-Acl -LiteralPath $path -AclObject $acl',
+    '}',
+    '(Get-Acl -LiteralPath $path).GetSecurityDescriptorSddlForm("Access")',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: windowsPowerShellEnv({
+      SPRINT_CODER_DACL_PATH: path,
+      SPRINT_CODER_DACL_OWNER_ONLY: ownerOnly ? '1' : '',
+    }),
+  });
+  if (result.status !== 0) throw new Error(`Get-Acl failed: ${result.stderr}`);
+  return result.stdout.trim();
+}
+
+/** One DACL entry: `flags` without INHERITED_ACE, which `inherited` carries. */
+type WindowsAce = { type: string; flags: number; inherited: boolean; mask: number; sid: string };
+
+/**
+ * A DACL as what grants access: whether it is protected and its entries (null for a NULL DACL),
+ * with every SID in its `S-` form. The other control flags, such as SE_DACL_AUTO_INHERITED (`AI`),
+ * and SDDL's SID aliases depend on how the descriptor was written and on who runs the test, not on
+ * who can access the file, so tests compare this instead of the SDDL text.
+ */
+type WindowsAccess = { protected: boolean; entries: WindowsAce[] | null };
+
+/** Windows only: `windowsDacl`, returned as the access it grants (see `WindowsAccess`). */
+async function windowsAccess(path: string, ownerOnly = false): Promise<WindowsAccess> {
+  const script = [
+    '$protected = $false',
+    '$entries = $null',
+    'if ($env:SPRINT_CODER_DACL_SDDL) {',
+    '  $sd = New-Object Security.AccessControl.RawSecurityDescriptor ($env:SPRINT_CODER_DACL_SDDL)',
+    '  $flag = [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected',
+    '  $protected = ($sd.ControlFlags -band $flag) -ne 0',
+    '  if ($null -ne $sd.DiscretionaryAcl) {',
+    '    $entries = @(foreach ($ace in $sd.DiscretionaryAcl) {',
+    '      $aceFlags = [int]$ace.AceFlags',
+    '      [ordered]@{ type = $ace.AceType.ToString(); flags = $aceFlags -band 0xEF;',
+    '        inherited = ($aceFlags -band 0x10) -ne 0; mask = $ace.AccessMask;',
+    '        sid = $ace.SecurityIdentifier.Value }',
+    '    })',
+    '  }',
+    '}',
+    'ConvertTo-Json -Compress -Depth 4 -InputObject ([ordered]@{',
+    '  protected = $protected; entries = $entries })',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: windowsPowerShellEnv({ SPRINT_CODER_DACL_SDDL: await windowsDacl(path, ownerOnly) }),
+  });
+  if (result.status !== 0) throw new Error(`parsing the DACL failed: ${result.stderr}`);
+  return JSON.parse(result.stdout) as WindowsAccess;
+}
+
+/**
+ * Windows only: writes a DACL through SetFileSecurityW, which stores it as given, so a protected
+ * DACL keeps entries flagged as inherited (what a re-application through SetSecurityInfo drops).
+ */
+function windowsSetRawDacl(path: string, sddl: string): void {
+  const script = [
+    'Add-Type -TypeDefinition @"',
+    'using System; using System.Runtime.InteropServices;',
+    'public static class RawSd {',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    '  public static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string s, uint r, out IntPtr sd, IntPtr size);',
+    '  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]',
+    '  public static extern bool SetFileSecurityW(string f, uint info, IntPtr sd);',
+    '}',
+    '"@',
+    '$user = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+    "$sddl = $env:SPRINT_CODER_RAW_SDDL.Replace('{user}', $user)",
+    '$sd = [IntPtr]::Zero',
+    'if (-not [RawSd]::ConvertStringSecurityDescriptorToSecurityDescriptorW($sddl, 1, [ref]$sd, [IntPtr]::Zero)) { throw "convert" }',
+    'if (-not [RawSd]::SetFileSecurityW($env:SPRINT_CODER_RAW_PATH, 4, $sd)) { throw "set" }',
+  ].join('\n');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-Command', script], {
+    encoding: 'utf8',
+    env: windowsPowerShellEnv({ SPRINT_CODER_RAW_PATH: path, SPRINT_CODER_RAW_SDDL: sddl }),
+  });
+  if (result.status !== 0) throw new Error(`SetFileSecurityW failed: ${result.stderr}`);
+}
+
+/**
+ * Windows only: a separate process that opens `path` the way .NET's default FileShare.Read does
+ * (no FILE_SHARE_DELETE) and holds it until killed.
+ */
+async function holdWithoutShareDelete(path: string): Promise<ReturnType<typeof spawn>> {
+  const holder = spawn(
+    'powershell.exe',
+    [
+      '-NoProfile',
+      '-Command',
+      [
+        "$stream = [IO.File]::Open($env:SPRINT_CODER_HELD_PATH, 'Open', 'Read', 'Read')",
+        "[Console]::Out.WriteLine('held')",
+        '[Console]::Out.Flush()',
+        'Start-Sleep -Seconds 120',
+      ].join('; '),
+    ],
+    {
+      env: windowsPowerShellEnv({ SPRINT_CODER_HELD_PATH: path }),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    },
+  );
+  await new Promise<void>((resolve, reject) => {
+    holder.stdout!.on('data', (chunk: Buffer) => {
+      if (chunk.toString().includes('held')) resolve();
+    });
+    holder.once('exit', () => reject(new Error('the holder exited before holding the file')));
+  });
+  return holder;
+}
+
+function currentUserSid(): string {
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-Command', '[Security.Principal.WindowsIdentity]::GetCurrent().User.Value'],
+    { encoding: 'utf8', env: windowsPowerShellEnv() },
+  );
+  return result.stdout.trim();
+}
+
 async function expectMissing(path: string): Promise<void> {
   await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
 }
 
 if (runsWithElectronAbi) {
-  describe.runIf(process.platform === 'win32')('Windows add-only EditSaga integration', () => {
+  describe.runIf(process.platform === 'win32')('Windows EditSaga integration', () => {
     it('commits an add through the real native boundary', async () => {
       const env = await fixture('windows-add');
       const native = loadNativeSafeFs({
@@ -401,9 +580,591 @@ if (runsWithElectronAbi) {
       expect(verification).toMatchObject({ decision: 'complete' });
       await expect(readFile(operation.canonicalPath, 'utf8')).resolves.toBe('WINDOWS_ADD');
     });
+
+    it('restores updated, renamed and deleted files under their original access control', async () => {
+      const env = await fixture('windows-compensate-acl');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      // Owner-only protected DACLs on the updated and renamed files; the identity digests the plan
+      // sealed do not depend on them. A delete of such a file is refused (native-safe-fs.test.ts),
+      // so the deleted file keeps the DACL it inherits, which re-creating it reproduces.
+      const restoredPaths = {
+        update: paths.updatePath,
+        rename: paths.renameSrcPath,
+        delete: paths.deletePath,
+      };
+      // Whatever a runner adds to the files it creates, the deleted one starts with only what it
+      // inherits from the Workspace.
+      const reset = spawnSync('icacls.exe', [paths.deletePath, '/reset'], { encoding: 'utf8' });
+      expect(reset.status, reset.stderr).toBe(0);
+      const original: Record<string, WindowsAccess> = {};
+      for (const [kind, path] of Object.entries(restoredPaths))
+        original[kind] = await windowsAccess(path, kind !== 'delete');
+      expect(original['delete']!.protected).toBe(false);
+      expect(original['delete']!.entries!.every((entry) => entry.inherited)).toBe(true);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        {
+          hit(point) {
+            if (point.kind === 'beforeFinalize')
+              throw new Error('deterministic finalize failure injected by test');
+          },
+        },
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-compensate-acl'),
+      );
+
+      const result = await executor.apply(
+        buildRequest({
+          id: 'saga-windows-compensate-acl',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'op-windows-compensate-acl',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+
+      expect(result.state).toBe('restored');
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+      const restored: Record<string, WindowsAccess> = {};
+      for (const [kind, path] of Object.entries(restoredPaths))
+        restored[kind] = await windowsAccess(path);
+      expect(restored).toEqual(original);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
+    it.each([
+      ['after an update it has to undo', true],
+      ['on its own', false],
+    ])(
+      'leaves a patch unapplied when Windows refuses its delete %s',
+      async (_label, withUpdate) => {
+        const env = await fixture(`windows-refused-${withUpdate ? 'batch' : 'single'}`);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const { resolveSession, sessions } = makeResolveSession(native, env);
+        const keptPath = join(env.workspace, 'kept.txt');
+        const ownPath = join(env.workspace, 'own-acl.txt');
+        await writeFile(keptPath, 'UPDATE_BEFORE', { mode: 0o600 });
+        await writeFile(ownPath, 'OWN_ACL', { mode: 0o600 });
+        const ownAccess = await windowsAccess(ownPath, true);
+        const operations: PreparedPatchOperation[] = [];
+        if (withUpdate)
+          operations.push(
+            Object.freeze({
+              kind: 'update' as const,
+              path: 'kept.txt',
+              canonicalPath: keptPath,
+              destination: null,
+              canonicalDestination: null,
+              revisionTokenId: 'token-kept',
+              preRevision: await fileRevision(keptPath),
+              preImage: 'UPDATE_BEFORE',
+              postImage: 'UPDATE_AFTER',
+              preHash: hash('UPDATE_BEFORE'),
+              postHash: hash('UPDATE_AFTER'),
+            }),
+          );
+        operations.push(
+          Object.freeze({
+            kind: 'delete' as const,
+            path: 'own-acl.txt',
+            canonicalPath: ownPath,
+            destination: null,
+            canonicalDestination: null,
+            revisionTokenId: 'token-own-acl',
+            preRevision: await fileRevision(ownPath),
+            preImage: 'OWN_ACL',
+            postImage: null,
+            preHash: hash('OWN_ACL'),
+            postHash: null,
+          }),
+        );
+        const facts = {
+          version: 1 as const,
+          policyEpoch: 0,
+          operations: Object.freeze(operations),
+        };
+        const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const instance = `windows-refused-${withUpdate ? 'batch' : 'single'}`;
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: persistence,
+            artifacts,
+            resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, instance),
+        );
+        const request = buildRequest({
+          id: `saga-${instance}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: `op-${instance}`,
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        });
+
+        // The reason is what apply_patch hands the model as its rejection.
+        await expect(executor.apply(request)).rejects.toMatchObject({
+          name: 'EditEffectRefusedError',
+          message: 'このファイルは独自のアクセス制御を持つため、Windows では削除できません',
+        });
+        expect(persistence.getEditSaga(request.id)).toMatchObject({
+          state: 'restored',
+          recovery: null,
+        });
+        await expect(readFile(keptPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+        await expect(readFile(ownPath, 'utf8')).resolves.toBe('OWN_ACL');
+        await expect(windowsAccess(ownPath)).resolves.toEqual(ownAccess);
+        // No intent was journaled for the refused step, so nothing is left to recover.
+        expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        for (const session of sessions.values()) await native.closeSession(session);
+        persistence.close();
+        const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+        expect(
+          reopened.initializeMutationRecovery(`${instance}-2`, new Date().toISOString()),
+        ).toEqual([]);
+        reopened.close();
+      },
+    );
+
+    it('commits updates whose protected DACL has inherited-flagged entries or mixes explicit and inherited ones', async () => {
+      const env = await fixture('windows-carried-dacl-kinds');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      // Every DACL here is written as the test decides, so neither the runner's default access
+      // control nor how icacls rewrites a DACL shapes them: a protected folder passes down full
+      // access for the user and SYSTEM to the two files below it.
+      const carried = join(env.workspace, 'carried');
+      await mkdir(carried);
+      windowsSetRawDacl(carried, 'D:PAI(A;OICI;FA;;;{user})(A;OICI;FA;;;SY)');
+      const protectedPath = join(carried, 'protected.txt');
+      const mixedPath = join(carried, 'mixed.txt');
+      await writeFile(protectedPath, 'UPDATE_BEFORE', { mode: 0o600 });
+      await writeFile(mixedPath, 'UPDATE_BEFORE', { mode: 0o600 });
+      // Protected, with its entries still flagged as inherited.
+      windowsSetRawDacl(protectedPath, 'D:PAI(A;ID;FA;;;{user})(A;ID;FR;;;BU)');
+      // One explicit entry for BUILTIN\Users ahead of the two `carried` passes down.
+      windowsSetRawDacl(mixedPath, 'D:AI(A;;FR;;;BU)(A;ID;FA;;;{user})(A;ID;FA;;;SY)');
+      const user = currentUserSid();
+      const entry = (inherited: boolean, mask: number, sid: string) => ({
+        type: 'AccessAllowed',
+        flags: 0,
+        inherited,
+        mask,
+        sid,
+      });
+      const fullAccess = 0x1f01ff;
+      const readAccess = 0x120089;
+      const protectedAccess = await windowsAccess(protectedPath);
+      const mixedAccess = await windowsAccess(mixedPath);
+      expect(protectedAccess).toEqual({
+        protected: true,
+        entries: [entry(true, fullAccess, user), entry(true, readAccess, 'S-1-5-32-545')],
+      });
+      expect(mixedAccess).toEqual({
+        protected: false,
+        entries: [
+          entry(false, readAccess, 'S-1-5-32-545'),
+          entry(true, fullAccess, user),
+          entry(true, fullAccess, 'S-1-5-18'),
+        ],
+      });
+      const operation = async (path: string, name: string) =>
+        Object.freeze({
+          kind: 'update' as const,
+          path: `carried/${name}`,
+          canonicalPath: path,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: `token-${name}`,
+          preRevision: await fileRevision(path),
+          preImage: 'UPDATE_BEFORE',
+          postImage: 'UPDATE_AFTER',
+          preHash: hash('UPDATE_BEFORE'),
+          postHash: hash('UPDATE_AFTER'),
+        });
+      const facts = {
+        version: 1 as const,
+        policyEpoch: 0,
+        operations: Object.freeze([
+          await operation(protectedPath, 'protected.txt'),
+          await operation(mixedPath, 'mixed.txt'),
+        ]),
+      };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-carried-dacl-kinds'),
+      );
+
+      // The preflight passes both, and staging produces exactly what it predicted.
+      const saga = await executor.apply(
+        buildRequest({
+          id: 'saga-windows-carried-dacl-kinds',
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: 'op-windows-carried-dacl-kinds',
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        }),
+      );
+      expect(saga).toMatchObject({ state: 'committed', recovery: null });
+      await expect(readFile(protectedPath, 'utf8')).resolves.toBe('UPDATE_AFTER');
+      await expect(readFile(mixedPath, 'utf8')).resolves.toBe('UPDATE_AFTER');
+      // A protected re-application keeps every entry and drops only where it came from. Get-Acl
+      // prints explicit entries in canonical order, so compare protection and the set of entries.
+      const withoutOrigin = (access: WindowsAccess) => ({
+        protected: access.protected,
+        entries: (access.entries ?? [])
+          .map(({ inherited: _inherited, ...entry }) => JSON.stringify(entry))
+          .sort(),
+      });
+      expect(withoutOrigin(await windowsAccess(protectedPath))).toEqual(
+        withoutOrigin(protectedAccess),
+      );
+      await expect(windowsAccess(mixedPath)).resolves.toEqual(mixedAccess);
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
+    it.each([
+      ['an inherited integrity label its new parent would not give', 'label', 'update'],
+      ['an inherited integrity label its new parent would not give', 'label', 'delete'],
+      ['a handle another program holds without FILE_SHARE_DELETE', 'held', 'update'],
+      ['a handle another program holds without FILE_SHARE_DELETE', 'held', 'delete'],
+    ] as const)(
+      'refuses before journaling a file with %s (%s, %s) and restores the Saga',
+      async (_label, condition, kind) => {
+        const instance = `windows-refused-${condition}-${kind}`;
+        const env = await fixture(instance);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const { resolveSession, sessions } = makeResolveSession(native, env);
+        const targetPath = join(env.workspace, 'target.txt');
+        let holder: ReturnType<typeof spawn> | null = null;
+        if (condition === 'label') {
+          const labelled = join(env.workspace, 'labelled');
+          await mkdir(labelled);
+          spawnSync('icacls.exe', [labelled, '/setintegritylevel', '(OI)(CI)Low']);
+          await writeFile(join(labelled, 'target.txt'), 'UPDATE_BEFORE', { mode: 0o600 });
+          // The file keeps the Low label it inherited; its new parent passes none down.
+          await rename(join(labelled, 'target.txt'), targetPath);
+        } else {
+          await writeFile(targetPath, 'UPDATE_BEFORE', { mode: 0o600 });
+          holder = await holdWithoutShareDelete(targetPath);
+        }
+        const operation = Object.freeze({
+          kind,
+          path: 'target.txt',
+          canonicalPath: targetPath,
+          destination: null,
+          canonicalDestination: null,
+          revisionTokenId: 'token-target',
+          preRevision: await fileRevision(targetPath),
+          preImage: 'UPDATE_BEFORE',
+          postImage: kind === 'update' ? 'UPDATE_AFTER' : null,
+          preHash: hash('UPDATE_BEFORE'),
+          postHash: kind === 'update' ? hash('UPDATE_AFTER') : null,
+        });
+        const facts = {
+          version: 1 as const,
+          policyEpoch: 0,
+          operations: Object.freeze([operation]),
+        };
+        const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: persistence,
+            artifacts,
+            resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, instance),
+        );
+        try {
+          await expect(
+            executor.apply(
+              buildRequest({
+                id: `saga-${instance}`,
+                taskId: task.id,
+                turnId: turn.turnId,
+                operationId: `op-${instance}`,
+                plan,
+                workspaceKey,
+                rootIdentityDigest,
+              }),
+            ),
+          ).rejects.toMatchObject({
+            name: 'EditEffectRefusedError',
+            message:
+              condition === 'label'
+                ? 'このファイルは整合性レベルを引き継げないため、Windows では更新・削除できません'
+                : 'このファイルは他のプログラムが開いているため、Windows では変更できません',
+          });
+        } finally {
+          holder?.kill();
+        }
+        expect(persistence.getEditSaga(`saga-${instance}`)).toMatchObject({ state: 'restored' });
+        await expect(readFile(targetPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+        expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        for (const session of sessions.values()) await native.closeSession(session);
+        persistence.close();
+      },
+    );
+
+    it('leaves a patch unapplied when Windows refuses to update a file moved in from a stricter directory', async () => {
+      const env = await fixture('windows-refused-moved-update');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const strict = join(env.workspace, 'strict');
+      await mkdir(strict);
+      await windowsDacl(strict, true);
+      // Make the protected DACL inheritable so the file created inside takes it as inherited.
+      spawnSync('icacls.exe', [strict, '/grant:r', `*${currentUserSid()}:(OI)(CI)F`]);
+      const movedPath = join(env.workspace, 'moved.txt');
+      await writeFile(join(strict, 'moved.txt'), 'UPDATE_BEFORE', { mode: 0o600 });
+      await rename(join(strict, 'moved.txt'), movedPath);
+      const movedAccess = await windowsAccess(movedPath);
+      const operation = Object.freeze({
+        kind: 'update' as const,
+        path: 'moved.txt',
+        canonicalPath: movedPath,
+        destination: null,
+        canonicalDestination: null,
+        revisionTokenId: 'token-moved',
+        preRevision: await fileRevision(movedPath),
+        preImage: 'UPDATE_BEFORE',
+        postImage: 'UPDATE_AFTER',
+        preHash: hash('UPDATE_BEFORE'),
+        postHash: hash('UPDATE_AFTER'),
+      });
+      const facts = { version: 1 as const, policyEpoch: 0, operations: Object.freeze([operation]) };
+      const plan = Object.freeze({ ...facts, digest: structuredPatchDigest(facts) });
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'windows-refused-moved-update'),
+      );
+      const request = buildRequest({
+        id: 'saga-windows-refused-moved-update',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-windows-refused-moved-update',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+
+      await expect(executor.apply(request)).rejects.toMatchObject({
+        name: 'EditEffectRefusedError',
+        message: 'このファイルのアクセス制御は引き継げないため、Windows では更新できません',
+      });
+      expect(persistence.getEditSaga(request.id)).toMatchObject({ state: 'restored' });
+      await expect(readFile(movedPath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(windowsAccess(movedPath)).resolves.toEqual(movedAccess);
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      expect(
+        (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+      ).toEqual([]);
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
+    // Windows has no atomic exchange: an update is three no-replace renames. A process that dies
+    // between them must neither report success nor strand the displaced revision.
+    it.each(['after parking the previous revision', 'after publishing the staged artifact'])(
+      'converges an update whose process died %s',
+      async (point) => {
+        const env = await fixture(`windows-interrupted-${point.split(' ')[1]}`);
+        const native = loadNativeSafeFs({
+          addonPath: nativeSafeFsAddonPath(),
+          lockDirectoryPath: env.locks,
+        });
+        const firstSessions = makeResolveSession(native, env);
+        const { path, plan } = await buildUpdatePatch(env.workspace);
+        const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+          await preparePersistence(env);
+        const artifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const request = buildRequest({
+          id: `saga-interrupted-${point.split(' ')[1]}`,
+          taskId: task.id,
+          turnId: turn.turnId,
+          operationId: `op-interrupted-${point.split(' ')[1]}`,
+          plan,
+          workspaceKey,
+          rootIdentityDigest,
+        });
+        // Reproduces the renames the native update performs up to the crash point, then dies.
+        const dying = Object.freeze({
+          ...native,
+          applyIntentEffect: async (_session: NativeSafeFsSession, intent: { temp: unknown }) => {
+            const temp = intent.temp as { leafName: string };
+            const nonce = temp.leafName.slice('.sprint-coder-temp-'.length);
+            await rename(path, join(env.workspace, `.sprint-coder-swap-${nonce}`));
+            if (point === 'after publishing the staged artifact')
+              await rename(join(env.workspace, temp.leafName), path);
+            throw new EditSagaCrashError(`simulated process crash ${point}`);
+          },
+        }) as NativeSafeFs;
+        await expect(
+          new EditSagaExecutor(
+            new PersistenceEditSagaStore(persistence),
+            new NativeSafeFsEditEffectBoundary({
+              native: dying,
+              journal: persistence,
+              artifacts,
+              resolveSession: firstSessions.resolveSession,
+            }),
+            artifacts,
+            undefined,
+            new SqliteEditSagaLeaseGuard(persistence, `interrupted-${point.split(' ')[1]}-1`),
+          ).apply(request),
+        ).rejects.toBeInstanceOf(EditSagaCrashError);
+        expect(persistence.getEditSaga(request.id)).toMatchObject({ state: 'applying' });
+        await Promise.all(
+          [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+        );
+        persistence.close();
+
+        const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+        const instance = `interrupted-${point.split(' ')[1]}-2`;
+        const startupQuarantines = reopened.initializeMutationRecovery(
+          instance,
+          new Date().toISOString(),
+        );
+        const secondSessions = makeResolveSession(native, env);
+        const reopenedArtifacts = await EditArtifactStore.open({
+          rootPath: env.artifactRoot,
+          quotaBytes: 4096,
+        });
+        const releasedFences = new Map<string, number>();
+        const executor = new EditSagaExecutor(
+          new PersistenceEditSagaStore(reopened),
+          new NativeSafeFsEditEffectBoundary({
+            native,
+            journal: reopened,
+            artifacts: reopenedArtifacts,
+            resolveSession: secondSessions.resolveSession,
+          }),
+          reopenedArtifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(reopened, instance, undefined, undefined, async (lease) => {
+            const active = secondSessions.sessions.get(lease.fence);
+            if (active !== undefined) await native.closeSession(active);
+            releasedFences.set(lease.workspaceKey, lease.fence);
+          }),
+        );
+        await reconcileStartupNativeMutations({
+          journal: reopened,
+          recoverSaga: (sagaId) => executor.recover(sagaId),
+          reconcileEditSagas: () => executor.reconcileAll(),
+          startupQuarantines,
+          releasedFences,
+          now: () => new Date().toISOString(),
+        });
+
+        await expect(readFile(path, 'utf8')).resolves.toBe('UPDATE_AFTER');
+        expect(reopened.getEditSaga(request.id)).toMatchObject({ state: 'committed' });
+        expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+        expect(
+          (await readdir(env.workspace)).filter((name) => name.startsWith('.sprint-coder-')),
+        ).toEqual([]);
+        reopened.close();
+      },
+    );
   });
 
-  describe.skipIf(process.platform === 'win32')('EditSagaExecutor native integration', () => {
+  describe('EditSagaExecutor native integration', () => {
     it('runs the Provider create_directory call through the durable Saga to a terminal intent', async () => {
       const env = await fixture('mkdir');
       const native = loadNativeSafeFs({
@@ -931,6 +1692,190 @@ if (runsWithElectronAbi) {
 
       for (const session of sessions.values()) await native.closeSession(session);
       persistence.close();
+    });
+
+    // The preflight refuses the update the first time and would allow it the second time: the
+    // Saga must restore the earlier add without asking about the refused update again, because a
+    // forward intent prepared while compensating is stale and would quarantine the Workspace.
+    it('restores the earlier steps without re-running a step the preflight refused', async () => {
+      const env = await fixture('refused-once');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      const scripted = scriptForwardUpdatePreflight(native, ['refuse']);
+      const { resolveSession, sessions } = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(persistence),
+        new NativeSafeFsEditEffectBoundary({
+          native: scripted.native,
+          journal: persistence,
+          artifacts,
+          resolveSession,
+        }),
+        artifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(persistence, 'refused-once-instance'),
+      );
+      const request = buildRequest({
+        id: 'saga-refused-once',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-refused-once',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+
+      await expect(executor.apply(request)).rejects.toMatchObject({
+        name: 'EditEffectRefusedError',
+        message: 'refused by the test preflight',
+      });
+      const saga = persistence.getEditSaga(request.id);
+      expect(saga).toMatchObject({ state: 'restored', recovery: null });
+      expect(saga.steps.map((step) => step.state)).toEqual([
+        'restored',
+        'restored',
+        'pending',
+        'pending',
+      ]);
+      expect(scripted.calls()).toBe(1);
+      expect(persistence.getNativeMutationIntent('nmi-forward-1-saga-refused-once')).toMatchObject({
+        state: 'completed',
+      });
+      expect(() => persistence.getNativeMutationIntent('nmi-forward-2-saga-refused-once')).toThrow(
+        'Native mutation intent not found',
+      );
+      expect(persistence.listRecoverableNativeMutationIntents()).toEqual([]);
+      await expectMissing(paths.addPath);
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expectMissing(paths.renameDstPath);
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+
+      for (const session of sessions.values()) await native.closeSession(session);
+      persistence.close();
+    });
+
+    it('restores the earlier steps when the preflight refuses the step a restart resumes', async () => {
+      const env = await fixture('refused-on-resume');
+      const native = loadNativeSafeFs({
+        addonPath: nativeSafeFsAddonPath(),
+        lockDirectoryPath: env.locks,
+      });
+      // The process dies after journaling the update as effect_pending, before its preflight
+      // answered; after the restart the preflight refuses once and would then allow.
+      const scripted = scriptForwardUpdatePreflight(native, ['crash', 'refuse']);
+      const firstSessions = makeResolveSession(native, env);
+      const { plan, paths } = await buildFullPatch(env.workspace);
+      const { persistence, task, turn, workspaceKey, rootIdentityDigest } =
+        await preparePersistence(env);
+      const artifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const request = buildRequest({
+        id: 'saga-refused-on-resume',
+        taskId: task.id,
+        turnId: turn.turnId,
+        operationId: 'op-refused-on-resume',
+        plan,
+        workspaceKey,
+        rootIdentityDigest,
+      });
+      await expect(
+        new EditSagaExecutor(
+          new PersistenceEditSagaStore(persistence),
+          new NativeSafeFsEditEffectBoundary({
+            native: scripted.native,
+            journal: persistence,
+            artifacts,
+            resolveSession: firstSessions.resolveSession,
+          }),
+          artifacts,
+          undefined,
+          new SqliteEditSagaLeaseGuard(persistence, 'refused-on-resume-1'),
+        ).apply(request),
+      ).rejects.toBeInstanceOf(EditSagaCrashError);
+      expect(persistence.getEditSaga(request.id).steps.map((step) => step.state)).toEqual([
+        'effect_observed',
+        'effect_pending',
+        'pending',
+        'pending',
+      ]);
+      await Promise.all(
+        [...firstSessions.sessions.values()].map((session) => native.closeSession(session)),
+      );
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(env.dbPath, verifyRealNativeSession);
+      const startupQuarantines = reopened.initializeMutationRecovery(
+        'refused-on-resume-2',
+        new Date().toISOString(),
+      );
+      const secondSessions = makeResolveSession(native, env);
+      const reopenedArtifacts = await EditArtifactStore.open({
+        rootPath: env.artifactRoot,
+        quotaBytes: 4096,
+      });
+      const releasedFences = new Map<string, number>();
+      const executor = new EditSagaExecutor(
+        new PersistenceEditSagaStore(reopened),
+        new NativeSafeFsEditEffectBoundary({
+          native: scripted.native,
+          journal: reopened,
+          artifacts: reopenedArtifacts,
+          resolveSession: secondSessions.resolveSession,
+        }),
+        reopenedArtifacts,
+        undefined,
+        new SqliteEditSagaLeaseGuard(
+          reopened,
+          'refused-on-resume-2',
+          undefined,
+          undefined,
+          async (lease) => {
+            const active = secondSessions.sessions.get(lease.fence);
+            if (active !== undefined) await native.closeSession(active);
+            releasedFences.set(lease.workspaceKey, lease.fence);
+          },
+        ),
+      );
+      await reconcileStartupNativeMutations({
+        journal: reopened,
+        recoverSaga: (sagaId) => executor.recover(sagaId),
+        reconcileEditSagas: () => executor.reconcileAll(),
+        startupQuarantines,
+        releasedFences,
+        now: () => new Date().toISOString(),
+      });
+
+      const saga = reopened.getEditSaga(request.id);
+      expect(saga).toMatchObject({ state: 'restored', recovery: null });
+      expect(saga.steps.map((step) => step.state)).toEqual([
+        'restored',
+        'restored',
+        'pending',
+        'pending',
+      ]);
+      expect(scripted.calls()).toBe(2);
+      expect(() =>
+        reopened.getNativeMutationIntent('nmi-forward-2-saga-refused-on-resume'),
+      ).toThrow('Native mutation intent not found');
+      expect(reopened.listRecoverableNativeMutationIntents()).toEqual([]);
+      await expectMissing(paths.addPath);
+      await expect(readFile(paths.updatePath, 'utf8')).resolves.toBe('UPDATE_BEFORE');
+      await expect(readFile(paths.renameSrcPath, 'utf8')).resolves.toBe('RENAME_CONTENT');
+      await expect(readFile(paths.deletePath, 'utf8')).resolves.toBe('DELETE_CONTENT');
+      expect(reopened.startTurn(task.id, 'continued after the refused resume')).toBeDefined();
+      reopened.close();
     });
 
     it('recovers a workspace-bound prepared Saga under a recovery lease', async () => {

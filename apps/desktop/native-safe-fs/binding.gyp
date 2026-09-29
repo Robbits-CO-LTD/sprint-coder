@@ -36,6 +36,13 @@
             "CLANG_CXX_LIBRARY": "libc++",
             "GCC_ENABLE_CPP_EXCEPTIONS": "YES"
           }
+        }],
+        ["sprint_coder_test_hooks==1 and OS=='win'", {
+          "type": "loadable_module",
+          "product_extension": "node",
+          "sources": ["native_safe_fs_win.cc", "native_safe_fs_win_mutation.cc"],
+          "defines": ["NAPI_VERSION=10", "SPRINT_CODER_NATIVE_SAFE_FS_TESTING=1"],
+          "libraries": ["Advapi32.lib"]
         }]
       ]
     }

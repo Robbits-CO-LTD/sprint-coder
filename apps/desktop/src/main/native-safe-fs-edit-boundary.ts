@@ -4,6 +4,7 @@ import type {
   NativeSafeFs,
   NativeSafeFsSession,
 } from './native-safe-fs';
+import { EditEffectRefusedError } from './edit-saga';
 import type {
   EditArtifactRepository,
   EditEffectBoundary,
@@ -80,6 +81,7 @@ export type NativeSafeFsEffectPort = Pick<
   Partial<
     Pick<
       NativeSafeFs,
+      | 'preflightIntentEffect'
       | 'observeDirectory'
       | 'createDirectory'
       | 'inspectDirectoryOwnership'
@@ -181,16 +183,7 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
         ? { state: 'pre', observation }
         : { state: 'post', observation };
     }
-    const id = this.intentId(token.sagaId, step.ordinal, 'forward');
-    let intent: NativeMutationIntentSnapshot | null = null;
-    if (process.platform === 'win32') {
-      try {
-        intent = this.journal.getNativeMutationIntent?.(id) ?? null;
-      } catch {
-        // A pre-effect observation has no durable intent yet.
-      }
-    }
-    intent ??= createNativeMutationIntentSnapshot(
+    const intent = createNativeMutationIntentSnapshot(
       this.buildSeed(step, token, session, 'forward'),
       randomBytes(16).toString('hex'),
     );
@@ -218,8 +211,19 @@ export class NativeSafeFsEditEffectBoundary implements EditEffectBoundary {
       // The first attempt has no native intent yet.
     }
     if (intent === null) {
+      const seed = this.buildSeed(step, token, session, direction);
+      // Decided before the intent is journaled, so a refusal leaves no intent to recover and the
+      // Saga restores without quarantining the Workspace.
+      if (
+        (seed.kind === 'update' || seed.kind === 'delete' || seed.kind === 'rename') &&
+        this.native.preflightIntentEffect
+      ) {
+        this.assertSession(session, resolveToken());
+        const preflight = await this.native.preflightIntentEffect(session, seed);
+        if (!preflight.allowed) throw new EditEffectRefusedError(preflight.reason);
+      }
       intent = this.journal.prepareNativeMutationIntent(
-        this.buildSeed(step, token, session, direction),
+        seed,
         token,
         this.now(),
         'edit-saga-executor',

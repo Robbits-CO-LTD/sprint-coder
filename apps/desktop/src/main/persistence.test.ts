@@ -57,6 +57,7 @@ import {
   InvalidCanvasViewError,
   ImageAttachmentLimitError,
   ImageAttachmentAcceptanceError,
+  NATIVE_ADDED_FILE_MODE,
   NotFoundError,
   OperationConflictError,
   SqliteEditSagaLeaseGuard,
@@ -6671,7 +6672,7 @@ if (runsWithElectronAbi)
                   artifactId: step.operation.postArtifact!.artifactId,
                   contentHash: step.operation.postArtifact!.contentHash,
                   size: step.operation.postArtifact!.size,
-                  expectedMode: 0o100600,
+                  expectedMode: NATIVE_ADDED_FILE_MODE,
                 }
               : null,
           createdAt: '2026-07-23T00:00:02.000Z',

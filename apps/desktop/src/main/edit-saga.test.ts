@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
   aggregateTurnDiff,
+  EditEffectRefusedError,
   EditSagaCrashError,
   EditSagaExecutor,
   InMemoryEditSagaStore,
@@ -138,6 +139,44 @@ class ResumableBoundary extends FakeBoundary {
     expect(observed.state).toBe('post');
     this.resumed.push(step.ordinal);
     return observed.observation;
+  }
+}
+
+/**
+ * Runs a preflight before step 2's effect, as the Windows boundary does, that refuses it the first
+ * time and allows it afterwards (the file changed in between). A step asked about again after its
+ * refusal would therefore be applied.
+ */
+class RefuseOnceBoundary extends FakeBoundary {
+  readonly preflights: number[] = [];
+  readonly resumed: number[] = [];
+  crashBeforePreflightOrdinal: number | null = null;
+
+  override async apply(step: EditSagaStep): Promise<OperationObservation> {
+    if (step.ordinal === this.crashBeforePreflightOrdinal) {
+      this.crashBeforePreflightOrdinal = null;
+      throw new EditSagaCrashError('simulated crash before the preflight');
+    }
+    this.preflight(step);
+    return super.apply(step);
+  }
+
+  async resume(
+    step: EditSagaStep,
+    direction: 'forward' | 'compensation',
+  ): Promise<OperationObservation> {
+    expect(direction).toBe('forward');
+    this.resumed.push(step.ordinal);
+    const observed = await this.observe(step);
+    if (observed.state === 'post') return observed.observation;
+    this.preflight(step);
+    return super.apply(step);
+  }
+
+  private preflight(step: EditSagaStep): void {
+    if (step.ordinal !== 2) return;
+    this.preflights.push(step.ordinal);
+    if (this.preflights.length === 1) throw new EditEffectRefusedError('cannot be undone here');
   }
 }
 
@@ -357,6 +396,51 @@ describe('EditSagaExecutor', () => {
     expect(boundary.restored).toEqual([1]);
     expect([...boundary.files.values()]).toEqual(['A0', 'B0']);
     expect(store.get(result.id).revision).toBeGreaterThanOrEqual(4);
+  });
+
+  it('restores a Saga whose boundary refused a step before journaling it and reports why', async () => {
+    const store = new InMemoryEditSagaStore();
+    const artifacts = new MemoryArtifacts();
+    const boundary = new RefuseOnceBoundary(artifacts);
+    const executor = new EditSagaExecutor(store, boundary, artifacts);
+
+    await expect(executor.apply(request())).rejects.toMatchObject({
+      name: 'EditEffectRefusedError',
+      message: 'cannot be undone here',
+    });
+    const saga = store.get('saga-1');
+    expect(saga).toMatchObject({ state: 'restored', recovery: null });
+    expect(saga.steps.map((step) => step.state)).toEqual(['restored', 'restored']);
+    // The refused step is never asked about again, so its now-allowing preflight cannot run it.
+    expect(boundary.preflights).toEqual([2]);
+    expect(boundary.resumed).toEqual([]);
+    expect(boundary.applied).toEqual([1]);
+    expect(boundary.restored).toEqual([1]);
+    expect([...boundary.files.values()]).toEqual(['A0', 'B0']);
+  });
+
+  it('restores a Saga whose boundary refused its interrupted step when resumed after a restart', async () => {
+    const store = new InMemoryEditSagaStore();
+    const artifacts = new MemoryArtifacts();
+    const boundary = new RefuseOnceBoundary(artifacts);
+    boundary.crashBeforePreflightOrdinal = 2;
+
+    await expect(
+      new EditSagaExecutor(store, boundary, artifacts).apply(request()),
+    ).rejects.toBeInstanceOf(EditSagaCrashError);
+    expect(store.get('saga-1').steps.map((step) => step.state)).toEqual([
+      'effect_observed',
+      'effect_pending',
+    ]);
+    const recovered = await new EditSagaExecutor(store, boundary, artifacts).recover('saga-1');
+
+    expect(recovered).toMatchObject({ state: 'restored', recovery: null });
+    expect(recovered.steps.map((step) => step.state)).toEqual(['restored', 'restored']);
+    expect(boundary.preflights).toEqual([2]);
+    expect(boundary.resumed).toEqual([2]);
+    expect(boundary.applied).toEqual([1]);
+    expect(boundary.restored).toEqual([1]);
+    expect([...boundary.files.values()]).toEqual(['A0', 'B0']);
   });
 
   it('quarantines a crash-unknown effect without replaying or overwriting it', async () => {
