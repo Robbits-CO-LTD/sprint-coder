@@ -498,7 +498,7 @@ describe('CommandRunner', () => {
       );
       await writeFile(
         join(root, 'ignore.cjs'),
-        "const r=require('node:child_process').spawnSync(process.execPath,['-e','process.exit(0)'],{stdio:'ignore'});if(r.error)throw r.error;process.exit(r.status??1);\n",
+        "const r=require('node:child_process').spawnSync(process.execPath,['-e','process.exit(0)'],{stdio:'ignore'});if(r.error||r.status!==0)process.stderr.write(JSON.stringify({status:r.status,signal:r.signal,error:r.error?.code,node:process.version,uv:process.versions.uv})+'\\n');if(r.error)throw r.error;process.exit(r.status??1);\n",
       );
       const runner = new CommandRunner({ sandboxed: true });
       const chunks: CommandOutputChunk[] = [];
@@ -519,14 +519,20 @@ describe('CommandRunner', () => {
         'SPRINT_CODER_SANDBOX_NODE_PIPE_UNSUPPORTED',
       );
       expect(blocked.durationMs).toBeLessThan(10_000);
+      const allowedChunks: CommandOutputChunk[] = [];
       const allowed = await runner.run(
         await prepareExecutionSpec({
           workspacePath: root,
           executable: process.execPath,
           argv: ['ignore.cjs'],
         }),
+        {
+          onChunk: (chunk) => {
+            allowedChunks.push(chunk);
+          },
+        },
       );
-      expect(allowed.exitCode).toBe(0);
+      expect(allowed.exitCode, allowedChunks.map(({ text }) => text).join('')).toBe(0);
       await runner.dispose();
     },
     30_000,

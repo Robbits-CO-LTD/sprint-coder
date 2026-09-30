@@ -55,7 +55,16 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       blocked(()=>cp.execFile(process.execPath,['child.cjs'],()=>{}));
       blocked(()=>cp.spawnSync(process.execPath,[],{stdio:['ignore','ignore','pipe']}));
       const ignored=cp.spawnSync(process.execPath,['child.cjs'],{stdio:'ignore'});
-      a.equal(ignored.status,0,JSON.stringify({code:ignored.error?.code,signal:ignored.signal}));
+      const inherited=cp.spawnSync(process.execPath,['child.cjs'],{stdio:'inherit'});
+      const fd=fs.openSync('child-output.txt','w+');
+      let fileBacked;
+      try {fileBacked=cp.spawnSync(process.execPath,['child.cjs'],{stdio:[fd,fd,fd]});}
+      finally {fs.closeSync(fd);}
+      const meta=(r)=>({status:r.status,code:r.error?.code,signal:r.signal});
+      const diagnostic=JSON.stringify({ignore:meta(ignored),inherit:meta(inherited),file:meta(fileBacked),node:process.version,uv:process.versions.uv});
+      a.equal(ignored.status,0,diagnostic);
+      a.equal(inherited.status,0,diagnostic);
+      a.equal(fileBacked.status,0,diagnostic);
       a.equal(cp.execFileSync(process.execPath,['child.cjs'],{stdio:'inherit'}),null);
       a.throws(()=>fs.readFileSync(${JSON.stringify(outside)}));
       a.throws(()=>fs.writeFileSync(${JSON.stringify(outside)},'changed'));
