@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <mutex>
 #include <atomic>
@@ -47,9 +48,8 @@ napi_value ThrowWindowsError(napi_env env, const char* operation) {
   return nullptr;
 }
 
-bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_identity) {
-  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-  if (process == nullptr) return false;
+bool ReadWindowsProcessIdentity(HANDLE process, DWORD pid, DWORD* parent_pid,
+                               uint64_t* start_identity) {
   FILETIME created{}, exited{}, kernel{}, user{};
   const BOOL read_times = GetProcessTimes(process, &created, &exited, &kernel, &user);
   struct SprintProcessBasicInformation {
@@ -71,7 +71,6 @@ bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_i
       query_basic == nullptr
           ? static_cast<LONG>(-1)
           : query_basic(process, 0, &basic, sizeof(basic), nullptr);
-  CloseHandle(process);
   if (!read_times || basic_status < 0 || basic.unique_process_id != pid ||
       basic.inherited_from_unique_process_id > std::numeric_limits<DWORD>::max())
     return false;
@@ -81,6 +80,14 @@ bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_i
   *parent_pid = static_cast<DWORD>(basic.inherited_from_unique_process_id);
   *start_identity = created_ticks.QuadPart;
   return true;
+}
+
+bool QueryWindowsProcessIdentity(DWORD pid, DWORD* parent_pid, uint64_t* start_identity) {
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (process == nullptr) return false;
+  const bool read = ReadWindowsProcessIdentity(process, pid, parent_pid, start_identity);
+  CloseHandle(process);
+  return read;
 }
 
 napi_value WindowsProcessIdentityObject(napi_env env, DWORD pid, DWORD parent_pid,
@@ -112,6 +119,164 @@ napi_value QueryProcessIdentity(napi_env env, napi_callback_info info) {
   if (!QueryWindowsProcessIdentity(pid, &parent_pid, &start_identity))
     return ThrowWindowsError(env, "queryProcessIdentity");
   return WindowsProcessIdentityObject(env, pid, parent_pid, start_identity);
+}
+
+// Read-only leases retain the exact kernel process object, including after exit.
+// They do not attest signatures/image bytes or confer process-control authority.
+constexpr uint32_t kMaximumOwnedProcessIdentityLeases = 16;
+std::atomic<uint32_t> owned_process_identity_leases{0};
+const napi_type_tag kOwnedProcessIdentityTag{0x90450fbd8a9b4206ULL, 0xb8270c0dc4241841ULL};
+
+struct OwnedProcessIdentityLease {
+  HANDLE process = nullptr;
+  DWORD pid = 0;
+  DWORD parent_pid = 0;
+  uint64_t start_identity = 0;
+  std::wstring image;
+  bool counted = false;
+
+  void Close() noexcept {
+    if (process != nullptr) {
+      CloseHandle(process);
+      process = nullptr;
+    }
+    if (counted) {
+      counted = false;
+      owned_process_identity_leases.fetch_sub(1);
+    }
+  }
+  ~OwnedProcessIdentityLease() { Close(); }
+};
+
+napi_value ThrowOwnedProcessIdentityFailure(napi_env env) {
+  napi_throw_error(env, "OWNED_PROCESS_IDENTITY_UNAVAILABLE",
+                   "Owned process identity could not be confirmed");
+  return nullptr;
+}
+
+bool ReadOwnedProcessImage(HANDLE process, std::wstring* image) {
+  std::vector<wchar_t> buffer(32768);
+  DWORD length = static_cast<DWORD>(buffer.size());
+  if (!QueryFullProcessImageNameW(process, 0, buffer.data(), &length) || length == 0 ||
+      length >= buffer.size()) return false;
+  image->assign(buffer.data(), length);
+  return true;
+}
+
+OwnedProcessIdentityLease* UnwrapOwnedProcessIdentity(napi_env env, napi_callback_info info) {
+  napi_value receiver;
+  size_t argc = 0;
+  bool tagged = false;
+  void* pointer = nullptr;
+  if (napi_get_cb_info(env, info, &argc, nullptr, &receiver, nullptr) != napi_ok ||
+      napi_check_object_type_tag(env, receiver, &kOwnedProcessIdentityTag, &tagged) != napi_ok ||
+      !tagged || napi_unwrap(env, receiver, &pointer) != napi_ok || pointer == nullptr) {
+    ThrowOwnedProcessIdentityFailure(env);
+    return nullptr;
+  }
+  return static_cast<OwnedProcessIdentityLease*>(pointer);
+}
+
+napi_value OwnedProcessIdentitySnapshot(napi_env env, napi_callback_info info) {
+  auto* lease = UnwrapOwnedProcessIdentity(env, info);
+  if (lease == nullptr) return nullptr;
+  if (lease->process == nullptr) return ThrowOwnedProcessIdentityFailure(env);
+  napi_value result = WindowsProcessIdentityObject(env, lease->pid, lease->parent_pid,
+                                                  lease->start_identity);
+  napi_value image;
+  if (napi_create_string_utf16(env, reinterpret_cast<const char16_t*>(lease->image.data()),
+                              lease->image.size(), &image) != napi_ok ||
+      napi_set_named_property(env, result, "imagePath", image) != napi_ok)
+    return ThrowOwnedProcessIdentityFailure(env);
+  return result;
+}
+
+napi_value OwnedProcessIdentityIsRunning(napi_env env, napi_callback_info info) {
+  auto* lease = UnwrapOwnedProcessIdentity(env, info);
+  if (lease == nullptr) return nullptr;
+  if (lease->process == nullptr) return ThrowOwnedProcessIdentityFailure(env);
+  const DWORD wait = WaitForSingleObject(lease->process, 0);
+  if (wait != WAIT_TIMEOUT && wait != WAIT_OBJECT_0)
+    return ThrowOwnedProcessIdentityFailure(env);
+  napi_value result;
+  napi_get_boolean(env, wait == WAIT_TIMEOUT, &result);
+  return result;
+}
+
+napi_value OwnedProcessIdentityVerify(napi_env env, napi_callback_info info) {
+  auto* lease = UnwrapOwnedProcessIdentity(env, info);
+  if (lease == nullptr) return nullptr;
+  DWORD parent_pid = 0;
+  uint64_t start_identity = 0;
+  std::wstring image;
+  const bool unchanged = lease->process != nullptr &&
+      GetProcessId(lease->process) == lease->pid &&
+      ReadWindowsProcessIdentity(lease->process, lease->pid, &parent_pid, &start_identity) &&
+      parent_pid == lease->parent_pid && start_identity == lease->start_identity &&
+      ReadOwnedProcessImage(lease->process, &image) && image == lease->image;
+  napi_value result;
+  napi_get_boolean(env, unchanged, &result);
+  return result;
+}
+
+napi_value OwnedProcessIdentityClose(napi_env env, napi_callback_info info) {
+  auto* lease = UnwrapOwnedProcessIdentity(env, info);
+  if (lease == nullptr) return nullptr;
+  lease->Close();
+  napi_value result;
+  napi_get_undefined(env, &result);
+  return result;
+}
+
+void FinalizeOwnedProcessIdentity(napi_env, void* data, void*) {
+  delete static_cast<OwnedProcessIdentityLease*>(data);
+}
+
+napi_value RetainOwnedProcessIdentity(napi_env env, napi_callback_info info) {
+  size_t argc = 2;
+  napi_value argv[2];
+  double input_pid = 0;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      napi_get_value_double(env, argv[0], &input_pid) != napi_ok || !std::isfinite(input_pid) ||
+      input_pid < 1 ||
+      input_pid > std::numeric_limits<DWORD>::max() ||
+      input_pid != static_cast<double>(static_cast<DWORD>(input_pid)))
+    return ThrowOwnedProcessIdentityFailure(env);
+  const DWORD pid = static_cast<DWORD>(input_pid);
+  auto lease = std::make_unique<OwnedProcessIdentityLease>();
+  lease->process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  if (lease->process == nullptr || WaitForSingleObject(lease->process, 0) != WAIT_TIMEOUT ||
+      GetProcessId(lease->process) != pid ||
+      !ReadWindowsProcessIdentity(lease->process, pid, &lease->parent_pid,
+                                  &lease->start_identity) ||
+      lease->parent_pid != GetCurrentProcessId() ||
+      !ReadOwnedProcessImage(lease->process, &lease->image))
+    return ThrowOwnedProcessIdentityFailure(env);
+  lease->pid = pid;
+  DWORD own_parent = 0;
+  uint64_t own_start = 0;
+  if (!ReadWindowsProcessIdentity(GetCurrentProcess(), GetCurrentProcessId(), &own_parent,
+                                   &own_start) || lease->start_identity < own_start ||
+      WaitForSingleObject(lease->process, 0) != WAIT_TIMEOUT)
+    return ThrowOwnedProcessIdentityFailure(env);
+  uint32_t count = owned_process_identity_leases.load();
+  do {
+    if (count >= kMaximumOwnedProcessIdentityLeases) return ThrowOwnedProcessIdentityFailure(env);
+  } while (!owned_process_identity_leases.compare_exchange_weak(count, count + 1));
+  lease->counted = true;
+  napi_value result;
+  napi_property_descriptor methods[] = {
+      {"snapshot", nullptr, OwnedProcessIdentitySnapshot, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"isRunning", nullptr, OwnedProcessIdentityIsRunning, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"verifyUnchanged", nullptr, OwnedProcessIdentityVerify, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"close", nullptr, OwnedProcessIdentityClose, nullptr, nullptr, nullptr, napi_default, nullptr}};
+  if (napi_create_object(env, &result) != napi_ok ||
+      napi_type_tag_object(env, result, &kOwnedProcessIdentityTag) != napi_ok ||
+      napi_define_properties(env, result, 4, methods) != napi_ok ||
+      napi_wrap(env, result, lease.get(), FinalizeOwnedProcessIdentity, nullptr, nullptr) != napi_ok)
+    return ThrowOwnedProcessIdentityFailure(env);
+  lease.release();
+  return result;
 }
 
 napi_value QueryNamedPipePeerIdentity(napi_env env, napi_callback_info info) {
@@ -1428,6 +1593,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"probe", nullptr, Probe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"queryProcessIdentity", nullptr, QueryProcessIdentity, nullptr, nullptr, nullptr,
+       napi_default, nullptr},
+      {"retainOwnedProcessIdentity", nullptr, RetainOwnedProcessIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},
       {"queryNamedPipePeerIdentity", nullptr, QueryNamedPipePeerIdentity, nullptr, nullptr, nullptr,
        napi_default, nullptr},
