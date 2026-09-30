@@ -432,21 +432,33 @@ export class ClaudeRuntimeAdapter {
         'spawn_error',
       );
     });
+    let stopUnconfirmedReported = false;
+    const reportUnconfirmedStop = (): void => {
+      if (stopUnconfirmedReported) return;
+      stopUnconfirmedReported = true;
+      failed = true;
+      failWithDiagnostic(
+        publicError(
+          'RUNTIME_STOP_UNCONFIRMED',
+          'Runtime process tree stop could not be confirmed',
+          false,
+        ),
+        'abnormal_exit',
+      );
+    };
+    if (process.platform === 'win32')
+      child.once('exit', () => {
+        // Owned descendants can keep inherited pipes open after the root exits, delaying close.
+        deadline.stop();
+        void control.stop().then((confirmed) => {
+          if (!confirmed) reportUnconfirmedStop();
+        });
+      });
     child.once('close', (code) => {
       deadline.stop();
       void control.stop().then((confirmed) => {
         if (!confirmed) {
-          {
-            failed = true;
-            failWithDiagnostic(
-              publicError(
-                'RUNTIME_STOP_UNCONFIRMED',
-                'Runtime process tree stop could not be confirmed',
-                false,
-              ),
-              'abnormal_exit',
-            );
-          }
+          reportUnconfirmedStop();
           return;
         }
         deadline.stop();

@@ -25,3 +25,17 @@ The existing CommandRunner terminateOwnedJob/closeOwnedJob APIs retain their beh
 POSIX natural-root-exit descendant ownership remains unproven and is not fixed by this Windows slice; issue #653 must remain open. A development UtilityProcess check is not a same-artifact packaged Windows acceptance. Real authenticated Claude/Codex/TeamMCP acceptance was not performed. The ordinary owned descendants guarantee does not encompass processes created by external services outside the CLI Job. Existing nodeJob support remains required; missing native exports fail closed before the CLI starts.
 
 Implementation review, integration with PR686's shared wrapper environment change and PR675's fixture isolation, exact remote head CI, and packaged acceptance are tracked separately.
+
+## Follow-up: inherited output pipes and CI console policy
+
+The first implementation review passed but identified an additional liveness case: a detached child inheriting stdout/stderr prevents Node ChildProcess close after root exit. The same actual Codex fixture, changed only from ignored to inherited stdout/stderr, failed on 4dee0fae after a 10-second wait with no exited callback. Windows adapters now start the same single-flight owned stop at exit. Cleanup and exited still require close and confirmed zero membership. Stop failure is reported even when close is delayed, and exit/close failures produce one unconfirmed notification. POSIX behavior remains unchanged.
+
+The exact 4dee0fae CI failed on Linux/macOS windows-hide.test.ts because its static policy scanner counted only spawn() and did not recognize the extracted owned CLI factory (2727 tests passed / 42 skipped / 2 policy assertions failed on each shard). The scanner now covers owned factory calls and the helper itself, which explicitly forces windowsHide on its real spawn boundaries.
+
+Post-review native hold is respected: these follow-up edits are TypeScript/tests only; native C++ equals 4dee0fae. Reused native artifact SHA256: C6F97BC42539E334D0CDD9CC3B2904F082C76BD04E3CE69C38400D14F1F34040. No additional build/download was performed. The existing standard-build log confirms cached Electron43.5.0 headers were already installed and installVersion was valid.
+
+The previous full integration checkpoint is specifically head35e68b77 (4dee0fae + PR6759a7663fa + PR6867bc41f0f): 10 suites171 PASS /31 intentional SKIP, desktop typecheck PASS, matching PR686 runner plus preload required. It is evidence for that exact combined source, not automatically evidence for later heads.
+
+Independent implementation review and the Windows exit follow-up review both passed with no blocker/P1. Real packaged authenticated CLI/TeamMCP and POSIX ownership guarantees remain pending.
+
+Final TS-only focused checkpoint on Windows Node22.23.2: 5 suites26 PASS, including both inherited/ignored stdio natural-close cases, both adapters' exit-before-close unconfirmed dedup, and console policy. Full workspace typecheck PASS; changed ESLint has zero errors/warnings, Prettier/diff PASS. Native artifact above reused without rebuild.

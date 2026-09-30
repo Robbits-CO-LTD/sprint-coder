@@ -16,6 +16,58 @@ vi.mock('./owned-cli-process', () => ({
   stopOwnedCliProcess: () => mocks.stop(),
 }));
 vi.mock('./process-tree', () => ({ terminateRuntimeProcessTree: mocks.stop }));
+
+it.runIf(process.platform === 'win32').each(['claude', 'codex'] as const)(
+  '%s reports an unconfirmed exit once even while inherited pipes prevent close',
+  async (kind) => {
+    const root = await mkdtemp(join(tmpdir(), 'sprint-stop-exit-before-close-'));
+    const child = Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      pid: undefined,
+      exitCode: 0,
+      signalCode: null,
+    });
+    mocks.spawn.mockReturnValue(child);
+    let confirm!: (value: boolean) => void;
+    mocks.stop.mockReset().mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        confirm = resolve;
+      }),
+    );
+    const adapter =
+      kind === 'claude'
+        ? new ClaudeRuntimeAdapter(60_000)
+        : new CodexRuntimeAdapter(60_000, 'fixture', [], root);
+    const failed = vi.fn(),
+      exited = vi.fn();
+    try {
+      adapter.start('exit-first', 'test', [], vi.fn(), root, 'auto', vi.fn(), failed, exited);
+      child.emit('exit', 0);
+      expect(mocks.stop).toHaveBeenCalledOnce();
+      confirm(false);
+      await vi.waitFor(() =>
+        expect(failed).toHaveBeenCalledWith(
+          expect.objectContaining({ code: 'RUNTIME_STOP_UNCONFIRMED' }),
+          expect.anything(),
+        ),
+      );
+      expect(exited).not.toHaveBeenCalled();
+      child.emit('close', 0);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(
+        failed.mock.calls.filter(([error]) => error.code === 'RUNTIME_STOP_UNCONFIRMED'),
+      ).toHaveLength(1);
+      expect(exited).not.toHaveBeenCalled();
+      expect(await adapter.cancel('exit-first')).toBe(true);
+    } finally {
+      adapter.dispose();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 it.each(
   ['claude', 'codex'].flatMap((kind) =>
     ['confirmed', 'unconfirmed', 'rejected'].map((outcome) => ({ kind, outcome })),

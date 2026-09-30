@@ -32,10 +32,12 @@ export function spawnOwnedCliProcess(
   options: SpawnOptionsWithoutStdio,
   beforeLaunch: (pid: number) => void | boolean,
 ): ChildProcessWithoutNullStreams {
-  if (process.platform !== 'win32') return spawn(executable, [...argv], options);
+  if (process.platform !== 'win32')
+    return spawn(executable, [...argv], { ...options, windowsHide: true });
   const child = spawn(windowsJobWrapperCommand(), ['-e', WINDOWS_JOB_WRAPPER], {
     ...options,
     stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+    windowsHide: true,
   });
   let ready!: () => void;
   const ownership: OwnedCli = {

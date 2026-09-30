@@ -4,9 +4,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { CodexRuntimeAdapter } from './codex-adapter';
-it.runIf(process.platform === 'win32')(
-  'confirms owned detached descendants exited before natural-close notification',
-  async () => {
+it.runIf(process.platform === 'win32').each(['ignore', 'inherit'] as const)(
+  'confirms owned detached descendants with %s stdio exited before natural-close notification',
+  async (stdio) => {
     const root = await mkdtemp(join(tmpdir(), 'sprint-natural-close-owned-'));
     const marker = join(root, 'owned-pid.txt');
     const script = join(root, 'synthetic-codex.cjs');
@@ -27,7 +27,7 @@ it.runIf(process.platform === 'win32')(
           "if (m.method === 'skills/list') send({jsonrpc:'2.0',id:m.id,result:{data:[{cwd:m.params.cwds[0],skills:[],errors:[]}]}});",
           "if (m.method === 'thread/start') send({jsonrpc:'2.0',id:m.id,result:{thread:{id:'synthetic-thread'}}});",
           "if (m.method === 'turn/start') {",
-          "const child = spawn(process.execPath,['-e','setInterval(() => {}, 1000)'],{stdio:'ignore',windowsHide:true,detached:true});",
+          `const child = spawn(process.execPath,['-e','setInterval(() => {}, 1000)'],{stdio:${JSON.stringify(stdio === 'ignore' ? 'ignore' : ['ignore', 'inherit', 'inherit'])},windowsHide:true,detached:true});`,
           `writeFileSync(${JSON.stringify(marker)}, String(child.pid));`,
           "send({jsonrpc:'2.0',id:m.id,result:{}});",
           "send({jsonrpc:'2.0',method:'turn/completed',params:{turn:{status:'completed'}}});",
