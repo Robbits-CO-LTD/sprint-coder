@@ -1,3 +1,4 @@
+import { parseNativeHandshake } from './computer-use-native-handshake';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createConnection, type Socket } from 'node:net';
@@ -213,6 +214,10 @@ class WindowsComputerUseHelperClient {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.connecting !== null) {
+      await this.connecting;
+      return;
+    }
     if (this.socket !== null) return;
     this.connecting ??= this.connect().finally(() => {
       this.connecting = null;
@@ -495,6 +500,7 @@ export function assertWindowsComputerUseHelperHandshake(
     throw new Error('Computer Use Windows helper handshake mismatch');
   if (handshake['sourceCommit'] !== expected.sourceCommit)
     throw new Error('Computer Use Windows helper source commit mismatch');
+  parseNativeHandshake(handshake, 'win32');
 }
 
 function attestSpawnedWindowsComputerUseHelper(pid: number): WindowsComputerUseHelperAttestation {
