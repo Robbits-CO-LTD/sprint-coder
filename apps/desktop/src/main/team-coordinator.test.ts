@@ -1890,6 +1890,258 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('lets a directly dispatched Worker await repeated same-Task Team messages before completing', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Direct callback');
+      const deterministic = new DeterministicTeamWorkerRuntime();
+      const order: string[] = [];
+      const stop = vi.fn(async () => undefined);
+      const runtime: TeamWorkerRuntime = {
+        start: async () => ({ pid: null }),
+        stop,
+        execute: async (input) => {
+          const leader = persistence
+            .getTeamSnapshot(input.worker.teamId!)
+            .agents.find(({ kind }) => kind === 'leader')!;
+          for (let index = 0; index < 2; index++) {
+            order.push('send');
+            await coordinator.sendAgentMessageAs(
+              task.id,
+              input.worker.id,
+              leader.id,
+              `fixture ${index}`,
+            );
+            order.push('returned');
+          }
+          order.push('complete');
+          return deterministic.execute(input);
+        },
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime, undefined, undefined, 100);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'read',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      try {
+        const reply = await coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'fixture',
+        });
+        expect(reply.state).toBe('delivered');
+        expect(order).toEqual(['send', 'returned', 'send', 'returned', 'complete']);
+        expect(stop).not.toHaveBeenCalled();
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it.each(['worker', 'all', 'unconfirmed', 'rejected', 'still-running'])(
+      'keeps late direct completion canceled after %s stop',
+      async (mode) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Direct cancellation');
+        const deterministic = new DeterministicTeamWorkerRuntime();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let entered = false;
+        let unsettled = mode === 'still-running';
+        const stop = vi.fn(async () => undefined);
+        if (mode === 'unconfirmed')
+          stop.mockRejectedValueOnce(new Error('runtime exit unconfirmed'));
+        const runtime: TeamWorkerRuntime = {
+          start: async () => ({ pid: null }),
+          stop,
+          hasUnsettledTurn: () => unsettled,
+          execute: async (input) => {
+            entered = true;
+            await gate;
+            if (mode === 'rejected') throw new Error('fixture runtime canceled');
+            input.onEvent?.({
+              type: 'activity',
+              phase: 'executing',
+              label: 'late stage',
+              at: new Date().toISOString(),
+            });
+            return deterministic.execute(input);
+          },
+        };
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reader',
+          objective: 'read',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const sending = coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'fixture',
+        });
+        const rejected = expect(sending).rejects.toThrow('canceled');
+        try {
+          await vi.waitFor(() => expect(entered).toBe(true));
+          if (mode === 'all') await coordinator.stopAll(task.id);
+          else if (mode === 'worker' || mode === 'rejected')
+            await coordinator.stopWorker(task.id, worker.id);
+          else
+            await expect(coordinator.stopWorker(task.id, worker.id)).rejects.toThrow('unconfirmed');
+          release();
+          await rejected;
+          if (mode === 'unconfirmed' || mode === 'still-running') {
+            expect(coordinator.hasBusyWorkers(task.id)).toBe(true);
+            expect(
+              persistence.getTeamBudgetStatus(worker.teamId).some(({ reserved }) => reserved > 0),
+            ).toBe(true);
+            unsettled = false;
+            await coordinator.stopWorker(task.id, worker.id);
+          }
+          expect(
+            persistence.getTeamSnapshot(worker.teamId).agents.find(({ id }) => id === worker.id),
+          ).toMatchObject({ state: 'stopped', currentActivity: null });
+          expect(
+            persistence.getTeamBudgetStatus(worker.teamId).every(({ reserved }) => reserved === 0),
+          ).toBe(true);
+          expect(
+            persistence
+              .getTeamSnapshot(worker.teamId)
+              .deliveries.filter(({ state }) => state === 'acked'),
+          ).toHaveLength(0);
+        } finally {
+          release();
+          persistence.close();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'serializes concurrent direct calls and continues after failure=%s',
+      async (failFirst) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Direct ordering');
+        const deterministic = new DeterministicTeamWorkerRuntime();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const started: string[] = [];
+        const runtime: TeamWorkerRuntime = {
+          start: async () => ({ pid: null }),
+          stop: vi.fn(async () => undefined),
+          execute: async (input) => {
+            started.push(input.content);
+            if (input.content === 'first') {
+              await gate;
+              if (failFirst) throw new Error('fixture failure');
+            }
+            const leader = persistence
+              .getTeamSnapshot(input.worker.teamId!)
+              .agents.find(({ kind }) => kind === 'leader')!;
+            await coordinator.sendAgentMessageAs(
+              task.id,
+              input.worker.id,
+              leader.id,
+              'fixture callback',
+            );
+            return deterministic.execute(input);
+          },
+        };
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const workers = [];
+        for (const role of ['first', 'second'])
+          workers.push(
+            await coordinator.hireWorker({
+              taskId: task.id,
+              role,
+              objective: 'read',
+              contextInheritancePolicy: 'none',
+              writeCapable: false,
+            }),
+          );
+        const first = coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: workers[0]!.id,
+          content: 'first',
+        });
+        const firstResult = failFirst
+          ? expect(first).rejects.toThrow('fixture failure')
+          : expect(first).resolves.toMatchObject({ state: 'delivered' });
+        const second = coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: workers[1]!.id,
+          content: 'second',
+        });
+        try {
+          await vi.waitFor(() => expect(started).toEqual(['first']));
+          await expect(
+            coordinator.assignTask({
+              taskId: task.id,
+              targetAgentId: workers[0]!.id,
+              content: 'overlap',
+              doneCriteria: ['fixture'],
+            }),
+          ).rejects.toThrow();
+          release();
+          await firstResult;
+          await expect(second).resolves.toMatchObject({ state: 'delivered' });
+          expect(started).toEqual(['first', 'second']);
+          expect(
+            persistence
+              .getTeamBudgetStatus(workers[0]!.teamId)
+              .every(({ reserved }) => reserved === 0),
+          ).toBe(true);
+        } finally {
+          release();
+          persistence.close();
+        }
+      },
+    );
+
+    it('refuses direct dispatch while the ready Worker owns an unfinished durable execution', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Durable ownership');
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'read',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const snapshot = persistence.getTeamSnapshot(worker.teamId);
+      persistence.createTeamExecution({
+        teamId: worker.teamId,
+        assigneeAgentId: worker.id,
+        createdByAgentId: snapshot.agents.find(({ kind }) => kind === 'leader')!.id,
+        instruction: 'parked work',
+        accessMode: 'read-only',
+        now: new Date().toISOString(),
+      });
+      try {
+        await expect(
+          coordinator.sendToWorker({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: 'overlap',
+          }),
+        ).rejects.toThrow('unfinished execution ownership');
+        expect(execute).not.toHaveBeenCalled();
+        expect(persistence.getTeamSnapshot(worker.teamId).messages).toHaveLength(
+          snapshot.messages.length,
+        );
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('refuses a direct message whose Task Workspace fails verification before recording anything (issue #570)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Unverified direct message');
