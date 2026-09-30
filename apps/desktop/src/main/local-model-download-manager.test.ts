@@ -121,11 +121,117 @@ async function fixture(input?: {
     () => '2026-08-23T00:00:00.000Z',
     async () => input?.availableBytes ?? 1024 * 1024 * 1024,
   );
-  return { root, repository, store, manager, plan, bytes };
+  return { root, repository, store, manager, plan, bytes, fetch };
 }
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
+    it.each(['queued', 'paused', 'interrupted', 'failed'] as const)(
+      'reinstalls a canceled %s job after reopening the database and store',
+      async (state) => {
+        const env = await fixture();
+        const original = await env.manager.enqueue(env.plan);
+        if (state !== 'queued') {
+          env.repository.transition(original.id, 'downloading', '2026-08-23T00:00:01.000Z');
+          env.repository.transition(original.id, state, '2026-08-23T00:00:02.000Z');
+        }
+        await env.manager.cancel(original.id, true);
+        env.repository.close();
+        const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+        const store = await LocalModelStore.open(env.store.rootPath);
+        const manager = new LocalModelDownloadManager(
+          repository,
+          store,
+          () => undefined,
+          env.fetch,
+        );
+        try {
+          // Legacy canceled rows can retain partial bytes. Cleanup precedes identity reuse.
+          await writeFile(store.partialPath(original.modelId, 1), Buffer.from('old'));
+          const replacement = await manager.enqueue(env.plan);
+          expect(replacement.id).not.toBe(original.id);
+          expect(replacement.modelId).toBe(original.modelId);
+          expect(replacement.downloadedBytes).toBe(0);
+          expect((await manager.run(replacement.id, env.plan)).state).toBe('installed');
+          expect(manager.listInstalledModels()).toHaveLength(1);
+        } finally {
+          repository.close();
+        }
+      },
+    );
+    it('reinstalls the same immutable model after confirmed cancel', async () => {
+      const env = await fixture();
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        await env.manager.cancel(original.id, true);
+        const replacement = await env.manager.enqueue(env.plan);
+        expect(replacement.modelId).toBe(original.modelId);
+        expect(replacement.id).not.toBe(original.id);
+        expect((await env.manager.run(replacement.id, env.plan)).state).toBe('installed');
+        expect(env.manager.listInstalledModels()).toHaveLength(1);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('serializes concurrent reinstallation cleanup and preserves the winning job', async () => {
+      const env = await fixture();
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        await env.manager.cancel(original.id, true);
+        const attempts = await Promise.allSettled([
+          env.manager.enqueue(env.plan),
+          env.manager.enqueue(env.plan),
+        ]);
+        expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+        const job = env.manager.listJobs()[0]!;
+        await expect(env.manager.cancel(original.id, true)).rejects.toThrow('not found');
+        expect((await env.manager.run(job.id, env.plan)).state).toBe('installed');
+        await expect(env.manager.enqueue(env.plan)).rejects.toThrow('already in use');
+        expect(env.manager.listInstalledModels()).toHaveLength(1);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('waits for an aborted stream before cleanup and permits reinstall', async () => {
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      let aborts = 0;
+      const env = await fixture({
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              pull() {
+                reading();
+              },
+              cancel() {
+                aborts += 1;
+              },
+            }),
+            { headers: { 'content-length': '11' } },
+          ),
+      });
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        const run = env.manager.run(original.id, env.plan);
+        await started;
+        const canceled = await env.manager.cancel(original.id, true);
+        await run;
+        expect(canceled.state).toBe('canceled');
+        expect(aborts).toBe(1);
+        await expect(readFile(env.store.partialPath(original.modelId, 1))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        const replacement = await env.manager.enqueue(env.plan);
+        expect(replacement.id).not.toBe(original.id);
+        expect(replacement.downloadedBytes).toBe(0);
+      } finally {
+        env.repository.close();
+      }
+    });
     it.each([
       [false, null],
       [true, null],
@@ -147,8 +253,8 @@ if (runsWithElectronAbi)
           baseModelId: 'owner/base',
           artifacts: [env.plan.artifacts[1]!],
         };
-        const target = env.manager.enqueue(targetPlan);
-        const draft = env.manager.enqueue(draftPlan);
+        const target = await env.manager.enqueue(targetPlan);
+        const draft = await env.manager.enqueue(draftPlan);
         await env.manager.run(target.id, targetPlan);
         await env.manager.run(draft.id, draftPlan);
         env.repository.setLaunchSettings(target.modelId, {
@@ -419,8 +525,8 @@ if (runsWithElectronAbi)
         baseModelId: 'owner/base',
         artifacts: [env.plan.artifacts[1]!],
       };
-      const target = env.manager.enqueue(targetPlan);
-      const draft = env.manager.enqueue(draftPlan);
+      const target = await env.manager.enqueue(targetPlan);
+      const draft = await env.manager.enqueue(draftPlan);
       expect((await env.manager.run(target.id, targetPlan)).state).toBe('installed');
       expect((await env.manager.run(draft.id, draftPlan)).state).toBe('installed');
       expect(
@@ -431,7 +537,7 @@ if (runsWithElectronAbi)
       const on = { type: 'draft-dflash', draftModelId: draft.modelId, draftTokensMax: 3 } as const;
       expect(env.repository.setSpeculativeSettings(target.modelId, on)).toEqual(on);
       const secondPlan = { ...targetPlan, quantization: 'Q8_0' };
-      const second = env.manager.enqueue(secondPlan);
+      const second = await env.manager.enqueue(secondPlan);
       expect((await env.manager.run(second.id, secondPlan)).state).toBe('installed');
       env.repository.setSpeculativeSettings(second.modelId, on);
       await expect(env.manager.deleteInstalled(draft.modelId)).rejects.toThrow('still referenced');
@@ -464,7 +570,7 @@ if (runsWithElectronAbi)
     it('rejects a declared draft before publish when the actual GGUF is a normal model', async () => {
       const env = await fixture({ bytes: [modelMetadata('llama')] });
       const plan = { ...env.plan, architecture: 'dflash', baseModelId: 'owner/base' };
-      const job = env.manager.enqueue(plan);
+      const job = await env.manager.enqueue(plan);
       expect(await env.manager.run(job.id, plan)).toMatchObject({
         state: 'failed',
         failureCode: 'unsafe_store',
@@ -476,7 +582,7 @@ if (runsWithElectronAbi)
 
     it('retains valid target settings when a different speculative entry is malformed', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       env.repository.close();
       const valid = { type: 'draft-dflash', draftModelId: 'b'.repeat(64), draftTokensMax: 3 };
@@ -498,7 +604,7 @@ if (runsWithElectronAbi)
 
     it('recovers only a malformed speculative row and retains unrelated launch settings', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       const launch = env.repository.getLaunchSettings(job.modelId);
       env.repository.setLaunchSettings(job.modelId, launch);
@@ -529,7 +635,7 @@ if (runsWithElectronAbi)
 
     it('migrates an installed v82 model without changing identity, files, or its launch settings', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       const before = env.repository.listInstalledModels();
       const launch = env.repository.getLaunchSettings(job.modelId);
@@ -580,7 +686,7 @@ if (runsWithElectronAbi)
 
     it('publishes every verified split GGUF shard before marking the model installed', async () => {
       const env = await fixture();
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const installed = await env.manager.run(queued.id, env.plan);
 
@@ -627,7 +733,7 @@ if (runsWithElectronAbi)
 
     it('clamps a legacy verification-derived default batch to its fallback context', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       env.manager.saveVerification(installed.modelId, {
         level: 'loaded',
@@ -680,7 +786,7 @@ if (runsWithElectronAbi)
           },
         ],
       };
-      const queued = env.manager.enqueue(plan);
+      const queued = await env.manager.enqueue(plan);
       const installed = await env.manager.run(queued.id, plan);
 
       expect(installed.state).toBe('installed');
@@ -705,7 +811,7 @@ if (runsWithElectronAbi)
 
     it('persists Managed Local inference settings per installed model in the existing settings table', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
@@ -730,7 +836,7 @@ if (runsWithElectronAbi)
 
     it('persists typed Managed Local launch settings per installed model in the existing settings table', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       expect(env.manager.getLaunchSettings(installed.modelId)).toEqual({
@@ -761,7 +867,7 @@ if (runsWithElectronAbi)
 
     it('removes per-model inference and launch settings when the model is deleted', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       env.manager.setInferenceSettings(installed.modelId, {
         maxOutputTokens: 4_096,
@@ -775,7 +881,7 @@ if (runsWithElectronAbi)
       });
 
       await env.manager.deleteInstalled(installed.modelId);
-      const requeued = env.manager.enqueue(env.plan);
+      const requeued = await env.manager.enqueue(env.plan);
       const reinstalled = await env.manager.run(requeued.id, env.plan);
 
       expect(env.manager.getInferenceSettings(reinstalled.modelId)).toEqual({
@@ -801,7 +907,7 @@ if (runsWithElectronAbi)
           }),
         bytes: [Buffer.alloc(wrong.byteLength, 1)],
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -829,7 +935,7 @@ if (runsWithElectronAbi)
             { status: 200, headers: { 'content-length': contentLength } },
           ),
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -847,7 +953,7 @@ if (runsWithElectronAbi)
           return new Response();
         },
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -858,7 +964,7 @@ if (runsWithElectronAbi)
 
     it('retains partial bytes on pause, recovers active jobs as interrupted, and deletes on confirmed cancel', async () => {
       const env = await fixture();
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const partial = env.store.partialPath(queued.modelId, 1);
       await writeFile(partial, env.bytes[0]!.subarray(0, 3));
       env.repository.progress(queued.id, 1, 3, '"old"');
@@ -886,7 +992,7 @@ if (runsWithElectronAbi)
             },
           }),
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       await writeFile(env.store.partialPath(queued.modelId, 1), Buffer.from('fir'));
       env.repository.progress(queued.id, 1, 3, '"old"');
 
@@ -903,7 +1009,7 @@ if (runsWithElectronAbi)
         artifacts: [{ ...env.plan.artifacts[0]!, sourceUrl: 'http://127.0.0.1/model.gguf' }],
       };
 
-      expect(() => env.manager.enqueue(unsafe)).toThrow('Unsafe model source URL');
+      await expect(env.manager.enqueue(unsafe)).rejects.toThrow('Unsafe model source URL');
       env.repository.close();
     });
 
@@ -934,7 +1040,7 @@ if (runsWithElectronAbi)
         ],
       };
 
-      const queued = env.manager.enqueue(plan);
+      const queued = await env.manager.enqueue(plan);
       expect((await env.manager.run(queued.id, plan)).state).toBe('installed');
       expect(requested).toEqual([
         `https://huggingface.co/owner/model/resolve/${revision}/model.gguf`,
@@ -944,7 +1050,7 @@ if (runsWithElectronAbi)
 
     it('keeps a failed deletion retryable and removes DB rows only after filesystem success', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       const unsafeEntry = join(modelPath, 'unexpected-directory');
@@ -968,7 +1074,7 @@ if (runsWithElectronAbi)
           throw new Error('Model has an active lease');
         },
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       await expect(env.manager.deleteInstalled(installed.modelId)).rejects.toThrow('active lease');

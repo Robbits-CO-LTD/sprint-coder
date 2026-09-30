@@ -758,7 +758,7 @@ export class ManagedLocalController {
     if (input.confirmed !== true) throw new Error('Install confirmation is required');
     const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
     const plan = installPlan(detail, input.artifactIds, input.quantization);
-    const job = this.manager.enqueue(plan);
+    const job = await this.manager.enqueue(plan);
     this.plans.set(job.id, plan);
     this.schedule(job.id);
     return job;

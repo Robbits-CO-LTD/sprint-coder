@@ -175,6 +175,42 @@ export class LocalModelDownloadRepository {
     const modelId = modelIdFor(plan);
     const totalBytes = plan.artifacts.reduce((sum, item) => sum + item.sizeBytes, 0);
     this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT state FROM local_models WHERE id = ?')
+        .get(modelId) as { state: string } | undefined;
+      if (existing !== undefined) {
+        const previous = this.listJobs().find((job) => job.modelId === modelId);
+        const rows = this.artifacts(modelId);
+        if (
+          existing.state !== 'installing' ||
+          previous?.state !== 'canceled' ||
+          rows.length !== plan.artifacts.length ||
+          rows.some((row, index) => {
+            const artifact = plan.artifacts[index]!;
+            return (
+              row.filename !== safeStoredFilename(artifact.filename, index + 1) ||
+              row.sha256 !== artifact.sha256 ||
+              row.byte_length !== artifact.sizeBytes ||
+              row.role !== artifact.role
+            );
+          })
+        )
+          throw new Error('Model identity is already in use');
+        this.db
+          .prepare('DELETE FROM local_model_download_jobs WHERE id = ? AND state = ?')
+          .run(previous.id, 'canceled');
+        this.db
+          .prepare(
+            "UPDATE local_model_artifacts SET state = 'pending', downloaded_bytes = 0, etag = NULL WHERE model_id = ?",
+          )
+          .run(modelId);
+        this.db
+          .prepare(
+            "INSERT INTO local_model_download_jobs(id, model_id, state, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
+          )
+          .run(id, modelId, now, now);
+        return;
+      }
       this.db
         .prepare(
           `INSERT INTO local_models(
@@ -957,6 +993,19 @@ export class LocalModelStore {
 export class LocalModelDownloadManager {
   private readonly controllers = new Map<string, AbortController>();
   private activeJobId: string | null = null;
+  private readonly runCompletions = new Map<string, Promise<void>>();
+  private readonly identityOperations = new Map<string, Promise<unknown>>();
+
+  private async withIdentity<T>(modelId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.identityOperations.get(modelId) ?? Promise.resolve();
+    const pending = previous.catch(() => undefined).then(operation);
+    this.identityOperations.set(modelId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.identityOperations.get(modelId) === pending) this.identityOperations.delete(modelId);
+    }
+  }
 
   constructor(
     private readonly repository: LocalModelDownloadRepository,
@@ -1076,9 +1125,29 @@ export class LocalModelDownloadManager {
     return this.repository.setLaunchSettings(modelId, settings);
   }
 
-  enqueue(input: LocalModelInstallPlan): LocalDownloadJob {
+  async enqueue(input: LocalModelInstallPlan): Promise<LocalDownloadJob> {
     const plan = validatePlan(input);
-    return this.repository.create(plan, randomUUID(), this.now());
+    const modelId = modelIdFor(plan);
+    return this.withIdentity(modelId, async () => {
+      const previous = this.repository.listJobs().find((job) => job.modelId === modelId);
+      if (previous?.state === 'canceled') {
+        await this.runCompletions.get(previous.id);
+        // Recovery may leave a legacy canceled partial. Never clean a published bundle.
+        for (const path of [
+          join(this.store.rootPath, 'models', modelId),
+          join(this.store.rootPath, 'models', `.staging-${modelId}`),
+        ]) {
+          try {
+            await lstat(path);
+            throw new LocalModelDownloadError('unsafe_store', 'Canceled model has published files');
+          } catch (error: unknown) {
+            if (!isNodeError(error, 'ENOENT')) throw error;
+          }
+        }
+        await this.store.cancel(modelId, previous.artifactCount);
+      }
+      return this.repository.create(plan, randomUUID(), this.now());
+    });
   }
 
   async run(jobId: string, planInput: LocalModelInstallPlan): Promise<LocalDownloadJob> {
@@ -1090,6 +1159,13 @@ export class LocalModelDownloadManager {
     this.activeJobId = jobId;
     const controller = new AbortController();
     this.controllers.set(jobId, controller);
+    let complete!: () => void;
+    this.runCompletions.set(
+      jobId,
+      new Promise<void>((resolve) => {
+        complete = resolve;
+      }),
+    );
     try {
       const rows = this.repository.artifacts(job.modelId);
       for (const row of rows) {
@@ -1098,8 +1174,10 @@ export class LocalModelDownloadManager {
         if (artifact === undefined)
           throw new LocalModelDownloadError('missing_shard', 'Install plan shard is missing');
         await this.downloadArtifact(jobId, job.modelId, row, artifact, controller.signal);
+        controller.signal.throwIfAborted();
         this.repository.artifactDownloaded(jobId, row.ordinal, this.now());
       }
+      controller.signal.throwIfAborted();
       this.repository.transition(jobId, 'verifying', this.now());
       const modelRows = this.repository
         .artifacts(job.modelId)
@@ -1134,6 +1212,8 @@ export class LocalModelDownloadManager {
     } finally {
       this.controllers.delete(jobId);
       this.activeJobId = null;
+      complete();
+      this.runCompletions.delete(jobId);
     }
   }
 
@@ -1146,10 +1226,19 @@ export class LocalModelDownloadManager {
   async cancel(jobId: string, confirmed: boolean): Promise<LocalDownloadJob> {
     if (!confirmed) throw new Error('Cancel confirmation is required');
     const current = this.repository.getJob(jobId);
-    this.controllers.get(jobId)?.abort();
-    await this.store.cancel(current.modelId, current.artifactCount);
-    const latest = this.repository.getJob(jobId);
-    return this.repository.transition(jobId, 'canceled', this.now(), latest.failureCode);
+    return this.withIdentity(current.modelId, async () => {
+      const latest = this.repository.getJob(jobId);
+      if (latest.state === 'canceled') return latest;
+      if (!transitions[latest.state].includes('canceled'))
+        throw new Error('Model download cannot be canceled');
+      this.controllers.get(jobId)?.abort();
+      await this.runCompletions.get(jobId);
+      const stopped = this.repository.getJob(jobId);
+      if (!transitions[stopped.state].includes('canceled'))
+        throw new Error('Model download cannot be canceled');
+      await this.store.cancel(stopped.modelId, stopped.artifactCount);
+      return this.repository.transition(jobId, 'canceled', this.now(), stopped.failureCode);
+    });
   }
 
   async deleteInstalled(modelId: string): Promise<void> {
@@ -1230,10 +1319,16 @@ export class LocalModelDownloadManager {
     const handle = await openPartial(partial, offset > 0);
     const reader = responseBody.getReader();
     let completed = false;
+    const abortRead = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    signal.addEventListener('abort', abortRead, { once: true });
     try {
       let written = offset;
       for (;;) {
+        signal.throwIfAborted();
         const chunk = await reader.read();
+        signal.throwIfAborted();
         if (chunk.done) {
           completed = true;
           break;
@@ -1260,6 +1355,7 @@ export class LocalModelDownloadManager {
         } catch {
           // Preserve the download, pause, or cancellation failure.
         }
+      signal.removeEventListener('abort', abortRead);
       reader.releaseLock();
       await handle.close();
     }
