@@ -773,6 +773,8 @@ export class ManagedLocalController {
     const job = this.manager.getJob(jobId);
     if (!['paused', 'interrupted', 'failed'].includes(job.state)) return job;
     const plan = this.plans.get(jobId) ?? (await this.rebuildPlan(job.modelId));
+    const latest = this.manager.getJob(jobId);
+    if (!['paused', 'interrupted', 'failed'].includes(latest.state)) return latest;
     this.plans.set(jobId, plan);
     this.schedule(jobId);
     return this.manager.getJob(jobId);
