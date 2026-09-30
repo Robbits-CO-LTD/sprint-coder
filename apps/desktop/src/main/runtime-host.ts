@@ -1058,7 +1058,7 @@ export class RuntimeHostClient {
     if (active === undefined || active.operationId !== operationId) return;
     active.startFailed = true;
     // Reuse the normal stop receipt watchdog. If the host discarded `start`, it still answers this
-    // valid cancel; if the host itself is wedged, cancel() restarts it after five seconds so an
+    // valid cancel; if the host itself is wedged, cancel() restarts it after its bounded timeout so an
     // already-spawned CLI process cannot become untracked.
     void this.cancel(taskId, turnId).catch(() => undefined);
     this.onFailure(
