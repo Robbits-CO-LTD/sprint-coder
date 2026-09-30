@@ -3447,8 +3447,39 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           expect(review.files).toHaveLength(2);
           await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
           await vi.waitFor(
-            () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
-            { timeout: process.platform === 'win32' ? gitCheckpointTimeout : 15000 },
+            () => {
+              const execution = f.persistence.getTeamExecution(run.execution.id);
+              const scheduler = coordinator['executionScheduler'].snapshot();
+              const worker = f.persistence
+                .getTeamSnapshot(f.team.id)
+                .agents.find((agent) => agent.id === execution.assigneeAgentId);
+              // Keep diagnostics to states and fixed reasons; currentActivity can contain instructions.
+              const preflightFailure =
+                [
+                  'Graph Worker is not ready',
+                  'Preserved workspace changed before admission; review it again',
+                  'Graph admission changed during preflight',
+                  'Preserved workspace changed before dispatch; review it again',
+                  'Graph execution canceled before dispatch',
+                ].find((reason) => reason === worker?.currentActivity) ?? null;
+              expect(
+                execution.state,
+                JSON.stringify({
+                  state: execution.state,
+                  workerState: worker?.state ?? null,
+                  queued: scheduler.queuedExecutionIds.includes(execution.id),
+                  active: scheduler.activeExecutionIds.includes(execution.id),
+                  waitReason: coordinator['graphWaitReasons'].get(execution.id) ?? null,
+                  preflightFailure,
+                  attemptStates: f.persistence
+                    .listTeamAttempts(execution.id)
+                    .map(({ state }) => state),
+                }),
+              ).toBe('completed');
+            },
+            // A two-repository resume performs guarded preflight while still waiting_resume.
+            // Use the existing bounded checkpoint allowance, also used by the other write cases.
+            { timeout: gitCheckpointTimeout },
           );
           for (const repository of isolation.repositories)
             expect(readFileSync(join(repository.repoPath, 'allowed/file.ts'), 'utf8')).toBe(
