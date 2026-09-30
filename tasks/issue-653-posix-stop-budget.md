@@ -11,3 +11,7 @@ Windows Node22 controlled product regression: four failures before, four success
 Synthetic review base413f7743 consists exclusively of already-reviewed Issue653 PR697 and Issue678 PR683 changes so this PR presents only the new budget delta. Native build/download and paid API holds remain respected.
 
 Full POSIX ownership, PID reuse, reparented new-group capture and malformed/cyclic ps output remain outside this slice. The nominal derived bound is not a hard scheduler or OS execution deadline; delayed receipt beyond the bounded margin remains unconfirmed. Issue653 must stay open until remaining acceptance is independently met.
+
+## Existing start-ack regression follow-up
+
+Initial CI1fa33874 failed the existing Main start acknowledgement test on Linux/macOS because its post-start-timeout cancellation assertion still required host kill at five seconds. The product correctly waited the new nine-second budget. This test now checks supported POSIX9s/other5s literal expectations at deadline-1 (no kill) and deadline (one kill, no duplicate failure). Main/budget35 PASS on Windows Node22;26 Main tests add to41 budget/stop tests for67 distinct PASS. Two independent readonly reviews passed, separately from execution. Production/native source is unchanged in this follow-up; initial failure logs are retained under task/ci700-linux-shard1.log and ci700-macos-shard1.log.
