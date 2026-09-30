@@ -219,6 +219,8 @@ describe('Grok process stop confirmation', () => {
     expect(mocks.cleanup).not.toHaveBeenCalled();
     resolveStop(true);
     await vi.waitFor(() => expect(f.exited).toHaveBeenCalledOnce());
+    // The Turn waits for each taskkill before its grace window (issue #665).
+    expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), { awaitTaskkill: true });
     expect(f.events.filter((event) => event.type === 'completed')).toEqual([
       { type: 'completed', resolvedModel: 'grok-fixture' },
     ]);

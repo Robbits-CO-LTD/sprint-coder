@@ -2,6 +2,17 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:c
 
 const GRACE_MS = 2_000;
 const POLL_MS = 50;
+const TASKKILL_TIMEOUT_MS = 10_000;
+
+export type RuntimeProcessTreeStopOptions = Readonly<{
+  /**
+   * Windows only: start the last wait after the forced taskkill has finished (bounded by
+   * TASKKILL_TIMEOUT_MS) instead of right after spawning it. taskkill needs about a second on an
+   * idle machine and longer under load, so the forced kill can land after a window counted from its
+   * spawn has already closed, reporting a tree that does stop as unconfirmed (issue #665).
+   */
+  awaitTaskkill?: boolean;
+}>;
 
 /**
  * Terminates both the runtime process group and descendants that created their own process group.
@@ -12,14 +23,21 @@ const POLL_MS = 50;
 export async function terminateRuntimeProcessTree(
   child: ChildProcessWithoutNullStreams,
   environment: NodeJS.ProcessEnv,
+  options: RuntimeProcessTreeStopOptions = {},
 ): Promise<boolean> {
   const pid = child.pid;
   if (pid === undefined) return true;
   if (process.platform === 'win32') {
     if (childHasExited(child)) return true;
-    signalWindowsTree(pid, 'SIGTERM', environment);
+    void signalWindowsTree(pid, 'SIGTERM', environment);
     await waitForExit(child, [], GRACE_MS);
-    if (!childHasExited(child)) signalWindowsTree(pid, 'SIGKILL', environment);
+    if (!childHasExited(child))
+      await signalWindowsTree(
+        pid,
+        'SIGKILL',
+        environment,
+        options.awaitTaskkill === true ? child : undefined,
+      );
     await waitForExit(child, [], GRACE_MS);
     return childHasExited(child);
   }
@@ -79,15 +97,32 @@ function signalPosixTree(
   }
 }
 
+/** Settles right away unless `awaited` is given; then once taskkill has finished, failed to
+ * start, or `awaited` has exited, and at the latest after TASKKILL_TIMEOUT_MS. */
 function signalWindowsTree(
   pid: number,
   signal: NodeJS.Signals,
   environment: NodeJS.ProcessEnv,
-): void {
-  spawn('taskkill', ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])], {
-    env: environment,
-    stdio: 'ignore',
-    windowsHide: true,
+  awaited?: ChildProcessWithoutNullStreams,
+): Promise<void> {
+  const taskkill = spawn(
+    'taskkill',
+    ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])],
+    { env: environment, stdio: 'ignore', windowsHide: true },
+  );
+  if (awaited === undefined) return Promise.resolve();
+  return new Promise((resolve) => {
+    const settle = (): void => {
+      clearTimeout(timer);
+      taskkill.off('exit', settle);
+      taskkill.off('error', settle);
+      awaited.off('exit', settle);
+      resolve();
+    };
+    const timer = setTimeout(settle, TASKKILL_TIMEOUT_MS);
+    taskkill.once('exit', settle);
+    taskkill.once('error', settle);
+    awaited.once('exit', settle);
   });
 }
 
