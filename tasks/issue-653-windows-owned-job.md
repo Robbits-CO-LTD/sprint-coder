@@ -39,3 +39,7 @@ The previous full integration checkpoint is specifically head35e68b77 (4dee0fae 
 Independent implementation review and the Windows exit follow-up review both passed with no blocker/P1. Real packaged authenticated CLI/TeamMCP and POSIX ownership guarantees remain pending.
 
 Final TS-only focused checkpoint on Windows Node22.23.2: 5 suites26 PASS, including both inherited/ignored stdio natural-close cases, both adapters' exit-before-close unconfirmed dedup, and console policy. Full workspace typecheck PASS; changed ESLint has zero errors/warnings, Prettier/diff PASS. Native artifact above reused without rebuild.
+
+## CI lifecycle fixture follow-up
+
+Run36745388481 at 32575788 reached FAILURE:21 successful jobs,1 intentional skip,2 matrix cancellations,3 failed jobs. The originating Windows shard2 failure was two cli-lifecycle EPIPE assertions; the other failures were Windows build and required-gate aggregation. Linux and macOS shards passed. Those EventEmitter children have no Windows startup gate or Job ownership and must remain stream-only fixtures. The lifecycle suite now bypasses the owned factory only for its explicit fixture sentinel, including explicit Claude resolution; real missing-executable tests still exercise the actual factory. Production and native source are unchanged. Windows Node22.23.2 lifecycle9 PASS; owned/lifecycle focused5 suites30 PASS using the existing artifact; desktop typecheck, ESLint and format PASS. CI failed logs are retained in task/ci690-32575788-failed.log.
