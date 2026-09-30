@@ -62,6 +62,9 @@ control.on('end', () => {
     if (boundary.enableSafeDllSearchPolicy() !== true) throw new Error('policy unavailable');
   } catch { process.exitCode = 125; return; }
   try {
+    // Load the host wrapper/native boundary before applying the command-only preload options.
+    // The native child inherits this environment; NODE_OPTIONS cannot affect an already-started host.
+    Object.assign(process.env, request.env);
     process.exitCode = boundary.runPreparedExecutionImage(request.executable, request.argv);
   } catch { process.exitCode = 126; }
 });
