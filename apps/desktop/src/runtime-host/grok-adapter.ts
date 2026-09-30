@@ -6,7 +6,7 @@ import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-c
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import desktopPackage from '../../package.json';
 import { removeTreeWithoutFollowingLinks } from '../main/worker-worktree';
-import { GrokAcpClient, GrokRpcError, grokRecord } from './grok-acp';
+import { GrokAcpClient, GrokProtocolFailure, GrokRpcError, grokRecord } from './grok-acp';
 import { GROK_AGENT_PROFILE, grokEnvironment, prepareGrokIsolation } from './grok-isolation';
 import { resolveGrokCommandCandidates } from './grok-command';
 import { probeCliCommandCandidates } from './cli-command-resolution';
@@ -20,15 +20,24 @@ import {
 } from './runtime-progress-deadline';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
-import type {
-  ResolvedCliCommand,
-  RuntimeCanonicalEvent,
-  RuntimeContextFragment,
-  RuntimeFailureDiagnostic,
-  RuntimeProjectContextItem,
-  RuntimeSkillInput,
-  RuntimeTeamMcpOption,
-  RuntimeWorkspaceSet,
+import {
+  GROK_PROTOCOL_COUNT_MAX,
+  GROK_PROTOCOL_PENDING_TOOL_MAX,
+  GROK_SESSION_UPDATE_KINDS,
+  GROK_STOP_REASONS,
+  type GrokProtocolDiagnostic,
+  type GrokProtocolFailureCode,
+  type GrokProtocolPhase,
+  type GrokSessionUpdateKind,
+  type GrokStopReason,
+  type ResolvedCliCommand,
+  type RuntimeCanonicalEvent,
+  type RuntimeContextFragment,
+  type RuntimeFailureDiagnostic,
+  type RuntimeProjectContextItem,
+  type RuntimeSkillInput,
+  type RuntimeTeamMcpOption,
+  type RuntimeWorkspaceSet,
 } from './protocol';
 
 type Emit = (event: RuntimeCanonicalEvent) => void;
@@ -301,7 +310,7 @@ export function assertGrokToolInventory(
     !nativeTools.every((name) => value.includes(name)) ||
     value.some((name) => typeof name !== 'string' || !allowed.has(name))
   )
-    throw new Error('Grok native tool isolation failed');
+    throw new GrokProtocolFailure('inventory_violation', 'Grok native tool isolation failed');
 }
 
 export function grokMcpInventoryReady(raw: unknown, expected: readonly string[]): boolean {
@@ -325,6 +334,105 @@ export function grokMcpInventoryReady(raw: unknown, expected: readonly string[])
   if (names.length !== expected.length || !expected.every((name) => names.includes(name)))
     throw new Error('Grok MCP tool inventory changed');
   return true;
+}
+
+type GrokProtocolObservation = Omit<GrokProtocolDiagnostic, 'stopConfirmation'>;
+
+/**
+ * Fixed-shape record of a Turn's Grok ACP stream for its failure diagnostic (issue #506). Only
+ * enums, counts and frame sequences are kept: never session IDs, tool arguments, notification
+ * names or text. It observes and never decides completion.
+ */
+export class GrokProtocolTrace {
+  phase: GrokProtocolPhase = 'initialize';
+  private promptResultFrame: number | null = null;
+  private stopReason: GrokStopReason | null = null;
+  private lastSessionUpdateFrame: number | null = null;
+  private lastSessionUpdate: GrokSessionUpdateKind | null = null;
+  private lastMessageChunkFrame: number | null = null;
+  private assistantTextObserved = false;
+  private assistantTextChars = 0;
+  private frozen: GrokProtocolObservation | null = null;
+
+  /** A `session/update` as the transport received it, before any adapter check. */
+  observeSessionUpdate(params: unknown, frame: number): void {
+    this.lastSessionUpdateFrame = boundedGrokCount(frame);
+    this.lastSessionUpdate = grokSessionUpdateKind(params);
+  }
+
+  /** Assistant text the adapter accepted and emitted. */
+  observeAssistantText(text: string, frame: number): void {
+    this.lastMessageChunkFrame = boundedGrokCount(frame);
+    this.assistantTextChars = boundedGrokCount(this.assistantTextChars + text.length);
+    if (text.trim() !== '') this.assistantTextObserved = true;
+  }
+
+  observePromptResult(result: unknown, frame: number): void {
+    this.promptResultFrame = boundedGrokCount(frame);
+    const reason =
+      typeof result === 'object' && result !== null && !Array.isArray(result)
+        ? (result as Record<string, unknown>)['stopReason']
+        : undefined;
+    this.stopReason = GROK_STOP_REASONS.find((known) => known === reason) ?? 'other';
+  }
+
+  /** Captures the state at the first failure. Later frames and failures cannot rewrite it. */
+  freeze(
+    failureCode: GrokProtocolFailureCode,
+    transport: Readonly<{ receivedFrames: number; partialFrame: boolean }>,
+    pendingToolCount: number,
+  ): void {
+    if (this.frozen !== null) return;
+    this.frozen = Object.freeze({
+      phase: this.phase,
+      failureCode,
+      promptResultReceived: this.promptResultFrame !== null,
+      stopReason: this.stopReason,
+      receivedFrames: boundedGrokCount(transport.receivedFrames),
+      promptResultFrame: this.promptResultFrame,
+      lastSessionUpdateFrame: this.lastSessionUpdateFrame,
+      lastSessionUpdate: this.lastSessionUpdate,
+      lastMessageChunkFrame: this.lastMessageChunkFrame,
+      assistantTextObserved: this.assistantTextObserved,
+      assistantTextChars: this.assistantTextChars,
+      pendingToolCount: Math.min(pendingToolCount, GROK_PROTOCOL_PENDING_TOOL_MAX),
+      partialFrame: transport.partialFrame,
+    });
+  }
+
+  diagnostic(stopConfirmation: GrokProtocolDiagnostic['stopConfirmation']) {
+    return this.frozen === null ? undefined : { ...this.frozen, stopConfirmation };
+  }
+}
+
+function boundedGrokCount(value: number): number {
+  return Math.min(Math.max(0, Math.trunc(value)), GROK_PROTOCOL_COUNT_MAX);
+}
+
+function grokSessionUpdateKind(params: unknown): GrokSessionUpdateKind {
+  const record = (value: unknown): Record<string, unknown> | undefined =>
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  const kind = record(record(params)?.['update'])?.['sessionUpdate'];
+  return GROK_SESSION_UPDATE_KINDS.find((known) => known === kind) ?? 'other';
+}
+
+/** The fixed code of an error; `undefined` for one that carries none. */
+function grokFailureCode(error: unknown): GrokProtocolFailureCode | undefined {
+  if (error instanceof GrokProtocolFailure) return error.failureCode;
+  if (error instanceof GrokRpcError) return `rpc_${error.category}`;
+  return undefined;
+}
+
+/** Runs a response check, giving a failure without its own code the given one. */
+function grokChecked<T>(failureCode: GrokProtocolFailureCode, check: () => T): T {
+  try {
+    return check();
+  } catch (error) {
+    if (grokFailureCode(error) !== undefined) throw error;
+    throw new GrokProtocolFailure(failureCode);
+  }
 }
 
 export class GrokRuntimeAdapter {
@@ -449,8 +557,9 @@ export class GrokRuntimeAdapter {
     let assistantText = false;
     let sessionId: string | null = null;
     let inventorySeen = false;
-    const earlyUpdates: unknown[] = [];
+    const earlyUpdates: Array<{ params: unknown; frame: number }> = [];
     let earlyBytes = 0;
+    const trace = new GrokProtocolTrace();
     const messageId = randomUUID();
     const pendingTools = new Set<string>();
     let resumeTools: (() => void) | undefined;
@@ -464,25 +573,35 @@ export class GrokRuntimeAdapter {
     const failAfterStop = (
       error: PublicError,
       stage: Parameters<RuntimeFailureDiagnosticCollector['snapshot']>[0],
+      failureCode: GrokProtocolFailureCode,
     ): void => {
       if (failed || completed || control.canceled) return;
       failed = true;
+      // Fixed at detection: frames that arrive while the stop is confirmed cannot rewrite it.
+      trace.freeze(failureCode, rpc, pendingTools.size);
       void control
         .stop()
         .catch(() => false)
         .then((stopped) => {
           if (!stopped) this.quarantined = true;
           if (stopped && control.canceled) return;
+          const grokProtocol = trace.diagnostic(stopped ? 'confirmed' : 'unconfirmed');
+          if (grokProtocol !== undefined) diagnostics.recordGrokProtocol(grokProtocol);
           fail(stopped ? error : grokStopUnconfirmed(), diagnostics.snapshot(stage));
         });
     };
     const abort = (
       stage: 'protocol_error' | 'startup_error' | 'spawn_error' | 'abnormal_exit',
       error?: unknown,
+      fallbackCode: GrokProtocolFailureCode = 'unexpected',
     ): void => {
       if (error instanceof GrokRpcError && error.httpStatus !== undefined)
         diagnostics.recordGrokHttpStatus(error.httpStatus);
-      failAfterStop(grokPublicError(error), grokDiagnosticStage(stage, error));
+      failAfterStop(
+        grokPublicError(error),
+        grokDiagnosticStage(stage, error),
+        grokFailureCode(error) ?? fallbackCode,
+      );
     };
     const deadline = new RuntimeProgressDeadline(
       {
@@ -498,22 +617,29 @@ export class GrokRuntimeAdapter {
             retryable: true,
           },
           `${phase}_timeout`,
+          `${phase}_timeout`,
         );
       },
     );
-    const update = (raw: unknown): void => {
+    const applyUpdate = (raw: unknown, frame: number): void => {
       const params = grokRecord(raw);
-      if (params['sessionId'] !== sessionId) throw new Error('Grok session identity changed');
+      if (params['sessionId'] !== sessionId)
+        throw new GrokProtocolFailure('session_mismatch', 'Grok session identity changed');
       const event = grokRecord(params['update']);
       const type = event['sessionUpdate'];
       if (type === 'available_commands_update') {
         assertGrokToolInventory(grokRecord(event['_meta'])['tools'], expectedTools);
         inventorySeen = true;
       } else if (type === 'agent_message_chunk' || type === 'agent_thought_chunk') {
-        if (!inventorySeen) throw new Error('Grok emitted content before inventory');
+        if (!inventorySeen)
+          throw new GrokProtocolFailure(
+            'content_before_inventory',
+            'Grok emitted content before inventory',
+          );
         const content = grokRecord(event['content']);
         if (content['type'] === 'text' && typeof content['text'] === 'string') {
           if (type === 'agent_message_chunk' && content['text'].trim() !== '') assistantText = true;
+          if (type === 'agent_message_chunk') trace.observeAssistantText(content['text'], frame);
           emit(
             type === 'agent_message_chunk'
               ? { type: 'delta', messageId, delta: content['text'] }
@@ -523,11 +649,12 @@ export class GrokRuntimeAdapter {
       } else if (type === 'tool_call' || type === 'tool_call_update') {
         const id = event['toolCallId'];
         if (typeof id !== 'string' || id.length > 256)
-          throw new Error('Invalid Grok tool identity');
+          throw new GrokProtocolFailure('invalid_tool_identity', 'Invalid Grok tool identity');
         const status = event['status'];
         if (status === 'completed' || status === 'failed') pendingTools.delete(id);
         else if (type === 'tool_call' || status === 'in_progress') pendingTools.add(id);
-        if (pendingTools.size > 128) throw new Error('Too many Grok tools');
+        if (pendingTools.size > 128)
+          throw new GrokProtocolFailure('too_many_tools', 'Too many Grok tools');
         if (pendingTools.size > 0) resumeTools ??= deadline.pauseActivity();
         else {
           resumeTools?.();
@@ -543,18 +670,31 @@ export class GrokRuntimeAdapter {
           });
       }
     };
+    const update = (raw: unknown, frame: number): void => {
+      try {
+        applyUpdate(raw, frame);
+      } catch (error) {
+        // A malformed update (not a record, missing content) has no code of its own.
+        throw error instanceof GrokProtocolFailure
+          ? error
+          : new GrokProtocolFailure('session_update_invalid');
+      }
+    };
     const rpc = new GrokAcpClient(
       child,
       (method, params) => {
         if (failed || completed || control.canceled) return;
         deadline.progress();
         if (method !== 'session/update') return;
+        // The transport calls this while it parses the frame, so its count is this frame's.
+        const frame = rpc.receivedFrames;
+        trace.observeSessionUpdate(params, frame);
         if (sessionId === null) {
           earlyBytes += Buffer.byteLength(JSON.stringify(params));
           if (earlyUpdates.length >= 256 || earlyBytes > 1024 * 1024)
-            throw new Error('Grok startup quota');
-          earlyUpdates.push(params);
-        } else update(params);
+            throw new GrokProtocolFailure('startup_quota', 'Grok startup quota');
+          earlyUpdates.push({ params, frame });
+        } else update(params, frame);
       },
       (error) => abort('protocol_error', error),
     );
@@ -567,7 +707,8 @@ export class GrokRuntimeAdapter {
     child.once('close', (code) => {
       deadline.stop();
       rpc.close();
-      if (!terminalReceived && !completed && !failed && !control.canceled) abort('abnormal_exit');
+      if (!terminalReceived && !completed && !failed && !control.canceled)
+        abort('abnormal_exit', undefined, 'process_exited');
       // Stop captures all descendants before cleanup so the bridge cannot outlive its owner.
       void control
         .stop()
@@ -575,7 +716,7 @@ export class GrokRuntimeAdapter {
         .then((stopped) => {
           if (!stopped) {
             this.quarantined = true;
-            abort('abnormal_exit');
+            abort('abnormal_exit', undefined, 'stop_unconfirmed');
             return;
           }
           cleanupGrokIsolation(isolation);
@@ -587,48 +728,61 @@ export class GrokRuntimeAdapter {
     void (async () => {
       try {
         const init = await rpc.request('initialize', INITIALIZE);
-        grokModelsFromInitialize(init);
-        const methodId = grokAuthenticationMethod(init);
+        grokChecked('initialize_invalid', () => grokModelsFromInitialize(init));
+        const methodId = grokChecked('initialize_invalid', () => grokAuthenticationMethod(init));
         if (methodId === null) throw new GrokRpcError(-32000);
+        trace.phase = 'authenticate';
         await rpc.request('authenticate', { methodId, _meta: { headless: true } });
-        const session = grokRecord(
-          await rpc.request('session/new', {
-            cwd: isolation.cwd,
-            mcpServers: servers,
-            _meta: {
-              agentProfile: GROK_AGENT_PROFILE,
-              yoloMode: false,
-              autoMode: false,
-              rules:
-                'Use only the Sprint Coder team MCP tools via search_tool and use_tool. The real Workspace is described in the application context, not your isolated cwd. Native file, terminal and subagent tools are unavailable. Use the exact host input schemas; read changed files back before finishing.',
-            },
-          }),
-        );
+        trace.phase = 'session';
+        const created = await rpc.request('session/new', {
+          cwd: isolation.cwd,
+          mcpServers: servers,
+          _meta: {
+            agentProfile: GROK_AGENT_PROFILE,
+            yoloMode: false,
+            autoMode: false,
+            rules:
+              'Use only the Sprint Coder team MCP tools via search_tool and use_tool. The real Workspace is described in the application context, not your isolated cwd. Native file, terminal and subagent tools are unavailable. Use the exact host input schemas; read changed files back before finishing.',
+          },
+        });
+        const session = grokChecked('session_invalid', () => grokRecord(created));
         if (typeof session['sessionId'] !== 'string' || session['sessionId'].length > 256)
-          throw new Error('Missing Grok session');
+          throw new GrokProtocolFailure('session_invalid', 'Missing Grok session');
         sessionId = session['sessionId'];
         // The CLI applies its campaign default to every new session and ignores `--model` there
         // (issue #515), so an explicit selection is bound to the session before the prompt.
-        const boundModel =
-          model === 'auto'
-            ? undefined
-            : grokBoundSessionModel(
-                await rpc.request('session/set_model', { sessionId, modelId: model }),
-                model,
-              );
-        for (const params of earlyUpdates) update(params);
+        let boundModel: string | undefined;
+        if (model !== 'auto') {
+          const bound = await rpc.request('session/set_model', { sessionId, modelId: model });
+          boundModel = grokChecked('model_binding_failed', () =>
+            grokBoundSessionModel(bound, model),
+          );
+        }
+        trace.phase = 'inventory';
+        for (const { params, frame } of earlyUpdates) update(params, frame);
         earlyUpdates.length = 0;
         const start = Date.now();
         while (!inventorySeen) {
           if (failed || control.canceled || Date.now() - start > 15_000)
-            throw new Error('Grok tool inventory unavailable');
+            throw new GrokProtocolFailure(
+              'tool_inventory_timeout',
+              'Grok tool inventory unavailable',
+            );
           await new Promise((resolve) => setTimeout(resolve, 25));
         }
         while (true) {
           if (failed || control.canceled || Date.now() - start > 20_000)
-            throw new Error('Grok MCP inventory unavailable');
+            throw new GrokProtocolFailure(
+              'mcp_inventory_timeout',
+              'Grok MCP inventory unavailable',
+            );
           const inventory = await rpc.request('_x.ai/mcp/list', { sessionId, cache: false });
-          if (grokMcpInventoryReady(inventory, expectedTools)) break;
+          if (
+            grokChecked('mcp_inventory_invalid', () =>
+              grokMcpInventoryReady(inventory, expectedTools),
+            )
+          )
+            break;
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
         if (failed || control.canceled) return;
@@ -643,16 +797,22 @@ export class GrokRuntimeAdapter {
             projectItems,
             skills,
           }).text;
-        const result = grokRecord(
-          await rpc.request(
-            'session/prompt',
-            { sessionId, prompt: [{ type: 'text', text: payload }] },
-            teamMcp === undefined ? this.timeoutMs : 60 * 60_000,
-          ),
+        trace.phase = 'prompt';
+        const prompted = await rpc.request(
+          'session/prompt',
+          { sessionId, prompt: [{ type: 'text', text: payload }] },
+          teamMcp === undefined ? this.timeoutMs : 60 * 60_000,
+          (value, frame) => trace.observePromptResult(value, frame),
         );
+        const result = grokChecked('prompt_result_invalid', () => grokRecord(prompted));
         if (failed || control.canceled) return;
-        if (result['stopReason'] !== 'end_turn' || pendingTools.size > 0 || !assistantText)
-          throw new Error('Grok turn did not finish');
+        // One code per unmet condition; together they are still the one check they always were.
+        if (result['stopReason'] !== 'end_turn')
+          throw new GrokProtocolFailure('turn_stop_reason', 'Grok turn did not finish');
+        if (pendingTools.size > 0)
+          throw new GrokProtocolFailure('turn_pending_tools', 'Grok turn did not finish');
+        if (!assistantText)
+          throw new GrokProtocolFailure('turn_no_assistant_text', 'Grok turn did not finish');
         const promptMeta = result['_meta'];
         const promptModel =
           typeof promptMeta === 'object' && promptMeta !== null && !Array.isArray(promptMeta)
@@ -660,11 +820,16 @@ export class GrokRuntimeAdapter {
             : undefined;
         // An explicitly selected model that did not run must not be reported as a success.
         if (boundModel !== undefined && promptModel !== undefined && promptModel !== boundModel)
-          throw new Error('Grok ran a different model than requested');
+          throw new GrokProtocolFailure(
+            'model_mismatch',
+            'Grok ran a different model than requested',
+          );
+        trace.phase = 'stopping';
         terminalReceived = true;
         deadline.stop();
         rpc.close();
-        if (!(await control.stop())) throw new Error('Grok process exit was not confirmed');
+        if (!(await control.stop()))
+          throw new GrokProtocolFailure('stop_unconfirmed', 'Grok process exit was not confirmed');
         if (failed || control.canceled) return;
         completed = true;
         // Prefer the model that actually answered; an explicit selection never falls back to the

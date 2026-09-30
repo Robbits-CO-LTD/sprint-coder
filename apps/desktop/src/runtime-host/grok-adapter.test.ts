@@ -169,21 +169,25 @@ describe('Grok ACP adapter process lifecycle', () => {
     expect(test.events.filter((e) => e.type === 'completed')).toHaveLength(1);
   });
   it.each([
-    'rogue-tools',
-    'rogue-mcp',
-    'wrong-session',
-    'malformed',
-    'early-exit',
-    'rpc-error',
-    'no-auth',
-    'max-tokens',
-    'empty',
-  ])('refuses %s without reporting success', async (mode) => {
+    ['rogue-tools', 'inventory', 'inventory_violation'],
+    ['rogue-mcp', 'inventory', 'mcp_inventory_invalid'],
+    ['wrong-session', 'prompt', 'session_mismatch'],
+    ['malformed', 'prompt', 'json_parse_failed'],
+    ['early-exit', 'prompt', 'process_exited'],
+    ['rpc-error', 'prompt', 'rpc_authentication'],
+    ['no-auth', 'initialize', 'rpc_authentication'],
+    ['max-tokens', 'prompt', 'turn_stop_reason'],
+    ['empty', 'prompt', 'turn_no_assistant_text'],
+  ])('refuses %s without reporting success', async (mode, phase, failureCode) => {
     const test = run(mode);
     await test.exit;
     expect(test.errors).toHaveLength(1);
     expect(test.events.some((e) => e.type === 'completed')).toBe(false);
     expect(JSON.stringify(test.errors)).not.toContain('FAKE_SECRET');
+    // Issue #506: the cause is kept as a fixed code, never as the CLI's text.
+    expect(test.diagnostics[0]?.grokProtocol).toMatchObject({ phase, failureCode });
+    expect(isRuntimeFailureDiagnostic(test.diagnostics[0])).toBe(true);
+    expect(JSON.stringify(test.diagnostics)).not.toMatch(/FAKE_SECRET|grok-fixture-session/u);
   });
   it('keeps tool waits in executing until the terminal reply', async () => {
     const test = run('tool-wait');

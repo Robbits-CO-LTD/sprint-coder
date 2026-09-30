@@ -4,8 +4,15 @@ import { dirname, join, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
+  GROK_PROTOCOL_COUNT_MAX,
+  GROK_PROTOCOL_FAILURE_CODES,
+  GROK_PROTOCOL_PENDING_TOOL_MAX,
+  GROK_PROTOCOL_PHASES,
+  GROK_SESSION_UPDATE_KINDS,
+  GROK_STOP_REASONS,
   RUNTIME_PROTOCOL_VERSION,
   correlatedRuntimeStartRejection,
+  isRuntimeFailureDiagnostic,
   isMainToRuntimeEnvelope,
   isRuntimeToMainEnvelope,
   runtimeWorkspaceSetFromLegacyPath,
@@ -747,6 +754,141 @@ describe('Runtime Host protocol', () => {
         },
       }),
     ).toBe(true);
+  });
+
+  it('accepts a bounded grokProtocol only on Grok diagnostics (issue #506)', () => {
+    const grokProtocol = {
+      phase: 'prompt',
+      failureCode: 'turn_no_assistant_text',
+      promptResultReceived: true,
+      stopReason: 'end_turn',
+      receivedFrames: 7,
+      promptResultFrame: 7,
+      lastSessionUpdateFrame: 3,
+      lastSessionUpdate: 'available_commands_update',
+      lastMessageChunkFrame: null,
+      assistantTextObserved: false,
+      assistantTextChars: 0,
+      pendingToolCount: 0,
+      partialFrame: false,
+      stopConfirmation: 'confirmed',
+    };
+    const grok = {
+      version: 1,
+      diagnosticId: '123e4567-e89b-42d3-a456-426614174000',
+      runtimeKind: 'grok',
+      failureStage: 'protocol_error',
+      elapsedMs: 10,
+      appVersion: '0.7.0',
+      cliVersion: 'grok 1.0.0',
+      teamMcp: { enabled: false, status: 'not_configured' },
+      lastRecognizedNotification: null,
+      lastReceivedNotification: null,
+      unsupportedNotificationCount: 0,
+      stderrObserved: false,
+      stderrTruncated: false,
+      recordedAt: '2026-09-30T00:00:00.000Z',
+      grokProtocol,
+    };
+    const { grokProtocol: _omitted, ...legacy } = grok;
+    const envelope = (diagnostic: unknown) => ({
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId: 'runtime-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      seq: 1,
+      operationId: 'operation-1',
+      type: 'error',
+      error: { code: 'RUNTIME_PROTOCOL_ERROR', userMessage: 'failed', retryable: true },
+      diagnostic,
+    });
+    expect(isRuntimeFailureDiagnostic(grok)).toBe(true);
+    expect(isRuntimeToMainEnvelope(envelope(grok))).toBe(true);
+    expect(isRuntimeFailureDiagnostic(legacy)).toBe(true);
+    expect(isRuntimeFailureDiagnostic({ ...grok, grokProtocol: undefined })).toBe(true);
+    // Every enum value and the upper bounds are accepted.
+    for (const [key, values] of [
+      ['phase', GROK_PROTOCOL_PHASES],
+      ['failureCode', GROK_PROTOCOL_FAILURE_CODES],
+      ['stopReason', [...GROK_STOP_REASONS, null]],
+      ['lastSessionUpdate', [...GROK_SESSION_UPDATE_KINDS, null]],
+      ['stopConfirmation', ['confirmed', 'unconfirmed']],
+      ['receivedFrames', [0, GROK_PROTOCOL_COUNT_MAX]],
+      ['promptResultFrame', [null, 0, GROK_PROTOCOL_COUNT_MAX]],
+      ['lastSessionUpdateFrame', [null, GROK_PROTOCOL_COUNT_MAX]],
+      ['lastMessageChunkFrame', [null, GROK_PROTOCOL_COUNT_MAX]],
+      ['assistantTextChars', [0, GROK_PROTOCOL_COUNT_MAX]],
+      ['pendingToolCount', [0, GROK_PROTOCOL_PENDING_TOOL_MAX]],
+    ] as const)
+      for (const value of values)
+        expect(
+          isRuntimeFailureDiagnostic({ ...grok, grokProtocol: { ...grokProtocol, [key]: value } }),
+          `${key}=${String(value)}`,
+        ).toBe(true);
+    // The same payload on another runtime is rejected; without it that runtime passes.
+    for (const runtime of [
+      { runtimeKind: 'codex', cliVersion: 'codex 1.0.0' },
+      { runtimeKind: 'claude', cliVersion: '2.1.218 (Claude Code)' },
+    ]) {
+      expect(isRuntimeFailureDiagnostic({ ...grok, ...runtime })).toBe(false);
+      expect(isRuntimeToMainEnvelope(envelope({ ...grok, ...runtime }))).toBe(false);
+      expect(isRuntimeFailureDiagnostic({ ...legacy, ...runtime })).toBe(true);
+    }
+    const { phase: _phase, ...missingKey } = grokProtocol;
+    for (const invalid of [
+      null,
+      [],
+      'prompt',
+      missingKey,
+      { ...grokProtocol, sessionId: 'session-1' },
+      { ...grokProtocol, text: 'answer' },
+      { ...grokProtocol, phase: 'unknown' },
+      { ...grokProtocol, phase: ['prompt'] },
+      { ...grokProtocol, failureCode: 'Grok turn did not finish' },
+      { ...grokProtocol, stopReason: 'PRIVATE_reason' },
+      { ...grokProtocol, lastSessionUpdate: 'future_update' },
+      { ...grokProtocol, stopConfirmation: 'unknown' },
+      { ...grokProtocol, promptResultReceived: 'true' },
+      { ...grokProtocol, assistantTextObserved: 1 },
+      { ...grokProtocol, partialFrame: null },
+      { ...grokProtocol, receivedFrames: -1 },
+      { ...grokProtocol, receivedFrames: 1.5 },
+      { ...grokProtocol, receivedFrames: null },
+      { ...grokProtocol, receivedFrames: '7' },
+      { ...grokProtocol, receivedFrames: GROK_PROTOCOL_COUNT_MAX + 1 },
+      { ...grokProtocol, promptResultFrame: -1 },
+      { ...grokProtocol, lastSessionUpdateFrame: 2.5 },
+      { ...grokProtocol, lastMessageChunkFrame: GROK_PROTOCOL_COUNT_MAX + 1 },
+      { ...grokProtocol, assistantTextChars: -1 },
+      { ...grokProtocol, assistantTextChars: GROK_PROTOCOL_COUNT_MAX + 1 },
+      { ...grokProtocol, pendingToolCount: GROK_PROTOCOL_PENDING_TOOL_MAX + 1 },
+      { ...grokProtocol, pendingToolCount: Number.POSITIVE_INFINITY },
+    ])
+      expect(isRuntimeFailureDiagnostic({ ...grok, grokProtocol: invalid })).toBe(false);
+    // The 16 KiB bound still covers the whole diagnostic, grokProtocol included: fill the other
+    // bounded fields to just under the limit, then add grokProtocol.
+    const sized = (executable: string, withProtocol: boolean) => ({
+      ...(withProtocol ? grok : legacy),
+      capabilityMismatch: {
+        missingTools: Array.from({ length: 32 }, () => `a${'x'.repeat(127)}`),
+        unexpectedTools: Array.from({ length: 32 }, () => `a${'x'.repeat(127)}`),
+      },
+      cliResolution: {
+        source: 'explicit',
+        executable,
+        version: '1.0.0',
+        compatibility: 'verified',
+        capabilities: Array.from({ length: 32 }, () => `a${'x'.repeat(63)}`),
+      },
+    });
+    const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+    const executable = 'あ'.repeat(Math.floor((16 * 1024 - bytes(sized('', false))) / 3));
+    expect(executable.length).toBeGreaterThan(0);
+    expect(executable.length).toBeLessThanOrEqual(2_048);
+    expect(bytes(sized(executable, false))).toBeLessThanOrEqual(16 * 1024);
+    expect(bytes(sized(executable, true))).toBeGreaterThan(16 * 1024);
+    expect(isRuntimeFailureDiagnostic(sized(executable, false))).toBe(true);
+    expect(isRuntimeFailureDiagnostic(sized(executable, true))).toBe(false);
   });
 
   it('validates the additive optional resolvedModel field on the completed canonical event', () => {

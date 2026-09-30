@@ -1,7 +1,7 @@
 import { ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { GrokAcpClient, GrokRpcError, grokRecord } from './grok-acp';
+import { GrokAcpClient, GrokProtocolFailure, GrokRpcError, grokRecord } from './grok-acp';
 
 const clients: GrokAcpClient[] = [];
 
@@ -223,6 +223,148 @@ describe('Grok ACP transport', () => {
     // Regression: removing the pending entry before validating error loses its reject callback.
     expect(settled).toHaveBeenCalledOnce();
     expect(settled.mock.calls[0]?.[0]).toBeInstanceOf(Error);
+  });
+});
+
+describe('Grok ACP failure codes (issue #506)', () => {
+  function failureCode(f: ReturnType<typeof fixture>): unknown {
+    expect(f.failed).toHaveBeenCalledOnce();
+    const error = f.failed.mock.calls[0]?.[0] as unknown;
+    expect(error).toBeInstanceOf(GrokProtocolFailure);
+    return (error as GrokProtocolFailure).failureCode;
+  }
+
+  it.each([
+    ['not-json\n', 'json_parse_failed'],
+    ['[]\n', 'rpc_invalid'],
+    ['{"jsonrpc":"1.0","id":1,"result":null}\n', 'rpc_invalid'],
+    ['{"jsonrpc":"2.0","id":{},"result":null}\n', 'rpc_invalid'],
+    ['{"jsonrpc":"2.0","id":"internal","result":{},"error":{}}\n', 'rpc_invalid'],
+    ['x'.repeat(1024 * 1024 + 1) + '\n', 'frame_too_large'],
+    ['x'.repeat(1024 * 1024 + 1), 'frame_too_large'],
+  ])('gives the stream failure %# a fixed code: %s', (frame, code) => {
+    const f = fixture();
+    f.stdout.write(frame);
+    expect(failureCode(f)).toBe(code);
+  });
+
+  it('checks the output quota before decoding a chunk', () => {
+    const f = fixture();
+    f.stdout.emit('data', Buffer.alloc(64 * 1024 * 1024 + 1, 0x20));
+    expect(failureCode(f)).toBe('output_quota_exceeded');
+  });
+
+  it.each([
+    ['stdin', 'stdin_failed'],
+    ['process', 'process_error'],
+    ['close', 'process_exited'],
+  ])('gives the %s failure a fixed code', (failure, code) => {
+    const f = fixture();
+    if (failure === 'stdin') f.stdin.emit('error', new Error('PRIVATE_CANARY'));
+    else if (failure === 'process') f.child.emit('error', new Error('PRIVATE_CANARY'));
+    else f.child.emit('close', 1);
+    expect(failureCode(f)).toBe(code);
+  });
+
+  it('keeps the code a notification handler threw and only counts any other handler failure', () => {
+    const typed = fixture();
+    typed.notify.mockImplementation(() => {
+      throw new GrokProtocolFailure('session_mismatch', 'Grok session identity changed');
+    });
+    typed.receive({ jsonrpc: '2.0', method: 'session/update', params: {} });
+    expect(failureCode(typed)).toBe('session_mismatch');
+
+    const untyped = fixture();
+    untyped.notify.mockImplementation(() => {
+      throw new Error('PRIVATE_CANARY handler text');
+    });
+    untyped.receive({ jsonrpc: '2.0', method: 'session/update', params: {} });
+    expect(failureCode(untyped)).toBe('notification_handler_failed');
+    expect(exposedErrorText(untyped.failed.mock.calls[0]?.[0] as object)).not.toContain(
+      'PRIVATE_CANARY',
+    );
+  });
+
+  it('rejects requests with fixed codes for a timeout, too many requests and a closed transport', async () => {
+    vi.useFakeTimers();
+    const f = fixture();
+    const timedOut = f.client.request('initialize', {}, 10).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(await timedOut).toMatchObject({ failureCode: 'request_timeout' });
+    const pending = Array.from({ length: 128 }, () =>
+      f.client.request('fixture', {}).catch((error: unknown) => error),
+    );
+    expect(await f.client.request('overflow', {}).catch((error: unknown) => error)).toMatchObject({
+      failureCode: 'too_many_requests',
+    });
+    f.client.close();
+    for (const error of await Promise.all(pending))
+      expect(error).toMatchObject({ failureCode: 'transport_closed' });
+    expect(await f.client.request('late', {}).catch((error: unknown) => error)).toMatchObject({
+      failureCode: 'transport_closed',
+    });
+    expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it('rejects a numeric reply without result or error as an invalid RPC', async () => {
+    const f = fixture();
+    const request = f.client.request('initialize', {}).catch((error: unknown) => error);
+    f.receive({ jsonrpc: '2.0', id: 1 });
+    expect(await request).toMatchObject({ failureCode: 'rpc_invalid' });
+    expect(f.failed).not.toHaveBeenCalled();
+  });
+
+  it('keeps a classified RPC error as a GrokRpcError, not a protocol failure', async () => {
+    const error = await rejectedRpc({ code: -32603, message: 'rate limit' });
+    expect(error).not.toBeInstanceOf(GrokProtocolFailure);
+    expect(error.category).toBe('rate_limit');
+  });
+});
+
+describe('Grok ACP frame sequence (issue #506)', () => {
+  it('counts only non-blank frames and reports an unterminated tail', () => {
+    const f = fixture();
+    expect(f.client.receivedFrames).toBe(0);
+    expect(f.client.partialFrame).toBe(false);
+    const update = JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: {} });
+    f.stdout.write(`\r\n${update}\n\n${update}\r\n${update.slice(0, 10)}`);
+    expect(f.client.receivedFrames).toBe(2);
+    expect(f.client.partialFrame).toBe(true);
+    f.stdout.write(`${update.slice(10)}\n`);
+    expect(f.client.receivedFrames).toBe(3);
+    expect(f.client.partialFrame).toBe(false);
+    expect(f.notify).toHaveBeenCalledTimes(3);
+  });
+
+  it('numbers a frame that fails to parse', () => {
+    const f = fixture();
+    f.stdout.write('{"jsonrpc":"2.0","method":"session/update","params":{}}\nnot-json\n');
+    expect(f.client.receivedFrames).toBe(2);
+    expect(f.failed).toHaveBeenCalledOnce();
+  });
+
+  it('reports a result with its frame before later frames of the same chunk are handled', async () => {
+    const f = fixture();
+    const observed: Array<[unknown, number, number]> = [];
+    const request = f.client.request('session/prompt', {}, 30_000, (result, frame) =>
+      observed.push([result, frame, f.notify.mock.calls.length]),
+    );
+    const update = JSON.stringify({ jsonrpc: '2.0', method: 'session/update', params: {} });
+    const result = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { stopReason: 'end_turn' } });
+    f.stdout.write(`${update}\n${result}\n${update}\n`);
+    expect(observed).toEqual([[{ stopReason: 'end_turn' }, 2, 1]]);
+    expect(f.notify).toHaveBeenCalledTimes(2);
+    await expect(request).resolves.toEqual({ stopReason: 'end_turn' });
+  });
+
+  it('settles a reply normally even when its observer throws', async () => {
+    const f = fixture();
+    const request = f.client.request('session/prompt', {}, 30_000, () => {
+      throw new Error('observer failure');
+    });
+    f.receive({ jsonrpc: '2.0', id: 1, result: 'done' });
+    await expect(request).resolves.toBe('done');
+    expect(f.failed).not.toHaveBeenCalled();
   });
 });
 

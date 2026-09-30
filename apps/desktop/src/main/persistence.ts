@@ -6670,6 +6670,10 @@ function safePersistedFailureDiagnostic(
         diagnostic.httpStatus <= 599
           ? { httpStatus: diagnostic.httpStatus }
           : {}),
+        // Checked field by field by isRuntimeFailureDiagnostic before this rebuild (issue #506).
+        ...(diagnostic.runtimeKind === 'grok' && diagnostic.grokProtocol !== undefined
+          ? { grokProtocol: diagnostic.grokProtocol }
+          : {}),
         elapsedMs: diagnostic.elapsedMs,
         appVersion: diagnostic.appVersion,
         cliVersion: diagnostic.cliVersion,

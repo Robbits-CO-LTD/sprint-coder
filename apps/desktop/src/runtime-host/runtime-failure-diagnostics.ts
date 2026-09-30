@@ -3,6 +3,7 @@ import { Buffer } from 'node:buffer';
 import { homedir } from 'node:os';
 import {
   RECOGNIZED_CODEX_NOTIFICATION_NAMES,
+  type GrokProtocolDiagnostic,
   type ResolvedCliCommand,
   type RuntimeFailureDiagnostic,
   type RuntimeFailureStage,
@@ -30,6 +31,7 @@ export class RuntimeFailureDiagnosticCollector {
   private codexIsolation: RuntimeFailureDiagnostic['codexIsolation'];
   private cliResolution: ResolvedCliCommand | null = null;
   private httpStatus?: number;
+  private grokProtocol?: GrokProtocolDiagnostic;
 
   constructor(
     private readonly runtimeKind: RuntimeKind,
@@ -99,8 +101,18 @@ export class RuntimeFailureDiagnosticCollector {
     this.httpStatus = status;
   }
 
+  /**
+   * Records the Grok ACP state of the first failure. Later calls cannot replace it, and other
+   * runtimes ignore it.
+   */
+  recordGrokProtocol(value: GrokProtocolDiagnostic): void {
+    if (this.runtimeKind !== 'grok' || this.grokProtocol !== undefined) return;
+    this.grokProtocol = Object.freeze({ ...value });
+  }
+
   snapshot(stage: RuntimeFailureStage, now = Date.now()): RuntimeFailureDiagnostic {
     const httpStatus = this.httpStatus;
+    const grokProtocol = this.grokProtocol;
     const diagnostic: RuntimeFailureDiagnostic = {
       version: 1,
       diagnosticId: randomUUID(),
@@ -124,6 +136,7 @@ export class RuntimeFailureDiagnosticCollector {
       stderrTruncated: this.stderrTruncated,
       ...(this.codexIsolation === undefined ? {} : { codexIsolation: this.codexIsolation }),
       ...(httpStatus === undefined ? {} : { httpStatus }),
+      ...(grokProtocol === undefined ? {} : { grokProtocol }),
       recordedAt: new Date(now).toISOString(),
     };
     return diagnostic;
