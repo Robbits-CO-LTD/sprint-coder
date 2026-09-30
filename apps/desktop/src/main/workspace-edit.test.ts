@@ -10,7 +10,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readlinkSync,
   readdirSync,
   renameSync,
   symlinkSync,
@@ -31,6 +30,7 @@ import { secureWindowsPath, verifyWindowsPathAcl } from './windows-acl';
 
 const fileSystemFault = vi.hoisted(() => ({
   nonce: null as string | null,
+  stagePaths: new Map<number, string>(),
   failWrite: false,
   failRename: false,
   unsupportedExchange: false,
@@ -115,11 +115,7 @@ vi.mock('node:child_process', async (importOriginal) => {
         args[0] === '/bin/cp' && Array.isArray(args[1]) && !args[1].includes('--attributes-only');
       const stage =
         copying && typeof stageDescriptor === 'number'
-          ? readlinkSync(
-              process.platform === 'linux'
-                ? `/proc/self/fd/${stageDescriptor}`
-                : `/dev/fd/${stageDescriptor}`,
-            )
+          ? fileSystemFault.stagePaths.get(stageDescriptor)
           : undefined;
       const swapping = swap !== null && stage?.includes('.sprint-coder-stage-') === true;
       if (swapping) {
@@ -170,10 +166,14 @@ vi.mock('node:fs', async (importOriginal) => {
         args[0].includes('.sprint-coder-stage-')
       ) {
         const descriptor = actual.openSync(...args);
+        fileSystemFault.stagePaths.set(descriptor, String(args[0]));
         fileSystemFault.failingStageDescriptor = descriptor;
         return descriptor;
       }
-      return actual.openSync(...args);
+      const descriptor = actual.openSync(...args);
+      if (typeof args[0] === 'string' && args[0].includes('.sprint-coder-stage-'))
+        fileSystemFault.stagePaths.set(descriptor, args[0]);
+      return descriptor;
     },
     fstatSync: (...args: Parameters<typeof actual.fstatSync>) => {
       if (args[0] === fileSystemFault.failingStageDescriptor) {
@@ -306,7 +306,8 @@ describe('saveWorkspaceFile (issue #43)', () => {
   it.each(process.platform === 'win32' ? [199, 200] : [199, 200, 255])(
     'saves a valid %i-character basename using bounded sibling names',
     (length) => {
-      const root = workspace();
+      // Keep the full Windows path below MAX_PATH, independently of its component limit.
+      const root = mkdtempSync(join(tmpdir(), 'e-'));
       const name = 'x'.repeat(length);
       writeFileSync(join(root, name), 'before');
       expect(openWorkspaceFileForEdit(root, name).editable).toBe(true);
