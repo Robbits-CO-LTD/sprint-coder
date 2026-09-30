@@ -124,7 +124,7 @@ const windowsCommandGateIt = it.runIf(process.platform === 'win32');
 afterEach(async () => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
   // Sequential synchronous SQLite tests can starve worker RPC acknowledgement delivery.
-  // Yield through the real event loop, independent of a test's fake clock, between cases.
+  // Yield through the real event loop after cases restore their fake clocks.
   await yieldToEventLoop();
 });
 
