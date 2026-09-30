@@ -35,6 +35,21 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
     const preload = join(resources, 'sandbox-node-pipe-guard.cjs');
     await copyFile(join(build, 'sprint-coder-sandbox-runner.exe'), runner);
     await copyFile(join(build, 'sandbox-node-pipe-guard.cjs'), preload);
+    // CopyFile may leave inherited ACEs awaiting OS normalization. Observe the same
+    // grant/remove operation without the product, then establish explicit test modes.
+    const aclControl = join(resources, 'acl-control.cjs');
+    await copyFile(join(build, 'sandbox-node-pipe-guard.cjs'), aclControl);
+    const controlBefore = (await exec('icacls.exe', [aclControl], { windowsHide: true })).stdout;
+    const controlSid =
+      'S-1-15-2-111111111-222222222-333333333-444444444-555555555-666666666-777777777';
+    expect(controlBefore).not.toContain(controlSid);
+    await exec('icacls.exe', [aclControl, '/grant', `*${controlSid}:RX`], { windowsHide: true });
+    await exec('icacls.exe', [aclControl, '/remove', `*${controlSid}`], { windowsHide: true });
+    const controlAfter = (await exec('icacls.exe', [aclControl], { windowsHide: true })).stdout;
+    expect(controlAfter).not.toContain(controlSid);
+    console.info('Copied ACL grant/remove control changed:', controlBefore !== controlAfter);
+    // Normalize only fixture setup, never the native result before comparing it.
+    await exec('icacls.exe', [preload, '/inheritance:e'], { windowsHide: true });
     const initialAcl = (await exec('icacls.exe', [preload], { windowsHide: true })).stdout;
     const outside = join(base, 'outside-secret.txt');
     await writeFile(outside, 'private');
@@ -128,6 +143,55 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
     expect(await readFile(outside, 'utf8')).toBe('private');
     expect(await readFile(join(workspace, 'baseline-inside.txt'), 'utf8')).toBe('allowed');
     expect(await readFile(join(workspace, 'inside.txt'), 'utf8')).toBe('allowed');
+    expect((await exec('icacls.exe', [preload], { windowsHide: true })).stdout).toBe(initialAcl);
+    // Preserve explicit owner/system/admin access while testing protected inheritance.
+    // These are new, test-owned files; no user's security settings are modified.
+    await exec('icacls.exe', [preload, '/inheritance:r'], { windowsHide: true });
+
+    const descriptor = async (file: string) => {
+      const powershell = join(
+        process.env.SystemRoot!,
+        'System32/WindowsPowerShell/v1.0/powershell.exe',
+      );
+      return (
+        await exec(
+          powershell,
+          [
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            `([System.IO.File]::GetAccessControl('${file.replaceAll("'", "''")}')).GetSecurityDescriptorSddlForm([System.Security.AccessControl.AccessControlSections]::Access)`,
+          ],
+          { windowsHide: true },
+        )
+      ).stdout.trim();
+    };
+    const ownerSid = (
+      await exec(
+        join(process.env.SystemRoot!, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
+        ],
+        { windowsHide: true },
+      )
+    ).stdout.trim();
+    expect(ownerSid).toMatch(/^S-1-5-21-[0-9-]+$/u);
+    await exec(
+      'icacls.exe',
+      [preload, '/grant:r', '*S-1-5-18:F', '*S-1-5-32-544:F', `*${ownerSid}:F`],
+      { windowsHide: true },
+    );
+    const protectedDescriptor = await descriptor(preload);
+    const protectedAcl = (await exec('icacls.exe', [preload], { windowsHide: true })).stdout;
+    expect(protectedDescriptor).toMatch(/D:P/u);
+    expect(protectedDescriptor).toContain(';;;SY)');
+    expect(protectedDescriptor).toContain(';;;BA)');
+    expect(await readFile(preload)).toEqual(
+      await readFile(join(build, 'sandbox-node-pipe-guard.cjs')),
+    );
     const esm = await exec(runner, [...args, 'guard-accept.mjs'], {
       cwd: workspace,
       env,
@@ -135,6 +199,7 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       timeout: 20_000,
     });
     expect(esm.stdout.trim()).toBe('ESM_OK');
+    expect(await descriptor(preload)).toBe(protectedDescriptor);
     await expect(
       exec(runner, [...args, 'npm-test.cjs'], {
         cwd: workspace,
@@ -144,7 +209,7 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       }),
     ).rejects.toThrow('cannot create child-process pipes/IPC safely');
     const beforeAcl = (await exec('icacls.exe', [preload], { windowsHide: true })).stdout;
-    expect(beforeAcl).toBe(initialAcl);
+    expect(beforeAcl).toBe(protectedAcl);
     await writeFile(preload, 'throw new Error("untrusted replacement");');
     await expect(
       exec(runner, [...args, 'must-not-start.cjs'], {
@@ -155,6 +220,7 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       }),
     ).rejects.toMatchObject({ code: 70 });
     expect(existsSync(join(workspace, 'should-not-start'))).toBe(false);
+    expect(await descriptor(preload)).toBe(protectedDescriptor);
     const afterAcl = (await exec('icacls.exe', [preload], { windowsHide: true })).stdout;
     expect(afterAcl).toBe(beforeAcl);
     await rename(preload, `${preload}.disabled`);
@@ -167,6 +233,7 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       }),
     ).rejects.toMatchObject({ code: 70 });
     expect(existsSync(join(workspace, 'should-not-start'))).toBe(false);
+    expect(await descriptor(`${preload}.disabled`)).toBe(protectedDescriptor);
     // Keep this isolated fixture for evidence. No user directory or external state is removed.
     expect(dirname(runner)).toBe(resources);
   }, 60_000);
