@@ -124,7 +124,7 @@ it.runIf(process.platform === 'linux' || process.platform === 'darwin').each(['i
       ownedGroup = owned.group;
       expect(Number.isSafeInteger(descendant) && descendant > 0).toBe(true);
       const state =
-        execFileSync('ps', ['-axo', 'pid=,stat='], { encoding: 'utf8' })
+        execFileSync('ps', ['-axo', 'pid=,stat='], { encoding: 'utf8', timeout: 2_000 })
           .split('\n')
           .map((line) => line.trim().split(/\s+/))
           .find(([pid]) => Number(pid) === descendant)?.[1] ?? '';

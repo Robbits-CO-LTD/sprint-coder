@@ -12,3 +12,5 @@ Native source/build untouched. Existing pre-hold artifact reused: SHA256 C6F97BC
 
 Limits: this does not detect reparented/new-group escaped descendants, solve PID reuse/malformed process snapshots, prove every POSIX CLI descendant, or provide same-package authenticated TeamMCP/real paid CLI acceptance. Those outstanding conditions remain tracked under issue653/506. No native build/download, paid APIs, settings/probe changes, merge, or issue closure.
 Root independent final read-only review PASS. Test-only fixed status prints confirmation and zombie/absent class without PID/path. A zombie/unconfirmed PASS proves timely stop attempt and fail-closed notification, not successful termination confirmation. Runtime second-seat review tracked separately.
+
+Runtime final independent read-only review PASS (no additional execution); bounded test-only ps observation uses a 2-second timeout.
