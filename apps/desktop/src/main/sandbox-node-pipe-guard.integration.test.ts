@@ -46,6 +46,26 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
     await writeFile(join(workspace, 'child.cjs'), 'process.exit(0);\n');
     const script = `
       const cp=require('node:child_process'),a=require('node:assert/strict'),fs=require('node:fs');
+      const meta=(r)=>({status:r.status,code:r.error?.code??null,signal:r.signal});
+      const controls=()=>{
+        const ignore=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:'ignore'}));
+        const inherit=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:'inherit'}));
+        const fd=fs.openSync('child-output.txt','w+');
+        let file;
+        try {file=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:[fd,fd,fd]}));}
+        finally {fs.closeSync(fd);}
+        return {ignore,inherit,file};
+      };
+      // Same parent, AppContainer token, executable and handles; only the compatibility
+      // preload changes. No pipe/IPC operation is attempted before the guard loads.
+      process.env.SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD='0';
+      const baseline=controls();
+      a.throws(()=>fs.readFileSync(${JSON.stringify(outside)}));
+      a.throws(()=>fs.writeFileSync(${JSON.stringify(outside)},'changed'));
+      fs.writeFileSync('baseline-inside.txt','allowed');
+      process.env.SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD='1';
+      process.env.NODE_OPTIONS=${JSON.stringify(sandboxNodeOptions(preload))};
+      require(${JSON.stringify(preload)});
       const blocked=(fn)=>a.throws(fn,{code:'SPRINT_CODER_SANDBOX_NODE_PIPE_UNSUPPORTED'});
       blocked(()=>cp.execFileSync(process.execPath,['child.cjs']));
       blocked(()=>cp.execSync('echo 7'));
@@ -54,22 +74,22 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       blocked(()=>cp.fork('missing.cjs',[],{stdio:'inherit'}));
       blocked(()=>cp.execFile(process.execPath,['child.cjs'],()=>{}));
       blocked(()=>cp.spawnSync(process.execPath,[],{stdio:['ignore','ignore','pipe']}));
-      const ignored=cp.spawnSync(process.execPath,['child.cjs'],{stdio:'ignore'});
-      const inherited=cp.spawnSync(process.execPath,['child.cjs'],{stdio:'inherit'});
-      const fd=fs.openSync('child-output.txt','w+');
-      let fileBacked;
-      try {fileBacked=cp.spawnSync(process.execPath,['child.cjs'],{stdio:[fd,fd,fd]});}
-      finally {fs.closeSync(fd);}
-      const meta=(r)=>({status:r.status,code:r.error?.code,signal:r.signal});
-      const diagnostic=JSON.stringify({ignore:meta(ignored),inherit:meta(inherited),file:meta(fileBacked),node:process.version,uv:process.versions.uv});
-      a.equal(ignored.status,0,diagnostic);
-      a.equal(inherited.status,0,diagnostic);
-      a.equal(fileBacked.status,0,diagnostic);
+      const guarded=controls();
+      const diagnostic=JSON.stringify({baseline,guarded,node:process.version,uv:process.versions.uv});
+      a.ok(baseline.ignore.signal===null&&(
+        (baseline.ignore.status===0&&baseline.ignore.code===null)||
+        (baseline.ignore.status===null&&baseline.ignore.code==='EPERM')
+      ),diagnostic);
+      a.deepEqual(guarded.ignore,baseline.ignore,diagnostic);
+      for(const group of [baseline,guarded]){
+        a.deepEqual(group.inherit,{status:0,code:null,signal:null},diagnostic);
+        a.deepEqual(group.file,{status:0,code:null,signal:null},diagnostic);
+      }
       a.equal(cp.execFileSync(process.execPath,['child.cjs'],{stdio:'inherit'}),null);
       a.throws(()=>fs.readFileSync(${JSON.stringify(outside)}));
       a.throws(()=>fs.writeFileSync(${JSON.stringify(outside)},'changed'));
       fs.writeFileSync('inside.txt','allowed');
-      console.log('APP_CONTAINER_GUARD_OK');
+      console.log(JSON.stringify({marker:'APP_CONTAINER_GUARD_OK',baseline,guarded,node:process.version,uv:process.versions.uv}));
     `;
     await writeFile(join(workspace, 'guard-accept.cjs'), script);
     await writeFile(
@@ -96,12 +116,17 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
     ];
     const result = await exec(runner, [...args, 'guard-accept.cjs'], {
       cwd: workspace,
-      env,
+      // The runner still verifies/grants the trusted resource. This parent loads it only
+      // after baseline controls; other fixtures below retain product startup preloading.
+      env: { ...env, NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main' },
       windowsHide: true,
       timeout: 20_000,
     });
-    expect(result.stdout.trim()).toBe('APP_CONTAINER_GUARD_OK');
+    const observation = JSON.parse(result.stdout.trim());
+    expect(observation.marker).toBe('APP_CONTAINER_GUARD_OK');
+    console.info('AppContainer pipe-free control:', JSON.stringify(observation));
     expect(await readFile(outside, 'utf8')).toBe('private');
+    expect(await readFile(join(workspace, 'baseline-inside.txt'), 'utf8')).toBe('allowed');
     expect(await readFile(join(workspace, 'inside.txt'), 'utf8')).toBe('allowed');
     const esm = await exec(runner, [...args, 'guard-accept.mjs'], {
       cwd: workspace,

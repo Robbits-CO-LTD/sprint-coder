@@ -497,8 +497,8 @@ describe('CommandRunner', () => {
         "require('node:child_process').execFileSync(process.execPath,['-e','console.log(7)']);\n",
       );
       await writeFile(
-        join(root, 'ignore.cjs'),
-        "const r=require('node:child_process').spawnSync(process.execPath,['-e','process.exit(0)'],{stdio:'ignore'});if(r.error||r.status!==0)process.stderr.write(JSON.stringify({status:r.status,signal:r.signal,error:r.error?.code,node:process.version,uv:process.versions.uv})+'\\n');if(r.error)throw r.error;process.exit(r.status??1);\n",
+        join(root, 'inherit.cjs'),
+        "const r=require('node:child_process').spawnSync(process.execPath,['-e','process.exit(0)'],{stdio:'inherit'});if(r.error||r.status!==0)process.stderr.write(JSON.stringify({status:r.status,signal:r.signal,error:r.error?.code,node:process.version,uv:process.versions.uv})+'\\n');if(r.error)throw r.error;process.exit(r.status??1);\n",
       );
       const runner = new CommandRunner({ sandboxed: true });
       const chunks: CommandOutputChunk[] = [];
@@ -524,7 +524,7 @@ describe('CommandRunner', () => {
         await prepareExecutionSpec({
           workspacePath: root,
           executable: process.execPath,
-          argv: ['ignore.cjs'],
+          argv: ['inherit.cjs'],
         }),
         {
           onChunk: (chunk) => {
