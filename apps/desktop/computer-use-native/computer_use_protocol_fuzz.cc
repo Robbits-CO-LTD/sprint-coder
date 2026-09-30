@@ -1,4 +1,5 @@
 #include "computer_use_protocol.h"
+#include "computer_use_preflight_classifier.h"
 
 #include <algorithm>
 #include <array>
@@ -24,6 +25,52 @@ bool Check(bool condition, const char *code) {
   return false;
 }
 
+bool CheckNativePreflightClassifier() {
+  using namespace sprint_coder::computer_use;
+  // Independent fixed truth table, bit order metadata/classified/secure/highimpact.
+  constexpr std::array<NativePreflightReason, 16> reasons = {
+      NativePreflightReason::kUnclassified, NativePreflightReason::kUnclassified,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kNone,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kUnclassified,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kSecure,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kUnclassified,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kHighImpact,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kUnclassified,
+      NativePreflightReason::kUnclassified, NativePreflightReason::kSecure};
+  for (std::uint32_t mask = 0; mask < 16; ++mask) {
+    const auto decision = ClassifyNativePreflightFacts(
+        {(mask & 1) != 0, (mask & 2) != 0, (mask & 4) != 0, (mask & 8) != 0});
+    const auto expected_kind = mask == 3 ? NativePreflightKind::kOrdinary
+        : mask == 7 || mask == 15 ? NativePreflightKind::kBlocked
+                                 : NativePreflightKind::kTakeover;
+    if (!Check(decision.classifier_version == 1 &&
+                   decision.reason == reasons[mask] &&
+                   decision.kind == expected_kind &&
+                   NativePreflightAllowsDispatch(decision) == (mask == 3),
+               "native-preflight-fact-matrix")) return false;
+  }
+  // Only the exact supported ordinary/none tuple can dispatch. Reserved
+  // approval and contradictory tuples never bypass the native decision gate.
+  for (const auto version : {0u, 1u, 2u, UINT32_MAX}) {
+    for (const auto kind : {NativePreflightKind::kOrdinary,
+                           NativePreflightKind::kSingleUseApproval,
+                           NativePreflightKind::kBlocked, NativePreflightKind::kTakeover,
+                           static_cast<NativePreflightKind>(255)}) {
+      for (const auto reason : {NativePreflightReason::kNone,
+                               NativePreflightReason::kUnclassified,
+                               NativePreflightReason::kSecure,
+                               NativePreflightReason::kHighImpact,
+                               static_cast<NativePreflightReason>(255)}) {
+        const bool expected = version == 1 && kind == NativePreflightKind::kOrdinary &&
+                              reason == NativePreflightReason::kNone;
+        if (!Check(NativePreflightAllowsDispatch({kind, reason, version}) == expected,
+                   "native-preflight-invalid-authority-tuple")) return false;
+      }
+    }
+  }
+  return true;
+}
+
 FrameHeader ValidHeader() {
   FrameHeader header{};
   header.message_type = static_cast<std::uint16_t>(MessageType::kObserveResult);
@@ -44,6 +91,8 @@ std::uint32_t Next(std::uint32_t *state) {
 } // namespace
 
 int main() {
+  if (!CheckNativePreflightClassifier()) return 1;
+  std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   using sprint_coder::computer_use::IsTypeTextScalar;
   for (std::uint32_t scalar = 0; scalar < 0x20; ++scalar)
     if (!Check(!IsTypeTextScalar(scalar), "type-c0-control")) return 1;
