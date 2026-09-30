@@ -10777,30 +10777,190 @@ if (runsWithElectronAbi)
   });
 else
   describe('SqlitePersistenceClient v27 Electron ABI bridge', () => {
+    it('keeps child reporting diagnostics bounded and excludes raw errors, paths and response data', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-report-test-'));
+      cleanup.push(directory);
+      const file = join(directory, 'report.json');
+      expect(persistenceBridgeReportSummary(file)).toBe('report=missing');
+      writeFileSync(
+        file,
+        JSON.stringify({
+          numTotalTests: 8,
+          numPassedTests: 1,
+          numFailedTests: 7,
+          numPendingTests: 0,
+          numRuntimeErrorTestSuites: 1,
+          testResults: [
+            {
+              name: 'PRIVATE_PATH',
+              message: 'PRIVATE_ERROR',
+              assertionResults: Array.from({ length: 7 }, () => ({
+                status: 'failed',
+                title: `bounded\n${'x'.repeat(200)}`,
+                failureMessages: ['PRIVATE_RESPONSE'],
+                fullName: 'PRIVATE_PROMPT',
+              })),
+            },
+          ],
+        }),
+      );
+      const summary = persistenceBridgeReportSummary(file);
+      expect(summary).not.toMatch(/PRIVATE_|\\n/u);
+      const childFailure = Object.assign(
+        new Error('PRIVATE_PATH PRIVATE_STDERR [vitest-worker]: Timeout calling "onTaskUpdate"'),
+        {
+          stdout: 'PRIVATE_STDOUT',
+          stderr: 'PRIVATE_STDERR',
+          code: 1,
+          killed: false,
+          signal: 'SIGTERM',
+        },
+      );
+      const safeFailure = persistenceBridgeFailure(childFailure, file);
+      // Serialize every own Error property, including stack/cause if a future change adds one.
+      const serializedFailure = JSON.stringify(
+        safeFailure,
+        Object.getOwnPropertyNames(safeFailure),
+      );
+      expect(serializedFailure).not.toContain('PRIVATE_');
+      expect(safeFailure.cause).toBeUndefined();
+      expect(safeFailure.message).toContain('"rpcTimeout":true');
+      expect(safeFailure.message).toContain('"code":1');
+      expect(safeFailure.message).toContain('"signal":"SIGTERM"');
+      expect(JSON.parse(summary)).toMatchObject({
+        report: 'available',
+        counts: {
+          numTotalTests: 8,
+          numPassedTests: 1,
+          numFailedTests: 7,
+          numPendingTests: 0,
+          numRuntimeErrorTestSuites: 1,
+        },
+      });
+      expect(JSON.parse(summary).failedTitles).toHaveLength(5);
+      expect(JSON.parse(summary).failedTitles.every((title: string) => title.length === 120)).toBe(
+        true,
+      );
+      writeFileSync(file, 'INVALID_PRIVATE_REPORT');
+      expect(persistenceBridgeReportSummary(file)).toBe('report=unreadable');
+      writeFileSync(file, 'x'.repeat(2 * 1024 * 1024 + 1));
+      expect(persistenceBridgeReportSummary(file)).toBe('report=oversized');
+    });
+
     it(
       'runs the SQLite integration suite with the bundled Electron Node ABI',
       async () => {
         // The Windows child can exceed Vitest's 60s RPC deadline. Keep this worker's event loop
         // available to receive reporting acknowledgements while SQLite tests run in Electron.
-        await promisify(execFile)(
-          electronTestExecutablePath(),
-          [
-            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-            'run',
-            'src/main/persistence.test.ts',
-          ],
-          {
-            cwd: process.cwd(),
-            encoding: 'utf8',
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-            timeout: persistenceBridgeTimeoutMs,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
+        const reportDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-report-'));
+        const reportFile = join(reportDirectory, 'report.json');
+        try {
+          await promisify(execFile)(
+            electronTestExecutablePath(),
+            [
+              join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+              'run',
+              'src/main/persistence.test.ts',
+              '--reporter=default',
+              '--reporter=json',
+              `--outputFile.json=${reportFile}`,
+            ],
+            {
+              cwd: process.cwd(),
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                ELECTRON_RUN_AS_NODE: '1',
+                SPRINT_CODER_ELECTRON_DB_TEST: '1',
+              },
+              timeout: persistenceBridgeTimeoutMs,
+              maxBuffer: 10 * 1024 * 1024,
+            },
+          );
+        } catch (error) {
+          // Keep the child failure authoritative. A reporting timeout otherwise exposes only
+          // stderr, losing whether SQLite assertions ran. Do not print raw stdout/report errors.
+          throw persistenceBridgeFailure(error, reportFile);
+        } finally {
+          try {
+            rmSync(reportDirectory, { recursive: true, force: true });
+          } catch {
+            // An OS lock on diagnostic output must not mask the authoritative child result or
+            // expose a raw cleanup error/path. This directory contains only test-owned reports.
+          }
+        }
       },
       persistenceBridgeTimeoutMs + 5_000,
     );
   });
+
+function persistenceBridgeFailure(error: unknown, reportFile: string): Error {
+  const failure: Record<string, number | string | boolean> = {};
+  if (typeof error === 'object' && error !== null) {
+    const source = error as Record<string, unknown>;
+    const code = source['code'];
+    if (
+      (typeof code === 'number' && Number.isSafeInteger(code)) ||
+      (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code))
+    )
+      failure['code'] = code;
+    if (typeof source['killed'] === 'boolean') failure['killed'] = source['killed'];
+    if (typeof source['signal'] === 'string' && /^SIG[A-Z]{1,16}$/u.test(source['signal']))
+      failure['signal'] = source['signal'];
+    failure['rpcTimeout'] =
+      typeof source['message'] === 'string' &&
+      source['message'].includes('[vitest-worker]: Timeout calling "onTaskUpdate"');
+  }
+  // Vitest prints Error.cause and execFile's message includes raw stderr. Retain the failure
+  // classification, never the child error or its stdout/stderr/path-bearing properties.
+  return new Error(
+    `SQLite Electron bridge failed; child=${JSON.stringify(failure)}; ${persistenceBridgeReportSummary(reportFile)}`,
+  );
+}
+
+function persistenceBridgeReportSummary(reportFile: string): string {
+  try {
+    if (!existsSync(reportFile)) return 'report=missing';
+    if (statSync(reportFile).size > 2 * 1024 * 1024) return 'report=oversized';
+    const report: unknown = JSON.parse(readFileSync(reportFile, 'utf8'));
+    if (typeof report !== 'object' || report === null || Array.isArray(report))
+      return 'report=invalid';
+    const record = report as Record<string, unknown>;
+    const counts: Record<string, number> = {};
+    for (const key of [
+      'numTotalTests',
+      'numPassedTests',
+      'numFailedTests',
+      'numPendingTests',
+      'numRuntimeErrorTestSuites',
+    ]) {
+      const value = record[key];
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+        counts[key] = value;
+    }
+    const failedTitles: string[] = [];
+    if (Array.isArray(record['testResults'])) {
+      for (const suite of record['testResults']) {
+        if (typeof suite !== 'object' || suite === null || !Array.isArray(suite.assertionResults))
+          continue;
+        for (const assertion of suite.assertionResults) {
+          if (failedTitles.length >= 5) break;
+          if (
+            typeof assertion !== 'object' ||
+            assertion === null ||
+            assertion.status !== 'failed' ||
+            typeof assertion.title !== 'string'
+          )
+            continue;
+          failedTitles.push(assertion.title.replace(/[\p{Cc}\p{Cf}]/gu, ' ').slice(0, 120));
+        }
+      }
+    }
+    return JSON.stringify({ report: 'available', counts, failedTitles });
+  } catch {
+    return 'report=unreadable';
+  }
+}
 
 async function createCommitOrderFixture(
   scenario: 'delayed cleanup' | 'equal timestamps' | 'clock rollback',
