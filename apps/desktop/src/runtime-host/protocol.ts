@@ -280,6 +280,17 @@ export const GROK_SESSION_UPDATE_KINDS = [
   'plan',
   'available_commands_update',
   'current_mode_update',
+  // Grok CLI extensions observed from grok 1.0.41 (issue #506 Slice B). Before every prompt result
+  // it sent `response_completed` and then `turn_completed`; `last_turn_summary` followed it.
+  'response_completed',
+  'turn_completed',
+  'last_turn_summary',
+  'model_changed',
+  'session_info_update',
+  'session_summary_generated',
+  'tool_call_delta_chunk',
+  'pending_interaction',
+  'interaction_resolved',
   'other',
 ] as const;
 export type GrokSessionUpdateKind = (typeof GROK_SESSION_UPDATE_KINDS)[number];

@@ -250,8 +250,11 @@ describe('Grok prompt result and text order across data events (issue #506)', ()
     expect(turn.completions()).toHaveLength(1);
   });
 
-  // Characterization of current behavior that Slice C is to address. These pin what happens
-  // today and are not the desired contract.
+  // Characterization of orders that break the ACP contract (text after the prompt result). These
+  // pin what happens today and are not the desired contract. Slice B observed grok 1.0.41 (4 real
+  // turns, 2026-09-30) sending every agent_message_chunk, then response_completed and
+  // turn_completed, before the result, and no text after it. Following the #506 plan, completion
+  // therefore gets no drain until a real CLI is seen sending text after its result.
   it('result then text in one data event: completes with the whole text (Slice C current behavior)', async () => {
     const turn = await startTurn();
     await turn.waitForPrompt();
@@ -335,6 +338,28 @@ describe('Grok protocol diagnostic failure codes (issue #506)', () => {
       });
     },
   );
+
+  it('names the Grok turn_completed update that precedes the result', async () => {
+    const turn = await startTurn();
+    const before = await turn.waitForPrompt();
+    // The order grok 1.0.41 sent in Slice B, with a stop reason that fails the Turn.
+    await deliverEach(turn, [
+      Buffer.from(
+        chunk('こんにちは') +
+          update({ sessionUpdate: 'response_completed' }) +
+          update({ sessionUpdate: 'turn_completed' }) +
+          turn.result('max_tokens'),
+      ),
+    ]);
+    await turn.settled();
+    expect(turn.protocol()).toMatchObject({
+      failureCode: 'turn_stop_reason',
+      lastSessionUpdate: 'turn_completed',
+      lastSessionUpdateFrame: before + 3,
+      promptResultFrame: before + 4,
+      lastMessageChunkFrame: before + 1,
+    });
+  });
 
   it('records a tool still pending at the result', async () => {
     const turn = await startTurn();
