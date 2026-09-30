@@ -21,6 +21,7 @@ import {
 import { join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
+import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
   managedLocalTargetKey,
   verifyManagedLocalSidecarBundle,
@@ -613,10 +614,16 @@ export function refreshPackagedComputerUseSignerDigest(appPath: string): string 
   return signerDigest;
 }
 
-export function refreshPackagedSandboxRunnerDigest(appPath: string): string {
-  const executable = join(appPath, 'Contents', 'Resources', 'sprint-coder-sandbox-runner');
+export function refreshPackagedSandboxRunnerDigest(
+  appPath: string,
+  platform: 'darwin' | 'win32' = 'darwin',
+): string {
+  const executable =
+    platform === 'win32'
+      ? join(appPath, 'resources', 'sprint-coder-sandbox-runner.exe')
+      : join(appPath, 'Contents', 'Resources', 'sprint-coder-sandbox-runner');
   if (!lstatSync(executable).isFile())
-    throw new Error('Packaged macOS sandbox runner was not found');
+    throw new Error(`Packaged ${platform} sandbox runner was not found`);
   const digest = createHash('sha256').update(readFileSync(executable)).digest('hex');
   writeFileSync(`${executable}.sha256`, `${digest}\n`, { mode: 0o600 });
   return digest;
@@ -849,6 +856,10 @@ const config: ForgeConfig = {
     postPackage: async (_forgeConfig, packageResult) => {
       if (packageResult.platform !== 'darwin') {
         for (const outputPath of packageResult.outputPaths) {
+          // Packager's Authenticode signing changes the helper after the build-time seal.
+          // Seal its final bytes before ZIP/Squirrel consume this packaged directory.
+          if (packageResult.platform === 'win32')
+            refreshPackagedSandboxRunnerDigest(outputPath, 'win32');
           if (packageResult.platform === 'win32')
             refreshPackagedComputerUseArtifactDigest(join(outputPath, 'resources'), 'win32');
           if (packageResult.platform === 'win32')
@@ -914,12 +925,15 @@ const config: ForgeConfig = {
         );
       }
     },
-    postMake: async (_forgeConfig, makeResults) =>
-      createWindowsWizardInstaller(makeResults, {
+    postMake: async (_forgeConfig, makeResults) => {
+      // Squirrel may sign extracted PE files. Refuse stale seals before wrapping its Setup.
+      await verifyWindowsSandboxArtifacts(makeResults);
+      return createWindowsWizardInstaller(makeResults, {
         scriptPath: resolve(__dirname, 'installer', 'windows-wizard.iss'),
         iconPath: `${appIconPath}.ico`,
         ...(windowsSign === undefined ? {} : { signOptions: windowsSign }),
-      }),
+      });
+    },
   },
   makers: [
     new MakerSquirrel({
