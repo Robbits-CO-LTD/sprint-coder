@@ -1795,9 +1795,10 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it.each([false, true])(
-      'rejects impossible connection capacity without starting a Worker attempt (live=%s)',
-      async (live) => {
+    it.each(['initial', 'live', 'startup'] as const)(
+      'rejects impossible connection capacity without starting a Worker attempt (%s)',
+      async (mode) => {
+        const live = mode !== 'initial';
         const persistence = createPersistence();
         const connection = managedLocalConnection();
         connection.rateLimit = {
@@ -1848,7 +1849,11 @@ if (runsWithElectronAbi)
           const updated = persistence.lowerProviderConnectionRateLimits(connection.id, {
             tokensPerMinute: 19_999,
           });
-          coordinator.refreshConnectionAdmission(updated);
+          if (mode === 'startup') {
+            expect(scheduler.cancelQueued(submission.executionId)).toBe(true);
+            const restarted = new TeamCoordinator(persistence, runtime);
+            restarted.recoverOnStartup();
+          } else coordinator.refreshConnectionAdmission(updated);
         }
         await waitFor(
           () => persistence.getTeamExecution(submission.executionId).state === 'failed',
