@@ -11,6 +11,10 @@ vi.mock('node:child_process', async (original) => ({
   ...(await original<object>()),
   spawn: mocks.spawn,
 }));
+vi.mock('./owned-cli-process', () => ({
+  spawnOwnedCliProcess: mocks.spawn,
+  stopOwnedCliProcess: () => mocks.stop(),
+}));
 vi.mock('./process-tree', () => ({ terminateRuntimeProcessTree: mocks.stop }));
 it.each(
   ['claude', 'codex'].flatMap((kind) =>

@@ -1,5 +1,5 @@
 import { codexManagedToolName } from './managed-tool-names';
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   accessSync,
@@ -41,6 +41,7 @@ import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { TEAM_CORE_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -231,7 +232,7 @@ export class CodexRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     localImages?: CodexLocalImagePreparation,
-    runtimeProcessStarted?: (pid: number) => void,
+    runtimeProcessStarted?: (pid: number) => void | boolean,
     toolCatalogSnapshot?: ToolCatalogSnapshot,
     invokeManagedTool?: InvokeManagedTool,
   ): void {
@@ -345,7 +346,7 @@ export class CodexRuntimeAdapter {
     void writeScope;
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = spawn(
+      child = spawnOwnedCliProcess(
         this.cli?.executable ?? resolveCodexCommand(this.command),
         [
           ...this.commandPrefixArgs,
@@ -369,6 +370,10 @@ export class CodexRuntimeAdapter {
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true,
         },
+        (pid) => {
+          if (teamMcp !== undefined && runtimeProcessStarted?.(pid) === false) return false;
+          if (localImages === undefined) accepted();
+        },
       );
     } catch {
       void releaseLocalImages();
@@ -379,7 +384,7 @@ export class CodexRuntimeAdapter {
       );
       return;
     }
-    if (teamMcp !== undefined)
+    if (process.platform !== 'win32' && teamMcp !== undefined)
       child.once('spawn', () => {
         if (child.pid === undefined) throw new Error('Codex runtime process id is unavailable');
         runtimeProcessStarted?.(child.pid);
@@ -403,7 +408,7 @@ export class CodexRuntimeAdapter {
     };
     let stopPromise: Promise<boolean> | undefined;
     const stop = (): Promise<boolean> =>
-      (stopPromise ??= terminateCodexProcessTree(child)
+      (stopPromise ??= (stopOwnedCliProcess(child) ?? terminateCodexProcessTree(child))
         .catch(() => false)
         .then((confirmed) => {
           if (!confirmed) this.quarantined = true;
@@ -435,7 +440,8 @@ export class CodexRuntimeAdapter {
               bufferedEventBytes += byteLength;
             }
           };
-    if (localImages === undefined && teamMcp === undefined) accepted();
+    if (process.platform !== 'win32' && localImages === undefined && teamMcp === undefined)
+      accepted();
 
     let failed = false;
     let sawCompletion = false;

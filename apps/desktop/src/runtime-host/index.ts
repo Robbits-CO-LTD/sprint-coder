@@ -348,7 +348,7 @@ function startAdapter(
             type: 'error',
             error: runtimeImageError('Team runtimeのprocess identityを確認できません。'),
           });
-          return;
+          return false;
         }
         send(data.taskId, data.turnId, data.operationId, {
           type: 'runtime_process',
