@@ -288,10 +288,11 @@ export function saveWorkspaceFile(
       };
     }
     if (publication === 'intervened') {
-      ownsBackup = existsSync(backup);
+      if (process.platform === 'win32') ownsBackup = existsSync(backup);
       return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
     }
-    ownsBackup = existsSync(backup);
+    // POSIX exchange never creates or consumes backup: an existing nonce sibling is third-party.
+    if (process.platform === 'win32') ownsBackup = existsSync(backup);
     try {
       syncParentDirectory(absolute);
     } catch {
@@ -312,7 +313,7 @@ export function saveWorkspaceFile(
           conflictPath: stagingRelative,
         };
       }
-      if (existsSync(backup)) {
+      if (process.platform === 'win32' && existsSync(backup)) {
         ownsBackup = false;
         return {
           outcome: 'refused',
