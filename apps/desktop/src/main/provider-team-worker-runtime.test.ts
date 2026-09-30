@@ -42,6 +42,31 @@ const connection: ProviderConnection = {
 };
 
 describe('ProviderAwareTeamWorkerRuntime', () => {
+  it('closes the provider iterator after completion before any later transport failure', async () => {
+    let released = false;
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        try {
+          yield { type: 'output_delta', text: 'Done' };
+          yield { type: 'completed', stopReason: 'completed' };
+          throw new Error('transport failure after terminal event');
+        } finally {
+          released = true;
+        }
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: 'fixture',
+    });
+    expect(result.completion).toMatchObject({ status: 'succeeded', summary: 'Done' });
+    expect(released).toBe(true);
+  });
   it('waits for an in-flight tool and session cleanup before confirming stop', async () => {
     const tool = deferred<unknown>();
     const cleanup = deferred<void>();

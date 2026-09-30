@@ -83,7 +83,7 @@ export async function* normalizeOpenAIResponsesStream(
         type: 'completed',
         stopReason: typeof response?.status === 'string' ? response.status : 'completed',
       };
-      continue;
+      return;
     }
     if (event.type === 'response.failed' || event.type === 'error') {
       yield {
