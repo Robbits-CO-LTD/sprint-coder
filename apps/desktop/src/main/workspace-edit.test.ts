@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import type * as NodeCrypto from 'node:crypto';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeFs from 'node:fs';
 import type * as NativeFilePublication from './native-file-publication';
@@ -47,7 +48,7 @@ const fileSystemFault = vi.hoisted(() => ({
 }));
 
 vi.mock('node:crypto', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:crypto')>();
+  const actual = await importOriginal<typeof NodeCrypto>();
   return {
     ...actual,
     randomBytes: (size: number) =>
