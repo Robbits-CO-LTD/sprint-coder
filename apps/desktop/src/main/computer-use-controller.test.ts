@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import {
   computerUseAvailabilitySchema,
@@ -8,6 +10,8 @@ import {
   type ComputerUseAvailability,
   type ComputerUseObservation,
   type ComputerUseSessionStatus,
+  type ProviderConnection,
+  type TaskSummary,
 } from '@sprint-coder/contracts';
 import type {
   ComputerActionAuditInput,
@@ -17,6 +21,7 @@ import type {
 } from './persistence';
 import {
   ComputerUseController,
+  type ComputerUseControllerDeps,
   type ComputerUseNativeActionResult,
   type ComputerUseNativeHost,
   type ComputerUseNativeObservation,
@@ -24,6 +29,9 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
+import { preflightComputerUseProvider, ProviderComputerUsePlanner } from './computer-use-planner';
+import type { ProviderRuntime } from './provider-runtime';
+import type { PermissionBroker } from './permission-broker';
 import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
@@ -139,6 +147,8 @@ function observation(
 function createFixture(
   options: {
     runtimeCapture?: ComputerUseRuntimeCapture;
+    plannerFactory?: ComputerUseControllerDeps['plannerFactory'];
+    captureInputReceipts?: boolean;
     mode?: 'observe_only' | 'supervised' | 'full_access_app';
     observationOverrides?: Partial<ComputerUseObservation>;
     observationOverridesForRevision?: (revision: number) => Partial<ComputerUseObservation>;
@@ -224,12 +234,15 @@ function createFixture(
     windowId: 'window-1',
     profileRevision: profile.revision,
     cancelEpoch: 0,
+    ...(options.captureInputReceipts
+      ? { inputReceipt: { sessionId: 'session-1', inputAttemptCount: 0, cancelEpoch: 0 } }
+      : {}),
     policyLanguage: options.sessionPolicyLanguage ?? 'en',
     maximumMode: options.sessionMaximumMode ?? 'full_access_app',
     screenBounds: { x: 0, y: 0, width: 800, height: 600 },
   };
   const native: ComputerUseNativeHost = {
-    availability: () => availability,
+    availability: () => ({ ...availability, platform: currentProfile.platform }),
     pickApplication: async () => appIdentity,
     listWindows: async () => {
       listWindowsCount += 1;
@@ -274,6 +287,9 @@ function createFixture(
       return {
         ...nativeSession,
         sessionId: input.sessionId,
+        ...(options.captureInputReceipts
+          ? { inputReceipt: { sessionId: input.sessionId, inputAttemptCount: 0, cancelEpoch: 0 } }
+          : {}),
         profileRevision: input.profile.revision,
         policyLanguage:
           startSessionCount > 1
@@ -289,6 +305,7 @@ function createFixture(
       const nextRevision = ++revision;
       const observed = observation(nextRevision, {
         sessionId: session.sessionId,
+        appIdentityDigest: session.appIdentityDigest,
         windowIdentityDigest: session.windowIdentityDigest,
         policyLanguage: options.observationPolicyLanguage ?? session.policyLanguage,
         maximumMode: options.observationMaximumMode ?? session.maximumMode,
@@ -318,15 +335,29 @@ function createFixture(
               ? { ...observed, focusedElementSignature: 'e'.repeat(64) }
               : observed;
     },
-    dispatch: async ({ requestId, action }) => {
+    dispatch: async ({ requestId, action, session }) => {
       dispatchCount += 1;
       dispatchedActions.push(action);
       if (options.dispatch !== undefined) return options.dispatch({ requestId, action });
-      return { result: 'completed', reasonCode: null };
+      return {
+        result: 'completed',
+        reasonCode: null,
+        ...(options.captureInputReceipts
+          ? {
+              inputReceipt: {
+                sessionId: session.sessionId,
+                inputAttemptCount: dispatchCount,
+                cancelEpoch: 0,
+              },
+            }
+          : {}),
+      };
     },
-    cancel: async () => {
+    cancel: async (session) => {
       nativeCancelCount += 1;
       await options.cancelGate;
+      if (options.captureInputReceipts)
+        return { sessionId: session.sessionId, inputAttemptCount: dispatchCount, cancelEpoch: 1 };
     },
     close: async () => {
       nativeCloseCount += 1;
@@ -424,6 +455,7 @@ function createFixture(
     native,
     ...(options.runtimeCapture === undefined ? {} : { runtimeCapture: options.runtimeCapture }),
     ...(options.planner === undefined ? {} : { planner: options.planner }),
+    ...(options.plannerFactory === undefined ? {} : { plannerFactory: options.plannerFactory }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -529,6 +561,165 @@ describe('ComputerUseController', () => {
     });
     expect(fixture.nativeCloseCount()).toBe(1);
   });
+
+  it.each(['complete', 'two-rounds', 'fallback', 'stop-in-flight'] as const)(
+    'connects the real planner, Controller and collector without sealing fixture evidence: %s',
+    async (scenario) => {
+      const runtimeCapture = new ComputerUseRuntimeCapture();
+      const windowsIdentityFacts = {
+        platform: 'win32' as const,
+        identityDigest: '',
+        executablePath: 'C:\\Windows\\System32\\notepad.exe',
+        executableDigest: 'b'.repeat(64),
+        signerDigest: 'e'.repeat(64),
+        packageFamilyName: null,
+        appUserModelId: null,
+        displayName: 'Offline fixture',
+        policyLanguage: 'en' as const,
+        maximumMode: 'full_access_app' as const,
+      };
+      const identityDigest = computerAppNativeIdentityDigest(
+        windowsIdentityFacts,
+        computerAppGrantIdentityFrom(windowsIdentityFacts)!,
+      )!;
+      const windowsProfile: ComputerAppProfileRecord = {
+        ...profile,
+        platform: 'win32',
+        kind: 'win32-executable',
+        canonicalPath: windowsIdentityFacts.executablePath,
+        identityDigest,
+        identity: { ...windowsIdentityFacts, identityDigest },
+      };
+      const connection = {
+        id: profile.connectionId,
+        providerId: 'openai',
+        runtimeKind: 'official_api',
+        enabled: true,
+        secretReference: null,
+        verification: { status: 'verified', verifiedAt: null, expiresAt: null, message: null },
+      } as ProviderConnection;
+      let requests = 0;
+      let releaseResponse!: () => void;
+      const responseGate = new Promise<void>((resolveResponse) => {
+        releaseResponse = resolveResponse;
+      });
+      const responses = [
+        { type: 'click', x: 0.75, y: 0.25, button: 'left' }, // fixed-marker preflight
+        { type: 'type', text: 'Q' },
+        { type: 'scroll', x: 0.5, y: 0.5, deltaX: 0, deltaY: 120 },
+        click,
+      ];
+      const runtime = {
+        execute: async function* (_connection: ProviderConnection, request: { modelId: string }) {
+          const index = requests++;
+          if (scenario === 'stop-in-flight' && index === 2) await responseGate;
+          yield { type: 'output_delta', text: JSON.stringify(responses[index]) };
+          yield {
+            type: 'resolution',
+            resolution: {
+              resolvedProvider: connection.providerId,
+              resolvedModel:
+                scenario === 'fallback' && index === 2 ? 'unexpected-model' : request.modelId,
+            },
+          };
+          yield { type: 'completed', stopReason: 'stop' };
+        },
+        cancel: async () => {
+          releaseResponse();
+        },
+      } as unknown as ProviderRuntime;
+      const fixture = createFixture({
+        runtimeCapture,
+        profileRecord: windowsProfile,
+        windowExecutableDigest: windowsIdentityFacts.executableDigest,
+        captureInputReceipts: true,
+        plannerFactory: async (input) => {
+          const base = {
+            runtime,
+            connection,
+            modelId: input.modelId,
+            mode: input.mode,
+            task: {
+              id: input.taskId,
+              title: 'PRIVATE_FIXTURE_TEXT',
+              goal: null,
+              localOnly: false,
+            } as TaskSummary,
+            turnId: input.turnId,
+            permissionBroker: {} as PermissionBroker,
+            catalogRevision: 7,
+            policyEpoch: input.policyEpoch,
+            structuredOutputSupported: false,
+            runtimeCapture,
+            egress: () => ({
+              allowed: true,
+              evaluation: {
+                decision: 'allow' as const,
+                reason: 'offline fixture',
+                policyEpoch: 0,
+                evaluationTrace: [],
+              },
+            }),
+          };
+          const compatibilityPermit = await preflightComputerUseProvider(
+            { ...base, sessionId: input.sessionId },
+            input.signal,
+          );
+          return new ProviderComputerUsePlanner({
+            ...base,
+            compatibilityPermit,
+            currentCompatibilityBinding: () => compatibilityPermit,
+          });
+        },
+      });
+      try {
+        const session = await start(
+          fixture,
+          'full_access_app',
+          false,
+          undefined,
+          scenario === 'two-rounds' ? 2 : 3,
+        );
+        if (scenario === 'stop-in-flight') {
+          await vi.waitFor(() => expect(requests).toBe(3));
+          await fixture.controller.stop(session.sessionId);
+        }
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        const snapshot = runtimeCapture.snapshot();
+        const { summarizeComputerUseCaptureRounds } = await import(
+          pathToFileURL(resolve(__dirname, '../../../../computer-use-capture-rounds.mjs')).href
+        );
+        const [aggregated] = summarizeComputerUseCaptureRounds([
+          {
+            kind: 'hello',
+            payload: { platform: 'win32', nativeManifestDigest: availability.manifestDigest },
+          },
+          ...snapshot.events.map((payload) => ({ kind: 'event', payload })),
+        ]);
+        expect(aggregated.platform).toBe('win32');
+        expect(snapshot.finalGateEligible).toBe(false);
+        expect(JSON.stringify(snapshot)).not.toContain('PRIVATE_FIXTURE_TEXT');
+        if (scenario === 'complete') {
+          expect(requests).toBe(4); // one preflight, exactly three real planner requests
+          expect(fixture.dispatchCount()).toBe(3);
+          expect(fixture.observationCount()).toBe(4);
+          expect(aggregated.roundsComplete).toBe(true);
+          expect(aggregated.binding).toMatchObject({ roundsCompleted: 3, fallbackUsed: false });
+        } else {
+          expect(aggregated.roundsComplete).toBe(false);
+          expect(aggregated.binding).toBeNull();
+          expect(fixture.dispatchCount()).toBe(scenario === 'two-rounds' ? 2 : 1);
+        }
+        const stoppedEvents = snapshot.events.length;
+        releaseResponse();
+        await fixture.controller.dispose();
+        expect(runtimeCapture.snapshot().events).toHaveLength(stoppedEvents);
+      } finally {
+        releaseResponse();
+        await fixture.controller.dispose();
+      }
+    },
+  );
 
   it('records actual native calls without giving direct handwritten actions Provider evidence', async () => {
     const runtimeCapture = new ComputerUseRuntimeCapture();
