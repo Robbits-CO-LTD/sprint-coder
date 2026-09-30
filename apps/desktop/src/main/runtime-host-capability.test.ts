@@ -58,6 +58,7 @@ import {
 } from '../runtime-host/protocol';
 import { RuntimeHostClient } from './runtime-host';
 import { secureLogger } from './secure-logger';
+import { RUNTIME_HOST_HELLO_TIMEOUT_MS } from '../runtime-host/probe-budget';
 
 function emitReadyHello(
   index: number,
@@ -94,6 +95,41 @@ afterEach(() => {
 });
 
 describe('RuntimeHostClient Grok capability', () => {
+  it.each(['codex', 'claude'] as const)(
+    'accepts %s initial and refreshed hello after a valid 10.7 second sequential probe',
+    async (kind) => {
+      vi.useFakeTimers();
+      const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, kind);
+      electronMock.children[0]!.emit('spawn');
+      const initial = client.probe();
+      await vi.advanceTimersByTimeAsync(10_700);
+      const overrides =
+        kind === 'claude'
+          ? { claudeAvailable: true, claudeReadiness: 'ready', claudeModels: [] }
+          : {};
+      emitReadyHello(0, false, 'hello', overrides);
+      await expect(initial).resolves.toMatchObject({ available: true, readiness: 'ready' });
+      const refreshed = client.refreshCapabilityProbe();
+      const operation = await pendingRefreshOperationId(client);
+      await vi.advanceTimersByTimeAsync(10_700);
+      emitReadyHello(0, false, operation, overrides);
+      await expect(refreshed).resolves.toMatchObject({ available: true, readiness: 'ready' });
+      client.dispose();
+    },
+  );
+
+  it('keeps a bounded hello wait and refuses a late hello after expiry', async () => {
+    vi.useFakeTimers();
+    const client = new RuntimeHostClient(vi.fn(), vi.fn());
+    electronMock.children[0]!.emit('spawn');
+    const probe = client.probe();
+    await vi.advanceTimersByTimeAsync(RUNTIME_HOST_HELLO_TIMEOUT_MS);
+    await expect(probe).resolves.toMatchObject({ available: false });
+    emitReadyHello(0, false);
+    await expect(client.probe()).resolves.toMatchObject({ available: false });
+    client.dispose();
+  });
+
   it('launches Grok and selects only its capability fields', async () => {
     const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, 'grok');
     const models = [{ id: 'grok-code-fast-1', displayName: 'Grok', description: 'test' }];
@@ -532,10 +568,10 @@ describe('RuntimeHostClient image attachment capability state', () => {
     vi.setSystemTime(20_000);
     const firstCapture = client.captureImageAttachmentCapability();
     const firstOperation = await pendingRefreshOperationId(client);
-    await vi.advanceTimersByTimeAsync(10_000);
+    await vi.advanceTimersByTimeAsync(RUNTIME_HOST_HELLO_TIMEOUT_MS);
     await expect(firstCapture).resolves.toMatchObject({ available: false });
 
-    vi.setSystemTime(40_000);
+    vi.setSystemTime(80_000);
     let secondSettled = false;
     const secondCapture = client.captureImageAttachmentCapability().then((value) => {
       secondSettled = true;
@@ -549,7 +585,7 @@ describe('RuntimeHostClient image attachment capability state', () => {
     emitReadyHello(0, false, secondOperation);
     await expect(secondCapture).resolves.toMatchObject({
       available: true,
-      capturedAtMs: 40_000,
+      capturedAtMs: 80_000,
     });
     client.dispose();
   });
