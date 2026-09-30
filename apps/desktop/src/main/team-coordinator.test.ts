@@ -1867,6 +1867,57 @@ if (runsWithElectronAbi)
       },
     );
 
+    it('parks an automatic retry on capacity lowering without changing its retained Attempt', async () => {
+      const persistence = createPersistence();
+      const connection = managedLocalConnection();
+      connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
+      persistence.createProviderConnection(connection);
+      const task = persistence.createTask('Retry token capacity');
+      const runtime = new HandedWorkspaceRecordingRuntime();
+      const execute = vi
+        .spyOn(runtime, 'execute')
+        .mockRejectedValue(new ProviderRateLimitedError('fixture rate limit', 60_000));
+      const scheduler = new TeamExecutionScheduler(1, new ConnectionAdmissionController());
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'read',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      });
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'read',
+        doneCriteria: ['read'],
+      });
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'waiting_rate_limit',
+      );
+      const attempts = persistence.listTeamAttempts(submission.executionId);
+      expect(attempts).toHaveLength(1);
+      const updated = persistence.lowerProviderConnectionRateLimits(connection.id, {
+        tokensPerMinute: 19_999,
+      });
+      coordinator.refreshConnectionAdmission(updated);
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'waiting_resume',
+      );
+      expect(persistence.listTeamAttempts(submission.executionId)).toEqual(attempts);
+      expect(execute).toHaveBeenCalledOnce();
+      expect(scheduler.snapshot().queuedExecutionIds).not.toContain(submission.executionId);
+      persistence.close();
+    });
+
     it('runs a direct message to a write-capable Managed Local or CLI Worker read-only over the Task Workspace (issue #570)', async () => {
       const persistence = createPersistence();
       persistence.createProviderConnection(managedLocalConnection());
