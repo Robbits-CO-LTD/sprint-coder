@@ -321,8 +321,12 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
-async function retainedWriteFixture() {
+async function retainedWriteFixture(independent = false) {
   const f = fixture(undefined, true);
+  if (independent) {
+    f.plan.steps[1]!.dependsOn = [];
+    f.diagram.edges = [];
+  }
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
   expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
@@ -362,8 +366,8 @@ async function retainedWriteFixture() {
   return { f, a, run, manager, worker, worktree };
 }
 
-async function sealedWriteFixture() {
-  const { f, a, run, manager, worker, worktree } = await retainedWriteFixture();
+async function sealedWriteFixture(independent = false) {
+  const { f, a, run, manager, worker, worktree } = await retainedWriteFixture(independent);
   const sealed = await manager.finalizeChanges({
     ...worker,
     baseHead: worktree.baseHead,
@@ -3080,11 +3084,101 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toBeNull();
       expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('released');
       expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
+      expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('active');
+      expect(
+        f.persistence
+          .getTeamSnapshot(f.team.id)
+          .agents.filter(({ kind }) => kind === 'worker')
+          .every(({ state }) => state !== 'done'),
+      ).toBe(true);
       await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
       expect(execute).not.toHaveBeenCalled();
       expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
       f.persistence.close();
     });
+
+    it.each(['complete', 'other-execution', 'other-worker'])(
+      'finishes participating Workers when the last integration resumes (%s)',
+      async (mode) => {
+        const { f, a, run, manager } = await sealedWriteFixture(true);
+        f.persistence.holdGraphIntegration({
+          ...completion(a.mission.id, 'a', run),
+          reason: 'Integration requires retry',
+        });
+        const sibling = begin(f, a.mission.id, 'b');
+        f.persistence.completeGraphStep(completion(a.mission.id, 'b', sibling));
+        if (mode === 'other-execution')
+          f.persistence.createTeamExecution({
+            teamId: f.team.id,
+            assigneeAgentId: f.workers[1]!.id,
+            createdByAgentId: f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.find(({ kind }) => kind === 'leader')!.id,
+            instruction: 'unrelated pending work',
+            accessMode: 'read-only',
+            now,
+          });
+        if (mode === 'other-worker') {
+          const other = f.persistence.registerTeamWorker({
+            teamId: f.team.id,
+            role: 'other',
+            objective: 'other work',
+            contextInheritancePolicy: 'none',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          });
+          f.persistence.transitionWorkerState(other.id, 'spawning');
+          f.persistence.transitionWorkerState(other.id, 'ready');
+        }
+        for (const worker of f.workers) {
+          f.persistence.transitionWorkerState(worker.id, 'busy');
+          f.persistence.transitionWorkerState(worker.id, 'waiting');
+        }
+        f.persistence.setWorkerCurrentActivity(
+          run.execution.assigneeAgentId,
+          'Integration requires retry',
+          now,
+        );
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+        expect(f.persistence.getTeamMission(a.mission.id).state).toBe('completed');
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.filter(({ kind }) => kind === 'worker')
+            .map(({ state }) => state),
+        ).toEqual(
+          mode === 'complete'
+            ? ['done', 'done']
+            : mode === 'other-execution'
+              ? ['done', 'waiting']
+              : ['done', 'done', 'ready'],
+        );
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(({ id }) => id === run.execution.assigneeAgentId)?.currentActivity,
+        ).toBeNull();
+        expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe(
+          mode === 'complete' ? 'completed' : 'active',
+        );
+        expect(coordinator.hasUnfinishedTeamWork(f.task.id)).toBe(mode !== 'complete');
+        expect(execute).not.toHaveBeenCalled();
+        f.persistence.close();
+      },
+      gitScenarioTimeout,
+    );
 
     it('does not treat restart as proof that an interrupted integration runner stopped', async () => {
       const { f, a, run } = await sealedWriteFixture();
