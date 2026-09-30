@@ -59,9 +59,11 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
     );
     await writeFile(join(workspace, 'case.test.cjs'), "require('node:test')('works',()=>{});\n");
     await writeFile(join(workspace, 'child.cjs'), 'process.exit(0);\n');
-    const script = `
+    const controlsSource = `
       const cp=require('node:child_process'),a=require('node:assert/strict'),fs=require('node:fs');
-      const meta=(r)=>({status:r.status,code:r.error?.code??null,signal:r.signal});
+      const code=(error)=>error===undefined?null:
+        ['EPERM','EACCES','ENOENT','EINVAL','EBADF','ETIMEDOUT'].includes(error.code)?error.code:'UNKNOWN';
+      const meta=(r)=>({status:r.status,code:code(r.error),signal:r.signal});
       const controls=()=>{
         const ignore=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:'ignore'}));
         const inherit=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:'inherit'}));
@@ -69,8 +71,26 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
         let file;
         try {file=meta(cp.spawnSync(process.execPath,['child.cjs'],{stdio:[fd,fd,fd]}));}
         finally {fs.closeSync(fd);}
-        return {ignore,inherit,file};
+        const ignoreSlots=[0,1,2].map((slot)=>{
+          const stdio=['inherit','inherit','inherit'];stdio[slot]='ignore';
+          return meta(cp.spawnSync(process.execPath,['-e','process.exit(0)'],{stdio}));
+        });
+        // Device opens have different flags from libuv's ignored-stdio CreateFile.
+        // Never use bare NUL here: Node fs can resolve it as an ordinary file path.
+        const nul=[fs.constants.O_RDONLY,fs.constants.O_WRONLY,fs.constants.O_RDWR].map((flags)=>{
+          let fd;
+          try {
+            fd=fs.openSync(${JSON.stringify('\\\\.\\NUL')},flags);
+            return {openCode:null,child:meta(cp.spawnSync(process.execPath,
+              ['-e','process.exit(0)'],{stdio:[fd,fd,fd]}))};
+          } catch(error) {return {openCode:code(error),child:null};}
+          finally {if(fd!==undefined)fs.closeSync(fd);}
+        });
+        return {ignore,inherit,file,ignoreSlots,nul};
       };
+    `;
+    const script = `
+      ${controlsSource}
       // Same parent, AppContainer token, executable and handles; only the compatibility
       // preload changes. No pipe/IPC operation is attempted before the guard loads.
       process.env.SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD='0';
@@ -96,9 +116,22 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
         (baseline.ignore.status===null&&baseline.ignore.code==='EPERM')
       ),diagnostic);
       a.deepEqual(guarded.ignore,baseline.ignore,diagnostic);
+      for(let slot=0;slot<3;slot++){
+        const result=baseline.ignoreSlots[slot];
+        a.ok(result.signal===null&&(
+          (result.status===0&&result.code===null)||
+          (result.status===null&&result.code==='EPERM')
+        ),diagnostic);
+        a.deepEqual(guarded.ignoreSlots[slot],result,diagnostic);
+      }
+      a.deepEqual(guarded.nul,baseline.nul,diagnostic);
       for(const group of [baseline,guarded]){
         a.deepEqual(group.inherit,{status:0,code:null,signal:null},diagnostic);
         a.deepEqual(group.file,{status:0,code:null,signal:null},diagnostic);
+        for(const result of group.nul){
+          if(result.openCode===null)a.deepEqual(result.child,{status:0,code:null,signal:null},diagnostic);
+          else a.ok(['EPERM','EACCES'].includes(result.openCode)&&result.child===null,diagnostic);
+        }
       }
       a.equal(cp.execFileSync(process.execPath,['child.cjs'],{stdio:'inherit'}),null);
       a.throws(()=>fs.readFileSync(${JSON.stringify(outside)}));
@@ -129,6 +162,30 @@ describe.skipIf(!available)('sandbox pipe preload in real Windows AppContainer',
       '--',
       process.execPath,
     ];
+    await writeFile(
+      join(workspace, 'guard-host-controls.cjs'),
+      `${controlsSource}console.log(JSON.stringify(controls()));`,
+    );
+    const host = await exec(process.execPath, ['guard-host-controls.cjs'], {
+      cwd: workspace,
+      env: {
+        ...env,
+        SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD: '0',
+        NODE_OPTIONS: '--preserve-symlinks --preserve-symlinks-main',
+      },
+      windowsHide: true,
+    });
+    const hostObservation = JSON.parse(host.stdout.trim());
+    for (const result of [
+      hostObservation.ignore,
+      hostObservation.inherit,
+      hostObservation.file,
+      ...hostObservation.ignoreSlots,
+    ])
+      expect(result).toEqual({ status: 0, code: null, signal: null });
+    for (const result of hostObservation.nul)
+      expect(result).toEqual({ openCode: null, child: { status: 0, code: null, signal: null } });
+    console.info('Unsandboxed NUL controls:', JSON.stringify(hostObservation));
     const result = await exec(runner, [...args, 'guard-accept.cjs'], {
       cwd: workspace,
       // The runner still verifies/grants the trusted resource. This parent loads it only
