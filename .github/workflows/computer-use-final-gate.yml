@@ -28,6 +28,11 @@ on:
         required: true
         default: false
         type: boolean
+      collect_owned_startup:
+        description: Opt into CU-OFF isolated startup capture on protected runners; an operator must normally Quit within 120 seconds. This is not parent acceptance.
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: computer-use-final-gate-${{ inputs.package_run_id }}
@@ -193,6 +198,18 @@ jobs:
             throw 'Protected computer-use-final-gate environment is not configured; complete #387 setup before using this runner.'
           }
 
+      - name: Checkout trusted startup collector
+        if: ${{ inputs.collect_owned_startup }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Node.js for opted-in startup checkpoint
+        if: ${{ inputs.collect_owned_startup }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.23.3
+
       - name: Download the explicit signed Windows artifact
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
         with:
@@ -236,6 +253,8 @@ jobs:
         env:
           INPUT_ROOT: ${{ runner.temp }}/computer-use-windows-input
           EXTRACT_ROOT: ${{ runner.temp }}/computer-use-windows-package
+          COLLECT_OWNED_STARTUP: ${{ inputs.collect_owned_startup }}
+          STARTUP_REPORT_ROOT: ${{ runner.temp }}/computer-use-owned-startup-windows
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
           EXPECTED_WINDOWS_SIGNER_THUMBPRINT: ${{ vars.WINDOWS_RELEASE_SIGNER_THUMBPRINT }}
           EXPECTED_WINDOWS_SIGNER_SUBJECT: ${{ vars.WINDOWS_RELEASE_SIGNER_SUBJECT }}
@@ -373,7 +392,22 @@ jobs:
           "portable_sha256=$portableDigest" >> $env:GITHUB_OUTPUT
           "installer_name=$($installer[0].Name)" >> $env:GITHUB_OUTPUT
           "installer_sha256=$installerDigest" >> $env:GITHUB_OUTPUT
-          'Verified signed Windows package metadata without launching it or reading user data.'
+          if ($env:COLLECT_OWNED_STARTUP -eq 'true') {
+            New-Item -ItemType Directory -Force -Path $env:STARTUP_REPORT_ROOT | Out-Null
+            $executableDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $app[0].FullName).Hash.ToLowerInvariant()
+            node collect-computer-use-owned-startup.mjs --executable $app[0].FullName --source-commit $env:SOURCE_COMMIT --executable-sha256 $executableDigest --package-sha256 $portableDigest --output (Join-Path $env:STARTUP_REPORT_ROOT 'owned-startup-checkpoint.json')
+            if ($LASTEXITCODE -ne 0) { throw 'Owned startup checkpoint failed; parent acceptance remains held.' }
+          }
+          'Verified signed Windows package metadata. Optional startup checkpoint does not establish parent acceptance.'
+
+      - name: Upload bounded non-authoritative Windows startup checkpoint
+        if: ${{ success() && inputs.collect_owned_startup }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: computer-use-owned-startup-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/computer-use-owned-startup-windows/owned-startup-checkpoint.json
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Remove extracted package
         if: always()
@@ -439,6 +473,12 @@ jobs:
             --source-digest "${SOURCE_COMMIT}" \
             --deny-self-hosted-runners
 
+      - name: Checkout trusted startup collector
+        if: ${{ inputs.collect_owned_startup }}
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+
       - name: Setup Node.js for strict manifest validation
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -452,6 +492,8 @@ jobs:
           MOUNT_ROOT: ${{ runner.temp }}/computer-use-macos-mount
           SOURCE_COMMIT: ${{ needs.validate-dispatch.outputs.source_commit }}
           EXPECTED_MACOS_TEAM_IDENTIFIER: ${{ vars.MACOS_RELEASE_TEAM_IDENTIFIER }}
+          COLLECT_OWNED_STARTUP: ${{ inputs.collect_owned_startup }}
+          STARTUP_REPORT_ROOT: ${{ runner.temp }}/computer-use-owned-startup-macos
         run: |
           set -euo pipefail
           [[ "${EXPECTED_MACOS_TEAM_IDENTIFIER:-}" =~ ^[A-Z0-9]{10}$ ]] || {
@@ -567,7 +609,25 @@ jobs:
 
           package_digest="$(/usr/bin/shasum -a 256 "${dmg}" | awk '{print $1}')"
           printf 'package_sha256=%s\n' "${package_digest}" >> "${GITHUB_OUTPUT}"
-          echo 'Verified notarized macOS package metadata without launching it or reading user data.'
+          if [[ "${COLLECT_OWNED_STARTUP}" == 'true' ]]; then
+            executable_name="$(/usr/bin/plutil -extract CFBundleExecutable raw -o - "${app}/Contents/Info.plist")"
+            [[ "${executable_name}" =~ ^[A-Za-z0-9][A-Za-z0-9._\ -]{0,127}$ ]] || { echo '::error::App executable name is invalid.'; exit 1; }
+            executable="${app}/Contents/MacOS/${executable_name}"
+            [[ -f "${executable}" && ! -L "${executable}" ]] || { echo '::error::App executable is missing or unsafe.'; exit 1; }
+            executable_digest="$(/usr/bin/shasum -a 256 "${executable}" | awk '{print $1}')"
+            mkdir -p "${STARTUP_REPORT_ROOT}"
+            node collect-computer-use-owned-startup.mjs --executable "${executable}" --source-commit "${SOURCE_COMMIT}" --executable-sha256 "${executable_digest}" --package-sha256 "${package_digest}" --output "${STARTUP_REPORT_ROOT}/owned-startup-checkpoint.json"
+          fi
+          echo 'Verified notarized macOS package metadata. Optional startup checkpoint does not establish parent acceptance.'
+
+      - name: Upload bounded non-authoritative macOS startup checkpoint
+        if: ${{ success() && inputs.collect_owned_startup }}
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: computer-use-owned-startup-macos-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/computer-use-owned-startup-macos/owned-startup-checkpoint.json
+          if-no-files-found: error
+          retention-days: 1
 
   validate-evidence:
     name: Validate exact AC-28, AC-29, and AC-30 journeys

@@ -735,7 +735,20 @@ describe('Computer Use external final gate', () => {
     expect(evidenceWorkflow).not.toContain('secrets.');
     expect(workflow).not.toMatch(/[A-Z][A-Z0-9_]*_API_KEY/u);
     expect(evidenceWorkflow).not.toMatch(/[A-Z][A-Z0-9_]*_API_KEY/u);
-    expect(workflow).not.toContain('upload-artifact');
+    const checkpointUploads = workflow.match(
+      /- name: Upload bounded non-authoritative [\s\S]*?retention-days: 1/g,
+    );
+    expect(checkpointUploads).toHaveLength(2);
+    expect(workflow.match(/uses: actions\/upload-artifact@/g)).toHaveLength(2);
+    for (const [index, platform] of ['windows', 'macos'].entries()) {
+      const upload = checkpointUploads![index]!;
+      expect(upload).toContain('success() && inputs.collect_owned_startup');
+      expect(upload).toContain(
+        `path: \${{ runner.temp }}/computer-use-owned-startup-${platform}/owned-startup-checkpoint.json`,
+      );
+      expect(upload).toContain('if-no-files-found: error');
+      expect(upload).not.toMatch(/path:.*[*]/u);
+    }
     expect(evidenceWorkflow).toContain('--validate-capture-only');
     expect(evidenceWorkflow.indexOf('--validate-capture-only')).toBeLessThan(
       evidenceWorkflow.indexOf('Upload bounded machine transcript for trusted sealing'),
