@@ -27,8 +27,17 @@ type Verifier = {
 const root = resolve(__dirname, '../..');
 const validatorPath = resolve(root, 'verify-computer-use-final-gate.mjs');
 let verifier: Verifier;
+let protectedRunner: {
+  verifyComputerUseProtectedRunnerEvidence: (
+    candidate: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+};
 beforeAll(async () => {
   verifier = await import(pathToFileURL(validatorPath).href);
+  protectedRunner = await import(
+    pathToFileURL(resolve(root, 'verify-computer-use-protected-runner.mjs')).href
+  );
 });
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
@@ -137,6 +146,37 @@ function syntheticEvidence(): Evidence {
   });
   return result;
 }
+
+it('evaluates complete journey rows through protected callbacks while missing parent proof stays held', async () => {
+  const evidence = syntheticEvidence();
+  const measured: string[] = [];
+  let asserted = false;
+  const result = await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+    expectedSourceCommit: 'a'.repeat(40),
+    expectedSourceRunId: '1234',
+    expectedEvidenceRunId: '5678',
+    expectedEvidenceRunAttempt: 1,
+    expectedWindowsArtifact: template.artifacts.windows.artifactName,
+    expectedMacosArtifact: template.artifacts.macos.artifactName,
+    expectedWindowsPortableName: 'test-portable.zip',
+    expectedWindowsInstallerName: 'test-installer.exe',
+    expectedWindowsInstallerSha256: 'c'.repeat(64),
+    expectedWindowsPortableSha256: 'b'.repeat(64),
+    expectedMacosSha256: 'd'.repeat(64),
+    trustedWorkflowAttestationVerified: true,
+    measureOwnedRunFacts: async (platform: string) => {
+      measured.push(platform);
+      return {};
+    },
+    verifyParentAssertions: async () => {
+      asserted = true;
+      return digest(evidence.parentClosure);
+    },
+  });
+  expect(measured).toEqual(['windows', 'macos']);
+  expect(asserted).toBe(true);
+  expect(result).toMatchObject({ status: 'CLOSE_HOLD', finalGateEligible: false });
+});
 
 function validate(candidate: unknown) {
   return verifier.validateComputerUseFinalGateEvidence(candidate, {
