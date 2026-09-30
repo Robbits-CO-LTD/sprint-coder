@@ -16,6 +16,7 @@ import type { WorkerActivityEvent } from './team-coordinator';
 import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError } from './tool-broker';
 import { WorkspacePatchRejection } from './workspace-patch-tool';
+import { normalizeGeminiContentStream } from './gemini-content-stream';
 
 const connection: ProviderConnection = {
   id: 'openai:primary',
@@ -42,6 +43,67 @@ const connection: ProviderConnection = {
 };
 
 describe('ProviderAwareTeamWorkerRuntime', () => {
+  it.each(['text', 'tool', 'usage'])(
+    'rejects a Gemini %s round truncated before finishReason without running tools',
+    async (kind) => {
+      const executeTool = vi.fn();
+      const release = vi.fn(async () => undefined);
+      const chunk =
+        kind === 'usage'
+          ? { usageMetadata: { promptTokenCount: 8 } }
+          : {
+              candidates: [
+                {
+                  content: {
+                    parts:
+                      kind === 'text'
+                        ? [{ text: 'partial' }]
+                        : [{ functionCall: { name: 'create_file', args: {} } }],
+                  },
+                },
+              ],
+            };
+      const runtime: ProviderRuntime = {
+        verify: vi.fn(),
+        listModels: vi.fn(),
+        cancel: vi.fn(),
+        execute() {
+          return normalizeGeminiContentStream(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`));
+                controller.close();
+              },
+            }),
+            'gemini-test',
+          );
+        },
+      };
+      const adapter = controlledProviderAdapter(runtime, {
+        managedToolsConnectionId: connection.id,
+        prepareManagedTools: async () => ({
+          tools: [{ name: 'create_file', description: 'write', inputSchema: { type: 'object' } }],
+          execute: executeTool,
+          release,
+        }),
+      });
+      await expect(
+        adapter.execute({
+          worker: { ...providerWorker(), writeCapable: true },
+          envelope,
+          content: 'inspect',
+          workspaceSet: {
+            primaryRootId: 'root',
+            roots: [{ rootId: 'root', path: '/workspace', label: 'root', role: 'primary' }],
+            digest: 'a'.repeat(64),
+          },
+        }),
+      ).rejects.toThrow('Gemini stream ended before completion');
+      expect(executeTool).not.toHaveBeenCalled();
+      expect(release).toHaveBeenCalledOnce();
+    },
+  );
+
   it('waits for an in-flight tool and session cleanup before confirming stop', async () => {
     const tool = deferred<unknown>();
     const cleanup = deferred<void>();
