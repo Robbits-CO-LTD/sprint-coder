@@ -17,6 +17,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -120,8 +121,11 @@ const artifactIt = it.skipIf(process.platform === 'win32');
 const commandExecutionIt = it.skipIf(process.platform === 'win32');
 const windowsCommandGateIt = it.runIf(process.platform === 'win32');
 
-afterEach(() => {
+afterEach(async () => {
   for (const directory of cleanup.splice(0)) rmSync(directory, { recursive: true, force: true });
+  // Sequential synchronous SQLite tests can starve worker RPC acknowledgement delivery.
+  // Yield through the real event loop, independent of a test's fake clock, between cases.
+  await yieldToEventLoop();
 });
 
 function createPersistence(
