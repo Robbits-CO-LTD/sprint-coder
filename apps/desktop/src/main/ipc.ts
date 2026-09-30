@@ -3328,19 +3328,24 @@ export class IpcRouter {
       providerConnectionRateLimitLowerInputSchema,
       providerConnectionSchema,
       (input, event, envelope) =>
-        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () =>
-          this.persistence.lowerProviderConnectionRateLimits(input.connectionId, {
-            ...(input.maxConcurrentRequests === undefined
-              ? {}
-              : { maxConcurrentRequests: input.maxConcurrentRequests }),
-            ...(input.requestsPerMinute === undefined
-              ? {}
-              : { requestsPerMinute: input.requestsPerMinute }),
-            ...(input.tokensPerMinute === undefined
-              ? {}
-              : { tokensPerMinute: input.tokensPerMinute }),
-          }),
-        ).value,
+        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () => {
+          const connection = this.persistence.lowerProviderConnectionRateLimits(
+            input.connectionId,
+            {
+              ...(input.maxConcurrentRequests === undefined
+                ? {}
+                : { maxConcurrentRequests: input.maxConcurrentRequests }),
+              ...(input.requestsPerMinute === undefined
+                ? {}
+                : { requestsPerMinute: input.requestsPerMinute }),
+              ...(input.tokensPerMinute === undefined
+                ? {}
+                : { tokensPerMinute: input.tokensPerMinute }),
+            },
+          );
+          this.teamCoordinator.refreshConnectionAdmission(connection);
+          return connection;
+        }).value,
     );
     this.handleMutation(
       IPC_CHANNELS.providersSetAutomaticModelRelease,

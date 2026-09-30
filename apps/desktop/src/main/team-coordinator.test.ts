@@ -45,6 +45,7 @@ import type { TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { ConnectionAdmissionController } from './connection-admission';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
@@ -1793,6 +1794,78 @@ if (runsWithElectronAbi)
       });
       persistence.close();
     });
+
+    it.each([false, true])(
+      'rejects impossible connection capacity without starting a Worker attempt (live=%s)',
+      async (live) => {
+        const persistence = createPersistence();
+        const connection = managedLocalConnection();
+        connection.rateLimit = {
+          ...connection.rateLimit,
+          mode: 'auto',
+          tokensPerMinute: live ? 20_000 : 19_999,
+        };
+        persistence.createProviderConnection(connection);
+        const task = persistence.createTask('Impossible token capacity');
+        const runtime = new HandedWorkspaceRecordingRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const scheduler = new TeamExecutionScheduler(1, new ConnectionAdmissionController());
+        let unblock!: () => void;
+        if (live)
+          scheduler.submit({
+            executionId: 'blocker',
+            workerId: 'blocker',
+            teamId: 'blocker',
+            teamLimit: 1,
+            run: () =>
+              new Promise<void>((resolve) => {
+                unblock = resolve;
+              }),
+          });
+        const coordinator = new TeamCoordinator(
+          persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          scheduler,
+        );
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reader',
+          objective: 'read',
+          contextInheritancePolicy: 'none',
+          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+          writeCapable: false,
+        });
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'read',
+          doneCriteria: ['read'],
+        });
+        if (live) {
+          const updated = persistence.lowerProviderConnectionRateLimits(connection.id, {
+            tokensPerMinute: 19_999,
+          });
+          coordinator.refreshConnectionAdmission(updated);
+        }
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
+        expect(persistence.listTeamAttempts(submission.executionId)).toEqual([]);
+        expect(execute).not.toHaveBeenCalled();
+        if (live) {
+          expect(scheduler.snapshot().activeExecutionIds).toEqual(['blocker']);
+          unblock();
+        }
+        expect(
+          persistence.getTeamSnapshot(worker.teamId!).agents.find((agent) => agent.id === worker.id)
+            ?.currentActivity,
+        ).toContain('tokens_per_minute_capacity');
+        persistence.close();
+      },
+    );
 
     it('runs a direct message to a write-capable Managed Local or CLI Worker read-only over the Task Workspace (issue #570)', async () => {
       const persistence = createPersistence();

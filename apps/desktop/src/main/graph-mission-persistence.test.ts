@@ -14,6 +14,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { ConnectionAdmissionController } from './connection-admission';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
@@ -490,6 +491,73 @@ async function unconfirmedExitGraph() {
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
+      const f = fixture();
+      const connection = managedLocalConnection();
+      connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 19_999 };
+      f.persistence.createProviderConnection(connection);
+      const plan = structuredClone(f.plan);
+      for (const step of plan.steps) {
+        const worker = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: step.key,
+          objective: step.key,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        });
+        f.persistence.transitionWorkerState(worker.id, 'spawning');
+        f.persistence.transitionWorkerState(worker.id, 'ready');
+        step.workerId = worker.id;
+      }
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(1, new ConnectionAdmissionController());
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        contextDigest: graphMissionContextDigest(
+          context,
+          new Set(plan.steps.map((step) => step.workerId)),
+        ),
+      }));
+      await vi.waitFor(() => expect(scheduler.snapshot().queuedExecutionIds).toEqual([]));
+      for (const step of mission.steps) {
+        expect(f.persistence.getTeamExecution(step.executionId).state).toBe('waiting_resume');
+        expect(f.persistence.listTeamAttempts(step.executionId)).toEqual([]);
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(
+              (worker) =>
+                worker.id === f.persistence.getTeamExecution(step.executionId).assigneeAgentId,
+            )?.currentActivity,
+        ).toContain('tokens_per_minute_capacity');
+      }
+      expect(execute).not.toHaveBeenCalled();
+      expect(f.persistence.listGraphResourceReservations(mission.id)).toEqual([]);
+      await expect(coordinator.resumeGraphStep(f.task.id, mission.id, 'a')).rejects.toThrow(
+        'tokens_per_minute_capacity',
+      );
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+      expect(f.persistence.listTeamAttempts(mission.steps[0]!.executionId)).toEqual([]);
+      f.persistence.close();
+    });
+
     it('publishes a queued wait-reason change from dependencies to resources without requiring a UI refresh', async () => {
       const holder = fixture();
       const heldMission = resourceMission(holder, 'display-resource');
