@@ -1,5 +1,11 @@
 import { expect, it } from 'vitest';
-import { runtimeStopConfirmationTimeoutMs } from './stop-budget';
+import { runtimeCliStopOnRootExitSupported, runtimeStopConfirmationTimeoutMs } from './stop-budget';
+
+it('starts root-exit cleanup only on supported owned-group and Job platforms', () => {
+  for (const platform of ['win32', 'linux', 'darwin'])
+    expect(runtimeCliStopOnRootExitSupported(platform)).toBe(true);
+  expect(runtimeCliStopOnRootExitSupported('freebsd')).toBe(false);
+});
 
 it.each(['codex', 'claude', 'grok'] as const)(
   '%s uses the bounded tree budget only on supported POSIX platforms',

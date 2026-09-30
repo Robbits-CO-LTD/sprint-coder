@@ -43,6 +43,7 @@ import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from 
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { runtimeCliStopOnRootExitSupported } from './stop-budget';
 import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
@@ -446,7 +447,7 @@ export class ClaudeRuntimeAdapter {
         'abnormal_exit',
       );
     };
-    if (process.platform === 'win32')
+    if (runtimeCliStopOnRootExitSupported())
       child.once('exit', () => {
         // Owned descendants can keep inherited pipes open after the root exits, delaying close.
         deadline.stop();
