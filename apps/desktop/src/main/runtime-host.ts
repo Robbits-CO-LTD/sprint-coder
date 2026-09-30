@@ -45,6 +45,7 @@ import {
 } from './runtime-start-acceptance-deadline';
 import { compilePromptGuidance, injectPromptGuidance, type PromptAgent } from './prompt-context';
 import { secureLogger } from './secure-logger';
+import { runtimeStopConfirmationTimeoutMs } from '../runtime-host/stop-budget';
 
 type ActiveTurn = {
   taskId: string;
@@ -474,13 +475,14 @@ export class RuntimeHostClient {
     operationId: string,
   ): Promise<RuntimeStopReceipt> {
     return new Promise<RuntimeStopReceipt>((resolve, reject) => {
+      const timeoutMs = runtimeStopConfirmationTimeoutMs(this.kind);
       const timer = setTimeout(() => {
         const current = this.cancelWaiters.get(turnId);
         if (current === undefined) return;
         this.restartHostAfterUnconfirmedStop(
-          new Error('Runtime stop was not confirmed within 5 seconds'),
+          new Error(`Runtime stop was not confirmed within ${timeoutMs / 1_000} seconds`),
         );
-      }, 5_000);
+      }, timeoutMs);
       this.cancelWaiters.set(turnId, { taskId, operationId, resolve, reject, timer });
     });
   }
