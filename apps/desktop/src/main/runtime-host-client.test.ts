@@ -163,7 +163,11 @@ describe('RuntimeHostClient start acknowledgement', () => {
     });
     expect(child.messages.map(messageType)).toEqual(['hello', 'start', 'cancel']);
 
-    await vi.advanceTimersByTimeAsync(5_000);
+    const stopTimeout =
+      process.platform === 'linux' || process.platform === 'darwin' ? 9_000 : 5_000;
+    await vi.advanceTimersByTimeAsync(stopTimeout - 1);
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(child.kill).toHaveBeenCalledOnce();
     expect(failed).toHaveBeenCalledOnce();
     client.dispose();

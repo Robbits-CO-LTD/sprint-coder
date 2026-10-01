@@ -260,7 +260,7 @@ function asPlatform(value: string): () => void {
 }
 it.each([
   { kind: 'codex' as const, platform: 'win32', timeout: 5000 },
-  { kind: 'grok' as const, platform: 'linux', timeout: 5000 },
+  { kind: 'grok' as const, platform: 'linux', timeout: 9000 },
   { kind: 'grok' as const, platform: 'win32', timeout: 15000 },
 ])(
   'keeps $kind/$platform nonresponse bounded at $timeout ms and ignores old-host receipts',

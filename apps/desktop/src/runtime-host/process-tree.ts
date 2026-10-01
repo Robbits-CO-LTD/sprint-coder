@@ -3,6 +3,7 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:c
 import {
   RUNTIME_PROCESS_TREE_GRACE_MS as GRACE_MS,
   RUNTIME_TASKKILL_TIMEOUT_MS as TASKKILL_TIMEOUT_MS,
+  RUNTIME_PROCESS_SNAPSHOT_TIMEOUT_MS,
 } from './stop-budget';
 
 const POLL_MS = 50;
@@ -71,7 +72,7 @@ export function collectDescendantPids(rootPid: number): number[] | undefined {
   try {
     output = execFileSync('ps', ['-axo', 'pid=,ppid='], {
       encoding: 'utf8',
-      timeout: 2_000,
+      timeout: RUNTIME_PROCESS_SNAPSHOT_TIMEOUT_MS,
     });
   } catch {
     // A failed snapshot is not evidence that the tree is empty.
