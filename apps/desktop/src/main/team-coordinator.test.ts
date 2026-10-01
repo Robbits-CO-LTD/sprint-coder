@@ -13,8 +13,15 @@ import { chmod, lstat, readdir, realpath, rmdir, unlink } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import {
+  assertShardReport,
+  collectedTestNames,
+  partitionTestNames,
+  testNamesPattern,
+} from './electron-test-shards';
 import type {
   AgentRecord,
   TeamExecutionIsolationRecord,
@@ -10716,28 +10723,81 @@ if (runsWithElectronAbi)
   });
 else
   describe('TeamCoordinator Electron ABI bridge', () => {
-    it('runs the TeamCoordinator integration suite with Electron', async () => {
-      // This suite can exceed Vitest's worker-RPC timeout on Windows CI. An asynchronous child
-      // keeps the worker event loop available while Electron runs the SQLite integration cases.
-      const result = await execFileAsync(
+    const file = 'src/main/team-coordinator.test.ts';
+    let directory: string;
+    let groups: string[][];
+    const childEnv = () => ({
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      SPRINT_CODER_ELECTRON_DB_TEST: '1',
+    });
+
+    beforeAll(async () => {
+      directory = mkdtempSync(join(tmpdir(), 'coordinator-shards-'));
+      const collection = join(directory, 'collection.json');
+      await execFileAsync(
         electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-          'run',
-          'src/main/team-coordinator.test.ts',
+          'list',
+          file,
+          '--json',
+          collection,
         ],
-        {
-          cwd: process.cwd(),
-          encoding: 'utf8',
-          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-          // This bridge runs the coordinator integration cases in a second Electron process. On
-          // Windows CI the serialized suite already took about 160 seconds before the retained
-          // worktree cases (issue #544) were added, so it gets room beyond that plus a clean
-          // Vitest/Electron shutdown.
-          timeout: 420_000,
-          maxBuffer: 10 * 1024 * 1024,
-        },
+        { cwd: process.cwd(), env: childEnv(), timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
       );
-      expect(result.stderr, result.stdout).not.toContain('Failed Tests');
-    }, 430_000);
+      groups = partitionTestNames(
+        collectedTestNames(
+          JSON.parse(readFileSync(collection, 'utf8')),
+          process.cwd(),
+          resolve(file),
+        ),
+        4,
+      );
+    }, 65_000);
+
+    afterAll(() => {
+      if (directory) removeTemporaryDirectory(directory);
+    });
+
+    it.each([0, 1, 2, 3])(
+      'runs integration shard %i with Electron',
+      async (index) => {
+        const group = groups[index];
+        if (!group) throw new Error('Missing Electron integration shard');
+        const report = join(directory, `report-${index}.json`);
+        const config = join(directory, `config-${index}.mjs`);
+        // Keep the existing workspace configuration and time budgets. Put the pattern in a
+        // file so growing test names cannot exhaust Windows' command-line length limit.
+        writeFileSync(
+          config,
+          `import config from ${JSON.stringify(
+            pathToFileURL(resolve('vitest.config.ts')).href,
+          )};\nexport default {...config,root:${JSON.stringify(process.cwd())},test:{...config.test,testNamePattern:${JSON.stringify(testNamesPattern(group))}}};\n`,
+        );
+        const result = await execFileAsync(
+          electronTestExecutablePath(),
+          [
+            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+            'run',
+            file,
+            '--config',
+            config,
+            '--reporter=json',
+            '--outputFile',
+            report,
+          ],
+          {
+            cwd: process.cwd(),
+            encoding: 'utf8',
+            env: childEnv(),
+            timeout: 420_000,
+            maxBuffer: 10 * 1024 * 1024,
+          },
+        );
+        expect(result.stderr, result.stdout).not.toContain('Failed Tests');
+        assertShardReport(JSON.parse(readFileSync(report, 'utf8')), group);
+      },
+      430_000,
+    );
   });
