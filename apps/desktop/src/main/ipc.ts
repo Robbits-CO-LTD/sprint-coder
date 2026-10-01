@@ -8969,6 +8969,7 @@ export class IpcRouter {
               this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
             if (providerEvent.type === 'completed') roundCompleted = true;
           });
+          if (roundCompleted) break;
         }
         if (roundError !== undefined) {
           if (

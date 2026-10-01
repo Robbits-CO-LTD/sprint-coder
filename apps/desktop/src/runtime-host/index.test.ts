@@ -58,6 +58,8 @@ vi.mock('./image-attachment-preparer', () => ({
 vi.mock('./codex-adapter', () => ({
   probeCodex: vi.fn(async () => ({ available: true, readiness: 'ready', models: [] })),
   CodexRuntimeAdapter: class {
+    setCliVersion(): void {}
+    setCliResolution(): void {}
     start(...args: unknown[]): void {
       const accepted = args[3] as () => void;
       const localImages = args[15] as
@@ -98,6 +100,50 @@ afterAll(() => {
 });
 
 describe('Runtime Host image two-phase state machine', () => {
+  it('does not publish an older probe after a newer hello owns the adapter', async () => {
+    await import('./index');
+    const { probeCodex } = await import('./codex-adapter');
+    let resolveOld!: (value: Awaited<ReturnType<typeof probeCodex>>) => void;
+    vi.mocked(probeCodex).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    hostMock.receive({
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId,
+      taskId: '',
+      turnId: '',
+      operationId: 'old-probe',
+      seq: 1,
+      type: 'hello',
+    });
+    hostMock.receive({
+      protocolVersion: RUNTIME_PROTOCOL_VERSION,
+      runtimeInstanceId,
+      taskId: '',
+      turnId: '',
+      operationId: 'new-probe',
+      seq: 1,
+      type: 'hello',
+    });
+    await vi.waitFor(() =>
+      expect(
+        hostMock.messages.some(
+          (message) => (message as { operationId: string }).operationId === 'new-probe',
+        ),
+      ).toBe(true),
+    );
+    resolveOld({ available: false, readiness: 'unavailable', models: [] });
+    await Promise.resolve();
+    expect(
+      hostMock.messages.some(
+        (message) => (message as { operationId: string }).operationId === 'old-probe',
+      ),
+    ).toBe(false);
+  });
+
   it('returns a bounded rejection for a correlated invalid start without reflecting content', async () => {
     await import('./index');
     const invalid = {
