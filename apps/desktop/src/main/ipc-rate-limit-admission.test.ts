@@ -66,7 +66,9 @@ describe('connection rate-limit mutation', () => {
     );
     expect(refresh).toHaveBeenCalledOnce();
     replayCached = true;
-    expect(handler({ connectionId: connection.id, tokensPerMinute: 19_999 }, {}, {})).toBe(connection);
+    expect(handler({ connectionId: connection.id, tokensPerMinute: 19_999 }, {}, {})).toBe(
+      connection,
+    );
     expect(refresh).toHaveBeenCalledOnce();
     replayCached = false;
     failAfterAction = true;
