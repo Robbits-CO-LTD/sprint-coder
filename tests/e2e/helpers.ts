@@ -345,8 +345,6 @@ export function createUserDataDir(label: string): string {
   return mkdtempSync(join(tmpdir(), `sprint-coder-e2e-${safeLabel}-`));
 }
 
-/** Feature specs start beyond first-run onboarding; setup-wizard.spec.ts owns that boundary. */
-
 export function removeUserDataDir(dir: string | null | undefined): void {
   if (!dir) return;
   try {

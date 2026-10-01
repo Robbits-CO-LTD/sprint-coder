@@ -9,6 +9,7 @@ export type FeatureSetupPage = {
   reload: () => Promise<unknown>;
 };
 
+/** Feature specs start beyond first-run onboarding; setup-wizard.spec.ts owns that boundary. */
 export async function completeSetupForFeatureTest(page: FeatureSetupPage): Promise<void> {
   // DOMContentLoaded precedes React's first render; absence of the wizard is not yet a shell.
   await page.waitForFunction(
