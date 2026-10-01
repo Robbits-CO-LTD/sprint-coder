@@ -119,6 +119,8 @@ describe('Claude runtime probe', () => {
 
   it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
+    // Keep ancestor discovery inside the fixture, regardless of developer-profile skills.
+    await mkdir(join(root, '.git'));
     temporaryRoots.push(root);
     const source = join(root, 'source');
     const plugin = join(root, 'plugin');
