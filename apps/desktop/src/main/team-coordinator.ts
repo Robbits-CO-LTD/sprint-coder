@@ -428,6 +428,8 @@ export class TeamCoordinator {
     {
       messageId: string;
       cancelled: boolean;
+      canceled: Promise<void>;
+      cancel: () => void;
       settled: boolean;
       finishCancelled: () => void;
     }
@@ -787,7 +789,12 @@ export class TeamCoordinator {
     targetAgentId: string,
     content: string,
   ): Promise<TeamMessageSummary> {
-    return this.enqueue(taskId, async () => {
+    // Stop owns the Task queue while awaiting runtime unwinding. A canceled direct
+    // runtime must not wait behind that stop to finish its last message callback.
+    const direct = this.directOwners.get(requesterAgentId);
+    if (direct?.cancelled) throw new Error('Worker direct dispatch canceled');
+    const routed = this.enqueue(taskId, async () => {
+      if (direct?.cancelled) throw new Error('Worker direct dispatch canceled');
       const team = this.persistence.getTeamByTask(taskId);
       if (team === null || team.state !== 'active') throw new Error('Team must be active');
       const snapshot = this.persistence.getTeamSnapshot(team.id);
@@ -830,6 +837,14 @@ export class TeamCoordinator {
       this.emit(taskId, team.id);
       return this.messageSummaryFromSnapshot(this.persistence.getTeamSnapshot(team.id), message.id);
     });
+    return direct === undefined
+      ? routed
+      : Promise.race([
+          routed,
+          direct.canceled.then(() => {
+            throw new Error('Worker direct dispatch canceled');
+          }),
+        ]);
   }
 
   async hireWorker(
@@ -3373,8 +3388,14 @@ export class TeamCoordinator {
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
 
+      let cancel!: () => void;
+      const canceled = new Promise<void>((resolve) => {
+        cancel = resolve;
+      });
       const owner = {
         messageId: message.id,
+        canceled,
+        cancel,
         cancelled: false,
         settled: false,
         finishCancelled: () => {
@@ -4593,7 +4614,10 @@ export class TeamCoordinator {
 
   private async cancelWorkerExecutions(teamId: string, workerId: string): Promise<void> {
     const direct = this.directOwners.get(workerId);
-    if (direct) direct.cancelled = true;
+    if (direct) {
+      direct.cancelled = true;
+      direct.cancel();
+    }
     const pending = this.persistence
       .listTeamExecutions(teamId)
       .filter(
