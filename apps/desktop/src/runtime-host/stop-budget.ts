@@ -10,6 +10,10 @@ export const GROK_WINDOWS_PROCESS_TREE_STOP_BUDGET_MS =
   2 * RUNTIME_PROCESS_TREE_GRACE_MS + RUNTIME_TASKKILL_TIMEOUT_MS;
 const STOP_RECEIPT_DELIVERY_MARGIN_MS = 1_000;
 
+export function runtimeCliStopOnRootExitSupported(platform: string = process.platform): boolean {
+  return platform === 'win32' || platform === 'linux' || platform === 'darwin';
+}
+
 export function runtimeStopConfirmationTimeoutMs(
   kind: RuntimeKind,
   platform: string = process.platform,
