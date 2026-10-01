@@ -38,6 +38,7 @@ import {
   type ModelSelection,
   type NormalizedProviderUsage,
   type PublicError,
+  type ProviderConnection,
   type WorkerCompletion,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
@@ -1317,6 +1318,24 @@ export class TeamCoordinator {
           teamLimit: team.policy.maxConcurrentExecutions,
           ...fields,
           onConnectionWait: () => this.emit(taskId, team.id),
+          onConnectionRejected: () => {
+            this.graphScheduledExecutions.delete(execution.id);
+            const state = this.persistence.getTeamExecution(execution.id).state;
+            if (!['assigned', 'queued', 'waiting_rate_limit', 'waiting_resume'].includes(state))
+              return;
+            if (state !== 'waiting_resume')
+              this.persistence.transitionTeamExecution({
+                executionId: execution.id,
+                to: 'waiting_resume',
+                now: this.isoNow(),
+              });
+            this.persistence.setWorkerCurrentActivity(
+              execution.assigneeAgentId,
+              'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+              this.isoNow(),
+            );
+            this.emit(taskId, team.id);
+          },
           onWorkerWaitChanged: () => this.emit(taskId, team.id),
           isReady: () => {
             const availability = this.persistence.inspectGraphResources({
@@ -1788,6 +1807,26 @@ export class TeamCoordinator {
       const execution = this.persistence.getTeamExecution(step.executionId);
       if (execution.state !== 'waiting_resume' || this.graphScheduledExecutions.has(execution.id))
         throw new Error('Graph step is not waiting for manual resume');
+      if (execution.modelSelection.connectionId !== null) {
+        const connection = this.persistence.getProviderConnection(
+          execution.modelSelection.connectionId,
+        );
+        const admission = new ConnectionAdmissionController();
+        admission.configure(connection);
+        if (
+          admission.waitReason({
+            executionId: execution.id,
+            teamId: execution.teamId,
+            connectionId: connection.id,
+            queueOrdinal: execution.queueOrdinal ?? 0,
+            queuedAt: execution.queuedAt ?? this.isoNow(),
+            estimatedTokens: executionEstimate.tokens,
+          }) === 'tokens_per_minute_capacity'
+        )
+          throw new Error(
+            'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+          );
+      }
       const { owners, hold } = this.graphIntegrationHoldFor(missionId, execution.id);
       // A sealed result is agreed work. Re-running the Worker would discard it, so the integration
       // path stays the only way forward.
@@ -4752,13 +4791,10 @@ export class TeamCoordinator {
     execution: TeamExecutionRecord,
     taskId: string,
     teamId: string,
-  ): Pick<TeamExecutionJob, 'connection' | 'onConnectionWait'> | Record<never, never> {
-    if (
-      execution.modelSelection.connectionId === null ||
-      execution.queueOrdinal === null ||
-      execution.queuedAt === null
-    )
-      return {};
+  ):
+    | Pick<TeamExecutionJob, 'connection' | 'onConnectionWait' | 'onConnectionRejected'>
+    | Record<never, never> {
+    if (execution.modelSelection.connectionId === null) return {};
     const connection = this.persistence.getProviderConnection(
       execution.modelSelection.connectionId,
     );
@@ -4766,13 +4802,39 @@ export class TeamCoordinator {
     return {
       connection: {
         connectionId: connection.id,
-        queueOrdinal: execution.queueOrdinal,
-        queuedAt: execution.queuedAt,
+        queueOrdinal: execution.queueOrdinal ?? 0,
+        queuedAt: execution.queuedAt ?? this.isoNow(),
         estimatedTokens: executionEstimate.tokens,
       },
       onConnectionWait: (reason: ConnectionWaitReason) =>
         this.markExecutionWaitingForConnection(taskId, teamId, execution.id, reason),
+      onConnectionRejected: () => {
+        const current = this.persistence.getTeamExecution(execution.id);
+        if (!['queued', 'waiting_rate_limit', 'waiting_verification'].includes(current.state))
+          return;
+        const unsettledAttempt = this.persistence
+          .listTeamAttempts(execution.id)
+          .some(
+            (attempt) =>
+              !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+          );
+        this.persistence.transitionTeamExecution({
+          executionId: execution.id,
+          to: unsettledAttempt ? 'waiting_resume' : 'failed',
+          now: this.isoNow(),
+        });
+        this.persistence.setWorkerCurrentActivity(
+          execution.assigneeAgentId,
+          'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+          this.isoNow(),
+        );
+        this.emit(taskId, teamId);
+      },
     };
+  }
+
+  refreshConnectionAdmission(connection: ProviderConnection): void {
+    this.executionScheduler.configureConnection(connection);
   }
 
   private markExecutionWaitingForConnection(
