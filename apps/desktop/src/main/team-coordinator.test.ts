@@ -2019,6 +2019,89 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each(['worker', 'all', 'worker-queued', 'all-queued'])(
+      'settles %s stop while a direct Worker sends a late Team message',
+      async (mode) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Stop callback');
+        let enter!: () => void;
+        const entered = new Promise<void>((resolve) => {
+          enter = resolve;
+        });
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let abandon!: () => void;
+        const cleanup = new Promise<void>((resolve) => {
+          abandon = resolve;
+        });
+        let executionSettled!: () => void;
+        const settled = new Promise<void>((resolve) => {
+          executionSettled = resolve;
+        });
+        const runtime: TeamWorkerRuntime = {
+          start: async () => ({ pid: null }),
+          stop: async () => {
+            release();
+            await Promise.race([settled, cleanup]);
+          },
+          execute: async (input) => {
+            enter();
+            await gate;
+            const leader = persistence
+              .getTeamSnapshot(input.worker.teamId!)
+              .agents.find(({ kind }) => kind === 'leader')!;
+            try {
+              await coordinator.sendAgentMessageAs(task.id, input.worker.id, leader.id, 'fixture');
+              throw new Error('fixture canceled');
+            } finally {
+              executionSettled();
+            }
+          },
+        };
+        const coordinator = new TeamCoordinator(persistence, runtime);
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'reader',
+          objective: 'read',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const sending = coordinator.sendToWorker({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'fixture',
+        });
+        const sent = sending.catch(() => undefined);
+        await entered;
+        const stopping = mode.startsWith('worker')
+          ? coordinator.stopWorker(task.id, worker.id)
+          : coordinator.stopAll(task.id);
+        if (mode.endsWith('-queued')) release();
+        let completed = false;
+        const stopped = stopping.finally(() => {
+          completed = true;
+        });
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 150));
+          expect(completed).toBe(true);
+        } finally {
+          abandon();
+          await stopped;
+          await sent;
+          expect(
+            persistence
+              .getTeamSnapshot(worker.teamId)
+              .messages.filter(
+                ({ sourceAgentId, content }) =>
+                  sourceAgentId === worker.id && content === 'fixture',
+              ),
+          ).toHaveLength(0);
+          persistence.close();
+        }
+      },
+    );
     it('lets a directly dispatched Worker await repeated same-Task Team messages before completing', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Direct callback');
