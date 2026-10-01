@@ -1,8 +1,11 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 
-const GRACE_MS = 2_000;
+import {
+  RUNTIME_PROCESS_TREE_GRACE_MS as GRACE_MS,
+  RUNTIME_TASKKILL_TIMEOUT_MS as TASKKILL_TIMEOUT_MS,
+} from './stop-budget';
+
 const POLL_MS = 50;
-const TASKKILL_TIMEOUT_MS = 10_000;
 
 export type RuntimeProcessTreeStopOptions = Readonly<{
   /**
