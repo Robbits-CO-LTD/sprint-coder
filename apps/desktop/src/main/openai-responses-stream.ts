@@ -85,7 +85,11 @@ export async function* normalizeOpenAIResponsesStream(
       };
       return;
     }
-    if (event.type === 'response.failed' || event.type === 'error') {
+    if (
+      event.type === 'response.failed' ||
+      event.type === 'error' ||
+      event.type === 'response.incomplete'
+    ) {
       yield {
         type: 'error',
         error: {
@@ -96,6 +100,7 @@ export async function* normalizeOpenAIResponsesStream(
           providerCode: stringOrNull(event.code),
         },
       };
+      return;
     }
   }
 }
