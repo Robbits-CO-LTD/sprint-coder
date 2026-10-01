@@ -3191,7 +3191,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       f.persistence.close();
     });
 
-    it.each(['complete', 'other-execution', 'other-worker'])(
+    it.each(['complete', 'other-execution', 'other-worker', 'ready-participant'])(
       'finishes participating Workers when the last integration resumes (%s)',
       async (mode) => {
         const { f, a, run, manager } = await sealedWriteFixture(true);
@@ -3224,6 +3224,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           f.persistence.transitionWorkerState(other.id, 'ready');
         }
         for (const worker of f.workers) {
+          if (mode === 'ready-participant' && worker.id === f.workers[1]!.id) continue;
           f.persistence.transitionWorkerState(worker.id, 'busy');
           f.persistence.transitionWorkerState(worker.id, 'waiting');
         }
@@ -3257,7 +3258,9 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
             ? ['done', 'done']
             : mode === 'other-execution'
               ? ['done', 'waiting']
-              : ['done', 'done', 'ready'],
+              : mode === 'ready-participant'
+                ? ['done', 'ready']
+                : ['done', 'done', 'ready'],
         );
         expect(
           f.persistence
@@ -3268,6 +3271,15 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           mode === 'complete' ? 'completed' : 'active',
         );
         expect(coordinator.hasUnfinishedTeamWork(f.task.id)).toBe(mode !== 'complete');
+        if (mode === 'ready-participant') {
+          await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+          expect(
+            f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.find(({ id }) => id === f.workers[1]!.id)?.state,
+          ).toBe('ready');
+          expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('active');
+        }
         expect(execute).not.toHaveBeenCalled();
         f.persistence.close();
       },

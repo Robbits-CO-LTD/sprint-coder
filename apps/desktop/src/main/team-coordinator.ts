@@ -2536,7 +2536,7 @@ export class TeamCoordinator {
               continue;
             if (agent.id === hold.agentId || result.mission.state === 'completed')
               this.persistence.setWorkerCurrentActivity(agent.id, null, this.isoNow());
-            if (result.mission.state === 'completed')
+            if (result.mission.state === 'completed' && agent.state === 'waiting')
               this.persistence.transitionWorkerState(agent.id, 'done');
           }
           if (result.mission.state === 'completed') this.finalizeTeamIfWorkersTerminal(team.id);
