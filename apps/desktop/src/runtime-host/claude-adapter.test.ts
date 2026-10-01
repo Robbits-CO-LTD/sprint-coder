@@ -1,3 +1,4 @@
+import type * as OwnedCliProcess from './owned-cli-process';
 import type * as ChildProcessModule from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readdirSync, symlinkSync } from 'node:fs';
@@ -28,6 +29,17 @@ vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof ChildProcessModule>();
   processMock.spawn = vi.fn(original.spawn);
   return { ...original, spawn: processMock.spawn };
+});
+// These legacy filesystem fixtures fake the child, not the Windows Job boundary.
+vi.mock('./owned-cli-process', async (importOriginal) => {
+  const actual = await importOriginal<typeof OwnedCliProcess>();
+  return {
+    ...actual,
+    spawnOwnedCliProcess: (...args: Parameters<typeof actual.spawnOwnedCliProcess>) =>
+      args[0] === 'fixture'
+        ? processMock.spawn(args[0], args[1], args[2])
+        : actual.spawnOwnedCliProcess(...args),
+  };
 });
 // The real link-safe removal and Node resolution run unless a test makes them fail.
 vi.mock('./link-safe-tree-removal', async (importOriginal) => {
@@ -119,6 +131,8 @@ describe('Claude runtime probe', () => {
 
   it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
+    // Keep ancestor discovery inside the fixture, regardless of developer-profile skills.
+    await mkdir(join(root, '.git'));
     temporaryRoots.push(root);
     const source = join(root, 'source');
     const plugin = join(root, 'plugin');
@@ -543,6 +557,13 @@ describe('Claude Turn temporary folders', () => {
    */
   function start(turnId: string, skill: string) {
     const adapter = new ClaudeRuntimeAdapter(2_000);
+    adapter.setCliResolution({
+      source: 'explicit',
+      executable: 'fixture',
+      version: 'test',
+      compatibility: 'verified',
+      capabilities: [],
+    });
     const failed = vi.fn();
     const exited = vi.fn();
     adapter.start(
@@ -608,6 +629,7 @@ describe('Claude Turn temporary folders', () => {
   it('removes them without following a junction the CLI left inside when the CLI exits', async () => {
     const turn = await startLinkingTurn('link-cleanup-exit');
     turn.close(1);
+    await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
 
     expect(turn.exited).toHaveBeenCalledWith(1, false);
     expect(turn.failed).toHaveBeenCalledWith(
@@ -629,6 +651,7 @@ describe('Claude Turn temporary folders', () => {
     const turn = await startLinkingTurn('link-cleanup-stop');
     await turn.adapter.cancel('link-cleanup-stop');
     turn.close(1);
+    await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
 
     expect(turn.exited).toHaveBeenCalledWith(1, true);
     expect(await readdir(turn.temporary)).toEqual([]);
@@ -646,6 +669,7 @@ describe('Claude Turn temporary folders', () => {
     });
     try {
       turn.close(1);
+      await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
     } finally {
       vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockReset();
     }

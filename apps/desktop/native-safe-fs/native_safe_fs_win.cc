@@ -961,6 +961,43 @@ napi_value TerminateOwnedJob(napi_env env, napi_callback_info info) {
   return result;
 }
 
+napi_value RetainedOwnedJobOperation(napi_env env, napi_callback_info info, bool terminate) {
+  size_t argc = 1;
+  napi_value argv[1];
+  std::string id;
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      !ReadString(env, argv[0], &id)) {
+    napi_throw_type_error(env, nullptr, "Owned job operation requires a job id");
+    return nullptr;
+  }
+  std::lock_guard<std::mutex> guard(jobs_mutex);
+  const auto found = jobs.find(id);
+  if (found == jobs.end()) {
+    napi_throw_error(env, "WINDOWS_NATIVE_FAILURE", "Owned job is unavailable");
+    return nullptr;
+  }
+  napi_value result;
+  if (terminate) {
+    if (!TerminateJobObject(found->second, 1)) return ThrowWindowsError(env, "TerminateJobObject");
+    napi_get_boolean(env, true, &result);
+  } else {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+    if (!QueryInformationJobObject(found->second, JobObjectBasicAccountingInformation,
+                                    &accounting, sizeof(accounting), nullptr))
+      return ThrowWindowsError(env, "QueryInformationJobObject");
+    napi_create_uint32(env, accounting.ActiveProcesses, &result);
+  }
+  return result;
+}
+
+napi_value TerminateRetainedOwnedJob(napi_env env, napi_callback_info info) {
+  return RetainedOwnedJobOperation(env, info, true);
+}
+
+napi_value OwnedJobActiveProcesses(napi_env env, napi_callback_info info) {
+  return RetainedOwnedJobOperation(env, info, false);
+}
+
 napi_value CloseOwnedJob(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -1465,6 +1502,8 @@ napi_value Initialize(napi_env env, napi_value exports) {
        napi_default, nullptr},
       {"assignProcessToOwnedJob", nullptr, AssignProcessToOwnedJob, nullptr, nullptr, nullptr,
        napi_default, nullptr},
+      {"terminateRetainedOwnedJob", nullptr, TerminateRetainedOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"ownedJobActiveProcesses", nullptr, OwnedJobActiveProcesses, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"terminateOwnedJob", nullptr, TerminateOwnedJob, nullptr, nullptr, nullptr, napi_default,
        nullptr},
       {"closeOwnedJob", nullptr, CloseOwnedJob, nullptr, nullptr, nullptr, napi_default, nullptr},
