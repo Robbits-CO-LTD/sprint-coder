@@ -1,7 +1,10 @@
 import type { ProviderConnection } from '@sprint-coder/contracts';
 
 export type ConnectionWaitReason =
-  'connection_concurrency' | 'requests_per_minute' | 'tokens_per_minute';
+  | 'connection_concurrency'
+  | 'requests_per_minute'
+  | 'tokens_per_minute'
+  | 'tokens_per_minute_capacity';
 
 export type ConnectionAdmissionCandidate = Readonly<{
   executionId: string;
@@ -48,6 +51,11 @@ export class ConnectionAdmissionController {
   waitReason(candidate: ConnectionAdmissionCandidate): ConnectionWaitReason | null {
     const connection = this.requireConnection(candidate.connectionId);
     if (isBypassed(connection)) return null;
+    if (
+      connection.rateLimit.tokensPerMinute !== null &&
+      candidate.estimatedTokens > connection.rateLimit.tokensPerMinute
+    )
+      return 'tokens_per_minute_capacity';
     const active = this.activeByConnection.get(connection.id)?.size ?? 0;
     if (
       connection.rateLimit.maxConcurrentRequests !== null &&

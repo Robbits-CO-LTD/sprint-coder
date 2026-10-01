@@ -3327,20 +3327,33 @@ export class IpcRouter {
       IPC_CHANNELS.providersLowerRateLimits,
       providerConnectionRateLimitLowerInputSchema,
       providerConnectionSchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () =>
-          this.persistence.lowerProviderConnectionRateLimits(input.connectionId, {
-            ...(input.maxConcurrentRequests === undefined
-              ? {}
-              : { maxConcurrentRequests: input.maxConcurrentRequests }),
-            ...(input.requestsPerMinute === undefined
-              ? {}
-              : { requestsPerMinute: input.requestsPerMinute }),
-            ...(input.tokensPerMinute === undefined
-              ? {}
-              : { tokensPerMinute: input.tokensPerMinute }),
-          }),
-        ).value,
+      (input, event, envelope) => {
+        const result = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersLowerRateLimits,
+          () => {
+            const connection = this.persistence.lowerProviderConnectionRateLimits(
+              input.connectionId,
+              {
+                ...(input.maxConcurrentRequests === undefined
+                  ? {}
+                  : { maxConcurrentRequests: input.maxConcurrentRequests }),
+                ...(input.requestsPerMinute === undefined
+                  ? {}
+                  : { requestsPerMinute: input.requestsPerMinute }),
+                ...(input.tokensPerMinute === undefined
+                  ? {}
+                  : { tokensPerMinute: input.tokensPerMinute }),
+              },
+            );
+            return connection;
+          },
+        );
+        if (result.executed) this.teamCoordinator.refreshConnectionAdmission(result.value);
+        return result.value;
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.providersSetAutomaticModelRelease,
@@ -8964,6 +8977,7 @@ export class IpcRouter {
               this.applyProviderTurnEvent(taskId, started.turnId, providerEvent);
             if (providerEvent.type === 'completed') roundCompleted = true;
           });
+          if (roundCompleted) break;
         }
         if (roundError !== undefined) {
           if (
