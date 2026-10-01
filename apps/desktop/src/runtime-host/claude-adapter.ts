@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   accessSync,
   constants,
@@ -47,6 +47,8 @@ import {
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { runtimeCliStopOnRootExitSupported } from './stop-budget';
+import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -67,6 +69,7 @@ type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
   canceled: boolean;
   cleanup: () => void;
+  stop: () => Promise<boolean>;
 };
 type EmitEvent = (event: RuntimeCanonicalEvent) => void;
 type EmitError = (error: PublicError, diagnostic?: RuntimeFailureDiagnostic) => void;
@@ -178,6 +181,7 @@ export async function probeClaude(
 }
 
 export class ClaudeRuntimeAdapter {
+  private quarantined = false;
   private readonly active = new Map<string, ActiveProcess>();
   private cliVersion: string | null = null;
   private cli: ResolvedCliCommand | null = null;
@@ -209,7 +213,7 @@ export class ClaudeRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     _localImages?: unknown,
-    runtimeProcessStarted?: (pid: number) => void,
+    runtimeProcessStarted?: (pid: number) => void | boolean,
     _toolCatalogSnapshot?: ToolCatalogSnapshot,
     _invokeManagedTool?: (input: {
       callId: string;
@@ -218,7 +222,7 @@ export class ClaudeRuntimeAdapter {
       catalogDigest: string;
     }) => Promise<{ success: boolean; output: unknown }>,
   ): void {
-    if (this.active.has(turnId)) {
+    if (this.quarantined || this.active.has(turnId)) {
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
       return;
     }
@@ -315,7 +319,7 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(teamMcpArgs?.toolNames),
     );
-    const child = spawn(
+    const child = spawnOwnedCliProcess(
       this.cli?.executable ?? resolveClaudeCommand('claude'),
       buildClaudeArgs(
         model,
@@ -340,16 +344,28 @@ export class ClaudeRuntimeAdapter {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
+      (pid) => {
+        if (teamMcp !== undefined && runtimeProcessStarted?.(pid) === false) return false;
+        accepted();
+      },
     );
-    if (teamMcp !== undefined)
+    if (process.platform !== 'win32' && teamMcp !== undefined)
       child.once('spawn', () => {
         if (child.pid === undefined) throw new Error('Claude runtime process id is unavailable');
         runtimeProcessStarted?.(child.pid);
         accepted();
       });
-    const control: ActiveProcess = { child, canceled: false, cleanup };
+    let stopPromise: Promise<boolean> | undefined;
+    const stop = (): Promise<boolean> =>
+      (stopPromise ??= (stopOwnedCliProcess(child) ?? terminateProcessTree(child))
+        .catch(() => false)
+        .then((confirmed) => {
+          if (!confirmed) this.quarantined = true;
+          return confirmed;
+        }));
+    const control: ActiveProcess = { child, canceled: false, cleanup, stop };
     this.active.set(turnId, control);
-    if (teamMcp === undefined) accepted();
+    if (process.platform !== 'win32' && teamMcp === undefined) accepted();
     const prompt = serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems);
     let failed = false;
     let sawCompletion = false;
@@ -368,7 +384,7 @@ export class ClaudeRuntimeAdapter {
             `${phase}_timeout`,
           );
         }
-        void terminateProcessTree(child);
+        void control.stop();
       },
     );
     deadline.start();
@@ -380,7 +396,7 @@ export class ClaudeRuntimeAdapter {
         publicError('RUNTIME_FAILED', 'Claude CLIへの入力送信に失敗しました。', true),
         'startup_error',
       );
-      void terminateProcessTree(child);
+      void control.stop();
     });
 
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -402,7 +418,7 @@ export class ClaudeRuntimeAdapter {
         if (error instanceof ClaudeCapabilityViolationError)
           diagnostics.recordCapabilityMismatch(error.missingTools, error.unexpectedTools);
         failWithDiagnostic(claudeOutputErrorToPublicError(error), 'protocol_error');
-        void terminateProcessTree(child);
+        void control.stop();
       }
     });
     // Keep only presence/size metadata; provider stderr text never crosses the Runtime boundary.
@@ -423,19 +439,48 @@ export class ClaudeRuntimeAdapter {
         'spawn_error',
       );
     });
+    let stopUnconfirmedReported = false;
+    const reportUnconfirmedStop = (): void => {
+      if (stopUnconfirmedReported) return;
+      stopUnconfirmedReported = true;
+      failed = true;
+      failWithDiagnostic(
+        publicError(
+          'RUNTIME_STOP_UNCONFIRMED',
+          'Runtime process tree stop could not be confirmed',
+          false,
+        ),
+        'abnormal_exit',
+      );
+    };
+    if (runtimeCliStopOnRootExitSupported())
+      child.once('exit', () => {
+        // Owned descendants can keep inherited pipes open after the root exits, delaying close.
+        deadline.stop();
+        void control.stop().then((confirmed) => {
+          if (!confirmed) reportUnconfirmedStop();
+        });
+      });
     child.once('close', (code) => {
       deadline.stop();
-      this.active.delete(turnId);
-      cleanup();
-      const exitCode = code ?? -1;
-      if (!control.canceled && !failed && (exitCode !== 0 || !sawCompletion)) {
-        failed = true;
-        failWithDiagnostic(
-          publicError('RUNTIME_FAILED', 'Claude runtimeが正常に完了しませんでした。', true),
-          'abnormal_exit',
-        );
-      }
-      exited(exitCode, control.canceled);
+      void control.stop().then((confirmed) => {
+        if (!confirmed) {
+          reportUnconfirmedStop();
+          return;
+        }
+        deadline.stop();
+        this.active.delete(turnId);
+        cleanup();
+        const exitCode = code ?? -1;
+        if (!control.canceled && !failed && (exitCode !== 0 || !sawCompletion)) {
+          failed = true;
+          failWithDiagnostic(
+            publicError('RUNTIME_FAILED', 'Claude runtimeが正常に完了しませんでした。', true),
+            'abnormal_exit',
+          );
+        }
+        exited(exitCode, control.canceled);
+      });
     });
     child.stdin.end(
       nativeSkillInvocation === '' ? prompt : `${nativeSkillInvocation}\n\n${prompt}`,
@@ -446,7 +491,7 @@ export class ClaudeRuntimeAdapter {
     const control = this.active.get(turnId);
     if (control === undefined) return false;
     control.canceled = true;
-    return !(await terminateProcessTree(control.child));
+    return !(await control.stop());
   }
 
   dispose(): void {
