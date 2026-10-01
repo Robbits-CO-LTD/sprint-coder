@@ -1,3 +1,4 @@
+import type { CanonicalProviderEvent } from '@sprint-coder/contracts';
 import { expect, it } from 'vitest';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
 
@@ -55,4 +56,3 @@ it.each(['response.failed', 'error', 'response.incomplete'])(
     }
   },
 );
-import type { CanonicalProviderEvent } from '@sprint-coder/contracts';
