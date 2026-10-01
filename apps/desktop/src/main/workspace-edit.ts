@@ -414,15 +414,18 @@ function publishStagedFile(
       throw error;
     }
   }
-  // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
+  // A failed ReplaceFileW may already have moved either version; mark the uncertainty first.
   markPublicationAttempted();
   replaceWindowsFileWithBackup(staging, absolute, backup);
+  let rollbackAttempted = false;
   try {
     if (digestOf(readFileSync(backup)) === baseDigest)
       return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
+    rollbackAttempted = true;
     replaceWindowsFileWithBackup(backup, absolute, staging);
     return 'conflict';
   } catch (error) {
+    if (rollbackAttempted) throw error;
     try {
       replaceWindowsFileWithBackup(backup, absolute, staging);
     } catch (rollbackError) {

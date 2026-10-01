@@ -554,33 +554,34 @@ describe('saveWorkspaceFile (issue #43)', () => {
     } else expect(readdirSync(root)).toEqual(['important.txt']);
   });
 
-  it.runIf(process.platform === 'win32').each(['publication', 'rollback', 'recreated-target'])(
+  it
+    .runIf(process.platform === 'win32')
+    .each(['publication', 'rollback', 'recreated-target', 'recreated-rollback'])(
     'retains both versions when Windows replacement partially fails during %s',
     (phase) => {
       const root = workspace();
       const file = join(root, 'important.txt');
       writeFileSync(file, 'before\n');
-      fileSystemFault.partialWindowsReplacement = phase === 'rollback' ? 2 : 1;
+      const rollback = phase === 'rollback' || phase === 'recreated-rollback';
+      const recreated = phase.startsWith('recreated');
+      fileSystemFault.partialWindowsReplacement = rollback ? 2 : 1;
       fileSystemFault.windowsReplacementCalls = 0;
-      if (phase === 'rollback') fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
-      if (phase === 'recreated-target')
-        fileSystemFault.afterPartialFailureContent = 'later writer\n';
+      if (rollback) fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
+      if (recreated) fileSystemFault.afterPartialFailureContent = 'later writer\n';
       try {
         const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
         expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
-        expect(readdirSync(root).some((name) => name === 'important.txt')).toBe(
-          phase === 'recreated-target',
-        );
-        if (phase === 'recreated-target') expect(readFileSync(file, 'utf8')).toBe('later writer\n');
+        expect(readdirSync(root).some((name) => name === 'important.txt')).toBe(recreated);
+        if (recreated) expect(readFileSync(file, 'utf8')).toBe('later writer\n');
         const backup = readdirSync(root).find((name) => name.startsWith('.sprint-coder-backup-'));
         expect(backup, 'the displaced original must survive cleanup').toBeDefined();
         expect(readFileSync(join(root, backup!), 'utf8')).toBe(
-          phase === 'rollback' ? 'concurrent writer\n' : 'before\n',
+          rollback ? 'concurrent writer\n' : 'before\n',
         );
         const staged = readdirSync(root).find((name) => name.startsWith('.sprint-coder-stage-'));
         expect(staged).toBeDefined();
         expect(readFileSync(join(root, staged!), 'utf8')).toBe('my edit\n');
-        expect(result.conflictPath).toBe(phase === 'recreated-target' ? staged : backup);
+        expect(result.conflictPath).toBe(recreated ? staged : backup);
       } finally {
         fileSystemFault.partialWindowsReplacement = null;
         fileSystemFault.windowsReplacementCalls = 0;
