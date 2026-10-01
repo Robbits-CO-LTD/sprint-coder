@@ -26,3 +26,7 @@ Desktop typecheck and changed-file ESLint/Prettier passed. The tests run real Ty
 | AC-3: invalid frames rejected while stop and binding stay enforced | Four invalid-frame controls reject before reconnecting; native, host and controller suites all pass, including existing Stop quarantine. |
 
 Commit, remote and CI status are reported in the draft PR; an outstanding CI result is not a successful check. Do not close the issue without review.
+
+## Latest-main serial checkpoint
+
+Integrated healthy main 02594d0a after PR681 main CI36857679683 completed with 26 successful checks and one intentional platform/scope skip. Windows yuseipc / Node22.23.3 reran the same four suites: **197 PASS**, 4.64s. Desktop typecheck, changed-file ESLint and Prettier passed. No new helper binary, native build, download, signing/credential settings, real input or process enumeration was involved. The branch contains only the three transport/regression/evidence files relative to main. Latest-head independent review and CI, then merge/main CI, remain gates. Native mid-frame interruption and installed UI acceptance remain unverified.
