@@ -30,3 +30,11 @@ Commit, remote and CI status are reported in the draft PR; an outstanding CI res
 ## Latest-main serial checkpoint
 
 Integrated healthy main 02594d0a after PR681 main CI36857679683 completed with 26 successful checks and one intentional platform/scope skip. Windows yuseipc / Node22.23.3 reran the same four suites: **197 PASS**, 4.64s. Desktop typecheck, changed-file ESLint and Prettier passed. No new helper binary, native build, download, signing/credential settings, real input or process enumeration was involved. The branch contains only the three transport/regression/evidence files relative to main. Latest-head independent review and CI, then merge/main CI, remain gates. Native mid-frame interruption and installed UI acceptance remain unverified.
+
+## Mac continuation checkpoint
+
+On 2026-10-01, integrated main `7dbefa83` after PR717 and exact main CI36872485765 completed successfully (26 success / one intentional skip). The Graph test's prior Worker-order assertion is fixed upstream; the initial180s timeout remains separately tracked in OPEN #716. The latest transport diff still contains only these three transport/regression/evidence files, and production transport bytes are unchanged from e169fb27.
+
+Mac arm64 / Node22.23.1: reran all four focused suites, **197 PASS** (transport19 / native83 / host17 / controller78), 1.47s overall. Desktop typecheck and changed-file ESLint/Prettier/diff check pass. This is actual TypeScript transport with fake Windows spawn/pipe/attestation, not Windows native or installed UI acceptance. Dependency installation used npm ci --ignore-scripts --offline; only existing same-OS runtime artifacts were copied, with no native build/download, real input, signing, paid API, credential or security-setting changes.
+
+Main self-review checked per-socket decoder lifetime, exact pending-object ownership, old child/socket guards, coalesced-frame synchronous consumption, timeout settlement and existing Stop/close/quarantine contracts. This is not independent review. Prior e169 review is historical evidence; latest-head ReviewBOT and exact required CI, merge/main CI remain gates. The accepted Issue plan requires the fixture boundary for this limited TS fix; real native mid-frame interruption and installed UI remain additional product acceptance.
