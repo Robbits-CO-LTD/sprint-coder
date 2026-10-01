@@ -519,9 +519,9 @@ export class RuntimeHostClient {
       for (const controller of active.toolControllers.values()) controller.abort();
     }
     this.active.clear();
-    for (const [turnId, waiter] of this.cancelWaiters) {
+    for (const waiter of this.cancelWaiters.values()) {
       clearTimeout(waiter.timer);
-      waiter.resolve({ turnId, forced: true, stoppedAt: new Date().toISOString() });
+      waiter.reject(new Error('Runtime Host was disposed before process stop confirmation'));
     }
     this.cancelWaiters.clear();
     this.rejectExitWaiters(new Error('Runtime Host was disposed before process exit confirmation'));
@@ -869,8 +869,13 @@ export class RuntimeHostClient {
     } else if (raw.type === 'error') {
       active.startAcceptanceDeadline.stop();
       for (const controller of active.toolControllers.values()) controller.abort();
-      this.active.delete(raw.turnId);
-      if (!active.startFailed)
+      const alreadyFailed = active.startFailed;
+      if (this.kind !== 'grok' && raw.rejection === undefined) {
+        // An error describes the Turn, not the process tree. Retain ownership until stopped/exit.
+        active.startFailed = true;
+        void this.cancel(raw.taskId, raw.turnId).catch(() => undefined);
+      } else this.active.delete(raw.turnId);
+      if (!alreadyFailed)
         this.onFailure(
           raw.taskId,
           raw.turnId,
@@ -913,9 +918,9 @@ export class RuntimeHostClient {
     clearTimeout(waiter.timer);
     this.cancelWaiters.delete(turnId);
     if (forced) {
-      this.restartHostAfterUnconfirmedStop(
-        new Error('Runtime process tree stop could not be confirmed'),
-      );
+      const error = new Error('Runtime process tree stop could not be confirmed');
+      waiter.reject(error);
+      this.restartHostAfterUnconfirmedStop(error);
       return;
     }
     waiter.resolve({ turnId, forced: false, stoppedAt: new Date().toISOString() });

@@ -68,6 +68,7 @@ type ActiveProcess = {
   child: ChildProcessWithoutNullStreams;
   canceled: boolean;
   cleanup: () => void;
+  stop: () => Promise<boolean>;
   rejectPending: (error: Error) => void;
   releaseLocalImages: () => void;
 };
@@ -190,6 +191,7 @@ export async function probeCodex(
 }
 
 export class CodexRuntimeAdapter {
+  private quarantined = false;
   private readonly active = new Map<string, ActiveProcess>();
   private cliVersion: string | null = null;
   private cli: ResolvedCliCommand | null = null;
@@ -241,7 +243,7 @@ export class CodexRuntimeAdapter {
         );
       return localImageReleasePromise;
     };
-    if (this.active.has(turnId)) {
+    if (this.quarantined || this.active.has(turnId)) {
       void releaseLocalImages();
       fail(publicError('RUNTIME_FAILED', 'このTurnはすでに実行中です。', false));
       return;
@@ -399,8 +401,17 @@ export class CodexRuntimeAdapter {
       void releaseLocalImages();
       cleanupPaths();
     };
+    let stopPromise: Promise<boolean> | undefined;
+    const stop = (): Promise<boolean> =>
+      (stopPromise ??= terminateCodexProcessTree(child)
+        .catch(() => false)
+        .then((confirmed) => {
+          if (!confirmed) this.quarantined = true;
+          return confirmed;
+        }));
     const control: ActiveProcess = {
       child,
+      stop,
       canceled: false,
       cleanup,
       rejectPending,
@@ -463,7 +474,7 @@ export class CodexRuntimeAdapter {
         }
         rejectPending(new Error('Codex runtime timed out'));
         void releaseLocalImages();
-        void terminateCodexProcessTree(child);
+        void control.stop();
       },
     );
     deadline.start();
@@ -476,7 +487,7 @@ export class CodexRuntimeAdapter {
         publicError('RUNTIME_FAILED', 'Codex CLIへの入力送信に失敗しました。', true),
         'startup_error',
       );
-      void terminateCodexProcessTree(child);
+      void control.stop();
     });
 
     createInterface({ input: child.stdout }).on('line', (line) => {
@@ -596,7 +607,7 @@ export class CodexRuntimeAdapter {
                 ),
                 'protocol_error',
               );
-              void terminateCodexProcessTree(child);
+              void control.stop();
             })
             .finally(() => {
               skillIsolationVerificationPending = false;
@@ -639,7 +650,7 @@ export class CodexRuntimeAdapter {
               ),
           error instanceof CodexTurnFailedError ? 'abnormal_exit' : 'protocol_error',
         );
-        void terminateCodexProcessTree(child);
+        void control.stop();
       }
     });
     void (async () => {
@@ -744,7 +755,7 @@ export class CodexRuntimeAdapter {
               ),
           'startup_error',
         );
-        void terminateCodexProcessTree(child);
+        void control.stop();
       } finally {
         await releaseLocalImages();
       }
@@ -772,19 +783,36 @@ export class CodexRuntimeAdapter {
     });
     child.once('close', (code) => {
       deadline.stop();
-      rejectPending(new Error('Codex runtime exited'));
-      void releaseLocalImages();
-      this.active.delete(turnId);
-      cleanup();
-      const exitCode = code ?? -1;
-      if (!control.canceled && !failed && (exitCode !== 0 || !sawCompletion)) {
-        failed = true;
-        failWithDiagnostic(
-          publicError('RUNTIME_FAILED', 'Codex runtimeが正常に完了しませんでした。', true),
-          'abnormal_exit',
-        );
-      }
-      exited(exitCode, control.canceled);
+      void control.stop().then((confirmed) => {
+        if (!confirmed) {
+          {
+            failed = true;
+            failWithDiagnostic(
+              publicError(
+                'RUNTIME_STOP_UNCONFIRMED',
+                'Runtime process tree stop could not be confirmed',
+                false,
+              ),
+              'abnormal_exit',
+            );
+          }
+          return;
+        }
+        deadline.stop();
+        rejectPending(new Error('Codex runtime exited'));
+        void releaseLocalImages();
+        this.active.delete(turnId);
+        cleanup();
+        const exitCode = code ?? -1;
+        if (!control.canceled && !failed && (exitCode !== 0 || !sawCompletion)) {
+          failed = true;
+          failWithDiagnostic(
+            publicError('RUNTIME_FAILED', 'Codex runtimeが正常に完了しませんでした。', true),
+            'abnormal_exit',
+          );
+        }
+        exited(exitCode, control.canceled);
+      });
     });
   }
 
@@ -794,7 +822,7 @@ export class CodexRuntimeAdapter {
     control.canceled = true;
     control.rejectPending(new Error('Codex runtime canceled'));
     control.releaseLocalImages();
-    return !(await terminateCodexProcessTree(control.child));
+    return !(await control.stop());
   }
 
   dispose(): void {

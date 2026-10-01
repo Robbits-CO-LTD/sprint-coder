@@ -119,6 +119,8 @@ describe('Claude runtime probe', () => {
 
   it('materializes only selected managed revisions as explicit namespaced invocations', async () => {
     const root = await mkdtemp(join(tmpdir(), 'claude-skill-plugin-'));
+    // Keep ancestor discovery inside the fixture, regardless of developer-profile skills.
+    await mkdir(join(root, '.git'));
     temporaryRoots.push(root);
     const source = join(root, 'source');
     const plugin = join(root, 'plugin');
@@ -608,6 +610,7 @@ describe('Claude Turn temporary folders', () => {
   it('removes them without following a junction the CLI left inside when the CLI exits', async () => {
     const turn = await startLinkingTurn('link-cleanup-exit');
     turn.close(1);
+    await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
 
     expect(turn.exited).toHaveBeenCalledWith(1, false);
     expect(turn.failed).toHaveBeenCalledWith(
@@ -629,6 +632,7 @@ describe('Claude Turn temporary folders', () => {
     const turn = await startLinkingTurn('link-cleanup-stop');
     await turn.adapter.cancel('link-cleanup-stop');
     turn.close(1);
+    await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
 
     expect(turn.exited).toHaveBeenCalledWith(1, true);
     expect(await readdir(turn.temporary)).toEqual([]);
@@ -646,6 +650,7 @@ describe('Claude Turn temporary folders', () => {
     });
     try {
       turn.close(1);
+      await vi.waitFor(() => expect(turn.exited).toHaveBeenCalledOnce());
     } finally {
       vi.mocked(removal.removeTreeWithoutFollowingLinksSync).mockReset();
     }
