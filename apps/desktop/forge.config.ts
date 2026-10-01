@@ -18,7 +18,7 @@ import {
   readdirSync,
   writeFileSync,
 } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import {
@@ -131,7 +131,13 @@ function sandboxRunnerResources(): string[] {
       ? 'sprint-coder-sandbox-runner.exe'
       : 'sprint-coder-sandbox-runner';
   const executable = resolve(__dirname, 'sandbox-runner', 'build', 'Release', name);
-  return [executable, `${executable}.sha256`];
+  return [
+    executable,
+    `${executable}.sha256`,
+    ...(process.platform === 'win32'
+      ? [join(dirname(executable), 'sandbox-node-pipe-guard.cjs')]
+      : []),
+  ];
 }
 
 export const COMPUTER_USE_NATIVE_RESOURCE_ROOT = resolve(
