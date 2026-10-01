@@ -14,6 +14,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { ConnectionAdmissionController } from './connection-admission';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
@@ -405,9 +406,26 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
  * `confirmExit()` the runtime counts it as possibly running and refuses the same execution before
  * starting it. Once the exit is confirmed, Turns complete like the deterministic runtime.
  */
-async function unconfirmedExitGraph() {
+async function unconfirmedExitGraph(limitedConnection = false) {
   const f = fixture();
   const plan = structuredClone(f.plan);
+  const connection = limitedConnection ? managedLocalConnection() : null;
+  if (connection !== null) {
+    connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
+    f.persistence.createProviderConnection(connection);
+    const worker = f.persistence.registerTeamWorker({
+      teamId: f.team.id,
+      role: 'limited',
+      objective: 'limited',
+      contextInheritancePolicy: 'summary',
+      parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+      writeCapable: false,
+      modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+    });
+    f.persistence.transitionWorkerState(worker.id, 'spawning');
+    f.persistence.transitionWorkerState(worker.id, 'ready');
+    plan.steps[0]!.workerId = worker.id;
+  }
   plan.steps[0]!.resourceClaims = [{ scope: 'machine', key: 'shared-db', rootId: null }];
   const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
   f.persistence.saveGraphDocument(document, 1);
@@ -434,7 +452,10 @@ async function unconfirmedExitGraph() {
     stop,
     hasUnsettledTurn: (_agentId, executionId) => unsettled.has(executionId),
   };
-  const scheduler = new TeamExecutionScheduler(1);
+  const scheduler = new TeamExecutionScheduler(
+    1,
+    limitedConnection ? new ConnectionAdmissionController() : undefined,
+  );
   const coordinator = new TeamCoordinator(
     f.persistence,
     runtime,
@@ -448,6 +469,10 @@ async function unconfirmedExitGraph() {
     renderRevision: document.renderRevision,
     semanticRevision: document.semanticRevision,
     semanticDigest: document.semanticDigest,
+    contextDigest: graphMissionContextDigest(
+      graphMissionContextFor(f.persistence, f.task.id),
+      new Set(plan.steps.map((step) => step.workerId)),
+    ),
   }));
   const executionId = mission.steps[0]!.executionId;
   const reservations = () =>
@@ -469,6 +494,8 @@ async function unconfirmedExitGraph() {
     executionId,
     executed,
     stop,
+    connection,
+    scheduler,
     reservations,
     confirmExit: () => unsettled.clear(),
     /** Whether another Mission's step that claims the same resource could be admitted now. */
@@ -490,6 +517,73 @@ async function unconfirmedExitGraph() {
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
+      const f = fixture();
+      const connection = managedLocalConnection();
+      connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 19_999 };
+      f.persistence.createProviderConnection(connection);
+      const plan = structuredClone(f.plan);
+      for (const step of plan.steps) {
+        const worker = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: step.key,
+          objective: step.key,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        });
+        f.persistence.transitionWorkerState(worker.id, 'spawning');
+        f.persistence.transitionWorkerState(worker.id, 'ready');
+        step.workerId = worker.id;
+      }
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(1, new ConnectionAdmissionController());
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        contextDigest: graphMissionContextDigest(
+          context,
+          new Set(plan.steps.map((step) => step.workerId)),
+        ),
+      }));
+      await vi.waitFor(() => expect(scheduler.snapshot().queuedExecutionIds).toEqual([]));
+      for (const step of mission.steps) {
+        expect(f.persistence.getTeamExecution(step.executionId).state).toBe('waiting_resume');
+        expect(f.persistence.listTeamAttempts(step.executionId)).toEqual([]);
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(
+              (worker) =>
+                worker.id === f.persistence.getTeamExecution(step.executionId).assigneeAgentId,
+            )?.currentActivity,
+        ).toContain('tokens_per_minute_capacity');
+      }
+      expect(execute).not.toHaveBeenCalled();
+      expect(f.persistence.listGraphResourceReservations(mission.id)).toEqual([]);
+      await expect(coordinator.resumeGraphStep(f.task.id, mission.id, 'a')).rejects.toThrow(
+        'tokens_per_minute_capacity',
+      );
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+      expect(f.persistence.listTeamAttempts(mission.steps[0]!.executionId)).toEqual([]);
+      f.persistence.close();
+    });
+
     it('publishes a queued wait-reason change from dependencies to resources without requiring a UI refresh', async () => {
       const holder = fixture();
       const heldMission = resourceMission(holder, 'display-resource');
@@ -3353,8 +3447,39 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           expect(review.files).toHaveLength(2);
           await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
           await vi.waitFor(
-            () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
-            { timeout: process.platform === 'win32' ? gitCheckpointTimeout : 15000 },
+            () => {
+              const execution = f.persistence.getTeamExecution(run.execution.id);
+              const scheduler = coordinator['executionScheduler'].snapshot();
+              const worker = f.persistence
+                .getTeamSnapshot(f.team.id)
+                .agents.find((agent) => agent.id === execution.assigneeAgentId);
+              // Keep diagnostics to states and fixed reasons; currentActivity can contain instructions.
+              const preflightFailure =
+                [
+                  'Graph Worker is not ready',
+                  'Preserved workspace changed before admission; review it again',
+                  'Graph admission changed during preflight',
+                  'Preserved workspace changed before dispatch; review it again',
+                  'Graph execution canceled before dispatch',
+                ].find((reason) => reason === worker?.currentActivity) ?? null;
+              expect(
+                execution.state,
+                JSON.stringify({
+                  state: execution.state,
+                  workerState: worker?.state ?? null,
+                  queued: scheduler.queuedExecutionIds.includes(execution.id),
+                  active: scheduler.activeExecutionIds.includes(execution.id),
+                  waitReason: coordinator['graphWaitReasons'].get(execution.id) ?? null,
+                  preflightFailure,
+                  attemptStates: f.persistence
+                    .listTeamAttempts(execution.id)
+                    .map(({ state }) => state),
+                }),
+              ).toBe('completed');
+            },
+            // A two-repository resume performs guarded preflight while still waiting_resume.
+            // Use the existing bounded checkpoint allowance, also used by the other write cases.
+            { timeout: gitCheckpointTimeout },
           );
           for (const repository of isolation.repositories)
             expect(readFileSync(join(repository.repoPath, 'allowed/file.ts'), 'utf8')).toBe(
@@ -4115,6 +4240,39 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    it('rejects capacity after Graph restart with null queue metadata while retaining an existing Attempt and owner', async () => {
+      const g = await unconfirmedExitGraph(true);
+      try {
+        const attempts = g.f.persistence.listTeamAttempts(g.executionId);
+        const owners = g.f.persistence.listGraphResourceReservations(g.mission.id);
+        g.confirmExit();
+        g.coordinator.recoverOnStartup();
+        const db = new Database(g.f.path);
+        try {
+          db.prepare(
+            'UPDATE team_executions SET queue_ordinal=NULL, queued_at=NULL WHERE id=?',
+          ).run(g.executionId);
+        } finally {
+          db.close();
+        }
+        const connection = g.f.persistence.lowerProviderConnectionRateLimits(g.connection!.id, {
+          tokensPerMinute: 19_999,
+        });
+        g.coordinator.refreshConnectionAdmission(connection);
+        await expect(g.coordinator.resumeGraphStep(g.f.task.id, g.mission.id, 'a')).rejects.toThrow(
+          'tokens_per_minute_capacity',
+        );
+        expect(g.f.persistence.listTeamAttempts(g.executionId)).toEqual(attempts);
+        expect(g.f.persistence.listGraphResourceReservations(g.mission.id)).toEqual(owners);
+        expect(g.reservations()).toEqual(['quarantined']);
+        expect(g.executed).toEqual([g.executionId]);
+        expect(g.stop).not.toHaveBeenCalled();
+        expect(g.scheduler.snapshot().queuedExecutionIds).not.toContain(g.executionId);
+      } finally {
+        await g.close();
+      }
+    });
 
     it('refuses to resume a graph step, keeping its reservation, while its Worker exit is unconfirmed', async () => {
       const g = await unconfirmedExitGraph();
