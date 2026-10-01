@@ -16,6 +16,7 @@ describe('connection rate-limit mutation', () => {
     const connection = managedLocalConnection();
     const lower = vi.fn(() => connection);
     const refresh = vi.fn();
+    let failAfterAction = false;
     let handler!: (
       input: { connectionId: string; tokensPerMinute: number },
       event: unknown,
@@ -41,7 +42,11 @@ describe('connection rate-limit mutation', () => {
         _task: unknown,
         _channel: unknown,
         action: () => unknown,
-      ) => ({ value: action() }),
+      ) => {
+        const value = action();
+        if (failAfterAction) throw new Error('commit failed');
+        return { value };
+      },
       persistence: { lowerProviderConnectionRateLimits: lower },
       teamCoordinator: { refreshConnectionAdmission: refresh },
     });
@@ -57,6 +62,12 @@ describe('connection rate-limit mutation', () => {
     expect(() => handler({ connectionId: connection.id, tokensPerMinute: 19_998 }, {}, {})).toThrow(
       'mutation denied',
     );
+    expect(refresh).toHaveBeenCalledOnce();
+    failAfterAction = true;
+    expect(() => handler({ connectionId: connection.id, tokensPerMinute: 19_997 }, {}, {})).toThrow(
+      'commit failed',
+    );
+    expect(lower).toHaveBeenLastCalledWith(connection.id, { tokensPerMinute: 19_997 });
     expect(refresh).toHaveBeenCalledOnce();
   });
 });

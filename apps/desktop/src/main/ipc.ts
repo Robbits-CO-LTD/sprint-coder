@@ -3327,25 +3327,33 @@ export class IpcRouter {
       IPC_CHANNELS.providersLowerRateLimits,
       providerConnectionRateLimitLowerInputSchema,
       providerConnectionSchema,
-      (input, event, envelope) =>
-        this.runMutation(event, envelope, '', IPC_CHANNELS.providersLowerRateLimits, () => {
-          const connection = this.persistence.lowerProviderConnectionRateLimits(
-            input.connectionId,
-            {
-              ...(input.maxConcurrentRequests === undefined
-                ? {}
-                : { maxConcurrentRequests: input.maxConcurrentRequests }),
-              ...(input.requestsPerMinute === undefined
-                ? {}
-                : { requestsPerMinute: input.requestsPerMinute }),
-              ...(input.tokensPerMinute === undefined
-                ? {}
-                : { tokensPerMinute: input.tokensPerMinute }),
-            },
-          );
-          this.teamCoordinator.refreshConnectionAdmission(connection);
-          return connection;
-        }).value,
+      (input, event, envelope) => {
+        const connection = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.providersLowerRateLimits,
+          () => {
+            const connection = this.persistence.lowerProviderConnectionRateLimits(
+              input.connectionId,
+              {
+                ...(input.maxConcurrentRequests === undefined
+                  ? {}
+                  : { maxConcurrentRequests: input.maxConcurrentRequests }),
+                ...(input.requestsPerMinute === undefined
+                  ? {}
+                  : { requestsPerMinute: input.requestsPerMinute }),
+                ...(input.tokensPerMinute === undefined
+                  ? {}
+                  : { tokensPerMinute: input.tokensPerMinute }),
+              },
+            );
+            return connection;
+          },
+        ).value;
+        this.teamCoordinator.refreshConnectionAdmission(connection);
+        return connection;
+      },
     );
     this.handleMutation(
       IPC_CHANNELS.providersSetAutomaticModelRelease,
