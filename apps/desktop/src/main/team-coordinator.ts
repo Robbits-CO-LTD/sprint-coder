@@ -2521,6 +2521,25 @@ export class TeamCoordinator {
           else if (worktree !== null)
             await this.cleanupIntegratedMissionWorktree(worktree, hold.agentId);
           this.persistence.deleteGraphIntegrationHold(owner.id);
+          const executions = this.persistence.listTeamExecutions(team.id);
+          const participants = new Set(graph.plan.steps.map(({ workerId }) => workerId));
+          for (const agent of this.persistence.getTeamSnapshot(team.id).agents) {
+            if (!participants.has(agent.id) || !['ready', 'waiting'].includes(agent.state))
+              continue;
+            if (
+              executions.some(
+                (other) =>
+                  other.assigneeAgentId === agent.id &&
+                  !['completed', 'failed', 'canceled'].includes(other.state),
+              )
+            )
+              continue;
+            if (agent.id === hold.agentId || result.mission.state === 'completed')
+              this.persistence.setWorkerCurrentActivity(agent.id, null, this.isoNow());
+            if (result.mission.state === 'completed' && agent.state === 'waiting')
+              this.persistence.transitionWorkerState(agent.id, 'done');
+          }
+          if (result.mission.state === 'completed') this.finalizeTeamIfWorkersTerminal(team.id);
           this.executionScheduler.notifyReadinessChanged();
           this.emit(taskId, team.id);
           return this.missionSummary(result.mission);
