@@ -27,7 +27,7 @@ it.each(['response.failed', 'error', 'response.incomplete'])(
     const iterator = normalizeOpenAIResponsesStream(body, 'openai', 'fixture')[
       Symbol.asyncIterator
     ]();
-    const events = [];
+    const events: CanonicalProviderEvent[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -55,3 +55,4 @@ it.each(['response.failed', 'error', 'response.incomplete'])(
     }
   },
 );
+import type { CanonicalProviderEvent } from '@sprint-coder/contracts';
