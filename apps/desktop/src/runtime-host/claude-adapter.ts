@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import {
   accessSync,
   constants,
@@ -43,6 +43,7 @@ import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from 
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
+import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
@@ -205,7 +206,7 @@ export class ClaudeRuntimeAdapter {
     projectItems: readonly RuntimeProjectContextItem[] = [],
     serializedPayload?: string,
     _localImages?: unknown,
-    runtimeProcessStarted?: (pid: number) => void,
+    runtimeProcessStarted?: (pid: number) => void | boolean,
     _toolCatalogSnapshot?: ToolCatalogSnapshot,
     _invokeManagedTool?: (input: {
       callId: string;
@@ -311,7 +312,7 @@ export class ClaudeRuntimeAdapter {
     const normalizer = new ClaudeJsonlNormalizer(
       claudeExpectedCapabilities(teamMcpArgs?.toolNames),
     );
-    const child = spawn(
+    const child = spawnOwnedCliProcess(
       this.cli?.executable ?? resolveClaudeCommand('claude'),
       buildClaudeArgs(
         model,
@@ -336,8 +337,12 @@ export class ClaudeRuntimeAdapter {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       },
+      (pid) => {
+        if (teamMcp !== undefined && runtimeProcessStarted?.(pid) === false) return false;
+        accepted();
+      },
     );
-    if (teamMcp !== undefined)
+    if (process.platform !== 'win32' && teamMcp !== undefined)
       child.once('spawn', () => {
         if (child.pid === undefined) throw new Error('Claude runtime process id is unavailable');
         runtimeProcessStarted?.(child.pid);
@@ -345,7 +350,7 @@ export class ClaudeRuntimeAdapter {
       });
     let stopPromise: Promise<boolean> | undefined;
     const stop = (): Promise<boolean> =>
-      (stopPromise ??= terminateProcessTree(child)
+      (stopPromise ??= (stopOwnedCliProcess(child) ?? terminateProcessTree(child))
         .catch(() => false)
         .then((confirmed) => {
           if (!confirmed) this.quarantined = true;
@@ -353,7 +358,7 @@ export class ClaudeRuntimeAdapter {
         }));
     const control: ActiveProcess = { child, canceled: false, cleanup, stop };
     this.active.set(turnId, control);
-    if (teamMcp === undefined) accepted();
+    if (process.platform !== 'win32' && teamMcp === undefined) accepted();
     const prompt = serializedPayload ?? buildClaudePrompt(input, contextFragments, projectItems);
     let failed = false;
     let sawCompletion = false;
@@ -427,21 +432,33 @@ export class ClaudeRuntimeAdapter {
         'spawn_error',
       );
     });
+    let stopUnconfirmedReported = false;
+    const reportUnconfirmedStop = (): void => {
+      if (stopUnconfirmedReported) return;
+      stopUnconfirmedReported = true;
+      failed = true;
+      failWithDiagnostic(
+        publicError(
+          'RUNTIME_STOP_UNCONFIRMED',
+          'Runtime process tree stop could not be confirmed',
+          false,
+        ),
+        'abnormal_exit',
+      );
+    };
+    if (process.platform === 'win32')
+      child.once('exit', () => {
+        // Owned descendants can keep inherited pipes open after the root exits, delaying close.
+        deadline.stop();
+        void control.stop().then((confirmed) => {
+          if (!confirmed) reportUnconfirmedStop();
+        });
+      });
     child.once('close', (code) => {
       deadline.stop();
       void control.stop().then((confirmed) => {
         if (!confirmed) {
-          {
-            failed = true;
-            failWithDiagnostic(
-              publicError(
-                'RUNTIME_STOP_UNCONFIRMED',
-                'Runtime process tree stop could not be confirmed',
-                false,
-              ),
-              'abnormal_exit',
-            );
-          }
+          reportUnconfirmedStop();
           return;
         }
         deadline.stop();

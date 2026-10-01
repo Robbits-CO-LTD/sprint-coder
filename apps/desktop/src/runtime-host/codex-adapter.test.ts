@@ -1,3 +1,4 @@
+import type * as OwnedCliProcess from './owned-cli-process';
 import { spawn } from 'node:child_process';
 import type * as ChildProcessModule from 'node:child_process';
 import { EventEmitter } from 'node:events';
@@ -41,6 +42,17 @@ vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof ChildProcessModule>();
   processMock.spawn = vi.fn(original.spawn);
   return { ...original, spawn: processMock.spawn };
+});
+// These legacy filesystem fixtures fake the child, not the Windows Job boundary.
+vi.mock('./owned-cli-process', async (importOriginal) => {
+  const actual = await importOriginal<typeof OwnedCliProcess>();
+  return {
+    ...actual,
+    spawnOwnedCliProcess: (...args: Parameters<typeof actual.spawnOwnedCliProcess>) =>
+      args[0] === 'fixture'
+        ? processMock.spawn(args[0], args[1], args[2])
+        : actual.spawnOwnedCliProcess(...args),
+  };
 });
 // The real link-safe removal runs unless a test makes it fail.
 vi.mock('./link-safe-tree-removal', async (importOriginal) => {
