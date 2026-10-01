@@ -1,7 +1,7 @@
 # Issue 716 検証
 
 base: `02594d0a18b01ca91abf439af84b09aa2d926982`。
-code blob: `a16a795087bb8cf334498d25a061f7ea6184c01f`。
+code blob: `cfa9180cd66db74c1c7a0579fa65aa9274b303bb`（ReviewBOT修正後）。
 Mac arm64 / Node22.23.1 / Electron43.5.0 ABI148 / SQLite3.53.4。
 添付: Issue654/716・PR687はいずれも0/0、全collector済み。
 
@@ -29,3 +29,11 @@ Claude CLI safe-mode / tools空 / no-session-persistence、設定済みsonnet al
 最新head必須CI、ReviewBOT、未解決thread、merge/main CIは未確認。#716と#654は未close。
 
 Logs: Mac側 run台帳 `tasks/issue-graph-flow/2026-10-01-mac-handoff/716-*.log`（元checkoutに保全、PRへraw log転記なし）。
+
+## レビュー後の修正
+
+- 独立read-only Claude CLIの2回目は、実model claude-sonnet-5 / tools空 / MCP空で完了。旧source blob a16a7950についてblockingなし。Mainはdescribe名と同期autocommit/closeを確認。初回timeoutをPASSにしていない。
+- ReviewBOT（head211c34f0、inline4155874573）は実Vitest verbose出力のfile prefix欠落を指摘。Mainが実Electron/Vitest3.2.7のfocused8case verbose出力で `✓ src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > ...` を確認した。
+- 同じfile付き形式へ診断fixtureを変更すると、旧parserはpassed0/failed0となりRED。file prefixを明示して修正すると4診断tests GREEN。ANSI入り実形式も保持する。合成形式だけの初回privacy PASSを実出力解析の証明とは扱わない。
+- old-head CI36867998979: macOS/Linux全shardとnativeGate成功。Windows ArchifyはElectron binary取得時にGitHub HTTP504でFAILし、試験未実行。最終head CIは更新後に確認する。旧FAILを保持。
+- full Graph childの確認済みsourceからの変更は診断parserとそのfixture・証跡のみ。ID/state8casesとchildの実行・deadline/coverageは不変。関連診断test/typecheck/lint/formatを再検証し、最終headのhosted全CIとReviewBOTを必須にする。

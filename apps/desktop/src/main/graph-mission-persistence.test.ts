@@ -5503,7 +5503,7 @@ else
           signal: null,
           message: 'PRIVATE_CHILD_MESSAGE [vitest-worker]: Timeout calling "onTaskUpdate"',
           stdout:
-            ' ✓ durable graph Mission definitions > PRIVATE_CASE 10ms\n × durable graph Mission definitions > PRIVATE_FAILED_CASE 20ms\nPRIVATE_STDOUT',
+            ' \u001b[32m✓\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > PRIVATE_CASE 10ms\n \u001b[31m×\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > PRIVATE_FAILED_CASE 20ms\nPRIVATE_STDOUT',
           stderr: 'PRIVATE_STDERR',
         },
         reportFile,
@@ -5629,7 +5629,10 @@ function graphBridgeFailure(error: unknown, reportFile: string): Error {
     const stdout: unknown = Reflect.get(error, 'stdout');
     if (typeof stdout === 'string') {
       for (const line of stripVTControlCharacters(stdout).split('\n')) {
-        const completed = /^\s*([✓×]) durable graph Mission definitions > (.+)$/u.exec(line);
+        const completed =
+          /^\s*([✓×]) src[\\/]main[\\/]graph-mission-persistence\.test\.ts > durable graph Mission definitions > (.+)$/u.exec(
+            line,
+          );
         if (!completed) continue;
         if (completed[1] === '✓') progress.passed += 1;
         else progress.failed += 1;
