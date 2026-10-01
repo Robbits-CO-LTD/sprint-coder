@@ -1,7 +1,9 @@
 use std::ffi::c_void;
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::io::Read;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -181,6 +183,9 @@ pub fn execute(root: &Path, executable: &str, argv: &[String]) -> u8 {
 }
 
 fn execute_impl(root: &Path, cwd: &Path, executable: &str, argv: &[String]) -> Result<u8, String> {
+    // This optional compatibility preload is compiled into this runner for integrity comparison.
+    // Holding a read-only-share handle prevents replacement until the command and ACL cleanup end.
+    let preload = verified_node_preload()?;
     let Ok(root) = std::fs::canonicalize(root) else {
         return Err("appcontainer_workspace_resolution_failed".to_owned());
     };
@@ -212,10 +217,16 @@ fn execute_impl(root: &Path, cwd: &Path, executable: &str, argv: &[String]) -> R
         .flatten();
     if !set_workspace_acl(&root, &sid_string)
         || executable_directory.is_some_and(|path| !set_read_tree_acl(path, &sid_string))
+        || preload
+            .as_ref()
+            .is_some_and(|(path, _)| !set_read_file_acl(path, &sid_string))
     {
         let _ = remove_inherited_acl(&root, &sid_string);
         if let Some(path) = executable_directory {
             let _ = remove_tree_acl(path, &sid_string);
+        }
+        if let Some((path, _)) = &preload {
+            let _ = remove_inherited_acl(path, &sid_string);
         }
         drop(sid);
         let _ = delete_appcontainer_profile(&profile);
@@ -225,12 +236,65 @@ fn execute_impl(root: &Path, cwd: &Path, executable: &str, argv: &[String]) -> R
     let workspace_acl_removed = remove_inherited_acl(&root, &sid_string);
     let executable_acl_removed =
         executable_directory.is_none_or(|path| remove_tree_acl(path, &sid_string));
+    let preload_acl_removed = preload
+        .as_ref()
+        .is_none_or(|(path, _)| remove_inherited_acl(path, &sid_string));
     drop(sid);
     let profile_deleted = delete_appcontainer_profile(&profile);
-    if !workspace_acl_removed || !executable_acl_removed || !profile_deleted {
+    if !workspace_acl_removed || !executable_acl_removed || !preload_acl_removed || !profile_deleted
+    {
         return Err("appcontainer_cleanup_failed".to_owned());
     }
     result.map_err(|code| format!("appcontainer_process_failed_{code}"))
+}
+
+fn verified_node_preload() -> Result<Option<(PathBuf, std::fs::File)>, String> {
+    if std::env::var("SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD").as_deref() != Ok("1") {
+        return Ok(None);
+    }
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|path| {
+            path.parent()
+                .map(|parent| parent.join("sandbox-node-pipe-guard.cjs"))
+        })
+        .ok_or_else(|| "appcontainer_node_preload_unavailable".to_owned())?;
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(1) // FILE_SHARE_READ only: Node can load, nobody can replace/write/delete.
+        .custom_flags(0x00200000) // FILE_FLAG_OPEN_REPARSE_POINT: inspect the file itself.
+        .open(&path)
+        .map_err(|_| "appcontainer_node_preload_unavailable".to_owned())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "appcontainer_node_preload_unavailable".to_owned())?;
+    let expected = include_bytes!("../../resources/sandbox-node-pipe-guard.cjs");
+    if !metadata.is_file()
+        || metadata.file_attributes() & 0x400 != 0
+        || metadata.len() != expected.len() as u64
+    {
+        return Err("appcontainer_node_preload_invalid".to_owned());
+    }
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)
+        .map_err(|_| "appcontainer_node_preload_unavailable".to_owned())?;
+    if bytes != expected {
+        return Err("appcontainer_node_preload_invalid".to_owned());
+    }
+    Ok(Some((path, file)))
+}
+
+fn set_read_file_acl(path: &Path, sid: &str) -> bool {
+    let Some(icacls) = trusted_system_executable("icacls.exe") else {
+        return false;
+    };
+    Command::new(icacls)
+        .arg(path)
+        .args(["/grant", &format!("*{sid}:RX"), "/Q"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn appcontainer_workspace_profile(root: &Path) -> String {

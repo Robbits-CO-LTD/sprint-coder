@@ -6,7 +6,14 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan } from '@sprint-coder/contracts';
 import { nextGraphDocument } from './graph-document';
 import { workspaceMutationBinding } from './path-guard';
-import { reviewGraphMission, type GraphMissionReviewContext } from './graph-mission-review';
+import {
+  reviewGraphMission,
+  graphMissionContextSnapshot,
+  prepareGraphStepWriteFootprints,
+  type GraphMissionReviewContext,
+} from './graph-mission-review';
+import { validateGraphWriteInventory } from './graph-write-inventory';
+import type { GraphMissionRecord } from './graph-mission-record';
 import type * as DirectoryNameRules from './directory-name-rules';
 import { NativeSafeFsError } from './native-safe-fs';
 import { secureLogger, writeSecureLogEntry, type SecureLogEntry } from './secure-logger';
@@ -115,6 +122,65 @@ async function fixture() {
 }
 
 describe('graph Mission reference review', () => {
+  it.each([1, 2])('admits implicit whole-root writes for %i agreed roots', async (rootCount) => {
+    const f = await fixture();
+    const rootIdentities = new Map(f.context.rootIdentities);
+    if (rootCount === 2) {
+      const other = await fixture();
+      f.context.workspace.roots.push({ ...other.context.workspace.roots[0]!, rootId: 'other' });
+      rootIdentities.set('other', other.binding.rootIdentityDigest);
+    }
+    const context = {
+      ...f.context,
+      rootIdentities,
+      workers: f.context.workers.map((worker) => ({ ...worker, authorityDigest: 'b'.repeat(64) })),
+    };
+    const plan = structuredClone(f.plan);
+    plan.steps[0]!.writeClaims = [];
+    plan.steps[1]!.writeClaims[0]!.path = 'existing.ts';
+    const document = nextGraphDocument('task', f.diagram, null, [], [], plan);
+    const review = await reviewGraphMission(f.input, document, () => context);
+    expect(review.summary.matched).toBe(true);
+    const graph: GraphMissionRecord = {
+      missionId: 'mission',
+      taskId: 'task',
+      graphId: document.id,
+      renderRevision: 1,
+      semanticRevision: 1,
+      semanticDigest: 'c'.repeat(64),
+      policyEpoch: context.policyEpoch,
+      workspaceDigest: context.workspace.digest,
+      contextDigest: review.contextDigest,
+      consentId: randomUUID(),
+      approvedAt: new Date().toISOString(),
+      contextJson: JSON.stringify(graphMissionContextSnapshot(context, new Set(['a', 'b']))),
+      plan,
+      steps: [],
+    };
+    const footprints = await prepareGraphStepWriteFootprints(graph, 'a', () => context);
+    expect(footprints).toHaveLength(rootCount);
+    expect(() => validateGraphWriteInventory(graph, 'a', footprints)).not.toThrow();
+    expect(footprints.map((footprint) => footprint.relativePath)).toEqual(
+      Array(rootCount).fill(null),
+    );
+    expect(() => validateGraphWriteInventory(graph, 'a', [])).toThrow('do not match');
+    plan.steps[0]!.access = 'read-only';
+    const reads = await prepareGraphStepWriteFootprints(graph, 'a', () => context);
+    expect(reads).toEqual([]);
+    expect(() => validateGraphWriteInventory(graph, 'a', reads)).not.toThrow();
+    plan.steps[0]!.access = 'workspace-write';
+    const identity = context.rootIdentities.get('root')!;
+    context.rootIdentities.set('root', 'd'.repeat(64));
+    await expect(prepareGraphStepWriteFootprints(graph, 'a', () => context)).rejects.toThrow(
+      'binding changed',
+    );
+    context.rootIdentities.set('root', identity);
+    context.policyEpoch += 1;
+    await expect(prepareGraphStepWriteFootprints(graph, 'a', () => context)).rejects.toThrow(
+      'authority changed',
+    );
+  });
+
   it('anchors whole-root declarations at the canonical workspace without guarding unrelated parents', async () => {
     const f = await fixture();
     const alias = await mkdtemp(join(tmpdir(), 'sc-root-alias-'));

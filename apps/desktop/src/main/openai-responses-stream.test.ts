@@ -2,6 +2,33 @@ import { describe, expect, it } from 'vitest';
 import { normalizeOpenAIResponsesStream } from './openai-responses-stream';
 
 describe('normalizeOpenAIResponsesStream', () => {
+  it('releases an open transport at response.completed and ignores later errors', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const event of [
+          { type: 'response.output_text.delta', delta: 'hello' },
+          {
+            type: 'response.completed',
+            response: { status: 'completed', usage: { input_tokens: 4 } },
+          },
+          { type: 'error', code: 'late_error' },
+        ])
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const events = [];
+    for await (const event of normalizeOpenAIResponsesStream(stream, 'openai', 'test'))
+      events.push(event);
+    expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'completed' });
+    expect(events.filter((event) => event.type === 'completed')).toHaveLength(1);
+    expect(events.some((event) => event.type === 'error')).toBe(false);
+    expect(cancelled).toBe(true);
+    expect(stream.locked).toBe(false);
+  }, 500);
   it('normalizes text, reasoning, function calls, resolved model, and usage', async () => {
     const stream = sse([
       {

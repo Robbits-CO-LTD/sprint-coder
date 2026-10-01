@@ -38,6 +38,7 @@ import {
   type ModelSelection,
   type NormalizedProviderUsage,
   type PublicError,
+  type ProviderConnection,
   type WorkerCompletion,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
@@ -421,6 +422,18 @@ export class TeamCoordinator {
     string,
     'dependencies' | 'resources' | 'write-conflicts' | 'owner-active'
   >();
+  private readonly directQueues = new Map<string, Promise<unknown>>();
+  private readonly directOwners = new Map<
+    string,
+    {
+      messageId: string;
+      cancelled: boolean;
+      canceled: Promise<void>;
+      cancel: () => void;
+      settled: boolean;
+      finishCancelled: () => void;
+    }
+  >();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly executionInterruptions = new Map<string, ExecutionInterruptionControl>();
   /**
@@ -776,7 +789,12 @@ export class TeamCoordinator {
     targetAgentId: string,
     content: string,
   ): Promise<TeamMessageSummary> {
-    return this.enqueue(taskId, async () => {
+    // Stop owns the Task queue while awaiting runtime unwinding. A canceled direct
+    // runtime must not wait behind that stop to finish its last message callback.
+    const direct = this.directOwners.get(requesterAgentId);
+    if (direct?.cancelled) throw new Error('Worker direct dispatch canceled');
+    const routed = this.enqueue(taskId, async () => {
+      if (direct?.cancelled) throw new Error('Worker direct dispatch canceled');
       const team = this.persistence.getTeamByTask(taskId);
       if (team === null || team.state !== 'active') throw new Error('Team must be active');
       const snapshot = this.persistence.getTeamSnapshot(team.id);
@@ -819,6 +837,14 @@ export class TeamCoordinator {
       this.emit(taskId, team.id);
       return this.messageSummaryFromSnapshot(this.persistence.getTeamSnapshot(team.id), message.id);
     });
+    return direct === undefined
+      ? routed
+      : Promise.race([
+          routed,
+          direct.canceled.then(() => {
+            throw new Error('Worker direct dispatch canceled');
+          }),
+        ]);
   }
 
   async hireWorker(
@@ -1307,6 +1333,24 @@ export class TeamCoordinator {
           teamLimit: team.policy.maxConcurrentExecutions,
           ...fields,
           onConnectionWait: () => this.emit(taskId, team.id),
+          onConnectionRejected: () => {
+            this.graphScheduledExecutions.delete(execution.id);
+            const state = this.persistence.getTeamExecution(execution.id).state;
+            if (!['assigned', 'queued', 'waiting_rate_limit', 'waiting_resume'].includes(state))
+              return;
+            if (state !== 'waiting_resume')
+              this.persistence.transitionTeamExecution({
+                executionId: execution.id,
+                to: 'waiting_resume',
+                now: this.isoNow(),
+              });
+            this.persistence.setWorkerCurrentActivity(
+              execution.assigneeAgentId,
+              'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+              this.isoNow(),
+            );
+            this.emit(taskId, team.id);
+          },
           onWorkerWaitChanged: () => this.emit(taskId, team.id),
           isReady: () => {
             const availability = this.persistence.inspectGraphResources({
@@ -1778,6 +1822,26 @@ export class TeamCoordinator {
       const execution = this.persistence.getTeamExecution(step.executionId);
       if (execution.state !== 'waiting_resume' || this.graphScheduledExecutions.has(execution.id))
         throw new Error('Graph step is not waiting for manual resume');
+      if (execution.modelSelection.connectionId !== null) {
+        const connection = this.persistence.getProviderConnection(
+          execution.modelSelection.connectionId,
+        );
+        const admission = new ConnectionAdmissionController();
+        admission.configure(connection);
+        if (
+          admission.waitReason({
+            executionId: execution.id,
+            teamId: execution.teamId,
+            connectionId: connection.id,
+            queueOrdinal: execution.queueOrdinal ?? 0,
+            queuedAt: execution.queuedAt ?? this.isoNow(),
+            estimatedTokens: executionEstimate.tokens,
+          }) === 'tokens_per_minute_capacity'
+        )
+          throw new Error(
+            'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+          );
+      }
       const { owners, hold } = this.graphIntegrationHoldFor(missionId, execution.id);
       // A sealed result is agreed work. Re-running the Worker would discard it, so the integration
       // path stays the only way forward.
@@ -3256,7 +3320,21 @@ export class TeamCoordinator {
   private async executeLegacyTask(
     input: TeamSendMessageInput & { doneCriteria: readonly string[] },
   ): Promise<TeamMessageSummary> {
-    return this.enqueue(input.taskId, async () => {
+    // Keep direct calls serialized without holding the state queue needed by Worker callbacks.
+    const previous = this.directQueues.get(input.taskId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(() => this.runDirectTask(input));
+    this.directQueues.set(input.taskId, next);
+    try {
+      return await next;
+    } finally {
+      if (this.directQueues.get(input.taskId) === next) this.directQueues.delete(input.taskId);
+    }
+  }
+
+  private async runDirectTask(
+    input: TeamSendMessageInput & { doneCriteria: readonly string[] },
+  ): Promise<TeamMessageSummary> {
+    const context = await this.enqueue(input.taskId, async () => {
       // The Task Workspace handed over below is verified as an assignment's is, and before the Team
       // is read, so nothing below awaits between its checks and the Worker turning busy.
       await this.verifyWorkspace?.(input.taskId);
@@ -3269,6 +3347,16 @@ export class TeamCoordinator {
       );
       if (leader === undefined || worker === undefined) throw new Error('Worker not found');
       if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
+      if (
+        this.persistence
+          .listTeamExecutions(team.id)
+          .some(
+            (execution) =>
+              execution.assigneeAgentId === worker.id &&
+              !['completed', 'failed', 'canceled'].includes(execution.state),
+          )
+      )
+        throw new Error('Worker has unfinished execution ownership');
       // A direct message has no execution whose access could let it write, so it runs as a
       // read-only assignment does: on the Task Workspace, by a Worker that may not write whatever
       // it was hired able to do. A runtime that reads only the root set and the Worker's
@@ -3319,24 +3407,76 @@ export class TeamCoordinator {
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
 
-      try {
-        // A direct message's only criterion is that the Worker reports back, which Main checks
-        // itself, so the Worker is not asked to report it (issue #550).
-        const dispatched = await this.dispatchWithRetry(
-          team.id,
-          leader,
-          readOnlyWorker,
-          message.id,
-          message.seq,
-          input.content,
-          teamTask.id,
-          [],
-          undefined,
-          undefined,
-          undefined,
-          'read-only',
-          workspaceSet,
-        );
+      let cancel!: () => void;
+      const canceled = new Promise<void>((resolve) => {
+        cancel = resolve;
+      });
+      const owner = {
+        messageId: message.id,
+        canceled,
+        cancel,
+        cancelled: false,
+        settled: false,
+        finishCancelled: () => {
+          if (owner.settled) return;
+          owner.settled = true;
+          this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
+          this.releaseReservations(reservations);
+          const delivery = this.persistence.getTeamDelivery(message.id);
+          if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
+            this.persistence.transitionTeamDelivery({
+              messageId: message.id,
+              to: 'failed',
+              now: this.isoNow(),
+              error: 'Worker direct dispatch canceled',
+            });
+        },
+      };
+      this.directOwners.set(worker.id, owner);
+      return {
+        team,
+        leader,
+        worker,
+        readOnlyWorker,
+        workspaceSet,
+        message,
+        teamTask,
+        reservations,
+        owner,
+      };
+    });
+    const {
+      team,
+      leader,
+      worker,
+      readOnlyWorker,
+      workspaceSet,
+      message,
+      teamTask,
+      reservations,
+      owner,
+    } = context;
+    try {
+      // A direct message's only criterion is that the Worker reports back, which Main checks
+      // itself, so the Worker is not asked to report it (issue #550).
+      const dispatched = await this.dispatchWithRetry(
+        team.id,
+        leader,
+        readOnlyWorker,
+        message.id,
+        message.seq,
+        input.content,
+        teamTask.id,
+        [],
+        undefined,
+        undefined,
+        undefined,
+        'read-only',
+        workspaceSet,
+      );
+      return await this.enqueue(input.taskId, async () => {
+        if (owner.cancelled || this.directOwners.get(worker.id) !== owner)
+          throw new Error('Worker direct dispatch canceled');
         const confirmed = confirmWorkerReport(input.doneCriteria, dispatched.value);
         const completion = {
           ...dispatched,
@@ -3377,8 +3517,13 @@ export class TeamCoordinator {
         this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
         this.finalizeTeamIfWorkersTerminal(team.id);
         this.emit(input.taskId, team.id);
+        owner.settled = true;
         return this.messageSummary(team.id, message.id);
-      } catch (error) {
+      });
+    } catch (error) {
+      await this.enqueue(input.taskId, async () => {
+        if (owner.settled || owner.cancelled || !runtimeStopConfirmed(error)) return;
+        owner.settled = true;
         this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
         this.releaseReservations(reservations);
         const current = this.persistence
@@ -3396,9 +3541,12 @@ export class TeamCoordinator {
             error: error instanceof Error ? error.message : 'worker failure',
           });
         this.emit(input.taskId, team.id);
-        throw error;
-      }
-    });
+      });
+      throw error;
+    } finally {
+      if (owner.settled && this.directOwners.get(worker.id) === owner)
+        this.directOwners.delete(worker.id);
+    }
   }
 
   private async runScheduledExecution(input: {
@@ -4484,6 +4632,11 @@ export class TeamCoordinator {
   }
 
   private async cancelWorkerExecutions(teamId: string, workerId: string): Promise<void> {
+    const direct = this.directOwners.get(workerId);
+    if (direct) {
+      direct.cancelled = true;
+      direct.cancel();
+    }
     const pending = this.persistence
       .listTeamExecutions(teamId)
       .filter(
@@ -4513,6 +4666,13 @@ export class TeamCoordinator {
       this.cancelMissionRemainder(execution.id);
     }
     if (!stoppedRunningRuntime) await this.runtime.stop(workerId);
+    if (direct) {
+      if (this.runtime.hasUnsettledTurn?.(workerId, direct.messageId) === true)
+        throw new WorkerRuntimeExitUnconfirmedError('Worker direct dispatch stop is unconfirmed');
+      // A rejected stop retains ownership and budget so a later confirmed stop can settle them.
+      direct.finishCancelled();
+      if (this.directOwners.get(workerId) === direct) this.directOwners.delete(workerId);
+    }
   }
 
   recoverOnStartup(): ReturnType<PersistenceClient['recoverTeamsOnStartup']> {
@@ -4674,13 +4834,10 @@ export class TeamCoordinator {
     execution: TeamExecutionRecord,
     taskId: string,
     teamId: string,
-  ): Pick<TeamExecutionJob, 'connection' | 'onConnectionWait'> | Record<never, never> {
-    if (
-      execution.modelSelection.connectionId === null ||
-      execution.queueOrdinal === null ||
-      execution.queuedAt === null
-    )
-      return {};
+  ):
+    | Pick<TeamExecutionJob, 'connection' | 'onConnectionWait' | 'onConnectionRejected'>
+    | Record<never, never> {
+    if (execution.modelSelection.connectionId === null) return {};
     const connection = this.persistence.getProviderConnection(
       execution.modelSelection.connectionId,
     );
@@ -4688,13 +4845,39 @@ export class TeamCoordinator {
     return {
       connection: {
         connectionId: connection.id,
-        queueOrdinal: execution.queueOrdinal,
-        queuedAt: execution.queuedAt,
+        queueOrdinal: execution.queueOrdinal ?? 0,
+        queuedAt: execution.queuedAt ?? this.isoNow(),
         estimatedTokens: executionEstimate.tokens,
       },
       onConnectionWait: (reason: ConnectionWaitReason) =>
         this.markExecutionWaitingForConnection(taskId, teamId, execution.id, reason),
+      onConnectionRejected: () => {
+        const current = this.persistence.getTeamExecution(execution.id);
+        if (!['queued', 'waiting_rate_limit', 'waiting_verification'].includes(current.state))
+          return;
+        const unsettledAttempt = this.persistence
+          .listTeamAttempts(execution.id)
+          .some(
+            (attempt) =>
+              !['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state),
+          );
+        this.persistence.transitionTeamExecution({
+          executionId: execution.id,
+          to: unsettledAttempt ? 'waiting_resume' : 'failed',
+          now: this.isoNow(),
+        });
+        this.persistence.setWorkerCurrentActivity(
+          execution.assigneeAgentId,
+          'Connection token capacity is below the execution estimate (tokens_per_minute_capacity)',
+          this.isoNow(),
+        );
+        this.emit(taskId, teamId);
+      },
     };
+  }
+
+  refreshConnectionAdmission(connection: ProviderConnection): void {
+    this.executionScheduler.configureConnection(connection);
   }
 
   private markExecutionWaitingForConnection(
@@ -4827,6 +5010,12 @@ export class TeamCoordinator {
               onApprovalWait,
               onEvent: (event) => {
                 observe(event);
+                const direct = this.directOwners.get(worker.id);
+                if (
+                  executionId === undefined &&
+                  (direct?.messageId !== messageId || direct.cancelled)
+                )
+                  return;
                 if (event.type === 'fileChange')
                   for (const change of event.changes) changedFiles.add(change.path);
                 if (event.type !== 'heartbeat' && attemptId !== undefined) {
@@ -4865,6 +5054,10 @@ export class TeamCoordinator {
       } catch (error) {
         lastError = error;
         lastChangedFiles = [...changedFiles];
+        if (executionId === undefined) {
+          const direct = this.directOwners.get(worker.id);
+          if (direct?.messageId !== messageId || direct.cancelled) break;
+        }
         // A deliberate steer/cancel stops the current Runtime call. That is an execution-control
         // outcome, not a transport timeout; let handleRequestedInterruption settle delivery with
         // the correct steer (acked) or cancel (failed) semantics.

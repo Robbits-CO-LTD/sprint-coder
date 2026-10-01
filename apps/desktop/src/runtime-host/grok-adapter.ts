@@ -567,7 +567,12 @@ export class GrokRuntimeAdapter {
     const control: Control = {
       child,
       canceled: false,
-      stop: () => (stopPromise ??= terminateRuntimeProcessTree(child, grokEnvironment())),
+      // A Turn that ended by the protocol must not be failed only because taskkill was slow to
+      // act (issue #665); the stop itself is still confirmed by the root's exit.
+      stop: () =>
+        (stopPromise ??= terminateRuntimeProcessTree(child, grokEnvironment(), {
+          awaitTaskkill: true,
+        })),
     };
     this.active.set(turnId, control);
     const failAfterStop = (
