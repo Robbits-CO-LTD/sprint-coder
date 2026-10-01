@@ -22,6 +22,7 @@ export type RuntimeProcessTreeStopOptions = Readonly<{
  * Codex terminal commands can be re-parented into a PTY group, so a negative-PID signal alone is
  * insufficient. Capture descendants before signaling the root; otherwise they become invisible
  * after the root exits and is re-parented to launchd/init.
+ * POSIX callers must have spawned this runtime detached, owning the group whose ID is child.pid.
  */
 export async function terminateRuntimeProcessTree(
   child: ChildProcessWithoutNullStreams,
@@ -30,6 +31,7 @@ export async function terminateRuntimeProcessTree(
 ): Promise<boolean> {
   const pid = child.pid;
   if (pid === undefined) return true;
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   if (process.platform === 'win32') {
     if (childHasExited(child)) return true;
     void signalWindowsTree(pid, 'SIGTERM', environment);
@@ -45,18 +47,26 @@ export async function terminateRuntimeProcessTree(
     return childHasExited(child);
   }
 
-  const descendants = collectDescendantPids(pid);
+  const initialSnapshot = collectDescendantPids(pid);
+  const descendants = initialSnapshot ?? [];
   signalPosixTree(pid, descendants, 'SIGTERM');
   await waitForExit(child, descendants, GRACE_MS);
-  const remaining = [...new Set([...descendants, ...collectDescendantPids(pid)])];
-  if (!childHasExited(child) || remaining.some(processAlive)) {
+  const finalSnapshot = collectDescendantPids(pid);
+  const remaining = [...new Set([...descendants, ...(finalSnapshot ?? [])])];
+  if (!childHasExited(child) || processAlive(-pid) || remaining.some(processAlive)) {
     signalPosixTree(pid, remaining, 'SIGKILL');
     await waitForExit(child, remaining, GRACE_MS);
   }
-  return childHasExited(child) && remaining.every((descendant) => !processAlive(descendant));
+  return (
+    initialSnapshot !== undefined &&
+    finalSnapshot !== undefined &&
+    childHasExited(child) &&
+    !processAlive(-pid) &&
+    remaining.every((descendant) => !processAlive(descendant))
+  );
 }
 
-export function collectDescendantPids(rootPid: number): number[] {
+export function collectDescendantPids(rootPid: number): number[] | undefined {
   let output: string;
   try {
     output = execFileSync('ps', ['-axo', 'pid=,ppid='], {
@@ -64,7 +74,8 @@ export function collectDescendantPids(rootPid: number): number[] {
       timeout: 2_000,
     });
   } catch {
-    return [];
+    // A failed snapshot is not evidence that the tree is empty.
+    return undefined;
   }
   const children = new Map<number, number[]>();
   for (const line of output.split('\n')) {
@@ -141,8 +152,14 @@ function processAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // EPERM still means the process/group exists. Unknown probe failures cannot confirm exit.
+    return !(
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ESRCH'
+    );
   }
 }
 
@@ -154,7 +171,9 @@ async function waitForExit(
   const deadline = Date.now() + timeoutMs;
   while (
     Date.now() < deadline &&
-    (!childHasExited(child) || descendants.some((pid) => processAlive(pid)))
+    (!childHasExited(child) ||
+      (process.platform !== 'win32' && child.pid !== undefined && processAlive(-child.pid)) ||
+      descendants.some((pid) => processAlive(pid)))
   )
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
 }
