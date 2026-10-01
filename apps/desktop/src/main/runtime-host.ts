@@ -45,6 +45,7 @@ import {
 } from './runtime-start-acceptance-deadline';
 import { compilePromptGuidance, injectPromptGuidance, type PromptAgent } from './prompt-context';
 import { secureLogger } from './secure-logger';
+import { runtimeStopConfirmationTimeoutMs } from '../runtime-host/stop-budget';
 
 type ActiveTurn = {
   taskId: string;
@@ -474,13 +475,14 @@ export class RuntimeHostClient {
     operationId: string,
   ): Promise<RuntimeStopReceipt> {
     return new Promise<RuntimeStopReceipt>((resolve, reject) => {
+      const timeoutMs = runtimeStopConfirmationTimeoutMs(this.kind);
       const timer = setTimeout(() => {
         const current = this.cancelWaiters.get(turnId);
         if (current === undefined) return;
         this.restartHostAfterUnconfirmedStop(
-          new Error('Runtime stop was not confirmed within 5 seconds'),
+          new Error(`Runtime stop was not confirmed within ${timeoutMs / 1_000} seconds`),
         );
-      }, 5_000);
+      }, timeoutMs);
       this.cancelWaiters.set(turnId, { taskId, operationId, resolve, reject, timer });
     });
   }
@@ -1061,7 +1063,7 @@ export class RuntimeHostClient {
     if (active === undefined || active.operationId !== operationId) return;
     active.startFailed = true;
     // Reuse the normal stop receipt watchdog. If the host discarded `start`, it still answers this
-    // valid cancel; if the host itself is wedged, cancel() restarts it after five seconds so an
+    // valid cancel; if the host itself is wedged, cancel() restarts it after its bounded timeout so an
     // already-spawned CLI process cannot become untracked.
     void this.cancel(taskId, turnId).catch(() => undefined);
     this.onFailure(
