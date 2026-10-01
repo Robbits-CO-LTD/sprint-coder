@@ -1,4 +1,5 @@
 import type { ProviderConnection } from '@sprint-coder/contracts';
+import { secureLogger } from './secure-logger';
 import type {
   ConnectionAdmissionController,
   ConnectionAdmissionCandidate,
@@ -19,6 +20,7 @@ export type TeamExecutionJob = Readonly<{
     estimatedTokens: number;
   }>;
   onConnectionWait?(reason: ConnectionWaitReason): void;
+  onConnectionRejected?(reason: 'tokens_per_minute_capacity'): void;
   onWorkerWaitChanged?(waiting: boolean): void;
   /** Main checks graph dependencies, physical claims and durable resource owners before slots.
    * This read-only observation never replaces the transaction immediately before dispatch. */
@@ -63,6 +65,7 @@ export class TeamExecutionScheduler {
 
   configureConnection(connection: ProviderConnection): void {
     this.connectionAdmission?.configure(connection);
+    this.schedulePump();
   }
 
   /** State changes outside an active run (for example confirmed recovery) can unblock work. */
@@ -154,6 +157,7 @@ export class TeamExecutionScheduler {
   }
 
   private pump(): void {
+    this.rejectImpossibleJobs();
     while (this.active.size < this.globalLimit) {
       const index = this.nextAdmissibleIndex();
       if (index === -1) return;
@@ -165,6 +169,49 @@ export class TeamExecutionScheduler {
       // The job owns durable failure recording. Admission control must still release its slot
       // without turning that already-recorded failure into an unhandled process rejection.
       void this.run(job).catch(() => undefined);
+    }
+  }
+
+  private rejectImpossibleJobs(): void {
+    if (this.connectionAdmission === undefined) return;
+    for (const job of [...this.queued]) {
+      if (
+        job.connection === undefined ||
+        this.connectionAdmission.waitReason(toAdmissionCandidate(job)) !==
+          'tokens_per_minute_capacity'
+      )
+        continue;
+      const index = this.queued.indexOf(job);
+      if (index === -1) continue;
+      this.queued.splice(index, 1);
+      this.notifyConnectionRejected(job);
+    }
+    // A pending replacement owns no new admission slot. Reject it without touching the active run.
+    for (const [id, job] of this.requeueAfterRun) {
+      if (
+        job.connection === undefined ||
+        this.connectionAdmission.waitReason(
+          toAdmissionCandidate({ ...job, ordinal: 0, waitingForWorker: false }),
+        ) !== 'tokens_per_minute_capacity'
+      )
+        continue;
+      this.requeueAfterRun.delete(id);
+      this.notifyConnectionRejected(job);
+    }
+    if (this.queued.length === 0 && this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private notifyConnectionRejected(job: TeamExecutionJob): void {
+    try {
+      job.onConnectionRejected?.('tokens_per_minute_capacity');
+    } catch {
+      secureLogger.error('Connection admission rejection could not be recorded', undefined, {
+        category: 'team',
+        event: 'connection_admission_rejection_record_failed',
+      });
     }
   }
 

@@ -58,6 +58,84 @@ function managedCatalog() {
 }
 
 describe('RuntimeHostClient start acknowledgement', () => {
+  it.each(['codex', 'claude'] as const)(
+    'retains %s failed-turn ownership until stop confirmation and rejects uncertainty',
+    async (kind) => {
+      vi.useFakeTimers();
+      const client = new RuntimeHostClient(vi.fn(), vi.fn(), undefined, undefined, kind);
+      const child = children[0]!;
+      child.emit('spawn');
+      client.start('task-error', 'turn-error', 'inspect', null, 'auto', emptyCatalog());
+      await Promise.resolve();
+      const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+        string,
+        unknown
+      >;
+      child.emit('message', {
+        ...start,
+        type: 'error',
+        seq: 1,
+        error: { code: 'RUNTIME_FAILED', userMessage: 'synthetic failure', retryable: true },
+      });
+      let settled = false;
+      const stopped = client.cancel('task-error', 'turn-error').finally(() => {
+        settled = true;
+      });
+      const rejected = expect(stopped).rejects.toThrow('stop could not be confirmed');
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      child.emit('message', {
+        ...start,
+        type: 'error',
+        seq: 2,
+        error: {
+          code: 'RUNTIME_STOP_UNCONFIRMED',
+          userMessage: 'synthetic uncertainty',
+          retryable: false,
+        },
+      });
+      await rejected;
+      expect(client.start('task-new', 'turn-new', 'retry', null, 'auto', emptyCatalog())).toBe(
+        false,
+      );
+      client.dispose();
+    },
+  );
+  it.each(['forced', 'dispose', 'timeout'] as const)(
+    'rejects all joined cancellation callers after %s without leaving pending work',
+    async (mode) => {
+      vi.useFakeTimers();
+      const client = new RuntimeHostClient(vi.fn(), vi.fn());
+      const child = children[0]!;
+      child.emit('spawn');
+      client.start('task-stop', 'turn-stop', 'inspect', null, 'auto', emptyCatalog());
+      await Promise.resolve();
+      const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+        string,
+        unknown
+      >;
+      const results = [
+        client.cancel('task-stop', 'turn-stop'),
+        client.cancel('task-stop', 'turn-stop'),
+      ].map((promise) =>
+        promise.then(
+          () => 'resolved',
+          () => 'rejected',
+        ),
+      );
+      let settled: string[] | undefined;
+      void Promise.all(results).then((value) => {
+        settled = value;
+      });
+      if (mode === 'forced')
+        child.emit('message', { ...start, type: 'stopped', seq: 1, forced: true });
+      if (mode === 'dispose') client.dispose();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(settled).toEqual(['rejected', 'rejected']);
+      child.emit('message', { ...start, type: 'stopped', seq: 2, forced: false });
+      client.dispose();
+    },
+  );
   afterEach(() => {
     children.length = 0;
     vi.useRealTimers();
@@ -85,7 +163,11 @@ describe('RuntimeHostClient start acknowledgement', () => {
     });
     expect(child.messages.map(messageType)).toEqual(['hello', 'start', 'cancel']);
 
-    await vi.advanceTimersByTimeAsync(5_000);
+    const stopTimeout =
+      process.platform === 'linux' || process.platform === 'darwin' ? 9_000 : 5_000;
+    await vi.advanceTimersByTimeAsync(stopTimeout - 1);
+    expect(child.kill).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(child.kill).toHaveBeenCalledOnce();
     expect(failed).toHaveBeenCalledOnce();
     client.dispose();

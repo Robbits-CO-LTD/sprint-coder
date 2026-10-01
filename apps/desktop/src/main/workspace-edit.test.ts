@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
+import type * as NodeCrypto from 'node:crypto';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeFs from 'node:fs';
 import type * as NativeFilePublication from './native-file-publication';
@@ -28,12 +29,18 @@ import {
 import { secureWindowsPath, verifyWindowsPathAcl } from './windows-acl';
 
 const fileSystemFault = vi.hoisted(() => ({
+  nonce: null as string | null,
+  stagePaths: new Map<number, string>(),
   failWrite: false,
   failRename: false,
   unsupportedExchange: false,
   failAtomicReplace: false,
+  partialWindowsReplacement: null as number | null,
+  windowsReplacementCalls: 0,
+  afterPartialFailureContent: null as string | null,
   failDirectorySync: false,
   failStageAfterCreate: false,
+  failingStageDescriptor: null as number | null,
   concurrentWindowsContent: null as string | null,
   concurrentPosixContent: null as string | null,
   afterPublicationContent: null as string | null,
@@ -42,6 +49,17 @@ const fileSystemFault = vi.hoisted(() => ({
   sourceSwap: null as { source: string; outside: string } | null,
   copiedStageText: null as string | null,
 }));
+
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeCrypto>();
+  return {
+    ...actual,
+    randomBytes: (size: number) =>
+      fileSystemFault.nonce === null
+        ? actual.randomBytes(size)
+        : Buffer.from(fileSystemFault.nonce, 'hex'),
+  };
+});
 
 vi.mock('./native-file-publication', async (importOriginal) => {
   const actual = await importOriginal<typeof NativeFilePublication>();
@@ -55,6 +73,18 @@ vi.mock('./native-file-publication', async (importOriginal) => {
       if (fileSystemFault.concurrentWindowsContent !== null) {
         writeFileSync(args[1], fileSystemFault.concurrentWindowsContent);
         fileSystemFault.concurrentWindowsContent = null;
+      }
+      if (
+        fileSystemFault.partialWindowsReplacement !== null &&
+        ++fileSystemFault.windowsReplacementCalls === fileSystemFault.partialWindowsReplacement
+      ) {
+        fileSystemFault.partialWindowsReplacement = null;
+        renameSync(args[1], args[2]);
+        if (fileSystemFault.afterPartialFailureContent !== null)
+          writeFileSync(args[1], fileSystemFault.afterPartialFailureContent);
+        throw Object.assign(new Error('simulated ReplaceFileW partial failure'), {
+          win32Code: 1177,
+        });
       }
       const result = actual.replaceWindowsFileWithBackup(...args);
       if (fileSystemFault.afterPublicationContent !== null) {
@@ -94,7 +124,14 @@ vi.mock('node:child_process', async (importOriginal) => {
         if (target !== undefined) writeFileSync(target, fileSystemFault.concurrentWindowsContent);
       }
       const swap = fileSystemFault.sourceSwap;
-      const stage = args[0] === '/bin/cp' && Array.isArray(args[1]) ? args[1].at(-1) : undefined;
+      const options = args[2] as { stdio?: unknown[] } | undefined;
+      const stageDescriptor = options?.stdio?.[4];
+      const copying =
+        args[0] === '/bin/cp' && Array.isArray(args[1]) && !args[1].includes('--attributes-only');
+      const stage =
+        copying && typeof stageDescriptor === 'number'
+          ? fileSystemFault.stagePaths.get(stageDescriptor)
+          : undefined;
       const swapping = swap !== null && stage?.includes('.sprint-coder-stage-') === true;
       if (swapping) {
         renameSync(swap.source, `${swap.source}.original`);
@@ -108,9 +145,9 @@ vi.mock('node:child_process', async (importOriginal) => {
         fileSystemFault.stagingSymlinkTarget !== null &&
         args[0] === '/bin/cp' &&
         Array.isArray(args[1]) &&
-        args[1].at(-1)?.includes('.sprint-coder-stage-') === true
+        stage?.includes('.sprint-coder-stage-') === true
       ) {
-        const staging = args[1].at(-1);
+        const staging = stage;
         if (staging !== undefined) {
           unlinkSync(staging);
           symlinkSync(fileSystemFault.stagingSymlinkTarget, staging);
@@ -144,10 +181,21 @@ vi.mock('node:fs', async (importOriginal) => {
         args[0].includes('.sprint-coder-stage-')
       ) {
         const descriptor = actual.openSync(...args);
-        actual.closeSync(descriptor);
+        fileSystemFault.stagePaths.set(descriptor, String(args[0]));
+        fileSystemFault.failingStageDescriptor = descriptor;
+        return descriptor;
+      }
+      const descriptor = actual.openSync(...args);
+      if (typeof args[0] === 'string' && args[0].includes('.sprint-coder-stage-'))
+        fileSystemFault.stagePaths.set(descriptor, args[0]);
+      return descriptor;
+    },
+    fstatSync: (...args: Parameters<typeof actual.fstatSync>) => {
+      if (args[0] === fileSystemFault.failingStageDescriptor) {
+        fileSystemFault.failingStageDescriptor = null;
         throw new Error('simulated staging failure after destination creation');
       }
-      return actual.openSync(...args);
+      return actual.fstatSync(...args);
     },
     writeSync: (...args: Parameters<typeof actual.writeSync>) => {
       if (fileSystemFault.failWrite) throw new Error('simulated disk write failure');
@@ -269,6 +317,52 @@ describe('openWorkspaceFileForEdit (issue #43)', () => {
 });
 
 describe('saveWorkspaceFile (issue #43)', () => {
+  // Windows native MAX_PATH is a separate boundary; 255 is exercised on POSIX CI.
+  it.each(process.platform === 'win32' ? [199, 200] : [199, 200, 255])(
+    'saves a valid %i-character basename using bounded sibling names',
+    (length) => {
+      // Keep the full Windows path below MAX_PATH, independently of its component limit.
+      const root = mkdtempSync(join(tmpdir(), 'e-'));
+      const name = 'x'.repeat(length);
+      writeFileSync(join(root, name), 'before');
+      expect(openWorkspaceFileForEdit(root, name).editable).toBe(true);
+      expect(saveWorkspaceFile(root, name, 'after', digestOf('before')).outcome).toBe('saved');
+      expect(readFileSync(join(root, name), 'utf8')).toBe('after');
+      expect(readdirSync(root)).toEqual([name]);
+    },
+  );
+
+  it('saves a Unicode basename in its original parent directory', () => {
+    const root = workspace();
+    mkdirSync(join(root, 'nested'));
+    const name = 'nested/日本語🎉.txt';
+    writeFileSync(join(root, name), 'before');
+    expect(saveWorkspaceFile(root, name, 'after', digestOf('before')).outcome).toBe('saved');
+    expect(readFileSync(join(root, name), 'utf8')).toBe('after');
+    expect(readdirSync(join(root, 'nested'))).toEqual(['日本語🎉.txt']);
+  });
+
+  it.each(['stage', 'backup'])('preserves an existing nonce %s sibling on collision', (kind) => {
+    const root = workspace();
+    writeFileSync(join(root, 'a.txt'), 'before');
+    const nonce = 'a'.repeat(32);
+    const sibling = join(root, `.sprint-coder-${kind}-${nonce}.tmp`);
+    writeFileSync(sibling, 'third party');
+    const legacySibling = join(root, `a.txt.sprint-coder-${kind}-${nonce}.tmp`);
+    writeFileSync(legacySibling, 'legacy third party');
+    fileSystemFault.nonce = nonce;
+    try {
+      const result = saveWorkspaceFile(root, 'a.txt', 'after', digestOf('before'));
+      if (kind === 'stage' || process.platform === 'win32') {
+        expect(result.outcome).toBe('refused');
+        expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('before');
+      }
+      expect(readFileSync(sibling, 'utf8')).toBe('third party');
+      expect(readFileSync(legacySibling, 'utf8')).toBe('legacy third party');
+    } finally {
+      fileSystemFault.nonce = null;
+    }
+  });
   it.skipIf(process.platform === 'win32')(
     'does not copy an outside file after the validated source pathname is replaced',
     () => {
@@ -380,7 +474,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
     try {
       const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
-      expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-/);
+      expect(result.conflictPath).toMatch(/^\.sprint-coder-/);
       expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
       expect(readFileSync(file, 'utf8')).toBe('before\n');
     } finally {
@@ -398,7 +492,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
       try {
         const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
         expect(result).toMatchObject({ outcome: 'conflict', digest: null });
-        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(result.conflictPath).toMatch(/^\.sprint-coder-stage-/);
         expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
       } finally {
         fileSystemFault.concurrentPosixContent = null;
@@ -443,14 +537,59 @@ describe('saveWorkspaceFile (issue #43)', () => {
         createHash('sha256').update(original).digest('hex'),
       );
       expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
-      expect(result.conflictPath).toBeNull();
+      if (process.platform === 'win32')
+        expect(result.conflictPath).toMatch(/^\.sprint-coder-stage-/);
+      else expect(result.conflictPath).toBeNull();
     } finally {
       fileSystemFault.failRename = false;
       fileSystemFault.failAtomicReplace = false;
     }
     expect(readFileSync(file)).toEqual(original);
-    expect(readdirSync(root)).toEqual(['important.txt']);
+    if (process.platform === 'win32') {
+      const staged = readdirSync(root).find((name) => name.startsWith('.sprint-coder-stage-'))!;
+      const backup = readdirSync(root).find((name) => name.startsWith('.sprint-coder-backup-'))!;
+      expect(readFileSync(join(root, staged), 'utf8')).toBe('replacement\r\n');
+      expect(readFileSync(join(root, backup)).byteLength).toBe(0);
+      expect(readdirSync(root)).toHaveLength(3);
+    } else expect(readdirSync(root)).toEqual(['important.txt']);
   });
+
+  it
+    .runIf(process.platform === 'win32')
+    .each(['publication', 'rollback', 'recreated-target', 'recreated-rollback'])(
+    'retains both versions when Windows replacement partially fails during %s',
+    (phase) => {
+      const root = workspace();
+      const file = join(root, 'important.txt');
+      writeFileSync(file, 'before\n');
+      const rollback = phase === 'rollback' || phase === 'recreated-rollback';
+      const recreated = phase.startsWith('recreated');
+      fileSystemFault.partialWindowsReplacement = rollback ? 2 : 1;
+      fileSystemFault.windowsReplacementCalls = 0;
+      if (rollback) fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
+      if (recreated) fileSystemFault.afterPartialFailureContent = 'later writer\n';
+      try {
+        const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'io_error' });
+        expect(readdirSync(root).some((name) => name === 'important.txt')).toBe(recreated);
+        if (recreated) expect(readFileSync(file, 'utf8')).toBe('later writer\n');
+        const backup = readdirSync(root).find((name) => name.startsWith('.sprint-coder-backup-'));
+        expect(backup, 'the displaced original must survive cleanup').toBeDefined();
+        expect(readFileSync(join(root, backup!), 'utf8')).toBe(
+          rollback ? 'concurrent writer\n' : 'before\n',
+        );
+        const staged = readdirSync(root).find((name) => name.startsWith('.sprint-coder-stage-'));
+        expect(staged).toBeDefined();
+        expect(readFileSync(join(root, staged!), 'utf8')).toBe('my edit\n');
+        expect(result.conflictPath).toBe(recreated ? staged : backup);
+      } finally {
+        fileSystemFault.partialWindowsReplacement = null;
+        fileSystemFault.windowsReplacementCalls = 0;
+        fileSystemFault.concurrentWindowsContent = null;
+        fileSystemFault.afterPartialFailureContent = null;
+      }
+    },
+  );
 
   it.runIf(process.platform === 'win32')(
     'restores a concurrent Windows edit observed at the File.Replace boundary',
@@ -462,7 +601,7 @@ describe('saveWorkspaceFile (issue #43)', () => {
       try {
         const result = saveWorkspaceFile(root, 'important.txt', 'my edit\n', digestOf('before\n'));
         expect(result).toMatchObject({ outcome: 'conflict', digest: null });
-        expect(result.conflictPath).toMatch(/^important\.txt\.sprint-coder-stage-/);
+        expect(result.conflictPath).toMatch(/^\.sprint-coder-stage-/);
         expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
       } finally {
         fileSystemFault.concurrentWindowsContent = null;
