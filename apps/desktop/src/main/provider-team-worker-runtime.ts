@@ -401,7 +401,10 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
               name: event.name,
               input: event.input,
             });
-          } else if (event.type === 'completed') completed = true;
+          } else if (event.type === 'completed') {
+            completed = true;
+            break;
+          }
         }
         controller.signal.throwIfAborted();
         if (!completed) throw new Error('Provider Worker stream ended without completion');

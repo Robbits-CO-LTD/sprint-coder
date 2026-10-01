@@ -43,6 +43,31 @@ const connection: ProviderConnection = {
 };
 
 describe('ProviderAwareTeamWorkerRuntime', () => {
+  it('closes the provider iterator after completion before any later transport failure', async () => {
+    let released = false;
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      async *execute() {
+        try {
+          yield { type: 'output_delta', text: 'Done' };
+          yield { type: 'completed', stopReason: 'completed' };
+          throw new Error('transport failure after terminal event');
+        } finally {
+          released = true;
+        }
+      },
+    };
+    const adapter = controlledProviderAdapter(runtime);
+    const result = await adapter.execute({
+      worker: providerWorker(),
+      envelope,
+      content: 'fixture',
+    });
+    expect(result.completion).toMatchObject({ status: 'succeeded', summary: 'Done' });
+    expect(released).toBe(true);
+  });
   it.each(['text', 'tool', 'usage'])(
     'rejects a Gemini %s round truncated before finishReason without running tools',
     async (kind) => {
