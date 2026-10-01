@@ -51,12 +51,15 @@ vi.mock('node:net', async (importOriginal) => {
 
 class FakeHelperSocket extends EventEmitter {
   destroyed = false;
+  holdWriteCallbacks = false;
+  readonly writeCallbacks: Array<(error?: Error | null) => void> = [];
   onWrite: ((frame: Buffer) => void) | null = null;
   write(chunk: Buffer, callback?: (error?: Error | null) => void): boolean {
     const written = Buffer.from(chunk);
+    if (callback !== undefined) this.writeCallbacks.push(callback);
     // A real socket never calls back or delivers a response inside `write`.
     queueMicrotask(() => {
-      callback?.(null);
+      if (!this.holdWriteCallbacks) callback?.(null);
       if (!this.destroyed) this.onWrite?.(written);
     });
     return true;
@@ -426,6 +429,185 @@ describe('Computer Use Windows helper transport', () => {
   afterEach(() => {
     vi.useRealTimers();
     onSocket = null;
+  });
+
+  it.each([1, 64, 68, 70])(
+    'reconnects the same addon after a frame is cut at byte %i',
+    async (prefixBytes) => {
+      const { addon } = createTarget();
+      const list = () => Promise.resolve(addon.listWindows!(profile));
+      await expect(list()).resolves.toBeInstanceOf(Array);
+      const oldSocket = sockets[0]!;
+      const oldChild = children[0]!;
+      oldSocket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const response = encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'probe_result',
+          metadata: Buffer.from(JSON.stringify(responders()['list_windows']!({})[1])),
+          binary: Buffer.alloc(0),
+        });
+        oldSocket.emit('data', response.subarray(0, prefixBytes));
+        oldSocket.destroy();
+      };
+      const failed = list().catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await failed).toEqual(
+        expect.objectContaining({ message: expect.stringContaining('pipe closed') }),
+      );
+      const reconnected = list();
+      // Also bounds the pre-fix retry loop, so failure is a product rejection rather than a test timeout.
+      const outcome = reconnected.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(510_000);
+      expect(await outcome).toBeInstanceOf(Array);
+      const newSocket = sockets.at(-1)!;
+      let remaining: Buffer = Buffer.alloc(0);
+      newSocket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const response = encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'probe_result',
+          metadata: Buffer.from(JSON.stringify(responders()['list_windows']!({})[1])),
+          binary: Buffer.alloc(0),
+        });
+        newSocket.emit('data', response.subarray(0, 64));
+        remaining = response.subarray(64);
+      };
+      const pending = list();
+      await vi.advanceTimersByTimeAsync(0);
+      oldSocket.emit('data', Buffer.alloc(100));
+      oldSocket.emit('error', new Error('late old socket error'));
+      oldSocket.emit('close');
+      oldChild.emit('exit', 1, null);
+      newSocket.emit('data', remaining);
+      await expect(pending).resolves.toBeInstanceOf(Array);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it.each(['header', 'length', 'body', 'binding'] as const)(
+    'rejects an invalid %s on its pipe and recovers on a fresh connection',
+    async (invalid) => {
+      const { addon } = createTarget();
+      const list = () => Promise.resolve(addon.listWindows!(profile));
+      await expect(list()).resolves.toBeInstanceOf(Array);
+      sockets[0]!.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const response = encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'probe_result',
+          sessionId: invalid === 'binding' ? { hex: 'e'.repeat(32) } : request.sessionId,
+          metadata: Buffer.from(invalid === 'body' ? '!' : '[]'),
+          binary: Buffer.alloc(0),
+        });
+        if (invalid === 'header') response.writeUInt32LE(0, 0);
+        if (invalid === 'length') response.writeUInt32LE(0xffffffff, 60);
+        sockets[0]!.emit('data', response);
+      };
+      await expect(list()).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(list()).resolves.toBeInstanceOf(Array);
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('ignores a delayed write failure from an old socket even when the request id is reused', async () => {
+    const { addon } = createTarget();
+    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    const oldSocket = sockets[0]!;
+    oldSocket.holdWriteCallbacks = true;
+    oldSocket.onWrite = () => oldSocket.destroy();
+    const observe = () =>
+      Promise.resolve(addon.observe!({ sessionId: 'session', requestId: 'same-id' }));
+    const rejected = expect(observe()).rejects.toThrow('pipe closed');
+    await vi.advanceTimersByTimeAsync(0);
+    await rejected;
+    const oldCallback = oldSocket.writeCallbacks.at(-1)!;
+    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    const newSocket = sockets.at(-1)!;
+    let remainder: Buffer = Buffer.alloc(0);
+    newSocket.onWrite = (encoded) => {
+      const request = decodeComputerUseNativeFrame(encoded);
+      const response = encodeComputerUseNativeFrame({
+        ...request,
+        messageType: 'observe_result',
+        metadata: Buffer.from('{"observed":true}'),
+        binary: Buffer.alloc(0),
+      });
+      newSocket.emit('data', response.subarray(0, 64));
+      remainder = response.subarray(64);
+    };
+    const current = observe().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    oldCallback(new Error('late write failure'));
+    newSocket.emit('data', remainder);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await expect(current).resolves.toEqual({ observed: true });
+    expect(newSocket.destroyed).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('starts every handshake retry with an empty decoder on the same helper', async () => {
+    const { addon } = createTarget();
+    const normalOnSocket = onSocket!;
+    let attempt = 0;
+    onSocket = (socket) => {
+      normalOnSocket(socket);
+      if (attempt++ !== 0) return;
+      socket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        const response = encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'handshake_result',
+          metadata: Buffer.from(JSON.stringify(responders()['handshake']!({})[1])),
+          binary: Buffer.alloc(0),
+        });
+        socket.emit('data', response.subarray(0, 64));
+        socket.destroy();
+      };
+    };
+    const listed = Promise.resolve(addon.listWindows!(profile));
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(listed).resolves.toBeInstanceOf(Array);
+    expect(sockets).toHaveLength(2);
+    expect(children).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('preserves chunk splitting and coalesced frames for parallel requests', async () => {
+    const { addon } = createTarget();
+    await expect(Promise.resolve(addon.listWindows!(profile))).resolves.toBeInstanceOf(Array);
+    const socket = sockets[0]!;
+    const responses: Buffer[] = [];
+    socket.onWrite = (encoded) => {
+      const request = decodeComputerUseNativeFrame(encoded);
+      responses.push(
+        encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'observe_result',
+          metadata: Buffer.from('{"observed":true}'),
+          binary: Buffer.alloc(0),
+        }),
+      );
+      if (responses.length === 2) {
+        const joined = Buffer.concat(responses);
+        socket.emit('data', joined.subarray(0, 64));
+        socket.emit('data', joined.subarray(64));
+      }
+    };
+    await expect(
+      Promise.all(
+        [1, 2].map((id) =>
+          Promise.resolve(
+            addon.observe!({
+              sessionId: 'session',
+              requestId: `observe-${id}`,
+            }),
+          ),
+        ),
+      ),
+    ).resolves.toEqual([{ observed: true }, { observed: true }]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('keeps the helper reachable so a close re-sent after the Main deadline is confirmed', async () => {

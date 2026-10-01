@@ -141,7 +141,6 @@ class WindowsComputerUseHelperClient {
   private child: ChildProcess | null = null;
   private socket: Socket | null = null;
   private connecting: Promise<void> | null = null;
-  private readBuffer = Buffer.alloc(0);
   private readonly pending = new Map<string, PendingRequest>();
   private readonly transportSessionId = newComputerUseNativeFrameId();
   private idleShutdownPending = false;
@@ -262,8 +261,10 @@ class WindowsComputerUseHelperClient {
       try {
         const socket = await connectPipe(pipePath);
         this.socket = socket;
+        // Partial frames belong to this pipe, including handshake retries on the same helper.
+        const decoder: { readBuffer: Buffer } = { readBuffer: Buffer.alloc(0) };
         socket.on('data', (chunk) => {
-          if (this.socket === socket) this.consume(chunk);
+          if (this.socket === socket) this.consume(chunk, decoder);
         });
         socket.on('error', (error) => {
           if (this.socket === socket) this.failAll(error);
@@ -328,7 +329,7 @@ class WindowsComputerUseHelperClient {
         // the transport — the last stop to time out finds no stop pending and aborts here.
         if (!this.hasPendingStop()) this.abortTransport(error);
       }, timeoutMilliseconds);
-      this.pending.set(requestId.hex, {
+      const pending: PendingRequest = {
         resolve,
         reject,
         timeout,
@@ -336,8 +337,10 @@ class WindowsComputerUseHelperClient {
         stopsSession,
         responseType: responseTypeFor(messageType),
         allowBinary: messageType === 'observe',
-      });
+      };
+      this.pending.set(requestId.hex, pending);
       socket.write(encoded, (error) => {
+        if (this.socket !== socket || this.pending.get(requestId.hex) !== pending) return;
         if (error === null || error === undefined) return;
         clearTimeout(timeout);
         this.pending.delete(requestId.hex);
@@ -347,21 +350,21 @@ class WindowsComputerUseHelperClient {
     });
   }
 
-  private consume(chunk: Buffer): void {
-    this.readBuffer = Buffer.concat([this.readBuffer, chunk]);
-    while (this.readBuffer.byteLength >= COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES) {
+  private consume(chunk: Buffer, decoder: { readBuffer: Buffer }): void {
+    decoder.readBuffer = Buffer.concat([decoder.readBuffer, chunk]);
+    while (decoder.readBuffer.byteLength >= COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES) {
       if (
-        this.readBuffer.readUInt32LE(0) !== 0x31554353 ||
-        this.readBuffer.readUInt16LE(4) !== 1 ||
-        this.readBuffer.readUInt16LE(6) < 1 ||
-        this.readBuffer.readUInt16LE(6) > 10
+        decoder.readBuffer.readUInt32LE(0) !== 0x31554353 ||
+        decoder.readBuffer.readUInt16LE(4) !== 1 ||
+        decoder.readBuffer.readUInt16LE(6) < 1 ||
+        decoder.readBuffer.readUInt16LE(6) > 10
       ) {
         this.failAll(new Error('Computer Use Windows helper returned an invalid frame header'));
         this.socket?.destroy();
         return;
       }
-      const metadataBytes = this.readBuffer.readUInt32LE(60);
-      const binaryBytes = this.readBuffer.readUInt32LE(64);
+      const metadataBytes = decoder.readBuffer.readUInt32LE(60);
+      const binaryBytes = decoder.readBuffer.readUInt32LE(64);
       if (
         metadataBytes === 0 ||
         metadataBytes > COMPUTER_USE_NATIVE_MAX_METADATA_BYTES ||
@@ -372,9 +375,9 @@ class WindowsComputerUseHelperClient {
         return;
       }
       const frameBytes = COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES + metadataBytes + binaryBytes;
-      if (this.readBuffer.byteLength < frameBytes) return;
-      const encoded = this.readBuffer.subarray(0, frameBytes);
-      this.readBuffer = this.readBuffer.subarray(frameBytes);
+      if (decoder.readBuffer.byteLength < frameBytes) return;
+      const encoded = decoder.readBuffer.subarray(0, frameBytes);
+      decoder.readBuffer = decoder.readBuffer.subarray(frameBytes);
       try {
         this.resolveFrame(decodeComputerUseNativeFrame(encoded));
       } catch (error) {
