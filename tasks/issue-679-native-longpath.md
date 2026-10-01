@@ -7,6 +7,7 @@ Root cause confirmed: Node supports the valid full target path, but the native w
 Minimal change: node:path.toNamespacedPath for replacement/target/backup at replaceWindowsFileWithBackup only, after the Windows availability check. Existing Workspace validation and native same-parent check remain. The API returns no path, so Renderer-visible relative paths are unchanged.
 
 Windows yuseipc / Electron43.5.0 / matching native-safe-fs evidence:
+
 - Before correction: native255component/fullpath308 FAIL error123; real editor open editable=true then save FAIL refused. Different-parent refusal test PASS.
 - After: native publication + workspace edit2suites 28PASS8POSIXSKIP. Long nested parent edit saved real bytes. Existing conflict rollback, retained displaced edits, private ACL, BOM, identity and escaping junction/hardlink tests PASS. Different-parent remains refused.
 - Desktop typecheck, changed-file ESLint/Prettier and diff-check PASS.
