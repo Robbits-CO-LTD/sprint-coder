@@ -35,6 +35,7 @@ import {
   type CommandOutputChunk,
 } from './command-runner';
 import { probeSandboxRunner } from './sandbox-runner';
+import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import { secureLogger } from './secure-logger';
 import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
@@ -187,13 +188,14 @@ describe('CommandRunner', () => {
     expect(unsandboxed['NODE_OPTIONS']).toBe('--preserve-symlinks-main');
 
     const sandboxed = windowsCommandEnvironment(approved, undefined, true);
-    expect(sandboxed['NODE_OPTIONS']).toBe('--preserve-symlinks --preserve-symlinks-main');
-    expect({ ...sandboxed, NODE_OPTIONS: approved['NODE_OPTIONS'] }).toEqual(approved);
+    expect(sandboxed['NODE_OPTIONS']).toBe(sandboxNodeOptions());
+    expect(sandboxed['SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD']).toBe('1');
+    expect(unsandboxed['SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD']).toBeUndefined();
     expect(
       windowsCommandEnvironment(approved, { NODE_OPTIONS: '--require C:\\x.cjs' }, true)[
         'NODE_OPTIONS'
       ],
-    ).toBe('--preserve-symlinks --preserve-symlinks-main');
+    ).toBe(sandboxNodeOptions());
   });
 
   it('keeps the fixed minimal PATH and excludes user state on non-Windows platforms', () => {
@@ -487,6 +489,56 @@ describe('CommandRunner', () => {
   );
 
   it.runIf(process.platform === 'win32')(
+    'fails fast for old-libuv child pipes through the product sandbox and preserves pipe-free commands',
+    async () => {
+      const root = await workspace();
+      await writeFile(
+        join(root, 'pipe.cjs'),
+        "require('node:child_process').execFileSync(process.execPath,['-e','console.log(7)']);\n",
+      );
+      await writeFile(
+        join(root, 'inherit.cjs'),
+        "const r=require('node:child_process').spawnSync(process.execPath,['-e','process.exit(0)'],{stdio:'inherit'});if(r.error||r.status!==0)process.stderr.write(JSON.stringify({status:r.status,signal:r.signal,error:r.error?.code,node:process.version,uv:process.versions.uv})+'\\n');if(r.error)throw r.error;process.exit(r.status??1);\n",
+      );
+      const runner = new CommandRunner({ sandboxed: true });
+      const chunks: CommandOutputChunk[] = [];
+      const blocked = await runner.run(
+        await prepareExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: ['pipe.cjs'],
+        }),
+        {
+          onChunk: (chunk) => {
+            chunks.push(chunk);
+          },
+        },
+      );
+      expect(blocked.exitCode).toBe(1);
+      expect(chunks.map((chunk) => chunk.text).join('')).toContain(
+        'SPRINT_CODER_SANDBOX_NODE_PIPE_UNSUPPORTED',
+      );
+      expect(blocked.durationMs).toBeLessThan(10_000);
+      const allowedChunks: CommandOutputChunk[] = [];
+      const allowed = await runner.run(
+        await prepareExecutionSpec({
+          workspacePath: root,
+          executable: process.execPath,
+          argv: ['inherit.cjs'],
+        }),
+        {
+          onChunk: (chunk) => {
+            allowedChunks.push(chunk);
+          },
+        },
+      );
+      expect(allowed.exitCode, allowedChunks.map(({ text }) => text).join('')).toBe(0);
+      await runner.dispose();
+    },
+    30_000,
+  );
+
+  it.runIf(process.platform === 'win32')(
     'resolves workspace require() and import inside the Windows sandbox without changing unsandboxed Node',
     async () => {
       expect((await probeSandboxRunner()).available).toBe(true);
@@ -529,9 +581,7 @@ describe('CommandRunner', () => {
         ]),
       ).toContain('cjs=42;');
       expect(await output(sandboxed, ['esm.mjs'])).toContain('esm=42;');
-      expect(await output(sandboxed, printOptions)).toContain(
-        'options=--preserve-symlinks --preserve-symlinks-main;',
-      );
+      expect(await output(sandboxed, printOptions)).toContain(`options=${sandboxNodeOptions()};`);
       expect(await output(new CommandRunner(), printOptions)).toContain(
         'options=--preserve-symlinks-main;',
       );

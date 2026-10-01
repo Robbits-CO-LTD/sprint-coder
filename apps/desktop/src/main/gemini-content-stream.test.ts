@@ -2,10 +2,36 @@ import { describe, expect, it } from 'vitest';
 import { normalizeGeminiContentStream } from './gemini-content-stream';
 
 describe('normalizeGeminiContentStream', () => {
+  it.each([
+    { candidates: [{ content: { parts: [{ text: 'partial' }] } }] },
+    { candidates: [{ content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] } }] },
+    { usageMetadata: { promptTokenCount: 8 } },
+  ])('rejects EOF without a finish reason: %j', async (chunk) => {
+    const events = [];
+    for await (const event of normalizeGeminiContentStream(sse([chunk]), 'gemini-test'))
+      events.push(event);
+    expect(events.some((event) => event.type === 'completed')).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      type: 'error',
+      error: {
+        category: 'provider_unavailable',
+        retryable: true,
+        providerCode: 'incomplete_stream',
+      },
+    });
+  });
+
   it('generates round-unique local IDs without claiming Gemini supplied them', async () => {
     const eventBody = () =>
       sse([
-        { candidates: [{ content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] } }] },
+        {
+          candidates: [
+            {
+              finishReason: 'STOP',
+              content: { parts: [{ functionCall: { name: 'lookup', args: {} } }] },
+            },
+          ],
+        },
       ]);
     const collect = async (executionId: string) => {
       const events = [];
@@ -24,6 +50,21 @@ describe('normalizeGeminiContentStream', () => {
     );
     expect(first).toMatchObject({ providerMetadata: { geminiCallIdPresent: false } });
   });
+
+  it.each(['MAX_TOKENS', 'RESOURCE_EXHAUSTED', 'CANCELLED'])(
+    'preserves failure for %s',
+    async (reason) => {
+      const chunk =
+        reason === 'MAX_TOKENS'
+          ? { candidates: [{ finishReason: reason, content: { parts: [{ text: 'partial' }] } }] }
+          : { error: { status: reason } };
+      const events = [];
+      for await (const event of normalizeGeminiContentStream(sse([chunk]), 'gemini-test'))
+        events.push(event);
+      expect(events.some((event) => event.type === 'completed')).toBe(false);
+      expect(events.at(-1)?.type).toBe('error');
+    },
+  );
 
   it('normalizes text, thought, function calls, model resolution, and usage', async () => {
     const body = sse([
