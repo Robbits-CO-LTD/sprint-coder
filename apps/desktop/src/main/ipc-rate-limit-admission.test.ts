@@ -17,6 +17,7 @@ describe('connection rate-limit mutation', () => {
     const lower = vi.fn(() => connection);
     const refresh = vi.fn();
     let failAfterAction = false;
+    let replayCached = false;
     let handler!: (
       input: { connectionId: string; tokensPerMinute: number },
       event: unknown,
@@ -43,9 +44,10 @@ describe('connection rate-limit mutation', () => {
         _channel: unknown,
         action: () => unknown,
       ) => {
+        if (replayCached) return { value: connection, executed: false };
         const value = action();
         if (failAfterAction) throw new Error('commit failed');
-        return { value };
+        return { value, executed: true };
       },
       persistence: { lowerProviderConnectionRateLimits: lower },
       teamCoordinator: { refreshConnectionAdmission: refresh },
@@ -63,6 +65,10 @@ describe('connection rate-limit mutation', () => {
       'mutation denied',
     );
     expect(refresh).toHaveBeenCalledOnce();
+    replayCached = true;
+    expect(handler({ connectionId: connection.id, tokensPerMinute: 19_999 }, {}, {})).toBe(connection);
+    expect(refresh).toHaveBeenCalledOnce();
+    replayCached = false;
     failAfterAction = true;
     expect(() => handler({ connectionId: connection.id, tokensPerMinute: 19_997 }, {}, {})).toThrow(
       'commit failed',

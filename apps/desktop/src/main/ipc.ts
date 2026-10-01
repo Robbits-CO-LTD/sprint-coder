@@ -3328,7 +3328,7 @@ export class IpcRouter {
       providerConnectionRateLimitLowerInputSchema,
       providerConnectionSchema,
       (input, event, envelope) => {
-        const connection = this.runMutation(
+        const result = this.runMutation(
           event,
           envelope,
           '',
@@ -3350,9 +3350,9 @@ export class IpcRouter {
             );
             return connection;
           },
-        ).value;
-        this.teamCoordinator.refreshConnectionAdmission(connection);
-        return connection;
+        );
+        if (result.executed) this.teamCoordinator.refreshConnectionAdmission(result.value);
+        return result.value;
       },
     );
     this.handleMutation(
