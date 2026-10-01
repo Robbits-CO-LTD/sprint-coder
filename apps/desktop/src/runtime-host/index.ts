@@ -415,12 +415,16 @@ function terminateImagePreparationForTurn(turnId: string): void {
   }
 }
 
+let probeGeneration = 0;
 async function probeAndSendCapability(operationId: string): Promise<void> {
+  const generation = ++probeGeneration;
   const probe = await (runtimeKind === 'claude'
     ? probeClaude()
     : runtimeKind === 'grok'
       ? probeGrok()
       : probeCodex());
+  // A refreshed probe owns the adapter selection; a late earlier probe must not replace it.
+  if (generation !== probeGeneration) return;
   adapter.setCliVersion(probe.version ?? null);
   adapter.setCliResolution(probe.cli ?? null);
   send('', '', operationId, {

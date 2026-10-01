@@ -36,7 +36,11 @@ import type {
   RuntimeWorkspaceSet,
 } from './protocol';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
-import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
+import {
+  RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+  RUNTIME_VERSION_PROBE_TIMEOUT_MS,
+  RUNTIME_CLI_SELECTION_BUDGET_MS,
+} from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { TEAM_CORE_MCP_TOOL_NAMES, type TeamMcpToolName } from './team-mcp-tool-contract';
@@ -164,11 +168,13 @@ export async function probeCodex(
       models: E2E_CODEX_MODELS,
     };
   }
+  const selectionDeadline = Date.now() + RUNTIME_CLI_SELECTION_BUDGET_MS;
   const cli = await probeCliCommandCandidates({
     kind: 'codex',
     candidates: resolveCodexCommandCandidates(command, environment),
     environment: minimalEnvironment(environment),
     timeoutMs: RUNTIME_VERSION_PROBE_TIMEOUT_MS,
+    deadlineAt: selectionDeadline,
   });
   const availability: Omit<CodexProbe, 'models' | 'readiness'> =
     cli === null ? { available: false } : { available: true, version: cli.version, cli };

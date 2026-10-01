@@ -39,7 +39,11 @@ import type {
 } from './protocol';
 import { expandSkillArguments } from './skill-arguments';
 import { runtimeWorkspaceSetFromLegacyPath } from './protocol';
-import { RUNTIME_AUTH_PROBE_TIMEOUT_MS, RUNTIME_VERSION_PROBE_TIMEOUT_MS } from './probe-budget';
+import {
+  RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+  RUNTIME_VERSION_PROBE_TIMEOUT_MS,
+  RUNTIME_CLI_SELECTION_BUDGET_MS,
+} from './probe-budget';
 import { teamMcpNodeCommand } from './team-mcp-node-command';
 import { TEAM_MCP_SERVER_SOURCE } from './team-mcp-server-source';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -146,11 +150,13 @@ export async function probeClaude(
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
     return { available: true, readiness: 'ready', version: 'e2e-fixture', models: CLAUDE_MODELS };
   }
+  const selectionDeadline = Date.now() + RUNTIME_CLI_SELECTION_BUDGET_MS;
   const cli = await probeCliCommandCandidates({
     kind: 'claude',
     candidates: resolveClaudeCommandCandidates(command, environment),
     environment: minimalEnvironment(environment),
     timeoutMs: RUNTIME_VERSION_PROBE_TIMEOUT_MS,
+    deadlineAt: selectionDeadline,
   });
   const availability: Omit<ClaudeProbe, 'models' | 'readiness'> =
     cli === null ? { available: false } : { available: true, version: cli.version, cli };
