@@ -13,4 +13,3 @@ Windows Node22.23.2: first six integration cases + existing Main/Grok stop suite
 Independent design review: runtime_fixes found no blocker for the bounded budget derivation and requested 14-second boundary, 15-second timeout, platform controls, old-instance and joined-call checks, now included. Independent code review also found no new blocker. Exact-head CI remains pending until the dedicated draft PR is created.
 
 Known independent work: #649 forced/disposal waiter behavior is handled by draft #671; its rejection semantics are not duplicated here. The disposal test checks watchdog cleanup and finite settlement, not an unconfirmed success receipt. #653 natural-close owned-descendant confirmation remains incomplete in #671. #665/#506 still require same-artifact Windows real Grok/TeamMCP acceptance; this fixture is not that acceptance.
-

@@ -13,13 +13,11 @@ export async function* normalizeGeminiContentStream(
   let stopReason: string | null = null;
   let usage = emptyUsage();
   let toolOrdinal = 0;
-  let received = false;
   let failed = false;
 
   for await (const value of readBoundedServerSentJson(body, budget)) {
     const chunk = record(value);
     if (chunk === null) continue;
-    received = true;
 
     const error = record(chunk.error);
     if (error !== null) {
@@ -51,7 +49,8 @@ export async function* normalizeGeminiContentStream(
     const candidates = Array.isArray(chunk.candidates) ? chunk.candidates : [];
     for (const candidateValue of candidates) {
       const candidate = record(candidateValue);
-      if (typeof candidate?.finishReason === 'string') stopReason = candidate.finishReason;
+      if (typeof candidate?.finishReason === 'string' && candidate.finishReason.length > 0)
+        stopReason = candidate.finishReason;
       const content = record(candidate?.content);
       const parts = Array.isArray(content?.parts) ? content.parts : [];
       for (const partValue of parts) {
@@ -87,7 +86,21 @@ export async function* normalizeGeminiContentStream(
     }
   }
 
-  if (received && !failed) {
+  if (!failed && stopReason === null) {
+    yield {
+      type: 'error',
+      error: {
+        category: 'provider_unavailable',
+        message: 'Gemini stream ended before completion',
+        retryable: true,
+        retryAfterMs: null,
+        providerCode: 'incomplete_stream',
+      },
+    };
+    return;
+  }
+
+  if (!failed) {
     yield {
       type: 'resolution',
       resolution: {
