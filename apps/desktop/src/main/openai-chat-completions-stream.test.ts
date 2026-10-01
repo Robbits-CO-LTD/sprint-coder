@@ -22,6 +22,47 @@ async function events(delta: object, finishReason = 'stop') {
 }
 
 describe('Chat Completions terminal responses', () => {
+  it.each(['text', 'tool'])(
+    'finishes an open transport after DONE (%s)',
+    async (kind) => {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          const delta =
+            kind === 'text'
+              ? { content: 'Done' }
+              : {
+                  tool_calls: [
+                    { index: 0, id: 'call-1', function: { name: 'read_file', arguments: '{}' } },
+                  ],
+                };
+          for (const value of [
+            { choices: [{ delta, finish_reason: null }] },
+            { choices: [{ delta: {}, finish_reason: kind === 'text' ? 'stop' : 'tool_calls' }] },
+            { choices: [], usage: { prompt_tokens: 3, completion_tokens: 2 } },
+          ])
+            controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`));
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const result = [];
+      for await (const event of normalizeOpenAIChatCompletionsStream(body, 'ollama', 'test-model'))
+        result.push(event);
+      expect(result.filter((event) => event.type === 'completed')).toHaveLength(1);
+      expect(result).toContainEqual(
+        expect.objectContaining({
+          type: 'usage',
+          usage: expect.objectContaining({ inputTokens: 3, outputTokens: 2 }),
+        }),
+      );
+      expect(cancelled).toBe(true);
+      expect(body.locked).toBe(false);
+    },
+    500,
+  );
   it.each([{}, { content: ' \n' }, { reasoning_content: 'Thinking only' }])(
     'does not report success for an empty final response',
     async (delta) => {

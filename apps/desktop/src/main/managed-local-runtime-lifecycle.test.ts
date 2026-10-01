@@ -273,6 +273,31 @@ describe('ManagedLocalRuntimeLifecycle', () => {
     expect(subject.snapshot()).toMatchObject({ state: 'stopped', activeLeaseCount: 0 });
   });
 
+  it.each([0, 1_000])(
+    'preserves automatic stop across overlapping manual leases (idle %i)',
+    async (idleReleaseMs) => {
+      vi.useFakeTimers();
+      try {
+        const model = await descriptor('a');
+        const { subject, supervisor } = lifecycle({ idleReleaseMs });
+        const automatic = await subject.acquire(model, true);
+        const manual = await subject.acquire(model, false);
+        await automatic.release();
+        const overlapping = await subject.acquire(model, false);
+        await manual.release();
+        await vi.advanceTimersByTimeAsync(2_000);
+        expect(supervisor.sessions[0]?.stopCount).toBe(0);
+        await overlapping.release();
+        await overlapping.release();
+        await vi.advanceTimersByTimeAsync(idleReleaseMs);
+        expect(supervisor.sessions[0]?.stopCount).toBe(1);
+        expect(subject.activeLeaseCount(model.id)).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it('keeps an automatically released model warm briefly and cancels the stop for a new lease', async () => {
     vi.useFakeTimers();
     try {
