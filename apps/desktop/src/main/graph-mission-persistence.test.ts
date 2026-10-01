@@ -1,5 +1,5 @@
 import { spawnSync, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
 import {
   mkdtempSync,
   mkdirSync,
@@ -9,6 +9,7 @@ import {
   existsSync,
   linkSync,
   lstatSync,
+  statSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -3191,10 +3192,42 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       f.persistence.close();
     });
 
-    it.each(['complete', 'other-execution', 'other-worker', 'ready-participant'])(
-      'finishes participating Workers when the last integration resumes (%s)',
-      async (mode) => {
+    it.each(
+      ['complete', 'other-execution', 'other-worker', 'ready-participant'].flatMap((mode) =>
+        ['creation-order', 'reverse-order'].map((order) => ({ mode, order })),
+      ),
+    )(
+      'finishes participating Workers when the last integration resumes ($mode, $order)',
+      async ({ mode, order }) => {
         const { f, a, run, manager } = await sealedWriteFixture(true);
+        // Snapshot order is depth/createdAt/id, not Worker registration order.
+        const orderDb = new Database(f.path);
+        try {
+          const orderedWorkers = order === 'creation-order' ? f.workers : [...f.workers].reverse();
+          for (const [index, worker] of orderedWorkers.entries())
+            orderDb
+              .prepare('UPDATE agents SET created_at = ? WHERE id = ?')
+              .run(`2026-09-11T00:00:0${index}.000Z`, worker.id);
+          expect(
+            f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.filter(({ kind }) => kind === 'worker')
+              .map(({ id }) => id),
+          ).toEqual(orderedWorkers.map(({ id }) => id));
+        } finally {
+          orderDb.close();
+        }
+        const expectedWorkerStates = new Map([
+          [f.workers[0]!.id, 'done'],
+          [
+            f.workers[1]!.id,
+            mode === 'other-execution'
+              ? 'waiting'
+              : mode === 'ready-participant'
+                ? 'ready'
+                : 'done',
+          ],
+        ]);
         f.persistence.holdGraphIntegration({
           ...completion(a.mission.id, 'a', run),
           reason: 'Integration requires retry',
@@ -3222,6 +3255,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           });
           f.persistence.transitionWorkerState(other.id, 'spawning');
           f.persistence.transitionWorkerState(other.id, 'ready');
+          expectedWorkerStates.set(other.id, 'ready');
         }
         for (const worker of f.workers) {
           if (mode === 'ready-participant' && worker.id === f.workers[1]!.id) continue;
@@ -3248,19 +3282,12 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         );
         await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
         expect(f.persistence.getTeamMission(a.mission.id).state).toBe('completed');
-        expect(
-          f.persistence
-            .getTeamSnapshot(f.team.id)
-            .agents.filter(({ kind }) => kind === 'worker')
-            .map(({ state }) => state),
-        ).toEqual(
-          mode === 'complete'
-            ? ['done', 'done']
-            : mode === 'other-execution'
-              ? ['done', 'waiting']
-              : mode === 'ready-participant'
-                ? ['done', 'ready']
-                : ['done', 'done', 'ready'],
+        const completedWorkers = f.persistence
+          .getTeamSnapshot(f.team.id)
+          .agents.filter(({ kind }) => kind === 'worker');
+        expect(completedWorkers).toHaveLength(expectedWorkerStates.size);
+        expect(new Map(completedWorkers.map(({ id, state }) => [id, state]))).toEqual(
+          expectedWorkerStates,
         );
         expect(
           f.persistence
@@ -5456,25 +5483,188 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   });
 else
   describe('graph Mission persistence Electron ABI bridge', () => {
+    it('retains bounded child and assertion metadata without private output', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+      roots.push(directory);
+      const reportFile = join(directory, 'report.json');
+      writeFileSync(
+        reportFile,
+        JSON.stringify({
+          numTotalTests: 122,
+          numPassedTests: 121,
+          numFailedTests: 1,
+          failureMessages: ['PRIVATE_REPORT_FAILURE'],
+        }),
+      );
+      const failure = graphBridgeFailure(
+        {
+          code: 1,
+          killed: false,
+          signal: null,
+          message: 'PRIVATE_CHILD_MESSAGE [vitest-worker]: Timeout calling "onTaskUpdate"',
+          stdout:
+            ' ✓ durable graph Mission definitions > PRIVATE_CASE 10ms\n × durable graph Mission definitions > PRIVATE_FAILED_CASE 20ms\nPRIVATE_STDOUT',
+          stderr: 'PRIVATE_STDERR',
+        },
+        reportFile,
+      );
+      expect(failure.message).toContain('"code":1');
+      expect(failure.message).toContain('"rpcTimeout":true');
+      expect(failure.message).toContain('"passed":1,"failed":1');
+      expect(failure.message).toContain('"numFailedTests":1');
+      expect(failure.message).toContain('lastCompletedCaseDigest');
+      expect(failure.message).not.toContain('PRIVATE_');
+      expect(failure.message).not.toContain(directory);
+      expect(failure.cause).toBeUndefined();
+      expect(Object.keys(failure)).toEqual([]);
+    });
+
+    it('classifies missing, malformed and oversized reports without exposing report bytes', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+      roots.push(directory);
+      const reportFile = join(directory, 'report.json');
+      expect(graphBridgeFailure('PRIVATE_UNKNOWN_ERROR', reportFile).message).toContain(
+        'report=missing',
+      );
+      writeFileSync(reportFile, 'PRIVATE_INVALID_JSON');
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report=unreadable');
+      writeFileSync(reportFile, 'x'.repeat(2 * 1024 * 1024 + 1));
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report=oversized');
+      writeFileSync(
+        reportFile,
+        JSON.stringify({ numTotalTests: 'PRIVATE_COUNT', numFailedTests: -1 }),
+      );
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report={}');
+    });
+
+    it.each(['exit', 'timeout'])(
+      'keeps a real child %s authoritative and redacts its private stderr',
+      async (mode) => {
+        const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+        roots.push(directory);
+        let childError: unknown;
+        try {
+          await promisify(execFile)(
+            process.execPath,
+            [
+              '-e',
+              mode === 'exit'
+                ? "process.stderr.write('PRIVATE_REAL_CHILD'); process.exit(7)"
+                : "process.stderr.write('PRIVATE_REAL_CHILD'); setInterval(() => {}, 1000)",
+            ],
+            { encoding: 'utf8', timeout: mode === 'exit' ? 10_000 : 500 },
+          );
+        } catch (error) {
+          childError = error;
+        }
+        expect(childError).toBeDefined();
+        const failure = graphBridgeFailure(childError, join(directory, 'report.json'));
+        expect(failure.message).toContain(mode === 'exit' ? '"code":7' : '"killed":true');
+        expect(failure.message).toContain('report=missing');
+        expect(failure.message).not.toContain('PRIVATE_');
+        expect(failure.cause).toBeUndefined();
+      },
+    );
+
     it(
       'runs the graph Mission transaction suite with Electron',
       async () => {
-        await promisify(execFile)(
-          electronTestExecutablePath(),
-          [
-            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-            'run',
-            'src/main/graph-mission-persistence.test.ts',
-          ],
-          {
-            cwd: process.cwd(),
-            encoding: 'utf8',
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-            timeout: graphBridgeTimeout,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
+        const reportDirectory = mkdtempSync(join(tmpdir(), 'sc-graph-bridge-report-'));
+        const reportFile = join(reportDirectory, 'report.json');
+        try {
+          await promisify(execFile)(
+            electronTestExecutablePath(),
+            [
+              join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+              'run',
+              'src/main/graph-mission-persistence.test.ts',
+              '--reporter=verbose',
+              '--reporter=json',
+              `--outputFile.json=${reportFile}`,
+            ],
+            {
+              cwd: process.cwd(),
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                ELECTRON_RUN_AS_NODE: '1',
+                SPRINT_CODER_ELECTRON_DB_TEST: '1',
+              },
+              timeout: graphBridgeTimeout,
+              maxBuffer: 10 * 1024 * 1024,
+            },
+          );
+        } catch (error) {
+          throw graphBridgeFailure(error, reportFile);
+        } finally {
+          // Diagnostic cleanup must not replace the authoritative child failure with raw paths.
+          await rm(reportDirectory, { recursive: true, force: true }).catch(() => {});
+        }
       },
       graphBridgeTimeout + 5_000,
     );
   });
+
+function graphBridgeFailure(error: unknown, reportFile: string): Error {
+  const child: Record<string, number | string | boolean> = {};
+  const progress: { passed: number; failed: number; lastCompletedCaseDigest?: string } = {
+    passed: 0,
+    failed: 0,
+  };
+  if (typeof error === 'object' && error !== null) {
+    const code: unknown = Reflect.get(error, 'code');
+    if (
+      (typeof code === 'number' && Number.isSafeInteger(code)) ||
+      (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code))
+    )
+      child['code'] = code;
+    const killed: unknown = Reflect.get(error, 'killed');
+    if (typeof killed === 'boolean') child['killed'] = killed;
+    const signal: unknown = Reflect.get(error, 'signal');
+    if (typeof signal === 'string' && /^SIG[A-Z]{1,16}$/u.test(signal)) child['signal'] = signal;
+    const message: unknown = Reflect.get(error, 'message');
+    child['rpcTimeout'] =
+      typeof message === 'string' &&
+      message.includes('[vitest-worker]: Timeout calling "onTaskUpdate"');
+    const stdout: unknown = Reflect.get(error, 'stdout');
+    if (typeof stdout === 'string') {
+      for (const line of stripVTControlCharacters(stdout).split('\n')) {
+        const completed = /^\s*([✓×]) durable graph Mission definitions > (.+)$/u.exec(line);
+        if (!completed) continue;
+        if (completed[1] === '✓') progress.passed += 1;
+        else progress.failed += 1;
+        const caseName = completed[2]!.replace(/\s+\d+(?:\.\d+)?ms\s*$/u, '');
+        progress.lastCompletedCaseDigest = createHash('sha256').update(caseName).digest('hex');
+      }
+    }
+  }
+  // execFile's error/cause includes raw stderr and paths. Expose only typed metadata and counts.
+  return new Error(
+    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}`,
+  );
+}
+
+function graphBridgeReportSummary(reportFile: string): string {
+  try {
+    if (!existsSync(reportFile)) return 'report=missing';
+    if (statSync(reportFile).size > 2 * 1024 * 1024) return 'report=oversized';
+    const report: unknown = JSON.parse(readFileSync(reportFile, 'utf8'));
+    if (typeof report !== 'object' || report === null || Array.isArray(report))
+      return 'report=invalid';
+    const counts: Record<string, number> = {};
+    for (const key of [
+      'numTotalTests',
+      'numPassedTests',
+      'numFailedTests',
+      'numPendingTests',
+      'numRuntimeErrorTestSuites',
+    ]) {
+      const value: unknown = Reflect.get(report, key);
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+        counts[key] = value;
+    }
+    return `report=${JSON.stringify(counts)}`;
+  } catch {
+    return 'report=unreadable';
+  }
+}
