@@ -302,6 +302,25 @@ export function saveWorkspaceFile(
     }
     return { outcome: 'saved', digest: digestOf(bytes), reason: null, conflictPath: null };
   } catch (error) {
+    // Once ReplaceFileW starts, failure does not prove that neither version moved. Retain both
+    // recovery files even if a concurrent writer has already recreated the destination.
+    if (process.platform === 'win32' && publicationAttempted) {
+      ownsStaging = false;
+      ownsBackup = false;
+      return {
+        outcome: 'refused',
+        digest: null,
+        reason: 'io_error',
+        conflictPath:
+          !existsSync(absolute) && existsSync(backup)
+            ? backupRelative
+            : existsSync(staging)
+              ? stagingRelative
+              : existsSync(backup)
+                ? backupRelative
+                : null,
+      };
+    }
     if (error instanceof AtomicExchangeUnsupportedError) return refuse('io_error');
     if (publicationAttempted) {
       if (existsSync(staging)) {
@@ -364,7 +383,7 @@ function publishStagedFile(
   backup: string,
   baseDigest: string,
   replacementDigest: string,
-  markPublished: () => void,
+  markPublicationAttempted: () => void,
 ): 'published' | 'conflict' | 'conflict_backup' | 'intervened' {
   if (process.platform !== 'win32') {
     try {
@@ -376,7 +395,7 @@ function publishStagedFile(
       if (isUnsupportedExchange(error)) throw new AtomicExchangeUnsupportedError(error);
       throw error;
     }
-    markPublished();
+    markPublicationAttempted();
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
         return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
@@ -396,8 +415,8 @@ function publishStagedFile(
     }
   }
   // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
+  markPublicationAttempted();
   replaceWindowsFileWithBackup(staging, absolute, backup);
-  markPublished();
   try {
     if (digestOf(readFileSync(backup)) === baseDigest)
       return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
