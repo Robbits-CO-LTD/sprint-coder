@@ -31,6 +31,37 @@ function fixture(wizardInitiallyVisible = false) {
 }
 
 describe('feature setup first-render boundary', () => {
+  it('does not accept the initial Sidebar before initialization reveals onboarding', async () => {
+    const f = fixture();
+    let initialized = false;
+    const querySelector = vi.fn((selector: string) =>
+      !selector.includes('data-app-initialized') || initialized ? {} : null,
+    );
+    vi.stubGlobal('document', { querySelector });
+    const rendered = new Promise<void>((resolve) => {
+      f.page.waitForFunction = vi.fn(async (predicate) => {
+        if (!predicate())
+          await new Promise<void>((ready) => {
+            initialized = true;
+            f.render(true);
+            ready();
+          });
+        expect(predicate()).toBe(true);
+        resolve();
+      });
+    });
+    try {
+      await completeSetupForFeatureTest(f.page);
+      await rendered;
+      expect(initialized).toBe(true);
+      expect(f.page.evaluate).toHaveBeenCalledOnce();
+      expect(f.page.reload).toHaveBeenCalledOnce();
+      expect(f.visible).toHaveBeenCalledOnce();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('does not classify an empty pre-render DOM as completed setup', async () => {
     const f = fixture();
     let finished = false;

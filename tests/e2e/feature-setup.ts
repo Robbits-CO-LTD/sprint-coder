@@ -11,15 +11,18 @@ export type FeatureSetupPage = {
 
 /** Feature specs start beyond first-run onboarding; setup-wizard.spec.ts owns that boundary. */
 export async function completeSetupForFeatureTest(page: FeatureSetupPage): Promise<void> {
-  // DOMContentLoaded precedes React's first render; absence of the wizard is not yet a shell.
+  // The first React render exposes Sidebar before async initialization can select onboarding.
   await page.waitForFunction(
     () =>
       document.querySelector(
-        '[data-testid="setup-wizard"], [data-testid="sidebar-new-task-button"]',
+        '[data-app-initialized="true"] [data-testid="setup-wizard"], [data-app-initialized="true"] [data-testid="sidebar-new-task-button"]',
       ) !== null,
   );
   if ((await page.getByTestId('setup-wizard').count()) === 0) return;
   await page.evaluate(() => window.localStorage.setItem('sprint-coder:setup-complete-v1', '1'));
   await page.reload();
+  await page.waitForFunction(
+    () => document.querySelector('[data-app-initialized="true"]') !== null,
+  );
   await page.getByTestId('sidebar-new-task-button').waitFor({ state: 'visible' });
 }
