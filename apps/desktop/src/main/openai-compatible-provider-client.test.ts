@@ -96,6 +96,46 @@ async function collect(
 }
 
 describe('OpenAICompatibleProviderClient', () => {
+  it('completes the production client and deadline drain without transport EOF after DONE', async () => {
+    let cancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const value of [
+          { choices: [{ delta: { content: 'done' }, finish_reason: 'stop' }] },
+          { choices: [], usage: { prompt_tokens: 3, completion_tokens: 2 } },
+        ])
+          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(value)}\n\n`));
+        controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = new OpenAICompatibleProviderClient(
+      registry(),
+      () => approvedCredential(profile, 'test-key'),
+      async () =>
+        new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } }),
+    );
+    const events = await collect(
+      providerEventsWithDeadline(
+        client.execute(
+          connection,
+          {
+            executionId: 'terminal-fixture',
+            connectionId: connection.id,
+            modelId: 'model-a',
+            messages: [{ role: 'user', content: 'fixture' }],
+          },
+          new AbortController().signal,
+        ),
+        { executionId: 'terminal-fixture', firstEventTimeoutMs: 100, idleTimeoutMs: 100 },
+      ),
+    );
+    expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'stop' });
+    expect(cancelled).toBe(true);
+    expect(stream.locked).toBe(false);
+  });
   it('does not start a request for a pre-aborted execution', async () => {
     const providerFetch = vi.fn();
     const client = new OpenAICompatibleProviderClient(

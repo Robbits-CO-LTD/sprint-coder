@@ -164,8 +164,10 @@ export async function* readBoundedServerSentJson(
           .filter((line) => line.startsWith('data:'))
           .map((line) => line.slice(5).trimStart())
           .join('\n');
-        if (data === '[DONE]') onDone?.();
-        else if (data !== '') {
+        if (data === '[DONE]') {
+          onDone?.();
+          return;
+        } else if (data !== '') {
           try {
             yield JSON.parse(data) as unknown;
           } catch {

@@ -72,6 +72,34 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
 }
 
 describe('executeTeamTool routing', () => {
+  it('awaits the completed direct dispatch before returning the Leader tool result', async () => {
+    const delivered = await fakeCoordinator().sendToWorker({
+      taskId: 'task-1',
+      targetAgentId: 'worker-1',
+      content: 'fixture',
+    });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const sendToWorker = vi.fn(async () => {
+      await gate;
+      return delivered;
+    });
+    const coordinator = fakeCoordinator({ sendToWorker });
+    let returned = false;
+    const result = executeTeamTool(coordinator, 'task-1', 'team_send_to_worker', {
+      workerId: 'worker-1',
+      content: 'fixture',
+    }).then((value) => {
+      returned = true;
+      return value;
+    });
+    await vi.waitFor(() => expect(sendToWorker).toHaveBeenCalledOnce());
+    expect(returned).toBe(false);
+    release();
+    await expect(result).resolves.toMatchObject({ ok: true, messageId: delivered.id });
+  });
   it('throws for an unknown tool name instead of silently no-op-ing', async () => {
     await expect(
       executeTeamTool(fakeCoordinator(), 'task-1', 'team_delete_everything', {}),
