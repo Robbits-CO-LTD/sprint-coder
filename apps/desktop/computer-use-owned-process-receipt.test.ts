@@ -139,19 +139,22 @@ describe('owned capture private retained process lifecycle', () => {
         `import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {startPinnedOwnedComputerUseProcessCapture} from ${JSON.stringify(pathToFileURL(resolve(root, 'computer-use-owned-process-receipt.mjs')).href)};
-let capture; let successful=false;
+let capture; let successful=false; let phase='pin_start'; let failureReported=false;
 try {
  const addonPath=${JSON.stringify(addonPath)};
  capture=startPinnedOwnedComputerUseProcessCapture({addonPath,addonSha256:createHash('sha256').update(readFileSync(addonPath)).digest('hex'),capture:{executable:process.execPath,args:[${JSON.stringify(child)}]}});
- const completed=await capture.completed; await capture.closed;
+ phase='handshake'; await capture.handshake;
+ phase='normal_completion'; const completed=await capture.completed;
+ phase='capture_closed'; await capture.closed;
+ phase='digest';
  if(!/^[a-f0-9]{64}$/.test(completed.processIdentityDigest)||JSON.stringify(completed).includes(process.execPath)) throw new Error();
  successful=true;
-} catch {process.exitCode=1;} finally {
+} catch {process.exitCode=1;process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+phase);failureReported=true;} finally {
  if(capture) { capture.stopOwnedChild(); if(!successful)capture.abandon();
-  let timer; try {await Promise.race([capture.closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error()),5000);timer.unref();})]);}catch{successful=false;process.exitCode=1;}finally{clearTimeout(timer);}
+  let timer; try {await Promise.race([capture.closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error()),5000);timer.unref();})]);}catch{phase='cleanup';successful=false;process.exitCode=1;}finally{clearTimeout(timer);}
  }
 }
-if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED');
+if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else if(!failureReported)process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+phase);
 `,
       );
       const driverProcess = spawn(process.execPath, [driver], {
@@ -162,8 +165,14 @@ if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else process.st
         driverProcess.once('close', () => resolveClosed()),
       );
       let output = '';
+      let diagnostic = '';
+      let diagnosticBytes = 0;
       driverProcess.stdout.on('data', (chunk: Buffer) => {
         output += chunk.toString();
+      });
+      driverProcess.stderr.on('data', (chunk: Buffer) => {
+        diagnosticBytes += chunk.length;
+        diagnostic = diagnosticBytes <= 128 ? diagnostic + chunk.toString('utf8') : '';
       });
       try {
         const code = await new Promise<number | null>((resolveCode, reject) => {
@@ -177,7 +186,13 @@ if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else process.st
             resolveCode(exitCode);
           });
         });
-        expect(code).toBe(0);
+        const failureBoundary =
+          /^OWNED_PROCESS_CAPTURE_UNCONFIRMED:(pin_start|handshake|normal_completion|capture_closed|digest|cleanup)$/u.test(
+            diagnostic,
+          )
+            ? diagnostic
+            : 'OWNED_PROCESS_CAPTURE_UNCONFIRMED';
+        expect(code, failureBoundary).toBe(0);
         expect(output).toBe('OWNED_PROCESS_CAPTURE_PASS');
       } finally {
         if (driverProcess.exitCode === null && driverProcess.signalCode === null)
