@@ -4600,10 +4600,9 @@ bool ReadNamedBool(napi_env env, napi_value object, const char* name, bool* outp
 
 bool ParseNativeDispatchRequest(napi_env env, napi_value object,
                                 NativeDispatchRequest* request,
-                                NativeDispatchOutcome* replay,
-                                bool* has_replay, std::string* error_code,
+                                std::unique_lock<std::mutex>& state_lock,
+                                std::string* error_code,
                                 std::string* error_message) {
-  *has_replay = false;
   std::uint32_t requested_pid = 0;
   std::uint32_t requested_window_id = 0;
   std::string requested_identity;
@@ -4723,64 +4722,69 @@ bool ParseNativeDispatchRequest(napi_env env, napi_value object,
     return false;
   }
 
-  {
-    std::lock_guard<std::mutex> state_lock(session.state_mutex);
-    if (!session.has_observation ||
-        request->observation_revision != session.observation_revision) {
-      *error_code = "STALE_TARGET";
-      *error_message = "The native observation revision is stale";
-      return false;
-    }
-    request->dialog_set_revision = session.dialog_set_revision;
-    request->observation_bounds = session.observation_bounds;
-    request->dialog_set_digest = session.dialog_set_digest;
-    request->active_window_identity = session.active_window_identity;
-    request->active_window_kind = session.active_window_kind;
-    request->active_window_id = session.active_window_id;
-    request->focused_control_signature = session.focused_control_signature;
-    request->visual_control_signatures = session.visual_control_signatures;
-    request->visual_patch_digests = session.visual_patch_digests;
-    if (!request->target_id.empty()) {
-      const auto target = session.semantic_control_signatures.find(
-          AccessibilityTargetLookupDigest(request->target_id));
-      if (target != session.semantic_control_signatures.end())
-        request->expected_target_signature = target->second;
-    }
-    request->envelope_digest = StringDigest(
-        "computer-native-dispatch-envelope-v1\n" + request->request_id + "\n" +
-        request->session_id + "\n" +
-        std::to_string(request->observation_revision) + "\n" +
-        std::to_string(request->dialog_set_revision) + "\n" +
-        request->dialog_set_digest + "\n" + request->active_window_identity + "\n" +
-        request->action_digest + "\n" + std::to_string(request->cancel_epoch));
-    const auto cached = session.dispatch_replay_cache.find(request->request_id);
-    if (cached != session.dispatch_replay_cache.end()) {
-      if (cached->second.envelope_digest != request->envelope_digest) {
-        *replay = MakeDispatchOutcome("rejected", "native_request_id_conflict");
-      } else {
-        *replay = {cached->second.result, cached->second.reason_code,
-                   cached->second.accepted, cached->second.effect_started};
-      }
-      *has_replay = true;
-      return true;
-    }
-    const auto inflight = session.inflight_dispatches.find(request->request_id);
-    if (inflight != session.inflight_dispatches.end()) {
-      *replay = MakeDispatchOutcome(
-          "rejected", inflight->second == request->envelope_digest
-                          ? "native_request_in_flight"
-                          : "native_request_id_conflict");
-      *has_replay = true;
-      return true;
-    }
-    if (session.inflight_dispatches.size() >= kMaxInflightDispatchEntries) {
-      *replay = MakeDispatchOutcome("rejected", "native_dispatch_busy");
-      *has_replay = true;
-      return true;
-    }
-    session.inflight_dispatches.emplace(request->request_id,
-                                        request->envelope_digest);
+  // Dispatch keeps this lock through reservation; read-only callers release it without reserving.
+  // Transferring ownership avoids an unlocked snapshot-to-reservation window.
+  state_lock = std::unique_lock<std::mutex>(session.state_mutex);
+  if (!session.has_observation ||
+      request->observation_revision != session.observation_revision) {
+    *error_code = "STALE_TARGET";
+    *error_message = "The native observation revision is stale";
+    return false;
   }
+  request->dialog_set_revision = session.dialog_set_revision;
+  request->observation_bounds = session.observation_bounds;
+  request->dialog_set_digest = session.dialog_set_digest;
+  request->active_window_identity = session.active_window_identity;
+  request->active_window_kind = session.active_window_kind;
+  request->active_window_id = session.active_window_id;
+  request->focused_control_signature = session.focused_control_signature;
+  request->visual_control_signatures = session.visual_control_signatures;
+  request->visual_patch_digests = session.visual_patch_digests;
+  if (!request->target_id.empty()) {
+    const auto target = session.semantic_control_signatures.find(
+        AccessibilityTargetLookupDigest(request->target_id));
+    if (target != session.semantic_control_signatures.end())
+      request->expected_target_signature = target->second;
+  }
+  request->envelope_digest = StringDigest(
+      "computer-native-dispatch-envelope-v1\n" + request->request_id + "\n" +
+      request->session_id + "\n" +
+      std::to_string(request->observation_revision) + "\n" +
+      std::to_string(request->dialog_set_revision) + "\n" +
+      request->dialog_set_digest + "\n" + request->active_window_identity + "\n" +
+      request->action_digest + "\n" + std::to_string(request->cancel_epoch));
+  return true;
+}
+
+// The sole caller holds the state lock returned by ParseNativeDispatchRequest. Replay lookup and
+// insertion remain atomic with the snapshot and do not perform any input.
+bool ReserveNativeDispatchRequestLocked(const NativeDispatchRequest* request,
+                                        NativeDispatchOutcome* replay) {
+  MacComputerUseSession& session = *request->session;
+  const auto cached = session.dispatch_replay_cache.find(request->request_id);
+  if (cached != session.dispatch_replay_cache.end()) {
+    if (cached->second.envelope_digest != request->envelope_digest) {
+      *replay = MakeDispatchOutcome("rejected", "native_request_id_conflict");
+    } else {
+      *replay = {cached->second.result, cached->second.reason_code,
+                 cached->second.accepted, cached->second.effect_started};
+    }
+    return false;
+  }
+  const auto inflight = session.inflight_dispatches.find(request->request_id);
+  if (inflight != session.inflight_dispatches.end()) {
+    *replay = MakeDispatchOutcome(
+        "rejected", inflight->second == request->envelope_digest
+                        ? "native_request_in_flight"
+                        : "native_request_id_conflict");
+    return false;
+  }
+  if (session.inflight_dispatches.size() >= kMaxInflightDispatchEntries) {
+    *replay = MakeDispatchOutcome("rejected", "native_dispatch_busy");
+    return false;
+  }
+  session.inflight_dispatches.emplace(request->request_id,
+                                     request->envelope_digest);
   return true;
 }
 
@@ -4832,13 +4836,19 @@ napi_value Dispatch(napi_env env, napi_callback_info info) {
   auto work = std::make_unique<AsyncNativeDispatchWork>();
   work->env = env;
   NativeDispatchOutcome replay;
-  bool has_replay = false;
+  bool parsed = false;
+  bool reserved = false;
   std::string error_code;
   std::string error_message;
-  if (!ParseNativeDispatchRequest(env, argv[0], &work->request, &replay, &has_replay,
-                                  &error_code, &error_message))
+  {
+    std::unique_lock<std::mutex> state_lock;
+    parsed = ParseNativeDispatchRequest(env, argv[0], &work->request, state_lock,
+                                        &error_code, &error_message);
+    if (parsed) reserved = ReserveNativeDispatchRequestLocked(&work->request, &replay);
+  }
+  if (!parsed)
     return ThrowNativeError(env, error_code.c_str(), error_message.c_str());
-  if (has_replay) return DispatchResultValue(env, work->request, replay);
+  if (!reserved) return DispatchResultValue(env, work->request, replay);
 
   napi_value promise;
   if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {

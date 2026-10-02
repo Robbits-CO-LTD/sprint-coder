@@ -64,6 +64,7 @@ ${driver}`,
           staleRepeatCloseRejected: boolean;
           unclosedSessionStillMissing: boolean;
           closedRegistryBounded: boolean;
+          closeClearsDispatchState: boolean;
           lifetimeReleased: boolean;
         };
         expect(result).toEqual({
@@ -80,7 +81,48 @@ ${driver}`,
           staleRepeatCloseRejected: true,
           unclosedSessionStillMissing: true,
           closedRegistryBounded: true,
+          closeClearsDispatchState: true,
           lifetimeReleased: true,
+        });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'preserves production parse/reservation/replay and async cleanup semantics (sanitizers=%s)',
+    (sanitizers) => {
+      const root = mkdtempSync(join(tmpdir(), 'computer-use-reservation-seam-'));
+      try {
+        const program = join(root, 'seam.cc');
+        const binary = join(root, 'seam');
+        writeFileSync(
+          program,
+          `${reservationPreamble}
+${functionSource('struct NativeDispatchOutcome {', 'NativeDispatchOutcome OutcomeForValidation(')}
+${functionSource('bool DispatchCancellationStillValid(', 'NativeTargetValidation RevalidateBoundTarget(')}
+${functionSource('void CacheDispatchOutcome(', 'napi_value DispatchResultValue(')}
+${reservationEffects}
+${functionSource('bool ParseNativeDispatchRequest(', 'napi_value Cancel(').replaceAll('@autoreleasepool {', '{')}
+${reservationDriver}`,
+        );
+        execFileSync(
+          'clang++',
+          [
+            '-std=c++20',
+            '-Wall',
+            '-Wextra',
+            '-Werror',
+            ...(sanitizers ? ['-fsanitize=address,undefined', '-fno-omit-frame-pointer'] : []),
+            program,
+            '-o',
+            binary,
+          ],
+          { stdio: 'pipe', timeout: 30_000 },
+        );
+        expect(JSON.parse(execFileSync(binary, [], { encoding: 'utf8', timeout: 5_000 }))).toEqual({
+          reservationSemantics: true,
         });
       } finally {
         rmSync(root, { recursive: true, force: true });
@@ -341,6 +383,9 @@ int main() {
   // close with the same receipt, and nothing may still need the session afterwards.
   auto replaySession = std::make_shared<MacComputerUseSession>();
   replaySession->session_id = "replay";
+  replaySession->inflight_dispatches.emplace("queued", "envelope");
+  replaySession->dispatch_replay_cache.emplace("completed", "envelope");
+  replaySession->dispatch_replay_order.push_back("completed");
   replaySession->input_api_attempts.fetch_add(3, std::memory_order_acq_rel);
   mac_sessions.emplace(replaySession->session_id, replaySession);
   rejections = 0;
@@ -348,6 +393,8 @@ int main() {
   const bool replayFirstQueued = closeRequest("replay", 1) == CloseOutcome::kQueued;
   drain();
   const bool replayDrained = rejections == 0 && resolutions == 1;
+  const bool closeClearsDispatchState = replaySession->inflight_dispatches.empty() &&
+    replaySession->dispatch_replay_cache.empty() && replaySession->dispatch_replay_order.empty();
   std::weak_ptr<MacComputerUseSession> replayLifetime = replaySession;
   replaySession.reset();
   const bool replayReleased = replayLifetime.expired();
@@ -389,6 +436,322 @@ int main() {
     << ",\\"staleRepeatCloseRejected\\":" << staleRepeatCloseRejected
     << ",\\"unclosedSessionStillMissing\\":" << unclosedSessionStillMissing
     << ",\\"closedRegistryBounded\\":" << closedRegistryBounded
+    << ",\\"closeClearsDispatchState\\":" << closeClearsDispatchState
     << ",\\"lifetimeReleased\\":" << lifetimeReleased << "}";
+}
+`;
+
+// The production parser/reservation/queue/cache run below. Only property reads, process identity
+// measurement and effects are inert; no OS target or real addon is loaded. Removing autoreleasepool
+// braces' keyword lets the existing C++ runner compile this otherwise unmodified worker body.
+const reservationPreamble = String.raw`
+#include <algorithm>
+#include <atomic>
+#include <cstdint>
+#include <cstdlib>
+#include <deque>
+#include <iostream>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+struct CGRect { struct { double x, y; } origin; struct { double width, height; } size; };
+struct MacDispatchReplayEntry {
+  std::string envelope_digest, result, reason_code;
+  bool accepted, effect_started;
+};
+struct MacComputerUseSession {
+  std::string session_id = "seam", app_identity = "app", window_identity = "window";
+  std::uint32_t pid = 1, window_id = 2;
+  std::atomic<bool> closed{false};
+  std::atomic<std::uint64_t> cancel_epoch{0};
+  std::mutex state_mutex;
+  bool has_observation = true;
+  std::uint64_t observation_revision = 7, dialog_set_revision = 4;
+  CGRect observation_bounds{{0, 0}, {100, 100}};
+  std::string dialog_set_digest = "dialogs", active_window_identity = "active";
+  std::string active_window_kind = "standard", focused_control_signature = "focused";
+  std::uint32_t active_window_id = 2;
+  std::set<std::string> visual_control_signatures{"control"};
+  std::vector<std::string> visual_patch_digests{"patch"};
+  std::unordered_map<std::string, std::string> semantic_control_signatures{{"target", "signature"}};
+  std::unordered_map<std::string, MacDispatchReplayEntry> dispatch_replay_cache;
+  std::deque<std::string> dispatch_replay_order;
+  std::unordered_map<std::string, std::string> inflight_dispatches;
+};
+constexpr std::size_t kMaxDispatchReplayEntries = 128, kMaxInflightDispatchEntries = 1;
+std::shared_ptr<MacComputerUseSession> current;
+std::atomic<std::uint64_t> cancellation_epoch{0};
+std::mutex mac_dispatch_serial_mutex;
+bool generationMatches = true;
+bool CurrentProcessGenerationMatches(const MacComputerUseSession&) { return generationMatches; }
+bool CheckCancellationEpoch(std::uint64_t epoch) { return cancellation_epoch.load() == epoch; }
+std::shared_ptr<MacComputerUseSession> FindMacSession(const std::string& id) {
+  return current && current->session_id == id ? current : nullptr;
+}
+// Digest measurement is inert here: replay cases test production comparison/cache ownership, not
+// SHA-256 authenticity. Every distinct domain-framed fixture input remains distinct.
+std::string StringDigest(const std::string& value) { return value; }
+std::string AccessibilityTargetLookupDigest(const std::string& value) { return value; }
+struct FakeValue {
+  std::unordered_map<std::string, std::string> strings;
+  std::unordered_map<std::string, double> numbers;
+};
+using napi_env = void*;
+using napi_callback_info = void*;
+using napi_value = FakeValue*;
+using napi_status = int;
+using napi_deferred = void*;
+struct FakeWork { void (*execute)(napi_env, void*); void (*complete)(napi_env, napi_status, void*); void* data; };
+using napi_async_work = FakeWork*;
+constexpr int napi_ok = 0;
+FakeValue input, promiseValue, resultValue;
+std::deque<FakeWork*> queue;
+bool failPromise = false, failCreate = false, failQueue = false, failEffect = false;
+unsigned promises = 0, rejections = 0, resolutions = 0, deletions = 0, effects = 0;
+void RequireStateUnlocked() {
+  std::atomic<bool> unlocked{false};
+  std::thread contender([&] {
+    if (current->state_mutex.try_lock()) { unlocked.store(true); current->state_mutex.unlock(); }
+  });
+  contender.join();
+  if (!unlocked.load()) throw std::runtime_error("snapshot_lock_held_in_napi_queue");
+}
+int napi_get_cb_info(napi_env, napi_callback_info, size_t* argc, napi_value* argv, void*, void*) {
+  *argc = 1; argv[0] = &input; return napi_ok;
+}
+bool IsObject(napi_env, napi_value) { return true; }
+bool ReadNamedString(napi_env, napi_value value, const char* key, std::string* out, std::size_t max = 4096) {
+  const auto found = value->strings.find(key);
+  if (found == value->strings.end() || found->second.size() > max) return false;
+  *out = found->second; return true;
+}
+bool ReadNamedDouble(napi_env, napi_value value, const char* key, double* out) {
+  const auto found = value->numbers.find(key);
+  if (found == value->numbers.end()) return false;
+  *out = found->second; return true;
+}
+bool ReadNamedUint32(napi_env env, napi_value value, const char* key, std::uint32_t* out) {
+  double number; if (!ReadNamedDouble(env, value, key, &number)) return false;
+  *out = static_cast<std::uint32_t>(number); return true;
+}
+bool ReadNamedUInt64(napi_env env, napi_value value, const char* key, std::uint64_t* out) {
+  double number; if (!ReadNamedDouble(env, value, key, &number)) return false;
+  *out = static_cast<std::uint64_t>(number); return true;
+}
+bool ReadNamedInt32(napi_env env, napi_value value, const char* key, std::int32_t* out) {
+  double number; if (!ReadNamedDouble(env, value, key, &number)) return false;
+  *out = static_cast<std::int32_t>(number); return true;
+}
+bool ReadNamedBool(napi_env, napi_value, const char*, bool* out) { *out = false; return true; }
+bool DecodeUtf8Scalars(const std::string& text, std::vector<std::uint32_t>* out) {
+  for (unsigned char character : text) out->push_back(character);
+  return true;
+}
+std::uint16_t KeyCodeForName(const std::string& key) { return key == "Enter" ? 36 : UINT16_MAX; }
+napi_value ThrowNativeError(napi_env, const char* code, const char*) { throw std::runtime_error(code); }
+napi_value StringValue(napi_env, const char*) { return &resultValue; }
+napi_value NativeErrorValue(napi_env, const char*, const char*) { return &resultValue; }
+int napi_create_promise(napi_env, napi_deferred* deferred, napi_value* promise) {
+  RequireStateUnlocked();
+  if (failPromise) return 1;
+  ++promises; *deferred = &promiseValue; *promise = &promiseValue; return napi_ok;
+}
+int napi_create_async_work(napi_env, void*, napi_value, void (*execute)(napi_env, void*), void (*complete)(napi_env, napi_status, void*), void* data, napi_async_work* out) {
+  RequireStateUnlocked();
+  if (failCreate) return 1;
+  *out = new FakeWork{execute, complete, data}; return napi_ok;
+}
+int napi_queue_async_work(napi_env, napi_async_work work) {
+  RequireStateUnlocked();
+  if (failQueue) return 1;
+  queue.push_back(work); return napi_ok;
+}
+void napi_delete_async_work(napi_env, napi_async_work work) { ++deletions; delete work; }
+void napi_reject_deferred(napi_env, napi_deferred, napi_value) { ++rejections; }
+void napi_resolve_deferred(napi_env, napi_deferred, napi_value) { ++resolutions; }
+`;
+
+const reservationEffects = String.raw`
+NativeDispatchOutcome lastOutcome;
+napi_value DispatchResultValue(napi_env, const NativeDispatchRequest&, const NativeDispatchOutcome& outcome) {
+  lastOutcome = outcome; return &resultValue;
+}
+NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request) {
+  if (failEffect) throw std::runtime_error("inert_worker_failure");
+  if (!DispatchCancellationStillValid(request))
+    return MakeDispatchOutcome("canceled", "native_canceled_pre_dispatch");
+  ++effects;
+  return MakeDispatchOutcome("completed", "", true, true);
+}
+`;
+
+const reservationDriver = String.raw`
+void Check(bool condition, const char* fixedCase) {
+  if (!condition) { std::cerr << fixedCase; std::exit(1); }
+}
+void Reset() {
+  Check(queue.empty(), "reset_with_pending_work");
+  current = std::make_shared<MacComputerUseSession>();
+  cancellation_epoch.store(0);
+  generationMatches = true;
+  failPromise = failCreate = failQueue = failEffect = false;
+  promises = rejections = resolutions = deletions = effects = 0;
+  input.strings = {{"kind", "click"}, {"requestId", "one"}, {"sessionId", "seam"},
+    {"actionDigest", std::string(64, 'a')}, {"appIdentityDigest", "app"}, {"windowIdentityDigest", "window"}};
+  input.numbers = {{"pid", 1}, {"windowId", 2}, {"cancelEpoch", 0}, {"observationRevision", 7}, {"x", .5}, {"y", .5}};
+}
+bool ParseOnly(std::string* error) {
+  NativeDispatchRequest request;
+  std::unique_lock<std::mutex> lock;
+  std::string message;
+  return ParseNativeDispatchRequest(&input, &input, &request, lock, error, &message);
+}
+void Drain() {
+  while (!queue.empty()) {
+    auto* work = queue.front(); queue.pop_front();
+    work->execute(&input, work->data);
+    work->complete(&input, napi_ok, work->data);
+  }
+}
+int main() {
+  Reset();
+  std::string error;
+  Check(ParseOnly(&error) && ParseOnly(&error) && current->inflight_dispatches.empty() &&
+    current->dispatch_replay_cache.empty() && effects == 0, "readonly_parse_repeat");
+  input.strings["targetId"] = "target";
+  input.strings["text"] = "x";
+  input.strings["value"] = "choice";
+  input.strings["key"] = "Enter";
+  input.numbers["deltaX"] = 0;
+  input.numbers["deltaY"] = 1;
+  for (const char* kind : {"invoke", "set_text", "select", "toggle", "expand_collapse", "click", "scroll", "type", "key"}) {
+    input.strings["kind"] = kind;
+    Check(ParseOnly(&error) && current->inflight_dispatches.empty() &&
+      current->dispatch_replay_cache.empty() && effects == 0, "readonly_supported_action");
+  }
+  input.strings["kind"] = "click";
+  input.strings["actionDigest"] = "invalid";
+  Check(!ParseOnly(&error) && error == "INVALID_ACTION_ENVELOPE", "invalid_envelope");
+  input.strings["actionDigest"] = std::string(64, 'a');
+  input.strings["kind"] = "unsupported";
+  Check(!ParseOnly(&error) && error == "UNSUPPORTED_ACTION", "unsupported_action");
+  input.strings["kind"] = "click";
+  input.strings["sessionId"] = "missing";
+  Check(!ParseOnly(&error) && error == "SESSION_MISSING", "missing_session");
+  input.strings["sessionId"] = "seam";
+  current->closed.store(true);
+  Check(!ParseOnly(&error) && error == "SESSION_MISSING", "closed_session");
+  current->closed.store(false);
+  input.numbers["pid"] = 3;
+  Check(!ParseOnly(&error) && error == "SESSION_IDENTITY_MISMATCH", "identity_mismatch");
+  input.numbers["pid"] = 1;
+  generationMatches = false;
+  Check(!ParseOnly(&error) && error == "APP_PROCESS_CHANGED", "generation_mismatch");
+  generationMatches = true;
+  input.numbers["observationRevision"] = 8;
+  Check(!ParseOnly(&error) && error == "STALE_TARGET" && current->inflight_dispatches.empty() &&
+    current->dispatch_replay_cache.empty(), "stale_observation_without_reservation");
+  input.numbers["observationRevision"] = 7;
+  {
+    NativeDispatchRequest request;
+    std::unique_lock<std::mutex> lock;
+    std::string message;
+    Check(ParseNativeDispatchRequest(&input, &input, &request, lock, &error, &message), "snapshot_parse");
+    std::atomic<bool> blocked{false};
+    std::thread contender([&] {
+      if (current->state_mutex.try_lock()) current->state_mutex.unlock();
+      else blocked.store(true);
+    });
+    contender.join();
+    NativeDispatchOutcome replay;
+    Check(blocked.load() && lock.owns_lock() && ReserveNativeDispatchRequestLocked(&request, &replay) &&
+      current->inflight_dispatches.size() == 1, "snapshot_reserve_atomic");
+  }
+  Reset();
+  Check(Dispatch(&input, nullptr) == &promiseValue && queue.size() == 1 &&
+    current->inflight_dispatches.size() == 1, "fresh_dispatch_reserved_once");
+  Check(ParseOnly(&error) && queue.size() == 1 && promises == 1 &&
+    current->inflight_dispatches.size() == 1, "readonly_parse_during_inflight");
+  Check(current->state_mutex.try_lock(), "snapshot_lock_released_before_queue_return");
+  current->state_mutex.unlock();
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.reason_code == "native_request_in_flight" && queue.size() == 1 && promises == 1,
+    "same_envelope_inflight");
+  input.strings["actionDigest"] = std::string(64, 'b');
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.reason_code == "native_request_id_conflict" && queue.size() == 1,
+    "changed_envelope_inflight_conflict");
+  input.strings["requestId"] = "two";
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.reason_code == "native_dispatch_busy" && current->inflight_dispatches.size() == 1,
+    "distinct_request_busy");
+  input.strings["requestId"] = "one";
+  input.strings["actionDigest"] = std::string(64, 'a');
+  Drain();
+  Check(effects == 1 && resolutions == 1 && current->inflight_dispatches.empty(), "single_effect_and_release");
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.result == "completed" && lastOutcome.accepted && lastOutcome.effect_started &&
+    effects == 1 && promises == 1 && queue.empty(), "completed_replay_no_second_effect");
+  input.strings["actionDigest"] = std::string(64, 'b');
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1,
+    "changed_envelope_cached_conflict");
+  for (int mode = 0; mode < 3; ++mode) {
+    Reset();
+    failPromise = mode == 0; failCreate = mode == 1; failQueue = mode == 2;
+    bool threw = false;
+    napi_value result = nullptr;
+    try { result = Dispatch(&input, nullptr); }
+    catch (const std::runtime_error& failure) { threw = std::string(failure.what()) == "ASYNC_UNAVAILABLE"; }
+    Check(current->inflight_dispatches.empty() && current->dispatch_replay_cache.empty() &&
+      queue.empty() && effects == 0 && rejections == (mode == 0 ? 0u : 1u) && resolutions == 0 &&
+      deletions == (mode == 2 ? 1u : 0u) &&
+      (mode == 0 ? threw : !threw && result == &promiseValue), "async_failure_releases_reservation");
+    failPromise = failCreate = failQueue = false;
+    Dispatch(&input, nullptr); Drain();
+    Check(effects == 1 && current->inflight_dispatches.empty(), "async_failure_can_retry_fresh");
+  }
+  Reset();
+  failEffect = true;
+  Dispatch(&input, nullptr); Drain();
+  Check(lastOutcome.result == "unknown_effect" && lastOutcome.effect_started &&
+    current->inflight_dispatches.empty(), "worker_exception_cached_unknown");
+  failEffect = false;
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.result == "unknown_effect" && queue.empty() && effects == 0, "worker_exception_replay");
+  Reset();
+  Dispatch(&input, nullptr);
+  auto* incomplete = queue.front(); queue.pop_front();
+  incomplete->complete(&input, 1, incomplete->data);
+  Check(lastOutcome.result == "unknown_effect" && current->inflight_dispatches.empty() &&
+    deletions == 1, "completion_failure_release");
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.result == "unknown_effect" && queue.empty() && effects == 0, "completion_failure_replay");
+  for (bool close : {false, true}) {
+    Reset(); Dispatch(&input, nullptr);
+    if (close) current->closed.store(true);
+    else { current->cancel_epoch.store(1); cancellation_epoch.store(1); }
+    Drain();
+    Check(lastOutcome.result == "canceled" && effects == 0 && current->inflight_dispatches.empty(),
+      "changed_epoch_or_closed_before_worker");
+  }
+  Reset();
+  for (unsigned index = 0; index <= kMaxDispatchReplayEntries; ++index) {
+    NativeDispatchRequest request;
+    request.session = current;
+    request.request_id = std::to_string(index);
+    request.envelope_digest = "envelope";
+    CacheDispatchOutcome(request, MakeDispatchOutcome("completed", "", true, true));
+  }
+  Check(current->dispatch_replay_cache.size() == kMaxDispatchReplayEntries &&
+    current->dispatch_replay_order.size() == kMaxDispatchReplayEntries &&
+    !current->dispatch_replay_cache.contains("0"), "replay_cache_bounded");
+  std::cout << "{\"reservationSemantics\":true}";
 }
 `;
