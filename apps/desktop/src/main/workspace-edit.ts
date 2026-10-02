@@ -15,7 +15,7 @@ import {
   unlinkSync,
   writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { exchangePosixFiles, replaceWindowsFileWithBackup } from './native-file-publication';
 import { resolveSafeWorkspaceFile } from './workspace-safe-path';
 
@@ -157,10 +157,12 @@ export function saveWorkspaceFile(
   let descriptor: number | null = null;
   let stagingDescriptor: number | null = null;
   const nonce = randomBytes(16).toString('hex');
-  const stagingRelative = `${relativePath}.sprint-coder-stage-${nonce}.tmp`;
-  const backupRelative = `${relativePath}.sprint-coder-backup-${nonce}.tmp`;
-  const staging = `${absolute}.sprint-coder-stage-${nonce}.tmp`;
-  const backup = `${absolute}.sprint-coder-backup-${nonce}.tmp`;
+  const stagingName = `.sprint-coder-stage-${nonce}.tmp`;
+  const backupName = `.sprint-coder-backup-${nonce}.tmp`;
+  const stagingRelative = join(dirname(relativePath), stagingName);
+  const backupRelative = join(dirname(relativePath), backupName);
+  const staging = join(dirname(absolute), stagingName);
+  const backup = join(dirname(absolute), backupName);
   let ownsStaging = false;
   let ownsBackup = false;
   let publicationAttempted = false;
@@ -182,7 +184,6 @@ export function saveWorkspaceFile(
     // POSIX starts from a copy of the validated target so copyable metadata is retained. Windows
     // creates the staging inode through one exclusive handle; File.Replace retains the target ACL.
     // Claim the nonce path first so a partial creation is always cleaned up after ENOSPC/EIO.
-    ownsStaging = true;
     const originalMode = Number(stat.mode & 0o7777n);
     let stagedIdentity: ReturnType<typeof fstatSync> | null = null;
     if (process.platform === 'win32') {
@@ -194,10 +195,19 @@ export function saveWorkspaceFile(
         constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
         0o600,
       );
+      ownsStaging = true;
       const stagingStat = fstatSync(stagingDescriptor, { bigint: true });
       if (!stagingStat.isFile() || stagingStat.nlink !== 1n) return refuse('outside_workspace');
     } else {
-      stageTargetFile(descriptor, staging);
+      stagingDescriptor = openSync(
+        staging,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+        0o600,
+      );
+      ownsStaging = true;
+      stageTargetFile(descriptor, stagingDescriptor);
+      closeSync(stagingDescriptor);
+      stagingDescriptor = null;
       // A watcher can replace the freshly-copied pathname before we make a read-only staging file
       // writable. Open without following links first and mutate only that validated inode, so a
       // planted symlink cannot redirect chmod outside the Workspace.
@@ -245,6 +255,15 @@ export function saveWorkspaceFile(
     // check keeps the race window as small as the filesystem API permits; rename itself is atomic.
     closeSync(descriptor);
     descriptor = null;
+    if (process.platform === 'win32') {
+      const backupDescriptor = openSync(
+        backup,
+        constants.O_CREAT | constants.O_EXCL | constants.O_RDWR,
+        0o600,
+      );
+      ownsBackup = true;
+      closeSync(backupDescriptor);
+    }
     const publication = publishStagedFile(
       staging,
       absolute,
@@ -269,10 +288,11 @@ export function saveWorkspaceFile(
       };
     }
     if (publication === 'intervened') {
-      ownsBackup = existsSync(backup);
+      if (process.platform === 'win32') ownsBackup = existsSync(backup);
       return { outcome: 'conflict', digest: null, reason: null, conflictPath: null };
     }
-    ownsBackup = existsSync(backup);
+    // POSIX exchange never creates or consumes backup: an existing nonce sibling is third-party.
+    if (process.platform === 'win32') ownsBackup = existsSync(backup);
     try {
       syncParentDirectory(absolute);
     } catch {
@@ -282,6 +302,25 @@ export function saveWorkspaceFile(
     }
     return { outcome: 'saved', digest: digestOf(bytes), reason: null, conflictPath: null };
   } catch (error) {
+    // Once ReplaceFileW starts, failure does not prove that neither version moved. Retain both
+    // recovery files even if a concurrent writer has already recreated the destination.
+    if (process.platform === 'win32' && publicationAttempted) {
+      ownsStaging = false;
+      ownsBackup = false;
+      return {
+        outcome: 'refused',
+        digest: null,
+        reason: 'io_error',
+        conflictPath:
+          !existsSync(absolute) && existsSync(backup)
+            ? backupRelative
+            : existsSync(staging)
+              ? stagingRelative
+              : existsSync(backup)
+                ? backupRelative
+                : null,
+      };
+    }
     if (error instanceof AtomicExchangeUnsupportedError) return refuse('io_error');
     if (publicationAttempted) {
       if (existsSync(staging)) {
@@ -293,7 +332,7 @@ export function saveWorkspaceFile(
           conflictPath: stagingRelative,
         };
       }
-      if (existsSync(backup)) {
+      if (process.platform === 'win32' && existsSync(backup)) {
         ownsBackup = false;
         return {
           outcome: 'refused',
@@ -344,7 +383,7 @@ function publishStagedFile(
   backup: string,
   baseDigest: string,
   replacementDigest: string,
-  markPublished: () => void,
+  markPublicationAttempted: () => void,
 ): 'published' | 'conflict' | 'conflict_backup' | 'intervened' {
   if (process.platform !== 'win32') {
     try {
@@ -356,7 +395,7 @@ function publishStagedFile(
       if (isUnsupportedExchange(error)) throw new AtomicExchangeUnsupportedError(error);
       throw error;
     }
-    markPublished();
+    markPublicationAttempted();
     try {
       if (digestOf(readFileSync(staging)) === baseDigest)
         return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
@@ -375,15 +414,18 @@ function publishStagedFile(
       throw error;
     }
   }
-  // ReplaceFileW retains the destination ACL and atomically places its boundary version in backup.
+  // A failed ReplaceFileW may already have moved either version; mark the uncertainty first.
+  markPublicationAttempted();
   replaceWindowsFileWithBackup(staging, absolute, backup);
-  markPublished();
+  let rollbackAttempted = false;
   try {
     if (digestOf(readFileSync(backup)) === baseDigest)
       return digestOf(readFileSync(absolute)) === replacementDigest ? 'published' : 'intervened';
+    rollbackAttempted = true;
     replaceWindowsFileWithBackup(backup, absolute, staging);
     return 'conflict';
   } catch (error) {
+    if (rollbackAttempted) throw error;
     try {
       replaceWindowsFileWithBackup(backup, absolute, staging);
     } catch (rollbackError) {
@@ -397,20 +439,29 @@ function publishStagedFile(
   }
 }
 
-function stageTargetFile(sourceDescriptor: number, staging: string): void {
+function stageTargetFile(sourceDescriptor: number, stagingDescriptor: number): void {
   // copyFile does not promise POSIX ACL/xattr retention. Use the trusted system copy command on
   // supported hosts so an atomic editor save cannot silently strip security metadata.
   if (process.platform === 'linux') {
     execFileSync(
       '/bin/cp',
-      ['--preserve=all', '--reflink=auto', '--no-target-directory', '/proc/self/fd/3', staging],
-      { stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor], timeout: 5_000 },
+      [
+        '--preserve=all',
+        '--reflink=auto',
+        '--no-target-directory',
+        '/proc/self/fd/3',
+        '/proc/self/fd/4',
+      ],
+      {
+        stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor],
+        timeout: 5_000,
+      },
     );
     return;
   }
   if (process.platform === 'darwin') {
-    execFileSync('/bin/cp', ['-p', '/dev/fd/3', staging], {
-      stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor],
+    execFileSync('/bin/cp', ['-p', '/dev/fd/3', '/dev/fd/4'], {
+      stdio: ['ignore', 'ignore', 'ignore', sourceDescriptor, stagingDescriptor],
       timeout: 5_000,
     });
     return;
