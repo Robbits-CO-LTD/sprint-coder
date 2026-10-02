@@ -8415,6 +8415,35 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
     expect(status.userMessage).not.toContain('無効なイベント');
   });
 
+  it.each([false, true])(
+    'describes unmet completion evidence without assuming files changed (committed=%s)',
+    async (committed) => {
+      const harness = createCompletionHarness(['criterion:requested-edit'], false, committed);
+
+      await settleCompletedEvent(harness);
+
+      const status = harness.pushRuntimeStatus.mock.calls.at(-1)?.[0] as {
+        state: string;
+        errorCode: string;
+        userMessage: string;
+      };
+      expect(status.state).toBe('failed');
+      expect(status.errorCode).toBe('ACCEPTANCE_EVIDENCE_MISSING');
+      expect(status.userMessage).toBe(
+        '完了条件を満たす検証結果がないため、Turnを完了として扱えません。未達の条件を確認してから再実行してください。',
+      );
+      expect(harness.completeTurnAndFinishGoal).toHaveBeenLastCalledWith(
+        'task-466',
+        'turn-466',
+        'failed',
+        expect.any(String),
+      );
+      expect(harness.handleRuntimeFailure).not.toHaveBeenCalled();
+      expect(harness.cancelTurn).not.toHaveBeenCalled();
+      expect(harness.terminateTurn).not.toHaveBeenCalled();
+    },
+  );
+
   it('never blames the Runtime Host for a completion its own Acceptance Contract refused', async () => {
     const harness = createCompletionHarness(['verification:saga-466']);
 
