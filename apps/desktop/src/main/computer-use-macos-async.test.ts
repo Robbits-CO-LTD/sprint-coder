@@ -24,6 +24,51 @@ function sourceBetweenLast(start: string, end: string): string {
 }
 
 describe('macOS Computer Use asynchronous native boundary', () => {
+  it('keeps parsed validation and snapshot read-only while handing its lock to Dispatch', () => {
+    const parse = sourceBetween(
+      'bool ParseNativeDispatchRequest(',
+      'bool ReserveNativeDispatchRequestLocked(',
+    );
+    expect(parse).toContain('std::unique_lock<std::mutex>& state_lock');
+    expect(parse).toContain('state_lock = std::unique_lock<std::mutex>(session.state_mutex)');
+    expect(parse).toContain('CurrentProcessGenerationMatches(session)');
+    expect(parse).toContain('request->observation_revision != session.observation_revision');
+    expect(parse).toContain('request->envelope_digest = StringDigest(');
+    expect(parse).not.toMatch(/dispatch_replay|inflight_dispatches/u);
+    expect(parse).not.toMatch(/CGEventPost|AXUIElement(SetAttributeValue|PerformAction)/u);
+  });
+
+  it('reserves exactly once under the same snapshot lock before creating deferred work', () => {
+    const reserve = sourceBetween(
+      'bool ReserveNativeDispatchRequestLocked(',
+      'struct AsyncNativeDispatchWork {',
+    );
+    const dispatch = sourceBetween('napi_value Dispatch(', 'napi_value Cancel(');
+    expect(reserve).toContain('const NativeDispatchRequest* request');
+    expect(reserve).toContain('native_request_id_conflict');
+    expect(reserve).toContain('native_request_in_flight');
+    expect(reserve).toContain('native_dispatch_busy');
+    expect(reserve.match(/inflight_dispatches.emplace\(/gu)).toHaveLength(1);
+    expect(reserve).not.toMatch(/napi_|CGEventPost|AXUIElement(SetAttributeValue|PerformAction)/u);
+    const lockedBlock = dispatch.slice(
+      dispatch.indexOf('std::unique_lock<std::mutex> state_lock;'),
+      dispatch.indexOf('if (!parsed)'),
+    );
+    expect(lockedBlock.indexOf('ParseNativeDispatchRequest(')).toBeGreaterThan(0);
+    expect(lockedBlock.indexOf('ReserveNativeDispatchRequestLocked(')).toBeGreaterThan(
+      lockedBlock.indexOf('ParseNativeDispatchRequest('),
+    );
+    expect(lockedBlock).not.toContain('unlock(');
+    expect(lockedBlock.trimEnd()).toMatch(/\n {2}\}$/u);
+    expect(dispatch.match(/ReserveNativeDispatchRequestLocked\(/gu)).toHaveLength(1);
+    expect(dispatch.indexOf('if (!reserved) return DispatchResultValue')).toBeLessThan(
+      dispatch.indexOf('napi_create_promise'),
+    );
+    expect(dispatch.match(/inflight_dispatches.erase\(work->request.request_id\)/gu)).toHaveLength(
+      2,
+    );
+  });
+
   it.each([
     {
       callback: 'napi_value StartSession(',
