@@ -121,7 +121,83 @@ function syntheticDefaultAddon(
   }
 }
 
+function secondaryReceiptCode(
+  verifies: readonly string[],
+  closeAttempts: number,
+  closeReturns: number,
+  closeThrows: number,
+  completed: boolean,
+): string {
+  const close =
+    closeAttempts === 1 && closeReturns === 1 && closeThrows === 0
+      ? 'CLOSE_RETURNED'
+      : closeAttempts === 1 && closeReturns === 0 && closeThrows === 1
+        ? 'CLOSE_THROW'
+        : closeAttempts === 0 && closeReturns === 0 && closeThrows === 0
+          ? 'CLOSE_NONE'
+          : 'CLOSE_UNEXPECTED';
+  const pattern = verifies.join(',');
+  const verify =
+    pattern === 'true' && !completed
+      ? 'NO_TERMINAL_VERIFY'
+      : pattern === 'true,false' && !completed
+        ? 'TERMINAL_FALSE'
+        : pattern === 'true,throw' && !completed
+          ? 'TERMINAL_THROW'
+          : pattern === 'true,true'
+            ? completed && close === 'CLOSE_RETURNED'
+              ? 'SECONDARY_COMPLETED'
+              : !completed
+                ? 'AFTER_VERIFY_FAILURE'
+                : 'VERIFY_UNEXPECTED'
+            : 'VERIFY_UNEXPECTED';
+  return `${verify}:${close}`;
+}
+
+function fixedCaptureDiagnostic(diagnostic: string, bytes: number): string {
+  return bytes <= 256 &&
+    /^OWNED_PROCESS_CAPTURE_UNCONFIRMED:(pin_start|handshake|normal_completion|capture_closed|digest|cleanup)(\nOWNED_PROCESS_CAPTURE_SECONDARY:(NO_TERMINAL_VERIFY|TERMINAL_FALSE|TERMINAL_THROW|SECONDARY_COMPLETED|AFTER_VERIFY_FAILURE|VERIFY_UNEXPECTED):(CLOSE_RETURNED|CLOSE_THROW|CLOSE_NONE|CLOSE_UNEXPECTED))?$/u.test(
+      diagnostic,
+    )
+    ? diagnostic
+    : 'OWNED_PROCESS_CAPTURE_UNCONFIRMED';
+}
+
 describe('owned capture private retained process lifecycle', () => {
+  it.each([
+    [['true'], 1, 1, 0, false, 'NO_TERMINAL_VERIFY:CLOSE_RETURNED'],
+    [['true', 'false'], 1, 1, 0, false, 'TERMINAL_FALSE:CLOSE_RETURNED'],
+    [['true', 'throw'], 1, 1, 0, false, 'TERMINAL_THROW:CLOSE_RETURNED'],
+    [['true', 'true'], 1, 0, 1, false, 'AFTER_VERIFY_FAILURE:CLOSE_THROW'],
+    [['true', 'true'], 1, 1, 0, false, 'AFTER_VERIFY_FAILURE:CLOSE_RETURNED'],
+    [['true', 'true'], 1, 1, 0, true, 'SECONDARY_COMPLETED:CLOSE_RETURNED'],
+    [['true', 'true', 'true'], 1, 1, 0, false, 'VERIFY_UNEXPECTED:CLOSE_RETURNED'],
+    [['PRIVATE_BACKEND_DETAIL'], 2, 1, 1, false, 'VERIFY_UNEXPECTED:CLOSE_UNEXPECTED'],
+  ] as const)(
+    'classifies only observed secondary receipt outcomes %j',
+    (verifies, attempts, returned, thrown, completed, expected) => {
+      expect(secondaryReceiptCode(verifies, attempts, returned, thrown, completed)).toBe(expected);
+    },
+  );
+
+  it('accepts only bounded fixed primary/secondary diagnostic tokens', () => {
+    const primary = 'OWNED_PROCESS_CAPTURE_UNCONFIRMED:normal_completion';
+    const secondary = 'OWNED_PROCESS_CAPTURE_SECONDARY:TERMINAL_FALSE:CLOSE_RETURNED';
+    const valid = `${primary}\n${secondary}`;
+    expect(fixedCaptureDiagnostic(primary, Buffer.byteLength(primary))).toBe(primary);
+    expect(fixedCaptureDiagnostic(valid, Buffer.byteLength(valid))).toBe(valid);
+    for (const invalid of [
+      `${primary}\nPRIVATE_PATH_OR_STACK`,
+      `${primary}\nOWNED_PROCESS_CAPTURE_SECONDARY:PRIVATE_NATIVE_DETAIL:CLOSE_RETURNED`,
+      `${valid}\n${secondary}`,
+      `${valid}${'PRIVATE'.repeat(100)}`,
+    ])
+      expect(fixedCaptureDiagnostic(invalid, Buffer.byteLength(invalid))).toBe(
+        'OWNED_PROCESS_CAPTURE_UNCONFIRMED',
+      );
+    expect(fixedCaptureDiagnostic(valid, 257)).toBe('OWNED_PROCESS_CAPTURE_UNCONFIRMED');
+  });
+
   it('keeps the controlled producer alive until acquisition is acknowledged', async () => {
     const { directory, child } = fixture('await-acquisition');
     const ack = resolve(directory, 'acquired.ack');
@@ -337,11 +413,14 @@ describe('owned capture private retained process lifecycle', () => {
         driver,
         `import {createHash} from 'node:crypto';
 import {readFileSync,writeFileSync} from 'node:fs';
-import {startPinnedOwnedComputerUseProcessCapture} from ${JSON.stringify(pathToFileURL(resolve(root, 'computer-use-owned-process-receipt.mjs')).href)};
+import {startPinnedOwnedComputerUseProcessCapture,createPinnedOwnedProcessRetainer} from ${JSON.stringify(pathToFileURL(resolve(root, 'computer-use-owned-process-receipt.mjs')).href)};
+import {startOwnedComputerUseCapture} from ${JSON.stringify(pathToFileURL(resolve(root, 'collect-computer-use-runtime.mjs')).href)};
+const secondaryCode=${secondaryReceiptCode.toString()};
 let capture; let successful=false; let phase='pin_start'; let failureReported=false;
+let addonPath; let addonSha256; let originalFailurePhase;
 try {
- const addonPath=${JSON.stringify(addonPath)};
- const addonSha256=createHash('sha256').update(readFileSync(addonPath)).digest('hex');
+ addonPath=${JSON.stringify(addonPath)};
+ addonSha256=createHash('sha256').update(readFileSync(addonPath)).digest('hex');
  const acknowledgements=${JSON.stringify([resolve(directory, 'acquired-0.ack'), resolve(directory, 'acquired-1.ack')])};
  const identities=[];
  for(let round=0;round<2;round++) {
@@ -358,12 +437,39 @@ try {
  }
  if(identities[0]===identities[1]) throw new Error();
  successful=true;
-} catch {process.exitCode=1;process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+phase);failureReported=true;} finally {
+} catch {originalFailurePhase=phase;process.exitCode=1;process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+originalFailurePhase);failureReported=true;} finally {
  if(capture) { capture.stopOwnedChild(); if(!successful)capture.abandon();
   let timer; try {await Promise.race([capture.closed,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error()),5000);timer.unref();})]);}catch{phase='cleanup';successful=false;process.exitCode=1;}finally{clearTimeout(timer);}
  }
 }
-if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else if(!failureReported)process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+phase);
+if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else {
+ if(!failureReported){originalFailurePhase=phase;process.stderr.write('OWNED_PROCESS_CAPTURE_UNCONFIRMED:'+originalFailurePhase);}
+ // Secondary observation never replaces the two required default-loader captures or exit 1.
+ if(originalFailurePhase==='normal_completion') {
+  const verifies=[];let attempts=0;let returned=0;let thrown=0;let completed=false;let secondary;let timer;
+  const timeout=new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error()),4000);});
+  try {
+   const factory=createPinnedOwnedProcessRetainer({addonPath,addonSha256});
+   secondary=startOwnedComputerUseCapture({executable:process.execPath,args:[${JSON.stringify(child)},${JSON.stringify(resolve(directory, 'diag-acquired.ack'))}],retainOwnedProcess:(context)=>{
+    const receipt=factory(context);
+    return {snapshot:()=>receipt.snapshot(),isRunning:()=>receipt.isRunning(),verifyUnchanged:()=>{
+     try {const result=receipt.verifyUnchanged();if(verifies.length<3)verifies.push(result===true?'true':result===false?'false':'other');return result;}
+     catch(error){if(verifies.length<3)verifies.push('throw');throw error;}
+    },close:()=>{attempts=Math.min(2,attempts+1);try{const result=receipt.close();returned=Math.min(2,returned+1);return result;}catch(error){thrown=Math.min(2,thrown+1);throw error;}}};
+   }});
+   writeFileSync(${JSON.stringify(resolve(directory, 'diag-acquired.ack'))},'ACQUISITION_RETURNED',{flag:'wx'});
+   await Promise.race([secondary.handshake,timeout]);
+   await Promise.race([secondary.completed,timeout]);
+   await Promise.race([secondary.closed,timeout]);
+   completed=true;
+  } catch {} finally {
+   clearTimeout(timer);
+   if(secondary){let cleanup;try{secondary.stopOwnedChild();if(!completed)secondary.abandon();await Promise.race([secondary.closed,new Promise((_,reject)=>{cleanup=setTimeout(()=>reject(new Error()),1000);})]);}catch{completed=false;}finally{clearTimeout(cleanup);}}
+  }
+  process.stderr.write('\\nOWNED_PROCESS_CAPTURE_SECONDARY:'+secondaryCode(verifies,attempts,returned,thrown,completed));
+ }
+ process.exitCode=1;
+}
 `,
       );
       const driverProcess = spawn(process.execPath, [driver], {
@@ -374,14 +480,16 @@ if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else if(!failur
         driverProcess.once('close', () => resolveClosed()),
       );
       let output = '';
+      let outputBytes = 0;
       let diagnostic = '';
       let diagnosticBytes = 0;
       driverProcess.stdout.on('data', (chunk: Buffer) => {
-        output += chunk.toString();
+        outputBytes += chunk.length;
+        output = outputBytes <= 128 ? output + chunk.toString() : '';
       });
       driverProcess.stderr.on('data', (chunk: Buffer) => {
         diagnosticBytes += chunk.length;
-        diagnostic = diagnosticBytes <= 128 ? diagnostic + chunk.toString('utf8') : '';
+        diagnostic = diagnosticBytes <= 256 ? diagnostic + chunk.toString('utf8') : '';
       });
       try {
         const code = await new Promise<number | null>((resolveCode, reject) => {
@@ -395,14 +503,12 @@ if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else if(!failur
             resolveCode(exitCode);
           });
         });
-        const failureBoundary =
-          /^OWNED_PROCESS_CAPTURE_UNCONFIRMED:(pin_start|handshake|normal_completion|capture_closed|digest|cleanup)$/u.test(
-            diagnostic,
-          )
-            ? diagnostic
-            : 'OWNED_PROCESS_CAPTURE_UNCONFIRMED';
+        const failureBoundary = fixedCaptureDiagnostic(diagnostic, diagnosticBytes);
         expect(code, failureBoundary).toBe(0);
-        expect(output).toBe('OWNED_PROCESS_CAPTURE_PASS');
+        expect(
+          output === 'OWNED_PROCESS_CAPTURE_PASS',
+          'OWNED_PROCESS_SUCCESS_MARKER_INVALID',
+        ).toBe(true);
       } finally {
         if (driverProcess.exitCode === null && driverProcess.signalCode === null)
           driverProcess.kill();
