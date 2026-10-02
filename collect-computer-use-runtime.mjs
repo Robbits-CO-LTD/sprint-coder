@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { Buffer } from 'node:buffer';
+import process from 'node:process';
+import { clearTimeout, setTimeout } from 'node:timers';
 import { createHash, randomBytes } from 'node:crypto';
 import { closeSync, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
@@ -34,7 +37,7 @@ const safeEnvironmentKeys = new Set([
   'SPRINT_CODER_COMPUTER_USE_DESKTOP_V1',
 ]);
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
-function hashExecutable(path) {
+export function hashExecutable(path) {
   const fd = openSync(path, 'r');
   try {
     const before = fstatSync(fd);
@@ -95,6 +98,7 @@ export function startOwnedComputerUseCapture({
     windowsHide: true,
     stdio: ['ignore', 'ignore', 'ignore', 'pipe'],
   });
+  const closed = new Promise((resolve) => child.once('close', () => resolve()));
   const frames = [];
   let hello;
   let failed = false;
@@ -174,6 +178,14 @@ export function startOwnedComputerUseCapture({
   return Object.freeze({
     handshake,
     completed,
+    closed,
+    abandon() {
+      // A bounded caller may stop waiting even when another process inherited the pipe.
+      // Invalidate first: abandoning transport can never establish normal completion.
+      fail();
+      pipe?.destroy();
+      child.unref();
+    },
     stopOwnedChild() {
       if (child.exitCode === null && child.signalCode === null && !child.killed) child.kill();
     },
