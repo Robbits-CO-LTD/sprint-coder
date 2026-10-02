@@ -201,7 +201,7 @@ function responders(): Readonly<Record<string, Responder>> {
   return {
     handshake: () => [
       'handshake_result',
-      { protocolVersion: 1, apiVersion: 2, platform: 'win32', sourceCommit },
+      { protocolVersion: 1, apiVersion: 2, platform: 'win32', napiVersion: 10, sourceCommit },
     ],
     list_windows: () => [
       'probe_result',
@@ -329,13 +329,13 @@ const profile = Object.freeze({
   updatedAt: '2026-09-18T00:00:00.000Z',
 });
 
-function createTarget(): {
+function createTarget(customResponders: Readonly<Record<string, Responder>> = responders()): {
   addon: ReturnType<typeof createWindowsComputerUseNativeAddon>;
   host: ReturnType<typeof createComputerUseNativeHost>;
   helper: () => FakeWindowsHelper;
 } {
   let helper: FakeWindowsHelper | null = null;
-  const table = responders();
+  const table = customResponders;
   // Every reconnect gets its own fake helper, the way a fresh child process would.
   onSocket = (socket) => {
     helper = new FakeWindowsHelper(socket, table);
@@ -431,6 +431,71 @@ describe('Computer Use Windows helper transport', () => {
     onSocket = null;
   });
 
+  it('waits for a valid handshake before parallel calls, including reconnect', async () => {
+    const target = createTarget();
+    const invoke = () => Promise.resolve(target.addon.listWindows!({ identity: {} }));
+    for (let connection = 0; connection < 2; connection += 1) {
+      onSocket = (socket) => {
+        const helper = new FakeWindowsHelper(socket, responders());
+        helper.holdOnly('handshake');
+        heldHelper = helper;
+      };
+      let heldHelper: FakeWindowsHelper | undefined;
+      const first = invoke();
+      await vi.advanceTimersByTimeAsync(0);
+      const second = invoke();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(heldHelper!.served).toEqual([]);
+      heldHelper!.release('handshake');
+      await Promise.all([first, second]);
+      expect(heldHelper!.served).toEqual(['handshake', 'list_windows', 'list_windows']);
+      sockets.at(-1)!.emit('close');
+    }
+  });
+
+  it.each(['buildMode', 'rulesetVersion', 'classifierVersion', 'lexiconVersion'])(
+    'rejects unsupported %s before parallel operations on every connection',
+    async (claim) => {
+      const table: Readonly<Record<string, Responder>> = {
+        ...responders(),
+        handshake: (): HelperResponse => [
+          'handshake_result',
+          {
+            protocolVersion: 1,
+            apiVersion: 2,
+            platform: 'win32',
+            napiVersion: 10,
+            sourceCommit,
+            [claim]: 'v2',
+          },
+        ],
+      };
+      const target = createTarget(table);
+      const served: string[] = [];
+      onSocket = (socket) => {
+        const tracked = Object.fromEntries(
+          Object.entries(table).map(([key, respond]) => [
+            key,
+            (metadata: Readonly<Record<string, unknown>>) => {
+              served.push(key);
+              return respond(metadata);
+            },
+          ]),
+        );
+        new FakeWindowsHelper(socket, tracked);
+      };
+      for (let connection = 0; connection < 2; connection += 1) {
+        const calls = Promise.allSettled([
+          Promise.resolve(target.addon.listWindows!({ identity: {} })),
+          Promise.resolve(target.addon.listWindows!({ identity: {} })),
+        ]);
+        await vi.advanceTimersByTimeAsync(5_100);
+        expect((await calls).map((result) => result.status)).toEqual(['rejected', 'rejected']);
+      }
+      expect(served.length).toBeGreaterThan(0);
+      expect(served.every((operation) => operation === 'handshake')).toBe(true);
+    },
+  );
   it.each([1, 64, 68, 70])(
     'reconnects the same addon after a frame is cut at byte %i',
     async (prefixBytes) => {

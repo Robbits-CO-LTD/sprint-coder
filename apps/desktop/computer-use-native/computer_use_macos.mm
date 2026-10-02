@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "computer_use_protocol.h"
+#include "computer_use_preflight_classifier.h"
 
 @interface SprintCoderCaptureOutput : NSObject <SCStreamOutput>
 @property(nonatomic, strong) dispatch_semaphore_t frameSemaphore;
@@ -4178,19 +4179,22 @@ napi_value DispatchResultValue(napi_env env, const NativeDispatchRequest& reques
 }
 
 bool RiskOutcome(const AxRiskClassification& risk, NativeDispatchOutcome* outcome) {
-  if (!risk.classified) {
-    *outcome = MakeDispatchOutcome("rejected", "native_target_unclassified");
-    return true;
+  using namespace sprint_coder::computer_use;
+  const auto decision = ClassifyNativePreflightFacts(
+      {true, risk.classified, risk.secure, risk.high_impact});
+  if (NativePreflightAllowsDispatch(decision)) return false;
+  switch (decision.reason) {
+    case NativePreflightReason::kSecure:
+      *outcome = MakeDispatchOutcome("rejected", "native_secure_field_blocked");
+      break;
+    case NativePreflightReason::kHighImpact:
+      *outcome = MakeDispatchOutcome("paused", "native_high_impact_user_takeover");
+      break;
+    default:
+      *outcome = MakeDispatchOutcome("rejected", "native_target_unclassified");
+      break;
   }
-  if (risk.secure) {
-    *outcome = MakeDispatchOutcome("rejected", "native_secure_field_blocked");
-    return true;
-  }
-  if (risk.high_impact) {
-    *outcome = MakeDispatchOutcome("paused", "native_high_impact_user_takeover");
-    return true;
-  }
-  return false;
+  return true;
 }
 
 AXUIElementRef FindBoundSemanticTarget(const NativeDispatchRequest& request,
