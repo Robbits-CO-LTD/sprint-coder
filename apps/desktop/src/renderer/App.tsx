@@ -330,6 +330,7 @@ export default function App() {
       <div className="app-frame">
         <AppTitlebar />
         <div
+          data-app-initialized={initialized}
           className={[
             'app-shell',
             chromeInert ? 'team-mode' : '',

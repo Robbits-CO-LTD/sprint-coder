@@ -7,12 +7,24 @@ import { PassThrough } from 'node:stream';
 import { expect, it, vi } from 'vitest';
 import { ClaudeRuntimeAdapter } from './claude-adapter';
 import { CodexRuntimeAdapter } from './codex-adapter';
+import type * as OwnedCliProcess from './owned-cli-process';
 
 const processMock = vi.hoisted(() => ({ spawn: vi.fn() }));
 vi.mock('node:child_process', async (importOriginal) => {
   const original = await importOriginal<typeof ChildProcessModule>();
   processMock.spawn.mockImplementation(original.spawn);
   return { ...original, spawn: processMock.spawn };
+});
+// Fake children exercise stream failures; real missing executables retain Job startup checks.
+vi.mock('./owned-cli-process', async (importOriginal) => {
+  const actual = await importOriginal<typeof OwnedCliProcess>();
+  return {
+    ...actual,
+    spawnOwnedCliProcess: (...args: Parameters<typeof actual.spawnOwnedCliProcess>) =>
+      args[0] === 'fixture'
+        ? processMock.spawn(args[0], args[1], args[2])
+        : actual.spawnOwnedCliProcess(...args),
+  };
 });
 
 it.each([
@@ -81,6 +93,13 @@ it.each(['claude', 'codex'] as const)(
         : new CodexRuntimeAdapter(500, 'fixture', [], root);
     const exited = vi.fn();
     const failed = vi.fn();
+    adapter.setCliResolution({
+      executable: 'fixture',
+      source: 'explicit',
+      version: 'fixture',
+      compatibility: 'verified',
+      capabilities: [],
+    });
     try {
       adapter.start('pipe-failure', 'test', [], vi.fn(), root, 'auto', vi.fn(), failed, exited);
       expect(() =>

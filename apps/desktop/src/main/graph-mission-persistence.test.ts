@@ -1,5 +1,5 @@
 import { spawnSync, execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { promisify, stripVTControlCharacters } from 'node:util';
 import {
   mkdtempSync,
   mkdirSync,
@@ -9,11 +9,13 @@ import {
   existsSync,
   linkSync,
   lstatSync,
+  statSync,
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import { ConnectionAdmissionController } from './connection-admission';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
@@ -321,8 +323,12 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
-async function retainedWriteFixture() {
+async function retainedWriteFixture(independent = false) {
   const f = fixture(undefined, true);
+  if (independent) {
+    f.plan.steps[1]!.dependsOn = [];
+    f.diagram.edges = [];
+  }
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
   expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
@@ -362,8 +368,8 @@ async function retainedWriteFixture() {
   return { f, a, run, manager, worker, worktree };
 }
 
-async function sealedWriteFixture() {
-  const { f, a, run, manager, worker, worktree } = await retainedWriteFixture();
+async function sealedWriteFixture(independent = false) {
+  const { f, a, run, manager, worker, worktree } = await retainedWriteFixture(independent);
   const sealed = await manager.finalizeChanges({
     ...worker,
     baseHead: worktree.baseHead,
@@ -405,9 +411,26 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
  * `confirmExit()` the runtime counts it as possibly running and refuses the same execution before
  * starting it. Once the exit is confirmed, Turns complete like the deterministic runtime.
  */
-async function unconfirmedExitGraph() {
+async function unconfirmedExitGraph(limitedConnection = false) {
   const f = fixture();
   const plan = structuredClone(f.plan);
+  const connection = limitedConnection ? managedLocalConnection() : null;
+  if (connection !== null) {
+    connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
+    f.persistence.createProviderConnection(connection);
+    const worker = f.persistence.registerTeamWorker({
+      teamId: f.team.id,
+      role: 'limited',
+      objective: 'limited',
+      contextInheritancePolicy: 'summary',
+      parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+      writeCapable: false,
+      modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+    });
+    f.persistence.transitionWorkerState(worker.id, 'spawning');
+    f.persistence.transitionWorkerState(worker.id, 'ready');
+    plan.steps[0]!.workerId = worker.id;
+  }
   plan.steps[0]!.resourceClaims = [{ scope: 'machine', key: 'shared-db', rootId: null }];
   const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
   f.persistence.saveGraphDocument(document, 1);
@@ -434,7 +457,10 @@ async function unconfirmedExitGraph() {
     stop,
     hasUnsettledTurn: (_agentId, executionId) => unsettled.has(executionId),
   };
-  const scheduler = new TeamExecutionScheduler(1);
+  const scheduler = new TeamExecutionScheduler(
+    1,
+    limitedConnection ? new ConnectionAdmissionController() : undefined,
+  );
   const coordinator = new TeamCoordinator(
     f.persistence,
     runtime,
@@ -448,6 +474,10 @@ async function unconfirmedExitGraph() {
     renderRevision: document.renderRevision,
     semanticRevision: document.semanticRevision,
     semanticDigest: document.semanticDigest,
+    contextDigest: graphMissionContextDigest(
+      graphMissionContextFor(f.persistence, f.task.id),
+      new Set(plan.steps.map((step) => step.workerId)),
+    ),
   }));
   const executionId = mission.steps[0]!.executionId;
   const reservations = () =>
@@ -469,6 +499,8 @@ async function unconfirmedExitGraph() {
     executionId,
     executed,
     stop,
+    connection,
+    scheduler,
     reservations,
     confirmExit: () => unsettled.clear(),
     /** Whether another Mission's step that claims the same resource could be admitted now. */
@@ -490,6 +522,73 @@ async function unconfirmedExitGraph() {
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
+      const f = fixture();
+      const connection = managedLocalConnection();
+      connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 19_999 };
+      f.persistence.createProviderConnection(connection);
+      const plan = structuredClone(f.plan);
+      for (const step of plan.steps) {
+        const worker = f.persistence.registerTeamWorker({
+          teamId: f.team.id,
+          role: step.key,
+          objective: step.key,
+          contextInheritancePolicy: 'summary',
+          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          writeCapable: false,
+          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        });
+        f.persistence.transitionWorkerState(worker.id, 'spawning');
+        f.persistence.transitionWorkerState(worker.id, 'ready');
+        step.workerId = worker.id;
+      }
+      const document = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
+      f.persistence.saveGraphDocument(document, 1);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      const execute = vi.spyOn(runtime, 'execute');
+      const scheduler = new TeamExecutionScheduler(1, new ConnectionAdmissionController());
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      const context = graphMissionContextFor(f.persistence, f.task.id);
+      const mission = await coordinator.startGraphMission(f.task.id, async () => ({
+        ...f.input,
+        renderRevision: document.renderRevision,
+        semanticRevision: document.semanticRevision,
+        semanticDigest: document.semanticDigest,
+        contextDigest: graphMissionContextDigest(
+          context,
+          new Set(plan.steps.map((step) => step.workerId)),
+        ),
+      }));
+      await vi.waitFor(() => expect(scheduler.snapshot().queuedExecutionIds).toEqual([]));
+      for (const step of mission.steps) {
+        expect(f.persistence.getTeamExecution(step.executionId).state).toBe('waiting_resume');
+        expect(f.persistence.listTeamAttempts(step.executionId)).toEqual([]);
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(
+              (worker) =>
+                worker.id === f.persistence.getTeamExecution(step.executionId).assigneeAgentId,
+            )?.currentActivity,
+        ).toContain('tokens_per_minute_capacity');
+      }
+      expect(execute).not.toHaveBeenCalled();
+      expect(f.persistence.listGraphResourceReservations(mission.id)).toEqual([]);
+      await expect(coordinator.resumeGraphStep(f.task.id, mission.id, 'a')).rejects.toThrow(
+        'tokens_per_minute_capacity',
+      );
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+      expect(f.persistence.listTeamAttempts(mission.steps[0]!.executionId)).toEqual([]);
+      f.persistence.close();
+    });
+
     it('publishes a queued wait-reason change from dependencies to resources without requiring a UI refresh', async () => {
       const holder = fixture();
       const heldMission = resourceMission(holder, 'display-resource');
@@ -3080,11 +3179,139 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toBeNull();
       expect(f.persistence.listGraphResourceReservations(a.mission.id)[0]?.state).toBe('released');
       expect(readFileSync(join(a.workspace, 'shared.ts'), 'utf8')).toBe('integrated\n');
+      expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('active');
+      expect(
+        f.persistence
+          .getTeamSnapshot(f.team.id)
+          .agents.filter(({ kind }) => kind === 'worker')
+          .every(({ state }) => state !== 'done'),
+      ).toBe(true);
       await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
       expect(execute).not.toHaveBeenCalled();
       expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
       f.persistence.close();
     });
+
+    it.each(
+      ['complete', 'other-execution', 'other-worker', 'ready-participant'].flatMap((mode) =>
+        ['creation-order', 'reverse-order'].map((order) => ({ mode, order })),
+      ),
+    )(
+      'finishes participating Workers when the last integration resumes ($mode, $order)',
+      async ({ mode, order }) => {
+        const { f, a, run, manager } = await sealedWriteFixture(true);
+        // Snapshot order is depth/createdAt/id, not Worker registration order.
+        const orderDb = new Database(f.path);
+        try {
+          const orderedWorkers = order === 'creation-order' ? f.workers : [...f.workers].reverse();
+          for (const [index, worker] of orderedWorkers.entries())
+            orderDb
+              .prepare('UPDATE agents SET created_at = ? WHERE id = ?')
+              .run(`2026-09-11T00:00:0${index}.000Z`, worker.id);
+          expect(
+            f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.filter(({ kind }) => kind === 'worker')
+              .map(({ id }) => id),
+          ).toEqual(orderedWorkers.map(({ id }) => id));
+        } finally {
+          orderDb.close();
+        }
+        const expectedWorkerStates = new Map([
+          [f.workers[0]!.id, 'done'],
+          [
+            f.workers[1]!.id,
+            mode === 'other-execution'
+              ? 'waiting'
+              : mode === 'ready-participant'
+                ? 'ready'
+                : 'done',
+          ],
+        ]);
+        f.persistence.holdGraphIntegration({
+          ...completion(a.mission.id, 'a', run),
+          reason: 'Integration requires retry',
+        });
+        const sibling = begin(f, a.mission.id, 'b');
+        f.persistence.completeGraphStep(completion(a.mission.id, 'b', sibling));
+        if (mode === 'other-execution')
+          f.persistence.createTeamExecution({
+            teamId: f.team.id,
+            assigneeAgentId: f.workers[1]!.id,
+            createdByAgentId: f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.find(({ kind }) => kind === 'leader')!.id,
+            instruction: 'unrelated pending work',
+            accessMode: 'read-only',
+            now,
+          });
+        if (mode === 'other-worker') {
+          const other = f.persistence.registerTeamWorker({
+            teamId: f.team.id,
+            role: 'other',
+            objective: 'other work',
+            contextInheritancePolicy: 'none',
+            parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
+          });
+          f.persistence.transitionWorkerState(other.id, 'spawning');
+          f.persistence.transitionWorkerState(other.id, 'ready');
+          expectedWorkerStates.set(other.id, 'ready');
+        }
+        for (const worker of f.workers) {
+          if (mode === 'ready-participant' && worker.id === f.workers[1]!.id) continue;
+          f.persistence.transitionWorkerState(worker.id, 'busy');
+          f.persistence.transitionWorkerState(worker.id, 'waiting');
+        }
+        f.persistence.setWorkerCurrentActivity(
+          run.execution.assigneeAgentId,
+          'Integration requires retry',
+          now,
+        );
+        const runtime = new DeterministicTeamWorkerRuntime();
+        const execute = vi.spyOn(runtime, 'execute');
+        const coordinator = new TeamCoordinator(
+          f.persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          manager,
+        );
+        await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+        expect(f.persistence.getTeamMission(a.mission.id).state).toBe('completed');
+        const completedWorkers = f.persistence
+          .getTeamSnapshot(f.team.id)
+          .agents.filter(({ kind }) => kind === 'worker');
+        expect(completedWorkers).toHaveLength(expectedWorkerStates.size);
+        expect(new Map(completedWorkers.map(({ id, state }) => [id, state]))).toEqual(
+          expectedWorkerStates,
+        );
+        expect(
+          f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(({ id }) => id === run.execution.assigneeAgentId)?.currentActivity,
+        ).toBeNull();
+        expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe(
+          mode === 'complete' ? 'completed' : 'active',
+        );
+        expect(coordinator.hasUnfinishedTeamWork(f.task.id)).toBe(mode !== 'complete');
+        if (mode === 'ready-participant') {
+          await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+          expect(
+            f.persistence
+              .getTeamSnapshot(f.team.id)
+              .agents.find(({ id }) => id === f.workers[1]!.id)?.state,
+          ).toBe('ready');
+          expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('active');
+        }
+        expect(execute).not.toHaveBeenCalled();
+        f.persistence.close();
+      },
+      gitScenarioTimeout,
+    );
 
     it('does not treat restart as proof that an interrupted integration runner stopped', async () => {
       const { f, a, run } = await sealedWriteFixture();
@@ -3353,8 +3580,39 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           expect(review.files).toHaveLength(2);
           await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
           await vi.waitFor(
-            () => expect(f.persistence.getTeamExecution(run.execution.id).state).toBe('completed'),
-            { timeout: process.platform === 'win32' ? gitCheckpointTimeout : 15000 },
+            () => {
+              const execution = f.persistence.getTeamExecution(run.execution.id);
+              const scheduler = coordinator['executionScheduler'].snapshot();
+              const worker = f.persistence
+                .getTeamSnapshot(f.team.id)
+                .agents.find((agent) => agent.id === execution.assigneeAgentId);
+              // Keep diagnostics to states and fixed reasons; currentActivity can contain instructions.
+              const preflightFailure =
+                [
+                  'Graph Worker is not ready',
+                  'Preserved workspace changed before admission; review it again',
+                  'Graph admission changed during preflight',
+                  'Preserved workspace changed before dispatch; review it again',
+                  'Graph execution canceled before dispatch',
+                ].find((reason) => reason === worker?.currentActivity) ?? null;
+              expect(
+                execution.state,
+                JSON.stringify({
+                  state: execution.state,
+                  workerState: worker?.state ?? null,
+                  queued: scheduler.queuedExecutionIds.includes(execution.id),
+                  active: scheduler.activeExecutionIds.includes(execution.id),
+                  waitReason: coordinator['graphWaitReasons'].get(execution.id) ?? null,
+                  preflightFailure,
+                  attemptStates: f.persistence
+                    .listTeamAttempts(execution.id)
+                    .map(({ state }) => state),
+                }),
+              ).toBe('completed');
+            },
+            // A two-repository resume performs guarded preflight while still waiting_resume.
+            // Use the existing bounded checkpoint allowance, also used by the other write cases.
+            { timeout: gitCheckpointTimeout },
           );
           for (const repository of isolation.repositories)
             expect(readFileSync(join(repository.repoPath, 'allowed/file.ts'), 'utf8')).toBe(
@@ -4115,6 +4373,39 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    it('rejects capacity after Graph restart with null queue metadata while retaining an existing Attempt and owner', async () => {
+      const g = await unconfirmedExitGraph(true);
+      try {
+        const attempts = g.f.persistence.listTeamAttempts(g.executionId);
+        const owners = g.f.persistence.listGraphResourceReservations(g.mission.id);
+        g.confirmExit();
+        g.coordinator.recoverOnStartup();
+        const db = new Database(g.f.path);
+        try {
+          db.prepare(
+            'UPDATE team_executions SET queue_ordinal=NULL, queued_at=NULL WHERE id=?',
+          ).run(g.executionId);
+        } finally {
+          db.close();
+        }
+        const connection = g.f.persistence.lowerProviderConnectionRateLimits(g.connection!.id, {
+          tokensPerMinute: 19_999,
+        });
+        g.coordinator.refreshConnectionAdmission(connection);
+        await expect(g.coordinator.resumeGraphStep(g.f.task.id, g.mission.id, 'a')).rejects.toThrow(
+          'tokens_per_minute_capacity',
+        );
+        expect(g.f.persistence.listTeamAttempts(g.executionId)).toEqual(attempts);
+        expect(g.f.persistence.listGraphResourceReservations(g.mission.id)).toEqual(owners);
+        expect(g.reservations()).toEqual(['quarantined']);
+        expect(g.executed).toEqual([g.executionId]);
+        expect(g.stop).not.toHaveBeenCalled();
+        expect(g.scheduler.snapshot().queuedExecutionIds).not.toContain(g.executionId);
+      } finally {
+        await g.close();
+      }
+    });
 
     it('refuses to resume a graph step, keeping its reservation, while its Worker exit is unconfirmed', async () => {
       const g = await unconfirmedExitGraph();
@@ -5192,25 +5483,191 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   });
 else
   describe('graph Mission persistence Electron ABI bridge', () => {
+    it('retains bounded child and assertion metadata without private output', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+      roots.push(directory);
+      const reportFile = join(directory, 'report.json');
+      writeFileSync(
+        reportFile,
+        JSON.stringify({
+          numTotalTests: 122,
+          numPassedTests: 121,
+          numFailedTests: 1,
+          failureMessages: ['PRIVATE_REPORT_FAILURE'],
+        }),
+      );
+      const failure = graphBridgeFailure(
+        {
+          code: 1,
+          killed: false,
+          signal: null,
+          message: 'PRIVATE_CHILD_MESSAGE [vitest-worker]: Timeout calling "onTaskUpdate"',
+          stdout:
+            ' \u001b[32m✓\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > PRIVATE_CASE 10ms\n \u001b[31m×\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > PRIVATE_FAILED_CASE 20ms\nPRIVATE_STDOUT',
+          stderr: 'PRIVATE_STDERR',
+        },
+        reportFile,
+      );
+      expect(failure.message).toContain('"code":1');
+      expect(failure.message).toContain('"rpcTimeout":true');
+      expect(failure.message).toContain('"passed":1,"failed":1');
+      expect(failure.message).toContain('"numFailedTests":1');
+      expect(failure.message).toContain('lastCompletedCaseDigest');
+      expect(failure.message).not.toContain('PRIVATE_');
+      expect(failure.message).not.toContain(directory);
+      expect(failure.cause).toBeUndefined();
+      expect(Object.keys(failure)).toEqual([]);
+    });
+
+    it('classifies missing, malformed and oversized reports without exposing report bytes', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+      roots.push(directory);
+      const reportFile = join(directory, 'report.json');
+      expect(graphBridgeFailure('PRIVATE_UNKNOWN_ERROR', reportFile).message).toContain(
+        'report=missing',
+      );
+      writeFileSync(reportFile, 'PRIVATE_INVALID_JSON');
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report=unreadable');
+      writeFileSync(reportFile, 'x'.repeat(2 * 1024 * 1024 + 1));
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report=oversized');
+      writeFileSync(
+        reportFile,
+        JSON.stringify({ numTotalTests: 'PRIVATE_COUNT', numFailedTests: -1 }),
+      );
+      expect(graphBridgeFailure({}, reportFile).message).toContain('report={}');
+    });
+
+    it.each(['exit', 'timeout'])(
+      'keeps a real child %s authoritative and redacts its private stderr',
+      async (mode) => {
+        const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
+        roots.push(directory);
+        let childError: unknown;
+        try {
+          await promisify(execFile)(
+            process.execPath,
+            [
+              '-e',
+              mode === 'exit'
+                ? "process.stderr.write('PRIVATE_REAL_CHILD'); process.exit(7)"
+                : "process.stderr.write('PRIVATE_REAL_CHILD'); setInterval(() => {}, 1000)",
+            ],
+            { encoding: 'utf8', timeout: mode === 'exit' ? 10_000 : 500 },
+          );
+        } catch (error) {
+          childError = error;
+        }
+        expect(childError).toBeDefined();
+        const failure = graphBridgeFailure(childError, join(directory, 'report.json'));
+        expect(failure.message).toContain(mode === 'exit' ? '"code":7' : '"killed":true');
+        expect(failure.message).toContain('report=missing');
+        expect(failure.message).not.toContain('PRIVATE_');
+        expect(failure.cause).toBeUndefined();
+      },
+    );
+
     it(
       'runs the graph Mission transaction suite with Electron',
       async () => {
-        await promisify(execFile)(
-          electronTestExecutablePath(),
-          [
-            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-            'run',
-            'src/main/graph-mission-persistence.test.ts',
-          ],
-          {
-            cwd: process.cwd(),
-            encoding: 'utf8',
-            env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-            timeout: graphBridgeTimeout,
-            maxBuffer: 10 * 1024 * 1024,
-          },
-        );
+        const reportDirectory = mkdtempSync(join(tmpdir(), 'sc-graph-bridge-report-'));
+        const reportFile = join(reportDirectory, 'report.json');
+        try {
+          await promisify(execFile)(
+            electronTestExecutablePath(),
+            [
+              join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+              'run',
+              'src/main/graph-mission-persistence.test.ts',
+              '--reporter=verbose',
+              '--reporter=json',
+              `--outputFile.json=${reportFile}`,
+            ],
+            {
+              cwd: process.cwd(),
+              encoding: 'utf8',
+              env: {
+                ...process.env,
+                ELECTRON_RUN_AS_NODE: '1',
+                SPRINT_CODER_ELECTRON_DB_TEST: '1',
+              },
+              timeout: graphBridgeTimeout,
+              maxBuffer: 10 * 1024 * 1024,
+            },
+          );
+        } catch (error) {
+          throw graphBridgeFailure(error, reportFile);
+        } finally {
+          // Diagnostic cleanup must not replace the authoritative child failure with raw paths.
+          await rm(reportDirectory, { recursive: true, force: true }).catch(() => {});
+        }
       },
       graphBridgeTimeout + 5_000,
     );
   });
+
+function graphBridgeFailure(error: unknown, reportFile: string): Error {
+  const child: Record<string, number | string | boolean> = {};
+  const progress: { passed: number; failed: number; lastCompletedCaseDigest?: string } = {
+    passed: 0,
+    failed: 0,
+  };
+  if (typeof error === 'object' && error !== null) {
+    const code: unknown = Reflect.get(error, 'code');
+    if (
+      (typeof code === 'number' && Number.isSafeInteger(code)) ||
+      (typeof code === 'string' && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code))
+    )
+      child['code'] = code;
+    const killed: unknown = Reflect.get(error, 'killed');
+    if (typeof killed === 'boolean') child['killed'] = killed;
+    const signal: unknown = Reflect.get(error, 'signal');
+    if (typeof signal === 'string' && /^SIG[A-Z]{1,16}$/u.test(signal)) child['signal'] = signal;
+    const message: unknown = Reflect.get(error, 'message');
+    child['rpcTimeout'] =
+      typeof message === 'string' &&
+      message.includes('[vitest-worker]: Timeout calling "onTaskUpdate"');
+    const stdout: unknown = Reflect.get(error, 'stdout');
+    if (typeof stdout === 'string') {
+      for (const line of stripVTControlCharacters(stdout).split('\n')) {
+        const completed =
+          /^\s*([✓×]) src[\\/]main[\\/]graph-mission-persistence\.test\.ts > durable graph Mission definitions > (.+)$/u.exec(
+            line,
+          );
+        if (!completed) continue;
+        if (completed[1] === '✓') progress.passed += 1;
+        else progress.failed += 1;
+        const caseName = completed[2]!.replace(/\s+\d+(?:\.\d+)?ms\s*$/u, '');
+        progress.lastCompletedCaseDigest = createHash('sha256').update(caseName).digest('hex');
+      }
+    }
+  }
+  // execFile's error/cause includes raw stderr and paths. Expose only typed metadata and counts.
+  return new Error(
+    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}`,
+  );
+}
+
+function graphBridgeReportSummary(reportFile: string): string {
+  try {
+    if (!existsSync(reportFile)) return 'report=missing';
+    if (statSync(reportFile).size > 2 * 1024 * 1024) return 'report=oversized';
+    const report: unknown = JSON.parse(readFileSync(reportFile, 'utf8'));
+    if (typeof report !== 'object' || report === null || Array.isArray(report))
+      return 'report=invalid';
+    const counts: Record<string, number> = {};
+    for (const key of [
+      'numTotalTests',
+      'numPassedTests',
+      'numFailedTests',
+      'numPendingTests',
+      'numRuntimeErrorTestSuites',
+    ]) {
+      const value: unknown = Reflect.get(report, key);
+      if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0)
+        counts[key] = value;
+    }
+    return `report=${JSON.stringify(counts)}`;
+  } catch {
+    return 'report=unreadable';
+  }
+}
