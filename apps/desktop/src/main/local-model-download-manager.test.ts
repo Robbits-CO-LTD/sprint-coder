@@ -403,6 +403,116 @@ if (runsWithElectronAbi)
         await reopened.dispose();
       }
     });
+    it('reinstalls a canceled model through the real Controller after reopening the store', async () => {
+      const env = await fixture({ bytes: [Buffer.from('controller model')] });
+      env.repository.close();
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      let aborts = 0;
+      const fetch = vi.fn(env.fetch).mockImplementationOnce(
+        async () =>
+          new Response(
+            new ReadableStream({
+              pull() {
+                reading();
+              },
+              cancel() {
+                aborts += 1;
+              },
+            }),
+            { headers: { 'content-length': String(env.bytes[0]!.length) } },
+          ),
+      );
+      const detail: PublicModelCatalogDetail = {
+        item: {
+          id: 'owner/model',
+          name: 'model',
+          author: 'owner',
+          source: 'hugging_face',
+          sourceId: 'owner/model',
+          sourceUrl: 'https://huggingface.co/owner/model',
+          immutableRevision: env.plan.immutableRevision,
+          gated: false,
+          private: false,
+          viewable: true,
+          installability: { state: 'installable', reason: 'fixture' },
+          license: null,
+          purpose: null,
+          tags: [],
+          downloads: null,
+          updatedAt: null,
+        },
+        description: '',
+        architecture: null,
+        parameterCount: null,
+        contextTokens: null,
+        toolTemplate: 'unknown',
+        backend: null,
+        variants: [],
+        referenceUrls: [],
+        artifacts: env.plan.artifacts.map((artifact, index) => ({
+          ...artifact,
+          sourceUrl: `https://huggingface.co/owner/model/blob/${env.plan.immutableRevision}/${artifact.filename}`,
+          id: `artifact-${index}`,
+          format: 'gguf',
+          quantization: env.plan.quantization,
+          installability: { state: 'installable', reason: 'fixture' },
+        })),
+      };
+      const catalog = new PublicModelCatalogService(env.fetch);
+      vi.spyOn(catalog, 'detail').mockResolvedValue(detail);
+      const dependencies = {
+        databasePath: join(env.root, 'app.sqlite3'),
+        storeRoot: env.store.rootPath,
+        lifecycle: null,
+        bundle: null,
+        catalog,
+        fetch,
+      };
+      const input = {
+        source: env.plan.source,
+        sourceId: env.plan.sourceId,
+        artifactIds: detail.artifacts.map(({ id }) => id),
+        quantization: env.plan.quantization,
+        confirmed: true as const,
+      };
+      const controller = await ManagedLocalController.create(dependencies);
+      let original!: Awaited<ReturnType<typeof controller.install>>;
+      try {
+        original = await controller.install(input);
+        await started;
+        expect((await controller.cancel(original.id, true)).state).toBe('canceled');
+        expect(aborts).toBe(1);
+        await expect(readFile(env.store.partialPath(original.modelId, 1))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await controller.dispose();
+      }
+      const reopened = await ManagedLocalController.create(dependencies);
+      try {
+        const replacement = await reopened.install(input);
+        expect(replacement.id).not.toBe(original.id);
+        expect(replacement.modelId).toBe(original.modelId);
+        await vi.waitFor(() =>
+          expect(reopened.listJobs().find(({ id }) => id === replacement.id)).toMatchObject({
+            state: 'installed',
+            failureCode: null,
+          }),
+        );
+        await expect(reopened.cancel(original.id, true)).rejects.toThrow('not found');
+        expect(reopened.listInstalled()).toHaveLength(1);
+        for (let index = 0; index < env.bytes.length; index += 1)
+          expect(await readFile(env.store.installedPath(replacement.modelId, index + 1))).toEqual(
+            env.bytes[index],
+          );
+      } finally {
+        await reopened.dispose();
+      }
+    });
+
     it.each(['before_publish', 'one_staged', 'all_staged', 'final', 'committed'] as const)(
       'recovers the %s cutpoint after a real SQLite/store reopen',
       async (cutpoint) => {
