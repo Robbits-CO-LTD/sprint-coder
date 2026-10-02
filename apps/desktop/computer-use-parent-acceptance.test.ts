@@ -147,36 +147,57 @@ function syntheticEvidence(): Evidence {
   return result;
 }
 
-it('evaluates complete journey rows through protected callbacks while missing parent proof stays held', async () => {
-  const evidence = syntheticEvidence();
-  const measured: string[] = [];
-  let asserted = false;
-  const result = await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
-    expectedSourceCommit: 'a'.repeat(40),
-    expectedSourceRunId: '1234',
-    expectedEvidenceRunId: '5678',
-    expectedEvidenceRunAttempt: 1,
-    expectedWindowsArtifact: template.artifacts.windows.artifactName,
-    expectedMacosArtifact: template.artifacts.macos.artifactName,
-    expectedWindowsPortableName: 'test-portable.zip',
-    expectedWindowsInstallerName: 'test-installer.exe',
-    expectedWindowsInstallerSha256: 'c'.repeat(64),
-    expectedWindowsPortableSha256: 'b'.repeat(64),
-    expectedMacosSha256: 'd'.repeat(64),
-    trustedWorkflowAttestationVerified: true,
-    measureOwnedRunFacts: async (platform: string) => {
-      measured.push(platform);
-      return {};
-    },
-    verifyParentAssertions: async () => {
-      asserted = true;
-      return digest(evidence.parentClosure);
-    },
-  });
-  expect(measured).toEqual(['windows', 'macos']);
-  expect(asserted).toBe(true);
-  expect(result).toMatchObject({ status: 'CLOSE_HOLD', finalGateEligible: false });
-});
+it.each([1, 2])(
+  'binds protected callbacks to attempt %i and every artifact pin while missing parent proof stays held',
+  async (attempt) => {
+    const evidence = syntheticEvidence();
+    evidence.harnessAttestation.workflowRunAttempt = attempt;
+    const release = {
+      sourceCommit: 'a'.repeat(40),
+      sourceRunId: '1234',
+      evidenceRunId: '5678',
+      evidenceRunAttempt: attempt,
+      windowsArtifact: template.artifacts.windows.artifactName,
+      macosArtifact: template.artifacts.macos.artifactName,
+      windowsPortableName: 'test-portable.zip',
+      windowsInstallerName: 'test-installer.exe',
+      windowsInstallerSha256: 'c'.repeat(64),
+      windowsPortableSha256: 'b'.repeat(64),
+      macosSha256: 'd'.repeat(64),
+    };
+    const measured: string[] = [];
+    let asserted = false;
+    const result = await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+      expectedSourceCommit: 'a'.repeat(40),
+      expectedSourceRunId: '1234',
+      expectedEvidenceRunId: '5678',
+      expectedEvidenceRunAttempt: attempt,
+      expectedWindowsArtifact: template.artifacts.windows.artifactName,
+      expectedMacosArtifact: template.artifacts.macos.artifactName,
+      expectedWindowsPortableName: 'test-portable.zip',
+      expectedWindowsInstallerName: 'test-installer.exe',
+      expectedWindowsInstallerSha256: 'c'.repeat(64),
+      expectedWindowsPortableSha256: 'b'.repeat(64),
+      expectedMacosSha256: 'd'.repeat(64),
+      trustedWorkflowAttestationVerified: true,
+      measureOwnedRunFacts: async (platform: string, measuredRelease: unknown) => {
+        expect(measuredRelease).toEqual(release);
+        expect(Object.isFrozen(measuredRelease)).toBe(true);
+        measured.push(platform);
+        return {};
+      },
+      verifyParentAssertions: async (_closure: unknown, assertedRelease: unknown) => {
+        expect(assertedRelease).toEqual(release);
+        expect(Object.isFrozen(assertedRelease)).toBe(true);
+        asserted = true;
+        return digest(evidence.parentClosure);
+      },
+    });
+    expect(measured).toEqual(['windows', 'macos']);
+    expect(asserted).toBe(true);
+    expect(result).toMatchObject({ status: 'CLOSE_HOLD', finalGateEligible: false });
+  },
+);
 
 function validate(candidate: unknown) {
   return verifier.validateComputerUseFinalGateEvidence(candidate, {

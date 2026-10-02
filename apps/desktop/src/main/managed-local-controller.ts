@@ -758,7 +758,7 @@ export class ManagedLocalController {
     if (input.confirmed !== true) throw new Error('Install confirmation is required');
     const detail = await this.catalog.detail({ source: input.source, sourceId: input.sourceId });
     const plan = installPlan(detail, input.artifactIds, input.quantization);
-    const job = this.manager.enqueue(plan);
+    const job = await this.manager.enqueue(plan);
     this.plans.set(job.id, plan);
     this.schedule(job.id);
     return job;
@@ -773,6 +773,8 @@ export class ManagedLocalController {
     const job = this.manager.getJob(jobId);
     if (!['paused', 'interrupted', 'failed'].includes(job.state)) return job;
     const plan = this.plans.get(jobId) ?? (await this.rebuildPlan(job.modelId));
+    const latest = this.manager.getJob(jobId);
+    if (!['paused', 'interrupted', 'failed'].includes(latest.state)) return latest;
     this.plans.set(jobId, plan);
     this.schedule(jobId);
     return this.manager.getJob(jobId);

@@ -52,6 +52,14 @@ export async function verifyComputerUseProtectedRunnerEvidence(candidate, option
     const evidence = snapshot(candidate);
     const release = snapshot({
       sourceCommit: expectedSourceCommit,
+      sourceRunId: expectedSourceRunId,
+      evidenceRunId: expectedEvidenceRunId,
+      evidenceRunAttempt: expectedEvidenceRunAttempt,
+      windowsArtifact: expectedWindowsArtifact,
+      macosArtifact: expectedMacosArtifact,
+      windowsPortableName: expectedWindowsPortableName,
+      windowsInstallerName: expectedWindowsInstallerName,
+      windowsInstallerSha256: expectedWindowsInstallerSha256,
       windowsPortableSha256: expectedWindowsPortableSha256,
       macosSha256: expectedMacosSha256,
     });

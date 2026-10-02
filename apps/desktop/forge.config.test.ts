@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -6,6 +15,7 @@ import { join, resolve } from 'node:path';
 import { createPackage as createAsarPackage, uncache as uncacheAsar } from '@electron/asar';
 import { computerUseNativeManifestSchema } from '@sprint-coder/contracts';
 import { describe, expect, it } from 'vitest';
+import type { ResolvedForgeConfig } from '@electron-forge/shared-types';
 import {
   COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
   COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
@@ -48,6 +58,11 @@ import {
   SQUIRREL_SETUP_EXE,
   WINDOWS_WIZARD_INSTALLER_EXE,
 } from './windows-wizard-installer';
+import {
+  probeSandboxRunner,
+  sandboxRunnerPath,
+  verifySandboxRunnerDigest,
+} from './src/main/sandbox-runner';
 
 describe('desktop package icon', () => {
   it('points Electron Packager at real macOS and Windows icon files', () => {
@@ -346,6 +361,80 @@ describe('Managed Local Vite pin injection', () => {
 });
 
 describe('macOS sandbox runner sealing', () => {
+  it.runIf(process.platform === 'win32')(
+    'probes the real Windows helper after sealing its changed PE bytes',
+    async () => {
+      const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-real-runner-seal-'));
+      try {
+        const resources = join(root, 'resources');
+        const runner = join(resources, 'sprint-coder-sandbox-runner.exe');
+        mkdirSync(resources, { recursive: true });
+        copyFileSync(sandboxRunnerPath(), runner);
+        copyFileSync(`${sandboxRunnerPath()}.sha256`, `${runner}.sha256`);
+        appendFileSync(runner, 'SIGNING_BYTE_MUTATION_FIXTURE');
+        await expect(probeSandboxRunner(runner)).resolves.toMatchObject({ available: false });
+        refreshPackagedSandboxRunnerDigest(root, 'win32');
+        await expect(probeSandboxRunner(runner)).resolves.toMatchObject({
+          available: true,
+          backend: 'windows-appcontainer',
+        });
+        appendFileSync(runner, 'TAMPER_FIXTURE');
+        await expect(probeSandboxRunner(runner)).resolves.toMatchObject({ available: false });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+    15_000,
+  );
+
+  it('refreshes Windows runner bytes in the real postPackage hook before other native verification', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-windows-runner-seal-'));
+    try {
+      const resources = join(root, 'resources');
+      const runner = join(resources, 'sprint-coder-sandbox-runner.exe');
+      mkdirSync(resources, { recursive: true });
+      writeFileSync(runner, 'unsigned-runner');
+      writeFileSync(
+        `${runner}.sha256`,
+        `${createHash('sha256').update('unsigned-runner').digest('hex')}\n`,
+      );
+      expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
+      // Deterministic signing-byte mutation; no certificate or signing service is used.
+      writeFileSync(runner, 'post-signing-runner');
+      expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
+      // This deliberately minimal fixture has no Computer Use artifact. Its separate verifier
+      // still fails, after the sandbox runner has been sealed by the real product hook.
+      const resolvedConfig: ResolvedForgeConfig = {
+        ...config,
+        plugins: config.plugins ?? [],
+        rebuildConfig: config.rebuildConfig ?? {},
+        packagerConfig: config.packagerConfig ?? {},
+        makers: config.makers ?? [],
+        publishers: config.publishers ?? [],
+        pluginInterface: {
+          triggerHook: async () => undefined,
+          getHookListrTasks: async () => [],
+          triggerMutatingHook: async (_name, item) => item,
+          overrideStartLogic: async () => {
+            throw new Error('Unexpected plugin invocation');
+          },
+        },
+      };
+      await expect(
+        config.hooks!.postPackage!(resolvedConfig, {
+          platform: 'win32',
+          arch: 'x64',
+          outputPaths: [root],
+        }),
+      ).rejects.toThrow();
+      expect(() => verifySandboxRunnerDigest(runner)).not.toThrow();
+      writeFileSync(runner, 'tampered-after-package');
+      expect(() => verifySandboxRunnerDigest(runner)).toThrow('digest mismatch');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('regenerates the packaged digest from the post-signing runner bytes', () => {
     const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-runner-seal-'));
     try {

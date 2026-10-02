@@ -730,6 +730,20 @@ describe('Computer Use external final gate', () => {
     expect(appTicket).toBeGreaterThan(mount);
   });
 
+  it.each(['windows', 'macos'])(
+    'does not persist checkout credentials before the %s startup checkpoint',
+    (platform) => {
+      const job = workflow
+        .split(`  verify-${platform}-package:\n`)[1]
+        ?.split(/\n {2}[a-z][a-z0-9-]*:/u)[0];
+      const checkout = job?.match(
+        /- name: Checkout trusted startup collector[\s\S]*?(?=\n {6}- name:|$)/u,
+      )?.[0];
+      expect(checkout).toContain('with:');
+      expect(checkout).toContain('          persist-credentials: false');
+    },
+  );
+
   it('does not receive Provider credentials or upload raw acceptance output', () => {
     expect(workflow).not.toContain('secrets.');
     expect(evidenceWorkflow).not.toContain('secrets.');

@@ -9,6 +9,7 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   statfs,
   unlink,
   writeFile,
@@ -175,6 +176,42 @@ export class LocalModelDownloadRepository {
     const modelId = modelIdFor(plan);
     const totalBytes = plan.artifacts.reduce((sum, item) => sum + item.sizeBytes, 0);
     this.db.transaction(() => {
+      const existing = this.db
+        .prepare('SELECT state FROM local_models WHERE id = ?')
+        .get(modelId) as { state: string } | undefined;
+      if (existing !== undefined) {
+        const previous = this.listJobs().find((job) => job.modelId === modelId);
+        const rows = this.artifacts(modelId);
+        if (
+          existing.state !== 'installing' ||
+          previous?.state !== 'canceled' ||
+          rows.length !== plan.artifacts.length ||
+          rows.some((row, index) => {
+            const artifact = plan.artifacts[index]!;
+            return (
+              row.filename !== safeStoredFilename(artifact.filename, index + 1) ||
+              row.sha256 !== artifact.sha256 ||
+              row.byte_length !== artifact.sizeBytes ||
+              row.role !== artifact.role
+            );
+          })
+        )
+          throw new Error('Model identity is already in use');
+        this.db
+          .prepare('DELETE FROM local_model_download_jobs WHERE id = ? AND state = ?')
+          .run(previous.id, 'canceled');
+        this.db
+          .prepare(
+            "UPDATE local_model_artifacts SET state = 'pending', downloaded_bytes = 0, etag = NULL WHERE model_id = ?",
+          )
+          .run(modelId);
+        this.db
+          .prepare(
+            "INSERT INTO local_model_download_jobs(id, model_id, state, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)",
+          )
+          .run(id, modelId, now, now);
+        return;
+      }
       this.db
         .prepare(
           `INSERT INTO local_models(
@@ -636,6 +673,23 @@ export class LocalModelDownloadRepository {
     return this.getJob(id);
   }
 
+  resetMissingArtifact(jobId: string, ordinal: number): void {
+    const job = this.getJob(jobId);
+    if (job.state !== 'downloading') throw new Error('Artifact recovery requires an active job');
+    this.db.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE local_model_artifacts SET state = 'pending', downloaded_bytes = 0, etag = NULL WHERE model_id = ? AND ordinal = ? AND state = 'downloaded'",
+        )
+        .run(job.modelId, ordinal);
+      this.db
+        .prepare(
+          "UPDATE local_model_download_jobs SET completed_artifacts = (SELECT COUNT(*) FROM local_model_artifacts WHERE model_id = ? AND state = 'downloaded'), downloaded_bytes = (SELECT COALESCE(SUM(downloaded_bytes), 0) FROM local_model_artifacts WHERE model_id = ?) WHERE id = ?",
+        )
+        .run(job.modelId, job.modelId, jobId);
+    })();
+  }
+
   progress(jobId: string, ordinal: number, bytes: number, etag: string | null): void {
     const job = this.getJob(jobId);
     this.db.transaction(() => {
@@ -856,6 +910,14 @@ export class LocalModelStore {
     const canonical = await realpath(rootPath);
     await mkdir(join(canonical, 'partials'), { recursive: true, mode: 0o700 });
     await mkdir(join(canonical, 'models'), { recursive: true, mode: 0o700 });
+    for (const child of ['partials', 'models']) {
+      const info = await lstat(join(canonical, child));
+      if (!info.isDirectory() || info.isSymbolicLink())
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Model store child must be a real directory',
+        );
+    }
     const markerPath = join(canonical, MARKER);
     try {
       await writeFile(markerPath, 'managed-local-v1\n', { flag: 'wx', mode: 0o600 });
@@ -874,7 +936,7 @@ export class LocalModelStore {
       if (!info.isDirectory() || info.isSymbolicLink())
         throw new LocalModelDownloadError('unsafe_store', 'Staging model directory is unsafe');
       await assertFlatPrivateDirectory(staging);
-      await rm(staging, { recursive: true });
+      // Preserve crash survivors until the owning job and immutable artifact hashes are known.
     }
     return new LocalModelStore(canonical);
   }
@@ -895,6 +957,121 @@ export class LocalModelStore {
     if (!Number.isInteger(ordinal) || ordinal < 1 || ordinal > MAX_ARTIFACTS)
       throw new LocalModelDownloadError('unsafe_store', 'Invalid artifact ordinal');
     return join(this.rootPath, 'models', modelId, `${String(ordinal).padStart(3, '0')}.gguf`);
+  }
+
+  private artifactFilename(artifact: ArtifactRow): string {
+    const suffix =
+      extname(basename(artifact.filename)).toLowerCase() === '.gguf' ? '.gguf' : '.bin';
+    return `${String(artifact.ordinal).padStart(3, '0')}${suffix}`;
+  }
+
+  private async assertArtifact(
+    path: string,
+    artifact: ArtifactRow,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+      throw new LocalModelDownloadError(
+        'unsafe_store',
+        'Recovery artifact is not a private regular file',
+      );
+    if (info.size !== artifact.byte_length)
+      throw new LocalModelDownloadError('size_changed', 'Recovery artifact size changed');
+    if ((await sha256File(path, signal)) !== artifact.sha256)
+      throw new LocalModelDownloadError('hash_mismatch', 'Recovery artifact hash mismatch');
+  }
+
+  private async bundleEntries(path: string): Promise<readonly string[] | null> {
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(path);
+    } catch (error: unknown) {
+      if (isNodeError(error, 'ENOENT')) return null;
+      throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw new LocalModelDownloadError('unsafe_store', 'Recovery bundle is not a real directory');
+    await assertFlatPrivateDirectory(path);
+    return readdir(path);
+  }
+
+  /** Reconcile only files owned by this job, validating all survivors before moving any. */
+  async recoverPublish(
+    modelId: string,
+    artifacts: readonly ArtifactRow[],
+    signal: AbortSignal,
+  ): Promise<'final' | 'partial'> {
+    assertModelId(modelId);
+    const finalPath = join(this.rootPath, 'models', modelId);
+    const staging = join(this.rootPath, 'models', `.staging-${modelId}`);
+    const finalEntries = await this.bundleEntries(finalPath);
+    const stagedEntries = await this.bundleEntries(staging);
+    const expected = new Map(artifacts.map((row) => [this.artifactFilename(row), row]));
+    if (finalEntries !== null) {
+      if (
+        stagedEntries !== null ||
+        artifacts.some((row) => row.state !== 'downloaded') ||
+        finalEntries.length !== artifacts.length ||
+        finalEntries.some((name) => !expected.has(name))
+      )
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Published recovery bundle has unexpected artifacts',
+        );
+      for (const row of artifacts)
+        await this.assertArtifact(join(finalPath, this.artifactFilename(row)), row, signal);
+      return 'final';
+    }
+    if (stagedEntries !== null) {
+      if (stagedEntries.some((name) => !expected.has(name)))
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Staged recovery bundle has unexpected artifacts',
+        );
+      const moves: { source: string; destination: string; duplicate: boolean }[] = [];
+      for (const name of stagedEntries) {
+        const row = expected.get(name)!;
+        if (row.state !== 'downloaded')
+          throw new LocalModelDownloadError(
+            'unsafe_store',
+            'Staged artifact is not owned by a verified job',
+          );
+        const source = join(staging, name);
+        const destination = this.partialPath(modelId, row.ordinal);
+        await this.assertArtifact(source, row, signal);
+        let duplicate = false;
+        try {
+          await this.assertArtifact(destination, row, signal);
+          duplicate = true;
+        } catch (error: unknown) {
+          if (!isNodeError(error, 'ENOENT')) throw error;
+        }
+        moves.push({ source, destination, duplicate });
+      }
+      signal.throwIfAborted();
+      for (const move of moves) {
+        if (move.duplicate) await unlink(move.source);
+        else await rename(move.source, move.destination);
+      }
+      // Nonrecursive removal can never discard the only surviving shard.
+      await rmdir(staging);
+    }
+    return 'partial';
+  }
+
+  async hasVerifiedPartial(
+    modelId: string,
+    artifact: ArtifactRow,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      await this.assertArtifact(this.partialPath(modelId, artifact.ordinal), artifact, signal);
+      return true;
+    } catch (error: unknown) {
+      if (isNodeError(error, 'ENOENT')) return false;
+      throw error;
+    }
   }
 
   async publish(modelId: string, artifacts: readonly ArtifactRow[]): Promise<void> {
@@ -931,8 +1108,23 @@ export class LocalModelStore {
     } catch (error) {
       for (const item of moved.reverse())
         await rename(item.destination, item.source).catch(() => undefined);
-      await rm(staging, { recursive: true }).catch(() => undefined);
+      await rmdir(staging).catch(() => undefined);
       throw error;
+    }
+  }
+
+  async assertUnpublished(modelId: string): Promise<void> {
+    assertModelId(modelId);
+    for (const path of [
+      join(this.rootPath, 'models', modelId),
+      join(this.rootPath, 'models', `.staging-${modelId}`),
+    ]) {
+      try {
+        await lstat(path);
+        throw new LocalModelDownloadError('unsafe_store', 'Model has published or staged files');
+      } catch (error: unknown) {
+        if (!isNodeError(error, 'ENOENT')) throw error;
+      }
     }
   }
 
@@ -957,6 +1149,19 @@ export class LocalModelStore {
 export class LocalModelDownloadManager {
   private readonly controllers = new Map<string, AbortController>();
   private activeJobId: string | null = null;
+  private readonly runCompletions = new Map<string, Promise<void>>();
+  private readonly identityOperations = new Map<string, Promise<unknown>>();
+
+  private async withIdentity<T>(modelId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.identityOperations.get(modelId) ?? Promise.resolve();
+    const pending = previous.catch(() => undefined).then(operation);
+    this.identityOperations.set(modelId, pending);
+    try {
+      return await pending;
+    } finally {
+      if (this.identityOperations.get(modelId) === pending) this.identityOperations.delete(modelId);
+    }
+  }
 
   constructor(
     private readonly repository: LocalModelDownloadRepository,
@@ -1076,36 +1281,94 @@ export class LocalModelDownloadManager {
     return this.repository.setLaunchSettings(modelId, settings);
   }
 
-  enqueue(input: LocalModelInstallPlan): LocalDownloadJob {
+  async enqueue(input: LocalModelInstallPlan): Promise<LocalDownloadJob> {
     const plan = validatePlan(input);
-    return this.repository.create(plan, randomUUID(), this.now());
+    const modelId = modelIdFor(plan);
+    return this.withIdentity(modelId, async () => {
+      const previous = this.repository.listJobs().find((job) => job.modelId === modelId);
+      if (previous?.state === 'canceled') {
+        await this.runCompletions.get(previous.id);
+        // Recovery may leave a legacy canceled partial. Never clean a published bundle.
+        await this.store.assertUnpublished(modelId);
+        await this.store.cancel(modelId, previous.artifactCount);
+      }
+      return this.repository.create(plan, randomUUID(), this.now());
+    });
   }
 
   async run(jobId: string, planInput: LocalModelInstallPlan): Promise<LocalDownloadJob> {
     const plan = validatePlan(planInput);
     let job = this.repository.getJob(jobId);
     if (job.modelId !== modelIdFor(plan)) throw new Error('Install plan does not match job');
-    if (this.activeJobId !== null) throw new Error('Another model download is active');
-    job = this.repository.transition(jobId, 'downloading', this.now());
-    this.activeJobId = jobId;
+    if (job.state === 'installed') return job;
+    let complete!: () => void;
     const controller = new AbortController();
-    this.controllers.set(jobId, controller);
+    let started = false;
+    await this.withIdentity(job.modelId, async () => {
+      job = this.repository.getJob(jobId);
+      if (job.state === 'canceled' || job.state === 'installed') return;
+      if (this.activeJobId !== null) throw new Error('Another model download is active');
+      job = this.repository.transition(jobId, 'downloading', this.now());
+      this.activeJobId = jobId;
+      started = true;
+      this.controllers.set(jobId, controller);
+      this.runCompletions.set(
+        jobId,
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+      );
+    });
+    if (!started) return job;
     try {
       const rows = this.repository.artifacts(job.modelId);
+      if (
+        rows.length !== plan.artifacts.length ||
+        rows.some((row, index) => {
+          const expected = plan.artifacts[index]!;
+          return (
+            row.ordinal !== index + 1 ||
+            row.filename !== safeStoredFilename(expected.filename, index + 1) ||
+            row.sha256 !== expected.sha256 ||
+            row.byte_length !== expected.sizeBytes ||
+            row.role !== expected.role
+          );
+        })
+      )
+        throw new LocalModelDownloadError(
+          'unsafe_store',
+          'Persisted artifact identity does not match the immutable plan',
+        );
+      const location = await this.store.recoverPublish(job.modelId, rows, controller.signal);
       for (const row of rows) {
-        if (row.state !== 'pending') continue;
+        if (location === 'final') continue;
+        if (row.state === 'downloaded') {
+          if (await this.store.hasVerifiedPartial(job.modelId, row, controller.signal)) continue;
+          this.repository.resetMissingArtifact(jobId, row.ordinal);
+        } else if (row.state !== 'pending')
+          throw new LocalModelDownloadError(
+            'unsafe_store',
+            'Unexpected artifact state during recovery',
+          );
         const artifact = plan.artifacts[row.ordinal - 1];
         if (artifact === undefined)
           throw new LocalModelDownloadError('missing_shard', 'Install plan shard is missing');
-        await this.downloadArtifact(jobId, job.modelId, row, artifact, controller.signal);
+        const currentRow = this.repository
+          .artifacts(job.modelId)
+          .find((item) => item.ordinal === row.ordinal)!;
+        await this.downloadArtifact(jobId, job.modelId, currentRow, artifact, controller.signal);
+        controller.signal.throwIfAborted();
         this.repository.artifactDownloaded(jobId, row.ordinal, this.now());
       }
+      controller.signal.throwIfAborted();
       this.repository.transition(jobId, 'verifying', this.now());
       const modelRows = this.repository
         .artifacts(job.modelId)
         .filter(({ role }) => role === 'model');
       const metadata = await readGgufModelMetadata(
-        this.store.partialPath(job.modelId, modelRows[0]!.ordinal),
+        location === 'final'
+          ? this.store.installedPath(job.modelId, modelRows[0]!.ordinal)
+          : this.store.partialPath(job.modelId, modelRows[0]!.ordinal),
       );
       const draft = plan.architecture === 'dflash';
       if (
@@ -1121,7 +1384,8 @@ export class LocalModelDownloadManager {
           'unsafe_store',
           'DFlash metadata or declared compatibility is invalid',
         );
-      await this.store.publish(job.modelId, this.repository.artifacts(job.modelId));
+      if (location !== 'final')
+        await this.store.publish(job.modelId, this.repository.artifacts(job.modelId));
       return this.repository.markInstalled(jobId, this.now(), {
         purpose: draft ? 'draft-dflash' : 'normal',
         baseModelId: plan.baseModelId ?? null,
@@ -1134,6 +1398,8 @@ export class LocalModelDownloadManager {
     } finally {
       this.controllers.delete(jobId);
       this.activeJobId = null;
+      complete();
+      this.runCompletions.delete(jobId);
     }
   }
 
@@ -1146,10 +1412,20 @@ export class LocalModelDownloadManager {
   async cancel(jobId: string, confirmed: boolean): Promise<LocalDownloadJob> {
     if (!confirmed) throw new Error('Cancel confirmation is required');
     const current = this.repository.getJob(jobId);
-    this.controllers.get(jobId)?.abort();
-    await this.store.cancel(current.modelId, current.artifactCount);
-    const latest = this.repository.getJob(jobId);
-    return this.repository.transition(jobId, 'canceled', this.now(), latest.failureCode);
+    return this.withIdentity(current.modelId, async () => {
+      const latest = this.repository.getJob(jobId);
+      if (latest.state === 'canceled') return latest;
+      if (!transitions[latest.state].includes('canceled'))
+        throw new Error('Model download cannot be canceled');
+      this.controllers.get(jobId)?.abort();
+      await this.runCompletions.get(jobId);
+      const stopped = this.repository.getJob(jobId);
+      if (!transitions[stopped.state].includes('canceled'))
+        throw new Error('Model download cannot be canceled');
+      await this.store.assertUnpublished(stopped.modelId);
+      await this.store.cancel(stopped.modelId, stopped.artifactCount);
+      return this.repository.transition(jobId, 'canceled', this.now(), stopped.failureCode);
+    });
   }
 
   async deleteInstalled(modelId: string): Promise<void> {
@@ -1230,10 +1506,16 @@ export class LocalModelDownloadManager {
     const handle = await openPartial(partial, offset > 0);
     const reader = responseBody.getReader();
     let completed = false;
+    const abortRead = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    signal.addEventListener('abort', abortRead, { once: true });
     try {
       let written = offset;
       for (;;) {
+        signal.throwIfAborted();
         const chunk = await reader.read();
+        signal.throwIfAborted();
         if (chunk.done) {
           completed = true;
           break;
@@ -1260,6 +1542,7 @@ export class LocalModelDownloadManager {
         } catch {
           // Preserve the download, pause, or cancellation failure.
         }
+      signal.removeEventListener('abort', abortRead);
       reader.releaseLock();
       await handle.close();
     }
