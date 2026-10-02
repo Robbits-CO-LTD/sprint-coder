@@ -8,12 +8,27 @@ const fail = () => {
   throw new Error('Owned process receipt is unavailable');
 };
 const requireNative = createRequire(import.meta.url);
+const verifiedNativeLoads = new WeakMap();
+const verifiedNativePaths = new Set();
 const samePath = (left, right) =>
   win32.normalize(left).toLowerCase() === win32.normalize(right).toLowerCase();
 function addonHash(path) {
   const stat = lstatSync(path);
   if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024 * 1024) fail();
   return hashExecutable(path, 64 * 1024 * 1024);
+}
+
+function verifiedCacheMatches(path, hash, entry, verified) {
+  return (
+    entry !== undefined &&
+    verified !== undefined &&
+    requireNative.cache[path] === entry &&
+    entry.loaded === true &&
+    verified.path === path &&
+    verified.hash === hash &&
+    entry.exports === verified.binding &&
+    verified.binding.retainOwnedProcessIdentity === verified.retainOwnedProcessIdentity
+  );
 }
 
 /** The protected caller must authenticate package/source provenance separately. A hash alone
@@ -34,14 +49,36 @@ export function createPinnedOwnedProcessRetainer(input, load = requireNative) {
       fail();
     const path = realpathSync(addonPath);
     if (!samePath(path, resolve(addonPath)) || addonHash(path) !== addonSha256) fail();
-    // A previously cached native module cannot be bound to the bytes just measured here.
-    if (load === requireNative && requireNative.cache[path] !== undefined) fail();
-    const binding = load(path);
+    const defaultLoader = load === requireNative;
+    let entry = defaultLoader ? requireNative.cache[path] : undefined;
+    let verified = entry === undefined ? undefined : verifiedNativeLoads.get(entry);
+    // Only this module's verified load may be reused. A missing/replaced cache entry cannot
+    // rebind an already loaded native image by deleting its cache and loading again.
+    if (
+      defaultLoader &&
+      (entry === undefined
+        ? verifiedNativePaths.has(path)
+        : !verifiedCacheMatches(path, addonSha256, entry, verified))
+    )
+      fail();
+    const binding = verified === undefined ? load(path) : verified.binding;
     if (
       addonHash(path) !== addonSha256 ||
       typeof binding?.retainOwnedProcessIdentity !== 'function'
     )
       fail();
+    if (defaultLoader) {
+      entry = requireNative.cache[path];
+      verified ??= Object.freeze({
+        path,
+        hash: addonSha256,
+        binding,
+        retainOwnedProcessIdentity: binding.retainOwnedProcessIdentity,
+      });
+      if (!verifiedCacheMatches(path, addonSha256, entry, verified)) fail();
+      verifiedNativeLoads.set(entry, verified);
+      verifiedNativePaths.add(path);
+    }
     return (context) => {
       let receipt;
       try {
@@ -52,7 +89,10 @@ export function createPinnedOwnedProcessRetainer(input, load = requireNative) {
           !isAbsolute(context.executable)
         )
           fail();
-        receipt = binding.retainOwnedProcessIdentity(context.pid);
+        if (defaultLoader && !verifiedCacheMatches(path, addonSha256, entry, verified)) fail();
+        receipt = defaultLoader
+          ? Reflect.apply(verified.retainOwnedProcessIdentity, binding, [context.pid])
+          : binding.retainOwnedProcessIdentity(context.pid);
         const measured = receipt.snapshot();
         const baseline = Object.freeze({
           pid: measured?.pid,
