@@ -155,12 +155,33 @@ function secondaryReceiptCode(
 }
 
 function fixedCaptureDiagnostic(diagnostic: string, bytes: number): string {
-  return bytes <= 256 &&
-    /^OWNED_PROCESS_CAPTURE_UNCONFIRMED:(pin_start|handshake|normal_completion|capture_closed|digest|cleanup)(\nOWNED_PROCESS_CAPTURE_SECONDARY:(NO_TERMINAL_VERIFY|TERMINAL_FALSE|TERMINAL_THROW|SECONDARY_COMPLETED|AFTER_VERIFY_FAILURE|VERIFY_UNEXPECTED):(CLOSE_RETURNED|CLOSE_THROW|CLOSE_NONE|CLOSE_UNEXPECTED))?$/u.test(
-      diagnostic,
-    )
-    ? diagnostic
-    : 'OWNED_PROCESS_CAPTURE_UNCONFIRMED';
+  const fallback = 'OWNED_PROCESS_CAPTURE_UNCONFIRMED';
+  if (bytes > 512) return fallback;
+  const tokens = diagnostic.split(/\r?\n/u).filter((token) => token !== '');
+  const primary = tokens.filter((token) =>
+    /^OWNED_PROCESS_CAPTURE_UNCONFIRMED:(pin_start|handshake|normal_completion|capture_closed|digest|cleanup)$/u.test(
+      token,
+    ),
+  );
+  const secondary = tokens.filter((token) =>
+    /^OWNED_PROCESS_CAPTURE_SECONDARY:(NO_TERMINAL_VERIFY|TERMINAL_FALSE|TERMINAL_THROW|SECONDARY_COMPLETED|AFTER_VERIFY_FAILURE|VERIFY_UNEXPECTED):(CLOSE_RETURNED|CLOSE_THROW|CLOSE_NONE|CLOSE_UNEXPECTED)$/u.test(
+      token,
+    ),
+  );
+  const native = tokens.filter((token) =>
+    /^OWNED_PROCESS_NATIVE_VERIFY:(CLOSED_HANDLE|PROCESS_ID_MISMATCH|IDENTITY_QUERY_FAILED|IDENTITY_TIMES_FAILED|IDENTITY_BASIC_FAILED|IDENTITY_PID_MISMATCH|IDENTITY_PARENT_OVERFLOW|PARENT_MISMATCH|START_MISMATCH|IMAGE_QUERY_FAILED|IMAGE_MISMATCH)$/u.test(
+      token,
+    ),
+  );
+  if (
+    primary.length !== 1 ||
+    secondary.length > 1 ||
+    native.length > 2 ||
+    primary.length + secondary.length + native.length !== tokens.length ||
+    (secondary.length === 1 && tokens.at(-1) !== secondary[0])
+  )
+    return fallback;
+  return tokens.join('\n');
 }
 
 describe('owned capture private retained process lifecycle', () => {
@@ -195,7 +216,39 @@ describe('owned capture private retained process lifecycle', () => {
       expect(fixedCaptureDiagnostic(invalid, Buffer.byteLength(invalid))).toBe(
         'OWNED_PROCESS_CAPTURE_UNCONFIRMED',
       );
-    expect(fixedCaptureDiagnostic(valid, 257)).toBe('OWNED_PROCESS_CAPTURE_UNCONFIRMED');
+    expect(fixedCaptureDiagnostic(valid, 513)).toBe('OWNED_PROCESS_CAPTURE_UNCONFIRMED');
+  });
+
+  it.each([
+    'CLOSED_HANDLE',
+    'PROCESS_ID_MISMATCH',
+    'IDENTITY_QUERY_FAILED',
+    'IDENTITY_TIMES_FAILED',
+    'IDENTITY_BASIC_FAILED',
+    'IDENTITY_PID_MISMATCH',
+    'IDENTITY_PARENT_OVERFLOW',
+    'PARENT_MISMATCH',
+    'START_MISMATCH',
+    'IMAGE_QUERY_FAILED',
+    'IMAGE_MISMATCH',
+  ])('accepts only fixed temporary native failure reason %s', (reason) => {
+    const native = `OWNED_PROCESS_NATIVE_VERIFY:${reason}`;
+    const primary = 'OWNED_PROCESS_CAPTURE_UNCONFIRMED:normal_completion';
+    const secondary = 'OWNED_PROCESS_CAPTURE_SECONDARY:TERMINAL_FALSE:CLOSE_RETURNED';
+    const payload = `\r\n${native}\r\n${primary}\r\n${native}\r\n${secondary}`;
+    expect(fixedCaptureDiagnostic(payload, Buffer.byteLength(payload))).toBe(
+      [native, primary, native, secondary].join('\n'),
+    );
+    for (const invalid of [
+      `${primary}\nOWNED_PROCESS_NATIVE_VERIFY:IMAGE_QUERY_FAILED:PRIVATE_PATH`,
+      `${primary}\nOWNED_PROCESS_NATIVE_VERIFY:PRIVATE_RAW_ERROR`,
+      `${primary}\n${primary}\n${native}`,
+      `${native}\n${native}\n${native}\n${primary}`,
+      `${primary}\n${secondary}\n${native}`,
+    ])
+      expect(fixedCaptureDiagnostic(invalid, Buffer.byteLength(invalid))).toBe(
+        'OWNED_PROCESS_CAPTURE_UNCONFIRMED',
+      );
   });
 
   it('keeps the controlled producer alive until acquisition is acknowledged', async () => {
@@ -489,7 +542,7 @@ if(successful)process.stdout.write('OWNED_PROCESS_CAPTURE_PASS');else {
       });
       driverProcess.stderr.on('data', (chunk: Buffer) => {
         diagnosticBytes += chunk.length;
-        diagnostic = diagnosticBytes <= 256 ? diagnostic + chunk.toString('utf8') : '';
+        diagnostic = diagnosticBytes <= 512 ? diagnostic + chunk.toString('utf8') : '';
       });
       try {
         const code = await new Promise<number | null>((resolveCode, reject) => {

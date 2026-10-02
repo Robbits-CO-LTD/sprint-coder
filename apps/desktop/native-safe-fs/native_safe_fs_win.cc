@@ -8,6 +8,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <mutex>
 #include <atomic>
 #include <cstring>
@@ -48,8 +49,42 @@ napi_value ThrowWindowsError(napi_env env, const char* operation) {
   return nullptr;
 }
 
+// TEMPORARY CI-only predicate diagnostic. Remove before merge after confirmed RCA.
+enum class OwnedProcessVerifyFailure {
+  kNone, kClosed, kPid, kIdentityQuery, kTimes, kBasic, kBasicPid,
+  kParentOverflow, kParent, kStart, kImageQuery, kImage,
+};
+
+bool IdentityReadFailure(OwnedProcessVerifyFailure* failure,
+                         OwnedProcessVerifyFailure reason) {
+  if (failure != nullptr) *failure = reason;
+  return false;
+}
+
+void TraceOwnedProcessVerifyFailure(OwnedProcessVerifyFailure failure) {
+  wchar_t ci[5]{};
+  if (GetEnvironmentVariableW(L"CI", ci, 5) != 4 ||
+      ci[0] != L't' || ci[1] != L'r' || ci[2] != L'u' || ci[3] != L'e') return;
+  const char* token = "\nOWNED_PROCESS_NATIVE_VERIFY:IDENTITY_QUERY_FAILED\n";
+  switch (failure) {
+    case OwnedProcessVerifyFailure::kClosed: token = "\nOWNED_PROCESS_NATIVE_VERIFY:CLOSED_HANDLE\n"; break;
+    case OwnedProcessVerifyFailure::kPid: token = "\nOWNED_PROCESS_NATIVE_VERIFY:PROCESS_ID_MISMATCH\n"; break;
+    case OwnedProcessVerifyFailure::kTimes: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IDENTITY_TIMES_FAILED\n"; break;
+    case OwnedProcessVerifyFailure::kBasic: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IDENTITY_BASIC_FAILED\n"; break;
+    case OwnedProcessVerifyFailure::kBasicPid: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IDENTITY_PID_MISMATCH\n"; break;
+    case OwnedProcessVerifyFailure::kParentOverflow: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IDENTITY_PARENT_OVERFLOW\n"; break;
+    case OwnedProcessVerifyFailure::kParent: token = "\nOWNED_PROCESS_NATIVE_VERIFY:PARENT_MISMATCH\n"; break;
+    case OwnedProcessVerifyFailure::kStart: token = "\nOWNED_PROCESS_NATIVE_VERIFY:START_MISMATCH\n"; break;
+    case OwnedProcessVerifyFailure::kImageQuery: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IMAGE_QUERY_FAILED\n"; break;
+    case OwnedProcessVerifyFailure::kImage: token = "\nOWNED_PROCESS_NATIVE_VERIFY:IMAGE_MISMATCH\n"; break;
+    default: break;
+  }
+  std::fputs(token, stderr);
+}
+
 bool ReadWindowsProcessIdentity(HANDLE process, DWORD pid, DWORD* parent_pid,
-                               uint64_t* start_identity) {
+                               uint64_t* start_identity,
+                               OwnedProcessVerifyFailure* failure = nullptr) {
   FILETIME created{}, exited{}, kernel{}, user{};
   const BOOL read_times = GetProcessTimes(process, &created, &exited, &kernel, &user);
   struct SprintProcessBasicInformation {
@@ -71,9 +106,12 @@ bool ReadWindowsProcessIdentity(HANDLE process, DWORD pid, DWORD* parent_pid,
       query_basic == nullptr
           ? static_cast<LONG>(-1)
           : query_basic(process, 0, &basic, sizeof(basic), nullptr);
-  if (!read_times || basic_status < 0 || basic.unique_process_id != pid ||
-      basic.inherited_from_unique_process_id > std::numeric_limits<DWORD>::max())
-    return false;
+  if (!read_times) return IdentityReadFailure(failure, OwnedProcessVerifyFailure::kTimes);
+  if (basic_status < 0) return IdentityReadFailure(failure, OwnedProcessVerifyFailure::kBasic);
+  if (basic.unique_process_id != pid)
+    return IdentityReadFailure(failure, OwnedProcessVerifyFailure::kBasicPid);
+  if (basic.inherited_from_unique_process_id > std::numeric_limits<DWORD>::max())
+    return IdentityReadFailure(failure, OwnedProcessVerifyFailure::kParentOverflow);
   ULARGE_INTEGER created_ticks{};
   created_ticks.LowPart = created.dwLowDateTime;
   created_ticks.HighPart = created.dwHighDateTime;
@@ -209,11 +247,18 @@ napi_value OwnedProcessIdentityVerify(napi_env env, napi_callback_info info) {
   DWORD parent_pid = 0;
   uint64_t start_identity = 0;
   std::wstring image;
-  const bool unchanged = lease->process != nullptr &&
-      GetProcessId(lease->process) == lease->pid &&
-      ReadWindowsProcessIdentity(lease->process, lease->pid, &parent_pid, &start_identity) &&
-      parent_pid == lease->parent_pid && start_identity == lease->start_identity &&
-      ReadOwnedProcessImage(lease->process, &image) && image == lease->image;
+  OwnedProcessVerifyFailure failure = OwnedProcessVerifyFailure::kNone;
+  const bool unchanged = [&] {
+    if (lease->process == nullptr) { failure = OwnedProcessVerifyFailure::kClosed; return false; }
+    if (GetProcessId(lease->process) != lease->pid) { failure = OwnedProcessVerifyFailure::kPid; return false; }
+    if (!ReadWindowsProcessIdentity(lease->process, lease->pid, &parent_pid, &start_identity, &failure)) return false;
+    if (parent_pid != lease->parent_pid) { failure = OwnedProcessVerifyFailure::kParent; return false; }
+    if (start_identity != lease->start_identity) { failure = OwnedProcessVerifyFailure::kStart; return false; }
+    if (!ReadOwnedProcessImage(lease->process, &image)) { failure = OwnedProcessVerifyFailure::kImageQuery; return false; }
+    if (image != lease->image) { failure = OwnedProcessVerifyFailure::kImage; return false; }
+    return true;
+  }();
+  if (!unchanged) TraceOwnedProcessVerifyFailure(failure);
   napi_value result;
   napi_get_boolean(env, unchanged, &result);
   return result;
