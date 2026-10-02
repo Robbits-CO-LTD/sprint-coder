@@ -31,8 +31,7 @@ import {
 // (better-sqlite3 is rebuilt for Electron), so under plain vitest they are skipped and a bridge
 // test re-runs this file inside Electron with ELECTRON_RUN_AS_NODE.
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
-// Windows CI spends most of this time creating the 10k-row fixture. The measured reopen/projection
-// budget below remains 1.5s; this timeout only keeps fixture setup from masking that assertion.
+// Keep the existing fixture deadline separate from the unchanged 1.5s reopen/projection budget.
 const projectionFixtureTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
 const recoveryBridgeTimeoutMs = process.platform === 'win32' ? 150_000 : 90_000;
 const execFileAsync = promisify(execFile);
@@ -439,34 +438,81 @@ if (runsWithElectronAbi)
   describe('10k-event projection restore (NFR-PERF-04)', () => {
     it(
       'reopens and projects a 10,000-delta task within budget',
-      async () => {
+      () => {
         const path = tempDatabasePath();
+        const fixtureStart = performance.now();
+        const chunks = Array.from({ length: 10_000 }, (_, index) => `chunk-${index} `);
         const seeded = new SqlitePersistenceClient(path);
-        const task = seeded.createTask('projection perf fixture');
-        const started = seeded.startTurn(task.id, '大量イベントの復元計測');
-        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
-          seeded.changeStage(task.id, started.turnId, stage);
+        let taskId: string;
+        let turnId: string;
         const messageId = randomUUID();
-        for (let index = 0; index < 10_000; index += 1) {
-          seeded.appendDelta(task.id, started.turnId, messageId, `chunk-${index} `);
-          // Windows can spend over a minute building this fixture. Yield periodically so Vitest's
-          // worker can service its control-plane RPC while keeping setup outside the measurement.
-          if (index % 250 === 249) await new Promise<void>((resolve) => setImmediate(resolve));
+        let sample: ReturnType<SqlitePersistenceClient['appendDelta']>;
+        try {
+          const task = seeded.createTask('projection perf fixture');
+          taskId = task.id;
+          const started = seeded.startTurn(task.id, 'projection fixture');
+          turnId = started.turnId;
+          for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+            seeded.changeStage(task.id, started.turnId, stage);
+          sample = seeded.appendDelta(task.id, started.turnId, messageId, chunks[0]!);
+        } finally {
+          seeded.close();
         }
-        seeded.close();
+
+        // This gate measures reopen/projection, not 10k individual streaming commits.
+        // Seed the remaining valid events in one test-owned transaction using the
+        // product's first event as the template; keep the materialized message identical.
+        const fixture = new Database(path);
+        try {
+          fixture.pragma('foreign_keys = ON');
+          const insert = fixture.prepare(
+            'INSERT INTO turn_events(id, task_id, turn_id, seq, schema_version, type, payload_json, created_at) VALUES (?, ?, ?, ?, 1, ?, ?, ?)',
+          );
+          const now = new Date().toISOString();
+          fixture.transaction(() => {
+            for (let index = 1; index < chunks.length; index++) {
+              const event = { ...sample, seq: sample.seq + index, delta: chunks[index]! };
+              insert.run(
+                randomUUID(),
+                taskId,
+                turnId,
+                event.seq,
+                event.type,
+                JSON.stringify(event),
+                now,
+              );
+            }
+            fixture
+              .prepare('UPDATE messages SET content = ? WHERE id = ?')
+              .run(chunks.join(''), messageId);
+            fixture.prepare('UPDATE turns SET updated_at = ? WHERE id = ?').run(now, turnId);
+          })();
+        } finally {
+          fixture.close();
+        }
+        console.info(
+          `[perf] 10k-event fixture setup: ${Math.round(performance.now() - fixtureStart)}ms`,
+        );
 
         const openStart = performance.now();
         const reopened = new SqlitePersistenceClient(path);
-        const messages = reopened.listMessages(task.id);
-        const elapsedMs = performance.now() - openStart;
-        reopened.close();
-
-        expect(messages.some((message) => message.content.includes('chunk-9999'))).toBe(true);
-        // NFR-PERF-04 targets 500ms first render; the DB open + projection share of that budget is
-        // asserted with headroom for slow CI machines. The measured value is printed for the gate
-        // record.
-        console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
-        expect(elapsedMs).toBeLessThan(1500);
+        try {
+          const messages = reopened.listMessages(taskId);
+          const elapsedMs = performance.now() - openStart;
+          expect(messages.find(({ id }) => id === messageId)?.content).toBe(chunks.join(''));
+          console.info(`[perf] 10k-event reopen+projection: ${Math.round(elapsedMs)}ms`);
+          expect(elapsedMs).toBeLessThan(1500);
+          const deltas = reopened
+            .listEventsAfter(taskId, 0)
+            .filter((event) => event.type === 'message.delta');
+          expect(deltas).toHaveLength(10_000);
+          expect(deltas.map(({ delta }) => delta)).toEqual(chunks);
+          expect(deltas.map(({ seq }) => seq)).toEqual(
+            chunks.map((_, index) => sample.seq + index),
+          );
+        } finally {
+          reopened.close();
+        }
       },
       projectionFixtureTimeoutMs,
     );

@@ -47,6 +47,7 @@ export async function probeCliCommandCandidates(input: {
   candidates: readonly CliCommandCandidate[];
   environment: Readonly<NodeJS.ProcessEnv>;
   timeoutMs: number;
+  deadlineAt?: number;
 }): Promise<ResolvedCliCommand | null> {
   return probeFirstCapableCliCommand(input.kind, input.candidates, async (candidate) => {
     const version = await probeVersion(
@@ -54,6 +55,7 @@ export async function probeCliCommandCandidates(input: {
       candidate.executable,
       input.environment,
       input.timeoutMs,
+      input.deadlineAt,
     );
     if (version === null) return null;
     const capabilities = await probeRequiredCapabilities(
@@ -61,6 +63,7 @@ export async function probeCliCommandCandidates(input: {
       candidate.executable,
       input.environment,
       input.timeoutMs,
+      input.deadlineAt,
     );
     if (capabilities === null) return null;
     return {
@@ -181,8 +184,16 @@ async function probeVersion(
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
+  deadlineAt?: number,
 ): Promise<string | null> {
-  const result = await probeCommand(executable, ['--version'], environment, timeoutMs, 512);
+  const result = await probeCommand(
+    executable,
+    ['--version'],
+    environment,
+    timeoutMs,
+    512,
+    deadlineAt,
+  );
   const version = result?.stdout.trim() ?? '';
   return result?.code === 0 && isSafeCliVersionText(kind, version) ? version : null;
 }
@@ -203,6 +214,7 @@ async function probeRequiredCapabilities(
   executable: string,
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
+  deadlineAt?: number,
 ): Promise<string[] | null> {
   if (kind === 'grok') {
     const result = await probeCommand(
@@ -211,6 +223,7 @@ async function probeRequiredCapabilities(
       environment,
       timeoutMs,
       16 * 1024,
+      deadlineAt,
     );
     if (
       result?.code !== 0 ||
@@ -228,12 +241,20 @@ async function probeRequiredCapabilities(
       environment,
       timeoutMs,
       8 * 1024,
+      deadlineAt,
     );
     if (result?.code !== 0) return null;
     const capabilities = capabilitiesFromCodexAppServerHelp(result.output);
     return capabilities.length === 3 ? capabilities : null;
   }
-  const result = await probeCommand(executable, ['--help'], environment, timeoutMs, 64 * 1024);
+  const result = await probeCommand(
+    executable,
+    ['--help'],
+    environment,
+    timeoutMs,
+    64 * 1024,
+    deadlineAt,
+  );
   if (result?.code !== 0) return null;
   const capabilities = capabilitiesFromClaudeHelp(result.output);
   return capabilities.length === 6 ? capabilities : null;
@@ -267,7 +288,11 @@ function probeCommand(
   environment: Readonly<NodeJS.ProcessEnv>,
   timeoutMs: number,
   outputLimit: number,
+  deadlineAt?: number,
 ): Promise<{ code: number | null; output: string; stdout: string } | null> {
+  const remainingMs =
+    deadlineAt === undefined ? timeoutMs : Math.min(timeoutMs, deadlineAt - Date.now());
+  if (remainingMs <= 0) return Promise.resolve(null);
   return new Promise((resolve) => {
     let settled = false;
     const chunks: Buffer[] = [];
@@ -288,7 +313,7 @@ function probeCommand(
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish(null);
-    }, timeoutMs);
+    }, remainingMs);
     timer.unref?.();
     const finish = (
       value: { code: number | null; output: string; stdout: string } | null,

@@ -53,6 +53,98 @@ const providerConnection = (
 });
 
 describe('TeamExecutionScheduler', () => {
+  it('rejects impossible queued jobs before readiness and timing without blocking another job', async () => {
+    const admission = new ConnectionAdmissionController();
+    const connection = providerConnection('openai:primary', 'official_api', 1);
+    connection.rateLimit.tokensPerMinute = 19_999;
+    const scheduler = new TeamExecutionScheduler(1, admission);
+    scheduler.configureConnection(connection);
+    const rejected = vi.fn(() => {
+      scheduler.notifyReadinessChanged();
+      throw new Error('fixture callback failure');
+    });
+    const readiness = vi.fn(() => false);
+    const blockedRun = vi.fn(async () => {});
+    const starts = vi.fn(async () => {});
+    scheduler.submit({
+      executionId: 'impossible',
+      workerId: 'worker',
+      teamId: 'team',
+      teamLimit: 1,
+      connection: {
+        connectionId: connection.id,
+        queueOrdinal: 1,
+        queuedAt: connection.createdAt,
+        estimatedTokens: 20_000,
+      },
+      notBeforeMs: Date.now() + 1_000_000,
+      isReady: readiness,
+      onConnectionRejected: rejected,
+      run: blockedRun,
+    });
+    scheduler.submit({
+      executionId: 'possible',
+      workerId: 'worker',
+      teamId: 'team',
+      teamLimit: 1,
+      connection: {
+        connectionId: connection.id,
+        queueOrdinal: 2,
+        queuedAt: connection.createdAt,
+        estimatedTokens: 1,
+      },
+      run: starts,
+    });
+    await settleScheduler();
+    expect(rejected).toHaveBeenCalledExactlyOnceWith('tokens_per_minute_capacity');
+    expect(readiness).not.toHaveBeenCalled();
+    expect(blockedRun).not.toHaveBeenCalled();
+    expect(starts).toHaveBeenCalledOnce();
+    scheduler.notifyReadinessChanged();
+    await settleScheduler();
+    expect(rejected).toHaveBeenCalledOnce();
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+  });
+
+  it('revalidates queued replacements on reconfiguration while retaining the active run', async () => {
+    const admission = new ConnectionAdmissionController();
+    const connection = providerConnection('openai:primary', 'official_api', 1);
+    connection.rateLimit.tokensPerMinute = 20_000;
+    const scheduler = new TeamExecutionScheduler(1, admission);
+    scheduler.configureConnection(connection);
+    const active = deferred();
+    const rejected = vi.fn();
+    const job = {
+      executionId: 'execution',
+      workerId: 'worker',
+      teamId: 'team',
+      teamLimit: 1,
+      connection: {
+        connectionId: connection.id,
+        queueOrdinal: 1,
+        queuedAt: connection.createdAt,
+        estimatedTokens: 20_000,
+      },
+      run: () => active.promise,
+    };
+    scheduler.submit(job);
+    await settleScheduler();
+    expect(
+      scheduler.requeueActive(job.executionId, { ...job, onConnectionRejected: rejected }),
+    ).toBe(true);
+    scheduler.configureConnection({
+      ...connection,
+      rateLimit: { ...connection.rateLimit, tokensPerMinute: 19_999 },
+    });
+    await settleScheduler();
+    expect(rejected).toHaveBeenCalledOnce();
+    expect(scheduler.snapshot().activeExecutionIds).toEqual(['execution']);
+    active.resolve();
+    await settleScheduler();
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+    expect(rejected).toHaveBeenCalledOnce();
+  });
+
   it('excludes blocked graph candidates before slots and Connection admission, waking on state change', async () => {
     const admission = new ConnectionAdmissionController(() =>
       Date.parse('2026-07-28T00:00:01.000Z'),

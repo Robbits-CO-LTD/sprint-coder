@@ -5,5 +5,9 @@ export const RUNTIME_AUTH_PROBE_TIMEOUT_MS = 3_000;
 // Grok adds an ACP initialize before authentication, then confirms probe-process exit.
 export const GROK_PROBE_BUDGET_MS = 2 * 2_000 + 3_000 + 2_000 + 4_000;
 export const GROK_HOST_HELLO_TIMEOUT_MS = GROK_PROBE_BUDGET_MS + 2_000;
-export const RUNTIME_HOST_HELLO_TIMEOUT_MS =
-  RUNTIME_VERSION_PROBE_TIMEOUT_MS + RUNTIME_AUTH_PROBE_TIMEOUT_MS + 2_000;
+// Candidate discovery may compare several Desktop installations and then try a fallback.
+// Bound the entire search rather than multiplying Main's wait by an unbounded candidate count.
+export const RUNTIME_CLI_SELECTION_BUDGET_MS = 4 * RUNTIME_VERSION_PROBE_TIMEOUT_MS;
+export const RUNTIME_PROBE_BUDGET_MS =
+  RUNTIME_CLI_SELECTION_BUDGET_MS + RUNTIME_AUTH_PROBE_TIMEOUT_MS;
+export const RUNTIME_HOST_HELLO_TIMEOUT_MS = RUNTIME_PROBE_BUDGET_MS + 2_000;
