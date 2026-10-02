@@ -391,7 +391,7 @@ export class ManagedLocalRuntimeLifecycle {
 
   private createLease(current: CurrentModel, automaticRelease: boolean): ManagedLocalModelLease {
     this.cancelIdleRelease();
-    current.pendingStop = false;
+    if (current.leases.size === 0) current.pendingStop = false;
     const id = Symbol(current.descriptor.id);
     current.leases.set(id, automaticRelease);
     this.notifyChanged();

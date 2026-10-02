@@ -83,9 +83,13 @@ export async function* normalizeOpenAIResponsesStream(
         type: 'completed',
         stopReason: typeof response?.status === 'string' ? response.status : 'completed',
       };
-      continue;
+      return;
     }
-    if (event.type === 'response.failed' || event.type === 'error') {
+    if (
+      event.type === 'response.failed' ||
+      event.type === 'error' ||
+      event.type === 'response.incomplete'
+    ) {
       yield {
         type: 'error',
         error: {
@@ -96,6 +100,7 @@ export async function* normalizeOpenAIResponsesStream(
           providerCode: stringOrNull(event.code),
         },
       };
+      return;
     }
   }
 }
