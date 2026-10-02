@@ -20,6 +20,8 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
+import { completeSetupForFeatureTest } from './feature-setup';
+export { completeSetupForFeatureTest } from './feature-setup';
 import { nativeSafeFsMissingExports } from '../../apps/desktop/src/main/native-safe-fs';
 import {
   diagnoseFirstWindow,
@@ -341,14 +343,6 @@ export function resolveDevElectronBinary(): string {
 export function createUserDataDir(label: string): string {
   const safeLabel = label.replace(/[^a-zA-Z0-9_-]+/g, '-');
   return mkdtempSync(join(tmpdir(), `sprint-coder-e2e-${safeLabel}-`));
-}
-
-/** Feature specs start beyond first-run onboarding; setup-wizard.spec.ts owns that boundary. */
-export async function completeSetupForFeatureTest(page: Page): Promise<void> {
-  if ((await page.getByTestId('setup-wizard').count()) === 0) return;
-  await page.evaluate(() => window.localStorage.setItem('sprint-coder:setup-complete-v1', '1'));
-  await page.reload();
-  await page.getByTestId('sidebar-new-task-button').waitFor({ state: 'visible' });
 }
 
 export function removeUserDataDir(dir: string | null | undefined): void {

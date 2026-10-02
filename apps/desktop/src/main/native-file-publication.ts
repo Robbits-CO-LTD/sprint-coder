@@ -1,5 +1,5 @@
 import { createRequire } from 'node:module';
-import { resolve } from 'node:path';
+import { resolve, toNamespacedPath } from 'node:path';
 import { nativeSafeFsAddonPath } from './native-safe-fs';
 
 type PublicationAddon = Readonly<{
@@ -42,7 +42,12 @@ export function replaceWindowsFileWithBackup(
   const replace = publicationAddon().replaceFileWithBackup;
   if (process.platform !== 'win32' || typeof replace !== 'function')
     throw new Error('Native Windows file replacement is unavailable');
-  if (replace(replacement, target, backup) !== true)
+  // Node filesystem calls already support extended Windows paths. Convert only the native API
+  // spelling; Workspace validation and native sibling checks still decide which files may publish.
+  if (
+    replace(toNamespacedPath(replacement), toNamespacedPath(target), toNamespacedPath(backup)) !==
+    true
+  )
     throw new Error('Native Windows file replacement failed');
 }
 
