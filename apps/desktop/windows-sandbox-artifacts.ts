@@ -29,7 +29,8 @@ export function verifyWindowsSandboxArchive(path: string): Promise<string> {
         else resolve(actual);
       });
       opened.on('entry', (entry: Entry) => {
-        const name = entry.fileName.replaceAll('\\', '/');
+        // Windows treats casing variants as the same extracted helper or sibling seal.
+        const name = entry.fileName.replaceAll('\\', '/').toLowerCase();
         const isRunner = name.endsWith(`/resources/${RUNNER}`) || name === `resources/${RUNNER}`;
         const isManifest =
           name.endsWith(`/resources/${RUNNER}.sha256`) || name === `resources/${RUNNER}.sha256`;

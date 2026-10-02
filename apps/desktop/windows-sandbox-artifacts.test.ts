@@ -73,6 +73,13 @@ describe('Windows final sandbox artifact seals', () => {
       await expect(verifyWindowsSandboxArchive(path)).resolves.toBe(seal('signed-helper'));
     },
   );
+  it('accepts one Windows helper and sibling seal with differing path casing', async () => {
+    const path = fixture([
+      [runner.toUpperCase(), 'signed-helper'],
+      [runner + '.sha256', seal('signed-helper')],
+    ]);
+    await expect(verifyWindowsSandboxArchive(path)).resolves.toBe(seal('signed-helper'));
+  });
   it.each([
     [
       [runner, 'signed-helper'],
@@ -91,6 +98,16 @@ describe('Windows final sandbox artifact seals', () => {
       [runner, 'signed-helper'],
       [runner, 'duplicate'],
       [runner + '.sha256', seal('signed-helper')],
+    ],
+    [
+      [runner, 'signed-helper'],
+      [runner.toUpperCase(), 'duplicate'],
+      [runner + '.sha256', seal('signed-helper')],
+    ],
+    [
+      [runner, 'signed-helper'],
+      [runner + '.sha256', seal('signed-helper')],
+      [(runner + '.sha256').toUpperCase(), seal('signed-helper')],
     ],
   ] as const)(
     'fails closed on stale, missing, malformed, misplaced or duplicate entries',
