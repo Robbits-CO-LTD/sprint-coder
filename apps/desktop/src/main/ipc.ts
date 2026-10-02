@@ -420,7 +420,7 @@ const COMPLETION_REFUSALS = Object.freeze({
   acceptance_evidence: {
     errorCode: 'ACCEPTANCE_EVIDENCE_MISSING',
     userMessage:
-      '変更後のファイルを検証できなかったため、Turnを完了として扱えません。ファイルの変更内容を確認してから再試行してください。',
+      '完了条件を満たす検証結果がないため、Turnを完了として扱えません。未達の条件を確認してから再実行してください。',
   },
   active_command: {
     errorCode: 'COMMAND_STILL_RUNNING',
