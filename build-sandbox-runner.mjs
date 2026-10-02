@@ -25,5 +25,11 @@ const output = join(crate, 'build', 'Release');
 mkdirSync(output, { recursive: true });
 const destination = join(output, name);
 copyFileSync(source, destination);
+if (process.platform === 'win32') {
+  copyFileSync(
+    join(root, 'apps', 'desktop', 'resources', 'sandbox-node-pipe-guard.cjs'),
+    join(output, 'sandbox-node-pipe-guard.cjs'),
+  );
+}
 const digest = createHash('sha256').update(readFileSync(destination)).digest('hex');
 writeFileSync(`${destination}.sha256`, `${digest}\n`, { mode: 0o600 });

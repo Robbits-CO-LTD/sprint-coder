@@ -47,6 +47,7 @@ import {
   windowsJobWrapperCommand,
 } from './windows-process-job';
 import { sandboxRunnerPath, verifySandboxRunnerDigest } from './sandbox-runner';
+import { sandboxNodeOptions } from './sandbox-node-pipe-guard';
 import type { WindowsExecutableFileVersion } from './windows-pe-version';
 
 export type CommandOutputChunk = Readonly<{
@@ -829,7 +830,11 @@ export class CommandRunner {
           ],
           {
             cwd: spec.cwdIdentity.canonicalPath,
-            env: commandEnvironment,
+            // The host Job wrapper creates pipes outside AppContainer and must stay unguarded.
+            // Only its payload below inherits the sandbox compatibility preload.
+            env: windows
+              ? windowsCommandEnvironment(spec.envDelta, executionImage.environment, false)
+              : commandEnvironment,
             shell: false,
             stdio: windows
               ? ['pipe', 'pipe', 'pipe', 'pipe']
@@ -1912,8 +1917,6 @@ function buildEnvironment(
   return environment;
 }
 
-const WINDOWS_SANDBOX_NODE_OPTIONS = '--preserve-symlinks --preserve-symlinks-main';
-
 /**
  * Environment for a Windows command launch. The Job wrapper and the sandbox runner both pass
  * their own environment on to the command, so this is what the command sees.
@@ -1931,7 +1934,13 @@ export function windowsCommandEnvironment(
 ): NodeJS.ProcessEnv {
   return buildEnvironment(
     delta,
-    sandboxed ? { ...internal, NODE_OPTIONS: WINDOWS_SANDBOX_NODE_OPTIONS } : internal,
+    sandboxed
+      ? {
+          ...internal,
+          NODE_OPTIONS: sandboxNodeOptions(),
+          SPRINT_CODER_SANDBOX_NODE_PIPE_GUARD: '1',
+        }
+      : internal,
   );
 }
 
