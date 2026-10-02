@@ -71,6 +71,7 @@
 #include <vector>
 
 #include "computer_use_protocol.h"
+#include "computer_use_preflight_classifier.h"
 
 namespace {
 
@@ -3581,19 +3582,22 @@ bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
 }
 
 bool RejectWindowsRisk(const WindowsUiaRisk &risk, std::string *reason) {
-  if (!risk.metadata_complete || !risk.classified) {
-    *reason = "target_unclassified";
-    return true;
+  using namespace sprint_coder::computer_use;
+  const auto decision = ClassifyNativePreflightFacts(
+      {risk.metadata_complete, risk.classified, risk.secure, risk.high_impact});
+  if (NativePreflightAllowsDispatch(decision)) return false;
+  switch (decision.reason) {
+    case NativePreflightReason::kSecure:
+      *reason = "secure_field_blocked";
+      break;
+    case NativePreflightReason::kHighImpact:
+      *reason = "high_impact_blocked";
+      break;
+    default:
+      *reason = "target_unclassified";
+      break;
   }
-  if (risk.secure) {
-    *reason = "secure_field_blocked";
-    return true;
-  }
-  if (risk.high_impact) {
-    *reason = "high_impact_blocked";
-    return true;
-  }
-  return false;
+  return true;
 }
 
 bool FindUiaTargetRecursive(IUIAutomationElement *element,
