@@ -1396,6 +1396,41 @@ describe('Computer Use native manifest and runtime gate', () => {
     expect(flagOff.probe.reason).toBe('FEATURE_FLAG_DISABLED');
   });
 
+  it.each([null, 'buildMode', 'ruleset', 'classifier', 'lexicon'])(
+    'validates non-enumerable native handshake claims: %s',
+    (claim) => {
+      const fixture = packageFixture();
+      const handshake = {};
+      for (const [key, value] of Object.entries({
+        protocolVersion: 1,
+        apiVersion: 2,
+        platform: 'darwin',
+        napiVersion: 10,
+      }))
+        Object.defineProperty(handshake, key, { value, enumerable: false });
+      if (claim !== null)
+        Object.defineProperty(handshake, claim, { value: 'unreviewed', enumerable: false });
+      const binding = loadComputerUseNative({
+        environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+        dirname: fixture.packagedDirname,
+        resourcesPath: fixture.resources,
+        platform: 'darwin',
+        architecture: 'arm64',
+        requireAddon: () => ({
+          probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+          handshake: () => handshake,
+        }),
+        verifySignature: () => 'a'.repeat(64),
+      });
+      expect(binding.probe.available).toBe(claim === null);
+      if (claim === null) expect(binding.addon).not.toBeNull();
+      else {
+        expect(binding.probe.reason).toBe('HANDSHAKE_INVALID');
+        expect(binding.addon).toBeNull();
+      }
+    },
+  );
+
   it.each([
     { buildMode: 'v2-denylist' },
     { ruleset: 'unreviewed' },

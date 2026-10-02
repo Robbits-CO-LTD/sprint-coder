@@ -4489,6 +4489,50 @@ const migrations = [
       ALTER TABLE team_execution_isolations ADD COLUMN reclaim_confirmed_at TEXT;
     `,
   },
+  {
+    version: 98,
+    checksum: 'user-file-save-v98-active-facts-operation-aliases',
+    sql: `
+      CREATE TABLE user_file_save_intents_v98 (
+        principal TEXT NOT NULL,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+        root_id TEXT NOT NULL,
+        root_label TEXT NOT NULL,
+        path TEXT NOT NULL,
+        base_digest TEXT NOT NULL CHECK (length(base_digest) = 64),
+        replacement_digest TEXT NOT NULL CHECK (length(replacement_digest) = 64),
+        byte_length INTEGER NOT NULL CHECK (byte_length >= 0),
+        state TEXT NOT NULL CHECK (state IN ('prepared', 'completed', 'recovery_required')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(principal, task_id, kind, operation_id)
+      );
+      INSERT INTO user_file_save_intents_v98 SELECT * FROM user_file_save_intents;
+      DROP TABLE user_file_save_intents;
+      ALTER TABLE user_file_save_intents_v98 RENAME TO user_file_save_intents;
+      CREATE INDEX user_file_save_intents_recovery_idx
+        ON user_file_save_intents(state, created_at, operation_id);
+      CREATE UNIQUE INDEX user_file_save_intents_active_facts_idx
+        ON user_file_save_intents(principal, task_id, kind, request_hash, root_id, path,
+                                  base_digest, replacement_digest)
+        WHERE state != 'completed';
+      CREATE TABLE user_file_save_operation_aliases (
+        principal TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        canonical_operation_id TEXT NOT NULL,
+        request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+        PRIMARY KEY(principal, task_id, kind, operation_id),
+        FOREIGN KEY(principal, task_id, kind, canonical_operation_id)
+          REFERENCES user_file_save_intents(principal, task_id, kind, operation_id)
+          ON DELETE CASCADE
+      );
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -20047,13 +20091,32 @@ export class SqlitePersistenceClient implements PersistenceClient {
     operationId: string,
     requestHash: string,
   ): { found: boolean; value?: T } {
-    const row = this.db
+    let row = this.db
       .prepare(
         `SELECT request_hash, state, result_json FROM operations
       WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?`,
       )
       .get(principal, taskId, kind, operationId) as OperationRow | undefined;
-    if (row === undefined) return { found: false };
+    if (row === undefined) {
+      const alias = this.db
+        .prepare(
+          `SELECT a.request_hash AS alias_request_hash, i.request_hash AS intent_request_hash,
+                  o.request_hash, o.state, o.result_json
+           FROM user_file_save_operation_aliases a
+           JOIN user_file_save_intents i ON i.principal = a.principal AND i.task_id = a.task_id
+             AND i.kind = a.kind AND i.operation_id = a.canonical_operation_id
+           LEFT JOIN operations o ON o.principal = a.principal AND o.task_id = a.task_id
+             AND o.kind = a.kind AND o.operation_id = a.canonical_operation_id
+           WHERE a.principal = ? AND a.task_id = ? AND a.kind = ? AND a.operation_id = ?`,
+        )
+        .get(principal, taskId, kind, operationId) as
+        (OperationRow & { alias_request_hash: string; intent_request_hash: string }) | undefined;
+      if (alias === undefined) return { found: false };
+      if (alias.alias_request_hash !== requestHash || alias.intent_request_hash !== requestHash)
+        throw new OperationConflictError();
+      if (alias.state === null) return { found: false };
+      row = alias;
+    }
     if (row.request_hash !== requestHash) throw new OperationConflictError();
     if (row.state !== 'completed' || row.result_json === null) throw new OperationInProgressError();
     const decoded = JSON.parse(row.result_json) as { value: T };
@@ -20077,11 +20140,40 @@ export class SqlitePersistenceClient implements PersistenceClient {
             throw new OperationConflictError('User file save operation was reused');
           return snapshot;
         }
+        if (
+          this.db
+            .prepare(
+              `SELECT 1 FROM operations
+               WHERE principal = ? AND task_id = ? AND kind = ? AND operation_id = ?`,
+            )
+            .get(intent.principal, intent.taskId, intent.kind, intent.operationId) !== undefined
+        )
+          throw new OperationConflictError('User file save operation already exists');
+        const alias = this.db
+          .prepare(
+            `SELECT i.*, a.request_hash AS alias_request_hash FROM user_file_save_operation_aliases a
+             JOIN user_file_save_intents i ON i.principal = a.principal AND i.task_id = a.task_id
+               AND i.kind = a.kind AND i.operation_id = a.canonical_operation_id
+             WHERE a.principal = ? AND a.task_id = ? AND a.kind = ? AND a.operation_id = ?`,
+          )
+          .get(intent.principal, intent.taskId, intent.kind, intent.operationId) as
+          (UserFileSaveIntentRow & { alias_request_hash: string }) | undefined;
+        if (alias !== undefined) {
+          const snapshot = toUserFileSaveIntent(alias);
+          if (
+            alias.alias_request_hash !== intent.requestHash ||
+            JSON.stringify(withoutUserFileSaveState(snapshot)) !==
+              JSON.stringify({ ...intent, operationId: snapshot.operationId })
+          )
+            throw new OperationConflictError('User file save alias was reused');
+          return snapshot;
+        }
         const matchingFacts = this.db
           .prepare(
             `SELECT * FROM user_file_save_intents
              WHERE principal = ? AND task_id = ? AND kind = ? AND request_hash = ?
-               AND root_id = ? AND path = ? AND base_digest = ? AND replacement_digest = ?`,
+               AND root_id = ? AND path = ? AND base_digest = ? AND replacement_digest = ?
+               AND state != 'completed'`,
           )
           .get(
             intent.principal,
@@ -20093,7 +20185,29 @@ export class SqlitePersistenceClient implements PersistenceClient {
             intent.baseDigest,
             intent.replacementDigest,
           ) as UserFileSaveIntentRow | undefined;
-        if (matchingFacts !== undefined) return toUserFileSaveIntent(matchingFacts);
+        if (matchingFacts !== undefined) {
+          const snapshot = toUserFileSaveIntent(matchingFacts);
+          if (
+            JSON.stringify(withoutUserFileSaveState(snapshot)) !==
+            JSON.stringify({ ...intent, operationId: snapshot.operationId })
+          )
+            throw new OperationConflictError('User file save facts changed');
+          this.db
+            .prepare(
+              `INSERT INTO user_file_save_operation_aliases(
+                 principal, task_id, kind, operation_id, canonical_operation_id, request_hash
+               ) VALUES (?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              intent.principal,
+              intent.taskId,
+              intent.kind,
+              intent.operationId,
+              snapshot.operationId,
+              intent.requestHash,
+            );
+          return snapshot;
+        }
         const now = new Date().toISOString();
         this.db
           .prepare(

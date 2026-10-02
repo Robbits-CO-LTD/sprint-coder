@@ -422,7 +422,15 @@ export async function prepareGraphStepWriteFootprints(
     return { root, expected };
   };
   const footprints: GraphWriteFootprint[] = [];
-  for (const claim of step.writeClaims) {
+  const writes =
+    step.access === 'workspace-write' && step.writeClaims.length === 0
+      ? context.workspace.roots.map((root) => ({
+          rootId: root.rootId,
+          path: null,
+          semanticKeys: [],
+        }))
+      : step.writeClaims;
+  for (const claim of writes) {
     const { root, expected } = rootFor(claim.rootId);
     const bound = await bindClaim(root.rootId, root.path, expected, claim.path);
     footprints.push(

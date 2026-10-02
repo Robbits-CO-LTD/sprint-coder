@@ -83,6 +83,7 @@ export function TaskHeader({
           onChange={(e) => setDraftTitle(e.target.value)}
           onBlur={commit}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
             if (e.key === 'Enter') {
               e.preventDefault();
               commit();
