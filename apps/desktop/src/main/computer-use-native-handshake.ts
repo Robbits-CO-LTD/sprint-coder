@@ -7,7 +7,7 @@ export function parseNativeHandshake(value: unknown, platform: NodeJS.Platform):
   const keys = ['protocolVersion', 'apiVersion', 'platform', 'napiVersion'];
   if (platform === 'win32')
     keys.push('sourceCommit', 'backend', 'architecture', 'available', 'capabilities', 'reason');
-  if (Object.keys(handshake).some((key) => !keys.includes(key)))
+  if (Reflect.ownKeys(handshake).some((key) => typeof key !== 'string' || !keys.includes(key)))
     throw new Error('HANDSHAKE_INVALID');
   if (
     handshake['protocolVersion'] !== 1 ||
