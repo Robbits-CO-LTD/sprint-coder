@@ -1,9 +1,20 @@
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import {
+  link,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import type * as FsPromises from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 import { electronTestExecutablePath } from './electron-test-runtime';
@@ -16,7 +27,7 @@ import {
   type ManagedLocalRuntimeSession,
 } from './managed-local-runtime-supervisor';
 import type { VerifiedManagedLocalSidecarBundle } from './managed-local-sidecar-bundle';
-import type { LocalHardwareSnapshot } from '@sprint-coder/contracts';
+import type { LocalHardwareSnapshot, PublicModelCatalogDetail } from '@sprint-coder/contracts';
 import {
   LocalModelDownloadManager,
   LocalModelDownloadRepository,
@@ -25,6 +36,19 @@ import {
 } from './local-model-download-manager';
 
 const roots: string[] = [];
+const filesystemFault = vi.hoisted(() => ({
+  rename: null as ((...args: Parameters<typeof FsPromises.rename>) => Promise<void>) | null,
+}));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const original = await importOriginal<typeof FsPromises>();
+  return {
+    ...original,
+    rename: async (...args: Parameters<typeof original.rename>) => {
+      if (filesystemFault.rename !== null) return filesystemFault.rename(...args);
+      return original.rename(...args);
+    },
+  };
+});
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_LOCAL_MODEL_DB_TEST === '1';
 const localModelBridgeTimeoutMs = process.platform === 'win32' ? 120_000 : 60_000;
 
@@ -74,6 +98,7 @@ function modelMetadata(architecture: string): Buffer {
 }
 
 afterEach(async () => {
+  filesystemFault.rename = null;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -121,11 +146,663 @@ async function fixture(input?: {
     () => '2026-08-23T00:00:00.000Z',
     async () => input?.availableBytes ?? 1024 * 1024 * 1024,
   );
-  return { root, repository, store, manager, plan, bytes };
+  return { root, repository, store, manager, plan, bytes, fetch };
+}
+
+async function verifiedFixture() {
+  const env = await fixture();
+  const job = await env.manager.enqueue(env.plan);
+  env.repository.transition(job.id, 'downloading', '2026-08-23T00:00:01.000Z');
+  for (let index = 0; index < env.bytes.length; index += 1) {
+    await writeFile(env.store.partialPath(job.modelId, index + 1), env.bytes[index]!);
+    env.repository.progress(job.id, index + 1, env.bytes[index]!.length, null);
+    env.repository.artifactDownloaded(job.id, index + 1, '2026-08-23T00:00:02.000Z');
+  }
+  env.repository.transition(job.id, 'verifying', '2026-08-23T00:00:03.000Z');
+  return { ...env, job };
 }
 
 if (runsWithElectronAbi)
   describe('LocalModelDownloadManager', () => {
+    it('rolls back canceled identity replacement if the new job insert fails', async () => {
+      const env = await fixture();
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        env.repository.progress(original.id, 1, 3, '"old"');
+        await env.manager.cancel(original.id, true);
+        const other = await env.manager.enqueue({ ...env.plan, quantization: 'Q8_0' });
+        expect(() => env.repository.create(env.plan, other.id, '2026-08-23T00:00:01.000Z')).toThrow(
+          'UNIQUE',
+        );
+        expect(env.manager.getJob(original.id)).toMatchObject({
+          state: 'canceled',
+          downloadedBytes: 3,
+        });
+        expect(env.repository.artifacts(original.modelId)[0]).toMatchObject({
+          downloaded_bytes: 3,
+          etag: '"old"',
+        });
+        expect(env.manager.getJob(other.id).state).toBe('queued');
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('protects active, installed, deleting and delete-failed identities from replacement', async () => {
+      const env = await fixture({ bytes: [Buffer.from('single model')] });
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        await expect(env.manager.enqueue(env.plan)).rejects.toThrow('already in use');
+        expect((await env.manager.run(original.id, env.plan)).state).toBe('installed');
+        const settings = env.manager.getInferenceSettings(original.modelId);
+        for (const state of ['installed', 'deleting', 'delete_failed'] as const) {
+          if (state === 'deleting')
+            env.repository.beginDelete(original.modelId, '2026-08-23T00:00:01.000Z');
+          if (state === 'delete_failed')
+            env.repository.markDeleteFailed(original.modelId, '2026-08-23T00:00:02.000Z');
+          await expect(env.manager.enqueue(env.plan)).rejects.toThrow('already in use');
+          expect(env.manager.listInstalledModels()[0]?.state).toBe(state);
+          expect(await readFile(env.store.installedPath(original.modelId, 1))).toEqual(
+            env.bytes[0],
+          );
+        }
+        expect(env.repository.getJob(original.id).state).toBe('installed');
+        expect(settings.maxOutputTokens).toBe(512);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('rejects DB artifact identity tampering even when the published bytes match the altered row', async () => {
+      const env = await verifiedFixture();
+      await env.store.publish(env.job.modelId, env.repository.artifacts(env.job.modelId));
+      env.repository.close();
+      const changed = Buffer.alloc(env.bytes[0]!.length);
+      const db = new Database(join(env.root, 'app.sqlite3'));
+      db.prepare(
+        'UPDATE local_model_artifacts SET sha256 = ? WHERE model_id = ? AND ordinal = 1',
+      ).run(createHash('sha256').update(changed).digest('hex'), env.job.modelId);
+      db.close();
+      await writeFile(env.store.installedPath(env.job.modelId, 1), changed);
+      const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      const store = await LocalModelStore.open(env.store.rootPath);
+      const manager = new LocalModelDownloadManager(repository, store, () => undefined, env.fetch);
+      try {
+        manager.recoverInterrupted();
+        expect(await manager.run(env.job.id, env.plan)).toMatchObject({
+          state: 'failed',
+          failureCode: 'unsafe_store',
+        });
+        expect(await readFile(store.installedPath(env.job.modelId, 1))).toEqual(changed);
+        expect(manager.listInstalledModels()).toEqual([]);
+      } finally {
+        repository.close();
+      }
+    });
+    it('preserves the only staged copy when both publish and rollback rename fail, including a replay', async () => {
+      const env = await verifiedFixture();
+      const actual = await vi.importActual<typeof FsPromises>('node:fs/promises');
+      const staging = join(env.store.rootPath, 'models', `.staging-${env.job.modelId}`);
+      const failPublishAndRollback = async (...args: Parameters<typeof actual.rename>) => {
+        if (
+          String(args[0]) === env.store.partialPath(env.job.modelId, 2) ||
+          String(args[0]) === join(staging, '001.gguf')
+        )
+          throw new Error('injected rename denial');
+        return actual.rename(...args);
+      };
+      filesystemFault.rename = failPublishAndRollback;
+      await expect(
+        env.store.publish(env.job.modelId, env.repository.artifacts(env.job.modelId)),
+      ).rejects.toThrow('rename denial');
+      filesystemFault.rename = null;
+      expect(await readFile(join(staging, '001.gguf'))).toEqual(env.bytes[0]);
+      env.repository.close();
+      let repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      let store = await LocalModelStore.open(env.store.rootPath);
+      let manager = new LocalModelDownloadManager(repository, store, () => undefined, env.fetch);
+      manager.recoverInterrupted();
+      filesystemFault.rename = async (...args) => {
+        // Permit recovery to return the shard, then fail the next publish and rollback.
+        if (
+          String(args[1]) === env.store.partialPath(env.job.modelId, 1) &&
+          String(args[0]) === join(staging, '001.gguf')
+        ) {
+          filesystemFault.rename = failPublishAndRollback;
+          return actual.rename(...args);
+        }
+        return failPublishAndRollback(...args);
+      };
+      expect((await manager.run(env.job.id, env.plan)).state).toBe('failed');
+      filesystemFault.rename = null;
+      expect(await readFile(join(staging, '001.gguf'))).toEqual(env.bytes[0]);
+      repository.close();
+      repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      store = await LocalModelStore.open(env.store.rootPath);
+      manager = new LocalModelDownloadManager(repository, store, () => undefined, env.fetch);
+      try {
+        expect((await manager.run(env.job.id, env.plan)).state).toBe('installed');
+        for (let index = 0; index < env.bytes.length; index += 1)
+          expect(await readFile(store.installedPath(env.job.modelId, index + 1))).toEqual(
+            env.bytes[index],
+          );
+      } finally {
+        repository.close();
+      }
+    });
+    it.each(['draft', 'projector'] as const)(
+      'keeps %s metadata and artifact roles when a published bundle recovers',
+      async (kind) => {
+        const env = await fixture({
+          bytes:
+            kind === 'draft'
+              ? [modelMetadata('dflash')]
+              : [modelMetadata('llama'), Buffer.from('projector')],
+        });
+        const plan = {
+          ...env.plan,
+          architecture: kind === 'draft' ? 'dflash' : 'llama',
+          baseModelId: 'owner/base',
+          artifacts: env.plan.artifacts.map((artifact, index) =>
+            kind === 'projector' && index === 1
+              ? { ...artifact, role: 'mmproj' as const, filename: 'mmproj-model.gguf' }
+              : artifact,
+          ),
+        };
+        const job = await env.manager.enqueue(plan);
+        vi.spyOn(env.repository, 'markInstalled').mockImplementationOnce(() => {
+          throw new Error('commit fault');
+        });
+        expect((await env.manager.run(job.id, plan)).state).toBe('failed');
+        env.repository.close();
+        const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+        const store = await LocalModelStore.open(env.store.rootPath);
+        const fetch = vi.fn(env.fetch);
+        const manager = new LocalModelDownloadManager(repository, store, () => undefined, fetch);
+        try {
+          expect((await manager.run(job.id, plan)).state).toBe('installed');
+          expect(manager.listInstalledModels()[0]).toMatchObject({
+            purpose: kind === 'draft' ? 'draft-dflash' : 'normal',
+            baseModelId: 'owner/base',
+          });
+          expect(manager.artifactExpectations(job.modelId).map(({ role }) => role)).toEqual(
+            plan.artifacts.map(({ role }) => role),
+          );
+          expect(fetch).not.toHaveBeenCalled();
+        } finally {
+          repository.close();
+        }
+      },
+    );
+
+    it('recovers through the real Controller startup, catalog identity reconstruction, and resume pump', async () => {
+      const env = await verifiedFixture();
+      await env.store.publish(env.job.modelId, env.repository.artifacts(env.job.modelId));
+      env.repository.close();
+      const detail: PublicModelCatalogDetail = {
+        item: {
+          id: 'owner/model',
+          name: 'model',
+          author: 'owner',
+          source: 'hugging_face',
+          sourceId: 'owner/model',
+          sourceUrl: 'https://huggingface.co/owner/model',
+          immutableRevision: env.plan.immutableRevision,
+          gated: false,
+          private: false,
+          viewable: true,
+          installability: { state: 'installable', reason: 'fixture' },
+          license: null,
+          purpose: null,
+          tags: [],
+          downloads: null,
+          updatedAt: null,
+        },
+        description: '',
+        architecture: null,
+        parameterCount: null,
+        contextTokens: null,
+        toolTemplate: 'unknown',
+        backend: null,
+        variants: [],
+        referenceUrls: [],
+        artifacts: env.plan.artifacts.map((artifact, index) => ({
+          ...artifact,
+          sourceUrl: `https://huggingface.co/owner/model/blob/${env.plan.immutableRevision}/${artifact.filename}`,
+          id: `artifact-${index}`,
+          format: 'gguf',
+          quantization: env.plan.quantization,
+          installability: { state: 'installable', reason: 'fixture' },
+        })),
+      };
+      const catalog = new PublicModelCatalogService(env.fetch);
+      vi.spyOn(catalog, 'detail').mockResolvedValue(detail);
+      const fetch = vi.fn(env.fetch);
+      const dependencies = {
+        databasePath: join(env.root, 'app.sqlite3'),
+        storeRoot: env.store.rootPath,
+        lifecycle: null,
+        bundle: null,
+        catalog,
+        fetch,
+      };
+      const controller = await ManagedLocalController.create(dependencies);
+      try {
+        expect(controller.listJobs()[0]?.state).toBe('interrupted');
+        await controller.resume(env.job.id);
+        await vi.waitFor(() => expect(controller.listJobs()[0]?.state).toBe('installed'));
+        expect(controller.listInstalled()[0]?.id).toBe(env.job.modelId);
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        await controller.dispose();
+      }
+      const reopened = await ManagedLocalController.create(dependencies);
+      try {
+        expect(reopened.listInstalled()).toHaveLength(1);
+      } finally {
+        await reopened.dispose();
+      }
+    });
+    it('reinstalls a canceled model through the real Controller after reopening the store', async () => {
+      const env = await fixture({ bytes: [Buffer.from('controller model')] });
+      env.repository.close();
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      let aborts = 0;
+      const fetch = vi.fn(env.fetch).mockImplementationOnce(
+        async () =>
+          new Response(
+            new ReadableStream({
+              pull() {
+                reading();
+              },
+              cancel() {
+                aborts += 1;
+              },
+            }),
+            { headers: { 'content-length': String(env.bytes[0]!.length) } },
+          ),
+      );
+      const detail: PublicModelCatalogDetail = {
+        item: {
+          id: 'owner/model',
+          name: 'model',
+          author: 'owner',
+          source: 'hugging_face',
+          sourceId: 'owner/model',
+          sourceUrl: 'https://huggingface.co/owner/model',
+          immutableRevision: env.plan.immutableRevision,
+          gated: false,
+          private: false,
+          viewable: true,
+          installability: { state: 'installable', reason: 'fixture' },
+          license: null,
+          purpose: null,
+          tags: [],
+          downloads: null,
+          updatedAt: null,
+        },
+        description: '',
+        architecture: null,
+        parameterCount: null,
+        contextTokens: null,
+        toolTemplate: 'unknown',
+        backend: null,
+        variants: [],
+        referenceUrls: [],
+        artifacts: env.plan.artifacts.map((artifact, index) => ({
+          ...artifact,
+          sourceUrl: `https://huggingface.co/owner/model/blob/${env.plan.immutableRevision}/${artifact.filename}`,
+          id: `artifact-${index}`,
+          format: 'gguf',
+          quantization: env.plan.quantization,
+          installability: { state: 'installable', reason: 'fixture' },
+        })),
+      };
+      const catalog = new PublicModelCatalogService(env.fetch);
+      vi.spyOn(catalog, 'detail').mockResolvedValue(detail);
+      const dependencies = {
+        databasePath: join(env.root, 'app.sqlite3'),
+        storeRoot: env.store.rootPath,
+        lifecycle: null,
+        bundle: null,
+        catalog,
+        fetch,
+      };
+      const input = {
+        source: env.plan.source,
+        sourceId: env.plan.sourceId,
+        artifactIds: detail.artifacts.map(({ id }) => id),
+        quantization: env.plan.quantization,
+        confirmed: true as const,
+      };
+      const controller = await ManagedLocalController.create(dependencies);
+      let original!: Awaited<ReturnType<typeof controller.install>>;
+      try {
+        original = await controller.install(input);
+        await started;
+        expect((await controller.cancel(original.id, true)).state).toBe('canceled');
+        expect(aborts).toBe(1);
+        await expect(readFile(env.store.partialPath(original.modelId, 1))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        await controller.dispose();
+      }
+      const reopened = await ManagedLocalController.create(dependencies);
+      try {
+        const replacement = await reopened.install(input);
+        expect(replacement.id).not.toBe(original.id);
+        expect(replacement.modelId).toBe(original.modelId);
+        await vi.waitFor(() =>
+          expect(reopened.listJobs().find(({ id }) => id === replacement.id)).toMatchObject({
+            state: 'installed',
+            failureCode: null,
+          }),
+        );
+        await expect(reopened.cancel(original.id, true)).rejects.toThrow('not found');
+        expect(reopened.listInstalled()).toHaveLength(1);
+        for (let index = 0; index < env.bytes.length; index += 1)
+          expect(await readFile(env.store.installedPath(replacement.modelId, index + 1))).toEqual(
+            env.bytes[index],
+          );
+      } finally {
+        await reopened.dispose();
+      }
+    });
+
+    it.each(['before_publish', 'one_staged', 'all_staged', 'final', 'committed'] as const)(
+      'recovers the %s cutpoint after a real SQLite/store reopen',
+      async (cutpoint) => {
+        const env = await verifiedFixture();
+        if (cutpoint === 'one_staged' || cutpoint === 'all_staged') {
+          const staging = join(env.store.rootPath, 'models', `.staging-${env.job.modelId}`);
+          await mkdir(staging);
+          const count = cutpoint === 'one_staged' ? 1 : env.bytes.length;
+          for (let index = 0; index < count; index += 1)
+            await rename(
+              env.store.partialPath(env.job.modelId, index + 1),
+              join(staging, `${String(index + 1).padStart(3, '0')}.gguf`),
+            );
+        }
+        if (cutpoint === 'final' || cutpoint === 'committed') {
+          await env.store.publish(env.job.modelId, env.repository.artifacts(env.job.modelId));
+          if (cutpoint === 'committed')
+            env.repository.markInstalled(env.job.id, '2026-08-23T00:00:04.000Z');
+        }
+        env.repository.close();
+        const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+        const store = await LocalModelStore.open(env.store.rootPath);
+        const fetch = vi.fn(env.fetch);
+        const manager = new LocalModelDownloadManager(repository, store, () => undefined, fetch);
+        try {
+          manager.recoverInterrupted();
+          const installed = await manager.run(env.job.id, env.plan);
+          expect(installed).toMatchObject({
+            id: env.job.id,
+            modelId: env.job.modelId,
+            state: 'installed',
+          });
+          expect(manager.listInstalledModels()).toHaveLength(1);
+          expect(fetch).not.toHaveBeenCalled();
+          for (let index = 0; index < env.bytes.length; index += 1)
+            expect(await readFile(store.installedPath(env.job.modelId, index + 1))).toEqual(
+              env.bytes[index],
+            );
+        } finally {
+          repository.close();
+        }
+      },
+    );
+
+    it.each(['missing', 'size', 'hash', 'extra', 'hardlink', 'directory-link'] as const)(
+      'preserves and rejects an unsafe published bundle (%s)',
+      async (fault) => {
+        const env = await verifiedFixture();
+        await env.store.publish(env.job.modelId, env.repository.artifacts(env.job.modelId));
+        const finalPath = join(env.store.rootPath, 'models', env.job.modelId);
+        const first = env.store.installedPath(env.job.modelId, 1);
+        if (fault === 'missing') await rm(first);
+        if (fault === 'size') await writeFile(first, 'x');
+        if (fault === 'hash') await writeFile(first, Buffer.alloc(env.bytes[0]!.length));
+        if (fault === 'extra') await writeFile(join(finalPath, 'unexpected'), 'extra');
+        if (fault === 'hardlink') await link(first, join(env.root, 'linked-shard'));
+        if (fault === 'directory-link') {
+          await rename(finalPath, join(env.root, 'outside-bundle'));
+          await symlink(join(env.root, 'outside-bundle'), finalPath, 'junction');
+        }
+        env.repository.close();
+        const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+        const store = await LocalModelStore.open(env.store.rootPath);
+        const manager = new LocalModelDownloadManager(
+          repository,
+          store,
+          () => undefined,
+          env.fetch,
+        );
+        try {
+          manager.recoverInterrupted();
+          const before = await readdir(finalPath);
+          expect((await manager.run(env.job.id, env.plan)).state).toBe('failed');
+          expect(manager.listInstalledModels()).toEqual([]);
+          expect(await readdir(finalPath)).toEqual(before);
+          await expect(manager.cancel(env.job.id, true)).rejects.toMatchObject({
+            code: 'unsafe_store',
+          });
+          expect(await readdir(finalPath)).toEqual(before);
+        } finally {
+          repository.close();
+        }
+      },
+    );
+
+    it('redownloads a missing downloaded partial instead of trusting only the DB row', async () => {
+      const env = await verifiedFixture();
+      await rm(env.store.partialPath(env.job.modelId, 1));
+      env.manager.recoverInterrupted();
+      try {
+        expect((await env.manager.run(env.job.id, env.plan)).state).toBe('installed');
+        expect(await readFile(env.store.installedPath(env.job.modelId, 1))).toEqual(env.bytes[0]);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('checks duplicate staging and partial bytes before removing either copy', async () => {
+      const env = await verifiedFixture();
+      const staging = join(env.store.rootPath, 'models', `.staging-${env.job.modelId}`);
+      await mkdir(staging);
+      await writeFile(join(staging, '001.gguf'), env.bytes[0]!);
+      await writeFile(
+        env.store.partialPath(env.job.modelId, 1),
+        Buffer.alloc(env.bytes[0]!.length),
+      );
+      env.manager.recoverInterrupted();
+      try {
+        expect(await env.manager.run(env.job.id, env.plan)).toMatchObject({
+          state: 'failed',
+          failureCode: 'hash_mismatch',
+        });
+        expect(await readFile(join(staging, '001.gguf'))).toEqual(env.bytes[0]);
+        await writeFile(env.store.partialPath(env.job.modelId, 1), env.bytes[0]!);
+        expect((await env.manager.run(env.job.id, env.plan)).state).toBe('installed');
+      } finally {
+        env.repository.close();
+      }
+    });
+    it('recovers a published bundle after the database commit fails and the store reopens', async () => {
+      const env = await fixture();
+      const original = await env.manager.enqueue(env.plan);
+      vi.spyOn(env.repository, 'markInstalled').mockImplementationOnce(() => {
+        throw new Error('simulated crash before DB commit');
+      });
+      expect((await env.manager.run(original.id, env.plan)).state).toBe('failed');
+      env.repository.close();
+      const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+      const store = await LocalModelStore.open(env.store.rootPath);
+      const manager = new LocalModelDownloadManager(repository, store, () => undefined, env.fetch);
+      try {
+        manager.recoverInterrupted();
+        expect((await manager.run(original.id, env.plan)).state).toBe('installed');
+        expect(manager.listInstalledModels()).toHaveLength(1);
+        for (let index = 0; index < env.bytes.length; index += 1)
+          expect(await readFile(store.installedPath(original.modelId, index + 1))).toEqual(
+            env.bytes[index],
+          );
+        expect((await manager.run(original.id, env.plan)).state).toBe('installed');
+      } finally {
+        repository.close();
+      }
+    });
+    it.each(['queued', 'paused', 'interrupted', 'failed'] as const)(
+      'reinstalls a canceled %s job after reopening the database and store',
+      async (state) => {
+        const env = await fixture();
+        const original = await env.manager.enqueue(env.plan);
+        if (state !== 'queued') {
+          env.repository.transition(original.id, 'downloading', '2026-08-23T00:00:01.000Z');
+          env.repository.transition(
+            original.id,
+            state,
+            '2026-08-23T00:00:02.000Z',
+            state === 'failed' ? 'network' : null,
+          );
+        }
+        await env.manager.cancel(original.id, true);
+        env.repository.close();
+        const repository = new LocalModelDownloadRepository(join(env.root, 'app.sqlite3'));
+        const store = await LocalModelStore.open(env.store.rootPath);
+        const manager = new LocalModelDownloadManager(
+          repository,
+          store,
+          () => undefined,
+          env.fetch,
+        );
+        try {
+          // Legacy canceled rows can retain partial bytes. Cleanup precedes identity reuse.
+          await writeFile(store.partialPath(original.modelId, 1), Buffer.from('old'));
+          const replacement = await manager.enqueue(env.plan);
+          expect(replacement.id).not.toBe(original.id);
+          expect(replacement.modelId).toBe(original.modelId);
+          expect(replacement.downloadedBytes).toBe(0);
+          expect((await manager.run(replacement.id, env.plan)).state).toBe('installed');
+          expect(manager.listInstalledModels()).toHaveLength(1);
+        } finally {
+          repository.close();
+        }
+      },
+    );
+    it('reinstalls the same immutable model after confirmed cancel', async () => {
+      const env = await fixture();
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        await env.manager.cancel(original.id, true);
+        const replacement = await env.manager.enqueue(env.plan);
+        expect(replacement.modelId).toBe(original.modelId);
+        expect(replacement.id).not.toBe(original.id);
+        expect((await env.manager.run(replacement.id, env.plan)).state).toBe('installed');
+        expect(env.manager.listInstalledModels()).toHaveLength(1);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('serializes concurrent reinstallation cleanup and preserves the winning job', async () => {
+      const env = await fixture();
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        await env.manager.cancel(original.id, true);
+        const attempts = await Promise.allSettled([
+          env.manager.enqueue(env.plan),
+          env.manager.enqueue(env.plan),
+        ]);
+        expect(attempts.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+        const job = env.manager.listJobs()[0]!;
+        await expect(env.manager.cancel(original.id, true)).rejects.toThrow('not found');
+        expect((await env.manager.run(job.id, env.plan)).state).toBe('installed');
+        await expect(env.manager.enqueue(env.plan)).rejects.toThrow('already in use');
+        expect(env.manager.listInstalledModels()).toHaveLength(1);
+      } finally {
+        env.repository.close();
+      }
+    });
+
+    it('does not report successful cancel after cleanup failure or restart the job during cleanup', async () => {
+      const env = await fixture();
+      const original = await env.manager.enqueue(env.plan);
+      const cleanup = vi
+        .spyOn(env.store, 'cancel')
+        .mockRejectedValueOnce(new Error('cleanup denied'));
+      await expect(env.manager.cancel(original.id, true)).rejects.toThrow('cleanup denied');
+      expect(env.manager.getJob(original.id).state).toBe('queued');
+      let release!: () => void;
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      cleanup.mockImplementationOnce(async () => {
+        entered();
+        await barrier;
+      });
+      try {
+        const cancellation = env.manager.cancel(original.id, true);
+        await ready;
+        const restart = env.manager.run(original.id, env.plan);
+        release();
+        expect((await cancellation).state).toBe('canceled');
+        expect((await restart).state).toBe('canceled');
+        expect(await readdir(join(env.store.rootPath, 'models'))).toEqual([]);
+        const replacement = await env.manager.enqueue(env.plan);
+        expect((await env.manager.run(replacement.id, env.plan)).state).toBe('installed');
+      } finally {
+        release();
+        env.repository.close();
+      }
+    });
+
+    it('waits for an aborted stream before cleanup and permits reinstall', async () => {
+      let reading!: () => void;
+      const started = new Promise<void>((resolve) => {
+        reading = resolve;
+      });
+      let aborts = 0;
+      const env = await fixture({
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              pull() {
+                reading();
+              },
+              cancel() {
+                aborts += 1;
+              },
+            }),
+            { headers: { 'content-length': '11' } },
+          ),
+      });
+      try {
+        const original = await env.manager.enqueue(env.plan);
+        const run = env.manager.run(original.id, env.plan);
+        await started;
+        const canceled = await env.manager.cancel(original.id, true);
+        await run;
+        expect(canceled.state).toBe('canceled');
+        expect(aborts).toBe(1);
+        await expect(readFile(env.store.partialPath(original.modelId, 1))).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+        const replacement = await env.manager.enqueue(env.plan);
+        expect(replacement.id).not.toBe(original.id);
+        expect(replacement.downloadedBytes).toBe(0);
+      } finally {
+        env.repository.close();
+      }
+    });
     it.each([
       [false, null],
       [true, null],
@@ -147,8 +824,8 @@ if (runsWithElectronAbi)
           baseModelId: 'owner/base',
           artifacts: [env.plan.artifacts[1]!],
         };
-        const target = env.manager.enqueue(targetPlan);
-        const draft = env.manager.enqueue(draftPlan);
+        const target = await env.manager.enqueue(targetPlan);
+        const draft = await env.manager.enqueue(draftPlan);
         await env.manager.run(target.id, targetPlan);
         await env.manager.run(draft.id, draftPlan);
         env.repository.setLaunchSettings(target.modelId, {
@@ -419,8 +1096,8 @@ if (runsWithElectronAbi)
         baseModelId: 'owner/base',
         artifacts: [env.plan.artifacts[1]!],
       };
-      const target = env.manager.enqueue(targetPlan);
-      const draft = env.manager.enqueue(draftPlan);
+      const target = await env.manager.enqueue(targetPlan);
+      const draft = await env.manager.enqueue(draftPlan);
       expect((await env.manager.run(target.id, targetPlan)).state).toBe('installed');
       expect((await env.manager.run(draft.id, draftPlan)).state).toBe('installed');
       expect(
@@ -431,7 +1108,7 @@ if (runsWithElectronAbi)
       const on = { type: 'draft-dflash', draftModelId: draft.modelId, draftTokensMax: 3 } as const;
       expect(env.repository.setSpeculativeSettings(target.modelId, on)).toEqual(on);
       const secondPlan = { ...targetPlan, quantization: 'Q8_0' };
-      const second = env.manager.enqueue(secondPlan);
+      const second = await env.manager.enqueue(secondPlan);
       expect((await env.manager.run(second.id, secondPlan)).state).toBe('installed');
       env.repository.setSpeculativeSettings(second.modelId, on);
       await expect(env.manager.deleteInstalled(draft.modelId)).rejects.toThrow('still referenced');
@@ -464,7 +1141,7 @@ if (runsWithElectronAbi)
     it('rejects a declared draft before publish when the actual GGUF is a normal model', async () => {
       const env = await fixture({ bytes: [modelMetadata('llama')] });
       const plan = { ...env.plan, architecture: 'dflash', baseModelId: 'owner/base' };
-      const job = env.manager.enqueue(plan);
+      const job = await env.manager.enqueue(plan);
       expect(await env.manager.run(job.id, plan)).toMatchObject({
         state: 'failed',
         failureCode: 'unsafe_store',
@@ -476,7 +1153,7 @@ if (runsWithElectronAbi)
 
     it('retains valid target settings when a different speculative entry is malformed', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       env.repository.close();
       const valid = { type: 'draft-dflash', draftModelId: 'b'.repeat(64), draftTokensMax: 3 };
@@ -498,7 +1175,7 @@ if (runsWithElectronAbi)
 
     it('recovers only a malformed speculative row and retains unrelated launch settings', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       const launch = env.repository.getLaunchSettings(job.modelId);
       env.repository.setLaunchSettings(job.modelId, launch);
@@ -529,7 +1206,7 @@ if (runsWithElectronAbi)
 
     it('migrates an installed v82 model without changing identity, files, or its launch settings', async () => {
       const env = await fixture();
-      const job = env.manager.enqueue(env.plan);
+      const job = await env.manager.enqueue(env.plan);
       await env.manager.run(job.id, env.plan);
       const before = env.repository.listInstalledModels();
       const launch = env.repository.getLaunchSettings(job.modelId);
@@ -580,7 +1257,7 @@ if (runsWithElectronAbi)
 
     it('publishes every verified split GGUF shard before marking the model installed', async () => {
       const env = await fixture();
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const installed = await env.manager.run(queued.id, env.plan);
 
@@ -627,7 +1304,7 @@ if (runsWithElectronAbi)
 
     it('clamps a legacy verification-derived default batch to its fallback context', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       env.manager.saveVerification(installed.modelId, {
         level: 'loaded',
@@ -680,7 +1357,7 @@ if (runsWithElectronAbi)
           },
         ],
       };
-      const queued = env.manager.enqueue(plan);
+      const queued = await env.manager.enqueue(plan);
       const installed = await env.manager.run(queued.id, plan);
 
       expect(installed.state).toBe('installed');
@@ -705,7 +1382,7 @@ if (runsWithElectronAbi)
 
     it('persists Managed Local inference settings per installed model in the existing settings table', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       expect(env.manager.getInferenceSettings(installed.modelId)).toEqual({
@@ -730,7 +1407,7 @@ if (runsWithElectronAbi)
 
     it('persists typed Managed Local launch settings per installed model in the existing settings table', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       expect(env.manager.getLaunchSettings(installed.modelId)).toEqual({
@@ -761,7 +1438,7 @@ if (runsWithElectronAbi)
 
     it('removes per-model inference and launch settings when the model is deleted', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       env.manager.setInferenceSettings(installed.modelId, {
         maxOutputTokens: 4_096,
@@ -775,7 +1452,7 @@ if (runsWithElectronAbi)
       });
 
       await env.manager.deleteInstalled(installed.modelId);
-      const requeued = env.manager.enqueue(env.plan);
+      const requeued = await env.manager.enqueue(env.plan);
       const reinstalled = await env.manager.run(requeued.id, env.plan);
 
       expect(env.manager.getInferenceSettings(reinstalled.modelId)).toEqual({
@@ -801,7 +1478,7 @@ if (runsWithElectronAbi)
           }),
         bytes: [Buffer.alloc(wrong.byteLength, 1)],
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -829,7 +1506,7 @@ if (runsWithElectronAbi)
             { status: 200, headers: { 'content-length': contentLength } },
           ),
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -847,7 +1524,7 @@ if (runsWithElectronAbi)
           return new Response();
         },
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
 
       const failed = await env.manager.run(queued.id, env.plan);
 
@@ -858,7 +1535,7 @@ if (runsWithElectronAbi)
 
     it('retains partial bytes on pause, recovers active jobs as interrupted, and deletes on confirmed cancel', async () => {
       const env = await fixture();
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const partial = env.store.partialPath(queued.modelId, 1);
       await writeFile(partial, env.bytes[0]!.subarray(0, 3));
       env.repository.progress(queued.id, 1, 3, '"old"');
@@ -886,7 +1563,7 @@ if (runsWithElectronAbi)
             },
           }),
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       await writeFile(env.store.partialPath(queued.modelId, 1), Buffer.from('fir'));
       env.repository.progress(queued.id, 1, 3, '"old"');
 
@@ -903,7 +1580,7 @@ if (runsWithElectronAbi)
         artifacts: [{ ...env.plan.artifacts[0]!, sourceUrl: 'http://127.0.0.1/model.gguf' }],
       };
 
-      expect(() => env.manager.enqueue(unsafe)).toThrow('Unsafe model source URL');
+      await expect(env.manager.enqueue(unsafe)).rejects.toThrow('Unsafe model source URL');
       env.repository.close();
     });
 
@@ -934,7 +1611,7 @@ if (runsWithElectronAbi)
         ],
       };
 
-      const queued = env.manager.enqueue(plan);
+      const queued = await env.manager.enqueue(plan);
       expect((await env.manager.run(queued.id, plan)).state).toBe('installed');
       expect(requested).toEqual([
         `https://huggingface.co/owner/model/resolve/${revision}/model.gguf`,
@@ -944,7 +1621,7 @@ if (runsWithElectronAbi)
 
     it('keeps a failed deletion retryable and removes DB rows only after filesystem success', async () => {
       const env = await fixture({ bytes: [Buffer.from('one model')] });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
       const modelPath = join(env.store.rootPath, 'models', installed.modelId);
       const unsafeEntry = join(modelPath, 'unexpected-directory');
@@ -968,7 +1645,7 @@ if (runsWithElectronAbi)
           throw new Error('Model has an active lease');
         },
       });
-      const queued = env.manager.enqueue(env.plan);
+      const queued = await env.manager.enqueue(env.plan);
       const installed = await env.manager.run(queued.id, env.plan);
 
       await expect(env.manager.deleteInstalled(installed.modelId)).rejects.toThrow('active lease');
