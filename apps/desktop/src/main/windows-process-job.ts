@@ -8,6 +8,8 @@ type WindowsJobAddon = Readonly<{
   assignProcessToOwnedJob(pid: number, jobId: string): boolean;
   terminateOwnedJob(jobId: string): boolean;
   closeOwnedJob(jobId: string): boolean;
+  terminateRetainedOwnedJob?(jobId: string): boolean;
+  ownedJobActiveProcesses?(jobId: string): number;
   runPreparedExecutionImage(executable: string, argv: readonly string[]): number;
 }>;
 
@@ -25,6 +27,23 @@ export function terminateOwnedJob(jobId: string): boolean {
 
 export function closeOwnedJob(jobId: string): boolean {
   return addon().closeOwnedJob(jobId);
+}
+
+/** Keeps ownership after termination so callers can confirm that every member exited. */
+export function terminateRetainedOwnedJob(jobId: string): boolean {
+  const operation = addon().terminateRetainedOwnedJob;
+  if (operation === undefined) throw new Error('Retained Windows Job termination is unavailable');
+  return operation(jobId);
+}
+
+export function ownedJobActiveProcesses(jobId: string): number {
+  const operation = addon().ownedJobActiveProcesses;
+  if (operation === undefined)
+    throw new Error('Windows Job membership confirmation is unavailable');
+  const count = operation(jobId);
+  if (!Number.isSafeInteger(count) || count < 0)
+    throw new Error('Invalid Windows Job member count');
+  return count;
 }
 
 function addon(): WindowsJobAddon {
@@ -62,6 +81,9 @@ control.on('end', () => {
     if (boundary.enableSafeDllSearchPolicy() !== true) throw new Error('policy unavailable');
   } catch { process.exitCode = 125; return; }
   try {
+    // Load the host wrapper/native boundary before applying the command-only preload options.
+    // The native child inherits this environment; NODE_OPTIONS cannot affect an already-started host.
+    Object.assign(process.env, request.env);
     process.exitCode = boundary.runPreparedExecutionImage(request.executable, request.argv);
   } catch { process.exitCode = 126; }
 });

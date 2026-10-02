@@ -100,6 +100,7 @@ describe('protected owned startup caller', () => {
     ])
       expect(bytes).not.toContain(value);
     expect(profiles).toHaveLength(1);
+    expect(() => readdirSync(profiles[0]!)).toThrow();
   });
 
   it.each(['source-mismatch', 'missing-end', 'nonzero-exit', 'timeout'])(
@@ -124,7 +125,7 @@ describe('protected owned startup caller', () => {
   );
 
   it('rejects executable mismatch before launching and rejects caller output overwrite', async () => {
-    const { input, start, captures } = fixture();
+    const { input, start, captures, profiles } = fixture();
     await expect(
       startup.collectOwnedComputerUseStartup(
         { ...input, expectedExecutableSha256: 'f'.repeat(64) },
@@ -137,6 +138,8 @@ describe('protected owned startup caller', () => {
       'COMPUTER_USE_OWNED_STARTUP_CHECKPOINT_FAILED',
     );
     expect(readFileSync(input.outputPath, 'utf8')).toBe('preserved');
+    expect(profiles).toHaveLength(1);
+    expect(() => readdirSync(profiles[0]!)).not.toThrow();
   });
 
   it('connects only opt-in protected workflow callers and uploads the exact bounded report', () => {

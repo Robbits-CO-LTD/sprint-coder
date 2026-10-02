@@ -18,6 +18,7 @@ export async function collectOwnedComputerUseStartup(
   let onAbort;
   let closed = false;
   let transportValidated = false;
+  let reportWritten = false;
   try {
     const {
       executable,
@@ -94,6 +95,7 @@ export async function collectOwnedComputerUseStartup(
     const bytes = `${JSON.stringify(report)}\n`;
     if (Buffer.byteLength(bytes) > 4096) throw new Error();
     writeFileSync(outputPath, bytes, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    reportWritten = true;
     return report;
   } catch {
     throw new Error('COMPUTER_USE_OWNED_STARTUP_CHECKPOINT_FAILED');
@@ -102,9 +104,9 @@ export async function collectOwnedComputerUseStartup(
     clearTimeout(timer);
     capture?.stopOwnedChild();
     if (capture !== undefined && !closed) capture.abandon();
-    // Only normal fully closed children permit profile cleanup. An unconfirmed forced stop
-    // leaves its isolated profile local; never confuse root kill with descendant completion.
-    if (profile !== undefined && closed && transportValidated) {
+    // Only a saved checkpoint from a normal fully closed child permits profile cleanup. Failed
+    // publication or an unconfirmed forced stop retains local state; root kill is not descendant proof.
+    if (profile !== undefined && closed && transportValidated && reportWritten) {
       try {
         rmSync(profile, { recursive: true, force: true });
       } catch {
