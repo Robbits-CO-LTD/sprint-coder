@@ -85,7 +85,7 @@ describe.runIf(process.platform === 'win32' && process.env['CI'] === 'true')(
       }
     }
 
-    it.each([0, 259])('retains the same direct child through normal exit %s', async (exitCode) => {
+    it.each([0, 259])('retains owned origin through normal exit %s', async (exitCode) => {
       await childFixture(exitCode, async (child) => {
         const receipt = addon().retainOwnedProcessIdentity(child.pid!);
         try {
@@ -110,6 +110,7 @@ describe.runIf(process.platform === 'win32' && process.env['CI'] === 'true')(
           await exited;
           expect(child.exitCode).toBe(exitCode);
           expect(receipt.isRunning()).toBe(false);
+          // Terminal proof is same-object origin continuity, not a fresh image-path query.
           expect(receipt.verifyUnchanged()).toBe(true);
           const after = receipt.snapshot();
           expect(
@@ -171,6 +172,23 @@ describe.runIf(process.platform === 'win32' && process.env['CI'] === 'true')(
           receipts[0]!.close();
           receipts.push(binding.retainOwnedProcessIdentity(child.pid!));
           expect(receipts.at(-1)!.verifyUnchanged()).toBe(true);
+          expect(() => binding.retainOwnedProcessIdentity(child.pid!)).toThrow();
+        } finally {
+          for (const receipt of receipts) receipt.close();
+        }
+      });
+    });
+
+    it('restores logical lease quota after failed non-child acquisitions', async () => {
+      const binding = addon();
+      for (let attempt = 0; attempt < 20; attempt++)
+        expect(() => binding.retainOwnedProcessIdentity(process.pid)).toThrow();
+      await childFixture(0, async (child) => {
+        const receipts: Receipt[] = [];
+        try {
+          for (let index = 0; index < 16; index++)
+            receipts.push(binding.retainOwnedProcessIdentity(child.pid!));
+          expect(receipts.every((receipt) => receipt.verifyUnchanged())).toBe(true);
           expect(() => binding.retainOwnedProcessIdentity(child.pid!)).toThrow();
         } finally {
           for (const receipt of receipts) receipt.close();
