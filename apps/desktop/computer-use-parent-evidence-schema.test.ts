@@ -26,11 +26,20 @@ let helper: {
 let verifier: {
   validateComputerUseFinalGateEvidence: (candidate: unknown, options: unknown) => unknown;
 };
+let protectedRunner: {
+  verifyComputerUseProtectedRunnerEvidence: (
+    candidate: unknown,
+    options: unknown,
+  ) => Promise<unknown>;
+};
 beforeAll(async () => {
   helper = await import(
     pathToFileURL(resolve(root, 'computer-use-parent-evidence-schema.mjs')).href
   );
   verifier = await import(pathToFileURL(resolve(root, 'verify-computer-use-final-gate.mjs')).href);
+  protectedRunner = await import(
+    pathToFileURL(resolve(root, 'verify-computer-use-protected-runner.mjs')).href
+  );
 });
 
 // Fixture claims are deliberately synthetic. Even complete references are not measured acceptance.
@@ -131,6 +140,141 @@ function fixture() {
     context: { sourceCommit, artifacts, primaryProviderBinding: structuredClone(windows.binding) },
   };
 }
+
+function protectedFixture() {
+  const { closure, context } = fixture();
+  const source = { sourceCommit: context.sourceCommit, sourceRunId: '1' };
+  const evidence = {
+    ...structuredClone(pending),
+    ...source,
+    parentClosure: closure,
+    providerBinding: closure.providerRuns.windows.binding,
+    artifacts: {
+      windows: {
+        ...pending.artifacts.windows,
+        ...source,
+        portable: {
+          ...pending.artifacts.windows.portable,
+          sha256: context.artifacts.windows.portable.sha256,
+        },
+      },
+      macos: {
+        ...pending.artifacts.macos,
+        ...source,
+        packageSha256: context.artifacts.macos.packageSha256,
+      },
+    },
+  };
+  const deriveFacts = (platform: 'windows' | 'macos'): Record<string, unknown> =>
+    Object.fromEntries(
+      helper.COMPUTER_USE_OWNED_RUN_FACT_KEYS.map((key) => [
+        key,
+        Reflect.get(closure.providerRuns[platform], key),
+      ]),
+    );
+  const facts = { windows: deriveFacts('windows'), macos: deriveFacts('macos') };
+  const options = {
+    allowIncomplete: true,
+    expectedSourceCommit: context.sourceCommit,
+    expectedWindowsPortableSha256: context.artifacts.windows.portable.sha256,
+    expectedMacosSha256: context.artifacts.macos.packageSha256,
+    measureOwnedRunFacts: async (platform: 'windows' | 'macos') => facts[platform],
+    verifyParentAssertions: async () => helper.computerUseParentClosureSha256(closure),
+  };
+  return { evidence, options, facts };
+}
+
+describe('protected runner library orchestration (synthetic measurements only)', () => {
+  it('keeps incomplete acceptance held even with matching independent callback measurements', async () => {
+    const { evidence, options } = protectedFixture();
+    expect(
+      await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, options),
+    ).toMatchObject({
+      status: 'CLOSE_HOLD',
+      finalGateEligible: false,
+    });
+  });
+
+  it.each(['missing', 'reject', 'undefined', 'malformed', 'mismatch'])(
+    'refuses %s measurements with a fixed private error',
+    async (kind) => {
+      const { evidence, options } = protectedFixture();
+      const measureOwnedRunFacts =
+        kind === 'missing'
+          ? undefined
+          : async () => {
+              if (kind === 'reject') throw new Error('PRIVATE_PRODUCER_DATA');
+              if (kind === 'undefined') return undefined;
+              if (kind === 'malformed') return { private: 'PRIVATE_PRODUCER_DATA' };
+              return { ...protectedFixture().facts.windows, processIdentityDigest: 'e'.repeat(64) };
+            };
+      await expect(
+        protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+          ...options,
+          measureOwnedRunFacts,
+        }),
+      ).rejects.toThrow('COMPUTER_USE_PROTECTED_RUNNER_VERIFICATION_FAILED');
+    },
+  );
+
+  it('isolates caller and callback snapshots across awaits and holds mismatched closure proof', async () => {
+    const { evidence, options, facts } = protectedFixture();
+    const original = structuredClone(facts.windows);
+    const result = await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+      ...options,
+      measureOwnedRunFacts: async (platform: 'windows' | 'macos', release: object) => {
+        expect(Object.isFrozen(release)).toBe(true);
+        if (platform === 'macos') {
+          facts.windows.processIdentityDigest = 'e'.repeat(64);
+          Object.assign(evidence.parentClosure.providerRuns.windows, {
+            processIdentityDigest: 'f'.repeat(64),
+          });
+        }
+        return facts[platform];
+      },
+      verifyParentAssertions: async (closure: { providerRuns: { windows: object } }) => {
+        expect(Object.isFrozen(closure.providerRuns.windows)).toBe(true);
+        expect(closure.providerRuns.windows).toMatchObject(original);
+        return 'e'.repeat(64);
+      },
+    });
+    expect(result).toMatchObject({ status: 'CLOSE_HOLD', finalGateEligible: false });
+  });
+
+  it('never fills missing parent coverage or grants workflow attestation from input options', async () => {
+    const { evidence, options } = protectedFixture();
+    Object.assign(evidence.parentClosure.coverage, { 'tests:PICKER_TOKEN_REPLAY': null });
+    for (const trustedWorkflowAttestationVerified of [false, true]) {
+      const result = await protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+        ...options,
+        trustedWorkflowAttestationVerified,
+        verifiedOwnedRunFacts: {},
+        verifiedClosureSha256: 'f'.repeat(64),
+      });
+      expect(result).toMatchObject({ status: 'CLOSE_HOLD', finalGateEligible: false });
+    }
+  });
+
+  it.each(['missing', 'reject', 'undefined', 'malformed'])(
+    'refuses %s assertion collector proof',
+    async (kind) => {
+      const { evidence, options } = protectedFixture();
+      const verifyParentAssertions =
+        kind === 'missing'
+          ? undefined
+          : async () => {
+              if (kind === 'reject') throw new Error('PRIVATE_ASSERTION_DATA');
+              return kind === 'undefined' ? undefined : { digest: 'a'.repeat(64) };
+            };
+      await expect(
+        protectedRunner.verifyComputerUseProtectedRunnerEvidence(evidence, {
+          ...options,
+          verifyParentAssertions,
+        }),
+      ).rejects.toThrow('COMPUTER_USE_PROTECTED_RUNNER_VERIFICATION_FAILED');
+    },
+  );
+});
 
 function cli(script: string, candidate: unknown, args: string[]) {
   const directory = mkdtempSync(resolve(tmpdir(), 'cu-parent-schema-'));
