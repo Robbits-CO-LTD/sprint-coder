@@ -2433,8 +2433,16 @@ export class TeamCoordinator {
       if (
         execution.state === 'completed' &&
         !reservations.some((row) => row.executionId === execution.id && row.state !== 'released')
-      )
+      ) {
+        // An earlier call can have released the reservation and then failed before the hold, Worker
+        // and Team end states were saved, so reconcile them again (idempotent).
+        const released = reservations.find((row) => row.executionId === execution.id);
+        if (released) {
+          this.reconcileGraphStepFinish(team.id, graph, execution, released.id, mission.state);
+          this.emit(taskId, team.id);
+        }
         return this.missionSummary(mission);
+      }
       const owner = reservations.find(
         (row) => row.executionId === execution.id && row.state !== 'released',
       );
@@ -2520,26 +2528,7 @@ export class TeamCoordinator {
             await this.cleanupIntegratedExecutionIsolation(isolation, hold.agentId);
           else if (worktree !== null)
             await this.cleanupIntegratedMissionWorktree(worktree, hold.agentId);
-          this.persistence.deleteGraphIntegrationHold(owner.id);
-          const executions = this.persistence.listTeamExecutions(team.id);
-          const participants = new Set(graph.plan.steps.map(({ workerId }) => workerId));
-          for (const agent of this.persistence.getTeamSnapshot(team.id).agents) {
-            if (!participants.has(agent.id) || !['ready', 'waiting'].includes(agent.state))
-              continue;
-            if (
-              executions.some(
-                (other) =>
-                  other.assigneeAgentId === agent.id &&
-                  !['completed', 'failed', 'canceled'].includes(other.state),
-              )
-            )
-              continue;
-            if (agent.id === hold.agentId || result.mission.state === 'completed')
-              this.persistence.setWorkerCurrentActivity(agent.id, null, this.isoNow());
-            if (result.mission.state === 'completed' && agent.state === 'waiting')
-              this.persistence.transitionWorkerState(agent.id, 'done');
-          }
-          if (result.mission.state === 'completed') this.finalizeTeamIfWorkersTerminal(team.id);
+          this.reconcileGraphStepFinish(team.id, graph, execution, owner.id, result.mission.state);
           this.executionScheduler.notifyReadinessChanged();
           this.emit(taskId, team.id);
           return this.missionSummary(result.mission);
@@ -5293,11 +5282,43 @@ export class TeamCoordinator {
     );
   }
 
-  private finalizeTeamIfWorkersTerminal(teamId: string): void {
+  // Idempotent post-completion work of a Graph integration step: drop the hold, settle the
+  // participating Workers, and finish the Team. Safe to repeat after a partial failure.
+  private reconcileGraphStepFinish(
+    teamId: string,
+    graph: { plan: { steps: readonly { workerId: string }[] } },
+    execution: { assigneeAgentId: string },
+    reservationId: string,
+    missionState: string,
+  ): void {
+    this.persistence.deleteGraphIntegrationHold(reservationId);
+    const executions = this.persistence.listTeamExecutions(teamId);
+    const participants = new Set(graph.plan.steps.map(({ workerId }) => workerId));
+    for (const agent of this.persistence.getTeamSnapshot(teamId).agents) {
+      if (!participants.has(agent.id) || !['ready', 'waiting'].includes(agent.state)) continue;
+      if (
+        executions.some(
+          (other) =>
+            other.assigneeAgentId === agent.id &&
+            !['completed', 'failed', 'canceled'].includes(other.state),
+        )
+      )
+        continue;
+      if (agent.id === execution.assigneeAgentId || missionState === 'completed')
+        this.persistence.setWorkerCurrentActivity(agent.id, null, this.isoNow());
+      if (missionState === 'completed' && agent.state === 'waiting')
+        this.persistence.transitionWorkerState(agent.id, 'done');
+    }
+    if (missionState === 'completed') this.finalizeTeamIfWorkersTerminal(teamId, true);
+  }
+
+  private finalizeTeamIfWorkersTerminal(teamId: string, resumeWindingDown = false): void {
     const snapshot = this.persistence.getTeamSnapshot(teamId);
     const workers = snapshot.agents.filter(({ kind }) => kind === 'worker');
+    // A repeated Graph finish may find a Team an earlier call left in winding_down.
+    const resuming = resumeWindingDown && snapshot.team.state === 'winding_down';
     if (
-      snapshot.team.state !== 'active' ||
+      (snapshot.team.state !== 'active' && !resuming) ||
       workers.length === 0 ||
       workers.some(({ state }) => !['done', 'failed', 'stopped'].includes(state))
     )
@@ -5312,7 +5333,7 @@ export class TeamCoordinator {
       });
       return;
     }
-    this.persistence.transitionTeamState(teamId, 'winding_down');
+    if (!resuming) this.persistence.transitionTeamState(teamId, 'winding_down');
     this.persistence.transitionTeamState(teamId, 'completed');
     this.diagnostic?.({
       event: 'team.completed',
