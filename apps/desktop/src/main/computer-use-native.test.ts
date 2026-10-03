@@ -1313,11 +1313,10 @@ describe('macOS native capture boundary', () => {
     // Same single source file and include directory: no new dependency or build input.
     expect(gyp).toContain('"sources": ["computer_use_macos.mm"]');
     expect(gyp).toContain('"include_dirs": ["."]');
-    // N2a adds native preflight/ticket only. Main, the loader and the Windows host do not know it.
+    // N2b-1 lets only the Main host adapter and the addon type use preflight/ticket. The loader,
+    // handshake, protocol and the Windows host still do not know it.
     for (const name of [
       'computer-use-native.ts',
-      'computer-use-native-host.ts',
-      'computer-use-native-types.ts',
       'computer-use-native-handshake.ts',
       'computer-use-native-protocol.ts',
     ]) {
@@ -1325,6 +1324,9 @@ describe('macOS native capture boundary', () => {
         /preflight|native_ticket_invalid|ordinary_ticket/iu,
       );
     }
+    expect(readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8')).not.toMatch(
+      /single_use_approval|SingleUseApproval/u,
+    );
     const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
     expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);
   });

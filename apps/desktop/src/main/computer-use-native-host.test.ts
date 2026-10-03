@@ -597,6 +597,110 @@ describe('Computer Use native Main adapter', () => {
         actionDigest: expect.stringMatching(/^[0-9a-f]{64}$/u),
       }),
     );
+    // N2b-1: a macOS native that exports preflight gets a preflight and a single-use ticket first.
+    const ticket = 'ab'.repeat(32);
+    const receipt = (input: unknown, overrides: Record<string, unknown> = {}) => {
+      const request = input as Record<string, unknown>;
+      return {
+        decision: 'ordinary',
+        reasonCode: null,
+        deniedResult: null,
+        ticket,
+        classifierVersion: 1,
+        inputAttemptCount: 2,
+        requestId: request['requestId'],
+        sessionId: request['sessionId'],
+        cancelEpoch: request['cancelEpoch'],
+        observationRevision: request['observationRevision'],
+        ...overrides,
+      };
+    };
+    const preflight = vi.fn((input: unknown): unknown => receipt(input));
+    const withPreflight = addon as unknown as { preflight?: typeof preflight };
+    withPreflight.preflight = preflight;
+    const preflightAction = (requestId: string) =>
+      host.dispatch({
+        session,
+        requestId,
+        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+        observationRevision: observation.revision,
+        cancelEpoch: 0,
+        signal: new AbortController().signal,
+      });
+    const dispatchCalls = (): number => dispatch.mock.calls.length;
+    await expect(preflightAction('pf-ok')).resolves.toMatchObject({ result: 'completed' });
+    expect(preflight).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestId: 'pf-ok', sessionId: 'session-1' }),
+    );
+    expect(preflight.mock.calls.at(-1)![0]).not.toHaveProperty('ticket');
+    expect(dispatch).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestId: 'pf-ok', ticket }),
+    );
+    // replay: answered from the native cache, so dispatch carries no ticket.
+    preflight.mockImplementationOnce((input) =>
+      receipt(input, { decision: 'replay', ticket: null }),
+    );
+    await preflightAction('pf-replay');
+    expect(dispatch.mock.calls.at(-1)![0]).not.toHaveProperty('ticket');
+    // blocked / takeover / denied never dispatch and keep the native result and reason.
+    for (const [decision, reasonCode, deniedResult] of [
+      ['blocked', 'native_secure_field_blocked', 'rejected'],
+      ['takeover', 'native_high_impact_user_takeover', 'paused'],
+      ['denied', 'native_stale_observation', 'rejected'],
+    ] as const) {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) =>
+        receipt(input, { decision, reasonCode, deniedResult, ticket: null }),
+      );
+      await expect(preflightAction('pf-' + decision)).resolves.toEqual({
+        result: deniedResult,
+        reasonCode,
+        inputReceipt: { sessionId: session.sessionId, cancelEpoch: 0, inputAttemptCount: 2 },
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
+    // Malformed receipts fail closed before any dispatch and never echo the ticket.
+    const malformed: Array<Record<string, unknown>> = [
+      { decision: 'single_use_approval' },
+      { decision: 'ordinary', ticket: 'short' },
+      { decision: 'ordinary', ticket: null },
+      { decision: 'ordinary', reasonCode: 'native_x' },
+      { decision: 'blocked', ticket },
+      { decision: 'denied', reasonCode: null, deniedResult: 'rejected', ticket: null },
+      { decision: 'denied', reasonCode: 'x', deniedResult: 'completed', ticket: null },
+      { requestId: 'other' },
+      { sessionId: 'other' },
+      { cancelEpoch: 9 },
+      { observationRevision: 99 },
+      { classifierVersion: 2 },
+      { extra: true },
+    ];
+    for (const overrides of malformed) {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) => receipt(input, overrides));
+      const failure = await preflightAction('pf-bad').catch((error: unknown) => error);
+      expect(failure).toMatchObject({ reasonCode: 'native_preflight_invalid' });
+      expect(String((failure as Error).message)).not.toContain(ticket);
+      expect(dispatchCalls()).toBe(before);
+    }
+    preflight.mockReturnValueOnce('not-an-object');
+    await expect(preflightAction('pf-bad')).rejects.toMatchObject({
+      reasonCode: 'native_preflight_invalid',
+    });
+    // A receipt whose input count regresses is not trusted.
+    preflight.mockImplementationOnce((input) => receipt(input, { inputAttemptCount: 1 }));
+    await expect(preflightAction('pf-regress')).rejects.toBeDefined();
+    // Pre-dispatch failures raised by preflight map like dispatch failures.
+    preflight.mockImplementationOnce(() => {
+      throw Object.assign(new Error('canceled'), { code: 'CANCELED' });
+    });
+    await expect(preflightAction('pf-throw')).resolves.toEqual({
+      result: 'canceled',
+      reasonCode: 'native_canceled_pre_dispatch',
+    });
+    delete withPreflight.preflight;
+    await preflightAction('pf-legacy');
+    expect(dispatch.mock.calls.at(-1)![0]).not.toHaveProperty('ticket');
     dispatch.mockReturnValueOnce({
       result: 'completed',
       reasonCode: null,
