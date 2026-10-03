@@ -493,12 +493,20 @@ export function createComputerUseNativeHost(
           input.cancelEpoch,
         );
         if (outcome.kind === 'ticket') ticket = outcome.ticket;
-        if (outcome.kind === 'refused')
+        if (outcome.kind === 'refused') {
+          // Same public-shape check as a dispatch result, so the contract owns the reason format.
+          if (
+            !computerUseActionResultSchema
+              .partial()
+              .safeParse({ result: outcome.result, reasonCode: outcome.reasonCode }).success
+          )
+            throw new ComputerUseNativeUnavailableError('native_preflight_invalid');
           return Object.freeze({
             result: outcome.result,
             reasonCode: outcome.reasonCode,
             inputReceipt: preflightReceipt,
           });
+        }
       }
       let value: unknown;
       try {
@@ -709,7 +717,6 @@ function parseNativePreflightReceipt(
   if (
     (decision === 'blocked' || decision === 'takeover' || decision === 'denied') &&
     typeof reasonCode === 'string' &&
-    /^[a-z0-9_]{1,128}$/u.test(reasonCode) &&
     (deniedResult === 'rejected' || deniedResult === 'paused' || deniedResult === 'canceled')
   )
     return { kind: 'refused', result: deniedResult, reasonCode, record };

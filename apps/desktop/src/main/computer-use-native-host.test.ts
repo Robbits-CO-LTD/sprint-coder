@@ -262,6 +262,118 @@ describe('Computer Use native Main adapter', () => {
     ]);
   });
 
+  it('never calls an exported preflight on win32 and keeps the legacy dispatch path', async () => {
+    const appIdentityDigest = digest('a');
+    const windowIdentityDigest = digest('c');
+    const screen = { x: 300, y: 150, width: 1_200, height: 900 };
+    const preflight = vi.fn(() => {
+      throw new Error('win32 must not preflight');
+    });
+    const dispatch = vi.fn((input: unknown) => {
+      const request = input as Record<string, unknown>;
+      return {
+        result: 'completed',
+        reasonCode: null,
+        sessionId: request['sessionId'],
+        cancelEpoch: request['cancelEpoch'],
+        inputAttemptCount: 1,
+      };
+    });
+    const surface = {
+      probe: () => ({}),
+      pickApplication: () => null,
+      listWindows: () => [
+        {
+          pid: 42,
+          windowHandle: '100',
+          boundsUnit: 'physical_px',
+          windowId: '100',
+          appIdentityDigest,
+          executableDigest: digest('b'),
+          windowIdentityDigest,
+          title: 'Target',
+          bounds: screen,
+          screenBounds: screen,
+          focused: false,
+          eligible: true,
+          ownerKind: 'application',
+          modal: false,
+          revision: 1,
+          maximumMode: 'full_access_app',
+        },
+      ],
+      startSession: () => ({
+        sessionId: 'session-w',
+        windowId: '100',
+        appIdentityDigest,
+        windowIdentityDigest,
+        profileRevision: 1,
+        cancelEpoch: 0,
+        screenBounds: screen,
+        maximumMode: 'full_access_app',
+        inputAttemptCount: 0,
+      }),
+      observe: () => ({}),
+      preflight,
+      dispatch,
+      cancel: () => undefined,
+      close: () => undefined,
+    };
+    const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
+      windowsPhysicalBoundsToDip: (bounds) => bounds,
+    });
+    const profile = {
+      id: 'profile-1',
+      platform: 'win32' as const,
+      kind: 'win32-executable' as const,
+      label: 'Target',
+      canonicalPath: 'C:\\Target\\Target.exe',
+      appUrl: null,
+      identity: {
+        platform: 'win32' as const,
+        identityDigest: appIdentityDigest,
+        executablePath: 'C:\\Target\\Target.exe',
+        executableDigest: digest('b'),
+        signerDigest: digest('d'),
+        packageFamilyName: null,
+        appUserModelId: null,
+        displayName: 'Target',
+        maximumMode: 'full_access_app' as const,
+      },
+      identityDigest: appIdentityDigest,
+      version: null,
+      executableDigest: digest('b'),
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: false,
+      revision: 1,
+      createdAt: '2026-08-30T00:00:00.000Z',
+      updatedAt: '2026-08-30T00:00:00.000Z',
+    };
+    const session = await host.startSession({
+      profile,
+      windowId: '100',
+      sessionId: 'session-w',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    });
+    await expect(
+      host.dispatch({
+        session,
+        requestId: 'request-w',
+        action: { type: 'click', x: 0.5, y: 0.5, button: 'left' },
+        observationRevision: 1,
+        cancelEpoch: 0,
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ result: 'completed' });
+    expect(preflight).not.toHaveBeenCalled();
+    expect(dispatch.mock.calls[0]![0]).not.toHaveProperty('ticket');
+  });
+
   it('rejects a changed executable digest for an unsigned Windows profile', async () => {
     const appIdentityDigest = digest('a');
     const registeredExecutableDigest = digest('b');
@@ -688,8 +800,30 @@ describe('Computer Use native Main adapter', () => {
       reasonCode: 'native_preflight_invalid',
     });
     // A receipt whose input count regresses is not trusted.
-    preflight.mockImplementationOnce((input) => receipt(input, { inputAttemptCount: 1 }));
-    await expect(preflightAction('pf-regress')).rejects.toBeDefined();
+    {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) => receipt(input, { inputAttemptCount: 1 }));
+      await expect(preflightAction('pf-regress')).rejects.toMatchObject({
+        reasonCode: 'native_input_receipt_unconfirmed',
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
+    // A refused reason outside the contract format is not trusted either.
+    {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) =>
+        receipt(input, {
+          decision: 'denied',
+          reasonCode: 'Not A Valid Reason',
+          deniedResult: 'rejected',
+          ticket: null,
+        }),
+      );
+      await expect(preflightAction('pf-reason')).rejects.toMatchObject({
+        reasonCode: 'native_preflight_invalid',
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
     // Pre-dispatch failures raised by preflight map like dispatch failures.
     preflight.mockImplementationOnce(() => {
       throw Object.assign(new Error('canceled'), { code: 'CANCELED' });
