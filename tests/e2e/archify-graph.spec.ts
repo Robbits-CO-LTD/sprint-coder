@@ -451,10 +451,11 @@ test('reviews and restores a proposed Mission without starting executions', asyn
         nativeApp.focus({ steal: true });
         BrowserWindow.getAllWindows()[0]!.focus();
       });
-    // Issue #714: the first click keeps Playwright's 30 s bound; a failure records one bool vector.
+    // Issue #714: the first click keeps the 30 s bound seen in the original failure, now explicit so
+    // the 3 s probe fits inside the 90 s test budget; a failure records one bool vector.
     await clickWithSidebarVector(
       page,
-      () => page.getByTestId('sidebar-new-task-button').click(),
+      () => page.getByTestId('sidebar-new-task-button').click({ timeout: 30_000 }),
       async (vector) => {
         const path = testInfo.outputPath('sidebar-click-vector.json');
         await writeFile(path, JSON.stringify(vector));
