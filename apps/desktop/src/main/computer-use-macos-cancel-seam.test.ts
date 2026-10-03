@@ -4,10 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-const source = readFileSync(
-  join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
-  'utf8',
-);
+const nativeSourceDirectory = join(__dirname, '../../computer-use-native');
+const source = readFileSync(join(nativeSourceDirectory, 'computer_use_macos.mm'), 'utf8');
 function functionSource(start: string, end: string) {
   const from = source.indexOf(start);
   const to = source.indexOf(end, from + start.length);
@@ -115,6 +113,9 @@ ${reservationDriver}`,
             '-Wextra',
             '-Werror',
             ...(sanitizers ? ['-fsanitize=address,undefined', '-fno-omit-frame-pointer'] : []),
+            // The production binding header is included as-is, never copied into this seam.
+            '-I',
+            nativeSourceDirectory,
             program,
             '-o',
             binary,
@@ -451,6 +452,7 @@ const reservationPreamble = String.raw`
 #include <cstdlib>
 #include <deque>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -460,6 +462,8 @@ const reservationPreamble = String.raw`
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include "computer_use_native_binding.h"
+#include "computer_use_preflight_classifier.h"
 struct CGRect { struct { double x, y; } origin; struct { double width, height; } size; };
 struct MacDispatchReplayEntry {
   std::string envelope_digest, result, reason_code;
@@ -467,6 +471,8 @@ struct MacDispatchReplayEntry {
 };
 struct MacComputerUseSession {
   std::string session_id = "seam", app_identity = "app", window_identity = "window";
+  std::string process_generation = "generation", task_id = "task", turn_id = "turn";
+  CGRect expected_bounds{{0, 0}, {100, 100}};
   std::uint32_t pid = 1, window_id = 2;
   std::atomic<bool> closed{false};
   std::atomic<std::uint64_t> cancel_epoch{0};
@@ -495,7 +501,8 @@ std::shared_ptr<MacComputerUseSession> FindMacSession(const std::string& id) {
   return current && current->session_id == id ? current : nullptr;
 }
 // Digest measurement is inert here: replay cases test production comparison/cache ownership, not
-// SHA-256 authenticity. Every distinct domain-framed fixture input remains distinct.
+// SHA-256 authenticity. The identity stub keeps every distinct canonical input distinct, so the
+// production IsLowerHexDigest check must never be applied to these internal digests.
 std::string StringDigest(const std::string& value) { return value; }
 std::string AccessibilityTargetLookupDigest(const std::string& value) { return value; }
 struct FakeValue {
@@ -752,6 +759,56 @@ int main() {
   Check(current->dispatch_replay_cache.size() == kMaxDispatchReplayEntries &&
     current->dispatch_replay_order.size() == kMaxDispatchReplayEntries &&
     !current->dispatch_replay_cache.contains("0"), "replay_cache_bounded");
+  // The envelope binds the request payload and the lock-held snapshot context. The identity
+  // digest stub cannot prove SHA behavior; it shows production compares distinct canonical bytes.
+  const auto expectConflict = [&](const char* name, bool semantic, auto mutate) {
+    Reset();
+    if (semantic) { input.strings["kind"] = "invoke"; input.strings["targetId"] = "target"; }
+    Dispatch(&input, nullptr); Drain();
+    Check(effects == 1 && lastOutcome.result == "completed", name);
+    mutate();
+    Dispatch(&input, nullptr);
+    Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1 && queue.empty(), name);
+  };
+  expectConflict("payload_x_conflict", false, [&] { input.numbers["x"] = .25; });
+  expectConflict("payload_y_conflict", false, [&] { input.numbers["y"] = .75; });
+  expectConflict("payload_kind_conflict", false, [&] {
+    input.strings["kind"] = "scroll"; input.numbers["deltaX"] = 0; input.numbers["deltaY"] = 1;
+  });
+  expectConflict("payload_target_conflict", true, [&] { input.strings["targetId"] = "target2"; });
+  expectConflict("context_focused_conflict", false, [&] { current->focused_control_signature = "other"; });
+  expectConflict("context_visual_control_conflict", false, [&] { current->visual_control_signatures.insert("more"); });
+  expectConflict("context_visual_patch_conflict", false, [&] { current->visual_patch_digests = {"changed"}; });
+  expectConflict("context_visual_patch_order_conflict", false, [&] {
+    current->visual_patch_digests = {"patch", "second"};
+  });
+  expectConflict("context_target_signature_conflict", true, [&] { current->semantic_control_signatures["target"] = "changed"; });
+  expectConflict("context_target_absent_conflict", true, [&] { current->semantic_control_signatures.clear(); });
+  expectConflict("context_observation_bounds_conflict", false, [&] { current->observation_bounds.size.width = 101; });
+  expectConflict("context_dialog_digest_conflict", false, [&] { current->dialog_set_digest = "other-dialogs"; });
+  expectConflict("context_process_generation_conflict", false, [&] { current->process_generation = "other"; });
+  expectConflict("context_expected_bounds_conflict", false, [&] { current->expected_bounds.origin.x = 1; });
+  expectConflict("context_task_conflict", false, [&] { current->task_id = "other-task"; });
+  expectConflict("context_turn_conflict", false, [&] { current->turn_id = "other-turn"; });
+  // A target that resolves to an empty signature is not the same as an unresolved target.
+  Reset();
+  input.strings["kind"] = "invoke"; input.strings["targetId"] = "target";
+  current->semantic_control_signatures.clear();
+  Dispatch(&input, nullptr); Drain();
+  current->semantic_control_signatures["target"] = "";
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1, "absent_vs_empty_target_signature");
+  // The same request replays unchanged, and a Task/Turn in the request is never read.
+  Reset();
+  Dispatch(&input, nullptr); Drain();
+  input.strings["taskId"] = "request-task"; input.strings["turnId"] = "request-turn";
+  Dispatch(&input, nullptr);
+  Check(lastOutcome.result == "completed" && effects == 1 && queue.empty() && promises == 1,
+    "dispatch_ignores_request_task_turn");
+  // A non-finite coordinate fails closed before any reservation.
+  Reset();
+  input.numbers["x"] = std::numeric_limits<double>::quiet_NaN();
+  Check(!ParseOnly(&error) && current->inflight_dispatches.empty() && effects == 0, "nan_payload_fail_closed");
   std::cout << "{\"reservationSemantics\":true}";
 }
 `;

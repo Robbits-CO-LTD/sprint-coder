@@ -1280,7 +1280,14 @@ describe('macOS native capture boundary', () => {
     expect(parserSource).toContain('"sessionId"');
     expect(parserSource).toContain('"observationRevision"');
     expect(parserSource).toContain('"actionDigest"');
-    expect(parserSource).toContain('computer-native-dispatch-envelope-v1');
+    expect(parserSource).toContain('BuildNativeBindingEnvelopeInput(');
+    expect(
+      readFileSync(
+        join(__dirname, '../../computer-use-native/computer_use_native_binding.h'),
+        'utf8',
+      ),
+    ).toContain('computer-native-dispatch-envelope-v2');
+    expect(parserSource).not.toContain('computer-native-dispatch-envelope-v1');
     expect(parserSource).toContain('native_request_id_conflict');
     expect(parserSource).toContain('native_dispatch_busy');
     expect(source).toContain('"accepted"');
