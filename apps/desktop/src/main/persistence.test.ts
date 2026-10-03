@@ -46,6 +46,7 @@ import {
 } from './managed-command-stdin';
 import { createDefaultToolBroker, startMockTurnCatalog } from './default-tools';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import { parseGapSnapshot, startEventLoopGapSampler } from './persistence-bridge-gap-sampler';
 import { ToolBroker } from './tool-broker';
 import {
   AcceptanceEvidenceMissingError,
@@ -112,6 +113,10 @@ import {
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
+// Issue #692 diagnostic: the Electron child samples its own real event-loop gap (real clocks, not
+// the fake ones cases install) into a fixed-size file that the bridge reads on failure.
+if (runsWithElectronAbi && process.env['SPRINT_CODER_BRIDGE_GAP_FILE'])
+  startEventLoopGapSampler(process.env['SPRINT_CODER_BRIDGE_GAP_FILE']);
 // The bridge runs the full SQLite integration suite in a child Electron process. Native startup,
 // the Windows-only Job Object case, and hosted-runner contention can exceed a short timeout: the
 // suite passed the 60 s mark on hosted macOS and Linux runners once it grew past ~190 cases
@@ -10858,6 +10863,7 @@ else
         // available to receive reporting acknowledgements while SQLite tests run in Electron.
         const reportDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-persistence-report-'));
         const reportFile = join(reportDirectory, 'report.json');
+        const gapFile = join(reportDirectory, 'gap.json');
         try {
           await promisify(execFile)(
             electronTestExecutablePath(),
@@ -10876,6 +10882,7 @@ else
                 ...process.env,
                 ELECTRON_RUN_AS_NODE: '1',
                 SPRINT_CODER_ELECTRON_DB_TEST: '1',
+                SPRINT_CODER_BRIDGE_GAP_FILE: gapFile,
               },
               timeout: persistenceBridgeTimeoutMs,
               maxBuffer: 10 * 1024 * 1024,
@@ -10884,7 +10891,7 @@ else
         } catch (error) {
           // Keep the child failure authoritative. A reporting timeout otherwise exposes only
           // stderr, losing whether SQLite assertions ran. Do not print raw stdout/report errors.
-          throw persistenceBridgeFailure(error, reportFile);
+          throw persistenceBridgeFailure(error, reportFile, gapFile);
         } finally {
           try {
             rmSync(reportDirectory, { recursive: true, force: true });
@@ -10898,7 +10905,23 @@ else
     );
   });
 
-function persistenceBridgeFailure(error: unknown, reportFile: string): Error {
+function persistenceBridgeGapSummary(gapFile: string | undefined): string {
+  if (gapFile === undefined) return 'gap=none';
+  try {
+    if (!existsSync(gapFile)) return 'gap=missing';
+    if (statSync(gapFile).size > 512) return 'gap=oversized';
+    const values = parseGapSnapshot(readFileSync(gapFile, 'utf8'));
+    if (values === null) return 'gap=invalid';
+    // Staleness of the last child write, on the parent's real clock: a large value with small
+    // child gaps means the child stopped writing; it does not by itself identify why.
+    const ageMs = Math.max(0, Date.now() - (values[3] ?? 0));
+    return `gap=${JSON.stringify(values)}; gapWriteAgeMs=${ageMs}`;
+  } catch {
+    return 'gap=unreadable';
+  }
+}
+
+function persistenceBridgeFailure(error: unknown, reportFile: string, gapFile?: string): Error {
   const failure: Record<string, number | string | boolean> = {};
   if (typeof error === 'object' && error !== null) {
     const source = error as Record<string, unknown>;
@@ -10918,7 +10941,7 @@ function persistenceBridgeFailure(error: unknown, reportFile: string): Error {
   // Vitest prints Error.cause and execFile's message includes raw stderr. Retain the failure
   // classification, never the child error or its stdout/stderr/path-bearing properties.
   return new Error(
-    `SQLite Electron bridge failed; child=${JSON.stringify(failure)}; ${persistenceBridgeReportSummary(reportFile)}`,
+    `SQLite Electron bridge failed; child=${JSON.stringify(failure)}; ${persistenceBridgeReportSummary(reportFile)}; ${persistenceBridgeGapSummary(gapFile)}`,
   );
 }
 
