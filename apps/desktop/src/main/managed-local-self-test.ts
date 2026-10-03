@@ -4,6 +4,20 @@ import type { ManagedLocalRuntimeSession } from './managed-local-runtime-supervi
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 const SELF_TEST_COMPLETION_TIMEOUT_MS = 120_000;
+const NONCE_DIAGNOSTIC_TAG = 'MANAGED_LOCAL_SELF_TEST_NONCE_V1';
+const NONCE_DIAGNOSTIC_FIELDS = [
+  'tag',
+  'reason',
+  'argumentsLength',
+  'keyCount',
+  'noncePresent',
+  'nonceIsString',
+  'nonceLength',
+  'finishReason',
+  'promptTokens',
+  'completionTokens',
+  'reasoningTokens',
+] as const;
 
 export async function runManagedLocalSelfTest(
   input: Readonly<{
@@ -193,6 +207,119 @@ function toolCall(value: unknown, name: string, nonce: string): Record<string, u
     Object.keys(parsed).length !== 1 ||
     (parsed as Record<string, unknown>).nonce !== nonce
   )
-    throw new Error('Self-test model returned the wrong nonce');
+    throw new Error('Self-test model returned the wrong nonce', {
+      cause: safeNonceDiagnostic(value, parsed, args.length),
+    });
   return record;
+}
+
+function safeNonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: number) {
+  try {
+    return nonceDiagnostic(value, parsed, argumentsLength);
+  } catch {
+    return undefined; // Observation must never replace the original nonce rejection.
+  }
+}
+
+function diagnosticObject(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function diagnosticCounter(value: unknown): number | 'MISSING' {
+  return typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 1_000_000
+    ? value
+    : 'MISSING';
+}
+
+function nonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: number) {
+  const args = diagnosticObject(parsed);
+  const keys = args === null ? 0 : Object.keys(args).length;
+  const noncePresent = args !== null && Object.hasOwn(args, 'nonce');
+  const nonce = noncePresent ? args?.['nonce'] : undefined;
+  const nonceIsString = typeof nonce === 'string';
+  const response = diagnosticObject(value);
+  const choices = response?.['choices'];
+  const choice = Array.isArray(choices) ? diagnosticObject(choices[0]) : null;
+  const finish = choice?.['finish_reason'];
+  const finishReason =
+    choice === null || !Object.hasOwn(choice, 'finish_reason')
+      ? 'MISSING'
+      : finish === 'stop' || finish === 'tool_calls' || finish === 'length'
+        ? finish
+        : 'UNKNOWN';
+  const usage = diagnosticObject(response?.['usage']);
+  const details = diagnosticObject(usage?.['completion_tokens_details']);
+  return Object.freeze({
+    tag: NONCE_DIAGNOSTIC_TAG,
+    reason:
+      args === null || keys !== 1 || !noncePresent || !nonceIsString
+        ? 'SHAPE_REJECT'
+        : 'NONCE_VALUE_REJECT',
+    argumentsLength,
+    keyCount: Math.min(keys, 8),
+    noncePresent,
+    nonceIsString,
+    nonceLength: nonceIsString ? Math.min(nonce.length, 8192) : 'MISSING',
+    finishReason,
+    promptTokens: diagnosticCounter(usage?.['prompt_tokens']),
+    completionTokens: diagnosticCounter(usage?.['completion_tokens']),
+    reasoningTokens: diagnosticCounter(details?.['reasoning_tokens']),
+  });
+}
+
+// This private cause tag identifies diagnostic shape, not provenance or authority.
+export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | null {
+  try {
+    if (process.env['CI'] !== 'true' || !(error instanceof Error)) return null;
+    const cause = diagnosticObject(error.cause);
+    if (cause === null) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(cause);
+    if (Reflect.ownKeys(descriptors).length !== NONCE_DIAGNOSTIC_FIELDS.length) return null;
+    const fields: Record<string, unknown> = {};
+    for (const name of NONCE_DIAGNOSTIC_FIELDS) {
+      const descriptor = descriptors[name];
+      if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) return null;
+      fields[name] = descriptor.value;
+    }
+    const bounded = (value: unknown, maximum: number) =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+    const finishReason = fields['finishReason'];
+    if (
+      fields['tag'] !== NONCE_DIAGNOSTIC_TAG ||
+      (fields['reason'] !== 'SHAPE_REJECT' && fields['reason'] !== 'NONCE_VALUE_REJECT') ||
+      !bounded(fields['argumentsLength'], 8192) ||
+      !bounded(fields['keyCount'], 8) ||
+      typeof fields['noncePresent'] !== 'boolean' ||
+      typeof fields['nonceIsString'] !== 'boolean' ||
+      (fields['nonceIsString']
+        ? !fields['noncePresent'] || !bounded(fields['nonceLength'], 8192)
+        : fields['nonceLength'] !== 'MISSING') ||
+      typeof finishReason !== 'string' ||
+      !['stop', 'tool_calls', 'length', 'UNKNOWN', 'MISSING'].includes(finishReason) ||
+      ['promptTokens', 'completionTokens', 'reasoningTokens'].some(
+        (name) => fields[name] !== 'MISSING' && !bounded(fields[name], 1_000_000),
+      ) ||
+      (fields['reason'] === 'NONCE_VALUE_REJECT') !==
+        (fields['keyCount'] === 1 && fields['noncePresent'] && fields['nonceIsString'])
+    )
+      return null;
+    const line = `MANAGED_LOCAL_SELF_TEST_NONCE_DIAGNOSTIC:${JSON.stringify(fields)}\n`;
+    return Buffer.byteLength(line, 'utf8') <= 512 ? line : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeManagedLocalSelfTestDiagnostic(error: unknown): void {
+  try {
+    const diagnostic = formatManagedLocalSelfTestDiagnostic(error);
+    if (diagnostic !== null) process.stderr.write(diagnostic);
+  } catch {
+    // Optional CI observation must not replace the original verification rejection.
+  }
 }

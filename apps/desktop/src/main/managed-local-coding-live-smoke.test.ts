@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 import { ManagedLocalController } from './managed-local-controller';
+import { writeManagedLocalSelfTestDiagnostic } from './managed-local-self-test';
 import { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
 import { loadBundledManagedLocalSidecar } from './managed-local-sidecar-bundle';
 import type { ManagedLocalSidecarPin, ManagedLocalTargetKey } from './managed-local-sidecar-bundle';
@@ -89,6 +90,7 @@ describe.runIf(LIVE && ELECTRON_LIVE)('Managed Local coding live smoke', () => {
         );
 
         const verification = await controller.verify(installed.modelId).catch((error: unknown) => {
+          if (process.env['CI'] === 'true') writeManagedLocalSelfTestDiagnostic(error);
           throw new Error(
             `Managed Local verification failed: ${error instanceof Error ? error.message : 'unknown'}; ` +
               `hardware=${JSON.stringify(lastHardware)}; runtime=${JSON.stringify(controller.runtime())}`,

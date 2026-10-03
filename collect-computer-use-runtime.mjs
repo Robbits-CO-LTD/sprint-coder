@@ -37,11 +37,13 @@ const safeEnvironmentKeys = new Set([
   'SPRINT_CODER_COMPUTER_USE_DESKTOP_V1',
 ]);
 const digest = (bytes) => createHash('sha256').update(bytes).digest('hex');
-export function hashExecutable(path) {
+export function hashExecutable(path, maxBytes = 1024 * 1024 * 1024) {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 1024 * 1024 * 1024)
+    throw new Error('executable_size');
   const fd = openSync(path, 'r');
   try {
     const before = fstatSync(fd);
-    if (!before.isFile() || before.size > 1024 * 1024 * 1024) throw new Error('executable_size');
+    if (!before.isFile() || before.size > maxBytes) throw new Error('executable_size');
     const buffer = Buffer.alloc(64 * 1024);
     const hash = createHash('sha256');
     let size = 0;
@@ -49,7 +51,7 @@ export function hashExecutable(path) {
       const count = readSync(fd, buffer);
       if (count === 0) break;
       size += count;
-      if (size > before.size) throw new Error('executable_changed');
+      if (size > before.size || size > maxBytes) throw new Error('executable_changed');
       hash.update(buffer.subarray(0, count));
     }
     const after = fstatSync(fd);
@@ -72,8 +74,10 @@ export function startOwnedComputerUseCapture({
   args = [],
   environment = process.env,
   handshakeTimeoutMs = 30_000,
+  retainOwnedProcess,
 }) {
   if (
+    (retainOwnedProcess !== undefined && typeof retainOwnedProcess !== 'function') ||
     !isAbsolute(executable) ||
     !Array.isArray(args) ||
     args.length > 32 ||
@@ -101,6 +105,19 @@ export function startOwnedComputerUseCapture({
   const closed = new Promise((resolve) => child.once('close', () => resolve()));
   const frames = [];
   let hello;
+  let retainedProcess;
+  let processIdentity;
+  const releaseProcess = (requireConfirmedClose = false) => {
+    if (!retainedProcess) return;
+    const receipt = retainedProcess;
+    retainedProcess = undefined;
+    try {
+      receipt.close();
+    } catch {
+      if (requireConfirmedClose) throw new Error('owned_process_close_unconfirmed');
+      /* cleanup never emits backend details */
+    }
+  };
   let failed = false;
   let resolveHello, rejectHello, resolveCompleted, rejectCompleted;
   const handshake = new Promise((resolve, reject) => {
@@ -119,6 +136,7 @@ export function startOwnedComputerUseCapture({
     if (failed) return;
     failed = true;
     frames.length = 0;
+    releaseProcess();
     clearTimeout(timer);
     const error = new Error('Computer Use live capture is incomplete');
     rejectHello(error);
@@ -161,10 +179,32 @@ export function startOwnedComputerUseCapture({
     try {
       if (code !== 0 || !hello) throw new Error('child_exit');
       const summary = decoder.finish();
+      if (
+        retainOwnedProcess !== undefined &&
+        (!retainedProcess || retainedProcess.verifyUnchanged() !== true)
+      )
+        throw new Error('owned_process_continuity');
+      releaseProcess(true);
       resolveCompleted(
         immutableCaptureResult({
           ...summary,
           hello,
+          ...(processIdentity
+            ? {
+                processIdentityDigest: digest(
+                  JSON.stringify([
+                    'sprint-coder-owned-process-identity-v1',
+                    process.platform,
+                    digest(nonce),
+                    executableSha256,
+                    processIdentity.pid,
+                    processIdentity.parentPid,
+                    processIdentity.startIdentity,
+                    processIdentity.imagePath,
+                  ]),
+                ),
+              }
+            : {}),
           frames,
           sessions: summarizeComputerUseCaptureRounds(frames),
           executableSha256,
@@ -175,6 +215,45 @@ export function startOwnedComputerUseCapture({
       fail();
     }
   });
+  if (retainOwnedProcess !== undefined) {
+    try {
+      retainedProcess = retainOwnedProcess(
+        Object.freeze({
+          pid: child.pid,
+          executable: path,
+          executableSha256,
+          runIdDigest: digest(nonce),
+        }),
+      );
+      if (
+        !retainedProcess ||
+        retainedProcess.isRunning() !== true ||
+        retainedProcess.verifyUnchanged() !== true
+      )
+        throw new Error('owned_process_unavailable');
+      const measured = retainedProcess.snapshot();
+      processIdentity = Object.freeze({
+        pid: measured?.pid,
+        parentPid: measured?.parentPid,
+        startIdentity: measured?.startIdentity,
+        imagePath: measured?.imagePath,
+      });
+      if (
+        processIdentity.pid !== child.pid ||
+        processIdentity.parentPid !== process.pid ||
+        typeof processIdentity.startIdentity !== 'string' ||
+        !/^win32:[1-9][0-9]*$/u.test(processIdentity.startIdentity) ||
+        processIdentity.startIdentity.length > 128 ||
+        typeof processIdentity.imagePath !== 'string' ||
+        !isAbsolute(processIdentity.imagePath) ||
+        processIdentity.imagePath.length > 32768
+      )
+        throw new Error('owned_process_mismatch');
+    } catch {
+      fail();
+      if (!child.killed) child.kill();
+    }
+  }
   return Object.freeze({
     handshake,
     completed,
