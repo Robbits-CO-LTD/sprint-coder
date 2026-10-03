@@ -57,8 +57,10 @@ describe('replaceWindowsFileWithBackup', () => {
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-long-guard-'));
       cleanup.push(root);
-      const first = join(root, 'f'.repeat(200));
-      const second = join(root, 's'.repeat(200));
+      // Derive the component length from the actual root so a short TEMP cannot shrink the path.
+      const pad = Math.min(255, Math.max(200, 262 - root.length - 12));
+      const first = join(root, 'f'.repeat(pad));
+      const second = join(root, 's'.repeat(pad));
       await mkdir(first);
       await mkdir(second);
       const replacement = join(first, 'replacement.txt');
@@ -91,7 +93,7 @@ describe('replaceWindowsFileWithBackup', () => {
   );
 
   it.runIf(process.platform === 'win32')(
-    'accepts a drive-relative spelling by resolving it against the current directory',
+    'accepts a plain relative spelling by resolving it against the current directory',
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-relative-'));
       cleanup.push(root);
@@ -109,6 +111,30 @@ describe('replaceWindowsFileWithBackup', () => {
     },
   );
 
+  it.runIf(process.platform === 'win32')(
+    'accepts a drive-relative spelling by resolving it against that drive current directory',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-drive-relative-'));
+      cleanup.push(root);
+      await writeFile(join(root, 'target.txt'), 'before');
+      await writeFile(join(root, 'stage.tmp'), 'after');
+      const drive = root.slice(0, 2);
+      const previous = process.cwd();
+      process.chdir(root);
+      try {
+        replaceWindowsFileWithBackup(
+          `${drive}stage.tmp`,
+          `${drive}target.txt`,
+          `${drive}backup.tmp`,
+        );
+      } finally {
+        process.chdir(previous);
+      }
+      expect(await readFile(join(root, 'target.txt'), 'utf8')).toBe('after');
+      expect(await readFile(join(root, 'backup.tmp'), 'utf8')).toBe('before');
+    },
+  );
+
   // A UNC spelling reaches the native call as \?\UNC\...; the loopback administrative share is
   // the only UNC path an unattended run can rely on. A machine without it records this as skipped.
   it.runIf(process.platform === 'win32' && existsSync(loopbackUncOf(tmpdir())))(
@@ -116,7 +142,9 @@ describe('replaceWindowsFileWithBackup', () => {
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-unc-'));
       cleanup.push(root);
-      const unc = join(loopbackUncOf(root), 'p'.repeat(120), 'q'.repeat(120));
+      const share = loopbackUncOf(root);
+      const pad = Math.min(255, Math.max(120, Math.ceil((262 - share.length - 12) / 2)));
+      const unc = join(share, 'p'.repeat(pad), 'q'.repeat(pad));
       await mkdir(unc, { recursive: true });
       const target = join(unc, 'target.txt');
       expect(target.length).toBeGreaterThan(260);
