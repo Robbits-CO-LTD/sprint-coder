@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -199,11 +199,13 @@ if (runsWithElectronAbi)
             manager,
             verifyWorkspace,
           );
-        const finish = async (coordinator: TeamCoordinator) => {
-          await vi.waitFor(
+        const drain = (coordinator: TeamCoordinator) =>
+          vi.waitFor(
             () => expect(coordinator['executionScheduler'].snapshot().activeCount).toBe(0),
             { timeout: gitCheckpointTimeout },
           );
+        const finish = async (coordinator: TeamCoordinator) => {
+          await drain(coordinator);
           f.persistence.close();
         };
         return {
@@ -216,6 +218,7 @@ if (runsWithElectronAbi)
           document,
           start,
           coordinatorFor,
+          drain,
           finish,
         };
       }
@@ -276,6 +279,7 @@ if (runsWithElectronAbi)
           expect(held.writeFootprints.map(({ rootId }) => rootId).sort()).toEqual(
             g.context.workspace.roots.map(({ rootId }) => rootId).sort(),
           );
+          await g.drain(coordinator);
           expect(g.f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
           await g.finish(coordinator);
         },
@@ -398,7 +402,10 @@ if (runsWithElectronAbi)
           }
           if (change === 'replaced') {
             const secondary = g.bindings[1]!.canonicalPath;
-            await rm(secondary, { recursive: true, force: true, maxRetries: 3 });
+            // The identity digests only (dev, ino, kind), and removing then recreating the path
+            // can reuse the inode (Linux does). Keep the old directory alive under another name
+            // so the new one cannot share its inode on any filesystem.
+            renameSync(secondary, `${secondary}-replaced`);
             mkdirSync(secondary);
           }
           await expect(coordinator.resumeGraphStep(g.f.task.id, mission.id, 'a')).rejects.toThrow(
