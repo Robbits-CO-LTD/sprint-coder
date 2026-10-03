@@ -19,7 +19,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, toNamespacedPath } from 'node:path';
 import {
   MAX_EDITABLE_BYTES,
   openWorkspaceFileForEdit,
@@ -776,6 +776,109 @@ describe('saveWorkspaceFile (issue #43)', () => {
       await verifyWindowsPathAcl(file, 'file');
     },
   );
+
+  // Issue #679: the whole-path boundary is independent of the 255-character component limit. The
+  // exact-length cases pin 259 (below MAX_PATH), 260 and 261 (at it) and a deeper path; the
+  // component and Unicode cases make the full path exceed it by other means.
+  describe.runIf(process.platform === 'win32')('long full paths on Windows (issue #679)', () => {
+    function exactLengthFile(totalLength: number): { root: string; dir: string; leaf: string } {
+      const root = workspace();
+      const dir = 'd'.repeat(100);
+      mkdirSync(join(root, dir));
+      const leafLength = totalLength - join(root, dir).length - 1;
+      expect(leafLength).toBeGreaterThanOrEqual(1);
+      expect(leafLength).toBeLessThanOrEqual(255);
+      const leaf = 'y'.repeat(leafLength);
+      expect(join(root, dir, leaf).length).toBe(totalLength);
+      return { root, dir, leaf };
+    }
+
+    function nestedFile(segments: string[], leaf: string): { root: string; rel: string } {
+      const root = workspace();
+      mkdirSync(join(root, ...segments), { recursive: true });
+      return { root, rel: [...segments, leaf].join('/') };
+    }
+
+    it.each([259, 260, 261, 300])(
+      'saves at a %i-character full path and preserves a third-party sibling',
+      (totalLength) => {
+        const { root, dir, leaf } = exactLengthFile(totalLength);
+        const rel = `${dir}/${leaf}`;
+        const sibling = join(root, dir, 'third-party.txt');
+        writeFileSync(join(root, rel), 'before');
+        writeFileSync(sibling, 'theirs');
+        const opened = openWorkspaceFileForEdit(root, rel);
+        expect(opened.editable).toBe(true);
+        expect(saveWorkspaceFile(root, rel, 'after', opened.digest).outcome).toBe('saved');
+        expect(readFileSync(join(root, rel), 'utf8')).toBe('after');
+        expect(readFileSync(sibling, 'utf8')).toBe('theirs');
+        expect(readdirSync(join(root, dir)).sort()).toEqual([leaf, 'third-party.txt'].sort());
+      },
+    );
+
+    it('saves a 255-character component under a long parent and leaves no sibling behind', () => {
+      const { root, rel } = nestedFile(['p'.repeat(60), 'q'.repeat(60)], 'x'.repeat(255));
+      expect(join(root, rel).length).toBeGreaterThan(400);
+      writeFileSync(join(root, rel), 'before');
+      expect(saveWorkspaceFile(root, rel, 'after', digestOf('before')).outcome).toBe('saved');
+      expect(readFileSync(join(root, rel), 'utf8')).toBe('after');
+      expect(readdirSync(join(root, rel.split('/').slice(0, -1).join('/')))).toEqual([
+        'x'.repeat(255),
+      ]);
+    });
+
+    it('saves a Unicode path whose full length passes the limit', () => {
+      const unicode = '日本語🎉';
+      const { root, rel } = nestedFile(Array<string>(45).fill(unicode), `${unicode}.txt`);
+      expect(join(root, rel).length).toBeGreaterThan(260);
+      writeFileSync(join(root, rel), 'before');
+      expect(saveWorkspaceFile(root, rel, 'after', digestOf('before')).outcome).toBe('saved');
+      expect(readFileSync(join(root, rel), 'utf8')).toBe('after');
+      expect(readdirSync(join(root, ...Array<string>(45).fill(unicode)))).toEqual([
+        `${unicode}.txt`,
+      ]);
+    });
+
+    it('still reports a conflict and restores the concurrent edit at a long full path', () => {
+      const { root, rel } = nestedFile(Array<string>(8).fill('x'.repeat(32)), 'note.txt');
+      const file = join(root, rel);
+      expect(file.length).toBeGreaterThan(260);
+      writeFileSync(file, 'before\n');
+      fileSystemFault.concurrentWindowsContent = 'concurrent writer\n';
+      try {
+        const result = saveWorkspaceFile(root, rel, 'my edit\n', digestOf('before\n'));
+        expect(result).toMatchObject({ outcome: 'conflict', digest: null });
+        expect(readFileSync(join(root, result.conflictPath ?? ''), 'utf8')).toBe('my edit\n');
+      } finally {
+        fileSystemFault.concurrentWindowsContent = null;
+      }
+      expect(readFileSync(file, 'utf8')).toBe('concurrent writer\n');
+    });
+
+    it('preserves a private Windows ACL across atomic publication at a long full path', async () => {
+      const { root, rel } = nestedFile(Array<string>(8).fill('x'.repeat(32)), 'private.txt');
+      const file = join(root, rel);
+      expect(file.length).toBeGreaterThan(260);
+      writeFileSync(file, 'before\n');
+      // The ACL helpers are not part of the save path; address the file in the extended
+      // namespace so they can observe the DACL the save has to carry across.
+      await secureWindowsPath(toNamespacedPath(file), 'file');
+      expect(saveWorkspaceFile(root, rel, 'after\n', digestOf('before\n')).outcome).toBe('saved');
+      await verifyWindowsPathAcl(toNamespacedPath(file), 'file');
+    });
+
+    it('still refuses a multiply-linked file at a long full path', () => {
+      const { root, rel } = nestedFile(Array<string>(8).fill('x'.repeat(32)), 'alias.txt');
+      const outside = workspace();
+      const outsideFile = join(outside, 'secret.txt');
+      writeFileSync(outsideFile, 'secret\n');
+      linkSync(outsideFile, join(root, rel));
+      expect(join(root, rel).length).toBeGreaterThan(260);
+      const result = saveWorkspaceFile(root, rel, 'changed\n', digestOf('secret\n'));
+      expect(result.outcome).toBe('refused');
+      expect(readFileSync(outsideFile, 'utf8')).toBe('secret\n');
+    });
+  });
 
   it('refuses to write more than the cap', () => {
     const root = workspace();
