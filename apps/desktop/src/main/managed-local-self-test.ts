@@ -321,7 +321,7 @@ function nonceDiagnostic(
     keyCount: Math.min(keys, 8),
     noncePresent,
     nonceIsString,
-    nonceLength: nonceIsString ? Math.min(nonce.length, 8192) : 'MISSING',
+    nonceLength: nonceIsString ? Math.min(nonce.length, NONCE_LENGTH_LIMIT) : 'MISSING',
     ...(comparison === null
       ? {}
       : {
@@ -342,7 +342,7 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
     const cause = diagnosticObject(error.cause);
     if (cause === null) return null;
     const descriptors = Object.getOwnPropertyDescriptors(cause);
-    // The comparison fields exist only on a NONCE_VALUE_REJECT-shaped packet (nonce is a string).
+    // Comparison fields are present exactly when nonceIsString is true, whatever the reason\n    // (a SHAPE_REJECT with a string nonce and extra keys carries them too).
     const withComparison = descriptors['nonceIsString']?.value === true;
     const names = NONCE_DIAGNOSTIC_FIELDS.filter(
       (name) => withComparison || !COMPARISON_FIELDS.includes(name),
@@ -359,24 +359,36 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
     const finishReason = fields['finishReason'];
     const validComparison = () => {
       if (!withComparison) return true;
+      const actualLength = fields['nonceLength'];
+      const expectedLength = fields['expectedNonceLength'];
       const delta = fields['lengthDelta'];
-      const ceiling = Math.min(
-        fields['nonceLength'] as number,
-        fields['expectedNonceLength'] as number,
-      );
       const prefix = fields['commonPrefixLength'];
+      if (
+        !bounded(actualLength, NONCE_LENGTH_LIMIT) ||
+        !bounded(expectedLength, NONCE_LENGTH_LIMIT)
+      )
+        return false;
+      const ceiling = Math.min(actualLength as number, expectedLength as number);
+      const unclamped =
+        (actualLength as number) < NONCE_LENGTH_LIMIT &&
+        (expectedLength as number) < NONCE_LENGTH_LIMIT;
+      const charClass = fields['actualCharClass'];
       return (
-        bounded(fields['expectedNonceLength'], 8192) &&
         typeof delta === 'number' &&
         Number.isSafeInteger(delta) &&
-        Math.abs(delta) <= 8192 &&
+        Math.abs(delta) <= NONCE_LENGTH_LIMIT &&
+        (!unclamped || delta === (actualLength as number) - (expectedLength as number)) &&
         bounded(prefix, ceiling) &&
         bounded(fields['commonSuffixLength'], ceiling) &&
-        (fields['firstMismatchIndex'] === 'NONE' || fields['firstMismatchIndex'] === prefix) &&
+        (fields['firstMismatchIndex'] === 'NONE'
+          ? delta === 0 && prefix === actualLength && prefix === expectedLength
+          : fields['firstMismatchIndex'] === prefix) &&
         typeof fields['caseInsensitiveEqual'] === 'boolean' &&
+        (delta === 0 || fields['caseInsensitiveEqual'] === false) &&
         typeof fields['equalIgnoringNonAlnum'] === 'boolean' &&
-        typeof fields['actualCharClass'] === 'string' &&
-        ['HEX', 'ALNUM', 'OTHER', 'EMPTY'].includes(fields['actualCharClass'])
+        typeof charClass === 'string' &&
+        ['HEX', 'ALNUM', 'OTHER', 'EMPTY'].includes(charClass) &&
+        (charClass === 'EMPTY') === (actualLength === 0)
       );
     };
     if (
@@ -388,7 +400,7 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
       typeof fields['noncePresent'] !== 'boolean' ||
       typeof fields['nonceIsString'] !== 'boolean' ||
       (fields['nonceIsString']
-        ? !fields['noncePresent'] || !bounded(fields['nonceLength'], 8192)
+        ? !fields['noncePresent'] || !bounded(fields['nonceLength'], NONCE_LENGTH_LIMIT)
         : fields['nonceLength'] !== 'MISSING') ||
       typeof finishReason !== 'string' ||
       !['stop', 'tool_calls', 'length', 'UNKNOWN', 'MISSING'].includes(finishReason) ||

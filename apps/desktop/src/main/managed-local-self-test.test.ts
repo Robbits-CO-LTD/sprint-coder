@@ -282,6 +282,23 @@ describe('Managed Local nonce rejection diagnostics', () => {
     expect(diagnostic).not.toContain('aB3d');
     expect(diagnostic).not.toContain('a3dE');
   });
+  it('carries comparison fields on a SHAPE_REJECT whose nonce is a correct string', async () => {
+    const fields = packet(
+      formatManagedLocalSelfTestDiagnostic(await rejectedTool({ nonce: EXPECTED, extra: 1 })),
+    );
+    expect(fields).toMatchObject({
+      reason: 'SHAPE_REJECT',
+      keyCount: 2,
+      firstMismatchIndex: 'NONE',
+      commonPrefixLength: 36,
+      commonSuffixLength: 36,
+      lengthDelta: 0,
+      caseInsensitiveEqual: true,
+      equalIgnoringNonAlnum: true,
+    });
+    expect(Object.keys(fields)).toHaveLength(19);
+  });
+
   it('omits comparison fields for shape rejections and clamps extremes', async () => {
     const shape = packet(formatManagedLocalSelfTestDiagnostic(await rejectedTool({ nonce: 42 })));
     for (const name of [
@@ -321,6 +338,9 @@ describe('Managed Local nonce rejection diagnostics', () => {
       { firstMismatchIndex: 3 },
       { firstMismatchIndex: 'MISSING' },
       { firstMismatchIndex: 36 },
+      { lengthDelta: -1 },
+      { firstMismatchIndex: 'NONE' },
+      { actualCharClass: 'EMPTY' },
       { caseInsensitiveEqual: 'PRIVATE_NONCE_VALUE' },
       { equalIgnoringNonAlnum: 1 },
       { actualCharClass: 'PRIVATE_NONCE_VALUE' },
@@ -331,6 +351,26 @@ describe('Managed Local nonce rejection diagnostics', () => {
           new Error('PRIVATE_ERROR', { cause: { ...cause, ...forged } }),
         ),
       ).toBeNull();
+    const shortCause = (await rejectedTool({ nonce: '1111' })).cause as Record<string, unknown>;
+    for (const forged of [
+      { caseInsensitiveEqual: true },
+      { actualCharClass: 'EMPTY' },
+      { lengthDelta: 0 },
+    ])
+      expect(
+        formatManagedLocalSelfTestDiagnostic(
+          new Error('PRIVATE_ERROR', { cause: { ...shortCause, ...forged } }),
+        ),
+      ).toBeNull();
+    const emptyCause = (await rejectedTool({ nonce: '' })).cause as Record<string, unknown>;
+    expect(
+      formatManagedLocalSelfTestDiagnostic(
+        new Error('PRIVATE_ERROR', { cause: { ...emptyCause, actualCharClass: 'HEX' } }),
+      ),
+    ).toBeNull();
+    expect(
+      formatManagedLocalSelfTestDiagnostic(new Error('E', { cause: emptyCause })),
+    ).not.toBeNull();
     const shapeCause = (await rejectedTool({ nonce: 42 })).cause as Record<string, unknown>;
     expect(
       formatManagedLocalSelfTestDiagnostic(
