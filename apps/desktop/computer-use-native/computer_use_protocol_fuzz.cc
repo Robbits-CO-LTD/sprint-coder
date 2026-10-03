@@ -1,4 +1,5 @@
 #include "computer_use_native_binding.h"
+#include "computer_use_native_ticket.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -418,6 +419,188 @@ bool CheckNativeBinding() {
          CheckNativeBindingPayload() && CheckNativeBindingEnvelopeAndIds();
 }
 
+using sprint_coder::computer_use::IsValidNativeOrdinaryTicketToken;
+using sprint_coder::computer_use::NativeOrdinaryTicketBinding;
+using sprint_coder::computer_use::NativeOrdinaryTicketSlot;
+using sprint_coder::computer_use::NativeOrdinaryTicketTokensEqual;
+using sprint_coder::computer_use::ScrubNativeTicketString;
+using sprint_coder::computer_use::kNativeOrdinaryTicketMaxTtlNs;
+using sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs;
+
+NativeOrdinaryTicketBinding TicketBinding() {
+  NativeOrdinaryTicketBinding binding;
+  binding.session_id = "session";
+  binding.request_id = "request";
+  binding.action_digest = "action";
+  binding.payload_digest = "payload";
+  binding.context_digest = "context";
+  binding.cancel_epoch = 7;
+  binding.ticket_generation = 5;
+  return binding;
+}
+
+// Changes exactly one of the seven bound fields.
+NativeOrdinaryTicketBinding MutatedTicketBinding(int field) {
+  NativeOrdinaryTicketBinding binding = TicketBinding();
+  switch (field) {
+  case 0: binding.session_id += "x"; break;
+  case 1: binding.request_id += "x"; break;
+  case 2: binding.action_digest += "x"; break;
+  case 3: binding.payload_digest += "x"; break;
+  case 4: binding.context_digest += "x"; break;
+  case 5: binding.cancel_epoch += 1; break;
+  default: binding.ticket_generation += 1; break;
+  }
+  return binding;
+}
+
+bool CheckNativeOrdinaryTicket() {
+  constexpr std::uint64_t kNow = 1'000;
+  constexpr std::uint64_t kTtl = kNativeOrdinaryTicketTtlNs;
+  const std::string token(64, 'a');
+  const std::string other_token = std::string(63, 'a') + 'b';
+
+  if (!Check(kNativeOrdinaryTicketMaxTtlNs <= 10'000'000'000ULL && kTtl > 0 &&
+                 kTtl <= kNativeOrdinaryTicketMaxTtlNs,
+             "ticket-ttl-limit")) return false;
+
+  // Token format and constant-time comparison.
+  std::string with_nul = token;
+  with_nul[10] = '\0';
+  if (!Check(IsValidNativeOrdinaryTicketToken(token) &&
+                 IsValidNativeOrdinaryTicketToken("0123456789abcdef0123456789abcdef"
+                                                  "0123456789abcdef0123456789abcdef") &&
+                 !IsValidNativeOrdinaryTicketToken("") &&
+                 !IsValidNativeOrdinaryTicketToken(std::string(63, 'a')) &&
+                 !IsValidNativeOrdinaryTicketToken(std::string(65, 'a')) &&
+                 !IsValidNativeOrdinaryTicketToken(std::string(64, 'A')) &&
+                 !IsValidNativeOrdinaryTicketToken(std::string(64, 'g')) &&
+                 !IsValidNativeOrdinaryTicketToken(with_nul),
+             "ticket-token-format")) return false;
+  std::string first_differs = token;
+  first_differs[0] = 'b';
+  if (!Check(NativeOrdinaryTicketTokensEqual(token, token) &&
+                 !NativeOrdinaryTicketTokensEqual(token, other_token) &&
+                 !NativeOrdinaryTicketTokensEqual(token, first_differs) &&
+                 !NativeOrdinaryTicketTokensEqual(token, std::string(63, 'a')) &&
+                 !NativeOrdinaryTicketTokensEqual(token, std::string(65, 'a')) &&
+                 !NativeOrdinaryTicketTokensEqual("", ""),
+             "ticket-constant-time-equality")) return false;
+
+  // Single use.
+  NativeOrdinaryTicketSlot slot;
+  if (!Check(!slot.occupied() && !slot.Consume(token, TicketBinding(), kNow),
+             "ticket-empty-slot")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) && slot.occupied() &&
+                 slot.generation() == 5,
+             "ticket-issue")) return false;
+  if (!Check(slot.Consume(token, TicketBinding(), kNow) && !slot.occupied() &&
+                 !slot.Consume(token, TicketBinding(), kNow),
+             "ticket-single-use")) return false;
+
+  // A new Issue replaces the previous ticket; the replaced one never validates.
+  NativeOrdinaryTicketBinding second = TicketBinding();
+  second.request_id = "second";
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 slot.Issue(other_token, second, kNow, kTtl) &&
+                 !slot.Consume(token, TicketBinding(), kNow),
+             "ticket-replaced-never-validates")) return false;
+  if (!Check(!slot.occupied(), "ticket-failed-consume-burns")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 slot.Issue(other_token, second, kNow, kTtl) &&
+                 slot.Consume(other_token, second, kNow),
+             "ticket-replacement-consumes")) return false;
+
+  // A failed check destroys the ticket (fail closed), even when a later attempt is correct.
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume(other_token, TicketBinding(), kNow) && !slot.occupied() &&
+                 !slot.Consume(token, TicketBinding(), kNow),
+             "ticket-wrong-token-burns")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume("", TicketBinding(), kNow) && !slot.occupied(),
+             "ticket-empty-token-burns")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume(std::string(65, 'a'), TicketBinding(), kNow) && !slot.occupied(),
+             "ticket-long-token-burns")) return false;
+
+  // TTL, expiry and a clock that goes backwards.
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 slot.Consume(token, TicketBinding(), kNow + kTtl - 1),
+             "ticket-valid-before-expiry")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume(token, TicketBinding(), kNow + kTtl) && !slot.occupied(),
+             "ticket-expired-at-ttl")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume(token, TicketBinding(), kNow + kTtl + 1),
+             "ticket-expired-after-ttl")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Consume(token, TicketBinding(), kNow - 1) && !slot.occupied(),
+             "ticket-clock-backwards")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), 0, kTtl) &&
+                 slot.Consume(token, TicketBinding(), 0),
+             "ticket-zero-clock-is-a-valid-instant")) return false;
+
+  // TTL bounds and overflow of the expiry computation.
+  constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
+  if (!Check(!slot.Issue(token, TicketBinding(), kNow, 0) && !slot.occupied() &&
+                 !slot.Issue(token, TicketBinding(), kNow, kNativeOrdinaryTicketMaxTtlNs + 1) &&
+                 !slot.occupied() &&
+                 slot.Issue(token, TicketBinding(), kNow, kNativeOrdinaryTicketMaxTtlNs) &&
+                 slot.Consume(token, TicketBinding(), kNow),
+             "ticket-ttl-bounds")) return false;
+  if (!Check(!slot.Issue(token, TicketBinding(), kMax - kTtl + 1, kTtl) && !slot.occupied() &&
+                 !slot.Issue(token, TicketBinding(), kMax, kTtl) && !slot.occupied() &&
+                 slot.Issue(token, TicketBinding(), kMax - kTtl, kTtl) &&
+                 slot.Consume(token, TicketBinding(), kMax - kTtl),
+             "ticket-expiry-overflow")) return false;
+
+  // Every bound field must match exactly.
+  for (int field = 0; field < 7; ++field) {
+    if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                   !slot.Consume(token, MutatedTicketBinding(field), kNow) && !slot.occupied(),
+               "ticket-binding-field-mismatch")) return false;
+  }
+
+  // Generation 0 is a sentinel, never issued; a generation only invalidates its own ticket.
+  NativeOrdinaryTicketBinding zero_generation = TicketBinding();
+  zero_generation.ticket_generation = 0;
+  if (!Check(!slot.Issue(token, zero_generation, kNow, kTtl) && !slot.occupied() &&
+                 slot.generation() == 0,
+             "ticket-generation-zero-never-issued")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) && !slot.InvalidateIfGeneration(0) &&
+                 !slot.InvalidateIfGeneration(4) && !slot.InvalidateIfGeneration(6) && slot.occupied() &&
+                 slot.InvalidateIfGeneration(5) && !slot.occupied() &&
+                 !slot.InvalidateIfGeneration(5),
+             "ticket-invalidate-only-own-generation")) return false;
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) && slot.occupied(),
+             "ticket-issue-again")) return false;
+  slot.Invalidate();
+  if (!Check(!slot.occupied() && !slot.Consume(token, TicketBinding(), kNow), "ticket-invalidate")) return false;
+
+  // Issue failures leave nothing behind, and each required binding string is mandatory.
+  if (!Check(slot.Issue(token, TicketBinding(), kNow, kTtl) &&
+                 !slot.Issue("not-hex", TicketBinding(), kNow, kTtl) && !slot.occupied(),
+             "ticket-failed-issue-clears-previous")) return false;
+  for (int field = 0; field < 5; ++field) {
+    NativeOrdinaryTicketBinding empty_field = TicketBinding();
+    switch (field) {
+    case 0: empty_field.session_id.clear(); break;
+    case 1: empty_field.request_id.clear(); break;
+    case 2: empty_field.action_digest.clear(); break;
+    case 3: empty_field.payload_digest.clear(); break;
+    default: empty_field.context_digest.clear(); break;
+    }
+    if (!Check(!slot.Issue(token, empty_field, kNow, kTtl) && !slot.occupied(),
+               "ticket-binding-string-required")) return false;
+  }
+
+  // The scrub helper empties a secret and tolerates a null pointer.
+  std::string secret = token;
+  ScrubNativeTicketString(&secret);
+  ScrubNativeTicketString(nullptr);
+  return Check(secret.empty(), "ticket-scrub");
+}
+
 FrameHeader ValidHeader() {
   FrameHeader header{};
   header.message_type = static_cast<std::uint16_t>(MessageType::kObserveResult);
@@ -442,6 +625,8 @@ int main() {
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;
   std::cout << "Computer Use native binding canonical framing: PASS\n";
+  if (!CheckNativeOrdinaryTicket()) return 1;
+  std::cout << "Computer Use native ordinary ticket slot: PASS\n";
   using sprint_coder::computer_use::IsTypeTextScalar;
   for (std::uint32_t scalar = 0; scalar < 0x20; ++scalar)
     if (!Check(!IsTypeTextScalar(scalar), "type-c0-control")) return 1;
