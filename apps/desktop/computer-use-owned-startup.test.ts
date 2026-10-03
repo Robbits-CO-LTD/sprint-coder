@@ -84,7 +84,7 @@ ${kind === 'nonzero-exit' ? 'process.exit(7);' : ''}
     outputPath: resolve(directory, 'checkpoint.json'),
     timeoutMs: kind === 'timeout' ? 100 : 5_000,
   };
-  // Text-only fake addon: only `load` is injected; the real pinned retainer verifies path/hash.
+  // Text-only fake addon: only `load` is injected (and `start` wraps the real startPinned); the real pinned retainer verifies path/hash.
   const addonPath = resolve(directory, 'fixture.node');
   writeFileSync(addonPath, 'controlled-startup-fixture-not-native');
   const addonSha256 = createHash('sha256').update(readFileSync(addonPath)).digest('hex');
@@ -547,6 +547,51 @@ describe('owned startup process identity digest (schemaVersion 2)', () => {
     }
   });
 
+  it.runIf(isWindows)(
+    'default win32 starter calls startPinned with {capture, addonPath, addonSha256} and load, and binds the digest',
+    async () => {
+      vi.resetModules();
+      const receiptPath = resolve(root, 'computer-use-owned-process-receipt.mjs');
+      const calls: unknown[][] = [];
+      const digest = 'e'.repeat(64);
+      vi.doMock(pathToFileURL(receiptPath).href, () => ({
+        startPinnedOwnedComputerUseProcessCapture: (...args: unknown[]) => {
+          calls.push(args);
+          return fakeCapture({ processIdentityDigest: digest }).start();
+        },
+      }));
+      vi.doMock(receiptPath, () => ({
+        startPinnedOwnedComputerUseProcessCapture: (...args: unknown[]) => {
+          calls.push(args);
+          return fakeCapture({ processIdentityDigest: digest }).start();
+        },
+      }));
+      try {
+        const fresh = (await import(
+          pathToFileURL(resolve(root, 'collect-computer-use-owned-startup.mjs')).href
+        )) as typeof startup;
+        const { input, load, addonPath, addonSha256 } = fixture();
+        const report = await fresh.collectOwnedComputerUseStartup(input, undefined, load);
+        expect(report['startupProcessIdentityDigest']).toBe(digest);
+        expect(calls).toHaveLength(1);
+        const [first, second] = calls[0]!;
+        expect(second).toBe(load);
+        expect(Object.keys(first as object).sort()).toEqual([
+          'addonPath',
+          'addonSha256',
+          'capture',
+        ]);
+        expect(first).toMatchObject({ addonPath, addonSha256 });
+        const launch = (first as { capture: Record<string, unknown> }).capture;
+        expect(launch['executable']).toBe(process.execPath);
+        expect(Object.hasOwn(launch, 'retainOwnedProcess')).toBe(false);
+      } finally {
+        vi.doUnmock(pathToFileURL(receiptPath).href);
+        vi.doUnmock(receiptPath);
+        vi.resetModules();
+      }
+    },
+  );
   it.runIf(isWindows && process.env['CI'] === 'true')(
     'binds the packaged-addon digest through the real addon in a separate driver (CI)',
     async () => {
@@ -590,7 +635,7 @@ const start=(launch)=>{
  return capture;
 };
 try {
- await collectOwnedComputerUseStartup({executable:process.execPath,expectedSourceCommit:'b'.repeat(40),expectedExecutableSha256:sha(process.execPath),packageSha256:'a'.repeat(64),outputPath:${JSON.stringify(outputPath)},timeoutMs:10000,addonPath,addonSha256},start);
+ await collectOwnedComputerUseStartup({executable:process.execPath,expectedSourceCommit:'b'.repeat(40),expectedExecutableSha256:sha(process.execPath),packageSha256:'a'.repeat(64),outputPath:${JSON.stringify(outputPath)},timeoutMs:6000,addonPath,addonSha256},start);
  process.stdout.write('OWNED_STARTUP_DIGEST_PASS');
 } catch {process.exitCode=1;process.stderr.write('OWNED_STARTUP_DIGEST_FAILED');}
 `,
@@ -599,25 +644,41 @@ try {
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
+      const driverClosed = new Promise<void>((resolveClosed) =>
+        driverProcess.once('close', () => resolveClosed()),
+      );
       let output = '';
       driverProcess.stdout.on('data', (chunk: Buffer) => {
         output = (output + chunk.toString()).slice(0, 128);
       });
-      const code = await new Promise<number | null>((resolveCode, reject) => {
-        const timer = setTimeout(() => {
-          driverProcess.kill();
-          reject(new Error('OWNED_STARTUP_CI_TIMEOUT'));
-        }, 20_000);
-        driverProcess.once('close', (exitCode) => {
-          clearTimeout(timer);
-          resolveCode(exitCode);
+      try {
+        const code = await new Promise<number | null>((resolveCode, reject) => {
+          const timer = setTimeout(() => reject(new Error('OWNED_STARTUP_CI_TIMEOUT')), 9_000);
+          driverProcess.once('error', () => {
+            clearTimeout(timer);
+            reject(new Error('OWNED_STARTUP_CI_START_FAILED'));
+          });
+          driverProcess.once('close', (exitCode) => {
+            clearTimeout(timer);
+            resolveCode(exitCode);
+          });
         });
-      });
-      expect(code).toBe(0);
-      expect(output).toBe('OWNED_STARTUP_DIGEST_PASS');
-      const report = JSON.parse(readFileSync(outputPath, 'utf8'));
-      expect(report.startupProcessIdentityDigest).toMatch(/^[a-f0-9]{64}$/u);
-      expect(readFileSync(outputPath, 'utf8')).not.toContain(process.execPath);
+        expect(code).toBe(0);
+        expect(output).toBe('OWNED_STARTUP_DIGEST_PASS');
+        const report = JSON.parse(readFileSync(outputPath, 'utf8'));
+        expect(report.startupProcessIdentityDigest).toMatch(/^[a-f0-9]{64}$/u);
+        expect(readFileSync(outputPath, 'utf8')).not.toContain(process.execPath);
+      } finally {
+        if (driverProcess.exitCode === null && driverProcess.signalCode === null)
+          driverProcess.kill();
+        await Promise.race([
+          driverClosed,
+          new Promise<void>((resolveWait) => {
+            const timer = setTimeout(resolveWait, 5000);
+            timer.unref();
+          }),
+        ]);
+      }
     },
   );
 });

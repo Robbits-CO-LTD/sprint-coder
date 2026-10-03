@@ -401,7 +401,7 @@ jobs:
             $addonRelative = 'resources\app.asar.unpacked\native-safe-fs\build\Release\sprint_coder_native_safe_fs.node'
             $addonExpected = Join-Path $app[0].DirectoryName $addonRelative
             $addon = @(
-              Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint_coder_native_safe_fs.node'
+              Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -Force -File -Filter 'sprint_coder_native_safe_fs.node'
             )
             if ($addon.Count -ne 1 -or $addon[0].FullName -ine $addonExpected) {
               throw 'Windows startup requires exactly one packaged native-safe-fs addon.'
