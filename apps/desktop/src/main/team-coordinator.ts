@@ -2535,7 +2535,13 @@ export class TeamCoordinator {
             await this.cleanupIntegratedExecutionIsolation(isolation, hold.agentId);
           else if (worktree !== null)
             await this.cleanupIntegratedMissionWorktree(worktree, hold.agentId);
-          this.reconcileGraphStepFinish(team.id, graph, execution, [owner.id], result.mission.state);
+          this.reconcileGraphStepFinish(
+            team.id,
+            graph,
+            execution,
+            [owner.id],
+            result.mission.state,
+          );
           this.executionScheduler.notifyReadinessChanged();
           this.emit(taskId, team.id);
           return this.missionSummary(result.mission);

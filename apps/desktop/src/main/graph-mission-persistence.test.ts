@@ -5580,77 +5580,81 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         gitScenarioTimeout,
       );
 
-      it('drops the hold of the newest reservation when an earlier one of the step was released', async () => {
-        const { f, a, run, manager } = await sealedWriteFixture(true);
-        const hold = f.persistence.holdGraphIntegration({
-          ...completion(a.mission.id, 'a', run),
-          reason: 'Integration requires retry',
-        });
-        // A step resumed after an interruption owns one row per owner: R1 released, then R2.
-        const db = new Database(f.path);
-        try {
-          const columns = (
-            db.prepare('PRAGMA table_info(team_graph_resource_reservations)').all() as {
-              name: string;
-            }[]
-          ).map(({ name }) => name);
-          const overrides: Record<string, string> = {
-            id: "'earlier-released-reservation'",
-            attempt_id: 'NULL',
-            state: "'released'",
-            created_at: "'2026-09-10T00:00:00.000Z'",
-            released_at: "'2026-09-10T00:00:01.000Z'",
-          };
-          db.prepare(
-            `INSERT INTO team_graph_resource_reservations(${columns.join(',')}) SELECT ${columns
-              .map((name) => overrides[name] ?? name)
-              .join(',')} FROM team_graph_resource_reservations WHERE id=?`,
-          ).run(hold.reservationId);
-        } finally {
-          db.close();
-        }
-        for (const worker of f.workers) {
-          f.persistence.transitionWorkerState(worker.id, 'busy');
-          f.persistence.transitionWorkerState(worker.id, 'waiting');
-        }
-        const sibling = begin(f, a.mission.id, 'b');
-        f.persistence.completeGraphStep(completion(a.mission.id, 'b', sibling));
-        const runtime = new DeterministicTeamWorkerRuntime();
-        const execute = vi.spyOn(runtime, 'execute');
-        const diagnostics: string[] = [];
-        const coordinator = new TeamCoordinator(
-          f.persistence,
-          runtime,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          manager,
-          undefined,
-          undefined,
-          (event) => diagnostics.push(event.event),
-        );
-        const failure = new Error('injected hold delete failure');
-        const spy = vi
-          .spyOn(f.persistence, 'deleteGraphIntegrationHold')
-          .mockImplementationOnce(() => {
-            throw failure;
+      it(
+        'drops the hold of the newest reservation when an earlier one of the step was released',
+        async () => {
+          const { f, a, run, manager } = await sealedWriteFixture(true);
+          const hold = f.persistence.holdGraphIntegration({
+            ...completion(a.mission.id, 'a', run),
+            reason: 'Integration requires retry',
           });
-        await expect(
-          coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a'),
-        ).rejects.toThrow(failure.message);
-        spy.mockRestore();
-        expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).not.toBeNull();
-        await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
-        expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toBeNull();
-        expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('completed');
-        expect(execute).not.toHaveBeenCalled();
-        expect(diagnostics.filter((event) => event === 'team.completed')).toHaveLength(1);
-        expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
-        f.persistence.close();
-      }, gitScenarioTimeout);
+          // A step resumed after an interruption owns one row per owner: R1 released, then R2.
+          const db = new Database(f.path);
+          try {
+            const columns = (
+              db.prepare('PRAGMA table_info(team_graph_resource_reservations)').all() as {
+                name: string;
+              }[]
+            ).map(({ name }) => name);
+            const overrides: Record<string, string> = {
+              id: "'earlier-released-reservation'",
+              attempt_id: 'NULL',
+              state: "'released'",
+              created_at: "'2026-09-10T00:00:00.000Z'",
+              released_at: "'2026-09-10T00:00:01.000Z'",
+            };
+            db.prepare(
+              `INSERT INTO team_graph_resource_reservations(${columns.join(',')}) SELECT ${columns
+                .map((name) => overrides[name] ?? name)
+                .join(',')} FROM team_graph_resource_reservations WHERE id=?`,
+            ).run(hold.reservationId);
+          } finally {
+            db.close();
+          }
+          for (const worker of f.workers) {
+            f.persistence.transitionWorkerState(worker.id, 'busy');
+            f.persistence.transitionWorkerState(worker.id, 'waiting');
+          }
+          const sibling = begin(f, a.mission.id, 'b');
+          f.persistence.completeGraphStep(completion(a.mission.id, 'b', sibling));
+          const runtime = new DeterministicTeamWorkerRuntime();
+          const execute = vi.spyOn(runtime, 'execute');
+          const diagnostics: string[] = [];
+          const coordinator = new TeamCoordinator(
+            f.persistence,
+            runtime,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            manager,
+            undefined,
+            undefined,
+            (event) => diagnostics.push(event.event),
+          );
+          const failure = new Error('injected hold delete failure');
+          const spy = vi
+            .spyOn(f.persistence, 'deleteGraphIntegrationHold')
+            .mockImplementationOnce(() => {
+              throw failure;
+            });
+          await expect(
+            coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a'),
+          ).rejects.toThrow(failure.message);
+          spy.mockRestore();
+          expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).not.toBeNull();
+          await coordinator.resumeGraphIntegration(f.task.id, a.mission.id, 'a');
+          expect(f.persistence.getGraphIntegrationHold(hold.reservationId)).toBeNull();
+          expect(f.persistence.getTeamByTask(f.task.id)?.state).toBe('completed');
+          expect(execute).not.toHaveBeenCalled();
+          expect(diagnostics.filter((event) => event === 'team.completed')).toHaveLength(1);
+          expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+          f.persistence.close();
+        },
+        gitScenarioTimeout,
+      );
     });
   });
 else
