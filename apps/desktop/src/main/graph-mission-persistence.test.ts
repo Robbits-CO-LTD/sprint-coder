@@ -5034,6 +5034,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
     });
 
     it('requires a current checkpoint generation and rechecks dependencies before Attempt binding', () => {
+      graphBridgeBodyMarker('checkpoint-generation', 'entry');
       const f = fixture();
       const mission = resourceMission(f);
       const predecessor = mission.steps[0]!.executionId;
@@ -5128,6 +5129,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         now,
       });
       f.persistence.close();
+      graphBridgeBodyMarker('checkpoint-generation', 'return');
     });
     it('arbitrates resources across Teams atomically and keeps dependency waiters unreserved', () => {
       const first = fixture();
@@ -5178,6 +5180,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
     });
 
     it('quarantines reservations on restart and prevents deletion until explicit release', () => {
+      graphBridgeBodyMarker('restart-quarantine', 'entry');
       const f = fixture();
       const mission = resourceMission(f);
       const held = reserve(f, mission.id);
@@ -5223,6 +5226,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       });
       expect(restored.listGraphResourceReservations(mission.id)[0]?.state).toBe('released');
       restored.close();
+      graphBridgeBodyMarker('restart-quarantine', 'return');
     });
 
     it('binds an Attempt before dispatch and refuses premature or stale generation releases', () => {
@@ -5519,6 +5523,94 @@ else
       expect(Object.keys(failure)).toEqual([]);
     });
 
+    it.each([
+      ['rolls back partial lease acquisition and release failures', 'checkpoint-generation'],
+      [
+        'arbitrates resources across Teams atomically and keeps dependency waiters unreserved',
+        'restart-quarantine',
+      ],
+    ] as const)(
+      'reports only the fixed entry/return bools of the case after "%s"',
+      (after, target) => {
+        const directory = mkdtempSync(join(tmpdir(), 'sc-graph-marker-test-'));
+        roots.push(directory);
+        const reportFile = join(directory, 'report.json');
+        const stdout = ` \u001b[32m✓\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > ${after} 10ms`;
+        const summary = (): string => graphBridgeFailure({ code: 143, stdout }, reportFile).message;
+        const marker = (bools: [boolean, boolean]): string =>
+          `firstUnfinishedBody={"target":"${target}","entry":${bools[0]},"return":${bools[1]}}`;
+        expect(summary()).toContain(marker([false, false]));
+        // Private bytes in marker files and unrelated files in the directory are never read.
+        writeFileSync(join(directory, `${target}.entry`), 'PRIVATE_MARKER_BYTES');
+        writeFileSync(join(directory, 'PRIVATE_EXTRA_FILE'), 'PRIVATE_EXTRA_BYTES');
+        expect(summary()).toContain(marker([true, false]));
+        writeFileSync(join(directory, `${target}.return`), 'PRIVATE_MARKER_BYTES');
+        const message = summary();
+        expect(message).toContain(marker([true, true]));
+        expect(message).not.toContain('PRIVATE_');
+        expect(message).not.toContain(directory);
+        // Only the target that follows the last completed case is reported.
+        const other = graphBridgeFailure(
+          {
+            code: 143,
+            stdout: ` \u001b[32m✓\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > some other case 10ms`,
+          },
+          reportFile,
+        ).message;
+        expect(other).not.toContain('firstUnfinishedBody');
+      },
+    );
+
+    it('keeps the body markers inert without a marker directory and pinned to the fixed case bodies', () => {
+      const previous = process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR;
+      delete process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR;
+      try {
+        expect(() => graphBridgeBodyMarker('restart-quarantine', 'entry')).not.toThrow();
+        const directory = mkdtempSync(join(tmpdir(), 'sc-graph-marker-test-'));
+        roots.push(directory);
+        process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR = join(directory, 'missing');
+        expect(() => graphBridgeBodyMarker('restart-quarantine', 'entry')).not.toThrow();
+        process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR = directory;
+        graphBridgeBodyMarker('checkpoint-generation', 'return');
+        expect(readFileSync(join(directory, 'checkpoint-generation.return'), 'utf8')).toBe('');
+      } finally {
+        if (previous === undefined) delete process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR;
+        else process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR = previous;
+      }
+      // Each target's first and last statements stay inside the case that follows its "after" case.
+      const source = readFileSync(
+        join(process.cwd(), 'src/main/graph-mission-persistence.test.ts'),
+        'utf8',
+      );
+      const caseTitles = [
+        [
+          'checkpoint-generation',
+          'rolls back partial lease acquisition and release failures',
+          'requires a current checkpoint generation and rechecks dependencies before Attempt binding',
+        ],
+        [
+          'restart-quarantine',
+          'arbitrates resources across Teams atomically and keeps dependency waiters unreserved',
+          'quarantines reservations on restart and prevents deletion until explicit release',
+        ],
+      ] as const;
+      for (const [target, after, title] of caseTitles) {
+        const start = source.indexOf(`it('${title}', () => {`);
+        const next = source.indexOf('\n    it(', start + 1);
+        const body = source.slice(start, next);
+        expect(start).toBeGreaterThan(-1);
+        expect(body.split(`graphBridgeBodyMarker('${target}', 'entry')`)).toHaveLength(2);
+        expect(body.split(`graphBridgeBodyMarker('${target}', 'return')`)).toHaveLength(2);
+        expect(body.indexOf(`'entry')`)).toBeLessThan(body.indexOf('fixture()'));
+        expect(
+          body.trimEnd().endsWith(`graphBridgeBodyMarker('${target}', 'return');\n    });`),
+        ).toBe(true);
+        // The preceding case in the source is the digest-bound "after" case.
+        const previousCase = source.lastIndexOf('\n    it(', start - 6);
+        expect(source.slice(previousCase, start)).toContain(after);
+      }
+    });
+
     it('classifies missing, malformed and oversized reports without exposing report bytes', () => {
       const directory = mkdtempSync(join(tmpdir(), 'sc-graph-report-test-'));
       roots.push(directory);
@@ -5589,6 +5681,7 @@ else
                 ...process.env,
                 ELECTRON_RUN_AS_NODE: '1',
                 SPRINT_CODER_ELECTRON_DB_TEST: '1',
+                SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR: reportDirectory,
               },
               timeout: graphBridgeTimeout,
               maxBuffer: 10 * 1024 * 1024,
@@ -5604,6 +5697,43 @@ else
       graphBridgeTimeout + 5_000,
     );
   });
+
+// Issue #716: the hosted child was killed at 180 s twice, after two different completed cases. Each
+// binding has a fixed target case (the one right after its last completed case) whose body writes
+// an entry and a return marker (empty files with fixed names) when the bridge parent asked for them.
+// The parent only turns the two existence bits of the matching target into the failure message.
+const graphBridgeMarkerTargets = [
+  {
+    id: 'checkpoint-generation',
+    after: 'rolls back partial lease acquisition and release failures',
+  },
+  {
+    id: 'restart-quarantine',
+    after: 'arbitrates resources across Teams atomically and keeps dependency waiters unreserved',
+  },
+] as const;
+type GraphBridgeMarkerTarget = (typeof graphBridgeMarkerTargets)[number]['id'];
+
+function graphBridgeBodyMarker(target: GraphBridgeMarkerTarget, edge: 'entry' | 'return'): void {
+  const directory = process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR;
+  if (!directory) return;
+  try {
+    writeFileSync(join(directory, `${target}.${edge}`), '');
+  } catch {
+    // A diagnostic marker must never change the outcome of the case it observes.
+  }
+}
+
+function graphBridgeBodySummary(directory: string, lastCompletedCaseDigest?: string): string {
+  const target = graphBridgeMarkerTargets.find(
+    (candidate) =>
+      createHash('sha256').update(candidate.after).digest('hex') === lastCompletedCaseDigest,
+  );
+  if (!target) return '';
+  const entry = existsSync(join(directory, `${target.id}.entry`));
+  const returned = existsSync(join(directory, `${target.id}.return`));
+  return `; firstUnfinishedBody=${JSON.stringify({ target: target.id, entry, return: returned })}`;
+}
 
 function graphBridgeFailure(error: unknown, reportFile: string): Error {
   const child: Record<string, number | string | boolean> = {};
@@ -5643,7 +5773,7 @@ function graphBridgeFailure(error: unknown, reportFile: string): Error {
   }
   // execFile's error/cause includes raw stderr and paths. Expose only typed metadata and counts.
   return new Error(
-    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}`,
+    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}${graphBridgeBodySummary(dirname(reportFile), progress.lastCompletedCaseDigest)}`,
   );
 }
 
