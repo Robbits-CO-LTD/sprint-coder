@@ -5,12 +5,18 @@ import { clearTimeout, setTimeout } from 'node:timers';
 import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hashExecutable, startOwnedComputerUseCapture } from './collect-computer-use-runtime.mjs';
+import { startPinnedOwnedComputerUseProcessCapture } from './computer-use-owned-process-receipt.mjs';
 
-/** Protected workflow startup/shutdown checkpoint, never parent acceptance or verified facts. */
-export async function collectOwnedComputerUseStartup(
-  input,
-  startCapture = startOwnedComputerUseCapture,
-) {
+const DIGEST = /^(?!0{64}$)[a-f0-9]{64}$/u;
+
+/**
+ * Protected workflow startup/shutdown checkpoint, never parent acceptance or verified facts.
+ * On win32 the process identity producer is connected through the pinned addon retainer; the
+ * report carries only a digest (startupProcessIdentityDigest, deliberately not the parent
+ * closure's processIdentityDigest owned-run fact). On other platforms the digest is null,
+ * meaning "not measured", never "no process". load is only a test seam for the addon loader.
+ */
+export async function collectOwnedComputerUseStartup(input, startCapture, load) {
   let capture;
   let profile;
   let timer;
@@ -27,7 +33,10 @@ export async function collectOwnedComputerUseStartup(
       packageSha256,
       outputPath,
       timeoutMs = 120_000,
+      addonPath,
+      addonSha256,
     } = input;
+    const windows = process.platform === 'win32';
     if (
       typeof executable !== 'string' ||
       typeof outputPath !== 'string' ||
@@ -43,6 +52,17 @@ export async function collectOwnedComputerUseStartup(
       timeoutMs > 120_000
     )
       throw new Error();
+    if (windows) {
+      if (
+        typeof addonPath !== 'string' ||
+        !isAbsolute(addonPath) ||
+        !addonPath.endsWith('.node') ||
+        typeof addonSha256 !== 'string' ||
+        !DIGEST.test(addonSha256) ||
+        hashExecutable(addonPath, 64 * 1024 * 1024) !== addonSha256
+      )
+        throw new Error();
+    } else if (addonPath !== undefined || addonSha256 !== undefined) throw new Error();
     if (hashExecutable(executable) !== expectedExecutableSha256) throw new Error();
     signal = input.signal;
     if (signal !== undefined && !(signal instanceof globalThis.AbortSignal)) throw new Error();
@@ -52,7 +72,16 @@ export async function collectOwnedComputerUseStartup(
       signal?.addEventListener('abort', onAbort, { once: true });
     });
     profile = mkdtempSync(join(dirname(outputPath), 'owned-startup-profile-'));
-    capture = startCapture({
+    const start =
+      startCapture ??
+      (windows
+        ? (launch) =>
+            startPinnedOwnedComputerUseProcessCapture(
+              { capture: launch, addonPath, addonSha256 },
+              load,
+            )
+        : startOwnedComputerUseCapture);
+    capture = start({
       executable,
       environment: {
         ...process.env,
@@ -74,12 +103,17 @@ export async function collectOwnedComputerUseStartup(
       completed.hello.packaged !== true ||
       completed.hello.sourceCommit !== expectedSourceCommit ||
       completed.executableSha256 !== expectedExecutableSha256 ||
-      completed.sessions.length !== 0
+      completed.sessions.length !== 0 ||
+      (windows &&
+        !(
+          typeof completed.processIdentityDigest === 'string' &&
+          DIGEST.test(completed.processIdentityDigest)
+        ))
     )
       throw new Error();
     transportValidated = true;
     const report = Object.freeze({
-      schemaVersion: 1,
+      schemaVersion: 2,
       evidenceKind: 'owned-startup-shutdown-checkpoint',
       finalGateEligible: false,
       sourceCommit: expectedSourceCommit,
@@ -88,6 +122,7 @@ export async function collectOwnedComputerUseStartup(
       executableSha256: completed.executableSha256,
       runIdDigest: completed.runIdDigest,
       eventChainDigest: completed.eventChainDigest,
+      startupProcessIdentityDigest: windows ? completed.processIdentityDigest : null,
       transportCompleted: true,
       sessionCount: 0,
       frameCount: completed.frameCount,
@@ -116,10 +151,12 @@ export async function collectOwnedComputerUseStartup(
   }
 }
 
-async function main() {
-  const keys = ['executable', 'source-commit', 'executable-sha256', 'package-sha256', 'output'];
+/** Complete per-platform key set: win32 requires the addon pair, other platforms forbid it. */
+export function parseOwnedStartupArguments(args, platform = process.platform) {
+  const base = ['executable', 'source-commit', 'executable-sha256', 'package-sha256', 'output'];
+  const addon = ['owned-process-addon', 'owned-process-addon-sha256'];
+  const keys = platform === 'win32' ? [...base, ...addon] : base;
   const options = {};
-  const args = process.argv.slice(2);
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index]?.slice(2);
     if (
@@ -132,6 +169,11 @@ async function main() {
     options[key] = args[index + 1];
   }
   if (Object.keys(options).length !== keys.length) throw new Error();
+  return options;
+}
+
+async function main() {
+  const options = parseOwnedStartupArguments(process.argv.slice(2));
   const controller = new globalThis.AbortController();
   const cancel = () => controller.abort();
   process.once('SIGINT', cancel);
@@ -143,6 +185,12 @@ async function main() {
       expectedExecutableSha256: options['executable-sha256'],
       packageSha256: options['package-sha256'],
       outputPath: options.output,
+      ...(process.platform === 'win32'
+        ? {
+            addonPath: options['owned-process-addon'],
+            addonSha256: options['owned-process-addon-sha256'],
+          }
+        : {}),
       signal: controller.signal,
     });
   } finally {

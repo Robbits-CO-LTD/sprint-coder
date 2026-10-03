@@ -396,7 +396,18 @@ jobs:
           if ($env:COLLECT_OWNED_STARTUP -eq 'true') {
             New-Item -ItemType Directory -Force -Path $env:STARTUP_REPORT_ROOT | Out-Null
             $executableDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $app[0].FullName).Hash.ToLowerInvariant()
-            node collect-computer-use-owned-startup.mjs --executable $app[0].FullName --source-commit $env:SOURCE_COMMIT --executable-sha256 $executableDigest --package-sha256 $portableDigest --output (Join-Path $env:STARTUP_REPORT_ROOT 'owned-startup-checkpoint.json')
+            # The addon digest is only as trusted as the package attestation above; the addon alone is not Authenticode-verified.
+            # Reparse points were already rejected for the whole extracted root above.
+            $addonRelative = 'resources\app.asar.unpacked\native-safe-fs\build\Release\sprint_coder_native_safe_fs.node'
+            $addonExpected = Join-Path $app[0].DirectoryName $addonRelative
+            $addon = @(
+              Get-ChildItem -LiteralPath $env:EXTRACT_ROOT -Recurse -File -Filter 'sprint_coder_native_safe_fs.node'
+            )
+            if ($addon.Count -ne 1 -or $addon[0].FullName -ine $addonExpected) {
+              throw 'Windows startup requires exactly one packaged native-safe-fs addon.'
+            }
+            $addonDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $addon[0].FullName).Hash.ToLowerInvariant()
+            node collect-computer-use-owned-startup.mjs --executable $app[0].FullName --source-commit $env:SOURCE_COMMIT --executable-sha256 $executableDigest --package-sha256 $portableDigest --output (Join-Path $env:STARTUP_REPORT_ROOT 'owned-startup-checkpoint.json') --owned-process-addon $addon[0].FullName --owned-process-addon-sha256 $addonDigest
             if ($LASTEXITCODE -ne 0) { throw 'Owned startup checkpoint failed; parent acceptance remains held.' }
           }
           'Verified signed Windows package metadata. Optional startup checkpoint does not establish parent acceptance.'

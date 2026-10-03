@@ -199,8 +199,14 @@ on signatures. What is now derived from measurement, and what is still unconnect
   or `verifiedClosureSha256`, so `finalGateEligible` is structurally false and the completed CLI
   always exits nonzero. As stated above this cannot be fixed with a flag or a JSON field: a
   protected runner must call the verifier as a library.
-- _Not connected._ Of `COMPUTER_USE_OWNED_RUN_FACT_KEYS`, `signerIdentityDigest`,
-  `processIdentityDigest` and `privacyReportDigest` have no producer. The final-gate workflow already
+- _Partially connected._ Of `COMPUTER_USE_OWNED_RUN_FACT_KEYS`, `signerIdentityDigest` and
+  `privacyReportDigest` have no producer. For `processIdentityDigest` the producer (the readonly
+  receipt in `computer-use-owned-process-receipt.mjs` and the runtime digest calculation) already
+  exists; what was missing was a caller. Only the owned-startup caller
+  (`collect-computer-use-owned-startup.mjs`) is now connected, on Windows, and it reports the result
+  under the distinct key `startupProcessIdentityDigest` (report schemaVersion 2). There is still no
+  provider-run producer of `processIdentityDigest`, and the startup report must never be used as a
+  parent-closure owned fact. The final-gate workflow already
   computes a signer digest on both OSes and checks it against the native manifest, but neither job
   exports it, so it is not bound into the closure.
 - _Not connected._ `generate-computer-use-final-gate-evidence.mjs` refuses every Core/Safety PASS and
