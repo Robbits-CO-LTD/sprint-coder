@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -79,7 +80,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       'bool ReserveNativeDispatchRequestLocked(',
       'struct AsyncNativeDispatchWork {',
     );
-    const dispatch = sourceBetween('napi_value Dispatch(', 'napi_value Cancel(');
+    // The preflight reservation helpers sit between Dispatch and Cancel, so Dispatch ends there.
+    const dispatch = sourceBetween('napi_value Dispatch(', 'bool ReserveNativePreflightLocked(');
     expect(reserve).toContain('const NativeDispatchRequest* request');
     expect(reserve).toContain('native_request_id_conflict');
     expect(reserve).toContain('native_request_in_flight');
@@ -136,7 +138,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
 
   it('settles every deferred it created when the async work cannot be created or queued', () => {
     const sites = [...source.matchAll(/napi_create_promise\(env, &work->deferred, &promise\)/gu)];
-    expect(sites).toHaveLength(4);
+    // StartSession, Observe, Dispatch and Preflight.
+    expect(sites).toHaveLength(5);
 
     for (const site of sites) {
       const promiseOffset = site.index;
@@ -386,5 +389,346 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       clickDispatch.indexOf('RevalidateVisualPointBeforePost(request, point, &outcome)'),
     ).toBeLessThan(clickDispatch.indexOf('CGEventPostToPid('));
     expect(clickDispatch).not.toContain('FreshVisualPatchMatches(request, &outcome)');
+  });
+
+  // Issue #500 N2a: native preflight and the single-use ordinary ticket. These are static source
+  // contracts. They do not execute the addon and are not native macOS evidence.
+  describe('N2a native preflight and ordinary ticket source contracts', () => {
+    const sha = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
+
+    it('exports preflight from Init as a default (non-writable) property next to dispatch', () => {
+      const init = sourceBetween('napi_value Init(', 'NAPI_MODULE(');
+      expect(init).toContain(
+        '{"preflight", nullptr, Preflight, nullptr, nullptr, nullptr, napi_default, nullptr},',
+      );
+      expect(init.indexOf('"dispatch"')).toBeLessThan(init.indexOf('"preflight"'));
+      expect(init.match(/napi_default/gu)).toHaveLength(10);
+      expect(init).not.toMatch(/napi_(writable|enumerable|configurable)/u);
+    });
+
+    it('performs no effect, no activation and no input attempt increment while measuring', () => {
+      const preflight = sourceBetween(
+        '// Preflight composed only from existing read-only guards.',
+        'bool GenerateOrdinaryTicketToken(',
+      );
+      const callbacks = sourceBetween('bool ReserveNativePreflightLocked(', 'napi_value Cancel(');
+      for (const part of [preflight, callbacks]) {
+        expect(part).not.toMatch(
+          /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
+        );
+        expect(part).not.toMatch(/Perform(Native|Semantic|Visual|FocusedInput)Dispatch\(/u);
+      }
+      // A subset of the dispatch guards, never described as identical to them.
+      expect(preflight).toContain('SUBSET of the dispatch');
+      expect(preflight).toContain('RevalidateBoundTarget(request)');
+      expect(preflight).toContain('FindBoundSemanticTarget(request, &risk, &outcome)');
+      expect(preflight).toContain('CFRelease(target)');
+      expect(preflight).toContain('ClassifyElementAtPoint(request.session->pid, point');
+      expect(preflight).toContain('FreshVisualPatchMatches(request, &outcome)');
+      expect(preflight).toContain('ClassifyFocusedElement(request.session->pid');
+      expect(preflight).toContain('RiskOutcome(risk, &outcome)');
+      expect(preflight).toContain('request.visual_control_signatures.contains(control_signature)');
+      expect(preflight).toContain('current_control_signature != request.focused_control_signature');
+    });
+
+    it('leaves the dispatch effect functions byte-for-byte as they were before N2a', () => {
+      // If N2b has to change these, update the expected digests together with a reviewed diff.
+      const spans: Array<[string, string, string]> = [
+        [
+          'NativeDispatchOutcome PerformSemanticDispatch(',
+          'bool FreshVisualPatchMatches(',
+          'ae3c160379352bb3',
+        ],
+        [
+          'NativeDispatchOutcome PerformVisualDispatch(',
+          'NativeDispatchOutcome PerformFocusedInputDispatch(',
+          '202ab7a471e750e0',
+        ],
+        [
+          'NativeDispatchOutcome PerformFocusedInputDispatch(',
+          'NativeDispatchOutcome PerformNativeDispatch(',
+          '8f0351989686557e',
+        ],
+        [
+          'NativeDispatchOutcome PerformNativeDispatch(',
+          '// Preflight composed only from existing read-only guards.',
+          '3d7a494a5c4a3d77',
+        ],
+      ];
+      for (const [start, end, digest] of spans) {
+        expect(sha(sourceBetween(start, end).replaceAll('\r\n', '\n'))).toBe(digest);
+      }
+    });
+
+    it('reads the own ticket key outside Parse and outside the state lock, as plain values', () => {
+      const reader = sourceBetween('bool ReadNativeTicketKey(', 'napi_value NullableStringValue(');
+      expect(reader).toContain('napi_has_own_property(env, object, key, &present)');
+      expect(reader).not.toMatch(/napi_has_property|napi_get_prototype|napi_get_property_names/u);
+      expect(reader).toContain('output->present = present;');
+      expect(reader).toContain('kNativeOrdinaryTicketTokenChars');
+      for (const [start, end] of [
+        ['napi_value Dispatch(', 'bool ReserveNativePreflightLocked('],
+        ['napi_value Preflight(', 'napi_value Cancel('],
+      ] as const) {
+        const callback = sourceBetween(start, end);
+        expect(
+          callback.indexOf('ReadNativeTicketKey(env, argv[0], &work->request.ticket_key)'),
+        ).toBeGreaterThan(0);
+        expect(callback.indexOf('ReadNativeTicketKey(')).toBeLessThan(
+          callback.indexOf('std::unique_lock<std::mutex> state_lock;'),
+        );
+        // No N-API call may run inside the locked block.
+        const locked = callback.slice(
+          callback.indexOf('std::unique_lock<std::mutex> state_lock;'),
+          callback.indexOf('if (!parsed)'),
+        );
+        expect(locked.replace('ParseNativeDispatchRequest(env,', '')).not.toMatch(
+          /\bnapi_[a-z_]+\s*\(/u,
+        );
+        expect(locked).not.toContain('ReadNativeTicketKey(');
+      }
+      // The legacy path is only taken when the key is absent: Reserve branches on presence.
+      const reserve = sourceBetween(
+        'bool ReserveNativeDispatchRequestLocked(',
+        'struct AsyncNativeDispatchWork {',
+      );
+      expect(reserve).toContain('if (request->ticket_key.present) {');
+      const preflight = sourceBetween('napi_value Preflight(', 'napi_value Cancel(');
+      expect(preflight).toContain('if (work->request.ticket_key.present)');
+    });
+
+    it('orders Reserve as replay, in-flight, ticket consume, busy, insert', () => {
+      const reserve = sourceBetween(
+        'bool ReserveNativeDispatchRequestLocked(',
+        'struct AsyncNativeDispatchWork {',
+      );
+      const order = [
+        'session.dispatch_replay_cache.find(',
+        'session.inflight_dispatches.find(',
+        'if (request->ticket_key.present) {',
+        'session.ordinary_ticket.Consume(',
+        'native_ticket_invalid',
+        'kMaxInflightDispatchEntries',
+        'inflight_dispatches.emplace(',
+      ].map((marker) => reserve.indexOf(marker));
+      expect(order.every((offset) => offset > 0)).toBe(true);
+      expect([...order].sort((left, right) => left - right)).toEqual(order);
+      expect(reserve).toContain('expected.payload_digest = request->payload_digest');
+      expect(reserve).toContain('expected.context_digest = request->context_digest');
+      expect(reserve).toContain('expected.ticket_generation = session.ticket_generation.load(');
+      expect(reserve).toContain(
+        'session.cancel_epoch.load(std::memory_order_acquire) != request->cancel_epoch',
+      );
+      // Replay and in-flight returns must not touch the ticket slot.
+      const beforeTicket = reserve.slice(0, reserve.indexOf('if (request->ticket_key.present) {'));
+      expect(beforeTicket).not.toMatch(/ordinary_ticket|ticket_generation/u);
+      // N2b note: a ticket-required rule belongs after the replay/in-flight checks.
+      expect(reserve).toContain('N2b note');
+    });
+
+    it('advances the ticket generation on cancel, close, observe, start and every issue', () => {
+      const cancel = sourceBetween('napi_value Cancel(', 'napi_value Init(');
+      expect(cancel).toContain(
+        'session->ticket_generation.fetch_add(1, std::memory_order_acq_rel)',
+      );
+      expect(cancel).not.toMatch(/state_mutex|lock_guard|unique_lock|ordinary_ticket/u);
+      expect(cancel.indexOf('ticket_generation.fetch_add')).toBeLessThan(
+        cancel.indexOf('session->cancel_epoch.store('),
+      );
+      const close = sourceBetween('napi_value CloseSession(', 'bool ReadWindowBounds(');
+      expect(close).toContain('session->ticket_generation.fetch_add(1, std::memory_order_acq_rel)');
+      expect(close.indexOf('ticket_generation.fetch_add')).toBeLessThan(
+        close.indexOf('session->cancel_epoch.store('),
+      );
+      const drain = sourceBetween('void ExecuteNativeStop(', 'void CompleteNativeStop(');
+      expect(drain).toContain('work->session->ordinary_ticket.Invalidate();');
+      expect(drain).toContain('work->session->preflight_owner = 0;');
+      const helper = sourceBetween(
+        'void AdvanceTicketGenerationLocked(',
+        'constexpr std::size_t kMaxDispatchReplayEntries',
+      );
+      expect(helper).toContain('ticket_generation.fetch_add(1, std::memory_order_acq_rel)');
+      expect(helper).toContain('ordinary_ticket.Invalidate()');
+      // Observe publication and StartSession resume/refocus advance it under the state lock.
+      const observeWorker = sourceBetweenLast(
+        'void ExecuteNativeObservation(',
+        'void CompleteNativeObservation(',
+      );
+      expect(observeWorker).toContain('AdvanceTicketGenerationLocked(session);');
+      expect(
+        observeWorker.lastIndexOf(
+          'std::lock_guard<std::mutex> state_lock(session.state_mutex);',
+          observeWorker.indexOf('AdvanceTicketGenerationLocked(session);'),
+        ),
+      ).toBeGreaterThan(0);
+      const startWorker = sourceBetween(
+        'bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {',
+        'void ExecuteNativeStartSession(napi_env env, void* data) {',
+      );
+      expect(startWorker).toContain('AdvanceTicketGenerationLocked(*existing_session);');
+      expect(
+        startWorker.lastIndexOf(
+          'std::lock_guard<std::mutex> state_lock(existing_session->state_mutex);',
+          startWorker.indexOf('AdvanceTicketGenerationLocked(*existing_session);'),
+        ),
+      ).toBeGreaterThan(0);
+      // Reservation, preflight reservation and issue all advance or check the same counter.
+      expect(
+        source.match(/ticket_generation\.fetch_add\(1, std::memory_order_acq_rel\)/gu)!.length,
+      ).toBeGreaterThanOrEqual(5);
+    });
+
+    it('issues in the worker under the state lock with the three conditions, and only the owner releases', () => {
+      const callbacks = sourceBetween('bool ReserveNativePreflightLocked(', 'napi_value Cancel(');
+      const issue = sourceBetween(
+        'NativePreflightReceipt IssueOrdinaryTicket(',
+        'void ExecuteNativePreflight(',
+      );
+      expect(issue).toContain('std::lock_guard<std::mutex> state_lock(session.state_mutex);');
+      expect(issue).toContain('DispatchCancellationStillValid(request)');
+      expect(issue).toContain('session.preflight_owner != owner');
+      expect(issue).toContain('session.ticket_generation.load(std::memory_order_acquire) != owner');
+      expect(issue).toContain('ticket_binding.ticket_generation = owner;');
+      expect(issue.indexOf('DispatchCancellationStillValid(request)')).toBeLessThan(
+        issue.indexOf('ReadNativeMonotonicNs(&now_ns)'),
+      );
+      expect(issue).toContain('kNativeOrdinaryTicketTtlNs');
+      // The issue never happens in the completion callback or the N-API callback.
+      const complete = sourceBetween('void CompleteNativePreflight(', 'napi_value Preflight(');
+      expect(complete).not.toMatch(
+        /IssueOrdinaryTicket|ordinary_ticket\.Issue|GenerateOrdinaryTicketToken/u,
+      );
+      expect(callbacks.match(/IssueOrdinaryTicket\(/gu)).toHaveLength(2);
+      const release = sourceBetween(
+        'void ReleaseNativePreflightOwner(',
+        'NativePreflightReceipt IssueOrdinaryTicket(',
+      );
+      expect(release).toContain(
+        'if (request.session->preflight_owner == owner) request.session->preflight_owner = 0;',
+      );
+      expect(release).toContain('InvalidateIfGeneration(owner)');
+      // Every failure route releases: promise, create, queue, completion and worker exception.
+      const preflight = sourceBetween('napi_value Preflight(', 'napi_value Cancel(');
+      expect(
+        preflight.match(/ReleaseNativePreflightOwner\(work->request, work->owner, true\)/gu),
+      ).toHaveLength(2);
+      expect(complete).toContain('if (status != napi_ok) {');
+      expect(complete).toContain('ReleaseNativePreflightOwner(work->request, work->owner, true)');
+      const execute = sourceBetween(
+        'void ExecuteNativePreflight(',
+        'void CompleteNativePreflight(',
+      );
+      expect(execute).toContain('catch (...) {');
+      expect(execute).toContain('native_preflight_exception');
+      expect(execute).not.toContain('unknown_effect');
+      expect(execute).toContain(
+        'std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);',
+      );
+      expect(execute).not.toMatch(/\bnapi_[a-z_]+\s*\(/u);
+    });
+
+    it('draws entropy only from SecRandomCopyBytes, reads a raw monotonic clock and never leaks secrets', () => {
+      const generator = sourceBetween(
+        'bool GenerateOrdinaryTicketToken(',
+        'bool ReadNativeMonotonicNs(',
+      );
+      expect(generator).toContain('SecRandomCopyBytes(kSecRandomDefault, sizeof(bytes), bytes)');
+      expect(generator).toContain('unsigned char bytes[32]');
+      expect(generator).not.toMatch(
+        /\brand\(|arc4random|std::random|mt19937|random_device|time\(/u,
+      );
+      // No fallback: a failure returns false before any token exists.
+      expect(generator).toContain('return false;');
+      const clock = sourceBetween('bool ReadNativeMonotonicNs(', 'bool ReadNativeTicketKey(');
+      expect(clock).toContain('clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)');
+      expect(source).not.toMatch(
+        /std::chrono::system_clock|gettimeofday|CFAbsoluteTimeGetCurrent|NSDate/u,
+      );
+      const receipt = sourceBetween('napi_value PreflightReceiptValue(', 'bool ReadNamedBool(');
+      expect(receipt).not.toMatch(
+        /payload_digest|context_digest|envelope_digest|action_digest|task_id|turn_id/u,
+      );
+      expect(receipt.match(/"[a-zA-Z]+"/gu)).toEqual([
+        '"decision"',
+        '"reasonCode"',
+        '"deniedResult"',
+        '"ticket"',
+        '"classifierVersion"',
+        '"inputAttemptCount"',
+        '"requestId"',
+        '"sessionId"',
+        '"cancelEpoch"',
+        '"observationRevision"',
+      ]);
+      expect(source).not.toContain('single_use_approval');
+      expect(source).not.toContain('SingleUseApproval');
+      const dispatchResult = sourceBetween('napi_value DispatchResultValue(', 'bool RiskOutcome(');
+      expect(dispatchResult).not.toMatch(/ticket/u);
+      // The presented secret is scrubbed right after the reservation and a minted one after use.
+      const dispatch = sourceBetween('napi_value Dispatch(', 'bool ReserveNativePreflightLocked(');
+      expect(dispatch).toContain('ScrubNativeTicketString(&work->request.ticket_key.token)');
+      expect(source).toContain('ScrubNativeTicketString(&work->receipt.ticket)');
+    });
+
+    it('keeps every returned preflight reason inside the closed receipt table', () => {
+      const table = sourceBetween(
+        'constexpr NativePreflightDeniedEntry kNativePreflightDeniedTable[] = {',
+        'NativePreflightReceipt MakeDeniedReceipt(',
+      );
+      const tableReasons = new Set(
+        [...table.matchAll(/\{"(native_[a-z_]+)", "(rejected|paused|canceled)"\}/gu)].map(
+          (match) => match[1] ?? '',
+        ),
+      );
+      const classifier = new Set([
+        'native_secure_field_blocked',
+        'native_high_impact_user_takeover',
+        'native_target_unclassified',
+      ]);
+      // Every reason literal produced by a function preflight can reach must be in the table or
+      // be one of the three classifier reasons mapped to blocked/takeover.
+      const outcomeForValidation = sourceBetween(
+        'NativeDispatchOutcome OutcomeForValidation(',
+        'bool DispatchCancellationStillValid(',
+      );
+      const outcomeForValidationSwitch = outcomeForValidation.slice(
+        outcomeForValidation.indexOf('switch (validation) {'),
+      );
+      const reachable = [
+        // effect_started is always false for preflight, so only the switch table is reachable.
+        outcomeForValidationSwitch,
+        sourceBetween('bool RiskOutcome(', 'AXUIElementRef FindBoundSemanticTarget('),
+        sourceBetween(
+          'AXUIElementRef FindBoundSemanticTarget(',
+          'NativeDispatchOutcome PerformSemanticDispatch(',
+        ),
+        sourceBetween('bool FreshVisualPatchMatches(', 'bool RevalidateVisualPointBeforePost('),
+        sourceBetween(
+          'NativePreflightReceipt PerformNativePreflight(',
+          'bool GenerateOrdinaryTicketToken(',
+        ),
+        sourceBetween('bool ReserveNativePreflightLocked(', 'struct AsyncNativePreflightWork {'),
+        sourceBetween('NativePreflightReceipt IssueOrdinaryTicket(', 'napi_value Preflight('),
+      ].join('\n');
+      const literals = new Set(
+        [...reachable.matchAll(/"(native_[a-z_]+)"/gu)].map((m) => m[1] ?? ''),
+      );
+      expect(literals.size).toBeGreaterThan(20);
+      for (const reason of literals) {
+        expect(tableReasons.has(reason) || classifier.has(reason), reason).toBe(true);
+      }
+      // The legacy-only effect reasons stay out of the table.
+      for (const forbidden of [
+        'native_input_effect_unknown',
+        'native_dispatch_exception_unknown_effect',
+        'native_async_completion_unknown_effect',
+        'native_ticket_invalid',
+      ]) {
+        expect(tableReasons.has(forbidden)).toBe(false);
+      }
+      // An unknown tuple is replaced by a closed denial before it leaves native code.
+      expect(source).toContain('SealNativePreflightReceipt(&work->receipt);');
+      expect(source).toContain('SealNativePreflightReceipt(&denied);');
+    });
   });
 });

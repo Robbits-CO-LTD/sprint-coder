@@ -26,10 +26,12 @@
 #include <set>
 #include <string>
 #include <string_view>
+#include <time.h>
 #include <unordered_map>
 #include <vector>
 
 #include "computer_use_native_binding.h"
+#include "computer_use_native_ticket.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -120,7 +122,21 @@ struct MacComputerUseSession {
   std::unordered_map<std::string, ReplayEntry> dispatch_replay_cache;
   std::deque<std::string> dispatch_replay_order;
   std::unordered_map<std::string, std::string> inflight_dispatches;
+  // Ordinary preflight ticket state. ticket_generation is advanced without the state lock by
+  // Cancel and Close (Cancel never takes the state lock), and under the state lock by observe,
+  // start/resume/refocus, a reservation and a preflight issue. The slot and the owner are only
+  // touched under state_mutex. 0 is the "none" sentinel for both the generation a ticket is
+  // bound to and the preflight owner.
+  std::atomic<std::uint64_t> ticket_generation{0};
+  sprint_coder::computer_use::NativeOrdinaryTicketSlot ordinary_ticket;
+  std::uint64_t preflight_owner = 0;
 };
+
+// The caller holds state_mutex. Any state change a ticket could depend on supersedes it.
+void AdvanceTicketGenerationLocked(MacComputerUseSession& session) {
+  session.ticket_generation.fetch_add(1, std::memory_order_acq_rel);
+  session.ordinary_ticket.Invalidate();
+}
 
 constexpr std::size_t kMaxDispatchReplayEntries = 128;
 constexpr std::size_t kMaxInflightDispatchEntries = 1;
@@ -1583,6 +1599,8 @@ bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {
       std::lock_guard<std::mutex> state_lock(existing_session->state_mutex);
       if (!cancellation_still_valid())
         return fail("CANCELED", "The native session start was canceled");
+      // Resume and refocus can change what an issued ordinary ticket was measured against.
+      AdvanceTicketGenerationLocked(*existing_session);
       if (explicit_resume) {
         existing_session->dialog_set_revision += 1;
         existing_session->dialog_set_digest = resume_target.dialog_set_digest;
@@ -1951,6 +1969,10 @@ void ExecuteNativeStop(napi_env env, void* data) {
       work->session->dispatch_replay_cache.clear();
       work->session->dispatch_replay_order.clear();
       work->session->inflight_dispatches.clear();
+      // Close already advanced the generation without a lock; the ticket secret and the preflight
+      // owner are dropped here, where the state lock is held.
+      work->session->ordinary_ticket.Invalidate();
+      work->session->preflight_owner = 0;
       // The closed-session registry can hold this session until its close is confirmed, so the
       // per-observation control signatures are dropped here too. Nothing can dispatch against a
       // closed session, and only the receipt has to outlive the drain. Clearing has to happen here
@@ -2065,6 +2087,9 @@ napi_value CloseSession(napi_env env, napi_callback_info info) {
                              confirmed_input_api_attempts);
   if (session != nullptr) {
     session->closed.store(true, std::memory_order_release);
+    // No state lock here: any outstanding ticket stops matching the generation at once, and the
+    // drain clears the stored secret.
+    session->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
     session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
     if (first_close) {
       // Only the close that took the session out of the active maps owns the global stop epoch and
@@ -3141,6 +3166,7 @@ void ExecuteNativeObservation(napi_env env, void* data) {
           return;
         }
         session.observation_revision += 1;
+        AdvanceTicketGenerationLocked(session);
         session.observation_bounds = observed_dialogs.active_bounds;
         session.has_observation = true;
         if (session.dialog_set_digest != observed_dialogs.dialog_set_digest)
@@ -4000,12 +4026,25 @@ struct NativeDispatchOutcome {
   bool effect_started = false;
 };
 
+// The `ticket` key of an input object, captured once outside the state lock as plain values. A key
+// that is present but is not a 64-character string keeps present == true, so it can never fall
+// back to the legacy no-ticket path.
+struct NativeTicketKeyInput {
+  bool present = false;
+  bool token_is_string = false;
+  std::string token;
+};
+
 struct NativeDispatchRequest {
   std::shared_ptr<MacComputerUseSession> session;
   std::string request_id;
   std::string session_id;
   std::string action_digest;
   std::string envelope_digest;
+  // Kept so a ticket can be bound to the exact request. Never part of any returned result.
+  std::string payload_digest;
+  std::string context_digest;
+  NativeTicketKeyInput ticket_key;
   std::string kind;
   std::string target_id;
   std::string expected_target_signature;
@@ -4057,6 +4096,118 @@ bool IsLowerHexDigest(std::string_view value) {
            return (character >= '0' && character <= '9') ||
                   (character >= 'a' && character <= 'f');
          });
+}
+
+// Preflight receipt model. The decision/reason/result tuples form a finite table; a receipt that
+// is not in the table is never returned (it is replaced by a denied native_dispatch_failed).
+struct NativePreflightReceipt {
+  std::string decision = "denied";
+  std::string reason_code = "native_dispatch_failed";
+  std::string denied_result = "rejected";
+  std::string ticket;
+};
+
+struct NativePreflightDeniedEntry {
+  const char* reason_code;
+  const char* result;
+};
+
+constexpr NativePreflightDeniedEntry kNativePreflightDeniedTable[] = {
+    {"native_canceled_pre_dispatch", "canceled"},
+    {"native_capability_unavailable", "rejected"},
+    {"native_dialog_user_takeover", "paused"},
+    {"native_app_identity_changed", "rejected"},
+    {"native_process_generation_changed", "rejected"},
+    {"native_target_ineligible", "rejected"},
+    {"native_focus_changed", "rejected"},
+    {"native_stale_observation", "rejected"},
+    {"native_dispatch_failed", "rejected"},
+    {"native_semantic_state_unavailable", "rejected"},
+    {"native_invalid_selection", "rejected"},
+    {"native_invalid_text", "rejected"},
+    {"native_input_unavailable", "rejected"},
+    {"native_key_not_allowed", "rejected"},
+    {"native_visual_binding_unavailable", "rejected"},
+    {"native_window_not_shareable", "rejected"},
+    {"native_capture_unavailable", "rejected"},
+    {"native_visual_patch_changed", "rejected"},
+    {"native_target_unavailable", "rejected"},
+    {"native_unsupported_action", "rejected"},
+    {"native_dispatch_busy", "rejected"},
+    {"native_request_in_flight", "rejected"},
+    {"native_request_id_conflict", "rejected"},
+    // Issue-time failures.
+    {"native_ticket_unavailable", "rejected"},
+    {"native_ticket_superseded", "rejected"},
+    {"native_preflight_exception", "rejected"},
+    {"native_async_completion_failed", "rejected"},
+};
+
+NativePreflightReceipt MakeDeniedReceipt(std::string result, std::string reason_code) {
+  NativePreflightReceipt receipt;
+  receipt.decision = "denied";
+  receipt.reason_code = std::move(reason_code);
+  receipt.denied_result = std::move(result);
+  return receipt;
+}
+
+NativePreflightReceipt MakeNullReceipt(const char* decision) {
+  NativePreflightReceipt receipt;
+  receipt.decision = decision;
+  receipt.reason_code.clear();
+  receipt.denied_result.clear();
+  return receipt;
+}
+
+// Maps a guard outcome onto a receipt. Only the classifier outcomes become blocked/takeover.
+NativePreflightReceipt PreflightReceiptFromOutcome(const NativeDispatchOutcome& outcome) {
+  if (outcome.reason_code == "native_secure_field_blocked" && outcome.result == "rejected") {
+    NativePreflightReceipt receipt;
+    receipt.decision = "blocked";
+    receipt.reason_code = outcome.reason_code;
+    receipt.denied_result = outcome.result;
+    return receipt;
+  }
+  if ((outcome.reason_code == "native_high_impact_user_takeover" && outcome.result == "paused") ||
+      (outcome.reason_code == "native_target_unclassified" && outcome.result == "rejected")) {
+    NativePreflightReceipt receipt;
+    receipt.decision = "takeover";
+    receipt.reason_code = outcome.reason_code;
+    receipt.denied_result = outcome.result;
+    return receipt;
+  }
+  return MakeDeniedReceipt(outcome.result, outcome.reason_code);
+}
+
+bool NativePreflightReceiptIsClosed(const NativePreflightReceipt& receipt) {
+  if (receipt.decision == "ordinary")
+    return receipt.reason_code.empty() && receipt.denied_result.empty() &&
+           sprint_coder::computer_use::IsValidNativeOrdinaryTicketToken(receipt.ticket);
+  if (!receipt.ticket.empty()) return false;
+  if (receipt.decision == "replay")
+    return receipt.reason_code.empty() && receipt.denied_result.empty();
+  if (receipt.decision == "blocked")
+    return receipt.reason_code == "native_secure_field_blocked" &&
+           receipt.denied_result == "rejected";
+  if (receipt.decision == "takeover")
+    return (receipt.reason_code == "native_high_impact_user_takeover" &&
+            receipt.denied_result == "paused") ||
+           (receipt.reason_code == "native_target_unclassified" &&
+            receipt.denied_result == "rejected");
+  if (receipt.decision == "denied") {
+    for (const auto& entry : kNativePreflightDeniedTable) {
+      if (receipt.reason_code == entry.reason_code && receipt.denied_result == entry.result)
+        return true;
+    }
+  }
+  return false;
+}
+
+// Applied to every receipt right before it leaves native code.
+void SealNativePreflightReceipt(NativePreflightReceipt* receipt) {
+  if (NativePreflightReceiptIsClosed(*receipt)) return;
+  sprint_coder::computer_use::ScrubNativeTicketString(&receipt->ticket);
+  *receipt = MakeDeniedReceipt("rejected", "native_dispatch_failed");
 }
 
 NativeDispatchOutcome OutcomeForValidation(NativeTargetValidation validation,
@@ -4620,6 +4771,148 @@ NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request
   return MakeDispatchOutcome("rejected", "native_unsupported_action");
 }
 
+// Preflight composed only from existing read-only guards. It is a SUBSET of the dispatch
+// classification guards, not a copy of them: RevalidateBoundTarget, semantic target resolution and
+// risk (FindBoundSemanticTarget), the visual point classification with its observed signature and
+// fresh patch check, and the focused-element classification with its observed signature. It never
+// posts an event, performs an AX action, sets an AX value, activates an app, or increments the
+// input attempt counter. Dispatch still re-runs every guard (RiskOutcome included) after a ticket is
+// consumed; a ticket is a typed preflight proof, never permission to skip a guard.
+NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
+  NativeTargetValidation validation = RevalidateBoundTarget(request);
+  if (validation != NativeTargetValidation::kValid)
+    return PreflightReceiptFromOutcome(OutcomeForValidation(validation, false));
+  NativeDispatchOutcome outcome;
+  if (request.kind == "invoke" || request.kind == "set_text" || request.kind == "select" ||
+      request.kind == "toggle" || request.kind == "expand_collapse") {
+    AxRiskClassification risk;
+    AXUIElementRef target = FindBoundSemanticTarget(request, &risk, &outcome);
+    if (target == nullptr) return PreflightReceiptFromOutcome(outcome);
+    // FindBoundSemanticTarget returns a retained element.
+    CFRelease(target);
+  } else if (request.kind == "click" || request.kind == "scroll") {
+    const CGPoint point = CGPointMake(
+        request.observation_bounds.origin.x +
+            request.x * std::max<CGFloat>(0, request.observation_bounds.size.width - 1),
+        request.observation_bounds.origin.y +
+            request.y * std::max<CGFloat>(0, request.observation_bounds.size.height - 1));
+    std::string control_signature;
+    const AxRiskClassification risk =
+        ClassifyElementAtPoint(request.session->pid, point, &control_signature);
+    if (RiskOutcome(risk, &outcome)) return PreflightReceiptFromOutcome(outcome);
+    if (control_signature.empty() ||
+        !request.visual_control_signatures.contains(control_signature))
+      return MakeDeniedReceipt("rejected", "native_stale_observation");
+    if (!FreshVisualPatchMatches(request, &outcome))
+      return PreflightReceiptFromOutcome(outcome);
+  } else if (request.kind == "type" || request.kind == "key") {
+    std::string current_control_signature;
+    const AxRiskClassification risk =
+        ClassifyFocusedElement(request.session->pid, &current_control_signature);
+    if (RiskOutcome(risk, &outcome)) return PreflightReceiptFromOutcome(outcome);
+    if (request.focused_control_signature.empty() ||
+        current_control_signature != request.focused_control_signature)
+      return MakeDeniedReceipt("rejected", "native_stale_observation");
+  } else {
+    return MakeDeniedReceipt("rejected", "native_unsupported_action");
+  }
+  validation = RevalidateBoundTarget(request);
+  if (validation != NativeTargetValidation::kValid)
+    return PreflightReceiptFromOutcome(OutcomeForValidation(validation, false));
+  // The ticket itself is attached at issue time under the state lock.
+  return MakeNullReceipt("ordinary");
+}
+
+// 32 bytes from the system CSPRNG, lowercase hex. There is deliberately no fallback: a failure
+// means no ticket.
+bool GenerateOrdinaryTicketToken(std::string* output) {
+  unsigned char bytes[32] = {};
+  volatile unsigned char* wipe = bytes;
+  if (SecRandomCopyBytes(kSecRandomDefault, sizeof(bytes), bytes) != errSecSuccess) {
+    for (std::size_t index = 0; index < sizeof(bytes); ++index) wipe[index] = 0;
+    return false;
+  }
+  static constexpr char hexadecimal[] = "0123456789abcdef";
+  std::string token(sizeof(bytes) * 2, '0');
+  for (std::size_t index = 0; index < sizeof(bytes); ++index) {
+    token[index * 2] = hexadecimal[bytes[index] >> 4];
+    token[index * 2 + 1] = hexadecimal[bytes[index] & 0xf];
+  }
+  for (std::size_t index = 0; index < sizeof(bytes); ++index) wipe[index] = 0;
+  *output = std::move(token);
+  return true;
+}
+
+// Monotonic raw clock for ticket TTLs. It is not affected by wall-clock changes.
+bool ReadNativeMonotonicNs(std::uint64_t* output) {
+  const std::uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+  if (now == 0) return false;
+  *output = now;
+  return true;
+}
+
+// Reads the own `ticket` key of an input object with no lock held and no prototype lookup. Any
+// N-API failure returns false and the caller rejects the request. A key that exists with any value
+// (undefined, null, empty, non-string, wrong length) still reports present.
+bool ReadNativeTicketKey(napi_env env, napi_value object, NativeTicketKeyInput* output) {
+  napi_value key = StringValue(env, "ticket");
+  bool present = false;
+  if (napi_has_own_property(env, object, key, &present) != napi_ok) return false;
+  output->present = present;
+  output->token_is_string = false;
+  output->token.clear();
+  if (!present) return true;
+  napi_value value;
+  if (napi_get_named_property(env, object, "ticket", &value) != napi_ok) return false;
+  size_t length = 0;
+  if (napi_get_value_string_utf8(env, value, nullptr, 0, &length) != napi_ok) return true;
+  if (length != sprint_coder::computer_use::kNativeOrdinaryTicketTokenChars) return true;
+  std::string buffer(length + 1, '\0');
+  if (napi_get_value_string_utf8(env, value, buffer.data(), buffer.size(), &length) != napi_ok ||
+      length != sprint_coder::computer_use::kNativeOrdinaryTicketTokenChars)
+    return true;
+  buffer.resize(length);
+  output->token_is_string = true;
+  output->token = std::move(buffer);
+  return true;
+}
+
+napi_value NullableStringValue(napi_env env, const std::string& value) {
+  if (!value.empty()) return StringValue(env, value.c_str());
+  napi_value null_value;
+  napi_get_null(env, &null_value);
+  return null_value;
+}
+
+// Fixed key set. The ticket is the only secret and appears only for decision "ordinary". Payload,
+// context and envelope digests are never returned.
+napi_value PreflightReceiptValue(napi_env env, const NativeDispatchRequest& request,
+                                 const NativePreflightReceipt& receipt) {
+  napi_value result;
+  napi_create_object(env, &result);
+  napi_set_named_property(env, result, "decision", StringValue(env, receipt.decision.c_str()));
+  napi_set_named_property(env, result, "reasonCode", NullableStringValue(env, receipt.reason_code));
+  napi_set_named_property(env, result, "deniedResult",
+                         NullableStringValue(env, receipt.denied_result));
+  napi_set_named_property(env, result, "ticket", NullableStringValue(env, receipt.ticket));
+  napi_set_named_property(
+      env, result, "classifierVersion",
+      NumberValue(env, static_cast<double>(
+                           sprint_coder::computer_use::kNativePreflightClassifierVersion)));
+  napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env,
+      static_cast<double>(request.session->input_api_attempts.load(std::memory_order_acquire))));
+  napi_set_named_property(env, result, "requestId",
+                         StringValue(env, request.request_id.c_str()));
+  napi_set_named_property(env, result, "sessionId",
+                         StringValue(env, request.session_id.c_str()));
+  napi_set_named_property(env, result, "cancelEpoch",
+                         NumberValue(env, static_cast<double>(request.cancel_epoch)));
+  napi_set_named_property(
+      env, result, "observationRevision",
+      NumberValue(env, static_cast<double>(request.observation_revision)));
+  return result;
+}
+
 bool ReadNamedBool(napi_env env, napi_value object, const char* name, bool* output) {
   napi_value value;
   return napi_get_named_property(env, object, name, &value) == napi_ok &&
@@ -4842,6 +5135,8 @@ bool ParseNativeDispatchRequest(napi_env env, napi_value object,
     return false;
   }
   request->envelope_digest = StringDigest(envelope_input);
+  request->payload_digest = payload_digest;
+  request->context_digest = context_digest;
   return true;
 }
 
@@ -4868,12 +5163,42 @@ bool ReserveNativeDispatchRequestLocked(const NativeDispatchRequest* request,
                         : "native_request_id_conflict");
     return false;
   }
+  // Replay and in-flight hits above never touch the ordinary ticket slot. A request that carries
+  // the ticket key at all, whatever its value, takes this branch and never falls back to the
+  // legacy path. The slot is consumed (and so burned) before any further check, then every binding
+  // must match: the 7 request fields, the TTL, the current ticket generation and the cancel epoch.
+  // N2b note: a "ticket required" rule must be placed after the replay/in-flight checks above.
+  if (request->ticket_key.present) {
+    std::uint64_t now_ns = 0;
+    const bool have_clock = ReadNativeMonotonicNs(&now_ns);
+    sprint_coder::computer_use::NativeOrdinaryTicketBinding expected;
+    expected.session_id = request->session_id;
+    expected.request_id = request->request_id;
+    expected.action_digest = request->action_digest;
+    expected.payload_digest = request->payload_digest;
+    expected.context_digest = request->context_digest;
+    expected.cancel_epoch = request->cancel_epoch;
+    expected.ticket_generation = session.ticket_generation.load(std::memory_order_acquire);
+    const bool consumed =
+        have_clock && request->ticket_key.token_is_string &&
+        session.ordinary_ticket.Consume(request->ticket_key.token, expected, now_ns);
+    // Burn the slot on every path, including a missing clock or a malformed presented value.
+    session.ordinary_ticket.Invalidate();
+    if (!consumed || session.closed.load(std::memory_order_acquire) ||
+        session.cancel_epoch.load(std::memory_order_acquire) != request->cancel_epoch) {
+      *replay = MakeDispatchOutcome("rejected", "native_ticket_invalid");
+      return false;
+    }
+  }
   if (session.inflight_dispatches.size() >= kMaxInflightDispatchEntries) {
     *replay = MakeDispatchOutcome("rejected", "native_dispatch_busy");
     return false;
   }
   session.inflight_dispatches.emplace(request->request_id,
                                      request->envelope_digest);
+  // A reservation that goes on to run supersedes any ticket measured before it.
+  session.ticket_generation.fetch_add(1, std::memory_order_acq_rel);
+  session.ordinary_ticket.Invalidate();
   return true;
 }
 
@@ -4924,6 +5249,11 @@ napi_value Dispatch(napi_env env, napi_callback_info info) {
     return ThrowNativeError(env, "INVALID_ACTION", "A dispatch action is required");
   auto work = std::make_unique<AsyncNativeDispatchWork>();
   work->env = env;
+  // The ticket key is captured here, outside Parse and before the state lock, as plain values:
+  // a getter or Proxy can re-enter, so no N-API call may run while the lock is held.
+  if (!ReadNativeTicketKey(env, argv[0], &work->request.ticket_key))
+    return ThrowNativeError(env, "INVALID_ACTION_ENVELOPE",
+                            "The native action ticket key could not be read");
   NativeDispatchOutcome replay;
   bool parsed = false;
   bool reserved = false;
@@ -4934,6 +5264,8 @@ napi_value Dispatch(napi_env env, napi_callback_info info) {
     parsed = ParseNativeDispatchRequest(env, argv[0], &work->request, state_lock,
                                         &error_code, &error_message);
     if (parsed) reserved = ReserveNativeDispatchRequestLocked(&work->request, &replay);
+    // The presented secret is not needed after the reservation, whatever its outcome.
+    sprint_coder::computer_use::ScrubNativeTicketString(&work->request.ticket_key.token);
   }
   if (!parsed)
     return ThrowNativeError(env, error_code.c_str(), error_message.c_str());
@@ -4959,6 +5291,197 @@ napi_value Dispatch(napi_env env, napi_callback_info info) {
     // which would leave the caller holding a Promise that can never be resolved or rejected.
     napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
                                         "Could not queue the serial native dispatch");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
+  }
+  work.release();
+  return promise;
+}
+
+// Preflight reservation. The caller holds the state lock returned by ParseNativeDispatchRequest.
+// Only a replay whose envelope matches is reported as "replay"; a replay hit never issues a
+// ticket. The generation is advanced and recorded as this preflight's owner before the lock is
+// released, so a later observe/start/cancel/close or another reservation supersedes it.
+bool ReserveNativePreflightLocked(const NativeDispatchRequest* request, std::uint64_t* owner,
+                                  NativePreflightReceipt* denied) {
+  MacComputerUseSession& session = *request->session;
+  const auto cached = session.dispatch_replay_cache.find(request->request_id);
+  if (cached != session.dispatch_replay_cache.end()) {
+    *denied = cached->second.envelope_digest == request->envelope_digest
+                  ? MakeNullReceipt("replay")
+                  : MakeDeniedReceipt("rejected", "native_request_id_conflict");
+    return false;
+  }
+  const auto inflight = session.inflight_dispatches.find(request->request_id);
+  if (inflight != session.inflight_dispatches.end()) {
+    *denied = MakeDeniedReceipt(
+        "rejected", inflight->second == request->envelope_digest
+                        ? "native_request_in_flight"
+                        : "native_request_id_conflict");
+    return false;
+  }
+  // One preflight per session, and none while a dispatch is in flight.
+  if (session.preflight_owner != 0 || !session.inflight_dispatches.empty()) {
+    *denied = MakeDeniedReceipt("rejected", "native_dispatch_busy");
+    return false;
+  }
+  const std::uint64_t generation =
+      session.ticket_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+  session.ordinary_ticket.Invalidate();
+  if (generation == 0) {
+    *denied = MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+    return false;
+  }
+  session.preflight_owner = generation;
+  *owner = generation;
+  return true;
+}
+
+struct AsyncNativePreflightWork {
+  napi_env env = nullptr;
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  NativeDispatchRequest request;
+  NativePreflightReceipt receipt;
+  std::uint64_t owner = 0;
+};
+
+// Releases the preflight slot only when this preflight still owns it, and drops a ticket only if
+// it carries this preflight's own generation. A late completion therefore never clears the owner
+// or the ticket of a newer preflight.
+void ReleaseNativePreflightOwner(const NativeDispatchRequest& request, std::uint64_t owner,
+                                 bool drop_ticket) {
+  if (request.session == nullptr || owner == 0) return;
+  std::lock_guard<std::mutex> state_lock(request.session->state_mutex);
+  if (request.session->preflight_owner == owner) request.session->preflight_owner = 0;
+  if (drop_ticket) request.session->ordinary_ticket.InvalidateIfGeneration(owner);
+}
+
+// Issues the ticket under the state lock, so the TTL starts here and the issue conditions are
+// checked at the moment of issue: not closed, cancel epoch unchanged, and generation still owned.
+NativePreflightReceipt IssueOrdinaryTicket(const NativeDispatchRequest& request,
+                                           std::uint64_t owner) {
+  namespace binding = sprint_coder::computer_use;
+  std::string token;
+  if (!GenerateOrdinaryTicketToken(&token))
+    return MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+  MacComputerUseSession& session = *request.session;
+  std::lock_guard<std::mutex> state_lock(session.state_mutex);
+  if (!DispatchCancellationStillValid(request)) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("canceled", "native_canceled_pre_dispatch");
+  }
+  if (session.preflight_owner != owner ||
+      session.ticket_generation.load(std::memory_order_acquire) != owner) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("rejected", "native_ticket_superseded");
+  }
+  std::uint64_t now_ns = 0;
+  binding::NativeOrdinaryTicketBinding ticket_binding;
+  ticket_binding.session_id = request.session_id;
+  ticket_binding.request_id = request.request_id;
+  ticket_binding.action_digest = request.action_digest;
+  ticket_binding.payload_digest = request.payload_digest;
+  ticket_binding.context_digest = request.context_digest;
+  ticket_binding.cancel_epoch = request.cancel_epoch;
+  ticket_binding.ticket_generation = owner;
+  if (!ReadNativeMonotonicNs(&now_ns) ||
+      !session.ordinary_ticket.Issue(token, std::move(ticket_binding), now_ns,
+                                     binding::kNativeOrdinaryTicketTtlNs)) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+  }
+  NativePreflightReceipt receipt = MakeNullReceipt("ordinary");
+  receipt.ticket = std::move(token);
+  return receipt;
+}
+
+void ExecuteNativePreflight(napi_env env, void* data) {
+  (void)env;
+  auto* work = static_cast<AsyncNativePreflightWork*>(data);
+  std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
+  @autoreleasepool {
+    try {
+      work->receipt = PerformNativePreflight(work->request);
+      if (work->receipt.decision == "ordinary")
+        work->receipt = IssueOrdinaryTicket(work->request, work->owner);
+    } catch (...) {
+      // Preflight performs no effect, so an escaped exception is a plain denial and never an
+      // unknown effect.
+      work->receipt = MakeDeniedReceipt("rejected", "native_preflight_exception");
+    }
+  }
+  ReleaseNativePreflightOwner(work->request, work->owner,
+                              work->receipt.decision != "ordinary");
+}
+
+void CompleteNativePreflight(napi_env env, napi_status status, void* data) {
+  std::unique_ptr<AsyncNativePreflightWork> work(static_cast<AsyncNativePreflightWork*>(data));
+  if (status != napi_ok) {
+    // Execute may not have run, or its result cannot be trusted: this preflight's ownership and
+    // its own ticket (only) are dropped, and no ticket is returned.
+    ReleaseNativePreflightOwner(work->request, work->owner, true);
+    sprint_coder::computer_use::ScrubNativeTicketString(&work->receipt.ticket);
+    work->receipt = MakeDeniedReceipt("rejected", "native_async_completion_failed");
+  }
+  SealNativePreflightReceipt(&work->receipt);
+  napi_value result = PreflightReceiptValue(env, work->request, work->receipt);
+  napi_resolve_deferred(env, work->deferred, result);
+  napi_delete_async_work(env, work->work);
+  sprint_coder::computer_use::ScrubNativeTicketString(&work->receipt.ticket);
+}
+
+napi_value Preflight(napi_env env, napi_callback_info info) {
+  size_t argc = 1;
+  napi_value argv[1];
+  if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
+      !IsObject(env, argv[0]))
+    return ThrowNativeError(env, "INVALID_ACTION", "A preflight action is required");
+  auto work = std::make_unique<AsyncNativePreflightWork>();
+  work->env = env;
+  // Read outside Parse and before the state lock, like Dispatch. A preflight request must not
+  // carry the key at all (whatever its value), so it never looks like a ticket-bearing dispatch.
+  if (!ReadNativeTicketKey(env, argv[0], &work->request.ticket_key))
+    return ThrowNativeError(env, "INVALID_ACTION_ENVELOPE",
+                            "The native action ticket key could not be read");
+  if (work->request.ticket_key.present)
+    return ThrowNativeError(env, "INVALID_ACTION",
+                            "A preflight request must not carry a ticket");
+  NativePreflightReceipt denied;
+  std::uint64_t owner = 0;
+  bool parsed = false;
+  bool reserved = false;
+  std::string error_code;
+  std::string error_message;
+  {
+    std::unique_lock<std::mutex> state_lock;
+    parsed = ParseNativeDispatchRequest(env, argv[0], &work->request, state_lock,
+                                        &error_code, &error_message);
+    if (parsed) reserved = ReserveNativePreflightLocked(&work->request, &owner, &denied);
+  }
+  if (!parsed)
+    return ThrowNativeError(env, error_code.c_str(), error_message.c_str());
+  if (!reserved) {
+    SealNativePreflightReceipt(&denied);
+    return PreflightReceiptValue(env, work->request, denied);
+  }
+  work->owner = owner;
+
+  napi_value promise;
+  if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
+    ReleaseNativePreflightOwner(work->request, work->owner, true);
+    return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
+                            "Could not create the native preflight promise");
+  }
+  napi_value resource_name = StringValue(env, "SprintCoderComputerUsePreflight");
+  if (napi_create_async_work(env, nullptr, resource_name, ExecuteNativePreflight,
+                             CompleteNativePreflight, work.get(), &work->work) != napi_ok ||
+      napi_queue_async_work(env, work->work) != napi_ok) {
+    if (work->work != nullptr) napi_delete_async_work(env, work->work);
+    ReleaseNativePreflightOwner(work->request, work->owner, true);
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native preflight");
     napi_reject_deferred(env, work->deferred, error);
     return promise;
   }
@@ -4996,6 +5519,8 @@ napi_value Cancel(napi_env env, napi_callback_info info) {
   }
   if (!advanced)
     return ThrowNativeError(env, "INVALID_CANCEL", "The global cancel epoch is newer");
+  // Cancel never takes the state lock, so the generation advances with a lock-free atomic.
+  session->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
   session->cancel_epoch.store(requested_cancel_epoch, std::memory_order_release);
   session->observation_publication_epoch.store(requested_cancel_epoch,
                                                std::memory_order_release);
@@ -5013,6 +5538,7 @@ napi_value Init(napi_env env, napi_value exports) {
       {"startSession", nullptr, StartSession, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"observe", nullptr, Observe, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"dispatch", nullptr, Dispatch, nullptr, nullptr, nullptr, napi_default, nullptr},
+      {"preflight", nullptr, Preflight, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"close", nullptr, CloseSession, nullptr, nullptr, nullptr, napi_default, nullptr},
   };

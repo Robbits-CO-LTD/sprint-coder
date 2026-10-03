@@ -1295,6 +1295,40 @@ describe('macOS native capture boundary', () => {
     expect(source).toContain('"unknown_effect"');
   });
 
+  it('ships the pure ordinary ticket header as a native-only change with no Main-facing surface', () => {
+    const nativeDirectory = join(__dirname, '../../computer-use-native');
+    const header = readFileSync(join(nativeDirectory, 'computer_use_native_ticket.h'), 'utf8');
+    const source = readFileSync(join(nativeDirectory, 'computer_use_macos.mm'), 'utf8');
+    const gyp = readFileSync(join(nativeDirectory, 'binding.gyp'), 'utf8');
+    const harness = readFileSync(join(nativeDirectory, 'computer_use_protocol_fuzz.cc'), 'utf8');
+    expect(header).toContain('#pragma once');
+    // No platform, N-API, hash, random or clock source: those are injected by the caller.
+    expect(header).not.toMatch(
+      /#import|node_api|CommonCrypto|<Security|SecRandom|<chrono>|<ctime>|<time\.h>|<random>|clock_gettime/u,
+    );
+    expect(header).toContain("kNativeOrdinaryTicketMaxTtlNs = 10'000'000'000ULL");
+    expect(header).not.toMatch(/single_use_approval|SingleUseApproval/u);
+    expect(source).toContain('#include "computer_use_native_ticket.h"');
+    expect(harness).toContain('#include "computer_use_native_ticket.h"');
+    // Same single source file and include directory: no new dependency or build input.
+    expect(gyp).toContain('"sources": ["computer_use_macos.mm"]');
+    expect(gyp).toContain('"include_dirs": ["."]');
+    // N2a adds native preflight/ticket only. Main, the loader and the Windows host do not know it.
+    for (const name of [
+      'computer-use-native.ts',
+      'computer-use-native-host.ts',
+      'computer-use-native-types.ts',
+      'computer-use-native-handshake.ts',
+      'computer-use-native-protocol.ts',
+    ]) {
+      expect(readFileSync(join(__dirname, name), 'utf8'), name).not.toMatch(
+        /preflight|native_ticket_invalid|ordinary_ticket/iu,
+      );
+    }
+    const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+    expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);
+  });
+
   it('recaptures and compares an observation-bound local visual patch before click or scroll', () => {
     const source = readFileSync(
       join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
