@@ -33,9 +33,45 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     expect(parse).toContain('state_lock = std::unique_lock<std::mutex>(session.state_mutex)');
     expect(parse).toContain('CurrentProcessGenerationMatches(session)');
     expect(parse).toContain('request->observation_revision != session.observation_revision');
-    expect(parse).toContain('request->envelope_digest = StringDigest(');
+    // The envelope is v2: payload digest before the lock, context digest from the locked snapshot.
+    expect(parse).toContain('request->envelope_digest = StringDigest(envelope_input)');
+    expect(parse).toContain('BuildNativeBindingPayloadInput(');
+    expect(parse).toContain('BuildNativeBindingContextInput(');
+    expect(parse.indexOf('StringDigest(payload_input)')).toBeGreaterThan(0);
+    expect(parse.indexOf('StringDigest(payload_input)')).toBeLessThan(
+      parse.indexOf('state_lock = std::unique_lock<std::mutex>(session.state_mutex)'),
+    );
+    expect(parse.indexOf('StringDigest(context_input)')).toBeGreaterThan(
+      parse.indexOf('state_lock = std::unique_lock<std::mutex>(session.state_mutex)'),
+    );
+    expect(parse).not.toMatch(/"taskId"|"turnId"|"ticket"|napi_[a-z_]+\s*\(/u);
+    const dispatchResult = sourceBetween('napi_value DispatchResultValue(', 'bool RiskOutcome(');
+    expect(dispatchResult).not.toMatch(
+      /task_id|turn_id|taskId|turnId|envelope_digest|context_digest|payload_digest/u,
+    );
     expect(parse).not.toMatch(/dispatch_replay|inflight_dispatches/u);
     expect(parse).not.toMatch(/CGEventPost|AXUIElement(SetAttributeValue|PerformAction)/u);
+  });
+
+  it('binds immutable task and turn ids once at session creation and never on resume', () => {
+    const start = sourceBetween('napi_value StartSession(', 'bool PerformNativeStartSession(');
+    const worker = sourceBetween(
+      'bool PerformNativeStartSession(AsyncNativeStartSessionWork* work) {',
+      'void ExecuteNativeStartSession(napi_env env, void* data) {',
+    );
+    expect(start).toContain('ReadNamedString(env, argv[0], "taskId"');
+    expect(start).toContain('ReadNamedString(env, argv[0], "turnId"');
+    expect(start).toContain('IsValidNativeBindingId(request.task_id)');
+    expect(start).toContain('NativeBindingIdsMatch(');
+    expect(start).toContain('"SESSION_ID_REUSE"');
+    expect(start.match(/session->task_id = request\.task_id/gu)).toHaveLength(1);
+    expect(start.match(/session->turn_id = request\.turn_id/gu)).toHaveLength(1);
+    expect(start.indexOf('session->task_id = request.task_id')).toBeLessThan(
+      start.indexOf('mac_pending_sessions.emplace('),
+    );
+    expect(worker).not.toMatch(/task_id\s*=[^=]|turn_id\s*=[^=]/u);
+    expect(source.match(/->task_id\s*=[^=]/gu)).toHaveLength(1);
+    expect(source.match(/->turn_id\s*=[^=]/gu)).toHaveLength(1);
   });
 
   it('reserves exactly once under the same snapshot lock before creating deferred work', () => {

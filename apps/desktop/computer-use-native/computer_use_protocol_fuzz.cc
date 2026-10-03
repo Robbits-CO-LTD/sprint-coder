@@ -1,3 +1,4 @@
+#include "computer_use_native_binding.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -5,8 +6,13 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
+#include <limits>
+#include <set>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -71,6 +77,347 @@ bool CheckNativePreflightClassifier() {
   return true;
 }
 
+// Owns the strings/containers that a NativeBindingContext only views.
+struct BindingContextFixture {
+  std::string app_identity = "app";
+  std::string window_identity = "window";
+  std::string process_generation = "generation";
+  std::uint32_t window_id = 2;
+  sprint_coder::computer_use::NativeBindingBounds expected_bounds{1, 2, 300, 400};
+  std::uint64_t observation_revision = 7;
+  std::uint64_t dialog_set_revision = 4;
+  std::string dialog_set_digest = "dialogs";
+  std::string active_window_identity = "active";
+  std::string active_window_kind = "application";
+  std::uint32_t active_window_id = 2;
+  sprint_coder::computer_use::NativeBindingBounds observation_bounds{1, 2, 300, 400};
+  std::string focused_control_signature = "focused";
+  bool has_expected_target_signature = true;
+  std::string expected_target_signature = "target-signature";
+  std::set<std::string> visual_control_signatures{"alpha", "beta"};
+  std::vector<std::string> visual_patch_digests{"patch-a", "patch-b"};
+  std::string task_id = "task";
+  std::string turn_id = "turn";
+  std::uint32_t classifier_version = 1;
+
+  sprint_coder::computer_use::NativeBindingContext View() const {
+    sprint_coder::computer_use::NativeBindingContext context;
+    context.app_identity = app_identity;
+    context.window_identity = window_identity;
+    context.process_generation = process_generation;
+    context.window_id = window_id;
+    context.expected_bounds = expected_bounds;
+    context.observation_revision = observation_revision;
+    context.dialog_set_revision = dialog_set_revision;
+    context.dialog_set_digest = dialog_set_digest;
+    context.active_window_identity = active_window_identity;
+    context.active_window_kind = active_window_kind;
+    context.active_window_id = active_window_id;
+    context.observation_bounds = observation_bounds;
+    context.focused_control_signature = focused_control_signature;
+    context.has_expected_target_signature = has_expected_target_signature;
+    context.expected_target_signature = expected_target_signature;
+    context.visual_control_signatures = &visual_control_signatures;
+    context.visual_patch_digests = &visual_patch_digests;
+    context.task_id = task_id;
+    context.turn_id = turn_id;
+    context.classifier_version = classifier_version;
+    return context;
+  }
+};
+
+bool BuildContext(const BindingContextFixture &fixture, std::string *output) {
+  return sprint_coder::computer_use::BuildNativeBindingContextInput(fixture.View(), output);
+}
+
+sprint_coder::computer_use::NativeBindingPayload BasePayload(std::string_view kind) {
+  sprint_coder::computer_use::NativeBindingPayload payload;
+  payload.kind = kind;
+  payload.target_id = "target";
+  payload.text = "text";
+  payload.selected_value = "value";
+  payload.key = "Enter";
+  payload.boolean_value = true;
+  payload.x = 0.25;
+  payload.y = 0.75;
+  payload.delta_x = 3;
+  payload.delta_y = -4;
+  return payload;
+}
+
+bool BuildEnvelope(std::string_view request, std::string_view session, std::string_view action,
+                   std::string_view payload, std::string_view context, std::uint64_t cancel,
+                   std::uint64_t revision, std::string *output) {
+  return sprint_coder::computer_use::BuildNativeBindingEnvelopeInput(
+      request, session, action, payload, context, cancel, revision, output);
+}
+
+bool CheckNativeBindingWriter() {
+  using namespace sprint_coder::computer_use;
+  // Length prefixes make adjacent strings unambiguous.
+  NativeBindingWriter first("d");
+  first.String("ab");
+  first.String("c");
+  NativeBindingWriter second("d");
+  second.String("a");
+  second.String("bc");
+  NativeBindingWriter same("d");
+  same.String("ab");
+  same.String("c");
+  if (!Check(first.bytes() != second.bytes(), "binding-adjacent-strings") ||
+      !Check(first.bytes() == same.bytes(), "binding-deterministic")) return false;
+  // Absent is not the same as present-but-empty, and an absent value is never encoded.
+  NativeBindingWriter absent("d");
+  absent.OptionalString(false, "");
+  NativeBindingWriter empty("d");
+  empty.OptionalString(true, "");
+  NativeBindingWriter ignored("d");
+  ignored.OptionalString(false, "ignored");
+  if (!Check(absent.bytes() != empty.bytes(), "binding-absent-vs-empty") ||
+      !Check(absent.bytes() == ignored.bytes(), "binding-absent-ignores-value")) return false;
+  // A count prefix cannot be shifted into a neighbouring field.
+  NativeBindingWriter one_list("d");
+  one_list.StringList({"a", "b"});
+  one_list.String("c");
+  NativeBindingWriter shifted("d");
+  shifted.StringList({"a"});
+  shifted.String("b");
+  shifted.String("c");
+  NativeBindingWriter empty_list("d");
+  empty_list.StringList({});
+  NativeBindingWriter missing("d");
+  if (!Check(one_list.bytes() != shifted.bytes(), "binding-count-shift") ||
+      !Check(empty_list.bytes() != missing.bytes(), "binding-empty-list-vs-missing")) return false;
+  // -0 normalizes to +0; non-finite values never encode.
+  NativeBindingWriter positive("d");
+  positive.Double(0.0);
+  NativeBindingWriter negative("d");
+  negative.Double(-0.0);
+  NativeBindingWriter one("d");
+  one.Double(1.0);
+  if (!Check(positive.bytes() == negative.bytes() && positive.valid() && negative.valid(),
+             "binding-negative-zero") ||
+      !Check(positive.bytes() != one.bytes(), "binding-double-distinct")) return false;
+  for (const double bad : {std::numeric_limits<double>::quiet_NaN(),
+                           std::numeric_limits<double>::infinity(),
+                           -std::numeric_limits<double>::infinity()}) {
+    NativeBindingWriter writer("d");
+    writer.Double(bad);
+    NativeBindingPayload payload = BasePayload("click");
+    payload.x = bad;
+    BindingContextFixture fixture;
+    fixture.observation_bounds.width = bad;
+    std::string output;
+    if (!Check(!writer.valid(), "binding-non-finite-invalid") ||
+        !Check(!BuildNativeBindingPayloadInput(payload, &output), "binding-payload-non-finite") ||
+        !Check(!BuildContext(fixture, &output), "binding-context-non-finite")) return false;
+  }
+  return true;
+}
+
+bool CheckNativeBindingContext() {
+  using namespace sprint_coder::computer_use;
+  // set order is deterministic; vector order is preserved.
+  BindingContextFixture baseline;
+  BindingContextFixture reversed;
+  reversed.visual_control_signatures.clear();
+  reversed.visual_control_signatures.insert("beta");
+  reversed.visual_control_signatures.insert("alpha");
+  BindingContextFixture reordered;
+  reordered.visual_patch_digests = {"patch-b", "patch-a"};
+  std::string base, again, reversed_output, reordered_output;
+  if (!Check(BuildContext(baseline, &base) && BuildContext(baseline, &again) &&
+                 BuildContext(reversed, &reversed_output) &&
+                 BuildContext(reordered, &reordered_output), "binding-context-build") ||
+      !Check(base == again, "binding-context-deterministic") ||
+      !Check(base == reversed_output, "binding-set-order") ||
+      !Check(base != reordered_output, "binding-vector-order")) return false;
+  // Changing any single context field changes the output.
+  const std::vector<std::function<void(BindingContextFixture &)>> mutations = {
+      [](BindingContextFixture &f) { f.app_identity += "x"; },
+      [](BindingContextFixture &f) { f.window_identity += "x"; },
+      [](BindingContextFixture &f) { f.process_generation += "x"; },
+      [](BindingContextFixture &f) { f.window_id += 1; },
+      [](BindingContextFixture &f) { f.expected_bounds.x += 1; },
+      [](BindingContextFixture &f) { f.expected_bounds.y += 1; },
+      [](BindingContextFixture &f) { f.expected_bounds.width += 1; },
+      [](BindingContextFixture &f) { f.expected_bounds.height += 1; },
+      [](BindingContextFixture &f) { f.observation_revision += 1; },
+      [](BindingContextFixture &f) { f.dialog_set_revision += 1; },
+      [](BindingContextFixture &f) { f.dialog_set_digest += "x"; },
+      [](BindingContextFixture &f) { f.active_window_identity += "x"; },
+      [](BindingContextFixture &f) { f.active_window_kind += "x"; },
+      [](BindingContextFixture &f) { f.active_window_id += 1; },
+      [](BindingContextFixture &f) { f.observation_bounds.x += 1; },
+      [](BindingContextFixture &f) { f.observation_bounds.y += 1; },
+      [](BindingContextFixture &f) { f.observation_bounds.width += 1; },
+      [](BindingContextFixture &f) { f.observation_bounds.height += 1; },
+      [](BindingContextFixture &f) { f.focused_control_signature += "x"; },
+      [](BindingContextFixture &f) { f.focused_control_signature.clear(); },
+      [](BindingContextFixture &f) { f.has_expected_target_signature = false; },
+      [](BindingContextFixture &f) { f.expected_target_signature.clear(); },
+      [](BindingContextFixture &f) { f.expected_target_signature += "x"; },
+      [](BindingContextFixture &f) { f.visual_control_signatures.insert("gamma"); },
+      [](BindingContextFixture &f) { f.visual_control_signatures.clear(); },
+      [](BindingContextFixture &f) { f.visual_patch_digests.push_back("patch-c"); },
+      [](BindingContextFixture &f) { f.visual_patch_digests.clear(); },
+      [](BindingContextFixture &f) { f.task_id += "x"; },
+      [](BindingContextFixture &f) { f.turn_id += "x"; },
+      [](BindingContextFixture &f) { f.classifier_version += 1; },
+  };
+  for (const auto &mutate : mutations) {
+    BindingContextFixture changed;
+    mutate(changed);
+    std::string output;
+    if (!Check(BuildContext(changed, &output) && output != base, "binding-context-field-change"))
+      return false;
+  }
+  // Absent differs from present-but-empty even when the value itself is empty.
+  BindingContextFixture absent_target;
+  absent_target.has_expected_target_signature = false;
+  absent_target.expected_target_signature.clear();
+  BindingContextFixture empty_target;
+  empty_target.expected_target_signature.clear();
+  std::string absent_output, empty_output;
+  if (!Check(BuildContext(absent_target, &absent_output) &&
+                 BuildContext(empty_target, &empty_output) && absent_output != empty_output,
+             "binding-context-absent-vs-empty-target")) return false;
+  // Missing containers, missing ids and a missing output fail closed.
+  BindingContextFixture no_task;
+  no_task.task_id.clear();
+  BindingContextFixture no_turn;
+  no_turn.turn_id.clear();
+  NativeBindingContext null_set = baseline.View();
+  null_set.visual_control_signatures = nullptr;
+  NativeBindingContext null_vector = baseline.View();
+  null_vector.visual_patch_digests = nullptr;
+  std::string output;
+  return Check(!BuildContext(no_task, &output) && !BuildContext(no_turn, &output) &&
+                   !BuildNativeBindingContextInput(null_set, &output) &&
+                   !BuildNativeBindingContextInput(null_vector, &output) &&
+                   !BuildNativeBindingContextInput(baseline.View(), nullptr),
+               "binding-context-fail-closed");
+}
+
+bool CheckNativeBindingPayload() {
+  using namespace sprint_coder::computer_use;
+  // Each payload kind has its own field set; every field a kind uses changes the output.
+  std::set<std::string> kinds;
+  for (const std::string_view kind : {"invoke", "set_text", "select", "toggle",
+                                      "expand_collapse", "click", "scroll", "type", "key"}) {
+    std::string base, again;
+    if (!Check(BuildNativeBindingPayloadInput(BasePayload(kind), &base) &&
+                   BuildNativeBindingPayloadInput(BasePayload(kind), &again) && base == again,
+               "binding-payload-deterministic")) return false;
+    kinds.insert(base);
+    std::vector<std::function<void(NativeBindingPayload &)>> mutations;
+    const bool semantic = kind != "click" && kind != "scroll" && kind != "type" && kind != "key";
+    if (semantic) mutations.push_back([](NativeBindingPayload &p) { p.target_id = "target2"; });
+    if (kind == "set_text" || kind == "type")
+      mutations.push_back([](NativeBindingPayload &p) { p.text = "text2"; });
+    if (kind == "select")
+      mutations.push_back([](NativeBindingPayload &p) { p.selected_value = "value2"; });
+    if (kind == "toggle" || kind == "expand_collapse")
+      mutations.push_back([](NativeBindingPayload &p) { p.boolean_value = false; });
+    if (kind == "key") mutations.push_back([](NativeBindingPayload &p) { p.key = "Tab"; });
+    if (kind == "click" || kind == "scroll") {
+      mutations.push_back([](NativeBindingPayload &p) { p.x = 0.5; });
+      mutations.push_back([](NativeBindingPayload &p) { p.y = 0.5; });
+    }
+    if (kind == "scroll") {
+      mutations.push_back([](NativeBindingPayload &p) { p.delta_x = 5; });
+      mutations.push_back([](NativeBindingPayload &p) { p.delta_y = 5; });
+    }
+    for (const auto &mutate : mutations) {
+      NativeBindingPayload changed = BasePayload(kind);
+      mutate(changed);
+      std::string output;
+      if (!Check(BuildNativeBindingPayloadInput(changed, &output) && output != base,
+                 "binding-payload-field-change")) return false;
+    }
+  }
+  // Different kinds never collide, and a field a kind does not use does not alter it.
+  std::string click, click_other_text;
+  NativeBindingPayload other_text = BasePayload("click");
+  other_text.text = "different";
+  if (!Check(kinds.size() == 9, "binding-payload-kind-distinct") ||
+      !Check(BuildNativeBindingPayloadInput(BasePayload("click"), &click) &&
+                 BuildNativeBindingPayloadInput(other_text, &click_other_text) &&
+                 click == click_other_text, "binding-payload-unused-field")) return false;
+  // -0 and +0 coordinates are the same request.
+  NativeBindingPayload negative_zero = BasePayload("click");
+  negative_zero.x = -0.0;
+  NativeBindingPayload positive_zero = BasePayload("click");
+  positive_zero.x = 0.0;
+  std::string negative_output, positive_output;
+  if (!Check(BuildNativeBindingPayloadInput(negative_zero, &negative_output) &&
+                 BuildNativeBindingPayloadInput(positive_zero, &positive_output) &&
+                 negative_output == positive_output, "binding-payload-negative-zero"))
+    return false;
+  // Unknown kinds, a missing semantic target and a missing output fail closed.
+  std::string output;
+  NativeBindingPayload unknown = BasePayload("unknown");
+  NativeBindingPayload no_target = BasePayload("invoke");
+  no_target.target_id = std::string_view();
+  return Check(!BuildNativeBindingPayloadInput(unknown, &output) &&
+                   !BuildNativeBindingPayloadInput(no_target, &output) &&
+                   !BuildNativeBindingPayloadInput(BasePayload("click"), nullptr),
+               "binding-payload-fail-closed");
+}
+
+bool CheckNativeBindingEnvelopeAndIds() {
+  using namespace sprint_coder::computer_use;
+  // The envelope binds each of its fields and requires non-empty digests.
+  std::string base;
+  if (!Check(BuildEnvelope("r", "s", "a", "p", "c", 1, 2, &base), "binding-envelope-build"))
+    return false;
+  std::array<std::string, 7> changed;
+  if (!Check(BuildEnvelope("r2", "s", "a", "p", "c", 1, 2, &changed[0]) &&
+                 BuildEnvelope("r", "s2", "a", "p", "c", 1, 2, &changed[1]) &&
+                 BuildEnvelope("r", "s", "a2", "p", "c", 1, 2, &changed[2]) &&
+                 BuildEnvelope("r", "s", "a", "p2", "c", 1, 2, &changed[3]) &&
+                 BuildEnvelope("r", "s", "a", "p", "c2", 1, 2, &changed[4]) &&
+                 BuildEnvelope("r", "s", "a", "p", "c", 2, 2, &changed[5]) &&
+                 BuildEnvelope("r", "s", "a", "p", "c", 1, 3, &changed[6]),
+             "binding-envelope-build-changed")) return false;
+  for (const auto &value : changed)
+    if (!Check(value != base, "binding-envelope-field-change")) return false;
+  std::string output;
+  if (!Check(!BuildEnvelope("", "s", "a", "p", "c", 1, 2, &output) &&
+                 !BuildEnvelope("r", "", "a", "p", "c", 1, 2, &output) &&
+                 !BuildEnvelope("r", "s", "", "p", "c", 1, 2, &output) &&
+                 !BuildEnvelope("r", "s", "a", "", "c", 1, 2, &output) &&
+                 !BuildEnvelope("r", "s", "a", "p", "", 1, 2, &output) &&
+                 !BuildNativeBindingEnvelopeInput("r", "s", "a", "p", "c", 1, 2, nullptr),
+             "binding-envelope-fail-closed")) return false;
+  // Adjacent-field boundary shifts stay distinct.
+  std::string left, right;
+  if (!Check(BuildEnvelope("ab", "c", "a", "p", "c", 1, 2, &left) &&
+                 BuildEnvelope("a", "bc", "a", "p", "c", 1, 2, &right) && left != right,
+             "binding-envelope-boundary")) return false;
+  // Task/Turn validation and comparison.
+  const std::string at_limit(kNativeBindingMaxIdBytes, 'a');
+  const std::string over_limit(kNativeBindingMaxIdBytes + 1, 'a');
+  const std::string with_nul = std::string("a") + '\0' + "b";
+  if (!Check(kNativeBindingMaxIdBytes >= 512, "binding-id-limit-covers-contract") ||
+      !Check(IsValidNativeBindingId("task") && IsValidNativeBindingId(at_limit),
+             "binding-id-valid") ||
+      !Check(!IsValidNativeBindingId("") && !IsValidNativeBindingId(over_limit) &&
+                 !IsValidNativeBindingId(with_nul), "binding-id-invalid")) return false;
+  return Check(NativeBindingIdsMatch("task", "turn", "task", "turn"), "binding-ids-match") &&
+         Check(!NativeBindingIdsMatch("task", "turn", "task", "other"), "binding-turn-mismatch") &&
+         Check(!NativeBindingIdsMatch("task", "turn", "other", "turn"), "binding-task-mismatch") &&
+         Check(!NativeBindingIdsMatch("", "", "", ""), "binding-empty-ids-never-match") &&
+         Check(!NativeBindingIdsMatch("task", "turn", "task", ""), "binding-empty-request-turn") &&
+         Check(!NativeBindingIdsMatch(over_limit, "turn", over_limit, "turn"),
+               "binding-oversized-never-match");
+}
+
+bool CheckNativeBinding() {
+  return CheckNativeBindingWriter() && CheckNativeBindingContext() &&
+         CheckNativeBindingPayload() && CheckNativeBindingEnvelopeAndIds();
+}
+
 FrameHeader ValidHeader() {
   FrameHeader header{};
   header.message_type = static_cast<std::uint16_t>(MessageType::kObserveResult);
@@ -93,6 +440,8 @@ std::uint32_t Next(std::uint32_t *state) {
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
+  if (!CheckNativeBinding()) return 1;
+  std::cout << "Computer Use native binding canonical framing: PASS\n";
   using sprint_coder::computer_use::IsTypeTextScalar;
   for (std::uint32_t scalar = 0; scalar < 0x20; ++scalar)
     if (!Check(!IsTypeTextScalar(scalar), "type-c0-control")) return 1;

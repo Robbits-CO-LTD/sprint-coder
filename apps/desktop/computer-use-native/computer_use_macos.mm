@@ -29,6 +29,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "computer_use_native_binding.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -81,6 +82,10 @@ struct MacComputerUseSession {
   std::string executable_path;
   std::string process_generation;
   std::string window_identity;
+  // Immutable after creation: written once under mac_sessions_mutex before the
+  // session is registered as pending, never by resume/refocus.
+  std::string task_id;
+  std::string turn_id;
   std::string policy_language = "unknown";
   std::string maximum_mode = "observe_only";
   std::uint32_t pid = 0;
@@ -1286,6 +1291,8 @@ struct NativeStartSessionRequest {
   std::string app_identity;
   std::string window_identity;
   std::string executable_path;
+  std::string task_id;
+  std::string turn_id;
   CGRect requested_bounds{};
   std::uint64_t requested_cancel_epoch = 0;
   bool explicit_resume = false;
@@ -1316,6 +1323,7 @@ void RemovePendingStart(const AsyncNativeStartSessionWork& work) {
 }
 
 napi_value StartSession(napi_env env, napi_callback_info info) {
+  namespace binding = sprint_coder::computer_use;
   size_t argc = 1;
   napi_value argv[1];
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok ||
@@ -1327,6 +1335,12 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
   if (!ReadNamedUint32(env, argv[0], "pid", &request.pid) ||
       !ReadNamedUint32(env, argv[0], "windowId", &request.window_id) ||
       !ReadNamedString(env, argv[0], "sessionId", &request.session_id) ||
+      !ReadNamedString(env, argv[0], "taskId", &request.task_id,
+                       binding::kNativeBindingMaxIdBytes) ||
+      !ReadNamedString(env, argv[0], "turnId", &request.turn_id,
+                       binding::kNativeBindingMaxIdBytes) ||
+      !binding::IsValidNativeBindingId(request.task_id) ||
+      !binding::IsValidNativeBindingId(request.turn_id) ||
       !ReadNamedString(env, argv[0], "appIdentityDigest",
                        &request.app_identity) ||
       !ReadNamedString(env, argv[0], "windowIdentityDigest",
@@ -1350,6 +1364,7 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
     return ThrowNativeError(env, "INVALID_SESSION",
                             "A valid native session target is required");
 
+  bool session_ids_reused = false;
   {
     std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
     const auto existing = mac_sessions.find(request.session_id);
@@ -1357,6 +1372,11 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       work->session = existing->second;
       work->start_cancel_epoch =
           work->session->cancel_epoch.load(std::memory_order_acquire);
+      // Reuse never rewrites the Task/Turn ids; a different pair is a reused id.
+      // This runs under the registry lock before any OS read.
+      session_ids_reused = !binding::NativeBindingIdsMatch(
+          work->session->task_id, work->session->turn_id, request.task_id,
+          request.turn_id);
     } else {
       if (mac_pending_sessions.contains(request.session_id))
         return ThrowNativeError(env, "SESSION_BUSY",
@@ -1375,6 +1395,9 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       work->session->app_identity = request.app_identity;
       work->session->executable_path = request.executable_path;
       work->session->window_identity = request.window_identity;
+      // The only write of the immutable Task/Turn ids, before pending registration.
+      work->session->task_id = request.task_id;
+      work->session->turn_id = request.turn_id;
       work->session->pid = request.pid;
       work->session->window_id = request.window_id;
       work->session->expected_bounds = request.requested_bounds;
@@ -1386,6 +1409,9 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       work->start_cancel_epoch = current_cancel_epoch;
     }
   }
+  if (session_ids_reused)
+    return ThrowNativeError(env, "SESSION_ID_REUSE",
+                            "The native session binding changed");
 
   napi_value promise;
   if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
@@ -3983,6 +4009,8 @@ struct NativeDispatchRequest {
   std::string kind;
   std::string target_id;
   std::string expected_target_signature;
+  // Distinguishes an unresolved target from a resolved but empty signature.
+  bool has_expected_target_signature = false;
   std::string text;
   std::string selected_value;
   std::string key;
@@ -4603,6 +4631,7 @@ bool ParseNativeDispatchRequest(napi_env env, napi_value object,
                                 std::unique_lock<std::mutex>& state_lock,
                                 std::string* error_code,
                                 std::string* error_message) {
+  namespace binding = sprint_coder::computer_use;
   std::uint32_t requested_pid = 0;
   std::uint32_t requested_window_id = 0;
   std::string requested_identity;
@@ -4722,6 +4751,26 @@ bool ParseNativeDispatchRequest(napi_env env, napi_value object,
     return false;
   }
 
+  // The payload is closed over this request, so its digest is computed before the state lock.
+  binding::NativeBindingPayload payload;
+  payload.kind = request->kind;
+  payload.target_id = request->target_id;
+  payload.text = request->text;
+  payload.selected_value = request->selected_value;
+  payload.key = request->key;
+  payload.boolean_value = request->boolean_value;
+  payload.x = request->x;
+  payload.y = request->y;
+  payload.delta_x = request->delta_x;
+  payload.delta_y = request->delta_y;
+  std::string payload_input;
+  if (!binding::BuildNativeBindingPayloadInput(payload, &payload_input)) {
+    *error_code = "INVALID_ACTION";
+    *error_message = "The native action payload could not be bound";
+    return false;
+  }
+  const std::string payload_digest = StringDigest(payload_input);
+
   // Dispatch keeps this lock through reservation; read-only callers release it without reserving.
   // Transferring ownership avoids an unlocked snapshot-to-reservation window.
   state_lock = std::unique_lock<std::mutex>(session.state_mutex);
@@ -4743,16 +4792,56 @@ bool ParseNativeDispatchRequest(napi_env env, napi_value object,
   if (!request->target_id.empty()) {
     const auto target = session.semantic_control_signatures.find(
         AccessibilityTargetLookupDigest(request->target_id));
-    if (target != session.semantic_control_signatures.end())
+    if (target != session.semantic_control_signatures.end()) {
+      request->has_expected_target_signature = true;
       request->expected_target_signature = target->second;
+    }
   }
-  request->envelope_digest = StringDigest(
-      "computer-native-dispatch-envelope-v1\n" + request->request_id + "\n" +
-      request->session_id + "\n" +
-      std::to_string(request->observation_revision) + "\n" +
-      std::to_string(request->dialog_set_revision) + "\n" +
-      request->dialog_set_digest + "\n" + request->active_window_identity + "\n" +
-      request->action_digest + "\n" + std::to_string(request->cancel_epoch));
+  // The context digest covers only request values, fields fixed at session creation and the
+  // snapshot read above under this lock. It performs no N-API or OS call and is bounded by the
+  // visual patch limit. Moving session state is intentionally excluded so a replay is stable.
+  const auto bounds_of = [](const CGRect& rect) {
+    return binding::NativeBindingBounds{rect.origin.x, rect.origin.y, rect.size.width,
+                                        rect.size.height};
+  };
+  binding::NativeBindingContext context;
+  context.app_identity = session.app_identity;
+  context.window_identity = session.window_identity;
+  context.process_generation = session.process_generation;
+  context.window_id = session.window_id;
+  context.expected_bounds = bounds_of(session.expected_bounds);
+  context.observation_revision = request->observation_revision;
+  context.dialog_set_revision = request->dialog_set_revision;
+  context.dialog_set_digest = request->dialog_set_digest;
+  context.active_window_identity = request->active_window_identity;
+  context.active_window_kind = request->active_window_kind;
+  context.active_window_id = request->active_window_id;
+  context.observation_bounds = bounds_of(request->observation_bounds);
+  context.focused_control_signature = request->focused_control_signature;
+  context.has_expected_target_signature = request->has_expected_target_signature;
+  context.expected_target_signature = request->expected_target_signature;
+  context.visual_control_signatures = &request->visual_control_signatures;
+  context.visual_patch_digests = &request->visual_patch_digests;
+  context.task_id = session.task_id;
+  context.turn_id = session.turn_id;
+  context.classifier_version = binding::kNativePreflightClassifierVersion;
+  std::string context_input;
+  if (!binding::BuildNativeBindingContextInput(context, &context_input)) {
+    *error_code = "INVALID_ACTION_ENVELOPE";
+    *error_message = "The native action context could not be bound";
+    return false;
+  }
+  const std::string context_digest = StringDigest(context_input);
+  std::string envelope_input;
+  if (!binding::BuildNativeBindingEnvelopeInput(
+          request->request_id, request->session_id, request->action_digest, payload_digest,
+          context_digest, request->cancel_epoch, request->observation_revision,
+          &envelope_input)) {
+    *error_code = "INVALID_ACTION_ENVELOPE";
+    *error_message = "The native action envelope could not be bound";
+    return false;
+  }
+  request->envelope_digest = StringDigest(envelope_input);
   return true;
 }
 
