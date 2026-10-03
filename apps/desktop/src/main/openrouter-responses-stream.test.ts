@@ -71,3 +71,55 @@ function sse(events: readonly unknown[]): ReadableStream<Uint8Array> {
     },
   });
 }
+
+describe('normalizeOpenRouterResponsesStream terminal handling', () => {
+  it.each(['response.completed', 'response.done'])(
+    'ends canonically on %s without waiting for the transport to close',
+    async (type) => {
+      let cancelled = false;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // The body is deliberately never closed: only a terminal-driven release can finish.
+          controller.enqueue(
+            new TextEncoder().encode(
+              [
+                { type: 'response.content_part.delta', delta: 'hi' },
+                { type, response: { status: 'completed', model: 'openai/gpt-5.2' } },
+                { type: 'response.output_text.delta', delta: 'late' },
+                { type: 'response.completed', response: { status: 'completed' } },
+              ]
+                .map((event) => `data: ${JSON.stringify(event)}\n\n`)
+                .join(''),
+            ),
+          );
+        },
+        cancel() {
+          cancelled = true;
+        },
+      });
+      const events: Array<{ type: string }> = [];
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          (async () => {
+            for await (const event of normalizeOpenRouterResponsesStream(body, 'openai/gpt-5.2'))
+              events.push(event);
+          })(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error('terminal drain still waiting')), 200);
+          }),
+        ]);
+        expect(events.map((event) => event.type)).toEqual([
+          'output_delta',
+          'resolution',
+          'usage',
+          'completed',
+        ]);
+        expect(cancelled).toBe(true);
+        expect(body.locked).toBe(false);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  );
+});

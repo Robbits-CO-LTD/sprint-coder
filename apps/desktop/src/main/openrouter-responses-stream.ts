@@ -93,7 +93,7 @@ export async function* normalizeOpenRouterResponsesStream(
         type: 'completed',
         stopReason: typeof response?.status === 'string' ? response.status : 'completed',
       };
-      continue;
+      return;
     }
     if (event.type === 'error' || event.type === 'response.failed')
       yield {

@@ -147,6 +147,55 @@ describe('OpenRouterCatalogClient', () => {
     expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'completed' });
   });
 
+  it('finishes a Responses stream at response.completed even when the connection stays open', async () => {
+    let cancelled = false;
+    const client = new OpenRouterCatalogClient(
+      () => ({ apiKey: 'openrouter-key' }),
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  'data: {"type":"response.content_part.delta","delta":"hi"}\n\n' +
+                    'data: {"type":"response.completed","response":{"status":"completed","model":"openai/gpt-5.2"}}\n\n',
+                ),
+              );
+            },
+            cancel() {
+              cancelled = true;
+            },
+          }),
+        ),
+    );
+    const events: Array<{ type: string }> = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        (async () => {
+          for await (const event of client.execute(
+            connection,
+            {
+              executionId: 'execution-open',
+              connectionId: connection.id,
+              modelId: 'openai/gpt-5.2',
+              messages: [{ role: 'user', content: 'hello' }],
+            },
+            new AbortController().signal,
+          ))
+            events.push(event);
+        })(),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('client still waiting for EOF')), 1_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+    expect(events.at(-1)).toEqual({ type: 'completed', stopReason: 'completed' });
+    expect(cancelled).toBe(true);
+  });
+
   it('adds the OpenRouter Web Search server tool without dropping Team function tools', async () => {
     const client = new OpenRouterCatalogClient(
       () => ({ apiKey: 'openrouter-key' }),
