@@ -13,11 +13,23 @@ const NONCE_DIAGNOSTIC_FIELDS = [
   'noncePresent',
   'nonceIsString',
   'nonceLength',
+  'expectedNonceLength',
+  'lengthDelta',
+  'firstMismatchIndex',
+  'commonPrefixLength',
+  'commonSuffixLength',
+  'caseInsensitiveEqual',
+  'equalIgnoringNonAlnum',
+  'actualCharClass',
   'finishReason',
   'promptTokens',
   'completionTokens',
   'reasoningTokens',
 ] as const;
+const NONCE_LENGTH_LIMIT = 8192;
+// Worst-case valid packet (all clamps at maximum) is about 550 bytes; over the cap is dropped, not truncated.
+const MAX_DIAGNOSTIC_BYTES = 640;
+const COMPARISON_FIELDS: readonly string[] = NONCE_DIAGNOSTIC_FIELDS.slice(7, 15);
 
 export async function runManagedLocalSelfTest(
   input: Readonly<{
@@ -208,14 +220,19 @@ function toolCall(value: unknown, name: string, nonce: string): Record<string, u
     (parsed as Record<string, unknown>).nonce !== nonce
   )
     throw new Error('Self-test model returned the wrong nonce', {
-      cause: safeNonceDiagnostic(value, parsed, args.length),
+      cause: safeNonceDiagnostic(value, parsed, args.length, nonce),
     });
   return record;
 }
 
-function safeNonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: number) {
+function safeNonceDiagnostic(
+  value: unknown,
+  parsed: unknown,
+  argumentsLength: number,
+  expectedNonce: string,
+) {
   try {
-    return nonceDiagnostic(value, parsed, argumentsLength);
+    return nonceDiagnostic(value, parsed, argumentsLength, expectedNonce);
   } catch {
     return undefined; // Observation must never replace the original nonce rejection.
   }
@@ -236,7 +253,46 @@ function diagnosticCounter(value: unknown): number | 'MISSING' {
     : 'MISSING';
 }
 
-function nonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: number) {
+// Compares only lengths and positions; neither nonce nor any fragment of it leaves this function.
+function nonceComparison(actual: string, expected: string) {
+  const limit = Math.min(actual.length, expected.length, NONCE_LENGTH_LIMIT);
+  let prefix = 0;
+  while (prefix < limit && actual.charCodeAt(prefix) === expected.charCodeAt(prefix)) prefix += 1;
+  let suffix = 0;
+  while (
+    suffix < limit &&
+    actual.charCodeAt(actual.length - 1 - suffix) ===
+      expected.charCodeAt(expected.length - 1 - suffix)
+  )
+    suffix += 1;
+  const alnumOnly = (text: string) => text.replace(/[^0-9A-Za-z]/gu, '');
+  return {
+    lengthDelta: Math.max(
+      -NONCE_LENGTH_LIMIT,
+      Math.min(NONCE_LENGTH_LIMIT, actual.length - expected.length),
+    ),
+    firstMismatchIndex: actual === expected ? ('NONE' as const) : prefix,
+    commonPrefixLength: prefix,
+    commonSuffixLength: suffix,
+    caseInsensitiveEqual: actual.toLowerCase() === expected.toLowerCase(),
+    equalIgnoringNonAlnum: alnumOnly(actual) === alnumOnly(expected),
+    actualCharClass:
+      actual.length === 0
+        ? ('EMPTY' as const)
+        : /^[0-9A-Fa-f]+$/u.test(actual)
+          ? ('HEX' as const)
+          : /^[0-9A-Za-z]+$/u.test(actual)
+            ? ('ALNUM' as const)
+            : ('OTHER' as const),
+  };
+}
+
+function nonceDiagnostic(
+  value: unknown,
+  parsed: unknown,
+  argumentsLength: number,
+  expectedNonce: string,
+) {
   const args = diagnosticObject(parsed);
   const keys = args === null ? 0 : Object.keys(args).length;
   const noncePresent = args !== null && Object.hasOwn(args, 'nonce');
@@ -252,6 +308,7 @@ function nonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: numbe
       : finish === 'stop' || finish === 'tool_calls' || finish === 'length'
         ? finish
         : 'UNKNOWN';
+  const comparison = nonceIsString ? nonceComparison(nonce, expectedNonce) : null;
   const usage = diagnosticObject(response?.['usage']);
   const details = diagnosticObject(usage?.['completion_tokens_details']);
   return Object.freeze({
@@ -264,7 +321,13 @@ function nonceDiagnostic(value: unknown, parsed: unknown, argumentsLength: numbe
     keyCount: Math.min(keys, 8),
     noncePresent,
     nonceIsString,
-    nonceLength: nonceIsString ? Math.min(nonce.length, 8192) : 'MISSING',
+    nonceLength: nonceIsString ? Math.min(nonce.length, NONCE_LENGTH_LIMIT) : 'MISSING',
+    ...(comparison === null
+      ? {}
+      : {
+          expectedNonceLength: Math.min(expectedNonce.length, NONCE_LENGTH_LIMIT),
+          ...comparison,
+        }),
     finishReason,
     promptTokens: diagnosticCounter(usage?.['prompt_tokens']),
     completionTokens: diagnosticCounter(usage?.['completion_tokens']),
@@ -279,9 +342,14 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
     const cause = diagnosticObject(error.cause);
     if (cause === null) return null;
     const descriptors = Object.getOwnPropertyDescriptors(cause);
-    if (Reflect.ownKeys(descriptors).length !== NONCE_DIAGNOSTIC_FIELDS.length) return null;
+    // Comparison fields are present exactly when nonceIsString is true, whatever the reason\n    // (a SHAPE_REJECT with a string nonce and extra keys carries them too).
+    const withComparison = descriptors['nonceIsString']?.value === true;
+    const names = NONCE_DIAGNOSTIC_FIELDS.filter(
+      (name) => withComparison || !COMPARISON_FIELDS.includes(name),
+    );
+    if (Reflect.ownKeys(descriptors).length !== names.length) return null;
     const fields: Record<string, unknown> = {};
-    for (const name of NONCE_DIAGNOSTIC_FIELDS) {
+    for (const name of names) {
       const descriptor = descriptors[name];
       if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) return null;
       fields[name] = descriptor.value;
@@ -289,7 +357,42 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
     const bounded = (value: unknown, maximum: number) =>
       typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= maximum;
     const finishReason = fields['finishReason'];
+    const validComparison = () => {
+      if (!withComparison) return true;
+      const actualLength = fields['nonceLength'];
+      const expectedLength = fields['expectedNonceLength'];
+      const delta = fields['lengthDelta'];
+      const prefix = fields['commonPrefixLength'];
+      if (
+        !bounded(actualLength, NONCE_LENGTH_LIMIT) ||
+        !bounded(expectedLength, NONCE_LENGTH_LIMIT)
+      )
+        return false;
+      const ceiling = Math.min(actualLength as number, expectedLength as number);
+      const unclamped =
+        (actualLength as number) < NONCE_LENGTH_LIMIT &&
+        (expectedLength as number) < NONCE_LENGTH_LIMIT;
+      const charClass = fields['actualCharClass'];
+      return (
+        typeof delta === 'number' &&
+        Number.isSafeInteger(delta) &&
+        Math.abs(delta) <= NONCE_LENGTH_LIMIT &&
+        (!unclamped || delta === (actualLength as number) - (expectedLength as number)) &&
+        bounded(prefix, ceiling) &&
+        bounded(fields['commonSuffixLength'], ceiling) &&
+        (fields['firstMismatchIndex'] === 'NONE'
+          ? delta === 0 && prefix === actualLength && prefix === expectedLength
+          : fields['firstMismatchIndex'] === prefix) &&
+        typeof fields['caseInsensitiveEqual'] === 'boolean' &&
+        (delta === 0 || fields['caseInsensitiveEqual'] === false) &&
+        typeof fields['equalIgnoringNonAlnum'] === 'boolean' &&
+        typeof charClass === 'string' &&
+        ['HEX', 'ALNUM', 'OTHER', 'EMPTY'].includes(charClass) &&
+        (charClass === 'EMPTY') === (actualLength === 0)
+      );
+    };
     if (
+      !validComparison() ||
       fields['tag'] !== NONCE_DIAGNOSTIC_TAG ||
       (fields['reason'] !== 'SHAPE_REJECT' && fields['reason'] !== 'NONCE_VALUE_REJECT') ||
       !bounded(fields['argumentsLength'], 8192) ||
@@ -297,7 +400,7 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
       typeof fields['noncePresent'] !== 'boolean' ||
       typeof fields['nonceIsString'] !== 'boolean' ||
       (fields['nonceIsString']
-        ? !fields['noncePresent'] || !bounded(fields['nonceLength'], 8192)
+        ? !fields['noncePresent'] || !bounded(fields['nonceLength'], NONCE_LENGTH_LIMIT)
         : fields['nonceLength'] !== 'MISSING') ||
       typeof finishReason !== 'string' ||
       !['stop', 'tool_calls', 'length', 'UNKNOWN', 'MISSING'].includes(finishReason) ||
@@ -309,7 +412,7 @@ export function formatManagedLocalSelfTestDiagnostic(error: unknown): string | n
     )
       return null;
     const line = `MANAGED_LOCAL_SELF_TEST_NONCE_DIAGNOSTIC:${JSON.stringify(fields)}\n`;
-    return Buffer.byteLength(line, 'utf8') <= 512 ? line : null;
+    return Buffer.byteLength(line, 'utf8') <= MAX_DIAGNOSTIC_BYTES ? line : null;
   } catch {
     return null;
   }

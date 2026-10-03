@@ -31,6 +31,7 @@ describe('Managed Local nonce rejection diagnostics', () => {
     parsed: unknown,
     metadata: { finish?: unknown; usage?: unknown } = {},
     expectedMessage = 'Self-test model returned the wrong nonce',
+    nonce = '11111111-1111-4111-8111-111111111111',
   ): Promise<Error> {
     const scratchRoot = await mkdtemp(join(tmpdir(), 'managed-local-nonce-observation-'));
     roots.push(scratchRoot);
@@ -72,7 +73,7 @@ describe('Managed Local nonce rejection diagnostics', () => {
         session,
         modelId: 'c'.repeat(64),
         scratchRoot,
-        nonce: '11111111-1111-4111-8111-111111111111',
+        nonce,
         onLoaded,
       });
     } catch (error) {
@@ -141,6 +142,251 @@ describe('Managed Local nonce rejection diagnostics', () => {
     },
   );
 
+  const EXPECTED = '11111111-1111-4111-8111-111111111111';
+  const packet = (diagnostic: string | null) =>
+    JSON.parse(diagnostic!.slice(diagnostic!.indexOf(':') + 1)) as Record<string, unknown>;
+
+  it.each([
+    {
+      name: 'shorter',
+      actual: '11111111-1111-4111-8111',
+      expected: {
+        lengthDelta: -13,
+        firstMismatchIndex: 23,
+        commonPrefixLength: 23,
+        commonSuffixLength: 3,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: false,
+        actualCharClass: 'OTHER',
+      },
+    },
+    {
+      name: 'one char substituted',
+      actual: '11111111-1111-4111-8111-111111111112',
+      expected: {
+        lengthDelta: 0,
+        firstMismatchIndex: 35,
+        commonPrefixLength: 35,
+        commonSuffixLength: 0,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: false,
+        actualCharClass: 'OTHER',
+      },
+    },
+    {
+      name: 'appended',
+      actual: `${EXPECTED}Z`,
+      expected: {
+        lengthDelta: 1,
+        firstMismatchIndex: 36,
+        commonPrefixLength: 36,
+        commonSuffixLength: 0,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: false,
+        actualCharClass: 'OTHER',
+      },
+    },
+    {
+      name: 'separators differ',
+      actual: EXPECTED.replaceAll('-', '_'),
+      expected: {
+        lengthDelta: 0,
+        firstMismatchIndex: 8,
+        commonPrefixLength: 8,
+        commonSuffixLength: 12,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: true,
+        actualCharClass: 'OTHER',
+      },
+    },
+    {
+      name: 'separators removed',
+      actual: EXPECTED.replaceAll('-', ''),
+      expected: {
+        lengthDelta: -4,
+        firstMismatchIndex: 8,
+        commonPrefixLength: 8,
+        commonSuffixLength: 12,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: true,
+        actualCharClass: 'HEX',
+      },
+    },
+    {
+      name: 'empty',
+      actual: '',
+      expected: {
+        lengthDelta: -36,
+        firstMismatchIndex: 0,
+        commonPrefixLength: 0,
+        commonSuffixLength: 0,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: false,
+        actualCharClass: 'EMPTY',
+      },
+    },
+    {
+      name: 'alphanumeric non hex',
+      actual: 'zzzz',
+      expected: {
+        lengthDelta: -32,
+        firstMismatchIndex: 0,
+        commonPrefixLength: 0,
+        commonSuffixLength: 0,
+        caseInsensitiveEqual: false,
+        equalIgnoringNonAlnum: false,
+        actualCharClass: 'ALNUM',
+      },
+    },
+  ])(
+    'adds fixed comparison primitives without the values ($name)',
+    async ({ actual, expected }) => {
+      const diagnostic = formatManagedLocalSelfTestDiagnostic(
+        await rejectedTool({ nonce: actual }),
+      );
+      expect(packet(diagnostic)).toMatchObject({
+        reason: 'NONCE_VALUE_REJECT',
+        nonceLength: actual.length,
+        expectedNonceLength: 36,
+        ...expected,
+      });
+      expect(Buffer.byteLength(diagnostic!, 'utf8')).toBeLessThanOrEqual(640);
+      expect(diagnostic!.match(/\n/gu)).toHaveLength(1);
+      expect(diagnostic).not.toContain(EXPECTED);
+      if (actual.length > 3) expect(diagnostic).not.toContain(actual);
+      // No fragment (including 4-char runs) of either value may appear.
+      for (const source of [EXPECTED, actual])
+        for (let i = 0; i + 4 <= source.length; i += 1)
+          if (/[A-Za-z0-9]/u.test(source.slice(i, i + 4)) && source.slice(i, i + 4) !== '1111')
+            expect(diagnostic).not.toContain(source.slice(i, i + 4));
+    },
+  );
+
+  it('detects a case-only difference', async () => {
+    const mixedExpected = 'aB3dEf90-1234-4abc-8DEF-0123456789ab';
+    const error = await rejectedTool(
+      { nonce: mixedExpected.toLowerCase() },
+      {},
+      undefined,
+      mixedExpected,
+    );
+    const diagnostic = formatManagedLocalSelfTestDiagnostic(error);
+    expect(packet(diagnostic)).toMatchObject({
+      caseInsensitiveEqual: true,
+      equalIgnoringNonAlnum: false,
+      firstMismatchIndex: 1,
+      actualCharClass: 'OTHER',
+    });
+    expect(diagnostic).not.toContain(mixedExpected);
+    expect(diagnostic).not.toContain(mixedExpected.toLowerCase());
+    expect(diagnostic).not.toContain('aB3d');
+    expect(diagnostic).not.toContain('a3dE');
+  });
+  it('carries comparison fields on a SHAPE_REJECT whose nonce is a correct string', async () => {
+    const fields = packet(
+      formatManagedLocalSelfTestDiagnostic(await rejectedTool({ nonce: EXPECTED, extra: 1 })),
+    );
+    expect(fields).toMatchObject({
+      reason: 'SHAPE_REJECT',
+      keyCount: 2,
+      firstMismatchIndex: 'NONE',
+      commonPrefixLength: 36,
+      commonSuffixLength: 36,
+      lengthDelta: 0,
+      caseInsensitiveEqual: true,
+      equalIgnoringNonAlnum: true,
+    });
+    expect(Object.keys(fields)).toHaveLength(19);
+  });
+
+  it('omits comparison fields for shape rejections and clamps extremes', async () => {
+    const shape = packet(formatManagedLocalSelfTestDiagnostic(await rejectedTool({ nonce: 42 })));
+    for (const name of [
+      'expectedNonceLength',
+      'lengthDelta',
+      'firstMismatchIndex',
+      'commonPrefixLength',
+      'commonSuffixLength',
+      'caseInsensitiveEqual',
+      'equalIgnoringNonAlnum',
+      'actualCharClass',
+    ])
+      expect(shape).not.toHaveProperty(name);
+    expect(Object.keys(shape)).toHaveLength(11);
+    const big = packet(
+      formatManagedLocalSelfTestDiagnostic(await rejectedTool({ nonce: '1'.repeat(8180) })),
+    );
+    expect(big).toMatchObject({
+      lengthDelta: 8144,
+      commonPrefixLength: 8,
+      actualCharClass: 'HEX',
+    });
+  });
+
+  it('rejects forged or inconsistent comparison fields', async () => {
+    const error = await rejectedTool({ nonce: '11111111-1111-4111-8111-111111111112' });
+    const cause = error.cause as Record<string, unknown>;
+    for (const forged of [
+      { expectedNonceLength: 8193 },
+      { expectedNonceLength: 'PRIVATE_NONCE_VALUE' },
+      { lengthDelta: 8193 },
+      { lengthDelta: 1.5 },
+      { lengthDelta: 'PRIVATE_NONCE_VALUE' },
+      { commonPrefixLength: 37 },
+      { commonPrefixLength: -1 },
+      { commonSuffixLength: 37 },
+      { firstMismatchIndex: 3 },
+      { firstMismatchIndex: 'MISSING' },
+      { firstMismatchIndex: 36 },
+      { lengthDelta: -1 },
+      { firstMismatchIndex: 'NONE' },
+      { actualCharClass: 'EMPTY' },
+      { caseInsensitiveEqual: 'PRIVATE_NONCE_VALUE' },
+      { equalIgnoringNonAlnum: 1 },
+      { actualCharClass: 'PRIVATE_NONCE_VALUE' },
+      { actualCharClass: 'MISSING' },
+    ])
+      expect(
+        formatManagedLocalSelfTestDiagnostic(
+          new Error('PRIVATE_ERROR', { cause: { ...cause, ...forged } }),
+        ),
+      ).toBeNull();
+    const shortCause = (await rejectedTool({ nonce: '1111' })).cause as Record<string, unknown>;
+    for (const forged of [
+      { caseInsensitiveEqual: true },
+      { actualCharClass: 'EMPTY' },
+      { lengthDelta: 0 },
+    ])
+      expect(
+        formatManagedLocalSelfTestDiagnostic(
+          new Error('PRIVATE_ERROR', { cause: { ...shortCause, ...forged } }),
+        ),
+      ).toBeNull();
+    const emptyCause = (await rejectedTool({ nonce: '' })).cause as Record<string, unknown>;
+    expect(
+      formatManagedLocalSelfTestDiagnostic(
+        new Error('PRIVATE_ERROR', { cause: { ...emptyCause, actualCharClass: 'HEX' } }),
+      ),
+    ).toBeNull();
+    expect(
+      formatManagedLocalSelfTestDiagnostic(new Error('E', { cause: emptyCause })),
+    ).not.toBeNull();
+    const shapeCause = (await rejectedTool({ nonce: 42 })).cause as Record<string, unknown>;
+    expect(
+      formatManagedLocalSelfTestDiagnostic(
+        new Error('PRIVATE_ERROR', { cause: { ...shapeCause, lengthDelta: 1 } }),
+      ),
+    ).toBeNull();
+    for (const name of ['lengthDelta', 'actualCharClass'])
+      expect(
+        formatManagedLocalSelfTestDiagnostic(
+          new Error('PRIVATE_ERROR', {
+            cause: Object.defineProperty({ ...cause }, name, { get: () => 0 }),
+          }),
+        ),
+      ).toBeNull();
+  });
+
   it('maps missing, unknown and invalid response metadata to fixed markers', async () => {
     const missing = await rejectedTool({ nonce: 'PRIVATE_NONCE_VALUE' });
     expect(formatManagedLocalSelfTestDiagnostic(missing)).toContain('"finishReason":"MISSING"');
@@ -176,7 +422,7 @@ describe('Managed Local nonce rejection diagnostics', () => {
     );
     const diagnostic = formatManagedLocalSelfTestDiagnostic(error)!;
     expect(diagnostic).toContain('"argumentsLength":8192');
-    expect(Buffer.byteLength(diagnostic, 'utf8')).toBeLessThanOrEqual(512);
+    expect(Buffer.byteLength(diagnostic, 'utf8')).toBeLessThanOrEqual(640);
     expect(diagnostic.match(/\n/gu)).toHaveLength(1);
     const oversized = await rejectedTool(
       { nonce: 'x'.repeat(8181) },
@@ -184,6 +430,25 @@ describe('Managed Local nonce rejection diagnostics', () => {
       'Invalid self-test tool arguments',
     );
     expect(formatManagedLocalSelfTestDiagnostic(oversized)).toBeNull();
+  });
+
+  it('keeps the worst-case maximal packet within the cap', async () => {
+    const error = await rejectedTool(
+      { nonce: '1'.repeat(8180) },
+      {
+        finish: 'tool_calls',
+        usage: {
+          prompt_tokens: 1_000_000,
+          completion_tokens: 1_000_000,
+          completion_tokens_details: { reasoning_tokens: 1_000_000 },
+        },
+      },
+      undefined,
+      '2'.repeat(8192),
+    );
+    const diagnostic = formatManagedLocalSelfTestDiagnostic(error)!;
+    expect(packet(diagnostic)).toMatchObject({ expectedNonceLength: 8192, lengthDelta: -12 });
+    expect(Buffer.byteLength(diagnostic, 'utf8')).toBeLessThanOrEqual(640);
   });
 
   it('clamps key counts and does not serialize raw keys', async () => {
