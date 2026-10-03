@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
-import { completeSetupForFeatureTest } from '../../tests/e2e/feature-setup';
-import type { FeatureSetupPage } from '../../tests/e2e/feature-setup';
+import {
+  clickWithSidebarVector,
+  completeSetupForFeatureTest,
+  readSidebarClickVector,
+} from '../../tests/e2e/feature-setup';
+import type {
+  FeatureSetupPage,
+  SidebarClickVector,
+  SidebarVectorPage,
+} from '../../tests/e2e/feature-setup';
 
 function fixture(wizardInitiallyVisible = false) {
   let wizardVisible = wizardInitiallyVisible;
@@ -105,5 +113,143 @@ describe('feature setup first-render boundary', () => {
     await expect(completeSetupForFeatureTest(f.page)).rejects.toBe(error);
     expect(f.count).not.toHaveBeenCalled();
     expect(f.page.evaluate).not.toHaveBeenCalled();
+  });
+});
+
+describe('Sidebar click bool vector (issue #714)', () => {
+  const states = (vector: SidebarClickVector) => JSON.stringify(vector);
+
+  function vectorPage(
+    observed: unknown,
+    closed = false,
+  ): SidebarVectorPage & { evaluate: ReturnType<typeof vi.fn> } {
+    return {
+      isClosed: () => closed,
+      evaluate: vi.fn(async () => observed),
+    };
+  }
+
+  it('keeps a successful click free of any probe or artifact', async () => {
+    const page = vectorPage({});
+    const record = vi.fn(async () => undefined);
+    await clickWithSidebarVector(page, async () => undefined, record);
+    expect(page.evaluate).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('records one all-false vector except the closed flag for a closed window, then rethrows', async () => {
+    const page = vectorPage({ initialized: true }, true);
+    const record = vi.fn(async () => undefined);
+    const error = new Error('click timeout');
+    await expect(
+      clickWithSidebarVector(
+        page,
+        async () => {
+          throw error;
+        },
+        record,
+      ),
+    ).rejects.toBe(error);
+    expect(page.evaluate).not.toHaveBeenCalled();
+    expect(record).toHaveBeenCalledOnce();
+    expect(record).toHaveBeenCalledWith({
+      initialized: false,
+      wizardPresent: false,
+      sidebarPresent: false,
+      sidebarVisible: false,
+      pageClosed: true,
+    });
+  });
+
+  it('separates an uninitialized wizard shell from a ready shell with a missing Sidebar', async () => {
+    const stuck = await readSidebarClickVector(
+      vectorPage({
+        initialized: false,
+        wizardPresent: true,
+        sidebarPresent: false,
+        sidebarVisible: false,
+      }),
+    );
+    expect(stuck).toEqual({
+      initialized: false,
+      wizardPresent: true,
+      sidebarPresent: false,
+      sidebarVisible: false,
+      pageClosed: false,
+    });
+    const ready = await readSidebarClickVector(
+      vectorPage({
+        initialized: true,
+        wizardPresent: false,
+        sidebarPresent: true,
+        sidebarVisible: false,
+      }),
+    );
+    expect(ready).toMatchObject({ initialized: true, sidebarPresent: true, sidebarVisible: false });
+  });
+
+  it('keeps only booleans even when the page returns private text or extra fields', async () => {
+    const vector = await readSidebarClickVector(
+      vectorPage({
+        initialized: 'PRIVATE_TEXT',
+        wizardPresent: 1,
+        sidebarPresent: true,
+        sidebarVisible: true,
+        url: 'PRIVATE_URL',
+        text: 'PRIVATE_BODY',
+      }),
+    );
+    expect(Object.keys(vector).sort()).toEqual([
+      'initialized',
+      'pageClosed',
+      'sidebarPresent',
+      'sidebarVisible',
+      'wizardPresent',
+    ]);
+    expect(states(vector)).not.toContain('PRIVATE_');
+    expect(vector).toMatchObject({
+      initialized: false,
+      wizardPresent: false,
+      sidebarVisible: true,
+    });
+  });
+
+  it('stays bounded and false when the probe rejects or never answers', async () => {
+    const rejecting = vectorPage({});
+    rejecting.evaluate.mockRejectedValue(new Error('Target closed PRIVATE'));
+    expect(await readSidebarClickVector(rejecting)).toEqual({
+      initialized: false,
+      wizardPresent: false,
+      sidebarPresent: false,
+      sidebarVisible: false,
+      pageClosed: false,
+    });
+    vi.useFakeTimers();
+    try {
+      const hanging = vectorPage({});
+      hanging.evaluate.mockReturnValue(new Promise(() => undefined));
+      const pending = readSidebarClickVector(hanging);
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(await pending).toMatchObject({ sidebarPresent: false, pageClosed: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not let a failing recorder replace the click error', async () => {
+    const error = new Error('click timeout');
+    const record = vi.fn(async () => {
+      throw new Error('disk PRIVATE');
+    });
+    await expect(
+      clickWithSidebarVector(
+        vectorPage({}),
+        async () => {
+          throw error;
+        },
+        record,
+      ),
+    ).rejects.toBe(error);
+    expect(record).toHaveBeenCalledOnce();
   });
 });

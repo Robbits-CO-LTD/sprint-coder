@@ -13,6 +13,7 @@ import {
   assignCurrentTaskToProjectFolder,
   REPO_ROOT,
 } from './helpers';
+import { clickWithSidebarVector } from './feature-setup';
 
 // eslint-disable-next-line no-empty-pattern
 test('binds an authorized file read and detects changed source bytes after restart', async ({}, testInfo) => {
@@ -435,7 +436,8 @@ test('the model tool path proposes and reads back a draft through the real Main 
   }
 });
 
-test('reviews and restores a proposed Mission without starting executions', async () => {
+// eslint-disable-next-line no-empty-pattern
+test('reviews and restores a proposed Mission without starting executions', async ({}, testInfo) => {
   const profile = createUserDataDir('graph-mission-plan');
   let app = await launchApp(profile, undefined, {
     SPRINT_CODER_E2E_GRAPH_FIXTURE: '1',
@@ -449,7 +451,16 @@ test('reviews and restores a proposed Mission without starting executions', asyn
         nativeApp.focus({ steal: true });
         BrowserWindow.getAllWindows()[0]!.focus();
       });
-    await page.getByTestId('sidebar-new-task-button').click();
+    // Issue #714: the first click keeps Playwright's 30 s bound; a failure records one bool vector.
+    await clickWithSidebarVector(
+      page,
+      () => page.getByTestId('sidebar-new-task-button').click(),
+      async (vector) => {
+        const path = testInfo.outputPath('sidebar-click-vector.json');
+        await writeFile(path, JSON.stringify(vector));
+        await testInfo.attach('sidebar-click-vector', { path, contentType: 'application/json' });
+      },
+    );
     const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
     await page.getByTestId('composer-textarea').fill('[fixture:graph-mission-proposal]');
     await page.getByTestId('composer-send-button').click();
