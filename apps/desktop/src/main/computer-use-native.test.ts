@@ -1313,11 +1313,10 @@ describe('macOS native capture boundary', () => {
     // Same single source file and include directory: no new dependency or build input.
     expect(gyp).toContain('"sources": ["computer_use_macos.mm"]');
     expect(gyp).toContain('"include_dirs": ["."]');
-    // N2a adds native preflight/ticket only. Main, the loader and the Windows host do not know it.
+    // N2b-1 lets only the Main host adapter and the addon type use preflight/ticket. The loader,
+    // handshake, protocol and the Windows host still do not know it.
     for (const name of [
       'computer-use-native.ts',
-      'computer-use-native-host.ts',
-      'computer-use-native-types.ts',
       'computer-use-native-handshake.ts',
       'computer-use-native-protocol.ts',
     ]) {
@@ -1325,8 +1324,48 @@ describe('macOS native capture boundary', () => {
         /preflight|native_ticket_invalid|ordinary_ticket/iu,
       );
     }
+    expect(readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8')).not.toMatch(
+      /single_use_approval|SingleUseApproval/u,
+    );
     const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
     expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);
+  });
+
+  it('keeps the native preflight receipt contract in sync with the Main host parser', () => {
+    const source = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
+      'utf8',
+    );
+    const classifier = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_preflight_classifier.h'),
+      'utf8',
+    );
+    const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    const start = source.indexOf('napi_value PreflightReceiptValue(');
+    const end = source.indexOf('\n}\n', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const nativeKeys = [
+      ...source
+        .slice(start, end)
+        .matchAll(/napi_set_named_property\(\s*env,\s*result,\s*"([^"]+)"/gu),
+    ].map((match) => match[1]!);
+    const keysStart = host.indexOf('const NATIVE_PREFLIGHT_KEYS = [');
+    expect(keysStart).toBeGreaterThanOrEqual(0);
+    const hostBlock = host.slice(keysStart, host.indexOf('] as const;', keysStart));
+    const mainKeys = [...hostBlock.matchAll(/'([A-Za-z]+)'/gu)].map((match) => match[1]!);
+    expect(nativeKeys).toHaveLength(10);
+    expect(mainKeys).toHaveLength(10);
+    expect(new Set(nativeKeys)).toEqual(new Set(mainKeys));
+    // Decision strings native produces must be the ones the Main parser accepts.
+    expect(source).toContain('MakeNullReceipt("ordinary")');
+    expect(source).toContain('MakeNullReceipt("replay")');
+    expect(source).toContain('receipt.decision = "blocked"');
+    expect(source).toContain('receipt.decision = "takeover"');
+    expect(source).toContain('receipt.decision = "denied"');
+    for (const decision of ['ordinary', 'replay', 'blocked', 'takeover', 'denied'])
+      expect(host).toContain(`decision === '${decision}'`);
+    expect(classifier).toContain('kNativePreflightClassifierVersion = 1;');
+    expect(host).toContain("record['classifierVersion'] !== 1");
   });
 
   it('recaptures and compares an observation-bound local visual patch before click or scroll', () => {

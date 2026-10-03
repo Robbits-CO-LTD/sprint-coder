@@ -31,6 +31,8 @@ export type ComputerUseNativeAddon = Readonly<{
   listWindows?(input: unknown): unknown;
   startSession?(input: unknown): unknown;
   observe?(input: unknown): unknown;
+  /** macOS native only (N2a). Absent on older native builds and on Windows. */
+  preflight?(input: unknown): unknown;
   dispatch?(input: unknown): unknown;
   cancel?(input: unknown): unknown;
   close?(input: unknown): unknown;

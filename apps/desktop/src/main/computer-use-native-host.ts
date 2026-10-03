@@ -82,7 +82,14 @@ export class ComputerUseNativeUnavailableError extends Error {
 type NativePlatform = 'darwin' | 'win32';
 type RuntimePlatform = 'darwin' | 'win32' | 'linux' | 'other';
 type NativeMethod =
-  'pickApplication' | 'listWindows' | 'startSession' | 'observe' | 'dispatch' | 'cancel' | 'close';
+  | 'pickApplication'
+  | 'listWindows'
+  | 'startSession'
+  | 'observe'
+  | 'preflight'
+  | 'dispatch'
+  | 'cancel'
+  | 'close';
 
 type InternalNativeSession = ComputerUseNativeSession &
   Readonly<{ raw: Readonly<Record<string, unknown>> }>;
@@ -196,7 +203,10 @@ export function createComputerUseNativeHost(
       );
     if (
       (!probeReady || inputQuarantined) &&
-      (method === 'startSession' || method === 'observe' || method === 'dispatch')
+      (method === 'startSession' ||
+        method === 'observe' ||
+        method === 'preflight' ||
+        method === 'dispatch')
     )
       throw new ComputerUseNativeUnavailableError(unavailableReason());
     return (input: unknown) => addon[method](input);
@@ -454,16 +464,56 @@ export function createComputerUseNativeHost(
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
       const actionDigest = computerUseActionDigest(input.action);
+      const dispatchRequest = {
+        ...internal.raw,
+        ...input.action,
+        requestId: input.requestId,
+        observationRevision: input.observationRevision,
+        cancelEpoch: input.cancelEpoch,
+        actionDigest,
+      };
+      // macOS native that exports preflight (N2a): every dispatch is preceded by a side-effect-free
+      // preflight and carries the single-use ordinary ticket it returns. The capability is the
+      // presence of the exported method; Windows and older native builds keep the legacy path.
+      let ticket: string | null = null;
+      if (internal.platform === 'darwin' && hasMethod(addon, 'preflight')) {
+        let receipt: unknown;
+        try {
+          receipt = await invoke('preflight', dispatchRequest);
+        } catch (error) {
+          const preDispatch = classifyComputerUseNativeDispatchFailure(error);
+          if (preDispatch !== null) return preDispatch;
+          throw error;
+        }
+        const outcome = parseNativePreflightReceipt(receipt, input);
+        // The preflight count must also be a non-regressing, session-bound receipt.
+        const preflightReceipt = inputReceipt(
+          outcome.record,
+          input.session.sessionId,
+          input.cancelEpoch,
+        );
+        if (outcome.kind === 'ticket') ticket = outcome.ticket;
+        if (outcome.kind === 'refused') {
+          // Same public-shape check as a dispatch result, so the contract owns the reason format.
+          if (
+            !computerUseActionResultSchema
+              .partial()
+              .safeParse({ result: outcome.result, reasonCode: outcome.reasonCode }).success
+          )
+            throw new ComputerUseNativeUnavailableError('native_preflight_invalid');
+          return Object.freeze({
+            result: outcome.result,
+            reasonCode: outcome.reasonCode,
+            inputReceipt: preflightReceipt,
+          });
+        }
+      }
       let value: unknown;
       try {
-        value = await invoke('dispatch', {
-          ...internal.raw,
-          ...input.action,
-          requestId: input.requestId,
-          observationRevision: input.observationRevision,
-          cancelEpoch: input.cancelEpoch,
-          actionDigest,
-        });
+        value = await invoke(
+          'dispatch',
+          ticket === null ? dispatchRequest : { ...dispatchRequest, ticket },
+        );
       } catch (error) {
         const preDispatch = classifyComputerUseNativeDispatchFailure(error);
         if (preDispatch !== null) return preDispatch;
@@ -594,6 +644,83 @@ export function createUnavailableComputerUseNativeHost(
     },
     platform,
   );
+}
+
+type NativePreflightOutcome =
+  | Readonly<{ kind: 'ticket'; ticket: string; record: Record<string, unknown> }>
+  | Readonly<{ kind: 'replay'; record: Record<string, unknown> }>
+  | Readonly<{
+      kind: 'refused';
+      result: 'rejected' | 'paused' | 'canceled';
+      reasonCode: string;
+      record: Record<string, unknown>;
+    }>;
+
+const NATIVE_PREFLIGHT_KEYS = [
+  'decision',
+  'reasonCode',
+  'deniedResult',
+  'ticket',
+  'classifierVersion',
+  'inputAttemptCount',
+  'requestId',
+  'sessionId',
+  'cancelEpoch',
+  'observationRevision',
+] as const;
+
+/**
+ * Validate a native preflight receipt. Fail closed (throw before any input) on anything outside
+ * the fixed key set or the closed decision table. The ticket is a secret: it is returned only to
+ * be passed straight to dispatch and never appears in an error message.
+ */
+function parseNativePreflightReceipt(
+  value: unknown,
+  input: Readonly<{
+    session: ComputerUseNativeSession;
+    requestId: string;
+    observationRevision: number;
+    cancelEpoch: number;
+  }>,
+): NativePreflightOutcome {
+  const invalid = (): never => {
+    throw new ComputerUseNativeUnavailableError('native_preflight_invalid');
+  };
+  const record = asRecord(value, 'native_preflight_invalid');
+  const keys = Reflect.ownKeys(record);
+  if (
+    keys.length !== NATIVE_PREFLIGHT_KEYS.length ||
+    NATIVE_PREFLIGHT_KEYS.some((key) => !keys.includes(key)) ||
+    record['classifierVersion'] !== 1 ||
+    record['requestId'] !== input.requestId ||
+    record['sessionId'] !== input.session.sessionId ||
+    record['cancelEpoch'] !== input.cancelEpoch ||
+    record['observationRevision'] !== input.observationRevision
+  )
+    return invalid();
+  const { decision, reasonCode, deniedResult, ticket } = record;
+  if (decision === 'ordinary') {
+    if (
+      reasonCode !== null ||
+      deniedResult !== null ||
+      typeof ticket !== 'string' ||
+      !/^[0-9a-f]{64}$/u.test(ticket)
+    )
+      return invalid();
+    return { kind: 'ticket', ticket, record };
+  }
+  if (ticket !== null) return invalid();
+  if (decision === 'replay') {
+    if (reasonCode !== null || deniedResult !== null) return invalid();
+    return { kind: 'replay', record };
+  }
+  if (
+    (decision === 'blocked' || decision === 'takeover' || decision === 'denied') &&
+    typeof reasonCode === 'string' &&
+    (deniedResult === 'rejected' || deniedResult === 'paused' || deniedResult === 'canceled')
+  )
+    return { kind: 'refused', result: deniedResult, reasonCode, record };
+  return invalid();
 }
 
 function hasMethod(
