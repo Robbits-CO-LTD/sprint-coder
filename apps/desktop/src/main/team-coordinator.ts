@@ -2436,9 +2436,16 @@ export class TeamCoordinator {
       ) {
         // An earlier call can have released the reservation and then failed before the hold, Worker
         // and Team end states were saved, so reconcile them again (idempotent).
-        const released = reservations.find((row) => row.executionId === execution.id);
-        if (released) {
-          this.reconcileGraphStepFinish(team.id, graph, execution, released.id, mission.state);
+        // A resumed step has one row per owner generation, so every one may still own a hold.
+        const released = reservations.filter((row) => row.executionId === execution.id);
+        if (released.length > 0) {
+          this.reconcileGraphStepFinish(
+            team.id,
+            graph,
+            execution,
+            released.map(({ id }) => id),
+            mission.state,
+          );
           this.emit(taskId, team.id);
         }
         return this.missionSummary(mission);
@@ -2528,7 +2535,7 @@ export class TeamCoordinator {
             await this.cleanupIntegratedExecutionIsolation(isolation, hold.agentId);
           else if (worktree !== null)
             await this.cleanupIntegratedMissionWorktree(worktree, hold.agentId);
-          this.reconcileGraphStepFinish(team.id, graph, execution, owner.id, result.mission.state);
+          this.reconcileGraphStepFinish(team.id, graph, execution, [owner.id], result.mission.state);
           this.executionScheduler.notifyReadinessChanged();
           this.emit(taskId, team.id);
           return this.missionSummary(result.mission);
@@ -5288,10 +5295,10 @@ export class TeamCoordinator {
     teamId: string,
     graph: { plan: { steps: readonly { workerId: string }[] } },
     execution: { assigneeAgentId: string },
-    reservationId: string,
+    reservationIds: readonly string[],
     missionState: string,
   ): void {
-    this.persistence.deleteGraphIntegrationHold(reservationId);
+    for (const id of reservationIds) this.persistence.deleteGraphIntegrationHold(id);
     const executions = this.persistence.listTeamExecutions(teamId);
     const participants = new Set(graph.plan.steps.map(({ workerId }) => workerId));
     for (const agent of this.persistence.getTeamSnapshot(teamId).agents) {
