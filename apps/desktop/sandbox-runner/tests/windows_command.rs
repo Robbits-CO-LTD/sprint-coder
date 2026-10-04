@@ -1,10 +1,14 @@
 #![cfg(windows)]
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "windows_command/nul_probe.rs"]
+mod nul_probe;
 
 struct Fixture(PathBuf);
 
@@ -264,4 +268,78 @@ fn sandbox_probe_keeps_its_explicit_workspace() {
     assert!(output.status.success());
     let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(result["available"], true, "{result}");
+}
+
+// Issue #733 diagnostic. Observation only, and it never fails: see nul_probe.rs. It runs
+// on CI (GITHUB_ACTIONS) or when SPRINT_CODER_NUL_PROBE=1. The AppContainer side is this
+// same test binary, copied into the workspace and launched through the real runner.
+#[test]
+fn nul_probe_host_and_appcontainer() {
+    if !nul_probe::enabled() {
+        return;
+    }
+    let _guard = EXECUTION_LOCK.lock().unwrap();
+    nul_probe::emit_stderr(&nul_probe::observe("host"));
+    let fixture = Fixture::new();
+    let probe = fixture.0.join("workspace/nul-probe.exe");
+    let launched = fs::copy(std::env::current_exe().unwrap(), &probe).map(|_| {
+        Command::new(env!("CARGO_BIN_EXE_sprint-coder-sandbox-runner"))
+            .env_remove("NODE_OPTIONS")
+            .args(["--exec", "workspace-write"])
+            .arg(fixture.0.join("workspace"))
+            .arg("--protected-home")
+            .arg(std::env::var_os("USERPROFILE").unwrap())
+            .arg("--")
+            .arg(&probe)
+            .args([
+                "--ignored",
+                "--exact",
+                "nul_probe_appcontainer_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .current_dir(fixture.0.join("workspace"))
+            .stdin(Stdio::null())
+            .output()
+    });
+    let observation = match launched {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // libtest prints "test <name> ... " before the child's own output, so the
+            // marker is not at the start of its line.
+            match stdout
+                .lines()
+                .find_map(|l| l.find(nul_probe::LINE_PREFIX).map(|at| &l[at..]))
+            {
+                Some(found) => {
+                    let _ = std::io::stderr().write_all(format!("{found}\n").as_bytes());
+                    return;
+                }
+                None => serde_json::json!({
+                    "probe": "#733",
+                    "side": "appcontainer",
+                    "launch": "no_probe_line",
+                    "exit": output.status.code(),
+                    "stderr_head": nul_probe::redact(&String::from_utf8_lossy(&output.stderr)),
+                }),
+            }
+        }
+        Ok(Err(error)) => serde_json::json!({
+            "probe": "#733", "side": "appcontainer", "launch": "runner_failed",
+            "os_error": error.raw_os_error(),
+        }),
+        Err(error) => serde_json::json!({
+            "probe": "#733", "side": "appcontainer", "launch": "copy_failed",
+            "os_error": error.raw_os_error(),
+        }),
+    };
+    nul_probe::emit_stderr(&observation);
+}
+
+// Entry point for the copied binary above. Ignored so a normal `cargo test` skips it.
+#[test]
+#[ignore = "launched by nul_probe_host_and_appcontainer inside the AppContainer"]
+fn nul_probe_appcontainer_child() {
+    let _ = std::io::stdout()
+        .write_all(nul_probe::line(&nul_probe::observe("appcontainer")).as_bytes());
 }

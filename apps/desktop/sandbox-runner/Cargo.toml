@@ -28,3 +28,14 @@ lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# Integration-test-only: the issue #733 NUL probe calls CreateFileW/GetSecurityInfo. A
+# separate dev-dependency keeps these features out of the shipped runner binary.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Threading",
+] }
