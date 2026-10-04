@@ -1336,7 +1336,9 @@ describe('macOS native capture boundary', () => {
     expect(approvalBranch).toContain('reasonCode !== null || deniedResult !== null');
     expect(approvalBranch).toContain("result: 'paused'");
     expect(approvalBranch).toContain('reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE');
-    expect(approvalBranch).not.toMatch(/\bticket\b\s*[,:}]|kind:\s*'ticket'/u);
+    expect(approvalBranch).not.toMatch(/\bticket\b/u);
+    // Exactly the branch condition and the named constant mention the decision.
+    expect(hostSource.match(/single_use_approval/gu)).toHaveLength(2);
     expect(hostSource).toContain(
       "NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable'",
     );

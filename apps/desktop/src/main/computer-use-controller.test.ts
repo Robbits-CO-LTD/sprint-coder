@@ -548,13 +548,18 @@ async function start(
  * dispatch must never run: every refused preflight is decided before any input.
  */
 function createPreflightHost(
-  receipt: (request: Record<string, unknown>) => Record<string, unknown>,
+  receipt: (request: Record<string, unknown>, callIndex: number) => Record<string, unknown>,
+  onNativeDispatch: (request: Record<string, unknown>) => Record<string, unknown> = () => {
+    throw new Error('native dispatch must not run after a refused preflight');
+  },
 ) {
   const zero = (digit: string): string => digit.repeat(64);
-  const nativeDispatch = vi.fn((): never => {
-    throw new Error('native dispatch must not run after a refused preflight');
-  });
-  const preflight = vi.fn((input: unknown) => receipt(input as Record<string, unknown>));
+  const nativeDispatch = vi.fn((input: unknown) =>
+    onNativeDispatch(input as Record<string, unknown>),
+  );
+  const preflight = vi.fn((input: unknown) =>
+    receipt(input as Record<string, unknown>, preflight.mock.calls.length),
+  );
   const addon = {
     probe: () => ({}),
     pickApplication: () => null,
@@ -645,17 +650,45 @@ function createPreflightHost(
   return { dispatch, preflight, nativeDispatch };
 }
 
-const approvalReceipt = (request: Record<string, unknown>): Record<string, unknown> => ({
+const approvalReceipt = (
+  request: Record<string, unknown>,
+  inputAttemptCount = 0,
+): Record<string, unknown> => ({
   decision: 'single_use_approval',
   reasonCode: null,
   deniedResult: null,
   ticket: null,
   classifierVersion: 1,
-  inputAttemptCount: 0,
+  inputAttemptCount,
   requestId: request['requestId'],
   sessionId: request['sessionId'],
   cancelEpoch: request['cancelEpoch'],
   observationRevision: request['observationRevision'],
+});
+
+const ordinaryReceipt = (
+  request: Record<string, unknown>,
+  inputAttemptCount: number,
+): Record<string, unknown> => ({
+  ...approvalReceipt(request, inputAttemptCount),
+  decision: 'ordinary',
+  ticket: 'ab'.repeat(32),
+});
+
+const completedNativeResult = (
+  request: Record<string, unknown>,
+  inputAttemptCount: number,
+): Record<string, unknown> => ({
+  result: 'completed',
+  reasonCode: null,
+  accepted: true,
+  effectStarted: true,
+  requestId: request['requestId'],
+  sessionId: request['sessionId'],
+  observationRevision: request['observationRevision'],
+  actionDigest: request['actionDigest'],
+  cancelEpoch: request['cancelEpoch'],
+  inputAttemptCount,
 });
 
 const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left' };
@@ -736,15 +769,96 @@ describe('ComputerUseController', () => {
         // A paused result neither spends nor installs a plan grant.
         expect(planGrantOf(fixture, started.sessionId)?.remaining ?? null).toBe(grantBefore);
         expect(install).toHaveBeenCalledTimes(mode === 'allow_plan' ? 1 : 0);
-        // The same request id replays the recorded audit and never reaches native again.
+        // The same request id replays the recorded audit (existing behavior: the audit state
+        // `rejected` is reported, with the reason kept) and never reaches native again.
         await expect(
           fixture.controller.act(started.sessionId, planAction, 'approval-1'),
-        ).resolves.toMatchObject({ result: 'rejected' });
+        ).resolves.toMatchObject({
+          result: 'rejected',
+          reasonCode: 'native_single_use_approval_unavailable',
+        });
         expect(host.preflight).toHaveBeenCalledTimes(1);
         expect(host.nativeDispatch).not.toHaveBeenCalled();
         await fixture.controller.stop(started.sessionId);
       },
     );
+
+    it.each(['approval', 'completed'] as const)(
+      'a grant-authorized second round whose preflight is %s keeps the plan grant accordingly',
+      async (second) => {
+        const host = createPreflightHost(
+          (request, index) =>
+            index === 1 || second === 'completed'
+              ? ordinaryReceipt(request, index - 1)
+              : approvalReceipt(request, 1),
+          (request) => completedNativeResult(request, host.nativeDispatch.mock.calls.length),
+        );
+        const fixture = createFixture({
+          mode: 'supervised',
+          authorizationRequired: true,
+          observationOverrides: planObservation,
+          nativeDispatch: host.dispatch,
+        });
+        const install = vi.spyOn(
+          fixture.controller as unknown as { installPlanGrant: () => void },
+          'installPlanGrant',
+        );
+        const started = await start(fixture, 'supervised', false, undefined, 3);
+        await fixture.controller.observe(started.sessionId);
+        // (a) The first round is approved with allow_plan and completes, installing the grant.
+        const first = fixture.controller.act(started.sessionId, planAction, 'grant-first');
+        await viWait();
+        const approval = fixture.approvals.find((value) => value.state === 'pending')!;
+        await fixture.controller.resolveApproval({
+          approvalId: approval.id,
+          expectedRevision: approval.revision,
+          decision: 'allow_plan',
+          challenge: approval.challenge,
+        });
+        await expect(first).resolves.toMatchObject({ result: 'completed' });
+        expect(install).toHaveBeenCalledTimes(1);
+        const before = planGrantOf(fixture, started.sessionId)!.remaining;
+        expect(before).toBeGreaterThan(0);
+        // (b) A new request id is authorized by the grant, then preflight answers.
+        await fixture.controller.observe(started.sessionId, 'grant-refresh');
+        const result = await fixture.controller.act(started.sessionId, planAction, 'grant-second');
+        expect(install).toHaveBeenCalledTimes(1);
+        expect(host.preflight).toHaveBeenCalledTimes(2);
+        if (second === 'completed') {
+          expect(result).toMatchObject({ result: 'completed' });
+          expect(host.nativeDispatch).toHaveBeenCalledTimes(2);
+          // Discriminating control: a spent grant is observable on this path.
+          expect(planGrantOf(fixture, started.sessionId)!.remaining).toBe(before - 1);
+        } else {
+          expect(result).toMatchObject({
+            result: 'paused',
+            reasonCode: 'native_single_use_approval_unavailable',
+          });
+          // Only the first round reached native; the refused second round gave no input.
+          expect(host.nativeDispatch).toHaveBeenCalledTimes(1);
+          expect(planGrantOf(fixture, started.sessionId)!.remaining).toBe(before);
+          expect(fixture.controller.getStatus(started.sessionId)?.pendingApproval).toBeNull();
+        }
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it('stops a multi-scalar type as unknown_effect when a later scalar needs approval', async () => {
+      const host = createPreflightHost(
+        (request, index) =>
+          index === 1 ? ordinaryReceipt(request, 0) : approvalReceipt(request, 1),
+        (request) => completedNativeResult(request, 1),
+      );
+      const fixture = createFixture({ nativeDispatch: host.dispatch });
+      const started = await start(fixture, 'full_access_app');
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, { type: 'type', text: 'ab' }, 'type-ab'),
+      ).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(host.preflight).toHaveBeenCalledTimes(2);
+      expect(host.nativeDispatch).toHaveBeenCalledTimes(1);
+      await fixture.controller.stop(started.sessionId);
+    });
 
     it('still records a malformed approval receipt as unknown_effect (comparison)', async () => {
       const host = createPreflightHost((request) => ({
