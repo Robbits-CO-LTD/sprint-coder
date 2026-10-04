@@ -1324,8 +1324,21 @@ describe('macOS native capture boundary', () => {
         /preflight|native_ticket_invalid|ordinary_ticket/iu,
       );
     }
-    expect(readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8')).not.toMatch(
-      /single_use_approval|SingleUseApproval/u,
+    // N2b-2: the Main host may name single_use_approval only as a closed no-input pause. Its branch
+    // takes no ticket and returns a fixed Main-owned reason (never the native one).
+    const hostSource = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    const approvalStart = hostSource.indexOf("if (decision === 'single_use_approval') {");
+    expect(approvalStart).toBeGreaterThanOrEqual(0);
+    const approvalBranch = hostSource.slice(
+      approvalStart,
+      hostSource.indexOf("if (decision === 'replay')", approvalStart),
+    );
+    expect(approvalBranch).toContain('reasonCode !== null || deniedResult !== null');
+    expect(approvalBranch).toContain("result: 'paused'");
+    expect(approvalBranch).toContain('reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE');
+    expect(approvalBranch).not.toMatch(/\bticket\b\s*[,:}]|kind:\s*'ticket'/u);
+    expect(hostSource).toContain(
+      "NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable'",
     );
     const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
     expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);

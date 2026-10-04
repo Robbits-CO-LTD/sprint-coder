@@ -771,9 +771,67 @@ describe('Computer Use native Main adapter', () => {
       });
       expect(dispatchCalls()).toBe(before);
     }
+    // N2b-2: single_use_approval has no approval path yet, so it is a closed no-input pause with a
+    // fixed Main-owned reason; the native reason (null only) never reaches the caller.
+    {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) =>
+        receipt(input, {
+          decision: 'single_use_approval',
+          reasonCode: null,
+          deniedResult: null,
+          ticket: null,
+        }),
+      );
+      await expect(preflightAction('pf-approval')).resolves.toEqual({
+        result: 'paused',
+        reasonCode: 'native_single_use_approval_unavailable',
+        inputReceipt: { sessionId: session.sessionId, cancelEpoch: 0, inputAttemptCount: 2 },
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
     // Malformed receipts fail closed before any dispatch and never echo the ticket.
     const malformed: Array<Record<string, unknown>> = [
-      { decision: 'single_use_approval' },
+      // N2b-2: single_use_approval is accepted only as the exact closed no-input tuple.
+      { decision: 'single_use_approval', ticket, reasonCode: null, deniedResult: null },
+      {
+        decision: 'single_use_approval',
+        ticket: null,
+        reasonCode: 'native_x',
+        deniedResult: null,
+      },
+      {
+        decision: 'single_use_approval',
+        ticket: null,
+        reasonCode: null,
+        deniedResult: 'paused',
+      },
+      {
+        decision: 'single_use_approval',
+        ticket: null,
+        reasonCode: null,
+        deniedResult: null,
+        classifierVersion: 2,
+      },
+      {
+        decision: 'single_use_approval',
+        ticket: null,
+        reasonCode: null,
+        deniedResult: null,
+        extra: true,
+      },
+      ...[
+        { requestId: 'other' },
+        { sessionId: 'other' },
+        { cancelEpoch: 9 },
+        { observationRevision: 99 },
+      ].map((mismatch) => ({
+        decision: 'single_use_approval',
+        ticket: null,
+        reasonCode: null,
+        deniedResult: null,
+        ...mismatch,
+      })),
       { decision: 'ordinary', ticket: 'short' },
       { decision: 'ordinary', ticket: null },
       { decision: 'ordinary', reasonCode: 'native_x' },
