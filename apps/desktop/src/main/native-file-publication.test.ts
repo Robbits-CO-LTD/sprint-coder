@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,9 +9,64 @@ import { openWorkspaceFileForEdit, saveWorkspaceFile } from './workspace-edit';
 
 const cleanup: string[] = [];
 
+// Resolve System32 tools explicitly: a Git for Windows PATH can shadow whoami with a POSIX one.
+function system32(name: string): string {
+  return join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', name);
+}
+
+// An elevated token creates Administrators-owned files, so give the user ownership first. A
+// standard token already owns them and may itself lack WRITE_OWNER (#737), so a refused rewrite
+// of the same owner is expected there.
+function ownAsCurrentUser(path: string, sid: string): void {
+  try {
+    execFileSync(system32('icacls.exe'), [path, '/setowner', `*${sid}`], { stdio: 'ignore' });
+  } catch {
+    // Already owned by the standard user.
+  }
+}
+
 function loopbackUncOf(path: string): string {
   const { root } = parse(path);
   return ['', '', 'localhost', `${root.slice(0, 1)}$`, path.slice(root.length)].join('\\');
+}
+
+function currentUserSid(): string {
+  const [, sid] = execFileSync(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf8',
+  })
+    .trim()
+    .split('","');
+  if (!sid?.startsWith('S-1-')) throw new Error('current user SID unavailable');
+  return sid.replace(/"$/, '');
+}
+
+// Issue #737: an owner holds READ_CONTROL and WRITE_DAC implicitly but not WRITE_OWNER. Owning a
+// file and being denied WRITE_OWNER reproduces a drive-root default ACL on either token: an
+// elevated run gets the owner back first, then neither the user nor Administrators may rewrite it.
+function ownWithoutWriteOwner(path: string, sid: string): void {
+  ownAsCurrentUser(path, sid);
+  execFileSync(system32('icacls.exe'), [path, '/deny', `*${sid}:(WO)`, '*S-1-5-32-544:(WO)'], {
+    stdio: 'ignore',
+  });
+}
+
+// The drive-root default of an added NTFS volume: Administrators and SYSTEM full control,
+// Authenticated Users Modify (no WRITE_DAC or WRITE_OWNER) and Users read, all inherited.
+function applyDriveRootDefaultAcl(directory: string, sid: string): void {
+  ownAsCurrentUser(directory, sid);
+  execFileSync(
+    system32('icacls.exe'),
+    [
+      directory,
+      '/inheritance:r',
+      '/grant:r',
+      '*S-1-5-32-544:(OI)(CI)F',
+      '*S-1-5-18:(OI)(CI)F',
+      '*S-1-5-11:(OI)(CI)M',
+      '*S-1-5-32-545:(OI)(CI)RX',
+    ],
+    { stdio: 'ignore' },
+  );
 }
 
 afterEach(async () => {
@@ -18,6 +74,40 @@ afterEach(async () => {
 });
 
 describe('replaceWindowsFileWithBackup', () => {
+  it.runIf(process.platform === 'win32')(
+    'publishes when the caller owns the target but lacks WRITE_OWNER (issue #737)',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-no-write-owner-'));
+      cleanup.push(root);
+      const sid = currentUserSid();
+      const target = join(root, 'target.txt');
+      const replacement = join(root, '.stage.tmp');
+      const backup = join(root, '.backup.tmp');
+      await writeFile(target, 'before');
+      await writeFile(replacement, 'after');
+      ownWithoutWriteOwner(target, sid);
+      ownWithoutWriteOwner(replacement, sid);
+      replaceWindowsFileWithBackup(replacement, target, backup);
+      expect(await readFile(target, 'utf8')).toBe('after');
+      expect(await readFile(backup, 'utf8')).toBe('before');
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'saves a Workspace file under a drive-root default ACL (issue #737)',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-default-acl-'));
+      cleanup.push(root);
+      applyDriveRootDefaultAcl(root, currentUserSid());
+      await writeFile(join(root, 'note.txt'), 'before');
+      const opened = openWorkspaceFileForEdit(root, 'note.txt');
+      expect(opened.editable).toBe(true);
+      const outcome = saveWorkspaceFile(root, 'note.txt', 'after', opened.digest);
+      expect(outcome.outcome).toBe('saved');
+      expect(await readFile(join(root, 'note.txt'), 'utf8')).toBe('after');
+    },
+  );
+
   it.runIf(process.platform === 'win32')(
     'publishes a valid 255-character component beyond the Win32 full-path limit',
     async () => {
