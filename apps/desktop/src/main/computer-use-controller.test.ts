@@ -30,6 +30,8 @@ import {
 } from './computer-use-controller';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
 import { preflightComputerUseProvider, ProviderComputerUsePlanner } from './computer-use-planner';
+import type { ComputerUseNativeBinding } from './computer-use-native';
+import { createComputerUseNativeHost } from './computer-use-native-host';
 import type { ProviderRuntime } from './provider-runtime';
 import type { PermissionBroker } from './permission-broker';
 import {
@@ -162,6 +164,8 @@ function createFixture(
       requestId: string;
       action: ComputerUseAction;
     }) => Promise<ComputerUseNativeActionResult>;
+    /** Full-input native dispatch (used to route through the real Main host over a fake addon). */
+    nativeDispatch?: ComputerUseNativeHost['dispatch'];
     authorizationRequired?: boolean;
     startSessionGate?: Promise<void>;
     revalidateWindowsGate?: Promise<void>;
@@ -335,9 +339,11 @@ function createFixture(
               ? { ...observed, focusedElementSignature: 'e'.repeat(64) }
               : observed;
     },
-    dispatch: async ({ requestId, action, session }) => {
+    dispatch: async (input) => {
+      const { requestId, action, session } = input;
       dispatchCount += 1;
       dispatchedActions.push(action);
+      if (options.nativeDispatch !== undefined) return options.nativeDispatch(input);
       if (options.dispatch !== undefined) return options.dispatch({ requestId, action });
       return {
         result: 'completed',
@@ -537,10 +543,342 @@ async function start(
   });
 }
 
+/**
+ * The real Main native host over a fake macOS addon whose preflight answers `receipt`. Its native
+ * dispatch must never run: every refused preflight is decided before any input.
+ */
+function createPreflightHost(
+  receipt: (request: Record<string, unknown>, callIndex: number) => Record<string, unknown>,
+  onNativeDispatch: (request: Record<string, unknown>) => Record<string, unknown> = () => {
+    throw new Error('native dispatch must not run after a refused preflight');
+  },
+) {
+  const zero = (digit: string): string => digit.repeat(64);
+  const nativeDispatch = vi.fn((input: unknown) =>
+    onNativeDispatch(input as Record<string, unknown>),
+  );
+  const preflight = vi.fn((input: unknown) =>
+    receipt(input as Record<string, unknown>, preflight.mock.calls.length),
+  );
+  const addon = {
+    probe: () => ({}),
+    pickApplication: () => null,
+    listWindows: () => [
+      {
+        pid: 42,
+        windowId: 'window-1',
+        platform: 'darwin' as const,
+        appIdentityDigest: profile.identityDigest,
+        windowIdentityDigest: zero('d'),
+        executableDigest: profile.executableDigest,
+        title: 'Fixture',
+        bounds: { x: 0, y: 0, width: 800, height: 600 },
+        screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+        focused: true,
+        eligible: true,
+        ownerKind: 'application' as const,
+        modal: false,
+        revision: 1,
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+      },
+    ],
+    startSession: (input: unknown) => ({
+      inputAttemptCount: 0,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      platform: 'darwin' as const,
+      appIdentityDigest: profile.identityDigest,
+      windowIdentityDigest: zero('d'),
+      windowId: 'window-1',
+      profileRevision: profile.revision,
+      cancelEpoch: 0,
+      policyLanguage: 'en',
+      maximumMode: 'full_access_app',
+      screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+      pid: 42,
+    }),
+    observe: () => ({}),
+    preflight,
+    dispatch: nativeDispatch,
+    cancel: () => undefined,
+    close: () => undefined,
+  };
+  const binding = {
+    manifest: {
+      version: 1,
+      sourceCommit: 'f'.repeat(40),
+      platform: 'darwin',
+      architecture: 'arm64',
+      protocolVersion: 1,
+      apiVersion: 2,
+      nativeVersion: 'test-native',
+      moduleDigest: zero('1'),
+      binaryDigest: zero('2'),
+      signerDigest: zero('3'),
+      capabilities: ['observe', 'capture', 'accessibility', 'input'],
+    },
+    probe: {
+      available: true,
+      protocolVersion: 1,
+      apiVersion: 2,
+      backend: 'test-native',
+      reason: '',
+      artifactPath: '/Resources/sprint_coder_computer_use_native.node',
+      artifactDigest: zero('1'),
+      capabilities: { observe: true, control: true },
+    },
+    artifactPath: '/Resources/sprint_coder_computer_use_native.node',
+    addon,
+  } as unknown as ComputerUseNativeBinding;
+  const host = createComputerUseNativeHost(binding, 'darwin');
+  let registered = false;
+  const dispatch: ComputerUseNativeHost['dispatch'] = async (input) => {
+    if (!registered) {
+      registered = true;
+      await host.listWindows(profile);
+      await host.startSession({
+        profile,
+        windowId: 'window-1',
+        sessionId: input.session.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: input.cancelEpoch,
+      });
+    }
+    return host.dispatch(input);
+  };
+  return { dispatch, preflight, nativeDispatch };
+}
+
+const approvalReceipt = (
+  request: Record<string, unknown>,
+  inputAttemptCount = 0,
+): Record<string, unknown> => ({
+  decision: 'single_use_approval',
+  reasonCode: null,
+  deniedResult: null,
+  ticket: null,
+  classifierVersion: 1,
+  inputAttemptCount,
+  requestId: request['requestId'],
+  sessionId: request['sessionId'],
+  cancelEpoch: request['cancelEpoch'],
+  observationRevision: request['observationRevision'],
+});
+
+const ordinaryReceipt = (
+  request: Record<string, unknown>,
+  inputAttemptCount: number,
+): Record<string, unknown> => ({
+  ...approvalReceipt(request, inputAttemptCount),
+  decision: 'ordinary',
+  ticket: 'ab'.repeat(32),
+});
+
+const completedNativeResult = (
+  request: Record<string, unknown>,
+  inputAttemptCount: number,
+): Record<string, unknown> => ({
+  result: 'completed',
+  reasonCode: null,
+  accepted: true,
+  effectStarted: true,
+  requestId: request['requestId'],
+  sessionId: request['sessionId'],
+  observationRevision: request['observationRevision'],
+  actionDigest: request['actionDigest'],
+  cancelEpoch: request['cancelEpoch'],
+  inputAttemptCount,
+});
+
 const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left' };
 const plainType: ComputerUseAction = { type: 'type', text: 'hello' };
 
 describe('ComputerUseController', () => {
+  describe('native single_use_approval (N2b-2: closed no-input pause)', () => {
+    const planAction: ComputerUseAction = {
+      type: 'invoke',
+      targetId: 'button',
+      name: 'activate',
+      arguments: {},
+    };
+    const planObservation = {
+      targetSignatures: { button: 'c'.repeat(64) },
+      targetMetadata: { button: { secure: false, highImpact: false } },
+    };
+    type Mode = 'full_access_app' | 'approve_actions' | 'allow_plan';
+    const planGrantOf = (fixture: ReturnType<typeof createFixture>, sessionId: string) =>
+      (
+        fixture.controller as unknown as {
+          sessions: Map<string, { planGrant: { remaining: number } | null }>;
+        }
+      ).sessions.get(sessionId)?.planGrant ?? null;
+
+    it.each(['full_access_app', 'approve_actions', 'allow_plan'] as const)(
+      'pauses with no input, a rejected audit and an unchanged grant in %s',
+      async (mode: Mode) => {
+        const host = createPreflightHost(approvalReceipt);
+        const fixture = createFixture({
+          mode: mode === 'full_access_app' ? 'full_access_app' : 'supervised',
+          ...(mode === 'full_access_app' ? {} : { authorizationRequired: true }),
+          observationOverrides: planObservation,
+          nativeDispatch: host.dispatch,
+        });
+        const install = vi.spyOn(
+          fixture.controller as unknown as { installPlanGrant: () => void },
+          'installPlanGrant',
+        );
+        const started = await start(
+          fixture,
+          mode === 'full_access_app' ? 'full_access_app' : 'supervised',
+          false,
+          undefined,
+          3,
+        );
+        await fixture.controller.observe(started.sessionId);
+        const acting = fixture.controller.act(started.sessionId, planAction, 'approval-1');
+        let grantBefore: number | null = null;
+        if (mode !== 'full_access_app') {
+          await viWait();
+          const approval = fixture.approvals.find((value) => value.state === 'pending')!;
+          await fixture.controller.resolveApproval({
+            approvalId: approval.id,
+            expectedRevision: approval.revision,
+            decision: mode === 'allow_plan' ? 'allow_plan' : 'allow_once',
+            challenge: approval.challenge,
+          });
+          grantBefore = planGrantOf(fixture, started.sessionId)?.remaining ?? null;
+        }
+        await expect(acting).resolves.toMatchObject({
+          result: 'paused',
+          reasonCode: 'native_single_use_approval_unavailable',
+        });
+        // No input: the fake native dispatch (and so any real input) never ran.
+        expect(host.nativeDispatch).not.toHaveBeenCalled();
+        expect(host.preflight).toHaveBeenCalledTimes(1);
+        const audits = [...fixture.audits.values()];
+        expect(audits).toEqual([
+          expect.objectContaining({
+            state: 'rejected',
+            reasonCode: 'native_single_use_approval_unavailable',
+          }),
+        ]);
+        const status = fixture.controller.getStatus(started.sessionId);
+        expect(status?.state).toBe('paused');
+        expect(status?.pendingApproval).toBeNull();
+        // A paused result neither spends nor installs a plan grant.
+        expect(planGrantOf(fixture, started.sessionId)?.remaining ?? null).toBe(grantBefore);
+        expect(install).toHaveBeenCalledTimes(mode === 'allow_plan' ? 1 : 0);
+        // The same request id replays the recorded audit (existing behavior: the audit state
+        // `rejected` is reported, with the reason kept) and never reaches native again.
+        await expect(
+          fixture.controller.act(started.sessionId, planAction, 'approval-1'),
+        ).resolves.toMatchObject({
+          result: 'rejected',
+          reasonCode: 'native_single_use_approval_unavailable',
+        });
+        expect(host.preflight).toHaveBeenCalledTimes(1);
+        expect(host.nativeDispatch).not.toHaveBeenCalled();
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it.each(['approval', 'completed'] as const)(
+      'a grant-authorized second round whose preflight is %s keeps the plan grant accordingly',
+      async (second) => {
+        const host = createPreflightHost(
+          (request, index) =>
+            index === 1 || second === 'completed'
+              ? ordinaryReceipt(request, index - 1)
+              : approvalReceipt(request, 1),
+          (request) => completedNativeResult(request, host.nativeDispatch.mock.calls.length),
+        );
+        const fixture = createFixture({
+          mode: 'supervised',
+          authorizationRequired: true,
+          observationOverrides: planObservation,
+          nativeDispatch: host.dispatch,
+        });
+        const install = vi.spyOn(
+          fixture.controller as unknown as { installPlanGrant: () => void },
+          'installPlanGrant',
+        );
+        const started = await start(fixture, 'supervised', false, undefined, 3);
+        await fixture.controller.observe(started.sessionId);
+        // (a) The first round is approved with allow_plan and completes, installing the grant.
+        const first = fixture.controller.act(started.sessionId, planAction, 'grant-first');
+        await viWait();
+        const approval = fixture.approvals.find((value) => value.state === 'pending')!;
+        await fixture.controller.resolveApproval({
+          approvalId: approval.id,
+          expectedRevision: approval.revision,
+          decision: 'allow_plan',
+          challenge: approval.challenge,
+        });
+        await expect(first).resolves.toMatchObject({ result: 'completed' });
+        expect(install).toHaveBeenCalledTimes(1);
+        const before = planGrantOf(fixture, started.sessionId)!.remaining;
+        expect(before).toBeGreaterThan(0);
+        // (b) A new request id is authorized by the grant, then preflight answers.
+        await fixture.controller.observe(started.sessionId, 'grant-refresh');
+        const result = await fixture.controller.act(started.sessionId, planAction, 'grant-second');
+        expect(install).toHaveBeenCalledTimes(1);
+        expect(host.preflight).toHaveBeenCalledTimes(2);
+        if (second === 'completed') {
+          expect(result).toMatchObject({ result: 'completed' });
+          expect(host.nativeDispatch).toHaveBeenCalledTimes(2);
+          // Discriminating control: a spent grant is observable on this path.
+          expect(planGrantOf(fixture, started.sessionId)!.remaining).toBe(before - 1);
+        } else {
+          expect(result).toMatchObject({
+            result: 'paused',
+            reasonCode: 'native_single_use_approval_unavailable',
+          });
+          // Only the first round reached native; the refused second round gave no input.
+          expect(host.nativeDispatch).toHaveBeenCalledTimes(1);
+          expect(planGrantOf(fixture, started.sessionId)!.remaining).toBe(before);
+          expect(fixture.controller.getStatus(started.sessionId)?.pendingApproval).toBeNull();
+        }
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it('stops a multi-scalar type as unknown_effect when a later scalar needs approval', async () => {
+      const host = createPreflightHost(
+        (request, index) =>
+          index === 1 ? ordinaryReceipt(request, 0) : approvalReceipt(request, 1),
+        (request) => completedNativeResult(request, 1),
+      );
+      const fixture = createFixture({ nativeDispatch: host.dispatch });
+      const started = await start(fixture, 'full_access_app');
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, { type: 'type', text: 'ab' }, 'type-ab'),
+      ).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(host.preflight).toHaveBeenCalledTimes(2);
+      expect(host.nativeDispatch).toHaveBeenCalledTimes(1);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('still records a malformed approval receipt as unknown_effect (comparison)', async () => {
+      const host = createPreflightHost((request) => ({
+        ...approvalReceipt(request),
+        reasonCode: 'native_x',
+      }));
+      const fixture = createFixture({
+        observationOverrides: planObservation,
+        nativeDispatch: host.dispatch,
+      });
+      const started = await start(fixture, 'full_access_app');
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, planAction, 'malformed-1'),
+      ).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(host.nativeDispatch).not.toHaveBeenCalled();
+      await fixture.controller.stop(started.sessionId);
+    });
+  });
+
   it('lets the Task agent stop only a session its own Task owns', async () => {
     const fixture = createFixture();
     const session = await start(fixture);

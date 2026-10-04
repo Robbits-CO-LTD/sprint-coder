@@ -656,6 +656,8 @@ type NativePreflightOutcome =
       record: Record<string, unknown>;
     }>;
 
+const NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable';
+
 const NATIVE_PREFLIGHT_KEYS = [
   'decision',
   'reasonCode',
@@ -710,6 +712,17 @@ function parseNativePreflightReceipt(
     return { kind: 'ticket', ticket, record };
   }
   if (ticket !== null) return invalid();
+  if (decision === 'single_use_approval') {
+    // N2b-2: no approval path exists yet, so this is a closed no-input pause. Only the exact
+    // null-reason tuple is accepted; the native reason is never forwarded, only a fixed Main one.
+    if (reasonCode !== null || deniedResult !== null) return invalid();
+    return {
+      kind: 'refused',
+      result: 'paused',
+      reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE,
+      record,
+    };
+  }
   if (decision === 'replay') {
     if (reasonCode !== null || deniedResult !== null) return invalid();
     return { kind: 'replay', record };
