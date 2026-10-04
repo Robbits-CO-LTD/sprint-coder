@@ -93,6 +93,9 @@ describe('replaceWindowsFileWithBackup', () => {
     },
   );
 
+  // A standard token reproduces #737 here. An elevated token creates Administrators-owned files that
+  // the inherited Administrators entry lets it rewrite, so the WRITE_OWNER test above is the one
+  // that catches a regression on either token.
   it.runIf(process.platform === 'win32')(
     'saves a Workspace file under a drive-root default ACL (issue #737)',
     async () => {

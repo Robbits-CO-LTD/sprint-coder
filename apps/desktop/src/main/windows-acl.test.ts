@@ -29,6 +29,16 @@ function ownAsCurrentUser(path: string, sid: string): void {
   }
 }
 
+function currentUserSid(): string {
+  const [, sid] = execFileSync(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf8',
+  })
+    .trim()
+    .split('","');
+  if (!sid?.startsWith('S-1-')) throw new Error('current user SID unavailable');
+  return sid.replace(/"$/, '');
+}
+
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -42,13 +52,7 @@ describe('Windows ACL runner', () => {
     async () => {
       const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-no-write-owner-'));
       cleanup.push(root);
-      const [, quotedSid] = execFileSync(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
-        encoding: 'utf8',
-      })
-        .trim()
-        .split('","');
-      const sid = quotedSid?.replace(/"$/, '') ?? '';
-      expect(sid.startsWith('S-1-')).toBe(true);
+      const sid = currentUserSid();
       const file = join(root, 'private.txt');
       const directory = join(root, 'private-dir');
       await writeFile(file, 'private');
