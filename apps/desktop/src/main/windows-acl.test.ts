@@ -1,4 +1,5 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -12,11 +13,68 @@ import {
 
 const cleanup: string[] = [];
 
+// Resolve System32 tools explicitly: a Git for Windows PATH can shadow whoami with a POSIX one.
+function system32(name: string): string {
+  return join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', name);
+}
+
+// An elevated token creates Administrators-owned files, so give the user ownership first. A
+// standard token already owns them and may itself lack WRITE_OWNER (#737), so a refused rewrite
+// of the same owner is expected there.
+function ownAsCurrentUser(path: string, sid: string): void {
+  try {
+    execFileSync(system32('icacls.exe'), [path, '/setowner', `*${sid}`], { stdio: 'ignore' });
+  } catch {
+    // Already owned by the standard user.
+  }
+}
+
+function currentUserSid(): string {
+  const [, sid] = execFileSync(system32('whoami.exe'), ['/user', '/fo', 'csv', '/nh'], {
+    encoding: 'utf8',
+  })
+    .trim()
+    .split('","');
+  if (!sid?.startsWith('S-1-')) throw new Error('current user SID unavailable');
+  return sid.replace(/"$/, '');
+}
+
 afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe('Windows ACL runner', () => {
+  // Issue #737: securing must not need WRITE_OWNER on a path the user already owns. Denying it to
+  // the user and Administrators after giving the user ownership reproduces a drive-root default
+  // ACL on either token.
+  it.runIf(process.platform === 'win32')(
+    'secures a current-user-owned path that denies WRITE_OWNER (issue #737)',
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), 'sprint-coder-acl-no-write-owner-'));
+      cleanup.push(root);
+      const sid = currentUserSid();
+      const file = join(root, 'private.txt');
+      const directory = join(root, 'private-dir');
+      await writeFile(file, 'private');
+      await mkdir(directory);
+      for (const path of [file, directory]) {
+        ownAsCurrentUser(path, sid);
+        execFileSync(
+          system32('icacls.exe'),
+          [path, '/deny', `*${sid}:(WO)`, '*S-1-5-32-544:(WO)'],
+          {
+            stdio: 'ignore',
+          },
+        );
+      }
+
+      await secureWindowsPath(file, 'file');
+      await secureWindowsPath(directory, 'directory');
+      await verifyWindowsPathAcl(file, 'file');
+      await verifyWindowsPathAcl(directory, 'directory');
+    },
+  );
+
   it.runIf(process.platform === 'win32')(
     'secures an ACL list larger than the Windows process-environment limit',
     async () => {

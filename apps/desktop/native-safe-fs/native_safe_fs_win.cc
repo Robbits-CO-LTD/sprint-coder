@@ -912,6 +912,23 @@ bool CurrentUserSid(std::vector<unsigned char>* storage, PSID* sid) {
   return true;
 }
 
+// Rewriting an owner, even to the SID it already has, requires WRITE_OWNER, while an owner holds
+// only READ_CONTROL and WRITE_DAC implicitly. A drive-root default ACL (Authenticated Users:
+// Modify) therefore refuses that rewrite to a standard token (#737). Callers compare the object's
+// actual owner rather than TokenOwner so an object an elevated run left Administrators-owned is
+// still repaired.
+DWORD OwnerEquals(const std::wstring& path, PSID expected, bool* equal) {
+  *equal = false;
+  PSID owner = nullptr;
+  PSECURITY_DESCRIPTOR descriptor = nullptr;
+  const DWORD error = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT,
+                                            OWNER_SECURITY_INFORMATION, &owner, nullptr, nullptr,
+                                            nullptr, &descriptor);
+  if (error == ERROR_SUCCESS) *equal = owner != nullptr && EqualSid(owner, expected) != FALSE;
+  if (descriptor != nullptr) LocalFree(descriptor);
+  return error;
+}
+
 napi_value ApplyWindowsAcl(napi_env env, napi_callback_info info) {
   size_t argc = 3;
   napi_value argv[3];
@@ -946,10 +963,15 @@ napi_value ApplyWindowsAcl(napi_env env, napi_callback_info info) {
     PACL acl = nullptr;
     DWORD error = SetEntriesInAclW(1, &access, nullptr, &acl);
     if (error == ERROR_SUCCESS) {
-      error = SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT,
-                                    OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
-                                        PROTECTED_DACL_SECURITY_INFORMATION,
-                                    current_sid, nullptr, acl, nullptr);
+      // Write the owner only when it differs. A failed read falls back to the owner rewrite, and
+      // the verification below still requires the current-user owner either way.
+      bool owned = false;
+      const bool keep_owner = OwnerEquals(path, current_sid, &owned) == ERROR_SUCCESS && owned;
+      SECURITY_INFORMATION information =
+          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION;
+      if (!keep_owner) information |= OWNER_SECURITY_INFORMATION;
+      error = SetNamedSecurityInfoW(path.data(), SE_FILE_OBJECT, information,
+                                    keep_owner ? nullptr : current_sid, nullptr, acl, nullptr);
     }
     if (acl != nullptr) LocalFree(acl);
     if (error != ERROR_SUCCESS) {
@@ -1056,7 +1078,11 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     if (!CurrentUserSid(&sid_storage, &current_sid)) {
       error = GetLastError();
     } else if (target_owner != nullptr && EqualSid(target_owner, current_sid)) {
-      information |= OWNER_SECURITY_INFORMATION;
+      bool staged_owned = false;
+      if (OwnerEquals(replacement, current_sid, &staged_owned) == ERROR_SUCCESS && staged_owned)
+        target_owner = nullptr;
+      else
+        information |= OWNER_SECURITY_INFORMATION;
     } else {
       target_owner = nullptr;
     }
@@ -1064,6 +1090,8 @@ napi_value ReplaceFileWithBackup(napi_env env, napi_callback_info info) {
     // first so that the merge preserves arbitrary private or shared ACLs without adding inherited
     // entries from the staging file's parent directory. Also preserve a current-user owner because
     // elevated Windows tokens can otherwise give staging files an Administrators default owner.
+    // Rewrite the owner only when the staged owner differs: the rewrite needs WRITE_OWNER even for
+    // the same SID (#737). A refused rewrite still fails closed instead of publishing silently.
     if (error == ERROR_SUCCESS)
       error = SetNamedSecurityInfoW(replacement.data(), SE_FILE_OBJECT, information, target_owner,
                                     nullptr, target_dacl, nullptr);
