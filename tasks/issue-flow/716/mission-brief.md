@@ -34,3 +34,12 @@ design-review-checklistの関連観点を適用: 登録→SQL snapshot→Coordin
 最小検証: reverse-order REDの同条件で全8cases GREEN、診断のprivacy/failure/timeoutテスト、実Electron Graph child全suite、desktop typecheck、変更lint/format/diff。適格な外部read-onlyレビューとhosted全OS CI。
 同一Macの既存Electron43.5.0 / SQLite / NativeSafeFs artifactをコピーしロード確認。npm ci --ignore-scripts --offline。local native rebuild/headers取得はしない。既存artifact使用はhead native build証明ではない。
 rollback: 本test-only commitをrevert。製品/DB migrationへの復旧操作は不要。
+
+## Macでの診断追補（2026-10-05）
+
+- base: main b6ea96c7、branch: codex/issue-716-mac-bridge。今回はMacで修正できる作業の再開指示。merge/closeは依頼範囲に含めない。
+- CI37187024010 attempt1は123 PASS後にkillされ、既存2case markerの対象外。局所診断が欠ける原因は確認済み、aggregate timeoutは引き続きHypothesis only。
+- 修正範囲にtest-only graph-bridge-progress.tsと直接テストを追加。全caseの開始・cleanup・終了、digest、件数、real clock時間だけを記録する。既存markerと期限は維持。
+- 未計測caseの診断欠落をREDで再現。変更後の直接テストとdesktop typecheckはPASS。実Electronの全caseとsnapshotの件数照合、独立review、latest-head CIを確認する。
+- このworktreeはNode22でnpm ciとprepare:desktopを実施。過去検証のartifactコピーとは別の今回のbuild。
+- attachments_viewed: 0/0 (NO_ATTACHMENTS)。
