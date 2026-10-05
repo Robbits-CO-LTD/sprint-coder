@@ -15,6 +15,111 @@ import {
 } from './helpers';
 import { clickWithSidebarVector } from './feature-setup';
 
+async function assertGraphSelectionWithEvidence(
+  page: Page,
+  kind: 'node' | 'edge',
+  id: string,
+  assertion: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await assertion();
+  } catch (error) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const probe = async () => {
+        const frame = await page
+          .frameLocator('[data-testid="graph-frame"]')
+          .locator('html')
+          .evaluate(
+            (element, expected) => {
+              const candidates = Array.from(
+                document.querySelectorAll(
+                  expected.kind === 'node'
+                    ? '[data-node-id]'
+                    : '[data-edge-id],[data-relationship-id]',
+                ),
+              ).filter(
+                (node) =>
+                  (node.getAttribute('data-node-id') ||
+                    node.getAttribute('data-edge-id') ||
+                    node.getAttribute('data-relationship-id')) === expected.id,
+              );
+              const archify = Reflect.get(window, 'Archify');
+              const focus = archify && Reflect.get(archify, 'focus');
+              return {
+                graphId: element.dataset.graphId ?? '',
+                revision: element.dataset.graphRevision ?? '',
+                matchingElements: candidates.length,
+                selectedElements: candidates.filter(
+                  (node) => node.getAttribute('aria-pressed') === 'true',
+                ).length,
+                focusApiPresent: typeof focus?.set === 'function',
+                focusActive: typeof focus?.active === 'function' ? focus.active() === true : null,
+                justPanned:
+                  document.querySelector('.diagram-container')?.getAttribute('data-just-panned') ===
+                  'true',
+              };
+            },
+            { kind, id },
+          );
+        const parent = await page.evaluate(
+          ({ kind, id, graphId, revision }) => {
+            const keys = Object.keys(localStorage).filter(
+              (key) =>
+                key.startsWith('sprint-coder:graph-view:v1:') &&
+                key.endsWith(':' + graphId + ':' + revision),
+            );
+            const preferences = keys.map((key) => {
+              try {
+                const raw = localStorage.getItem(key);
+                return raw && raw.length <= 1024 ? JSON.parse(raw) : null;
+              } catch {
+                return null;
+              }
+            });
+            return {
+              visibleGraphPreferenceCount: keys.length,
+              expectedPreferencePresent: preferences.some(
+                (pref) => pref?.selection?.kind === kind && pref?.selection?.id === id,
+              ),
+              expectedInspectorPresent:
+                document
+                  .querySelector('[data-testid="graph-selection"]')
+                  ?.textContent?.endsWith(' ' + id) === true,
+              sourcesPresent: document.querySelector('[data-testid="graph-sources"]') !== null,
+            };
+          },
+          { kind, id, graphId: frame.graphId, revision: frame.revision },
+        );
+        return {
+          ...parent,
+          matchingElements: frame.matchingElements,
+          selectedElements: frame.selectedElements,
+          focusApiPresent: frame.focusApiPresent,
+          focusActive: frame.focusActive,
+          justPanned: frame.justPanned,
+        };
+      };
+      const vector = await Promise.race([
+        probe().catch(() => null),
+        new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), 3_000);
+        }),
+      ]);
+      if (vector !== null)
+        await test.info().attach('graph-selection-checkpoint', {
+          contentType: 'application/json',
+          body: Buffer.from(JSON.stringify(vector)),
+        });
+    } catch {
+      // Bounded optional metadata must never replace the original assertion failure.
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    throw error;
+  }
+}
+
 // eslint-disable-next-line no-empty-pattern
 test('binds an authorized file read and detects changed source bytes after restart', async ({}, testInfo) => {
   const profile = createUserDataDir('graph-source-proposal');
@@ -207,9 +312,14 @@ test('binds an authorized file read and detects changed source bytes after resta
     await reopened.getByTestId('inline-graph-open').last().click();
     await expect(reopened.getByTestId('graph-frame')).toHaveAttribute('data-graph-ready', '1');
     // The selected node and its inspector now survive restart; a second click would toggle it.
-    await expect(
-      reopened.frameLocator('[data-testid="graph-frame"]').locator('[data-node-id="api"]').first(),
-    ).toHaveAttribute('aria-pressed', 'true');
+    await assertGraphSelectionWithEvidence(reopened, 'node', 'api', () =>
+      expect(
+        reopened
+          .frameLocator('[data-testid="graph-frame"]')
+          .locator('[data-node-id="api"]')
+          .first(),
+      ).toHaveAttribute('aria-pressed', 'true'),
+    );
     const restored = reopened.getByTestId('graph-sources');
     await restored.locator('summary').click();
     await expect(restored).toContainText('return "config"');
@@ -368,7 +478,9 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await frame.locator('#btn-focus-clear').click();
     await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="store"]').first().click();
-    await expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案');
+    await assertGraphSelectionWithEvidence(page, 'node', 'store', () =>
+      expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案'),
+    );
     await frame.locator('#btn-focus-clear').click();
     await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="client"]').first().click();
