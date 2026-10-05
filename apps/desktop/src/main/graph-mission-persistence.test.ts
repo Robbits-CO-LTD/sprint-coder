@@ -17,7 +17,7 @@ import { join, dirname } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { ConnectionAdmissionController } from './connection-admission';
 import Database from 'better-sqlite3';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import { SqlitePersistenceClient, type ApprovalRequestInput } from './persistence';
@@ -49,12 +49,36 @@ import {
   managedLocalTeamWorkerRuntime,
 } from './managed-local-team-worker-fixture';
 import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+import {
+  createGraphBridgeProgressTracker,
+  GRAPH_BRIDGE_PROGRESS_MAX_BYTES,
+  graphBridgeRealDateNow,
+  parseGraphBridgeProgress,
+} from './graph-bridge-progress';
 
 const roots: string[] = [];
+const caseProgress = createGraphBridgeProgressTracker(
+  process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1' &&
+    process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR
+    ? join(process.env.SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR, 'case-progress.json')
+    : null,
+);
+beforeEach(({ task }) => {
+  const names = [task.name];
+  for (let suite = task.suite; suite && suite !== task.file; suite = suite.suite)
+    names.unshift(suite.name);
+  // Match the verbose reporter's case identity, omitting only the fixed root suite title.
+  caseProgress.start(names.slice(1).join(' > '));
+});
 afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 3 })),
-  );
+  caseProgress.cleanup();
+  try {
+    await Promise.all(
+      roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 3 })),
+    );
+  } finally {
+    caseProgress.finish();
+  }
 });
 const now = '2026-09-11T00:00:00.000Z';
 // mainpc: three real guarded Git/native-image reads take 25.4s; write continuation uses four
@@ -5695,6 +5719,39 @@ else
       expect(Object.keys(failure)).toEqual([]);
     });
 
+    it('reports progress of an unmarked case when the child report is missing', () => {
+      const directory = mkdtempSync(join(tmpdir(), 'sc-graph-progress-test-'));
+      roots.push(directory);
+      const caseDigest = createHash('sha256').update('PRIVATE_UNMARKED_CASE').digest('hex');
+      writeFileSync(
+        join(directory, 'case-progress.json'),
+        JSON.stringify({
+          version: 1,
+          started: 124,
+          completed: 123,
+          caseDigest,
+          phase: 'running',
+          caseStartedAtMs: Date.now() - 100,
+          updatedAtMs: Date.now() - 100,
+          caseDurationMs: 0,
+          maxCaseDurationMs: 700,
+          elapsedMs: 179_000,
+        }),
+      );
+      const message = graphBridgeFailure(
+        { code: 143, killed: true, stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR' },
+        join(directory, 'report.json'),
+      ).message;
+      expect(message).toContain('report=missing');
+      expect(message).toContain('caseProgress=');
+      expect(message).toContain('"started":124,"completed":123');
+      expect(message).toContain(caseDigest);
+      expect(message).toContain('"phase":"running"');
+      expect(message).toMatch(/caseAgeMs=\d+/u);
+      expect(message).not.toContain('PRIVATE_');
+      expect(message).not.toContain(directory);
+    });
+
     it.each([
       ['rolls back partial lease acquisition and release failures', 'checkpoint-generation'],
       [
@@ -5945,8 +6002,23 @@ function graphBridgeFailure(error: unknown, reportFile: string): Error {
   }
   // execFile's error/cause includes raw stderr and paths. Expose only typed metadata and counts.
   return new Error(
-    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}${graphBridgeBodySummary(dirname(reportFile), progress.lastCompletedCaseDigest)}`,
+    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}${graphBridgeBodySummary(dirname(reportFile), progress.lastCompletedCaseDigest)}; ${graphBridgeProgressSummary(dirname(reportFile))}`,
   );
+}
+
+function graphBridgeProgressSummary(directory: string): string {
+  const file = join(directory, 'case-progress.json');
+  try {
+    if (!existsSync(file)) return 'caseProgress=missing';
+    if (statSync(file).size > GRAPH_BRIDGE_PROGRESS_MAX_BYTES) return 'caseProgress=oversized';
+    const snapshot = parseGraphBridgeProgress(readFileSync(file, 'utf8'));
+    if (snapshot === null) return 'caseProgress=invalid';
+    const caseAgeMs = Math.max(0, graphBridgeRealDateNow() - snapshot.caseStartedAtMs);
+    const progressAgeMs = Math.max(0, graphBridgeRealDateNow() - snapshot.updatedAtMs);
+    return `caseProgress=${JSON.stringify(snapshot)}; caseAgeMs=${caseAgeMs}; progressAgeMs=${progressAgeMs}`;
+  } catch {
+    return 'caseProgress=unreadable';
+  }
 }
 
 function graphBridgeReportSummary(reportFile: string): string {
