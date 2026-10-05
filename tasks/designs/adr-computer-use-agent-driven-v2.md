@@ -632,6 +632,21 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 4. **操作単位の承認**: native は入力前に action・対象要素・祖先・ウィンドウ面を分類する副作用のない preflight を行い、`ordinary` / `single_use_approval` / `blocked` / `takeover` の固定結果だけを Main に返す。E1/E4/E5 と分類不能な危険操作には承認を出さず拒否または takeover。E2/E3 と §3.5 の高リスク確定操作は、同じ session、action、対象、観測 revision、cancel epoch、process generation、ruleset 版へ束縛した一回限りの preflight ticket に対し、Main が trusted activation の承認を取る。既存のセッション中操作承認カードを使う場合も、承認ボタンとウィンドウの自動フォーカスを S4 で解消し、明示的な Tab またはクリックだけを承認の入口にする。bounded plan grant と `full_access_app` でこの単発承認を省略しない。native は dispatch 直前に全条件を再分類・再照合し、ticket を一度だけ消費する。承認中に Stop、focus、geometry、identity、観測、Task/Turn が変わったら入力せず ticket を破棄する。
 5. **Finder と視覚入力**: Finder の `invoke`、Enter、ダブルクリック、視覚クリック、メニュー、ドラッグが「開く」や委譲を起こす可能性を持つ。安全な対象ファイル名・拡張子・祖先チェーンと効果を取得できない入力経路は許可しない。Finder の実機で各経路の AX 対象と効果を観察し、E1/E3 の正負テストを通してから該当操作を解放する。実機で証明できない経路は S4 で拒否を維持する。
 
+### S4-4 承認 ticket の契約（2026-10-05、N2b-3）
+
+承認待ちの intent と、入力直前の execution ticket を分ける。人がカードへ到達する際にはアプリのフォーカスが変わり、承認後の `startSession` / `observe` は観測 revision と ordinary ticket 世代を進めるため、承認待ちに発行した5秒の ordinary ticketをそのまま実行権限にしない。
+
+1. **発行主体と保存先**: intent / execution tokenはnativeだけがCSPRNGで生成し、セッションのstate mutexで保護する一つのslotへ保存する。Mainはopaque handleをnative adapter内だけで保持し、Renderer・Provider・DB・監査ログへ渡さない。Mainの既存trusted activationを、approval ID / revision / challenge / decision / Task / Turnへ束縛して消費した後だけ、nativeの承認遷移を呼ぶ。nativeへの承認呼び出しはMainの専用経路だけに限定し、モデルの引数や画面上の文言を承認の根拠にしない。
+2. **native intentの束縛**: session、Task、Turn、元の承認request ID、Main action digest、native payload digest、native authority digest、cancel epoch、独立したapproval generation、元の観測revisionとticket generation、classifier / ruleset / lexicon版、効果クラスを固定する。authority digestは実行中のidentity・process generation・window・geometry・対象要素と祖先・面・効果をnativeが測定し、版付きのdomainで正規にフレーム化して作る。観測revisionやticket generationだけを除いた「同じ効果への権限」であり、現在のrevision入りcontext digestを流用しない。
+3. **承認可能なクラス**: E2、E3、§3.5の高リスク確定、supervisedの一般操作だけ。E1/E4/E5、secure、分類不能、欠けたauthorityにはintentを発行しない。精密分類が存在しないclassifier v1も対象外。`full_access_app`やplan grantで省略しない。
+4. **待機と時計**: nativeの単調時計でintentは最大60秒。Mainのカード期限も残り時間以下とし、60秒を過ぎたクリックは拒否する。逆行、期限丁度、加算overflow、世代0は拒否。拒否・Stop・close・Task/Turn/policy/identity/geometry/対象変更は破棄する。カードへの明示的なフォーカス移動はintentから入力を許可せず、次項の復帰と再検証が必要となる。
+5. **承認後の再検証**: Mainが既存のtrusted activationを消費し、同じ対象へ復帰して新しく観測する。nativeは同じpayloadとauthority、cancel epoch、approval generation、版、効果を再検証する。origin変更やdialog/祖先/効果の不一致は新しい承認を自動で作らず拒否またはtakeover。新しい観測revisionとticket generationは元より大きく、dispatch request IDは元の承認request IDと異なる。再分類が承認対象外・不完全なら入力しない。
+6. **execution ticket**: 再検証が成功した場合だけ、intentを消費して別のtokenを発行する。上のintent束縛に、新しいdispatch request ID、観測revision、ticket generation、native context digestを加えて固定する。有効期間は最大5秒と、元intentの残り時間の短い方。待機tokenと実行tokenの同一値、ordinary ticketとの交換を拒否する。dispatch直前も既存のidentity・focus・geometry・観測鮮度・epochと効果の再分類を省略しない。
+7. **一回限りと競合**: 承認・消費を試みたら成功失敗を問わず当該slotを破棄する。新しいintentは以前のintent/ticketを置き換える。遅れて完了した作業は、自分のapproval / ticket generationに一致するときだけ破棄する。replay / in-flightはticketを消費する前に処理し、missing / malformed / expired ticketからlegacy dispatchへ戻らない。
+8. **操作単位と監査**: `type`のexecution ticketはnativeが送る一つのUnicode scalarだけに対応する。複数文字入力・複数操作への包括許可にしない。Mainの元のtool call / approval IDと、新しいnative dispatch request IDを別の相関IDとして追跡する。結果は元のcallへ返すが、nativeのrequest IDをすり替えて一致した扱いにしない。token、入力本文、authority/context digestは監査へ記録しない。
+
+**N2b-3の着地点**: 上記のpending → ready → consumedを、privateなportable C++ policy型と実際にコンパイルするharnessで証明する。この段階ではMain-facing export、公開receipt、controller、UI、manifest/flag、対象適格性を変えない。現行の `single_use_approval` はN2b-2の入力しないpauseを保つ。N2b-4でtrusted activation・復帰/再preflight・失効・監査相関とnative側の必須ticketを接続し、精密classifierとS4 interlockが揃うまでV2入力を公開しない。pure型の試験は実機でのAX/CG入力・署名・人の承認の証明とは分ける。
+
 ---
 
 ## 10. オーナー決定と実装前の残件
