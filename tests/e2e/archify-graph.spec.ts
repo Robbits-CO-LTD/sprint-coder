@@ -54,7 +54,7 @@ async function assertGraphSelectionWithEvidence(
                   (node) => node.getAttribute('aria-pressed') === 'true',
                 ).length,
                 focusApiPresent: typeof focus?.set === 'function',
-                focusActive: typeof focus?.active === 'function' ? focus.active() === true : null,
+                focusActive: typeof focus?.active === 'function' ? focus.active() !== null : null,
                 justPanned:
                   document.querySelector('.diagram-container')?.getAttribute('data-just-panned') ===
                   'true',
