@@ -1,5 +1,6 @@
 #include "computer_use_native_binding.h"
 #include "computer_use_native_ticket.h"
+#include "computer_use_native_approval_ticket.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -14,6 +15,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -601,6 +603,247 @@ bool CheckNativeOrdinaryTicket() {
   return Check(secret.empty(), "ticket-scrub");
 }
 
+
+using sprint_coder::computer_use::NativeApprovalEffect;
+using sprint_coder::computer_use::NativeApprovalIntentBinding;
+using sprint_coder::computer_use::NativeApprovalExecutionBinding;
+using sprint_coder::computer_use::NativeApprovalTicketSlot;
+using sprint_coder::computer_use::kNativeApprovalWaitMaxNs;
+using sprint_coder::computer_use::kNativeApprovalExecutionTtlNs;
+
+NativeApprovalIntentBinding ApprovalIntentBinding() {
+  NativeApprovalIntentBinding binding;
+  binding.session_id = "session";
+  binding.task_id = "task";
+  binding.turn_id = "turn";
+  binding.approval_request_id = "original-request";
+  binding.action_digest = std::string(64, 'a');
+  binding.payload_digest = std::string(64, 'b');
+  binding.authority_digest = std::string(64, 'c');
+  binding.cancel_epoch = 3;
+  binding.approval_generation = 7;
+  binding.observation_revision = 10;
+  binding.ticket_generation = 12;
+  binding.classifier_version = 2;
+  binding.ruleset_version = 1;
+  binding.lexicon_version = 1;
+  binding.effect = NativeApprovalEffect::kFileManagerOpen;
+  return binding;
+}
+
+NativeApprovalExecutionBinding ApprovalExecutionBinding() {
+  return {ApprovalIntentBinding(), "fresh-request", std::string(64, 'd'), 11, 13};
+}
+
+NativeApprovalIntentBinding MutatedApprovalIntent(int field) {
+  auto binding = ApprovalIntentBinding();
+  switch (field) {
+  case 0: binding.session_id += "x"; break;
+  case 1: binding.task_id += "x"; break;
+  case 2: binding.turn_id += "x"; break;
+  case 3: binding.approval_request_id += "x"; break;
+  case 4: binding.action_digest[0] = 'f'; break;
+  case 5: binding.payload_digest[0] = 'f'; break;
+  case 6: binding.authority_digest[0] = 'f'; break;
+  case 7: binding.cancel_epoch += 1; break;
+  case 8: binding.approval_generation += 1; break;
+  case 9: binding.observation_revision += 1; break;
+  case 10: binding.ticket_generation += 1; break;
+  case 11: binding.classifier_version += 1; break;
+  case 12: binding.ruleset_version += 1; break;
+  case 13: binding.lexicon_version += 1; break;
+  default: binding.effect = NativeApprovalEffect::kDownloadOpen; break;
+  }
+  return binding;
+}
+
+bool CheckNativeApprovalTicket() {
+  constexpr std::uint64_t kNow = 100;
+  constexpr std::uint64_t kApproved = kNow + 20;
+  constexpr std::uint64_t kMax = std::numeric_limits<std::uint64_t>::max();
+  const std::string intent_token(64, 'e');
+  const std::string execution_token(64, 'f');
+  NativeApprovalTicketSlot slot;
+  static_assert(!std::is_copy_constructible_v<NativeApprovalTicketSlot>);
+  static_assert(!std::is_move_constructible_v<NativeApprovalTicketSlot>);
+  static_assert(!std::is_convertible_v<NativeApprovalExecutionBinding,
+                                       NativeOrdinaryTicketBinding>);
+  const auto begin = [&] {
+    return slot.Begin(intent_token, ApprovalIntentBinding(), kNow,
+                      kNativeApprovalWaitMaxNs);
+  };
+  const auto approve = [&] {
+    return slot.Approve(intent_token, ApprovalIntentBinding(),
+                        ApprovalExecutionBinding(), execution_token, kApproved);
+  };
+  const auto ready = [&] { return begin() && approve(); };
+  if (!Check(kNativeApprovalWaitMaxNs == 60'000'000'000ULL &&
+                 kNativeApprovalExecutionTtlNs == 5'000'000'000ULL &&
+                 !slot.occupied() && !approve() && !slot.occupied() &&
+                 !slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved),
+             "approval-empty-and-bounds")) return false;
+  if (!Check(begin() && slot.pending() && !slot.ready() &&
+                 slot.approval_generation() == 7 && slot.ticket_generation() == 0 &&
+                 approve() && slot.ready() && !slot.pending() &&
+                 slot.ticket_generation() == 13 &&
+                 slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved) &&
+                 !slot.occupied() &&
+                 !slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved),
+             "approval-begin-approve-consume-once")) return false;
+  if (!Check(begin() && !slot.Consume(intent_token, ApprovalExecutionBinding(), kNow) &&
+                 slot.pending() && approve() &&
+                 !slot.Consume(intent_token, ApprovalExecutionBinding(), kApproved) &&
+                 !slot.occupied(), "approval-intent-is-not-execution")) return false;
+  if (!Check(begin() && !slot.Approve(intent_token, ApprovalIntentBinding(),
+                                    ApprovalExecutionBinding(), intent_token, kApproved) &&
+                 !slot.occupied(), "approval-token-rotation-required")) return false;
+  if (!Check(begin() && !slot.Approve(execution_token, ApprovalIntentBinding(),
+                                    ApprovalExecutionBinding(), execution_token, kApproved) &&
+                 !slot.occupied(), "approval-wrong-token-burns")) return false;
+
+  if (!Check(ready() && !approve() && slot.ready() &&
+                 slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved),
+             "approval-duplicate-completion-preserves-ready")) return false;
+
+  // Every original authority field and fresh execution field is independently bound.
+  for (int field = 0; field < 15; ++field) {
+    if (!Check(begin() &&
+                   !slot.Approve(intent_token, MutatedApprovalIntent(field),
+                                 ApprovalExecutionBinding(), execution_token, kApproved) &&
+                   slot.occupied() == (field == 8), "approval-intent-binding-changed")) return false;
+    auto fresh = ApprovalExecutionBinding();
+    fresh.intent = MutatedApprovalIntent(field);
+    if (!Check(begin() && !slot.Approve(intent_token, ApprovalIntentBinding(), fresh,
+                                      execution_token, kApproved) && !slot.occupied(),
+               "approval-fresh-authority-changed")) return false;
+    if (!Check(ready() && !slot.Consume(execution_token, fresh, kApproved) &&
+                   slot.occupied() == (field == 8), "approval-consume-authority-changed")) return false;
+  }
+  for (int field = 0; field < 4; ++field) {
+    auto changed = ApprovalExecutionBinding();
+    switch (field) {
+    case 0: changed.request_id += "x"; break;
+    case 1: changed.context_digest[0] = 'a'; break;
+    case 2: changed.observation_revision += 1; break;
+    default: changed.ticket_generation += 1; break;
+    }
+    if (!Check(ready() && !slot.Consume(execution_token, changed, kApproved) &&
+                   slot.occupied() == (field == 3), "approval-execution-binding-changed")) return false;
+  }
+  for (int field = 0; field < 6; ++field) {
+    auto stale = ApprovalExecutionBinding();
+    switch (field) {
+    case 0: stale.request_id = stale.intent.approval_request_id; break;
+    case 1: stale.observation_revision = stale.intent.observation_revision; break;
+    case 2: stale.ticket_generation = stale.intent.ticket_generation; break;
+    case 3: stale.observation_revision = 0; break;
+    case 4: stale.ticket_generation = 0; break;
+    default: stale.context_digest = "not-a-native-digest"; break;
+    }
+    if (!Check(begin() && !slot.Approve(intent_token, ApprovalIntentBinding(), stale,
+                                      execution_token, kApproved) && !slot.occupied(),
+               "approval-requires-fresh-observation-and-request")) return false;
+  }
+
+  // Expires at the boundary; a late approval never extends the waiting deadline.
+  if (!Check(begin() && !slot.Approve(intent_token, ApprovalIntentBinding(),
+                                    ApprovalExecutionBinding(), execution_token, kNow - 1) &&
+                 !slot.occupied() && begin() &&
+                 !slot.Approve(intent_token, ApprovalIntentBinding(), ApprovalExecutionBinding(),
+                               execution_token, kNow + kNativeApprovalWaitMaxNs) &&
+                 !slot.occupied(), "approval-wait-clock-and-expiry")) return false;
+  if (!Check(ready() && slot.Consume(execution_token, ApprovalExecutionBinding(),
+                                    kApproved + kNativeApprovalExecutionTtlNs - 1) &&
+                 ready() && !slot.Consume(execution_token, ApprovalExecutionBinding(),
+                                         kApproved + kNativeApprovalExecutionTtlNs) &&
+                 !slot.occupied() && ready() &&
+                 !slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved - 1),
+             "approval-execution-clock-and-expiry")) return false;
+  if (!Check(slot.Begin(intent_token, ApprovalIntentBinding(), kNow, 30) && approve() &&
+                 !slot.Consume(execution_token, ApprovalExecutionBinding(), kNow + 30),
+             "approval-wait-deadline-also-bounds-ready")) return false;
+  if (!Check(!slot.Begin(intent_token, ApprovalIntentBinding(), kNow, 0) &&
+                 !slot.Begin(intent_token, ApprovalIntentBinding(), kNow,
+                             kNativeApprovalWaitMaxNs + 1) &&
+                 !slot.Begin(intent_token, ApprovalIntentBinding(), kMax - 9, 10) &&
+                 !slot.occupied(), "approval-wait-overflow-and-ttl")) return false;
+  if (!Check(slot.Begin(intent_token, ApprovalIntentBinding(), kMax - 9, 9) &&
+                 !slot.Approve(intent_token, ApprovalIntentBinding(), ApprovalExecutionBinding(),
+                               execution_token, kMax - 8) && !slot.occupied(),
+             "approval-ready-expiry-overflow")) return false;
+
+  // Unknown/legacy classification, missing bindings and zero generation never grant authority.
+  for (int field = 0; field < 15; ++field) {
+    auto invalid = ApprovalIntentBinding();
+    switch (field) {
+    case 0: invalid.session_id.clear(); break;
+    case 1: invalid.task_id.clear(); break;
+    case 2: invalid.turn_id.clear(); break;
+    case 3: invalid.approval_request_id.clear(); break;
+    case 4: invalid.action_digest.clear(); break;
+    case 5: invalid.payload_digest.clear(); break;
+    case 6: invalid.authority_digest.clear(); break;
+    case 7: invalid.approval_generation = 0; break;
+    case 8: invalid.observation_revision = 0; break;
+    case 9: invalid.ticket_generation = 0; break;
+    case 10: invalid.classifier_version = 1; break;
+    case 11: invalid.ruleset_version = 0; break;
+    case 12: invalid.lexicon_version = 0; break;
+    case 13: invalid.effect = NativeApprovalEffect::kInvalid; break;
+    default: invalid.task_id = std::string(513, 'x'); break;
+    }
+    if (!Check(ready() && !slot.Begin(intent_token, invalid, kNow,
+                                    kNativeApprovalWaitMaxNs) && !slot.occupied(),
+               "approval-invalid-begin-clears-previous")) return false;
+  }
+  for (const auto effect : {NativeApprovalEffect::kDownloadOpen,
+                           NativeApprovalEffect::kFileManagerOpen,
+                           NativeApprovalEffect::kHighImpactConfirmation,
+                           NativeApprovalEffect::kSupervisedAction}) {
+    auto binding = ApprovalIntentBinding();
+    binding.effect = effect;
+    auto fresh = ApprovalExecutionBinding();
+    fresh.intent = binding;
+    if (!Check(slot.Begin(intent_token, binding, kNow, kNativeApprovalWaitMaxNs) &&
+                   slot.Approve(intent_token, binding, fresh, execution_token, kApproved) &&
+                   slot.Consume(execution_token, fresh, kApproved),
+               "approval-supported-effect")) return false;
+  }
+  auto unknown = ApprovalIntentBinding();
+  unknown.effect = static_cast<NativeApprovalEffect>(255);
+  if (!Check(!slot.Begin(intent_token, unknown, kNow, kNativeApprovalWaitMaxNs),
+             "approval-unknown-effect-denied")) return false;
+
+  // Late owners cannot invalidate a replacement. Explicit Stop/close burns every stage.
+  if (!Check(begin() && !slot.InvalidateIfApprovalGeneration(0) &&
+                 !slot.InvalidateIfApprovalGeneration(6) && slot.pending() &&
+                 slot.InvalidateIfApprovalGeneration(7) && !slot.occupied() && ready() &&
+                 !slot.InvalidateIfTicketGeneration(12) && slot.ready() &&
+                 slot.InvalidateIfTicketGeneration(13) && !slot.occupied(),
+             "approval-owner-scoped-invalidation")) return false;
+  auto replacement = ApprovalIntentBinding();
+  replacement.approval_generation = 8;
+  if (!Check(begin() && slot.Begin(execution_token, replacement, kNow,
+                                  kNativeApprovalWaitMaxNs) &&
+                 !slot.InvalidateIfApprovalGeneration(7) && slot.pending() &&
+                 !slot.Approve(intent_token, ApprovalIntentBinding(),
+                               ApprovalExecutionBinding(), execution_token, kApproved) &&
+                 slot.pending(),
+             "approval-old-owner-cannot-clear-new-intent")) return false;
+  slot.Invalidate();
+  if (!Check(!slot.occupied() && !approve() && ready(), "approval-stop-clears-intent")) return false;
+  slot.Invalidate();
+  if (!Check(!slot.Consume(execution_token, ApprovalExecutionBinding(), kApproved),
+             "approval-close-clears-ready")) return false;
+  NativeOrdinaryTicketSlot ordinary;
+  if (!Check(ordinary.Issue(std::string(64, '0'), TicketBinding(), kNow,
+                           kNativeOrdinaryTicketTtlNs) && ready() &&
+                 !slot.Consume(std::string(64, '0'), ApprovalExecutionBinding(), kApproved) &&
+                 !ordinary.Consume(execution_token, TicketBinding(), kApproved),
+             "approval-ordinary-tokens-cannot-be-exchanged")) return false;
+  return true;
+}
+
 FrameHeader ValidHeader() {
   FrameHeader header{};
   header.message_type = static_cast<std::uint16_t>(MessageType::kObserveResult);
@@ -625,6 +868,8 @@ int main() {
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;
   std::cout << "Computer Use native binding canonical framing: PASS\n";
+  if (!CheckNativeApprovalTicket()) return 1;
+  std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
   std::cout << "Computer Use native ordinary ticket slot: PASS\n";
   using sprint_coder::computer_use::IsTypeTextScalar;
