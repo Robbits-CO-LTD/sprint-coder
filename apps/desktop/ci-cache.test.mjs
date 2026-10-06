@@ -288,6 +288,7 @@ describe('full CI partition contract', () => {
     expect(archify.strategy.matrix.shard).toEqual([1, 2]);
     expect(archify.strategy.matrix.os).toEqual(['windows-2022']);
     const macPackage = workflow.jobs['package-macos'];
+    expect(macPackage.needs).toBeUndefined();
     const packageIndex = macPackage.steps.findIndex(
       (step) => step.name === 'Production package smoke',
     );

@@ -101,3 +101,8 @@ flips the inspector fuse only in its test copy. Source/provenance/compile flags
 match; Mac E2E failure remains a package job failure in the required OS gate.
 Windows keeps2 packaged case shards. No cached or old package substitutes for
 this same-run, freshly built artifact.
+
+The long Mac package/E2E job starts immediately instead of depending on the
+constant full-matrix classifier. Every PR already requires it unconditionally;
+its result remains required by the Mac/final aggregate. This avoids allowing
+shorter classified jobs to consume all Mac slots before the longest job starts.

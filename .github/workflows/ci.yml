@@ -259,7 +259,6 @@ jobs:
   package-macos:
     # Every CI invocation proves the production Forge boundary and its pinned Managed Local bundle.
     name: macOS production package smoke
-    needs: classify
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
