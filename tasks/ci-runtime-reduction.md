@@ -93,3 +93,11 @@ unchanged Cargo to the Windows native gate, pairs Mac groups0/1 and2/3 per VM
 Archify into2 one-worker jobs perOS. Actual Playwright listing verified all8
 cases form disjoint4/4 shards with fullyParallel enabled; per-case fixtures are
 isolated. No case, deadline or assertion is removed.
+
+Remaining duplicate Mac packaging is eliminated: the same production Forge
+package already required by package-macos is passed to existing Playwright
+prebuilt-executable handling for all8 Archify cases. The harness copies it and
+flips the inspector fuse only in its test copy. Source/provenance/compile flags
+match; Mac E2E failure remains a package job failure in the required OS gate.
+Windows keeps2 packaged case shards. No cached or old package substitutes for
+this same-run, freshly built artifact.

@@ -314,6 +314,26 @@ jobs:
         env:
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
 
+      - name: Exercise bundled Archify using the production package
+        shell: bash
+        run: |
+          set -euo pipefail
+          executables=(apps/desktop/out/*/*.app/Contents/MacOS/*)
+          test "${#executables[@]}" -eq 1
+          test -x "${executables[0]}"
+          SPRINT_CODER_E2E_EXECUTABLE_PATH="${PWD}/${executables[0]}" \
+            npx playwright test tests/e2e/archify-graph.spec.ts --workers=1
+        env:
+          SPRINT_CODER_E2E_MODE: packaged
+          SPRINT_CODER_E2E_HIDDEN: '0'
+          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
+      - name: Upload macOS packaged Archify evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: archify-packaged-macos
+          path: test-results
+          if-no-files-found: ignore
       - name: Managed Local transport smoke
         working-directory: apps/desktop
         run: npx vitest run src/main/managed-local-runtime-supervisor.test.ts
@@ -896,7 +916,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-2022]
+        os: [windows-2022]
         shard: [1, 2]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

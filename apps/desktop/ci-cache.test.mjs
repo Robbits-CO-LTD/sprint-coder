@@ -286,6 +286,23 @@ describe('full CI partition contract', () => {
     expect(paired.run).toBe(runBridge.run);
     const archify = workflow.jobs['archify-packaged'];
     expect(archify.strategy.matrix.shard).toEqual([1, 2]);
+    expect(archify.strategy.matrix.os).toEqual(['windows-2022']);
+    const macPackage = workflow.jobs['package-macos'];
+    const packageIndex = macPackage.steps.findIndex(
+      (step) => step.name === 'Production package smoke',
+    );
+    const exerciseIndex = macPackage.steps.findIndex(
+      (step) => step.name === 'Exercise bundled Archify using the production package',
+    );
+    expect(packageIndex).toBeGreaterThanOrEqual(0);
+    expect(exerciseIndex).toBeGreaterThan(packageIndex);
+    const exerciseMac = macPackage.steps[exerciseIndex];
+    expect(exerciseMac.env.SPRINT_CODER_E2E_MODE).toBe('packaged');
+    expect(exerciseMac.run).toContain('SPRINT_CODER_E2E_EXECUTABLE_PATH=');
+    expect(exerciseMac.run).toContain('--workers=1');
+    expect(exerciseMac.run).not.toContain('--shard=');
+    expect(exerciseMac['continue-on-error']).toBeUndefined();
+
     const runArchify = archify.steps.find((step) =>
       step.name?.startsWith('Exercise the real bundled'),
     );
