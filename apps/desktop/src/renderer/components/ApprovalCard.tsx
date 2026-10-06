@@ -76,8 +76,7 @@ export function ApprovalCard({
       {userInput === null && perCall === null ? <p>{approval.reason}</p> : null}
       {approval.capability === 'shell.execute' ? (
         <p className="approval-card__warning" role="note">
-          OS
-          sandboxなしで、あなたと同じ権限で実行されます。Workspace外のファイルやネットワークにもアクセスできます。
+          コマンドの実行または実行中プロセスへの入力を許可します。対象と実行内容を確認してください。
         </p>
       ) : null}
       {stdinNote === null ? null : (

@@ -458,6 +458,17 @@ function ModelGroup() {
       {selectedModel !== undefined && selectedModel.description !== '' && (
         <p className="settings-hint">{selectedModel.description}</p>
       )}
+      {runtime.kind === 'grok' && runtime.grokCli !== null && (
+        <p
+          className="settings-hint"
+          data-testid="settings-grok-cli-identity"
+          style={{ overflowWrap: 'anywhere' }}
+        >
+          Grok CLI: {runtime.grokCli.version}
+          <br />
+          実行パス: {runtime.grokCli.executable}
+        </p>
+      )}
       <CliCompatibilityNotice />
     </div>
   );
