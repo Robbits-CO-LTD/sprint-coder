@@ -19,8 +19,16 @@ runs:
       if: steps.sandbox.outputs.cache-hit == 'true'
       shell: bash
       run: node ci-cache.mjs check-sandbox >> "$GITHUB_OUTPUT"
-    - name: Build sandbox helper on cache miss or invalid output
-      if: steps.sandbox.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true'
+    - name: Build sandbox helper on Windows cache miss or invalid output
+      if: runner.os == 'Windows' && (steps.sandbox.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true')
+      shell: pwsh
+      run: |
+        node ci-cache.mjs reset-sandbox
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        npm run build:sandbox-runner
+        exit $LASTEXITCODE
+    - name: Build sandbox helper on Unix cache miss or invalid output
+      if: runner.os != 'Windows' && (steps.sandbox.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true')
       shell: bash
       run: |
         node ci-cache.mjs reset-sandbox

@@ -48,12 +48,16 @@ afterEach(() =>
   cleanup.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })),
 );
 
-function condition(expression, outputs) {
+function condition(expression, outputs, os = 'Windows') {
   const substituted = expression.replace(
     /steps\.([a-z-]+)\.outputs\.([a-z-]+)/gu,
     (_, step, output) => JSON.stringify(outputs[step]?.[output] ?? ''),
   );
-  return runInNewContext(substituted, {}, { timeout: 100 });
+  return runInNewContext(
+    substituted.replace(/runner\.os/gu, JSON.stringify(os)),
+    {},
+    { timeout: 100 },
+  );
 }
 
 function dependencies(root) {
@@ -95,9 +99,13 @@ describe('CI cache reuse and fallback', () => {
     const install = depsAction.runs.steps.find((step) =>
       step.name.startsWith('Install dependencies on'),
     );
-    const build = sandboxAction.runs.steps.find((step) =>
+    const builds = sandboxAction.runs.steps.filter((step) =>
       step.name.startsWith('Build sandbox helper on'),
     );
+    expect(builds).toHaveLength(2);
+    const windows = builds.find((step) => step.shell === 'pwsh');
+    expect(windows.run).toContain('if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }');
+    expect(windows.run).toContain('exit $LASTEXITCODE');
     for (const [hit, valid, expected] of [
       ['', '', true],
       ['false', 'true', true],
@@ -107,9 +115,13 @@ describe('CI cache reuse and fallback', () => {
       expect(condition(install.if, { dependencies: { 'cache-hit': hit }, links: { valid } })).toBe(
         expected,
       );
-      expect(condition(build.if, { sandbox: { 'cache-hit': hit }, validation: { valid } })).toBe(
-        expected,
-      );
+      for (const os of ['Windows', 'Linux', 'macOS']) {
+        const selected = builds.filter((build) =>
+          condition(build.if, { sandbox: { 'cache-hit': hit }, validation: { valid } }, os),
+        );
+        expect(selected).toHaveLength(expected ? 1 : 0);
+        if (expected) expect(selected[0].shell).toBe(os === 'Windows' ? 'pwsh' : 'bash');
+      }
     }
     const restore = sandboxAction.runs.steps.find((step) => step.id === 'sandbox');
     expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
