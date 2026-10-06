@@ -1985,6 +1985,45 @@ describe('rejectWindowsSandboxedNodeTestIsolation node version instruction', () 
     }
   });
 
+  // Issue #734: a release newer than the last one known to ship libuv < 1.53 may carry the
+  // upstream pipe fix, so the in-sandbox guard (which reads the real libuv) decides instead.
+  it('keeps rejecting every release known to ship libuv older than 1.53', () => {
+    vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const nodeVersion of [
+      { major: 22, minor: 23, build: 3 },
+      { major: 24, minor: 21, build: 0 },
+      { major: 26, minor: 10, build: 0 },
+      { major: 23, minor: 11, build: 1 },
+      { major: 25, minor: 9, build: 0 },
+    ]) {
+      expect(() =>
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], {
+          ...sandboxedWindows,
+          nodeVersion,
+        }),
+      ).toThrow(CommandRunnerError);
+    }
+  });
+
+  it('leaves releases newer than the known old-libuv ones to the in-sandbox guard', () => {
+    const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
+    for (const nodeVersion of [
+      { major: 22, minor: 23, build: 4 },
+      { major: 22, minor: 24, build: 0 },
+      { major: 24, minor: 21, build: 1 },
+      { major: 26, minor: 11, build: 0 },
+      { major: 27, minor: 0, build: 0 },
+    ]) {
+      expect(() =>
+        rejectWindowsSandboxedNodeTestIsolation(nodeExe, ['--test'], {
+          ...sandboxedWindows,
+          nodeVersion,
+        }),
+      ).not.toThrow();
+    }
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('never reads a version or logs when the check does not reject the command', () => {
     const warn = vi.spyOn(secureLogger, 'warn').mockImplementation(() => undefined);
     expect(
