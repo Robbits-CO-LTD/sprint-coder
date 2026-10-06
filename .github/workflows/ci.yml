@@ -25,37 +25,10 @@ jobs:
     outputs:
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          # The PR classifier compares the real base and head commits. A complete checkout avoids
-          # silently selecting the fast lane when a long-lived PR's base is outside a shallow clone.
-          fetch-depth: 0
-
-      - name: Select fast or full platform coverage
+      - name: Require full platform coverage
         id: scope
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-
-          full_matrix=true
-          if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
-            full_matrix=false
-            changed_files="$(git diff --no-renames --name-only "${BASE_SHA}" "${HEAD_SHA}")"
-            printf '%s\n' "${changed_files}"
-
-            # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(better-sqlite3|native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|sandbox-runner/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
-              full_matrix=true
-            fi
-          fi
-
-          echo "full_matrix=${full_matrix}" >> "${GITHUB_OUTPUT}"
-          echo "Selected full matrix: ${full_matrix}"
+        run: echo 'full_matrix=true' >> "$GITHUB_OUTPUT"
 
   quality:
     name: quality (${{ matrix.label }})
@@ -81,10 +54,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Run ${{ matrix.label }}
         run: npm run ${{ matrix.command }}
@@ -116,10 +90,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
@@ -146,10 +121,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
@@ -237,22 +213,17 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -297,26 +268,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
-      # forge.config.ts lists the runner in `extraResource` unconditionally, so packaging cannot
-      # succeed without it. Every other job that packages or launches the app already builds it;
-      # this one was missed, which made the fast-lane package smoke fail on any renderer-only PR —
-      # exactly the PRs it is the only packaging coverage for.
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
+      # Forge always packages the runner, so prepare and verify it before packaging.
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -369,19 +332,14 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
-
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        uses: ./.github/actions/install-deps
         with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
@@ -429,13 +387,40 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, windows-2022]
-        shard: [1/3, 2/3, 3/3]
         include:
           - os: ubuntu-latest
             label: Linux
+            shard: 1/3
+          - os: ubuntu-latest
+            label: Linux
+            shard: 2/3
+          - os: ubuntu-latest
+            label: Linux
+            shard: 3/3
           - os: windows-2022
             label: Windows
+            shard: 1/8
+          - os: windows-2022
+            label: Windows
+            shard: 2/8
+          - os: windows-2022
+            label: Windows
+            shard: 3/8
+          - os: windows-2022
+            label: Windows
+            shard: 4/8
+          - os: windows-2022
+            label: Windows
+            shard: 5/8
+          - os: windows-2022
+            label: Windows
+            shard: 6/8
+          - os: windows-2022
+            label: Windows
+            shard: 7/8
+          - os: windows-2022
+            label: Windows
+            shard: 8/8
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -444,10 +429,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
@@ -456,17 +442,11 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Test Windows sandbox working directory and access boundary
-        if: runner.os == 'Windows' && matrix.shard == '1/3'
+        if: runner.os == 'Windows' && matrix.shard == '8/8'
         run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
 
       - name: Restore better-sqlite3 Electron ABI binary
@@ -528,21 +508,16 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Install Linux sandbox dependency
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -587,23 +562,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Initialize MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -644,12 +614,16 @@ jobs:
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
 
   e2e-windows:
-    name: Windows major E2E
+    name: Windows major E2E (${{ matrix.group }})
     needs: classify
     runs-on: windows-2022
     timeout-minutes: 40
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, archify]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -657,23 +631,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Initialize MSVC developer environment
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -705,11 +674,12 @@ jobs:
           }
         env:
           SPRINT_CODER_E2E_MODE: dev
+          SPRINT_CODER_WINDOWS_E2E_GROUP: ${{ matrix.group }}
       - name: Upload Windows E2E evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-e2e-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-results
             playwright-report
@@ -778,8 +748,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: npm ci
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Initialize MSVC for packaged graph workers
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
@@ -788,14 +760,8 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
-      - name: Cache managed sandbox Rust build
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/sandbox-runner/target
-          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
-
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache

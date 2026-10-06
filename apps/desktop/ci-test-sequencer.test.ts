@@ -35,7 +35,7 @@ describe('Windows CI test partition', () => {
       ...Array.from({ length: 400 }, (_, index) => specification(`future-${index}.test.ts`)),
     ];
     const original = [...files];
-    for (const count of [1, 3, 7]) {
+    for (const count of [1, 3, 7, 8]) {
       const groups = partitionWindowsTests(files, root, count);
       expect(groups).toHaveLength(count);
       expect(groups.flat()).toHaveLength(files.length);

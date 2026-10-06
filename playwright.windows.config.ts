@@ -16,8 +16,17 @@ export const WINDOWS_MAJOR_E2E_SPECS = [
   '**/archify-graph.spec.ts',
 ] as const;
 
+export function windowsMajorE2ESpecs(group: string | undefined): string[] {
+  if (group === undefined) return [...WINDOWS_MAJOR_E2E_SPECS];
+  if (group === 'core')
+    return WINDOWS_MAJOR_E2E_SPECS.filter((spec) => !spec.endsWith('/archify-graph.spec.ts'));
+  if (group === 'archify')
+    return WINDOWS_MAJOR_E2E_SPECS.filter((spec) => spec.endsWith('/archify-graph.spec.ts'));
+  throw new Error('Unknown Windows major E2E group');
+}
+
 export default defineConfig(createPlaywrightConfig(), {
-  testMatch: [...WINDOWS_MAJOR_E2E_SPECS],
+  testMatch: windowsMajorE2ESpecs(process.env.SPRINT_CODER_WINDOWS_E2E_GROUP),
   workers: 1,
   retries: 0,
   outputDir: 'test-results/windows-major-e2e',

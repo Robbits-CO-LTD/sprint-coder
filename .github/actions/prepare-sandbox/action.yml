@@ -1,0 +1,30 @@
+name: Prepare verified CI sandbox helper
+description: Reuse the exact compiled helper and rebuild invalid or unavailable cached output.
+runs:
+  using: composite
+  steps:
+    - name: Identify Rust compiler
+      id: compiler
+      shell: bash
+      run: node ci-cache.mjs compiler >> "$GITHUB_OUTPUT"
+    - name: Restore compiled sandbox helper
+      id: sandbox
+      if: steps.compiler.outputs.cacheable == 'true'
+      uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: apps/desktop/sandbox-runner/build/Release
+        key: sandbox-helper-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.compiler.outputs.digest }}-${{ hashFiles('package.json', 'apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/resources/sandbox-node-pipe-guard.cjs', 'build-sandbox-runner.mjs', 'ci-cache.mjs', '.github/workflows/ci.yml', '.github/actions/prepare-sandbox/action.yml', '**/.cargo/config*', '**/rust-toolchain*') }}
+    - name: Validate restored sandbox output
+      id: validation
+      if: steps.sandbox.outputs.cache-hit == 'true'
+      shell: bash
+      run: node ci-cache.mjs check-sandbox >> "$GITHUB_OUTPUT"
+    - name: Build sandbox helper on cache miss or invalid output
+      if: steps.sandbox.outputs.cache-hit != 'true' || steps.validation.outputs.valid != 'true'
+      shell: bash
+      run: |
+        node ci-cache.mjs reset-sandbox
+        npm run build:sandbox-runner
+    - name: Verify sandbox digest and executable protocol
+      shell: bash
+      run: node ci-cache.mjs assert-sandbox
