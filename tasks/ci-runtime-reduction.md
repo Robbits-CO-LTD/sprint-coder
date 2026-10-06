@@ -35,7 +35,7 @@ times and total elapsed/job time at the same GitHub observation points.
 
 ## Local verification
 
-- Partition and existing workflow/Forge boundary tests: 46 PASS, 2 existing
+- Partition and existing workflow/Forge boundary tests: 47 PASS, 2 existing
   Windows-only SKIP on macOS.
 - Actual Vitest API collected 389 specifications; the configured sequencer
   selected 127 / 130 / 132 files, with the exact union and no duplicate object,
@@ -46,3 +46,13 @@ times and total elapsed/job time at the same GitHub observation points.
 - Same-baseline timing simulation (371 files with timing lines) predicts
   test-only load of 372 / 356 / 373 seconds instead of the former uneven
   allocation. This is an estimate; actual PR CI measures the result.
+
+## Direct Electron config import
+
+The first PR CI caught a real configuration regression: the Coordinator bridge
+imports vitest.config.ts directly from a temporary .mjs, so native ESM cannot
+resolve an extensionless relative sequencer import. Reproduced with the bundled
+Electron before repair (ERR_MODULE_NOT_FOUND). Keep the partition/sequencer in
+vitest.config.ts so its runtime imports remain Node-resolvable, and exercise the
+raw import with real Electron in a focused regression test. No bridge assertion
+or timeout is changed.

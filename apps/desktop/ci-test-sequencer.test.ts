@@ -1,6 +1,9 @@
+import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { partitionWindowsTests } from './ci-test-sequencer';
+import { partitionWindowsTests } from './vitest.config';
+import { electronTestExecutablePath } from './src/main/electron-test-runtime';
 
 const root = resolve('/ci/desktop');
 const specification = (path: string, pool = 'forks') => ({
@@ -9,6 +12,21 @@ const specification = (path: string, pool = 'forks') => ({
 });
 
 describe('Windows CI test partition', () => {
+  it('can be imported directly by the Electron bridge without the Vite config bundler', () => {
+    const configUrl = pathToFileURL(resolve(__dirname, 'vitest.config.ts')).href;
+    expect(() =>
+      execFileSync(
+        electronTestExecutablePath(),
+        ['--input-type=module', '-e', `await import(${JSON.stringify(configUrl)})`],
+        {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          timeout: 20_000,
+          stdio: 'pipe',
+        },
+      ),
+    ).not.toThrow();
+  });
+
   it('preserves every specification exactly once, including new files and multiple pools', () => {
     const files = [
       specification('src/main/team-coordinator.test.ts'),
