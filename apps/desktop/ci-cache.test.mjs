@@ -322,6 +322,49 @@ describe('full CI partition contract', () => {
     expect(exerciseMac.run).toContain('--workers=1');
     expect(exerciseMac.run).not.toContain('--shard=');
     expect(exerciseMac['continue-on-error']).toBeUndefined();
+    expect(macPackage.steps.some((step) => step.env?.SPRINT_CODER_MANAGED_LOCAL_LIVE)).toBe(false);
+    const nativeGate = workflow.jobs['computer-use-native-gate'];
+    const bundleIndex = nativeGate.steps.findIndex(
+      (step) => step.name === 'Build pinned Managed Local smoke bundle',
+    );
+    const smokeIndex = nativeGate.steps.findIndex(
+      (step) => step.name === 'Managed Local transport smoke',
+    );
+    expect(bundleIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeIndex).toBeGreaterThan(bundleIndex);
+    expect(nativeGate.steps[bundleIndex].if).toBe("runner.os == 'macOS'");
+    expect(nativeGate.steps[bundleIndex].run).toBe('npm run build:managed-local-sidecar');
+    expect(nativeGate.steps[bundleIndex].env.SPRINT_CODER_ALLOW_ADHOC_CODESIGN).toBe('1');
+    const smoke = nativeGate.steps[smokeIndex];
+    expect(smoke.if).toBe("runner.os == 'macOS'");
+    expect(smoke['working-directory']).toBe('apps/desktop');
+    expect(smoke.run).toBe('npx vitest run src/main/managed-local-runtime-supervisor.test.ts');
+    expect(smoke.env.SPRINT_CODER_MANAGED_LOCAL_LIVE).toBe('1');
+    expect(smoke['continue-on-error']).toBeUndefined();
+    const required = workflow.jobs.required;
+    expect(required.needs).toContain('computer-use-native-gate');
+    const macResult = workflow.jobs['macos-result'];
+    expect(macResult.needs).toContain('computer-use-native-gate');
+    for (const status of ['success', 'failure', 'cancelled', 'skipped', '']) {
+      for (const verification of [required.steps[0], macResult.steps[0]]) {
+        const invocation = spawnSync('bash', ['-e', '-c', verification.run], {
+          env: {
+            ...process.env,
+            QUALITY_RESULT: 'success',
+            MACOS_RESULT: 'success',
+            WINDOWS_RESULT: 'success',
+            COMPUTER_USE_NATIVE_RESULT: status,
+            ARCHIFY_RESULT: 'success',
+            PACKAGE_TEST_RESULT: 'success',
+            MACOS_TEST_RESULT: 'success',
+            MACOS_PACKAGE_RESULT: 'success',
+            ELECTRON_BRIDGE_RESULT: 'success',
+          },
+          encoding: 'utf8',
+        });
+        expect(invocation.status === 0).toBe(status === 'success');
+      }
+    }
 
     const runArchify = archify.steps.find((step) =>
       step.name?.startsWith('Exercise the real bundled'),
@@ -366,6 +409,7 @@ describe('full CI partition contract', () => {
             LINUX_PACKAGE_RESULT: 'success',
             WINDOWS_PACKAGE_RESULT: 'success',
             ELECTRON_BRIDGE_RESULT: status,
+            COMPUTER_USE_NATIVE_RESULT: 'success',
           },
           encoding: 'utf8',
         });
