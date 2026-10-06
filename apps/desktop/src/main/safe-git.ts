@@ -44,7 +44,7 @@ export function safeGitEnvironment(
   if (source['PATH'] !== undefined) env['PATH'] = source['PATH'];
   if (source['HOME'] !== undefined) env['HOME'] = source['HOME'];
   if (source['SYSTEMROOT'] !== undefined) env['SYSTEMROOT'] = source['SYSTEMROOT'];
-  const nullConfig = platform === 'win32' ? 'NUL' : '/dev/null';
+  const nullConfig = platform === 'win32' ? 'nul' : '/dev/null';
   env['GIT_CONFIG_GLOBAL'] = nullConfig;
   env['GIT_CONFIG_SYSTEM'] = nullConfig;
   env['GIT_TERMINAL_PROMPT'] = '0';
