@@ -59,8 +59,8 @@ describe('safe Git boundary', () => {
     expect(
       safeGitEnvironment({ Path: 'C:\\Git', SYSTEMROOT: 'C:\\Windows' }, 'win32'),
     ).toMatchObject({
-      GIT_CONFIG_GLOBAL: 'NUL',
-      GIT_CONFIG_SYSTEM: 'NUL',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_SYSTEM: '/dev/null',
       SYSTEMROOT: 'C:\\Windows',
     });
   });

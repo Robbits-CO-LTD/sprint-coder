@@ -106,3 +106,13 @@ The long Mac package/E2E job starts immediately instead of depending on the
 constant full-matrix classifier. Every PR already requires it unconditionally;
 its result remains required by the Mac/final aggregate. This avoids allowing
 shorter classified jobs to consume all Mac slots before the longest job starts.
+
+Git image drift explained the apparent Windows flakes: failed jobs reported
+Git2.56.0.windows.1 with fatalunableaccessNUL InvalidArgument; the same-head
+isolated passing retry used2.55.0.windows.5. Existing safeGitEnvironment assigned
+NUL as the system/globalconfig replacement. Switch both to Git's documented
+/dev/null nullconfig path; keep hook/filter/include/environment isolation.
+Source+logs+version contrast confirm the failure boundary. Existing real-Git
+canary verifies executable localconfig traps remain blocked. Windows2.56 CI
+PASS is required before treating this compatibility fix as verified.
+Source: https://git-scm.com/docs/git#Documentation/git.txt-GIT_CONFIG_GLOBAL
