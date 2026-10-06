@@ -126,6 +126,10 @@ describe('CI cache reuse and fallback', () => {
     const restore = sandboxAction.runs.steps.find((step) => step.id === 'sandbox');
     expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
     expect(condition(restore.if, { compiler: { cacheable: 'true' } })).toBe(true);
+    expect(restore.with.key).not.toContain("'**/.cargo/");
+    expect(restore.with.key).not.toContain("'**/rust-toolchain");
+    expect(restore.with.key).toContain("'.cargo/config*'");
+    expect(restore.with.key).toContain("'apps/desktop/sandbox-runner/.cargo/config*'");
     expect(sandboxAction.runs.steps.at(-1).if).toBeUndefined();
   });
 

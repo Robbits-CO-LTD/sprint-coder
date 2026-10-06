@@ -122,3 +122,9 @@ VM (10-second metadata budget). This only controls reuse: probe failure now
 emitscacheable=false and proceeds through the original locked build and final
 executable checks. A missing-compiler fixture verifies this fallback; validation
 failure remains fatal. No test timeout or assertion changes.
+
+ReviewBOT found recursive Rust config/toolchain globs traversed node_modules
+after dependency installation. Cache key discovery now searches only the
+repository/crate configuration locations, retaining the actual build inputs
+without enumerating the installed tree. Focused contract test prevents readding
+workspace-wide recursive config/toolchain patterns.
