@@ -522,6 +522,25 @@ const NODE_TEST_ISOLATION_OWN_SCRIPT_NOTE =
   'If --test is an argument to your own script, the same placement also passes, and Node ' +
   'ignores the flag without --test.';
 
+// The newest release of each line known to bundle libuv older than 1.53 (checked against
+// nodejs.org/dist/index.json on 2026-10-06). libuv 1.53.0 fixes the AppContainer pipe name
+// (libuv/libuv#5181). A newer release is not rejected here: the in-sandbox pipe guard reads its
+// real libuv and still fails fast when the fix is missing, so this table never needs an update
+// to stay safe (Issue #734). Lines missing from it are older and all bundle an older libuv,
+// except the ones after it, which are left to the guard.
+const NODE_LAST_RELEASE_WITH_OLD_LIBUV: ReadonlyMap<number, readonly [number, number]> = new Map([
+  [22, [23, 3]],
+  [24, [21, 0]],
+  [26, [10, 0]],
+]);
+const NODE_NEWEST_LINE_WITH_OLD_LIBUV = 26;
+
+function mayCarryLibuvPipeFix(version: WindowsExecutableFileVersion): boolean {
+  const last = NODE_LAST_RELEASE_WITH_OLD_LIBUV.get(version.major);
+  if (last === undefined) return version.major > NODE_NEWEST_LINE_WITH_OLD_LIBUV;
+  return compareMajorMinor([version.minor, version.build], last) > 0;
+}
+
 function formatWindowsExecutableFileVersion(version: WindowsExecutableFileVersion): string {
   return `v${version.major}.${version.minor}.${version.build}`;
 }
@@ -581,13 +600,14 @@ export function rejectWindowsSandboxedNodeTestIsolation(
   options: {
     platform?: NodeJS.Platform;
     sandboxed: boolean;
-    // The rejected node.exe's own file version, when the caller could read it (Issue #549). Only
-    // used to pick the one instruction that matches this Node; never used to decide whether to
-    // reject.
+    // The rejected node.exe's own file version, when the caller could read it (Issue #549). Picks
+    // the one instruction that matches this Node, and lets a release that may carry the libuv
+    // fix through (Issue #734).
     nodeVersion?: WindowsExecutableFileVersion | null;
   },
 ): void {
   if (!shouldRejectWindowsSandboxedNodeTestIsolation(canonicalExecutable, argv, options)) return;
+  if (options.nodeVersion && mayCarryLibuvPipeFix(options.nodeVersion)) return;
   secureLogger.warn(
     'Node test process isolation was rejected before approval',
     {
