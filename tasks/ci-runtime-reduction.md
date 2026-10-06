@@ -22,12 +22,13 @@ packaged Mac Archify retains one worker and all8 cases.
 ## Final design
 
 - Full matrix is unconditional. Mac/Linux ordinary tests use3 shards; Windows
-  uses4 one-worker weighted shards. Only Coordinator/Graph move from ordinary
+  uses5 one-worker weighted shards. Only Coordinator/Graph move from ordinary
   Mac/Windows CLI invocations to required Electron case groups. Linux and local
   unconfigured execution retain all groups. Mac ordinary shards also run the
   eight Electron groups (3/3/2 groups across3 jobs), reusing their existing
   setup; Windows retains8 separate one-worker group jobs. All16 logical
   tuples run exactly once. Mac uses5 physical jobs to reduce runner queueing.
+  CI-only Mac file weights balance the measured160/106/73s ordinary workloads.
 - Each integration group uses the actual collected case list, isolated
   report/marker/progress paths and anchored selection. Exact JSON PASS-set
   verification rejects missing, extra, duplicate or skipped planned cases.

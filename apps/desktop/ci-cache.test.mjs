@@ -440,7 +440,7 @@ describe('full CI partition contract', () => {
     ]);
     expect(
       entries.filter((entry) => entry.label === 'Windows').map((entry) => entry.shard),
-    ).toEqual(Array.from({ length: 4 }, (_, i) => `${i + 1}/4`));
+    ).toEqual(Array.from({ length: 5 }, (_, i) => `${i + 1}/5`));
     const cargoSteps = Object.entries(workflow.jobs).flatMap(([job, definition]) =>
       definition.steps
         .filter((step) => step.run?.includes('--test windows_command'))

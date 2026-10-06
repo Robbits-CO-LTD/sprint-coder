@@ -2,7 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { partitionWindowsTests } from './vitest.config';
+import { BaseSequencer } from 'vitest/node';
+import {
+  ciSequencer,
+  MacCiSequencer,
+  partitionMacTests,
+  partitionWindowsTests,
+  WindowsCiSequencer,
+} from './vitest.config';
 import { electronTestExecutablePath } from './src/main/electron-test-runtime';
 
 const root = resolve('/ci/desktop');
@@ -11,7 +18,7 @@ const specification = (path: string, pool = 'forks') => ({
   pool,
 });
 
-describe('Windows CI test partition', () => {
+describe('CI test partition', () => {
   it('can be imported directly by the Electron bridge without the Vite config bundler', () => {
     const configUrl = pathToFileURL(resolve(__dirname, 'vitest.config.ts')).href;
     expect(() =>
@@ -35,20 +42,47 @@ describe('Windows CI test partition', () => {
       ...Array.from({ length: 400 }, (_, index) => specification(`future-${index}.test.ts`)),
     ];
     const original = [...files];
-    for (const count of [1, 3, 7, 8]) {
-      const groups = partitionWindowsTests(files, root, count);
-      expect(groups).toHaveLength(count);
-      expect(groups.flat()).toHaveLength(files.length);
-      expect(new Set(groups.flat())).toEqual(new Set(files));
-      expect(files).toEqual(original);
+    for (const partition of [partitionWindowsTests, partitionMacTests]) {
+      for (const count of [1, 3, 5, 7, 8]) {
+        const groups = partition(files, root, count);
+        expect(groups).toHaveLength(count);
+        expect(groups.flat()).toHaveLength(files.length);
+        expect(new Set(groups.flat())).toEqual(new Set(files));
+        expect(files).toEqual(original);
+      }
     }
   });
 
   it('assigns the same files to each shard regardless of discovery order', () => {
     const files = Array.from({ length: 30 }, (_, index) => specification(`${index}.test.ts`));
-    expect(partitionWindowsTests([...files].reverse(), root, 3)).toEqual(
-      partitionWindowsTests(files, root, 3),
+    for (const partition of [partitionWindowsTests, partitionMacTests]) {
+      expect(partition([...files].reverse(), root, 3)).toEqual(partition(files, root, 3));
+    }
+  });
+
+  it('balances the measured Mac persistence file and keeps unknown files eligible', () => {
+    const persistence = specification('src/main/persistence.test.ts');
+    const files = [
+      persistence,
+      ...Array.from({ length: 300 }, (_, i) => specification(`new-${i}.test.ts`)),
+    ];
+    const groups = partitionMacTests(files, root, 3);
+    const loads = groups.map((group) =>
+      group.reduce((sum, file) => sum + (file === persistence ? 82 : 1), 0),
     );
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(1);
+  });
+
+  it('uses weighted placement only in Mac/Windows CI and retains the inherited sorting', () => {
+    expect(ciSequencer('darwin', 'true')).toBe(MacCiSequencer);
+    expect(ciSequencer('win32', 'true')).toBe(WindowsCiSequencer);
+    expect(ciSequencer('linux', 'true')).toBeUndefined();
+    for (const platform of ['darwin', 'win32', 'linux'] as const) {
+      for (const ci of [undefined, 'false', '1']) expect(ciSequencer(platform, ci)).toBeUndefined();
+    }
+    for (const sequencer of [MacCiSequencer, WindowsCiSequencer]) {
+      expect(sequencer.prototype.sort).toBe(BaseSequencer.prototype.sort);
+    }
   });
 
   it('separates the measured slow bridges and spreads unknown files across the remaining load', () => {
@@ -68,11 +102,13 @@ describe('Windows CI test partition', () => {
   });
 
   it('handles empty and undersized collections without dropping tests', () => {
-    expect(partitionWindowsTests([], root, 3)).toEqual([[], [], []]);
     const file = specification('single.test.ts');
-    expect(partitionWindowsTests([file], root, 3)).toEqual([[file], [], []]);
-    for (const count of [0, -1, 1.5, NaN]) {
-      expect(() => partitionWindowsTests([file], root, count)).toThrow('Invalid CI shard count');
+    for (const partition of [partitionWindowsTests, partitionMacTests]) {
+      expect(partition([], root, 3)).toEqual([[], [], []]);
+      expect(partition([file], root, 3)).toEqual([[file], [], []]);
+      for (const count of [0, -1, 1.5, NaN]) {
+        expect(() => partition([file], root, count)).toThrow('Invalid CI shard count');
+      }
     }
   });
 });
