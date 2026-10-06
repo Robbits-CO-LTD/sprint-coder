@@ -569,7 +569,38 @@ export function registerCommandRunnerTool(
           );
         };
         if (backgroundSpecs.has(spec)) persistBackground();
-        const started = await sessions.start(spec, owner, hooks, sessionId);
+        let started: Awaited<ReturnType<ManagedCommandSessions['start']>>;
+        try {
+          started = await sessions.start(spec, owner, hooks, sessionId);
+        } catch (error) {
+          const current = command.persistence.getCommand(commandId);
+          if (
+            current.state === 'prepared' ||
+            current.state === 'starting' ||
+            current.state === 'running'
+          ) {
+            const persisted = command.persistence.completeCommand({
+              commandId,
+              state: 'failed',
+              exitCode: null,
+              signal: null,
+              outputBytes: current.outputBytes,
+              truncated: current.state === 'running',
+              finishedAt: new Date().toISOString(),
+            });
+            command.publish(persisted.event);
+          }
+          if (backgroundPersisted)
+            command.persistence.completeBackgroundActivity({
+              activityId: sessionId,
+              completionId: randomUUID(),
+              outcome: 'failed',
+              payload: JSON.stringify({ sessionId, state: 'failed' }),
+              outputCursor: 0,
+              completedAt: new Date().toISOString(),
+            });
+          throw error;
+        }
         const finalize = (snapshot: Awaited<ReturnType<ManagedCommandSessions['wait']>>): void => {
           const persisted =
             snapshot.result === null
