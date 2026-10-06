@@ -199,6 +199,21 @@ describe('CI cache reuse and fallback', () => {
       expect(compilerCacheable({ [name]: 'override' }), name).toBe(false);
   });
 
+  it('falls back to an ordinary build when compiler identity is unavailable', () => {
+    const root = fixture();
+    const result = spawnSync(process.execPath, [join(repo, 'ci-cache.mjs'), 'compiler'], {
+      cwd: root,
+      env: { ...process.env, PATH: root, Path: root },
+      encoding: 'utf8',
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('cacheable=false');
+    const restore = sandboxAction.runs.steps.find((step) => step.id === 'sandbox');
+    expect(condition(restore.if, { compiler: { cacheable: 'false' } })).toBe(false);
+    const windowsBuild = sandboxAction.runs.steps.find((step) => step.shell === 'pwsh');
+    expect(condition(windowsBuild.if, { sandbox: {}, validation: {} })).toBe(true);
+  });
+
   it('fails closed when build output or executable protocol is invalid', () => {
     const root = fixture();
     const invoke = () =>

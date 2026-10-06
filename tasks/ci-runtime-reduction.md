@@ -116,3 +116,9 @@ Source+logs+version contrast confirm the failure boundary. Existing real-Git
 canary verifies executable localconfig traps remain blocked. Windows2.56 CI
 PASS is required before treating this compatibility fix as verified.
 Source: https://git-scm.com/docs/git#Documentation/git.txt-GIT_CONFIG_GLOBAL
+
+The optional Rust compiler identity probe timed out once on a hostedWindows
+VM (10-second metadata budget). This only controls reuse: probe failure now
+emitscacheable=false and proceeds through the original locked build and final
+executable checks. A missing-compiler fixture verifies this fallback; validation
+failure remains fatal. No test timeout or assertion changes.

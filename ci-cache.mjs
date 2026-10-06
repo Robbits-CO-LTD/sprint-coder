@@ -138,8 +138,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     }
     case 'compiler': {
       const version = spawnSync('rustc', ['-vV'], { encoding: 'utf8', timeout: 10_000 });
-      if (version.error || version.status !== 0)
-        throw new Error('Cannot identify CI Rust compiler');
+      if (version.error || version.status !== 0) {
+        // Compiler identity only authorizes cache reuse. The original Cargo build
+        // remains authoritative when the optional probe is unavailable or slow.
+        process.stdout.write('cacheable=false\n');
+        break;
+      }
       const digest = createHash('sha256').update(version.stdout).digest('hex');
       process.stdout.write(`digest=${digest}\ncacheable=${compilerCacheable(process.env)}\n`);
       break;
