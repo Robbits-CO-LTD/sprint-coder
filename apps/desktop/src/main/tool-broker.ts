@@ -3,11 +3,27 @@ import {
   type ToolExecutionContext,
   type ToolId,
   type ToolImplementation,
+  type ToolExecutionControl,
   type ToolRegistry,
   type ToolCatalogEntry,
   type ToolResourceClaim,
   toolValueMatchesSchema,
 } from '@sprint-coder/domain';
+import { secureLogger } from './secure-logger';
+
+export type BackgroundToolCompletionState = 'succeeded' | 'failed' | 'canceled';
+type MainToolExecutionControl = ToolExecutionControl &
+  Readonly<{
+    onBackgroundCompletion?: (completion: Promise<BackgroundToolCompletionState>) => void;
+  }>;
+type MainToolImplementation = Omit<ToolImplementation, 'execute'> &
+  Readonly<{
+    execute: (
+      input: unknown,
+      context: ToolExecutionContext,
+      control: MainToolExecutionControl,
+    ) => Promise<unknown> | unknown;
+  }>;
 
 export type ToolDispatchRequest = {
   taskId: string;
@@ -92,7 +108,7 @@ export class ToolAuthorizationDeniedError extends Error {
 type BoundTurn = {
   context: ToolExecutionContext;
   snapshot: ToolCatalogSnapshot;
-  implementations: ReadonlyMap<ToolId, ToolImplementation>;
+  implementations: ReadonlyMap<ToolId, MainToolImplementation>;
   claimedCallIds: Set<string>;
   gate: ToolResourceGate;
   resultGate: OrderedToolResultGate;
@@ -101,7 +117,7 @@ type BoundTurn = {
 };
 
 export class ToolBroker {
-  private readonly implementations = new Map<ToolId, ToolImplementation>();
+  private readonly implementations = new Map<ToolId, MainToolImplementation>();
   private readonly turns = new Map<string, BoundTurn>();
 
   constructor(
@@ -111,7 +127,7 @@ export class ToolBroker {
     private readonly lifecycle?: (event: ManagedToolLifecycleEvent) => void,
   ) {}
 
-  registerImplementation(implementation: ToolImplementation): void {
+  registerImplementation(implementation: MainToolImplementation): void {
     const definition = this.registry.get(implementation.toolId);
     if (definition === undefined) throw new Error('Cannot implement an unregistered ToolId');
     if (definition.implementationKind !== implementation.implementationKind)
@@ -147,7 +163,7 @@ export class ToolBroker {
         this.implementations.has(toolId),
       ),
     });
-    const implementations = new Map<ToolId, ToolImplementation>();
+    const implementations = new Map<ToolId, MainToolImplementation>();
     for (const entry of snapshot.entries) {
       const implementation = this.implementations.get(entry.toolId);
       if (implementation === undefined)
@@ -205,6 +221,10 @@ export class ToolBroker {
     let terminal = false;
     let requestedRecorded = false;
     let resultGateStarted = false;
+    let backgroundCompletion: Promise<BackgroundToolCompletionState> | undefined;
+    let backgroundCompletionState: BackgroundToolCompletionState | undefined;
+    let backgrounded = false;
+    let backgroundCompletionRecorded = false;
     const transition = (state: ManagedToolCallState): void => {
       this.lifecycle?.({
         taskId: request.taskId,
@@ -218,6 +238,46 @@ export class ToolBroker {
       });
       if (state === 'succeeded' || state === 'failed' || state === 'denied' || state === 'canceled')
         terminal = true;
+    };
+    const completeBackground = (state: BackgroundToolCompletionState): void => {
+      if (terminal || backgroundCompletionRecorded) return;
+      // 監査書込みの失敗時に終端を再試行しないよう、書込み前に通知を消費する。
+      backgroundCompletionRecorded = true;
+      transition(state);
+    };
+    const logBackgroundFailure = (status: string): void =>
+      secureLogger.error(
+        'Managed background tool completion failed',
+        { callId: request.callId },
+        {
+          event: 'managed_tool.background_completion_failed',
+          taskId: request.taskId,
+          turnId: request.turnId,
+          provider: request.providerName,
+          status,
+        },
+      );
+    const observeBackgroundCompletion = (
+      completion: Promise<BackgroundToolCompletionState>,
+    ): void => {
+      if (backgroundCompletion !== undefined) {
+        void completion.catch(() => undefined);
+        return;
+      }
+      backgroundCompletion = completion;
+      void completion
+        .then(
+          (state) => {
+            backgroundCompletionState = state;
+            if (backgrounded) completeBackground(state);
+          },
+          () => {
+            backgroundCompletionState = 'failed';
+            logBackgroundFailure('completion_rejected');
+            if (backgrounded) completeBackground('failed');
+          },
+        )
+        .catch(() => logBackgroundFailure('audit_failed'));
     };
     try {
       transition('requested');
@@ -335,6 +395,9 @@ export class ToolBroker {
           ...(authorization.userInputSelection === undefined
             ? {}
             : { userInputSelection: authorization.userInputSelection }),
+          ...(entry.supportsBackground
+            ? { onBackgroundCompletion: observeBackgroundCompletion }
+            : {}),
         });
       } finally {
         release();
@@ -358,12 +421,17 @@ export class ToolBroker {
         output !== null &&
         (output as Record<string, unknown>)['state'] === 'running' &&
         typeof (output as Record<string, unknown>)['sessionId'] === 'string'
-      )
+      ) {
         transition('backgrounded');
-      else transition('succeeded');
+        backgrounded = true;
+        if (backgroundCompletionState !== undefined) completeBackground(backgroundCompletionState);
+      } else if (backgroundCompletion !== undefined) {
+        // 結果がBrokerへ届く前にセッションが終了した場合も、実際の完了結果を使う。
+        completeBackground(await backgroundCompletion.catch(() => 'failed' as const));
+      } else transition('succeeded');
       return output;
     } catch (error) {
-      if (!terminal && requestedRecorded)
+      if (!terminal && requestedRecorded && !backgroundCompletionRecorded)
         transition(request.signal?.aborted ? 'canceled' : 'failed');
       throw error;
     } finally {

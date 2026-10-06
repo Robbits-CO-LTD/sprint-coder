@@ -8,7 +8,7 @@ import {
   type JsonValue,
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
-import { ToolBroker, type ToolAuthorizer } from './tool-broker';
+import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
 import {
   CommandRunner,
   prepareExecutionSpec,
@@ -636,8 +636,21 @@ export function registerCommandRunnerTool(
               completedAt: new Date().toISOString(),
             });
         };
+        const observeBackground = (): void => {
+          const completion = sessions.wait(started.sessionId, owner).then((snapshot) => {
+            finalize(snapshot);
+            return (
+              snapshot.state === 'exited'
+                ? 'succeeded'
+                : snapshot.state === 'canceled'
+                  ? 'canceled'
+                  : 'failed'
+            ) satisfies BackgroundToolCompletionState;
+          });
+          control.onBackgroundCompletion?.(completion);
+        };
         if (backgroundSpecs.has(spec)) {
-          void sessions.wait(started.sessionId, owner).then(finalize);
+          observeBackground();
           return started;
         }
         const completed = await sessions.waitFor(
@@ -647,7 +660,7 @@ export function registerCommandRunnerTool(
         );
         if (completed === null) {
           persistBackground();
-          void sessions.wait(started.sessionId, owner).then(finalize);
+          observeBackground();
           return sessions.poll(started.sessionId, owner);
         }
         const persisted =
