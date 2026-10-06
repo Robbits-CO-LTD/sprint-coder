@@ -241,31 +241,60 @@ describe('full CI partition contract', () => {
     expect(
       entries.filter((entry) => entry.label === 'Windows').map((entry) => entry.shard),
     ).toEqual(Array.from({ length: 4 }, (_, i) => `${i + 1}/4`));
-    const cargo = workflow.jobs['platform-tests'].steps.find((step) =>
-      step.name.startsWith('Test Windows sandbox working'),
+    const cargoSteps = Object.entries(workflow.jobs).flatMap(([job, definition]) =>
+      definition.steps
+        .filter((step) => step.run?.includes('--test windows_command'))
+        .map((step) => ({ job, step })),
     );
-    expect(cargo.if).toBe("runner.os == 'Windows' && matrix.shard == '4/4'");
+    expect(cargoSteps).toHaveLength(1);
+    expect(cargoSteps[0].job).toBe('computer-use-native-gate');
+    expect(cargoSteps[0].step.if).toBe("runner.os == 'Windows'");
+    expect(cargoSteps[0].step.shell).toBe('pwsh');
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;
-    const combinations = matrix.os.flatMap((os) =>
-      matrix.suite.flatMap((suite) => matrix.shard.map((index) => `${os}:${suite}:${index}`)),
+    const combinations = matrix.include.flatMap((row) =>
+      [row.shard, ...(row.follow === '' ? [] : [row.follow])].map(
+        (index) => `${row.os}:${row.suite}:${index}`,
+      ),
     );
-    expect(new Set(combinations)).toEqual(
-      new Set(
-        ['macos-latest', 'windows-2022'].flatMap((os) =>
-          ['coordinator', 'graph'].flatMap((suite) =>
-            [0, 1, 2, 3].map((index) => `${os}:${suite}:${index}`),
-          ),
-        ),
+    const expected = ['macos-latest', 'windows-2022'].flatMap((os) =>
+      ['coordinator', 'graph'].flatMap((suite) =>
+        [0, 1, 2, 3].map((index) => `${os}:${suite}:${index}`),
       ),
     );
     expect(combinations).toHaveLength(16);
+    expect(new Set(combinations)).toEqual(new Set(expected));
+    for (const row of matrix.include) {
+      expect(row.file).toBe(
+        row.suite === 'coordinator'
+          ? 'src/main/team-coordinator.test.ts'
+          : 'src/main/graph-mission-persistence.test.ts',
+      );
+      expect(row.follow === '').toBe(row.os === 'windows-2022');
+    }
     const runBridge = bridges.steps.find(
       (step) => step.name === 'Run bounded Electron integration group',
     );
     expect(runBridge.run).not.toContain('--shard=');
     expect(runBridge.run).not.toContain('--exclude');
     expect(runBridge.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD).toBe('${{ matrix.shard }}');
+    const paired = bridges.steps.find(
+      (step) => step.name === 'Run paired Mac Electron integration group',
+    );
+    expect(paired.if).toBe("matrix.follow != ''");
+    expect(paired.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD).toBe('${{ matrix.follow }}');
+    expect(paired.run).toBe(runBridge.run);
+    const archify = workflow.jobs['archify-packaged'];
+    expect(archify.strategy.matrix.shard).toEqual([1, 2]);
+    const runArchify = archify.steps.find((step) =>
+      step.name?.startsWith('Exercise the real bundled'),
+    );
+    expect(runArchify.run).toContain('--fully-parallel --workers=1 --shard=${{ matrix.shard }}/2');
+    const evidence = archify.steps.find((step) =>
+      step.uses?.startsWith('actions/upload-artifact@'),
+    );
+    expect(evidence.with.name).toContain('${{ matrix.shard }}');
+
     const macTest = workflow.jobs['test-macos'].steps.find((step) =>
       step.name.startsWith('Test desktop'),
     );

@@ -18,7 +18,7 @@ queue time alone does not explain the duration. RCA A/B/C/D: YES.
 
 - Full matrix is unconditional. Keep macOS3 and Linux3 ordinary shards and
   Windows4 one-worker ordinary shards. Move Coordinator/Graph to a required
-  Mac/Windows × suite ×4-group matrix (16 jobs); only those two files are excluded
+  Mac/Windows × suite ×4 logical groups (12 jobs, paired Mac groups); only those two files are excluded
   from ordinary Mac/Windows CLI invocations. Linux retains all default groups.
   The existing Windows Cargo boundary test runs in ordinary4/4.
 - Split Windows major E2E into core and Archify with one worker in each. The
@@ -74,7 +74,7 @@ Each child has isolated report/marker/progress paths. Fixed marker summaries
 now use the validated active-case digest rather than source adjacency, which
 round-robin partitioning invalidates. Collection failures also retain redaction.
 Three focused independent reviews checked this additional boundary. The matrix
-contract checks all16 unique tuples; both OS aggregates reject failed, cancelled,
+contract checks all16 unique logical tuples; both OS aggregates reject failed, cancelled,
 skipped or missing bridge results. No assertions or deadlines are weakened.
 
 Local real-Electron acceptance: Graph all4 groups PASS (127 planned child cases,
@@ -84,3 +84,12 @@ tests, one selected group, ~27 seconds). Selector/coverage/workflow regression
 suite53 PASS /2 existing Mac-host Windows-only SKIP. Typecheck/lint/format and
 actionlint PASS. Graph collection/report errors and active-case markers retain
 the bounded diagnostic redaction contract. Actions remains the timing gate.
+
+Warm all-pass run37458573270 attempt2 took7m07. Measured remaining paths:
+packaged Mac Archify367s (110s package +~198s cases), final Mac group queued316s,
+and ordinary Windows4/4 added60s Cargo to236s tests. Final scheduling moves
+unchanged Cargo to the Windows native gate, pairs Mac groups0/1 and2/3 per VM
+(still exact16 logical groups across12 jobs), and test-level shards packaged
+Archify into2 one-worker jobs perOS. Actual Playwright listing verified all8
+cases form disjoint4/4 shards with fullyParallel enabled; per-case fixtures are
+isolated. No case, deadline or assertion is removed.
