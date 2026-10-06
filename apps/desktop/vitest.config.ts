@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
+import { WindowsCiSequencer } from './ci-test-sequencer';
 
-// Only the timeouts are configured here; everything else stays on Vitest's defaults.
+// Keep integration deadlines and Windows process concurrency consistent across local and CI runs.
 //
 // Vitest's default 5s per-test timeout is written for pure unit tests. A large part of this
 // suite is not that: specs open real SQLite databases, spawn child processes, and drive the
@@ -23,5 +24,8 @@ export default defineConfig({
     // one worker on Windows so PowerShell-backed ACL tests still run as part of the complete suite
     // without competing hosts; other platforms retain Vitest's automatic worker count.
     ...(process.platform === 'win32' ? { maxWorkers: 1 } : {}),
+    ...(process.platform === 'win32' && process.env.CI === 'true'
+      ? { sequence: { sequencer: WindowsCiSequencer } }
+      : {}),
   },
 });

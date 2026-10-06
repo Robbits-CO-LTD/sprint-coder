@@ -245,6 +245,12 @@ jobs:
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
 
@@ -303,6 +309,12 @@ jobs:
       # succeed without it. Every other job that packages or launches the app already builds it;
       # this one was missed, which made the fast-lane package smoke fail on any renderer-only PR —
       # exactly the PRs it is the only packaging coverage for.
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
 
@@ -361,6 +373,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
 
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
@@ -438,6 +456,12 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
 
@@ -511,6 +535,12 @@ jobs:
         run: node node_modules/electron/install.js
       - name: Install Linux sandbox dependency
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
@@ -566,6 +596,12 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
@@ -630,6 +666,12 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
       - name: Build managed sandbox runner
         run: npm run build:sandbox-runner
       - name: Restore better-sqlite3 Electron ABI binary
@@ -743,8 +785,40 @@ jobs:
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
-      - name: Prepare packaged native dependencies
-        run: npm run prepare:desktop --workspace @sprint-coder/desktop
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Cache managed sandbox Rust build
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/sandbox-runner/target
+          key: sandbox-rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('apps/desktop/sandbox-runner/Cargo.lock', 'apps/desktop/sandbox-runner/Cargo.toml', 'apps/desktop/sandbox-runner/**/*.rs', 'apps/desktop/sandbox-runner/build.rs', 'build-sandbox-runner.mjs') }}
+
+      - name: Build managed sandbox runner
+        run: npm run build:sandbox-runner
+
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
+
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: node ../../build-better-sqlite3.mjs
+
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
       - name: Exercise the real bundled Archify worker and sandboxed viewer
         env:
           SPRINT_CODER_E2E_MODE: packaged
