@@ -110,6 +110,7 @@ const pid = join(root, 'sidecar-pid');
 const smoke = process.argv[2] === 'vitest';
 appendFileSync(trace, (smoke ? 'smoke' : 'archify') + ':start\n');
 if (smoke) {
+  console.log('CI_SMOKE_STARTED');
   if (process.env.SPRINT_CODER_MANAGED_LOCAL_LIVE !== '1' ||
       !process.cwd().replaceAll('\\', '/').endsWith('/apps/desktop')) process.exit(99);
   if (process.env.CI_FIXTURE_CANCEL === '1') {
@@ -344,6 +345,7 @@ describe('full CI partition contract', () => {
         }
         expect(result.error).toBeUndefined();
         expect(result.status).toBe(143);
+        expect(result.stdout).toContain('CI_SMOKE_STARTED');
         expect(pids).toHaveLength(3);
         for (const pid of pids) {
           const child = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });

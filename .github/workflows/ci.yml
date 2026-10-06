@@ -369,6 +369,7 @@ jobs:
             if [[ -n "${e2e_pid}" ]]; then
               kill -TERM -- "-${e2e_pid}" 2>/dev/null || true
             fi
+            cat "${RUNNER_TEMP}/managed-local-macos-smoke.log" 2>/dev/null || true
           }
           trap stop_checks EXIT
           trap 'exit 130' INT
