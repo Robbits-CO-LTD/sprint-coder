@@ -361,6 +361,68 @@ describe('full CI partition contract', () => {
     },
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'executes all eight Mac groups and rejects empty lists or failed groups',
+    () => {
+      const root = fixture();
+      mkdirSync(join(root, 'apps/desktop'), { recursive: true });
+      write(
+        join(root, 'bin/npx'),
+        '#!/bin/sh\nprintf "%s:%s\\n" "$3" "$SPRINT_CODER_ELECTRON_BRIDGE_SHARD" >> "$RUNNER_TEMP/groups"\ntest "$SPRINT_CODER_ELECTRON_BRIDGE_SHARD" != "$CI_FIXTURE_FAIL_GROUP"\n',
+        0o755,
+      );
+      const mac = workflow.jobs['test-macos'];
+      const expected = [];
+      for (const row of mac.strategy.matrix.include) {
+        for (const [suite, label, file] of [
+          ['coordinator', 'Coordinator', 'team-coordinator'],
+          ['graph', 'Graph', 'graph-mission-persistence'],
+        ]) {
+          const step = mac.steps.find((entry) => entry.name === `Test ${label} Electron groups`);
+          const invoke = (groups, fail = '') =>
+            spawnSync('bash', ['-e', '-c', step.run], {
+              cwd: join(root, step['working-directory']),
+              env: {
+                ...process.env,
+                PATH: `${root}/bin:${process.env.PATH}`,
+                RUNNER_TEMP: root,
+                BRIDGE_GROUPS: groups,
+                CI_FIXTURE_FAIL_GROUP: fail,
+              },
+              encoding: 'utf8',
+            });
+          expect(invoke(row[suite]).status).toBe(0);
+          expected.push(
+            ...row[suite].split(' ').map((index) => `src/main/${file}.test.ts:${index}`),
+          );
+        }
+      }
+      expect(readFileSync(join(root, 'groups'), 'utf8').trim().split('\n')).toEqual(expected);
+      expect(new Set(expected).size).toBe(8);
+      for (const label of ['Coordinator', 'Graph']) {
+        const step = mac.steps.find((entry) => entry.name === `Test ${label} Electron groups`);
+        for (const [groups, fail] of [
+          ['', ''],
+          ['   ', ''],
+          ['0 1', '1'],
+        ]) {
+          const result = spawnSync('bash', ['-e', '-c', step.run], {
+            cwd: join(root, step['working-directory']),
+            env: {
+              ...process.env,
+              PATH: `${root}/bin:${process.env.PATH}`,
+              RUNNER_TEMP: root,
+              BRIDGE_GROUPS: groups,
+              CI_FIXTURE_FAIL_GROUP: fail,
+            },
+            encoding: 'utf8',
+          });
+          expect(result.status).not.toBe(0);
+        }
+      }
+    },
+  );
+
   it('requires full coverage on every PR and includes all Linux/Windows shards', () => {
     const output = join(fixture(), 'output');
     const classifier = workflow.jobs.classify.steps.find((step) => step.id === 'scope');
@@ -390,11 +452,17 @@ describe('full CI partition contract', () => {
     expect(cargoSteps[0].step.shell).toBe('pwsh');
     const bridges = workflow.jobs['electron-bridges'];
     const matrix = bridges.strategy.matrix;
-    const combinations = matrix.include.flatMap((row) =>
-      [row.shard, ...(row.follow === '' ? [] : [row.follow])].map(
-        (index) => `${row.os}:${row.suite}:${index}`,
-      ),
-    );
+    const macRows = workflow.jobs['test-macos'].strategy.matrix.include;
+    expect(macRows.map((row) => row.shard)).toEqual(['1/3', '2/3', '3/3']);
+    const combinations = matrix.include.map((row) => `${row.os}:${row.suite}:${row.shard}`);
+    for (const row of macRows) {
+      for (const suite of ['coordinator', 'graph']) {
+        const indices = row[suite].trim().split(/\s+/u);
+        expect(indices.length).toBeGreaterThan(0);
+        expect(indices.every((index) => /^[0-3]$/u.test(index))).toBe(true);
+        combinations.push(...indices.map((index) => `macos-latest:${suite}:${index}`));
+      }
+    }
     const expected = ['macos-latest', 'windows-2022'].flatMap((os) =>
       ['coordinator', 'graph'].flatMap((suite) =>
         [0, 1, 2, 3].map((index) => `${os}:${suite}:${index}`),
@@ -408,7 +476,7 @@ describe('full CI partition contract', () => {
           ? 'src/main/team-coordinator.test.ts'
           : 'src/main/graph-mission-persistence.test.ts',
       );
-      expect(row.follow === '').toBe(row.os === 'windows-2022');
+      expect(row.os).toBe('windows-2022');
     }
     const runBridge = bridges.steps.find(
       (step) => step.name === 'Run bounded Electron integration group',
@@ -416,12 +484,19 @@ describe('full CI partition contract', () => {
     expect(runBridge.run).not.toContain('--shard=');
     expect(runBridge.run).not.toContain('--exclude');
     expect(runBridge.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD).toBe('${{ matrix.shard }}');
-    const paired = bridges.steps.find(
-      (step) => step.name === 'Run paired Mac Electron integration group',
-    );
-    expect(paired.if).toBe("matrix.follow != ''");
-    expect(paired.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD).toBe('${{ matrix.follow }}');
-    expect(paired.run).toBe(runBridge.run);
+    for (const [suite, name, file] of [
+      ['coordinator', 'Coordinator', 'team-coordinator'],
+      ['graph', 'Graph', 'graph-mission-persistence'],
+    ]) {
+      const step = workflow.jobs['test-macos'].steps.find(
+        (entry) => entry.name === `Test ${name} Electron groups`,
+      );
+      expect(step.env.BRIDGE_GROUPS).toBe('${{ matrix.' + suite + ' }}');
+      expect(step.run).toContain(`npx vitest run src/main/${file}.test.ts --maxWorkers=1`);
+      expect(step.run).not.toContain('--shard=');
+      expect(step.run).not.toContain('--exclude');
+      expect(step['continue-on-error']).toBeUndefined();
+    }
     const archify = workflow.jobs['archify-packaged'];
     expect(archify.strategy.matrix.shard).toEqual([1, 2]);
     expect(archify.strategy.matrix.os).toEqual(['windows-2022']);
@@ -452,19 +527,24 @@ describe('full CI partition contract', () => {
     const macResult = workflow.jobs['macos-result'];
     expect(macResult.needs).toContain('computer-use-native-gate');
     for (const status of ['success', 'failure', 'cancelled', 'skipped', '']) {
-      for (const verification of [required.steps[0], macResult.steps[0]]) {
+      for (const [verification, dependency] of [
+        [required.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
+        [macResult.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
+        [macResult.steps[0], 'MACOS_TEST_RESULT'],
+      ]) {
         const invocation = spawnSync('bash', ['-e', '-c', verification.run], {
           env: {
             ...process.env,
             QUALITY_RESULT: 'success',
             MACOS_RESULT: 'success',
             WINDOWS_RESULT: 'success',
-            COMPUTER_USE_NATIVE_RESULT: status,
+            COMPUTER_USE_NATIVE_RESULT: 'success',
             ARCHIFY_RESULT: 'success',
             PACKAGE_TEST_RESULT: 'success',
             MACOS_TEST_RESULT: 'success',
             MACOS_PACKAGE_RESULT: 'success',
             ELECTRON_BRIDGE_RESULT: 'success',
+            [dependency]: status,
           },
           encoding: 'utf8',
         });
