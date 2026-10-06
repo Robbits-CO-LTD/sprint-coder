@@ -240,11 +240,72 @@ describe('full CI partition contract', () => {
     ]);
     expect(
       entries.filter((entry) => entry.label === 'Windows').map((entry) => entry.shard),
-    ).toEqual(Array.from({ length: 8 }, (_, i) => `${i + 1}/8`));
+    ).toEqual(Array.from({ length: 4 }, (_, i) => `${i + 1}/4`));
     const cargo = workflow.jobs['platform-tests'].steps.find((step) =>
       step.name.startsWith('Test Windows sandbox working'),
     );
-    expect(cargo.if).toBe("runner.os == 'Windows' && matrix.shard == '8/8'");
+    expect(cargo.if).toBe("runner.os == 'Windows' && matrix.shard == '4/4'");
+    const bridges = workflow.jobs['electron-bridges'];
+    const matrix = bridges.strategy.matrix;
+    const combinations = matrix.os.flatMap((os) =>
+      matrix.suite.flatMap((suite) => matrix.shard.map((index) => `${os}:${suite}:${index}`)),
+    );
+    expect(new Set(combinations)).toEqual(
+      new Set(
+        ['macos-latest', 'windows-2022'].flatMap((os) =>
+          ['coordinator', 'graph'].flatMap((suite) =>
+            [0, 1, 2, 3].map((index) => `${os}:${suite}:${index}`),
+          ),
+        ),
+      ),
+    );
+    expect(combinations).toHaveLength(16);
+    const runBridge = bridges.steps.find(
+      (step) => step.name === 'Run bounded Electron integration group',
+    );
+    expect(runBridge.run).not.toContain('--shard=');
+    expect(runBridge.run).not.toContain('--exclude');
+    expect(runBridge.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD).toBe('${{ matrix.shard }}');
+    const macTest = workflow.jobs['test-macos'].steps.find((step) =>
+      step.name.startsWith('Test desktop'),
+    );
+    const windowsTest = workflow.jobs['platform-tests'].steps.find((step) =>
+      step.name.endsWith('on Windows'),
+    );
+    const linuxTest = workflow.jobs['platform-tests'].steps.find((step) =>
+      step.name.endsWith('on Linux'),
+    );
+    for (const step of [macTest, windowsTest]) {
+      expect(step.run.match(/--exclude/gu)).toHaveLength(2);
+      expect(step.run).toContain('src/main/team-coordinator.test.ts');
+      expect(step.run).toContain('src/main/graph-mission-persistence.test.ts');
+    }
+    expect(linuxTest.run).not.toContain('--exclude');
+    for (const name of ['macos-result', 'windows-result']) {
+      const result = workflow.jobs[name];
+      expect(result.needs).toContain('electron-bridges');
+      const verification = result.steps.find((step) =>
+        step.run?.includes('ELECTRON_BRIDGE_RESULT'),
+      );
+      for (const status of ['success', 'failure', 'cancelled', 'skipped']) {
+        const invocation = spawnSync('bash', ['-c', verification.run], {
+          env: {
+            ...process.env,
+            PACKAGE_TEST_RESULT: 'success',
+            MACOS_TEST_RESULT: 'success',
+            MACOS_PACKAGE_RESULT: 'success',
+            WINDOWS_E2E_RESULT: 'success',
+            FULL_MATRIX: 'true',
+            TEST_RESULT: 'success',
+            LINUX_PACKAGE_RESULT: 'success',
+            WINDOWS_PACKAGE_RESULT: 'success',
+            ELECTRON_BRIDGE_RESULT: status,
+          },
+          encoding: 'utf8',
+        });
+        expect(invocation.status === 0).toBe(status === 'success');
+      }
+    }
     for (const job of Object.values(workflow.jobs)) {
       const depsIndex = job.steps?.findIndex(
         (step) => step.uses === './.github/actions/install-deps',

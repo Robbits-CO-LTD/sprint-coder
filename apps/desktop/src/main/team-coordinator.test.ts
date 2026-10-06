@@ -18,6 +18,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { electronTestExecutablePath } from './electron-test-runtime';
 import {
   assertShardReport,
+  electronBridgeShardIndices,
   collectedTestNames,
   partitionTestNames,
   testNamesPattern,
@@ -10760,7 +10761,9 @@ else
       if (directory) removeTemporaryDirectory(directory);
     });
 
-    it.each([0, 1, 2, 3])(
+    it.each(
+      electronBridgeShardIndices(process.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD, process.env.CI),
+    )(
       'runs integration shard %i with Electron',
       async (index) => {
         const group = groups[index];

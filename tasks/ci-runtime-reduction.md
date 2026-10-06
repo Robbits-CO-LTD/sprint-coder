@@ -16,9 +16,11 @@ queue time alone does not explain the duration. RCA A/B/C/D: YES.
 
 ## Final design
 
-- Full matrix is unconditional. Keep macOS3 and Linux3 shards; use Windows8
-  one-worker shards, leaving Coordinator and Graph alone. Move the existing
-  Windows Cargo boundary test to8/8, away from the longest file.
+- Full matrix is unconditional. Keep macOS3 and Linux3 ordinary shards and
+  Windows4 one-worker ordinary shards. Move Coordinator/Graph to a required
+  Mac/Windows × suite ×4-group matrix (16 jobs); only those two files are excluded
+  from ordinary Mac/Windows CLI invocations. Linux retains all default groups.
+  The existing Windows Cargo boundary test runs in ordinary4/4.
 - Split Windows major E2E into core and Archify with one worker in each. The
   exact union of all9 existing specs is required; artifacts include group names.
   Local ungrouped execution still selects all9. Invalid groups fail closed.
@@ -56,3 +58,29 @@ new lockfiles and hosted-runner queues can take longer than five minutes; no
 unverified performance guarantee is made. Runtime/packaging/E2E successes are
 required before reporting completion. Source/dependency/native inputs changing
 must rebuild rather than reuse a previous binary.
+
+## Bounded bridge follow-up
+
+Full run37454909571 exposed the existing Mac Graph aggregate180-second ceiling:
+103 cases passed, the next case remained active, maxCase14.3 seconds and
+rpcTimeout=false. Windows Coordinator took322 seconds across four serial groups
+(85/83/67/80 seconds). This makes single-file partitioning insufficient for5min.
+Move both harnesses into required case-group jobs. Graph dynamically collects
+127 active Mac cases, partitions them32/32/32/31, checks each exact JSON result
+and retains180s Mac/300s Windows child budgets. Coordinator retains420s.
+
+CI-only group selection is strict0..3; local unconfigured execution runs all4.
+Each child has isolated report/marker/progress paths. Fixed marker summaries
+now use the validated active-case digest rather than source adjacency, which
+round-robin partitioning invalidates. Collection failures also retain redaction.
+Three focused independent reviews checked this additional boundary. The matrix
+contract checks all16 unique tuples; both OS aggregates reject failed, cancelled,
+skipped or missing bridge results. No assertions or deadlines are weakened.
+
+Local real-Electron acceptance: Graph all4 groups PASS (127 planned child cases,
+outer12 tests, ~59 seconds; each child11–16 seconds). Explicit CI group2 PASS
+(outer9 tests, one selected group). Coordinator explicit CI group0 PASS (outer32
+tests, one selected group, ~27 seconds). Selector/coverage/workflow regression
+suite53 PASS /2 existing Mac-host Windows-only SKIP. Typecheck/lint/format and
+actionlint PASS. Graph collection/report errors and active-case markers retain
+the bounded diagnostic redaction contract. Actions remains the timing gate.

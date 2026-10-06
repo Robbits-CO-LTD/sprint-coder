@@ -83,8 +83,8 @@ describe('Windows major E2E workflow', () => {
     const e2eAssertion = 'test "${WINDOWS_E2E_RESULT}" = \'success\'';
     const fullMatrixBranch = windowsResultJob.indexOf('if [[ "${FULL_MATRIX}" == \'true\' ]]');
 
-    expect(windowsResultJob).toContain(
-      'needs: [classify, windows-smoke, platform-tests, package-linux, package-windows, e2e-windows]',
+    expect(windowsResultJob.replace(/\s+/gu, '').replace(/,\]/gu, ']')).toContain(
+      'needs:[classify,windows-smoke,platform-tests,package-linux,package-windows,e2e-windows,electron-bridges]',
     );
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeGreaterThan(-1);
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeLessThan(fullMatrixBranch);
