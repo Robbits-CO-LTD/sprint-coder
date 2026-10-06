@@ -70,7 +70,6 @@ export class WindowsCiSequencer extends BaseSequencer {
   }
 }
 
-
 // Keep integration deadlines and Windows process concurrency consistent across local and CI runs.
 //
 // Vitest's default 5s per-test timeout is written for pure unit tests. A large part of this
