@@ -534,7 +534,9 @@ describe('release artifacts', () => {
     expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');
     expect(ciWorkflow).toContain('Require full platform coverage');
     expect(ciWorkflow).not.toContain('full_matrix=false');
-    expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(3);
+    expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(2);
+    expect(macPackageJob).toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
+    expect(macPackageJob).toContain('src/main/managed-local-runtime-supervisor.test.ts');
     expect(ciWorkflow.match(/SPRINT_CODER_MANAGED_LOCAL_LIVE/gu)).toHaveLength(3);
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
     expect(unsignedVerifier).toContain('Sprint-Coder-Installer.exe');

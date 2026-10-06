@@ -10,12 +10,14 @@ Baseline [37307810511](https://github.com/Robbits-CO-LTD/sprint-coder/actions/ru
 confirmed bottlenecks in the Actions step/test timing logs; queue time alone
 does not explain the duration. RCA A/B/C/D: YES.
 
-Before the final smoke relocation, head79761a8 passed all required gates in6m42
-(cold) and6m40 (warm) in [37470380316](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/37470380316).
-The warm Mac package job still had104s packaging,182s Archify and44s Managed
-Local smoke. Move the unchanged smoke to the shorter required Mac native gate.
-Two simultaneous GUI workers on one Mac would compete for native foreground
-focus, so packaged Mac Archify retains one worker and all8 cases.
+Head79761a8 passed all required gates in6m42 (cold) and6m40 (warm) in
+[37470380316](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/37470380316).
+Its Mac package job had104s packaging,182s Archify and44s Managed Local smoke.
+Moving smoke plus a second bundle build to the native gate still took6m44: the
+last Mac Coordinator group waited263s for a runner. Avoid that extra slot/bundle
+work by running the headless smoke alongside Archify after fresh packaging.
+Two simultaneous GUI workers would compete for native foreground focus, so
+packaged Mac Archify retains one worker and all8 cases.
 
 ## Final design
 
@@ -34,10 +36,12 @@ focus, so packaged Mac Archify retains one worker and all8 cases.
   handling copies it, changes the inspector fuse only in that test copy and
   verifies the production source fuse remains intact.
 - Windows Cargo boundary tests run once in the required Windows native gate.
-  Mac Managed Local LIVE smoke runs in the required Mac native gate after the
-  same pinned sidecar builder, preserving signatures, digests, version/protocol
-  probes, isolated scratch/model roots, OS-assigned port and bounded deadlines.
-  Both the Mac aggregate and final required gate require native gate success.
+  Mac Managed Local LIVE smoke reads the same freshly pinned bundle alongside
+  Archify in the required package job. It has no GUI or loaded model; scratch
+  roots and OS-assigned ports are isolated. Both exit codes are required, logs
+  are retained, and cancellation kills the smoke process group including its
+  restricted-environment sidecar. Existing signatures/digests/probes/deadlines
+  remain required. Mac/final aggregates also require native gate success.
 - Installed dependency cache requires exact OS/architecture/Node/lock/all
   workspace manifests/action/validator inputs and current workspace links.
   Missing/invalid hits fall back to npm ci; source-transform caches are cleared.

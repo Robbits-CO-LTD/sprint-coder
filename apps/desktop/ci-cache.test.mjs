@@ -94,6 +94,72 @@ function sandbox(root, platform = process.platform, content = 'fixture-binary') 
   return executable;
 }
 
+function macExerciseFixture() {
+  const root = fixture();
+  write(join(root, 'apps/desktop/out/test/Sprint.app/Contents/MacOS/Sprint'), 'fixture', 0o755);
+  write(
+    join(root, 'bin/npx'),
+    `#!${process.execPath}\n` +
+      String.raw`
+const { appendFileSync, existsSync, writeFileSync } = require('node:fs');
+const { spawn } = require('node:child_process');
+const { join } = require('node:path');
+const root = process.env.RUNNER_TEMP;
+const trace = join(root, 'trace');
+const pid = join(root, 'sidecar-pid');
+const smoke = process.argv[2] === 'vitest';
+appendFileSync(trace, (smoke ? 'smoke' : 'archify') + ':start\n');
+if (smoke) {
+  if (process.env.SPRINT_CODER_MANAGED_LOCAL_LIVE !== '1' ||
+      !process.cwd().replaceAll('\\', '/').endsWith('/apps/desktop')) process.exit(99);
+  if (process.env.CI_FIXTURE_CANCEL === '1') {
+    writeFileSync(join(root, 'smoke-pid'), String(process.pid));
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      env: {}, stdio: 'ignore',
+    });
+    writeFileSync(pid, String(child.pid));
+    setInterval(() => {}, 1000);
+  } else setTimeout(() => {
+    appendFileSync(trace, 'smoke:done\n');
+    process.exit(Number(process.env.CI_FIXTURE_SMOKE_RESULT));
+  }, 60);
+} else if (process.env.CI_FIXTURE_CANCEL === '1') {
+  const cancel = () => {
+    if (!existsSync(pid)) return setTimeout(cancel, 10);
+    writeFileSync(join(root, 'archify-pid'), String(process.pid));
+    process.kill(process.ppid, 'SIGTERM');
+    setInterval(() => {}, 1000);
+  };
+  cancel();
+} else {
+  if (process.env.SPRINT_CODER_MANAGED_LOCAL_LIVE !== undefined) process.exit(99);
+  appendFileSync(trace, 'archify:done\n');
+  process.exit(Number(process.env.CI_FIXTURE_ARCHIFY_RESULT));
+}
+`,
+    0o755,
+  );
+  const step = workflow.jobs['package-macos'].steps.find(
+    (entry) => entry.name === 'Exercise bundled Archify using the production package',
+  );
+  return {
+    root,
+    invoke: (env) =>
+      spawnSync('bash', ['-e', '-c', step.run], {
+        cwd: root,
+        env: {
+          ...process.env,
+          ...step.env,
+          RUNNER_TEMP: root,
+          PATH: `${root}/bin:${process.env.PATH}`,
+          ...env,
+        },
+        encoding: 'utf8',
+        timeout: 3_000,
+      }),
+  };
+}
+
 describe('CI cache reuse and fallback', () => {
   it('installs/builds on miss or invalid exact hit and skips only verified exact hits', () => {
     const install = depsAction.runs.steps.find((step) =>
@@ -242,6 +308,59 @@ describe('CI cache reuse and fallback', () => {
 });
 
 describe('full CI partition contract', () => {
+  it.skipIf(process.platform === 'win32')(
+    'waits for both Mac checks and rejects either failure',
+    () => {
+      for (const [smoke, archify] of [
+        [0, 0],
+        [1, 0],
+        [0, 1],
+        [1, 1],
+      ]) {
+        const fixture = macExerciseFixture();
+        const result = fixture.invoke({
+          CI_FIXTURE_SMOKE_RESULT: String(smoke),
+          CI_FIXTURE_ARCHIFY_RESULT: String(archify),
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status === 0).toBe(smoke === 0 && archify === 0);
+        const trace = readFileSync(join(fixture.root, 'trace'), 'utf8');
+        expect(trace).toContain('archify:done');
+        expect(trace).toContain('smoke:done');
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills the restricted-env smoke descendant when cancelled',
+    () => {
+      const fixture = macExerciseFixture();
+      const pids = [];
+      try {
+        const result = fixture.invoke({ CI_FIXTURE_CANCEL: '1' });
+        for (const file of ['sidecar-pid', 'archify-pid', 'smoke-pid']) {
+          const path = join(fixture.root, file);
+          if (existsSync(path)) pids.push(Number(readFileSync(path, 'utf8')));
+        }
+        expect(result.error).toBeUndefined();
+        expect(result.status).toBe(143);
+        expect(pids).toHaveLength(3);
+        for (const pid of pids) {
+          const child = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' });
+          expect(child.stdout.trim() === '' || child.stdout.trim().startsWith('Z')).toBe(true);
+        }
+      } finally {
+        for (const pid of pids) {
+          try {
+            process.kill(pid, 'SIGKILL');
+          } catch {
+            /* Already stopped. */
+          }
+        }
+      }
+    },
+  );
+
   it('requires full coverage on every PR and includes all Linux/Windows shards', () => {
     const output = join(fixture(), 'output');
     const classifier = workflow.jobs.classify.steps.find((step) => step.id === 'scope');
@@ -323,24 +442,11 @@ describe('full CI partition contract', () => {
     expect(exerciseMac.run).not.toContain('--shard=');
     expect(exerciseMac['continue-on-error']).toBeUndefined();
     expect(macPackage.steps.some((step) => step.env?.SPRINT_CODER_MANAGED_LOCAL_LIVE)).toBe(false);
-    const nativeGate = workflow.jobs['computer-use-native-gate'];
-    const bundleIndex = nativeGate.steps.findIndex(
-      (step) => step.name === 'Build pinned Managed Local smoke bundle',
+    expect(exerciseMac.run).toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
+    expect(exerciseMac.run).toContain('src/main/managed-local-runtime-supervisor.test.ts');
+    expect(macPackage.steps.some((step) => step.run?.includes('build:managed-local-sidecar'))).toBe(
+      false,
     );
-    const smokeIndex = nativeGate.steps.findIndex(
-      (step) => step.name === 'Managed Local transport smoke',
-    );
-    expect(bundleIndex).toBeGreaterThanOrEqual(0);
-    expect(smokeIndex).toBeGreaterThan(bundleIndex);
-    expect(nativeGate.steps[bundleIndex].if).toBe("runner.os == 'macOS'");
-    expect(nativeGate.steps[bundleIndex].run).toBe('npm run build:managed-local-sidecar');
-    expect(nativeGate.steps[bundleIndex].env.SPRINT_CODER_ALLOW_ADHOC_CODESIGN).toBe('1');
-    const smoke = nativeGate.steps[smokeIndex];
-    expect(smoke.if).toBe("runner.os == 'macOS'");
-    expect(smoke['working-directory']).toBe('apps/desktop');
-    expect(smoke.run).toBe('npx vitest run src/main/managed-local-runtime-supervisor.test.ts');
-    expect(smoke.env.SPRINT_CODER_MANAGED_LOCAL_LIVE).toBe('1');
-    expect(smoke['continue-on-error']).toBeUndefined();
     const required = workflow.jobs.required;
     expect(required.needs).toContain('computer-use-native-gate');
     const macResult = workflow.jobs['macos-result'];

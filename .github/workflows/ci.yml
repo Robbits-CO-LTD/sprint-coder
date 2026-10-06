@@ -197,17 +197,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
-      - name: Build pinned Managed Local smoke bundle
-        if: runner.os == 'macOS'
-        run: npm run build:managed-local-sidecar
-        env:
-          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-      - name: Managed Local transport smoke
-        if: runner.os == 'macOS'
-        working-directory: apps/desktop
-        run: npx vitest run src/main/managed-local-runtime-supervisor.test.ts
-        env:
-          SPRINT_CODER_MANAGED_LOCAL_LIVE: '1'
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -331,8 +320,33 @@ jobs:
           executables=(apps/desktop/out/*/*.app/Contents/MacOS/*)
           test "${#executables[@]}" -eq 1
           test -x "${executables[0]}"
+          # Give the headless smoke its own process group, including its restricted-env sidecar.
+          set -m
+          (
+            cd apps/desktop
+            SPRINT_CODER_MANAGED_LOCAL_LIVE=1 \
+              npx vitest run src/main/managed-local-runtime-supervisor.test.ts
+          ) > "${RUNNER_TEMP}/managed-local-macos-smoke.log" 2>&1 &
+          smoke_pid=$!
+          e2e_pid=''
+          stop_checks() {
+            kill -KILL -- "-${smoke_pid}" 2>/dev/null || true
+            if [[ -n "${e2e_pid}" ]]; then
+              kill -TERM -- "-${e2e_pid}" 2>/dev/null || true
+            fi
+          }
+          trap stop_checks EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          result=0
           SPRINT_CODER_E2E_EXECUTABLE_PATH="${PWD}/${executables[0]}" \
-            npx playwright test tests/e2e/archify-graph.spec.ts --workers=1
+            npx playwright test tests/e2e/archify-graph.spec.ts --workers=1 &
+          e2e_pid=$!
+          wait "${e2e_pid}" || result=$?
+          wait "${smoke_pid}" || result=1
+          trap - EXIT INT TERM
+          cat "${RUNNER_TEMP}/managed-local-macos-smoke.log"
+          exit "${result}"
         env:
           SPRINT_CODER_E2E_MODE: packaged
           SPRINT_CODER_E2E_HIDDEN: '0'
