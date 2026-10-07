@@ -20,6 +20,7 @@ describe('Team state subscription boundary', () => {
       teamByTask: {},
       teamLoadFailedByTask: {},
       teamBusy: false,
+      teamBusyByTask: {},
       teamViewOpen: false,
       error: null,
     });
@@ -258,5 +259,63 @@ describe('Team state subscription boundary', () => {
     expect(useAppStore.getState().teamViewOpen).toBe(false);
     expect(useAppStore.getState().teamBusy).toBe(false);
     expect(useAppStore.getState().error).toContain('Teamを取得できませんでした');
+  });
+
+  it('keeps an unfinished stop busy when returning to its Task and rejects a duplicate stop', async () => {
+    const stopping = deferred<TeamDetail>();
+    const stopAll = vi.fn().mockReturnValue(stopping.promise);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { messages: vi.fn().mockResolvedValue([]) },
+        turns: {
+          snapshot: vi.fn().mockResolvedValue(null),
+          subscribe: vi.fn().mockReturnValue(vi.fn()),
+        },
+        teams: { stopAll, subscribe: vi.fn().mockReturnValue(vi.fn()) },
+      },
+    });
+    useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
+    const stop = useAppStore.getState().stopAllTeamWorkers(taskId);
+    await useAppStore.getState().selectTask('other');
+    expect(useAppStore.getState().teamBusy).toBe(false);
+    await useAppStore.getState().selectTask(taskId);
+    const busyOnReturn = useAppStore.getState().teamBusy;
+    const duplicate = useAppStore.getState().stopAllTeamWorkers(taskId);
+    stopping.resolve({ team: { id: 'stopped' } } as unknown as TeamDetail);
+    await Promise.all([stop, duplicate]);
+    expect(busyOnReturn).toBe(true);
+    expect(stopAll).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().teamBusy).toBe(false);
+  });
+
+  it('does not clear another Task toggle busy when an older stop finishes', async () => {
+    const stopping = deferred<TeamDetail>();
+    const reading = deferred<TeamDetail>();
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { messages: vi.fn().mockResolvedValue([]) },
+        turns: {
+          snapshot: vi.fn().mockResolvedValue(null),
+          subscribe: vi.fn().mockReturnValue(vi.fn()),
+        },
+        teams: {
+          stopAll: vi.fn().mockReturnValue(stopping.promise),
+          get: vi.fn().mockReturnValue(reading.promise),
+          subscribe: vi.fn().mockReturnValue(vi.fn()),
+        },
+      },
+    });
+    useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
+    const stop = useAppStore.getState().stopAllTeamWorkers(taskId);
+    await useAppStore.getState().selectTask('other');
+    const toggle = useAppStore.getState().toggleTeamView('other');
+    stopping.resolve({ team: { id: 'stopped' } } as unknown as TeamDetail);
+    await stop;
+    const busyWhileReading = useAppStore.getState().teamBusy;
+    reading.resolve({ team: { id: 'new-team' } } as unknown as TeamDetail);
+    await toggle;
+    expect(busyWhileReading).toBe(true);
+    expect(useAppStore.getState().teamBusy).toBe(false);
+    expect(useAppStore.getState().teamViewOpen).toBe(true);
   });
 });

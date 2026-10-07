@@ -242,6 +242,7 @@ type AppState = {
    * placeholder rather than either a card or the raw anchor. */
   graphVersionsStateByTask: Record<string, GraphVersionsState | undefined>;
   teamBusy: boolean;
+  teamBusyByTask: Record<string, boolean>;
   projectSwitchingByTask: Record<string, boolean | undefined>;
 
   /** Runtime (Mock/Codex) selection surfaced by the Composer runtime chip (FR-SET-03).
@@ -927,6 +928,23 @@ function mergeGraphVersions(
 
 export const useAppStore = create<AppState>((set, get) => {
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
+  const beginTeamOperation = (taskId: string) => {
+    if (get().teamBusyByTask[taskId]) return false;
+    set((state) => ({
+      teamBusyByTask: { ...state.teamBusyByTask, [taskId]: true },
+      teamBusy: state.selectedTaskId === taskId ? true : state.teamBusy,
+    }));
+    return true;
+  };
+  const finishTeamOperation = (taskId: string) => {
+    set((state) => {
+      const teamBusyByTask = { ...state.teamBusyByTask, [taskId]: false };
+      return {
+        teamBusyByTask,
+        teamBusy: state.selectedTaskId !== null && !!teamBusyByTask[state.selectedTaskId],
+      };
+    });
+  };
 
   return {
     sprintCoderAvailable: typeof window !== 'undefined' && !!window.sprintCoder,
@@ -982,6 +1000,7 @@ export const useAppStore = create<AppState>((set, get) => {
     graphVersionsByTask: {},
     graphVersionsStateByTask: {},
     teamBusy: false,
+    teamBusyByTask: {},
     projectSwitchingByTask: {},
     runtime: {
       kind: 'mock',
@@ -1450,7 +1469,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       set((state) => ({
         teamViewOpen: false,
-        teamBusy: false,
+        teamBusy: !!state.teamBusyByTask[taskId],
         teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
       }));
       void restoreDraft(taskId, apply, get);
@@ -1990,7 +2009,8 @@ export const useAppStore = create<AppState>((set, get) => {
       const generation = taskSelectionGeneration;
       const isCurrentSelection = () =>
         taskSelectionGeneration === generation && get().selectedTaskId === taskId;
-      set({ teamBusy: true, error: null });
+      if (!beginTeamOperation(taskId)) return;
+      set({ error: null });
       try {
         let detail = await window.sprintCoder.teams.get(taskId);
         if (!isCurrentSelection()) return;
@@ -2008,13 +2028,12 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         if (isCurrentSelection()) set({ error: describeError(err) });
       } finally {
-        if (isCurrentSelection()) set({ teamBusy: false });
+        finishTeamOperation(taskId);
       }
     },
 
     async stopTeamWorker(taskId: string, agentId: string) {
-      if (!window.sprintCoder?.teams || get().teamBusy) return;
-      set({ teamBusy: true });
+      if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
       try {
         await window.sprintCoder.teams.stopWorker({ taskId, agentId });
         const detail = await window.sprintCoder.teams.get(taskId);
@@ -2022,26 +2041,28 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         set({ error: describeError(err) });
       } finally {
-        set({ teamBusy: false });
+        finishTeamOperation(taskId);
       }
     },
     async resumeTeamMission(taskId: string, missionId: string) {
-      set({ teamBusy: true, error: null });
+      if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      set({ error: null });
       try {
         await window.sprintCoder!.teams.resumeMission({ taskId, missionId });
         const detail = await window.sprintCoder!.teams.get(taskId);
         set((state) => ({
           teamByTask: { ...state.teamByTask, [taskId]: detail },
-          teamBusy: false,
         }));
       } catch (error) {
-        set({ teamBusy: false, error: describeError(error) });
+        set({ error: describeError(error) });
+      } finally {
+        finishTeamOperation(taskId);
       }
     },
 
     async resumeTeamExecutionIntegration(taskId: string, executionId: string) {
-      if (!window.sprintCoder?.teams || get().teamBusy) return;
-      set({ teamBusy: true, error: null });
+      if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      set({ error: null });
       try {
         const detail = await window.sprintCoder.teams.resumeExecutionIntegration({
           taskId,
@@ -2049,16 +2070,16 @@ export const useAppStore = create<AppState>((set, get) => {
         });
         set((state) => ({
           teamByTask: { ...state.teamByTask, [taskId]: detail },
-          teamBusy: false,
         }));
       } catch (error) {
-        set({ teamBusy: false, error: describeError(error) });
+        set({ error: describeError(error) });
+      } finally {
+        finishTeamOperation(taskId);
       }
     },
 
     async stopAllTeamWorkers(taskId: string) {
-      if (!window.sprintCoder?.teams || get().teamBusy) return;
-      set({ teamBusy: true });
+      if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
       try {
         // The Team Leader runs as the task's active Turn, separately from worker runtimes.
         // Stop it first so it cannot react to worker cancellation by hiring replacements while
@@ -2073,7 +2094,7 @@ export const useAppStore = create<AppState>((set, get) => {
       } catch (err) {
         set({ error: describeError(err) });
       } finally {
-        set({ teamBusy: false });
+        finishTeamOperation(taskId);
       }
     },
 

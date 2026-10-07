@@ -14,6 +14,8 @@
 
 独立レビューでCanvas未取得時のTab横取りを検出し、Team nodeが存在しない時は通常のfocus移動へ戻した。rootからのTab/Shift+Tabを直接検証する回帰を追加し、対象UI検証と最新差分レビューで確認する。
 
+ReviewBOTの追加指摘で、復帰buttonのpointerdownがcanvasに捕捉される2ケースと、未完了のTeam操作がTask切替でbusy解除される2競合を現行headで再現した。pointer領域を既存pan除外へ加え、Team操作のbusyをTask別に保持し、旧Taskの完了で現在Taskのbusyを消さないようにした。pointer6件とstate/停止16件、desktop型検査はPASS。変更箇所のfocused lint/format、最新差分の独立レビュー、同headのCI/BOTと製品UIは引き続き確認する。
+
 ---
 
 # Issue #353 Managed Local AI実効設定（2026-08-27）
