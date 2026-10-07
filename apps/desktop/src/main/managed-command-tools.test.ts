@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ToolBroker } from './tool-broker';
+import { ToolBroker, type ManagedToolLifecycleEvent } from './tool-broker';
 import { ToolRegistry, type Capability } from '@sprint-coder/domain';
 import {
   MANAGED_EXEC_COMMAND_TOOL,
@@ -14,7 +14,8 @@ import {
   type CommandToolBoundary,
 } from './default-tools';
 import { MANAGED_STDIN_MAX_CHARACTERS } from './managed-command-stdin';
-import { CommandRunner } from './command-runner';
+import { CommandRunner, CommandRunnerError, type CommandResult } from './command-runner';
+import * as commandRunnerModule from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
 
@@ -24,8 +25,21 @@ afterEach(async () => {
 });
 
 function createCommandBoundary(workspace: string) {
-  const commandRows = new Map<string, { state: string; outputBytes: number }>();
+  const commandRows = new Map<
+    string,
+    {
+      state: string;
+      outputBytes: number;
+      pid: number | null;
+      startedAt: string | null;
+      finishedAt: string | null;
+    }
+  >();
   const backgroundTransitions: string[] = [];
+  const backgroundCompletions: Parameters<
+    CommandToolBoundary['persistence']['completeBackgroundActivity']
+  >[0][] = [];
+  const publish = vi.fn();
   const boundary = {
     persistence: {
       readTurnWorkspaceSet: () => ({
@@ -45,7 +59,13 @@ function createCommandBoundary(workspace: string) {
       }),
       getTurnWorkspaceRootIdentities: () => new Map(),
       prepareCommand: (input: { id: string }) => {
-        const row = { state: 'prepared', outputBytes: 0 };
+        const row = {
+          state: 'prepared',
+          outputBytes: 0,
+          pid: null,
+          startedAt: null,
+          finishedAt: null,
+        };
         commandRows.set(input.id, row);
         return { id: input.id, ...row } as never;
       },
@@ -53,10 +73,19 @@ function createCommandBoundary(workspace: string) {
         commandRows.get(id)!.state = 'starting';
         return { id, ...commandRows.get(id)! } as never;
       },
-      startCommand: ({ commandId }: { commandId: string }) => {
-        commandRows.get(commandId)!.state = 'running';
-        return { command: {} as never, event: {} as never };
-      },
+      startCommand: vi.fn(
+        ({
+          commandId,
+          pid,
+          startedAt,
+        }: Parameters<CommandToolBoundary['persistence']['startCommand']>[0]) => {
+          const row = commandRows.get(commandId)!;
+          row.state = 'running';
+          row.pid = pid;
+          row.startedAt = startedAt;
+          return { command: {} as never, event: {} as never };
+        },
+      ),
       appendCommandOutput: () => ({}) as never,
       appendCommandOutputBatch: ({
         commandId,
@@ -71,22 +100,356 @@ function createCommandBoundary(workspace: string) {
         );
         return [];
       },
-      completeCommand: ({ commandId, state }: { commandId: string; state: string }) => {
-        commandRows.get(commandId)!.state = state;
-        return { command: {} as never, event: {} as never };
-      },
+      completeCommand: vi.fn(
+        ({
+          commandId,
+          state,
+          finishedAt,
+        }: Parameters<CommandToolBoundary['persistence']['completeCommand']>[0]) => {
+          const row = commandRows.get(commandId)!;
+          row.state = state;
+          row.finishedAt = finishedAt;
+          return { command: {} as never, event: { type: 'command.completed' } as never };
+        },
+      ),
       getCommand: (id: string) => ({ id, ...commandRows.get(id)! }) as never,
       createBackgroundActivity: () => ({}) as never,
       transitionBackgroundActivity: (_id: string, state: string) => {
         backgroundTransitions.push(state);
         return {} as never;
       },
-      completeBackgroundActivity: () => ({}) as never,
+      completeBackgroundActivity: vi.fn(
+        (
+          input: Parameters<CommandToolBoundary['persistence']['completeBackgroundActivity']>[0],
+        ) => {
+          backgroundCompletions.push(input);
+          backgroundTransitions.push(input.outcome);
+          return {} as never;
+        },
+      ),
     },
-    publish: () => undefined,
+    publish,
   } as unknown as CommandToolBoundary;
-  return { boundary, commandRows, backgroundTransitions };
+  return { boundary, commandRows, backgroundTransitions, backgroundCompletions, publish };
 }
+
+describe('managed command startup persistence', () => {
+  it.each([
+    { state: 'prepared', beforeSpawn: false, background: false, terminationUnconfirmed: true },
+    { state: 'starting', beforeSpawn: true, background: false, terminationUnconfirmed: false },
+    { state: 'background', beforeSpawn: false, background: true, terminationUnconfirmed: false },
+  ])('terminalizes a rejected $state start without spawning', async (scenario) => {
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-managed-start-failure-'));
+    roots.push(workspace);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const { boundary, commandRows, backgroundTransitions, backgroundCompletions, publish } =
+      createCommandBoundary(workspace);
+    const runner = new CommandRunner();
+    const sessions = new ManagedCommandSessions(runner);
+    const run = vi.spyOn(runner, 'run').mockImplementation(async (_spec, options) => {
+      if (scenario.beforeSpawn) options?.beforeSpawn?.();
+      expect([...commandRows.values()][0]?.state).toBe(
+        scenario.beforeSpawn ? 'starting' : 'prepared',
+      );
+      throw new CommandRunnerError(
+        scenario.terminationUnconfirmed ? 'PROCESS_TREE_TERMINATION_FAILED' : 'SPAWN_FAILED',
+        'synthetic startup failure',
+      );
+    });
+    const startSession = sessions.start.bind(sessions);
+    let startError: unknown;
+    const start = vi.spyOn(sessions, 'start').mockImplementation(async (...args) => {
+      try {
+        return await startSession(...args);
+      } catch (error) {
+        startError = error;
+        throw error;
+      }
+    });
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({
+        decision: 'allow',
+        reason: 'test',
+        beforeExecute: () => true,
+      }),
+    );
+    registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
+    const owner = {
+      taskId: 'task-start-failure',
+      turnId: 'turn-start-failure',
+      workspaceId: 'workspace-start-failure',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    try {
+      const error = await broker
+        .dispatch({
+          ...owner,
+          callId: 'exec-start-failure',
+          providerName: 'exec_command',
+          input: {
+            executable: process.execPath,
+            argv: ['-e', ''],
+            purpose: 'startup persistence contract',
+            background: scenario.background,
+          },
+        })
+        .then(
+          () => null,
+          (failure: unknown) => failure,
+        );
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toBe(startError);
+      expect(error).toHaveProperty('message', 'synthetic startup failure');
+      expect(run).toHaveBeenCalledOnce();
+      expect(commandRows.size).toBe(1);
+      expect([...commandRows.values()][0]).toMatchObject({
+        state: 'failed',
+        outputBytes: 0,
+        pid: null,
+        startedAt: null,
+        finishedAt: expect.any(String),
+      });
+      expect(Number.isFinite(Date.parse([...commandRows.values()][0]!.finishedAt!))).toBe(true);
+      expect(boundary.persistence.startCommand).not.toHaveBeenCalled();
+      expect(boundary.persistence.completeCommand).toHaveBeenCalledOnce();
+      expect(boundary.persistence.completeCommand).toHaveBeenCalledWith(
+        expect.objectContaining({
+          state: 'failed',
+          exitCode: null,
+          signal: null,
+          outputBytes: 0,
+          truncated: false,
+        }),
+      );
+      expect(publish).toHaveBeenCalledExactlyOnceWith({ type: 'command.completed' });
+      if (scenario.background) {
+        expect(backgroundTransitions).toEqual(['running', 'failed']);
+        expect(backgroundCompletions).toHaveLength(1);
+        expect(backgroundCompletions[0]).toMatchObject({
+          outcome: 'failed',
+          outputCursor: 0,
+          completedAt: expect.any(String),
+        });
+        expect(JSON.parse(backgroundCompletions[0]!.payload)).toEqual({
+          sessionId: expect.any(String),
+          state: 'failed',
+        });
+      } else {
+        expect(backgroundCompletions).toHaveLength(0);
+      }
+      expect(sessions.hasActiveTurnSessions(owner)).toBe(scenario.terminationUnconfirmed);
+      expect(
+        sessions.hasActiveWorkspaceSessions([{ path: workspace, rootIdentityDigest: undefined }]),
+      ).toBe(scenario.terminationUnconfirmed);
+      if (scenario.terminationUnconfirmed)
+        await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
+      else await expect(sessions.terminateTurn(owner)).resolves.toBeUndefined();
+    } finally {
+      await broker.dispose();
+      start.mockRestore();
+      run.mockRestore();
+    }
+  });
+});
+
+describe('managed background tool completion', () => {
+  it.each([
+    {
+      scenario: 'explicit success',
+      mode: 'explicit',
+      outcome: 'exited',
+      exitCode: 0,
+      stop: 'none',
+    },
+    { scenario: 'auto nonzero exit', mode: 'auto', outcome: 'exited', exitCode: 7, stop: 'none' },
+    {
+      scenario: 'explicit failure',
+      mode: 'explicit',
+      outcome: 'failed',
+      exitCode: 0,
+      stop: 'none',
+    },
+    { scenario: 'auto failure', mode: 'auto', outcome: 'failed', exitCode: 0, stop: 'none' },
+    { scenario: 'Turn stop', mode: 'explicit', outcome: 'canceled', exitCode: 0, stop: 'turn' },
+    { scenario: 'epoch revocation', mode: 'auto', outcome: 'canceled', exitCode: 0, stop: 'task' },
+    {
+      scenario: 'unconfirmed stop',
+      mode: 'explicit',
+      outcome: 'failed',
+      exitCode: 0,
+      stop: 'unconfirmed',
+    },
+    {
+      scenario: 'foreground success',
+      mode: 'foreground',
+      outcome: 'exited',
+      exitCode: 0,
+      stop: 'none',
+    },
+    {
+      scenario: 'foreground nonzero exit',
+      mode: 'foreground',
+      outcome: 'exited',
+      exitCode: 7,
+      stop: 'none',
+    },
+    {
+      scenario: 'auto terminal poll',
+      mode: 'auto-race',
+      outcome: 'failed',
+      exitCode: 0,
+      stop: 'none',
+    },
+  ])(
+    'terminalizes the original background tool after its $scenario completion',
+    async (scenario) => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-background-completion-'));
+      roots.push(workspace);
+      const registry = new ToolRegistry();
+      registry.register(MANAGED_EXEC_COMMAND_TOOL);
+      const { boundary, backgroundTransitions } = createCommandBoundary(workspace);
+      const events: ManagedToolLifecycleEvent[] = [];
+      let complete!: (result: CommandResult) => void;
+      let reject!: (error: Error) => void;
+      const completion = new Promise<CommandResult>((resolve, fail) => {
+        complete = resolve;
+        reject = fail;
+      });
+      const runner = new CommandRunner();
+      // この契約テストは実行対象の封印後から始め、OSプロセスを起動しない。
+      const prepare = vi.spyOn(commandRunnerModule, 'prepareExecutionSpec').mockResolvedValueOnce(
+        Object.freeze({
+          absoluteExecutable: process.execPath,
+          argv: Object.freeze(['-e', '']),
+          cwdIdentity: Object.freeze({ canonicalPath: workspace }),
+        }) as never,
+      );
+      const run = vi.spyOn(runner, 'run').mockImplementation(async (_spec, options) => {
+        options?.beforeSpawn?.();
+        await options?.onStarted?.({
+          executionId: 'synthetic-execution',
+          pid: 123,
+          startedAt: Date.now(),
+          processStartIdentity: 'synthetic-process-identity',
+          executionImageDigest: 'a'.repeat(64),
+          executionImageIdentity: 'synthetic-image-identity',
+        });
+        options?.signal?.addEventListener(
+          'abort',
+          () => {
+            if (scenario.stop === 'unconfirmed')
+              reject(
+                new CommandRunnerError(
+                  'PROCESS_TREE_TERMINATION_FAILED',
+                  'synthetic unconfirmed stop',
+                ),
+              );
+            else complete(result);
+          },
+          { once: true },
+        );
+        return completion;
+      });
+      const sessions = new ManagedCommandSessions(runner, 1);
+      const waitFor =
+        scenario.mode === 'auto-race'
+          ? vi.spyOn(sessions, 'waitFor').mockImplementation(async (sessionId, owner) => {
+              reject(new Error('synthetic post-start failure'));
+              await sessions.wait(sessionId, owner);
+              return null;
+            })
+          : undefined;
+      const broker = new ToolBroker(
+        registry,
+        () => 1,
+        () => ({ decision: 'allow', reason: 'test' }),
+        (event) => {
+          if (event.state === 'succeeded' || event.state === 'failed' || event.state === 'canceled')
+            expect(boundary.persistence.completeCommand).toHaveBeenCalledOnce();
+          events.push(event);
+        },
+      );
+      registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions, 1);
+      const owner = {
+        taskId: 'task-background-completion',
+        turnId: 'turn-background-completion',
+        workspaceId: 'workspace-background-completion',
+        policyEpoch: 1,
+      };
+      broker.startTurn(owner, 'grok');
+      const result: CommandResult = {
+        executionId: 'synthetic-execution',
+        exitCode: scenario.exitCode,
+        signal: null,
+        canceled: scenario.outcome === 'canceled',
+        termination: scenario.outcome === 'canceled' ? 'forced' : 'natural',
+        durationMs: 1,
+        outputBytes: 0,
+        truncated: false,
+      };
+      try {
+        if (scenario.mode === 'foreground') complete(result);
+        const output = await broker.dispatch({
+          ...owner,
+          callId: 'original-background-call',
+          providerName: 'exec_command',
+          input: {
+            executable: process.execPath,
+            argv: ['-e', ''],
+            purpose: 'background completion contract',
+            background: scenario.mode === 'explicit',
+          },
+        });
+        if (scenario.mode === 'foreground') {
+          expect(output).toMatchObject({ exitCode: scenario.exitCode });
+        } else if (scenario.mode !== 'auto-race') {
+          expect(output).toMatchObject({ state: 'running' });
+          expect(events.at(-1)?.state).toBe('backgrounded');
+          broker.finishTurn(owner.taskId, owner.turnId);
+          if (scenario.stop === 'turn') await sessions.terminateTurn(owner);
+          else if (scenario.stop === 'task') await sessions.terminateTask(owner.taskId);
+          else if (scenario.stop === 'unconfirmed')
+            await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
+          else if (scenario.outcome === 'failed') reject(new Error('synthetic post-start failure'));
+          else complete(result);
+        } else expect(output).toMatchObject({ state: 'failed' });
+        await vi.waitFor(() => expect(boundary.persistence.completeCommand).toHaveBeenCalledOnce());
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(backgroundTransitions).toEqual(
+          scenario.mode === 'foreground'
+            ? []
+            : ['running', scenario.outcome === 'exited' ? 'completed' : scenario.outcome],
+        );
+        expect(events.map(({ state }) => state)).toEqual([
+          'requested',
+          'prepared',
+          'awaiting_approval',
+          'queued',
+          'running',
+          ...(['foreground', 'auto-race'].includes(scenario.mode) ? [] : ['backgrounded']),
+          scenario.outcome === 'exited' ? 'succeeded' : scenario.outcome,
+        ]);
+        if (scenario.stop === 'unconfirmed') {
+          expect(sessions.hasActiveTurnSessions(owner)).toBe(true);
+          await expect(
+            sessions.start({} as never, { taskId: 'another-task', turnId: 'another-turn' }),
+          ).rejects.toThrow('session limit reached');
+          await expect(sessions.terminateTurn(owner)).rejects.toThrow('could not be confirmed');
+        } else expect(sessions.hasActiveTurnSessions(owner)).toBe(false);
+      } finally {
+        complete(result);
+        await broker.dispose();
+        prepare.mockRestore();
+        run.mockRestore();
+        waitFor?.mockRestore();
+      }
+    },
+  );
+});
 
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'managed command tool contract',

@@ -8,7 +8,7 @@ import {
   type JsonValue,
 } from '@sprint-coder/domain';
 import { randomUUID } from 'node:crypto';
-import { ToolBroker, type ToolAuthorizer } from './tool-broker';
+import { ToolBroker, type ToolAuthorizer, type BackgroundToolCompletionState } from './tool-broker';
 import {
   CommandRunner,
   prepareExecutionSpec,
@@ -569,7 +569,38 @@ export function registerCommandRunnerTool(
           );
         };
         if (backgroundSpecs.has(spec)) persistBackground();
-        const started = await sessions.start(spec, owner, hooks, sessionId);
+        let started: Awaited<ReturnType<ManagedCommandSessions['start']>>;
+        try {
+          started = await sessions.start(spec, owner, hooks, sessionId);
+        } catch (error) {
+          const current = command.persistence.getCommand(commandId);
+          if (
+            current.state === 'prepared' ||
+            current.state === 'starting' ||
+            current.state === 'running'
+          ) {
+            const persisted = command.persistence.completeCommand({
+              commandId,
+              state: 'failed',
+              exitCode: null,
+              signal: null,
+              outputBytes: current.outputBytes,
+              truncated: current.state === 'running',
+              finishedAt: new Date().toISOString(),
+            });
+            command.publish(persisted.event);
+          }
+          if (backgroundPersisted)
+            command.persistence.completeBackgroundActivity({
+              activityId: sessionId,
+              completionId: randomUUID(),
+              outcome: 'failed',
+              payload: JSON.stringify({ sessionId, state: 'failed' }),
+              outputCursor: 0,
+              completedAt: new Date().toISOString(),
+            });
+          throw error;
+        }
         const finalize = (snapshot: Awaited<ReturnType<ManagedCommandSessions['wait']>>): void => {
           const persisted =
             snapshot.result === null
@@ -605,8 +636,21 @@ export function registerCommandRunnerTool(
               completedAt: new Date().toISOString(),
             });
         };
+        const observeBackground = (): void => {
+          const completion = sessions.wait(started.sessionId, owner).then((snapshot) => {
+            finalize(snapshot);
+            return (
+              snapshot.state === 'exited'
+                ? 'succeeded'
+                : snapshot.state === 'canceled'
+                  ? 'canceled'
+                  : 'failed'
+            ) satisfies BackgroundToolCompletionState;
+          });
+          control.onBackgroundCompletion?.(completion);
+        };
         if (backgroundSpecs.has(spec)) {
-          void sessions.wait(started.sessionId, owner).then(finalize);
+          observeBackground();
           return started;
         }
         const completed = await sessions.waitFor(
@@ -616,7 +660,7 @@ export function registerCommandRunnerTool(
         );
         if (completed === null) {
           persistBackground();
-          void sessions.wait(started.sessionId, owner).then(finalize);
+          observeBackground();
           return sessions.poll(started.sessionId, owner);
         }
         const persisted =

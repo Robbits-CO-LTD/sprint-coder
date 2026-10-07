@@ -5,7 +5,13 @@ import {
   createToolId,
   type ToolExecutionContext,
 } from '@sprint-coder/domain';
-import { ToolBroker, type ToolAuthorizer } from './tool-broker';
+import {
+  ToolBroker,
+  type ToolAuthorizer,
+  type BackgroundToolCompletionState,
+  type ManagedToolLifecycleEvent,
+} from './tool-broker';
+import { secureLogger } from './secure-logger';
 
 const inputSchema = {
   type: 'object',
@@ -73,6 +79,266 @@ const context: ToolExecutionContext = {
   workspaceId: 'workspace-1',
   policyEpoch: 3,
 };
+
+function createBackgroundRegistry() {
+  const { command } = createRegistry();
+  const registry = new ToolRegistry();
+  const definition = createToolDefinition({
+    ...command,
+    supportsBackground: true,
+    outputSchema: {
+      type: 'object',
+      properties: { state: { type: 'string' }, sessionId: { type: 'string' } },
+      required: ['state', 'sessionId'],
+      additionalProperties: false,
+    },
+  });
+  registry.register(definition);
+  return { registry, definition };
+}
+
+describe('Main background tool lifecycle', () => {
+  it.each(
+    (['succeeded', 'failed', 'canceled'] as const).flatMap((state) =>
+      (['early', 'late', 'terminal-result'] as const).map((timing) => ({ state, timing })),
+    ),
+  )('records one original $state completion for $timing settlement', async ({ state, timing }) => {
+    const { registry, definition } = createBackgroundRegistry();
+    const events: ManagedToolLifecycleEvent[] = [];
+    let epoch = context.policyEpoch;
+    let complete!: (state: BackgroundToolCompletionState) => void;
+    const completion = new Promise<BackgroundToolCompletionState>((resolve) => {
+      complete = resolve;
+    });
+    const broker = new ToolBroker(
+      registry,
+      () => epoch,
+      authorizeAll,
+      (event) => events.push(event),
+    );
+    broker.registerImplementation({
+      toolId: definition.toolId,
+      implementationKind: 'command-runner',
+      execute: (_input, _context, control) => {
+        control.onBackgroundCompletion?.(completion);
+        // 重複通知は元の完了結果を書き換えず、拒否されたPromiseも回収する。
+        control.onBackgroundCompletion?.(
+          state === 'canceled'
+            ? Promise.reject(new Error('ignored duplicate failure'))
+            : Promise.resolve(state === 'failed' ? 'succeeded' : 'failed'),
+        );
+        if (timing !== 'late') complete(state);
+        return {
+          state: timing === 'terminal-result' ? 'exited' : 'running',
+          sessionId: 'owned-session',
+        };
+      },
+    });
+    const snapshot = broker.startTurn(context, 'mock');
+    await broker.dispatch({
+      ...context,
+      callId: 'original-background',
+      providerName: 'run_command',
+      input: { executable: '/bin/echo', argv: [] },
+    });
+    if (timing === 'late') {
+      expect(events.at(-1)?.state).toBe('backgrounded');
+      // Turn終了・epoch変更後も過去の監査完了だけを記録し、新しい実行権限は作らない。
+      broker.finishTurn(context.taskId, context.turnId);
+      epoch += 1;
+      complete(state);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await expect(
+        broker.dispatch({
+          ...context,
+          callId: 'stale-after-finish',
+          providerName: 'run_command',
+          input: { executable: '/bin/echo', argv: [] },
+        }),
+      ).rejects.toThrow('No ToolCatalogSnapshot');
+      expect(() => broker.startTurn(context, 'mock')).toThrow('stale policy epoch');
+    }
+    expect(events.map(({ state: next }) => next)).toEqual([
+      'requested',
+      'prepared',
+      'awaiting_approval',
+      'queued',
+      'running',
+      ...(timing === 'terminal-result' ? [] : ['backgrounded']),
+      state,
+    ]);
+    for (const event of events)
+      expect(event).toMatchObject({
+        taskId: context.taskId,
+        turnId: context.turnId,
+        callId: 'original-background',
+        ordinal: 1,
+        providerName: 'run_command',
+        catalogDigest: snapshot.digest,
+      });
+  });
+
+  it.each(['schema', 'size', 'abort'] as const)(
+    'ignores a late completion after a %s dispatch rejection',
+    async (failure) => {
+      const { registry, definition } = createBackgroundRegistry();
+      const events: ManagedToolLifecycleEvent[] = [];
+      let complete!: (state: BackgroundToolCompletionState) => void;
+      const completion = new Promise<BackgroundToolCompletionState>((resolve) => {
+        complete = resolve;
+      });
+      const controller = new AbortController();
+      const broker = new ToolBroker(
+        registry,
+        () => 3,
+        authorizeAll,
+        (event) => events.push(event),
+      );
+      broker.registerImplementation({
+        toolId: definition.toolId,
+        implementationKind: 'command-runner',
+        execute: (_input, _context, control) => {
+          control.onBackgroundCompletion?.(completion);
+          return failure === 'schema'
+            ? { invalid: true }
+            : {
+                state: 'running',
+                sessionId: failure === 'size' ? 'x'.repeat(1024 * 1024) : 'session',
+              };
+        },
+      });
+      broker.startTurn(context, 'mock');
+      const dispatch = () =>
+        broker.dispatch(
+          {
+            ...context,
+            callId: 'rejected-background',
+            providerName: 'run_command',
+            input: { executable: '/bin/echo', argv: [] },
+            signal: controller.signal,
+          },
+          (result) => {
+            if (failure === 'abort') controller.abort(new Error('synthetic consumer abort'));
+            return result;
+          },
+        );
+      await expect(dispatch()).rejects.toThrow(
+        failure === 'abort'
+          ? 'synthetic consumer abort'
+          : failure === 'schema'
+            ? 'pinned schema'
+            : 'pinned output limit',
+      );
+      const statesBefore = events.map(({ state }) => state);
+      complete('succeeded');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(events.map(({ state }) => state)).toEqual(statesBefore);
+      expect(events.at(-1)?.state).toBe(failure === 'abort' ? 'canceled' : 'failed');
+      expect(statesBefore).not.toContain('backgrounded');
+    },
+  );
+
+  it('drains a rejected finalizer without recording success or leaking the error', async () => {
+    const { registry, definition } = createBackgroundRegistry();
+    const states: string[] = [];
+    const log = vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined);
+    let reject!: (error: Error) => void;
+    const completion = new Promise<BackgroundToolCompletionState>((_resolve, fail) => {
+      reject = fail;
+    });
+    const broker = new ToolBroker(
+      registry,
+      () => 3,
+      authorizeAll,
+      ({ state }) => states.push(state),
+    );
+    broker.registerImplementation({
+      toolId: definition.toolId,
+      implementationKind: 'command-runner',
+      execute: (_input, _context, control) => {
+        control.onBackgroundCompletion?.(completion);
+        return { state: 'running', sessionId: 'session' };
+      },
+    });
+    broker.startTurn(context, 'mock');
+    try {
+      await broker.dispatch({
+        ...context,
+        callId: 'failed-finalizer',
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      });
+      reject(new Error('private raw command failure'));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(states.slice(-2)).toEqual(['backgrounded', 'failed']);
+      expect(log).toHaveBeenCalledOnce();
+      expect(JSON.stringify(log.mock.calls)).not.toContain('private raw');
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it.each(['early', 'late', 'terminal-result'] as const)(
+    'does not retry a failed %s terminal audit or block the next result',
+    async (timing) => {
+      const { registry, definition } = createBackgroundRegistry();
+      const states: string[] = [];
+      const log = vi.spyOn(secureLogger, 'error').mockImplementation(() => undefined);
+      let complete!: (state: BackgroundToolCompletionState) => void;
+      const completion = new Promise<BackgroundToolCompletionState>((resolve) => {
+        complete = resolve;
+      });
+      const broker = new ToolBroker(
+        registry,
+        () => 3,
+        authorizeAll,
+        ({ callId, state }) => {
+          states.push(`${callId}:${state}`);
+          if (callId === 'audit-failure' && state === 'succeeded')
+            throw new Error('private audit failure');
+        },
+      );
+      broker.registerImplementation({
+        toolId: definition.toolId,
+        implementationKind: 'command-runner',
+        execute: (_input, _context, control) => {
+          if (control.callId === 'audit-failure') {
+            control.onBackgroundCompletion?.(completion);
+            if (timing !== 'late') complete('succeeded');
+          }
+          return {
+            state: timing === 'terminal-result' ? 'exited' : 'running',
+            sessionId: 'session',
+          };
+        },
+      });
+      broker.startTurn(context, 'mock');
+      const dispatch = (callId: string) =>
+        broker.dispatch(
+          {
+            ...context,
+            callId,
+            providerName: 'run_command',
+            input: { executable: '/bin/echo', argv: [] },
+          },
+          (result) => result,
+        );
+      try {
+        if (timing === 'late') {
+          await dispatch('audit-failure');
+          complete('succeeded');
+        } else await expect(dispatch('audit-failure')).rejects.toThrow('private audit failure');
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(states.filter((state) => state === 'audit-failure:succeeded')).toHaveLength(1);
+        expect(states).not.toContain('audit-failure:failed');
+        expect(log).toHaveBeenCalledTimes(timing === 'late' ? 1 : 0);
+        await expect(dispatch('next-call')).resolves.toMatchObject({ sessionId: 'session' });
+      } finally {
+        log.mockRestore();
+      }
+    },
+  );
+});
 
 describe('Main ToolBroker', () => {
   it('continues audit ordinals after a persisted Mission session is rebound', async () => {
