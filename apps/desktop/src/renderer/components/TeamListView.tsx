@@ -46,6 +46,7 @@ export function TeamListView({
   onSwitchToCanvasView: () => void;
 }) {
   const detail = useAppStore((state) => state.teamByTask[task.id]);
+  const loadFailed = useAppStore((state) => state.teamLoadFailedByTask[task.id]);
   const teamBusy = useAppStore((state) => state.teamBusy);
   const stopTeamWorker = useAppStore((state) => state.stopTeamWorker);
   const resumeTeamMission = useAppStore((state) => state.resumeTeamMission);
@@ -79,7 +80,24 @@ export function TeamListView({
         aria-labelledby="team-list-title"
         tabIndex={-1}
       >
-        <h2 id="team-list-title">Teamを準備しています</h2>
+        <h2 id="team-list-title">
+          {loadFailed
+            ? 'Teamを取得できませんでした'
+            : detail === null
+              ? 'このTaskにはTeamがありません'
+              : 'Teamを準備しています'}
+        </h2>
+        <button type="button" className="team-back-btn" data-testid="team-back" onClick={onBack}>
+          Chatに戻る
+        </button>
+        <button
+          type="button"
+          className="team-view-toggle-btn"
+          data-testid="team-view-toggle"
+          onClick={onSwitchToCanvasView}
+        >
+          Canvas表示
+        </button>
       </section>
     );
   }

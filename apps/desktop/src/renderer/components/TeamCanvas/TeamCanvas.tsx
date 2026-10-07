@@ -103,6 +103,7 @@ export function TeamCanvas({
   ref?: Ref<TeamCanvasHandle>;
 }) {
   const detail = useAppStore((s) => s.teamByTask[task.id]);
+  const loadFailed = useAppStore((s) => s.teamLoadFailedByTask[task.id]);
   const teamBusy = useAppStore((s) => s.teamBusy);
   const stopTeamWorker = useAppStore((s) => s.stopTeamWorker);
   const resumeTeamMission = useAppStore((s) => s.resumeTeamMission);
@@ -860,6 +861,8 @@ export function TeamCanvas({
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
       if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
+      // Recovery controls use the browser's normal focus order until Team nodes exist.
+      if (!detail) return;
       if (e.key === 'Escape') {
         // Native-DOM Escape handling above already covers every case (including from inside the
         // portaled composer); this branch just avoids a double `.preventDefault()`/no-op re-run
@@ -902,6 +905,7 @@ export function TeamCanvas({
     },
     [
       canvasRef,
+      detail,
       moveSelection,
       activateSelection,
       animateCamTo,
@@ -938,7 +942,29 @@ export function TeamCanvas({
     >
       {!detail ? (
         <div className="team-canvas-notice">
-          <div className="sys-notice">Teamを準備しています</div>
+          <div className="sys-notice">
+            {loadFailed
+              ? 'Teamを取得できませんでした'
+              : detail === null
+                ? 'このTaskにはTeamがありません'
+                : 'Teamを準備しています'}
+          </div>
+          <button
+            type="button"
+            className="team-back-btn"
+            data-testid="team-back"
+            onClick={onRequestExit}
+          >
+            Chatに戻る
+          </button>
+          <button
+            type="button"
+            className="team-view-toggle-btn"
+            data-testid="team-view-toggle"
+            onClick={onSwitchToListView}
+          >
+            List表示
+          </button>
         </div>
       ) : (
         <>
