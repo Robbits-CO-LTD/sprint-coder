@@ -1,3 +1,4 @@
+import type { Writable } from 'node:stream';
 import { redactSecrets } from './secret-redactor';
 
 export type SecureLogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -137,7 +138,45 @@ function redactLogString(value: string): string {
 }
 
 export function writeSecureLogEntry(entry: SecureLogEntry): void {
-  const line = `${JSON.stringify(entry)}\n`;
-  if (entry.level === 'error' || entry.level === 'warn') process.stderr.write(line);
-  else process.stdout.write(line);
+  consoleLogSink(entry);
 }
+
+export function createConsoleLogSink(
+  stdout: Writable,
+  stderr: Writable,
+  onPipeClosed: (stream: 'stdout' | 'stderr', code: string) => void,
+): SecureLogSink {
+  const closed = new Set<Writable>();
+  const handleError = (stream: Writable, name: 'stdout' | 'stderr', error: unknown): void => {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    if (code !== 'EPIPE' && code !== 'ERR_STREAM_DESTROYED') throw error;
+    if (closed.has(stream)) return;
+    // Disable this pipe before reporting through the logger, which may use the same pipe.
+    closed.add(stream);
+    onPipeClosed(name, code);
+  };
+  stdout.on('error', (error: Error) => handleError(stdout, 'stdout', error));
+  stderr.on('error', (error: Error) => handleError(stderr, 'stderr', error));
+  return (entry): void => {
+    const name = entry.level === 'error' || entry.level === 'warn' ? 'stderr' : 'stdout';
+    const stream = name === 'stderr' ? stderr : stdout;
+    if (closed.has(stream)) return;
+    try {
+      stream.write(`${JSON.stringify(entry)}\n`);
+    } catch (error) {
+      handleError(stream, name, error);
+    }
+  };
+}
+
+const consoleLogSink = createConsoleLogSink(process.stdout, process.stderr, (stream, code) => {
+  secureLogger.error(
+    'Diagnostic console pipe closed',
+    { stream, code },
+    {
+      event: 'system.logging.console_pipe_closed',
+      status: 'failed',
+    },
+  );
+});

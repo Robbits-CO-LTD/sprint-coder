@@ -742,3 +742,22 @@ S4 の下限は native deny/面/実行トリガの正負ケース、Main の tok
 - 準備用 PR #631 を作成し、#500 を `implementing` に更新。最新 main へ rebase した head で対象 53 件と型検査は PASS。CI の Linux shard で破棄処理テストが新規 Set の fixture 未初期化を検出したためテスト準備を修正し、直接関連する 56 件を再確認して PASS。修正版 head の CI・review は未完了。
 
 ---
+
+## Grok残件 #749〜#754（2026-10-07）
+
+目的: 公開schema v2計画に沿って原因調査、必要な最小修正、検証、PRレビューとclose条件の確認を行う。baseはorigin/main 3662aecc。canonicalの未追跡差分と旧FAIL隔離を保持する。
+非対象: #732/#734/#500、release公開、課金拡大、auth/Trust変更、AppContainer/NUL ACL緩和。旧planning_onlyの終了地点は今回へ持ち越さない。
+承認: 今回の引継ぎ依頼は対象6件の実装・検証・必要PR・条件達成時closeを含む。mergeは本人原文と対象条件を実行前に照合する。署名・通常送信/承認/Stop操作は既存許可を照合して継続。
+依存: #751は#749/#750の未達解消待ち。他3件は独立。実機/profile/アカウント/署名/build/mergeは直列。WIP最大3。
+
+- [x] 最新Issue/PR/main、最近接規約、関連教訓、添付0/0を確認（OPEN PR 0、implementing 0）。
+- [ ] plan-version hash/schema v2/AC/INV/層と必須review/CI経路を検証。
+- [ ] #749/#752/#754: 現行再現→RCA→必要な最小修正→対象test/型/lint。
+- [ ] #750/#753: cheap contractと製品経路/安全な観測のpreflight、実行可能性の正規補正。
+- [ ] 固定候補に独立レビュー、最新head CI、必要なWindows dev/package受入を結び付ける。
+- [ ] #751集約と各Issueのclose/holdを実状態へ反映し、自分の一時物を整理。
+
+JP-19着手前: 第一仮説PASS（旧FAILを現行不具合と断定しない）、周辺影響PASS（runtime/main/logger/state/IPCを追跡）、責任境界PASS（停止確認・所有権・secret redaction維持）、最小差分PASS（対象6件だけ）、別経路は現行再現/拒否/回帰testで確認する。
+証跡: ../tasks/grok-remaining-20261007（各Issue live snapshot、添付manifest、ログ）。成果は本worktree、旧署名copy/profile/失敗隔離は保持。
+
+#752 RCA: Root Cause Confirmed。閉じた実OS stderr pipeで、現行SecureLogger→非同期error EPIPE→uncaughtExceptionの再ログが8回連鎖するbounded対照を保存。CLI stdinとは独立で、合成diagnosticのみ。A=YES/B=YES/C=YES/D=YES。最小修正はconsole pipeごとにEPIPE/ERR_STREAM_DESTROYEDを一度だけ記録して停止、他console/persistent sinkとredactionを維持、想定外errorは伝播。修正後の同一再現はuncaught 0、logger/persistent 13 tests PASS。旧697件の全アプリ事象の完全原因とnative終了/Turn回収は別の実機条件として未達。stop/isolation/Team既存preflightは26 PASS/1 platform SKIP、#749の旧FAILを解消したとは扱わない。
