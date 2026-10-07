@@ -227,6 +227,7 @@ type AppState = {
   pendingOptimisticIdByTask: Record<string, string | undefined>;
   teamByTask: Record<string, TeamDetail | null | undefined>;
   teamViewOpen: boolean;
+  teamLoadFailedByTask: Record<string, boolean>;
   /** The graph panel opens on request, never from a button: Main's `graphsUpdated` push raises one
    * for the selected Task the moment a graph tool rendered a diagram, and the inline graph card in
    * the transcript raises one again after the panel was closed. `nonce` distinguishes repeats. */
@@ -388,6 +389,7 @@ let updateHealthUnsubscribe: (() => void) | null = null;
 let runtimeStatusUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
+let taskSelectionGeneration = 0;
 let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -975,6 +977,7 @@ export const useAppStore = create<AppState>((set, get) => {
     pendingOptimisticIdByTask: {},
     teamByTask: {},
     teamViewOpen: false,
+    teamLoadFailedByTask: {},
     graphOpenRequest: null,
     graphVersionsByTask: {},
     graphVersionsStateByTask: {},
@@ -1426,6 +1429,9 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async selectTask(taskId: string) {
+      const generation = ++taskSelectionGeneration;
+      const isCurrentSelection = () =>
+        taskSelectionGeneration === generation && get().selectedTaskId === taskId;
       // Live bodies belong to the Task that produced them; carrying them across a switch would show
       // one Task's file under another's name (issue #39).
       if (get().selectedTaskId !== taskId) {
@@ -1442,7 +1448,11 @@ export const useAppStore = create<AppState>((set, get) => {
         currentTeamUnsubscribe();
         currentTeamUnsubscribe = null;
       }
-      set({ teamViewOpen: false });
+      set((state) => ({
+        teamViewOpen: false,
+        teamBusy: false,
+        teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+      }));
       void restoreDraft(taskId, apply, get);
       void get().refreshDraftAttachments(taskId);
       void restoreSkillSelection(taskId, apply, get);
@@ -1607,48 +1617,81 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       }
 
-      if (get().selectedTaskId !== taskId) return;
+      if (!isCurrentSelection()) return;
       subscribeToTask(taskId, apply, get, afterSeq);
       if (typeof sprintCoder.teams?.subscribe === 'function') {
         let lastTeamEventSeq = 0;
         let receivedSnapshot = false;
-        currentTeamUnsubscribe = sprintCoder.teams.subscribe(taskId, (event) => {
-          if (get().selectedTaskId !== taskId) return;
-          if (event.type === 'snapshot') {
-            receivedSnapshot = true;
+        currentTeamUnsubscribe = sprintCoder.teams.subscribe(
+          taskId,
+          (event) => {
+            if (!isCurrentSelection()) return;
+            if (event.type === 'snapshot') {
+              receivedSnapshot = true;
+              lastTeamEventSeq = event.seq;
+              set((state) => ({
+                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+              }));
+              return;
+            }
+            if (!receivedSnapshot || event.seq <= lastTeamEventSeq) return;
+            if (event.seq !== lastTeamEventSeq + 1) {
+              lastTeamEventSeq = event.seq;
+              const requestedSeq = event.seq;
+              void sprintCoder.teams
+                .get(taskId)
+                .then((fresh) => {
+                  if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+                    set((state) => ({
+                      teamByTask: { ...state.teamByTask, [taskId]: fresh },
+                      teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+                    }));
+                })
+                .catch(() => {
+                  if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+                    set((state) => ({
+                      teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
+                    }));
+                });
+              return;
+            }
             lastTeamEventSeq = event.seq;
-            set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: event.detail } }));
-            return;
-          }
-          if (!receivedSnapshot || event.seq <= lastTeamEventSeq) return;
-          if (event.seq !== lastTeamEventSeq + 1) {
-            lastTeamEventSeq = event.seq;
-            void sprintCoder.teams.get(taskId).then((fresh) => {
-              if (get().selectedTaskId === taskId)
-                set((state) => ({
-                  teamByTask: { ...state.teamByTask, [taskId]: fresh },
-                }));
+            set((state) => {
+              // First team appearance for the selected task (leader-driven auto-promotion)
+              // pulls the user into the canvas; later updates never fight a manual close.
+              const firstAppearance =
+                state.teamByTask[taskId] == null &&
+                state.selectedTaskId === taskId &&
+                !state.teamViewOpen;
+              return {
+                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+                ...(firstAppearance ? { teamViewOpen: true } : {}),
+              };
             });
-            return;
-          }
-          lastTeamEventSeq = event.seq;
-          set((state) => {
-            // First team appearance for the selected task (leader-driven auto-promotion)
-            // pulls the user into the canvas; later updates never fight a manual close.
-            const firstAppearance =
-              state.teamByTask[taskId] == null &&
-              state.selectedTaskId === taskId &&
-              !state.teamViewOpen;
-            return {
-              teamByTask: { ...state.teamByTask, [taskId]: event.detail },
-              ...(firstAppearance ? { teamViewOpen: true } : {}),
-            };
-          });
-        });
+          },
+          () => {
+            if (isCurrentSelection())
+              set((state) => ({
+                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
+              }));
+          },
+        );
       } else if (typeof sprintCoder.teams?.get === 'function') {
-        const team = await sprintCoder.teams.get(taskId).catch(() => null);
-        if (get().selectedTaskId === taskId)
-          set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: team } }));
+        try {
+          const team = await sprintCoder.teams.get(taskId);
+          if (isCurrentSelection())
+            set((state) => ({
+              teamByTask: { ...state.teamByTask, [taskId]: team },
+              teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+            }));
+        } catch {
+          if (isCurrentSelection())
+            set((state) => ({
+              teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
+            }));
+        }
       }
     },
 
@@ -1944,21 +1987,28 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ teamViewOpen: false });
         return;
       }
+      const generation = taskSelectionGeneration;
+      const isCurrentSelection = () =>
+        taskSelectionGeneration === generation && get().selectedTaskId === taskId;
       set({ teamBusy: true, error: null });
       try {
         let detail = await window.sprintCoder.teams.get(taskId);
+        if (!isCurrentSelection()) return;
         if (detail === null) {
           await window.sprintCoder.teams.promote(taskId);
+          if (!isCurrentSelection()) return;
           detail = await window.sprintCoder.teams.get(taskId);
         }
+        if (!isCurrentSelection()) return;
+        if (detail === null) throw new Error('Teamを取得できませんでした。Chatで続けられます。');
         set((state) => ({
           teamByTask: { ...state.teamByTask, [taskId]: detail },
           teamViewOpen: true,
         }));
       } catch (err) {
-        set({ error: describeError(err) });
+        if (isCurrentSelection()) set({ error: describeError(err) });
       } finally {
-        set({ teamBusy: false });
+        if (isCurrentSelection()) set({ teamBusy: false });
       }
     },
 

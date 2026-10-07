@@ -898,7 +898,7 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.teamsStopWorker, teamWorkerRefSchema, workerSummarySchema, input),
     stopAll: (taskId) =>
       invoke(IPC_CHANNELS.teamsStopAll, taskIdPayloadSchema, teamDetailSchema, { taskId }),
-    subscribe: (taskId, listener) => {
+    subscribe: (taskId, listener, onError) => {
       const subscriptionId = globalThis.crypto.randomUUID();
       const input = { taskId, subscriptionId };
       const buffer = createTeamSubscriptionBuffer(listener);
@@ -930,6 +930,7 @@ const api: SprintCoderApi = {
         .catch(() => {
           buffer.dispose();
           ipcRenderer.removeListener(IPC_CHANNELS.teamsEvent, handler);
+          if (!disposed) onError?.();
         });
       return () => {
         if (disposed) return;

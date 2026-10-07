@@ -1,3 +1,19 @@
+## Issue #754 — Task切替とTeam取得失敗からの復帰（2026-10-07）
+
+目的は新TaskがTeam準備表示に残る競合を解消し、Teamなし・失敗・読込中から通常会話へ戻れること。対象は公開計画のstate/preload/contracts/UI境界。DB、Worker拒否設計、provider、認可、配布は非対象。baseはmain `3662aecc22e28f8f6027402319bd263649cedd79`、別worktreeでcanonicalの未追跡データを保持する。
+
+- [x] Issue/計画/添付0/0と対象コードを確認し、旧toggle・A→B→A・seq gap取得の3競合を失敗テストで再現した。
+- [x] 選択世代とevent位置を照合し、optional失敗callback、rendererローカル失敗状態、両表示の復帰ボタンを最小実装した。
+- [x] state/UI/bufferの18件と実preload wrapperの2件、desktop/contracts型検査、対象lintとformatをPASSした。lintのd.ts既存ignore警告1件は型検査で確認した。
+- [x] 共有型と利用先を明記した第2世代計画をvalidatorと4観点確認で固定し、live公開readbackを行った。
+- [ ] 同headの独立実装レビューとReviewBOT/必須CIを確認する。
+- [ ] 製品UIで新Task/切替、Canvas/List、キーボード、狭幅、light/dark、Chat継続を確認する。
+- [ ] 未達受入条件を保ったまま、PR/Issueの実状態と今回所有の一時生成物を整理する。merge/closeは有効な個別承認と全条件を照合する。
+
+実装結果レビュー: 3競合は現行baseで再現し修正後PASS。旧実機事象全体との同一性と製品UI受入はNOT_RUNであり、単体PASSだけでIssue完了にしない。
+
+---
+
 # Issue #353 Managed Local AI実効設定（2026-08-27）
 
 ### 計画
