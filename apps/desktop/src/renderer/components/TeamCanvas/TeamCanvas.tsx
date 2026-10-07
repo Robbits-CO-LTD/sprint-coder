@@ -861,6 +861,8 @@ export function TeamCanvas({
   const handleCanvasKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLElement>) => {
       if ((e.target as HTMLElement).closest('.team-policy-dialog')) return;
+      // Recovery controls use the browser's normal focus order until Team nodes exist.
+      if (!detail) return;
       if (e.key === 'Escape') {
         // Native-DOM Escape handling above already covers every case (including from inside the
         // portaled composer); this branch just avoids a double `.preventDefault()`/no-op re-run
@@ -903,6 +905,7 @@ export function TeamCanvas({
     },
     [
       canvasRef,
+      detail,
       moveSelection,
       activateSelection,
       animateCamTo,

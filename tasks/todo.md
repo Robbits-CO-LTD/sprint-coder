@@ -12,6 +12,8 @@
 
 実装結果レビュー: 3競合は現行baseで再現し修正後PASS。旧実機事象全体との同一性と製品UI受入はNOT_RUNであり、単体PASSだけでIssue完了にしない。
 
+独立レビューでCanvas未取得時のTab横取りを検出し、Team nodeが存在しない時は通常のfocus移動へ戻した。rootからのTab/Shift+Tabを直接検証する回帰を追加し、対象UI検証と最新差分レビューで確認する。
+
 ---
 
 # Issue #353 Managed Local AI実効設定（2026-08-27）

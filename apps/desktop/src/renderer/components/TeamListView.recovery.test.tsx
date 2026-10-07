@@ -79,6 +79,20 @@ describe.each(['list', 'canvas'] as const)('%s recovery controls', (view) => {
         ),
       );
       expect(container.textContent).toContain(text);
+      if (view === 'canvas') {
+        const canvas = container.querySelector<HTMLElement>('[data-testid="team-list"]')!;
+        expect(document.activeElement).toBe(canvas);
+        for (const shiftKey of [false, true]) {
+          const tab = new KeyboardEvent('keydown', {
+            key: 'Tab',
+            shiftKey,
+            bubbles: true,
+            cancelable: true,
+          });
+          act(() => canvas.dispatchEvent(tab));
+          expect(tab.defaultPrevented).toBe(false);
+        }
+      }
       const backButton = container.querySelector<HTMLButtonElement>('[data-testid="team-back"]')!;
       const switchButton = container.querySelector<HTMLButtonElement>(
         '[data-testid="team-view-toggle"]',
