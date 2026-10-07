@@ -1,5 +1,14 @@
 import { relative, resolve } from 'node:path';
 
+export function electronBridgeShardIndices(
+  value: string | undefined,
+  ci: string | undefined,
+): number[] {
+  if (value === undefined) return [0, 1, 2, 3];
+  if (ci !== 'true' || !/^[0-3]$/u.test(value)) throw new Error('Invalid CI Electron bridge shard');
+  return [Number(value)];
+}
+
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Invalid Electron test report');

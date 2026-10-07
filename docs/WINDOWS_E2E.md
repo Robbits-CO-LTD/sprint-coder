@@ -35,7 +35,7 @@ $env:SPRINT_CODER_E2E_MODE = 'dev'
 npx playwright test --config playwright.windows.config.ts
 ```
 
-CIは開発モードで起動します。失敗時は `test-results`、`playwright-report`、`windows-e2e.log` を `windows-e2e-<run>-<attempt>` artifactへ保存します。artifactのアップロードだけはテスト失敗後も動きますが、テストの終了コードは保持され、`CI required` は失敗します。
+CIは開発モードで起動します。Archifyとその他の主要画面操作を2つのjobへ分け、各jobは1 workerで実行します。両方の成功を必須とします。失敗時は `test-results`、`playwright-report`、`windows-e2e.log` を `windows-e2e-<group>-<run>-<attempt>` artifactへ保存します。artifactのアップロードだけはテスト失敗後も動きますが、テストの終了コードは保持され、`CI required` は失敗します。
 
 ## 起動待ちの記録と切り分け
 

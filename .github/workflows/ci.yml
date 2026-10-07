@@ -25,37 +25,10 @@ jobs:
     outputs:
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          # The PR classifier compares the real base and head commits. A complete checkout avoids
-          # silently selecting the fast lane when a long-lived PR's base is outside a shallow clone.
-          fetch-depth: 0
-
-      - name: Select fast or full platform coverage
+      - name: Require full platform coverage
         id: scope
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-
-          full_matrix=true
-          if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
-            full_matrix=false
-            changed_files="$(git diff --no-renames --name-only "${BASE_SHA}" "${HEAD_SHA}")"
-            printf '%s\n' "${changed_files}"
-
-            # Native, process, packaging, E2E, dependency, and CI changes retain full OS coverage.
-            if grep -Eq '(^|/)package(-lock)?\.json$|^\.github/workflows/|^build-(better-sqlite3|native-safe-fs|managed-local-sidecar)\.mjs$|^build-computer-use-native\.mjs$|^playwright.*\.ts$|^tests/e2e/|^apps/desktop/(forge\.config\.ts|vite\..*\.config\.ts|managed-local-release\.json|native-safe-fs/|sandbox-runner/|computer-use-native/|scripts/)|^apps/desktop/src/(main|preload|runtime-host)/' <<< "${changed_files}"; then
-              full_matrix=true
-            fi
-          fi
-
-          echo "full_matrix=${full_matrix}" >> "${GITHUB_OUTPUT}"
-          echo "Selected full matrix: ${full_matrix}"
+        run: echo 'full_matrix=true' >> "$GITHUB_OUTPUT"
 
   quality:
     name: quality (${{ matrix.label }})
@@ -81,10 +54,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Run ${{ matrix.label }}
         run: npm run ${{ matrix.command }}
@@ -116,10 +90,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Test contracts and domain packages
         run: npm run test --workspace @sprint-coder/contracts --workspace @sprint-coder/domain
@@ -146,10 +121,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
@@ -217,6 +193,10 @@ jobs:
           npx vitest run
           src/main/computer-use-native.test.ts
           computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
+      - name: Test Windows sandbox working directory and access boundary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -228,7 +208,16 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        shard: [1/3, 2/3, 3/3]
+        include:
+          - shard: 1/3
+            coordinator: '0'
+            graph: '0 1'
+          - shard: 2/3
+            coordinator: '1 2'
+            graph: '2'
+          - shard: 3/3
+            coordinator: '3'
+            graph: '3'
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -237,16 +226,17 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -273,12 +263,37 @@ jobs:
 
       - name: Test desktop shard ${{ matrix.shard }}
         working-directory: apps/desktop
-        run: npx vitest run --shard=${{ matrix.shard }}
+        run: npx vitest run --shard=${{ matrix.shard }} --exclude src/main/team-coordinator.test.ts --exclude src/main/graph-mission-persistence.test.ts
+      - name: Test Coordinator Electron groups
+        working-directory: apps/desktop
+        env:
+          BRIDGE_GROUPS: ${{ matrix.coordinator }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a groups <<< "${BRIDGE_GROUPS}"
+          test "${#groups[@]}" -gt 0
+          for group in "${groups[@]}"; do
+            SPRINT_CODER_ELECTRON_BRIDGE_SHARD="${group}" \
+              npx vitest run src/main/team-coordinator.test.ts --maxWorkers=1
+          done
+      - name: Test Graph Electron groups
+        working-directory: apps/desktop
+        env:
+          BRIDGE_GROUPS: ${{ matrix.graph }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          read -r -a groups <<< "${BRIDGE_GROUPS}"
+          test "${#groups[@]}" -gt 0
+          for group in "${groups[@]}"; do
+            SPRINT_CODER_ELECTRON_BRIDGE_SHARD="${group}" \
+              npx vitest run src/main/graph-mission-persistence.test.ts --maxWorkers=1
+          done
 
   package-macos:
     # Every CI invocation proves the production Forge boundary and its pinned Managed Local bundle.
     name: macOS production package smoke
-    needs: classify
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
@@ -291,20 +306,18 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
 
-      # forge.config.ts lists the runner in `extraResource` unconditionally, so packaging cannot
-      # succeed without it. Every other job that packages or launches the app already builds it;
-      # this one was missed, which made the fast-lane package smoke fail on any renderer-only PR —
-      # exactly the PRs it is the only packaging coverage for.
+      # Forge always packages the runner, so prepare and verify it before packaging.
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -335,12 +348,52 @@ jobs:
         env:
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
 
-      - name: Managed Local transport smoke
-        working-directory: apps/desktop
-        run: npx vitest run src/main/managed-local-runtime-supervisor.test.ts
+      - name: Exercise bundled Archify using the production package
+        shell: bash
+        run: |
+          set -euo pipefail
+          executables=(apps/desktop/out/*/*.app/Contents/MacOS/*)
+          test "${#executables[@]}" -eq 1
+          test -x "${executables[0]}"
+          # Give the headless smoke its own process group, including its restricted-env sidecar.
+          set -m
+          (
+            cd apps/desktop
+            SPRINT_CODER_MANAGED_LOCAL_LIVE=1 \
+              npx vitest run src/main/managed-local-runtime-supervisor.test.ts
+          ) > "${RUNNER_TEMP}/managed-local-macos-smoke.log" 2>&1 &
+          smoke_pid=$!
+          e2e_pid=''
+          stop_checks() {
+            kill -KILL -- "-${smoke_pid}" 2>/dev/null || true
+            if [[ -n "${e2e_pid}" ]]; then
+              kill -TERM -- "-${e2e_pid}" 2>/dev/null || true
+            fi
+            cat "${RUNNER_TEMP}/managed-local-macos-smoke.log" 2>/dev/null || true
+          }
+          trap stop_checks EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          result=0
+          SPRINT_CODER_E2E_EXECUTABLE_PATH="${PWD}/${executables[0]}" \
+            npx playwright test tests/e2e/archify-graph.spec.ts --workers=1 &
+          e2e_pid=$!
+          wait "${e2e_pid}" || result=$?
+          wait "${smoke_pid}" || result=1
+          trap - EXIT INT TERM
+          cat "${RUNNER_TEMP}/managed-local-macos-smoke.log"
+          exit "${result}"
         env:
-          SPRINT_CODER_MANAGED_LOCAL_LIVE: '1'
-
+          SPRINT_CODER_E2E_MODE: packaged
+          SPRINT_CODER_E2E_HIDDEN: '0'
+          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
+      - name: Upload macOS packaged Archify evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: archify-packaged-macos
+          path: test-results
+          if-no-files-found: ignore
   windows-smoke:
     name: Windows focused smoke
     needs: classify
@@ -357,13 +410,14 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore NativeSafeFs Electron ABI binary
         id: native-safe-fs-cache
@@ -411,13 +465,31 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [ubuntu-latest, windows-2022]
-        shard: [1/3, 2/3, 3/3]
         include:
           - os: ubuntu-latest
             label: Linux
+            shard: 1/3
+          - os: ubuntu-latest
+            label: Linux
+            shard: 2/3
+          - os: ubuntu-latest
+            label: Linux
+            shard: 3/3
           - os: windows-2022
             label: Windows
+            shard: 1/5
+          - os: windows-2022
+            label: Windows
+            shard: 2/5
+          - os: windows-2022
+            label: Windows
+            shard: 3/5
+          - os: windows-2022
+            label: Windows
+            shard: 4/5
+          - os: windows-2022
+            label: Windows
+            shard: 5/5
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -426,10 +498,11 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
 
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install Electron binary
         run: node node_modules/electron/install.js
@@ -439,11 +512,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
 
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
-
-      - name: Test Windows sandbox working directory and access boundary
-        if: runner.os == 'Windows' && matrix.shard == '1/3'
-        run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
+        uses: ./.github/actions/prepare-sandbox
 
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
@@ -487,7 +556,122 @@ jobs:
       - name: Test desktop shard ${{ matrix.shard }} on Windows
         if: runner.os == 'Windows'
         working-directory: apps/desktop
-        run: npx vitest run --shard=${{ matrix.shard }} --maxWorkers=1
+        run: npx vitest run --shard=${{ matrix.shard }} --maxWorkers=1 --exclude src/main/team-coordinator.test.ts --exclude src/main/graph-mission-persistence.test.ts
+
+  electron-bridges:
+    name: ${{ matrix.label }} ${{ matrix.suite }} Electron bridge ${{ matrix.shard }}/4
+    needs: classify
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            label: Windows
+            suite: coordinator
+            file: src/main/team-coordinator.test.ts
+            shard: 0
+          - os: windows-2022
+            label: Windows
+            suite: coordinator
+            file: src/main/team-coordinator.test.ts
+            shard: 1
+          - os: windows-2022
+            label: Windows
+            suite: coordinator
+            file: src/main/team-coordinator.test.ts
+            shard: 2
+          - os: windows-2022
+            label: Windows
+            suite: coordinator
+            file: src/main/team-coordinator.test.ts
+            shard: 3
+          - os: windows-2022
+            label: Windows
+            suite: graph
+            file: src/main/graph-mission-persistence.test.ts
+            shard: 0
+          - os: windows-2022
+            label: Windows
+            suite: graph
+            file: src/main/graph-mission-persistence.test.ts
+            shard: 1
+          - os: windows-2022
+            label: Windows
+            suite: graph
+            file: src/main/graph-mission-persistence.test.ts
+            shard: 2
+          - os: windows-2022
+            label: Windows
+            suite: graph
+            file: src/main/graph-mission-persistence.test.ts
+            shard: 3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Build managed sandbox runner
+        uses: ./.github/actions/prepare-sandbox
+
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
+
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: node ../../build-better-sqlite3.mjs
+
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+
+      - name: Warm Windows process identity query
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $identity = & $windowsPowerShell -NoProfile -NonInteractive -Command `
+            '(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks'
+          if ($LASTEXITCODE -ne 0 -or -not $identity) {
+            throw 'Windows process identity query warm-up failed'
+          }
+
+      - name: Run bounded Electron integration group
+        working-directory: apps/desktop
+        run: npx vitest run ${{ matrix.file }} --maxWorkers=1
+        env:
+          SPRINT_CODER_ELECTRON_BRIDGE_SHARD: ${{ matrix.shard }}
 
   package-linux:
     name: Linux packaged startup smoke
@@ -504,15 +688,16 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Install Linux sandbox dependency
         run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -557,9 +742,10 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Initialize MSVC developer environment
@@ -567,7 +753,7 @@ jobs:
         with:
           arch: x64
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -608,12 +794,16 @@ jobs:
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
 
   e2e-windows:
-    name: Windows major E2E
+    name: Windows major E2E (${{ matrix.group }})
     needs: classify
     runs-on: windows-2022
     timeout-minutes: 40
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, archify]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -621,9 +811,10 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
       - name: Install dependencies
-        run: npm ci
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Electron binary
         run: node node_modules/electron/install.js
       - name: Initialize MSVC developer environment
@@ -631,7 +822,7 @@ jobs:
         with:
           arch: x64
       - name: Build managed sandbox runner
-        run: npm run build:sandbox-runner
+        uses: ./.github/actions/prepare-sandbox
       - name: Restore better-sqlite3 Electron ABI binary
         id: better-sqlite-cache
         uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
@@ -663,11 +854,12 @@ jobs:
           }
         env:
           SPRINT_CODER_E2E_MODE: dev
+          SPRINT_CODER_WINDOWS_E2E_GROUP: ${{ matrix.group }}
       - name: Upload Windows E2E evidence
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: windows-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-e2e-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             test-results
             playwright-report
@@ -678,7 +870,15 @@ jobs:
   macos-result:
     name: build (macos-latest)
     if: always()
-    needs: [classify, package-tests, test-macos, package-macos]
+    needs:
+      [
+        classify,
+        package-tests,
+        test-macos,
+        package-macos,
+        electron-bridges,
+        computer-use-native-gate,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -688,16 +888,29 @@ jobs:
           PACKAGE_TEST_RESULT: ${{ needs.package-tests.result }}
           MACOS_TEST_RESULT: ${{ needs.test-macos.result }}
           MACOS_PACKAGE_RESULT: ${{ needs.package-macos.result }}
+          ELECTRON_BRIDGE_RESULT: ${{ needs.electron-bridges.result }}
+          COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
         run: |
           set -euo pipefail
           test "${PACKAGE_TEST_RESULT}" = 'success'
           test "${MACOS_TEST_RESULT}" = 'success'
           test "${MACOS_PACKAGE_RESULT}" = 'success'
+          test "${ELECTRON_BRIDGE_RESULT}" = 'success'
+          test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'
 
   windows-result:
     name: build (windows-2022)
     if: always()
-    needs: [classify, windows-smoke, platform-tests, package-linux, package-windows, e2e-windows]
+    needs:
+      [
+        classify,
+        windows-smoke,
+        platform-tests,
+        package-linux,
+        package-windows,
+        e2e-windows,
+        electron-bridges,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -710,9 +923,11 @@ jobs:
           LINUX_PACKAGE_RESULT: ${{ needs.package-linux.result }}
           WINDOWS_PACKAGE_RESULT: ${{ needs.package-windows.result }}
           WINDOWS_E2E_RESULT: ${{ needs.e2e-windows.result }}
+          ELECTRON_BRIDGE_RESULT: ${{ needs.electron-bridges.result }}
         run: |
           set -euo pipefail
           test "${WINDOWS_E2E_RESULT}" = 'success'
+          test "${ELECTRON_BRIDGE_RESULT}" = 'success'
           if [[ "${FULL_MATRIX}" == 'true' ]]; then
             test "${TEST_RESULT}" = 'success'
             test "${LINUX_PACKAGE_RESULT}" = 'success'
@@ -722,7 +937,7 @@ jobs:
           fi
 
   archify-packaged:
-    name: Archify packaged (${{ matrix.os }})
+    name: Archify packaged (${{ matrix.os }}, ${{ matrix.shard }}/2)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -730,21 +945,50 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-2022]
+        os: [windows-2022]
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-      - run: npm ci
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Initialize MSVC for packaged graph workers
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
         with:
           arch: x64
-      - name: Prepare packaged native dependencies
-        run: npm run prepare:desktop --workspace @sprint-coder/desktop
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Build managed sandbox runner
+        uses: ./.github/actions/prepare-sandbox
+
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
+
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: node ../../build-better-sqlite3.mjs
+
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
       - name: Exercise the real bundled Archify worker and sandboxed viewer
         env:
           SPRINT_CODER_E2E_MODE: packaged
@@ -753,11 +997,11 @@ jobs:
           # Local E2E retains its independently configured hidden/non-focus mode.
           SPRINT_CODER_E2E_HIDDEN: '0'
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-        run: npm run e2e -- tests/e2e/archify-graph.spec.ts
+        run: npm run e2e -- tests/e2e/archify-graph.spec.ts --fully-parallel --workers=1 --shard=${{ matrix.shard }}/2
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         if: always()
         with:
-          name: archify-packaged-${{ matrix.os }}
+          name: archify-packaged-${{ matrix.os }}-${{ matrix.shard }}
           path: test-results
           if-no-files-found: ignore
 

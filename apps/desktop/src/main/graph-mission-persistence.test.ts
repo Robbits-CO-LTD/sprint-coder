@@ -13,11 +13,12 @@ import {
 } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID, createHash } from 'node:crypto';
 import { ConnectionAdmissionController } from './connection-admission';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import { SqlitePersistenceClient, type ApprovalRequestInput } from './persistence';
@@ -31,6 +32,13 @@ import {
 } from './graph-mission-review';
 import type { GraphWriteFootprint } from './graph-write-conflicts';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import {
+  assertShardReport,
+  collectedTestNames,
+  electronBridgeShardIndices,
+  partitionTestNames,
+  testNamesPattern,
+} from './electron-test-shards';
 import { workspaceMutationBinding } from './path-guard';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
 import { WorkerWorktreeManager } from './worker-worktree';
@@ -5753,17 +5761,36 @@ else
     });
 
     it.each([
-      ['rolls back partial lease acquisition and release failures', 'checkpoint-generation'],
       [
-        'arbitrates resources across Teams atomically and keeps dependency waiters unreserved',
+        'requires a current checkpoint generation and rechecks dependencies before Attempt binding',
+        'checkpoint-generation',
+      ],
+      [
+        'quarantines reservations on restart and prevents deletion until explicit release',
         'restart-quarantine',
       ],
     ] as const)(
-      'reports only the fixed entry/return bools of the case after "%s"',
+      'reports only the fixed entry/return bools of active case "%s"',
       (after, target) => {
         const directory = mkdtempSync(join(tmpdir(), 'sc-graph-marker-test-'));
         roots.push(directory);
         const reportFile = join(directory, 'report.json');
+        const progressFile = join(directory, 'case-progress.json');
+        writeFileSync(
+          progressFile,
+          JSON.stringify({
+            version: 1,
+            started: 1,
+            completed: 0,
+            caseDigest: createHash('sha256').update(after).digest('hex'),
+            phase: 'running',
+            caseStartedAtMs: Date.now() - 100,
+            updatedAtMs: Date.now(),
+            caseDurationMs: 1,
+            maxCaseDurationMs: 1,
+            elapsedMs: 100,
+          }),
+        );
         const stdout = ` \u001b[32m✓\u001b[39m src/main/graph-mission-persistence.test.ts > durable graph Mission definitions > ${after} 10ms`;
         const summary = (): string => graphBridgeFailure({ code: 143, stdout }, reportFile).message;
         const marker = (bools: [boolean, boolean]): string =>
@@ -5778,7 +5805,22 @@ else
         expect(message).toContain(marker([true, true]));
         expect(message).not.toContain('PRIVATE_');
         expect(message).not.toContain(directory);
-        // Only the target that follows the last completed case is reported.
+        // An unrelated last completed case does not identify the active body.
+        writeFileSync(
+          progressFile,
+          JSON.stringify({
+            version: 1,
+            started: 1,
+            completed: 0,
+            caseDigest: createHash('sha256').update('unrelated').digest('hex'),
+            phase: 'running',
+            caseStartedAtMs: Date.now() - 100,
+            updatedAtMs: Date.now(),
+            caseDurationMs: 1,
+            maxCaseDurationMs: 1,
+            elapsedMs: 100,
+          }),
+        );
         const other = graphBridgeFailure(
           {
             code: 143,
@@ -5887,18 +5929,68 @@ else
       },
     );
 
-    it(
-      'runs the graph Mission transaction suite with Electron',
-      async () => {
+    const file = 'src/main/graph-mission-persistence.test.ts';
+    let collectionDirectory: string;
+    let groups: string[][];
+    const childEnv = () => ({
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+      SPRINT_CODER_ELECTRON_DB_TEST: '1',
+    });
+    beforeAll(async () => {
+      collectionDirectory = mkdtempSync(join(tmpdir(), 'sc-graph-collection-'));
+      const collection = join(collectionDirectory, 'collection.json');
+      try {
+        await promisify(execFile)(
+          electronTestExecutablePath(),
+          [
+            join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+            'list',
+            file,
+            '--json',
+            collection,
+          ],
+          { cwd: process.cwd(), env: childEnv(), timeout: 60_000, maxBuffer: 10 * 1024 * 1024 },
+        );
+        groups = partitionTestNames(
+          collectedTestNames(
+            JSON.parse(readFileSync(collection, 'utf8')),
+            process.cwd(),
+            resolve(file),
+          ),
+          4,
+        );
+      } catch (error) {
+        throw graphBridgeFailure(error, collection);
+      }
+    }, 65_000);
+    afterAll(async () => {
+      if (collectionDirectory)
+        await rm(collectionDirectory, { recursive: true, force: true }).catch(() => {});
+    });
+    it.each(
+      electronBridgeShardIndices(process.env.SPRINT_CODER_ELECTRON_BRIDGE_SHARD, process.env.CI),
+    )(
+      'runs graph Mission integration shard %i with Electron',
+      async (index) => {
         const reportDirectory = mkdtempSync(join(tmpdir(), 'sc-graph-bridge-report-'));
         const reportFile = join(reportDirectory, 'report.json');
         try {
+          const group = groups[index];
+          if (!group) throw new Error('Missing graph Electron integration shard');
+          const config = join(reportDirectory, 'config.mjs');
+          writeFileSync(
+            config,
+            `import config from ${JSON.stringify(pathToFileURL(resolve('vitest.config.ts')).href)};\nexport default {...config,root:${JSON.stringify(process.cwd())},test:{...config.test,testNamePattern:${JSON.stringify(testNamesPattern(group))}}};\n`,
+          );
           await promisify(execFile)(
             electronTestExecutablePath(),
             [
               join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
               'run',
-              'src/main/graph-mission-persistence.test.ts',
+              file,
+              '--config',
+              config,
               '--reporter=verbose',
               '--reporter=json',
               `--outputFile.json=${reportFile}`,
@@ -5906,20 +5998,15 @@ else
             {
               cwd: process.cwd(),
               encoding: 'utf8',
-              env: {
-                ...process.env,
-                ELECTRON_RUN_AS_NODE: '1',
-                SPRINT_CODER_ELECTRON_DB_TEST: '1',
-                SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR: reportDirectory,
-              },
+              env: { ...childEnv(), SPRINT_CODER_GRAPH_BRIDGE_MARKER_DIR: reportDirectory },
               timeout: graphBridgeTimeout,
               maxBuffer: 10 * 1024 * 1024,
             },
           );
+          assertShardReport(JSON.parse(readFileSync(reportFile, 'utf8')), group);
         } catch (error) {
           throw graphBridgeFailure(error, reportFile);
         } finally {
-          // Diagnostic cleanup must not replace the authoritative child failure with raw paths.
           await rm(reportDirectory, { recursive: true, force: true }).catch(() => {});
         }
       },
@@ -5928,17 +6015,18 @@ else
   });
 
 // Issue #716: the hosted child was killed at 180 s twice, after two different completed cases. Each
-// binding has a fixed target case (the one right after its last completed case) whose body writes
+// binding has a fixed target case whose actual running-case digest identifies its body; it writes
 // an entry and a return marker (empty files with fixed names) when the bridge parent asked for them.
 // The parent only turns the two existence bits of the matching target into the failure message.
 const graphBridgeMarkerTargets = [
   {
     id: 'checkpoint-generation',
-    after: 'rolls back partial lease acquisition and release failures',
+    title:
+      'requires a current checkpoint generation and rechecks dependencies before Attempt binding',
   },
   {
     id: 'restart-quarantine',
-    after: 'arbitrates resources across Teams atomically and keeps dependency waiters unreserved',
+    title: 'quarantines reservations on restart and prevents deletion until explicit release',
   },
 ] as const;
 type GraphBridgeMarkerTarget = (typeof graphBridgeMarkerTargets)[number]['id'];
@@ -5953,15 +6041,23 @@ function graphBridgeBodyMarker(target: GraphBridgeMarkerTarget, edge: 'entry' | 
   }
 }
 
-function graphBridgeBodySummary(directory: string, lastCompletedCaseDigest?: string): string {
-  const target = graphBridgeMarkerTargets.find(
-    (candidate) =>
-      createHash('sha256').update(candidate.after).digest('hex') === lastCompletedCaseDigest,
-  );
-  if (!target) return '';
-  const entry = existsSync(join(directory, `${target.id}.entry`));
-  const returned = existsSync(join(directory, `${target.id}.return`));
-  return `; firstUnfinishedBody=${JSON.stringify({ target: target.id, entry, return: returned })}`;
+function graphBridgeBodySummary(directory: string): string {
+  try {
+    const file = join(directory, 'case-progress.json');
+    if (!existsSync(file) || statSync(file).size > GRAPH_BRIDGE_PROGRESS_MAX_BYTES) return '';
+    const snapshot = parseGraphBridgeProgress(readFileSync(file, 'utf8'));
+    if (!snapshot || snapshot.phase === 'completed') return '';
+    const target = graphBridgeMarkerTargets.find(
+      (candidate) =>
+        createHash('sha256').update(candidate.title).digest('hex') === snapshot.caseDigest,
+    );
+    if (!target) return '';
+    const entry = existsSync(join(directory, `${target.id}.entry`));
+    const returned = existsSync(join(directory, `${target.id}.return`));
+    return `; firstUnfinishedBody=${JSON.stringify({ target: target.id, entry, return: returned })}`;
+  } catch {
+    return '';
+  }
 }
 
 function graphBridgeFailure(error: unknown, reportFile: string): Error {
@@ -6002,7 +6098,7 @@ function graphBridgeFailure(error: unknown, reportFile: string): Error {
   }
   // execFile's error/cause includes raw stderr and paths. Expose only typed metadata and counts.
   return new Error(
-    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}${graphBridgeBodySummary(dirname(reportFile), progress.lastCompletedCaseDigest)}; ${graphBridgeProgressSummary(dirname(reportFile))}`,
+    `Graph Electron bridge failed; child=${JSON.stringify(child)}; progress=${JSON.stringify(progress)}; ${graphBridgeReportSummary(reportFile)}${graphBridgeBodySummary(dirname(reportFile))}; ${graphBridgeProgressSummary(dirname(reportFile))}`,
   );
 }
 

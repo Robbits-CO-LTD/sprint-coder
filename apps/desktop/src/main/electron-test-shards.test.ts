@@ -4,9 +4,25 @@ import {
   collectedTestNames,
   partitionTestNames,
   testNamesPattern,
+  electronBridgeShardIndices,
 } from './electron-test-shards';
 
 describe('bounded Electron test shards', () => {
+  it('runs all groups by default and accepts one strict CI group only', () => {
+    expect(electronBridgeShardIndices(undefined, undefined)).toEqual([0, 1, 2, 3]);
+    expect(electronBridgeShardIndices(undefined, 'true')).toEqual([0, 1, 2, 3]);
+    for (const index of [0, 1, 2, 3]) {
+      expect(electronBridgeShardIndices(String(index), 'true')).toEqual([index]);
+      expect(() => electronBridgeShardIndices(String(index), undefined)).toThrow(
+        'Invalid CI Electron bridge shard',
+      );
+    }
+    for (const value of ['', '4', '-1', '01', ' 0', '0 ', 'NaN']) {
+      expect(() => electronBridgeShardIndices(value, 'true')).toThrow(
+        'Invalid CI Electron bridge shard',
+      );
+    }
+  });
   it('partitions every collected case exactly once and escapes anchored patterns', () => {
     const names = ['Suite > a (x)', 'Suite > b.*', 'Nested > Suite > c', 'Suite > d', 'Suite > e'];
     const groups = partitionTestNames(names, 4);

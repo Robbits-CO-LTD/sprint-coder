@@ -7,6 +7,8 @@ const workflowFiles = [
   '.github/workflows/computer-use-final-gate.yml',
   '.github/workflows/computer-use-evidence-harness.yml',
   '.github/workflows/ci.yml',
+  '.github/actions/install-deps/action.yml',
+  '.github/actions/prepare-sandbox/action.yml',
   '.github/workflows/release-beta.yml',
   '.github/workflows/computer-use-acceptance-build.yml',
 ] as const;
@@ -68,7 +70,8 @@ describe('workflow security boundaries', () => {
   });
 
   it('scopes permissions per job and protects artifact/attestation jobs', () => {
-    for (const workflow of Object.values(workflows)) {
+    for (const [file, workflow] of Object.entries(workflows)) {
+      if (file.startsWith('.github/actions/')) continue;
       expect(workflow).toMatch(/^permissions:\s*\{\}\s*$/mu);
       expect(workflow).not.toMatch(/^permissions:\s*\n(?: {2,}.+\n)+/mu);
       for (const block of allJobBlocks(workflow)) {

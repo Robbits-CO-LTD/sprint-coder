@@ -38,13 +38,15 @@ const ALLOWED_COMMANDS = new Set([
 
 export function safeGitEnvironment(
   source: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
+  _platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
   if (source['PATH'] !== undefined) env['PATH'] = source['PATH'];
   if (source['HOME'] !== undefined) env['HOME'] = source['HOME'];
   if (source['SYSTEMROOT'] !== undefined) env['SYSTEMROOT'] = source['SYSTEMROOT'];
-  const nullConfig = platform === 'win32' ? 'nul' : '/dev/null';
+  // Git's documented null-config path also works in Git for Windows. Newer Windows
+  // Git for Windows versions reject NUL as a config filename before any command runs.
+  const nullConfig = '/dev/null';
   env['GIT_CONFIG_GLOBAL'] = nullConfig;
   env['GIT_CONFIG_SYSTEM'] = nullConfig;
   env['GIT_TERMINAL_PROMPT'] = '0';
