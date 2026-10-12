@@ -5139,6 +5139,10 @@ button.composer-permission-chip[aria-expanded='true'] {
   inset: 0;
   z-index: 2;
   display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  text-align: center;
   align-items: center;
   justify-content: center;
 }

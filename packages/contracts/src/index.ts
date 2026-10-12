@@ -6761,7 +6761,11 @@ export interface SprintCoderApi {
     sendToWorker(input: TeamSendMessageInput): Promise<TeamMessageSummary>;
     stopWorker(input: TeamWorkerRef): Promise<WorkerSummary>;
     stopAll(taskId: string): Promise<TeamDetail>;
-    subscribe(taskId: string, listener: (event: TeamEvent) => void): () => void;
+    subscribe(
+      taskId: string,
+      listener: (event: TeamEvent) => void,
+      onError?: () => void,
+    ): () => void;
     getCanvasView(taskId: string): Promise<CanvasView | null>;
     saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
   };

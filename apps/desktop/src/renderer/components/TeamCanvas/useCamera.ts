@@ -225,6 +225,7 @@ export function useCamera(onSettle?: () => void) {
         target.closest('.worker') ||
         target.closest('.team-header-overlay') ||
         target.closest('.team-canvas-controls') ||
+        target.closest('.team-canvas-notice') ||
         target.closest('.team-policy-dialog')
       )
         return;

@@ -1000,6 +1000,7 @@ export interface SprintCoderApi {
           | { type: 'snapshot'; seq: number; detail: TeamDetail | null }
           | { type: 'updated'; seq: number; detail: TeamDetail },
       ) => void,
+      onError?: () => void,
     ): () => void;
     getCanvasView(taskId: string): Promise<CanvasView | null>;
     saveCanvasView(input: CanvasViewSaveInput): Promise<CanvasViewSaveResult>;
