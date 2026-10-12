@@ -5731,10 +5731,11 @@ else
       const directory = mkdtempSync(join(tmpdir(), 'sc-graph-progress-test-'));
       roots.push(directory);
       const caseDigest = createHash('sha256').update('PRIVATE_UNMARKED_CASE').digest('hex');
+      const slowestDigest = createHash('sha256').update('PRIVATE_SLOWEST_CASE').digest('hex');
       writeFileSync(
         join(directory, 'case-progress.json'),
         JSON.stringify({
-          version: 1,
+          version: 2,
           started: 124,
           completed: 123,
           caseDigest,
@@ -5742,7 +5743,8 @@ else
           caseStartedAtMs: Date.now() - 100,
           updatedAtMs: Date.now() - 100,
           caseDurationMs: 0,
-          maxCaseDurationMs: 700,
+          maxCaseDurationMs: 28_908,
+          maxCaseDigest: slowestDigest,
           elapsedMs: 179_000,
         }),
       );
@@ -5754,6 +5756,7 @@ else
       expect(message).toContain('caseProgress=');
       expect(message).toContain('"started":124,"completed":123');
       expect(message).toContain(caseDigest);
+      expect(message).toContain(`"maxCaseDurationMs":28908,"maxCaseDigest":"${slowestDigest}"`);
       expect(message).toContain('"phase":"running"');
       expect(message).toMatch(/caseAgeMs=\d+/u);
       expect(message).not.toContain('PRIVATE_');
@@ -5779,7 +5782,7 @@ else
         writeFileSync(
           progressFile,
           JSON.stringify({
-            version: 1,
+            version: 2,
             started: 1,
             completed: 0,
             caseDigest: createHash('sha256').update(after).digest('hex'),
@@ -5788,6 +5791,7 @@ else
             updatedAtMs: Date.now(),
             caseDurationMs: 1,
             maxCaseDurationMs: 1,
+            maxCaseDigest: 'a'.repeat(64),
             elapsedMs: 100,
           }),
         );
@@ -5809,7 +5813,7 @@ else
         writeFileSync(
           progressFile,
           JSON.stringify({
-            version: 1,
+            version: 2,
             started: 1,
             completed: 0,
             caseDigest: createHash('sha256').update('unrelated').digest('hex'),
@@ -5818,6 +5822,7 @@ else
             updatedAtMs: Date.now(),
             caseDurationMs: 1,
             maxCaseDurationMs: 1,
+            maxCaseDigest: 'a'.repeat(64),
             elapsedMs: 100,
           }),
         );

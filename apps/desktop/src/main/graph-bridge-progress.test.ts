@@ -67,6 +67,32 @@ describe('Graph Electron child progress', () => {
     expect(progress.caseDurationMs).toBeLessThanOrEqual(progress.elapsedMs);
   });
 
+  it('identifies the slowest case by digest only', () => {
+    const { directory } = fixture();
+    const file = join(directory, 'slowest.json');
+    const digest = (name: string) => createHash('sha256').update(name).digest('hex');
+    let nowNs = 0n;
+    const tracker = createGraphBridgeProgressTracker(file, () => nowNs);
+    for (const [name, durationMs] of [
+      ['PRIVATE_FAST', 5n],
+      ['PRIVATE_SLOW', 30n],
+      ['PRIVATE_NEXT', 10n],
+    ] as const) {
+      tracker.start(name);
+      nowNs += durationMs * 1_000_000n;
+      tracker.cleanup();
+      tracker.finish();
+    }
+    const text = readFileSync(file, 'utf8');
+    expect(text).not.toContain('PRIVATE_');
+    expect(parseGraphBridgeProgress(text)).toMatchObject({
+      maxCaseDurationMs: 30,
+      maxCaseDigest: digest('PRIVATE_SLOW'),
+      caseDigest: digest('PRIVATE_NEXT'),
+      elapsedMs: 45,
+    });
+  });
+
   it('does not change case outcomes when diagnostics are disabled or unwritable', () => {
     const { directory } = fixture();
     for (const file of [null, join(directory, 'missing', 'progress.json')]) {
@@ -89,12 +115,13 @@ describe('Graph Electron child progress', () => {
       JSON.stringify({ ...value, extra: 'PRIVATE_BYTES' }),
       JSON.stringify({ ...value, phase: 'PRIVATE_PHASE' }),
       JSON.stringify({ ...value, caseDigest: 'PRIVATE_CASE' }),
+      JSON.stringify({ ...value, maxCaseDigest: 'PRIVATE_CASE' }),
       JSON.stringify({ ...value, started: 1.5 }),
       JSON.stringify({ ...value, completed: 2 }),
       JSON.stringify({ ...value, caseDurationMs: -1 }),
       JSON.stringify({ ...value, updatedAtMs: value.caseStartedAtMs - 1 }),
       JSON.stringify({ ...value, elapsedMs: null }),
-      JSON.stringify({ ...value, version: 2 }),
+      JSON.stringify({ ...value, version: 1 }),
       JSON.stringify([value]),
     ])
       expect(parseGraphBridgeProgress(invalid)).toBeNull();

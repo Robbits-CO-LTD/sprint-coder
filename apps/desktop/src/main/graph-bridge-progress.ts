@@ -7,7 +7,7 @@ export const graphBridgeRealDateNow = Date.now.bind(Date);
 export const GRAPH_BRIDGE_PROGRESS_MAX_BYTES = 512;
 
 export interface GraphBridgeProgress {
-  version: 1;
+  version: 2;
   started: number;
   completed: number;
   caseDigest: string;
@@ -16,25 +16,34 @@ export interface GraphBridgeProgress {
   updatedAtMs: number;
   caseDurationMs: number;
   maxCaseDurationMs: number;
+  // Identifies the slowest case so an aggregate timeout can be split into one slow case vs. a slow runner.
+  maxCaseDigest: string;
   elapsedMs: number;
 }
 
-export function createGraphBridgeProgressTracker(outputFile: string | null) {
-  const suiteStarted = realHrtime();
+export function createGraphBridgeProgressTracker(
+  outputFile: string | null,
+  hrtimeNs: () => bigint = realHrtime,
+) {
+  const suiteStarted = hrtimeNs();
   let caseStarted = suiteStarted;
   let started = 0;
   let completed = 0;
   let caseDigest = '';
   let caseStartedAtMs = 0;
   let maxCaseDurationMs = 0;
+  let maxCaseDigest = '';
 
   const record = (phase: GraphBridgeProgress['phase']): void => {
     if (outputFile === null || !caseDigest) return;
-    const now = realHrtime();
+    const now = hrtimeNs();
     const caseDurationMs = Number((now - caseStarted) / 1_000_000n);
-    maxCaseDurationMs = Math.max(maxCaseDurationMs, caseDurationMs);
+    if (!maxCaseDigest || caseDurationMs > maxCaseDurationMs) {
+      maxCaseDurationMs = caseDurationMs;
+      maxCaseDigest = caseDigest;
+    }
     const snapshot: GraphBridgeProgress = {
-      version: 1,
+      version: 2,
       started,
       completed,
       caseDigest,
@@ -43,6 +52,7 @@ export function createGraphBridgeProgressTracker(outputFile: string | null) {
       updatedAtMs: graphBridgeRealDateNow(),
       caseDurationMs,
       maxCaseDurationMs,
+      maxCaseDigest,
       elapsedMs: Number((now - suiteStarted) / 1_000_000n),
     };
     try {
@@ -57,7 +67,7 @@ export function createGraphBridgeProgressTracker(outputFile: string | null) {
       if (outputFile === null) return;
       started += 1;
       caseDigest = createHash('sha256').update(caseName).digest('hex');
-      caseStarted = realHrtime();
+      caseStarted = hrtimeNs();
       caseStartedAtMs = graphBridgeRealDateNow();
       record('running');
     },
@@ -82,15 +92,17 @@ function isProgress(value: unknown): value is GraphBridgeProgress {
     'maxCaseDurationMs',
     'elapsedMs',
   ];
-  if (Object.keys(value).length !== numbers.length + 3 || Reflect.get(value, 'version') !== 1)
+  if (Object.keys(value).length !== numbers.length + 4 || Reflect.get(value, 'version') !== 2)
     return false;
   for (const key of numbers) {
     const number: unknown = Reflect.get(value, key);
     if (typeof number !== 'number' || !Number.isSafeInteger(number) || number < 0) return false;
   }
-  const digest: unknown = Reflect.get(value, 'caseDigest');
+  for (const key of ['caseDigest', 'maxCaseDigest']) {
+    const digest: unknown = Reflect.get(value, key);
+    if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) return false;
+  }
   const phase: unknown = Reflect.get(value, 'phase');
-  if (typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)) return false;
   if (phase !== 'running' && phase !== 'cleanup' && phase !== 'completed') return false;
   const started: number = Reflect.get(value, 'started');
   const completed: number = Reflect.get(value, 'completed');
