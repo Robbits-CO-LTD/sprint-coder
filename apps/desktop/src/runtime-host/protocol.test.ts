@@ -837,6 +837,7 @@ describe('Runtime Host protocol', () => {
       rootExitMs: 4_300,
       rootCloseMs: 4_301,
       isolationRemaining: 1,
+      rootAliveAtSettle: 0,
     };
     const withTiming = (value: unknown) => ({
       ...grok,
@@ -855,17 +856,18 @@ describe('Runtime Host protocol', () => {
           forceTaskkillExitCode: 4_294_967_295,
           rootExitMs: 0,
           isolationRemaining: 0,
+          rootAliveAtSettle: null,
         }),
       ),
     ).toBe(true);
-    const { settledMs: _settled, ...missingTimingKey } = stopTiming;
+    const { rootAliveAtSettle: _alive, ...missingTimingKey } = stopTiming;
     for (const invalid of [
       null,
       [],
       'timing',
       missingTimingKey,
       { ...stopTiming, pid: 1234 },
-      { ...stopTiming, path: 'C:\Users' },
+      { ...stopTiming, path: 'C:\\Users' },
       { ...stopTiming, settledMs: -1 },
       { ...stopTiming, settledMs: 1.5 },
       { ...stopTiming, settledMs: '4300' },
@@ -876,6 +878,9 @@ describe('Runtime Host protocol', () => {
       { ...stopTiming, forceTaskkillExitCode: 4_294_967_296 },
       { ...stopTiming, isolationRemaining: 2 },
       { ...stopTiming, isolationRemaining: true },
+      { ...stopTiming, rootAliveAtSettle: 2 },
+      { ...stopTiming, rootAliveAtSettle: false },
+      { ...stopTiming, rootAliveAtSettle: undefined },
     ])
       expect(isRuntimeFailureDiagnostic(withTiming(invalid))).toBe(false);
     // The same payload on another runtime is rejected; without it that runtime passes.

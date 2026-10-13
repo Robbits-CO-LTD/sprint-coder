@@ -1,5 +1,8 @@
 import { ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type * as childProcess from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GrokRuntimeAdapter } from './grok-adapter';
@@ -9,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
   stop: vi.fn<() => Promise<boolean>>(),
   cleanup: vi.fn(),
+  isolationDirectory: '/inert-grok-fixture',
 }));
 
 vi.mock('node:child_process', async (importOriginal) => ({
@@ -19,7 +23,7 @@ vi.mock('./process-tree', () => ({ terminateRuntimeProcessTree: mocks.stop }));
 vi.mock('./grok-isolation', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   prepareGrokIsolation: () => ({
-    directory: '/inert-grok-fixture',
+    directory: mocks.isolationDirectory,
     cwd: '/inert-grok-fixture/work',
     environment: {},
     cleanup: mocks.cleanup,
@@ -160,10 +164,14 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
   const observedStop = (confirmed: boolean) =>
     mocks.stop.mockImplementation(async (...args: unknown[]) => {
       const options = args[2] as { observe?: (o: unknown) => void } | undefined;
+      const pause = () => new Promise((resolve) => setTimeout(resolve, 15));
       options?.observe?.({ signal: 'SIGTERM', event: 'start' });
+      await pause();
       options?.observe?.({ signal: 'SIGTERM', event: 'exit', exitCode: 128 });
       options?.observe?.({ signal: 'SIGKILL', event: 'start' });
+      await pause();
       options?.observe?.({ signal: 'SIGKILL', event: 'exit', exitCode: 0 });
+      await pause();
       return confirmed;
     });
   const timingOf = (failed: ReturnType<typeof vi.fn>) =>
@@ -182,7 +190,14 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
       rootExitMs: null,
       rootCloseMs: null,
       isolationRemaining: 0,
+      rootAliveAtSettle: null,
     });
+    // requested() and settled() are both wired: offsets start at the stop request and the stop
+    // settles after the last taskkill finished.
+    const timing = grokProtocol?.['stopTiming'] as Record<string, number>;
+    expect(timing['forceTaskkillExitMs']).toBeGreaterThanOrEqual(15);
+    expect(timing['settledMs']).toBeGreaterThanOrEqual(timing['forceTaskkillExitMs']! + 10);
+    expect(timing['settledMs']).toBeLessThan(500);
     expect(Object.keys(grokProtocol?.['stopTiming'] as object).sort()).toEqual(
       [
         'settledMs',
@@ -194,9 +209,29 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
         'rootExitMs',
         'rootCloseMs',
         'isolationRemaining',
+        'rootAliveAtSettle',
       ].sort(),
     );
     expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
+  });
+
+  it('reports a surviving isolation directory and a root the OS still knows', async () => {
+    observedStop(false);
+    mocks.isolationDirectory = mkdtempSync(join(tmpdir(), 'grok-749-isolation-'));
+    try {
+      const f = await startFixture();
+      Object.defineProperty(f.child, 'pid', { value: process.pid, configurable: true });
+      f.finishPrompt();
+      await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+      expect(timingOf(f.failed)?.['stopTiming']).toMatchObject({
+        isolationRemaining: 1,
+        rootAliveAtSettle: 1,
+        rootExitMs: null,
+      });
+    } finally {
+      rmSync(mocks.isolationDirectory, { recursive: true, force: true });
+      mocks.isolationDirectory = '/inert-grok-fixture';
+    }
   });
 
   it('records the timing too when the stop is confirmed and the Turn fails for another reason', async () => {

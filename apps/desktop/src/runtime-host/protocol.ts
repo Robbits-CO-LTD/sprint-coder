@@ -325,6 +325,13 @@ export type GrokStopTiming = Readonly<{
   rootCloseMs: number | null;
   /** 1 while the Turn's isolation directory still existed. */
   isolationRemaining: 0 | 1;
+  /**
+   * Asked of the OS when the diagnostic was taken, right after the stop settled: 1 when the root
+   * process still existed, 0 when it did not, null when that could not be told. Together with
+   * rootExitMs this tells a late Node exit event (OS: 0, rootExitMs: null) from a root that never
+   * exited (OS: 1).
+   */
+  rootAliveAtSettle: 0 | 1 | null;
 }>;
 
 /**
@@ -1394,6 +1401,7 @@ const GROK_STOP_TIMING_KEYS = [
   'rootExitMs',
   'rootCloseMs',
   'isolationRemaining',
+  'rootAliveAtSettle',
 ] as const;
 
 function isGrokStopTiming(value: unknown): boolean {
@@ -1419,7 +1427,10 @@ function isGrokStopTiming(value: unknown): boolean {
     exitCode(record['forceTaskkillExitCode']) &&
     offset(record['rootExitMs']) &&
     offset(record['rootCloseMs']) &&
-    (record['isolationRemaining'] === 0 || record['isolationRemaining'] === 1)
+    (record['isolationRemaining'] === 0 || record['isolationRemaining'] === 1) &&
+    (record['rootAliveAtSettle'] === null ||
+      record['rootAliveAtSettle'] === 0 ||
+      record['rootAliveAtSettle'] === 1)
   );
 }
 

@@ -1,6 +1,20 @@
 import { GROK_STOP_TIMING_MS_MAX, type GrokStopTiming } from './protocol';
 import type { RuntimeProcessTreeObservation } from './process-tree';
 
+/** Asks the OS whether a process still exists; the PID is never recorded. */
+export function probeProcessAlive(pid: number | undefined): 0 | 1 | null {
+  if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    process.kill(pid, 0);
+    return 1;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException | null)?.code;
+    // EPERM still means the process exists.
+    if (code === 'ESRCH') return 0;
+    return code === 'EPERM' ? 1 : null;
+  }
+}
+
 /**
  * Records when the pieces of a Grok stop happened (issue #749). It only observes: nothing here
  * decides whether the stop is confirmed. Offsets are from the first stop request.
@@ -49,7 +63,7 @@ export class GrokStopTimingRecorder {
     }
   };
 
-  snapshot(isolationRemaining: 0 | 1): GrokStopTiming {
+  snapshot(isolationRemaining: 0 | 1, rootAliveAtSettle: 0 | 1 | null): GrokStopTiming {
     const origin = this.requestedAt ?? 0;
     const offset = (at: number | null): number | null =>
       at === null ? null : Math.min(Math.max(0, Math.round(at - origin)), GROK_STOP_TIMING_MS_MAX);
@@ -63,6 +77,7 @@ export class GrokStopTimingRecorder {
       rootExitMs: offset(this.rootExitAt),
       rootCloseMs: offset(this.rootCloseAt),
       isolationRemaining,
+      rootAliveAtSettle,
     };
   }
 }

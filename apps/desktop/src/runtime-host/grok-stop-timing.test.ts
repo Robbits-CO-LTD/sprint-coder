@@ -1,5 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { GrokStopTimingRecorder } from './grok-stop-timing';
+import { GrokStopTimingRecorder, probeProcessAlive } from './grok-stop-timing';
 import { GROK_STOP_TIMING_MS_MAX } from './protocol';
 
 describe('GrokStopTimingRecorder (issue #749)', () => {
@@ -12,7 +13,7 @@ describe('GrokStopTimingRecorder (issue #749)', () => {
     now = 3_050;
     recorder.requested(); // A later request does not move the origin.
     recorder.observe({ signal: 'SIGKILL', event: 'start' });
-    expect(recorder.snapshot(1)).toEqual({
+    expect(recorder.snapshot(1, 1)).toEqual({
       settledMs: null,
       signalTaskkillExitMs: 2_000,
       signalTaskkillExitCode: 128,
@@ -22,6 +23,7 @@ describe('GrokStopTimingRecorder (issue #749)', () => {
       rootExitMs: null,
       rootCloseMs: null,
       isolationRemaining: 1,
+      rootAliveAtSettle: 1,
     });
   });
 
@@ -34,11 +36,23 @@ describe('GrokStopTimingRecorder (issue #749)', () => {
     now = 1_000 + GROK_STOP_TIMING_MS_MAX + 5_000;
     recorder.rootClosed();
     recorder.settled();
-    expect(recorder.snapshot(0)).toMatchObject({
+    expect(recorder.snapshot(0, null)).toMatchObject({
       rootExitMs: 0,
       rootCloseMs: GROK_STOP_TIMING_MS_MAX,
       settledMs: GROK_STOP_TIMING_MS_MAX,
       isolationRemaining: 0,
+      rootAliveAtSettle: null,
     });
+  });
+});
+
+describe('probeProcessAlive (issue #749)', () => {
+  it('tells a live process from an exited one and never guesses for an unusable PID', () => {
+    expect(probeProcessAlive(process.pid)).toBe(1);
+    const finished = spawnSync(process.execPath, ['-e', '0']);
+    expect(finished.pid).toBeGreaterThan(0);
+    expect(probeProcessAlive(finished.pid)).toBe(0);
+    for (const pid of [undefined, 0, -1, 1.5, Number.NaN])
+      expect(probeProcessAlive(pid)).toBeNull();
   });
 });

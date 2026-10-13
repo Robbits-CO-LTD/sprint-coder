@@ -9,7 +9,7 @@ import { removeTreeWithoutFollowingLinks } from '../main/worker-worktree';
 import { GrokAcpClient, GrokProtocolFailure, GrokRpcError, grokRecord } from './grok-acp';
 import { GROK_AGENT_PROFILE, grokEnvironment, prepareGrokIsolation } from './grok-isolation';
 import { resolveGrokCommandCandidates } from './grok-command';
-import { GrokStopTimingRecorder } from './grok-stop-timing';
+import { GrokStopTimingRecorder, probeProcessAlive } from './grok-stop-timing';
 import { probeCliCommandCandidates } from './cli-command-resolution';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -605,7 +605,10 @@ export class GrokRuntimeAdapter {
           if (stopped && control.canceled) return;
           const grokProtocol = trace.diagnostic(
             stopped ? 'confirmed' : 'unconfirmed',
-            stopTiming.snapshot(existsSync(isolation.directory) ? 1 : 0),
+            stopTiming.snapshot(
+              existsSync(isolation.directory) ? 1 : 0,
+              probeProcessAlive(child.pid),
+            ),
           );
           if (grokProtocol !== undefined) diagnostics.recordGrokProtocol(grokProtocol);
           fail(stopped ? error : grokStopUnconfirmed(), diagnostics.snapshot(stage));
