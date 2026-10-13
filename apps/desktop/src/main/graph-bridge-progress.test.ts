@@ -92,7 +92,7 @@ describe('Graph Electron child progress', () => {
       elapsedMs: 45,
     });
 
-    // A tie keeps the earlier case; a running case that outlasts the maximum takes over before cleanup.
+    // A tie keeps the earlier case; a case reaching cleanup past the maximum takes over before finish.
     tracker.start('PRIVATE_TIE');
     nowNs += 30n * 1_000_000n;
     tracker.finish();

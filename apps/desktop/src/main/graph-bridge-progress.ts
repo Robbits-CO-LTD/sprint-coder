@@ -17,7 +17,8 @@ export interface GraphBridgeProgress {
   caseDurationMs: number;
   maxCaseDurationMs: number;
   // Identifies the slowest case so an aggregate timeout can be split into one slow case vs. a slow runner.
-  // Includes the running case: once it outlasts the previous maximum it becomes the max case. Ties keep the earlier case.
+  // Updated only when a snapshot is written (start, cleanup, finish), so a case killed mid-body is found via
+  // caseDigest + caseAgeMs instead; a case that reaches cleanup past the maximum takes over. Ties keep the earlier case.
   maxCaseDigest: string;
   elapsedMs: number;
 }
