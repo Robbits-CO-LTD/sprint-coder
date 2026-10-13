@@ -8,6 +8,14 @@ import {
 
 const POLL_MS = 50;
 
+/** A Windows taskkill started or exited. Observation only; it never affects the stop. */
+export type RuntimeProcessTreeObservation = Readonly<{
+  signal: NodeJS.Signals;
+  event: 'start' | 'exit';
+  /** taskkill's exit code for 'exit'. */
+  exitCode?: number | null;
+}>;
+
 export type RuntimeProcessTreeStopOptions = Readonly<{
   /**
    * Windows only: start the last wait after the forced taskkill has finished (bounded by
@@ -16,6 +24,8 @@ export type RuntimeProcessTreeStopOptions = Readonly<{
    * spawn has already closed, reporting a tree that does stop as unconfirmed (issue #665).
    */
   awaitTaskkill?: boolean;
+  /** Windows only: called when each taskkill starts and exits (issue #749). */
+  observe?: (observation: RuntimeProcessTreeObservation) => void;
 }>;
 
 /**
@@ -35,7 +45,7 @@ export async function terminateRuntimeProcessTree(
   if (!Number.isSafeInteger(pid) || pid <= 0) return false;
   if (process.platform === 'win32') {
     if (childHasExited(child)) return true;
-    void signalWindowsTree(pid, 'SIGTERM', environment);
+    void signalWindowsTree(pid, 'SIGTERM', environment, undefined, options.observe);
     await waitForExit(child, [], GRACE_MS);
     if (!childHasExited(child))
       await signalWindowsTree(
@@ -43,6 +53,7 @@ export async function terminateRuntimeProcessTree(
         'SIGKILL',
         environment,
         options.awaitTaskkill === true ? child : undefined,
+        options.observe,
       );
     await waitForExit(child, [], GRACE_MS);
     return childHasExited(child);
@@ -119,12 +130,24 @@ function signalWindowsTree(
   signal: NodeJS.Signals,
   environment: NodeJS.ProcessEnv,
   awaited?: ChildProcessWithoutNullStreams,
+  observe?: (observation: RuntimeProcessTreeObservation) => void,
 ): Promise<void> {
   const taskkill = spawn(
     'taskkill',
     ['/pid', String(pid), '/t', ...(signal === 'SIGKILL' ? ['/f'] : [])],
     { env: environment, stdio: 'ignore', windowsHide: true },
   );
+  if (observe !== undefined) {
+    const report = (observation: RuntimeProcessTreeObservation): void => {
+      try {
+        observe(observation);
+      } catch {
+        // Observation must never change the outcome of the stop.
+      }
+    };
+    report({ signal, event: 'start' });
+    taskkill.once('exit', (code) => report({ signal, event: 'exit', exitCode: code }));
+  }
   if (awaited === undefined) return Promise.resolve();
   return new Promise((resolve) => {
     const settle = (): void => {

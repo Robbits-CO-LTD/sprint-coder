@@ -229,7 +229,10 @@ it.each([6000, 14000])(
       expect(adapterReceipt).toBe(false);
       expect(await settled).toBe('resolved');
       expect(host.kill).not.toHaveBeenCalled();
-      expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), { awaitTaskkill: true });
+      expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), {
+        awaitTaskkill: true,
+        observe: expect.any(Function),
+      });
     } finally {
       confirm(true);
       client?.dispose();

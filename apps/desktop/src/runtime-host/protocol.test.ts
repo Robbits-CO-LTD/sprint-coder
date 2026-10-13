@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
 import {
   GROK_PROTOCOL_COUNT_MAX,
+  GROK_STOP_TIMING_MS_MAX,
   GROK_PROTOCOL_FAILURE_CODES,
   GROK_PROTOCOL_PENDING_TOOL_MAX,
   GROK_PROTOCOL_PHASES,
@@ -825,6 +826,63 @@ describe('Runtime Host protocol', () => {
           isRuntimeFailureDiagnostic({ ...grok, grokProtocol: { ...grokProtocol, [key]: value } }),
           `${key}=${String(value)}`,
         ).toBe(true);
+    // Stop timing (issue #749) is optional, so an older diagnostic without it stays valid.
+    const stopTiming = {
+      settledMs: 4_300,
+      signalTaskkillExitMs: 2_000,
+      signalTaskkillExitCode: 128,
+      forceTaskkillStartMs: 2_050,
+      forceTaskkillExitMs: 4_300,
+      forceTaskkillExitCode: 0,
+      rootExitMs: 4_300,
+      rootCloseMs: 4_301,
+      isolationRemaining: 1,
+      rootAliveAtSettle: 0,
+    };
+    const withTiming = (value: unknown) => ({
+      ...grok,
+      grokProtocol: { ...grokProtocol, stopTiming: value },
+    });
+    expect(isRuntimeFailureDiagnostic(withTiming(stopTiming))).toBe(true);
+    expect(isRuntimeToMainEnvelope(envelope(withTiming(stopTiming)))).toBe(true);
+    expect(isRuntimeFailureDiagnostic(withTiming(undefined))).toBe(true);
+    expect(
+      isRuntimeFailureDiagnostic(
+        withTiming({
+          ...stopTiming,
+          settledMs: null,
+          signalTaskkillExitMs: GROK_STOP_TIMING_MS_MAX,
+          signalTaskkillExitCode: null,
+          forceTaskkillExitCode: 4_294_967_295,
+          rootExitMs: 0,
+          isolationRemaining: 0,
+          rootAliveAtSettle: null,
+        }),
+      ),
+    ).toBe(true);
+    const { rootAliveAtSettle: _alive, ...missingTimingKey } = stopTiming;
+    for (const invalid of [
+      null,
+      [],
+      'timing',
+      missingTimingKey,
+      { ...stopTiming, pid: 1234 },
+      { ...stopTiming, path: 'C:\\Users' },
+      { ...stopTiming, settledMs: -1 },
+      { ...stopTiming, settledMs: 1.5 },
+      { ...stopTiming, settledMs: '4300' },
+      { ...stopTiming, rootCloseMs: GROK_STOP_TIMING_MS_MAX + 1 },
+      { ...stopTiming, forceTaskkillStartMs: Number.POSITIVE_INFINITY },
+      { ...stopTiming, signalTaskkillExitCode: 1.5 },
+      { ...stopTiming, signalTaskkillExitCode: 'exit' },
+      { ...stopTiming, forceTaskkillExitCode: 4_294_967_296 },
+      { ...stopTiming, isolationRemaining: 2 },
+      { ...stopTiming, isolationRemaining: true },
+      { ...stopTiming, rootAliveAtSettle: 2 },
+      { ...stopTiming, rootAliveAtSettle: false },
+      { ...stopTiming, rootAliveAtSettle: undefined },
+    ])
+      expect(isRuntimeFailureDiagnostic(withTiming(invalid))).toBe(false);
     // The same payload on another runtime is rejected; without it that runtime passes.
     for (const runtime of [
       { runtimeKind: 'codex', cliVersion: 'codex 1.0.0' },

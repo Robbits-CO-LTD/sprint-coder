@@ -1,14 +1,18 @@
 import { ChildProcess, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import type * as childProcess from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GrokRuntimeAdapter } from './grok-adapter';
-import type { RuntimeCanonicalEvent } from './protocol';
+import { isRuntimeFailureDiagnostic, type RuntimeCanonicalEvent } from './protocol';
 
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
   stop: vi.fn<() => Promise<boolean>>(),
   cleanup: vi.fn(),
+  isolationDirectory: '/inert-grok-fixture',
 }));
 
 vi.mock('node:child_process', async (importOriginal) => ({
@@ -19,7 +23,7 @@ vi.mock('./process-tree', () => ({ terminateRuntimeProcessTree: mocks.stop }));
 vi.mock('./grok-isolation', async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   prepareGrokIsolation: () => ({
-    directory: '/inert-grok-fixture',
+    directory: mocks.isolationDirectory,
     cwd: '/inert-grok-fixture/work',
     environment: {},
     cleanup: mocks.cleanup,
@@ -146,8 +150,121 @@ async function startFixture() {
     });
     send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
   };
-  return { child, adapter, events, failed, exited, start, finishPrompt };
+  const refusePrompt = () => {
+    update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Fixture refused.' },
+    });
+    send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'refusal' } });
+  };
+  return { child, adapter, events, failed, exited, start, finishPrompt, refusePrompt };
 }
+
+describe('Grok stop timing diagnostic (issue #749)', () => {
+  // A virtual clock: the recorder reads performance.now() on every call, so the offsets below
+  // are exact and independent of real time.
+  let clock = 0;
+  beforeEach(() => {
+    clock = 50_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => {
+    vi.mocked(performance.now).mockRestore();
+  });
+  const observedStop = (confirmed: boolean) =>
+    mocks.stop.mockImplementation(async (...args: unknown[]) => {
+      const options = args[2] as { observe?: (o: unknown) => void } | undefined;
+      options?.observe?.({ signal: 'SIGTERM', event: 'start' });
+      clock += 100;
+      options?.observe?.({ signal: 'SIGTERM', event: 'exit', exitCode: 128 });
+      options?.observe?.({ signal: 'SIGKILL', event: 'start' });
+      clock += 100;
+      options?.observe?.({ signal: 'SIGKILL', event: 'exit', exitCode: 0 });
+      clock += 100;
+      return confirmed;
+    });
+  const timingOf = (failed: ReturnType<typeof vi.fn>) =>
+    (failed.mock.lastCall?.[1] as { grokProtocol?: Record<string, unknown> }).grokProtocol;
+
+  it('records the taskkill results and an unobserved root exit when stop=false', async () => {
+    observedStop(false);
+    const f = await startFixture();
+    f.finishPrompt();
+    await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+    const grokProtocol = timingOf(f.failed);
+    expect(grokProtocol).toMatchObject({ stopConfirmation: 'unconfirmed' });
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      signalTaskkillExitCode: 128,
+      forceTaskkillExitCode: 0,
+      rootExitMs: null,
+      rootCloseMs: null,
+      isolationRemaining: 0,
+      rootAliveAtSettle: null,
+    });
+    // requested() and settled() are both wired: offsets start at the stop request (clock 0) and
+    // the stop settles after the last taskkill finished.
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      signalTaskkillExitMs: 100,
+      forceTaskkillStartMs: 100,
+      forceTaskkillExitMs: 200,
+      settledMs: 300,
+    });
+    expect(Object.keys(grokProtocol?.['stopTiming'] as object).sort()).toEqual(
+      [
+        'settledMs',
+        'signalTaskkillExitMs',
+        'signalTaskkillExitCode',
+        'forceTaskkillStartMs',
+        'forceTaskkillExitMs',
+        'forceTaskkillExitCode',
+        'rootExitMs',
+        'rootCloseMs',
+        'isolationRemaining',
+        'rootAliveAtSettle',
+      ].sort(),
+    );
+    expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
+  });
+
+  it('reports a surviving isolation directory and a root the OS still knows', async () => {
+    observedStop(false);
+    mocks.isolationDirectory = mkdtempSync(join(tmpdir(), 'grok-749-isolation-'));
+    try {
+      const f = await startFixture();
+      Object.defineProperty(f.child, 'pid', { value: process.pid, configurable: true });
+      f.finishPrompt();
+      await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+      expect(timingOf(f.failed)?.['stopTiming']).toMatchObject({
+        isolationRemaining: 1,
+        rootAliveAtSettle: 1,
+        rootExitMs: null,
+      });
+    } finally {
+      rmSync(mocks.isolationDirectory, { recursive: true, force: true });
+      mocks.isolationDirectory = '/inert-grok-fixture';
+    }
+  });
+
+  it('records the timing too when the stop is confirmed and the Turn fails for another reason', async () => {
+    observedStop(true);
+    const f = await startFixture();
+    // Node has handled the root's exit: its PID is no longer evidence, whatever the OS says.
+    Object.defineProperty(f.child, 'pid', { value: process.pid, configurable: true });
+    Object.assign(f.child, { exitCode: 1 });
+    f.child.emit('exit', 1, null);
+    f.refusePrompt();
+    await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+    const grokProtocol = timingOf(f.failed);
+    expect(grokProtocol).toMatchObject({ stopConfirmation: 'confirmed' });
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      forceTaskkillExitCode: 0,
+      rootExitMs: expect.any(Number),
+      rootCloseMs: null,
+      rootAliveAtSettle: 0,
+    });
+    expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
+  });
+});
 
 describe('Grok process stop confirmation', () => {
   it('cannot complete, exit, clean up or forget the active turn when a terminal reply is followed by stop=false', async () => {
@@ -220,7 +337,10 @@ describe('Grok process stop confirmation', () => {
     resolveStop(true);
     await vi.waitFor(() => expect(f.exited).toHaveBeenCalledOnce());
     // The Turn waits for each taskkill before its grace window (issue #665).
-    expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), { awaitTaskkill: true });
+    expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), {
+      awaitTaskkill: true,
+      observe: expect.any(Function),
+    });
     expect(f.events.filter((event) => event.type === 'completed')).toEqual([
       { type: 'completed', resolvedModel: 'grok-fixture' },
     ]);

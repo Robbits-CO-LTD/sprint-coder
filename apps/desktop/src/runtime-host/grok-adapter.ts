@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { CodexModelOption, PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
@@ -9,6 +9,7 @@ import { removeTreeWithoutFollowingLinks } from '../main/worker-worktree';
 import { GrokAcpClient, GrokProtocolFailure, GrokRpcError, grokRecord } from './grok-acp';
 import { GROK_AGENT_PROFILE, grokEnvironment, prepareGrokIsolation } from './grok-isolation';
 import { resolveGrokCommandCandidates } from './grok-command';
+import { GrokStopTimingRecorder, probeProcessAlive } from './grok-stop-timing';
 import { probeCliCommandCandidates } from './cli-command-resolution';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { terminateRuntimeProcessTree } from './process-tree';
@@ -26,6 +27,7 @@ import {
   GROK_SESSION_UPDATE_KINDS,
   GROK_STOP_REASONS,
   type GrokProtocolDiagnostic,
+  type GrokStopTiming,
   type GrokProtocolFailureCode,
   type GrokProtocolPhase,
   type GrokSessionUpdateKind,
@@ -400,8 +402,13 @@ export class GrokProtocolTrace {
     });
   }
 
-  diagnostic(stopConfirmation: GrokProtocolDiagnostic['stopConfirmation']) {
-    return this.frozen === null ? undefined : { ...this.frozen, stopConfirmation };
+  diagnostic(
+    stopConfirmation: GrokProtocolDiagnostic['stopConfirmation'],
+    stopTiming?: GrokStopTiming,
+  ) {
+    return this.frozen === null
+      ? undefined
+      : { ...this.frozen, stopConfirmation, ...(stopTiming === undefined ? {} : { stopTiming }) };
   }
 }
 
@@ -564,16 +571,22 @@ export class GrokRuntimeAdapter {
     const pendingTools = new Set<string>();
     let resumeTools: (() => void) | undefined;
     let stopPromise: Promise<boolean> | undefined;
+    const stopTiming = new GrokStopTimingRecorder();
     const control: Control = {
       child,
       canceled: false,
       // A Turn that ended by the protocol must not be failed only because taskkill was slow to
       // act (issue #665); the stop itself is still confirmed by the root's exit.
-      stop: () =>
-        (stopPromise ??= terminateRuntimeProcessTree(child, grokEnvironment(), {
+      stop: () => {
+        stopTiming.requested();
+        return (stopPromise ??= terminateRuntimeProcessTree(child, grokEnvironment(), {
           awaitTaskkill: true,
-        })),
+          observe: stopTiming.observe,
+        }).finally(() => stopTiming.settled()));
+      },
     };
+    child.once('exit', () => stopTiming.rootExited());
+    child.once('close', () => stopTiming.rootClosed());
     this.active.set(turnId, control);
     const failAfterStop = (
       error: PublicError,
@@ -590,7 +603,16 @@ export class GrokRuntimeAdapter {
         .then((stopped) => {
           if (!stopped) this.quarantined = true;
           if (stopped && control.canceled) return;
-          const grokProtocol = trace.diagnostic(stopped ? 'confirmed' : 'unconfirmed');
+          const grokProtocol = trace.diagnostic(
+            stopped ? 'confirmed' : 'unconfirmed',
+            stopTiming.snapshot(
+              existsSync(isolation.directory) ? 1 : 0,
+              // Once Node has handled the root's exit its PID may belong to another process.
+              child.exitCode === null && child.signalCode === null
+                ? probeProcessAlive(child.pid)
+                : 0,
+            ),
+          );
           if (grokProtocol !== undefined) diagnostics.recordGrokProtocol(grokProtocol);
           fail(stopped ? error : grokStopUnconfirmed(), diagnostics.snapshot(stage));
         });
