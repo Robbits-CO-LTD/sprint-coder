@@ -91,6 +91,22 @@ describe('Graph Electron child progress', () => {
       caseDigest: digest('PRIVATE_NEXT'),
       elapsedMs: 45,
     });
+
+    // A tie keeps the earlier case; a running case that outlasts the maximum takes over before cleanup.
+    tracker.start('PRIVATE_TIE');
+    nowNs += 30n * 1_000_000n;
+    tracker.finish();
+    expect(parseGraphBridgeProgress(readFileSync(file, 'utf8'))?.maxCaseDigest).toBe(
+      digest('PRIVATE_SLOW'),
+    );
+    tracker.start('PRIVATE_HUNG');
+    nowNs += 31n * 1_000_000n;
+    tracker.cleanup();
+    expect(parseGraphBridgeProgress(readFileSync(file, 'utf8'))).toMatchObject({
+      phase: 'cleanup',
+      maxCaseDurationMs: 31,
+      maxCaseDigest: digest('PRIVATE_HUNG'),
+    });
   });
 
   it('does not change case outcomes when diagnostics are disabled or unwritable', () => {
