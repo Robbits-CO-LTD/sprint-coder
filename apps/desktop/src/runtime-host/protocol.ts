@@ -300,6 +300,33 @@ export const GROK_PROTOCOL_COUNT_MAX = 64 * 1024 * 1024;
 /** The adapter fails once more than 128 tools are pending. */
 export const GROK_PROTOCOL_PENDING_TOOL_MAX = 256;
 
+/** Upper bound of a stop timing offset; the Windows stop budget is far below it. */
+export const GROK_STOP_TIMING_MS_MAX = 600_000;
+const GROK_STOP_TIMING_EXIT_CODE_MIN = -(2 ** 31);
+const GROK_STOP_TIMING_EXIT_CODE_MAX = 2 ** 32 - 1;
+
+/**
+ * Where the stop of a Grok Turn spent its time (issue #749). Offsets are milliseconds from the
+ * start of the stop; null means the event had not been observed when the diagnostic was taken.
+ * Only integers: never PIDs, paths, names or text.
+ */
+export type GrokStopTiming = Readonly<{
+  /** The stop settled (control.stop resolved) at this offset. */
+  settledMs: number | null;
+  /** Windows: the first (non-forced) taskkill exited. */
+  signalTaskkillExitMs: number | null;
+  signalTaskkillExitCode: number | null;
+  /** Windows: the forced taskkill started and exited. */
+  forceTaskkillStartMs: number | null;
+  forceTaskkillExitMs: number | null;
+  forceTaskkillExitCode: number | null;
+  /** The Grok root's exit and close events reached Node (0 when they came before the stop). */
+  rootExitMs: number | null;
+  rootCloseMs: number | null;
+  /** 1 while the Turn's isolation directory still existed. */
+  isolationRemaining: 0 | 1;
+}>;
+
 /**
  * Grok ACP state captured when the first failure was detected (issue #506). Frames are the
  * 1-based sequence of non-blank JSONL lines received. Session IDs, tool arguments, notification
@@ -322,6 +349,8 @@ export type GrokProtocolDiagnostic = Readonly<{
   /** Bytes after the last newline were still waiting for their terminator. */
   partialFrame: boolean;
   stopConfirmation: 'confirmed' | 'unconfirmed';
+  /** Absent in diagnostics recorded before issue #749. */
+  stopTiming?: GrokStopTiming;
 }>;
 
 export type RuntimeFailureDiagnostic = Readonly<{
@@ -1330,8 +1359,13 @@ function isGrokProtocolDiagnostic(value: unknown): boolean {
   // Fields are checked one by one only: a cross-field rule that a producer bug broke would make
   // Main drop the whole error envelope, losing the failure itself.
   return (
-    keys.length === GROK_PROTOCOL_DIAGNOSTIC_KEYS.length &&
+    keys.every(
+      (key) => key === 'stopTiming' || GROK_PROTOCOL_DIAGNOSTIC_KEYS.includes(key as never),
+    ) &&
     GROK_PROTOCOL_DIAGNOSTIC_KEYS.every((key) => keys.includes(key)) &&
+    (!('stopTiming' in record) ||
+      record['stopTiming'] === undefined ||
+      isGrokStopTiming(record['stopTiming'])) &&
     isOneOf(GROK_PROTOCOL_PHASES, record['phase']) &&
     isOneOf(GROK_PROTOCOL_FAILURE_CODES, record['failureCode']) &&
     typeof record['promptResultReceived'] === 'boolean' &&
@@ -1347,6 +1381,45 @@ function isGrokProtocolDiagnostic(value: unknown): boolean {
     isBoundedCount(record['pendingToolCount'], GROK_PROTOCOL_PENDING_TOOL_MAX) &&
     typeof record['partialFrame'] === 'boolean' &&
     isOneOf(['confirmed', 'unconfirmed'], record['stopConfirmation'])
+  );
+}
+
+const GROK_STOP_TIMING_KEYS = [
+  'settledMs',
+  'signalTaskkillExitMs',
+  'signalTaskkillExitCode',
+  'forceTaskkillStartMs',
+  'forceTaskkillExitMs',
+  'forceTaskkillExitCode',
+  'rootExitMs',
+  'rootCloseMs',
+  'isolationRemaining',
+] as const;
+
+function isGrokStopTiming(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  const offset = (candidate: unknown): boolean =>
+    candidate === null || isBoundedCount(candidate, GROK_STOP_TIMING_MS_MAX);
+  const exitCode = (candidate: unknown): boolean =>
+    candidate === null ||
+    (typeof candidate === 'number' &&
+      Number.isSafeInteger(candidate) &&
+      candidate >= GROK_STOP_TIMING_EXIT_CODE_MIN &&
+      candidate <= GROK_STOP_TIMING_EXIT_CODE_MAX);
+  return (
+    keys.length === GROK_STOP_TIMING_KEYS.length &&
+    GROK_STOP_TIMING_KEYS.every((key) => keys.includes(key)) &&
+    offset(record['settledMs']) &&
+    offset(record['signalTaskkillExitMs']) &&
+    exitCode(record['signalTaskkillExitCode']) &&
+    offset(record['forceTaskkillStartMs']) &&
+    offset(record['forceTaskkillExitMs']) &&
+    exitCode(record['forceTaskkillExitCode']) &&
+    offset(record['rootExitMs']) &&
+    offset(record['rootCloseMs']) &&
+    (record['isolationRemaining'] === 0 || record['isolationRemaining'] === 1)
   );
 }
 

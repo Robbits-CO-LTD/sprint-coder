@@ -288,6 +288,7 @@ describe('Grok prompt result and text order across data events (issue #506)', ()
       pendingToolCount: 0,
       partialFrame: false,
       stopConfirmation: 'confirmed',
+      stopTiming: expect.any(Object),
     });
   });
 
@@ -517,6 +518,7 @@ describe('Grok protocol diagnostic failure codes (issue #506)', () => {
       promptResultReceived: true,
       stopReason: 'end_turn',
       stopConfirmation: 'unconfirmed',
+      stopTiming: expect.any(Object),
     });
   });
 
@@ -557,6 +559,7 @@ describe('Grok protocol diagnostic failure codes (issue #506)', () => {
       pendingToolCount: 0,
       partialFrame: false,
       stopConfirmation: 'confirmed',
+      stopTiming: expect.any(Object),
     });
     expect(turn.text()).toBe('こんにちは');
   });

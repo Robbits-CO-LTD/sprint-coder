@@ -162,4 +162,52 @@ describe('Windows runtime process-tree stop bounds', () => {
       restore();
     }
   });
+
+  it('reports each taskkill start and exit to an observer without changing the stop outcome (issue #749)', async () => {
+    const restore = asWindows();
+    try {
+      for (const observed of [true, false]) {
+        vi.useFakeTimers();
+        mocks.taskkill = { kind: 'noop', exitAfterMs: 1_000 };
+        mocks.taskkillCalls.length = 0;
+        const seen: Array<[string, string, number | null | undefined]> = [];
+        const root = fakeRoot();
+        let result: boolean | undefined;
+        void terminateRuntimeProcessTree(
+          root,
+          {},
+          {
+            awaitTaskkill: true,
+            ...(observed
+              ? {
+                  observe: (o) => {
+                    seen.push([o.signal, o.event, o.exitCode]);
+                    throw new Error('an observer failure must not reach the stop');
+                  },
+                }
+              : {}),
+          },
+        ).then((stopped) => {
+          result = stopped;
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        // The root never exits: both runs end unconfirmed, with the same two taskkill calls.
+        expect(result).toBe(false);
+        expect(mocks.taskkillCalls.map((args) => args.includes('/f'))).toEqual([false, true]);
+        expect(seen).toEqual(
+          observed
+            ? [
+                ['SIGTERM', 'start', undefined],
+                ['SIGTERM', 'exit', 0],
+                ['SIGKILL', 'start', undefined],
+                ['SIGKILL', 'exit', 0],
+              ]
+            : [],
+        );
+        vi.useRealTimers();
+      }
+    } finally {
+      restore();
+    }
+  });
 });

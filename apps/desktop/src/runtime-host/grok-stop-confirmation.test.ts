@@ -3,7 +3,7 @@ import type * as childProcess from 'node:child_process';
 import { PassThrough } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GrokRuntimeAdapter } from './grok-adapter';
-import type { RuntimeCanonicalEvent } from './protocol';
+import { isRuntimeFailureDiagnostic, type RuntimeCanonicalEvent } from './protocol';
 
 const mocks = vi.hoisted(() => ({
   spawn: vi.fn(),
@@ -146,8 +146,75 @@ async function startFixture() {
     });
     send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'end_turn' } });
   };
-  return { child, adapter, events, failed, exited, start, finishPrompt };
+  const refusePrompt = () => {
+    update({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'Fixture refused.' },
+    });
+    send({ jsonrpc: '2.0', id: promptId, result: { stopReason: 'refusal' } });
+  };
+  return { child, adapter, events, failed, exited, start, finishPrompt, refusePrompt };
 }
+
+describe('Grok stop timing diagnostic (issue #749)', () => {
+  const observedStop = (confirmed: boolean) =>
+    mocks.stop.mockImplementation(async (...args: unknown[]) => {
+      const options = args[2] as { observe?: (o: unknown) => void } | undefined;
+      options?.observe?.({ signal: 'SIGTERM', event: 'start' });
+      options?.observe?.({ signal: 'SIGTERM', event: 'exit', exitCode: 128 });
+      options?.observe?.({ signal: 'SIGKILL', event: 'start' });
+      options?.observe?.({ signal: 'SIGKILL', event: 'exit', exitCode: 0 });
+      return confirmed;
+    });
+  const timingOf = (failed: ReturnType<typeof vi.fn>) =>
+    (failed.mock.lastCall?.[1] as { grokProtocol?: Record<string, unknown> }).grokProtocol;
+
+  it('records the taskkill results and an unobserved root exit when stop=false', async () => {
+    observedStop(false);
+    const f = await startFixture();
+    f.finishPrompt();
+    await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+    const grokProtocol = timingOf(f.failed);
+    expect(grokProtocol).toMatchObject({ stopConfirmation: 'unconfirmed' });
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      signalTaskkillExitCode: 128,
+      forceTaskkillExitCode: 0,
+      rootExitMs: null,
+      rootCloseMs: null,
+      isolationRemaining: 0,
+    });
+    expect(Object.keys(grokProtocol?.['stopTiming'] as object).sort()).toEqual(
+      [
+        'settledMs',
+        'signalTaskkillExitMs',
+        'signalTaskkillExitCode',
+        'forceTaskkillStartMs',
+        'forceTaskkillExitMs',
+        'forceTaskkillExitCode',
+        'rootExitMs',
+        'rootCloseMs',
+        'isolationRemaining',
+      ].sort(),
+    );
+    expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
+  });
+
+  it('records the timing too when the stop is confirmed and the Turn fails for another reason', async () => {
+    observedStop(true);
+    const f = await startFixture();
+    f.child.emit('exit', 1, null);
+    f.refusePrompt();
+    await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
+    const grokProtocol = timingOf(f.failed);
+    expect(grokProtocol).toMatchObject({ stopConfirmation: 'confirmed' });
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      forceTaskkillExitCode: 0,
+      rootExitMs: expect.any(Number),
+      rootCloseMs: null,
+    });
+    expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
+  });
+});
 
 describe('Grok process stop confirmation', () => {
   it('cannot complete, exit, clean up or forget the active turn when a terminal reply is followed by stop=false', async () => {
@@ -220,7 +287,10 @@ describe('Grok process stop confirmation', () => {
     resolveStop(true);
     await vi.waitFor(() => expect(f.exited).toHaveBeenCalledOnce());
     // The Turn waits for each taskkill before its grace window (issue #665).
-    expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), { awaitTaskkill: true });
+    expect(mocks.stop).toHaveBeenCalledWith(f.child, expect.any(Object), {
+      awaitTaskkill: true,
+      observe: expect.any(Function),
+    });
     expect(f.events.filter((event) => event.type === 'completed')).toEqual([
       { type: 'completed', resolvedModel: 'grok-fixture' },
     ]);
