@@ -25,7 +25,10 @@ test.describe('Team view survives Task switching (issue #754)', () => {
   });
 
   test('creating and re-selecting Tasks from the List view stays operable', async () => {
-    app = await launchApp(userDataDir);
+    // Hold the Mock stream after its first delta so every Send can be stopped deterministically.
+    app = await launchApp(userDataDir, undefined, {
+      SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA: '1',
+    });
     const page: Page = await firstWindow(app);
     await completeSetupForFeatureTest(page);
     const preparing = page.getByText('Teamを準備しています');
@@ -33,18 +36,31 @@ test.describe('Team view survives Task switching (issue #754)', () => {
     const activeTaskId = () => page.locator('.sb-row.active').first().getAttribute('data-task-id');
     const sidebarInert = () =>
       page.getByTestId('sidebar').evaluate((el) => el.closest('[inert]') !== null);
+    // One Mock Send, stopped mid-stream, driven to the terminal "canceled" state. Waits only on
+    // observable state (no fixed sleeps).
+    const sendAndStop = async (text: string) => {
+      await composer.fill(text);
+      await composer.press('Enter');
+      const runCard = page.getByTestId('run-card').last();
+      await expect(runCard).toBeVisible();
+      await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({
+        timeout: 15_000,
+      });
+      const stop = page.getByTestId('composer-send-button');
+      await expect(stop).toHaveAttribute('aria-label', '実行を停止');
+      await stop.click();
+      await expect(runCard).toHaveAttribute('data-run-status', 'canceled', { timeout: 15_000 });
+      await expect(page.getByTestId('streaming-assistant-message')).toHaveCount(0);
+      await expect(composer).toBeEnabled();
+    };
 
     // Task A needs a real conversation, otherwise it leaves the sidebar once Task B is created.
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(composer).toBeVisible();
     const taskA = await activeTaskId();
     expect(taskA).toBeTruthy();
-    await composer.fill('team task switch: task A');
-    await composer.press('Enter');
-    await expect(page.getByTestId('assistant-message').first()).toBeVisible({ timeout: 20_000 });
-    await expect(page.getByTestId('streaming-assistant-message')).toHaveCount(0, {
-      timeout: 20_000,
-    });
+    await sendAndStop('team task switch: task A');
+    await expect(page.getByTestId('assistant-message').first()).toBeVisible();
 
     // Open the Team, then check both views: the sidebar is inert in Canvas only.
     await page.getByTestId('team-toggle').click();
@@ -64,8 +80,7 @@ test.describe('Team view survives Task switching (issue #754)', () => {
     await page.getByTestId('sidebar-new-task-button').click();
     await expect(preparing).toHaveCount(0);
     await expect(composer).toBeVisible();
-    await composer.fill('operable on task B');
-    await expect(composer).toHaveValue('operable on task B');
+    await sendAndStop('operable on task B');
     const taskB = await activeTaskId();
     expect(taskB).toBeTruthy();
     expect(taskB).not.toBe(taskA);
@@ -77,8 +92,7 @@ test.describe('Team view survives Task switching (issue #754)', () => {
     await expect(page.locator('.sb-row.active').first()).toHaveAttribute('data-task-id', taskA!);
     await expect(preparing).toHaveCount(0);
     await expect(composer).toBeVisible();
-    await composer.fill('operable back on task A');
-    await expect(composer).toHaveValue('operable back on task A');
+    await sendAndStop('operable back on task A');
 
     // The Team view can still be left through its own control.
     await page.getByTestId('team-toggle').click();

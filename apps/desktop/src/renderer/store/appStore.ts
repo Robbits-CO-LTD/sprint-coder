@@ -959,12 +959,20 @@ export const useAppStore = create<AppState>((set, get) => {
   // view is opened after a failed subscription, so a dead stream is not left behind a live-looking
   // Team (issue #754).
   const subscribeToTeam = (taskId: string, isCurrentSelection: () => boolean) => {
+    // Never leave an earlier stream attached: two live streams would double every event.
+    if (currentTeamUnsubscribe) {
+      currentTeamUnsubscribe();
+      currentTeamUnsubscribe = null;
+    }
+    // A disposed stream must stay silent even for reads it started before it was disposed.
+    let disposed = false;
+    const live = () => !disposed && isCurrentSelection();
     let lastTeamEventSeq = 0;
     let receivedSnapshot = false;
-    currentTeamUnsubscribe = window.sprintCoder!.teams.subscribe(
+    const unsubscribe = window.sprintCoder!.teams.subscribe(
       taskId,
       (event) => {
-        if (!isCurrentSelection()) return;
+        if (!live()) return;
         if (event.type === 'snapshot') {
           receivedSnapshot = true;
           lastTeamEventSeq = event.seq;
@@ -981,14 +989,14 @@ export const useAppStore = create<AppState>((set, get) => {
           void window
             .sprintCoder!.teams.get(taskId)
             .then((fresh) => {
-              if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+              if (live() && lastTeamEventSeq === requestedSeq)
                 set((state) => ({
                   teamByTask: { ...state.teamByTask, [taskId]: fresh },
                   teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
                 }));
             })
             .catch(() => {
-              if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+              if (live() && lastTeamEventSeq === requestedSeq)
                 set((state) => ({
                   teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
                 }));
@@ -1011,12 +1019,17 @@ export const useAppStore = create<AppState>((set, get) => {
         });
       },
       () => {
-        if (isCurrentSelection())
+        if (live())
           set((state) => ({
             teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
           }));
       },
     );
+
+    currentTeamUnsubscribe = () => {
+      disposed = true;
+      unsubscribe();
+    };
   };
 
   return {
@@ -2033,10 +2046,6 @@ export const useAppStore = create<AppState>((set, get) => {
         ) {
           // The earlier subscription failed: entering the view must not show a Team that no longer
           // receives updates. Re-establish the stream; a repeated failure marks it again.
-          if (currentTeamUnsubscribe) {
-            currentTeamUnsubscribe();
-            currentTeamUnsubscribe = null;
-          }
           set((state) => ({
             teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
           }));
