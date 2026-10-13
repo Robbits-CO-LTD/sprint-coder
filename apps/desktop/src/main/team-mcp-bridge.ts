@@ -272,6 +272,9 @@ export type TeamMcpRegistration = Readonly<{
 }>;
 
 type Registered = TeamMcpRegistration & {
+  /** Aborted when the registration ends (Turn cancel/finish/failure unregisters it, or it is
+   * replaced), so a managed long-poll such as team_wait_reports stops waiting at once. */
+  turnAbort: AbortController;
   waitCursor: number;
   modelCatalogQueried: boolean;
   researchedModels: Set<string>;
@@ -327,6 +330,7 @@ export class TeamMcpBridge {
         callId: string;
         toolName: string;
         catalogDigest: string;
+        signal: AbortSignal;
       },
     ) => Promise<unknown>,
   ) {}
@@ -568,9 +572,13 @@ export class TeamMcpBridge {
    * `unregister` on completion/failure/cancel — an un-unregistered turn keeps its token live. */
   register(turnId: string, registration: TeamMcpRegistration): void {
     const previous = this.registrations.get(turnId);
-    if (previous !== undefined) this.releaseRuntimeProcessBindingWaiters(previous, null);
+    if (previous !== undefined) {
+      this.releaseRuntimeProcessBindingWaiters(previous, null);
+      previous.turnAbort.abort();
+    }
     this.registrations.set(turnId, {
       ...registration,
+      turnAbort: new AbortController(),
       waitCursor: registration.initialWaitCursor ?? 0,
       modelCatalogQueried: false,
       researchedModels: new Set(),
@@ -606,7 +614,10 @@ export class TeamMcpBridge {
 
   unregister(turnId: string): void {
     const registration = this.registrations.get(turnId);
-    if (registration !== undefined) this.releaseRuntimeProcessBindingWaiters(registration, null);
+    if (registration !== undefined) {
+      this.releaseRuntimeProcessBindingWaiters(registration, null);
+      registration.turnAbort.abort();
+    }
     this.registrations.delete(turnId);
   }
 
@@ -780,6 +791,7 @@ export class TeamMcpBridge {
                 callId: request.requestId,
                 toolName: managedTool.name,
                 catalogDigest: registration.managedToolCatalogDigest,
+                signal: registration.turnAbort.signal,
               })
           : registration.allowTeamTools === false
             ? (() => {
@@ -913,8 +925,10 @@ export class TeamMcpBridge {
   }
 
   async dispose(): Promise<void> {
-    for (const registration of this.registrations.values())
+    for (const registration of this.registrations.values()) {
       this.releaseRuntimeProcessBindingWaiters(registration, null);
+      registration.turnAbort.abort();
+    }
     this.registrations.clear();
     this.startPromise = null;
     const server = this.server;

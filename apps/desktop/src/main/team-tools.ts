@@ -527,6 +527,10 @@ export type ExecuteTeamToolOptions = Readonly<{
   waitReportsCursor?: TeamWaitReportsCursor;
   longPollTimeoutMs?: number;
   longPollIntervalMs?: number;
+  /** Abort of the owning tool call/Turn. A long-poll stops waiting immediately (Issue #753) by
+   * throwing the signal's reason, so ToolBroker records the call as canceled (never succeeded)
+   * and no report is consumed or cursor advanced for a call whose result nobody will read. */
+  signal?: AbortSignal;
   listModelCandidates?(input: {
     taskId: string;
     text: string;
@@ -560,8 +564,19 @@ export type ExecuteTeamToolOptions = Readonly<{
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 60_000;
 const DEFAULT_LONG_POLL_INTERVAL_MS = 500;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function reportPayload(report: {
@@ -586,20 +601,24 @@ async function executeWaitReports(
   options: ExecuteTeamToolOptions,
 ): Promise<unknown> {
   const cursor = options.waitReportsCursor;
-  const after = cursor?.read() ?? 0;
   const longPoll = options.longPoll ?? false;
   const timeoutMs = options.longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    options.signal?.throwIfAborted();
+    // Re-read the trusted cursor on every pass: concurrent waits sharing one Turn context must
+    // never deliver the same report twice, and the watermark only ever moves forward. The
+    // list + advance pair below is synchronous, so it is atomic between waits.
+    const after = cursor?.read() ?? 0;
     const reports = coordinator.listWorkerReports(taskId, after, options.requesterAgentId);
     if (reports.length > 0) {
-      cursor?.advance(Math.max(after, ...reports.map((report) => report.seq)));
+      cursor?.advance(Math.max(after, cursor.read(), ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
     }
     if (!longPoll || !coordinator.hasBusyWorkers(taskId) || Date.now() >= deadline)
       return { ok: true, reports: [] };
-    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), options.signal);
   }
 }
 
@@ -1003,6 +1022,15 @@ export function registerTeamTools(
   } = {},
 ): void {
   const modelCatalogQueried = new WeakSet<object>();
+  // Issue #753: real (non-fixture) Turns reach these implementations through the managed tool
+  // catalog (the MCP bridge dispatches a managed `team_wait_*` via the ToolBroker, never via
+  // executeTeamTool's own bridge branch), so long-polling must be requested here too. Without it a
+  // busy Worker made every wait return empty after ~1s. Only the isolated mock fixture, and
+  // callers that cannot classify the Turn, keep the synchronous replay semantics.
+  // NOTE: modelSelectionRequired is reused as "this is not the isolated mock Team fixture"; the
+  // provider-workspace-tools wiring that supplies it is the single place that knows that.
+  const longPollFor = (context: ToolExecutionContext): boolean =>
+    options.modelSelectionRequired?.(context) === true;
   broker.registerImplementation({
     toolId: TEAM_LIST_MODELS_TOOL.toolId,
     implementationKind: 'built-in',
@@ -1082,8 +1110,10 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_WAIT_EVENTS_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) =>
+    execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_events', input, {
+        longPoll: longPollFor(context),
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),
@@ -1094,14 +1124,16 @@ export function registerTeamTools(
   // Per-Turn read cursor: `context` is the exact same frozen object for every dispatch within one
   // Turn (see ToolBroker.startTurn), so keying a WeakMap by it scopes "already surfaced reports"
   // without new persistence state — the same technique default-tools.ts uses for command ids.
-  // longPoll stays false here (the default), preserving the exact synchronous,
-  // replay-since-cursor behavior the existing tests pin.
+  // longPoll is false unless the Turn is a real one (see longPollFor), preserving the exact
+  // synchronous, replay-since-cursor behavior the mock fixture tests pin.
   const reportCursors = new WeakMap<object, number>();
   broker.registerImplementation({
     toolId: TEAM_WAIT_REPORTS_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) =>
+    execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_reports', input, {
+        longPoll: longPollFor(context),
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),

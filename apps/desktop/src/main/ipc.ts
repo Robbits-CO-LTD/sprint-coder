@@ -498,6 +498,7 @@ type GenericManagedRuntimeToolHandlers = Readonly<{
       callId: string;
       toolName: string;
       catalogDigest: string;
+      signal?: AbortSignal;
     },
   ) => Promise<unknown>;
   codexRuntime: DirectGenericManagedRuntimeToolHandler;
@@ -5404,7 +5405,9 @@ export class IpcRouter {
             arguments: input,
             catalogDigest: context.catalogDigest,
           },
-          new AbortController().signal,
+          // Ends with the Turn's Team MCP registration (cancel/finish/failure), so a managed
+          // long-poll wait stops at once instead of blocking for its full deadline (Issue #753).
+          context.signal ?? new AbortController().signal,
         );
       },
       codexRuntime: direct('codex-runtime'),
@@ -5519,8 +5522,9 @@ export class IpcRouter {
         input: request.arguments,
         // The validated host binding identifies this runtime; provider arguments cannot pick it.
         ...(worker === undefined ? {} : { resultOrderScope: worker }),
-        // A Worker call also ends with its Worker Turn (issue #525). Team MCP hands this path a
-        // signal nothing aborts, and a write can wait on an Approval Card past the Worker's end.
+        // A Worker call also ends with its Worker Turn (issue #525). The Team MCP signal aborts only
+        // when the bridge registration ends (issue #753), and a write can wait on an Approval Card
+        // past the Worker's end, so the Worker's own release must cancel it too.
         signal: worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]),
         // Main's own binding for the Turn, never anything in the call's input (issue #573).
         ...(worker?.onApprovalWait === undefined ? {} : { onApprovalWait: worker.onApprovalWait }),
