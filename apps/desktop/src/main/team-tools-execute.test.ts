@@ -977,16 +977,30 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
 
 describe('registerTeamTools managed wait path (Issue #753)', () => {
   const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+  const control = (signal?: AbortSignal) => ({
+    callId: 'call-1',
+    ...(signal === undefined ? {} : { signal }),
+  });
+  const report = (seq: number) => ({
+    sourceAgentId: 'worker-1',
+    seq,
+    content: '{"status":"succeeded"}',
+    executionId: 'execution-1',
+    attemptId: 'attempt-1',
+  });
 
   function captureImplementations(
     coordinator: TeamCoordinator,
     modelSelectionRequired?: (context: unknown) => boolean,
   ) {
-    const implementations = new Map<string, (input: unknown, context: never) => unknown>();
+    const implementations = new Map<
+      string,
+      (input: unknown, context: never, control: never) => unknown
+    >();
     const broker = {
       registerImplementation: (implementation: {
         toolId: string;
-        execute: (input: unknown, context: never) => unknown;
+        execute: (input: unknown, context: never, control: never) => unknown;
       }) => implementations.set(implementation.toolId, implementation.execute),
     } as unknown as ToolBroker;
     registerTeamTools(broker, coordinator, {
@@ -1018,10 +1032,12 @@ describe('registerTeamTools managed wait path (Issue #753)', () => {
       const implementation = captureImplementations(coordinator, () => true);
       const waitReports = implementation(TEAM_WAIT_REPORTS_TOOL.toolId);
       let settled = false;
-      const pending = Promise.resolve(waitReports({}, context as never)).then((value) => {
-        settled = true;
-        return value;
-      });
+      const pending = Promise.resolve(waitReports({}, context as never, control() as never)).then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+      );
       await vi.advanceTimersByTimeAsync(40_000);
       expect(settled).toBe(false);
       reportReady = true;
@@ -1052,10 +1068,12 @@ describe('registerTeamTools managed wait path (Issue #753)', () => {
         () => true,
       )(TEAM_WAIT_EVENTS_TOOL.toolId);
       let settled = false;
-      const pending = Promise.resolve(waitEvents({}, context as never)).then((value) => {
-        settled = true;
-        return value;
-      });
+      const pending = Promise.resolve(waitEvents({}, context as never, control() as never)).then(
+        (value) => {
+          settled = true;
+          return value;
+        },
+      );
       await vi.advanceTimersByTimeAsync(59_000);
       expect(settled).toBe(false);
       await vi.advanceTimersByTimeAsync(1_500);
@@ -1072,7 +1090,73 @@ describe('registerTeamTools managed wait path (Issue #753)', () => {
         coordinator,
         classify,
       )(TEAM_WAIT_REPORTS_TOOL.toolId);
-      expect(await waitReports({}, context as never)).toEqual({ ok: true, reports: [] });
+      expect(await waitReports({}, context as never, control() as never)).toEqual({
+        ok: true,
+        reports: [],
+      });
+    }
+  });
+
+  it('stops waiting immediately when the call is aborted, without waiting for the 60s deadline', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => true) });
+      const waitReports = captureImplementations(
+        coordinator,
+        () => true,
+      )(TEAM_WAIT_REPORTS_TOOL.toolId);
+      const abort = new AbortController();
+      let settled = false;
+      const pending = Promise.resolve(
+        waitReports({}, context as never, control(abort.signal) as never),
+      ).then((value) => {
+        settled = true;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(settled).toBe(false);
+      abort.abort();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
+      expect(await pending).toEqual({ ok: true, reports: [] });
+      // No timer is left behind to keep the process (or the sleep) alive after the abort.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('delivers a report once to concurrent waits sharing one Turn cursor, and not again afterwards', async () => {
+    vi.useFakeTimers();
+    try {
+      let ready = false;
+      let drained = false;
+      const coordinator = fakeCoordinator({
+        hasBusyWorkers: vi.fn(() => !ready && !drained),
+        listWorkerReports: vi.fn((_task: string, after: number) =>
+          ready ? [report(1), report(2)].filter((item) => item.seq > after) : [],
+        ) as never,
+      });
+      const waitReports = captureImplementations(
+        coordinator,
+        () => true,
+      )(TEAM_WAIT_REPORTS_TOOL.toolId);
+      const first = Promise.resolve(waitReports({}, context as never, control() as never));
+      const second = Promise.resolve(waitReports({}, context as never, control() as never));
+      await vi.advanceTimersByTimeAsync(5_000);
+      ready = true;
+      await vi.advanceTimersByTimeAsync(600);
+      const results = (await Promise.all([first, second])) as { reports: { seq: number }[] }[];
+      expect(results.flatMap((result) => result.reports.map((item) => item.seq))).toEqual([1, 2]);
+      // The cursor moved forward: a later wait on the same Turn re-delivers nothing.
+      ready = false;
+      drained = true;
+      const third = (await waitReports({}, context as never, control() as never)) as {
+        reports: unknown[];
+      };
+      expect(third.reports).toEqual([]);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

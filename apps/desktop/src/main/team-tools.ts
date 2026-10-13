@@ -527,6 +527,9 @@ export type ExecuteTeamToolOptions = Readonly<{
   waitReportsCursor?: TeamWaitReportsCursor;
   longPollTimeoutMs?: number;
   longPollIntervalMs?: number;
+  /** Abort of the owning tool call/Turn. A long-poll stops waiting immediately (Issue #753); the
+   * caller (ToolBroker) is the one that classifies the call as canceled after execute returns. */
+  signal?: AbortSignal;
   listModelCandidates?(input: {
     taskId: string;
     text: string;
@@ -560,8 +563,19 @@ export type ExecuteTeamToolOptions = Readonly<{
 const DEFAULT_LONG_POLL_TIMEOUT_MS = 60_000;
 const DEFAULT_LONG_POLL_INTERVAL_MS = 500;
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function reportPayload(report: {
@@ -586,20 +600,28 @@ async function executeWaitReports(
   options: ExecuteTeamToolOptions,
 ): Promise<unknown> {
   const cursor = options.waitReportsCursor;
-  const after = cursor?.read() ?? 0;
   const longPoll = options.longPoll ?? false;
   const timeoutMs = options.longPollTimeoutMs ?? DEFAULT_LONG_POLL_TIMEOUT_MS;
   const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    // Re-read the trusted cursor on every pass: concurrent waits sharing one Turn context must
+    // never deliver the same report twice, and the watermark only ever moves forward. The
+    // list + advance pair below is synchronous, so it is atomic between waits.
+    const after = cursor?.read() ?? 0;
     const reports = coordinator.listWorkerReports(taskId, after, options.requesterAgentId);
     if (reports.length > 0) {
-      cursor?.advance(Math.max(after, ...reports.map((report) => report.seq)));
+      cursor?.advance(Math.max(after, cursor.read(), ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
     }
-    if (!longPoll || !coordinator.hasBusyWorkers(taskId) || Date.now() >= deadline)
+    if (
+      !longPoll ||
+      options.signal?.aborted === true ||
+      !coordinator.hasBusyWorkers(taskId) ||
+      Date.now() >= deadline
+    )
       return { ok: true, reports: [] };
-    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+    await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), options.signal);
   }
 }
 
@@ -1008,6 +1030,8 @@ export function registerTeamTools(
   // executeTeamTool's own bridge branch), so long-polling must be requested here too. Without it a
   // busy Worker made every wait return empty after ~1s. Only the isolated mock fixture, and
   // callers that cannot classify the Turn, keep the synchronous replay semantics.
+  // NOTE: modelSelectionRequired is reused as "this is not the isolated mock Team fixture"; the
+  // provider-workspace-tools wiring that supplies it is the single place that knows that.
   const longPollFor = (context: ToolExecutionContext): boolean =>
     options.modelSelectionRequired?.(context) === true;
   broker.registerImplementation({
@@ -1089,9 +1113,10 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_WAIT_EVENTS_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) =>
+    execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_events', input, {
         longPoll: longPollFor(context),
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),
@@ -1108,9 +1133,10 @@ export function registerTeamTools(
   broker.registerImplementation({
     toolId: TEAM_WAIT_REPORTS_TOOL.toolId,
     implementationKind: 'built-in',
-    execute: (input, context) =>
+    execute: (input, context, control) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_reports', input, {
         longPoll: longPollFor(context),
+        ...(control.signal === undefined ? {} : { signal: control.signal }),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),
