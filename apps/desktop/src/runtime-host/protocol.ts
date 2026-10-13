@@ -326,10 +326,10 @@ export type GrokStopTiming = Readonly<{
   /** 1 while the Turn's isolation directory still existed. */
   isolationRemaining: 0 | 1;
   /**
-   * Asked of the OS when the diagnostic was taken, right after the stop settled: 1 when the root
-   * process still existed, 0 when it did not, null when that could not be told. Together with
-   * rootExitMs this tells a late Node exit event (OS: 0, rootExitMs: null) from a root that never
-   * exited (OS: 1).
+   * When the diagnostic was taken, right after the stop settled: 1 when the OS still knew the root
+   * process (on POSIX also an unreaped zombie), 0 when it did not or when Node had already handled
+   * the root's exit, null when that could not be told. With rootExitMs null, 0 means a late Node
+   * exit event and 1 means the root still existed at settle.
    */
   rootAliveAtSettle: 0 | 1 | null;
 }>;

@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import { GrokStopTimingRecorder, probeProcessAlive } from './grok-stop-timing';
 import { GROK_STOP_TIMING_MS_MAX } from './protocol';
@@ -47,10 +47,18 @@ describe('GrokStopTimingRecorder (issue #749)', () => {
 });
 
 describe('probeProcessAlive (issue #749)', () => {
-  it('tells a live process from an exited one and never guesses for an unusable PID', () => {
+  it('tells a live process from an exited one and never guesses for an unusable PID', async () => {
     expect(probeProcessAlive(process.pid)).toBe(1);
-    const finished = spawnSync(process.execPath, ['-e', '0']);
+    const finished = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: 'ignore',
+    });
     expect(finished.pid).toBeGreaterThan(0);
+    expect(probeProcessAlive(finished.pid)).toBe(1);
+    const exited = new Promise((resolve) => finished.once('exit', resolve));
+    finished.kill();
+    await exited;
+    // Probed only after Node has seen the exit, so the PID cannot yet have been handed out again
+    // by anything this test started.
     expect(probeProcessAlive(finished.pid)).toBe(0);
     for (const pid of [undefined, 0, -1, 1.5, Number.NaN])
       expect(probeProcessAlive(pid)).toBeNull();

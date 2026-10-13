@@ -607,7 +607,10 @@ export class GrokRuntimeAdapter {
             stopped ? 'confirmed' : 'unconfirmed',
             stopTiming.snapshot(
               existsSync(isolation.directory) ? 1 : 0,
-              probeProcessAlive(child.pid),
+              // Once Node has handled the root's exit its PID may belong to another process.
+              child.exitCode === null && child.signalCode === null
+                ? probeProcessAlive(child.pid)
+                : 0,
             ),
           );
           if (grokProtocol !== undefined) diagnostics.recordGrokProtocol(grokProtocol);

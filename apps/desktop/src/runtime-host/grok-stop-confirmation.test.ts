@@ -161,17 +161,26 @@ async function startFixture() {
 }
 
 describe('Grok stop timing diagnostic (issue #749)', () => {
+  // A virtual clock: the recorder reads performance.now() on every call, so the offsets below
+  // are exact and independent of real time.
+  let clock = 0;
+  beforeEach(() => {
+    clock = 50_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+  });
+  afterEach(() => {
+    vi.mocked(performance.now).mockRestore();
+  });
   const observedStop = (confirmed: boolean) =>
     mocks.stop.mockImplementation(async (...args: unknown[]) => {
       const options = args[2] as { observe?: (o: unknown) => void } | undefined;
-      const pause = () => new Promise((resolve) => setTimeout(resolve, 15));
       options?.observe?.({ signal: 'SIGTERM', event: 'start' });
-      await pause();
+      clock += 100;
       options?.observe?.({ signal: 'SIGTERM', event: 'exit', exitCode: 128 });
       options?.observe?.({ signal: 'SIGKILL', event: 'start' });
-      await pause();
+      clock += 100;
       options?.observe?.({ signal: 'SIGKILL', event: 'exit', exitCode: 0 });
-      await pause();
+      clock += 100;
       return confirmed;
     });
   const timingOf = (failed: ReturnType<typeof vi.fn>) =>
@@ -192,12 +201,14 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
       isolationRemaining: 0,
       rootAliveAtSettle: null,
     });
-    // requested() and settled() are both wired: offsets start at the stop request and the stop
-    // settles after the last taskkill finished.
-    const timing = grokProtocol?.['stopTiming'] as Record<string, number>;
-    expect(timing['forceTaskkillExitMs']).toBeGreaterThanOrEqual(15);
-    expect(timing['settledMs']).toBeGreaterThanOrEqual(timing['forceTaskkillExitMs']! + 10);
-    expect(timing['settledMs']).toBeLessThan(500);
+    // requested() and settled() are both wired: offsets start at the stop request (clock 0) and
+    // the stop settles after the last taskkill finished.
+    expect(grokProtocol?.['stopTiming']).toMatchObject({
+      signalTaskkillExitMs: 100,
+      forceTaskkillStartMs: 100,
+      forceTaskkillExitMs: 200,
+      settledMs: 300,
+    });
     expect(Object.keys(grokProtocol?.['stopTiming'] as object).sort()).toEqual(
       [
         'settledMs',
@@ -237,6 +248,9 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
   it('records the timing too when the stop is confirmed and the Turn fails for another reason', async () => {
     observedStop(true);
     const f = await startFixture();
+    // Node has handled the root's exit: its PID is no longer evidence, whatever the OS says.
+    Object.defineProperty(f.child, 'pid', { value: process.pid, configurable: true });
+    Object.assign(f.child, { exitCode: 1 });
     f.child.emit('exit', 1, null);
     f.refusePrompt();
     await vi.waitFor(() => expect(f.failed).toHaveBeenCalledOnce());
@@ -246,6 +260,7 @@ describe('Grok stop timing diagnostic (issue #749)', () => {
       forceTaskkillExitCode: 0,
       rootExitMs: expect.any(Number),
       rootCloseMs: null,
+      rootAliveAtSettle: 0,
     });
     expect(isRuntimeFailureDiagnostic(f.failed.mock.lastCall?.[1])).toBe(true);
   });
