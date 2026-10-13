@@ -940,6 +940,11 @@ export function TeamCanvas({
       tabIndex={0}
       onKeyDown={handleCanvasKeyDown}
     >
+      {detail && loadFailed && (
+        <p className="sys-notice team-stale-notice" role="alert" data-testid="team-stale-notice">
+          Teamの更新を受信できません。Chatに戻って開き直してください
+        </p>
+      )}
       {!detail ? (
         <div className="team-canvas-notice">
           <div className="sys-notice">

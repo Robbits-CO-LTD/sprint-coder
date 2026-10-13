@@ -391,6 +391,9 @@ let runtimeStatusUnsubscribe: (() => void) | null = null;
 let currentUnsubscribe: (() => void) | null = null;
 let currentTeamUnsubscribe: (() => void) | null = null;
 let taskSelectionGeneration = 0;
+// Advances only when the selected Task actually changes. A same-Task re-select (the Turn seq-gap
+// resync) must not look like a switch to an in-flight Team operation, but A -> B -> A still does.
+let taskSwitchGeneration = 0;
 let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -928,6 +931,12 @@ function mergeGraphVersions(
 
 export const useAppStore = create<AppState>((set, get) => {
   const apply = (fn: (state: AppState) => Partial<AppState>) => set(fn);
+  // Snapshot of "the user is still looking at this Task". A late result or error from a Team
+  // operation is dropped once the user has switched away (A -> B -> A included).
+  const captureTaskView = (taskId: string) => {
+    const generation = taskSwitchGeneration;
+    return () => taskSwitchGeneration === generation && get().selectedTaskId === taskId;
+  };
   const beginTeamOperation = (taskId: string) => {
     if (get().teamBusyByTask[taskId]) return false;
     set((state) => ({
@@ -944,6 +953,70 @@ export const useAppStore = create<AppState>((set, get) => {
         teamBusy: state.selectedTaskId !== null && !!teamBusyByTask[state.selectedTaskId],
       };
     });
+  };
+
+  // Opens the Team subscription for `taskId`. Called on Task selection and again when the Team
+  // view is opened after a failed subscription, so a dead stream is not left behind a live-looking
+  // Team (issue #754).
+  const subscribeToTeam = (taskId: string, isCurrentSelection: () => boolean) => {
+    let lastTeamEventSeq = 0;
+    let receivedSnapshot = false;
+    currentTeamUnsubscribe = window.sprintCoder!.teams.subscribe(
+      taskId,
+      (event) => {
+        if (!isCurrentSelection()) return;
+        if (event.type === 'snapshot') {
+          receivedSnapshot = true;
+          lastTeamEventSeq = event.seq;
+          set((state) => ({
+            teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+            teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+          }));
+          return;
+        }
+        if (!receivedSnapshot || event.seq <= lastTeamEventSeq) return;
+        if (event.seq !== lastTeamEventSeq + 1) {
+          lastTeamEventSeq = event.seq;
+          const requestedSeq = event.seq;
+          void window
+            .sprintCoder!.teams.get(taskId)
+            .then((fresh) => {
+              if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+                set((state) => ({
+                  teamByTask: { ...state.teamByTask, [taskId]: fresh },
+                  teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+                }));
+            })
+            .catch(() => {
+              if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
+                set((state) => ({
+                  teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
+                }));
+            });
+          return;
+        }
+        lastTeamEventSeq = event.seq;
+        set((state) => {
+          // First team appearance for the selected task (leader-driven auto-promotion)
+          // pulls the user into the canvas; later updates never fight a manual close.
+          const firstAppearance =
+            state.teamByTask[taskId] == null &&
+            state.selectedTaskId === taskId &&
+            !state.teamViewOpen;
+          return {
+            teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+            teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+            ...(firstAppearance ? { teamViewOpen: true } : {}),
+          };
+        });
+      },
+      () => {
+        if (isCurrentSelection())
+          set((state) => ({
+            teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
+          }));
+      },
+    );
   };
 
   return {
@@ -1448,6 +1521,7 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async selectTask(taskId: string) {
+      if (get().selectedTaskId !== taskId) taskSwitchGeneration += 1;
       const generation = ++taskSelectionGeneration;
       const isCurrentSelection = () =>
         taskSelectionGeneration === generation && get().selectedTaskId === taskId;
@@ -1639,64 +1713,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!isCurrentSelection()) return;
       subscribeToTask(taskId, apply, get, afterSeq);
       if (typeof sprintCoder.teams?.subscribe === 'function') {
-        let lastTeamEventSeq = 0;
-        let receivedSnapshot = false;
-        currentTeamUnsubscribe = sprintCoder.teams.subscribe(
-          taskId,
-          (event) => {
-            if (!isCurrentSelection()) return;
-            if (event.type === 'snapshot') {
-              receivedSnapshot = true;
-              lastTeamEventSeq = event.seq;
-              set((state) => ({
-                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
-                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
-              }));
-              return;
-            }
-            if (!receivedSnapshot || event.seq <= lastTeamEventSeq) return;
-            if (event.seq !== lastTeamEventSeq + 1) {
-              lastTeamEventSeq = event.seq;
-              const requestedSeq = event.seq;
-              void sprintCoder.teams
-                .get(taskId)
-                .then((fresh) => {
-                  if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
-                    set((state) => ({
-                      teamByTask: { ...state.teamByTask, [taskId]: fresh },
-                      teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
-                    }));
-                })
-                .catch(() => {
-                  if (isCurrentSelection() && lastTeamEventSeq === requestedSeq)
-                    set((state) => ({
-                      teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
-                    }));
-                });
-              return;
-            }
-            lastTeamEventSeq = event.seq;
-            set((state) => {
-              // First team appearance for the selected task (leader-driven auto-promotion)
-              // pulls the user into the canvas; later updates never fight a manual close.
-              const firstAppearance =
-                state.teamByTask[taskId] == null &&
-                state.selectedTaskId === taskId &&
-                !state.teamViewOpen;
-              return {
-                teamByTask: { ...state.teamByTask, [taskId]: event.detail },
-                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
-                ...(firstAppearance ? { teamViewOpen: true } : {}),
-              };
-            });
-          },
-          () => {
-            if (isCurrentSelection())
-              set((state) => ({
-                teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: true },
-              }));
-          },
-        );
+        subscribeToTeam(taskId, isCurrentSelection);
       } else if (typeof sprintCoder.teams?.get === 'function') {
         try {
           const team = await sprintCoder.teams.get(taskId);
@@ -2006,12 +2023,25 @@ export const useAppStore = create<AppState>((set, get) => {
         set({ teamViewOpen: false });
         return;
       }
-      const generation = taskSelectionGeneration;
-      const isCurrentSelection = () =>
-        taskSelectionGeneration === generation && get().selectedTaskId === taskId;
+      const isCurrentSelection = captureTaskView(taskId);
       if (!beginTeamOperation(taskId)) return;
       set({ error: null });
       try {
+        if (
+          get().teamLoadFailedByTask[taskId] &&
+          typeof window.sprintCoder.teams.subscribe === 'function'
+        ) {
+          // The earlier subscription failed: entering the view must not show a Team that no longer
+          // receives updates. Re-establish the stream; a repeated failure marks it again.
+          if (currentTeamUnsubscribe) {
+            currentTeamUnsubscribe();
+            currentTeamUnsubscribe = null;
+          }
+          set((state) => ({
+            teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
+          }));
+          subscribeToTeam(taskId, isCurrentSelection);
+        }
         let detail = await window.sprintCoder.teams.get(taskId);
         if (!isCurrentSelection()) return;
         if (detail === null) {
@@ -2034,18 +2064,20 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async stopTeamWorker(taskId: string, agentId: string) {
       if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      const isCurrentView = captureTaskView(taskId);
       try {
         await window.sprintCoder.teams.stopWorker({ taskId, agentId });
         const detail = await window.sprintCoder.teams.get(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
-        set({ error: describeError(err) });
+        if (isCurrentView()) set({ error: describeError(err) });
       } finally {
         finishTeamOperation(taskId);
       }
     },
     async resumeTeamMission(taskId: string, missionId: string) {
       if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      const isCurrentView = captureTaskView(taskId);
       set({ error: null });
       try {
         await window.sprintCoder!.teams.resumeMission({ taskId, missionId });
@@ -2054,7 +2086,7 @@ export const useAppStore = create<AppState>((set, get) => {
           teamByTask: { ...state.teamByTask, [taskId]: detail },
         }));
       } catch (error) {
-        set({ error: describeError(error) });
+        if (isCurrentView()) set({ error: describeError(error) });
       } finally {
         finishTeamOperation(taskId);
       }
@@ -2062,6 +2094,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async resumeTeamExecutionIntegration(taskId: string, executionId: string) {
       if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      const isCurrentView = captureTaskView(taskId);
       set({ error: null });
       try {
         const detail = await window.sprintCoder.teams.resumeExecutionIntegration({
@@ -2072,7 +2105,7 @@ export const useAppStore = create<AppState>((set, get) => {
           teamByTask: { ...state.teamByTask, [taskId]: detail },
         }));
       } catch (error) {
-        set({ error: describeError(error) });
+        if (isCurrentView()) set({ error: describeError(error) });
       } finally {
         finishTeamOperation(taskId);
       }
@@ -2080,6 +2113,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async stopAllTeamWorkers(taskId: string) {
       if (!window.sprintCoder?.teams || !beginTeamOperation(taskId)) return;
+      const isCurrentView = captureTaskView(taskId);
       try {
         // The Team Leader runs as the task's active Turn, separately from worker runtimes.
         // Stop it first so it cannot react to worker cancellation by hiring replacements while
@@ -2092,7 +2126,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const detail = await window.sprintCoder.teams.stopAll(taskId);
         set((state) => ({ teamByTask: { ...state.teamByTask, [taskId]: detail } }));
       } catch (err) {
-        set({ error: describeError(err) });
+        if (isCurrentView()) set({ error: describeError(err) });
       } finally {
         finishTeamOperation(taskId);
       }

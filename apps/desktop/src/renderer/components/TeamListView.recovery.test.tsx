@@ -106,3 +106,48 @@ describe.each(['list', 'canvas'] as const)('%s recovery controls', (view) => {
     },
   );
 });
+
+describe.each(['list', 'canvas'] as const)('%s stale-subscription notice', (view) => {
+  const detail = {
+    team: { id: 'team-1', leaderAgentId: 'leader', state: 'idle', policy: null },
+    workers: [],
+    messages: [],
+    executions: [],
+  } as never;
+  const render = () =>
+    act(() =>
+      root.render(
+        view === 'list' ? (
+          <TeamListView task={task} onBack={vi.fn()} onSwitchToCanvasView={vi.fn()} />
+        ) : (
+          <TeamCanvas
+            task={task}
+            leaderRef={createRef()}
+            leaderAnchorRef={createRef()}
+            onRequestExit={vi.fn()}
+            onSwitchToListView={vi.fn()}
+          />
+        ),
+      ),
+    );
+
+  it('tells the user updates stopped when a loaded Team lost its subscription', () => {
+    useAppStore.setState({
+      teamByTask: { [task.id]: detail },
+      teamLoadFailedByTask: { [task.id]: true },
+    });
+    render();
+    const notice = container.querySelector('[data-testid="team-stale-notice"]');
+    expect(notice?.getAttribute('role')).toBe('alert');
+    expect(notice?.textContent).toContain('Teamの更新を受信できません');
+  });
+
+  it('shows no notice while the subscription is healthy', () => {
+    useAppStore.setState({
+      teamByTask: { [task.id]: detail },
+      teamLoadFailedByTask: { [task.id]: false },
+    });
+    render();
+    expect(container.querySelector('[data-testid="team-stale-notice"]')).toBeNull();
+  });
+});

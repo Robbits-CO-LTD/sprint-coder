@@ -5134,6 +5134,18 @@ button.composer-permission-chip[aria-expanded='true'] {
     opacity: 0;
   }
 }
+.team-stale-notice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  z-index: 6;
+  transform: translateX(-50%);
+}
+.team-list-view .team-stale-notice {
+  position: static;
+  margin: 8px auto 0;
+  transform: none;
+}
 .team-canvas-notice {
   position: absolute;
   inset: 0;
