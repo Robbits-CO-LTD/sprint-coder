@@ -217,6 +217,61 @@ describe('TeamMcpBridge', () => {
     );
   });
 
+  it('aborts the signal handed to a managed long-poll tool when the Turn registration ends (Issue #753)', async () => {
+    let seen: AbortSignal | undefined;
+    let entered!: () => void;
+    const started = new Promise<void>((resolve) => (entered = resolve));
+    const executeManaged = vi.fn(
+      (_input: unknown, context: { signal: AbortSignal }) =>
+        new Promise((resolve) => {
+          seen = context.signal;
+          entered();
+          context.signal.addEventListener('abort', () => resolve({ aborted: true }), {
+            once: true,
+          });
+        }),
+    );
+    const bridge = new TeamMcpBridge(
+      fakeCoordinator(),
+      testSocketPath(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      executeManaged,
+    );
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-wait', {
+      taskId: 'task-wait',
+      token,
+      allowTeamTools: false,
+      allowedTools: [],
+      managedTools: [
+        { name: 'team_wait_reports', description: 'wait', inputSchema: { type: 'object' } },
+      ],
+      managedToolCatalogDigest: 'b'.repeat(64),
+    });
+    const pending = roundTrip(
+      socketPath as string,
+      { token, tool: 'team_wait_reports', args: {} },
+      RESPONSE_TIMEOUT_MS,
+    );
+    await started;
+    expect(seen?.aborted).toBe(false);
+    // Turn cancel / finish / failure all end in unregister.
+    bridge.unregister('turn-wait');
+    expect(seen?.aborted).toBe(true);
+    const response = await pending;
+    expect(JSON.parse(response.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { aborted: true },
+    });
+  });
+
   it('dispatches both auxiliary names through the managed executor, never native callbacks', async () => {
     const createSkillDraft = vi.fn(async () => ({ unsafe: true }));
     const queueCandidate = vi.fn(async () => ({ unsafe: true }));

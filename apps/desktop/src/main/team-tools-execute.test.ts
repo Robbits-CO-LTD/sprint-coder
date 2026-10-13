@@ -1109,16 +1109,19 @@ describe('registerTeamTools managed wait path (Issue #753)', () => {
       let settled = false;
       const pending = Promise.resolve(
         waitReports({}, context as never, control(abort.signal) as never),
-      ).then((value) => {
+      ).finally(() => {
         settled = true;
-        return value;
       });
+      const outcome = pending.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      );
       await vi.advanceTimersByTimeAsync(2_000);
       expect(settled).toBe(false);
       abort.abort();
       await vi.advanceTimersByTimeAsync(0);
       expect(settled).toBe(true);
-      expect(await pending).toEqual({ ok: true, reports: [] });
+      expect(await outcome).toBe(abort.signal.reason);
       // No timer is left behind to keep the process (or the sleep) alive after the abort.
       expect(vi.getTimerCount()).toBe(0);
     } finally {

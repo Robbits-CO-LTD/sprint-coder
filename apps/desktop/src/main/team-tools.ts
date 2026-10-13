@@ -527,8 +527,9 @@ export type ExecuteTeamToolOptions = Readonly<{
   waitReportsCursor?: TeamWaitReportsCursor;
   longPollTimeoutMs?: number;
   longPollIntervalMs?: number;
-  /** Abort of the owning tool call/Turn. A long-poll stops waiting immediately (Issue #753); the
-   * caller (ToolBroker) is the one that classifies the call as canceled after execute returns. */
+  /** Abort of the owning tool call/Turn. A long-poll stops waiting immediately (Issue #753) by
+   * throwing the signal's reason, so ToolBroker records the call as canceled (never succeeded)
+   * and no report is consumed or cursor advanced for a call whose result nobody will read. */
   signal?: AbortSignal;
   listModelCandidates?(input: {
     taskId: string;
@@ -605,6 +606,7 @@ async function executeWaitReports(
   const intervalMs = options.longPollIntervalMs ?? DEFAULT_LONG_POLL_INTERVAL_MS;
   const deadline = Date.now() + timeoutMs;
   for (;;) {
+    options.signal?.throwIfAborted();
     // Re-read the trusted cursor on every pass: concurrent waits sharing one Turn context must
     // never deliver the same report twice, and the watermark only ever moves forward. The
     // list + advance pair below is synchronous, so it is atomic between waits.
@@ -614,12 +616,7 @@ async function executeWaitReports(
       cursor?.advance(Math.max(after, cursor.read(), ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
     }
-    if (
-      !longPoll ||
-      options.signal?.aborted === true ||
-      !coordinator.hasBusyWorkers(taskId) ||
-      Date.now() >= deadline
-    )
+    if (!longPoll || !coordinator.hasBusyWorkers(taskId) || Date.now() >= deadline)
       return { ok: true, reports: [] };
     await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), options.signal);
   }
