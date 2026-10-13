@@ -1003,6 +1003,13 @@ export function registerTeamTools(
   } = {},
 ): void {
   const modelCatalogQueried = new WeakSet<object>();
+  // Issue #753: real (non-fixture) Turns reach these implementations through the managed tool
+  // catalog (the MCP bridge dispatches a managed `team_wait_*` via the ToolBroker, never via
+  // executeTeamTool's own bridge branch), so long-polling must be requested here too. Without it a
+  // busy Worker made every wait return empty after ~1s. Only the isolated mock fixture, and
+  // callers that cannot classify the Turn, keep the synchronous replay semantics.
+  const longPollFor = (context: ToolExecutionContext): boolean =>
+    options.modelSelectionRequired?.(context) === true;
   broker.registerImplementation({
     toolId: TEAM_LIST_MODELS_TOOL.toolId,
     implementationKind: 'built-in',
@@ -1084,6 +1091,7 @@ export function registerTeamTools(
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_events', input, {
+        longPoll: longPollFor(context),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),
@@ -1094,14 +1102,15 @@ export function registerTeamTools(
   // Per-Turn read cursor: `context` is the exact same frozen object for every dispatch within one
   // Turn (see ToolBroker.startTurn), so keying a WeakMap by it scopes "already surfaced reports"
   // without new persistence state — the same technique default-tools.ts uses for command ids.
-  // longPoll stays false here (the default), preserving the exact synchronous,
-  // replay-since-cursor behavior the existing tests pin.
+  // longPoll is false unless the Turn is a real one (see longPollFor), preserving the exact
+  // synchronous, replay-since-cursor behavior the mock fixture tests pin.
   const reportCursors = new WeakMap<object, number>();
   broker.registerImplementation({
     toolId: TEAM_WAIT_REPORTS_TOOL.toolId,
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_wait_reports', input, {
+        longPoll: longPollFor(context),
         waitReportsCursor: {
           read: () => reportCursors.get(context) ?? 0,
           advance: (seq) => reportCursors.set(context, seq),

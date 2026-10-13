@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelSelection } from '@sprint-coder/contracts';
-import { executeTeamTool } from './team-tools';
+import {
+  executeTeamTool,
+  registerTeamTools,
+  TEAM_WAIT_EVENTS_TOOL,
+  TEAM_WAIT_REPORTS_TOOL,
+} from './team-tools';
+import type { ToolBroker } from './tool-broker';
 import type { TeamCoordinator } from './team-coordinator';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
 
@@ -966,5 +972,107 @@ describe('executeTeamTool team_wait_reports long-poll', () => {
       },
     );
     expect(second).toEqual({ ok: true, reports: [] });
+  });
+});
+
+describe('registerTeamTools managed wait path (Issue #753)', () => {
+  const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+
+  function captureImplementations(
+    coordinator: TeamCoordinator,
+    modelSelectionRequired?: (context: unknown) => boolean,
+  ) {
+    const implementations = new Map<string, (input: unknown, context: never) => unknown>();
+    const broker = {
+      registerImplementation: (implementation: {
+        toolId: string;
+        execute: (input: unknown, context: never) => unknown;
+      }) => implementations.set(implementation.toolId, implementation.execute),
+    } as unknown as ToolBroker;
+    registerTeamTools(broker, coordinator, {
+      ...(modelSelectionRequired === undefined ? {} : { modelSelectionRequired }),
+    });
+    return (toolId: string) => implementations.get(toolId)!;
+  }
+
+  it('keeps waiting for the real deadline while a Worker is busy, instead of returning after ~1s', async () => {
+    vi.useFakeTimers();
+    try {
+      let reportReady = false;
+      const coordinator = fakeCoordinator({
+        hasBusyWorkers: vi.fn(() => !reportReady),
+        listWorkerReports: vi.fn(() =>
+          reportReady
+            ? [
+                {
+                  sourceAgentId: 'worker-1',
+                  seq: 4,
+                  content: '{"status":"succeeded"}',
+                  executionId: 'execution-1',
+                  attemptId: 'attempt-1',
+                },
+              ]
+            : [],
+        ) as never,
+      });
+      const implementation = captureImplementations(coordinator, () => true);
+      const waitReports = implementation(TEAM_WAIT_REPORTS_TOOL.toolId);
+      let settled = false;
+      const pending = Promise.resolve(waitReports({}, context as never)).then((value) => {
+        settled = true;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(40_000);
+      expect(settled).toBe(false);
+      reportReady = true;
+      await vi.advanceTimersByTimeAsync(600);
+      expect(await pending).toEqual({
+        ok: true,
+        reports: [
+          {
+            workerId: 'worker-1',
+            seq: 4,
+            content: '{"status":"succeeded"}',
+            executionId: 'execution-1',
+            attemptId: 'attempt-1',
+          },
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns empty only at the 60s deadline for a busy Worker', async () => {
+    vi.useFakeTimers();
+    try {
+      const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => true) });
+      const waitEvents = captureImplementations(
+        coordinator,
+        () => true,
+      )(TEAM_WAIT_EVENTS_TOOL.toolId);
+      let settled = false;
+      const pending = Promise.resolve(waitEvents({}, context as never)).then((value) => {
+        settled = true;
+        return value;
+      });
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(await pending).toEqual({ ok: true, reports: [] });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps the synchronous replay semantics for the mock fixture (and when the Turn is not classified)', async () => {
+    const coordinator = fakeCoordinator({ hasBusyWorkers: vi.fn(() => true) });
+    for (const classify of [() => false, undefined]) {
+      const waitReports = captureImplementations(
+        coordinator,
+        classify,
+      )(TEAM_WAIT_REPORTS_TOOL.toolId);
+      expect(await waitReports({}, context as never)).toEqual({ ok: true, reports: [] });
+    }
   });
 });
