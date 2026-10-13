@@ -47,9 +47,12 @@ describe('Team preload failure boundary', () => {
     const failure = vi.fn();
     const dispose = api.teams.subscribe('task-disposed', listener, failure);
     dispose();
+    // dispose() detaches the event listener once; the subscribe rejection handler detaches it
+    // again, so a second removal proves the rejection reached that handler (and passed its
+    // `disposed` guard) before the negative assertions below.
+    expect(bridge.removeListener).toHaveBeenCalledTimes(1);
     reject(new Error('late synthetic failure'));
-    await pending.catch(() => undefined);
-    await Promise.resolve();
+    await vi.waitFor(() => expect(bridge.removeListener).toHaveBeenCalledTimes(2));
     expect(listener).not.toHaveBeenCalled();
     expect(failure).not.toHaveBeenCalled();
   });

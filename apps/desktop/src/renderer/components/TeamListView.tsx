@@ -164,6 +164,11 @@ export function TeamListView({
           </button>
         </div>
       </header>
+      {loadFailed && (
+        <p className="sys-notice team-stale-notice" role="alert" data-testid="team-stale-notice">
+          Teamの更新を受信できません。Chatに戻って開き直してください
+        </p>
+      )}
       <div aria-live="polite" className="visually-hidden">
         {`Team status: ${detail.team.state}, workers ${currentWorkerCount}`}
       </div>

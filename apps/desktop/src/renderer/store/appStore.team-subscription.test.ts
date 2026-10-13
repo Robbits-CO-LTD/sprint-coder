@@ -318,4 +318,367 @@ describe('Team state subscription boundary', () => {
     expect(useAppStore.getState().teamBusy).toBe(false);
     expect(useAppStore.getState().teamViewOpen).toBe(true);
   });
+
+  describe('follow-ups from the post-merge review', () => {
+    function stubTeamWindow(teams: Record<string, unknown>) {
+      vi.stubGlobal('window', {
+        sprintCoder: {
+          tasks: { messages: vi.fn().mockResolvedValue([]) },
+          turns: {
+            snapshot: vi.fn().mockResolvedValue(null),
+            subscribe: vi.fn().mockReturnValue(vi.fn()),
+          },
+          teams,
+        },
+      });
+    }
+
+    // A read whose settlement the test can wait for. The store attaches its own handlers to the
+    // promise returned by `then` before the test can, and reactions run in registration order,
+    // so `handled()` settles only after the store's then/catch handlers have run. That is a
+    // positive synchronization point instead of a guess about microtask counts.
+    function observableRead<T>() {
+      let resolveRead!: (value: T) => void;
+      let rejectRead!: (reason: Error) => void;
+      const base = new Promise<T>((resolve, reject) => {
+        resolveRead = resolve;
+        rejectRead = reject;
+      });
+      let derived: Promise<unknown> | undefined;
+      const read = {
+        then: (onFulfilled: (value: T) => unknown) => {
+          derived = base.then(onFulfilled);
+          return derived;
+        },
+      };
+      return {
+        read,
+        resolve: resolveRead,
+        reject: rejectRead,
+        handled: async () => {
+          await vi.waitFor(() => expect(derived).toBeDefined());
+          await derived!.then(
+            () => undefined,
+            () => undefined,
+          );
+        },
+      };
+    }
+
+    it('re-establishes a failed subscription when the Team view is opened', async () => {
+      const failures: Array<() => void> = [];
+      const listeners: Array<(event: TeamEvent) => void> = [];
+      const unsubscribe = vi.fn();
+      const subscribe = vi.fn((_id, listener, onError) => {
+        listeners.push(listener);
+        failures.push(onError);
+        return unsubscribe;
+      });
+      const detail = { team: { id: 'live' } } as unknown as TeamDetail;
+      stubTeamWindow({ get: vi.fn().mockResolvedValue(detail), subscribe });
+      await useAppStore.getState().selectTask(taskId);
+      failures[0]!();
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(true);
+
+      await useAppStore.getState().toggleTeamView(taskId);
+
+      expect(subscribe).toHaveBeenCalledTimes(2);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().teamViewOpen).toBe(true);
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(false);
+      failures[1]!();
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(true);
+      const updated = { team: { id: 'updated' } } as unknown as TeamDetail;
+      listeners[1]!({ type: 'snapshot', seq: 0, detail });
+      listeners[1]!({ type: 'updated', seq: 1, detail: updated });
+      expect(useAppStore.getState().teamByTask[taskId]).toBe(updated);
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(false);
+    });
+
+    it('does not re-subscribe when the subscription is healthy', async () => {
+      const subscribe = vi.fn().mockReturnValue(vi.fn());
+      stubTeamWindow({
+        get: vi.fn().mockResolvedValue({ team: { id: 'live' } }),
+        subscribe,
+      });
+      await useAppStore.getState().selectTask(taskId);
+      await useAppStore.getState().toggleTeamView(taskId);
+      expect(subscribe).toHaveBeenCalledTimes(1);
+    });
+
+    it('marks the Team failed when the sequence-gap read fails', async () => {
+      let listener!: (event: TeamEvent) => void;
+      stubTeamWindow({
+        get: vi.fn().mockRejectedValue(new Error('gap read failed')),
+        subscribe: vi.fn((_id, next: (event: TeamEvent) => void) => {
+          listener = next;
+          return vi.fn();
+        }),
+      });
+      await useAppStore.getState().selectTask(taskId);
+      listener({ type: 'snapshot', seq: 0, detail: null });
+      listener({
+        type: 'updated',
+        seq: 2,
+        detail: { team: { id: 'gap' } } as unknown as TeamDetail,
+      });
+      await vi.waitFor(() =>
+        expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(true),
+      );
+    });
+
+    it('drops the failure of a superseded sequence-gap read', async () => {
+      const first = observableRead<TeamDetail>();
+      const second = deferred<TeamDetail>();
+      let listener!: (event: TeamEvent) => void;
+      const get = vi.fn().mockReturnValueOnce(first.read).mockReturnValueOnce(second.promise);
+      stubTeamWindow({
+        get,
+        subscribe: vi.fn((_id, next: (event: TeamEvent) => void) => {
+          listener = next;
+          return vi.fn();
+        }),
+      });
+      await useAppStore.getState().selectTask(taskId);
+      listener({ type: 'snapshot', seq: 0, detail: null });
+      listener({
+        type: 'updated',
+        seq: 2,
+        detail: { team: { id: 'gap-1' } } as unknown as TeamDetail,
+      });
+      // A second gap supersedes the first read; the first read's failure must not mark failure.
+      listener({
+        type: 'updated',
+        seq: 4,
+        detail: { team: { id: 'gap-2' } } as unknown as TeamDetail,
+      });
+      first.reject(new Error('stale gap read failed'));
+      await first.handled();
+      expect(get).toHaveBeenCalledTimes(2);
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(false);
+      const fresh = { team: { id: 'fresh' } } as unknown as TeamDetail;
+      second.resolve(fresh);
+      await vi.waitFor(() => expect(useAppStore.getState().teamByTask[taskId]).toBe(fresh));
+    });
+
+    it('keeps an in-flight toggle when the same Task is re-selected by a Turn resync', async () => {
+      const read = deferred<TeamDetail>();
+      stubTeamWindow({
+        get: vi.fn().mockReturnValue(read.promise),
+        subscribe: vi.fn().mockReturnValue(vi.fn()),
+      });
+      useAppStore.setState({ selectedTaskId: taskId });
+      const toggle = useAppStore.getState().toggleTeamView(taskId);
+      await useAppStore.getState().selectTask(taskId);
+      read.resolve({ team: { id: 'team' } } as unknown as TeamDetail);
+      await toggle;
+      expect(useAppStore.getState().teamViewOpen).toBe(true);
+    });
+
+    it.each([
+      [
+        'stopTeamWorker',
+        'stopWorker',
+        (id: string) => useAppStore.getState().stopTeamWorker(id, 'w'),
+      ],
+      [
+        'resumeTeamMission',
+        'resumeMission',
+        (id: string) => useAppStore.getState().resumeTeamMission(id, 'm'),
+      ],
+      [
+        'resumeTeamExecutionIntegration',
+        'resumeExecutionIntegration',
+        (id: string) => useAppStore.getState().resumeTeamExecutionIntegration(id, 'e'),
+      ],
+      [
+        'stopAllTeamWorkers',
+        'stopAll',
+        (id: string) => useAppStore.getState().stopAllTeamWorkers(id),
+      ],
+    ])('%s does not show an old Task error on a newer Task', async (_name, method, run) => {
+      let fail!: (reason: Error) => void;
+      const pending = new Promise<TeamDetail>((_resolve, reject) => {
+        fail = reject;
+      });
+      stubTeamWindow({
+        [method]: vi.fn().mockReturnValue(pending),
+        get: vi.fn().mockResolvedValue(null),
+        subscribe: vi.fn().mockReturnValue(vi.fn()),
+      });
+      useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
+      const operation = run(taskId);
+      await useAppStore.getState().selectTask('other');
+      fail(new Error('old task failure'));
+      await operation;
+      expect(useAppStore.getState().error).toBeNull();
+    });
+
+    it('ignores reads from a stream disposed by a same-Task re-select', async () => {
+      const staleOk = observableRead<TeamDetail>();
+      const staleFail = observableRead<TeamDetail>();
+      const listeners: Array<(event: TeamEvent) => void> = [];
+      const get = vi.fn().mockReturnValueOnce(staleOk.read).mockReturnValueOnce(staleFail.read);
+      stubTeamWindow({
+        get,
+        subscribe: vi.fn((_id, next: (event: TeamEvent) => void) => {
+          listeners.push(next);
+          return vi.fn();
+        }),
+      });
+      await useAppStore.getState().selectTask(taskId);
+      const gap = (seq: number) => ({
+        type: 'updated' as const,
+        seq,
+        detail: { team: { id: `gap-${seq}` } } as unknown as TeamDetail,
+      });
+      listeners[0]!({ type: 'snapshot', seq: 0, detail: null });
+      listeners[0]!(gap(2));
+      await useAppStore.getState().selectTask(taskId); // Turn resync: same Task, new stream
+      const current = { team: { id: 'current' } } as unknown as TeamDetail;
+      listeners[1]!({ type: 'snapshot', seq: 0, detail: current });
+
+      staleOk.resolve({ team: { id: 'stale' } } as unknown as TeamDetail);
+      await staleOk.handled();
+      expect(useAppStore.getState().teamByTask[taskId]).toBe(current);
+
+      // A failing read of a disposed stream must not mark the new selection as failed.
+      listeners[1]!(gap(2));
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+      await useAppStore.getState().selectTask(taskId); // dispose the second stream as well
+      staleFail.reject(new Error('late failure of a disposed stream'));
+      await staleFail.handled();
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(false);
+    });
+
+    it('ignores reads of a toggle-created stream after a same-Task re-select disposes it', async () => {
+      const stale = observableRead<TeamDetail>();
+      const listeners: Array<(event: TeamEvent) => void> = [];
+      const failures: Array<() => void> = [];
+      const get = vi
+        .fn()
+        .mockResolvedValueOnce({ team: { id: 'toggle-read' } })
+        .mockReturnValueOnce(stale.read);
+      stubTeamWindow({
+        get,
+        subscribe: vi.fn((_id, next: (event: TeamEvent) => void, onError: () => void) => {
+          listeners.push(next);
+          failures.push(onError);
+          return vi.fn();
+        }),
+      });
+      await useAppStore.getState().selectTask(taskId);
+      failures[0]!();
+      await useAppStore.getState().toggleTeamView(taskId); // stream #2 is created by the toggle
+      listeners[1]!({ type: 'snapshot', seq: 0, detail: null });
+      listeners[1]!({
+        type: 'updated',
+        seq: 2,
+        detail: { team: { id: 'gap' } } as unknown as TeamDetail,
+      });
+      await vi.waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+      await useAppStore.getState().selectTask(taskId); // disposes stream #2
+      failures[2]!(); // the new stream fails; this is the state that must stay visible
+      stale.resolve({ team: { id: 'stale' } } as unknown as TeamDetail);
+      await stale.handled();
+      expect(useAppStore.getState().teamLoadFailedByTask[taskId]).toBe(true);
+      expect(useAppStore.getState().teamByTask[taskId]).not.toEqual({ team: { id: 'stale' } });
+    });
+
+    it('does not leave the toggle-created stream attached when selectTask finishes later', async () => {
+      const snapshot = deferred<null>();
+      const unsubscribes: Array<ReturnType<typeof vi.fn>> = [];
+      const subscribe = vi.fn(() => {
+        const unsubscribe = vi.fn();
+        unsubscribes.push(unsubscribe);
+        return unsubscribe;
+      });
+      vi.stubGlobal('window', {
+        sprintCoder: {
+          tasks: { messages: vi.fn().mockResolvedValue([]) },
+          turns: {
+            snapshot: vi.fn().mockReturnValue(snapshot.promise),
+            subscribe: vi.fn().mockReturnValue(vi.fn()),
+          },
+          teams: { get: vi.fn().mockResolvedValue({ team: { id: 'live' } }), subscribe },
+        },
+      });
+      const selection = useAppStore.getState().selectTask(taskId);
+      useAppStore.setState({ teamLoadFailedByTask: { [taskId]: true } });
+      await useAppStore.getState().toggleTeamView(taskId);
+      expect(subscribe).toHaveBeenCalledTimes(1); // the stream the toggle re-established
+      snapshot.resolve(null);
+      await selection;
+      expect(subscribe).toHaveBeenCalledTimes(2); // selectTask's own stream replaces it
+      expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+      expect(unsubscribes[1]).not.toHaveBeenCalled();
+    });
+
+    it('drops a toggle that was in flight across A -> B -> A', async () => {
+      const read = deferred<TeamDetail>();
+      stubTeamWindow({
+        get: vi.fn().mockReturnValue(read.promise),
+        subscribe: vi.fn().mockReturnValue(vi.fn()),
+      });
+      useAppStore.setState({ selectedTaskId: taskId });
+      const toggle = useAppStore.getState().toggleTeamView(taskId);
+      await useAppStore.getState().selectTask('other');
+      await useAppStore.getState().selectTask(taskId);
+      read.resolve({ team: { id: 'old-visit' } } as unknown as TeamDetail);
+      await toggle;
+      expect(useAppStore.getState().teamViewOpen).toBe(false);
+      expect(useAppStore.getState().teamByTask[taskId]).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'stopTeamWorker',
+        'stopWorker',
+        (id: string) => useAppStore.getState().stopTeamWorker(id, 'w'),
+      ],
+      [
+        'resumeTeamMission',
+        'resumeMission',
+        (id: string) => useAppStore.getState().resumeTeamMission(id, 'm'),
+      ],
+      [
+        'resumeTeamExecutionIntegration',
+        'resumeExecutionIntegration',
+        (id: string) => useAppStore.getState().resumeTeamExecutionIntegration(id, 'e'),
+      ],
+      [
+        'stopAllTeamWorkers',
+        'stopAll',
+        (id: string) => useAppStore.getState().stopAllTeamWorkers(id),
+      ],
+    ])('%s drops its error after A -> B -> A', async (_name, method, run) => {
+      let fail!: (reason: Error) => void;
+      const pending = new Promise<TeamDetail>((_resolve, reject) => {
+        fail = reject;
+      });
+      stubTeamWindow({
+        [method]: vi.fn().mockReturnValue(pending),
+        get: vi.fn().mockResolvedValue(null),
+        subscribe: vi.fn().mockReturnValue(vi.fn()),
+      });
+      useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
+      const operation = run(taskId);
+      await useAppStore.getState().selectTask('other');
+      await useAppStore.getState().selectTask(taskId);
+      fail(new Error('error from the previous visit'));
+      await operation;
+      expect(useAppStore.getState().error).toBeNull();
+    });
+
+    it('still reports the error when the user stays on the Task', async () => {
+      stubTeamWindow({
+        stopWorker: vi.fn().mockRejectedValue(new Error('stay failure')),
+        get: vi.fn(),
+        subscribe: vi.fn().mockReturnValue(vi.fn()),
+      });
+      useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
+      await useAppStore.getState().stopTeamWorker(taskId, 'w');
+      expect(useAppStore.getState().error).toContain('stay failure');
+    });
+  });
 });
