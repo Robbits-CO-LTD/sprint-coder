@@ -258,6 +258,17 @@ export function createComputerUseNativeHost(
     }
   };
 
+  // A session bound to a route whose expected classifier is not 2 (every panel session, and an
+  // agent session of a build that did not attest 2) is refused the approval calls here as well as
+  // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session that was
+  // never bound (a direct host user; Main always binds) keeps the pre-C3 rule.
+  const approvalRouteAllowed = (sessionId: string): boolean => {
+    const binding = classifierBindings.get(sessionId);
+    return binding === undefined || binding.expectedVersion === 2;
+  };
+
+  // Process-wide: it does not look at a session's route yet. Making the "approval path is open"
+  // test (here and in the controller) route-aware is part of C5, where the route v2 term joins it.
   const approvalPathEnabled = (): boolean =>
     platform === 'darwin' &&
     options.classifierV2Attested === true &&
@@ -317,6 +328,107 @@ export function createComputerUseNativeHost(
       reasonCode: reasonCode ?? null,
       inputReceipt: inputReceipt(record, input.session.sessionId, input.cancelEpoch),
     });
+  };
+
+  const startNative = async (
+    input: Omit<Parameters<ComputerUseNativeHost['startSession']>[0], 'classifierRoute'>,
+  ): Promise<ComputerUseNativeSession> => {
+    const existing = sessions.get(input.sessionId);
+    if (existing !== undefined) {
+      if (
+        existing.platform !== input.profile.platform ||
+        existing.appIdentityDigest !== input.profile.identityDigest ||
+        existing.windowId !== input.windowId ||
+        existing.profileRevision !== input.profile.revision
+      )
+        throw new ComputerUseNativeUnavailableError('native_session_rebind_forbidden');
+      const request = {
+        ...existing.raw,
+        ...input,
+        appIdentityDigest: input.profile.identityDigest,
+        canonicalPath: input.profile.canonicalPath,
+        windowIdentityDigest: existing.windowIdentityDigest,
+        resume: input.resume === true,
+        expectedPolicyLanguage: existing.policyLanguage,
+      };
+      const value = await invoke('startSession', request);
+      const raw = asRecord(value, 'native_session_invalid');
+      const session = parseNativeSession(
+        raw,
+        input.profile.platform,
+        input,
+        request,
+        options.windowsPhysicalBoundsToDip,
+      );
+      sessions.set(session.sessionId, session);
+      return publicNativeSession(session);
+    }
+    let pid = pidsByIdentity.get(input.profile.identityDigest);
+    if (pid === undefined) {
+      const windows = await host.listWindows(input.profile);
+      pid = pidsByIdentity.get(input.profile.identityDigest);
+      if (pid === undefined || windows.every((candidate) => candidate.windowId !== input.windowId))
+        throw new ComputerUseNativeUnavailableError('native_app_not_active');
+    }
+    const candidate = await invoke('listWindows', {
+      ...input.profile,
+      pid,
+      appIdentityDigest: input.profile.identityDigest,
+    });
+    if (!Array.isArray(candidate))
+      throw new ComputerUseNativeUnavailableError('native_windows_invalid');
+    const selected = candidate.find((value) => {
+      const raw = asRecord(value, 'native_window_invalid');
+      return raw['windowId'] === input.windowId && raw['eligible'] === true;
+    });
+    const selectedRecord =
+      selected === undefined ? null : asRecord(selected, 'native_window_invalid');
+    if (selectedRecord === null) throw new ComputerUseNativeUnavailableError('native_window_stale');
+    const selectedPid = selectedRecord['pid'];
+    if (typeof selectedPid !== 'number' || !Number.isSafeInteger(selectedPid) || selectedPid < 1)
+      throw new ComputerUseNativeUnavailableError('native_window_owner_invalid');
+    pid = selectedPid;
+    pidsByIdentity.set(input.profile.identityDigest, selectedPid);
+    const selectedBounds = asRecord(selectedRecord['bounds'], 'native_window_invalid');
+    const expectedMaximumMode = bindComputerUseMaximumMode(
+      nativeMaximumMode(input.profile.identity),
+      nativeMaximumMode(selectedRecord),
+    );
+    const request = {
+      ...input,
+      pid,
+      appIdentityDigest: input.profile.identityDigest,
+      canonicalPath: input.profile.canonicalPath,
+      windowIdentityDigest: stringField(selectedRecord, 'windowIdentityDigest'),
+      expectedBoundsX: selectedBounds['x'],
+      expectedBoundsY: selectedBounds['y'],
+      expectedBoundsWidth: selectedBounds['width'],
+      expectedBoundsHeight: selectedBounds['height'],
+      expectedPolicyLanguage: nativePolicyLanguage(selectedRecord),
+      maximumMode: expectedMaximumMode,
+      expectedMaximumMode,
+    };
+    const value = await invoke('startSession', request);
+    const raw = asRecord(value, 'native_session_invalid');
+    const session = parseNativeSession(
+      raw,
+      input.profile.platform,
+      input,
+      request,
+      options.windowsPhysicalBoundsToDip,
+    );
+    sessions.set(session.sessionId, session);
+    // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
+    // implementation, but it is never returned to the controller or renderer.
+    try {
+      return {
+        ...publicNativeSession(session),
+        inputReceipt: inputReceipt(raw, session.sessionId, session.cancelEpoch),
+      };
+    } catch (error) {
+      await host.close(session).catch(() => undefined);
+      throw error;
+    }
   };
 
   const host: ComputerUseNativeHost = {
@@ -418,120 +530,27 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
-      // The route is Main's, not the native's: it never goes into the request.
+      // C3: the native is still v1-only, so the route stays in Main and is not sent to it. C4 passes
+      // the bound route to the native, which then issues an approval intent only for route v2.
       const { classifierRoute, ...input } = startInput;
       const bound = classifierBindings.get(input.sessionId);
       if (bound !== undefined && classifierRoute !== undefined && classifierRoute !== bound.route)
         throw new ComputerUseNativeUnavailableError('native_classifier_route_forbidden');
-      const bindRoute = (sessionId: string): void => {
-        if (classifierRoute === undefined || classifierBindings.has(sessionId)) return;
-        classifierBindings.set(sessionId, {
+      // Bound before the first await, so two starts of one new session cannot both pass the check
+      // above with different routes. The route asks; the attest decides: v2 is expected only from
+      // a build that attested classifier 2.
+      const created = bound === undefined && classifierRoute !== undefined;
+      if (created)
+        classifierBindings.set(input.sessionId, {
           route: classifierRoute,
-          // The route asks; the attest decides. v2 is expected only from a build that attested it.
           expectedVersion:
             classifierRoute === 'v2' && options.classifierV2Attested === true ? 2 : 1,
         });
-      };
-      const existing = sessions.get(input.sessionId);
-      if (existing !== undefined) {
-        if (
-          existing.platform !== input.profile.platform ||
-          existing.appIdentityDigest !== input.profile.identityDigest ||
-          existing.windowId !== input.windowId ||
-          existing.profileRevision !== input.profile.revision
-        )
-          throw new ComputerUseNativeUnavailableError('native_session_rebind_forbidden');
-        const request = {
-          ...existing.raw,
-          ...input,
-          appIdentityDigest: input.profile.identityDigest,
-          canonicalPath: input.profile.canonicalPath,
-          windowIdentityDigest: existing.windowIdentityDigest,
-          resume: input.resume === true,
-          expectedPolicyLanguage: existing.policyLanguage,
-        };
-        const value = await invoke('startSession', request);
-        const raw = asRecord(value, 'native_session_invalid');
-        const session = parseNativeSession(
-          raw,
-          input.profile.platform,
-          input,
-          request,
-          options.windowsPhysicalBoundsToDip,
-        );
-        sessions.set(session.sessionId, session);
-        bindRoute(session.sessionId);
-        return publicNativeSession(session);
-      }
-      let pid = pidsByIdentity.get(input.profile.identityDigest);
-      if (pid === undefined) {
-        const windows = await host.listWindows(input.profile);
-        pid = pidsByIdentity.get(input.profile.identityDigest);
-        if (
-          pid === undefined ||
-          windows.every((candidate) => candidate.windowId !== input.windowId)
-        )
-          throw new ComputerUseNativeUnavailableError('native_app_not_active');
-      }
-      const candidate = await invoke('listWindows', {
-        ...input.profile,
-        pid,
-        appIdentityDigest: input.profile.identityDigest,
-      });
-      if (!Array.isArray(candidate))
-        throw new ComputerUseNativeUnavailableError('native_windows_invalid');
-      const selected = candidate.find((value) => {
-        const raw = asRecord(value, 'native_window_invalid');
-        return raw['windowId'] === input.windowId && raw['eligible'] === true;
-      });
-      const selectedRecord =
-        selected === undefined ? null : asRecord(selected, 'native_window_invalid');
-      if (selectedRecord === null)
-        throw new ComputerUseNativeUnavailableError('native_window_stale');
-      const selectedPid = selectedRecord['pid'];
-      if (typeof selectedPid !== 'number' || !Number.isSafeInteger(selectedPid) || selectedPid < 1)
-        throw new ComputerUseNativeUnavailableError('native_window_owner_invalid');
-      pid = selectedPid;
-      pidsByIdentity.set(input.profile.identityDigest, selectedPid);
-      const selectedBounds = asRecord(selectedRecord['bounds'], 'native_window_invalid');
-      const expectedMaximumMode = bindComputerUseMaximumMode(
-        nativeMaximumMode(input.profile.identity),
-        nativeMaximumMode(selectedRecord),
-      );
-      const request = {
-        ...input,
-        pid,
-        appIdentityDigest: input.profile.identityDigest,
-        canonicalPath: input.profile.canonicalPath,
-        windowIdentityDigest: stringField(selectedRecord, 'windowIdentityDigest'),
-        expectedBoundsX: selectedBounds['x'],
-        expectedBoundsY: selectedBounds['y'],
-        expectedBoundsWidth: selectedBounds['width'],
-        expectedBoundsHeight: selectedBounds['height'],
-        expectedPolicyLanguage: nativePolicyLanguage(selectedRecord),
-        maximumMode: expectedMaximumMode,
-        expectedMaximumMode,
-      };
-      const value = await invoke('startSession', request);
-      const raw = asRecord(value, 'native_session_invalid');
-      const session = parseNativeSession(
-        raw,
-        input.profile.platform,
-        input,
-        request,
-        options.windowsPhysicalBoundsToDip,
-      );
-      sessions.set(session.sessionId, session);
-      bindRoute(session.sessionId);
-      // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
-      // implementation, but it is never returned to the controller or renderer.
       try {
-        return {
-          ...publicNativeSession(session),
-          inputReceipt: inputReceipt(raw, session.sessionId, session.cancelEpoch),
-        };
+        return await startNative(input);
       } catch (error) {
-        await host.close(session).catch(() => undefined);
+        // A start that did not produce a session leaves no binding behind.
+        if (created && !sessions.has(input.sessionId)) classifierBindings.delete(input.sessionId);
         throw error;
       }
     },
@@ -565,6 +584,13 @@ export function createComputerUseNativeHost(
           kind: 'refused',
           result: 'rejected',
           reasonCode: 'native_session_missing',
+        });
+      // A session bound to a route that does not expect classifier 2 never gets an approval.
+      if (!approvalRouteAllowed(input.session.sessionId))
+        return Object.freeze({
+          kind: 'refused',
+          result: 'rejected',
+          reasonCode: 'native_approval_route_forbidden',
         });
       const request = {
         ...internal.raw,
@@ -651,7 +677,7 @@ export function createComputerUseNativeHost(
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
-      if (!approvalPathEnabled())
+      if (!approvalPathEnabled() || !approvalRouteAllowed(input.session.sessionId))
         throw new ComputerUseNativeUnavailableError('native_approval_closed');
       const actionDigest = computerUseActionDigest(input.action);
       const request = {

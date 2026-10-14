@@ -149,6 +149,11 @@ function build(
       inputAttemptCount: 0,
     })),
   };
+  // A test may replace how the fake native starts or closes a session.
+  for (const name of ['startSession', 'close'] as const) {
+    const replacement = overrides[name];
+    if (replacement !== undefined) methods[name] = fn(name, replacement);
+  }
   for (const name of options.omit ?? []) delete methods[name];
   const platform = options.platform ?? 'darwin';
   const binding = {
@@ -495,13 +500,71 @@ describe('Computer Use native host: classifier route (C3)', () => {
     // Another route for the same session is refused; the same route, or none, is fine (resume).
     await expect(startWith(built.host, 'v2')).rejects.toThrow(/route/u);
     await expect(startWith(built.host, 'v1')).resolves.toBeDefined();
-    const session = await startWith(built.host);
-    // The unspecified resume keeps the bound route: a classifier 2 receipt is still invalid.
-    const stillV1 = build({ attested: true }, { preflight: withClassifier(2) });
-    const other = await startWith(stillV1.host, 'v1');
-    await startWith(stillV1.host);
-    await expect(stillV1.host.dispatch(request(other, 'c-2'))).resolves.toMatchObject(invalid);
-    expect(session.sessionId).toBe('session-1');
+    await expect(startWith(built.host)).resolves.toBeDefined();
+  });
+
+  it('keeps the bound route through a start that names none (a resume)', async () => {
+    // An approval offer is only acceptable to a session that is not bound to v1. If a start that
+    // names no route dropped or replaced the binding, the offer would be accepted again.
+    const built = build({ attested: true }, { preflight: offerReceipt });
+    const session = await startWith(built.host, 'v1');
+    await startWith(built.host);
+    const result = await built.host.dispatch(request(session, 'c-2'));
+    expect(result).toMatchObject(invalid);
+    expect(result).not.toHaveProperty('approvalOffer');
+    // The same offer is accepted by a session that was never bound, so the case does tell them apart.
+    const unbound = build({ attested: true }, { preflight: offerReceipt });
+    const free = await startWith(unbound.host);
+    await expect(unbound.host.dispatch(request(free, 'c-3'))).resolves.toHaveProperty(
+      'approvalOffer',
+    );
+  });
+
+  it('binds before it awaits, so two racing starts cannot end with two routes', async () => {
+    const built = build({ attested: true });
+    await built.host.listWindows(profile);
+    const base = {
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-race',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    } as const;
+    const results = await Promise.allSettled([
+      built.host.startSession({ ...base, classifierRoute: 'v1' }),
+      built.host.startSession({ ...base, classifierRoute: 'v2' }),
+    ]);
+    expect(results.map((entry) => entry.status).sort()).toEqual(['fulfilled', 'rejected']);
+  });
+
+  it('leaves no binding behind when the native start fails', async () => {
+    let fail = true;
+    const built = build(
+      { attested: true },
+      {
+        startSession: (i) => {
+          if (fail) throw new Error('native start failed');
+          return {
+            inputAttemptCount: 0,
+            sessionId: i['sessionId'],
+            platform: 'darwin',
+            appIdentityDigest: identityDigest,
+            windowIdentityDigest: zero('d'),
+            windowId: 'window-1',
+            profileRevision: 1,
+            cancelEpoch: 0,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+            screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+            pid: 42,
+          };
+        },
+      },
+    );
+    await expect(startWith(built.host, 'v1')).rejects.toThrow();
+    fail = false;
+    await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
   });
 
   it('forgets the route when the session is closed, so the id can be bound again', async () => {
@@ -509,5 +572,47 @@ describe('Computer Use native host: classifier route (C3)', () => {
     const session = await startWith(built.host, 'v1');
     await built.host.close(session);
     await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
+  });
+
+  it('keeps the route when the close is not confirmed', async () => {
+    const built = build(
+      { attested: true },
+      { close: () => ({ result: 'closed', drained: false }) },
+    );
+    const session = await startWith(built.host, 'v1');
+    await expect(built.host.close(session)).rejects.toThrow();
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/route/u);
+  });
+
+  it('refuses the approval calls to a session bound to a route that does not expect classifier 2', async () => {
+    // Bound to v1: even with the path open, approvalApprove and dispatchApproved are refused here,
+    // before the native is called; approvalDiscard (no input capability) is still allowed.
+    const v1 = build({ attested: true });
+    const bound = await startWith(v1.host, 'v1');
+    await expect(
+      v1.host.approvalApprove!({ ...request(bound, 'a-1'), approvalGeneration: 4 }),
+    ).resolves.toMatchObject({ kind: 'refused', reasonCode: 'native_approval_route_forbidden' });
+    await expect(
+      v1.host.dispatchApproved!({ ...request(bound, 'a-2'), approvalGeneration: 4 }),
+    ).rejects.toThrow();
+    await v1.host.approvalDiscard!({ session: bound, approvalGeneration: 4 });
+    expect(v1.calls['approvalApprove']).not.toHaveBeenCalled();
+    expect(v1.calls['dispatchApproved']).not.toHaveBeenCalled();
+    expect(v1.calls['approvalDiscard']).toHaveBeenCalledTimes(1);
+    // A v2 route on a build that did not attest 2 expects v1, so it is refused the same way.
+    const unattested = build({ attested: false });
+    const fallback = await startWith(unattested.host, 'v2');
+    await expect(
+      unattested.host.approvalApprove!({ ...request(fallback, 'a-3'), approvalGeneration: 4 }),
+    ).resolves.toMatchObject({ kind: 'refused' });
+    // A v2 route on an attested build, and a session never bound, may use them.
+    const v2 = build({ attested: true });
+    const open = await startWith(v2.host, 'v2');
+    await expect(
+      v2.host.approvalApprove!({ ...request(open, 'a-4'), approvalGeneration: 4 }),
+    ).resolves.toEqual({ kind: 'approved' });
+    await expect(
+      v2.host.dispatchApproved!({ ...request(open, 'a-5'), approvalGeneration: 4 }),
+    ).resolves.toMatchObject({ result: 'completed' });
   });
 });

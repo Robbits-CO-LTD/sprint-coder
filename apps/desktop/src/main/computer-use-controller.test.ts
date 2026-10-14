@@ -1173,6 +1173,24 @@ describe('ComputerUseController', () => {
       await native.acting;
     });
 
+    it('repeats a v2 binding on the refocus after a native approval, though the mode is v1 by then', async () => {
+      let effective: 'v1-allowlist' | 'v2-denylist' = 'v2-denylist';
+      const { fixture, acting, sessionId } = await offered({
+        effectiveEligibilityMode: () => effective,
+      });
+      (
+        fixture.controller as unknown as {
+          sessions: Map<string, { classifierRoute: 'v1' | 'v2' }>;
+        }
+      ).sessions.get(sessionId)!.classifierRoute = 'v2';
+      effective = 'v1-allowlist';
+      await viWait();
+      await clickCard(fixture);
+      await expect(acting).resolves.toMatchObject({ result: 'completed' });
+      expect(fixture.startRoutes.slice(1)).toEqual(['v2']);
+      await fixture.controller.stop(sessionId);
+    });
+
     it('ignores a double click and calls approvalApprove once', async () => {
       const { fixture, acting } = await offered();
       await viWait();
@@ -1676,6 +1694,92 @@ describe('ComputerUseController', () => {
   });
 
   describe('classifier route binding (C3)', () => {
+    /** A session Main created for the agent under an effective v2-denylist, bound to the v2 route. */
+    const bindAsAgentV2 = (fixture: ReturnType<typeof createFixture>, sessionId: string): void => {
+      const record = (
+        fixture.controller as unknown as {
+          sessions: Map<string, { classifierRoute: 'v1' | 'v2' }>;
+        }
+      ).sessions.get(sessionId)!;
+      record.classifierRoute = 'v2';
+    };
+    const startAfterCreation = (fixture: ReturnType<typeof createFixture>) =>
+      fixture.startRoutes.slice(1);
+
+    it('leaves nothing registered when the effective mode cannot be read, so the next start works', async () => {
+      let failing = true;
+      const fixture = createFixture({
+        effectiveEligibilityMode: () => {
+          if (failing) throw new Error('mode unavailable');
+          return 'v1-allowlist';
+        },
+      });
+      await expect(start(fixture)).rejects.toThrow('mode unavailable');
+      expect(fixture.startRoutes).toEqual([]);
+      failing = false;
+      const started = await start(fixture);
+      expect(started.state).not.toBe('stopped');
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('repeats a v2 binding on the refocus after a V1 card, though the mode is v1 by then', async () => {
+      let effective: 'v1-allowlist' | 'v2-denylist' = 'v2-denylist';
+      const fixture = createFixture({
+        mode: 'supervised',
+        authorizationRequired: true,
+        effectiveEligibilityMode: () => effective,
+      });
+      const started = await start(fixture, 'supervised');
+      await fixture.controller.observe(started.sessionId);
+      bindAsAgentV2(fixture, started.sessionId);
+      effective = 'v1-allowlist';
+      const acting = fixture.controller.act(started.sessionId, click, 'route-v1card');
+      await viWait();
+      const card = fixture.approvals.find((approval) => approval.state === 'pending')!;
+      await fixture.controller.resolveApproval({
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        decision: 'allow_once',
+        challenge: card.challenge,
+      });
+      await acting;
+      expect(startAfterCreation(fixture)).toEqual(['v2']);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('repeats a v2 binding on the resume of a paused session', async () => {
+      let effective: 'v1-allowlist' | 'v2-denylist' = 'v2-denylist';
+      const fixture = createFixture({
+        dispatch: async () => ({ result: 'paused', reasonCode: 'native_dialog_user_takeover' }),
+        effectiveEligibilityMode: () => effective,
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      bindAsAgentV2(fixture, started.sessionId);
+      effective = 'v1-allowlist';
+      await fixture.controller.act(started.sessionId, click, 'route-pause');
+      await fixture.controller.start({
+        resumeSessionId: started.sessionId,
+        taskId: started.taskId,
+        profileId: started.profileId,
+        windowId: started.windowId,
+        mode: started.mode,
+        connectionId: started.connectionId,
+        modelId: started.modelId,
+        providerEgressConsent: true,
+        providerEgressConsentBinding: {
+          connectionId: started.connectionId,
+          modelId: started.modelId,
+        },
+        remember: false,
+        expectedPolicyEpoch: started.policyEpoch,
+        expectedWindowRevision: 1,
+        expectedProfileRevision: started.profileRevision,
+      });
+      expect(startAfterCreation(fixture)).toEqual(['v2']);
+      await fixture.controller.stop(started.sessionId);
+    });
+
     it('binds a panel session to v1 for its whole life, whatever the effective mode', async () => {
       for (const mode of [undefined, () => 'v1-allowlist' as const, () => 'v2-denylist' as const]) {
         const fixture = createFixture({

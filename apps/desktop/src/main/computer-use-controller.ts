@@ -2723,6 +2723,12 @@ export class ComputerUseController {
       preflightMaximumMode,
     );
     const sessionId = randomUUID();
+    // Decided before anything of this start is registered (startingSessions, the emergency stop),
+    // so a wiring that throws here leaves nothing behind that would block the next start.
+    const classifierRoute = computerUseClassifierRoute({
+      agent: input.agent !== undefined,
+      effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
+    });
     const turnId = input.turnId ?? `computer-turn:${sessionId}`;
     const starting = {
       controller,
@@ -2744,10 +2750,6 @@ export class ComputerUseController {
       throw new Error(`Computer Use start canceled: ${starting.reason ?? 'emergency_stop'}`);
     }
     let native: ComputerUseNativeSession;
-    const classifierRoute = computerUseClassifierRoute({
-      agent: input.agent !== undefined,
-      effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
-    });
     try {
       native = await this.deps.native.startSession({
         profile: selectedProfile,
