@@ -163,6 +163,20 @@ function idFromBytes(value: Buffer, allowZero = false): ComputerUseNativeFrameId
   return Object.freeze({ hex });
 }
 
+/**
+ * Whether a number on the wire is a message type this protocol knows, in either direction. The
+ * receiver in the Windows transport uses this rather than a hand-written range, so adding a type
+ * to the table below cannot leave the receiver refusing it.
+ */
+export function isKnownComputerUseNativeMessageType(value: number): boolean {
+  return MESSAGE_TYPES_BY_NUMBER.has(value);
+}
+
+/** Every message type of the protocol, by name. */
+export function computerUseNativeMessageTypeNames(): ComputerUseNativeMessageType[] {
+  return Object.keys(MESSAGE_TYPES) as ComputerUseNativeMessageType[];
+}
+
 export function computerUseNativeMessageTypeValue(type: ComputerUseNativeMessageType): number {
   return MESSAGE_TYPES[type];
 }

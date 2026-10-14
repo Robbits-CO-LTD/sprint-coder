@@ -6,6 +6,9 @@ import { createConnection, type Socket } from 'node:net';
 import { win32 } from 'node:path';
 import {
   COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
+  COMPUTER_USE_NATIVE_MAGIC,
+  COMPUTER_USE_NATIVE_PROTOCOL_VERSION,
+  isKnownComputerUseNativeMessageType,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
   COMPUTER_USE_NATIVE_MAX_METADATA_BYTES,
   decodeComputerUseNativeFrame,
@@ -379,10 +382,9 @@ class WindowsComputerUseHelperClient {
     decoder.readBuffer = Buffer.concat([decoder.readBuffer, chunk]);
     while (decoder.readBuffer.byteLength >= COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES) {
       if (
-        decoder.readBuffer.readUInt32LE(0) !== 0x31554353 ||
-        decoder.readBuffer.readUInt16LE(4) !== 1 ||
-        decoder.readBuffer.readUInt16LE(6) < 1 ||
-        decoder.readBuffer.readUInt16LE(6) > 10
+        decoder.readBuffer.readUInt32LE(0) !== COMPUTER_USE_NATIVE_MAGIC ||
+        decoder.readBuffer.readUInt16LE(4) !== COMPUTER_USE_NATIVE_PROTOCOL_VERSION ||
+        !isKnownComputerUseNativeMessageType(decoder.readBuffer.readUInt16LE(6))
       ) {
         this.failAll(new Error('Computer Use Windows helper returned an invalid frame header'));
         this.socket?.destroy();
