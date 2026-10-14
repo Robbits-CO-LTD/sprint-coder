@@ -1216,6 +1216,7 @@ const ActionKind kEffAllInputs[] = {
 
 using sprint_coder::computer_use::ShadowAxNode;
 using sprint_coder::computer_use::ShadowBudget;
+using sprint_coder::computer_use::kShadowGapBusy;
 using sprint_coder::computer_use::ShadowSkippedRecord;
 using sprint_coder::computer_use::kShadowMaxAxCalls;
 using sprint_coder::computer_use::kShadowDeadlineNs;
@@ -1732,6 +1733,90 @@ bool CheckEffectShadowBounds() {
     }
   }
   std::cout << "Computer Use native effect shadow bounds: PASS\n";
+  return true;
+}
+
+// Labels disguised by character width are folded before the core reads them.
+bool CheckEffectShadowFolding() {
+  using sprint_coder::computer_use::shadow_detail::CompatFold;
+  // Half-width katakana become full-width ones, marks combine into the letter.
+  if (!Check(CompatFold(u8"ﾊﾟｽﾜｰﾄﾞ"_u8) == u8"パスワード"_u8,
+             "shadow-fold-password-katakana")) return false;
+  if (!Check(CompatFold(u8"ｶｰﾄﾞ"_u8) == u8"カード"_u8, "shadow-fold-card")) return false;
+  if (!Check(CompatFold(u8"ｳﾞ"_u8) == u8"ヴ"_u8, "shadow-fold-vu")) return false;
+  if (!Check(CompatFold(u8"ﾊﾞﾋﾟ"_u8) == u8"バピ"_u8, "shadow-fold-voiced-and-semi")) return false;
+  // A mark that cannot combine stays, a lone mark stays, and other text is untouched.
+  if (!Check(CompatFold(u8"ｱﾞ"_u8) == u8"アﾞ"_u8, "shadow-fold-mark-on-a-vowel")) return false;
+  if (!Check(CompatFold(u8"ﾊﾞﾞ"_u8) == u8"バﾞ"_u8, "shadow-fold-second-mark")) return false;
+  if (!Check(CompatFold(u8"ﾞ"_u8) == u8"ﾞ"_u8, "shadow-fold-lone-mark")) return false;
+  if (!Check(CompatFold(u8"パス pay"_u8) == u8"パス pay"_u8, "shadow-fold-leaves-other-text")) return false;
+  // Full-width Latin, digits and punctuation become ASCII.
+  if (!Check(CompatFold(u8"Ｐａｙ ｎｏｗ！１"_u8) == u8"Pay now!1"_u8, "shadow-fold-fullwidth-ascii"))
+    return false;
+  if (!Check(CompatFold(std::string("a\xE3\x81")) == std::string("a\xE3\x81"), "shadow-fold-malformed-passes")) return false;
+  if (!Check(CompatFold("") .empty(), "shadow-fold-empty")) return false;
+
+  // The core now sees what the label says.
+  const std::string half_width_password = u8"ﾊﾟｽﾜｰﾄﾞ"_u8;
+  {
+    ShadowAxCapture field = ShadowBase();
+    field.chain[0] = ShadowNode("AXTextField", half_width_password);
+    const ShadowRecord record = ShadowClassify(field, ShadowRequest("type"), true);
+    if (!Check(record.kind == DecisionKind::kBlocked && record.effect_class == EffectClass::kSecure,
+               "shadow-halfwidth-password-is-secure")) return false;
+    ShadowAxCapture card = ShadowBase();
+    card.chain[0] = ShadowNode("AXTextField", u8"ｶｰﾄﾞ番号"_u8);
+    if (!Check(ShadowClassify(card, ShadowRequest("type"), true).effect_class == EffectClass::kCredential,
+               "shadow-halfwidth-card-number")) return false;
+    ShadowAxCapture wide = ShadowBase();
+    wide.chain[0] = ShadowNode("AXTextField", u8"Ｐａｓｓｗｏｒｄ"_u8);
+    if (!Check(ShadowClassify(wide, ShadowRequest("type"), true).effect_class == EffectClass::kSecure,
+               "shadow-fullwidth-password-is-secure")) return false;
+    ShadowAxCapture pay = ShadowBase();
+    pay.chain[0] = ShadowNode("AXButton", u8"Ｐａｙ ｎｏｗ"_u8);
+    if (!Check(ShadowClassify(pay, ShadowRequest("click"), true).effect_class == EffectClass::kConfirm,
+               "shadow-fullwidth-pay-now-is-confirm")) return false;
+    // The caption near a field, the role and the subrole are folded too.
+    ShadowAxCapture near = ShadowBase();
+    near.chain[0] = ShadowNode("AXTextField", "Year");
+    near.neighbors = {ShadowNode("AXStaticText")};
+    near.neighbors[0].value = u8"Ｃａｒｄ ｎｕｍｂｅｒ"_u8;
+    near.chain.insert(near.chain.begin() + 1, ShadowNode("AXWebArea", "Checkout"));
+    near.web_area_url_read = true;
+    near.web_area_url = "https://example.com/";
+    if (!Check(ShadowClassify(near, ShadowRequest("type"), true).effect_class == EffectClass::kCredential,
+               "shadow-fullwidth-neighbor-caption")) return false;
+    ShadowAxCapture role = ShadowBase();
+    role.chain[0].role = u8"AXSecureＴｅｘｔＦｉｅｌｄ"_u8;
+    role.chain[0].title = "Name";
+    if (!Check(BuildShadowFacts(role, ShadowRequest("type")).facts.chain[0].role == "AXSecureTextField",
+               "shadow-fold-role")) return false;
+  }
+  // Every half-width character folds to its own full-width one.
+  {
+    std::string all;
+    for (char32_t code = 0xFF61; code <= 0xFF9D; ++code)
+      sprint_coder::computer_use::shadow_detail::AppendCodePoint(code, &all);
+    const std::string expected = u8"。「」、・ヲァィゥェォャュョッーアイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン"_u8;
+    if (!Check(CompatFold(all) == expected, "shadow-fold-every-halfwidth-kana")) return false;
+    ShadowAxCapture subrole = ShadowBase();
+    subrole.chain[0].role = "AXTextField";
+    subrole.chain[0].subrole = u8"AXSecureTextField"_u8;
+    subrole.chain[0].subrole = u8"AX\uFF33\uFF45\uFF43\uFF55\uFF52\uFF45\uFF34\uFF45\uFF58\uFF54\uFF26\uFF49\uFF45\uFF4C\uFF44"_u8;
+    subrole.chain[0].title = "Name";
+    if (!Check(BuildShadowFacts(subrole, ShadowRequest("type")).facts.chain[0].subrole == "AXSecureTextField",
+               "shadow-fold-subrole")) return false;
+    if (!Check(ShadowClassify(subrole, ShadowRequest("type"), true).effect_class == EffectClass::kSecure,
+               "shadow-fullwidth-subrole-is-secure")) return false;
+  }
+  // A capture that was not taken because another was running is not a comparison.
+  {
+    const ShadowRecord busy = ShadowSkippedRecord("click", kShadowGapBusy, true);
+    if (!Check(busy.Skipped() && !busy.V2IsStricter() && !busy.V2IsLooser() &&
+                   busy.kind == DecisionKind::kTakeover && (busy.gaps & kShadowGapBusy) != 0,
+               "shadow-busy-record")) return false;
+  }
+  std::cout << "Computer Use native effect shadow folding: PASS\n";
   return true;
 }
 
@@ -2924,6 +3009,7 @@ int main() {
   if (!CheckEffectClassifierCore()) return 1;
   if (!CheckEffectShadow()) return 1;
   if (!CheckEffectShadowBounds()) return 1;
+  if (!CheckEffectShadowFolding()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

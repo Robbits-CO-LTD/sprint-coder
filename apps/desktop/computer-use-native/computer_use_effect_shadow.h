@@ -47,6 +47,8 @@ constexpr std::uint32_t kShadowGapCanceled = 1u << 10;
 constexpr std::uint32_t kShadowGapBudget = 1u << 11;
 // An attribute failed to read (not "no value"): the facts are missing something.
 constexpr std::uint32_t kShadowGapReadFailed = 1u << 12;
+// Another capture was still running (a hung target app), so this one was not taken.
+constexpr std::uint32_t kShadowGapBusy = 1u << 13;
 
 // The shadow shares the serial lane with the preflight, so a capture is bounded: AX calls, and
 // time on a monotonic clock. The numbers are a share of the lane's budgets (the Cancel ack waits
@@ -170,15 +172,93 @@ namespace shadow_detail {
   return output;
 }
 
+// NFKC-style folding for the characters a label can disguise itself with, applied again here so the
+// portable half does not depend on the platform having folded already (the macOS capture does, with
+// CFStringNormalize): full-width ASCII becomes ASCII, and half-width katakana become full-width
+// katakana, with a following voiced or semi-voiced mark combined into the letter.
+inline void AppendCodePoint(char32_t code, std::string *output) {
+  if (code < 0x80) {
+    output->push_back(static_cast<char>(code));
+  } else if (code < 0x800) {
+    output->push_back(static_cast<char>(0xC0 | (code >> 6)));
+    output->push_back(static_cast<char>(0x80 | (code & 0x3F)));
+  } else if (code < 0x10000) {
+    output->push_back(static_cast<char>(0xE0 | (code >> 12)));
+    output->push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | (code & 0x3F)));
+  } else {
+    output->push_back(static_cast<char>(0xF0 | (code >> 18)));
+    output->push_back(static_cast<char>(0x80 | ((code >> 12) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | ((code >> 6) & 0x3F)));
+    output->push_back(static_cast<char>(0x80 | (code & 0x3F)));
+  }
+}
+
+// U+FF61..U+FF9F to the full-width form (U+FF9E / U+FF9F, the marks, are handled by the caller).
+inline constexpr char32_t kHalfWidthKana[] = {
+    0x3002, 0x300C, 0x300D, 0x3001, 0x30FB, 0x30F2, 0x30A1, 0x30A3, 0x30A5, 0x30A7, 0x30A9,
+    0x30E3, 0x30E5, 0x30E7, 0x30C3, 0x30FC, 0x30A2, 0x30A4, 0x30A6, 0x30A8, 0x30AA, 0x30AB,
+    0x30AD, 0x30AF, 0x30B1, 0x30B3, 0x30B5, 0x30B7, 0x30B9, 0x30BB, 0x30BD, 0x30BF, 0x30C1,
+    0x30C4, 0x30C6, 0x30C8, 0x30CA, 0x30CB, 0x30CC, 0x30CD, 0x30CE, 0x30CF, 0x30D2, 0x30D5,
+    0x30D8, 0x30DB, 0x30DE, 0x30DF, 0x30E0, 0x30E1, 0x30E2, 0x30E4, 0x30E6, 0x30E8, 0x30E9,
+    0x30EA, 0x30EB, 0x30EC, 0x30ED, 0x30EF, 0x30F3};
+static_assert(sizeof(kHalfWidthKana) / sizeof(kHalfWidthKana[0]) == 0xFF9D - 0xFF61 + 1);
+
+[[nodiscard]] inline std::string CompatFold(std::string_view text) {
+  using effect_detail::DecodeUtf8;
+  std::string output;
+  output.reserve(text.size());
+  std::size_t index = 0;
+  while (index < text.size()) {
+    char32_t code = 0;
+    std::size_t length = 1;
+    if (!DecodeUtf8(text, index, &code, &length)) {
+      output.push_back(text[index]);
+      ++index;
+      continue;
+    }
+    index += length;
+    if (code >= 0xFF01 && code <= 0xFF5E) {
+      output.push_back(static_cast<char>(code - 0xFF01 + 0x21));
+      continue;
+    }
+    if (code < 0xFF61 || code > 0xFF9D) {
+      AppendCodePoint(code, &output);
+      continue;
+    }
+    char32_t folded = kHalfWidthKana[code - 0xFF61];
+    // A voiced (U+FF9E) or semi-voiced (U+FF9F) mark right after combines into the letter.
+    char32_t mark = 0;
+    std::size_t mark_length = 1;
+    if (index < text.size() && DecodeUtf8(text, index, &mark, &mark_length) &&
+        (mark == 0xFF9E || mark == 0xFF9F)) {
+      const bool semi = mark == 0xFF9F;
+      const bool voiceable = (folded >= 0x30AB && folded <= 0x30C1 && (folded - 0x30AB) % 2 == 0) ||
+                             (folded >= 0x30C4 && folded <= 0x30C8 && (folded - 0x30C4) % 2 == 0) ||
+                             (folded >= 0x30CF && folded <= 0x30DB && (folded - 0x30CF) % 3 == 0);
+      if (!semi && (voiceable || folded == 0x30A6)) {
+        folded = folded == 0x30A6 ? 0x30F4 : folded + 1;
+        index += mark_length;
+      } else if (semi && folded >= 0x30CF && folded <= 0x30DB && (folded - 0x30CF) % 3 == 0) {
+        folded += 2;
+        index += mark_length;
+      }
+    }
+    AppendCodePoint(folded, &output);
+  }
+  return output;
+}
+
 // The node's words as one label (title, description, help, placeholder, identifier, value),
 // refused when any part, or the whole, is longer than the core accepts.
 [[nodiscard]] inline bool JoinLabel(const ShadowAxNode &node, std::string *label) {
   const std::string_view parts[] = {node.title,       node.description, node.help,
                                     node.placeholder, node.identifier,  node.value};
   std::string joined;
-  for (const std::string_view part : parts) {
-    if (part.size() > kEffectMaxLabelBytes) return false;
-    if (part.empty()) continue;
+  for (const std::string_view raw : parts) {
+    if (raw.size() > kEffectMaxLabelBytes) return false;
+    if (raw.empty()) continue;
+    const std::string part = CompatFold(raw);
     if (!joined.empty()) joined.push_back(' ');
     joined.append(part);
     if (joined.size() > kEffectMaxLabelBytes) return false;
@@ -309,8 +389,8 @@ struct ItemFacts {
     if (!NodeIsBounded(node)) {
       fact.role.clear();
     } else {
-      fact.role = node.role;
-      fact.subrole = node.subrole;
+      fact.role = CompatFold(node.role);
+      fact.subrole = CompatFold(node.subrole);
     }
     if (Lowercase(node.role) == "axwebarea") web_area = true;
     facts.chain.push_back(std::move(fact));
@@ -386,7 +466,7 @@ struct ShadowRecord {
   // Nothing was read (v1 could not re-validate the target, or the action was canceled): not a
   // comparison, so it is neither stricter nor looser.
   [[nodiscard]] bool Skipped() const {
-    return (gaps & (kShadowGapV1Invalid | kShadowGapCanceled)) != 0;
+    return (gaps & (kShadowGapV1Invalid | kShadowGapCanceled | kShadowGapBusy)) != 0;
   }
   [[nodiscard]] bool V2IsStricter() const {
     return !Skipped() && v1_ordinary && kind != DecisionKind::kOrdinary;

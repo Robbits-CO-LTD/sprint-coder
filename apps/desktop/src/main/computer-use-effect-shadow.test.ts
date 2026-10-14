@@ -64,10 +64,12 @@ const ALLOWED_CALLS = new Set([
   'CFGetTypeID',
   'CFRelease',
   'CFRetain',
+  'CFStringCreateMutableCopy',
   'CFStringGetCString',
   'CFStringGetLength',
   'CFStringGetMaximumSizeForEncoding',
   'CFStringGetTypeID',
+  'CFStringNormalize',
   'CFURLGetString',
   'CFURLGetTypeID',
   'CGPointMake',
@@ -82,7 +84,13 @@ const ALLOWED_CALLS = new Set([
   'ReadShadowNode',
   'ReadShadowString',
   'RecordEffectShadow',
+  'ScheduleEffectShadow',
   'ShadowCfRef',
+  'ShadowInFlight',
+  'ShadowQueue',
+  'dispatch_async',
+  'dispatch_queue_attr_make_with_qos_class',
+  'dispatch_queue_create',
   'ShadowClassify',
   'ShadowReader',
   'ShadowSkippedRecord',
@@ -103,6 +111,7 @@ const ALLOWED_CALLS = new Set([
   'children_holder',
   'current',
   'focused_window',
+  'folded',
   'holder',
   'length',
   'neighbors',
@@ -170,7 +179,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
 
   it('returns the v1 receipt exactly as built, and cannot throw out of the shadow', () => {
     const wrapper =
-      /NativePreflightReceipt PerformNativePreflight\(const NativeDispatchRequest& request\) \{\s*NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;\s*NativePreflightReceipt receipt = PerformNativePreflightV1\(request, &v1_validation\);\s*RecordEffectShadow\(request, receipt\.decision == "ordinary", v1_validation\);\s*return receipt;\s*\}/u;
+      /NativePreflightReceipt PerformNativePreflight\(const NativeDispatchRequest& request\) \{\s*NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;\s*NativePreflightReceipt receipt = PerformNativePreflightV1\(request, &v1_validation\);\s*ScheduleEffectShadow\(request, receipt\.decision == "ordinary", v1_validation\);\s*return receipt;\s*\}/u;
     expect(macos).toMatch(wrapper);
     expect(shadowSection()).toContain('NativeTargetValidation v1_validation) noexcept {');
     expect(shadowSection()).toContain('catch (...)');
@@ -385,7 +394,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(shadowHeader).toMatch(/kShadowDeadlineNs = 150'000'000;/u);
   });
 
-  it('runs on the serial lane the v1 preflight already holds', () => {
+  it('reads nothing through AX while the serial lane is held: the capture runs on its own queue', () => {
     const worker = /void ExecuteNativePreflight\(napi_env env, void\* data\) \{[\s\S]*?\n\}/u.exec(
       macos,
     );
@@ -393,9 +402,78 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(worker![0]).toContain(
       'std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);',
     );
-    expect(worker![0].indexOf('serial_lock')).toBeLessThan(
-      worker![0].indexOf('PerformNativePreflight('),
+    // The lane's work is v1, and the shadow only schedules.
+    expect(worker![0]).toContain('PerformNativePreflight(');
+    expect(worker![0]).not.toMatch(/Shadow/u);
+    const section = shadowSection();
+    expect(shadowCode()).not.toMatch(
+      /mac_dispatch_serial_mutex|lock_guard|unique_lock|scoped_lock/u,
     );
+    const schedule = /void ScheduleEffectShadow\([\s\S]*?\n\}\n/u.exec(section);
+    expect(schedule).not.toBeNull();
+    const body = schedule![0];
+    // Scheduling reads nothing: no reader, no AX or CF call.
+    expect(body).not.toMatch(
+      /ShadowReader|\.Step\(|AXUIElement|CFString|CopyShadowTarget|Capture/u,
+    );
+    // The capture is called from exactly one place: the block on the shadow queue.
+    expect(section.match(/\bRecordEffectShadow\(/gu)).toHaveLength(2);
+    expect(body).toMatch(
+      /dispatch_async\(ShadowQueue\(\), \^\{[\s\S]*?RecordEffectShadow\(job, v1_ordinary, v1_validation\);[\s\S]*?ShadowInFlight\(\)\.store\(false\);[\s\S]*?\}\);/u,
+    );
+    // One capture at a time; another is recorded as busy, and the flag is always released.
+    expect(body).toContain('ShadowInFlight().exchange(true)');
+    expect(body).toContain('kShadowGapBusy');
+    expect(body).toContain('ShadowInFlight().store(false);');
+    // The copy handed over is trimmed: no text, no selection, no ticket.
+    const fields = [...body.matchAll(/\bjob\.(\w+) = /gu)].map((entry) => entry[1]).sort();
+    expect(fields).toEqual(
+      [
+        'cancel_epoch',
+        'key',
+        'kind',
+        'observation_bounds',
+        'session',
+        'target_id',
+        'x',
+        'y',
+      ].sort(),
+    );
+    const queue = /dispatch_queue_t ShadowQueue\(\) \{[\s\S]*?\n\}\n/u.exec(section);
+    expect(queue).not.toBeNull();
+    expect(queue![0]).toContain('DISPATCH_QUEUE_SERIAL');
+    expect(queue![0]).toContain('QOS_CLASS_UTILITY');
+  });
+
+  it('folds every string to NFKC before the core sees it, except what finds the target', () => {
+    const section = shadowSection();
+    const reader = /ShadowRead ReadShadowString\([\s\S]*?\n\}\n/u.exec(section);
+    expect(reader).not.toBeNull();
+    expect(reader![0]).toContain('bool normalize');
+    expect(reader![0]).toMatch(
+      /if \(normalize\) \{[\s\S]*?CFStringNormalize\(copy, kCFStringNormalizationFormKC\);/u,
+    );
+    // It can lengthen a string, so the bound is checked after.
+    expect(reader![0].match(/> maximum_units\) return ShadowRead::kTooLong;/gu)).toHaveLength(2);
+    // Which reads are folded: the node's words and the file name; not the target's identifier or
+    // title (compared with the id v1 gave), and not URLs.
+    const calls = [
+      ...shadowCode().matchAll(/ReadShadowString\(reader, ([^;]*?), (true|false)\)/gu),
+    ].map((entry) => `${entry[1]!.replace(/\s+/gu, ' ')}|${entry[2]}`);
+    expect(calls.sort()).toEqual(
+      [
+        'element, attribute, kEffectMaxLabelBytes, output|true',
+        'element, kAXIdentifierAttribute, kSearchStringUnits, &text|false',
+        'element, kAXTitleAttribute, kSearchStringUnits, &text|false',
+        'current.Element(), kAXURLAttribute, 2048, &url|false',
+        'target.Element(), kAXURLAttribute, 2048, &url|false',
+        'target.Element(), kAXFilenameAttribute, kEffectMaxLabelBytes, &capture.filename|true',
+      ].sort(),
+    );
+    // The portable half folds again, so it does not depend on the platform having done it.
+    expect(shadowHeader).toContain('const std::string part = CompatFold(raw);');
+    expect(shadowHeader).toContain('fact.role = CompatFold(node.role);');
+    expect(shadowHeader).toContain('fact.subrole = CompatFold(node.subrole);');
   });
 
   it('is recorded in the ADR with the C2 scope, the budget and what is left to a real device', () => {

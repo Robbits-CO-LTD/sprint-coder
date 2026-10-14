@@ -4872,17 +4872,25 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
 // description, help, identifier, placeholder, the value of static text, parent, children, URL and
 // file name.
 //
-// It runs on the serial lane the v1 preflight holds, so it is bounded and gives way:
+// It runs OFF the serial lane: PerformNativePreflight only schedules it (ScheduleEffectShadow reads
+// nothing through AX) once v1 has produced its receipt, and the capture runs on its own low
+// priority queue, one at a time. A hung target app can hold that queue for the system's AX timeout
+// (about six seconds) without delaying a Cancel ack or a Close drain, a ticket, or the receipt; a
+// capture that arrives while one is still running is not taken (a busy record). Its own bounds
+// still apply, so the queue is not occupied longer than it needs to be:
 //   * it does not read at all when v1 could not re-validate the bound target (closed, canceled,
 //     identity, generation, eligibility, focus or stale observation), when the session is gone or
-//     when the cancellation epoch has moved;
+//     when the cancellation epoch has moved (the check is made when it is scheduled and again when
+//     it starts, and before every AX call);
 //   * before every AX call it checks the cancellation epoch and spends one call of a budget of
 //     kShadowMaxAxCalls calls and kShadowDeadlineNs on a monotonic clock, and stops at the first
 //     refusal; a stopped capture is incomplete, and incomplete is a takeover for the core;
 //   * a string longer than the core accepts, or an attribute that failed to read (anything but
 //     "no value" / "unsupported"), is a gap, never an empty string.
 // AXUIElementSetMessagingTimeout is not used: its reach over elements derived from the one it is
-// set on is not established, so one hung call can still last the system default (see the ADR).
+// set on is not established. Because the capture is off the serial lane, a hung call costs only the
+// shadow itself (see the ADR). Strings are folded to NFKC (half-width kana, full-width Latin and the
+// like) before the core sees them, as the core expects; identifiers used to find the target are not.
 class ShadowCfRef {
  public:
   ShadowCfRef() = default;
@@ -4941,7 +4949,7 @@ enum class ShadowRead { kOk, kAbsent, kFailed, kTooLong, kStopped };
 // A string attribute. "No value" and "unsupported" are an absent attribute; any other error is a
 // failed read; a string longer than `maximum_units` is too long (never truncated, never empty).
 ShadowRead ReadShadowString(ShadowReader& reader, AXUIElementRef element, CFStringRef attribute,
-                            std::size_t maximum_units, std::string* output) {
+                            std::size_t maximum_units, std::string* output, bool normalize) {
   if (!reader.Step()) return ShadowRead::kStopped;
   CFTypeRef value = nullptr;
   const AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
@@ -4958,8 +4966,20 @@ ShadowRead ReadShadowString(ShadowReader& reader, AXUIElementRef element, CFStri
     text = CFURLGetString(static_cast<CFURLRef>(value));
   }
   if (text == nullptr) return ShadowRead::kAbsent;
-  const CFIndex length = CFStringGetLength(text);
+  CFIndex length = CFStringGetLength(text);
   if (length < 0 || static_cast<std::size_t>(length) > maximum_units) return ShadowRead::kTooLong;
+  ShadowCfRef folded;
+  if (normalize) {
+    // NFKC, which the core expects of its callers (half-width kana, full-width Latin, ...). It can
+    // lengthen a string, so the bound is checked again.
+    CFMutableStringRef copy = CFStringCreateMutableCopy(kCFAllocatorDefault, 0, text);
+    if (copy == nullptr) return ShadowRead::kFailed;
+    folded.Reset(copy);
+    CFStringNormalize(copy, kCFStringNormalizationFormKC);
+    text = copy;
+    length = CFStringGetLength(text);
+    if (length < 0 || static_cast<std::size_t>(length) > maximum_units) return ShadowRead::kTooLong;
+  }
   const CFIndex maximum = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
   std::string buffer(static_cast<std::size_t>(maximum), '\0');
   if (!CFStringGetCString(text, buffer.data(), maximum, kCFStringEncodingUTF8))
@@ -4992,7 +5012,7 @@ sprint_coder::computer_use::ShadowAxNode ReadShadowNode(ShadowReader& reader,
   using sprint_coder::computer_use::kEffectMaxLabelBytes;
   sprint_coder::computer_use::ShadowAxNode node;
   const auto read = [&](CFStringRef attribute, std::string* output) {
-    switch (ReadShadowString(reader, element, attribute, kEffectMaxLabelBytes, output)) {
+    switch (ReadShadowString(reader, element, attribute, kEffectMaxLabelBytes, output, true)) {
       case ShadowRead::kTooLong:
         node.oversize = true;
         break;
@@ -5024,7 +5044,7 @@ ShadowCfRef FindShadowSemanticTarget(ShadowReader& reader, AXUIElementRef elemen
   // v1 reads these through a 4096-byte string helper (at most 1365 UTF-16 units); the same bound.
   constexpr std::size_t kSearchStringUnits = 1365;
   std::string text;
-  ShadowRead read = ReadShadowString(reader, element, kAXIdentifierAttribute, kSearchStringUnits, &text);
+  ShadowRead read = ReadShadowString(reader, element, kAXIdentifierAttribute, kSearchStringUnits, &text, false);
   if (read == ShadowRead::kOk && text == target_id) {
     ++*matches;
     CFRetain(element);
@@ -5033,7 +5053,7 @@ ShadowCfRef FindShadowSemanticTarget(ShadowReader& reader, AXUIElementRef elemen
   if (read == ShadowRead::kFailed || read == ShadowRead::kTooLong || read == ShadowRead::kStopped)
     reader.search_incomplete = true;
   text.clear();
-  read = ReadShadowString(reader, element, kAXTitleAttribute, kSearchStringUnits, &text);
+  read = ReadShadowString(reader, element, kAXTitleAttribute, kSearchStringUnits, &text, false);
   if (read == ShadowRead::kOk && text == target_id) {
     ++*matches;
     CFRetain(element);
@@ -5125,7 +5145,7 @@ void CaptureShadowChain(ShadowReader& reader, AXUIElementRef target,
     const std::string role = capture->chain.back().role;
     if (role == "AXWebArea" && !capture->web_area_url_read) {
       std::string url;
-      if (ReadShadowString(reader, current.Element(), kAXURLAttribute, 2048, &url) ==
+      if (ReadShadowString(reader, current.Element(), kAXURLAttribute, 2048, &url, false) ==
           ShadowRead::kOk) {
         capture->web_area_url_read = true;
         capture->web_area_url = std::move(url);
@@ -5214,7 +5234,7 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
       CaptureShadowChain(reader, target.Element(), &capture);
       CaptureShadowNeighbors(reader, target.Element(), &capture);
       std::string url;
-      const ShadowRead url_read = ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, &url);
+      const ShadowRead url_read = ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, &url, false);
       if (url_read == ShadowRead::kOk) {
         capture.url_present = true;
         capture.url = std::move(url);
@@ -5222,7 +5242,7 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
         capture.read_failed = true;
       }
       const ShadowRead name_read = ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
-                                                    kEffectMaxLabelBytes, &capture.filename);
+                                                    kEffectMaxLabelBytes, &capture.filename, true);
       if (name_read == ShadowRead::kFailed || name_read == ShadowRead::kTooLong)
         capture.read_failed = true;
     }
@@ -5242,13 +5262,64 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
     // A shadow failure is invisible to the caller.
   }
 }
+
+std::atomic<bool>& ShadowInFlight() {
+  static std::atomic<bool> in_flight{false};
+  return in_flight;
+}
+
+dispatch_queue_t ShadowQueue() {
+  static dispatch_queue_t queue = dispatch_queue_create(
+      "computer-use.effect-shadow",
+      dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0));
+  return queue;
+}
+
+// Called with the serial lane held, after v1 has its receipt. It reads nothing through AX: it only
+// decides whether a capture may start and hands a trimmed copy of the request (no text, no ticket)
+// to the shadow queue. At most one capture is in flight; another one is recorded as busy.
+void ScheduleEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
+                          NativeTargetValidation v1_validation) noexcept {
+  using namespace sprint_coder::computer_use;
+  bool claimed = false;
+  bool handed_over = false;
+  try {
+    if (request.session == nullptr || v1_validation != NativeTargetValidation::kValid) {
+      EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapV1Invalid, v1_ordinary));
+      return;
+    }
+    if (ShadowInFlight().exchange(true)) {
+      EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapBusy, v1_ordinary));
+      return;
+    }
+    claimed = true;
+    NativeDispatchRequest job;
+    job.session = request.session;
+    job.kind = request.kind;
+    job.key = request.key;
+    job.target_id = request.target_id;
+    job.x = request.x;
+    job.y = request.y;
+    job.observation_bounds = request.observation_bounds;
+    job.cancel_epoch = request.cancel_epoch;
+    dispatch_async(ShadowQueue(), ^{
+      @autoreleasepool {
+        RecordEffectShadow(job, v1_ordinary, v1_validation);
+      }
+      ShadowInFlight().store(false);
+    });
+    handed_over = true;
+  } catch (...) {
+    if (claimed && !handed_over) ShadowInFlight().store(false);
+  }
+}
 // END effect shadow capture
 
 // The v1 preflight decides; the shadow only watches. The receipt is returned exactly as v1 built it.
 NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
   NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;
   NativePreflightReceipt receipt = PerformNativePreflightV1(request, &v1_validation);
-  RecordEffectShadow(request, receipt.decision == "ordinary", v1_validation);
+  ScheduleEffectShadow(request, receipt.decision == "ordinary", v1_validation);
   return receipt;
 }
 
