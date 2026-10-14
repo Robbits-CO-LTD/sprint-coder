@@ -671,7 +671,7 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 
 1. `adapter.dispatch` は、preflight が承認の提示（版 2 の `single_use_approval`）を返したとき、入力せずに型付きの結果 `{ kind: 'approval_required', approvalGeneration, remainingMs, effect }` を返す。例外は使わない。
 2. controller は、その dispatch の native request ID の監査行 (b) を `state = rejected`、`reason_code = native_approval_required` で確定する。承認の結果の列 `approval_outcome` はまだ NULL。
-3. 同じツール呼び出し（`act`）の中で `awaitNativeApproval` に入る。カードはここで作る。V1 の `authorizeTool` の `awaitApproval` とは別のカードで、V1 の `allow_once` / `allow_plan` / `planGrantAuthorizedCalls` は、native の単発承認の代わりにならない（N2b-3 の 3）。したがって、`supervised` では V1 のカードの後にこのカードが出ることがある。`full_access_app` では V1 のカードは出ず、このカードだけが出る。native が承認を要求した操作でだけ 2 枚目が出るので、頻度は低い。
+3. 同じツール呼び出し（`act`）の中で `awaitNativeApproval` に入る。カードはここで作る。V1 の `authorizeTool` の `awaitApproval` とは別のカードで、V1 の `allow_once` / `allow_plan` / `planGrantAuthorizedCalls` は、native の単発承認の代わりにならない（N2b-3 の 3）。したがって、`supervised` では V1 のカードの後にこのカードが出ることがある。`full_access_app` では V1 のカードは出ず、このカードだけが出る。native が承認を要求した操作でだけ 2 枚目が出るので、頻度は低い。**オーナー決定（2026-10-14）: A（カードを 2 枚出す）。B（native のカード 1 枚に統合する）は後続の改善として扱う。**
 4. trusted activation を消費できたら、controller が Main 側の検査（後述の 3）を行い、新しい requestId で再観測する（既存の `resolveApproval` の復帰・`startSession`・`approvedObservationEquivalent` を再利用する）。
 5. addon の承認遷移 `approvalApprove` を呼ぶ。native が再 preflight を行い、成功したら intent を消費して execution ticket を発行する。`approvalApprove` は入力の能力を持たない。
 6. 成功したときだけ、新しい dispatch request ID で `dispatch` を呼ぶ。execution ticket は addon の外に出ない（TS は `sessionId` と `approvalGeneration` で参照する）。結果の監査行 (c) を確定し、元のツール呼び出しへ返す。
