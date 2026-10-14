@@ -2184,6 +2184,61 @@ bool CheckEffectClassifierCore() {
     if (!Check(EffTakeover(facts), "effect-value-scroll-browser-without-any-label")) return false;
   }
 
+  // Any action inside a value-changing control (a selection, a click, an invoke, a toggle, a key)
+  // changes the value, so it reads the captions near it like typing does.
+  for (const ActionKind action : {ActionKind::kSelect, ActionKind::kClick, ActionKind::kDoubleClick,
+                                  ActionKind::kInvoke, ActionKind::kToggle, ActionKind::kKey}) {
+    for (const char *role : {"axcombobox", "ComboBox", "axpopupbutton", "axslider"}) {
+      EffectFacts facts = EffBase();
+      facts.chain = {{"axlistitem", "", "2026"}, {role, "", "Year"}, {"axwindow", "", "Checkout"}};
+      facts.action = action;
+      facts.key_is_activation = true;
+      facts.origin = OriginState::kOrdinary;
+      facts.neighbor_labels = {"Card expiration date"};
+      facts.neighbor_labels_complete = true;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-value-action-neighbor-blocks"))
+        return false;
+      facts.neighbor_labels = {"Security code"};
+      if (!Check(ClassifyEffect(facts).effect_class == EffectClass::kCredential, "effect-value-action-neighbor-credential"))
+        return false;
+      facts.neighbor_labels = {"Password"};
+      if (!Check(ClassifyEffect(facts).effect_class == EffectClass::kSecure, "effect-value-action-neighbor-secure"))
+        return false;
+      facts.neighbor_labels = {"Year"};
+      facts.neighbor_labels_complete = false;
+      if (!Check(EffTakeover(facts), "effect-value-action-neighbors-incomplete")) return false;
+      facts.neighbor_labels_complete = true;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-value-action-neighbors-complete"))
+        return false;
+      facts.neighbor_labels = {"Year", "Expir\xD0\xB0tion"};
+      if (!Check(EffTakeover(facts), "effect-value-action-neighbor-unreadable")) return false;
+      facts.neighbor_labels = {"Year"};
+      facts.text_language_supported = false;
+      if (!Check(EffTakeover(facts), "effect-value-action-unsupported-language")) return false;
+    }
+  }
+  // A selection that is not inside a value-changing control only browses.
+  {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axrow", "", "report.docx"}, {"axwindow", "", "Files"}};
+    facts.action = ActionKind::kSelect;
+    facts.origin = OriginState::kOrdinary;
+    facts.neighbor_labels = {"Card number"};
+    facts.neighbor_labels_complete = false;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-plain-select-ignores-neighbors"))
+      return false;
+  }
+  // In a native app (no origin) a neighbouring caption is not the control's label.
+  {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axcombobox", "", ""}, {"axwindow", "", ""}};
+    facts.action = ActionKind::kScroll;
+    facts.origin = OriginState::kNotApplicable;
+    facts.neighbor_labels = {"Sort by"};
+    facts.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(facts), "effect-value-scroll-native-neighbor-is-not-a-label")) return false;
+  }
+
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
   // always carries a valid native effect; everything else carries none.
   {

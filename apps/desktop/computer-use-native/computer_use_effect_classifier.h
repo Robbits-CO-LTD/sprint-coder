@@ -758,6 +758,14 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return scope > value_end ? scope : value_end;
 }
 
+// Actions that can change the value of a drop-down, a picker or a spin box (all but reading and
+// expanding); a text entry is judged as entering text.
+[[nodiscard]] inline bool ChangesValueAction(const EffectFacts &facts) {
+  return facts.action == ActionKind::kSelect || facts.action == ActionKind::kClick ||
+         facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke ||
+         facts.action == ActionKind::kToggle || facts.action == ActionKind::kKey;
+}
+
 // True when a wheel over this control can change a value (a value-changing node is in scope). Such
 // a scroll is judged like an input: it needs a label the lexicon can read.
 [[nodiscard]] inline bool ScrollChangesValue(const EffectFacts &facts, std::size_t limit) {
@@ -821,10 +829,13 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   // number field.
   const std::size_t scope =
       facts.action == ActionKind::kScroll ? ScrollScope(facts) : facts.chain.size();
-  // A wheel over a combobox or a number field changes a value: its caption may sit next to it in a
-  // browser, as it does for a text field.
+  // An action on a combobox, a number field or anything inside one changes a value, whatever the
+  // action (a wheel, a selection, a click, an invoke, a toggle, a key): the caption may sit next to
+  // it in a browser, as it does for a text field. The same range as the scroll's is searched.
+  // A selection elsewhere (a file in a browser) only browses.
   const bool value_scroll = facts.action == ActionKind::kScroll && ScrollChangesValue(facts, scope);
-  const bool reads_neighbors = entering_text || value_scroll;
+  const bool value_action = ChangesValueAction(facts) && ScrollChangesValue(facts, ScrollScope(facts));
+  const bool reads_neighbors = entering_text || value_scroll || value_action;
   if (ChainContains(facts, kSecureTerms, Mode::kSubstring, scope) ||
       ChainContains(facts, kSecureBoundedTerms, Mode::kBounded, scope) ||
       (reads_neighbors && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
