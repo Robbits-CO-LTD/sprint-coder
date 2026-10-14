@@ -2002,6 +2002,79 @@ bool CheckEffectClassifierCore() {
     if (!Check(EffTakeover(subrole), "effect-raw-malformed-subrole")) return false;
   }
 
+  // Whitespace between the words is one blank: runs, tabs, line breaks and the Unicode spaces.
+  for (const std::string &gap : std::vector<std::string>{
+           "  ", "\t", "\n", "\r\n", " \t \n ", "\xC2\xA0", "\xE2\x80\x83", "\xE2\x80\xA8",
+           "\xE3\x80\x80", "\xE2\x80\xAF", " \xE2\x80\x8B ", "\xC2\x85"}) {
+    if (!Check(ClassifyEffect(EffLabel("Place" + gap + "order", ActionKind::kInvoke)).effect_class ==
+                   EffectClass::kConfirm,
+               "effect-whitespace-confirm")) return false;
+    if (!Check(ClassifyEffect(EffLabel("Card" + gap + "number", ActionKind::kType)).kind ==
+                   DecisionKind::kBlocked,
+               "effect-whitespace-credential")) return false;
+    if (!Check(ClassifyEffect(EffLabel("Security" + gap + "code", ActionKind::kType)).kind ==
+                   DecisionKind::kBlocked,
+               "effect-whitespace-credential-two")) return false;
+  }
+  // A leading, trailing or only-whitespace label is still the same words, or no words.
+  if (!Check(ClassifyEffect(EffLabel("\n Place order \t", ActionKind::kInvoke)).effect_class ==
+                 EffectClass::kConfirm,
+             "effect-whitespace-edges")) return false;
+  if (!Check(ClassifyEffect(EffLabel("pla ce order", ActionKind::kInvoke)).effect_class !=
+                 EffectClass::kConfirm,
+             "effect-whitespace-does-not-join-words")) return false;
+
+  // A wheel over a text field inside a combobox changes the combobox: the scope reaches it.
+  for (const char *role : {"axcombobox", "axpopupbutton", "axincrementor", "axslider", "axspinbutton",
+                           "ComboBox", "Spinner", "Slider", "AXStepper"}) {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axtextfield", "", "2026"}, {role, "", "Expiration year"}, {"axwindow", "", "Pay"}};
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-value-ancestor-in-scope"))
+      return false;
+    facts.chain = {{"axtextfield", "", "2026"}, {"axgroup", "", ""}, {role, "", "Card number"},
+                   {"axwindow", "", "Pay"}};
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-value-ancestor-past-group"))
+      return false;
+    // A value-changing role in the subrole counts too.
+    facts.chain = {{"axtextfield", "", "2026"}, {"axgroup", role, "Expiration year"}, {"axwindow", "", "Pay"}};
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-value-ancestor-subrole"))
+      return false;
+  }
+  // The window above is still out of scope, even if it is a combobox-like role.
+  {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axscrollarea", "", "Results"}, {"axwindow", "", "Password"}};
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-scroll-value-scope-keeps-window-out"))
+      return false;
+  }
+
+  // A scroll that can change a value needs a language the lexicon covers; browsing does not.
+  {
+    EffectFacts value = EffBase();
+    value.chain = {{"axtextfield", "", "2026"}, {"axcombobox", "", "Ablaufdatum"}, {"axwindow", "", "Pay"}};
+    value.action = ActionKind::kScroll;
+    value.text_language_supported = false;
+    if (!Check(EffTakeover(value), "effect-scroll-value-unsupported-language")) return false;
+    value.text_language_supported = true;
+    if (!Check(ClassifyEffect(value).kind != DecisionKind::kTakeover, "effect-scroll-value-supported-language"))
+      return false;
+    EffectFacts unlabeled = EffBase();
+    unlabeled.chain = {{"axcombobox", "", ""}, {"axwindow", "", ""}};
+    unlabeled.action = ActionKind::kScroll;
+    if (!Check(EffTakeover(unlabeled), "effect-scroll-value-without-label")) return false;
+    EffectFacts browse = EffBase();
+    browse.chain = {{"axscrollarea", "", "Ergebnisse"}, {"axwindow", "", "Hilfe"}};
+    browse.action = ActionKind::kScroll;
+    browse.text_language_supported = false;
+    if (!Check(ClassifyEffect(browse).kind == DecisionKind::kOrdinary, "effect-scroll-browse-unsupported-language"))
+      return false;
+    browse.chain = {{"axscrollarea", "", ""}, {"axwindow", "", ""}};
+    if (!Check(ClassifyEffect(browse).kind == DecisionKind::kOrdinary, "effect-scroll-browse-no-label"))
+      return false;
+  }
+
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
   // always carries a valid native effect; everything else carries none.
   {

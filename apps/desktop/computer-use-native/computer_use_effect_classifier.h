@@ -30,8 +30,10 @@
 //     Otherwise the classifier could not be applied and the round is a takeover (ADR section 4).
 //   * A scroll cannot enter a secret, so secure and credential words in the window around the
 //     scrolled control do not stop it; the words on the control itself (up to its nearest
-//     actionable ancestor, or up to the first labeled node when the control has no label, never
-//     the window) still do, and that text must be readable like any other.
+//     actionable ancestor, the nearest value-changing one such as a combobox, or the first
+//     labeled node when the control has no label, never the window) still do, and that text must
+//     be readable like any other. A scroll that can change a value also needs a label in a
+//     language the lexicon covers; a plain scroll over content does not.
 //   * A refusal class always wins over an approval class, in this order: secure, credential,
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
@@ -379,9 +381,19 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
          (code >= 0xE0000 && code <= 0xE0FFF);
 }
 
-// Drops the default-ignorable code points, so a label cannot hide a word behind them, and folds
-// ASCII case. Malformed UTF-8 bytes are kept as they are; TextIsClassifiable refuses text that is
-// malformed before this runs.
+// Whitespace of every kind: ASCII blanks and line breaks, no-break and ideographic spaces, the
+// en / em / thin / hair spaces and the line and paragraph separators. A run of them is one blank.
+[[nodiscard]] constexpr bool IsWhitespace(char32_t code) {
+  return code == 0x09 || code == 0x0A || code == 0x0B || code == 0x0C || code == 0x0D ||
+         code == 0x20 || code == 0x85 || code == 0xA0 || code == 0x1680 ||
+         (code >= 0x2000 && code <= 0x200A) || code == 0x2028 || code == 0x2029 ||
+         code == 0x202F || code == 0x205F || code == 0x3000;
+}
+
+// Drops the default-ignorable code points, so a label cannot hide a word behind them, folds ASCII
+// case and turns every run of whitespace into one blank ("Place  order" and "Card\nnumber" are the
+// words they look like). Malformed UTF-8 bytes are kept as they are; TextIsClassifiable refuses
+// text that is malformed before this runs.
 [[nodiscard]] inline std::string NormalizeForMatch(std::string_view text) {
   std::string output;
   output.reserve(text.size());
@@ -390,6 +402,11 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
     std::size_t length = 1;
     if (DecodeUtf8(text, index, &code, &length)) {
       if (IsDefaultIgnorable(code)) {
+        index += length;
+        continue;
+      }
+      if (IsWhitespace(code)) {
+        if (output.empty() || output.back() != ' ') output.push_back(' ');
         index += length;
         continue;
       }
@@ -680,10 +697,26 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return false;
 }
 
+// Controls a wheel changes the value of: drop-downs, pickers, spin boxes and sliders, named the way
+// AX and UI Automation name them.
+[[nodiscard]] inline bool IsValueChangingRole(std::string_view role_text) {
+  static constexpr std::string_view kValueChanging[] = {
+      "combobox", "popupbutton", "spinbutton", "spinner", "incrementor", "stepper", "slider",
+      "datepicker", "timepicker", "picker", "dropdown", "listbox"};
+  for (const std::string_view name : kValueChanging)
+    if (role_text.find(name) != std::string_view::npos) return true;
+  return false;
+}
+
+[[nodiscard]] inline bool NodeChangesValue(const NodeFacts &node) {
+  return IsValueChangingRole(NormalizeForMatch(node.role) + " " + NormalizeForMatch(node.subrole));
+}
+
 // How many nodes, from the target up, a scroll is judged on: the control it lands on (up to the
-// nearest actionable ancestor) and, when that control carries no label of its own, up to the first
-// labeled node, but never the last node, which is the window around it. A wheel can change the
-// value of a combobox or a number field whose caption sits on an unlabeled group above it.
+// nearest actionable ancestor), up to the nearest value-changing ancestor (a combobox around a
+// text field), and, when that control carries no label of its own, up to the first labeled node,
+// but never the last node, which is the window around it. A wheel can change the value of a
+// combobox or a number field whose caption sits on a group or a combobox above it.
 [[nodiscard]] inline std::size_t ScrollScope(const EffectFacts &facts) {
   const std::size_t span = ActionableSpan(facts);
   std::size_t first_labeled = facts.chain.size();
@@ -694,7 +727,37 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
     }
   const std::size_t below_window = facts.chain.size() > 1 ? facts.chain.size() - 1 : 1;
   const std::size_t labeled_end = first_labeled + 1 < below_window ? first_labeled + 1 : below_window;
-  return span > labeled_end ? span : labeled_end;
+  std::size_t value_end = 0;
+  for (std::size_t index = 0; index < below_window && index < facts.chain.size(); ++index)
+    if (NodeChangesValue(facts.chain[index])) {
+      value_end = index + 1;
+      break;
+    }
+  std::size_t scope = span > labeled_end ? span : labeled_end;
+  return scope > value_end ? scope : value_end;
+}
+
+// True when a wheel over this control can change a value (a value-changing node is in scope). Such
+// a scroll is judged like an input: it needs a label the lexicon can read.
+[[nodiscard]] inline bool ScrollChangesValue(const EffectFacts &facts, std::size_t limit) {
+  std::size_t index = 0;
+  for (const NodeFacts &node : facts.chain) {
+    if (index++ >= limit) break;
+    if (NodeChangesValue(node)) return true;
+  }
+  return false;
+}
+
+// The label requirement of a value-changing scroll: the caller says the language is covered and some
+// node in scope has a label.
+[[nodiscard]] inline bool ScrollValueTextIsClassifiable(const EffectFacts &facts, std::size_t limit) {
+  if (!facts.text_language_supported) return false;
+  std::size_t index = 0;
+  for (const NodeFacts &node : facts.chain) {
+    if (index++ >= limit) break;
+    if (!NormalizeForMatch(node.label).empty()) return true;
+  }
+  return false;
 }
 
 // A scroll needs no label, but the text it is judged on (the nodes within `limit`) must be readable:
@@ -759,7 +822,10 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   // Text the lexicon cannot read is a round the classifier could not be applied to (ADR section
   // 4). A scroll cannot confirm, open or run anything, so it does not need readable text.
   if (facts.action != ActionKind::kScroll && !TextIsClassifiable(facts)) return Takeover();
-  if (facts.action == ActionKind::kScroll && !ScopeIsReadable(facts, scope)) return Takeover();
+  if (facts.action == ActionKind::kScroll &&
+      (!ScopeIsReadable(facts, scope) ||
+       (ScrollChangesValue(facts, scope) && !ScrollValueTextIsClassifiable(facts, scope))))
+    return Takeover();
 
   if (IsActivating(facts) && ActionableContains(facts, kInstallerTerms))
     return Make(EffectClass::kE4InstallerLaunch, DecisionKind::kBlocked,
