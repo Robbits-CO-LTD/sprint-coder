@@ -6,6 +6,7 @@ import {
   COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE,
   classifyComputerUseNativeDispatchFailure,
   createComputerUseNativeHost,
+  parseNativeApprovalApproveReceipt,
 } from './computer-use-native-host';
 
 const digest = (digit: string): string => digit.repeat(64);
@@ -847,9 +848,58 @@ describe('Computer Use native Main adapter', () => {
       const outcome = await preflightAction('pf-v2-approval');
       expect(outcome).toEqual({
         ...pausedUnavailable,
-        approvalOffer: { approvalGeneration: 1, remainingMs: 60_000, effect },
+        approvalOffer: {
+          kind: 'approval_required',
+          approvalGeneration: 1,
+          remainingMs: 60_000,
+          effect,
+        },
       });
       expect(dispatchCalls()).toBe(before);
+    }
+    // Boundaries of the accepted shape, and the other version 2 decisions at classifier version 1.
+    for (const [overrides, offer] of [
+      [{ remainingMs: 1 }, { remainingMs: 1 }],
+      [
+        { approvalGeneration: Number.MAX_SAFE_INTEGER },
+        { approvalGeneration: Number.MAX_SAFE_INTEGER },
+      ],
+    ] as Array<[Record<string, unknown>, Record<string, unknown>]>) {
+      preflight.mockImplementationOnce((input) =>
+        v2Receipt(input, { ...approvalV2, ...overrides }),
+      );
+      await expect(preflightAction('pf-v2-boundary')).resolves.toMatchObject({
+        result: 'paused',
+        approvalOffer: { kind: 'approval_required', ...offer },
+      });
+    }
+    {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) =>
+        v2Receipt(input, {
+          decision: 'replay',
+          ticket: null,
+          reasonCode: null,
+          deniedResult: null,
+        }),
+      );
+      await preflightAction('pf-v2-replay');
+      expect(dispatch.mock.calls.at(-1)![0]).not.toHaveProperty('ticket');
+      for (const [decision, reasonCode, deniedResult] of [
+        ['takeover', 'native_high_impact_user_takeover', 'paused'],
+        ['denied', 'native_stale_observation', 'rejected'],
+      ] as const) {
+        const calls = dispatchCalls();
+        preflight.mockImplementationOnce((input) =>
+          v2Receipt(input, { decision, reasonCode, deniedResult, ticket: null }),
+        );
+        await expect(preflightAction('pf-v2-' + decision)).resolves.toMatchObject({
+          result: deniedResult,
+          reasonCode,
+        });
+        expect(dispatchCalls()).toBe(calls);
+      }
+      expect(dispatchCalls()).toBe(before + 1);
     }
     const invalidV2: Array<Record<string, unknown>> = [
       { effect: 'invalid' },
@@ -1752,5 +1802,80 @@ describe('Computer Use native OS permission availability', () => {
       available: true,
       missingPermissions: [],
     });
+  });
+
+  it('validates the nine-key approvalApprove receipt as typed pre-input results', () => {
+    const expected = {
+      sessionId: 'session-1',
+      requestId: 'request-2',
+      cancelEpoch: 3,
+      observationRevision: 11,
+      approvalGeneration: 7,
+    };
+    const ok = {
+      ok: true,
+      reasonCode: null,
+      deniedResult: null,
+      ...expected,
+      inputAttemptCount: 4,
+    };
+    const invalid = {
+      kind: 'invalid',
+      result: 'rejected',
+      reasonCode: 'native_approval_receipt_invalid',
+    };
+    expect(parseNativeApprovalApproveReceipt(ok, expected)).toEqual({
+      kind: 'approved',
+      inputAttemptCount: 4,
+    });
+    for (const [result, reasonCode] of [
+      ['rejected', 'native_approval_expired'],
+      ['paused', 'native_approval_revalidation_failed'],
+      ['canceled', 'native_canceled_pre_dispatch'],
+    ] as const)
+      expect(
+        parseNativeApprovalApproveReceipt(
+          { ...ok, ok: false, reasonCode, deniedResult: result },
+          expected,
+        ),
+      ).toEqual({ kind: 'refused', result, reasonCode, inputAttemptCount: 4 });
+    const bad: Array<Record<string, unknown>> = [
+      { sessionId: 'other' },
+      { requestId: 'other' },
+      { cancelEpoch: 9 },
+      { observationRevision: 99 },
+      { approvalGeneration: 8 },
+      { ok: 'true' },
+      { ok: 1 },
+      { ok: undefined },
+      { inputAttemptCount: -1 },
+      { inputAttemptCount: 1.5 },
+      { inputAttemptCount: '4' },
+      { inputAttemptCount: Number.MAX_SAFE_INTEGER + 1 },
+      { extra: true },
+      // ok / reasonCode / deniedResult combinations
+      { reasonCode: 'native_x' },
+      { deniedResult: 'rejected' },
+      { ok: false },
+      { ok: false, reasonCode: 'native_x' },
+      { ok: false, deniedResult: 'rejected' },
+      { ok: false, reasonCode: 'native_x', deniedResult: 'completed' },
+      { ok: false, reasonCode: 'Not A Valid Reason', deniedResult: 'rejected' },
+      { ok: false, reasonCode: 5, deniedResult: 'rejected' },
+    ];
+    for (const overrides of bad) {
+      const value: Record<string, unknown> = { ...ok, ...overrides };
+      for (const [key, entry] of Object.entries(value)) if (entry === undefined) delete value[key];
+      expect(parseNativeApprovalApproveReceipt(value, expected), JSON.stringify(overrides)).toEqual(
+        invalid,
+      );
+    }
+    for (const key of Object.keys(ok)) {
+      const value: Record<string, unknown> = { ...ok };
+      delete value[key];
+      expect(parseNativeApprovalApproveReceipt(value, expected), key).toEqual(invalid);
+    }
+    for (const notAnObject of [null, undefined, 'ok', 7, [], [ok]])
+      expect(parseNativeApprovalApproveReceipt(notAnObject, expected)).toEqual(invalid);
   });
 });

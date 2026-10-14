@@ -217,8 +217,14 @@ export type ComputerUseNativeActionResult = Readonly<{
   approvalOffer?: ComputerUseNativeApprovalOffer;
 }>;
 
-/** What a native approval offer tells Main (ADR v2 S4-4 addendum). No token ever crosses here. */
+/**
+ * What a native approval offer tells Main (ADR v2 S4-4 addendum, flow step 1): the discriminated
+ * `{ kind: 'approval_required', approvalGeneration, remainingMs, effect }` that `adapter.dispatch`
+ * reports instead of dispatching. Today the controller still treats it as the closed no-input
+ * pause, and PR 4 builds `awaitNativeApproval` on it. No token ever crosses here.
+ */
 export type ComputerUseNativeApprovalOffer = Readonly<{
+  kind: 'approval_required';
   approvalGeneration: number;
   remainingMs: number;
   effect: 'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';

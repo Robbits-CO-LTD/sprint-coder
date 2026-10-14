@@ -797,6 +797,7 @@ function parseNativePreflightReceipt(
       reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE,
       record,
       approvalOffer: {
+        kind: 'approval_required',
         approvalGeneration,
         remainingMs,
         effect: effect as ComputerUseNativeApprovalOffer['effect'],
@@ -826,6 +827,92 @@ function parseNativePreflightReceipt(
   )
     return { kind: 'refused', result: deniedResult, reasonCode, record };
   return invalid();
+}
+
+/** What `parseNativeApprovalApproveReceipt` expects the receipt to echo back. */
+export type NativeApprovalApproveExpectation = Readonly<{
+  sessionId: string;
+  requestId: string;
+  cancelEpoch: number;
+  observationRevision: number;
+  approvalGeneration: number;
+}>;
+
+export type NativeApprovalApproveOutcome =
+  | Readonly<{ kind: 'approved'; inputAttemptCount: number }>
+  | Readonly<{
+      kind: 'refused';
+      result: 'rejected' | 'paused' | 'canceled';
+      reasonCode: string;
+      inputAttemptCount: number;
+    }>
+  // Wrong keys, types, correlation or ok / reasonCode / deniedResult combination. Nothing was input.
+  | Readonly<{
+      kind: 'invalid';
+      result: 'rejected';
+      reasonCode: 'native_approval_receipt_invalid';
+    }>;
+
+const NATIVE_APPROVAL_APPROVE_KEYS = [
+  'ok',
+  'reasonCode',
+  'deniedResult',
+  'sessionId',
+  'requestId',
+  'cancelEpoch',
+  'observationRevision',
+  'approvalGeneration',
+  'inputAttemptCount',
+] as const;
+
+/**
+ * Validates the nine-key `approvalApprove` receipt (ADR v2 S4-4 addendum). `approvalApprove` has no
+ * input capability, so every violation is a typed pre-input result, never an exception. The input
+ * attempt count is returned for the caller to check against its own non-regression record, because
+ * a count that went backwards may mean input happened and keeps throwing there, like preflight.
+ * Nothing calls this yet; the controller connection is a later change.
+ */
+export function parseNativeApprovalApproveReceipt(
+  value: unknown,
+  expected: NativeApprovalApproveExpectation,
+): NativeApprovalApproveOutcome {
+  const invalid = Object.freeze({
+    kind: 'invalid',
+    result: 'rejected',
+    reasonCode: 'native_approval_receipt_invalid',
+  } as const);
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return invalid;
+  const record = value as Record<string, unknown>;
+  const keys = Reflect.ownKeys(record);
+  if (
+    keys.length !== NATIVE_APPROVAL_APPROVE_KEYS.length ||
+    NATIVE_APPROVAL_APPROVE_KEYS.some((key) => !keys.includes(key)) ||
+    record['sessionId'] !== expected.sessionId ||
+    record['requestId'] !== expected.requestId ||
+    record['cancelEpoch'] !== expected.cancelEpoch ||
+    record['observationRevision'] !== expected.observationRevision ||
+    record['approvalGeneration'] !== expected.approvalGeneration
+  )
+    return invalid;
+  const { ok, reasonCode, deniedResult, inputAttemptCount } = record;
+  if (
+    typeof ok !== 'boolean' ||
+    typeof inputAttemptCount !== 'number' ||
+    !Number.isSafeInteger(inputAttemptCount) ||
+    inputAttemptCount < 0
+  )
+    return invalid;
+  if (ok) {
+    if (reasonCode !== null || deniedResult !== null) return invalid;
+    return { kind: 'approved', inputAttemptCount };
+  }
+  if (
+    typeof reasonCode !== 'string' ||
+    (deniedResult !== 'rejected' && deniedResult !== 'paused' && deniedResult !== 'canceled') ||
+    !computerUseActionResultSchema.partial().safeParse({ result: deniedResult, reasonCode }).success
+  )
+    return invalid;
+  return { kind: 'refused', result: deniedResult, reasonCode, inputAttemptCount };
 }
 
 /** The typed, pre-input result for a receipt that failed validation; null for any other error. */
