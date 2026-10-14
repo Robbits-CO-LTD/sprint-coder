@@ -416,6 +416,19 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         'bool ReserveNativePreflightLocked(',
         '// What native measures *now* for an approval.',
       );
+      // The approval calls (N2b-4: measure, facts, receipt, approvalApprove, approvalDiscard and the
+      // approved reservation) get the same guard. They may read the attempt counter for a receipt
+      // (`.load`) but never raise it.
+      const approvals = sourceBetween(
+        '// What native measures *now* for an approval.',
+        'napi_value DispatchApproved(',
+      );
+      expect(approvals).toContain('napi_value ApprovalApprove(');
+      expect(approvals).toContain('napi_value ApprovalDiscard(');
+      expect(approvals).not.toMatch(
+        /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts(?!\.load\()|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
+      );
+      expect(approvals).not.toMatch(/Perform(Native|Semantic|Visual|FocusedInput)Dispatch\(/u);
       for (const part of [preflight, callbacks]) {
         expect(part).not.toMatch(
           /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
@@ -528,6 +541,33 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       expect(beforeTicket).not.toMatch(/ordinary_ticket|ticket_generation/u);
       // N2b note: a ticket-required rule belongs after the replay/in-flight checks.
       expect(reserve).toContain('N2b note');
+    });
+
+    it('orders the approved Reserve as replay, in-flight, approval consume, busy, insert', () => {
+      const reserve = sourceBetween(
+        'bool ReserveNativeApprovedDispatchLocked(',
+        'napi_value DispatchApproved(',
+      );
+      const order = [
+        'session.dispatch_replay_cache.find(',
+        'session.inflight_dispatches.find(',
+        'session.approval.ConsumeApproved(',
+        'kMaxInflightDispatchEntries',
+        'inflight_dispatches.emplace(',
+      ].map((marker) => reserve.indexOf(marker));
+      expect(order.every((offset) => offset > 0)).toBe(true);
+      expect([...order].sort((left, right) => left - right)).toEqual(order);
+      // Replay and in-flight returns must not touch the approval slot or the ticket generation.
+      const beforeConsume = reserve.slice(0, reserve.indexOf('session.approval.ConsumeApproved('));
+      expect(beforeConsume.slice(0, beforeConsume.indexOf('std::uint64_t now_ns'))).not.toMatch(
+        /approval\.|ticket_generation|ordinary_ticket/u,
+      );
+      // A consume that does not succeed returns before busy and before the insert.
+      expect(reserve.indexOf('if (!outcome.ok) {')).toBeLessThan(
+        reserve.indexOf('kMaxInflightDispatchEntries'),
+      );
+      // The reservation never begins an intent and never reads a presented ticket.
+      expect(reserve).not.toMatch(/\.Offer\(|\.Begin\(|ticket_key/u);
     });
 
     it('advances the ticket generation on cancel, close, observe, start and every issue', () => {

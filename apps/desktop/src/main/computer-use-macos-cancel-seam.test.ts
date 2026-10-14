@@ -113,7 +113,11 @@ ${functionSource('struct NativeDispatchOutcome {', 'NativeDispatchOutcome Outcom
 ${functionSource('bool DispatchCancellationStillValid(', 'NativeTargetValidation RevalidateBoundTarget(')}
 ${functionSource('void CacheDispatchOutcome(', 'napi_value DispatchResultValue(')}
 ${reservationEffects}
-${functionSource('bool ParseNativeDispatchRequest(', 'napi_value Cancel(').replaceAll('@autoreleasepool {', '{')}
+${functionSource(
+  'bool ParseNativeDispatchRequest(',
+  // The approval calls (N2b-4) sit between Preflight and Cancel and are not part of this seam.
+  '// What native measures *now* for an approval.',
+).replaceAll('@autoreleasepool {', '{')}
 ${reservationDriver}`,
         );
         execFileSync(
@@ -157,6 +161,7 @@ const preamble = `
 #include <stdexcept>
 #include <string>
 #include "computer_use_native_ticket.h"
+#include "computer_use_native_approval_flow.h"
 using pid_t = int;
 bool failStopDrain = false;
 // ExecuteNativeStop reads the attempt counter inside its try block, so an inert seam can fail a
@@ -178,6 +183,8 @@ struct MacComputerUseSession {
   std::atomic<std::uint64_t> cancel_epoch{0}, observation_publication_epoch{0};
   std::atomic<std::uint64_t> ticket_generation{0};
   sprint_coder::computer_use::NativeOrdinaryTicketSlot ordinary_ticket;
+  // ExecuteNativeStop ends any approval on cancel and close.
+  sprint_coder::computer_use::NativeApprovalFlow approval;
   std::uint64_t preflight_owner = 0;
   SeamInputAttemptCounter input_api_attempts;
   std::mutex state_mutex;
