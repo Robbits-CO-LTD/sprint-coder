@@ -11,6 +11,7 @@ const workflowFiles = [
   '.github/actions/prepare-sandbox/action.yml',
   '.github/workflows/release-beta.yml',
   '.github/workflows/computer-use-acceptance-build.yml',
+  '.github/workflows/node-libuv-watch.yml',
 ] as const;
 
 const workflows = Object.fromEntries(

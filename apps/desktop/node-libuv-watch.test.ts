@@ -40,9 +40,15 @@ describe('Node libuv watch (#734)', () => {
       { version: 'v27.0.0', uv: '1.53' },
       { version: 'nightly', uv: '1.60.0' },
       { version: 'v27.0.0', uv: 1.6 },
+      { version: 'v27.0.0', date: '2026-11-01 | @owner', uv: '1.60.0' },
       null,
     ];
     expect(findFixedReleases(index)).toEqual([]);
+    expect(
+      findFixedReleases([
+        { version: 'v27.0.0', date: '2026-11-01', uv: '1.60.0', lts: '![x](https://example.test)' },
+      ]),
+    ).toEqual([{ version: 'v27.0.0', date: '2026-11-01', uv: '1.60.0', lts: false }]);
     expect(() => findFixedReleases({})).toThrow(/must be an array/u);
   });
 
@@ -61,6 +67,9 @@ describe('Node libuv watch (#734)', () => {
     expect(workflow).toMatch(/marker='node-libuv-watch:1\.53\.0'/u);
     expect(workflow).toMatch(/--state all --search "\\"\$\{marker\}\\" in:body"/u);
     expect(workflow).toMatch(/監視マーカー: \$\{marker\}/u);
-    expect(workflow).toMatch(/if: steps\.find\.outputs\.count != '0'/u);
+    expect(workflow).toMatch(
+      /if: steps\.find\.outputs\.count != '' && steps\.find\.outputs\.count != '0'/u,
+    );
+    expect(workflow).toMatch(/count="\$\(jq 'length'/u);
   });
 });

@@ -24,12 +24,13 @@ export function findFixedReleases(index, minLibuv = MIN_FIXED_LIBUV) {
   if (!Array.isArray(index)) throw new Error('dist index must be an array');
   return index
     .filter((entry) => parseVersion(entry?.version) !== null && parseVersion(entry?.uv) !== null)
+    .filter((entry) => typeof entry.date === 'string' && /^\d{4}-\d{2}-\d{2}$/u.test(entry.date))
     .filter((entry) => compareVersions(entry.uv, minLibuv) >= 0)
     .map((entry) => ({
       version: entry.version,
       date: entry.date,
       uv: entry.uv,
-      lts: entry.lts || false,
+      lts: typeof entry.lts === 'string' && /^[A-Za-z]+$/u.test(entry.lts) ? entry.lts : false,
     }));
 }
 
