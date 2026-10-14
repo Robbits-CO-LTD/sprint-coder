@@ -283,6 +283,40 @@ describe('Computer Use native host: approval path', () => {
     expect(closed.calls['approvalApprove']).not.toHaveBeenCalled();
   });
 
+  it('answers a regressed count or a missing session as a pre-input result, never an exception', async () => {
+    let count = 5;
+    const open = build(
+      { attested: true },
+      {
+        approvalApprove: (i) => ({
+          ok: true,
+          reasonCode: null,
+          deniedResult: null,
+          sessionId: i['sessionId'],
+          requestId: i['requestId'],
+          cancelEpoch: i['cancelEpoch'],
+          observationRevision: i['observationRevision'],
+          approvalGeneration: i['approvalGeneration'],
+          inputAttemptCount: count,
+        }),
+      },
+    );
+    const session = await sessionOf(open.host);
+    await expect(
+      open.host.approvalApprove!({ ...request(session, 'g-1'), approvalGeneration: 5 }),
+    ).resolves.toEqual({ kind: 'approved' });
+    count = 2;
+    await expect(
+      open.host.approvalApprove!({ ...request(session, 'g-2'), approvalGeneration: 5 }),
+    ).resolves.toMatchObject({ kind: 'invalid', reasonCode: 'native_approval_receipt_invalid' });
+    await expect(
+      open.host.approvalApprove!({
+        ...request({ ...session, sessionId: 'unknown-session' }, 'g-3'),
+        approvalGeneration: 5,
+      }),
+    ).resolves.toMatchObject({ kind: 'refused', result: 'rejected' });
+  });
+
   it('discards exactly the named generation and swallows every failure', async () => {
     const open = build({ attested: true });
     const session = await sessionOf(open.host);

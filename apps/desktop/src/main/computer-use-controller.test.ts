@@ -625,6 +625,7 @@ function createPreflightHost(
   onNativeDispatch: (request: Record<string, unknown>) => Record<string, unknown> = () => {
     throw new Error('native dispatch must not run after a refused preflight');
   },
+  hostOptions: Parameters<typeof createComputerUseNativeHost>[2] = {},
 ) {
   const zero = (digit: string): string => digit.repeat(64);
   const nativeDispatch = vi.fn((input: unknown) =>
@@ -673,6 +674,14 @@ function createPreflightHost(
     observe: () => ({}),
     preflight,
     dispatch: nativeDispatch,
+    // Present so a host given `classifierV2Attested` opens the approval path; never called here.
+    approvalApprove: () => {
+      throw new Error('approvalApprove must not run');
+    },
+    approvalDiscard: () => undefined,
+    dispatchApproved: () => {
+      throw new Error('dispatchApproved must not run');
+    },
     cancel: () => undefined,
     close: () => undefined,
   };
@@ -703,7 +712,7 @@ function createPreflightHost(
     artifactPath: '/Resources/sprint_coder_computer_use_native.node',
     addon,
   } as unknown as ComputerUseNativeBinding;
-  const host = createComputerUseNativeHost(binding, 'darwin');
+  const host = createComputerUseNativeHost(binding, 'darwin', hostOptions);
   let registered = false;
   const dispatch: ComputerUseNativeHost['dispatch'] = async (input) => {
     if (!registered) {
@@ -1307,6 +1316,12 @@ describe('ComputerUseController', () => {
         expect(c).toMatchObject({ state: auditState, reasonCode: reason });
         expect(c!.state).not.toBe('unknown_effect');
         expect(fixture.nativeLog).not.toContain('dispatchApproved');
+        // The slot is discarded on every refusal, and the session shows no stale card.
+        expect(fixture.nativeLog).toContain('approvalDiscard:7');
+        expect(fixture.controller.getStatus(sessionId)).toMatchObject({
+          state: 'paused',
+          pendingApproval: null,
+        });
         // No automatic second card.
         expect(fixture.approvals.filter((approval) => approval.state === 'pending')).toHaveLength(
           1,
@@ -1315,7 +1330,7 @@ describe('ComputerUseController', () => {
       }
     });
 
-    it('books a throw from approvalApprove or dispatchApproved as unknown_effect, never rejected', async () => {
+    it('books a throw from dispatchApproved as unknown_effect, and a throw from approvalApprove as a pre-input rejection', async () => {
       const dispatchThrows = await offered({
         nativeApproval: {
           dispatchApproved: async () => {
@@ -1326,6 +1341,10 @@ describe('ComputerUseController', () => {
       await viWait();
       await clickCard(dispatchThrows.fixture);
       await expect(dispatchThrows.acting).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(dispatchThrows.fixture.controller.getStatus(dispatchThrows.sessionId)).toMatchObject({
+        state: 'paused',
+        pendingApproval: null,
+      });
       expect(auditList(dispatchThrows.fixture)[1]).toMatchObject({
         state: 'unknown_effect',
         reasonCode: 'native_ack_unknown',
@@ -1339,8 +1358,74 @@ describe('ComputerUseController', () => {
       });
       await viWait();
       await clickCard(approveThrows.fixture);
-      await expect(approveThrows.acting).resolves.toMatchObject({ result: 'unknown_effect' });
+      // approvalApprove has no input capability (ADR section 6): a throw is not unknown_effect.
+      await expect(approveThrows.acting).resolves.toMatchObject({ result: 'rejected' });
+      expect(auditList(approveThrows.fixture)[1]).toMatchObject({
+        state: 'rejected',
+        reasonCode: 'native_approval_revalidation_failed',
+      });
       expect(approveThrows.fixture.nativeLog).not.toContain('dispatchApproved');
+      expect(approveThrows.fixture.nativeLog).toContain('approvalDiscard:7');
+    });
+
+    it('clears the answered card and returns the status on every approval path', async () => {
+      const completed = await offered();
+      await viWait();
+      expect(completed.fixture.controller.getStatus(completed.sessionId)?.state).toBe(
+        'awaiting_approval',
+      );
+      const status = await clickCard(completed.fixture);
+      expect(status).toMatchObject({ state: 'acting', pendingApproval: null });
+      await completed.acting;
+      expect(completed.fixture.controller.getStatus(completed.sessionId)).toMatchObject({
+        state: 'acting',
+        pendingApproval: null,
+      });
+      const denied = await offered();
+      await viWait();
+      expect(await clickCard(denied.fixture, 'deny')).toMatchObject({
+        state: 'paused',
+        pendingApproval: null,
+      });
+      await denied.acting;
+      const canceled = await offered({
+        nativeApproval: {
+          dispatchApproved: async () => ({ result: 'canceled', reasonCode: 'native_canceled' }),
+        },
+      });
+      await viWait();
+      await clickCard(canceled.fixture);
+      await expect(canceled.acting).resolves.toMatchObject({ result: 'canceled' });
+      expect(canceled.fixture.controller.getStatus(canceled.sessionId)).toMatchObject({
+        state: 'paused',
+        pendingApproval: null,
+      });
+    });
+
+    it('passes mainHighImpact to the host so an ordinary preflight stops with no input', async () => {
+      const host = createPreflightHost((request) => ordinaryReceipt(request, 0), undefined, {
+        classifierV2Attested: true,
+      });
+      const seen: Array<boolean | undefined> = [];
+      const fixture = createFixture({
+        mode: 'full_access_app',
+        observationOverrides: nativeFacts,
+        nativeApproval: {},
+        nativeDispatch: (input) => {
+          seen.push(input.mainHighImpact);
+          return host.dispatch(input);
+        },
+      });
+      const started = await start(fixture, 'full_access_app', false, undefined, 3);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, buttonAction, 'defence-1'),
+      ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+      expect(seen).toEqual([true]);
+      expect(host.preflight).toHaveBeenCalledTimes(1);
+      expect(host.nativeDispatch).not.toHaveBeenCalled();
+      expect(fixture.approvals).toHaveLength(0);
+      await fixture.controller.stop(started.sessionId);
     });
 
     it('refuses a multi-scalar type at index 0 without a card and stops at a later scalar as partial', async () => {

@@ -537,8 +537,13 @@ export function createComputerUseNativeHost(
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
       const internal = sessions.get(input.session.sessionId);
+      // approvalApprove has no input capability: every failure below is a typed pre-input result.
       if (internal === undefined)
-        throw new ComputerUseNativeUnavailableError('native_session_missing');
+        return Object.freeze({
+          kind: 'refused',
+          result: 'rejected',
+          reasonCode: 'native_session_missing',
+        });
       const request = {
         ...internal.raw,
         ...input.action,
@@ -574,16 +579,24 @@ export function createComputerUseNativeHost(
           result: outcome.result,
           reasonCode: outcome.reasonCode,
         });
-      // A count that went backwards may mean input happened, so (like preflight) it keeps throwing.
-      inputReceipt(
-        {
-          sessionId: input.session.sessionId,
-          cancelEpoch: input.cancelEpoch,
-          inputAttemptCount: outcome.inputAttemptCount,
-        },
-        input.session.sessionId,
-        input.cancelEpoch,
-      );
+      try {
+        inputReceipt(
+          {
+            sessionId: input.session.sessionId,
+            cancelEpoch: input.cancelEpoch,
+            inputAttemptCount: outcome.inputAttemptCount,
+          },
+          input.session.sessionId,
+          input.cancelEpoch,
+        );
+      } catch {
+        // A count that went backwards is an untrustworthy receipt, but approvalApprove cannot input.
+        return Object.freeze({
+          kind: 'invalid',
+          result: 'rejected',
+          reasonCode: 'native_approval_receipt_invalid',
+        });
+      }
       if (outcome.kind === 'approved') return Object.freeze({ kind: 'approved' });
       return Object.freeze({
         kind: 'refused',

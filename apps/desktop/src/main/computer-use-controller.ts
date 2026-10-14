@@ -3181,6 +3181,17 @@ export class ComputerUseController {
       // A native single-use card only settles here. The trusted click is the single entry to
       // `runNativeApproval`, which alone may call `approvalApprove`.
       pending.native.settle(decision === 'deny' ? 'denied' : 'approved');
+      // The card is answered: clear it now, as the V1 card does. A denial is paused by
+      // `runNativeApproval`; an approval is acting until the action ends.
+      record.status = this.status(
+        record,
+        decision === 'deny' ? 'paused' : 'acting',
+        null,
+        record.observation?.revision ?? record.status.observationRevision,
+        record.status.round,
+        null,
+      );
+      this.emit(record.status);
       return record.status;
     }
     let approved = decision !== 'deny';
@@ -4385,7 +4396,7 @@ export class ComputerUseController {
         reasonCode,
         updatedAt: new Date(this.now()).toISOString(),
       });
-      if (result !== 'completed' && result !== 'canceled') pause();
+      if (result !== 'completed') pause();
       const actionResult = actionResultFromAudit(completed, sessionId, requestId);
       return result === 'paused' ? { ...actionResult, result: 'paused' } : actionResult;
     };
@@ -4410,9 +4421,9 @@ export class ComputerUseController {
         approvalGeneration: offer.approvalGeneration,
       });
     } catch {
-      // The only throw left is a receipt count that went backwards: input may have happened.
+      // approvalApprove has no input capability, so even a throw is a failure before any input.
       await this.discardNativeApproval(record, offer.approvalGeneration);
-      return finish('unknown_effect', 'native_ack_unknown', 'unknown_effect');
+      return finish('rejected', 'native_approval_revalidation_failed', 'rejected');
     }
     if (approved.kind !== 'approved') {
       await this.discardNativeApproval(record, offer.approvalGeneration);
