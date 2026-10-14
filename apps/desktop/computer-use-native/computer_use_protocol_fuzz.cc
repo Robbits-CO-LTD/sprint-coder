@@ -1,6 +1,7 @@
 #include "computer_use_native_binding.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_ticket.h"
+#include "computer_use_native_approval_flow.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -863,12 +864,241 @@ std::uint32_t Next(std::uint32_t *state) {
 
 } // namespace
 
+using sprint_coder::computer_use::NativeApprovalFacts;
+using sprint_coder::computer_use::NativeApprovalFailure;
+using sprint_coder::computer_use::NativeApprovalFlow;
+using sprint_coder::computer_use::NativeApprovalMeasurement;
+using sprint_coder::computer_use::NativeApprovalDenialFor;
+using sprint_coder::computer_use::kNativeApprovalClassifierVersion;
+
+NativeApprovalFacts FlowFacts() {
+  NativeApprovalFacts facts;
+  facts.session_id = "session";
+  facts.task_id = "task";
+  facts.turn_id = "turn";
+  facts.request_id = "fresh-request";
+  facts.context_digest = std::string(64, 'd');
+  facts.action_digest = std::string(64, 'a');
+  facts.payload_digest = std::string(64, 'b');
+  facts.cancel_epoch = 3;
+  facts.current_cancel_epoch = 3;
+  facts.approval_generation = 7;
+  facts.observation_revision = 11;
+  facts.ticket_generation = 13;
+  return facts;
+}
+
+NativeApprovalMeasurement FlowMeasured() {
+  NativeApprovalMeasurement measured;
+  measured.eligible = true;
+  measured.effect = NativeApprovalEffect::kFileManagerOpen;
+  measured.authority_digest = std::string(64, 'c');
+  measured.classifier_version = 2;
+  measured.ruleset_version = 1;
+  measured.lexicon_version = 1;
+  return measured;
+}
+
+struct FlowCase {
+  const char *name;
+  void (*mutate)(NativeApprovalFacts *, NativeApprovalMeasurement *, std::uint64_t *);
+  NativeApprovalFailure expected;
+};
+
+bool CheckNativeApprovalFlow() {
+  constexpr std::uint64_t kNow = 100;
+  constexpr std::uint64_t kApproved = kNow + 20;
+  const std::string intent_token(64, 'e');
+  const std::string execution_token(64, 'f');
+  NativeApprovalFlow flow;
+  const auto offer = [&] {
+    return flow.Offer(intent_token, ApprovalIntentBinding(), kNow, kNativeApprovalWaitMaxNs);
+  };
+
+  // A production native never offers: nothing is pending, so every call fails closed and nothing
+  // ever begins an intent on its own.
+  if (!Check(kNativeApprovalClassifierVersion == 2 && !flow.occupied(), "flow-constants"))
+    return false;
+  {
+    const auto approve = flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved);
+    const auto consume = flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved);
+    if (!Check(!approve.ok && approve.failure == NativeApprovalFailure::kUnavailable &&
+                   !consume.ok && consume.failure == NativeApprovalFailure::kUnavailable &&
+                   !flow.Discard(7) && !flow.occupied() && !flow.pending(),
+               "flow-empty-fails-closed")) return false;
+  }
+
+  // Offer -> Approve -> ConsumeApproved, once.
+  if (!Check(offer() && flow.pending() && flow.approval_generation() == 7, "flow-offer"))
+    return false;
+  if (!Check(flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                 flow.ready() && !flow.pending(), "flow-approve")) return false;
+  if (!Check(flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved).ok &&
+                 !flow.occupied(), "flow-consume-once")) return false;
+  {
+    const auto again = flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved);
+    if (!Check(!again.ok && again.failure == NativeApprovalFailure::kUnavailable &&
+                   !flow.occupied(), "flow-consume-twice")) return false;
+  }
+
+  // A generation that does not match changes nothing; the matching one is discarded.
+  {
+    auto wrong = FlowFacts();
+    wrong.approval_generation = 8;
+    if (!Check(offer(), "flow-offer-2")) return false;
+    const auto result = flow.Approve(wrong, FlowMeasured(), execution_token, kApproved);
+    if (!Check(!result.ok && result.failure == NativeApprovalFailure::kUnavailable &&
+                   flow.pending() && !flow.Discard(8) && flow.pending() && flow.Discard(7) &&
+                   !flow.occupied() && !flow.Discard(7), "flow-generation-mismatch"))
+      return false;
+    wrong.approval_generation = 0;
+    if (!Check(offer() && !flow.Approve(wrong, FlowMeasured(), execution_token, kApproved).ok &&
+                   flow.pending() && !flow.Discard(0), "flow-generation-zero")) return false;
+    flow.Invalidate();
+  }
+
+  // Every failed approve attempt on the matching generation burns the slot and fails closed.
+  {
+    const FlowCase cases[] = {
+        {"closed", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->session_closed = true; }, NativeApprovalFailure::kCanceled},
+        {"cancel-epoch", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->current_cancel_epoch = 4; }, NativeApprovalFailure::kCanceled},
+        {"expired-at-deadline", [](NativeApprovalFacts *, NativeApprovalMeasurement *, std::uint64_t *now) { *now = 100 + kNativeApprovalWaitMaxNs; }, NativeApprovalFailure::kExpired},
+        {"clock-backwards", [](NativeApprovalFacts *, NativeApprovalMeasurement *, std::uint64_t *now) { *now = 50; }, NativeApprovalFailure::kRevalidationFailed},
+        {"takeover", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->takeover = true; }, NativeApprovalFailure::kTakeover},
+        {"no-longer-eligible", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->eligible = false; }, NativeApprovalFailure::kRevalidationFailed},
+        {"authority", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->authority_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+        {"effect", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->effect = NativeApprovalEffect::kDownloadOpen; }, NativeApprovalFailure::kRevalidationFailed},
+        {"classifier-v1", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->classifier_version = 1; }, NativeApprovalFailure::kRevalidationFailed},
+        {"ruleset", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->ruleset_version = 2; }, NativeApprovalFailure::kRevalidationFailed},
+        {"lexicon", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->lexicon_version = 2; }, NativeApprovalFailure::kRevalidationFailed},
+        {"action", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->action_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+        {"payload", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->payload_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+        {"session", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->session_id = "other"; }, NativeApprovalFailure::kRevalidationFailed},
+        {"task", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->task_id = "other"; }, NativeApprovalFailure::kRevalidationFailed},
+        {"turn", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->turn_id = "other"; }, NativeApprovalFailure::kRevalidationFailed},
+        {"same-request-id", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->request_id = "original-request"; }, NativeApprovalFailure::kRevalidationFailed},
+        {"observation-not-advanced", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->observation_revision = 10; }, NativeApprovalFailure::kRevalidationFailed},
+        {"ticket-generation-not-advanced", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->ticket_generation = 12; }, NativeApprovalFailure::kRevalidationFailed},
+        {"context-digest-invalid", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->context_digest = "short"; }, NativeApprovalFailure::kRevalidationFailed},
+    };
+    for (const FlowCase &c : cases) {
+      auto facts = FlowFacts();
+      auto measured = FlowMeasured();
+      std::uint64_t now = kApproved;
+      c.mutate(&facts, &measured, &now);
+      if (!Check(offer(), "flow-approve-case-offer")) return false;
+      const auto result = flow.Approve(facts, measured, execution_token, now);
+      if (!Check(!result.ok && result.failure == c.expected && !flow.occupied(), c.name))
+        return false;
+    }
+    // The execution token must differ from the waiting one, and be a well-formed secret.
+    if (!Check(offer() && !flow.Approve(FlowFacts(), FlowMeasured(), intent_token, kApproved).ok &&
+                   !flow.occupied(), "flow-token-rotation")) return false;
+    if (!Check(offer() && !flow.Approve(FlowFacts(), FlowMeasured(), "short", kApproved).ok &&
+                   !flow.occupied(), "flow-token-shape")) return false;
+  }
+
+  // Every failed consume burns the ready slot, and none of them begins a new intent.
+  {
+    const FlowCase cases[] = {
+        {"closed", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->session_closed = true; }, NativeApprovalFailure::kCanceled},
+        {"cancel-epoch", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->current_cancel_epoch = 4; }, NativeApprovalFailure::kCanceled},
+        {"execution-expired", [](NativeApprovalFacts *, NativeApprovalMeasurement *, std::uint64_t *now) { *now = 120 + kNativeApprovalExecutionTtlNs; }, NativeApprovalFailure::kExpired},
+        {"takeover", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->takeover = true; }, NativeApprovalFailure::kTakeover},
+        {"reclassified-not-approvable", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->eligible = false; }, NativeApprovalFailure::kRevalidationFailed},
+        {"authority", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->authority_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+        {"effect", [](NativeApprovalFacts *, NativeApprovalMeasurement *m, std::uint64_t *) { m->effect = NativeApprovalEffect::kSupervisedAction; }, NativeApprovalFailure::kRevalidationFailed},
+        {"different-request-id", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->request_id = "another-request"; }, NativeApprovalFailure::kRevalidationFailed},
+        {"context-changed", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->context_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+        {"observed-again", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->ticket_generation = 14; }, NativeApprovalFailure::kRevalidationFailed},
+        {"observation-revision", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->observation_revision = 12; }, NativeApprovalFailure::kRevalidationFailed},
+        {"action", [](NativeApprovalFacts *f, NativeApprovalMeasurement *, std::uint64_t *) { f->action_digest[0] = 'f'; }, NativeApprovalFailure::kRevalidationFailed},
+    };
+    for (const FlowCase &c : cases) {
+      if (!Check(offer() &&
+                     flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                     flow.ready(), "flow-consume-case-ready")) return false;
+      auto facts = FlowFacts();
+      auto measured = FlowMeasured();
+      std::uint64_t now = kApproved;
+      c.mutate(&facts, &measured, &now);
+      const auto result = flow.ConsumeApproved(facts, measured, now);
+      if (!Check(!result.ok && result.failure == c.expected && !flow.occupied() &&
+                     !flow.pending(), c.name)) return false;
+    }
+    // The last instant of the execution window still consumes.
+    if (!Check(offer() &&
+                   flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                   flow.ConsumeApproved(FlowFacts(), FlowMeasured(),
+                                        kApproved + kNativeApprovalExecutionTtlNs - 1).ok &&
+                   !flow.occupied(), "flow-consume-last-instant")) return false;
+    // A generation that does not match changes nothing, even on a ready slot.
+    auto wrong = FlowFacts();
+    wrong.approval_generation = 9;
+    if (!Check(offer() &&
+                   flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                   !flow.ConsumeApproved(wrong, FlowMeasured(), kApproved).ok && flow.ready() &&
+                   !flow.Discard(9) && flow.ready() && flow.Discard(7) && !flow.occupied(),
+               "flow-consume-generation-mismatch")) return false;
+  }
+
+  // Approve cannot be applied to a ready slot, a replacement offer ends the old one, and cancel /
+  // close end either stage.
+  if (!Check(offer() &&
+                 flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                 !flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
+                 flow.ready(), "flow-approve-not-twice")) return false;
+  flow.Invalidate();
+  {
+    auto next = ApprovalIntentBinding();
+    next.approval_generation = 9;
+    if (!Check(offer() && flow.Offer(intent_token, next, kNow, kNativeApprovalWaitMaxNs) &&
+                   flow.approval_generation() == 9 && !flow.Discard(7) && flow.pending(),
+               "flow-offer-replaces")) return false;
+    flow.Invalidate();
+    if (!Check(!flow.occupied() && offer(), "flow-invalidate-pending")) return false;
+    flow.Invalidate();
+    if (!Check(offer() &&
+                   flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok,
+               "flow-invalidate-ready-setup")) return false;
+    flow.Invalidate();
+    if (!Check(!flow.occupied() &&
+                   !flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved).ok,
+               "flow-invalidate-ready")) return false;
+  }
+
+  // The denial table is the contract with Main.
+  const auto same = [](const char *left, const char *right) {
+    return std::string_view(left) == std::string_view(right);
+  };
+  struct Row {
+    NativeApprovalFailure failure;
+    const char *reason;
+    const char *result;
+  };
+  const Row rows[] = {
+      {NativeApprovalFailure::kUnavailable, "native_approval_unavailable", "rejected"},
+      {NativeApprovalFailure::kExpired, "native_approval_expired", "rejected"},
+      {NativeApprovalFailure::kRevalidationFailed, "native_approval_revalidation_failed", "rejected"},
+      {NativeApprovalFailure::kTakeover, "native_approval_revalidation_failed", "paused"},
+      {NativeApprovalFailure::kCanceled, "native_canceled_pre_dispatch", "canceled"},
+      {NativeApprovalFailure::kTicketUnavailable, "native_ticket_unavailable", "rejected"},
+  };
+  for (const Row &row : rows) {
+    const auto denial = NativeApprovalDenialFor(row.failure);
+    if (!Check(same(denial.reason_code, row.reason) && same(denial.result, row.result),
+               "flow-denial-table")) return false;
+  }
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
   if (!CheckNativeBinding()) return 1;
   std::cout << "Computer Use native binding canonical framing: PASS\n";
   if (!CheckNativeApprovalTicket()) return 1;
+  if (!CheckNativeApprovalFlow()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
   std::cout << "Computer Use native ordinary ticket slot: PASS\n";

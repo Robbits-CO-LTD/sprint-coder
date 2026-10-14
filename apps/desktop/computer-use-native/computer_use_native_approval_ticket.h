@@ -1,6 +1,7 @@
 #pragma once
 
-// Private, portable policy only; no production caller or Main-facing export.
+// Private, portable policy only. The macOS addon reaches it only through
+// computer_use_native_approval_flow.h and no production path begins an intent yet.
 // The native owner supplies CSPRNG tokens, real monotonic times and freshly
 // measured bindings under its state mutex. Approve may be called only after
 // Main's separately bound trusted activation and native revalidation succeed.
@@ -195,6 +196,42 @@ public:
     const bool time_ok = now_ns >= issued_ns_ && now_ns < expires_ns_;
     Invalidate();
     return token_ok && binding_ok && time_ok;
+  }
+
+  // The native owner is the only holder of the secrets, so the in-process transitions use the
+  // token held in the slot instead of one presented from outside. They are the same checks as
+  // Approve / Consume: a mismatch burns the matching stage exactly like those do.
+  [[nodiscard]] bool ApproveHeld(const NativeApprovalIntentBinding &expected_intent,
+                                 NativeApprovalExecutionBinding fresh,
+                                 std::string_view execution_token,
+                                 std::uint64_t now_ns) {
+    if (!pending())
+      return false;
+    std::string held = token_;
+    const bool approved = Approve(held, expected_intent, std::move(fresh),
+                                  execution_token, now_ns);
+    ScrubNativeTicketString(&held);
+    return approved;
+  }
+
+  [[nodiscard]] bool ConsumeHeld(const NativeApprovalExecutionBinding &expected,
+                                 std::uint64_t now_ns) {
+    if (!ready())
+      return false;
+    std::string held = token_;
+    const bool consumed = Consume(held, expected, now_ns);
+    ScrubNativeTicketString(&held);
+    return consumed;
+  }
+
+  // The stored intent (the waiting one, or the one the ready execution was built from). It holds
+  // no secret; null when the slot is empty.
+  [[nodiscard]] const NativeApprovalIntentBinding *intent_view() const noexcept {
+    return pending() ? &intent_ : ready() ? &execution_.intent : nullptr;
+  }
+  // Monotonic nanosecond deadline of the current stage; 0 when empty.
+  [[nodiscard]] std::uint64_t expires_ns() const noexcept {
+    return occupied() ? expires_ns_ : 0;
   }
 
   void Invalidate() noexcept {

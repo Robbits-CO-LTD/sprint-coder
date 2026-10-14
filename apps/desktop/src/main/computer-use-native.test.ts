@@ -1345,7 +1345,10 @@ describe('macOS native capture boundary', () => {
     expect(hostSource).toContain(
       "NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable'",
     );
-    const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+    const windowsHost = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+      'utf8',
+    );
     expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);
   });
 
@@ -1404,6 +1407,76 @@ describe('macOS native capture boundary', () => {
       .filter((name) => name !== 'Invalid')
       .map((name) => name.replace(/([a-z])([A-Z])/gu, '$1_$2').toLowerCase());
     expect([...NATIVE_APPROVAL_EFFECTS]).toEqual(native);
+  });
+
+  it('wires approvalApprove, approvalDiscard and dispatchApproved with no production way to begin an approval', () => {
+    const source = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
+      'utf8',
+    );
+    const flow = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_native_approval_flow.h'),
+      'utf8',
+    );
+    const section = (from: string, to: string): string => {
+      const start = source.indexOf(from);
+      expect(start, from).toBeGreaterThanOrEqual(0);
+      const end = source.indexOf(to, start);
+      expect(end, to).toBeGreaterThan(start);
+      return source.slice(start, end);
+    };
+    for (const name of ['approvalApprove', 'approvalDiscard', 'dispatchApproved'])
+      expect(source).toContain(`{"${name}", nullptr,`);
+    // Nothing in the addon begins an intent: a production session never holds an approval, so every
+    // approve and approved dispatch fails closed until classifier v2 measures something approvable.
+    expect(source).not.toMatch(/approval\.Offer\(|\.Begin\(/u);
+    expect(source).toContain('NativeApprovalMeasurement\nMeasureNativeApproval(');
+    const measure = section('MeasureNativeApproval(', 'NativeApprovalFactsLocked(');
+    expect(measure).toContain('return {};');
+    // Observation and refocus advance the ticket generation but never end the approval.
+    const advance = section(
+      'void AdvanceTicketGenerationLocked(',
+      'constexpr std::size_t kMaxDispatchReplayEntries',
+    );
+    expect(advance).not.toContain('approval');
+    // Cancel and close end it.
+    expect(source).toContain('work->session->approval.Invalidate();');
+    // approvalApprove: no input, no new generation, no ticket in the request.
+    const approve = section('napi_value ApprovalApprove(', 'napi_value ApprovalDiscard(');
+    expect(approve).toContain('ticket_key.present');
+    expect(approve).toContain('"approvalGeneration"');
+    expect(approve).not.toMatch(
+      /PerformNativeDispatch|input_api_attempts\.fetch_add|CGEventPost|ticket_generation\.fetch_add|AdvanceTicketGenerationLocked/u,
+    );
+    // approvalDiscard names exactly one generation and touches nothing else.
+    const discard = section(
+      'napi_value ApprovalDiscard(',
+      '// Reservation of an approved dispatch.',
+    );
+    expect(discard).toContain('approval.Discard(approval_generation)');
+    expect(discard).not.toMatch(/PerformNativeDispatch|ordinary_ticket|inflight_dispatches/u);
+    // dispatchApproved: its own reservation, never the ordinary ticket path or preflight.
+    const approved = section('napi_value DispatchApproved(', 'napi_value Cancel(');
+    expect(approved).toContain('ticket_key.present');
+    expect(approved).toContain('ReserveNativeApprovedDispatchLocked(');
+    expect(approved).not.toMatch(
+      /ReserveNativeDispatchRequestLocked|ReserveNativePreflightLocked|Preflight/u,
+    );
+    const reserve = section(
+      'bool ReserveNativeApprovedDispatchLocked(',
+      'napi_value DispatchApproved(',
+    );
+    expect(reserve).toContain('ConsumeApproved(');
+    expect(reserve).not.toMatch(/\.Offer\(|\.Begin\(|ticket_key/u);
+    // The portable flow has no platform, N-API, clock or random dependency and cannot begin an
+    // intent except through `Offer`.
+    expect(flow).not.toMatch(/#import|CoreGraphics|napi|<chrono>|<random>|Sec[A-Z]/u);
+    // The Windows host knows none of it.
+    const windowsHost = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
+      'utf8',
+    );
+    expect(windowsHost).not.toMatch(/approvalApprove|dispatchApproved|NativeApprovalFlow/u);
   });
 
   it('recaptures and compares an observation-bound local visual patch before click or scroll', () => {

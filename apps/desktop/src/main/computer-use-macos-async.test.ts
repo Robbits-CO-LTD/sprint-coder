@@ -138,8 +138,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
 
   it('settles every deferred it created when the async work cannot be created or queued', () => {
     const sites = [...source.matchAll(/napi_create_promise\(env, &work->deferred, &promise\)/gu)];
-    // StartSession, Observe, Dispatch and Preflight.
-    expect(sites).toHaveLength(5);
+    // StartSession, Observe, Dispatch, Preflight and DispatchApproved (N2b-4).
+    expect(sites).toHaveLength(6);
 
     for (const site of sites) {
       const promiseOffset = site.index;
@@ -402,7 +402,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         '{"preflight", nullptr, Preflight, nullptr, nullptr, nullptr, napi_default, nullptr},',
       );
       expect(init.indexOf('"dispatch"')).toBeLessThan(init.indexOf('"preflight"'));
-      expect(init.match(/napi_default/gu)).toHaveLength(10);
+      // preflight (N2a) plus approvalApprove, approvalDiscard and dispatchApproved (N2b-4).
+      expect(init.match(/napi_default/gu)).toHaveLength(13);
       expect(init).not.toMatch(/napi_(writable|enumerable|configurable)/u);
     });
 
@@ -411,7 +412,10 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         '// Preflight composed only from existing read-only guards.',
         'bool GenerateOrdinaryTicketToken(',
       );
-      const callbacks = sourceBetween('bool ReserveNativePreflightLocked(', 'napi_value Cancel(');
+      const callbacks = sourceBetween(
+        'bool ReserveNativePreflightLocked(',
+        '// What native measures *now* for an approval.',
+      );
       for (const part of [preflight, callbacks]) {
         expect(part).not.toMatch(
           /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
