@@ -1038,6 +1038,32 @@ describe('Computer Use native Main adapter', () => {
       result: 'canceled',
       reasonCode: 'native_canceled_pre_dispatch',
     });
+    // A preflight that throws, times out or never answers has no input capability, so it is a typed
+    // pre-input rejection as well, never an exception the controller would book as unknown_effect.
+    for (const failure of [
+      new Error('preflight blew up'),
+      Object.assign(new Error('timeout'), { code: 'TIMEOUT' }),
+      Object.assign(new Error('addon unavailable'), { reasonCode: 'native_unavailable' }),
+    ]) {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce(() => {
+        throw failure;
+      });
+      await expect(preflightAction('pf-throw-generic')).resolves.toEqual({
+        result: 'rejected',
+        reasonCode: 'native_preflight_failed',
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
+    // An input count that went backwards may mean input happened, so that one still throws.
+    {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) => receipt(input, { inputAttemptCount: 1 }));
+      await expect(preflightAction('pf-regress-2')).rejects.toMatchObject({
+        reasonCode: 'native_input_receipt_unconfirmed',
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
     delete withPreflight.preflight;
     await preflightAction('pf-legacy');
     expect(dispatch.mock.calls.at(-1)![0]).not.toHaveProperty('ticket');

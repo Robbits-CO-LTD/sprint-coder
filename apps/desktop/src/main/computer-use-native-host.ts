@@ -482,9 +482,12 @@ export function createComputerUseNativeHost(
         try {
           receipt = await invoke('preflight', dispatchRequest);
         } catch (error) {
-          const preDispatch = classifyComputerUseNativeDispatchFailure(error);
-          if (preDispatch !== null) return preDispatch;
-          throw error;
+          // Preflight has no input capability, so whatever went wrong happened before any input:
+          // a coded pre-dispatch failure keeps its mapping, anything else is a typed rejection.
+          return (
+            classifyComputerUseNativeDispatchFailure(error) ??
+            Object.freeze({ result: 'rejected', reasonCode: 'native_preflight_failed' })
+          );
         }
         let outcome: NativePreflightOutcome;
         try {
