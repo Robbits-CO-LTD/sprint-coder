@@ -33,6 +33,17 @@ export type ComputerUseNativeAddon = Readonly<{
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
   preflight?(input: unknown): unknown;
+  /**
+   * macOS native only (N2b-4). Revalidates and exchanges the waiting approval for an execution
+   * ticket. The request is a dispatch request plus `approvalGeneration`; the receipt is a fixed set
+   * of nine keys (`ok`, `reasonCode`, `deniedResult`, `sessionId`, `requestId`, `cancelEpoch`,
+   * `observationRevision`, `approvalGeneration`, `inputAttemptCount`). No input capability.
+   */
+  approvalApprove?(input: unknown): unknown;
+  /** Ends the approval of exactly `{ sessionId, approvalGeneration }`. No input capability. */
+  approvalDiscard?(input: unknown): unknown;
+  /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
+  dispatchApproved?(input: unknown): unknown;
   dispatch?(input: unknown): unknown;
   cancel?(input: unknown): unknown;
   close?(input: unknown): unknown;
