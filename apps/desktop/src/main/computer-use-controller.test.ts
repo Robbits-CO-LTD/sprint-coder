@@ -203,6 +203,7 @@ function createFixture(
     now?: () => number;
     profileRecord?: ComputerAppProfileRecord;
     windowExecutableDigest?: string | null;
+    effectiveEligibilityMode?: () => 'v1-allowlist' | 'v2-denylist';
     /** Opens the native approval path on the fake host (a production host never reports it). */
     nativeApproval?: {
       enabled?: boolean;
@@ -246,6 +247,8 @@ function createFixture(
   let nativeCloseCount = 0;
   /** Ordered record of the native calls the approval tests care about. */
   const nativeLog: string[] = [];
+  /** The classifier route every startSession (start, refocus, resume) was given. */
+  const startRoutes: Array<'v1' | 'v2' | undefined> = [];
   const approveInputs: Parameters<NonNullable<ComputerUseNativeHost['approvalApprove']>>[0][] = [];
   const approvedDispatches: Parameters<
     NonNullable<ComputerUseNativeHost['dispatchApproved']>
@@ -300,6 +303,7 @@ function createFixture(
     },
     startSession: async (input) => {
       nativeLog.push('startSession');
+      startRoutes.push(input.classifierRoute);
       // Counted before the gate, so a test can observe "native startup has begun and is still
       // running" — the window in which a session exists only in `startingSessions`.
       startSessionEnteredCount += 1;
@@ -534,6 +538,9 @@ function createFixture(
     ...(options.plannerFactory === undefined ? {} : { plannerFactory: options.plannerFactory }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
+    ...(options.effectiveEligibilityMode === undefined
+      ? {}
+      : { effectiveEligibilityMode: options.effectiveEligibilityMode }),
     ...(options.now === undefined ? {} : { now: options.now }),
     currentPolicyEpoch: () => policyEpoch,
     publishStatus: (status) => statuses.push(status),
@@ -572,6 +579,7 @@ function createFixture(
       policyEpoch = next;
     },
     nativeLog,
+    startRoutes,
     approveInputs,
     approvedDispatches,
     dispatchCount: () => dispatchCount,
@@ -1664,6 +1672,34 @@ describe('ComputerUseController', () => {
       expect(prototype).not.toContain('approvalApprove');
       expect(prototype).not.toContain('approvalDiscard');
       expect(prototype).not.toContain('dispatchApproved');
+    });
+  });
+
+  describe('classifier route binding (C3)', () => {
+    it('binds a panel session to v1 for its whole life, whatever the effective mode', async () => {
+      for (const mode of [undefined, () => 'v1-allowlist' as const, () => 'v2-denylist' as const]) {
+        const fixture = createFixture({
+          mode: 'supervised',
+          nativeApproval: {},
+          ...(mode === undefined ? {} : { effectiveEligibilityMode: mode }),
+        });
+        const started = await start(fixture, 'supervised');
+        await fixture.controller.observe(started.sessionId);
+        // A refocus after a card (V1) and a native refocus both ask for the same route.
+        const acting = fixture.controller.act(started.sessionId, click, 'route-1');
+        await viWait();
+        const card = fixture.approvals.find((approval) => approval.state === 'pending')!;
+        await fixture.controller.resolveApproval({
+          approvalId: card.id,
+          expectedRevision: card.revision,
+          decision: 'allow_once',
+          challenge: card.challenge,
+        });
+        await acting;
+        expect(fixture.startRoutes.length).toBeGreaterThanOrEqual(2);
+        expect(new Set(fixture.startRoutes)).toEqual(new Set(['v1']));
+        await fixture.controller.stop(started.sessionId);
+      }
     });
   });
 

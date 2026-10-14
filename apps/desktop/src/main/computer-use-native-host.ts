@@ -161,6 +161,12 @@ export function createComputerUseNativeHost(
   const pidsByIdentity = new Map<string, number>();
   const revisionsBySession = new Map<string, number>();
   const inputAttemptsBySession = new Map<string, number>();
+  // The classifier route each session was bound to at creation, and the classifierVersion that
+  // route makes Main accept. Never changed after the first binding; dropped on a verified close.
+  const classifierBindings = new Map<
+    string,
+    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 2 }>
+  >();
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
   let inputQuarantined = false;
@@ -411,7 +417,21 @@ export function createComputerUseNativeHost(
       });
     },
 
-    startSession: async (input): Promise<ComputerUseNativeSession> => {
+    startSession: async (startInput): Promise<ComputerUseNativeSession> => {
+      // The route is Main's, not the native's: it never goes into the request.
+      const { classifierRoute, ...input } = startInput;
+      const bound = classifierBindings.get(input.sessionId);
+      if (bound !== undefined && classifierRoute !== undefined && classifierRoute !== bound.route)
+        throw new ComputerUseNativeUnavailableError('native_classifier_route_forbidden');
+      const bindRoute = (sessionId: string): void => {
+        if (classifierRoute === undefined || classifierBindings.has(sessionId)) return;
+        classifierBindings.set(sessionId, {
+          route: classifierRoute,
+          // The route asks; the attest decides. v2 is expected only from a build that attested it.
+          expectedVersion:
+            classifierRoute === 'v2' && options.classifierV2Attested === true ? 2 : 1,
+        });
+      };
       const existing = sessions.get(input.sessionId);
       if (existing !== undefined) {
         if (
@@ -440,6 +460,7 @@ export function createComputerUseNativeHost(
           options.windowsPhysicalBoundsToDip,
         );
         sessions.set(session.sessionId, session);
+        bindRoute(session.sessionId);
         return publicNativeSession(session);
       }
       let pid = pidsByIdentity.get(input.profile.identityDigest);
@@ -501,6 +522,7 @@ export function createComputerUseNativeHost(
         options.windowsPhysicalBoundsToDip,
       );
       sessions.set(session.sessionId, session);
+      bindRoute(session.sessionId);
       // `raw` stays inside this Main/native adapter. It may contain OS handles needed by a native
       // implementation, but it is never returned to the controller or renderer.
       try {
@@ -683,7 +705,11 @@ export function createComputerUseNativeHost(
         }
         let outcome: NativePreflightOutcome;
         try {
-          outcome = parseNativePreflightReceipt(receipt, input);
+          const expected = classifierBindings.get(input.session.sessionId)?.expectedVersion;
+          outcome = parseNativePreflightReceipt(receipt, {
+            ...input,
+            ...(expected === undefined ? {} : { expectedClassifierVersion: expected }),
+          });
         } catch (error) {
           // A receipt that cannot be trusted was produced before any input. It is a typed
           // pre-input rejection, never an exception the controller would book as unknown_effect.
@@ -774,6 +800,7 @@ export function createComputerUseNativeHost(
       if (!parsed.success) throw new ComputerUseNativeUnavailableError('native_stop_unconfirmed');
       inputReceipt(parsed.data, session.sessionId, cancelEpoch);
       sessions.delete(session.sessionId);
+      classifierBindings.delete(session.sessionId);
       inputAttemptsBySession.delete(session.sessionId);
       stopEpochs.delete(session.sessionId);
       revisionsBySession.delete(session.sessionId);
@@ -894,6 +921,13 @@ function parseNativePreflightReceipt(
     requestId: string;
     observationRevision: number;
     cancelEpoch: number;
+    /**
+     * The classifier version the session's route expects (classifier C3). Bound: every receipt
+     * must carry exactly this version, and an approval offer additionally needs classifier 2, so
+     * a v1-bound session can never be offered one. Unbound (no route given at start): the
+     * pre-C3 rule, classifier 2 for an offer and 1 for the rest. Main always binds a route.
+     */
+    expectedClassifierVersion?: number;
   }>,
 ): NativePreflightOutcome {
   const invalid = (): never => {
@@ -911,13 +945,15 @@ function parseNativePreflightReceipt(
     : offersApproval
       ? NATIVE_APPROVAL_OFFER_KEYS_V2
       : NATIVE_PREFLIGHT_KEYS_V2;
+  const bound = input.expectedClassifierVersion;
   const expectedClassifierVersion = offersApproval
     ? NATIVE_APPROVAL_CLASSIFIER_VERSION
-    : NATIVE_PREFLIGHT_CLASSIFIER_VERSION;
+    : (bound ?? NATIVE_PREFLIGHT_CLASSIFIER_VERSION);
   if (
     keys.length !== expectedKeys.length ||
     expectedKeys.some((key) => !keys.includes(key)) ||
     record['classifierVersion'] !== expectedClassifierVersion ||
+    (bound !== undefined && record['classifierVersion'] !== bound) ||
     record['requestId'] !== input.requestId ||
     record['sessionId'] !== input.session.sessionId ||
     record['cancelEpoch'] !== input.cancelEpoch ||

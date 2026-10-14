@@ -119,6 +119,11 @@ import type {
 } from './computer-use-planner-port';
 import { COMPUTER_USE_ACCESSIBILITY_POLICY_VERSION } from './computer-use-accessibility-tree';
 import { secureLogger } from './secure-logger';
+import type { ComputerUseEligibilityMode } from '@sprint-coder/contracts';
+import {
+  computerUseClassifierRoute,
+  type ComputerUseClassifierRoute,
+} from './computer-use-eligibility';
 import {
   captureComputerUseRuntime,
   computerUseCaptureDigest,
@@ -262,6 +267,12 @@ export interface ComputerUseNativeHost {
       turnId: string;
       cancelEpoch: number;
       resume?: boolean;
+      /**
+       * The classifier route this session is bound to (ADR v2 D7 / classifier C3). Chosen by Main
+       * alone when the session is created and repeated on every later start of the same session;
+       * the host refuses a different route for a session it has already bound.
+       */
+      classifierRoute?: ComputerUseClassifierRoute;
     }>,
   ): Promise<ComputerUseNativeSession>;
   observe(
@@ -431,6 +442,11 @@ export type ComputerUseControllerDeps = Readonly<{
    */
   agentDrivenEnabled?: () => boolean;
   /**
+   * The effective eligibility mode (compiled pin, V2 flag, FORCE_V1_ALLOWLIST). Absent means
+   * v1-allowlist, so every session is bound to the v1 classifier route until this is wired.
+   */
+  effectiveEligibilityMode?: () => ComputerUseEligibilityMode;
+  /**
    * Where the calling Turn actually sends, for the same egress consent test `start` already applies.
    *
    * Keyed by Turn, not by Task: the Task's model setting is mutable and can be repointed at a
@@ -568,6 +584,8 @@ type SessionRecord = {
   profile: ComputerAppProfileRecord;
   /** Present for a session `computer_start` created; null for one a person started. */
   agent: ComputerUseAgentStartBinding | null;
+  /** Fixed when the session was created; every later native start repeats it. */
+  readonly classifierRoute: ComputerUseClassifierRoute;
   native: ComputerUseNativeSession;
   screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
   controller: AbortController;
@@ -2543,6 +2561,7 @@ export class ComputerUseController {
         turnId: record.turnId,
         cancelEpoch: record.native.cancelEpoch,
         resume: true,
+        classifierRoute: record.classifierRoute,
       });
       if (
         focused.sessionId !== record.native.sessionId ||
@@ -2725,6 +2744,10 @@ export class ComputerUseController {
       throw new Error(`Computer Use start canceled: ${starting.reason ?? 'emergency_stop'}`);
     }
     let native: ComputerUseNativeSession;
+    const classifierRoute = computerUseClassifierRoute({
+      agent: input.agent !== undefined,
+      effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
+    });
     try {
       native = await this.deps.native.startSession({
         profile: selectedProfile,
@@ -2733,6 +2756,7 @@ export class ComputerUseController {
         taskId: input.taskId,
         turnId,
         cancelEpoch: 0,
+        classifierRoute,
       });
     } catch (error) {
       this.startingSessions.delete(sessionId);
@@ -2862,6 +2886,7 @@ export class ComputerUseController {
       status,
       profile: selectedProfile,
       agent: input.agent ?? null,
+      classifierRoute,
       native,
       screenBounds: native.screenBounds,
       controller,
@@ -3276,6 +3301,7 @@ export class ComputerUseController {
       taskId: record.status.taskId,
       turnId: record.turnId,
       cancelEpoch: record.native.cancelEpoch,
+      classifierRoute: record.classifierRoute,
     });
     ctx.focusedSession = focusedSession;
     if (
