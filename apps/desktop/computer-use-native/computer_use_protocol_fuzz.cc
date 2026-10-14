@@ -1215,6 +1215,14 @@ const ActionKind kEffAllInputs[] = {
     ActionKind::kToggle,  ActionKind::kExpandCollapse};
 
 using sprint_coder::computer_use::ShadowAxNode;
+using sprint_coder::computer_use::ShadowBudget;
+using sprint_coder::computer_use::ShadowSkippedRecord;
+using sprint_coder::computer_use::kShadowMaxAxCalls;
+using sprint_coder::computer_use::kShadowDeadlineNs;
+using sprint_coder::computer_use::kShadowGapV1Invalid;
+using sprint_coder::computer_use::kShadowGapCanceled;
+using sprint_coder::computer_use::kShadowGapBudget;
+using sprint_coder::computer_use::kShadowGapReadFailed;
 using sprint_coder::computer_use::ShadowAxCapture;
 using sprint_coder::computer_use::ShadowRequestInfo;
 using sprint_coder::computer_use::ShadowFacts;
@@ -1246,12 +1254,11 @@ ShadowAxNode ShadowNode(const std::string &role, const std::string &title = "") 
   return node;
 }
 
-// A TextEdit-like capture: a button in a window, the walk reached the window then the application.
+// A TextEdit-like capture: a button in a window. The native walk ends at the window.
 ShadowAxCapture ShadowBase() {
   ShadowAxCapture capture;
   capture.target_found = true;
-  capture.chain = {ShadowNode("AXButton", "Save"), ShadowNode("AXWindow", "Notes"),
-                   ShadowNode("AXApplication", "TextEdit")};
+  capture.chain = {ShadowNode("AXButton", "Save"), ShadowNode("AXWindow", "Notes")};
   capture.chain_reached_root = true;
   capture.neighbors_complete = true;
   return capture;
@@ -1570,6 +1577,161 @@ bool CheckEffectShadow() {
                "shadow-is-deterministic")) return false;
   }
   std::cout << "Computer Use native effect shadow: PASS\n";
+  return true;
+}
+
+// The shadow is bounded, gives way, and never reads a gap as an empty string.
+bool CheckEffectShadowBounds() {
+  // The budget: calls are counted, the deadline is on the caller's clock, and a spent budget stays spent.
+  {
+    ShadowBudget calls(1000);
+    for (std::uint32_t index = 0; index < kShadowMaxAxCalls; ++index)
+      if (!Check(calls.Spend(1000), "shadow-budget-spends-calls")) return false;
+    if (!Check(calls.Calls() == kShadowMaxAxCalls && !calls.Exhausted(), "shadow-budget-counts")) return false;
+    if (!Check(!calls.Spend(1000) && calls.Exhausted(), "shadow-budget-call-limit")) return false;
+    if (!Check(!calls.Spend(1000) && calls.Calls() == kShadowMaxAxCalls, "shadow-budget-stays-spent")) return false;
+
+    ShadowBudget timed(5000);
+    if (!Check(timed.Spend(5000 + kShadowDeadlineNs), "shadow-budget-deadline-inclusive")) return false;
+    if (!Check(!timed.Spend(5000 + kShadowDeadlineNs + 1) && timed.Exhausted(), "shadow-budget-deadline")) return false;
+    if (!Check(!timed.Spend(5000), "shadow-budget-deadline-is-sticky")) return false;
+    if (!Check(kShadowDeadlineNs <= 200'000'000 && kShadowMaxAxCalls >= 256, "shadow-budget-is-small-but-whole"))
+      return false;
+  }
+
+  // A capture that stopped, or lost an attribute, is not whole: takeover, with the reason.
+  {
+    ShadowAxCapture stopped = ShadowBase();
+    stopped.budget_exhausted = true;
+    ShadowFacts built = BuildShadowFacts(stopped, ShadowRequest());
+    if (!Check((built.gaps & kShadowGapBudget) != 0 && !built.facts.metadata_complete &&
+                   !built.facts.neighbor_labels_complete,
+               "shadow-budget-exhausted-is-incomplete")) return false;
+    const ShadowRecord stopped_record = ShadowClassify(stopped, ShadowRequest(), true);
+    if (!Check(stopped_record.kind == DecisionKind::kTakeover && (stopped_record.gaps & kShadowGapBudget) != 0 &&
+                   !stopped_record.Skipped() && stopped_record.V2IsStricter(),
+               "shadow-budget-exhausted-takeover")) return false;
+
+    ShadowAxCapture failed_read = ShadowBase();
+    failed_read.chain[0].read_failed = true;
+    built = BuildShadowFacts(failed_read, ShadowRequest());
+    if (!Check((built.gaps & kShadowGapReadFailed) != 0 && !built.facts.metadata_complete, "shadow-node-read-failed"))
+      return false;
+    ShadowAxCapture ancestor = ShadowBase();
+    ancestor.chain[1].read_failed = true;
+    if (!Check(ShadowClassify(ancestor, ShadowRequest(), true).kind == DecisionKind::kTakeover,
+               "shadow-ancestor-read-failed-takeover")) return false;
+    ShadowAxCapture url_failed = ShadowBase();
+    url_failed.read_failed = true;
+    built = BuildShadowFacts(url_failed, ShadowRequest());
+    if (!Check((built.gaps & kShadowGapReadFailed) != 0 && !built.facts.metadata_complete, "shadow-url-read-failed"))
+      return false;
+
+    // A long attribute next to a short one is not "the short one": the node is not whole.
+    ShadowAxCapture long_attribute = ShadowBase();
+    long_attribute.chain[0].title = "Notes";
+    long_attribute.chain[0].description.clear();
+    long_attribute.chain[0].oversize = true;
+    built = BuildShadowFacts(long_attribute, ShadowRequest());
+    if (!Check((built.gaps & kShadowGapOversize) != 0 && !built.facts.metadata_complete, "shadow-oversize-flag-is-a-gap"))
+      return false;
+    if (!Check(ShadowClassify(long_attribute, ShadowRequest(), true).kind == DecisionKind::kTakeover,
+               "shadow-oversize-flag-takeover")) return false;
+
+    // The same on a neighbour: its caption is lost, so the neighbours are not complete.
+    for (const bool oversize : {true, false}) {
+      ShadowAxCapture neighbor = ShadowBase();
+      neighbor.neighbors = {ShadowNode("AXStaticText")};
+      neighbor.neighbors[0].value = "Year";
+      neighbor.neighbors[0].oversize = oversize;
+      neighbor.neighbors[0].read_failed = !oversize;
+      const ShadowFacts lost = BuildShadowFacts(neighbor, ShadowRequest());
+      if (!Check(!lost.facts.neighbor_labels_complete && lost.facts.neighbor_labels.empty() &&
+                     (lost.gaps & kShadowGapNeighborsIncomplete) != 0,
+                 "shadow-neighbor-lost-caption")) return false;
+    }
+    // Over the node count with the window last: the window would be cut, so the chain is cut short.
+    ShadowAxCapture deep = ShadowBase();
+    deep.chain.clear();
+    for (std::size_t index = 0; index + 1 < kShadowMaxCaptureNodes; ++index)
+      deep.chain.push_back(ShadowNode(index == 0 ? "AXButton" : "AXGroup", index == 0 ? "Save" : ""));
+    deep.chain.push_back(ShadowNode("AXWindow", "Notes"));
+    deep.chain_reached_root = true;
+    built = BuildShadowFacts(deep, ShadowRequest());
+    if (!Check(built.facts.chain.size() == kEffectMaxChainNodes && !built.facts.chain_complete &&
+                   (built.gaps & kShadowGapChainTruncated) != 0,
+               "shadow-ten-nodes-is-cut-short")) return false;
+    // Nine nodes ending at the window is whole.
+    deep.chain.erase(deep.chain.begin() + 1);
+    built = BuildShadowFacts(deep, ShadowRequest());
+    if (!Check(built.facts.chain.size() == kEffectMaxChainNodes && built.facts.chain_complete && built.gaps == 0,
+               "shadow-nine-nodes-to-the-window-is-whole")) return false;
+    // A role over the bound is dropped and is a gap.
+    ShadowAxCapture long_role = ShadowBase();
+    long_role.chain[1].role = std::string(kEffectMaxLabelBytes + 1, 'r');
+    built = BuildShadowFacts(long_role, ShadowRequest());
+    if (!Check((built.gaps & kShadowGapOversize) != 0 && built.facts.chain[1].role.empty() && !built.facts.metadata_complete,
+               "shadow-role-over-the-bound")) return false;
+  }
+
+  // Nothing was read: neither stricter nor looser, and a takeover of the unclassified kind.
+  for (const std::uint32_t gap : {kShadowGapV1Invalid, kShadowGapCanceled}) {
+    for (const bool v1 : {true, false}) {
+      const ShadowRecord skipped = ShadowSkippedRecord("invoke", gap, v1);
+      if (!Check(skipped.Skipped() && !skipped.V2IsStricter() && !skipped.V2IsLooser() &&
+                     skipped.kind == DecisionKind::kTakeover && skipped.effect_class == EffectClass::kUnclassified &&
+                     skipped.gaps == gap && skipped.v1_ordinary == v1 && skipped.action == ActionKind::kInvoke,
+                 "shadow-skipped-record")) return false;
+    }
+  }
+  if (!Check((ShadowSkippedRecord("nonsense", kShadowGapV1Invalid, false).gaps & kShadowGapUnsupportedAction) != 0,
+             "shadow-skipped-unknown-kind")) return false;
+
+  // The comparison with v1 goes both ways, and the record keeps what v1 said and what was asked.
+  {
+    ShadowAxCapture pay = ShadowBase();
+    pay.chain[0].title = "Place order";
+    const ShadowRecord stricter = ShadowClassify(pay, ShadowRequest(), true);
+    if (!Check(stricter.V2IsStricter() && !stricter.V2IsLooser() && stricter.v1_ordinary &&
+                   stricter.action == ActionKind::kInvoke && !stricter.Skipped(),
+               "shadow-record-stricter")) return false;
+    // v1 refused and v2 would let it through: the looser case that matters for the roll-out.
+    const ShadowRecord looser = ShadowClassify(ShadowBase(), ShadowRequest("click"), false);
+    if (!Check(looser.V2IsLooser() && !looser.V2IsStricter() && !looser.v1_ordinary &&
+                   looser.kind == DecisionKind::kOrdinary && looser.action == ActionKind::kClick,
+               "shadow-record-looser")) return false;
+    const ShadowRecord both_refuse = ShadowClassify(pay, ShadowRequest(), false);
+    if (!Check(!both_refuse.V2IsLooser() && !both_refuse.V2IsStricter() && !both_refuse.v1_ordinary,
+               "shadow-record-both-refuse")) return false;
+  }
+
+  // Schemes and executables the first cases did not reach.
+  {
+    ShadowAxCapture page = ShadowBase();
+    page.chain.insert(page.chain.begin() + 1, ShadowNode("AXWebArea", "Shop"));
+    page.web_area_url_read = true;
+    for (const std::string url : {"file:///Users/me/index.html", "chrome-devtools://devtools/x"}) {
+      page.web_area_url = url;
+      if (!Check(BuildShadowFacts(page, ShadowRequest()).facts.origin == OriginState::kOrdinary, "shadow-origin-more-schemes"))
+        return false;
+    }
+    page.web_area_url = "chrome-devtools://devtools/x";
+    if (!Check(BuildShadowFacts(page, ShadowRequest()).facts.surface == SurfaceKind::kDevToolsConsole, "shadow-chrome-devtools-surface"))
+      return false;
+    page.web_area_url = "javascript:alert(1)";
+    if (!Check(BuildShadowFacts(page, ShadowRequest()).facts.origin == OriginState::kUnknown, "shadow-origin-javascript"))
+      return false;
+    for (const auto &entry : std::vector<std::pair<std::string, SurfaceKind>>{
+             {"/Applications/Alfred 5.app/Contents/MacOS/Alfred", SurfaceKind::kCommandPalette},
+             {"/System/Library/CoreServices/Spotlight.app/Contents/MacOS/Spotlight", SurfaceKind::kCommandPalette},
+             {"/Applications/WezTerm.app/Contents/MacOS/wezterm-gui", SurfaceKind::kShellLike}}) {
+      ShadowRequestInfo request = ShadowRequest();
+      request.executable_path = entry.first;
+      if (!Check(BuildShadowFacts(ShadowBase(), request).facts.surface == entry.second, "shadow-surface-more-executables"))
+        return false;
+    }
+  }
+  std::cout << "Computer Use native effect shadow bounds: PASS\n";
   return true;
 }
 
@@ -2761,6 +2923,7 @@ int main() {
   if (!CheckNativeEligibility()) return 1;
   if (!CheckEffectClassifierCore()) return 1;
   if (!CheckEffectShadow()) return 1;
+  if (!CheckEffectShadowBounds()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

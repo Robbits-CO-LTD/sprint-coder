@@ -24,8 +24,8 @@
 namespace sprint_coder::computer_use {
 
 constexpr std::size_t kShadowLogCapacity = 64;
-// The walk reads one node more than the core accepts: the application element above the window is
-// read to know the window was the root, then dropped.
+// The walk reads one node more than the core accepts, so a chain that only just fits is told from
+// one that does not; a window ends the walk, and an application element (if reached) is dropped.
 constexpr std::size_t kShadowMaxCaptureNodes = kEffectMaxChainNodes + 1;
 
 // Why a fact set is not whole (bit set). Reported next to the decision, so a takeover can be told
@@ -39,6 +39,21 @@ constexpr std::uint32_t kShadowGapLanguage = 1u << 5;
 constexpr std::uint32_t kShadowGapOrigin = 1u << 6;
 constexpr std::uint32_t kShadowGapUnsupportedAction = 1u << 7;
 constexpr std::uint32_t kShadowGapRoleMissing = 1u << 8;
+// Nothing was read: v1 could not re-validate the bound target (closed, canceled, identity,
+// generation, eligibility, focus, stale), or the action was canceled while the capture ran.
+constexpr std::uint32_t kShadowGapV1Invalid = 1u << 9;
+constexpr std::uint32_t kShadowGapCanceled = 1u << 10;
+// The call or time budget ran out before the capture was whole.
+constexpr std::uint32_t kShadowGapBudget = 1u << 11;
+// An attribute failed to read (not "no value"): the facts are missing something.
+constexpr std::uint32_t kShadowGapReadFailed = 1u << 12;
+
+// The shadow shares the serial lane with the preflight, so a capture is bounded: AX calls, and
+// time on a monotonic clock. The numbers are a share of the lane's budgets (the Cancel ack waits
+// one second, the Close drain ten) that a normal capture fits in (about 250 calls, well under a
+// millisecond each), and are to be measured on a real device (#777).
+constexpr std::uint32_t kShadowMaxAxCalls = 640;
+constexpr std::uint64_t kShadowDeadlineNs = 150'000'000;
 
 // One accessibility node as read. An attribute that is absent or could not be read is empty.
 struct ShadowAxNode {
@@ -51,6 +66,12 @@ struct ShadowAxNode {
   std::string placeholder;
   // Only ever filled for static text (a form caption), never for an editable control.
   std::string value;
+  // An attribute was longer than the core accepts (kEffectMaxLabelBytes): it was not read, and
+  // the node is not whole. Never an empty string.
+  bool oversize = false;
+  // An attribute failed to read for a reason other than "no value" / "unsupported", or the
+  // capture stopped before it: the node is not whole.
+  bool read_failed = false;
 };
 
 struct ShadowAxCapture {
@@ -58,7 +79,8 @@ struct ShadowAxCapture {
   // [0] is the target, then its parents, at most kShadowMaxCaptureNodes. The walk stops after a
   // window, or at the application element.
   std::vector<ShadowAxNode> chain;
-  // The walk ended because there was no parent (or it reached the window), not because of the cap.
+  // The walk arrived at a window or the application element. A parent that was missing or could
+  // not be read, or the cap, leaves this false: the chain is cut short.
   bool chain_reached_root = false;
   // The other children of the target's parent.
   std::vector<ShadowAxNode> neighbors;
@@ -71,6 +93,33 @@ struct ShadowAxCapture {
   // The URL of the AXWebArea in the chain, when there is one and it could be read.
   bool web_area_url_read = false;
   std::string web_area_url;
+  // The call or time budget ran out, or a read of the target's URL / file name failed.
+  bool budget_exhausted = false;
+  bool read_failed = false;
+};
+
+// Spends AX calls against a count and a deadline. Pure: the caller passes the time.
+class ShadowBudget {
+public:
+  explicit ShadowBudget(std::uint64_t start_ns) : deadline_ns_(start_ns + kShadowDeadlineNs) {}
+  // One more AX call: false (and from then on always false) when the calls are used up or the
+  // deadline has passed.
+  [[nodiscard]] bool Spend(std::uint64_t now_ns) {
+    if (exhausted_) return false;
+    if (calls_ >= kShadowMaxAxCalls || now_ns > deadline_ns_) {
+      exhausted_ = true;
+      return false;
+    }
+    ++calls_;
+    return true;
+  }
+  [[nodiscard]] bool Exhausted() const { return exhausted_; }
+  [[nodiscard]] std::uint32_t Calls() const { return calls_; }
+
+private:
+  std::uint64_t deadline_ns_;
+  std::uint32_t calls_ = 0;
+  bool exhausted_ = false;
 };
 
 struct ShadowRequestInfo {
@@ -244,6 +293,7 @@ struct ItemFacts {
   bool chain_reached_root = capture.chain_reached_root;
   if (!nodes.empty() && Lowercase(nodes.back().role) == "axapplication") nodes.pop_back();
   bool oversize = false;
+  bool node_read_failed = false;
   if (nodes.size() > kEffectMaxChainNodes) {
     nodes.resize(kEffectMaxChainNodes);
     chain_reached_root = false;
@@ -254,7 +304,8 @@ struct ItemFacts {
   bool web_area = false;
   for (const ShadowAxNode &node : nodes) {
     NodeFacts fact;
-    if (!NodeIsBounded(node) || !JoinLabel(node, &fact.label)) oversize = true;
+    if (node.oversize || !NodeIsBounded(node) || !JoinLabel(node, &fact.label)) oversize = true;
+    if (node.read_failed) node_read_failed = true;
     if (!NodeIsBounded(node)) {
       fact.role.clear();
     } else {
@@ -265,17 +316,20 @@ struct ItemFacts {
     facts.chain.push_back(std::move(fact));
   }
   if (oversize) result.gaps |= kShadowGapOversize;
+  if (node_read_failed || capture.read_failed) result.gaps |= kShadowGapReadFailed;
+  if (capture.budget_exhausted) result.gaps |= kShadowGapBudget;
   const bool role_present = !nodes.empty() && !nodes.front().role.empty();
   if (!nodes.empty() && !role_present) result.gaps |= kShadowGapRoleMissing;
   facts.metadata_complete = capture.target_found && role_present && !oversize &&
+                            !node_read_failed && !capture.read_failed && !capture.budget_exhausted &&
                             (result.gaps & kShadowGapUnsupportedAction) == 0;
   facts.chain_complete = chain_reached_root && !nodes.empty();
 
   // Captions near the target. Empty ones carry nothing and are dropped.
-  bool neighbors_complete = capture.neighbors_complete;
+  bool neighbors_complete = capture.neighbors_complete && !capture.budget_exhausted;
   for (const ShadowAxNode &node : capture.neighbors) {
     std::string label;
-    if (!JoinLabel(node, &label)) {
+    if (node.oversize || node.read_failed || !JoinLabel(node, &label)) {
       neighbors_complete = false;
       continue;
     }
@@ -329,11 +383,33 @@ struct ShadowRecord {
   std::uint32_t gaps = 0;
   // What the v1 preflight said: it let the action through as ordinary.
   bool v1_ordinary = false;
-  [[nodiscard]] bool V2IsStricter() const { return v1_ordinary && kind != DecisionKind::kOrdinary; }
-  [[nodiscard]] bool V2IsLooser() const { return !v1_ordinary && kind == DecisionKind::kOrdinary; }
+  // Nothing was read (v1 could not re-validate the target, or the action was canceled): not a
+  // comparison, so it is neither stricter nor looser.
+  [[nodiscard]] bool Skipped() const {
+    return (gaps & (kShadowGapV1Invalid | kShadowGapCanceled)) != 0;
+  }
+  [[nodiscard]] bool V2IsStricter() const {
+    return !Skipped() && v1_ordinary && kind != DecisionKind::kOrdinary;
+  }
+  [[nodiscard]] bool V2IsLooser() const {
+    return !Skipped() && !v1_ordinary && kind == DecisionKind::kOrdinary;
+  }
 };
 static_assert(std::is_trivially_copyable_v<ShadowRecord>,
               "a shadow record must not be able to hold text");
+
+// A shadow that read nothing (see kShadowGapV1Invalid / kShadowGapCanceled): not a classification.
+// It is a takeover of the unclassified kind, so a count of "v2 is looser" never includes it.
+[[nodiscard]] inline ShadowRecord ShadowSkippedRecord(std::string_view kind, std::uint32_t gap,
+                                                      bool v1_ordinary) {
+  ShadowRecord record;
+  ActionKind action = ActionKind::kClick;
+  if (!ShadowActionForKind(kind, &action)) gap |= kShadowGapUnsupportedAction;
+  record.action = action;
+  record.gaps = gap;
+  record.v1_ordinary = v1_ordinary;
+  return record;
+}
 
 [[nodiscard]] inline ShadowRecord ShadowClassify(const ShadowAxCapture &capture,
                                                  const ShadowRequestInfo &request,

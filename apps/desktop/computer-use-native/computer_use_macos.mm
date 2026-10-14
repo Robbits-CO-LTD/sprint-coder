@@ -4815,8 +4815,11 @@ NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request
 // posts an event, performs an AX action, sets an AX value, activates an app, or increments the
 // input attempt counter. Dispatch still re-runs every guard (RiskOutcome included) after a ticket is
 // consumed; a ticket is a typed preflight proof, never permission to skip a guard.
-NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& request) {
+NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& request,
+                                               NativeTargetValidation* initial_validation) {
   NativeTargetValidation validation = RevalidateBoundTarget(request);
+  // Reported for the shadow only: whether the bound target could be re-validated at all.
+  *initial_validation = validation;
   if (validation != NativeTargetValidation::kValid)
     return PreflightReceiptFromOutcome(OutcomeForValidation(validation, false));
   NativeDispatchOutcome outcome;
@@ -4861,85 +4864,211 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
 }
 
 // BEGIN effect shadow capture (classifier v2 C2)
-// The v2 effect classifier runs here in shadow: it reads the same target the v1 preflight just
-// judged, builds the portable facts, classifies, and keeps an enum-only summary in a bounded ring
-// and one os_log line. Nothing here decides anything: the v1 receipt returned to the caller is the
-// one PerformNativePreflightV1 produced, an exception is swallowed, and no input API, AX action,
-// AX write or focus change is reachable from this section. It reads only role, subrole, title,
+// The v2 effect classifier runs here in shadow: it reads the target the v1 preflight just judged,
+// builds the portable facts, classifies, and keeps an enum-only summary in a bounded ring and one
+// os_log line. Nothing here decides anything: the v1 receipt returned to the caller is the one
+// PerformNativePreflightV1 produced, an exception is swallowed, and no input API, AX action, AX
+// write or focus change is reachable from this section. It reads only role, subrole, title,
 // description, help, identifier, placeholder, the value of static text, parent, children, URL and
-// file name, all with the existing read helpers.
+// file name.
+//
+// It runs on the serial lane the v1 preflight holds, so it is bounded and gives way:
+//   * it does not read at all when v1 could not re-validate the bound target (closed, canceled,
+//     identity, generation, eligibility, focus or stale observation), when the session is gone or
+//     when the cancellation epoch has moved;
+//   * before every AX call it checks the cancellation epoch and spends one call of a budget of
+//     kShadowMaxAxCalls calls and kShadowDeadlineNs on a monotonic clock, and stops at the first
+//     refusal; a stopped capture is incomplete, and incomplete is a takeover for the core;
+//   * a string longer than the core accepts, or an attribute that failed to read (anything but
+//     "no value" / "unsupported"), is a gap, never an empty string.
+// AXUIElementSetMessagingTimeout is not used: its reach over elements derived from the one it is
+// set on is not established, so one hung call can still last the system default (see the ADR).
+class ShadowCfRef {
+ public:
+  ShadowCfRef() = default;
+  explicit ShadowCfRef(CFTypeRef ref) : ref_(ref) {}
+  ShadowCfRef(const ShadowCfRef&) = delete;
+  ShadowCfRef& operator=(const ShadowCfRef&) = delete;
+  ShadowCfRef(ShadowCfRef&& other) noexcept : ref_(other.ref_) { other.ref_ = nullptr; }
+  ShadowCfRef& operator=(ShadowCfRef&& other) noexcept {
+    if (this != &other) {
+      Reset();
+      ref_ = other.ref_;
+      other.ref_ = nullptr;
+    }
+    return *this;
+  }
+  ~ShadowCfRef() { Reset(); }
+  CFTypeRef Get() const { return ref_; }
+  AXUIElementRef Element() const { return static_cast<AXUIElementRef>(const_cast<void*>(ref_)); }
+  void Reset(CFTypeRef ref = nullptr) {
+    if (ref_ != nullptr) CFRelease(ref_);
+    ref_ = ref;
+  }
+
+ private:
+  CFTypeRef ref_ = nullptr;
+};
+
 sprint_coder::computer_use::EffectShadowLog& EffectShadowRing() {
   static sprint_coder::computer_use::EffectShadowLog ring;
   return ring;
 }
 
-bool CopyShadowUrlString(AXUIElementRef element, CFStringRef attribute, std::string* output) {
-  CFTypeRef value = nullptr;
-  if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess ||
-      value == nullptr) {
-    if (value != nullptr) CFRelease(value);
-    return false;
-  }
-  CFStringRef text = nullptr;
-  if (CFGetTypeID(value) == CFURLGetTypeID()) {
-    text = CFURLGetString(static_cast<CFURLRef>(value));
-  } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
-    text = static_cast<CFStringRef>(value);
-  }
-  bool copied = false;
-  if (text != nullptr) {
-    const CFIndex length = CFStringGetLength(text);
-    const CFIndex maximum = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
-    if (maximum > 0 && maximum <= 4096) {
-      std::string buffer(static_cast<std::size_t>(maximum), '\0');
-      if (CFStringGetCString(text, buffer.data(), maximum, kCFStringEncodingUTF8)) {
-        buffer.resize(std::char_traits<char>::length(buffer.c_str()));
-        *output = std::move(buffer);
-        copied = true;
-      }
+struct ShadowReader {
+  const NativeDispatchRequest& request;
+  sprint_coder::computer_use::ShadowBudget budget;
+  bool canceled = false;
+
+  explicit ShadowReader(const NativeDispatchRequest& source)
+      : request(source), budget(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) {}
+
+  // One AX call is about to be made: false when the action was canceled or the budget is spent.
+  bool Step() {
+    if (!DispatchCancellationStillValid(request)) {
+      canceled = true;
+      return false;
     }
+    return budget.Spend(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
   }
-  CFRelease(value);
-  return copied;
+};
+
+enum class ShadowRead { kOk, kAbsent, kFailed, kTooLong, kStopped };
+
+// A string attribute. "No value" and "unsupported" are an absent attribute; any other error is a
+// failed read; a string longer than `maximum_units` is too long (never truncated, never empty).
+ShadowRead ReadShadowString(ShadowReader& reader, AXUIElementRef element, CFStringRef attribute,
+                            std::size_t maximum_units, std::string* output) {
+  if (!reader.Step()) return ShadowRead::kStopped;
+  CFTypeRef value = nullptr;
+  const AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
+  ShadowCfRef holder(value);
+  if (error == kAXErrorNoValue || error == kAXErrorAttributeUnsupported ||
+      error == kAXErrorNotImplemented)
+    return ShadowRead::kAbsent;
+  if (error != kAXErrorSuccess) return ShadowRead::kFailed;
+  if (value == nullptr) return ShadowRead::kAbsent;
+  CFStringRef text = nullptr;
+  if (CFGetTypeID(value) == CFStringGetTypeID()) {
+    text = static_cast<CFStringRef>(value);
+  } else if (CFGetTypeID(value) == CFURLGetTypeID()) {
+    text = CFURLGetString(static_cast<CFURLRef>(value));
+  }
+  if (text == nullptr) return ShadowRead::kAbsent;
+  const CFIndex length = CFStringGetLength(text);
+  if (length < 0 || static_cast<std::size_t>(length) > maximum_units) return ShadowRead::kTooLong;
+  const CFIndex maximum = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+  std::string buffer(static_cast<std::size_t>(maximum), '\0');
+  if (!CFStringGetCString(text, buffer.data(), maximum, kCFStringEncodingUTF8))
+    return ShadowRead::kFailed;
+  buffer.resize(std::char_traits<char>::length(buffer.c_str()));
+  *output = std::move(buffer);
+  return ShadowRead::kOk;
 }
 
-sprint_coder::computer_use::ShadowAxNode ReadShadowNode(AXUIElementRef element,
+// A child or parent element. A missing value is "none"; any other error is a failed read.
+ShadowRead ReadShadowElement(ShadowReader& reader, AXUIElementRef element, CFStringRef attribute,
+                             ShadowCfRef* output) {
+  if (!reader.Step()) return ShadowRead::kStopped;
+  CFTypeRef value = nullptr;
+  const AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
+  ShadowCfRef holder(value);
+  if (error == kAXErrorNoValue || error == kAXErrorAttributeUnsupported ||
+      error == kAXErrorNotImplemented)
+    return ShadowRead::kAbsent;
+  if (error != kAXErrorSuccess) return ShadowRead::kFailed;
+  if (value == nullptr || CFGetTypeID(value) != AXUIElementGetTypeID()) return ShadowRead::kAbsent;
+  CFRetain(value);
+  output->Reset(value);
+  return ShadowRead::kOk;
+}
+
+sprint_coder::computer_use::ShadowAxNode ReadShadowNode(ShadowReader& reader,
+                                                        AXUIElementRef element,
                                                         bool read_static_text_value) {
+  using sprint_coder::computer_use::kEffectMaxLabelBytes;
   sprint_coder::computer_use::ShadowAxNode node;
-  CopyAccessibilityString(element, kAXRoleAttribute, &node.role);
-  CopyAccessibilityString(element, kAXSubroleAttribute, &node.subrole);
-  CopyAccessibilityString(element, kAXTitleAttribute, &node.title);
-  CopyAccessibilityString(element, kAXDescriptionAttribute, &node.description);
-  CopyAccessibilityString(element, kAXHelpAttribute, &node.help);
-  if (@available(macOS 10.10, *))
-    CopyAccessibilityString(element, kAXIdentifierAttribute, &node.identifier);
-  CopyAccessibilityString(element, kAXPlaceholderValueAttribute, &node.placeholder);
+  const auto read = [&](CFStringRef attribute, std::string* output) {
+    switch (ReadShadowString(reader, element, attribute, kEffectMaxLabelBytes, output)) {
+      case ShadowRead::kTooLong:
+        node.oversize = true;
+        break;
+      case ShadowRead::kFailed:
+      case ShadowRead::kStopped:
+        node.read_failed = true;
+        break;
+      default:
+        break;
+    }
+  };
+  read(kAXRoleAttribute, &node.role);
+  read(kAXSubroleAttribute, &node.subrole);
+  read(kAXTitleAttribute, &node.title);
+  read(kAXDescriptionAttribute, &node.description);
+  read(kAXHelpAttribute, &node.help);
+  if (@available(macOS 10.10, *)) read(kAXIdentifierAttribute, &node.identifier);
+  read(kAXPlaceholderValueAttribute, &node.placeholder);
   // The text of a caption. An editable control's value is never read.
-  if (read_static_text_value && node.role == "AXStaticText")
-    CopyAccessibilityString(element, kAXValueAttribute, &node.value);
+  if (read_static_text_value && node.role == "AXStaticText") read(kAXValueAttribute, &node.value);
   return node;
 }
 
-// The element the action lands on, found the way the v1 preflight finds it. The caller releases it.
-AXUIElementRef CopyShadowTarget(const NativeDispatchRequest& request) {
+// The target found by a bounded walk of the focused window, matching what v1's search matches (an
+// identifier or a title equal to the target id; two matches are none). Every read is on budget.
+ShadowCfRef FindShadowSemanticTarget(ShadowReader& reader, AXUIElementRef element,
+                                     std::string_view target_id, int depth, int* matches) {
+  if (element == nullptr || depth > 16 || *matches > 1) return ShadowCfRef();
+  std::string text;
+  if (ReadShadowString(reader, element, kAXIdentifierAttribute, 256, &text) == ShadowRead::kOk &&
+      text == target_id) {
+    ++*matches;
+    CFRetain(element);
+    return ShadowCfRef(element);
+  }
+  text.clear();
+  if (ReadShadowString(reader, element, kAXTitleAttribute, 256, &text) == ShadowRead::kOk &&
+      text == target_id) {
+    ++*matches;
+    CFRetain(element);
+    return ShadowCfRef(element);
+  }
+  if (!reader.Step()) return ShadowCfRef();
+  CFTypeRef children_value = nullptr;
+  const AXError error = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value);
+  ShadowCfRef children_holder(children_value);
+  if (error != kAXErrorSuccess || children_value == nullptr ||
+      CFGetTypeID(children_value) != CFArrayGetTypeID())
+    return ShadowCfRef();
+  ShadowCfRef match;
+  const CFArrayRef children = static_cast<CFArrayRef>(children_value);
+  for (CFIndex index = 0; index < CFArrayGetCount(children) && *matches <= 1; ++index) {
+    const void* child = CFArrayGetValueAtIndex(children, index);
+    if (child == nullptr || CFGetTypeID(child) != AXUIElementGetTypeID()) continue;
+    ShadowCfRef candidate = FindShadowSemanticTarget(
+        reader, static_cast<AXUIElementRef>(const_cast<void*>(child)), target_id, depth + 1, matches);
+    if (candidate.Get() != nullptr) match = std::move(candidate);
+    if (reader.canceled || reader.budget.Exhausted()) break;
+  }
+  return match;
+}
+
+// The element the action lands on, found the way the v1 preflight finds it.
+ShadowCfRef CopyShadowTarget(ShadowReader& reader) {
+  const NativeDispatchRequest& request = reader.request;
+  AXUIElementRef created =
+      AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
+  if (created == nullptr) return ShadowCfRef();
+  ShadowCfRef application(created);
   if (request.kind == "invoke" || request.kind == "set_text" || request.kind == "select" ||
       request.kind == "toggle" || request.kind == "expand_collapse") {
-    AXUIElementRef application =
-        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
-    if (application == nullptr) return nullptr;
-    AXUIElementRef focused_window =
-        CopyAccessibilityElementAttribute(application, kAXFocusedWindowAttribute);
-    CFRelease(application);
-    if (focused_window == nullptr) return nullptr;
+    ShadowCfRef focused_window;
+    if (ReadShadowElement(reader, application.Element(), kAXFocusedWindowAttribute,
+                          &focused_window) != ShadowRead::kOk)
+      return ShadowCfRef();
     int matches = 0;
-    AXUIElementRef target =
-        FindAccessibilityTarget(focused_window, request.target_id, 0, &matches);
-    CFRelease(focused_window);
-    if (target != nullptr && matches != 1) {
-      CFRelease(target);
-      return nullptr;
-    }
-    return target;
+    ShadowCfRef target = FindShadowSemanticTarget(reader, focused_window.Element(),
+                                                  request.target_id, 0, &matches);
+    return matches == 1 ? std::move(target) : ShadowCfRef();
   }
   if (request.kind == "click" || request.kind == "scroll") {
     const CGPoint point = CGPointMake(
@@ -4947,75 +5076,69 @@ AXUIElementRef CopyShadowTarget(const NativeDispatchRequest& request) {
             request.x * std::max<CGFloat>(0, request.observation_bounds.size.width - 1),
         request.observation_bounds.origin.y +
             request.y * std::max<CGFloat>(0, request.observation_bounds.size.height - 1));
-    AXUIElementRef application =
-        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
-    if (application == nullptr) return nullptr;
+    if (!reader.Step()) return ShadowCfRef();
     AXUIElementRef element = nullptr;
     const AXError copied = AXUIElementCopyElementAtPosition(
-        application, static_cast<float>(point.x), static_cast<float>(point.y), &element);
-    CFRelease(application);
-    if (copied != kAXErrorSuccess || element == nullptr) {
-      if (element != nullptr) CFRelease(element);
-      return nullptr;
-    }
-    return element;
+        application.Element(), static_cast<float>(point.x), static_cast<float>(point.y), &element);
+    ShadowCfRef holder(element);
+    return copied == kAXErrorSuccess && element != nullptr ? std::move(holder) : ShadowCfRef();
   }
   if (request.kind == "type" || request.kind == "key") {
-    AXUIElementRef application =
-        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
-    if (application == nullptr) return nullptr;
-    AXUIElementRef focused = nullptr;
-    const AXError copied = AXUIElementCopyAttributeValue(
-        application, kAXFocusedUIElementAttribute, reinterpret_cast<CFTypeRef*>(&focused));
-    CFRelease(application);
-    if (copied != kAXErrorSuccess || focused == nullptr) {
-      if (focused != nullptr) CFRelease(focused);
-      return nullptr;
-    }
+    ShadowCfRef focused;
+    if (ReadShadowElement(reader, application.Element(), kAXFocusedUIElementAttribute,
+                          &focused) != ShadowRead::kOk)
+      return ShadowCfRef();
     return focused;
   }
-  return nullptr;
+  return ShadowCfRef();
 }
 
 // The target and its parents up to the window (or the application element), at most
-// kShadowMaxCaptureNodes nodes.
-void CaptureShadowChain(AXUIElementRef target, sprint_coder::computer_use::ShadowAxCapture* capture) {
+// kShadowMaxCaptureNodes nodes. The walk reached the root only by arriving at a window or the
+// application element: a parent that is missing or could not be read leaves the chain cut short.
+void CaptureShadowChain(ShadowReader& reader, AXUIElementRef target,
+                        sprint_coder::computer_use::ShadowAxCapture* capture) {
   CFRetain(target);
-  AXUIElementRef current = target;
+  ShadowCfRef current{target};
   for (std::size_t depth = 0;
-       current != nullptr && depth < sprint_coder::computer_use::kShadowMaxCaptureNodes; ++depth) {
-    capture->chain.push_back(ReadShadowNode(current, false));
+       current.Get() != nullptr && depth < sprint_coder::computer_use::kShadowMaxCaptureNodes;
+       ++depth) {
+    capture->chain.push_back(ReadShadowNode(reader, current.Element(), false));
     const std::string role = capture->chain.back().role;
-    if (role == "AXWebArea" && !capture->web_area_url_read)
-      capture->web_area_url_read = CopyShadowUrlString(current, kAXURLAttribute, &capture->web_area_url);
+    if (role == "AXWebArea" && !capture->web_area_url_read) {
+      std::string url;
+      if (ReadShadowString(reader, current.Element(), kAXURLAttribute, 2048, &url) ==
+          ShadowRead::kOk) {
+        capture->web_area_url_read = true;
+        capture->web_area_url = std::move(url);
+      }
+    }
     if (role == "AXWindow" || role == "AXApplication") {
       capture->chain_reached_root = true;
-      CFRelease(current);
-      current = nullptr;
-      break;
+      return;
     }
-    AXUIElementRef parent = CopyAccessibilityElementAttribute(current, kAXParentAttribute);
-    CFRelease(current);
-    current = parent;
-    if (current == nullptr) capture->chain_reached_root = true;
+    ShadowCfRef parent;
+    if (ReadShadowElement(reader, current.Element(), kAXParentAttribute, &parent) !=
+        ShadowRead::kOk)
+      return;
+    current = std::move(parent);
   }
-  if (current != nullptr) CFRelease(current);
 }
 
 // The other children of the target's parent, for the captions a page puts beside a field.
-void CaptureShadowNeighbors(AXUIElementRef target,
+void CaptureShadowNeighbors(ShadowReader& reader, AXUIElementRef target,
                             sprint_coder::computer_use::ShadowAxCapture* capture) {
   capture->neighbors_complete = false;
-  AXUIElementRef parent = CopyAccessibilityElementAttribute(target, kAXParentAttribute);
-  if (parent == nullptr) return;
+  ShadowCfRef parent;
+  if (ReadShadowElement(reader, target, kAXParentAttribute, &parent) != ShadowRead::kOk) return;
+  if (!reader.Step()) return;
   CFTypeRef children_value = nullptr;
-  if (AXUIElementCopyAttributeValue(parent, kAXChildrenAttribute, &children_value) !=
-          kAXErrorSuccess ||
-      children_value == nullptr || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
-    if (children_value != nullptr) CFRelease(children_value);
-    CFRelease(parent);
+  const AXError error =
+      AXUIElementCopyAttributeValue(parent.Element(), kAXChildrenAttribute, &children_value);
+  ShadowCfRef children_holder(children_value);
+  if (error != kAXErrorSuccess || children_value == nullptr ||
+      CFGetTypeID(children_value) != CFArrayGetTypeID())
     return;
-  }
   const CFArrayRef children = static_cast<CFArrayRef>(children_value);
   const CFIndex count = CFArrayGetCount(children);
   bool complete = true;
@@ -5031,45 +5154,71 @@ void CaptureShadowNeighbors(AXUIElementRef target,
     }
     if (CFEqual(child, target)) continue;
     capture->neighbors.push_back(
-        ReadShadowNode(static_cast<AXUIElementRef>(const_cast<void*>(child)), true));
+        ReadShadowNode(reader, static_cast<AXUIElementRef>(const_cast<void*>(child)), true));
+    if (reader.canceled || reader.budget.Exhausted()) {
+      complete = false;
+      break;
+    }
   }
   capture->neighbors_complete = complete;
-  CFRelease(children_value);
-  CFRelease(parent);
 }
 
-void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary) noexcept {
+void EmitShadowRecord(const sprint_coder::computer_use::ShadowRecord& record) {
+  EffectShadowRing().Record(record);
+  // Enum values and counters only: never a label, a title, a URL or a path.
+  os_log_info(OS_LOG_DEFAULT,
+              "computer-use effect shadow action=%{public}u class=%{public}u kind=%{public}u "
+              "reason=%{public}u gaps=%{public}u v1_ordinary=%{public}d",
+              static_cast<unsigned>(record.action), static_cast<unsigned>(record.effect_class),
+              static_cast<unsigned>(record.kind), static_cast<unsigned>(record.reason),
+              static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
+}
+
+void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
+                        NativeTargetValidation v1_validation) noexcept {
+  using namespace sprint_coder::computer_use;
   try {
-    sprint_coder::computer_use::ShadowAxCapture capture;
-    AXUIElementRef target = CopyShadowTarget(request);
-    if (target != nullptr) {
+    // v1 could not re-validate the bound target, or the action was canceled: nothing is read.
+    if (request.session == nullptr || v1_validation != NativeTargetValidation::kValid) {
+      EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapV1Invalid, v1_ordinary));
+      return;
+    }
+    if (!DispatchCancellationStillValid(request)) {
+      EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapCanceled, v1_ordinary));
+      return;
+    }
+    ShadowReader reader(request);
+    ShadowAxCapture capture;
+    ShadowCfRef target = CopyShadowTarget(reader);
+    if (target.Get() != nullptr) {
       capture.target_found = true;
-      CaptureShadowChain(target, &capture);
-      CaptureShadowNeighbors(target, &capture);
+      CaptureShadowChain(reader, target.Element(), &capture);
+      CaptureShadowNeighbors(reader, target.Element(), &capture);
       std::string url;
-      if (CopyShadowUrlString(target, kAXURLAttribute, &url)) {
+      const ShadowRead url_read = ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, &url);
+      if (url_read == ShadowRead::kOk) {
         capture.url_present = true;
         capture.url = std::move(url);
+      } else if (url_read == ShadowRead::kFailed || url_read == ShadowRead::kTooLong) {
+        capture.read_failed = true;
       }
-      CopyAccessibilityString(target, kAXFilenameAttribute, &capture.filename);
-      CFRelease(target);
+      const ShadowRead name_read = ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
+                                                    kEffectMaxLabelBytes, &capture.filename);
+      if (name_read == ShadowRead::kFailed || name_read == ShadowRead::kTooLong)
+        capture.read_failed = true;
     }
-    sprint_coder::computer_use::ShadowRequestInfo info;
+    if (reader.canceled) {
+      EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapCanceled, v1_ordinary));
+      return;
+    }
+    capture.budget_exhausted = reader.budget.Exhausted();
+    ShadowRequestInfo info;
     info.kind = request.kind;
     info.key = request.key;
     info.maximum_mode = request.session->maximum_mode;
     info.policy_language = request.session->policy_language;
     info.executable_path = request.session->executable_path;
-    const sprint_coder::computer_use::ShadowRecord record =
-        sprint_coder::computer_use::ShadowClassify(capture, info, v1_ordinary);
-    EffectShadowRing().Record(record);
-    // Enum values and counters only: never a label, a title, a URL or a path.
-    os_log_info(OS_LOG_DEFAULT,
-                "computer-use effect shadow action=%{public}u class=%{public}u kind=%{public}u "
-                "reason=%{public}u gaps=%{public}u v1_ordinary=%{public}d",
-                static_cast<unsigned>(record.action), static_cast<unsigned>(record.effect_class),
-                static_cast<unsigned>(record.kind), static_cast<unsigned>(record.reason),
-                static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
+    EmitShadowRecord(ShadowClassify(capture, info, v1_ordinary));
   } catch (...) {
     // A shadow failure is invisible to the caller.
   }
@@ -5078,8 +5227,9 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary) 
 
 // The v1 preflight decides; the shadow only watches. The receipt is returned exactly as v1 built it.
 NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
-  NativePreflightReceipt receipt = PerformNativePreflightV1(request);
-  RecordEffectShadow(request, receipt.decision == "ordinary");
+  NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;
+  NativePreflightReceipt receipt = PerformNativePreflightV1(request, &v1_validation);
+  RecordEffectShadow(request, receipt.decision == "ordinary", v1_validation);
   return receipt;
 }
 
