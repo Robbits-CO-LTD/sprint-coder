@@ -674,10 +674,10 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 3. 同じツール呼び出し（`act`）の中で `awaitNativeApproval` に入る。カードはここで作る。V1 の `authorizeTool` の `awaitApproval` とは別のカードで、V1 の `allow_once` / `allow_plan` / `planGrantAuthorizedCalls` は、native の単発承認の代わりにならない（N2b-3 の 3）。したがって、`supervised` では V1 のカードの後にこのカードが出ることがある。`full_access_app` では V1 のカードは出ず、このカードだけが出る。native が承認を要求した操作でだけ 2 枚目が出るので、頻度は低い。**オーナー決定（2026-10-14）: A（カードを 2 枚出す）。B（native のカード 1 枚に統合する）は後続の改善として扱う。**
 4. trusted activation を消費できたら、controller が Main 側の検査（後述の 3）を行い、新しい requestId で再観測する（既存の `resolveApproval` の復帰・`startSession`・`approvedObservationEquivalent` を再利用する）。
 5. addon の承認遷移 `approvalApprove` を呼ぶ。native が再 preflight を行い、成功したら intent を消費して execution ticket を発行する。`approvalApprove` は入力の能力を持たない。
-6. 成功したときだけ、新しい dispatch request ID で `dispatch` を呼ぶ。execution ticket は addon の外に出ない（TS は `sessionId` と `approvalGeneration` で参照する）。結果の監査行 (c) を確定し、元のツール呼び出しへ返す。
-7. 拒否・取り消し・期限切れ・activation の失敗・Main 側の検査の失敗では、`approvalDiscard` を呼んで slot を即座に失効させ、(b) の `approval_outcome` を記録し、(c) は作らない。
+6. 成功したときだけ、承認後の入力専用の別経路 `dispatchApproved` を呼ぶ（TS は `preflight` を呼ばない）。execution ticket は addon の外に出ない（TS は `sessionId` と `approvalGeneration` で参照する）。結果の監査行 (c) を確定し、元のツール呼び出しへ返す。
+7. 拒否・取り消し・期限切れ・activation の失敗・Main 側の検査の失敗では、`approvalDiscard` を呼んで slot を即座に失効させ、(b) の `approval_outcome` を記録し、(c) は作らない。`approvalApprove` が失敗した場合は、(c) を `approvalApprove` の前に `pending` で作ってあるので、それを `rejected` で確定する（8 を参照）。ツールへ返す `reasonCode` は Main の固定値で、`denied` は `native_approval_denied`、`expired` は `native_approval_expired`、`revoked` は `native_approval_revoked`、再 preflight の失敗は `native_approval_revalidation_failed` とする（native の理由はそのまま転送しない）。
 
-**addon の呼び出し（名前を固定する）**: `preflight`（既存。ticket の発行までで、承認の遷移はしない）、`approvalApprove`（再 preflight → intent の消費 → execution ticket の発行。入力の能力なし）、`approvalDiscard`（`sessionId` と `approvalGeneration` を指定して slot を失効させるだけ。入力の能力なし。世代が違えば何もしない）、`dispatch`（既存。ordinary ticket か execution ticket を addon 内の参照で要求する）。これらはすべて macOS の addon にだけ置く。
+**addon の呼び出し（名前を固定する）**: `preflight`（既存。ticket の発行までで、承認の遷移はしない）、`approvalApprove`（再 preflight → intent の消費 → execution ticket の発行。入力の能力なし）、`approvalDiscard`（`sessionId` と `approvalGeneration` を指定して slot を失効させるだけ。入力の能力なし。世代が違えば何もしない）、`dispatch`（既存。ordinary ticket だけを要求する）、`dispatchApproved`（仮称。承認後の入力専用の別経路で、`approvalGeneration` だけを要求する。`ticket` が同時に指定されたら拒否する。native は dispatch の直前に再分類し、結果がまだ承認対象（`single_use_approval`）なら、新しい intent を発行せずに `rejected` で拒否する）。これらはすべて macOS の addon にだけ置く。承認の slot を失効させるのは、新しい intent による置換（Begin）、`approvalDiscard`、cancel、close、期限切れだけである。`observe` や `startSession` の refocus では失効させない。identity や geometry の変化は、`approvalApprove` の再 preflight が検出し、その試行で slot を使い切る。
 
 1. **発行主体と、Main に渡すもの**
    - intent token と execution token は native だけが発行する（N2b-3 の 1）。token の値は addon（`.mm`）の slot の外に出さない。Main の TS は token を持たず、`sessionId` と `approvalGeneration` だけを参照に使う。
@@ -692,11 +692,13 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
      | `single_use_approval`             | `approvalGeneration`、`remainingMs`、`effect` | `approvalGeneration` は 1 以上の安全な整数。`remainingMs` は 1 以上 60000 以下の整数。`effect` は下の 4 つの文字列。`ticket` などは null |
 
    - `effect` の文字列の集合は `download_open` / `file_manager_open` / `high_impact_confirmation` / `supervised_action` に固定する。native の `NativeApprovalEffect`（`kInvalid` を除く 4 値）と 1 対 1 で、契約テストで `.h` と Main の集合を照合する。集合にない値は `native_preflight_invalid`。
+   - `single_use_approval` を受け付けるのは `classifierVersion` が 2 のときだけである。Main 側の固定値は定数（`NATIVE_APPROVAL_CLASSIFIER_VERSION`）として置き、`.h` の `classifier_version` の値と契約テストで照合する。
    - **classifier v2 より先に N2b-4 が入る場合**: 承認の経路は閉じたままにする。native は `IsValidNativeApprovalIntent` が `classifier_version == 2` を要求するので、v1 の判定では intent を発行しない。再 preflight を v1 の判定で代用することはしない。そのため、classifier v2 が入るまで、本番の native は版 2 の `single_use_approval` を返さない。テストは harness の注入で駆動する。
 
 2. **trusted activation との接続（Main）**
    - 承認カードは、approval ID、revision、challenge、決定、Task、Turn に束縛された既存の trusted activation だけで操作できる。カードを作るときに、`approvalGeneration` と `effect` を承認レコードへ固定する。
    - **オーナー決定（2026-10-14）**: 60 秒の期限は ticket を伴う承認のカードだけに適用する。V1 の操作承認カード（現在 60 分）は変えない。V1 は S8 で撤去する。
+   - native のカードの `allowedDecisions` は `['allow_once', 'deny']` に固定し、`eligibleForPlan` は false、plan grant は作らない。
    - カードの期限は、native が返した `remainingMs` と既存のカード期限の短い方とする。native の期限（最大 60 秒）が権威で、Main の時計は短縮にだけ使う。期限を過ぎたクリック、すでに処理済みの承認、Task / Turn / policy epoch が変わった承認では、`approvalApprove` を呼ばない。ただし `approvalDiscard` は必ず呼び、native の slot を最大 60 秒の期限まで pending のまま残さない。
    - Main が `approvalApprove` を呼べるのは、trusted activation の消費に成功した後の一箇所だけにする。`approvalDiscard` は入力の能力を持たないので、Main のどの拒否経路からも呼んでよい。モデルの引数、ツール結果、画面上の文言、Renderer からの通常の IPC からは、どちらにも到達できない。
 
@@ -704,16 +706,24 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
    - **native が測るもの**: 実行中 PID の動的コード署名（macOS は `SecCode`）、正規化した実行ファイルのパス、プロセス世代、bundle id（署名者）。署名済みでないアプリは実行ファイル digest の完全一致。helper や XPC への主体変更も不一致。window identity digest、geometry、フォーカス、標準ウィンドウかどうか、面の判定（§3.7）。action digest と payload digest が intent と同一であること。`type` は 1 つの Unicode scalar だけ。対象要素と祖先、効果クラス、authority digest。精密分類（classifier v2）で、承認対象外、secure、分類不能に変わったら拒否する。classifier / ruleset / lexicon の版。新しい観測 revision と ticket generation が元より大きく、dispatch の request ID が元の承認の request ID と異なること。cancel epoch と approval generation。
    - **Main が `approvalApprove` を呼ぶ前と、`dispatch` の直前に検査するもの**: Stop と emergency stop、Task / Turn / policy epoch、grant の有効性、§6.4 の provider egress consent（接続とモデルの対）、build mode と manifest の attest、カードの有効性。native はこれらを知らないので、native 側の条件には含めない。
 
-4. **execution ticket の交換と dispatch は別々の呼び出し**: 再 preflight と交換は `approvalApprove`、入力は `dispatch`。execution ticket は、保存・再送・再利用をしない。`approvalApprove` の成功は、入力が始まったことを意味しない。ordinary ticket との交換や、待機 token と同じ値は拒否する。有効期間は最大 5 秒と、元の残り時間の短い方。
+4. **execution ticket の交換と dispatch は別々の呼び出し**: 再 preflight と交換は `approvalApprove`、入力は `dispatchApproved`。execution ticket は、保存・再送・再利用をしない。`approvalApprove` の成功は、入力が始まったことを意味しない。ordinary ticket との交換や、待機 token と同じ値は拒否する。有効期間は最大 5 秒と、元の残り時間の短い方。
+   - `approvalApprove` の要求と受領レシートは、次の固定キーで定義する。レシートのキーの過不足、型の違い、照合キーの不一致は、入力前の失敗（`native_approval_receipt_invalid`）として扱う。
+
+     | 方向                        | キー                                                                                                                          | 値の型と範囲                                                                                                                                                                                                                                          |
+     | --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+     | 要求（`approvalApprove`）   | `sessionId`、`requestId`、`action`（action 全体）、`actionDigest`、`observationRevision`、`cancelEpoch`、`approvalGeneration` | `requestId` は新しい dispatch request ID（元の承認の request ID と異なる）。`observationRevision` は再観測後の値で元より大きい。`approvalGeneration` は 1 以上の安全な整数                                                                            |
+     | 受領レシート（固定 8 キー） | `ok`、`reasonCode`、`sessionId`、`requestId`、`cancelEpoch`、`observationRevision`、`approvalGeneration`、`inputAttemptCount` | `ok` は boolean。成功は `ok: true` かつ `reasonCode: null`、失敗は `ok: false` かつ契約の形式の `reasonCode`。`sessionId` / `requestId` / `cancelEpoch` / `observationRevision` / `approvalGeneration` は要求と一致。`inputAttemptCount` は後退しない |
+
+   - **`approvalApprove` から `dispatchApproved` までの間に、同じ session に対して `observe` / `preflight` / `startSession` を呼ばない**。execution の束縛は、`approvalApprove` が測った ticket generation と観測 revision に固定されるので、その間にどれかが進むと不一致になって入力せず拒否される。
 
 5. **native 側で ticket を必須にすること**
-   - **D7 より先に入れる**。main にはまだ D7（build 時定数と manifest の attest）がない。そこで、`preflight` を export する macOS native は、build mode にかかわらず、`dispatch` が ticket（ordinary か execution）を欠く、形式が不正、期限切れ、消費済み、世代違いのいずれでも、旧経路へ戻らず入力せずに拒否する。Main は preflight を export する native には常に ticket を添えるので、V1 の経路は回帰しない。`preflight` を export しない native（Windows と古い native）は、S5 まで旧経路のままで、V2 入力を公開しない。
+   - **D7 より先に入れる**。main にはまだ D7（build 時定数と manifest の attest）がない。そこで、`preflight` を export する macOS native は、build mode にかかわらず、`dispatch` が ticket（ordinary か execution）を欠く、形式が不正、期限切れ、消費済み、世代違いのいずれでも、旧経路へ戻らず入力せずに拒否する。ticket 必須の判定は、replay と in-flight の判定の後に置く。replay のときは ticket がなくても、キャッシュ済みの結果を返す。Main は preflight を export する native には常に ticket を添えるので、V1 の経路は回帰しない。`preflight` を export しない native（Windows と古い native）は、S5 まで旧経路のままで、V2 入力を公開しない。
    - D7 が入った後は、`v2-denylist` ビルドの native が ticket 必須であることを handshake の attest で確認できない場合、Main は capability を閉じる。
 
 6. **失敗したら拒否する条件**
    - 発行の失敗、レシートの形式・キー・版の不一致、requestId / sessionId / cancelEpoch / observationRevision の不一致、承認クラス外の効果、期限切れ（逆行、期限丁度、加算 overflow、世代 0 を含む）、trusted activation の不一致または二重消費、再 preflight の不一致、Stop / close / Task / Turn / policy / identity / geometry / 対象の変化。いずれも、入力せず、slot を失効させて確定記録する。
    - **入力前の失敗は、adapter が型付きの結果として返し、`unknown_effect` にしない**。対象は、`preflight` の失敗、レシートの検証の失敗（`parseNativePreflightReceipt` が現在 try の外で throw して、controller の catch-all で `unknown_effect` / `native_ack_unknown` になる点を直す。検証の失敗は `native_preflight_invalid` の入力前の結果にする）、`approvalApprove`、`approvalDiscard`。`approvalApprove` と `approvalDiscard` は入力の能力を持たないので、無応答や例外も入力前の失敗として扱う。監査では、`paused` は `rejected` に写され（`mapAuditState`）、`reason_code` で区別する。
-   - **`dispatch` を execution ticket で呼んだ後の例外・timeout・無応答は、既存の規則どおり `unknown_effect` とし、ticket は消費済みとして扱う**。応答がなかったことを `rejected` と記録してはならない（承認済みの操作が実際に入力されたのに、再承認を求めて二重に実行される経路になるため）。
+   - **`dispatchApproved` を呼んだ後の例外・timeout・無応答は、既存の規則どおり `unknown_effect` とし、ticket は消費済みとして扱う**。応答がなかったことを `rejected` と記録してはならない（承認済みの操作が実際に入力されたのに、再承認を求めて二重に実行される経路になるため）。
 
 7. **複数文字の `type`**
    - 承認の単位は atomic dispatch（1 つの Unicode scalar）とする。(b) と (c) に記録する native request ID は、atomic の ID（controller が dispatch に渡す ID）である。
@@ -722,8 +732,8 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 
 8. **監査の相関**
    - **オーナー決定（2026-10-14）**: 相関は `computer_action_audits` に NULL 可の列を追加して保存する（migration あり）。
-   - 追加する列: `approval_id`（Main の承認 ID。(b) の行）、`approval_parent_request_id`（(c) の行が参照する (b) の native request ID。64 桁 hex の CHECK）、`approval_outcome`（NULL / `approved` / `denied` / `expired` / `revoked`）、`approval_effect`（上の `effect` の 4 つの文字列）。(b) の行は `state = rejected`、`reason_code = native_approval_required` で確定記録される。
-   - (b) の行は確定後に更新しない。ただし `approval_outcome` だけは、NULL から値への 1 回の更新を許す（`UPDATE ... WHERE approval_outcome IS NULL`）。(c) の行は、承認が `approved` で `approvalApprove` が成功した場合だけ作る。`denied` / `expired` / `revoked` では (c) を作らない。
+   - 追加する列: `approval_id`（Main の承認 ID。(b) の行）、`approval_parent_request_id`（(c) の行が参照する (b) の native request ID。生の ID ではなく `computerUseAuditBindingDigest(requestId)` の digest を入れる。64 桁 hex の CHECK）、`approval_outcome`（NULL / `approved` / `denied` / `expired` / `revoked`）、`approval_effect`（上の `effect` の 4 つの文字列）。(b) の行は `state = rejected`、`reason_code = native_approval_required` で確定記録される。
+   - (b) の行は確定後に更新しない。ただし `approval_outcome` だけは、NULL から値への 1 回の更新を許す（`UPDATE ... WHERE approval_outcome IS NULL`）。(c) の行は、承認が `approved` になった時点で、`approvalApprove` を呼ぶ前に `pending` で作る。`approvalApprove` が失敗したら、(c) を `rejected`（`paused` の写し）で確定し、`reason_code` は `native_approval_revalidation_failed` とする。`denied` / `expired` / `revoked` では (c) を作らない。
    - 3 つの ID を別々に記録し、混ぜない。(a) Main の元のツール呼び出しと承認 ID、(b) 承認待ちになった元の native request ID（atomic）、(c) 承認後の dispatch の新しい native request ID。結果は元のツール呼び出しへ返すが、native の request ID をすり替えて一致させない。
    - **相関の列は事後の追跡専用である**。dispatch・承認・重複判定・再起動後の再開の根拠としては、決して読まない。この表には MAC がなく（他の Computer Use 監査と同じ扱い）、MAC を付けない。付けない理由は、この列から権限が生じないので、改ざんされても入力は起きないためである。
    - 監査には、token、入力本文、authority digest、context digest を記録しない。
@@ -732,7 +742,21 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 
 **INV-3 との関係**: N2b-4 は承認の接続であり、適格性を広げない。新しい候補への入力は公開しない。したがって INV-3 の順序制約（§9）に反しないかぎり、interlock・面 deny・ListTargets（Windows では `list_targets`）とは別 PR で先行して merge してよい。ただし、上の 5 の「native の ticket 必須化」の PR（N2b-4 の末尾の PR）は、macOS の ListTargets による適格性の拡大より前に入れる。Windows は S5 で、preflight / ticket と helper の ticket 必須化を `list_targets` と同じ PR か、その前に入れる。逆順は認めない。
 
-**N2b-4 の PR で通すテスト**: 版 1 のレシートの現状の維持、`receiptVersion` を持つレシートの表どおりの検証（decision ごとのキー・型・範囲、余分なキー、欠けたキー、`effect` の集合）、`classifierVersion` が attest 値と違うレシートの拒否、`.h` の `NativeApprovalEffect` と Main の `effect` 集合の照合、trusted activation 消費前の `approvalApprove` 呼び出しの拒否、`approvalDiscard` が Main のすべての拒否経路で呼ばれ入力の能力を持たないこと、期限切れ・二重消費・世代違いの拒否、再 preflight の各不一致で入力 0 件、execution ticket の使い回し拒否、ticket 欠落時に旧経路へ戻らないこと、レシートの検証の失敗や `approvalApprove` の失敗が `unknown_effect` にならないこと、execution ticket で呼んだ `dispatch` の後の例外が `unknown_effect` になること、複数文字の `type` の先頭での拒否と index 1 以上での `unknown_effect`（`partial`）、V1 のカードと native のカードが二重に出る場合の順序、監査の 4 つの列と `approval_outcome` の 1 回更新、相関の列を認可に使わないこと、秘密の非記録。.mm 側は macOS CI のコンパイル済み harness（ASan / UBSan 含む）で確かめ、実機の AX と署名の証明とは分ける。
+**N2b-4 の PR の分け方とテスト**: 次の 5 つに分ける。依存は 1 → 4、2 → 4、3 → 4 → 5。1・2・3 は互いに独立で、並行して進めてよい。.mm 側は macOS CI のコンパイル済み harness（ASan / UBSan 含む）で確かめ、実機の AX と署名の証明とは分ける。
+
+| PR  | 目的                                                                                                                                             | 規模 | 依存    |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ---- | ------- |
+| 1   | TS の parser（`receiptVersion` の版 2、`approval_required` の型）と、入力前の型付き結果（レシート検証の失敗を `unknown_effect` にしない）        | S    | なし    |
+| 2   | persistence の migration（監査の相関列 4 つ）と、`approval_outcome` の 1 回更新                                                                  | S〜M | なし    |
+| 3   | native の `approvalApprove` / `approvalDiscard` / `dispatchApproved` と harness（本番では無効な分類注入）                                        | L    | なし    |
+| 4   | controller（`awaitNativeApproval`、trusted activation、再観測、`approvalApprove`、`dispatchApproved`、(a)(b)(c) の相関、複数文字 `type` の規則） | M〜L | 1・2・3 |
+| 5   | native の ticket 必須化（INV-3: macOS の ListTargets より前）                                                                                    | S〜M | 4       |
+
+- **PR 1 のテスト**: 版 1 のレシートの現状の維持、`receiptVersion` を持つレシートの表どおりの検証（decision ごとのキー・型・範囲、余分なキー、欠けたキー、`effect` の集合）、`classifierVersion` が 2 以外の `single_use_approval` の拒否、`classifierVersion` が attest 値と違うレシートの拒否、`NATIVE_APPROVAL_CLASSIFIER_VERSION` と `.h` の値の照合、`.h` の `NativeApprovalEffect` と Main の `effect` 集合の照合、レシート検証の失敗が `unknown_effect` にならないこと、`approvalApprove` の受領レシートの検証。
+- **PR 2 のテスト**: migration の前後（旧 DB が NULL のまま開く、新規 DB の列と CHECK、チェックサムの安定）、`approval_outcome` が NULL から値への 1 回だけ更新できること、`approval_parent_request_id` が `computerUseAuditBindingDigest` の digest であること、相関の列を認可・重複判定・再開に使わないこと、秘密の非記録。
+- **PR 3 のテスト（harness）**: 期限切れ・期限丁度・時計逆行・加算 overflow・世代 0 の拒否、二重消費、approval generation 違い、観測 revision と ticket generation が増えていない、dispatch request ID が元の承認 request ID と同じ、待機 token と execution token の同値、ordinary ticket との交換、再 preflight の各不一致で入力 0 件、`approvalDiscard` の世代違いは何もせず一致なら失効し入力の能力がないこと、`dispatchApproved` が `ticket` 同時指定を拒否すること、dispatch 直前の再分類がまだ承認対象のとき新しい intent を発行せず拒否すること、`observe` / `startSession` の refocus で slot が失効しないこと、遅れた完了が置換 slot を破棄しないこと。
+- **PR 4 のテスト**: trusted activation 消費前の `approvalApprove` 呼び出しの拒否、モデル引数・ツール結果・通常 IPC から `approvalApprove` / `approvalDiscard` に到達できないこと、`approvalDiscard` が Main のすべての拒否経路で呼ばれること、期限が `min(remainingMs, 60 秒)` で期限後のクリックは approve せず discard すること、V1 のカードが 60 分のままであること、`supervised` で V1 のカードの後に native のカードが出る順序と `full_access_app` で native のカードだけが出ること、native のカードの `allowedDecisions` と plan grant を作らないこと、二重クリック、Task / Turn / policy epoch / grant / §6.4 の egress consent / Stop の各変化（approve の前と `dispatchApproved` の直前）、再 preflight の失敗で新しい承認を自動で作らないこと、`approvalApprove` の失敗が `unknown_effect` にならず (c) が `rejected` で確定すること、denied / expired / revoked の固定 `reasonCode`、`dispatchApproved` の後の例外・timeout が `unknown_effect` になること、複数文字の `type` の先頭での拒否と index 1 以上での `unknown_effect`（`partial`）、監査の (a)(b)(c) の相関、`approvalApprove` から `dispatchApproved` までに `observe` / `preflight` / `startSession` を呼ばないこと。
+- **PR 5 のテスト**: ticket なしの `dispatch` が入力 0 件で拒否されること、形式不正・期限切れ・消費済み・世代違いで旧経路に戻らないこと、replay のときは ticket なしでもキャッシュ済みの結果を返すこと、Main が `preflight` を export する native に必ず ticket を添えること（V1 の回帰なし）、`preflight` を export しない native は旧経路が通ること。
 
 ---
 
