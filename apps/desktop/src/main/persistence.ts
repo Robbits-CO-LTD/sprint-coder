@@ -1233,6 +1233,25 @@ export type ComputerActionKind =
   | 'finish';
 export type ComputerActionAuditState =
   'pending' | 'applied' | 'rejected' | 'unknown_effect' | 'canceled';
+/**
+ * N2b-4 approval correlation (ADR S4-4 addendum 8). Trace-only: these values are never read to
+ * authorize, de-duplicate, or resume anything. `revalidation_failed` is a reason code, not an outcome.
+ */
+export type ComputerActionApprovalOutcome = 'approved' | 'denied' | 'expired' | 'revoked';
+export type ComputerActionApprovalEffect =
+  'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
+const COMPUTER_ACTION_APPROVAL_OUTCOMES: readonly string[] = [
+  'approved',
+  'denied',
+  'expired',
+  'revoked',
+];
+const COMPUTER_ACTION_APPROVAL_EFFECTS: readonly string[] = [
+  'download_open',
+  'file_manager_open',
+  'high_impact_confirmation',
+  'supervised_action',
+];
 export type ComputerActionAuditRecord = Readonly<{
   id: string;
   taskId: string;
@@ -1256,6 +1275,13 @@ export type ComputerActionAuditRecord = Readonly<{
   /** SHA-256 binding digest; the native request id remains ephemeral. */
   nativeRequestId: string;
   policyEpoch: number;
+  /** Main approval id; set on the (b) row only. */
+  approvalId: string | null;
+  /** computerUseAuditBindingDigest(requestId) of the (b) native request; set on the (c) row only. */
+  approvalParentRequestId: string | null;
+  /** NULL until the approval resolves; then written exactly once. */
+  approvalOutcome: ComputerActionApprovalOutcome | null;
+  approvalEffect: ComputerActionApprovalEffect | null;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -1282,6 +1308,10 @@ export type ComputerActionAuditInput = Readonly<{
   /** SHA-256 binding digest. */
   nativeRequestId: string;
   policyEpoch: number;
+  approvalId?: string | null;
+  /** SHA-256 binding digest of the (b) native request id, never the raw id. */
+  approvalParentRequestId?: string | null;
+  approvalEffect?: ComputerActionApprovalEffect | null;
   createdAt?: string;
 }>;
 type ComputerAppProfileRow = {
@@ -1324,6 +1354,10 @@ type ComputerActionAuditRow = {
   reason_code: string | null;
   native_request_id: string;
   policy_epoch: number;
+  approval_id: string | null;
+  approval_parent_request_id: string | null;
+  approval_outcome: ComputerActionApprovalOutcome | null;
+  approval_effect: ComputerActionApprovalEffect | null;
   created_at: string;
   updated_at: string;
 };
@@ -4533,6 +4567,38 @@ const migrations = [
       );
     `,
   },
+  {
+    version: 99,
+    checksum: 'computer-use-v99-audit-approval-correlation',
+    // Trace-only correlation (#500 N2b-4). All columns are NULL-able so existing rows stay NULL;
+    // nothing reads them for authorization, de-duplication or resume, and there is deliberately no MAC.
+    sql: `
+      ALTER TABLE computer_action_audits ADD COLUMN approval_id TEXT
+        CHECK (approval_id IS NULL OR (length(approval_id) BETWEEN 1 AND 128));
+      ALTER TABLE computer_action_audits ADD COLUMN approval_parent_request_id TEXT
+        CHECK (
+          approval_parent_request_id IS NULL OR
+          (length(approval_parent_request_id) = 64 AND approval_parent_request_id NOT GLOB '*[^0-9a-f]*')
+        );
+      ALTER TABLE computer_action_audits ADD COLUMN approval_outcome TEXT
+        CHECK (approval_outcome IS NULL OR approval_outcome IN ('approved', 'denied', 'expired', 'revoked'));
+      ALTER TABLE computer_action_audits ADD COLUMN approval_effect TEXT
+        CHECK (approval_effect IS NULL OR approval_effect IN (
+          'download_open', 'file_manager_open', 'high_impact_confirmation', 'supervised_action'
+        ));
+      CREATE TRIGGER computer_action_audits_approval_correlation_guard
+      BEFORE UPDATE OF approval_id, approval_parent_request_id, approval_outcome, approval_effect
+      ON computer_action_audits
+      WHEN OLD.approval_id IS NOT NEW.approval_id
+        OR OLD.approval_parent_request_id IS NOT NEW.approval_parent_request_id
+        OR OLD.approval_effect IS NOT NEW.approval_effect
+        OR (OLD.approval_outcome IS NOT NULL AND OLD.approval_outcome IS NOT NEW.approval_outcome)
+        OR (OLD.approval_outcome IS NULL AND NEW.approval_outcome IS NOT NULL AND OLD.approval_id IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'computer action audit approval correlation is write-once');
+      END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5746,6 +5812,11 @@ export interface PersistenceClient {
     auditId: string;
     state: Exclude<ComputerActionAuditState, 'pending'>;
     reasonCode?: string | null;
+    updatedAt: string;
+  }): ComputerActionAuditRecord;
+  recordComputerActionApprovalOutcome(input: {
+    auditId: string;
+    outcome: ComputerActionApprovalOutcome;
     updatedAt: string;
   }): ComputerActionAuditRecord;
   listComputerActionAudits(taskId: string, limit?: number): ComputerActionAuditRecord[];
@@ -15717,8 +15788,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
            id, task_id, turn_id, session_id, profile_id, profile_revision,
            app_identity_digest, window_identity_digest, observation_revision,
            observation_digest, client_width, client_height, action_digest, action_kind,
-           route, state, reason_code, native_request_id, policy_epoch, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           route, state, reason_code, native_request_id, policy_epoch, created_at, updated_at,
+           approval_id, approval_parent_request_id, approval_effect
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -15742,6 +15814,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
         validated.policyEpoch,
         createdAt,
         createdAt,
+        validated.approvalId ?? null,
+        validated.approvalParentRequestId ?? null,
+        validated.approvalEffect ?? null,
       );
     return toComputerActionAudit(
       this.db
@@ -15778,6 +15853,47 @@ export class SqlitePersistenceClient implements PersistenceClient {
          WHERE id = ? AND state = 'pending'`,
       )
       .run(input.state, reasonCode, updatedAt, input.auditId);
+    if (result.changes !== 1) throw new OperationConflictError();
+    return toComputerActionAudit(
+      this.db
+        .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+        .get(input.auditId) as ComputerActionAuditRow,
+    );
+  }
+
+  /**
+   * Records how an approval resolved on its (b) row. NULL -> value exactly once: replaying the same
+   * value is a no-op, any other second value is refused. Trace-only; never read for authorization.
+   */
+  recordComputerActionApprovalOutcome(input: {
+    auditId: string;
+    outcome: ComputerActionApprovalOutcome;
+    updatedAt: string;
+  }): ComputerActionAuditRecord {
+    if (
+      typeof input.outcome !== 'string' ||
+      !COMPUTER_ACTION_APPROVAL_OUTCOMES.includes(input.outcome)
+    )
+      throw new Error('Invalid Computer Use approval outcome');
+    const updatedAt = canonicalTimestamp(input.updatedAt);
+    const row = this.db
+      .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
+      .get(input.auditId) as ComputerActionAuditRow | undefined;
+    if (row === undefined) throw new NotFoundError('Computer Use action audit not found');
+    const current = toComputerActionAudit(row);
+    if (current.approvalId === null)
+      throw new OperationConflictError('Computer Use action audit has no approval');
+    if (current.approvalOutcome !== null) {
+      if (current.approvalOutcome === input.outcome) return current;
+      throw new OperationConflictError('Computer Use approval outcome is already recorded');
+    }
+    const result = this.db
+      .prepare(
+        `UPDATE computer_action_audits
+         SET approval_outcome = ?, updated_at = ?
+         WHERE id = ? AND approval_outcome IS NULL AND approval_id IS NOT NULL`,
+      )
+      .run(input.outcome, updatedAt, input.auditId);
     if (result.changes !== 1) throw new OperationConflictError();
     return toComputerActionAudit(
       this.db
@@ -24078,13 +24194,27 @@ function validateComputerActionAuditInput(
       !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(input.reasonCode)) ||
     !/^[a-f0-9]{64}$/.test(input.nativeRequestId) ||
     !Number.isSafeInteger(input.policyEpoch) ||
-    input.policyEpoch < 0
+    input.policyEpoch < 0 ||
+    (input.approvalId !== undefined &&
+      input.approvalId !== null &&
+      (typeof input.approvalId !== 'string' ||
+        input.approvalId.length < 1 ||
+        input.approvalId.length > 128)) ||
+    (input.approvalParentRequestId !== undefined &&
+      input.approvalParentRequestId !== null &&
+      !/^[a-f0-9]{64}$/.test(input.approvalParentRequestId)) ||
+    (input.approvalEffect !== undefined &&
+      input.approvalEffect !== null &&
+      !COMPUTER_ACTION_APPROVAL_EFFECTS.includes(input.approvalEffect))
   )
     throw new Error('Invalid Computer Use action audit');
   return {
     ...input,
     state: input.state ?? 'pending',
     reasonCode: normalizeComputerReasonCode(input.reasonCode),
+    approvalId: input.approvalId ?? null,
+    approvalParentRequestId: input.approvalParentRequestId ?? null,
+    approvalEffect: input.approvalEffect ?? null,
   };
 }
 
@@ -24109,7 +24239,15 @@ function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAudit
     reasonCode: row.reason_code,
     nativeRequestId: row.native_request_id,
     policyEpoch: row.policy_epoch,
+    approvalId: row.approval_id,
+    approvalParentRequestId: row.approval_parent_request_id,
+    approvalEffect: row.approval_effect,
   });
+  if (
+    row.approval_outcome !== null &&
+    !COMPUTER_ACTION_APPROVAL_OUTCOMES.includes(row.approval_outcome)
+  )
+    throw new Error('Invalid persisted Computer Use approval outcome');
   if (!Number.isFinite(Date.parse(row.created_at)) || !Number.isFinite(Date.parse(row.updated_at)))
     throw new Error('Invalid persisted Computer Use action audit timestamps');
   return Object.freeze({
@@ -24132,6 +24270,10 @@ function toComputerActionAudit(row: ComputerActionAuditRow): ComputerActionAudit
     reasonCode: parsed.reasonCode ?? null,
     nativeRequestId: parsed.nativeRequestId,
     policyEpoch: parsed.policyEpoch,
+    approvalId: parsed.approvalId ?? null,
+    approvalParentRequestId: parsed.approvalParentRequestId ?? null,
+    approvalOutcome: row.approval_outcome,
+    approvalEffect: parsed.approvalEffect ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   });
