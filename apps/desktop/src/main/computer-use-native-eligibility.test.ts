@@ -7,6 +7,7 @@ import {
   type ComputerUseEligibility,
 } from '@sprint-coder/contracts';
 import { assertWindowsComputerUseHelperHandshake } from './computer-use-native-windows';
+import { checkComputerUseEligibility } from './computer-use-eligibility';
 import {
   eligibilityBuildHeader,
   eligibilityDeclaration,
@@ -48,13 +49,43 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     expect(fallback('CLASSIFIER_VERSION')).toBe(table.versions.classifierVersion);
     expect(fallback('LEXICON_VERSION')).toBe(table.versions.lexiconVersion);
     expect(fallback('V2')).toBe(0);
-    expect(fallback('TICKET_REQUIRED')).toBe(0);
+    // No generated header: the macOS native requires a ticket, any other platform does not.
+    expect(header).toMatch(
+      /#if defined\(__APPLE__\)\s*#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 1\s*#else\s*#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 0\s*#endif/u,
+    );
     // The native mode names are the contract's, in order.
     const modes = computerUseEligibilityModeSchema.options;
     expect(header).toContain(`"${modes[0]}"`);
     expect(header).toContain(`"${modes[1]}"`);
-    // mac and Windows attest no ticket until N2b-4 PR 5 / S5 turn it on.
-    expect(table.ticketRequired).toEqual({ darwin: false, win32: false });
+    // The macOS native requires a ticket for every input (N2b-4 PR 5); Windows waits for S5.
+    expect(table.ticketRequired).toEqual({ darwin: true, win32: false });
+  });
+
+  it('closes nothing for the macOS build once pin, manifest and attest all say a ticket is required', () => {
+    const v1 = eligibilityDeclaration('v1-allowlist', 'darwin') as ComputerUseEligibility;
+    const v2 = eligibilityDeclaration('v2-denylist', 'darwin') as ComputerUseEligibility;
+    expect(v1.ticketRequired).toBe(true);
+    // A v1 Main and a v2 Main both open (the v2 one used to close as ticket_unattested).
+    expect(checkComputerUseEligibility({ compiled: v1, manifest: v1, attested: v1 })).toBe('ok');
+    expect(checkComputerUseEligibility({ compiled: v2, manifest: v2, attested: v2 })).toBe('ok');
+    // A v1 Main also accepts a legacy artifact that declares nothing.
+    expect(
+      checkComputerUseEligibility({ compiled: null, manifest: undefined, attested: undefined }),
+    ).toBe('ok');
+    // Any one of the three places disagreeing about the ticket closes it.
+    const off = { ...v1, ticketRequired: false };
+    for (const [compiled, manifest, attested] of [
+      [off, v1, v1],
+      [v1, off, v1],
+      [v1, v1, off],
+    ] as const)
+      expect(checkComputerUseEligibility({ compiled, manifest, attested })).toBe('mismatch');
+    // Windows keeps claiming none until S5, so a v1 Main for Windows agrees with itself.
+    const windows = eligibilityDeclaration('v1-allowlist', 'win32') as ComputerUseEligibility;
+    expect(windows.ticketRequired).toBe(false);
+    expect(
+      checkComputerUseEligibility({ compiled: windows, manifest: windows, attested: windows }),
+    ).toBe('ok');
   });
 
   it('reads nothing from the environment or the command line', () => {

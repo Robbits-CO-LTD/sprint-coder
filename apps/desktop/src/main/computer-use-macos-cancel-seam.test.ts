@@ -739,6 +739,45 @@ void Drain() {
     work->complete(&input, napi_ok, work->data);
   }
 }
+// Every dispatch needs the ordinary ticket its preflight issued (ADR v2 S4-4 addendum 5). The cases
+// that test replay, envelope, cancellation or failure injection are not about the ticket, so they
+// start from a ticket issued straight into the slot for the exact request the production parser
+// reads; the production Reserve then consumes it. A request already answered (replay or in flight)
+// needs no ticket and is passed through untouched.
+std::string IssueTicketFor(const NativeDispatchRequest& request) {
+  namespace ticketns = sprint_coder::computer_use;
+  if (current->dispatch_replay_cache.contains(request.request_id) ||
+      current->inflight_dispatches.contains(request.request_id))
+    return std::string();
+  // A real preflight advances the generation before it issues, so an issued ticket never carries
+  // generation 0 (the slot refuses it). A fresh session starts at 0; do the same advance here.
+  if (current->ticket_generation.load(std::memory_order_acquire) == 0)
+    current->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
+  ticketns::NativeOrdinaryTicketBinding binding;
+  binding.session_id = request.session_id;
+  binding.request_id = request.request_id;
+  binding.action_digest = request.action_digest;
+  binding.payload_digest = request.payload_digest;
+  binding.context_digest = request.context_digest;
+  binding.cancel_epoch = request.cancel_epoch;
+  binding.ticket_generation = current->ticket_generation.load(std::memory_order_acquire);
+  const std::string token(64, 'e');
+  return current->ordinary_ticket.Issue(token, binding, fakeNowNs, ticketns::kNativeOrdinaryTicketTtlNs)
+    ? token : std::string();
+}
+napi_value DispatchD() {
+  if (input.ticketKind == "absent") {
+    NativeDispatchRequest request;
+    std::unique_lock<std::mutex> lock;
+    std::string error, message;
+    if (ParseNativeDispatchRequest(&input, &input, &request, lock, &error, &message)) {
+      const std::string token = IssueTicketFor(request);
+      if (!token.empty()) { input.ticketKind = "string"; input.ticketValue = token; }
+    }
+  }
+  struct Restore { ~Restore() { input.ticketKind = "absent"; input.ticketValue.clear(); } } restore;
+  return Dispatch(&input, nullptr);
+}
 int main() {
   Reset();
   std::string error;
@@ -790,36 +829,42 @@ int main() {
     });
     contender.join();
     NativeDispatchOutcome replay;
+    {
+      const std::string token = IssueTicketFor(request);
+      request.ticket_key.present = !token.empty();
+      request.ticket_key.token_is_string = !token.empty();
+      request.ticket_key.token = token;
+    }
     Check(blocked.load() && lock.owns_lock() && ReserveNativeDispatchRequestLocked(&request, &replay) &&
       current->inflight_dispatches.size() == 1, "snapshot_reserve_atomic");
   }
   Reset();
-  Check(Dispatch(&input, nullptr) == &promiseValue && queue.size() == 1 &&
+  Check(DispatchD() == &promiseValue && queue.size() == 1 &&
     current->inflight_dispatches.size() == 1, "fresh_dispatch_reserved_once");
   Check(ParseOnly(&error) && queue.size() == 1 && promises == 1 &&
     current->inflight_dispatches.size() == 1, "readonly_parse_during_inflight");
   Check(current->state_mutex.try_lock(), "snapshot_lock_released_before_queue_return");
   current->state_mutex.unlock();
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.reason_code == "native_request_in_flight" && queue.size() == 1 && promises == 1,
     "same_envelope_inflight");
   input.strings["actionDigest"] = std::string(64, 'b');
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.reason_code == "native_request_id_conflict" && queue.size() == 1,
     "changed_envelope_inflight_conflict");
   input.strings["requestId"] = "two";
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.reason_code == "native_dispatch_busy" && current->inflight_dispatches.size() == 1,
     "distinct_request_busy");
   input.strings["requestId"] = "one";
   input.strings["actionDigest"] = std::string(64, 'a');
   Drain();
   Check(effects == 1 && resolutions == 1 && current->inflight_dispatches.empty(), "single_effect_and_release");
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.result == "completed" && lastOutcome.accepted && lastOutcome.effect_started &&
     effects == 1 && promises == 1 && queue.empty(), "completed_replay_no_second_effect");
   input.strings["actionDigest"] = std::string(64, 'b');
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1,
     "changed_envelope_cached_conflict");
   for (int mode = 0; mode < 3; ++mode) {
@@ -827,34 +872,34 @@ int main() {
     failPromise = mode == 0; failCreate = mode == 1; failQueue = mode == 2;
     bool threw = false;
     napi_value result = nullptr;
-    try { result = Dispatch(&input, nullptr); }
+    try { result = DispatchD(); }
     catch (const std::runtime_error& failure) { threw = std::string(failure.what()) == "ASYNC_UNAVAILABLE"; }
     Check(current->inflight_dispatches.empty() && current->dispatch_replay_cache.empty() &&
       queue.empty() && effects == 0 && rejections == (mode == 0 ? 0u : 1u) && resolutions == 0 &&
       deletions == (mode == 2 ? 1u : 0u) &&
       (mode == 0 ? threw : !threw && result == &promiseValue), "async_failure_releases_reservation");
     failPromise = failCreate = failQueue = false;
-    Dispatch(&input, nullptr); Drain();
+    DispatchD(); Drain();
     Check(effects == 1 && current->inflight_dispatches.empty(), "async_failure_can_retry_fresh");
   }
   Reset();
   failEffect = true;
-  Dispatch(&input, nullptr); Drain();
+  DispatchD(); Drain();
   Check(lastOutcome.result == "unknown_effect" && lastOutcome.effect_started &&
     current->inflight_dispatches.empty(), "worker_exception_cached_unknown");
   failEffect = false;
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.result == "unknown_effect" && queue.empty() && effects == 0, "worker_exception_replay");
   Reset();
-  Dispatch(&input, nullptr);
+  DispatchD();
   auto* incomplete = queue.front(); queue.pop_front();
   incomplete->complete(&input, 1, incomplete->data);
   Check(lastOutcome.result == "unknown_effect" && current->inflight_dispatches.empty() &&
     deletions == 1, "completion_failure_release");
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.result == "unknown_effect" && queue.empty() && effects == 0, "completion_failure_replay");
   for (bool close : {false, true}) {
-    Reset(); Dispatch(&input, nullptr);
+    Reset(); DispatchD();
     if (close) current->closed.store(true);
     else { current->cancel_epoch.store(1); cancellation_epoch.store(1); }
     Drain();
@@ -877,10 +922,10 @@ int main() {
   const auto expectConflict = [&](const char* name, bool semantic, auto mutate) {
     Reset();
     if (semantic) { input.strings["kind"] = "invoke"; input.strings["targetId"] = "target"; }
-    Dispatch(&input, nullptr); Drain();
+    DispatchD(); Drain();
     Check(effects == 1 && lastOutcome.result == "completed", name);
     mutate();
-    Dispatch(&input, nullptr);
+    DispatchD();
     Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1 && queue.empty(), name);
   };
   expectConflict("payload_x_conflict", false, [&] { input.numbers["x"] = .25; });
@@ -907,15 +952,15 @@ int main() {
   Reset();
   input.strings["kind"] = "invoke"; input.strings["targetId"] = "target";
   current->semantic_control_signatures.clear();
-  Dispatch(&input, nullptr); Drain();
+  DispatchD(); Drain();
   current->semantic_control_signatures["target"] = "";
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.reason_code == "native_request_id_conflict" && effects == 1, "absent_vs_empty_target_signature");
   // The same request replays unchanged, and a Task/Turn in the request is never read.
   Reset();
-  Dispatch(&input, nullptr); Drain();
+  DispatchD(); Drain();
   input.strings["taskId"] = "request-task"; input.strings["turnId"] = "request-turn";
-  Dispatch(&input, nullptr);
+  DispatchD();
   Check(lastOutcome.result == "completed" && effects == 1 && queue.empty() && promises == 1,
     "dispatch_ignores_request_task_turn");
   // A non-finite coordinate fails closed before any reservation.
@@ -981,9 +1026,11 @@ int main() {
     dispatchWith("string", other);
     expectTicketInvalid("ticket_for_other_request_rejected", 0);
     dispatchWith("absent", "");
-    Check(queue.size() == 1 && current->inflight_dispatches.size() == 1, "no_ticket_key_is_legacy");
+    expectTicketInvalid("no_ticket_key_is_refused", 0);
+    DispatchD();
+    Check(queue.size() == 1 && current->inflight_dispatches.size() == 1, "ticketed_dispatch_after_burned_ticket");
     Drain();
-    Check(effects == 1 && lastOutcome.result == "completed", "legacy_dispatch_after_burned_ticket");
+    Check(effects == 1 && lastOutcome.result == "completed", "ticketed_dispatch_runs_after_burned_ticket");
   }
   const auto mismatch = [&](const char* name, auto mutate) {
     Reset();
@@ -1000,10 +1047,12 @@ int main() {
   mismatch("ticket_generation_mismatch", [&] { current->ticket_generation.fetch_add(1); });
   Reset();
   {
-    issue("issue_before_legacy");
+    issue("issue_before_ticketless");
     dispatchWith("absent", "");
-    Check(queue.size() == 1 && !current->ordinary_ticket.occupied(), "legacy_reservation_supersedes_ticket");
-    Drain();
+    // A ticket-free request is refused and leaves another request's ticket alone.
+    Check(lastOutcome.reason_code == "native_ticket_invalid" && lastOutcome.result == "rejected" &&
+      !lastOutcome.accepted && !lastOutcome.effect_started && queue.empty() && effects == 0 &&
+      current->inflight_dispatches.empty() && current->ordinary_ticket.occupied(), "ticketless_dispatch_refused_slot_kept");
   }
 
   // 3. TTL and the monotonic clock.
@@ -1047,7 +1096,7 @@ int main() {
 
   // 5. Replay and in-flight hits are answered before the ticket and never touch the slot.
   Reset();
-  Dispatch(&input, nullptr);
+  DispatchD();
   Drain();
   input.strings["requestId"] = "two";
   issue("issue_for_two");
@@ -1056,7 +1105,7 @@ int main() {
   Check(lastOutcome.result == "completed" && effects == 1 && queue.empty() && current->ordinary_ticket.occupied(),
     "replay_hit_keeps_slot");
   Reset();
-  Dispatch(&input, nullptr);
+  DispatchD();
   {
     ticketns::NativeOrdinaryTicketBinding held;
     held.session_id = "s"; held.request_id = "r"; held.action_digest = "a"; held.payload_digest = "p";
@@ -1070,7 +1119,7 @@ int main() {
 
   // 6. Preflight on replay, conflict, busy and in-flight.
   Reset();
-  Dispatch(&input, nullptr);
+  DispatchD();
   Drain();
   Check(Preflight(&input, nullptr) == &resultValue && lastReceipt.decision == "replay" && lastReceipt.reason_code.empty() &&
     lastReceipt.denied_result.empty() && lastReceipt.ticket.empty() && preflights == 0 &&
@@ -1086,7 +1135,7 @@ int main() {
     lastReceipt.reason_code == "native_dispatch_busy" && queue.size() == 1, "one_preflight_per_session");
   Drain();
   Reset();
-  Dispatch(&input, nullptr);
+  DispatchD();
   input.strings["requestId"] = "two";
   Check(Preflight(&input, nullptr) == &resultValue && lastReceipt.reason_code == "native_dispatch_busy" &&
     queue.size() == 1 && current->preflight_owner == 0, "preflight_busy_while_dispatch_inflight");

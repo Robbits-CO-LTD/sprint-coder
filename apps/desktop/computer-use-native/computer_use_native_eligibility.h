@@ -27,7 +27,13 @@
 #define SPRINT_CODER_ELIGIBILITY_LEXICON_VERSION 1
 #endif
 #if !defined(SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED)
+// The macOS native refuses every input that carries no ticket (N2b-4 PR 5), so a build with no
+// generated header says so; the Windows helper does not until S5.
+#if defined(__APPLE__)
+#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 1
+#else
 #define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 0
+#endif
 #endif
 
 #include <cstdint>

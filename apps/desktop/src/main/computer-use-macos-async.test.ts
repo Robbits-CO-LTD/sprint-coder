@@ -505,12 +505,15 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         );
         expect(locked).not.toContain('ReadNativeTicketKey(');
       }
-      // The legacy path is only taken when the key is absent: Reserve branches on presence.
+      // Reserve branches on presence, and an absent key is refused: there is no ticket-free path.
       const reserve = sourceBetween(
         'bool ReserveNativeDispatchRequestLocked(',
         'struct AsyncNativeDispatchWork {',
       );
       expect(reserve).toContain('if (request->ticket_key.present) {');
+      expect(reserve).toMatch(
+        /\} else \{\s*\*replay = MakeDispatchOutcome\("rejected", "native_ticket_invalid"\);\s*return false;\s*\}/u,
+      );
       const preflight = sourceBetween('napi_value Preflight(', 'napi_value Cancel(');
       expect(preflight).toContain('if (work->request.ticket_key.present)');
     });
@@ -540,8 +543,32 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       // Replay and in-flight returns must not touch the ticket slot.
       const beforeTicket = reserve.slice(0, reserve.indexOf('if (request->ticket_key.present) {'));
       expect(beforeTicket).not.toMatch(/ordinary_ticket|ticket_generation/u);
-      // N2b note: a ticket-required rule belongs after the replay/in-flight checks.
-      expect(reserve).toContain('N2b note');
+      // The ticket-required rule is the else branch of the presence check, so it is after the
+      // replay/in-flight checks, before the busy check and the reservation, and before any effect.
+      expect(reserve).not.toContain('N2b note');
+      const elseOffset = reserve.search(/\} else \{\s*\*replay = MakeDispatchOutcome\("rejected"/u);
+      expect(elseOffset).toBeGreaterThan(reserve.indexOf('session.ordinary_ticket.Consume('));
+      expect(elseOffset).toBeLessThan(reserve.indexOf('kMaxInflightDispatchEntries'));
+      expect(elseOffset).toBeLessThan(reserve.indexOf('inflight_dispatches.emplace('));
+      // The native states the claim it now keeps, and never in the forbidden approval vocabulary.
+      const source = readFileSync(
+        join(__dirname, '../../computer-use-native/computer_use_macos.mm'),
+        'utf8',
+      );
+      expect(source).not.toContain('single_use_approval');
+      expect(source).not.toContain('ticketRequired` is false');
+    });
+
+    it('lets only a held execution ticket start an approved dispatch', () => {
+      const reserve = sourceBetween(
+        'bool ReserveNativeApprovedDispatchLocked(',
+        'napi_value DispatchApproved(',
+      );
+      // dispatchApproved carries no ticket key; the held execution ticket is the only authority.
+      expect(reserve).toContain('session.approval.ConsumeApproved(');
+      expect(reserve).not.toContain('ticket_key');
+      const entry = sourceBetween('napi_value DispatchApproved(', 'napi_value Cancel(');
+      expect(entry).toContain('work->request.ticket_key.present');
     });
 
     it('orders the approved Reserve as replay, in-flight, approval consume, busy, insert', () => {

@@ -1142,6 +1142,29 @@ describe('ComputerUseController', () => {
       expect(auditList(second.fixture)[0]).toMatchObject({ approvalOutcome: 'expired' });
     });
 
+    it('gives both card kinds an exact lifetime even when the clock advances on every read', async () => {
+      let clock = 1_000_000;
+      const ticking = (): number => (clock += 1);
+      const { fixture, acting } = await offered(
+        { now: ticking, authorizationRequired: true },
+        'supervised',
+      );
+      await viWait();
+      const v1 = pendingCard(fixture);
+      expect(Date.parse(v1.expiresAt) - Date.parse(v1.createdAt)).toBe(60 * 60 * 1_000);
+      await clickCard(fixture, 'deny');
+      await acting.catch(() => undefined);
+      const native = await offered({
+        now: ticking,
+        nativeDispatch: async () => offer('supervised_action', 9, 30_000),
+      });
+      await viWait();
+      const card = pendingCard(native.fixture);
+      expect(Date.parse(card.expiresAt) - Date.parse(card.createdAt)).toBe(30_000);
+      await clickCard(native.fixture, 'deny');
+      await native.acting;
+    });
+
     it('ignores a double click and calls approvalApprove once', async () => {
       const { fixture, acting } = await offered();
       await viWait();

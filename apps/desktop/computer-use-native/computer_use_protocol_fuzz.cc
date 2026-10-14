@@ -1113,10 +1113,17 @@ bool CheckNativeEligibility() {
   if (!Check(kNativeEligibilityClassifierVersion == kNativePreflightClassifierVersion,
              "eligibility-classifier-version-matches-classifier")) return false;
 #if !defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
-  // The harness is compiled without the generated header: the legacy v1 defaults apply, and no
-  // ticket is claimed until the native requires one.
+  // The harness is compiled without the generated header: the legacy v1 defaults apply. The
+  // ticket claim follows the platform: the macOS native requires a ticket for every input, the
+  // Windows helper does not until S5.
+#if defined(__APPLE__)
+  constexpr bool kExpectedTicketRequired = true;
+#else
+  constexpr bool kExpectedTicketRequired = false;
+#endif
   if (!Check(name == "v1-allowlist" && !kNativeEligibilityIsV2 &&
-                 !kNativeEligibilityTicketRequired, "eligibility-defaults")) return false;
+                 kNativeEligibilityTicketRequired == kExpectedTicketRequired,
+             "eligibility-defaults")) return false;
 #endif
   return true;
 }
