@@ -632,31 +632,37 @@ function assembled(): string {
   ].join('\n');
 }
 
-describe.skipIf(compiler === null)('Windows helper ordinary ticket behaviour seam (S5-a)', () => {
-  it('issues, binds, consumes and voids the ticket as the contract says', () => {
-    const root = mkdtempSync(join(tmpdir(), 'computer-use-win-ticket-seam-'));
-    try {
-      const path = join(root, 'seam.cc');
-      const binary = join(root, process.platform === 'win32' ? 'seam.exe' : 'seam');
-      writeFileSync(path, assembled());
-      const command = compiler!.command(path, binary);
-      const built = spawnSync(command.file, command.args, {
-        encoding: 'utf8',
-        timeout: 120_000,
-        windowsVerbatimArguments: command.verbatim,
-        env: { ...process.env, VSLANG: '1033' },
-      });
-      expect(built.status, `${compiler!.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-      const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 20_000 });
-      expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
-      expect(run.stdout).toContain('OK');
-      // The frame id the helper derives for a request is the one Main puts on a dispatch frame.
-      const derived = /DERIVED_ID:([0-9a-f]{32})/u.exec(run.stdout)?.[1];
-      expect(derived).toBe(
-        createHash('sha256').update('request:request-1', 'utf8').digest('hex').slice(0, 32),
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  }, 180_000);
-});
+// Where there is no compiler the test is skipped, except in CI: a runner that cannot compile must
+// not turn a behaviour check into a silent pass.
+describe.skipIf(compiler === null && process.env['CI'] === undefined)(
+  'Windows helper ordinary ticket behaviour seam (S5-a)',
+  () => {
+    it('issues, binds, consumes and voids the ticket as the contract says', () => {
+      expect(compiler, 'a C++ compiler is required to run this seam in CI').not.toBeNull();
+      const root = mkdtempSync(join(tmpdir(), 'computer-use-win-ticket-seam-'));
+      try {
+        const path = join(root, 'seam.cc');
+        const binary = join(root, process.platform === 'win32' ? 'seam.exe' : 'seam');
+        writeFileSync(path, assembled());
+        const command = compiler!.command(path, binary);
+        const built = spawnSync(command.file, command.args, {
+          encoding: 'utf8',
+          timeout: 120_000,
+          windowsVerbatimArguments: command.verbatim,
+          env: { ...process.env, VSLANG: '1033' },
+        });
+        expect(built.status, `${compiler!.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
+        const run = spawnSync(binary, [], { encoding: 'utf8', timeout: 20_000 });
+        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(run.stdout).toContain('OK');
+        // The frame id the helper derives for a request is the one Main puts on a dispatch frame.
+        const derived = /DERIVED_ID:([0-9a-f]{32})/u.exec(run.stdout)?.[1];
+        expect(derived).toBe(
+          createHash('sha256').update('request:request-1', 'utf8').digest('hex').slice(0, 32),
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    }, 180_000);
+  },
+);

@@ -107,6 +107,7 @@ ${windowsCloseSeamDriver}`,
           '-Wextra',
           '-Werror',
           '-fsanitize=address,undefined',
+          `-I${join(__dirname, '../../computer-use-native')}`,
           path,
           '-o',
           binary,
@@ -148,6 +149,8 @@ const windowsCloseSeamPreamble = `
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+// The extracted session block also holds the ordinary ticket state (S5-a), which Close forgets.
+#include "computer_use_native_ticket.h"
 struct FrameId { std::string key; };
 struct FrameHeader { FrameId session_id; };
 struct Frame { FrameHeader header; };

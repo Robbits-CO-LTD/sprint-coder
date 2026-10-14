@@ -120,6 +120,16 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
   it('drops the ticket at every session boundary', () => {
     const cancel = between(host, 'case MessageType::kCancel: {', 'case MessageType::kObserve: {');
     expect(cancel).toContain('InvalidateWindowsTicket(');
+    // A new observation changes what a ticket was measured against, as on macOS.
+    const observe = between(
+      host,
+      'case MessageType::kObserve: {',
+      'case MessageType::kDispatch: {',
+    );
+    expect(observe).toContain('InvalidateWindowsTicket(FrameIdKey(request.header.session_id))');
+    expect(observe.indexOf('InvalidateWindowsTicket(')).toBeLessThan(
+      observe.indexOf('ObserveWindowsWindow('),
+    );
     const start = between(host, 'bool StartWindowsSession(', 'bool CloseWindowsSession(');
     expect(start).toContain('InvalidateWindowsTicket(session_key)');
     const close = between(host, 'bool CloseWindowsSession(', 'std::string ProbeJson(');
