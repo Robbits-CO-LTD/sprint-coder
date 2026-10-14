@@ -1,0 +1,365 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { ComputerUseNativeBinding } from './computer-use-native';
+import type { ComputerAppProfileRecord } from './persistence';
+import { createComputerUseNativeHost } from './computer-use-native-host';
+import type { ComputerUseNativeHost, ComputerUseNativeSession } from './computer-use-controller';
+
+// The Main adapter side of the native approval path (ADR v2 S4-4 addendum, sections 0, 4 and 6),
+// driven through a fake macOS addon. The path is closed unless the handshake confirmed classifier
+// v2, which no production host does yet.
+
+const zero = (digit: string): string => digit.repeat(64);
+const identityDigest = zero('a');
+const ticket = 'ab'.repeat(32);
+
+const profile = {
+  id: 'profile-1',
+  platform: 'darwin',
+  kind: 'macos-bundle',
+  label: 'Target',
+  canonicalPath: '/Applications/Target.app/Contents/MacOS/Target',
+  appUrl: null,
+  identity: {
+    platform: 'darwin',
+    kind: 'macos-bundle',
+    displayName: 'Target',
+    canonicalPath: '/Applications/Target.app/Contents/MacOS/Target',
+    identityDigest,
+    executableDigest: zero('b'),
+    policyLanguage: 'en',
+    maximumMode: 'full_access_app',
+  },
+  identityDigest,
+  version: null,
+  executableDigest: zero('b'),
+  mode: 'full_access_app',
+  connectionId: 'connection-1',
+  modelId: 'model-1',
+  providerEgressConsent: true,
+  remember: false,
+  revision: 1,
+  createdAt: '2026-10-14T00:00:00.000Z',
+  updatedAt: '2026-10-14T00:00:00.000Z',
+} as unknown as ComputerAppProfileRecord;
+
+type Calls = Record<string, ReturnType<typeof vi.fn>>;
+
+function build(
+  options: { attested?: boolean; omit?: readonly string[]; platform?: 'darwin' | 'win32' } = {},
+  overrides: Record<string, (input: Record<string, unknown>) => unknown> = {},
+) {
+  const calls: Calls = {};
+  const fn = (name: string, impl: (input: Record<string, unknown>) => unknown) => {
+    calls[name] = vi.fn((input: unknown) => impl(input as Record<string, unknown>));
+    return calls[name]!;
+  };
+  const baseReceipt = (input: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    decision: 'ordinary',
+    reasonCode: null,
+    deniedResult: null,
+    ticket,
+    classifierVersion: 1,
+    inputAttemptCount: 0,
+    requestId: input['requestId'],
+    sessionId: input['sessionId'],
+    cancelEpoch: input['cancelEpoch'],
+    observationRevision: input['observationRevision'],
+    ...extra,
+  });
+  const result = (input: Record<string, unknown>) => ({
+    result: 'completed',
+    reasonCode: null,
+    accepted: true,
+    effectStarted: true,
+    requestId: input['requestId'],
+    sessionId: input['sessionId'],
+    observationRevision: input['observationRevision'],
+    actionDigest: input['actionDigest'],
+    cancelEpoch: input['cancelEpoch'],
+    inputAttemptCount: 1,
+  });
+  const methods: Record<string, unknown> = {
+    probe: () => ({}),
+    pickApplication: () => null,
+    listWindows: fn('listWindows', () => [
+      {
+        pid: 42,
+        windowId: 'window-1',
+        platform: 'darwin',
+        appIdentityDigest: identityDigest,
+        windowIdentityDigest: zero('d'),
+        executableDigest: zero('b'),
+        title: 'Target',
+        bounds: { x: 0, y: 0, width: 100, height: 80 },
+        screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+        focused: true,
+        eligible: true,
+        ownerKind: 'application',
+        modal: false,
+        revision: 1,
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+      },
+    ]),
+    startSession: fn('startSession', (input) => ({
+      inputAttemptCount: 0,
+      sessionId: input['sessionId'],
+      platform: 'darwin',
+      appIdentityDigest: identityDigest,
+      windowIdentityDigest: zero('d'),
+      windowId: 'window-1',
+      profileRevision: 1,
+      cancelEpoch: 0,
+      policyLanguage: 'en',
+      maximumMode: 'full_access_app',
+      screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+      pid: 42,
+    })),
+    observe: () => ({}),
+    preflight: fn('preflight', (input) => (overrides['preflight'] ?? baseReceipt)(input)),
+    approvalApprove: fn('approvalApprove', (input) =>
+      (
+        overrides['approvalApprove'] ??
+        ((i) => ({
+          ok: true,
+          reasonCode: null,
+          deniedResult: null,
+          sessionId: i['sessionId'],
+          requestId: i['requestId'],
+          cancelEpoch: i['cancelEpoch'],
+          observationRevision: i['observationRevision'],
+          approvalGeneration: i['approvalGeneration'],
+          inputAttemptCount: 0,
+        }))
+      )(input),
+    ),
+    approvalDiscard: fn('approvalDiscard', (input) =>
+      (overrides['approvalDiscard'] ?? ((i) => ({ discarded: true, ...i })))(input),
+    ),
+    dispatchApproved: fn('dispatchApproved', (input) =>
+      (overrides['dispatchApproved'] ?? result)(input),
+    ),
+    dispatch: fn('dispatch', (input) => (overrides['dispatch'] ?? result)(input)),
+    cancel: () => undefined,
+    close: () => undefined,
+  };
+  for (const name of options.omit ?? []) delete methods[name];
+  const platform = options.platform ?? 'darwin';
+  const binding = {
+    manifest: {
+      version: 1,
+      sourceCommit: 'f'.repeat(40),
+      platform,
+      architecture: 'arm64',
+      protocolVersion: 1,
+      apiVersion: 2,
+      nativeVersion: 'test-native',
+      moduleDigest: zero('1'),
+      binaryDigest: zero('2'),
+      signerDigest: zero('3'),
+      capabilities: ['observe', 'capture', 'accessibility', 'input'],
+    },
+    probe: {
+      available: true,
+      protocolVersion: 1,
+      apiVersion: 2,
+      backend: 'test-native',
+      reason: '',
+      artifactPath: '/Resources/sprint_coder_computer_use_native.node',
+      artifactDigest: zero('1'),
+      capabilities: { observe: true, control: true },
+    },
+    artifactPath: '/Resources/sprint_coder_computer_use_native.node',
+    addon: methods,
+  } as unknown as ComputerUseNativeBinding;
+  const host = createComputerUseNativeHost(binding, platform, {
+    ...(options.attested === undefined ? {} : { classifierV2Attested: options.attested }),
+  });
+  return { host, calls, baseReceipt };
+}
+
+async function sessionOf(host: ComputerUseNativeHost): Promise<ComputerUseNativeSession> {
+  await host.listWindows(profile);
+  return host.startSession({
+    profile,
+    windowId: 'window-1',
+    sessionId: 'session-1',
+    taskId: 'task-1',
+    turnId: 'turn-1',
+    cancelEpoch: 0,
+  });
+}
+
+const action = { type: 'click', x: 0.5, y: 0.5, button: 'left' } as const;
+const request = (session: ComputerUseNativeSession, requestId: string, extra = {}) => ({
+  session,
+  requestId,
+  action,
+  observationRevision: 1,
+  cancelEpoch: 0,
+  signal: new AbortController().signal,
+  ...extra,
+});
+
+describe('Computer Use native host: approval path', () => {
+  it('opens only for an attested classifier v2, a complete addon, on macOS', () => {
+    // Production never attests (there is no D7), so the path is closed however complete the addon.
+    expect(build({}).host.nativeApprovalPathEnabled?.()).toBe(false);
+    expect(build({ attested: false }).host.nativeApprovalPathEnabled?.()).toBe(false);
+    expect(build({ attested: true }).host.nativeApprovalPathEnabled?.()).toBe(true);
+    for (const missing of ['preflight', 'approvalApprove', 'approvalDiscard', 'dispatchApproved'])
+      expect(
+        build({ attested: true, omit: [missing] }).host.nativeApprovalPathEnabled?.(),
+        missing,
+      ).toBe(false);
+  });
+
+  it('answers approvalApprove with typed results and never throws for a pre-input failure', async () => {
+    const open = build({ attested: true });
+    const session = await sessionOf(open.host);
+    await expect(
+      open.host.approvalApprove!({ ...request(session, 'r-1'), approvalGeneration: 5 }),
+    ).resolves.toEqual({ kind: 'approved' });
+    expect(open.calls['approvalApprove']).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'r-1', approvalGeneration: 5, sessionId: 'session-1' }),
+    );
+    expect(open.calls['approvalApprove']!.mock.calls[0]![0]).not.toHaveProperty('ticket');
+    // A refusal keeps the native result and reason; Main maps them to fixed codes later.
+    const refusing = build(
+      { attested: true },
+      {
+        approvalApprove: (i) => ({
+          ok: false,
+          reasonCode: 'native_target_unclassified',
+          deniedResult: 'paused',
+          sessionId: i['sessionId'],
+          requestId: i['requestId'],
+          cancelEpoch: i['cancelEpoch'],
+          observationRevision: i['observationRevision'],
+          approvalGeneration: i['approvalGeneration'],
+          inputAttemptCount: 0,
+        }),
+      },
+    );
+    await expect(
+      refusing.host.approvalApprove!({
+        ...request(await sessionOf(refusing.host), 'r-2'),
+        approvalGeneration: 5,
+      }),
+    ).resolves.toEqual({
+      kind: 'refused',
+      result: 'paused',
+      reasonCode: 'native_target_unclassified',
+    });
+    // A receipt that cannot be trusted, a throw and a closed path are all values, not exceptions.
+    const invalid = build({ attested: true }, { approvalApprove: () => ({ ok: true }) });
+    await expect(
+      invalid.host.approvalApprove!({
+        ...request(await sessionOf(invalid.host), 'r-3'),
+        approvalGeneration: 5,
+      }),
+    ).resolves.toMatchObject({ kind: 'invalid', reasonCode: 'native_approval_receipt_invalid' });
+    const throwing = build(
+      { attested: true },
+      {
+        approvalApprove: () => {
+          throw new Error('boom');
+        },
+      },
+    );
+    await expect(
+      throwing.host.approvalApprove!({
+        ...request(await sessionOf(throwing.host), 'r-4'),
+        approvalGeneration: 5,
+      }),
+    ).resolves.toMatchObject({ kind: 'refused', reasonCode: 'native_approval_approve_failed' });
+    const closed = build({});
+    await expect(
+      closed.host.approvalApprove!({
+        ...request(await sessionOf(closed.host), 'r-5'),
+        approvalGeneration: 5,
+      }),
+    ).resolves.toMatchObject({ kind: 'refused', result: 'rejected' });
+    expect(closed.calls['approvalApprove']).not.toHaveBeenCalled();
+  });
+
+  it('discards exactly the named generation and swallows every failure', async () => {
+    const open = build({ attested: true });
+    const session = await sessionOf(open.host);
+    await expect(
+      open.host.approvalDiscard!({ session, approvalGeneration: 9 }),
+    ).resolves.toBeUndefined();
+    expect(open.calls['approvalDiscard']).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: 'session-1', approvalGeneration: 9 }),
+    );
+    const throwing = build(
+      { attested: true },
+      {
+        approvalDiscard: () => {
+          throw new Error('gone');
+        },
+      },
+    );
+    await expect(
+      throwing.host.approvalDiscard!({
+        session: await sessionOf(throwing.host),
+        approvalGeneration: 9,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('sends dispatchApproved the generation and no ticket, and validates its result like dispatch', async () => {
+    const open = build({ attested: true });
+    const session = await sessionOf(open.host);
+    await expect(
+      open.host.dispatchApproved!({ ...request(session, 'r-6'), approvalGeneration: 5 }),
+    ).resolves.toMatchObject({ result: 'completed' });
+    const sent = open.calls['dispatchApproved']!.mock.calls[0]![0] as Record<string, unknown>;
+    expect(sent).toMatchObject({ requestId: 'r-6', approvalGeneration: 5 });
+    expect(sent).not.toHaveProperty('ticket');
+    expect(open.calls['preflight']).not.toHaveBeenCalled();
+    expect(open.calls['dispatch']).not.toHaveBeenCalled();
+    // An envelope that does not echo the request is an exception (the caller books unknown_effect).
+    const wrong = build(
+      { attested: true },
+      { dispatchApproved: (i) => ({ ...(i as object), result: 'completed', reasonCode: null }) },
+    );
+    await expect(
+      wrong.host.dispatchApproved!({
+        ...request(await sessionOf(wrong.host), 'r-7'),
+        approvalGeneration: 5,
+      }),
+    ).rejects.toThrow();
+    // Closed path: refuses before native is called.
+    const closed = build({});
+    await expect(
+      closed.host.dispatchApproved!({
+        ...request(await sessionOf(closed.host), 'r-8'),
+        approvalGeneration: 5,
+      }),
+    ).rejects.toThrow();
+    expect(closed.calls['dispatchApproved']).not.toHaveBeenCalled();
+  });
+
+  it('refuses an ordinary preflight for a target Main judged high-impact, with no input', async () => {
+    const open = build({ attested: true });
+    const session = await sessionOf(open.host);
+    await expect(
+      open.host.dispatch(request(session, 'd-1', { mainHighImpact: true })),
+    ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+    expect(open.calls['preflight']).toHaveBeenCalledTimes(1);
+    expect(open.calls['dispatch']).not.toHaveBeenCalled();
+    // Without the flag an ordinary receipt still dispatches with its ticket.
+    await expect(open.host.dispatch(request(session, 'd-2'))).resolves.toMatchObject({
+      result: 'completed',
+    });
+    expect(open.calls['dispatch']).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'd-2', ticket }),
+    );
+    // Closed path: the flag is never set by Main, and a host that is not attested ignores it.
+    const closed = build({});
+    await expect(
+      closed.host.dispatch(request(await sessionOf(closed.host), 'd-3', { mainHighImpact: true })),
+    ).resolves.toMatchObject({ result: 'completed' });
+  });
+});

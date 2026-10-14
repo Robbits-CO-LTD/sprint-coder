@@ -230,6 +230,19 @@ export type ComputerUseNativeApprovalOffer = Readonly<{
   effect: 'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
 }>;
 
+/**
+ * The typed, pre-input outcome of `approvalApprove` (ADR v2 S4-4 addendum, section 4). It has no
+ * input capability, so a refusal is a value, never an exception. `invalid` is a receipt that could
+ * not be trusted. No token ever crosses here.
+ */
+export type ComputerUseNativeApprovalApproveResult =
+  | Readonly<{ kind: 'approved' }>
+  | Readonly<{
+      kind: 'refused' | 'invalid';
+      result: 'rejected' | 'paused' | 'canceled';
+      reasonCode: string;
+    }>;
+
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
 export interface ComputerUseNativeHost {
   availability(): ComputerUseAvailability;
@@ -263,6 +276,44 @@ export interface ComputerUseNativeHost {
       observationRevision: number;
       cancelEpoch: number;
       signal: AbortSignal;
+      /**
+       * Set only while the native approval path is open: Main judged this target high-impact. An
+       * `ordinary` preflight for it is then refused as `hard_boundary` before any input.
+       */
+      mainHighImpact?: boolean;
+    }>,
+  ): Promise<ComputerUseNativeActionResult>;
+  /**
+   * macOS native only. True when the native approval path is open: the addon exports preflight,
+   * approvalApprove, approvalDiscard and dispatchApproved, and the handshake confirmed classifier
+   * v2. D7 does not exist yet, so a production host never reports true.
+   */
+  nativeApprovalPathEnabled?(): boolean;
+  /** Revalidates and exchanges the waiting approval; no input capability. */
+  approvalApprove?(
+    input: Readonly<{
+      session: ComputerUseNativeSession;
+      requestId: string;
+      action: ComputerUseAction;
+      observationRevision: number;
+      cancelEpoch: number;
+      approvalGeneration: number;
+    }>,
+  ): Promise<ComputerUseNativeApprovalApproveResult>;
+  /** Ends exactly this session's approval of that generation; no input capability, never throws. */
+  approvalDiscard?(
+    input: Readonly<{ session: ComputerUseNativeSession; approvalGeneration: number }>,
+  ): Promise<void>;
+  /** The input entry after `approvalApprove`; names the generation and never a ticket. */
+  dispatchApproved?(
+    input: Readonly<{
+      session: ComputerUseNativeSession;
+      requestId: string;
+      action: ComputerUseAction;
+      observationRevision: number;
+      cancelEpoch: number;
+      approvalGeneration: number;
+      signal: AbortSignal;
     }>,
   ): Promise<ComputerUseNativeActionResult>;
   cancel(
@@ -294,6 +345,7 @@ export type ComputerUseControllerPersistence = Pick<
   | 'listComputerAppAccessRequestTotals'
   | 'recordComputerActionAudit'
   | 'completeComputerActionAudit'
+  | 'recordComputerActionApprovalOutcome'
   | 'listComputerActionAudits'
   | 'getActiveTurnId'
 > &
@@ -596,7 +648,39 @@ type PendingComputerApproval = {
   action: ComputerUseAction;
   resolve: (decision: ToolAuthorizationDecision) => void;
   timer: ReturnType<typeof setTimeout>;
+  /**
+   * Present only for the card of a native single-use approval (ADR v2 S4-4 addendum, section 0).
+   * Its decision is settled here and everything after the click (Main checks, re-observation,
+   * approvalApprove, dispatchApproved) happens in `runNativeApproval`, never in the click handler.
+   */
+  native?: Readonly<{
+    settle: (outcome: NativeApprovalOutcome) => void;
+  }>;
 };
+
+/** How a native approval card ended; recorded on the (b) audit row's `approval_outcome`. */
+type NativeApprovalOutcome = 'approved' | 'denied' | 'expired' | 'revoked';
+
+/** The card of a native approval is never open longer than the native wait (ADR section 2). */
+const NATIVE_APPROVAL_CARD_MAX_MS = 60_000;
+
+/** Fixed Main reason codes returned to the tool; the native reason is never forwarded. */
+const NATIVE_APPROVAL_REFUSAL_REASON: Readonly<
+  Record<Exclude<NativeApprovalOutcome, 'approved'>, string>
+> = Object.freeze({
+  denied: 'native_approval_denied',
+  expired: 'native_approval_expired',
+  revoked: 'native_approval_revoked',
+});
+
+/** What a card was about, fixed when it was made so the click is checked against what was read. */
+type NativeApprovalSnapshot = Readonly<{
+  approvalGeneration: number;
+  effect: ComputerUseNativeApprovalOffer['effect'];
+  policyEpoch: number;
+  turnId: string;
+  deadline: number;
+}>;
 /**
  * What one application contributed to an in-flight enumeration, and what that contribution assumed.
  *
@@ -3093,80 +3177,37 @@ export class ComputerUseController {
     this.pendingApprovals.delete(input.approvalId);
     clearTimeout(pending.timer);
     this.deps.publishApproval?.(next);
+    if (pending.native !== undefined) {
+      // A native single-use card only settles here. The trusted click is the single entry to
+      // `runNativeApproval`, which alone may call `approvalApprove`.
+      pending.native.settle(decision === 'deny' ? 'denied' : 'approved');
+      return record.status;
+    }
     let approved = decision !== 'deny';
     let focusedSession: ComputerUseNativeSession | null = null;
     if (approved) {
+      const ctx: { focusedSession: ComputerUseNativeSession | null } = { focusedSession: null };
+      const relaxHighImpact = this.relaxesHighImpact(pending.action, record.observation);
       try {
-        this.assertSessionLive(record);
-        if (!this.observationIsFresh(record))
-          throw new Error('Computer Use approval observation expired');
-        focusedSession = await this.deps.native.startSession({
-          profile: record.profile,
-          windowId: record.native.windowId,
-          sessionId: record.status.sessionId,
-          taskId: record.status.taskId,
-          turnId: record.turnId,
-          cancelEpoch: record.native.cancelEpoch,
-        });
-        if (
-          focusedSession.sessionId !== record.native.sessionId ||
-          focusedSession.appIdentityDigest !== record.native.appIdentityDigest ||
-          focusedSession.windowIdentityDigest !== record.native.windowIdentityDigest ||
-          focusedSession.windowId !== record.native.windowId ||
-          focusedSession.profileRevision !== record.native.profileRevision ||
-          record.controller.signal.aborted ||
-          this.sessions.get(record.status.sessionId) !== record
-        )
-          throw new Error('Computer Use approval focus binding changed');
-        record.native = focusedSession;
-        this.revalidateNativeAttestation(
+        await this.refocusAndReobserve(
           record,
-          focusedSession.policyLanguage,
-          focusedSession.maximumMode,
-          focusedSession.screenBounds,
+          ctx,
+          (previous, fresh) =>
+            approvedObservationEquivalent(
+              previous,
+              fresh,
+              pending.action,
+              this.now(),
+              relaxHighImpact,
+            ),
+          true,
         );
-        if (
-          !(await this.repositionEmergencyStop(
-            record.status.sessionId,
-            focusedSession.screenBounds,
-          ))
-        ) {
-          await this.stop(record.status.sessionId, 'emergency_stop');
-          throw new Error('Computer Use Stop overlay could not follow the native target');
-        }
-        const previousObservation = record.observation;
-        if (previousObservation === null)
-          throw new Error('Computer Use approval observation is unavailable');
-        const freshObservation = await this.acceptNativeObservation(
-          record,
-          await this.deps.native.observe(record.native, {
-            requestId: `${record.status.sessionId}:approval:${randomUUID()}`,
-            cancelEpoch: record.native.cancelEpoch,
-          }),
-        );
-        if (
-          !approvedObservationEquivalent(
-            previousObservation,
-            freshObservation,
-            pending.action,
-            this.now(),
-          )
-        )
-          throw new Error('Computer Use approval observation changed');
-        record.observation = stripComputerUseObservationPayload(freshObservation);
       } catch {
         approved = false;
       }
+      focusedSession = ctx.focusedSession;
     }
-    if (
-      focusedSession !== null &&
-      (record.controller.signal.aborted || this.sessions.get(record.status.sessionId) !== record)
-    ) {
-      await this.deps.native
-        .cancel(focusedSession, focusedSession.cancelEpoch + 1)
-        .catch(() => undefined);
-      await this.deps.native.close(focusedSession).catch(() => undefined);
-    }
+    await this.cleanupAbandonedRefocus(record, focusedSession);
     if (record.controller.signal.aborted || this.sessions.get(record.status.sessionId) !== record) {
       pending.resolve({ decision: 'deny', reason: 'computer_session_ended' });
       return record.status;
@@ -3201,6 +3242,85 @@ export class ComputerUseController {
     return record.status;
   }
 
+  /**
+   * Restores focus to the approved target and re-observes it. Throws if any binding changed. The
+   * focused session is reported through `ctx` so a caller can clean it up even when this throws.
+   */
+  private async refocusAndReobserve(
+    record: SessionRecord,
+    ctx: { focusedSession: ComputerUseNativeSession | null },
+    equivalent: (
+      previous: ComputerUseNativeObservation,
+      fresh: ComputerUseNativeObservation,
+    ) => boolean,
+    requireFreshObservation: boolean,
+  ): Promise<ComputerUseNativeObservation> {
+    this.assertSessionLive(record);
+    if (requireFreshObservation && !this.observationIsFresh(record))
+      throw new Error('Computer Use approval observation expired');
+    const focusedSession = await this.deps.native.startSession({
+      profile: record.profile,
+      windowId: record.native.windowId,
+      sessionId: record.status.sessionId,
+      taskId: record.status.taskId,
+      turnId: record.turnId,
+      cancelEpoch: record.native.cancelEpoch,
+    });
+    ctx.focusedSession = focusedSession;
+    if (
+      focusedSession.sessionId !== record.native.sessionId ||
+      focusedSession.appIdentityDigest !== record.native.appIdentityDigest ||
+      focusedSession.windowIdentityDigest !== record.native.windowIdentityDigest ||
+      focusedSession.windowId !== record.native.windowId ||
+      focusedSession.profileRevision !== record.native.profileRevision ||
+      record.controller.signal.aborted ||
+      this.sessions.get(record.status.sessionId) !== record
+    )
+      throw new Error('Computer Use approval focus binding changed');
+    record.native = focusedSession;
+    this.revalidateNativeAttestation(
+      record,
+      focusedSession.policyLanguage,
+      focusedSession.maximumMode,
+      focusedSession.screenBounds,
+    );
+    if (
+      !(await this.repositionEmergencyStop(record.status.sessionId, focusedSession.screenBounds))
+    ) {
+      await this.stop(record.status.sessionId, 'emergency_stop');
+      throw new Error('Computer Use Stop overlay could not follow the native target');
+    }
+    const previousObservation = record.observation;
+    if (previousObservation === null)
+      throw new Error('Computer Use approval observation is unavailable');
+    const freshObservation = await this.acceptNativeObservation(
+      record,
+      await this.deps.native.observe(record.native, {
+        requestId: `${record.status.sessionId}:approval:${randomUUID()}`,
+        cancelEpoch: record.native.cancelEpoch,
+      }),
+    );
+    if (!equivalent(previousObservation, freshObservation))
+      throw new Error('Computer Use approval observation changed');
+    record.observation = stripComputerUseObservationPayload(freshObservation);
+    return freshObservation;
+  }
+
+  private async cleanupAbandonedRefocus(
+    record: SessionRecord,
+    focusedSession: ComputerUseNativeSession | null,
+  ): Promise<void> {
+    if (
+      focusedSession !== null &&
+      (record.controller.signal.aborted || this.sessions.get(record.status.sessionId) !== record)
+    ) {
+      await this.deps.native
+        .cancel(focusedSession, focusedSession.cancelEpoch + 1)
+        .catch(() => undefined);
+      await this.deps.native.close(focusedSession).catch(() => undefined);
+    }
+  }
+
   private cancelPendingApprovals(sessionId: string, reason: string): void {
     for (const [id, pending] of this.pendingApprovals) {
       if (pending.approval.sessionId !== sessionId) continue;
@@ -3213,6 +3333,7 @@ export class ComputerUseController {
         revision: pending.approval.revision + 1,
       });
       this.deps.publishApproval?.(canceled);
+      if (pending.native !== undefined) pending.native.settle('revoked');
       pending.resolve({ decision: 'deny', reason });
     }
   }
@@ -3452,7 +3573,7 @@ export class ComputerUseController {
     if (result !== undefined) {
       let authorized = await result;
       if (authorized.decision === 'approval_required' && action?.success) {
-        if (this.isHardBoundary(action.data, record.observation))
+        if (this.preDispatchBoundary(action.data, record.observation))
           return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
         if (this.planGrantMatches(record, action.data)) {
           this.planGrantAuthorizedCalls.add(`${sessionId}\0${request.callId}`);
@@ -3473,7 +3594,7 @@ export class ComputerUseController {
         authorized.decision === 'approval_required' &&
         record.status.mode === 'full_access_app' &&
         action?.success &&
-        !this.isHardBoundary(action.data, record.observation)
+        !this.preDispatchBoundary(action.data, record.observation)
       )
         authorized = { decision: 'allow', reason: 'computer_full_access_app' };
       if (approvalDecision === 'allow_plan' && action?.success)
@@ -3504,7 +3625,7 @@ export class ComputerUseController {
     if (capability === 'computer.observe') return { decision: 'allow', reason: 'computer_observe' };
     if (action?.success && this.safeSessionAction(record, action.data, request.callId))
       return { decision: 'allow', reason: 'computer_session_grant' };
-    if (action?.success && this.isHardBoundary(action.data, record.observation))
+    if (action?.success && this.preDispatchBoundary(action.data, record.observation))
       return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
     if (action?.success) return this.awaitApproval(record, request.callId, action.data);
     return { decision: 'deny', reason: 'computer_action_requires_approval' };
@@ -3666,7 +3787,7 @@ export class ComputerUseController {
     if (action.type === 'finish')
       return this.completeNonNativeAction(record, action, requestId, 'completed', null);
     if (record.status.mode === 'observe_only') throw new Error('Computer Use is observe-only');
-    if (this.isHardBoundary(action, record.observation)) {
+    if (this.preDispatchBoundary(action, record.observation)) {
       record.status = this.status(
         record,
         'paused',
@@ -3791,6 +3912,7 @@ export class ComputerUseController {
         requestId,
         observation.revision,
         signal ?? record.controller.signal,
+        this.nativeApprovalPathOpen() && this.boundaryFacts(action, record.observation).highImpact,
       );
     } catch {
       this.planGrantAuthorizedCalls.delete(`${sessionId}\0${requestId}`);
@@ -3814,6 +3936,21 @@ export class ComputerUseController {
       }
       return actionResultFromAudit(completed, sessionId, requestId);
     }
+    if (
+      nativeResult.approvalOffer !== undefined &&
+      nativeResult.result === 'paused' &&
+      nativeResult.reasonCode === NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE &&
+      this.nativeApprovalPathOpen()
+    )
+      return this.runNativeApproval({
+        record,
+        action,
+        requestId,
+        observation,
+        audit,
+        offer: nativeResult.approvalOffer,
+        signal: signal ?? record.controller.signal,
+      });
     const completed = this.deps.persistence.completeComputerActionAudit({
       auditId: audit.id,
       state: nativeResult.result === 'completed' ? 'applied' : mapAuditState(nativeResult.result),
@@ -3873,6 +4010,7 @@ export class ComputerUseController {
     requestId: string,
     observationRevision: number,
     signal: AbortSignal,
+    mainHighImpact = false,
   ): Promise<ComputerUseNativeActionResult> {
     const atomicActions: readonly ComputerUseAction[] =
       action.type === 'type'
@@ -3908,6 +4046,7 @@ export class ComputerUseController {
           observationRevision,
           cancelEpoch: record.native.cancelEpoch,
           signal,
+          ...(mainHighImpact ? { mainHighImpact: true } : {}),
         });
       } catch (error) {
         captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
@@ -3938,6 +4077,19 @@ export class ComputerUseController {
           revision: observationRevision,
         }),
       );
+      if (result.approvalOffer !== undefined && this.nativeApprovalPathOpen()) {
+        // An approval can be carried out only for one whole atomic action (ADR section 7).
+        if (index > 0) {
+          // Part of the text is already typed: no card, stop here with a partial effect.
+          await this.discardNativeApproval(record, result.approvalOffer.approvalGeneration);
+          return { result: 'unknown_effect', reasonCode: 'partial_type' };
+        }
+        if (atomicActions.length > 1) {
+          await this.discardNativeApproval(record, result.approvalOffer.approvalGeneration);
+          return { result: 'rejected', reasonCode: 'native_approval_multi_scalar_type' };
+        }
+        return result;
+      }
       // Once native returned a bounded result, that result is authoritative even if Stop won the
       // next microtask. Downgrading a confirmed completion/rejection to canceled corrupts the
       // durable audit. A partial multi-scalar type still reaches the next loop boundary, where the
@@ -3951,6 +4103,353 @@ export class ComputerUseController {
             };
     }
     return result;
+  }
+
+  private async discardNativeApproval(
+    record: SessionRecord,
+    approvalGeneration: number,
+  ): Promise<void> {
+    // approvalDiscard has no input capability and may be called from any refusal path.
+    try {
+      await this.deps.native.approvalDiscard?.({ session: record.native, approvalGeneration });
+    } catch {
+      // The native slot also expires on its own within 60 seconds.
+    }
+  }
+
+  /**
+   * The card of a native single-use approval. It is not the V1 card: it allows only `allow_once` and
+   * `deny`, never makes a plan grant, and lives for min(remainingMs, 60 s); the V1 card keeps its
+   * own 60 minutes. Native's expiry is the authority; Main's clock may only shorten it.
+   */
+  private awaitNativeApproval(
+    record: SessionRecord,
+    callId: string,
+    action: ComputerUseAction,
+    snapshot: NativeApprovalSnapshot,
+    approvalId: string,
+    remainingMs: number,
+  ): Promise<NativeApprovalOutcome> {
+    const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
+    const approval = computerUseApprovalSchema.parse({
+      id: approvalId,
+      sessionId: record.status.sessionId,
+      taskId: record.status.taskId,
+      turnId: record.turnId,
+      callId,
+      actionType: action.type,
+      actionDigest: computerUseActionDigest(action),
+      targetLabel: actionTargetLabel(action),
+      preview: safeActionPreview(action),
+      risk: 'high',
+      policyEpoch: snapshot.policyEpoch,
+      observationRevision: record.observation?.revision ?? record.status.observationRevision,
+      eligibleForPlan: false,
+      allowedDecisions: ['allow_once', 'deny'],
+      state: 'pending',
+      decision: null,
+      revision: 0,
+      challenge: `${randomUUID()}${randomUUID()}`,
+      createdAt: new Date(this.now()).toISOString(),
+      expiresAt: new Date(this.now() + lifetimeMs).toISOString(),
+    });
+    record.status = this.status(
+      record,
+      'awaiting_approval',
+      null,
+      record.observation?.revision ?? record.status.observationRevision,
+      record.status.round,
+      approval,
+    );
+    this.emit(record.status);
+    return new Promise<NativeApprovalOutcome>((resolve) => {
+      let settled = false;
+      const settle = (outcome: NativeApprovalOutcome): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(outcome);
+      };
+      const timer = setTimeout(() => {
+        const current = this.pendingApprovals.get(approvalId);
+        if (current === undefined) return;
+        this.pendingApprovals.delete(approvalId);
+        record.status = this.status(
+          record,
+          'paused',
+          null,
+          record.observation?.revision ?? record.status.observationRevision,
+          record.status.round,
+          null,
+        );
+        this.emit(record.status);
+        this.deps.publishApproval?.(
+          computerUseApprovalSchema.parse({
+            ...current.approval,
+            state: 'expired',
+            decision: null,
+            revision: current.approval.revision + 1,
+          }),
+        );
+        settle('expired');
+      }, lifetimeMs);
+      timer.unref?.();
+      this.pendingApprovals.set(approvalId, {
+        approval,
+        action,
+        timer,
+        native: { settle },
+        // Withdrawal paths (Stop, Task change) arrive here as a denial of the V1 shape.
+        resolve: () => settle('revoked'),
+      });
+      this.deps.publishApproval?.(approval);
+      // If Stop raced publication, do not leave an orphaned promise behind.
+      if (record.controller.signal.aborted) {
+        this.pendingApprovals.delete(approvalId);
+        settle('revoked');
+      }
+    });
+  }
+
+  /**
+   * Main-side checks that native cannot make (ADR section 3): Stop, Task / Turn / policy epoch,
+   * grant, provider egress consent (§6.4), build mode / attest, and the card itself. Run before
+   * re-observation, before approvalApprove and again before dispatchApproved.
+   */
+  private async assertNativeApprovalHolds(
+    record: SessionRecord,
+    action: ComputerUseAction,
+    snapshot: NativeApprovalSnapshot,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted || record.controller.signal.aborted)
+      throw new Error('Computer Use is canceled');
+    if (this.sessions.get(record.status.sessionId) !== record)
+      throw new Error('Computer Use session is no longer active');
+    this.assertSessionLive(record);
+    if (
+      record.status.policyEpoch !== snapshot.policyEpoch ||
+      record.turnId !== snapshot.turnId ||
+      this.now() >= snapshot.deadline
+    )
+      throw new Error('Computer Use approval is no longer valid');
+    const availability = this.deps.native.availability();
+    if (!availability.available || !availability.control)
+      throw new Error('Computer Use native control is unavailable');
+    if (this.deps.visualActionBlocked?.(record.status.sessionId, action) === true)
+      throw new Error('Computer Use action is inside the Stop boundary');
+    await record.planner?.revalidate?.(signal);
+    if (signal.aborted || record.controller.signal.aborted)
+      throw new Error('Computer Use is canceled');
+    this.assertSessionLive(record);
+  }
+
+  /**
+   * Native single-use approval (ADR v2 S4-4 addendum, section 0). Reached only when
+   * `adapter.dispatch` offered an approval while the path is open. `approvalApprove` is called from
+   * exactly one place below, after the trusted click settled the card as approved.
+   *
+   * Three native request ids stay separate: (a) the tool call and approval id, (b) the atomic
+   * request that was offered, (c) the new request that is dispatched once approved.
+   */
+  private async runNativeApproval(
+    input: Readonly<{
+      record: SessionRecord;
+      action: ComputerUseAction;
+      requestId: string;
+      observation: ComputerUseObservation;
+      audit: ComputerActionAuditRecord;
+      offer: ComputerUseNativeApprovalOffer;
+      signal: AbortSignal;
+    }>,
+  ): Promise<ComputerUseActionResult> {
+    const { record, action, requestId, observation, audit, offer, signal } = input;
+    const sessionId = record.status.sessionId;
+    const approvalId = randomUUID();
+    this.planGrantAuthorizedCalls.delete(`${sessionId}\0${requestId}`);
+    // (b): the offered request is closed as rejected with the approval id and effect. Its outcome is
+    // still NULL and is written exactly once below.
+    const offered = this.deps.persistence.completeComputerActionAudit({
+      auditId: audit.id,
+      state: 'rejected',
+      reasonCode: 'native_approval_required',
+      approvalId,
+      approvalEffect: offer.effect,
+      updatedAt: new Date(this.now()).toISOString(),
+    });
+    const snapshot: NativeApprovalSnapshot = {
+      approvalGeneration: offer.approvalGeneration,
+      effect: offer.effect,
+      policyEpoch: record.status.policyEpoch,
+      turnId: record.turnId,
+      deadline: this.now() + Math.min(offer.remainingMs, NATIVE_APPROVAL_CARD_MAX_MS),
+    };
+    const pause = (): void => {
+      if (record.controller.signal.aborted || !this.sessions.has(sessionId)) return;
+      record.status = this.status(
+        record,
+        'paused',
+        null,
+        record.observation?.revision ?? observation.revision,
+        record.status.round,
+        null,
+      );
+      this.emit(record.status);
+    };
+    const recordOutcome = (outcome: NativeApprovalOutcome): void => {
+      try {
+        this.deps.persistence.recordComputerActionApprovalOutcome({
+          auditId: offered.id,
+          outcome,
+          updatedAt: new Date(this.now()).toISOString(),
+        });
+      } catch {
+        // Correlation is trace-only; failing to write it never changes what was authorised.
+      }
+    };
+    const refuse = async (
+      outcome: Exclude<NativeApprovalOutcome, 'approved'>,
+    ): Promise<ComputerUseActionResult> => {
+      await this.discardNativeApproval(record, offer.approvalGeneration);
+      recordOutcome(outcome);
+      pause();
+      return {
+        ...actionResultFromAudit(offered, sessionId, requestId),
+        result: 'rejected',
+        reasonCode: NATIVE_APPROVAL_REFUSAL_REASON[outcome],
+      };
+    };
+
+    const decision = await this.awaitNativeApproval(
+      record,
+      requestId,
+      action,
+      snapshot,
+      approvalId,
+      offer.remainingMs,
+    );
+    if (decision !== 'approved') return refuse(decision);
+
+    // A click after the native deadline never reaches approvalApprove; the slot is discarded.
+    if (this.now() >= snapshot.deadline) return refuse('expired');
+    // From here the trusted click has been consumed. Main's own checks, then a re-observation.
+    const ctx: { focusedSession: ComputerUseNativeSession | null } = { focusedSession: null };
+    try {
+      await this.assertNativeApprovalHolds(record, action, snapshot, signal);
+      await this.refocusAndReobserve(
+        record,
+        ctx,
+        (previous, current) =>
+          nativeApprovalObservationEquivalent(previous, current, action, offer.effect, this.now()),
+        false,
+      );
+    } catch {
+      await this.cleanupAbandonedRefocus(record, ctx.focusedSession);
+      return refuse('revoked');
+    }
+    await this.cleanupAbandonedRefocus(record, ctx.focusedSession);
+    if (record.controller.signal.aborted || this.sessions.get(sessionId) !== record)
+      return refuse('revoked');
+    recordOutcome('approved');
+
+    // (c): a new native request, created pending before approvalApprove and bound to (b) by digest.
+    const dispatchRequestId = randomUUID();
+    const freshStripped = computerUseObservationSchema.parse(record.observation);
+    const nextAudit = this.deps.persistence.recordComputerActionAudit({
+      taskId: record.status.taskId,
+      turnId: computerUseAuditBindingDigest(record.turnId),
+      sessionId: computerUseAuditBindingDigest(sessionId),
+      profileId: record.profile.id,
+      profileRevision: record.profile.revision,
+      appIdentityDigest: record.status.appIdentityDigest,
+      windowIdentityDigest: record.status.windowIdentityDigest,
+      observationRevision: freshStripped.revision,
+      observationDigest: computerUseObservationAuditDigest(freshStripped),
+      clientWidth: freshStripped.clientWidth,
+      clientHeight: freshStripped.clientHeight,
+      actionDigest: computerUseActionDigest(action),
+      actionKind: computerUseActionKind(action),
+      route: computerUseActionRoute(action),
+      nativeRequestId: computerUseAuditBindingDigest(dispatchRequestId),
+      policyEpoch: record.status.policyEpoch,
+      approvalParentRequestId: computerUseAuditBindingDigest(requestId),
+    });
+    const finish = (
+      state: Exclude<ComputerActionAuditState, 'pending'>,
+      reasonCode: string | null,
+      result: ComputerUseActionResult['result'],
+    ): ComputerUseActionResult => {
+      const completed = this.deps.persistence.completeComputerActionAudit({
+        auditId: nextAudit.id,
+        state,
+        reasonCode,
+        updatedAt: new Date(this.now()).toISOString(),
+      });
+      if (result !== 'completed' && result !== 'canceled') pause();
+      const actionResult = actionResultFromAudit(completed, sessionId, requestId);
+      return result === 'paused' ? { ...actionResult, result: 'paused' } : actionResult;
+    };
+    const abandon = async (): Promise<ComputerUseActionResult> => {
+      await this.discardNativeApproval(record, offer.approvalGeneration);
+      return finish('rejected', NATIVE_APPROVAL_REFUSAL_REASON.revoked, 'rejected');
+    };
+
+    try {
+      await this.assertNativeApprovalHolds(record, action, snapshot, signal);
+    } catch {
+      return abandon();
+    }
+    let approved: ComputerUseNativeApprovalApproveResult;
+    try {
+      approved = await this.deps.native.approvalApprove!({
+        session: record.native,
+        requestId: dispatchRequestId,
+        action,
+        observationRevision: freshStripped.revision,
+        cancelEpoch: record.native.cancelEpoch,
+        approvalGeneration: offer.approvalGeneration,
+      });
+    } catch {
+      // The only throw left is a receipt count that went backwards: input may have happened.
+      await this.discardNativeApproval(record, offer.approvalGeneration);
+      return finish('unknown_effect', 'native_ack_unknown', 'unknown_effect');
+    }
+    if (approved.kind !== 'approved') {
+      await this.discardNativeApproval(record, offer.approvalGeneration);
+      if (approved.kind === 'invalid') return finish('rejected', approved.reasonCode, 'rejected');
+      return finish(
+        mapAuditState(approved.result),
+        approved.result === 'paused'
+          ? 'native_approval_revalidation_takeover'
+          : 'native_approval_revalidation_failed',
+        approved.result,
+      );
+    }
+    try {
+      await this.assertNativeApprovalHolds(record, action, snapshot, signal);
+    } catch {
+      return abandon();
+    }
+    let dispatched: ComputerUseNativeActionResult;
+    try {
+      dispatched = await this.deps.native.dispatchApproved!({
+        session: record.native,
+        requestId: dispatchRequestId,
+        action,
+        observationRevision: freshStripped.revision,
+        cancelEpoch: record.native.cancelEpoch,
+        approvalGeneration: offer.approvalGeneration,
+        signal,
+      });
+    } catch {
+      // Once dispatchApproved was called the ticket is spent: never record this as not-input.
+      return finish('unknown_effect', 'native_ack_unknown', 'unknown_effect');
+    }
+    return finish(
+      dispatched.result === 'completed' ? 'applied' : mapAuditState(dispatched.result),
+      dispatched.reasonCode,
+      dispatched.result,
+    );
   }
 
   private completeNonNativeAction(
@@ -4003,12 +4502,13 @@ export class ComputerUseController {
     if (record.status.mode === 'observe_only') return false;
     if (
       record.status.mode === 'full_access_app' &&
-      (!this.fullAccessLanguageAttested(record) || this.isHardBoundary(action, record.observation))
+      (!this.fullAccessLanguageAttested(record) ||
+        this.preDispatchBoundary(action, record.observation))
     )
       return false;
     if (
       record.status.mode === 'full_access_app' &&
-      !this.isHardBoundary(action, record.observation)
+      !this.preDispatchBoundary(action, record.observation)
     )
       return true;
     const allowed = this.planGrantMatches(record, action);
@@ -4075,6 +4575,75 @@ export class ComputerUseController {
     )
       return false;
     return true;
+  }
+
+  /** Whether the native approval path is open (addon exports, classifier v2 confirmed). */
+  private nativeApprovalPathOpen(): boolean {
+    return this.deps.native.nativeApprovalPathEnabled?.() === true;
+  }
+
+  /**
+   * What the observation says about the thing an action would touch. `nativeHighImpact` is true only
+   * when native's own facts said so; Main's projection (`HIGH_IMPACT_TEXT`) is broader and never
+   * counts as native's.
+   */
+  private boundaryFacts(
+    action: ComputerUseAction,
+    observation: ComputerUseNativeObservation | null,
+  ): Readonly<{ secure: boolean; highImpact: boolean; nativeHighImpact: boolean }> {
+    if (
+      (action.type === 'invoke' ||
+        action.type === 'set_text' ||
+        action.type === 'select' ||
+        action.type === 'toggle' ||
+        action.type === 'expand_collapse') &&
+      'targetId' in action
+    ) {
+      const metadata = observation?.targetMetadata?.[action.targetId];
+      return {
+        secure: metadata?.secure === true,
+        highImpact: metadata?.highImpact === true,
+        nativeHighImpact: metadata?.highImpactNative === true,
+      };
+    }
+    if (action.type === 'type' || action.type === 'key') {
+      // The focused element's flag comes from native alone.
+      const highImpact = observation?.focusedElementHighImpact === true;
+      return {
+        secure: observation?.focusedElementSecure === true,
+        highImpact,
+        nativeHighImpact: highImpact,
+      };
+    }
+    return { secure: false, highImpact: false, nativeHighImpact: false };
+  }
+
+  /**
+   * The one boundary before dispatch (ADR v2 S4-4 addendum, section 0, step 4). A secure field
+   * always stops. High-impact stops too, except while the native approval path is open and native
+   * itself called the target high-impact: then native's preflight decides and may offer a card.
+   * Unclassifiable targets are not judged here; native's preflight takes over for them.
+   * Plan-grant checks keep using the stricter `isHardBoundary`.
+   */
+  private preDispatchBoundary(
+    action: ComputerUseAction,
+    observation: ComputerUseNativeObservation | null,
+  ): boolean {
+    const facts = this.boundaryFacts(action, observation);
+    if (facts.secure) return true;
+    if (!facts.highImpact) return false;
+    return !(this.nativeApprovalPathOpen() && facts.nativeHighImpact);
+  }
+
+  /** True when this action's high-impact flag is waived only because native owns the judgement. */
+  private relaxesHighImpact(
+    action: ComputerUseAction,
+    observation: ComputerUseNativeObservation | null,
+  ): boolean {
+    const facts = this.boundaryFacts(action, observation);
+    return (
+      !facts.secure && facts.highImpact && facts.nativeHighImpact && this.nativeApprovalPathOpen()
+    );
   }
 
   private isHardBoundary(
@@ -4208,7 +4777,7 @@ export class ComputerUseController {
 
   private actionMayNeedApproval(record: SessionRecord, action: ComputerUseAction): boolean {
     if (action.type === 'wait' || action.type === 'finish') return false;
-    if (this.isHardBoundary(action, record.observation)) return false;
+    if (this.preDispatchBoundary(action, record.observation)) return false;
     if (record.status.mode === 'supervised') return true;
     if (record.status.mode === 'full_access_app') return false;
     return true;
@@ -4602,6 +5171,12 @@ function approvedObservationEquivalent(
   current: ComputerUseNativeObservation,
   action: ComputerUseAction,
   now: number,
+  /**
+   * The V1 card of an action whose high-impact flag is native's to judge (native approval path
+   * open). The flag must be exactly as it was when the card was made, so a changed target is still
+   * refused.
+   */
+  unchangedHighImpact = false,
 ): boolean {
   if (
     current.sessionId !== previous.sessionId ||
@@ -4625,7 +5200,12 @@ function approvedObservationEquivalent(
       priorSignature !== undefined &&
       current.targetSignatures?.[action.targetId] === priorSignature &&
       current.targetMetadata?.[action.targetId]?.secure !== true &&
-      current.targetMetadata?.[action.targetId]?.highImpact !== true
+      (unchangedHighImpact
+        ? current.targetMetadata?.[action.targetId]?.highImpact ===
+            previous.targetMetadata?.[action.targetId]?.highImpact &&
+          current.targetMetadata?.[action.targetId]?.highImpactNative ===
+            previous.targetMetadata?.[action.targetId]?.highImpactNative
+        : current.targetMetadata?.[action.targetId]?.highImpact !== true)
     );
   }
   if (action.type === 'type' || action.type === 'key')
@@ -4634,7 +5214,83 @@ function approvedObservationEquivalent(
       previous.focusedElementSignature !== null &&
       current.focusedElementSignature === previous.focusedElementSignature &&
       current.focusedElementSecure !== true &&
-      current.focusedElementHighImpact !== true &&
+      (unchangedHighImpact
+        ? current.focusedElementHighImpact === previous.focusedElementHighImpact
+        : current.focusedElementHighImpact !== true) &&
+      (previous.treeDigest === null
+        ? current.images[0]?.digest === previous.images[0]?.digest
+        : current.treeDigest === previous.treeDigest)
+    );
+  if (action.type === 'click' || action.type === 'scroll')
+    return (
+      current.treeDigest === previous.treeDigest &&
+      current.images.length === previous.images.length &&
+      current.images.every((image, index) => image.digest === previous.images[index]?.digest)
+    );
+  return false;
+}
+
+/**
+ * The re-observation check for a native single-use approval (ADR v2 S4-4 addendum, section 0 step
+ * 4). `approvedObservationEquivalent` cannot be used: it refuses every high-impact target, which is
+ * exactly what a `high_impact_confirmation` approval is about. Here the target, window, geometry
+ * and target metadata must equal what the user was shown, and a high-impact flag is accepted only
+ * if it is unchanged and the approved `effect` is `high_impact_confirmation`. Secure fields never
+ * pass.
+ */
+export function nativeApprovalObservationEquivalent(
+  previous: ComputerUseNativeObservation,
+  current: ComputerUseNativeObservation,
+  action: ComputerUseAction,
+  effect: ComputerUseNativeApprovalOffer['effect'],
+  now: number,
+): boolean {
+  if (
+    current.sessionId !== previous.sessionId ||
+    current.appIdentityDigest !== previous.appIdentityDigest ||
+    current.windowIdentityDigest !== previous.windowIdentityDigest ||
+    (current.dialogSetRevision ?? 0) !== (previous.dialogSetRevision ?? 0) ||
+    current.dialogSetDigest !== previous.dialogSetDigest ||
+    current.activeWindowIdentityDigest !== previous.activeWindowIdentityDigest ||
+    current.activeWindowKind !== previous.activeWindowKind ||
+    current.policyLanguage !== previous.policyLanguage ||
+    current.profileRevision !== previous.profileRevision ||
+    current.revision <= previous.revision ||
+    current.clientWidth !== previous.clientWidth ||
+    current.clientHeight !== previous.clientHeight ||
+    current.screenBounds.x !== previous.screenBounds.x ||
+    current.screenBounds.y !== previous.screenBounds.y ||
+    current.screenBounds.width !== previous.screenBounds.width ||
+    current.screenBounds.height !== previous.screenBounds.height ||
+    Date.parse(current.expiresAt) <= now
+  )
+    return false;
+  const highImpactAllowed = (before: boolean, after: boolean): boolean =>
+    before === after && (!after || effect === 'high_impact_confirmation');
+  if ('targetId' in action) {
+    const priorSignature = previous.targetSignatures?.[action.targetId];
+    const before = previous.targetMetadata?.[action.targetId];
+    const after = current.targetMetadata?.[action.targetId];
+    return (
+      priorSignature !== undefined &&
+      current.targetSignatures?.[action.targetId] === priorSignature &&
+      before?.secure !== true &&
+      after?.secure !== true &&
+      (before?.highImpactNative === true) === (after?.highImpactNative === true) &&
+      highImpactAllowed(before?.highImpact === true, after?.highImpact === true)
+    );
+  }
+  if (action.type === 'type' || action.type === 'key')
+    return (
+      previous.focusedElementSignature !== undefined &&
+      previous.focusedElementSignature !== null &&
+      current.focusedElementSignature === previous.focusedElementSignature &&
+      previous.focusedElementSecure !== true &&
+      current.focusedElementSecure !== true &&
+      highImpactAllowed(
+        previous.focusedElementHighImpact === true,
+        current.focusedElementHighImpact === true,
+      ) &&
       (previous.treeDigest === null
         ? current.images[0]?.digest === previous.images[0]?.digest
         : current.treeDigest === previous.treeDigest)
@@ -4670,6 +5326,8 @@ function actionResultFromAudit(
     reasonCode: audit.reasonCode,
   });
 }
+
+const NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable';
 
 function mapAuditState(
   result: ComputerUseActionResult['result'],

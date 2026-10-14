@@ -21,6 +21,7 @@ import {
 } from '@sprint-coder/contracts';
 import type {
   ComputerUseNativeActionResult,
+  ComputerUseNativeApprovalApproveResult,
   ComputerUseNativeApprovalOffer,
   ComputerUseNativeHost,
   ComputerUseNativeSession,
@@ -88,6 +89,9 @@ type NativeMethod =
   | 'startSession'
   | 'observe'
   | 'preflight'
+  | 'approvalApprove'
+  | 'approvalDiscard'
+  | 'dispatchApproved'
   | 'dispatch'
   | 'cancel'
   | 'close';
@@ -101,6 +105,12 @@ type ComputerUseNativeBounds = Readonly<{
   height: number;
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
+  /**
+   * Whether the handshake confirmed classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). D7 does
+   * not exist yet, so production never sets this and the native approval path stays closed; tests
+   * inject it to drive the path (ADR v2 S4-4 addendum, section 0).
+   */
+  classifierV2Attested?: boolean;
   stopTimeoutMs?: number;
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds;
 }>;
@@ -207,6 +217,8 @@ export function createComputerUseNativeHost(
       (method === 'startSession' ||
         method === 'observe' ||
         method === 'preflight' ||
+        method === 'approvalApprove' ||
+        method === 'dispatchApproved' ||
         method === 'dispatch')
     )
       throw new ComputerUseNativeUnavailableError(unavailableReason());
@@ -238,6 +250,67 @@ export function createComputerUseNativeHost(
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }
+  };
+
+  const approvalPathEnabled = (): boolean =>
+    platform === 'darwin' &&
+    options.classifierV2Attested === true &&
+    hasMethod(addon, 'preflight') &&
+    hasMethod(addon, 'approvalApprove') &&
+    hasMethod(addon, 'approvalDiscard') &&
+    hasMethod(addon, 'dispatchApproved');
+
+  const parseDispatchRecord = (
+    value: unknown,
+    input: Readonly<{
+      session: ComputerUseNativeSession;
+      requestId: string;
+      observationRevision: number;
+      cancelEpoch: number;
+    }>,
+    internal: InternalNativeSession,
+    actionDigest: string,
+  ): ComputerUseNativeActionResult => {
+    const record = asRecord(value, 'native_action_result_invalid');
+    const result = computerUseResultSchema.parse(record['result']);
+    const reasonCode = record['reasonCode'];
+    if (reasonCode !== null && typeof reasonCode !== 'string')
+      throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
+    if (
+      internal.platform === 'darwin' &&
+      (record['requestId'] !== input.requestId ||
+        record['sessionId'] !== input.session.sessionId ||
+        record['observationRevision'] !== input.observationRevision ||
+        record['actionDigest'] !== actionDigest ||
+        typeof record['accepted'] !== 'boolean' ||
+        typeof record['effectStarted'] !== 'boolean')
+    )
+      throw new ComputerUseNativeUnavailableError('native_action_envelope_invalid');
+    if (internal.platform === 'darwin') {
+      const accepted = record['accepted'] === true;
+      const effectStarted = record['effectStarted'] === true;
+      if (
+        (result === 'completed' && !accepted) ||
+        (result === 'unknown_effect' && (!accepted || !effectStarted)) ||
+        ((result === 'rejected' || result === 'paused' || result === 'canceled') &&
+          (accepted || effectStarted))
+      )
+        throw new ComputerUseNativeUnavailableError('native_action_effect_invalid');
+    }
+    // Parse the public result shape once here so malformed native responses cannot cross the
+    // controller boundary. The action id is native request-bound and is not persisted here.
+    computerUseActionResultSchema.partial().parse({
+      actionId: input.requestId,
+      sessionId: input.session.sessionId,
+      observationRevision: input.observationRevision,
+      result,
+      reasonCode: reasonCode ?? null,
+    });
+    return Object.freeze({
+      result,
+      reasonCode: reasonCode ?? null,
+      inputReceipt: inputReceipt(record, input.session.sessionId, input.cancelEpoch),
+    });
   };
 
   const host: ComputerUseNativeHost = {
@@ -460,6 +533,108 @@ export function createComputerUseNativeHost(
       );
     },
 
+    nativeApprovalPathEnabled: (): boolean => approvalPathEnabled(),
+
+    approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
+      const internal = sessions.get(input.session.sessionId);
+      if (internal === undefined)
+        throw new ComputerUseNativeUnavailableError('native_session_missing');
+      const request = {
+        ...internal.raw,
+        ...input.action,
+        requestId: input.requestId,
+        observationRevision: input.observationRevision,
+        cancelEpoch: input.cancelEpoch,
+        actionDigest: computerUseActionDigest(input.action),
+        approvalGeneration: input.approvalGeneration,
+      };
+      let receipt: unknown;
+      try {
+        if (!approvalPathEnabled())
+          throw new ComputerUseNativeUnavailableError('native_approval_closed');
+        receipt = await invoke('approvalApprove', request);
+      } catch {
+        // approvalApprove has no input capability: a throw or a closed path is a pre-input failure.
+        return Object.freeze({
+          kind: 'refused',
+          result: 'rejected',
+          reasonCode: 'native_approval_approve_failed',
+        });
+      }
+      const outcome = parseNativeApprovalApproveReceipt(receipt, {
+        sessionId: input.session.sessionId,
+        requestId: input.requestId,
+        cancelEpoch: input.cancelEpoch,
+        observationRevision: input.observationRevision,
+        approvalGeneration: input.approvalGeneration,
+      });
+      if (outcome.kind === 'invalid')
+        return Object.freeze({
+          kind: 'invalid',
+          result: outcome.result,
+          reasonCode: outcome.reasonCode,
+        });
+      // A count that went backwards may mean input happened, so (like preflight) it keeps throwing.
+      inputReceipt(
+        {
+          sessionId: input.session.sessionId,
+          cancelEpoch: input.cancelEpoch,
+          inputAttemptCount: outcome.inputAttemptCount,
+        },
+        input.session.sessionId,
+        input.cancelEpoch,
+      );
+      if (outcome.kind === 'approved') return Object.freeze({ kind: 'approved' });
+      return Object.freeze({
+        kind: 'refused',
+        result: outcome.result,
+        reasonCode: outcome.reasonCode,
+      });
+    },
+
+    approvalDiscard: async (input): Promise<void> => {
+      const internal = sessions.get(input.session.sessionId);
+      if (internal === undefined || !hasMethod(addon, 'approvalDiscard')) return;
+      try {
+        // No input capability, and a stale generation is a no-op: nothing here can fail closed.
+        await invoke('approvalDiscard', {
+          ...internal.raw,
+          sessionId: input.session.sessionId,
+          approvalGeneration: input.approvalGeneration,
+        });
+      } catch {
+        // The slot also expires on its own (at most 60 seconds), is replaced by the next intent,
+        // and is dropped by cancel and close.
+      }
+    },
+
+    dispatchApproved: async (input): Promise<ComputerUseNativeActionResult> => {
+      const internal = sessions.get(input.session.sessionId);
+      if (internal === undefined)
+        throw new ComputerUseNativeUnavailableError('native_session_missing');
+      if (!approvalPathEnabled())
+        throw new ComputerUseNativeUnavailableError('native_approval_closed');
+      const actionDigest = computerUseActionDigest(input.action);
+      const request = {
+        ...internal.raw,
+        ...input.action,
+        requestId: input.requestId,
+        observationRevision: input.observationRevision,
+        cancelEpoch: input.cancelEpoch,
+        actionDigest,
+        approvalGeneration: input.approvalGeneration,
+      };
+      let value: unknown;
+      try {
+        value = await invoke('dispatchApproved', request);
+      } catch (error) {
+        const preDispatch = classifyComputerUseNativeDispatchFailure(error);
+        if (preDispatch !== null) return preDispatch;
+        throw error;
+      }
+      return parseDispatchRecord(value, input, internal, actionDigest);
+    },
+
     dispatch: async (input): Promise<ComputerUseNativeActionResult> => {
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
@@ -505,7 +680,18 @@ export function createComputerUseNativeHost(
           input.session.sessionId,
           input.cancelEpoch,
         );
-        if (outcome.kind === 'ticket') ticket = outcome.ticket;
+        if (outcome.kind === 'ticket') {
+          // Defence in depth: Main judged this target high-impact and the approval path is open, yet
+          // native called it ordinary. The vocabularies differ, so no input is made. The ordinary
+          // ticket is never used; it expires in the native slot or is replaced by the next preflight.
+          if (input.mainHighImpact === true && approvalPathEnabled())
+            return Object.freeze({
+              result: 'paused',
+              reasonCode: 'hard_boundary',
+              inputReceipt: preflightReceipt,
+            });
+          ticket = outcome.ticket;
+        }
         if (outcome.kind === 'refused') {
           // Same public-shape check as a dispatch result, so the contract owns the reason format.
           if (
@@ -535,46 +721,7 @@ export function createComputerUseNativeHost(
         if (preDispatch !== null) return preDispatch;
         throw error;
       }
-      const record = asRecord(value, 'native_action_result_invalid');
-      const result = computerUseResultSchema.parse(record['result']);
-      const reasonCode = record['reasonCode'];
-      if (reasonCode !== null && typeof reasonCode !== 'string')
-        throw new ComputerUseNativeUnavailableError('native_action_result_invalid');
-      if (
-        internal.platform === 'darwin' &&
-        (record['requestId'] !== input.requestId ||
-          record['sessionId'] !== input.session.sessionId ||
-          record['observationRevision'] !== input.observationRevision ||
-          record['actionDigest'] !== actionDigest ||
-          typeof record['accepted'] !== 'boolean' ||
-          typeof record['effectStarted'] !== 'boolean')
-      )
-        throw new ComputerUseNativeUnavailableError('native_action_envelope_invalid');
-      if (internal.platform === 'darwin') {
-        const accepted = record['accepted'] === true;
-        const effectStarted = record['effectStarted'] === true;
-        if (
-          (result === 'completed' && !accepted) ||
-          (result === 'unknown_effect' && (!accepted || !effectStarted)) ||
-          ((result === 'rejected' || result === 'paused' || result === 'canceled') &&
-            (accepted || effectStarted))
-        )
-          throw new ComputerUseNativeUnavailableError('native_action_effect_invalid');
-      }
-      // Parse the public result shape once here so malformed native responses cannot cross the
-      // controller boundary. The action id is native request-bound and is not persisted here.
-      computerUseActionResultSchema.partial().parse({
-        actionId: input.requestId,
-        sessionId: input.session.sessionId,
-        observationRevision: input.observationRevision,
-        result,
-        reasonCode: reasonCode ?? null,
-      });
-      return Object.freeze({
-        result,
-        reasonCode: reasonCode ?? null,
-        inputReceipt: inputReceipt(record, input.session.sessionId, input.cancelEpoch),
-      });
+      return parseDispatchRecord(value, input, internal, actionDigest);
     },
 
     cancel: async (session, cancelEpoch): Promise<ComputerUseNativeInputReceipt> => {
@@ -1299,12 +1446,17 @@ function sanitizeCanonicalObservationTree(
     });
   }
   const projection = projectNativeAccessibilityTree(observation.accessibilityTree);
-  const targetMetadata = { ...projection.metadata };
+  const targetMetadata: Record<
+    string,
+    { secure: boolean; highImpact: boolean; highImpactNative?: boolean }
+  > = { ...projection.metadata };
   for (const [targetId, facts] of Object.entries(observation.targetMetadata ?? {})) {
     const projectedFacts = targetMetadata[targetId];
     targetMetadata[targetId] = {
       secure: projectedFacts?.secure === true || facts.secure === true,
       highImpact: projectedFacts?.highImpact === true || facts.highImpact === true,
+      // The incoming observation is native's; only its own flag counts as native's judgement.
+      highImpactNative: facts.highImpact === true,
     };
   }
   return computerUseObservationSchema.parse({

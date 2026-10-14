@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
@@ -23,6 +24,9 @@ import {
   ComputerUseController,
   type ComputerUseControllerDeps,
   type ComputerUseNativeActionResult,
+  type ComputerUseNativeApprovalApproveResult,
+  type ComputerUseNativeApprovalOffer,
+  nativeApprovalObservationEquivalent,
   type ComputerUseNativeHost,
   type ComputerUseNativeObservation,
   type ComputerUseNativeSession,
@@ -199,6 +203,16 @@ function createFixture(
     now?: () => number;
     profileRecord?: ComputerAppProfileRecord;
     windowExecutableDigest?: string | null;
+    /** Opens the native approval path on the fake host (a production host never reports it). */
+    nativeApproval?: {
+      enabled?: boolean;
+      approve?: (
+        input: Parameters<NonNullable<ComputerUseNativeHost['approvalApprove']>>[0],
+      ) => ComputerUseNativeApprovalApproveResult | Promise<ComputerUseNativeApprovalApproveResult>;
+      dispatchApproved?: (
+        input: Parameters<NonNullable<ComputerUseNativeHost['dispatchApproved']>>[0],
+      ) => Promise<ComputerUseNativeActionResult>;
+    };
   } = {},
 ) {
   let activeTurn: string | null = null;
@@ -230,6 +244,12 @@ function createFixture(
   let startSessionCount = 0;
   let nativeCancelCount = 0;
   let nativeCloseCount = 0;
+  /** Ordered record of the native calls the approval tests care about. */
+  const nativeLog: string[] = [];
+  const approveInputs: Parameters<NonNullable<ComputerUseNativeHost['approvalApprove']>>[0][] = [];
+  const approvedDispatches: Parameters<
+    NonNullable<ComputerUseNativeHost['dispatchApproved']>
+  >[0][] = [];
   const nativeSession: ComputerUseNativeSession = {
     sessionId: 'session-1',
     platform: currentProfile.platform,
@@ -279,6 +299,7 @@ function createFixture(
       ] satisfies readonly ComputerUseNativeWindow[];
     },
     startSession: async (input) => {
+      nativeLog.push('startSession');
       // Counted before the gate, so a test can observe "native startup has begun and is still
       // running" — the window in which a session exists only in `startingSessions`.
       startSessionEnteredCount += 1;
@@ -306,6 +327,7 @@ function createFixture(
       };
     },
     observe: async (session) => {
+      nativeLog.push('observe');
       const nextRevision = ++revision;
       const observed = observation(nextRevision, {
         sessionId: session.sessionId,
@@ -339,7 +361,31 @@ function createFixture(
               ? { ...observed, focusedElementSignature: 'e'.repeat(64) }
               : observed;
     },
+    ...(options.nativeApproval === undefined
+      ? {}
+      : {
+          nativeApprovalPathEnabled: () => options.nativeApproval!.enabled !== false,
+          approvalApprove: async (input) => {
+            nativeLog.push('approvalApprove');
+            approveInputs.push(input);
+            return (await options.nativeApproval!.approve?.(input)) ?? { kind: 'approved' };
+          },
+          approvalDiscard: async (input) => {
+            nativeLog.push(`approvalDiscard:${input.approvalGeneration}`);
+          },
+          dispatchApproved: async (input) => {
+            nativeLog.push('dispatchApproved');
+            approvedDispatches.push(input);
+            return (
+              (await options.nativeApproval!.dispatchApproved?.(input)) ?? {
+                result: 'completed',
+                reasonCode: null,
+              }
+            );
+          },
+        }),
     dispatch: async (input) => {
+      nativeLog.push('dispatch');
       const { requestId, action, session } = input;
       dispatchCount += 1;
       dispatchedActions.push(action);
@@ -440,6 +486,8 @@ function createFixture(
       auditId: string;
       state: Exclude<ComputerActionAuditRecord['state'], 'pending'>;
       reasonCode?: string | null;
+      approvalId?: string | null;
+      approvalEffect?: ComputerActionAuditRecord['approvalEffect'];
       updatedAt: string;
     }) => {
       const current = audits.get(input.auditId);
@@ -448,8 +496,26 @@ function createFixture(
         ...current,
         state: input.state,
         reasonCode: input.reasonCode ?? null,
+        approvalId: input.approvalId ?? current.approvalId,
+        approvalEffect: input.approvalEffect ?? current.approvalEffect,
         updatedAt: input.updatedAt,
       };
+      audits.set(input.auditId, next);
+      return next;
+    },
+    recordComputerActionApprovalOutcome: (input: {
+      auditId: string;
+      outcome: NonNullable<ComputerActionAuditRecord['approvalOutcome']>;
+      updatedAt: string;
+    }) => {
+      const current = audits.get(input.auditId);
+      if (current === undefined) throw new Error('audit missing');
+      if (current.approvalId === null) throw new Error('audit has no approval');
+      if (current.approvalOutcome !== null) {
+        if (current.approvalOutcome === input.outcome) return current;
+        throw new Error('outcome already recorded');
+      }
+      const next = { ...current, approvalOutcome: input.outcome, updatedAt: input.updatedAt };
       audits.set(input.auditId, next);
       return next;
     },
@@ -505,6 +571,9 @@ function createFixture(
     setPolicyEpoch: (next: number) => {
       policyEpoch = next;
     },
+    nativeLog,
+    approveInputs,
+    approvedDispatches,
     dispatchCount: () => dispatchCount,
     observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
@@ -880,6 +949,613 @@ describe('ComputerUseController', () => {
       ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'native_preflight_invalid' });
       expect(host.nativeDispatch).not.toHaveBeenCalled();
       await fixture.controller.stop(started.sessionId);
+    });
+  });
+
+  describe('native single-use approval path (N2b-4: Main connection)', () => {
+    const buttonAction: ComputerUseAction = {
+      type: 'invoke',
+      targetId: 'button',
+      name: 'activate',
+      arguments: {},
+    };
+    const nativeFacts = {
+      targetSignatures: { button: 'c'.repeat(64) },
+      targetMetadata: { button: { secure: false, highImpact: true, highImpactNative: true } },
+    };
+    const mainOnlyFacts = {
+      targetSignatures: { button: 'c'.repeat(64) },
+      targetMetadata: { button: { secure: false, highImpact: true } },
+    };
+    const secureFacts = {
+      targetSignatures: { button: 'c'.repeat(64) },
+      targetMetadata: { button: { secure: true, highImpact: true, highImpactNative: true } },
+    };
+    const offer = (
+      effect: ComputerUseNativeApprovalOffer['effect'] = 'high_impact_confirmation',
+      approvalGeneration = 7,
+      remainingMs = 30_000,
+    ): ComputerUseNativeActionResult => ({
+      result: 'paused',
+      reasonCode: 'native_single_use_approval_unavailable',
+      approvalOffer: { kind: 'approval_required', approvalGeneration, remainingMs, effect },
+    });
+    const sha = (value: string): string => createHash('sha256').update(value, 'utf8').digest('hex');
+    const pendingCard = (fixture: ReturnType<typeof createFixture>) =>
+      fixture.approvals.filter((approval) => approval.state === 'pending').at(-1)!;
+    const clickCard = async (
+      fixture: ReturnType<typeof createFixture>,
+      decision: 'allow_once' | 'deny' = 'allow_once',
+    ) => {
+      const card = pendingCard(fixture);
+      return fixture.controller.resolveApproval({
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        decision,
+        challenge: card.challenge,
+      });
+    };
+    async function offered(
+      overrides: Parameters<typeof createFixture>[0] = {},
+      mode: 'full_access_app' | 'supervised' = 'full_access_app',
+      action: ComputerUseAction = buttonAction,
+    ) {
+      const fixture = createFixture({
+        mode,
+        observationOverrides: nativeFacts,
+        nativeApproval: {},
+        nativeDispatch: async () => offer(),
+        ...overrides,
+      });
+      const started = await start(fixture, mode, false, undefined, 3);
+      await fixture.controller.observe(started.sessionId);
+      const acting = fixture.controller.act(started.sessionId, action, 'req-a');
+      return { fixture, started, acting, sessionId: started.sessionId };
+    }
+    const auditList = (fixture: ReturnType<typeof createFixture>) => [...fixture.audits.values()];
+
+    it('approves a high_impact_confirmation once: card, click, re-observation, approve, dispatchApproved', async () => {
+      const { fixture, acting, sessionId } = await offered();
+      await viWait();
+      const card = pendingCard(fixture);
+      // The card is a native one: allow_once / deny only, no plan grant, at most 60 seconds.
+      expect(card.allowedDecisions).toEqual(['allow_once', 'deny']);
+      expect(card.eligibleForPlan).toBe(false);
+      expect(Date.parse(card.expiresAt) - Date.parse(card.createdAt)).toBe(30_000);
+      // Nothing past the offer has run before the trusted click.
+      expect(fixture.nativeLog.filter((entry) => entry.startsWith('approval'))).toEqual([]);
+      const logBefore = fixture.nativeLog.length;
+      await clickCard(fixture);
+      await expect(acting).resolves.toMatchObject({ result: 'completed', actionId: 'req-a' });
+      const afterClick = fixture.nativeLog.slice(logBefore);
+      // Re-observation (refocus + observe) happens before approvalApprove; no observe / preflight /
+      // startSession runs between approvalApprove and dispatchApproved.
+      expect(afterClick).toEqual([
+        'startSession',
+        'observe',
+        'approvalApprove',
+        'dispatchApproved',
+      ]);
+      expect(fixture.approveInputs).toHaveLength(1);
+      expect(fixture.approveInputs[0]).toMatchObject({
+        approvalGeneration: 7,
+        action: buttonAction,
+      });
+      expect(fixture.approvedDispatches).toHaveLength(1);
+      expect(fixture.approvedDispatches[0]!.requestId).toBe(fixture.approveInputs[0]!.requestId);
+      expect(fixture.approvedDispatches[0]!.requestId).not.toBe('req-a');
+      expect(fixture.approvedDispatches[0]!.observationRevision).toBeGreaterThan(1);
+      // The offered request never produced input: only one native dispatch (the offer) ran.
+      expect(fixture.dispatchCount()).toBe(1);
+      // Audit correlation: (b) is the offered request, (c) is new and points at (b) by digest.
+      const [b, c] = auditList(fixture);
+      expect(b).toMatchObject({
+        state: 'rejected',
+        reasonCode: 'native_approval_required',
+        approvalId: card.id,
+        approvalEffect: 'high_impact_confirmation',
+        approvalOutcome: 'approved',
+        approvalParentRequestId: null,
+        nativeRequestId: sha('req-a'),
+      });
+      expect(c).toMatchObject({
+        state: 'applied',
+        approvalId: null,
+        approvalOutcome: null,
+        approvalParentRequestId: sha('req-a'),
+      });
+      expect(c!.nativeRequestId).toBe(sha(fixture.approvedDispatches[0]!.requestId));
+      expect(c!.nativeRequestId).not.toBe(b!.nativeRequestId);
+      expect(JSON.stringify(auditList(fixture))).not.toContain('req-a');
+      await fixture.controller.stop(sessionId);
+    });
+
+    it('records denied / expired / revoked with fixed reason codes, discards, and makes no (c)', async () => {
+      // denied
+      const denied = await offered();
+      await viWait();
+      await clickCard(denied.fixture, 'deny');
+      await expect(denied.acting).resolves.toMatchObject({
+        result: 'rejected',
+        reasonCode: 'native_approval_denied',
+      });
+      expect(denied.fixture.nativeLog).toContain('approvalDiscard:7');
+      expect(denied.fixture.nativeLog).not.toContain('approvalApprove');
+      expect(auditList(denied.fixture)).toHaveLength(1);
+      expect(auditList(denied.fixture)[0]).toMatchObject({ approvalOutcome: 'denied' });
+      await denied.fixture.controller.stop(denied.sessionId);
+      // revoked by Stop while the card is open
+      const revoked = await offered();
+      await viWait();
+      await revoked.fixture.controller.stop(revoked.sessionId);
+      await expect(revoked.acting).resolves.toMatchObject({
+        result: 'rejected',
+        reasonCode: 'native_approval_revoked',
+      });
+      expect(revoked.fixture.nativeLog).toContain('approvalDiscard:7');
+      expect(auditList(revoked.fixture)[0]).toMatchObject({ approvalOutcome: 'revoked' });
+      expect(revoked.fixture.nativeLog).not.toContain('approvalApprove');
+    });
+
+    it('expires at min(remainingMs, 60 s): the timer and a late click both discard without approving', async () => {
+      // The timer fires at the native remainingMs (kept tiny here) and discards the slot.
+      const first = await offered({
+        nativeDispatch: async () => offer('supervised_action', 7, 40),
+      });
+      await viWait();
+      const shortCard = pendingCard(first.fixture);
+      expect(Date.parse(shortCard.expiresAt) - Date.parse(shortCard.createdAt)).toBe(40);
+      await expect(first.acting).resolves.toMatchObject({
+        result: 'rejected',
+        reasonCode: 'native_approval_expired',
+      });
+      expect(first.fixture.nativeLog).toContain('approvalDiscard:7');
+      expect(first.fixture.nativeLog).not.toContain('approvalApprove');
+      expect(auditList(first.fixture)[0]).toMatchObject({ approvalOutcome: 'expired' });
+      expect(first.fixture.controller.getStatus(first.sessionId)?.pendingApproval).toBeNull();
+      // The card is never longer than 60 s, which is also the largest remainingMs native may send.
+      let clock = Date.now();
+      const second = await offered({
+        nativeDispatch: async () => offer('supervised_action', 8, 60_000),
+        now: () => clock,
+      });
+      await viWait();
+      const longCard = pendingCard(second.fixture);
+      expect(Date.parse(longCard.expiresAt) - Date.parse(longCard.createdAt)).toBe(60_000);
+      // The clock passes the deadline before the timer fires: the click is refused as expired.
+      clock += 60_001;
+      await clickCard(second.fixture);
+      await expect(second.acting).resolves.toMatchObject({
+        reasonCode: 'native_approval_expired',
+      });
+      expect(second.fixture.nativeLog).not.toContain('approvalApprove');
+      expect(second.fixture.nativeLog).toContain('approvalDiscard:8');
+      expect(auditList(second.fixture)[0]).toMatchObject({ approvalOutcome: 'expired' });
+    });
+
+    it('ignores a double click and calls approvalApprove once', async () => {
+      const { fixture, acting } = await offered();
+      await viWait();
+      const card = pendingCard(fixture);
+      const input = {
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        decision: 'allow_once' as const,
+        challenge: card.challenge,
+      };
+      await fixture.controller.resolveApproval(input);
+      await expect(fixture.controller.resolveApproval(input)).rejects.toThrow(/not found|stale/iu);
+      await acting;
+      expect(fixture.approveInputs).toHaveLength(1);
+      expect(fixture.approvedDispatches).toHaveLength(1);
+    });
+
+    it.each([
+      ['policy epoch', (f: ReturnType<typeof createFixture>) => f.setPolicyEpoch(5)],
+      ['Turn', (f: ReturnType<typeof createFixture>) => f.setActiveTurn('other-turn')],
+    ])(
+      'revokes without approving when the %s changes before the click is acted on',
+      async (_name, change) => {
+        const { fixture, acting } = await offered();
+        await viWait();
+        change(fixture);
+        await clickCard(fixture);
+        await expect(acting).resolves.toMatchObject({ reasonCode: 'native_approval_revoked' });
+        expect(fixture.nativeLog).not.toContain('approvalApprove');
+        expect(fixture.nativeLog).toContain('approvalDiscard:7');
+        expect(auditList(fixture)).toHaveLength(1);
+        expect(auditList(fixture)[0]).toMatchObject({ approvalOutcome: 'revoked' });
+      },
+    );
+
+    it('revokes when the provider egress consent / permit no longer holds, before and before dispatchApproved', async () => {
+      // Before approvalApprove: a revalidate that fails once the card is open.
+      let armed = false;
+      let calls = 0;
+      const before = await offered({
+        planner: {
+          plan: () => new Promise<ComputerUseAction>(() => undefined),
+          revalidate: async () => {
+            if (!armed) return;
+            calls += 1;
+            throw new Error('egress consent withdrawn');
+          },
+        },
+      });
+      await viWait();
+      armed = true;
+      await clickCard(before.fixture);
+      await expect(before.acting).resolves.toMatchObject({ reasonCode: 'native_approval_revoked' });
+      expect(before.fixture.nativeLog).not.toContain('approvalApprove');
+      expect(calls).toBeGreaterThan(0);
+      // Just before dispatchApproved: the third check after the click (after approvalApprove) fails.
+      let lateArmed = false;
+      let checks = 0;
+      const late = await offered({
+        planner: {
+          plan: () => new Promise<ComputerUseAction>(() => undefined),
+          revalidate: async () => {
+            if (!lateArmed) return;
+            checks += 1;
+            if (checks >= 3) throw new Error('consent withdrawn late');
+          },
+        },
+      });
+      await viWait();
+      lateArmed = true;
+      await clickCard(late.fixture);
+      await expect(late.acting).resolves.toMatchObject({ result: 'rejected' });
+      expect(late.fixture.nativeLog).toContain('approvalApprove');
+      expect(late.fixture.nativeLog).not.toContain('dispatchApproved');
+      expect(late.fixture.nativeLog.at(-1)).toBe('approvalDiscard:7');
+      const [, cRow] = auditList(late.fixture);
+      expect(cRow).toMatchObject({ state: 'rejected', reasonCode: 'native_approval_revoked' });
+    });
+
+    it('revokes when the target changes or becomes secure during re-observation', async () => {
+      const changed = await offered({
+        observationOverridesForRevision: (revision) =>
+          revision > 1 ? { targetSignatures: { button: 'd'.repeat(64) } } : {},
+      });
+      await viWait();
+      await clickCard(changed.fixture);
+      await expect(changed.acting).resolves.toMatchObject({
+        reasonCode: 'native_approval_revoked',
+      });
+      expect(changed.fixture.nativeLog).not.toContain('approvalApprove');
+      expect(changed.fixture.nativeLog).toContain('approvalDiscard:7');
+      const nowSecure = await offered({
+        observationOverridesForRevision: (revision) =>
+          revision > 1 ? { targetMetadata: secureFacts.targetMetadata } : {},
+      });
+      await viWait();
+      await clickCard(nowSecure.fixture);
+      await expect(nowSecure.acting).resolves.toMatchObject({
+        reasonCode: 'native_approval_revoked',
+      });
+      expect(nowSecure.fixture.nativeLog).not.toContain('approvalApprove');
+    });
+
+    it('matches the effect against the re-observed metadata (unit matrix)', () => {
+      const base = observation(1, nativeFacts);
+      const next = (overrides: Partial<ComputerUseObservation>) =>
+        observation(2, { ...nativeFacts, ...overrides });
+      const ok = (
+        current: ComputerUseNativeObservation,
+        effect: ComputerUseNativeApprovalOffer['effect'] = 'high_impact_confirmation',
+        previous: ComputerUseNativeObservation = base,
+      ) => nativeApprovalObservationEquivalent(previous, current, buttonAction, effect, Date.now());
+      expect(ok(next({}))).toBe(true);
+      // Same high-impact target, but the approved effect is another class: refused.
+      expect(ok(next({}), 'download_open')).toBe(false);
+      expect(ok(next({}), 'supervised_action')).toBe(false);
+      // Secure fields never pass.
+      expect(ok(next({ targetMetadata: secureFacts.targetMetadata }))).toBe(false);
+      // A flag that was not there, or that disappeared, is a changed target.
+      const plainMeta = { button: { secure: false, highImpact: false } };
+      expect(ok(next({ targetMetadata: plainMeta }))).toBe(false);
+      expect(
+        ok(
+          next({}),
+          'high_impact_confirmation',
+          observation(1, { ...nativeFacts, targetMetadata: plainMeta }),
+        ),
+      ).toBe(false);
+      // An approval for a plain target still passes for any effect while nothing changed.
+      const plainBase = observation(1, { ...nativeFacts, targetMetadata: plainMeta });
+      expect(ok(next({ targetMetadata: plainMeta }), 'supervised_action', plainBase)).toBe(true);
+      // Geometry, window and signature must be identical.
+      expect(ok(next({ clientWidth: 801 }))).toBe(false);
+      expect(ok(next({ screenBounds: { x: 1, y: 0, width: 800, height: 600 } }))).toBe(false);
+      expect(ok(next({ windowIdentityDigest: '9'.repeat(64) }))).toBe(false);
+      expect(ok(next({ targetSignatures: { button: 'e'.repeat(64) } }))).toBe(false);
+      expect(ok(observation(1, nativeFacts))).toBe(false);
+    });
+
+    it('records an approvalApprove refusal as a rejected (c), never unknown_effect, and offers no new card', async () => {
+      const cases: Array<[ComputerUseNativeApprovalApproveResult, string, string]> = [
+        [
+          { kind: 'refused', result: 'rejected', reasonCode: 'native_x' },
+          'rejected',
+          'native_approval_revalidation_failed',
+        ],
+        [
+          { kind: 'refused', result: 'paused', reasonCode: 'native_target_unclassified' },
+          'rejected',
+          'native_approval_revalidation_takeover',
+        ],
+        [
+          { kind: 'refused', result: 'canceled', reasonCode: 'native_canceled' },
+          'canceled',
+          'native_approval_revalidation_failed',
+        ],
+        [
+          { kind: 'invalid', result: 'rejected', reasonCode: 'native_approval_receipt_invalid' },
+          'rejected',
+          'native_approval_receipt_invalid',
+        ],
+      ];
+      for (const [receipt, auditState, reason] of cases) {
+        const { fixture, acting, sessionId } = await offered({
+          nativeApproval: { approve: () => receipt },
+        });
+        await viWait();
+        await clickCard(fixture);
+        await acting;
+        const [b, c] = auditList(fixture);
+        expect(b).toMatchObject({ approvalOutcome: 'approved' });
+        expect(c).toMatchObject({ state: auditState, reasonCode: reason });
+        expect(c!.state).not.toBe('unknown_effect');
+        expect(fixture.nativeLog).not.toContain('dispatchApproved');
+        // No automatic second card.
+        expect(fixture.approvals.filter((approval) => approval.state === 'pending')).toHaveLength(
+          1,
+        );
+        await fixture.controller.stop(sessionId);
+      }
+    });
+
+    it('books a throw from approvalApprove or dispatchApproved as unknown_effect, never rejected', async () => {
+      const dispatchThrows = await offered({
+        nativeApproval: {
+          dispatchApproved: async () => {
+            throw new Error('lost');
+          },
+        },
+      });
+      await viWait();
+      await clickCard(dispatchThrows.fixture);
+      await expect(dispatchThrows.acting).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(auditList(dispatchThrows.fixture)[1]).toMatchObject({
+        state: 'unknown_effect',
+        reasonCode: 'native_ack_unknown',
+      });
+      const approveThrows = await offered({
+        nativeApproval: {
+          approve: () => {
+            throw new Error('receipt regressed');
+          },
+        },
+      });
+      await viWait();
+      await clickCard(approveThrows.fixture);
+      await expect(approveThrows.acting).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(approveThrows.fixture.nativeLog).not.toContain('dispatchApproved');
+    });
+
+    it('refuses a multi-scalar type at index 0 without a card and stops at a later scalar as partial', async () => {
+      const first = await offered(
+        { observationOverrides: { focusedElementHighImpact: true } },
+        'full_access_app',
+        { type: 'type', text: 'ab' },
+      );
+      await expect(first.acting).resolves.toMatchObject({
+        result: 'rejected',
+        reasonCode: 'native_approval_multi_scalar_type',
+      });
+      expect(first.fixture.approvals).toHaveLength(0);
+      expect(first.fixture.nativeLog).toContain('approvalDiscard:7');
+      expect(first.fixture.nativeLog).not.toContain('approvalApprove');
+      let call = 0;
+      const later = await offered(
+        {
+          observationOverrides: { focusedElementHighImpact: true },
+          nativeDispatch: async () =>
+            ++call === 1 ? { result: 'completed', reasonCode: null } : offer(),
+        },
+        'full_access_app',
+        { type: 'type', text: 'ab' },
+      );
+      await expect(later.acting).resolves.toMatchObject({ result: 'unknown_effect' });
+      expect(auditList(later.fixture)[0]).toMatchObject({
+        state: 'unknown_effect',
+        reasonCode: 'partial_type',
+      });
+      expect(later.fixture.approvals).toHaveLength(0);
+      expect(later.fixture.nativeLog).toContain('approvalDiscard:7');
+      // One scalar is a unit of approval: it gets a card.
+      const single = await offered(
+        { observationOverrides: { focusedElementHighImpact: true } },
+        'full_access_app',
+        { type: 'type', text: 'a' },
+      );
+      await viWait();
+      expect(pendingCard(single.fixture).allowedDecisions).toEqual(['allow_once', 'deny']);
+      await clickCard(single.fixture, 'deny');
+      await single.acting;
+    });
+
+    describe('preDispatchBoundary', () => {
+      it.each([
+        ['path disabled, native-flagged high impact', nativeFacts, false],
+        ['path open, Main-only high impact (e.g. an Install button)', mainOnlyFacts, true],
+        ['path open, secure field', secureFacts, true],
+      ])('stops before native: %s', async (_name, facts, open) => {
+        const fixture = createFixture({
+          mode: 'full_access_app',
+          observationOverrides: facts,
+          nativeApproval: { enabled: open },
+          nativeDispatch: async () => offer(),
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, buttonAction, 'stop-1'),
+        ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+        expect(fixture.dispatchCount()).toBe(0);
+        expect(fixture.approvals).toHaveLength(0);
+        await fixture.controller.stop(started.sessionId);
+      });
+
+      it('with no approval-capable host at all, high impact stops exactly as before', async () => {
+        const fixture = createFixture({
+          mode: 'full_access_app',
+          observationOverrides: nativeFacts,
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, buttonAction, 'stop-2'),
+        ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.stop(started.sessionId);
+      });
+
+      it.each([
+        ['without deps.authorize', false],
+        ['with deps.authorize', true],
+      ])(
+        'full_access_app reaches preflight with only the native card %s',
+        async (_name, authorize) => {
+          const { fixture, acting } = await offered({
+            authorizationRequired: authorize,
+          });
+          await viWait();
+          expect(fixture.dispatchCount()).toBe(1);
+          expect(fixture.approvals.filter((approval) => approval.state === 'pending')).toHaveLength(
+            1,
+          );
+          const card = pendingCard(fixture);
+          expect(card.allowedDecisions).toEqual(['allow_once', 'deny']);
+          await clickCard(fixture, 'deny');
+          await acting;
+        },
+      );
+
+      it('supervised: the V1 card comes first (60 min, no plan), then the native card (<= 60 s)', async () => {
+        const { fixture, acting } = await offered({ authorizationRequired: true }, 'supervised');
+        await viWait();
+        const v1 = pendingCard(fixture);
+        expect(Date.parse(v1.expiresAt) - Date.parse(v1.createdAt)).toBe(60 * 60 * 1_000);
+        expect(v1.eligibleForPlan).toBe(false);
+        expect(v1.allowedDecisions).toEqual(['allow_once', 'deny']);
+        // A plan grant cannot be created from a high-impact target's card.
+        await expect(
+          fixture.controller.resolveApproval({
+            approvalId: v1.id,
+            expectedRevision: v1.revision,
+            decision: 'allow_plan',
+            challenge: v1.challenge,
+          }),
+        ).rejects.toThrow(/not allowed/iu);
+        await clickCard(fixture);
+        await viWait();
+        expect(fixture.dispatchCount()).toBe(1);
+        const native = pendingCard(fixture);
+        expect(native.id).not.toBe(v1.id);
+        expect(Date.parse(native.expiresAt) - Date.parse(native.createdAt)).toBe(30_000);
+        expect(fixture.nativeLog).not.toContain('approvalApprove');
+        await clickCard(fixture);
+        await expect(acting).resolves.toMatchObject({ result: 'completed' });
+        expect(fixture.approveInputs).toHaveLength(1);
+        // No plan grant came out of either card.
+        const sessions = (
+          fixture.controller as unknown as {
+            sessions: Map<string, { planGrant: unknown }>;
+          }
+        ).sessions;
+        expect([...sessions.values()].every((entry) => entry.planGrant === null)).toBe(true);
+      });
+
+      it('passes an unclassifiable target through as the native takeover with no input', async () => {
+        const fixture = createFixture({
+          mode: 'full_access_app',
+          observationOverrides: nativeFacts,
+          nativeApproval: {},
+          nativeDispatch: async () => ({
+            result: 'paused',
+            reasonCode: 'native_target_unclassified',
+          }),
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, buttonAction, 'unclassified'),
+        ).resolves.toMatchObject({ result: 'paused', reasonCode: 'native_target_unclassified' });
+        expect(fixture.approvals).toHaveLength(0);
+        expect(fixture.nativeLog).not.toContain('approvalApprove');
+        await fixture.controller.stop(started.sessionId);
+      });
+    });
+
+    it('keeps the closed pause when the path is closed even if a host reports an offer', async () => {
+      const fixture = createFixture({
+        mode: 'full_access_app',
+        observationOverrides: { targetSignatures: nativeFacts.targetSignatures },
+        nativeApproval: { enabled: false },
+        nativeDispatch: async () => offer(),
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, buttonAction, 'closed-1'),
+      ).resolves.toMatchObject({
+        result: 'paused',
+        reasonCode: 'native_single_use_approval_unavailable',
+      });
+      expect(fixture.approvals).toHaveLength(0);
+      expect(fixture.nativeLog.filter((entry) => entry.startsWith('approval'))).toEqual([]);
+      expect(auditList(fixture)).toEqual([
+        expect.objectContaining({
+          state: 'rejected',
+          reasonCode: 'native_single_use_approval_unavailable',
+          approvalId: null,
+          approvalEffect: null,
+        }),
+      ]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('reaches approvalApprove / approvalDiscard / dispatchApproved from nowhere but the controller', () => {
+      const root = resolve(__dirname, '..');
+      const hits: string[] = [];
+      const visit = (dir: string): void => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          const full = resolve(dir, entry.name);
+          if (entry.isDirectory()) visit(full);
+          else if (/\.(ts|tsx|mts)$/u.test(entry.name) && !/\.test\./u.test(entry.name))
+            for (const name of ['approvalApprove', 'approvalDiscard', 'dispatchApproved'])
+              if (readFileSync(full, 'utf8').includes(name)) hits.push(`${entry.name}:${name}`);
+        }
+      };
+      visit(root);
+      const allowed = new Set([
+        'computer-use-controller.ts',
+        'computer-use-native-host.ts',
+        'computer-use-native-types.ts',
+      ]);
+      expect(hits.filter((hit) => !allowed.has(hit.split(':')[0]!))).toEqual([]);
+      const controllerSource = readFileSync(
+        resolve(root, 'main', 'computer-use-controller.ts'),
+        'utf8',
+      );
+      // Exactly one approvalApprove call site, and none on the public surface.
+      expect(controllerSource.match(/native\.approvalApprove!?\(/gu)).toHaveLength(1);
+      expect(controllerSource.match(/native\.dispatchApproved!?\(/gu)).toHaveLength(1);
+      const prototype = Object.getOwnPropertyNames(ComputerUseController.prototype);
+      expect(prototype).not.toContain('approvalApprove');
+      expect(prototype).not.toContain('approvalDiscard');
+      expect(prototype).not.toContain('dispatchApproved');
     });
   });
 

@@ -96,6 +96,7 @@ function controllerFor(binding: ComputerUseNativeBinding, enabled?: () => boolea
     listComputerAppAccessRequestTotals: unexpectedPersistence,
     recordComputerActionAudit: unexpectedPersistence,
     completeComputerActionAudit: unexpectedPersistence,
+    recordComputerActionApprovalOutcome: unexpectedPersistence,
     listComputerActionAudits: unexpectedPersistence,
     getActiveTurnId: unexpectedPersistence,
     getPermissionPolicy: unexpectedPersistence,

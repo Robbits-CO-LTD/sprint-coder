@@ -6276,7 +6276,14 @@ export const computerUseObservationSchema = z
     targetMetadata: z
       .record(
         z.string().min(1).max(128),
-        z.object({ secure: z.boolean().optional(), highImpact: z.boolean().optional() }).strict(),
+        z
+          .object({
+            secure: z.boolean().optional(),
+            highImpact: z.boolean().optional(),
+            /** True only when native's own facts said high-impact; Main's projection never sets it. */
+            highImpactNative: z.boolean().optional(),
+          })
+          .strict(),
       )
       .optional(),
     /** Digest of the currently focused native control; never contains control text. */
