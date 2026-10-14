@@ -262,4 +262,75 @@ describe('workflow security boundaries', () => {
     expect(macosPackage).not.toContain('GH_TOKEN');
     expect(macosPackage).not.toContain('gh attestation verify');
   });
+
+  it('builds and checks the native in both eligibility modes on macOS, v1 only on Windows, and ships only v1', () => {
+    const ci = workflows['.github/workflows/ci.yml'];
+    const gate = jobBlock(ci, 'computer-use-native-gate');
+    const entries = [...gate.matchAll(/- label: (.+)\n\s+os: (.+)\n\s+eligibility: (v[12])/gu)].map(
+      (match) => [match[1], match[2], match[3]],
+    );
+    expect(entries).toEqual([
+      ['macOS', 'macos-latest', 'v1'],
+      ['macOS v2', 'macos-latest', 'v2'],
+      ['Windows', 'windows-2022', 'v1'],
+    ]);
+    expect(stepBlock(gate, 'Compile and manifest native artifact')).toContain(
+      'npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}',
+    );
+    const verify = stepBlock(gate, 'Verify the built artifact attests what its manifest declares');
+    expect(verify).toContain(
+      'verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require',
+    );
+    expect(verify).toContain('--report=${{ runner.temp }}/computer-use-eligibility-report.json');
+    const loaderTests = stepBlock(gate, 'Verify Gate 0 loader tests');
+    expect(loaderTests).toContain(
+      'COMPUTER_USE_ELIGIBILITY_REPORT: ${{ runner.temp }}/computer-use-eligibility-report.json',
+    );
+    expect(loaderTests).toContain('src/main/computer-use-eligibility-artifact.test.ts');
+    expect(loaderTests).toContain('verify-computer-use-eligibility.test.mjs');
+    // The macOS harness sees the generated header of the mode that was just built.
+    expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
+    // The harness is told which mode its matrix row built, and asserts it.
+    expect(gate).toContain(
+      "-DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }}",
+    );
+    const harness = readFileSync(
+      resolve(repositoryRoot, 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'),
+      'utf8',
+    );
+    expect(harness).toContain('SPRINT_CODER_EXPECT_ELIGIBILITY_V2');
+    expect(harness).toContain('eligibility-mode-matches-matrix');
+  });
+
+  it('never asks a distributed or acceptance build for the deny-list', () => {
+    // Every route that builds the Computer Use native for a package, by either spelling of its
+    // name, must leave the mode at its v1 default. Only the CI gate chooses a mode.
+    const rootPackage = JSON.parse(
+      readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    const builders = (scripts: Record<string, string>) =>
+      Object.entries(scripts).filter(([, script]) => /build[-:]computer-use-native/u.test(script));
+    // The guard must not be vacuous: the routes it is about really exist.
+    expect(builders(rootPackage.scripts).map(([name]) => name)).toContain(
+      'build:computer-use-native',
+    );
+    expect(builders(desktopPackage.scripts).map(([name]) => name)).toContain('prepare:desktop');
+    for (const [name, script] of [
+      ...builders(rootPackage.scripts),
+      ...builders(desktopPackage.scripts),
+    ])
+      expect(script, name).not.toContain('--eligibility');
+    const forge = readFileSync(resolve(repositoryRoot, 'apps/desktop/forge.config.ts'), 'utf8');
+    expect(forge).toContain('build-computer-use-native.mjs');
+    expect(forge).not.toContain('--eligibility');
+    for (const file of [
+      '.github/workflows/release-beta.yml',
+      '.github/workflows/computer-use-acceptance-build.yml',
+      '.github/workflows/computer-use-final-gate.yml',
+      '.github/workflows/computer-use-evidence-harness.yml',
+    ] as const)
+      expect(workflows[file], file).not.toContain('--eligibility');
+    // The one workflow that does pass it is the CI gate.
+    expect(workflows['.github/workflows/ci.yml']).toContain('--eligibility=');
+  });
 });
