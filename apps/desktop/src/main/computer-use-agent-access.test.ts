@@ -238,6 +238,8 @@ function createFixture(
     plannerFactory?: (input: { signal: AbortSignal }) => Promise<void>;
     /** What the inner planner answers each round. The default finishes the first round. */
     plan?: (round: number) => Promise<ComputerUseAction>;
+    /** Every observation reports the focused element as a secure field. */
+    focusedSecure?: boolean;
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -279,12 +281,15 @@ function createFixture(
     },
     observe: async (session) => {
       observationRevision += 1;
-      return observation(
+      const observed = observation(
         session.sessionId,
         observationRevision,
         Date.now(),
         session.appIdentityDigest,
       );
+      return options.focusedSecure === true
+        ? { ...observed, focusedElementSecure: true }
+        : observed;
     },
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
@@ -392,6 +397,7 @@ function createFixture(
     grants: grantStore.grants,
     accessRequests: grantStore.accessRequests,
     startedSessions: () => startedSessions,
+    audits: () => [...audits.values()],
     plannedRounds: () => plannedRounds,
     closedSessions: () => closedSessions,
     listWindowCalls: () => listWindowCalls,
@@ -1603,6 +1609,29 @@ describe('computer_start', () => {
     ).toMatchObject({ state: 'paused', stopReason: null, mode: 'observe_only' });
   });
 
+  it('still records the audit row of the action that paused the session', async () => {
+    // A hard boundary publishes `paused` and only then records the refused action. Ending the
+    // session in the publisher's own synchronous run would clear the observation that row needs.
+    const fixture = createFixture({
+      focusedSecure: true,
+      plan: async () => ({ type: 'type', text: 'a' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const output = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(output).toMatchObject({ state: 'paused' });
+    expect(fixture.audits()).toEqual([
+      expect.objectContaining({ state: 'rejected', reasonCode: 'hard_boundary' }),
+    ]);
+  });
+
   it('releases the session slot when it returns paused, so the same Turn can list and start again', async () => {
     const fixture = createFixture({
       plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
@@ -1628,6 +1657,43 @@ describe('computer_start', () => {
     expect(second).toMatchObject({ state: 'paused' });
     expect(second.sessionId).not.toBe(first.sessionId);
     expect(fixture.startedSessions()).toBe(2);
+  });
+
+  it('also releases the slot when the session had already paused before start returned', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    // `start` resolving only after the session has settled is the path that never waits for a
+    // status: it has to release the slot itself.
+    const start = fixture.controller.start.bind(fixture.controller);
+    const delayed = vi
+      .spyOn(fixture.controller, 'start')
+      .mockImplementation(async (...args: Parameters<typeof start>) => {
+        const status = await start(...args);
+        await vi.advanceTimersByTimeAsync(5_000);
+        return status;
+      });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    delayed.mockRestore();
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
   });
 
   it('releases the single-session slot when it returns paused, so another Task can start', async () => {
