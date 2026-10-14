@@ -20,7 +20,9 @@ export type ComputerUseNativeMessageType =
   | 'dispatch'
   | 'dispatch_result'
   | 'cancel'
-  | 'error';
+  | 'error'
+  | 'preflight'
+  | 'preflight_result';
 
 const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Object.freeze({
   handshake: 1,
@@ -33,6 +35,8 @@ const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Ob
   dispatch_result: 8,
   cancel: 9,
   error: 10,
+  preflight: 11,
+  preflight_result: 12,
 });
 const MESSAGE_TYPES_BY_NUMBER = new Map(
   Object.entries(MESSAGE_TYPES).map(([name, value]) => [
@@ -157,6 +161,20 @@ function idFromBytes(value: Buffer, allowZero = false): ComputerUseNativeFrameId
   const hex = value.toString('hex');
   if (!allowZero && /^0+$/u.test(hex)) return null;
   return Object.freeze({ hex });
+}
+
+/**
+ * Whether a number on the wire is a message type this protocol knows, in either direction. The
+ * receiver in the Windows transport uses this rather than a hand-written range, so adding a type
+ * to the table below cannot leave the receiver refusing it.
+ */
+export function isKnownComputerUseNativeMessageType(value: number): boolean {
+  return MESSAGE_TYPES_BY_NUMBER.has(value);
+}
+
+/** Every message type of the protocol, by name. */
+export function computerUseNativeMessageTypeNames(): ComputerUseNativeMessageType[] {
+  return Object.keys(MESSAGE_TYPES) as ComputerUseNativeMessageType[];
 }
 
 export function computerUseNativeMessageTypeValue(type: ComputerUseNativeMessageType): number {

@@ -675,7 +675,13 @@ describe('Windows native helper compile boundary', () => {
     expect(invalidationSource).toContain('session->semantic_control_signatures.clear()');
     expect(invalidationSource).toContain('session->visual_control_signatures.clear()');
     expect(invalidationSource).toContain('session->observation_patch_digests.clear()');
-    expect(dispatchSource).toContain('!session.has_observation');
+    // The binding every dispatch (and its preflight) checks, shared so the two cannot drift.
+    const bindingSource = source.slice(
+      source.indexOf('bool ValidateWindowsDispatchBinding('),
+      source.indexOf('void AppendDigestField('),
+    );
+    expect(bindingSource).toContain('!session.has_observation');
+    expect(dispatchSource).toContain('ValidateWindowsDispatchBinding(session, metadata, &kind');
     expect(source).toContain('session.has_observation = true');
   });
 
@@ -1323,17 +1329,17 @@ describe('macOS native capture boundary', () => {
     // "generated" holds the per-build eligibility header (D7-2); it is outside node-gyp's cleaned
     // build directory and is rewritten by the build script on every build.
     expect(gyp).toContain('"include_dirs": [".", "generated"]');
-    // N2b-1 lets only the Main host adapter and the addon type use preflight/ticket. The loader,
-    // handshake, protocol and the Windows host still do not know it.
-    for (const name of [
-      'computer-use-native.ts',
-      'computer-use-native-handshake.ts',
-      'computer-use-native-protocol.ts',
-    ]) {
+    // N2b-1 lets only the Main host adapter and the addon type use preflight/ticket. The loader and
+    // the handshake still do not know it. The wire protocol names the preflight message (S5-a) but
+    // knows nothing of tickets.
+    for (const name of ['computer-use-native.ts', 'computer-use-native-handshake.ts']) {
       expect(readFileSync(join(__dirname, name), 'utf8'), name).not.toMatch(
         /preflight|native_ticket_invalid|ordinary_ticket/iu,
       );
     }
+    expect(readFileSync(join(__dirname, 'computer-use-native-protocol.ts'), 'utf8')).not.toMatch(
+      /native_ticket_invalid|ordinary_ticket/iu,
+    );
     // N2b-2: the Main host may name single_use_approval only as a closed no-input pause. Its branch
     // takes no ticket and returns a fixed Main-owned reason (never the native one).
     const hostSource = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
@@ -1357,7 +1363,10 @@ describe('macOS native capture boundary', () => {
       join(__dirname, '../../computer-use-native/computer_use_windows_host.cc'),
       'utf8',
     );
-    expect(windowsHost).not.toMatch(/ordinary_ticket|native_ticket_invalid|NativeOrdinaryTicket/u);
+    // S5-a: the Windows helper uses the same portable ticket slot, and never the approval vocabulary.
+    expect(windowsHost).toContain('#include "computer_use_native_ticket.h"');
+    expect(windowsHost).toContain('NativeOrdinaryTicketSlot');
+    expect(windowsHost).not.toMatch(/single_use_approval|SingleUseApproval/u);
   });
 
   it('keeps the native preflight receipt contract in sync with the Main host parser', () => {

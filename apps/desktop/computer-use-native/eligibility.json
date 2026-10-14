@@ -6,6 +6,6 @@
   },
   "ticketRequired": {
     "darwin": true,
-    "win32": false
+    "win32": true
   }
 }

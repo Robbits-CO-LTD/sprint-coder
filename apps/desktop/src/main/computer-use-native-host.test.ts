@@ -263,12 +263,25 @@ describe('Computer Use native Main adapter', () => {
     ]);
   });
 
-  it('never calls an exported preflight on win32 and keeps the legacy dispatch path', async () => {
+  const win32TicketScenario = async (withPreflight: boolean) => {
     const appIdentityDigest = digest('a');
     const windowIdentityDigest = digest('c');
     const screen = { x: 300, y: 150, width: 1_200, height: 900 };
-    const preflight = vi.fn(() => {
-      throw new Error('win32 must not preflight');
+    const winTicket = 'cd'.repeat(32);
+    const preflight = vi.fn((input: unknown) => {
+      const request = input as Record<string, unknown>;
+      return {
+        decision: 'ordinary',
+        reasonCode: null,
+        deniedResult: null,
+        ticket: winTicket,
+        classifierVersion: 1,
+        inputAttemptCount: 0,
+        requestId: request['requestId'],
+        sessionId: request['sessionId'],
+        cancelEpoch: request['cancelEpoch'],
+        observationRevision: request['observationRevision'],
+      };
     });
     const dispatch = vi.fn((input: unknown) => {
       const request = input as Record<string, unknown>;
@@ -315,7 +328,7 @@ describe('Computer Use native Main adapter', () => {
         inputAttemptCount: 0,
       }),
       observe: () => ({}),
-      preflight,
+      ...(withPreflight ? { preflight } : {}),
       dispatch,
       cancel: () => undefined,
       close: () => undefined,
@@ -371,6 +384,19 @@ describe('Computer Use native Main adapter', () => {
         signal: new AbortController().signal,
       }),
     ).resolves.toMatchObject({ result: 'completed' });
+    return { preflight, dispatch, winTicket };
+  };
+
+  it('preflights on win32 and dispatches with the ordinary ticket it returns (S5-a)', async () => {
+    const { preflight, dispatch, winTicket } = await win32TicketScenario(true);
+    expect(preflight).toHaveBeenCalledTimes(1);
+    expect(preflight.mock.calls[0]![0]).toMatchObject({ requestId: 'request-w' });
+    expect(preflight.mock.calls[0]![0]).not.toHaveProperty('ticket');
+    expect(dispatch.mock.calls[0]![0]).toMatchObject({ requestId: 'request-w', ticket: winTicket });
+  });
+
+  it('keeps the legacy dispatch path for a win32 addon that does not export preflight', async () => {
+    const { preflight, dispatch } = await win32TicketScenario(false);
     expect(preflight).not.toHaveBeenCalled();
     expect(dispatch.mock.calls[0]![0]).not.toHaveProperty('ticket');
   });

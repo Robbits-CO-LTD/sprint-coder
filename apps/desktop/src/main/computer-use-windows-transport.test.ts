@@ -3,7 +3,11 @@ import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as NodeChildProcess from 'node:child_process';
 import type * as NodeNet from 'node:net';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
+  computerUseNativeMessageTypeNames,
+  computerUseNativeMessageTypeValue,
   decodeComputerUseNativeFrame,
   encodeComputerUseNativeFrame,
   type ComputerUseNativeFrame,
@@ -410,6 +414,19 @@ async function closeWithBoundedResend(
       () => false,
     );
   return closed;
+}
+
+/** The message types the helper's own protocol header defines, by the TypeScript name. */
+function headerEnumTypes(): Record<string, number> {
+  const header = readFileSync(
+    join(__dirname, '../../computer-use-native/computer_use_protocol.h'),
+    'utf8',
+  );
+  const body = /enum class MessageType : std::uint16_t \{([\s\S]*?)\};/u.exec(header)?.[1] ?? '';
+  const types: Record<string, number> = {};
+  for (const match of body.matchAll(/\bk([A-Za-z]+) = (\d+),/gu))
+    types[match[1]!.replace(/([a-z])([A-Z])/gu, '$1_$2').toLowerCase()] = Number(match[2]);
+  return types;
 }
 
 describe('Computer Use Windows helper transport', () => {
@@ -853,6 +870,171 @@ describe('Computer Use Windows helper transport', () => {
     await expect(Promise.resolve(listWindows(profile))).resolves.toBeInstanceOf(Array);
     expect(children).toHaveLength(2);
     expect(children[1]!.killed).toBe(false);
+  });
+
+  // ---- the preflight round trip (S5-a) -------------------------------------------------------
+  const preflightReceipt = (
+    metadata: Readonly<Record<string, unknown>>,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    decision: 'ordinary',
+    reasonCode: null,
+    deniedResult: null,
+    ticket: 'ab'.repeat(32),
+    classifierVersion: 1,
+    inputAttemptCount: 0,
+    requestId: metadata['requestId'],
+    sessionId: metadata['sessionId'],
+    cancelEpoch: metadata['cancelEpoch'],
+    observationRevision: metadata['observationRevision'],
+    ...overrides,
+  });
+  const ticketedTable = (
+    seen: Array<Readonly<Record<string, unknown>>>,
+    receipt: (metadata: Readonly<Record<string, unknown>>) => Record<string, unknown> = (
+      metadata,
+    ) => preflightReceipt(metadata),
+    dispatchAnswer: HelperResponse | null = null,
+  ): Readonly<Record<string, Responder>> => ({
+    ...responders(),
+    preflight: (metadata): HelperResponse => {
+      seen.push({ operation: 'preflight', ...metadata });
+      return ['preflight_result', receipt(metadata)];
+    },
+    dispatch: (metadata): HelperResponse => {
+      seen.push({ operation: 'dispatch', ...metadata });
+      return (
+        dispatchAnswer ?? [
+          'dispatch_result',
+          {
+            result: 'completed',
+            reasonCode: null,
+            sessionId: metadata['sessionId'],
+            cancelEpoch: metadata['cancelEpoch'],
+            inputAttemptCount: 1,
+          },
+        ]
+      );
+    },
+  });
+  const click = { type: 'click', x: 0.5, y: 0.5, button: 'left' } as const;
+  async function dispatchThrough(
+    target: ReturnType<typeof createTarget>,
+    session: Awaited<ReturnType<typeof startSession>>,
+    requestId = 'request-1',
+  ) {
+    const pending = target.host.dispatch({
+      session,
+      requestId,
+      action: click,
+      observationRevision: 1,
+      cancelEpoch: 0,
+      signal: new AbortController().signal,
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    return await pending;
+  }
+
+  it('carries a preflight and its ticket through the transport to a ticketed dispatch', async () => {
+    const seen: Array<Readonly<Record<string, unknown>>> = [];
+    const target = createTarget(ticketedTable(seen));
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    // The helper answers the preflight with a type-12 frame; the receiver must accept it.
+    await expect(dispatchThrough(target, session)).resolves.toMatchObject({ result: 'completed' });
+    expect(seen.map((entry) => entry['operation'])).toEqual(['preflight', 'dispatch']);
+    expect(seen[0]).toMatchObject({ requestId: 'request-1', sessionId: 'session-1' });
+    expect(seen[0]).not.toHaveProperty('ticket');
+    expect(seen[1]).toMatchObject({ requestId: 'request-1', ticket: 'ab'.repeat(32) });
+    // The transport stayed healthy: one helper, one connection, nothing torn down.
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.destroyed).toBe(false);
+  });
+
+  it('maps the helper ticket refusal and a denied preflight to typed rejections', async () => {
+    const refusedSeen: Array<Readonly<Record<string, unknown>>> = [];
+    const refused = createTarget(
+      ticketedTable(refusedSeen, undefined, ['error', { code: 'ticket_invalid', accepted: false }]),
+    );
+    const refusedSession = await startSession(refused.host, 'session-1', 'turn-1');
+    await expect(dispatchThrough(refused, refusedSession)).resolves.toEqual({
+      result: 'rejected',
+      reasonCode: 'native_ticket_invalid',
+    });
+    const deniedSeen: Array<Readonly<Record<string, unknown>>> = [];
+    const denied = createTarget(
+      ticketedTable(deniedSeen, (metadata) =>
+        preflightReceipt(metadata, {
+          decision: 'denied',
+          reasonCode: 'native_stale_target',
+          deniedResult: 'rejected',
+          ticket: null,
+        }),
+      ),
+    );
+    const deniedSession = await startSession(denied.host, 'session-2', 'turn-2');
+    await expect(dispatchThrough(denied, deniedSession)).resolves.toMatchObject({
+      result: 'rejected',
+      reasonCode: 'native_stale_target',
+    });
+    // A denial never reaches the dispatch.
+    expect(deniedSeen.map((entry) => entry['operation'])).toEqual(['preflight']);
+  });
+
+  it('sends a replay dispatch without a ticket', async () => {
+    const seen: Array<Readonly<Record<string, unknown>>> = [];
+    const target = createTarget(
+      ticketedTable(seen, (metadata) =>
+        preflightReceipt(metadata, { decision: 'replay', ticket: null }),
+      ),
+    );
+    const session = await startSession(target.host, 'session-1', 'turn-1');
+    await expect(dispatchThrough(target, session)).resolves.toMatchObject({ result: 'completed' });
+    expect(seen.map((entry) => entry['operation'])).toEqual(['preflight', 'dispatch']);
+    expect(seen[1]).not.toHaveProperty('ticket');
+  });
+
+  it('accepts every message type the protocol defines and refuses one it does not', async () => {
+    const target = createTarget();
+    await expect(
+      Promise.resolve(target.addon.listWindows!({ identity: {} })),
+    ).resolves.toBeDefined();
+    const socket = sockets.at(-1)!;
+    const typeNames = computerUseNativeMessageTypeNames();
+    // The table, the C++ enum and the receiver have to name the same set of types.
+    expect(typeNames.sort()).toEqual(Object.keys(headerEnumTypes()).sort());
+    for (const messageType of typeNames) {
+      expect(computerUseNativeMessageTypeValue(messageType), messageType).toBe(
+        headerEnumTypes()[messageType],
+      );
+      // A response for a request nobody is waiting on is dropped, but only a valid header gets that far.
+      socket.emit(
+        'data',
+        encodeComputerUseNativeFrame({
+          messageType,
+          flags: 0,
+          requestId: { hex: 'a'.repeat(32) },
+          sessionId: { hex: 'b'.repeat(32) },
+          cancelId: messageType === 'cancel' ? { hex: 'c'.repeat(32) } : null,
+          metadata: Buffer.from('{}', 'utf8'),
+          binary: Buffer.alloc(0),
+        }),
+      );
+      expect(socket.destroyed, `${messageType} must not break the transport`).toBe(false);
+    }
+    // One past the highest known number is refused and the transport is dropped.
+    const unknown = encodeComputerUseNativeFrame({
+      messageType: 'error',
+      flags: 0,
+      requestId: { hex: 'a'.repeat(32) },
+      sessionId: { hex: 'b'.repeat(32) },
+      cancelId: null,
+      metadata: Buffer.from('{}', 'utf8'),
+      binary: Buffer.alloc(0),
+    });
+    unknown.writeUInt16LE(Math.max(...Object.values(headerEnumTypes())) + 1, 6);
+    socket.emit('data', unknown);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(socket.destroyed).toBe(true);
   });
 
   it('budgets the close round trip beyond every close deadline Main can still be waiting on', () => {

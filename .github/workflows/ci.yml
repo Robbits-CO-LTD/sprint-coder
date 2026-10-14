@@ -208,6 +208,8 @@ jobs:
           npx vitest run
           src/main/computer-use-native.test.ts
           src/main/computer-use-eligibility-artifact.test.ts
+          src/main/computer-use-windows-ticket.test.ts
+          src/main/computer-use-windows-ticket-seam.test.ts
           verify-computer-use-eligibility.test.mjs
           computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
       - name: Test Windows sandbox working directory and access boundary

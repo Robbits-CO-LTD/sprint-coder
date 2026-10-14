@@ -31,10 +31,10 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
     },
   );
 
-  it('wants the macOS native to claim a ticket in both modes and the Windows helper to claim none', () => {
+  it('wants both natives to claim a ticket', () => {
     expect(declare('v1', 'darwin').ticketRequired).toBe(true);
     expect(declare('v2', 'darwin').ticketRequired).toBe(true);
-    expect(declare('v1', 'win32').ticketRequired).toBe(false);
+    expect(declare('v1', 'win32').ticketRequired).toBe(true);
   });
 
   it.each(cases)(

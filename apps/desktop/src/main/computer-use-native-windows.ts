@@ -6,6 +6,9 @@ import { createConnection, type Socket } from 'node:net';
 import { win32 } from 'node:path';
 import {
   COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
+  COMPUTER_USE_NATIVE_MAGIC,
+  COMPUTER_USE_NATIVE_PROTOCOL_VERSION,
+  isKnownComputerUseNativeMessageType,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
   COMPUTER_USE_NATIVE_MAX_METADATA_BYTES,
   decodeComputerUseNativeFrame,
@@ -103,6 +106,20 @@ export function createWindowsComputerUseNativeAddon(
         value,
         stringField(value, 'sessionId'),
         stringField(value, 'requestId'),
+      );
+    },
+    // The side-effect-free check that precedes every dispatch and answers with its one-time ticket
+    // (ADR v2 S4-4 addendum 5). It travels as its own message type, so it can never be mistaken for
+    // a dispatch, and under its own request key, so its answer is never confused with the
+    // dispatch's cached result.
+    preflight: (input) => {
+      const value = record(input);
+      return client.call(
+        'preflight',
+        'preflight',
+        value,
+        stringField(value, 'sessionId'),
+        `preflight:${stringField(value, 'requestId')}`,
       );
     },
     dispatch: (input) => {
@@ -365,10 +382,9 @@ class WindowsComputerUseHelperClient {
     decoder.readBuffer = Buffer.concat([decoder.readBuffer, chunk]);
     while (decoder.readBuffer.byteLength >= COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES) {
       if (
-        decoder.readBuffer.readUInt32LE(0) !== 0x31554353 ||
-        decoder.readBuffer.readUInt16LE(4) !== 1 ||
-        decoder.readBuffer.readUInt16LE(6) < 1 ||
-        decoder.readBuffer.readUInt16LE(6) > 10
+        decoder.readBuffer.readUInt32LE(0) !== COMPUTER_USE_NATIVE_MAGIC ||
+        decoder.readBuffer.readUInt16LE(4) !== COMPUTER_USE_NATIVE_PROTOCOL_VERSION ||
+        !isKnownComputerUseNativeMessageType(decoder.readBuffer.readUInt16LE(6))
       ) {
         this.failAll(new Error('Computer Use Windows helper returned an invalid frame header'));
         this.socket?.destroy();
@@ -696,6 +712,8 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
     case 'dispatch':
     case 'cancel':
       return 'dispatch_result';
+    case 'preflight':
+      return 'preflight_result';
     default:
       throw new Error(`Unsupported Computer Use Windows request type: ${requestType}`);
   }

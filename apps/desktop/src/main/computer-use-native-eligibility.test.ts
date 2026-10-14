@@ -49,16 +49,15 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
     expect(fallback('CLASSIFIER_VERSION')).toBe(table.versions.classifierVersion);
     expect(fallback('LEXICON_VERSION')).toBe(table.versions.lexiconVersion);
     expect(fallback('V2')).toBe(0);
-    // No generated header: the macOS native requires a ticket, any other platform does not.
-    expect(header).toMatch(
-      /#if defined\(__APPLE__\)\s*#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 1\s*#else\s*#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 0\s*#endif/u,
-    );
+    // No generated header: both natives require a ticket (macOS: PR 5, Windows: S5-a), on every platform.
+    expect(fallback('TICKET_REQUIRED')).toBe(1);
+    expect(header).not.toContain('__APPLE__');
     // The native mode names are the contract's, in order.
     const modes = computerUseEligibilityModeSchema.options;
     expect(header).toContain(`"${modes[0]}"`);
     expect(header).toContain(`"${modes[1]}"`);
-    // The macOS native requires a ticket for every input (N2b-4 PR 5); Windows waits for S5.
-    expect(table.ticketRequired).toEqual({ darwin: true, win32: false });
+    // Each native requires a ticket for every input (macOS: N2b-4 PR 5, Windows: S5-a).
+    expect(table.ticketRequired).toEqual({ darwin: true, win32: true });
   });
 
   it('closes nothing for the macOS build once pin, manifest and attest all say a ticket is required', () => {
@@ -80,9 +79,9 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
       [v1, v1, off],
     ] as const)
       expect(checkComputerUseEligibility({ compiled, manifest, attested })).toBe('mismatch');
-    // Windows keeps claiming none until S5, so a v1 Main for Windows agrees with itself.
+    // The Windows helper claims the ticket too (S5-a), so a v1 Main for Windows agrees with itself.
     const windows = eligibilityDeclaration('v1-allowlist', 'win32') as ComputerUseEligibility;
-    expect(windows.ticketRequired).toBe(false);
+    expect(windows.ticketRequired).toBe(true);
     expect(
       checkComputerUseEligibility({ compiled: windows, manifest: windows, attested: windows }),
     ).toBe('ok');
@@ -169,7 +168,7 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
         [{ ...v1, rulesetVersion: 2 }, v1],
         [{ ...v1, classifierVersion: 2 }, v1],
         [{ ...v1, lexiconVersion: 2 }, v1],
-        [{ ...v1, ticketRequired: true }, v1],
+        [{ ...v1, ticketRequired: false }, v1],
         [{ ...v1, mode: 'v2-denylist' }, v1],
       ] as Array<[ComputerUseEligibility | undefined, ComputerUseEligibility | undefined]>)
         expect(() =>

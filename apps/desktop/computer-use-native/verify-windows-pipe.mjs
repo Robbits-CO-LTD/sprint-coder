@@ -192,3 +192,41 @@ test('disconnecting during an incomplete request releases the pending read and e
     await delay(50);
   });
 });
+
+test('a preflight or dispatch for a session that was never started is refused without a ticket or an effect (S5-a)', async () => {
+  await withHelper(async ({ send }) => {
+    const action = {
+      type: 'click',
+      x: 0.5,
+      y: 0.5,
+      requestId: 'request-1',
+      actionDigest: 'a'.repeat(64),
+      cancelEpoch: 0,
+      observationRevision: 1,
+    };
+    // The preflight is a known message of its own (type 11) and answers an error, never a result.
+    const preflight = await send(11, { operation: 'preflight', ...action });
+    assert.equal(preflight.type, 10);
+    assert.equal(preflight.metadata.code, 'session_missing');
+    assert.equal(preflight.metadata.accepted, false);
+    assert.equal('ticket' in preflight.metadata, false);
+    // A dispatch with a ticket-shaped value, still for no session, never reaches an input call.
+    const dispatch = await send(7, {
+      operation: 'dispatch',
+      ...action,
+      ticket: 'b'.repeat(64),
+    });
+    assert.equal(dispatch.type, 10);
+    assert.equal(dispatch.metadata.code, 'session_missing');
+    assert.equal(dispatch.metadata.accepted, false);
+    // The helper stays healthy after both.
+    assert.equal((await send(3, { operation: 'probe' })).type, 4);
+  });
+});
+
+// Handover (S5-a review): the ticket paths of a live session (a dispatch without a ticket answers
+// ticket_invalid, a ticket cannot be spent twice, a cancel voids it) are covered by the behaviour
+// seam in src/main/computer-use-windows-ticket-seam.test.ts, which compiles the production
+// functions against inert Win32 seams. A pipe test of those paths needs a started session, which
+// needs a real window and the acceptance fixture; the fixture is built in a later CI step than
+// this test runs in. Add the live-session cases here when the fixture build moves ahead of it.

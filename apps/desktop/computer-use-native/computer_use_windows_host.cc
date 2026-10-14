@@ -65,12 +65,15 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <chrono>
+#include <cstdio>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "computer_use_protocol.h"
+#include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_native_eligibility.h"
 
@@ -173,6 +176,30 @@ struct WindowsSession {
 };
 
 std::unordered_map<std::string, WindowsSession> sessions;
+
+// The ordinary dispatch ticket (ADR v2 S4-4 addendum 5). The Windows helper serves one frame at a
+// time, so the slot and its generation need no lock. A ticket is issued by a preflight and consumed
+// by exactly one dispatch; every session boundary (start/resume, cancel, close) drops it.
+struct WindowsTicketState {
+  sprint_coder::computer_use::NativeOrdinaryTicketSlot slot;
+  // 0 is the "none" sentinel and is never issued; it advances on every issue and every dispatch.
+  std::uint64_t generation = 0;
+};
+std::unordered_map<std::string, WindowsTicketState> ticket_states;
+
+void InvalidateWindowsTicket(const std::string &session_key) {
+  const auto found = ticket_states.find(session_key);
+  if (found == ticket_states.end()) return;
+  found->second.slot.Invalidate();
+  ++found->second.generation;
+}
+
+void ForgetWindowsTicket(const std::string &session_key) {
+  const auto found = ticket_states.find(session_key);
+  if (found == ticket_states.end()) return;
+  found->second.slot.Invalidate();
+  ticket_states.erase(found);
+}
 std::uint64_t last_closed_cancel_epoch = 0;
 
 // A close releases the session before Main can acknowledge the response, so a close whose answer
@@ -2043,6 +2070,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     return false;
   }
   const std::string session_key = FrameIdKey(request.header.session_id);
+  // Any attempt to (re)start the session, successful or not, voids a ticket from before it.
+  InvalidateWindowsTicket(session_key);
   if (!sessions.empty() && !sessions.contains(session_key)) {
     *reason = "session_limit";
     return false;
@@ -2219,6 +2248,8 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     session.cancel_epoch = effective_cancel_epoch;
     sessions.emplace(session_key, std::move(session));
   }
+  // A start or a resume begins a new measurement; any ticket from before it is void.
+  InvalidateWindowsTicket(session_key);
   std::uint64_t profile_revision = 0;
   ReadJsonUint64(metadata, "profileRevision", &profile_revision);
   *response = "{\"sessionId\":\"" + JsonEscape(session_id) +
@@ -2267,6 +2298,7 @@ bool CloseWindowsSession(const Frame &request, const std::string& metadata, std:
         std::max(last_closed_cancel_epoch, found->second.cancel_epoch);
     RememberClosedWindowsSession(session_key, receipt);
     ReleaseWindowsSessionResources(&found->second);
+    ForgetWindowsTicket(session_key);
     sessions.erase(found);
   }
   *response = "{\"result\":\"closed\",\"drained\":true,\"sessionId\":\"" +
@@ -3898,15 +3930,56 @@ std::string ResponseCacheKey(const Frame &request) {
   return identity;
 }
 
+bool IsLowerHexDigest64(std::string_view value) {
+  if (value.size() != 64) return false;
+  for (const char c : value)
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  return true;
+}
+
+// A dispatch carries the ticket its preflight issued, but a repeat of a finished request is answered
+// from the cache whatever ticket (or none) it carries, so the request identity used for that
+// comparison leaves the ticket out. Only the exact `"ticket":"<64 lowercase hex>"` member is
+// removed; a text field that merely contains those characters has them escaped and never matches.
+std::string WithoutDispatchTicket(const std::string &metadata) {
+  const std::string needle = "\"ticket\":\"";
+  for (std::size_t at = metadata.find(needle); at != std::string::npos;
+       at = metadata.find(needle, at + 1)) {
+    const std::size_t value_at = at + needle.size();
+    if (value_at + 65 > metadata.size() ||
+        !IsLowerHexDigest64(std::string_view(metadata).substr(value_at, 64)) ||
+        metadata[value_at + 64] != '"')
+      continue;
+    std::size_t begin = at;
+    std::size_t end = value_at + 65;
+    if (begin > 0 && metadata[begin - 1] == ',')
+      --begin;
+    else if (end < metadata.size() && metadata[end] == ',')
+      ++end;
+    return metadata.substr(0, begin) + metadata.substr(end);
+  }
+  return metadata;
+}
+
 std::string RequestPayloadDigest(const Frame &request) {
+  // The metadata the request is compared by. For a dispatch that leaves out the ticket, and the
+  // length that goes into the digest is the length of what is compared, not of what was sent.
+  std::string metadata(reinterpret_cast<const char *>(request.metadata.data()),
+                       request.metadata.size());
+  if (request.header.message_type ==
+      static_cast<std::uint16_t>(MessageType::kDispatch))
+    metadata = WithoutDispatchTicket(metadata);
+  const std::uint32_t metadata_bytes =
+      request.header.message_type ==
+              static_cast<std::uint16_t>(MessageType::kDispatch)
+          ? static_cast<std::uint32_t>(metadata.size())
+          : request.header.metadata_bytes;
   std::string payload;
-  payload.reserve(sizeof(request.header.metadata_bytes) +
-                  request.metadata.size() +
+  payload.reserve(sizeof(metadata_bytes) + metadata.size() +
                   sizeof(request.header.binary_bytes) + request.binary.size());
-  payload.append(reinterpret_cast<const char *>(&request.header.metadata_bytes),
-                 sizeof(request.header.metadata_bytes));
-  payload.append(reinterpret_cast<const char *>(request.metadata.data()),
-                 request.metadata.size());
+  payload.append(reinterpret_cast<const char *>(&metadata_bytes),
+                 sizeof(metadata_bytes));
+  payload.append(metadata);
   payload.append(reinterpret_cast<const char *>(&request.header.binary_bytes),
                  sizeof(request.header.binary_bytes));
   if (!request.binary.empty())
@@ -4038,15 +4111,18 @@ bool DecodeUtf8Scalars(std::string_view text,
   return !output->empty();
 }
 
-bool DispatchWindowsAction(const WindowsSession &session,
-                           const std::string &metadata, std::string *result,
-                           std::string *reason, bool *accepted) {
-  *accepted = false;
+// What a dispatch needs before it may do anything, shared by the preflight (which issues the
+// ticket) and the dispatch itself (which consumes it): the request names this session's current
+// cancel epoch and observation, the bound window is still the observed one, and the key/type
+// focus has not moved. It performs no input.
+bool ValidateWindowsDispatchBinding(const WindowsSession &session,
+                                    const std::string &metadata,
+                                    std::string *kind, RECT *bounds,
+                                    std::string *reason) {
   const std::uint64_t expected_epoch = session.cancel_epoch;
-  std::string kind;
   std::uint64_t requested_epoch = 0;
   std::uint64_t requested_observation = 0;
-  if (!ReadJsonString(metadata, "type", &kind) ||
+  if (!ReadJsonString(metadata, "type", kind) ||
       !ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch) ||
       !ReadJsonUint64(metadata, "observationRevision",
                       &requested_observation) ||
@@ -4059,24 +4135,187 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT current_bounds{};
   if (!ValidateWindowsSession(session, &current_bounds, reason))
     return false;
-  const RECT bounds = session.observation_bounds;
-  if (current_bounds.left != bounds.left || current_bounds.top != bounds.top ||
-      current_bounds.right != bounds.right ||
-      current_bounds.bottom != bounds.bottom ||
-      !RevalidateWindowsTarget(session, bounds, expected_epoch)) {
+  const RECT observed = session.observation_bounds;
+  if (current_bounds.left != observed.left ||
+      current_bounds.top != observed.top ||
+      current_bounds.right != observed.right ||
+      current_bounds.bottom != observed.bottom ||
+      !RevalidateWindowsTarget(session, observed, expected_epoch)) {
     *reason = "stale_target";
     return false;
   }
-  if (kind == "key" || kind == "type") {
+  if (*kind == "key" || *kind == "type") {
     std::string current_focused_signature;
     if (!session.has_focused_element_signature ||
-        !WindowsFocusedElementSignature(session.pid, bounds,
+        !WindowsFocusedElementSignature(session.pid, observed,
                                         &current_focused_signature) ||
         current_focused_signature != session.focused_element_signature) {
       *reason = "focused_target_changed";
       return false;
     }
   }
+  *bounds = observed;
+  return true;
+}
+
+void AppendDigestField(std::string *frame, std::string_view name,
+                       std::string_view value, bool present) {
+  frame->append(std::to_string(name.size()));
+  frame->push_back(':');
+  frame->append(name);
+  frame->push_back(present ? '1' : '0');
+  frame->append(std::to_string(value.size()));
+  frame->push_back(':');
+  frame->append(value);
+}
+
+// The fields the dispatch reads from the request, framed so adjacent fields cannot run together and
+// an absent field differs from an empty one. A field the dispatch does not read cannot change what
+// it does, so it is not bound.
+std::string WindowsDispatchPayloadDigest(const std::string &metadata) {
+  std::string frame = "windows-dispatch-payload-v1";
+  for (const char *name : {"type", "targetId", "name", "key", "text", "value",
+                           "button"}) {
+    std::string value;
+    const bool present = ReadJsonString(metadata, name, &value);
+    AppendDigestField(&frame, name, value, present);
+  }
+  for (const char *name : {"x", "y", "deltaX", "deltaY"}) {
+    double number = 0;
+    const bool present = ReadJsonDouble(metadata, name, &number);
+    char text[48]{};
+    if (present) std::snprintf(text, sizeof(text), "%.17g", number);
+    AppendDigestField(&frame, name, text, present);
+  }
+  // The booleans a toggle and an expand/collapse are decided by, read with the same text search the
+  // dispatch uses (true, false or absent), so a flipped target state cannot ride on the same ticket.
+  for (const char *name : {"value", "expanded"}) {
+    const std::string member = "\"" + std::string(name) + "\":";
+    const bool is_true = metadata.find(member + "true") != std::string::npos;
+    const bool is_false = metadata.find(member + "false") != std::string::npos;
+    AppendDigestField(&frame, std::string(name) + "Boolean",
+                      is_true ? "true" : (is_false ? "false" : ""),
+                      is_true || is_false);
+  }
+  return Sha256String(frame);
+}
+
+// The session state a dispatch acts on, so a ticket measured against one window state is refused
+// against another. It does not include the observation counters of this request (the binding does).
+std::string WindowsDispatchContextDigest(const WindowsSession &session) {
+  std::string frame = "windows-dispatch-context-v1";
+  AppendDigestField(&frame, "app", session.app_identity, true);
+  AppendDigestField(&frame, "window", session.window_identity, true);
+  AppendDigestField(&frame, "activeWindow", session.active_window_identity, true);
+  AppendDigestField(&frame, "activeKind", session.active_window_kind, true);
+  AppendDigestField(&frame, "processStart", session.process_start, true);
+  AppendDigestField(&frame, "pid", std::to_string(session.pid), true);
+  AppendDigestField(&frame, "dialogs", session.dialog_set_digest, true);
+  AppendDigestField(&frame, "dialogRevision",
+                    std::to_string(session.dialog_set_revision), true);
+  AppendDigestField(&frame, "observation",
+                    std::to_string(session.observation_revision), true);
+  const RECT bounds = session.observation_bounds;
+  AppendDigestField(&frame, "bounds",
+                    std::to_string(bounds.left) + "," +
+                        std::to_string(bounds.top) + "," +
+                        std::to_string(bounds.right) + "," +
+                        std::to_string(bounds.bottom),
+                    true);
+  AppendDigestField(&frame, "focused", session.focused_element_signature,
+                    session.has_focused_element_signature);
+  return Sha256String(frame);
+}
+
+std::uint64_t MonotonicNowNs() {
+  return static_cast<std::uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+// Overwrites a secret before its storage is released (the token and the receipt that carries it).
+void ScrubString(std::string *value) {
+  if (value == nullptr || value->empty()) return;
+  SecureZeroMemory(value->data(), value->size());
+  value->clear();
+}
+
+bool GenerateTicketToken(std::string *token) {
+  std::array<std::uint8_t, 32> bytes{};
+  token->clear();
+  const bool generated =
+      BCryptGenRandom(nullptr, bytes.data(), static_cast<ULONG>(bytes.size()),
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+  if (generated) {
+    static const char hex[] = "0123456789abcdef";
+    for (const auto byte : bytes) {
+      token->push_back(hex[byte >> 4]);
+      token->push_back(hex[byte & 0x0f]);
+    }
+  }
+  SecureZeroMemory(bytes.data(), bytes.size());
+  return generated;
+}
+
+sprint_coder::computer_use::NativeOrdinaryTicketBinding WindowsTicketBinding(
+    const WindowsSession &session, const std::string &request_id,
+    const std::string &action_digest, const std::string &payload_digest,
+    std::uint64_t cancel_epoch, std::uint64_t generation) {
+  sprint_coder::computer_use::NativeOrdinaryTicketBinding binding;
+  binding.session_id = session.session_id;
+  binding.request_id = request_id;
+  binding.action_digest = action_digest;
+  binding.payload_digest = payload_digest;
+  binding.context_digest = WindowsDispatchContextDigest(session);
+  binding.cancel_epoch = cancel_epoch;
+  binding.ticket_generation = generation;
+  return binding;
+}
+
+// Consumes the ordinary ticket a dispatch carries. A request without the key is refused and leaves
+// the slot alone; a request that carries it burns the slot whatever the outcome, and the
+// generation advances so a ticket measured before cannot match again. Replays are answered from the
+// response cache before this runs, so they need no ticket.
+bool ConsumeWindowsDispatchTicket(const std::string &session_key,
+                                  const WindowsSession &session,
+                                  const std::string &metadata) {
+  const auto found = ticket_states.find(session_key);
+  std::string token;
+  if (found == ticket_states.end() || !ReadJsonString(metadata, "ticket", &token))
+    return false;
+  WindowsTicketState &state = found->second;
+  std::string request_id;
+  std::string action_digest;
+  std::uint64_t cancel_epoch = 0;
+  const bool readable =
+      ReadJsonString(metadata, "requestId", &request_id) &&
+      ReadJsonString(metadata, "actionDigest", &action_digest) &&
+      ReadJsonUint64(metadata, "cancelEpoch", &cancel_epoch) &&
+      IsLowerHexDigest64(action_digest);
+  const bool consumed =
+      readable &&
+      state.slot.Consume(
+          token,
+          WindowsTicketBinding(session, request_id, action_digest,
+                               WindowsDispatchPayloadDigest(metadata),
+                               cancel_epoch, state.generation),
+          MonotonicNowNs());
+  state.slot.Invalidate();
+  ++state.generation;
+  ScrubString(&token);
+  return consumed && session.cancel_epoch == cancel_epoch;
+}
+
+bool DispatchWindowsAction(const WindowsSession &session,
+                           const std::string &metadata, std::string *result,
+                           std::string *reason, bool *accepted) {
+  *accepted = false;
+  const std::uint64_t expected_epoch = session.cancel_epoch;
+  std::string kind;
+  RECT bounds{};
+  if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
+    return false;
   bool dispatched = false;
   if (kind == "click") {
     double x = 0;
@@ -4424,6 +4663,120 @@ WindowsSession *FindWindowsSession(const Frame &request) {
   return found == sessions.end() ? nullptr : &found->second;
 }
 
+std::string WindowsPreflightReceipt(const WindowsSession &session,
+                                    const std::string &request_id,
+                                    std::uint64_t cancel_epoch,
+                                    std::uint64_t observation_revision,
+                                    std::string_view decision,
+                                    std::string_view denied_reason,
+                                    const std::string &ticket) {
+  const bool denied = decision == "denied";
+  const bool ordinary = decision == "ordinary";
+  return "{\"decision\":\"" + std::string(decision) +
+         "\",\"reasonCode\":" +
+         (denied ? "\"" + std::string(denied_reason) + "\"" : std::string("null")) +
+         ",\"deniedResult\":" + (denied ? "\"rejected\"" : "null") +
+         ",\"ticket\":" + (ordinary ? "\"" + ticket + "\"" : "null") +
+         ",\"classifierVersion\":" +
+         std::to_string(sprint_coder::computer_use::kNativePreflightClassifierVersion) +
+         ",\"inputAttemptCount\":" +
+         std::to_string(session.input_api_attempts->load(std::memory_order_acquire)) +
+         ",\"requestId\":\"" + JsonEscape(request_id) + "\",\"sessionId\":\"" +
+         JsonEscape(session.session_id) + "\",\"cancelEpoch\":" +
+         std::to_string(cancel_epoch) + ",\"observationRevision\":" +
+         std::to_string(observation_revision) + "}";
+}
+
+// The wire request id of the dispatch for a request id, derived the way Main derives it
+// (the first 16 bytes of SHA-256("request:" + id)), so a finished dispatch can be found in the
+// response cache from the preflight that precedes its repeat.
+bool DispatchFrameIdFor(const std::string &request_id,
+                        sprint_coder::computer_use::FrameId *id) {
+  const std::string digest = Sha256String("request:" + request_id);
+  if (digest.size() < 32) return false;
+  for (std::size_t index = 0; index < 16; ++index) {
+    const auto nibble = [](char c) -> int {
+      return c >= '0' && c <= '9' ? c - '0' : (c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1);
+    };
+    const int high = nibble(digest[index * 2]);
+    const int low = nibble(digest[index * 2 + 1]);
+    if (high < 0 || low < 0) return false;
+    id->bytes[index] = static_cast<std::uint8_t>(high * 16 + low);
+  }
+  return true;
+}
+
+// Side-effect-free: it makes no input call. It checks the same binding a dispatch checks, and on
+// success issues the one ordinary ticket that dispatch must present. Risk classification of the
+// target stays in the dispatch for now, so a secure or high-impact target is refused there exactly
+// as before; this step only decides whether a dispatch may start. A preflight is never cached,
+// because a repeat must get a fresh ticket rather than a spent one. Like the macOS preflight, any
+// preflight for an existing session first voids the ticket it holds, whatever its own outcome, and
+// a request whose dispatch already finished answers `replay` (the dispatch is then answered from
+// the cache and needs no ticket).
+bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
+                            const std::string &metadata) {
+  const std::string session_key = FrameIdKey(request.header.session_id);
+  const auto found = sessions.find(session_key);
+  if (found == sessions.end())
+    return Respond(pipe, request, MessageType::kError,
+                   ErrorPayload("session_missing"));
+  const WindowsSession &session = found->second;
+  WindowsTicketState &state = ticket_states[session_key];
+  state.slot.Invalidate();
+  ++state.generation;
+  std::string request_id;
+  std::string action_digest;
+  std::uint64_t cancel_epoch = 0;
+  std::uint64_t observation_revision = 0;
+  if (!ReadJsonString(metadata, "requestId", &request_id) ||
+      request_id.empty() || request_id.size() > 256 ||
+      !ReadJsonString(metadata, "actionDigest", &action_digest) ||
+      !IsLowerHexDigest64(action_digest) ||
+      !ReadJsonUint64(metadata, "cancelEpoch", &cancel_epoch) ||
+      !ReadJsonUint64(metadata, "observationRevision", &observation_revision))
+    return Respond(pipe, request, MessageType::kError,
+                   ErrorPayload("invalid_action"));
+  Frame finished;
+  finished.header = request.header;
+  finished.header.message_type = static_cast<std::uint16_t>(MessageType::kDispatch);
+  if (DispatchFrameIdFor(request_id, &finished.header.request_id) &&
+      response_cache.contains(ResponseCacheKey(finished)))
+    return Respond(pipe, request, MessageType::kPreflightResult,
+                   WindowsPreflightReceipt(session, request_id, cancel_epoch,
+                                           observation_revision, "replay", "",
+                                           ""));
+  std::string kind;
+  RECT bounds{};
+  std::string reason;
+  if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds,
+                                      &reason))
+    return Respond(pipe, request, MessageType::kPreflightResult,
+                   WindowsPreflightReceipt(session, request_id, cancel_epoch,
+                                           observation_revision, "denied",
+                                           "native_" + reason, ""));
+  std::string token;
+  const bool issued =
+      GenerateTicketToken(&token) &&
+      state.slot.Issue(
+          token,
+          WindowsTicketBinding(session, request_id, action_digest,
+                               WindowsDispatchPayloadDigest(metadata),
+                               cancel_epoch, state.generation),
+          MonotonicNowNs(),
+          sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs);
+  std::string receipt = WindowsPreflightReceipt(
+      session, request_id, cancel_epoch, observation_revision,
+      issued ? "ordinary" : "denied",
+      issued ? "" : "native_ticket_unavailable", issued ? token : "");
+  const bool sent =
+      Respond(pipe, request, MessageType::kPreflightResult, receipt);
+  // The secret only needs to live until it is on the wire (the slot keeps its own copy).
+  ScrubString(&token);
+  ScrubString(&receipt);
+  return sent;
+}
+
 bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
                           std::vector<std::uint8_t> *binary,
                           std::string *reason) {
@@ -4644,6 +4997,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       break;
     }
     session->cancel_epoch = requested_epoch;
+    InvalidateWindowsTicket(FrameIdKey(request.header.session_id));
     std::uint64_t current = cancellation_epoch.load(std::memory_order_acquire);
     while (requested_epoch > current &&
            !cancellation_epoch.compare_exchange_weak(
@@ -4669,6 +5023,8 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
         return false;
       break;
     }
+    // A new observation changes what a ticket was measured against, as on macOS.
+    InvalidateWindowsTicket(FrameIdKey(request.header.session_id));
     std::string response;
     std::vector<std::uint8_t> binary;
     std::string reason;
@@ -4683,11 +5039,25 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     }
     break;
   }
+  case MessageType::kPreflight: {
+    if (!HandleWindowsPreflight(pipe, request, metadata)) return false;
+    break;
+  }
   case MessageType::kDispatch: {
     WindowsSession *session = FindWindowsSession(request);
     if (session == nullptr) {
       if (!RespondAndCache(pipe, request, MessageType::kError,
                            ErrorPayload("session_missing")))
+        return false;
+      break;
+    }
+    // A ticket is required for every input. This sits after the replay answer above, so a repeat of
+    // a finished request still gets its cached result, and it is not cached itself, so the same
+    // request id can be tried again with a ticket.
+    if (!ConsumeWindowsDispatchTicket(FrameIdKey(request.header.session_id),
+                                      *session, metadata)) {
+      if (!Respond(pipe, request, MessageType::kError,
+                   ErrorPayload("ticket_invalid")))
         return false;
       break;
     }

@@ -712,14 +712,14 @@ describe('Computer Use external final gate', () => {
     });
 
     it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
-      // A distributed package is the v1 allow-list at the table's v1 numbers. Only the macOS native
-      // claims a ticket requirement (N2b-4 PR 5); Windows stays false until S5.
+      // A distributed package is the v1 allow-list at the table's v1 numbers. Both natives claim a
+      // ticket requirement (macOS: N2b-4 PR 5, Windows: S5-a).
       expect(eligibilityTable.versions).toEqual({
         rulesetVersion: 1,
         classifierVersion: 1,
         lexiconVersion: 1,
       });
-      expect(eligibilityTable.ticketRequired).toEqual({ darwin: true, win32: false });
+      expect(eligibilityTable.ticketRequired).toEqual({ darwin: true, win32: true });
       for (const key of [
         'classifierVersion',
         'lexiconVersion',
@@ -739,7 +739,7 @@ describe('Computer Use external final gate', () => {
         "foreach ($versionName in @('rulesetVersion', 'classifierVersion', 'lexiconVersion'))",
       );
       expect(workflow).toContain('-not ($eligibility.ticketRequired -is [bool])');
-      expect(workflow).toContain('$eligibility.ticketRequired -ne $false');
+      expect(workflow).toContain('$eligibility.ticketRequired -ne $true');
       expect(workflow).toContain("eligibility.mode !== 'v1-allowlist'");
       expect(workflow).toContain('eligibility.ticketRequired !== true');
       expect(workflow).toContain('Windows Computer Use native manifest eligibility is invalid.');
@@ -782,7 +782,7 @@ describe('Computer Use external final gate', () => {
             rulesetVersion: '1',
             classifierVersion: '1',
             lexiconVersion: '1',
-            ticketRequired: 'false',
+            ticketRequired: 'true',
           };
           const json = (change: Record<string, string> = {}): string =>
             `{${Object.entries({ ...good, ...change })
@@ -797,9 +797,9 @@ describe('Computer Use external final gate', () => {
             { mode: '["v1-allowlist"]' },
             { mode: '"V1-ALLOWLIST"' },
             { mode: '"v2-denylist"' },
-            { ticketRequired: 'true' },
-            { ticketRequired: '"false"' },
-            { ticketRequired: '0' },
+            { ticketRequired: 'false' },
+            { ticketRequired: '"true"' },
+            { ticketRequired: '1' },
           ])
             expect(run(json(change)), JSON.stringify(change)).not.toBe(0);
         } finally {
