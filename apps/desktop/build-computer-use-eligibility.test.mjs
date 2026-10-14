@@ -81,6 +81,8 @@ describe('Computer Use native eligibility declaration', () => {
   it('writes a header that carries exactly the declaration', () => {
     const header = eligibilityBuildHeader(eligibilityDeclaration('v2-denylist', 'darwin'));
     expect(header).toContain('#pragma once');
+    // The harness conditions its default-value checks on this macro.
+    expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_FROM_BUILD 1');
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_V2 1');
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_RULESET_VERSION 1');
     expect(header).toContain('#define SPRINT_CODER_ELIGIBILITY_CLASSIFIER_VERSION 1');

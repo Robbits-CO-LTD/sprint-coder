@@ -361,11 +361,29 @@ jobs:
           finally { $sha.Dispose() }
           $manifestKeys = @($nativeManifest.PSObject.Properties.Name | Sort-Object)
           $expectedManifestKeys = @(
-            'architecture', 'apiVersion', 'binaryDigest', 'capabilities', 'moduleDigest',
+            'architecture', 'apiVersion', 'binaryDigest', 'capabilities', 'eligibility', 'moduleDigest',
             'nativeVersion', 'platform', 'protocolVersion', 'signerDigest', 'sourceCommit', 'version'
           ) | Sort-Object
           if (($manifestKeys -join '|') -ne ($expectedManifestKeys -join '|')) {
             throw 'Windows Computer Use native manifest has unexpected keys.'
+          }
+          # A distributed package is always the v1 allow-list: no deny-list build ships, and the
+          # native claims no ticket requirement until it demands one (ADR v2 D7).
+          $eligibility = $nativeManifest.eligibility
+          $eligibilityKeys = @($eligibility.PSObject.Properties.Name | Sort-Object)
+          $expectedEligibilityKeys = @(
+            'classifierVersion', 'lexiconVersion', 'mode', 'rulesetVersion', 'ticketRequired'
+          ) | Sort-Object
+          if (
+            ($eligibilityKeys -join '|') -ne ($expectedEligibilityKeys -join '|') -or
+            $eligibility.mode -ne 'v1-allowlist' -or
+            $eligibility.rulesetVersion -ne 1 -or
+            $eligibility.classifierVersion -ne 1 -or
+            $eligibility.lexiconVersion -ne 1 -or
+            -not ($eligibility.ticketRequired -is [bool]) -or
+            $eligibility.ticketRequired -ne $false
+          ) {
+            throw 'Windows Computer Use native manifest eligibility is invalid.'
           }
           if (
             $nativeManifest.platform -ne 'win32' -or
@@ -545,12 +563,27 @@ jobs:
           import { readFileSync } from 'node:fs';
           const value = JSON.parse(readFileSync(process.env.MANIFEST_PATH, 'utf8'));
           const expected = [
-            'architecture', 'apiVersion', 'binaryDigest', 'capabilities', 'moduleDigest',
+            'architecture', 'apiVersion', 'binaryDigest', 'capabilities', 'eligibility', 'moduleDigest',
             'nativeVersion', 'platform', 'protocolVersion', 'signerDigest', 'sourceCommit', 'version',
           ].sort();
           const actual = Object.keys(value).sort();
           if (JSON.stringify(actual) !== JSON.stringify(expected)) {
             throw new Error('macOS Computer Use native manifest has unexpected keys.');
+          }
+          // A distributed package is always the v1 allow-list; the native claims no ticket
+          // requirement until it demands one (ADR v2 D7).
+          const eligibility = value.eligibility;
+          const eligibilityKeys = ['classifierVersion', 'lexiconVersion', 'mode', 'rulesetVersion', 'ticketRequired'];
+          if (
+            typeof eligibility !== 'object' || eligibility === null || Array.isArray(eligibility) ||
+            JSON.stringify(Object.keys(eligibility).sort()) !== JSON.stringify(eligibilityKeys) ||
+            eligibility.mode !== 'v1-allowlist' ||
+            eligibility.rulesetVersion !== 1 ||
+            eligibility.classifierVersion !== 1 ||
+            eligibility.lexiconVersion !== 1 ||
+            eligibility.ticketRequired !== false
+          ) {
+            throw new Error('macOS Computer Use native manifest eligibility is invalid.');
           }
           if (typeof value.nativeVersion !== 'string' || value.nativeVersion.length < 1 || value.nativeVersion.length > 64) {
             throw new Error('macOS Computer Use nativeVersion is invalid.');

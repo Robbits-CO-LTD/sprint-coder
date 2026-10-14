@@ -8,6 +8,7 @@ import {
 } from '@sprint-coder/contracts';
 import { assertWindowsComputerUseHelperHandshake } from './computer-use-native-windows';
 import {
+  eligibilityBuildHeader,
   eligibilityDeclaration,
   parseEligibilityMode,
 } from '../../../../build-computer-use-eligibility.mjs';
@@ -144,6 +145,14 @@ describe('Computer Use native eligibility attestation (D7-2)', () => {
           assertWindowsComputerUseHelperHandshake(handshake(attested), trust(declared)),
         ).toThrow(/eligibility/iu);
     });
+  });
+
+  it('has a harness guard macro that the generated header actually defines', () => {
+    const harness = read('computer_use_protocol_fuzz.cc');
+    expect(harness).toContain('SPRINT_CODER_ELIGIBILITY_FROM_BUILD');
+    expect(eligibilityBuildHeader(eligibilityDeclaration('v1-allowlist', 'darwin'))).toContain(
+      '#define SPRINT_CODER_ELIGIBILITY_FROM_BUILD 1',
+    );
   });
 
   it('parses the build argument the way the build script does', () => {

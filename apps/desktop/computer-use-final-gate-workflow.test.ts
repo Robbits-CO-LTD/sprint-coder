@@ -673,6 +673,145 @@ describe('Computer Use external final gate', () => {
     }
   });
 
+  describe('native manifest keys the package checks expect (D7)', () => {
+    const buildScript = readFileSync(
+      resolve(repositoryRoot, 'build-computer-use-native.mjs'),
+      'utf8',
+    );
+    const eligibilityTable = JSON.parse(
+      readFileSync(resolve(__dirname, 'computer-use-native', 'eligibility.json'), 'utf8'),
+    ) as {
+      versions: { rulesetVersion: number; classifierVersion: number; lexiconVersion: number };
+      ticketRequired: { darwin: boolean; win32: boolean };
+    };
+    const quoted = (text: string): string[] =>
+      [...text.matchAll(/'([A-Za-z]+)'/gu)].map((m) => m[1]!);
+
+    /** The top-level keys the build script writes into the manifest it ships. */
+    function builtManifestKeys(): string[] {
+      const start = buildScript.indexOf('const manifest = {');
+      const end = buildScript.indexOf('\n  };', start);
+      expect(start).toBeGreaterThanOrEqual(0);
+      expect(end).toBeGreaterThan(start);
+      return [...buildScript.slice(start, end).matchAll(/^ {4}([A-Za-z]+)[:,]/gmu)]
+        .map((match) => match[1]!)
+        .sort();
+    }
+
+    it('expects exactly the keys the build writes, on both platforms', () => {
+      const built = builtManifestKeys();
+      expect(built).toContain('eligibility');
+      const windows = /\$expectedManifestKeys = @\(([\s\S]*?)\) \| Sort-Object/u.exec(
+        workflow,
+      )?.[1];
+      expect(windows).toBeDefined();
+      expect(quoted(windows!).sort()).toEqual(built);
+      const macos = /const expected = \[([\s\S]*?)\]\.sort\(\);/u.exec(workflow)?.[1];
+      expect(macos).toBeDefined();
+      expect(quoted(macos!).sort()).toEqual(built);
+    });
+
+    it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
+      // A distributed package is the v1 allow-list at the table's v1 numbers, claiming no ticket.
+      expect(eligibilityTable.versions).toEqual({
+        rulesetVersion: 1,
+        classifierVersion: 1,
+        lexiconVersion: 1,
+      });
+      expect(eligibilityTable.ticketRequired).toEqual({ darwin: false, win32: false });
+      for (const key of [
+        'classifierVersion',
+        'lexiconVersion',
+        'mode',
+        'rulesetVersion',
+        'ticketRequired',
+      ]) {
+        expect(workflow).toContain(`'${key}'`);
+      }
+      expect(workflow).toContain("$eligibility.mode -ne 'v1-allowlist'");
+      expect(workflow).toContain('$eligibility.rulesetVersion -ne 1');
+      expect(workflow).toContain('$eligibility.classifierVersion -ne 1');
+      expect(workflow).toContain('$eligibility.lexiconVersion -ne 1');
+      expect(workflow).toContain('$eligibility.ticketRequired -ne $false');
+      expect(workflow).toContain("eligibility.mode !== 'v1-allowlist'");
+      expect(workflow).toContain('eligibility.ticketRequired !== false');
+      expect(workflow).toContain('Windows Computer Use native manifest eligibility is invalid.');
+      expect(workflow).toContain('macOS Computer Use native manifest eligibility is invalid.');
+    });
+
+    it('accepts a manifest shaped like the build output and refuses a changed eligibility (macOS check)', () => {
+      const block = /<<'NODE'\n([\s\S]*?)\n\s*NODE\n/u.exec(workflow)?.[1];
+      expect(block).toBeDefined();
+      const script = block!
+        .split('\n')
+        .map((line) => line.replace(/^ {10}/u, ''))
+        .join('\n');
+      const directory = mkdtempSync(resolve(tmpdir(), 'sprint-coder-manifest-check-'));
+      try {
+        const manifest = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+          version: 1,
+          sourceCommit: 'a'.repeat(40),
+          platform: 'darwin',
+          architecture: 'arm64',
+          protocolVersion: 1,
+          apiVersion: 2,
+          nativeVersion: 'computer-use-native-gate0-1',
+          moduleDigest: 'b'.repeat(64),
+          binaryDigest: 'b'.repeat(64),
+          signerDigest: 'c'.repeat(64),
+          capabilities: ['observe', 'capture', 'accessibility', 'input'],
+          eligibility: {
+            mode: 'v1-allowlist',
+            rulesetVersion: 1,
+            classifierVersion: 1,
+            lexiconVersion: 1,
+            ticketRequired: false,
+          },
+          ...overrides,
+        });
+        const run = (value: Record<string, unknown>): number | null => {
+          const manifestPath = resolve(directory, 'manifest.json');
+          writeFileSync(manifestPath, JSON.stringify(value));
+          const scriptPath = resolve(directory, 'check.mjs');
+          writeFileSync(scriptPath, script);
+          return spawnSync(process.execPath, [scriptPath], {
+            env: { ...process.env, MANIFEST_PATH: manifestPath },
+            encoding: 'utf8',
+          }).status;
+        };
+        expect(Object.keys(manifest()).sort()).toEqual(builtManifestKeys());
+        expect(run(manifest())).toBe(0);
+        const eligibility = (change: Record<string, unknown>) =>
+          manifest({
+            eligibility: {
+              mode: 'v1-allowlist',
+              rulesetVersion: 1,
+              classifierVersion: 1,
+              lexiconVersion: 1,
+              ticketRequired: false,
+              ...change,
+            },
+          });
+        for (const change of [
+          { mode: 'v2-denylist' },
+          { rulesetVersion: 2 },
+          { classifierVersion: 2 },
+          { lexiconVersion: 2 },
+          { ticketRequired: true },
+          { ticketRequired: 'false' },
+          { extra: true },
+        ])
+          expect(run(eligibility(change)), JSON.stringify(change)).not.toBe(0);
+        const withoutEligibility = manifest();
+        delete withoutEligibility['eligibility'];
+        expect(run(withoutEligibility)).not.toBe(0);
+        expect(run(manifest({ eligibility: null }))).not.toBe(0);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+  });
+
   it('is manual-only and requires explicit signed package and bounded evidence artifacts', () => {
     expect(workflow).toContain('workflow_dispatch:');
     expect(workflow).not.toContain('pull_request:');
