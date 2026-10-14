@@ -471,6 +471,8 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 
 **S3b の実装状況（2026-09-21）**: 動的検証は native を変えずに行える範囲、すなわち `listWindows` の再列挙で代用している（走っているプロセスから identity digest と mode attestation を取り直し、Windows では実行中イメージの digest を照合する）。終了した／差し替えられた／適格なウィンドウを失ったアプリはここで落ちる。下記の pid ベースの検証は S4 / S5 で置き換える。
 
+**S4-2 の実装状況（macOS）**: 実行中 PID の動的検証を `CurrentApplicationMatchesIdentityNative` に入れた。start・resume・観測・入力の前後の既存の再検証がすべてこの関数を通るので、同じ箇所で効く。実行中プロセス自身のコードオブジェクト（`kSecGuestAttributePid`）を strict に検証し、designated requirement を満たすこと、signer（Team ID・signing identifier）と code directory hash が束縛時の値と一致すること、実行中イメージの正規化パスが束縛時のパスと一致することを要求する。束縛時に未署名だった実体は、実行中イメージのバイト列の digest が完全一致することを要求し、署名済みに変わっていれば拒否する。測れないものは拒否（fail-closed）で、拒否は入力の前に既存の `native_app_identity_changed` で閉じる。判定表は portable なヘッダ（`computer_use_native_identity.h`）にあり、harness が全項目を縛る。署名者を持たないアプリの `maximumMode` は supervised までに上限を掛ける（Apple の platform binary である system の TextEdit は exact path で束縛されるため従来どおり）。実機での署名検証（署名済み・未署名・差し替え・更新中のアプリ、Rosetta 下の cdHash）は人間の受入（HA）の項目である。
+
 - **主**: pid ベースの動的コード署名検証。macOS は `SecCodeCopyGuestWithAttributes`（`kSecGuestAttributePid`）で走っているプロセスのコードオブジェクトを取り、`SecCodeCheckValidity` を通す。Windows は実行中イメージ（`QueryFullProcessImageName` で得たイメージを、プロセスがロックしているファイルハンドル経由で）検証し、volume serial + file id で同一性を確認する（既存の `WindowsSessionExecutableMatches`、`computer_use_windows_host.cc:962-979` の枠組みを流用）。
 - **補助**: 従来の静的検証。動的検証が使えない環境では静的にフォールバックし、その旨を `identityKind` に反映する（`verified-signed-static`）。
 - **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。

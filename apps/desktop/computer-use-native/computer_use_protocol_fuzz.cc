@@ -3,6 +3,7 @@
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
+#include "computer_use_native_identity.h"
 #include "computer_use_effect_classifier.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -1094,6 +1095,111 @@ bool CheckNativeApprovalFlow() {
     if (!Check(same(denial.reason_code, row.reason) && same(denial.result, row.result),
                "flow-denial-table")) return false;
   }
+  return true;
+}
+
+bool CheckNativeRunningIdentity() {
+  using namespace sprint_coder::computer_use;
+  NativeIdentityExpectation signed_app;
+  signed_app.signed_target = true;
+  signed_app.team_id = "TEAMID";
+  signed_app.signing_identifier = "com.example.app";
+  signed_app.cd_hash = "cdhash-a";
+  NativeRunningObservation good;
+  good.path_measured = true;
+  good.path_matches = true;
+  good.dynamic_signature_checked = true;
+  good.dynamic_signature_valid = true;
+  good.designated_requirement_satisfied = true;
+  good.team_id = "TEAMID";
+  good.signing_identifier = "com.example.app";
+  good.cd_hash = "cdhash-a";
+  if (!Check(CheckRunningIdentity(signed_app, good) == NativeIdentityVerdict::kMatch &&
+                 NativeIdentityAllowsInput(CheckRunningIdentity(signed_app, good)),
+             "identity-signed-match"))
+    return false;
+  // Every field that could differ is refused on its own, and only the exact match passes.
+  const auto refuses = [&](const char *name, auto mutate, NativeIdentityVerdict verdict) {
+    NativeRunningObservation observed = good;
+    mutate(observed);
+    return Check(CheckRunningIdentity(signed_app, observed) == verdict &&
+                     !NativeIdentityAllowsInput(CheckRunningIdentity(signed_app, observed)),
+                 name);
+  };
+  if (!refuses("identity-path-not-measured", [](auto &o) { o.path_measured = false; },
+               NativeIdentityVerdict::kUnavailable) ||
+      !refuses("identity-path-differs", [](auto &o) { o.path_matches = false; },
+               NativeIdentityVerdict::kPathMismatch) ||
+      !refuses("identity-signature-not-checked", [](auto &o) { o.dynamic_signature_checked = false; },
+               NativeIdentityVerdict::kUnavailable) ||
+      !refuses("identity-signature-invalid", [](auto &o) { o.dynamic_signature_valid = false; },
+               NativeIdentityVerdict::kSignatureInvalid) ||
+      !refuses("identity-requirement-unsatisfied",
+               [](auto &o) { o.designated_requirement_satisfied = false; },
+               NativeIdentityVerdict::kSignatureInvalid) ||
+      !refuses("identity-team-differs", [](auto &o) { o.team_id = "OTHER"; },
+               NativeIdentityVerdict::kSignerMismatch) ||
+      !refuses("identity-identifier-differs", [](auto &o) { o.signing_identifier = "com.example.other"; },
+               NativeIdentityVerdict::kSignerMismatch) ||
+      !refuses("identity-cdhash-differs", [](auto &o) { o.cd_hash = "cdhash-b"; },
+               NativeIdentityVerdict::kCodeDirectoryMismatch) ||
+      !refuses("identity-cdhash-missing", [](auto &o) { o.cd_hash.clear(); },
+               NativeIdentityVerdict::kCodeDirectoryMismatch))
+    return false;
+  // An expectation that is itself incomplete cannot be satisfied (nothing to compare is no match).
+  for (auto field : {&NativeIdentityExpectation::team_id, &NativeIdentityExpectation::signing_identifier,
+                     &NativeIdentityExpectation::cd_hash}) {
+    NativeIdentityExpectation incomplete = signed_app;
+    incomplete.*field = "";
+    if (!Check(CheckRunningIdentity(incomplete, good) == NativeIdentityVerdict::kUnavailable,
+               "identity-incomplete-expectation-refused"))
+      return false;
+  }
+  // Bound as unsigned: the exact bytes, and it must not have become signed.
+  NativeIdentityExpectation unsigned_app;
+  unsigned_app.executable_digest = "digest-a";
+  NativeRunningObservation image;
+  image.path_measured = true;
+  image.path_matches = true;
+  image.image_digest_measured = true;
+  image.image_digest = "digest-a";
+  if (!Check(CheckRunningIdentity(unsigned_app, image) == NativeIdentityVerdict::kMatch,
+             "identity-unsigned-match"))
+    return false;
+  NativeRunningObservation changed = image;
+  changed.image_digest = "digest-b";
+  NativeRunningObservation unreadable = image;
+  unreadable.image_digest_measured = false;
+  NativeRunningObservation became_signed = image;
+  became_signed.dynamic_signature_checked = true;
+  became_signed.dynamic_signature_valid = true;
+  became_signed.team_id = "TEAMID";
+  NativeIdentityExpectation no_digest = unsigned_app;
+  no_digest.executable_digest.clear();
+  if (!Check(CheckRunningIdentity(unsigned_app, changed) == NativeIdentityVerdict::kImageDigestMismatch,
+             "identity-unsigned-digest-differs") ||
+      !Check(CheckRunningIdentity(unsigned_app, unreadable) == NativeIdentityVerdict::kUnavailable,
+             "identity-unsigned-unreadable") ||
+      !Check(CheckRunningIdentity(unsigned_app, became_signed) == NativeIdentityVerdict::kBecameSigned,
+             "identity-unsigned-became-signed") ||
+      !Check(CheckRunningIdentity(no_digest, image) == NativeIdentityVerdict::kUnavailable,
+             "identity-unsigned-no-bound-digest"))
+    return false;
+  // An unsigned image with an invalid (ad hoc) signature still has to match its bytes.
+  NativeRunningObservation adhoc = image;
+  adhoc.dynamic_signature_checked = true;
+  adhoc.dynamic_signature_valid = true;
+  if (!Check(CheckRunningIdentity(unsigned_app, adhoc) == NativeIdentityVerdict::kMatch,
+             "identity-adhoc-without-team-matches-bytes"))
+    return false;
+  // The signing-state cap: unsigned is never above supervised, and nothing else is changed.
+  if (!Check(CapModeForSigningState(false, "full_access_app") == "supervised" &&
+                 CapModeForSigningState(false, "supervised") == "supervised" &&
+                 CapModeForSigningState(false, "observe_only") == "observe_only" &&
+                 CapModeForSigningState(true, "full_access_app") == "full_access_app" &&
+                 CapModeForSigningState(true, "supervised") == "supervised",
+             "identity-unsigned-mode-cap"))
+    return false;
   return true;
 }
 
@@ -2371,6 +2477,7 @@ int main() {
   if (!CheckNativeApprovalTicket()) return 1;
   if (!CheckNativeApprovalFlow()) return 1;
   if (!CheckNativeEligibility()) return 1;
+  if (!CheckNativeRunningIdentity()) return 1;
   if (!CheckEffectClassifierCore()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "computer_use_native_binding.h"
+#include "computer_use_native_identity.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
@@ -646,7 +647,7 @@ std::string PolicyLanguageForMacExecutable(NSString* executable) {
   return PolicyLanguageForMacBundle(MacBundleForExecutable(executable));
 }
 
-std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
+std::string UncappedMaximumModeForIdentityFacts(const IdentityFacts& facts) {
   const bool policy_language_attested =
       facts.policy_language == "en" || facts.policy_language == "ja";
   if (IsExactSystemTextEdit(
@@ -659,6 +660,17 @@ std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
                                  facts.signing_identifier))
     return "supervised";
   return "observe_only";
+}
+
+// An application with no signer to hold it to never gets more than a person's approval for every
+// operation. The exact system TextEdit is an Apple platform binary that carries no team id, so the
+// exact-path rule above is what binds it and it keeps the mode it always had.
+std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
+  const std::string mode = UncappedMaximumModeForIdentityFacts(facts);
+  if (IsExactSystemTextEdit([NSString stringWithUTF8String:facts.bundle_id.c_str()],
+                            [NSString stringWithUTF8String:facts.executable_path.c_str()]))
+    return mode;
+  return std::string(sprint_coder::computer_use::CapModeForSigningState(facts.signed_target, mode));
 }
 
 void SetScreenBoundsProperty(napi_env env, napi_value object,
@@ -780,6 +792,92 @@ napi_value IdentityObjectFromBundle(napi_env env, NSURL* bundle_url, std::uint32
   return IdentityObjectFromFacts(env, facts, pid);
 }
 
+// ---- Running-process identity (ADR v2 D12, section 6.2.1) -------------------------------------
+// The static check above validates the file on disk. Here the process that is running now is
+// measured and judged by CheckRunningIdentity, so "the file I validated" and "the process I am
+// controlling" cannot drift apart (a binary replaced after launch, a process that changed owner
+// image, an unsigned image whose bytes changed). Every measurement is read-only; nothing here sends
+// input, changes focus or performs an accessibility action.
+
+bool ReadRunningImagePath(std::uint32_t pid, std::string* path) {
+  char buffer[PROC_PIDPATHINFO_MAXSIZE] = {};
+  if (pid == 0 || proc_pidpath(static_cast<int>(pid), buffer, sizeof(buffer)) <= 0) return false;
+  *path = buffer;
+  return !path->empty();
+}
+
+// Signing facts of the running process's own code object (kSecGuestAttributePid), not of a file.
+void MeasureRunningSignature(std::uint32_t pid,
+                             sprint_coder::computer_use::NativeRunningObservation* observed) {
+  const int32_t pid_value = static_cast<int32_t>(pid);
+  CFNumberRef pid_number = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pid_value);
+  if (pid_number == nullptr) return;
+  const void* keys[] = {kSecGuestAttributePid};
+  const void* values[] = {pid_number};
+  CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 1,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+  CFRelease(pid_number);
+  if (attributes == nullptr) return;
+  SecCodeRef code = nullptr;
+  const OSStatus guest = SecCodeCopyGuestWithAttributes(nullptr, attributes, kSecCSDefaultFlags, &code);
+  CFRelease(attributes);
+  if (guest != errSecSuccess || code == nullptr) return;
+  observed->dynamic_signature_checked = true;
+  const SecCSFlags strict = kSecCSStrictValidate | kSecCSCheckAllArchitectures;
+  observed->dynamic_signature_valid = SecCodeCheckValidity(code, strict, nullptr) == errSecSuccess;
+  SecRequirementRef requirement = nullptr;
+  if (SecCodeCopyDesignatedRequirement(code, kSecCSDefaultFlags, &requirement) == errSecSuccess &&
+      requirement != nullptr) {
+    observed->designated_requirement_satisfied =
+        SecCodeCheckValidity(code, strict, requirement) == errSecSuccess;
+    CFRelease(requirement);
+  }
+  CFDictionaryRef information = nullptr;
+  if (SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information) == errSecSuccess &&
+      information != nullptr) {
+    const auto copyString = [&](const void* key, std::string* output) {
+      const auto value = static_cast<CFStringRef>(CFDictionaryGetValue(information, key));
+      if (value == nullptr || CFGetTypeID(value) != CFStringGetTypeID()) return;
+      char buffer[257] = {};
+      if (CFStringGetCString(value, buffer, sizeof(buffer), kCFStringEncodingUTF8)) *output = buffer;
+    };
+    copyString(kSecCodeInfoIdentifier, &observed->signing_identifier);
+    copyString(kSecCodeInfoTeamIdentifier, &observed->team_id);
+    const auto hash_data = static_cast<CFDataRef>(CFDictionaryGetValue(information, kSecCodeInfoUnique));
+    if (hash_data != nullptr && CFGetTypeID(hash_data) == CFDataGetTypeID())
+      observed->cd_hash = HexDigest(CFDataGetBytePtr(hash_data),
+                                    static_cast<std::size_t>(CFDataGetLength(hash_data)));
+    CFRelease(information);
+  }
+  CFRelease(code);
+}
+
+bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& bound) {
+  using namespace sprint_coder::computer_use;
+  NativeRunningObservation observed;
+  std::string running_path;
+  if (ReadRunningImagePath(pid, &running_path)) {
+    observed.path_measured = true;
+    NSString* running = [NSString stringWithUTF8String:running_path.c_str()];
+    observed.path_matches = SameMacExecutablePath(running, bound.executable_path);
+    if (!bound.signed_target && observed.path_matches) {
+      // No signer to compare: the bytes of the image that is running must be the bound bytes.
+      const std::string digest = FileDigest(running);
+      observed.image_digest_measured = !digest.empty();
+      observed.image_digest = digest;
+    }
+  }
+  MeasureRunningSignature(pid, &observed);
+  NativeIdentityExpectation expected;
+  expected.signed_target = bound.signed_target;
+  expected.team_id = bound.team_id;
+  expected.signing_identifier = bound.signing_identifier;
+  expected.cd_hash = bound.cd_hash;
+  expected.executable_digest = bound.executable_digest;
+  return NativeIdentityAllowsInput(CheckRunningIdentity(expected, observed));
+}
+
 bool CurrentApplicationMatchesIdentityNative(
     std::uint32_t pid, std::string_view expected_identity,
     std::string_view expected_executable_path = {}) {
@@ -790,9 +888,11 @@ bool CurrentApplicationMatchesIdentityNative(
        !SameMacExecutablePath(application.executableURL.path, expected_executable_path)))
     return false;
   IdentityFacts facts;
+  // The static facts say what the file on disk is; the running process must also be that (D12).
   return BuildIdentityFacts(application.executableURL.path, application.bundleIdentifier,
                             application.localizedName, &facts) &&
-         facts.identity_digest == expected_identity;
+         facts.identity_digest == expected_identity &&
+         RunningProcessMatchesBoundIdentity(pid, facts);
 }
 
 bool CurrentApplicationMatchesIdentity(napi_env env, std::uint32_t pid,
