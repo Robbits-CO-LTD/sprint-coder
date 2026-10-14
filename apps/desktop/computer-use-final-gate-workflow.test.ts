@@ -728,16 +728,84 @@ describe('Computer Use external final gate', () => {
       ]) {
         expect(workflow).toContain(`'${key}'`);
       }
-      expect(workflow).toContain("$eligibility.mode -ne 'v1-allowlist'");
-      expect(workflow).toContain('$eligibility.rulesetVersion -ne 1');
-      expect(workflow).toContain('$eligibility.classifierVersion -ne 1');
-      expect(workflow).toContain('$eligibility.lexiconVersion -ne 1');
+      // PowerShell's -ne converts types and ignores case, so the Windows check types each value first
+      // and compares with the case-sensitive operator.
+      expect(workflow).toContain('-not ($eligibility.mode -is [string])');
+      expect(workflow).toContain("$eligibility.mode -cne 'v1-allowlist'");
+      expect(workflow).toContain('($versionValue -is [int]) -or ($versionValue -is [long])');
+      expect(workflow).toContain('$versionValue -ne 1');
+      expect(workflow).toContain(
+        "foreach ($versionName in @('rulesetVersion', 'classifierVersion', 'lexiconVersion'))",
+      );
+      expect(workflow).toContain('-not ($eligibility.ticketRequired -is [bool])');
       expect(workflow).toContain('$eligibility.ticketRequired -ne $false');
       expect(workflow).toContain("eligibility.mode !== 'v1-allowlist'");
       expect(workflow).toContain('eligibility.ticketRequired !== false');
       expect(workflow).toContain('Windows Computer Use native manifest eligibility is invalid.');
       expect(workflow).toContain('macOS Computer Use native manifest eligibility is invalid.');
     });
+
+    const pwsh = spawnSync(
+      'pwsh',
+      ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'],
+      {
+        encoding: 'utf8',
+      },
+    );
+    it.skipIf(pwsh.status !== 0)(
+      'accepts the v1 eligibility and refuses type-coerced or differently cased values (Windows check)',
+      () => {
+        const start = workflow.indexOf('$eligibility = $nativeManifest.eligibility');
+        const marker =
+          "throw 'Windows Computer Use native manifest eligibility is invalid.'\n          }";
+        const end = workflow.indexOf(marker, start);
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        const block = workflow.slice(start, end + marker.length);
+        const directory = mkdtempSync(resolve(tmpdir(), 'sprint-coder-eligibility-ps-'));
+        try {
+          const run = (eligibilityJson: string): number | null => {
+            const manifestPath = resolve(directory, 'manifest.json');
+            writeFileSync(manifestPath, `{"version":1,"eligibility":${eligibilityJson}}`);
+            const scriptPath = resolve(directory, 'check.ps1');
+            writeFileSync(
+              scriptPath,
+              `$ErrorActionPreference = 'Stop'\n$nativeManifest = Get-Content -Raw -LiteralPath '${manifestPath}' | ConvertFrom-Json\n${block}\n`,
+            );
+            return spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
+              encoding: 'utf8',
+            }).status;
+          };
+          const good = {
+            mode: '"v1-allowlist"',
+            rulesetVersion: '1',
+            classifierVersion: '1',
+            lexiconVersion: '1',
+            ticketRequired: 'false',
+          };
+          const json = (change: Record<string, string> = {}): string =>
+            `{${Object.entries({ ...good, ...change })
+              .map(([key, value]) => `"${key}":${value}`)
+              .join(',')}}`;
+          expect(run(json())).toBe(0);
+          for (const change of [
+            { rulesetVersion: '"1"' },
+            { classifierVersion: 'true' },
+            { lexiconVersion: '1.0' },
+            { rulesetVersion: '2' },
+            { mode: '["v1-allowlist"]' },
+            { mode: '"V1-ALLOWLIST"' },
+            { mode: '"v2-denylist"' },
+            { ticketRequired: 'true' },
+            { ticketRequired: '"false"' },
+            { ticketRequired: '0' },
+          ])
+            expect(run(json(change)), JSON.stringify(change)).not.toBe(0);
+        } finally {
+          rmSync(directory, { recursive: true, force: true });
+        }
+      },
+    );
 
     it('accepts a manifest shaped like the build output and refuses a changed eligibility (macOS check)', () => {
       const block = /<<'NODE'\n([\s\S]*?)\n\s*NODE\n/u.exec(workflow)?.[1];

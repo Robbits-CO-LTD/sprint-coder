@@ -374,12 +374,20 @@ jobs:
           $expectedEligibilityKeys = @(
             'classifierVersion', 'lexiconVersion', 'mode', 'rulesetVersion', 'ticketRequired'
           ) | Sort-Object
+          # PowerShell's -ne converts types and ignores case, so each value is checked for its type
+          # first and compared with the case-sensitive operator (the macOS check is strict the same way).
+          $eligibilityVersionsAreOne = $true
+          foreach ($versionName in @('rulesetVersion', 'classifierVersion', 'lexiconVersion')) {
+            $versionValue = $eligibility.$versionName
+            if (-not (($versionValue -is [int]) -or ($versionValue -is [long])) -or $versionValue -ne 1) {
+              $eligibilityVersionsAreOne = $false
+            }
+          }
           if (
-            ($eligibilityKeys -join '|') -ne ($expectedEligibilityKeys -join '|') -or
-            $eligibility.mode -ne 'v1-allowlist' -or
-            $eligibility.rulesetVersion -ne 1 -or
-            $eligibility.classifierVersion -ne 1 -or
-            $eligibility.lexiconVersion -ne 1 -or
+            ($eligibilityKeys -join '|') -cne ($expectedEligibilityKeys -join '|') -or
+            -not ($eligibility.mode -is [string]) -or
+            $eligibility.mode -cne 'v1-allowlist' -or
+            -not $eligibilityVersionsAreOne -or
             -not ($eligibility.ticketRequired -is [bool]) -or
             $eligibility.ticketRequired -ne $false
           ) {
