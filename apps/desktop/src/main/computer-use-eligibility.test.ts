@@ -337,4 +337,3 @@ describe('Computer Use eligibility contract (D7-1)', () => {
     });
   });
 });
-
