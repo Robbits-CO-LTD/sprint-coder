@@ -47,9 +47,11 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
       'DispatchWindowsAction(',
       'input_api_attempts->fetch_add',
       'RespondAndCache',
-      'response_cache',
     ])
       expect(preflight, forbidden).not.toContain(forbidden);
+    // It only reads the response cache (to answer a finished request with a replay), never writes.
+    expect(preflight).not.toMatch(/response_cache.(emplace|insert|erase|clear)/u);
+    expect(preflight).toContain('response_cache.contains(');
     // It checks exactly what a dispatch checks, and answers under the preflight result type.
     expect(preflight).toContain('ValidateWindowsDispatchBinding(session, metadata');
     expect(preflight).toContain('MessageType::kPreflightResult');

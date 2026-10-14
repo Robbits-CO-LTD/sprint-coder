@@ -223,3 +223,10 @@ test('a preflight or dispatch for a session that was never started is refused wi
     assert.equal((await send(3, { operation: 'probe' })).type, 4);
   });
 });
+
+// Handover (S5-a review): the ticket paths of a live session (a dispatch without a ticket answers
+// ticket_invalid, a ticket cannot be spent twice, a cancel voids it) are covered by the behaviour
+// seam in src/main/computer-use-windows-ticket-seam.test.ts, which compiles the production
+// functions against inert Win32 seams. A pipe test of those paths needs a started session, which
+// needs a real window and the acceptance fixture; the fixture is built in a later CI step than
+// this test runs in. Add the live-session cases here when the fixture build moves ahead of it.

@@ -712,8 +712,8 @@ describe('Computer Use external final gate', () => {
     });
 
     it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
-      // A distributed package is the v1 allow-list at the table's v1 numbers. Only the macOS native
-      // claims a ticket requirement (N2b-4 PR 5); Windows stays false until S5.
+      // A distributed package is the v1 allow-list at the table's v1 numbers. Both natives claim a
+      // ticket requirement (macOS: N2b-4 PR 5, Windows: S5-a).
       expect(eligibilityTable.versions).toEqual({
         rulesetVersion: 1,
         classifierVersion: 1,

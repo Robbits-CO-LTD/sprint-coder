@@ -715,8 +715,11 @@ export function createComputerUseNativeHost(
       };
       // A native that exports preflight (macOS N2a, Windows S5-a): every dispatch is preceded by a
       // side-effect-free preflight and carries the single-use ordinary ticket it returns. The
-      // capability is the presence of the exported method; an older native build keeps the legacy
-      // path, and the native itself then refuses an input that carries no ticket.
+      // capability is the presence of the exported method. A native build from before ticket
+      // enforcement keeps the legacy path and does not itself refuse an input without a ticket; the
+      // Windows addon always exports preflight, and the packaged helper is pinned to this Main by
+      // digest and source commit, so only an unpinned development run can pair them differently
+      // (a stale helper then fails closed on the unknown message type).
       let ticket: string | null = null;
       if (hasMethod(addon, 'preflight')) {
         let receipt: unknown;

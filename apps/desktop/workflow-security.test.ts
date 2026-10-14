@@ -288,6 +288,9 @@ describe('workflow security boundaries', () => {
     );
     expect(loaderTests).toContain('src/main/computer-use-eligibility-artifact.test.ts');
     expect(loaderTests).toContain('verify-computer-use-eligibility.test.mjs');
+    // The Windows ticket behaviour seam compiles production code with the runner's compiler, so the
+    // gate (which has cl.exe on Windows and clang++ on macOS) must run it.
+    expect(loaderTests).toContain('src/main/computer-use-windows-ticket-seam.test.ts');
     // The macOS harness sees the generated header of the mode that was just built.
     expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
     // The harness is told which mode its matrix row built, and asserts it.
