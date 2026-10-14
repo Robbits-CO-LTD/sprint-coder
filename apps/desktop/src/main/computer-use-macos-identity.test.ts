@@ -57,6 +57,10 @@ describe('macOS running-process identity (D12)', () => {
     );
     expect(running).toContain('anchor apple generic and identifier');
     expect(running).toContain('certificate leaf[subject.OU]');
+    // Mac App Store apps (shared Apple leaf certificate, no team in the OU) must still satisfy it.
+    expect(running).toContain(
+      'certificate leaf[field.1.2.840.113635.100.6.1.9] or certificate leaf[subject.OU]',
+    );
     expect(running).toContain('proc_pidpath(');
     // The call that measures the running process is made with the bound signer and the real result
     // is judged by the portable table, with the reason kept for diagnostics.

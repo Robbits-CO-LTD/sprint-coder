@@ -816,7 +816,10 @@ constexpr SecCSFlags kRunningValidityFlags = kSecCSStrictValidate;
 
 // The requirement the running code must satisfy, built from the BOUND signer (never from the running
 // code itself): Apple-anchored chain, this identifier, this team. Empty when the bound facts cannot
-// be written into a requirement safely (then the check cannot pass: fail-closed).
+// be written into a requirement safely (then the check cannot pass: fail-closed). A Mac App Store
+// app is signed with Apple's shared leaf certificate whose OU is not the team, so that chain is
+// accepted through its marker OID; the team itself is still compared from the code directory
+// (kSignerMismatch), so the extra branch does not loosen who may be controlled.
 std::string RequirementTextForBoundSigner(const std::string& identifier, const std::string& team) {
   const auto safe = [](const std::string& value) {
     if (value.empty() || value.size() > 128) return false;
@@ -829,7 +832,8 @@ std::string RequirementTextForBoundSigner(const std::string& identifier, const s
   };
   if (!safe(identifier) || !safe(team)) return {};
   return "anchor apple generic and identifier \"" + identifier +
-         "\" and certificate leaf[subject.OU] = \"" + team + "\"";
+         "\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] or certificate leaf[subject.OU] = \"" +
+         team + "\")";
 }
 
 // Signing facts of the running process's own code object (kSecGuestAttributePid), not of a file.
