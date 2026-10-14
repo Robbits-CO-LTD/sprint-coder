@@ -94,6 +94,8 @@ for (const [name, source] of [
           '/std:c++20',
           '/EHsc',
           '/W4',
+          // The sources carry CJK lexicon terms; do not depend on the machine's code page.
+          '/utf-8',
           `/Fo:${join(output, `${name}.obj`)}`,
           `/Fe:${executable}`,
           source,

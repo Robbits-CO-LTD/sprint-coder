@@ -8,26 +8,43 @@ const read = (name: string): string => readFileSync(join(nativeDirectory, name),
 const header = read('computer_use_effect_classifier.h');
 const harness = read('computer_use_protocol_fuzz.cc');
 
-/** The quoted terms of one `inline constexpr std::array<std::string_view, N> name = {...};`. */
-function terms(name: string): string[] {
-  const match = new RegExp(`${name} = \\{([\\s\\S]*?)\\};`, 'u').exec(header);
+const LEXICON_TABLES = [
+  'kSecureTerms',
+  'kSecureBoundedTerms',
+  'kCredentialTerms',
+  'kCredentialPrefixTerms',
+  'kSurfaceTerms',
+  'kConfirmTerms',
+  'kInstallerTerms',
+  'kOpenTerms',
+] as const;
+const EXTENSION_TABLES = ['kExecutableExtensions', 'kInstallerExtensions'] as const;
+
+/** The body of one `inline constexpr std::...string_view name[] = {...};`. */
+function body(name: string): string {
+  const match = new RegExp(`${name}\\[\\] = \\{([\\s\\S]*?)\\};`, 'u').exec(header);
   expect(match, name).not.toBeNull();
-  return [...match![1]!.matchAll(/"([^"]*)"/gu)].map((entry) => entry[1]!);
+  return match![1]!;
 }
 
-/** FNV-1a 64-bit with the same separator the header uses, over UTF-8 bytes. */
-function digest(parts: string[]): bigint {
+function terms(name: string): string[] {
+  return [...body(name).matchAll(/"([^"]*)"/gu)].map((entry) => entry[1]!);
+}
+
+/** FNV-1a 64-bit with the same separator and version bytes the header uses. */
+function digest(parts: string[], versions: number[]): bigint {
   const mask = (1n << 64n) - 1n;
   let hash = 14695981039346656037n;
-  const mix = (text: string): void => {
-    for (const byte of Buffer.from(text, 'utf8')) {
-      hash ^= BigInt(byte);
-      hash = (hash * 1099511628211n) & mask;
-    }
-    hash ^= 0xffn;
+  const step = (byte: number): void => {
+    hash ^= BigInt(byte);
     hash = (hash * 1099511628211n) & mask;
   };
-  for (const part of parts) mix(part);
+  for (const part of parts) {
+    for (const byte of Buffer.from(part, 'utf8')) step(byte);
+    step(0xff);
+  }
+  for (const version of versions)
+    for (const shift of [24, 16, 8, 0]) step((version >> shift) & 0xff);
   return hash;
 }
 
@@ -75,35 +92,52 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
     expect(NATIVE_APPROVAL_EFFECTS).toHaveLength(4);
   });
 
-  it('pins the digest of its versioned tables, recomputed independently', () => {
-    const lexicon = [
-      'kSecureTerms',
-      'kCredentialTerms',
-      'kSurfaceTerms',
-      'kConfirmTerms',
-      'kInstallerTerms',
-      'kOpenTerms',
-    ].flatMap((name) => terms(name));
-    const extensions = ['kExecutableExtensions', 'kInstallerExtensions'].flatMap((name) =>
-      terms(name),
-    );
-    const expected = digest([...lexicon, '|extensions|', ...extensions])
+  it('pins the digest of its versioned tables in the header, recomputed independently', () => {
+    const lexicon = LEXICON_TABLES.flatMap((name) => terms(name));
+    const extensions = EXTENSION_TABLES.flatMap((name) => terms(name));
+    const expected = digest([...lexicon, '|extensions|', ...extensions, '|versions|'], [2, 2, 2])
       .toString(16)
       .padStart(16, '0');
-    expect(harness).toContain(`0x${expected}ULL`);
+    // The pin is a static_assert in the header itself, so every translation unit checks it.
+    expect(header).toContain(`kEffectTablesDigestPinned = 0x${expected}ULL`);
+    expect(header).toContain('static_assert(kEffectTablesDigest == kEffectTablesDigestPinned');
+  });
+
+  it('does not depend on the compiler character set: BOM, and u8 literals for every lexicon term', () => {
+    for (const name of ['computer_use_effect_classifier.h', 'computer_use_protocol_fuzz.cc'])
+      expect(readFileSync(join(nativeDirectory, name)).subarray(0, 3), name).toEqual(
+        Buffer.from([0xef, 0xbb, 0xbf]),
+      );
+    for (const name of LEXICON_TABLES) {
+      expect(header).toContain(`std::u8string_view ${name}[] = {`);
+      const text = body(name);
+      // Every string literal is a u8 literal.
+      expect([...text.matchAll(/"/gu)].length, name).toBe([...text.matchAll(/u8"/gu)].length * 2);
+    }
+    // A harness string that carries CJK text is a u8 literal as well.
+    const narrowCjk = [...harness.matchAll(/"(?:[^"\\\n]|\\.)*"/gu)].filter(
+      (match) =>
+        [...match[0]].some((character) => character.codePointAt(0)! > 0x7f) &&
+        !harness.slice(match.index - 2, match.index).includes('u8'),
+    );
+    expect(narrowCjk.map((match) => match[0])).toEqual([]);
+  });
+
+  it('runs the core from main and says so in the log', () => {
+    expect(harness).toContain('if (!CheckEffectClassifierCore()) return 1;');
+    expect(harness).toContain('Computer Use native effect classifier core: PASS');
+  });
+
+  it('is built as UTF-8 by the offline verification script on Windows too', () => {
+    const script = readFileSync(
+      join(__dirname, '../../../../verify-computer-use-native-offline.mjs'),
+      'utf8',
+    );
+    expect(script).toContain("'/utf-8'");
   });
 
   it('keeps every term lowercase and the installer extensions inside the executable set', () => {
-    for (const name of [
-      'kSecureTerms',
-      'kCredentialTerms',
-      'kSurfaceTerms',
-      'kConfirmTerms',
-      'kInstallerTerms',
-      'kOpenTerms',
-      'kExecutableExtensions',
-      'kInstallerExtensions',
-    ])
+    for (const name of [...LEXICON_TABLES, ...EXTENSION_TABLES])
       for (const term of terms(name)) {
         expect(term.length, name).toBeGreaterThan(0);
         expect(term, name).toBe(term.toLowerCase());

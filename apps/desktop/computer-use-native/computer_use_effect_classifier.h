@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Pure, portable (C++20) effect classifier core for Computer Use (ADR v2 section 3.5 to 3.7, D13).
 // It turns freshly measured, already normalized facts about the target of one action into a fixed
@@ -12,15 +12,27 @@
 //     candidates a later, separate change attests. Only tests call this code.
 //   * The facts are a model. Producing them from AX / UIA is per OS (and needs a real device to
 //     validate); text is expected already NFKC-normalized by the caller. This file lowercases
-//     ASCII and compares; it never consults the process or any input but its facts.
+//     ASCII, drops invisible code points and compares; it never consults the process or any input
+//     but its facts.
+//   * This file is UTF-8 with a byte order mark, so MSVC reads it as UTF-8 whatever the code page,
+//     and every lexicon term is a u8 literal, so its bytes do not depend on the execution
+//     character set. The digest pin below fails the build of any translation unit that still got
+//     them wrong.
 //
 // Fail-closed rules:
 //   * Only `ActionKind::kObserve` is exempt. Any other action with incomplete facts (target
-//     metadata, the ancestor walk, the window surface) is a takeover, never ordinary.
+//     metadata, the ancestor walk, the window surface, bounded sizes) is a takeover, never
+//     ordinary. Any action but a scroll also needs text it can read: no label anywhere, a label in
+//     a language the lexicon does not cover, or a script that can imitate Latin letters is a
+//     takeover ("the classifier could not be applied", ADR section 4).
 //   * A refusal class always wins over an approval class, in this order: secure, credential,
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
 //   * An approval whose effect the rule set has not enabled is a refusal, not an approval.
+//   * Anything that might open a file from a file browser or a download list (a visual click, a
+//     key, an invoke, a double click) is treated as opening it until a real device shows otherwise
+//     (ADR v2 S4 contract 5, decision 2-A). Only a semantic select, a rename or a scroll is
+//     browsing.
 
 #include "computer_use_native_approval_ticket.h"
 
@@ -39,6 +51,11 @@ namespace sprint_coder::computer_use {
 constexpr std::uint32_t kEffectClassifierVersion = 2;
 constexpr std::uint32_t kEffectRulesetVersion = 2;
 constexpr std::uint32_t kEffectLexiconVersion = 2;
+
+// Bounds the caller must respect; anything larger is a takeover rather than a slow scan.
+constexpr std::size_t kEffectMaxChainNodes = 9;
+constexpr std::size_t kEffectMaxLabelBytes = 512;
+constexpr std::size_t kEffectMaxNeighborLabels = 16;
 
 enum class ActionKind : std::uint8_t {
   kObserve,
@@ -73,7 +90,7 @@ enum class OriginState : std::uint8_t { kNotApplicable, kOrdinary, kUnknown, kSe
 struct NodeFacts {
   std::string role;
   std::string subrole;
-  // Title, description, help, identifier and placeholder, joined; length capped by the caller.
+  // Title, description, help, identifier and placeholder, joined; at most kEffectMaxLabelBytes.
   std::string label;
 };
 
@@ -82,18 +99,27 @@ struct EffectFacts {
   bool metadata_complete = false;
   // The bounded walk reached the window root (a truncated walk proves nothing).
   bool chain_complete = false;
+  // The labels are in a language the lexicon covers (English or Japanese). The classifier cannot
+  // judge text it cannot read, so the default is "no".
+  bool text_language_supported = false;
   SurfaceKind surface = SurfaceKind::kUnknown;
   ActionKind action = ActionKind::kObserve;
   SessionMode mode = SessionMode::kObserveOnly;
   OriginState origin = OriginState::kNotApplicable;
-  // The key is Enter / Return (an activation), for `ActionKind::kKey`.
+  // The key activates the focused control (Enter, Return, Space or a control's own shortcut).
   bool key_is_activation = false;
-  // The target is a file (not a folder) item of a file browser or a download list.
+  // The target (or the item the action would open) is a document or program item rather than a
+  // folder that opens by browsing into it. macOS packages (.app and the like) count as items.
   bool target_is_file_item = false;
+  // The extension of the item the action would open, when it is known.
   bool extension_known = false;
   std::string extension;
-  // [0] is the target, then its ancestors up to the bounded depth.
+  // [0] is the target, then its ancestors up to kEffectMaxChainNodes.
   std::vector<NodeFacts> chain;
+  // Labels near the target in the same window (a web form's field caption often sits in a sibling
+  // element). At most kEffectMaxNeighborLabels, each at most kEffectMaxLabelBytes.
+  std::vector<std::string> neighbor_labels;
+  bool neighbor_labels_complete = false;
 };
 
 enum class EffectClass : std::uint8_t {
@@ -145,69 +171,88 @@ struct EffectRuleset {
 };
 
 // ----------------------------------------------------------------------------------------------
-// Versioned tables. All terms are lowercase ASCII or CJK text. ASCII terms match on word
-// boundaries ("pay" does not match "payload"); CJK terms match as substrings.
+// Versioned tables. All terms are lowercase ASCII or CJK text. Matching depends on the table:
+//   bounded:   an ASCII term must sit on word boundaries ("pay" does not match "payload");
+//   prefix:    only the start must sit on a boundary ("cvv" matches "cvv2");
+//   substring: anywhere ("password" matches "userpassword" and "passwords").
+// A non-ASCII term is always a substring (CJK has no word separators).
 // ----------------------------------------------------------------------------------------------
 
-// Secure fields (password and PIN entry).
-inline constexpr std::array<std::string_view, 9> kSecureTerms = {
-    "securetextfield", "axsecuretextfield", "passwordfield", "password", "passcode",
-    "pin code",        "パスワード",        "暗証番号",       "パスコード"};
+// Secure fields (password and PIN entry): substring.
+inline constexpr std::u8string_view kSecureTerms[] = {
+    u8"securetextfield", u8"axsecuretextfield", u8"passwordfield", u8"password", u8"passcode",
+    u8"pin code",        u8"パスワード",        u8"暗証番号",       u8"パスコード"};
+// A bare "pin" is too short to match inside words: bounded.
+inline constexpr std::u8string_view kSecureBoundedTerms[] = {u8"pin", u8"pin entry"};
 
-// Card data and other credentials a plain text field can hold.
-inline constexpr std::array<std::string_view, 14> kCredentialTerms = {
-    "card number",   "cvv",       "cvc",         "security code", "card verification",
-    "expiration date", "expiry date", "expiration", "カード番号", "セキュリティコード",
-    "有効期限",       "クレジットカード番号", "カード有効期限", "認証コード"};
+// Card data and other credentials a plain text field can hold: substring.
+inline constexpr std::u8string_view kCredentialTerms[] = {
+    u8"card number",        u8"cardnumber",         u8"cc-number", u8"cc-exp",       u8"card verification",
+    u8"security code",      u8"securitycode",       u8"expiration date", u8"expiry date", u8"expiration",
+    u8"カード番号",         u8"セキュリティコード", u8"有効期限",  u8"クレジットカード番号",
+    u8"カード有効期限",     u8"認証コード",         u8"cardholder", u8"account number", u8"routing number"};
+// Short codes: only the start needs a boundary.
+inline constexpr std::u8string_view kCredentialPrefixTerms[] = {u8"cvv", u8"cvc", u8"cc-csc"};
 
-// Command-running words (a terminal, a console, a script runner).
-inline constexpr std::array<std::string_view, 15> kSurfaceTerms = {
-    "integrated terminal", "terminal", "console",   "shell", "powershell", "command prompt",
-    "cmd.exe",             "xterm",    "run script", "shell script", "script console",
-    "ターミナル",          "コンソール", "コマンドプロンプト", "スクリプトを実行"};
+// Command-running words (a terminal, a console, a script runner): bounded.
+inline constexpr std::u8string_view kSurfaceTerms[] = {
+    u8"integrated terminal", u8"terminal", u8"console",   u8"shell", u8"powershell", u8"command prompt",
+    u8"cmd.exe",             u8"xterm",    u8"run script", u8"shell script", u8"script console",
+    u8"ターミナル",          u8"コンソール", u8"コマンドプロンプト", u8"スクリプトを実行"};
 
-// Final confirmations of payment, transfer, purchase, permission grants and destructive steps.
-inline constexpr std::array<std::string_view, 27> kConfirmTerms = {
-    "pay now",   "pay",         "place order",   "submit order",   "complete order",
-    "buy now",   "confirm purchase", "complete purchase", "confirm payment", "wire transfer",
-    "send money", "transfer funds", "grant access", "grant permission", "allow access",
-    "authorize", "delete and continue", "送金",     "振込",            "決済",
-    "購入確定",  "注文を確定",  "アクセスを許可", "権限を付与",     "削除して続行",
-    "支払いを確定", "支払う"};
+// Final confirmations of payment, transfer, purchase, permission grants and destructive steps:
+// bounded.
+inline constexpr std::u8string_view kConfirmTerms[] = {
+    u8"pay now",       u8"pay",          u8"place order",      u8"submit order",  u8"complete order",
+    u8"buy now",       u8"buy",          u8"purchase",         u8"checkout",      u8"subscribe",
+    u8"confirm order", u8"order now",    u8"confirm purchase", u8"complete purchase", u8"confirm payment",
+    u8"wire transfer", u8"send money",   u8"transfer funds",   u8"grant access",  u8"grant permission",
+    u8"allow access",  u8"allow",        u8"authorize",        u8"delete and continue", u8"送金",
+    u8"振込",          u8"決済",         u8"購入確定",         u8"購入する",      u8"今すぐ購入",
+    u8"注文する",      u8"注文を確定",   u8"お支払い",         u8"支払います",    u8"アクセスを許可",
+    u8"権限を付与",    u8"削除して続行", u8"支払いを確定",     u8"支払う",        u8"決済する",
+    u8"申し込む",      u8"申込み",       u8"登録する",         u8"契約する",      u8"同意して続行",
+    u8"送金する",      u8"振り込む"};
 
-// Words on a control that starts an installer.
-inline constexpr std::array<std::string_view, 5> kInstallerTerms = {
-    "install", "install application", "installer", "インストール", "インストーラ"};
+// Words on a control that starts an installer: bounded.
+inline constexpr std::u8string_view kInstallerTerms[] = {
+    u8"install", u8"install application", u8"installer", u8"インストール", u8"インストーラ"};
 
-// Words on a control that opens or runs a file.
-inline constexpr std::array<std::string_view, 8> kOpenTerms = {
-    "open", "run", "execute", "open with", "開く", "実行", "アプリケーションで開く", "起動"};
+// Words on a control that opens or runs a file: bounded.
+inline constexpr std::u8string_view kOpenTerms[] = {
+    u8"open", u8"run", u8"execute", u8"open with", u8"開く", u8"実行", u8"アプリケーションで開く", u8"起動"};
 
-inline constexpr std::array<std::span<const std::string_view>, 6> kEffectLexiconTables = {
-    std::span<const std::string_view>(kSecureTerms),
-    std::span<const std::string_view>(kCredentialTerms),
-    std::span<const std::string_view>(kSurfaceTerms),
-    std::span<const std::string_view>(kConfirmTerms),
-    std::span<const std::string_view>(kInstallerTerms),
-    std::span<const std::string_view>(kOpenTerms)};
+inline constexpr std::array<std::span<const std::u8string_view>, 8> kEffectLexiconTables = {
+    std::span<const std::u8string_view>(kSecureTerms),
+    std::span<const std::u8string_view>(kSecureBoundedTerms),
+    std::span<const std::u8string_view>(kCredentialTerms),
+    std::span<const std::u8string_view>(kCredentialPrefixTerms),
+    std::span<const std::u8string_view>(kSurfaceTerms),
+    std::span<const std::u8string_view>(kConfirmTerms),
+    std::span<const std::u8string_view>(kInstallerTerms),
+    std::span<const std::u8string_view>(kOpenTerms)};
 
 // Extensions whose opening can run code (E1). Platform-reported case is normalized before lookup.
-inline constexpr std::array<std::string_view, 24> kExecutableExtensions = {
-    "command", "sh",  "bash", "zsh", "app", "pkg", "dmg", "scpt",
-    "scptd",   "applescript", "jar", "bat", "cmd", "com", "exe", "msi",
-    "msix",    "ps1", "vbs",  "wsf", "reg", "lnk", "scr", "hta"};
+inline constexpr std::string_view kExecutableExtensions[] = {
+    "command", "sh",   "bash",  "zsh",  "app",  "pkg",  "mpkg", "dmg",  "scpt",
+    "scptd",   "applescript", "jar",  "bat",  "cmd",  "com",  "exe",  "msi",
+    "msix",    "msixbundle", "appx", "appxbundle", "ps1", "vbs", "vbe", "wsf", "wsh",
+    "reg",     "lnk",  "scr",   "hta",  "js",   "jse",  "msc",  "cpl",  "pif",
+    "appref-ms", "url", "settingcontent-ms", "py", "pyw", "terminal", "workflow", "action",
+    "fileloc", "inetloc"};
 
 // The subset of E1 that is an installer (E4).
-inline constexpr std::array<std::string_view, 4> kInstallerExtensions = {"pkg", "dmg", "msi",
-                                                                         "msix"};
+inline constexpr std::string_view kInstallerExtensions[] = {
+    "pkg", "mpkg", "dmg", "msi", "msix", "msixbundle", "appxbundle"};
 
 inline constexpr std::array<std::span<const std::string_view>, 2> kEffectExtensionTables = {
     std::span<const std::string_view>(kExecutableExtensions),
     std::span<const std::string_view>(kInstallerExtensions)};
 
-constexpr std::uint64_t EffectDigestMix(std::uint64_t hash, std::string_view text) {
-  // FNV-1a 64-bit over the bytes, then a separator so adjacent terms cannot merge.
-  for (const char character : text) {
+// FNV-1a 64-bit over the bytes, then a separator so adjacent terms cannot merge.
+template <typename Text>
+constexpr std::uint64_t EffectDigestMix(std::uint64_t hash, Text text) {
+  for (const auto character : text) {
     hash ^= static_cast<std::uint8_t>(character);
     hash *= 1099511628211ULL;
   }
@@ -216,21 +261,42 @@ constexpr std::uint64_t EffectDigestMix(std::uint64_t hash, std::string_view tex
   return hash;
 }
 
-constexpr std::uint64_t ComputeEffectTablesDigest() {
-  std::uint64_t hash = 14695981039346656037ULL;
-  for (const auto &table : kEffectLexiconTables)
-    for (const std::string_view term : table)
-      hash = EffectDigestMix(hash, term);
-  hash = EffectDigestMix(hash, "|extensions|");
-  for (const auto &table : kEffectExtensionTables)
-    for (const std::string_view term : table)
-      hash = EffectDigestMix(hash, term);
+constexpr std::uint64_t EffectDigestMixNumber(std::uint64_t hash, std::uint32_t value) {
+  for (int shift = 24; shift >= 0; shift -= 8) {
+    hash ^= (value >> shift) & 0xffU;
+    hash *= 1099511628211ULL;
+  }
   return hash;
 }
 
-// Any edit to a table changes this; the harness pins the expected value, so a silent edit fails
-// until the digest and the lexicon / ruleset versions are updated together.
+// Covers every term, every extension and the three candidate versions. It does not cover the
+// decision rules in ClassifyEffect (their order and conditions); the harness cases, which fail
+// when a rule is mutated, pin those.
+constexpr std::uint64_t ComputeEffectTablesDigest() {
+  std::uint64_t hash = 14695981039346656037ULL;
+  for (const auto &table : kEffectLexiconTables)
+    for (const std::u8string_view term : table)
+      hash = EffectDigestMix(hash, term);
+  hash = EffectDigestMix(hash, std::string_view("|extensions|"));
+  for (const auto &table : kEffectExtensionTables)
+    for (const std::string_view term : table)
+      hash = EffectDigestMix(hash, term);
+  hash = EffectDigestMix(hash, std::string_view("|versions|"));
+  hash = EffectDigestMixNumber(hash, kEffectClassifierVersion);
+  hash = EffectDigestMixNumber(hash, kEffectRulesetVersion);
+  hash = EffectDigestMixNumber(hash, kEffectLexiconVersion);
+  return hash;
+}
+
 inline constexpr std::uint64_t kEffectTablesDigest = ComputeEffectTablesDigest();
+
+// The reviewed value. Editing a table or raising a version without updating this pin is a compile
+// error in every translation unit that includes the header, and so is reading the CJK terms with a
+// wrong character set: the build fails closed instead of matching nothing.
+inline constexpr std::uint64_t kEffectTablesDigestPinned = 0x9d3ac3d7ac1f9012ULL;
+static_assert(kEffectTablesDigest == kEffectTablesDigestPinned,
+              "The effect classifier tables changed: review them, bump the lexicon / ruleset "
+              "version, and update kEffectTablesDigestPinned.");
 
 // ----------------------------------------------------------------------------------------------
 // Matching
@@ -238,13 +304,7 @@ inline constexpr std::uint64_t kEffectTablesDigest = ComputeEffectTablesDigest()
 
 namespace effect_detail {
 
-[[nodiscard]] inline std::string LowerAscii(std::string_view text) {
-  std::string output(text);
-  for (char &character : output)
-    if (character >= 'A' && character <= 'Z')
-      character = static_cast<char>(character + ('a' - 'A'));
-  return output;
-}
+enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 
 [[nodiscard]] inline bool IsAsciiWordCharacter(char character) {
   return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9');
@@ -256,25 +316,78 @@ namespace effect_detail {
   return true;
 }
 
-// ASCII terms must be bounded by non-word characters; anything with a non-ASCII byte is a plain
-// substring (CJK has no word separators).
-[[nodiscard]] inline bool ContainsTerm(std::string_view haystack, std::string_view term) {
-  const bool bounded = IsAsciiTerm(term);
+// Drops code points that are invisible or only join / vary glyphs, so a label cannot hide a word
+// behind them: soft hyphen, zero-width space and joiners, directional marks and embeddings, word
+// joiner and invisible operators, Mongolian vowel separator, variation selectors, BOM. Lowercases
+// ASCII.
+[[nodiscard]] inline std::string NormalizeForMatch(std::string_view text) {
+  std::string output;
+  output.reserve(text.size());
+  for (std::size_t index = 0; index < text.size();) {
+    const auto byte = [&](std::size_t offset) {
+      return index + offset < text.size() ? static_cast<unsigned char>(text[index + offset]) : 0U;
+    };
+    if (byte(0) == 0xC2 && byte(1) == 0xAD) {
+      index += 2;
+    } else if (byte(0) == 0xE2 && byte(1) == 0x80 &&
+               ((byte(2) >= 0x8B && byte(2) <= 0x8F) || (byte(2) >= 0xAA && byte(2) <= 0xAE))) {
+      index += 3;
+    } else if (byte(0) == 0xE2 && byte(1) == 0x81 && byte(2) >= 0xA0 && byte(2) <= 0xA4) {
+      index += 3;
+    } else if (byte(0) == 0xE1 && byte(1) == 0xA0 && byte(2) == 0x8E) {
+      index += 3;
+    } else if (byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) {
+      index += 3;
+    } else if (byte(0) == 0xEF && byte(1) == 0xB8 && byte(2) >= 0x80 && byte(2) <= 0x8F) {
+      index += 3;
+    } else {
+      char character = text[index];
+      if (character >= 'A' && character <= 'Z')
+        character = static_cast<char>(character + ('a' - 'A'));
+      output.push_back(character);
+      ++index;
+    }
+  }
+  return output;
+}
+
+// Greek, Cyrillic and neighbouring blocks (UTF-8 lead bytes CE..D4) contain look-alikes of Latin
+// letters; the lexicon cannot read such text, so it is not classified (a takeover).
+[[nodiscard]] inline bool HasLookAlikeScript(std::string_view text) {
+  for (const char character : text) {
+    const auto byte = static_cast<unsigned char>(character);
+    if (byte >= 0xCE && byte <= 0xD4) return true;
+  }
+  return false;
+}
+
+// A lexicon term as bytes. The u8 literals are UTF-8; the haystack is UTF-8 in plain chars.
+[[nodiscard]] inline std::string_view TermBytes(std::u8string_view term) {
+  return std::string_view(reinterpret_cast<const char *>(term.data()), term.size());
+}
+
+[[nodiscard]] inline bool ContainsTerm(std::string_view haystack, std::u8string_view lexicon_term,
+                                       MatchMode mode) {
+  const std::string_view term = TermBytes(lexicon_term);
+  if (term.empty()) return false;
+  const bool plain = mode == MatchMode::kSubstring || !IsAsciiTerm(term);
   for (std::size_t position = haystack.find(term); position != std::string_view::npos;
        position = haystack.find(term, position + 1)) {
-    if (!bounded) return true;
+    if (plain) return true;
     const bool before = position == 0 || !IsAsciiWordCharacter(haystack[position - 1]);
     const std::size_t end = position + term.size();
-    const bool after = end == haystack.size() || !IsAsciiWordCharacter(haystack[end]);
+    const bool after = mode == MatchMode::kPrefix || end == haystack.size() ||
+                       !IsAsciiWordCharacter(haystack[end]);
     if (before && after) return true;
   }
   return false;
 }
 
 [[nodiscard]] inline bool ContainsAnyTerm(std::string_view haystack,
-                                          std::span<const std::string_view> terms) {
-  for (const std::string_view term : terms)
-    if (ContainsTerm(haystack, term)) return true;
+                                          std::span<const std::u8string_view> terms,
+                                          MatchMode mode) {
+  for (const std::u8string_view term : terms)
+    if (ContainsTerm(haystack, term, mode)) return true;
   return false;
 }
 
@@ -286,19 +399,53 @@ namespace effect_detail {
 
 // One lowercase text for a node: role, subrole and label. Lines keep terms from fusing.
 [[nodiscard]] inline std::string NodeText(const NodeFacts &node) {
-  return LowerAscii(node.role) + "\n" + LowerAscii(node.subrole) + "\n" + LowerAscii(node.label);
+  return NormalizeForMatch(node.role) + "\n" + NormalizeForMatch(node.subrole) + "\n" +
+         NormalizeForMatch(node.label);
 }
 
-[[nodiscard]] inline bool ChainContains(const EffectFacts &facts,
-                                        std::span<const std::string_view> terms) {
-  for (const NodeFacts &node : facts.chain)
-    if (ContainsAnyTerm(NodeText(node), terms)) return true;
+// Role names of controls that act when activated. The nearest one (or the target) carries the
+// meaning of a click that lands on an unlabeled child such as an icon.
+[[nodiscard]] inline bool IsActionableRole(std::string_view role_text) {
+  static constexpr std::string_view kActionable[] = {
+      "button", "link",     "menuitem",   "checkbox",  "radiobutton", "switch",
+      "popupbutton", "menubutton", "hyperlink", "listitem", "tabitem", "splitbutton"};
+  for (const std::string_view name : kActionable)
+    if (role_text.find(name) != std::string_view::npos) return true;
   return false;
 }
 
-[[nodiscard]] inline bool TargetContains(const EffectFacts &facts,
-                                         std::span<const std::string_view> terms) {
-  return !facts.chain.empty() && ContainsAnyTerm(NodeText(facts.chain.front()), terms);
+// How many nodes, from the target up, make the control the action lands on: the target itself, or
+// everything up to and including the nearest actionable ancestor.
+[[nodiscard]] inline std::size_t ActionableSpan(const EffectFacts &facts) {
+  for (std::size_t index = 0; index < facts.chain.size(); ++index) {
+    const std::string role = NormalizeForMatch(facts.chain[index].role) + " " +
+                             NormalizeForMatch(facts.chain[index].subrole);
+    if (IsActionableRole(role)) return index + 1;
+  }
+  return facts.chain.empty() ? 0 : 1;
+}
+
+[[nodiscard]] inline bool ChainContains(const EffectFacts &facts,
+                                        std::span<const std::u8string_view> terms, MatchMode mode) {
+  for (const NodeFacts &node : facts.chain)
+    if (ContainsAnyTerm(NodeText(node), terms, mode)) return true;
+  return false;
+}
+
+[[nodiscard]] inline bool NeighborsContain(const EffectFacts &facts,
+                                           std::span<const std::u8string_view> terms,
+                                           MatchMode mode) {
+  for (const std::string &label : facts.neighbor_labels)
+    if (ContainsAnyTerm(NormalizeForMatch(label), terms, mode)) return true;
+  return false;
+}
+
+[[nodiscard]] inline bool ActionableContains(const EffectFacts &facts,
+                                             std::span<const std::u8string_view> terms) {
+  const std::size_t span = ActionableSpan(facts);
+  for (std::size_t index = 0; index < span; ++index)
+    if (ContainsAnyTerm(NodeText(facts.chain[index]), terms, MatchMode::kBounded)) return true;
+  return false;
 }
 
 [[nodiscard]] inline bool IsCommandSurface(SurfaceKind surface) {
@@ -306,14 +453,26 @@ namespace effect_detail {
          surface == SurfaceKind::kCommandPalette || surface == SurfaceKind::kDevToolsConsole;
 }
 
-// An action that can open, run or confirm something (as opposed to typing, selecting or reading).
-[[nodiscard]] inline bool IsOpeningAction(const EffectFacts &facts) {
-  return facts.action == ActionKind::kInvoke || facts.action == ActionKind::kDoubleClick ||
-         (facts.action == ActionKind::kKey && facts.key_is_activation);
+// Entering text: the field's own caption may sit next to it rather than on it.
+[[nodiscard]] inline bool IsTextEntry(const EffectFacts &facts) {
+  return facts.action == ActionKind::kSetText || facts.action == ActionKind::kType ||
+         (facts.action == ActionKind::kKey && !facts.key_is_activation);
 }
 
-[[nodiscard]] inline bool IsConfirmingAction(const EffectFacts &facts) {
-  return facts.action == ActionKind::kClick || IsOpeningAction(facts);
+// An action that might open a file when aimed at one: until a real device shows what a visual
+// click or a key does in a file browser or a download list, they all count (ADR v2 S4-5).
+[[nodiscard]] inline bool MayOpen(const EffectFacts &facts) {
+  return facts.action == ActionKind::kClick || facts.action == ActionKind::kDoubleClick ||
+         facts.action == ActionKind::kInvoke || facts.action == ActionKind::kKey;
+}
+
+// An action that activates a control: a click, an invoke, a toggle, a menu pick or an activating
+// key. Typing letters is not activation.
+[[nodiscard]] inline bool IsActivating(const EffectFacts &facts) {
+  return facts.action == ActionKind::kClick || facts.action == ActionKind::kDoubleClick ||
+         facts.action == ActionKind::kInvoke || facts.action == ActionKind::kToggle ||
+         facts.action == ActionKind::kSelect ||
+         (facts.action == ActionKind::kKey && facts.key_is_activation);
 }
 
 [[nodiscard]] inline EffectDecision Make(EffectClass effect_class, DecisionKind kind,
@@ -326,6 +485,10 @@ namespace effect_detail {
   decision.reason = reason;
   decision.approval_effect = approval_effect;
   return decision;
+}
+
+[[nodiscard]] inline EffectDecision Takeover() {
+  return Make(EffectClass::kUnclassified, DecisionKind::kTakeover, DecisionReason::kUnclassified);
 }
 
 [[nodiscard]] inline bool Enabled(const EffectRuleset &ruleset, NativeApprovalEffect effect) {
@@ -352,65 +515,115 @@ namespace effect_detail {
   return Make(effect_class, DecisionKind::kApproval, DecisionReason::kNone, effect);
 }
 
+[[nodiscard]] inline bool WithinBounds(const EffectFacts &facts) {
+  if (facts.chain.size() > kEffectMaxChainNodes ||
+      facts.neighbor_labels.size() > kEffectMaxNeighborLabels ||
+      facts.extension.size() > kEffectMaxLabelBytes)
+    return false;
+  for (const NodeFacts &node : facts.chain)
+    if (node.role.size() > kEffectMaxLabelBytes || node.subrole.size() > kEffectMaxLabelBytes ||
+        node.label.size() > kEffectMaxLabelBytes)
+      return false;
+  for (const std::string &label : facts.neighbor_labels)
+    if (label.size() > kEffectMaxLabelBytes) return false;
+  return true;
+}
+
+// Text the lexicon can read: some label exists, nothing in it imitates Latin letters, and the
+// caller says the language is one the lexicon covers.
+[[nodiscard]] inline bool TextIsClassifiable(const EffectFacts &facts) {
+  if (!facts.text_language_supported) return false;
+  bool any_label = false;
+  for (const NodeFacts &node : facts.chain) {
+    if (HasLookAlikeScript(node.label) || HasLookAlikeScript(node.role) ||
+        HasLookAlikeScript(node.subrole))
+      return false;
+    if (!NormalizeForMatch(node.label).empty()) any_label = true;
+  }
+  for (const std::string &label : facts.neighbor_labels)
+    if (HasLookAlikeScript(label)) return false;
+  return any_label;
+}
+
 } // namespace effect_detail
 
 [[nodiscard]] inline EffectDecision ClassifyEffect(const EffectFacts &facts,
                                                    const EffectRuleset &ruleset = EffectRuleset{}) {
   using namespace effect_detail;
+  using Mode = MatchMode;
   // Reading is never refused here; every other action needs a complete picture.
   if (facts.action == ActionKind::kObserve)
     return Make(EffectClass::kOrdinary, DecisionKind::kOrdinary, DecisionReason::kNone);
   if (!facts.metadata_complete || !facts.chain_complete || facts.chain.empty() ||
-      facts.surface == SurfaceKind::kUnknown)
-    return Make(EffectClass::kUnclassified, DecisionKind::kTakeover, DecisionReason::kUnclassified);
+      facts.surface == SurfaceKind::kUnknown || !WithinBounds(facts))
+    return Takeover();
 
-  if (ChainContains(facts, kSecureTerms))
+  const bool entering_text = IsTextEntry(facts);
+  if (ChainContains(facts, kSecureTerms, Mode::kSubstring) ||
+      ChainContains(facts, kSecureBoundedTerms, Mode::kBounded) ||
+      (entering_text && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
+                         NeighborsContain(facts, kSecureBoundedTerms, Mode::kBounded))))
     return Make(EffectClass::kSecure, DecisionKind::kBlocked, DecisionReason::kSecure);
-  if (ChainContains(facts, kCredentialTerms))
+  if (ChainContains(facts, kCredentialTerms, Mode::kSubstring) ||
+      ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix) ||
+      (entering_text && (NeighborsContain(facts, kCredentialTerms, Mode::kSubstring) ||
+                         NeighborsContain(facts, kCredentialPrefixTerms, Mode::kPrefix))))
     return Make(EffectClass::kCredential, DecisionKind::kBlocked, DecisionReason::kCredential);
-  if (IsCommandSurface(facts.surface) || ChainContains(facts, kSurfaceTerms))
+  if (IsCommandSurface(facts.surface) || ChainContains(facts, kSurfaceTerms, Mode::kBounded))
     return Make(EffectClass::kSurface, DecisionKind::kBlocked, DecisionReason::kSurface);
 
-  // Executable and installer triggers (E1, E4) are refused for every opening action.
-  const std::string extension = LowerAscii(facts.extension);
-  if (IsOpeningAction(facts) && facts.target_is_file_item && facts.extension_known &&
+  // Executable and installer extensions (E1, E4) are refused for anything that might open the
+  // item, wherever it is shown, and whether or not the target is the item itself.
+  const std::string extension = NormalizeForMatch(facts.extension);
+  if ((MayOpen(facts) || facts.action == ActionKind::kToggle) && facts.extension_known &&
       InSet(extension, kExecutableExtensions)) {
     return Make(InSet(extension, kInstallerExtensions) ? EffectClass::kE4InstallerLaunch
                                                        : EffectClass::kE1ExecutableOpen,
                 DecisionKind::kBlocked, DecisionReason::kExecutionTrigger);
   }
-  if (IsConfirmingAction(facts) && TargetContains(facts, kInstallerTerms))
+
+  // Text the lexicon cannot read is a round the classifier could not be applied to (ADR section
+  // 4). A scroll cannot confirm, open or run anything, so it does not need readable text.
+  if (facts.action != ActionKind::kScroll && !TextIsClassifiable(facts)) return Takeover();
+
+  if (IsActivating(facts) && ActionableContains(facts, kInstallerTerms))
     return Make(EffectClass::kE4InstallerLaunch, DecisionKind::kBlocked,
                 DecisionReason::kExecutionTrigger);
 
-  // A browser that cannot show where it is, or shows a sensitive place, is a person's.
-  if (facts.origin == OriginState::kUnknown)
-    return Make(EffectClass::kUnclassified, DecisionKind::kTakeover, DecisionReason::kUnclassified);
+  // A browser that cannot show where it is, or shows a sensitive place, is a person's. A text
+  // field whose neighbouring captions could not be read is, too (ADR 3.5-5).
+  if (facts.origin == OriginState::kUnknown) return Takeover();
   if (facts.origin == OriginState::kSensitive)
     return Make(EffectClass::kSurface, DecisionKind::kTakeover, DecisionReason::kSensitiveOrigin);
+  if (entering_text && facts.origin != OriginState::kNotApplicable &&
+      !facts.neighbor_labels_complete)
+    return Takeover();
 
-  // E2 / E3: opening a file from a download list or a file manager. Folders are just browsing.
-  const bool download_open =
-      facts.surface == SurfaceKind::kDownloadPanel && IsOpeningAction(facts) &&
-      (facts.target_is_file_item || TargetContains(facts, kOpenTerms));
-  const bool file_manager_open = facts.surface == SurfaceKind::kFileBrowser &&
-                                 IsOpeningAction(facts) && facts.target_is_file_item;
-  if (download_open || file_manager_open) {
-    if (!facts.extension_known)
-      return Make(EffectClass::kUnclassified, DecisionKind::kTakeover,
-                  DecisionReason::kUnclassified);
-    if (facts.mode == SessionMode::kObserveOnly)
-      return Make(EffectClass::kOrdinary, DecisionKind::kBlocked, DecisionReason::kObserveOnly);
-    return download_open ? Approval(EffectClass::kE2DownloadOpen, NativeApprovalEffect::kDownloadOpen,
-                                    ruleset)
-                         : Approval(EffectClass::kE3FileManagerOpen,
-                                    NativeApprovalEffect::kFileManagerOpen, ruleset);
+  // E2 / E3: opening a file from a download list or a file manager. A folder opens by browsing.
+  const bool listed_surface =
+      facts.surface == SurfaceKind::kDownloadPanel || facts.surface == SurfaceKind::kFileBrowser;
+  const bool opens_item =
+      listed_surface && MayOpen(facts) &&
+      (facts.target_is_file_item || ActionableContains(facts, kOpenTerms));
+  // A file item opened from any other surface still needs its extension.
+  const bool opens_unlisted_item = !listed_surface && MayOpen(facts) && facts.target_is_file_item;
+  if (opens_item || opens_unlisted_item) {
+    if (!facts.extension_known) return Takeover();
+    if (opens_item) {
+      if (facts.mode == SessionMode::kObserveOnly)
+        return Make(EffectClass::kOrdinary, DecisionKind::kBlocked, DecisionReason::kObserveOnly);
+      return facts.surface == SurfaceKind::kDownloadPanel
+                 ? Approval(EffectClass::kE2DownloadOpen, NativeApprovalEffect::kDownloadOpen,
+                            ruleset)
+                 : Approval(EffectClass::kE3FileManagerOpen,
+                            NativeApprovalEffect::kFileManagerOpen, ruleset);
+    }
   }
 
   if (facts.mode == SessionMode::kObserveOnly)
     return Make(EffectClass::kOrdinary, DecisionKind::kBlocked, DecisionReason::kObserveOnly);
 
-  if (IsConfirmingAction(facts) && TargetContains(facts, kConfirmTerms))
+  if (IsActivating(facts) && ActionableContains(facts, kConfirmTerms))
     return Approval(EffectClass::kConfirm, NativeApprovalEffect::kHighImpactConfirmation, ruleset);
 
   if (facts.mode == SessionMode::kSupervised)
