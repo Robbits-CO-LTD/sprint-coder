@@ -668,9 +668,15 @@ D7-1 の実装（TS のみ）に合わせて、上の方針を次のとおり固
    - **2-A: win32 の `--eligibility=v2` は S5 まで build script で拒否する**。Windows helper は v1 を attest するだけで、S5 の前に「v2 を名乗る Windows 成果物」を作れないようにする。
    - **3-A: attest のない旧成果物は、Main が v1 のときだけ受け入れる**。既存の release、beta、ローカルビルド、Windows 受入ビルドが起動できなくならない。attest の必須化は、別の PR で後から行う。
 
+   - **D7-2 の実装判断（2026-10-14）**:
+     - 既定の v1 ビルドでも、manifest に `eligibility` を書く（attest ありの v1 にする）。
+     - mac の `ticketRequired` は、native の ticket 必須化（N2b-4 の PR 5）が merge されるまで名乗らない。D7-2 では mac も `ticketRequired: false` を attest し、PR 5 で true に切り替える。attest を実装より先に出さないためである。v2 の Main は `ticketRequired` が false なら `ELIGIBILITY_TICKET_UNATTESTED` で閉じるので、安全側に倒れる。Windows は S5 まで false のまま。
+     - Windows で spawn ごとに行う handshake の attest も、manifest と照合する。
+     - mac のビルドで gyp 変数が node-gyp に渡らない場合は、生成ヘッダを build ディレクトリの外に置く方式に切り替える（macOS CI で確認する）。
+
 5. **分割**。
    - **D7-1**（TS のみ。PR #769）: contracts の型と schema、handshake のパーサ、compiled pin、gate の照合、`effectiveComputerUseEligibilityMode`、`computerUseCompiledEligibility`。native には触れない。
-   - **D7-2**（build script と native。macOS CI が必要。#768 の merge 後）: `--eligibility=v1|v2`（既定 v1。win32 の v2 は拒否）、mac の `Handshake` と Windows の handshake 応答への attest、portable な定数ヘッダ、manifest への書き込み、harness と source 契約テスト。native が返す値は `-D` で渡された定数だけから作り、環境変数や引数は読まない。`preflight` を export する mac native は `ticketRequired` を true にする。
+   - **D7-2**（build script と native。macOS CI が必要。#768 の merge 後）: `--eligibility=v1|v2`（既定 v1。win32 の v2 は拒否）、mac の `Handshake` と Windows の handshake 応答への attest、portable な定数ヘッダ、manifest への書き込み、harness と source 契約テスト。native が返す値は `-D` で渡された定数だけから作り、環境変数や引数は読まない。`preflight` を export する mac native の `ticketRequired` は、PR 5（ticket 必須化）が入るまで false で、PR 5 で true にする。
    - **D7-3**（CI）: `computer-use-native-gate` に eligibility の行列を足す。macOS は v1 と v2 の両方をビルドし、実際の `.node` の handshake の attest が manifest と一致することを検証するスクリプトを実行する。Windows は v1 のみ。Main と native のモードが食い違う組合せが、閉じることを確認する。
 
 6. **S4-4 補遺の「承認経路が有効」の条件との関係**。D7 が入っても、承認経路は開かない。「有効」の条件のうち、handshake で classifier v2（`NATIVE_APPROVAL_CLASSIFIER_VERSION`）が確認できることは、D7 の attest（`classifierVersion`）で初めて判定できるようになる。しかし v2 モードのビルドも、classifier v2 が入るまでは `classifierVersion` として 1 を attest する。したがって、classifier v2 が入るまでは、D7 が入った後もこの条件は満たされず、承認経路は閉じたままである。`ticketRequired` の attest は、ticket 必須化が実際に入っていることの確認であり、それ自体は承認経路を開かない。
