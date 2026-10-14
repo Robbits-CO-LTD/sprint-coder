@@ -1675,6 +1675,209 @@ bool CheckEffectClassifierCore() {
                "effect-precedence-surface-without-text")) return false;
   }
 
+  // The control the action lands on must carry the label, not the window around it: a titled
+  // window with an unlabeled button (or an icon inside one) is unreadable, however it is reached.
+  {
+    auto unlabeled = [](std::vector<NodeFacts> chain) {
+      EffectFacts facts = EffBase();
+      facts.chain = std::move(chain);
+      return facts;
+    };
+    const std::vector<std::vector<NodeFacts>> chains = {
+        {{"axbutton", "", ""}, {"axwindow", "", "Shop"}},
+        {{"aximage", "", ""}, {"axbutton", "", ""}, {"axwindow", "", "Checkout"}},
+        {{"axgroup", "", ""}, {"axwindow", "", "pay now"}},
+    };
+    for (const auto &chain : chains) {
+      for (const SessionMode mode : {SessionMode::kFullAccess, SessionMode::kSupervised}) {
+        for (const ActionKind action : {ActionKind::kClick, ActionKind::kInvoke, ActionKind::kToggle,
+                                        ActionKind::kSelect, ActionKind::kDoubleClick}) {
+          EffectFacts facts = unlabeled(chain);
+          facts.mode = mode;
+          facts.action = action;
+          if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-unlabeled-control-takeover"))
+            return false;
+        }
+      }
+      EffectFacts scroll = unlabeled(chain);
+      scroll.action = ActionKind::kScroll;
+      if (!Check(ClassifyEffect(scroll).kind == DecisionKind::kOrdinary, "effect-unlabeled-scroll"))
+        return false;
+    }
+    // Text entry: the field's own label, or in a browser a caption near it; a window title is not.
+    EffectFacts field = unlabeled({{"axtextfield", "", ""}, {"axwindow", "", "Pay"}});
+    field.action = ActionKind::kType;
+    if (!Check(EffTakeover(field), "effect-unlabeled-field-takeover")) return false;
+    field.origin = OriginState::kOrdinary;
+    field.neighbor_labels = {"Nickname"};
+    field.neighbor_labels_complete = true;
+    if (!Check(ClassifyEffect(field).kind == DecisionKind::kOrdinary, "effect-field-captioned-by-neighbor"))
+      return false;
+    field.neighbor_labels = {""};
+    if (!Check(EffTakeover(field), "effect-field-empty-neighbor")) return false;
+    field.origin = OriginState::kNotApplicable;
+    field.neighbor_labels = {"Nickname"};
+    if (!Check(EffTakeover(field), "effect-native-field-neighbor-is-not-a-label")) return false;
+    // A labeled control in an untitled window is fine, and a window title never counts as the
+    // control's own words: with no actionable ancestor only the target is looked at.
+    EffectFacts titled = unlabeled({{"axbutton", "", "ok"}, {"axwindow", "", ""}});
+    if (!Check(ClassifyEffect(titled).kind == DecisionKind::kOrdinary, "effect-labeled-control"))
+      return false;
+    EffectFacts plain = unlabeled({{"axgroup", "", "ok"}, {"axwindow", "", "pay now"}});
+    if (!Check(ClassifyEffect(plain, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+               "effect-window-title-is-not-the-control")) return false;
+    EffectFacts installer = unlabeled({{"axgroup", "", "ok"}, {"axwindow", "", "install"}});
+    if (!Check(ClassifyEffect(installer, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+               "effect-window-title-is-not-an-installer")) return false;
+  }
+
+  // Captions near a field count for text entry in a browser, with the short codes too, for every
+  // way of entering text; clicking next to a caption is not entry. Look-alike text anywhere near
+  // the field cannot be read.
+  for (const ActionKind action : {ActionKind::kType, ActionKind::kSetText, ActionKind::kKey}) {
+    for (const auto &[caption, reason] :
+         std::vector<std::pair<std::string, DecisionReason>>{{"CVV", DecisionReason::kCredential},
+                                                              {"cvc code", DecisionReason::kCredential},
+                                                              {"CC-CSC", DecisionReason::kCredential},
+                                                              {"PIN", DecisionReason::kSecure},
+                                                              {"Enter your PIN", DecisionReason::kSecure}}) {
+      EffectFacts facts = EffLabel("input", action);
+      facts.origin = OriginState::kOrdinary;
+      facts.neighbor_labels = {caption};
+      facts.neighbor_labels_complete = true;
+      if (!Check(ClassifyEffect(facts).reason == reason, "effect-neighbor-short-codes")) return false;
+    }
+    EffectFacts lookalike = EffLabel("input", action);
+    lookalike.origin = OriginState::kOrdinary;
+    lookalike.neighbor_labels = {"P\xD0\xB0ssword"};  // Cyrillic a
+    lookalike.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(lookalike), "effect-neighbor-lookalike")) return false;
+    EffectFacts incomplete = EffLabel("input", action);
+    incomplete.origin = OriginState::kOrdinary;
+    incomplete.neighbor_labels = {"Nickname"};
+    if (!Check(EffTakeover(incomplete), "effect-neighbor-incomplete-for-every-entry")) return false;
+  }
+  {
+    // A key that only types (not an activation) is not an activation of a "pay now" button.
+    EffectFacts typed = EffLabel("pay now", ActionKind::kKey);
+    typed.key_is_activation = false;
+    if (!Check(ClassifyEffect(typed).kind == DecisionKind::kOrdinary, "effect-typing-key-is-not-activation"))
+      return false;
+    typed.key_is_activation = true;
+    if (!Check(ClassifyEffect(typed).effect_class == EffectClass::kConfirm, "effect-activation-key"))
+      return false;
+    // Role or subrole in a look-alike script cannot be read either.
+    EffectFacts role = EffBase();
+    role.chain[0].role = "\xD0\xB0xbutton";
+    if (!Check(EffTakeover(role), "effect-role-lookalike")) return false;
+    role = EffBase();
+    role.chain[0].subrole = "\xCE\xBFk";
+    if (!Check(EffTakeover(role), "effect-subrole-lookalike")) return false;
+  }
+
+  // An executable is refused even when nothing around it could be read, and before the text check.
+  {
+    EffectFacts facts = EffItem(SurfaceKind::kOrdinary, ActionKind::kClick, "exe");
+    facts.chain[0].label = "";
+    facts.text_language_supported = false;
+    if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kBlocked, DecisionReason::kExecutionTrigger,
+                     EffectClass::kE1ExecutableOpen), "effect-e1-before-text-check")) return false;
+  }
+
+  // Invisible and format code points of every kind cannot hide a word.
+  {
+    const std::string marks[] = {
+        "\xE2\x81\xA6", "\xE2\x81\xA9", "\xCD\x8F",         "\xD8\x9C",         "\xE1\x85\x9F",
+        "\xE1\x85\xA0", "\xE1\x9E\xB4", "\xE1\xA0\x8B",     "\xE3\x85\xA4",     "\xEF\xBE\xA0",
+        "\xF3\xA0\x80\xA0", "\xF0\x9D\x85\xB3", "\xE2\x81\xAF", "\xEF\xB8\x80", "\xF3\xA0\x84\x80"};
+    for (const std::string &mark : marks) {
+      if (!Check(ClassifyEffect(EffLabel("pa" + mark + "y now", ActionKind::kInvoke)).effect_class ==
+                     EffectClass::kConfirm, "effect-ignorable-confirm")) return false;
+      if (!Check(ClassifyEffect(EffLabel("card" + mark + " number", ActionKind::kType)).reason ==
+                     DecisionReason::kCredential, "effect-ignorable-credential")) return false;
+      if (!Check(ClassifyEffect(EffLabel("pass" + mark + "word", ActionKind::kType)).reason ==
+                     DecisionReason::kSecure, "effect-ignorable-secure")) return false;
+      if (!Check(NormalizeForMatch("a" + mark + "b") == "ab", "effect-ignorable-normalize"))
+        return false;
+    }
+  }
+
+  // Text that carries letters a lexicon cannot read, or is not valid UTF-8, is not classified.
+  for (const std::string &label : std::vector<std::string>{
+           "K\xC3\xA4ufen", "p\xC9\x91y now", "Security c\xD6\x85" "de", "\xEF\xBD\x90\xEF\xBD\x81\xEF\xBD\x99 now",
+           "\xED\x8C\x8C\xEC\x9D\xB4", "pay\xC3", "pay\xC0\xAF now", "\xED\xA0\x80 pay", "pay \xF4\x90\x80\x80"}) {
+    if (!Check(EffTakeover(EffLabel(label, ActionKind::kClick), EffAllEnabled()), "effect-unreadable-characters"))
+      return false;
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kScroll)).kind == DecisionKind::kOrdinary,
+               "effect-unreadable-characters-scroll")) return false;
+  }
+  for (const std::string &label : std::vector<std::string>{
+           "\xF0\x9F\x9B\x92 Buy", u8"保存"_u8, "Cost: \xC2\xA5" "100", "Next \xE2\x86\x92",
+           "\xE2\x80\x9CPay now\xE2\x80\x9D"}) {
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kClick)).kind != DecisionKind::kTakeover,
+               "effect-readable-symbols")) return false;
+  }
+  if (!Check(ClassifyEffect(EffLabel("\xF0\x9F\x9B\x92 Buy", ActionKind::kClick)).effect_class ==
+                 EffectClass::kConfirm, "effect-emoji-label")) return false;
+
+  // Extensions are read the way the platform reads file names, and an odd one is unknown.
+  for (const std::string &extension :
+       std::vector<std::string>{"exe ", "exe.", ".exe", " EXE\t", "exe..", ". exe .", "Exe"}) {
+    if (!Check(ClassifyEffect(EffItem(SurfaceKind::kOrdinary, ActionKind::kClick, extension),
+                              EffAllEnabled()).effect_class == EffectClass::kE1ExecutableOpen,
+               "effect-extension-normalized")) return false;
+  }
+  for (const std::string &extension :
+       std::vector<std::string>{"ex e", "exe$", "e\xCC\x81xe", "", "a.b", std::string(40, 'a')}) {
+    EffectFacts facts = EffItem(SurfaceKind::kOrdinary, ActionKind::kClick, extension);
+    if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-extension-odd-is-unknown")) return false;
+    facts.surface = SurfaceKind::kFileBrowser;
+    if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-extension-odd-is-unknown-listed"))
+      return false;
+  }
+
+  // An "open" control on any surface needs the extension of what it opens.
+  {
+    EffectFacts menu = EffBase();
+    menu.action = ActionKind::kClick;
+    menu.chain[0] = NodeFacts{"axmenuitem", "", "Open"};
+    menu.chain.push_back(NodeFacts{"axmenu", "", ""});
+    menu.chain.push_back(NodeFacts{"axwindow", "", "Finder"});
+    if (!Check(EffTakeover(menu, EffAllEnabled()), "effect-open-control-unlisted-unknown")) return false;
+    menu.extension_known = true;
+    menu.extension = "txt";
+    if (!Check(ClassifyEffect(menu, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+               "effect-open-control-unlisted-known")) return false;
+    menu.extension = "exe";
+    if (!Check(ClassifyEffect(menu, EffAllEnabled()).effect_class == EffectClass::kE1ExecutableOpen,
+               "effect-open-control-unlisted-executable")) return false;
+  }
+
+  // A scroll cannot enter a secret: words in the window around it do not stop it. Clicking and
+  // typing there still do.
+  for (const char *title : {"Change password", "1Password", "Card expiration FAQ", "Account number"}) {
+    EffectFacts facts = EffBase();
+    facts.chain[0] = NodeFacts{"axscrollarea", "", ""};
+    facts.chain.push_back(NodeFacts{"axwindow", "", title});
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-scroll-ignores-window-title"))
+      return false;
+    facts.chain[0].label = "Read more";
+    facts.chain[0].role = "axlink";
+    for (const ActionKind action : {ActionKind::kClick, ActionKind::kType}) {
+      facts.action = action;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-click-still-refused-near-secret"))
+        return false;
+    }
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kScroll;
+    facts.chain[0].label = "terminal";
+    if (!Check(ClassifyEffect(facts).reason == DecisionReason::kSurface, "effect-scroll-still-refused-on-surface"))
+      return false;
+  }
+
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
   // always carries a valid native effect; everything else carries none.
   {

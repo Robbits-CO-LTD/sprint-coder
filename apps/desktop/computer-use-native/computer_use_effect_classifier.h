@@ -316,52 +316,144 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return true;
 }
 
-// Drops code points that are invisible or only join / vary glyphs, so a label cannot hide a word
-// behind them: soft hyphen, zero-width space and joiners, directional marks and embeddings, word
-// joiner and invisible operators, Mongolian vowel separator, variation selectors, BOM. Lowercases
-// ASCII.
+// Decodes one UTF-8 code point at `index`. False for anything malformed (overlong forms, surrogates,
+// values above U+10FFFF, truncated sequences).
+[[nodiscard]] inline bool DecodeUtf8(std::string_view text, std::size_t index, char32_t *code,
+                                     std::size_t *length) {
+  const auto byte = [&](std::size_t offset) -> unsigned {
+    return index + offset < text.size() ? static_cast<unsigned char>(text[index + offset]) : 0x100U;
+  };
+  const unsigned lead = byte(0);
+  const auto continuation = [&](std::size_t offset) {
+    const unsigned value = byte(offset);
+    return value >= 0x80 && value <= 0xBF;
+  };
+  if (lead < 0x80) {
+    *code = lead;
+    *length = 1;
+    return true;
+  }
+  if (lead >= 0xC2 && lead <= 0xDF && continuation(1)) {
+    *code = static_cast<char32_t>(((lead & 0x1FU) << 6) | (byte(1) & 0x3FU));
+    *length = 2;
+    return true;
+  }
+  if (lead >= 0xE0 && lead <= 0xEF && continuation(1) && continuation(2)) {
+    const char32_t value = static_cast<char32_t>(((lead & 0x0FU) << 12) | ((byte(1) & 0x3FU) << 6) |
+                                                 (byte(2) & 0x3FU));
+    if (value < 0x800 || (value >= 0xD800 && value <= 0xDFFF)) return false;
+    *code = value;
+    *length = 3;
+    return true;
+  }
+  if (lead >= 0xF0 && lead <= 0xF4 && continuation(1) && continuation(2) && continuation(3)) {
+    const char32_t value = static_cast<char32_t>(((lead & 0x07U) << 18) | ((byte(1) & 0x3FU) << 12) |
+                                                 ((byte(2) & 0x3FU) << 6) | (byte(3) & 0x3FU));
+    if (value < 0x10000 || value > 0x10FFFF) return false;
+    *code = value;
+    *length = 4;
+    return true;
+  }
+  return false;
+}
+
+// The Default_Ignorable_Code_Point set (invisible, joining or glyph-varying code points): soft
+// hyphen, combining grapheme joiner, Arabic letter mark, Hangul fillers, Khmer inherent vowels,
+// Mongolian free variation selectors, the zero-width and directional controls up to the invisible
+// operators and isolates, the Hangul and halfwidth Hangul fillers, variation selectors, BOM, the
+// shorthand and musical format controls and the tag characters.
+[[nodiscard]] constexpr bool IsDefaultIgnorable(char32_t code) {
+  return code == 0x00AD || code == 0x034F || code == 0x061C || code == 0x115F || code == 0x1160 ||
+         code == 0x17B4 || code == 0x17B5 || (code >= 0x180B && code <= 0x180F) ||
+         (code >= 0x200B && code <= 0x200F) || (code >= 0x202A && code <= 0x202E) ||
+         (code >= 0x2060 && code <= 0x206F) || code == 0x3164 || (code >= 0xFE00 && code <= 0xFE0F) ||
+         code == 0xFEFF || code == 0xFFA0 || (code >= 0xFFF0 && code <= 0xFFF8) ||
+         (code >= 0x1BCA0 && code <= 0x1BCA3) || (code >= 0x1D173 && code <= 0x1D17A) ||
+         (code >= 0xE0000 && code <= 0xE0FFF);
+}
+
+// Drops the default-ignorable code points, so a label cannot hide a word behind them, and folds
+// ASCII case. Malformed UTF-8 bytes are kept as they are (TextIsClassifiable refuses such text).
 [[nodiscard]] inline std::string NormalizeForMatch(std::string_view text) {
   std::string output;
   output.reserve(text.size());
   for (std::size_t index = 0; index < text.size();) {
-    const auto byte = [&](std::size_t offset) {
-      return index + offset < text.size() ? static_cast<unsigned char>(text[index + offset]) : 0U;
-    };
-    if (byte(0) == 0xC2 && byte(1) == 0xAD) {
-      index += 2;
-    } else if (byte(0) == 0xE2 && byte(1) == 0x80 &&
-               ((byte(2) >= 0x8B && byte(2) <= 0x8F) || (byte(2) >= 0xAA && byte(2) <= 0xAE))) {
-      index += 3;
-    } else if (byte(0) == 0xE2 && byte(1) == 0x81 && byte(2) >= 0xA0 && byte(2) <= 0xA4) {
-      index += 3;
-    } else if (byte(0) == 0xE1 && byte(1) == 0xA0 && byte(2) == 0x8E) {
-      index += 3;
-    } else if (byte(0) == 0xEF && byte(1) == 0xBB && byte(2) == 0xBF) {
-      index += 3;
-    } else if (byte(0) == 0xEF && byte(1) == 0xB8 && byte(2) >= 0x80 && byte(2) <= 0x8F) {
-      index += 3;
+    char32_t code = 0;
+    std::size_t length = 1;
+    if (DecodeUtf8(text, index, &code, &length)) {
+      if (IsDefaultIgnorable(code)) {
+        index += length;
+        continue;
+      }
+      if (length == 1) {
+        char character = text[index];
+        if (character >= 'A' && character <= 'Z')
+          character = static_cast<char>(character + ('a' - 'A'));
+        output.push_back(character);
+      } else {
+        output.append(text.substr(index, length));
+      }
+      index += length;
     } else {
-      char character = text[index];
-      if (character >= 'A' && character <= 'Z')
-        character = static_cast<char>(character + ('a' - 'A'));
-      output.push_back(character);
+      output.push_back(text[index]);
       ++index;
     }
   }
   return output;
 }
 
-// Greek, Cyrillic and neighbouring blocks (UTF-8 lead bytes CE..D4) contain look-alikes of Latin
-// letters; the lexicon cannot read such text, so it is not classified (a takeover).
-[[nodiscard]] inline bool HasLookAlikeScript(std::string_view text) {
-  for (const char character : text) {
-    const auto byte = static_cast<unsigned char>(character);
-    if (byte >= 0xCE && byte <= 0xD4) return true;
+// Non-ASCII code points the lexicon can read: Japanese text (kana, ideographs, CJK punctuation,
+// fullwidth punctuation and signs), punctuation, symbols, arrows, currency and emoji. Letters of
+// other scripts (accented Latin, IPA, Greek, Cyrillic, Armenian, Hangul, fullwidth Latin) can
+// imitate or replace Latin letters, so text carrying them is not classified.
+[[nodiscard]] constexpr bool IsReadableNonAscii(char32_t code) {
+  if ((code >= 0xFF10 && code <= 0xFF19) || (code >= 0xFF21 && code <= 0xFF3A) ||
+      (code >= 0xFF41 && code <= 0xFF5A))
+    return false;
+  return (code >= 0x00A0 && code <= 0x00BF) || (code >= 0x2000 && code <= 0x206F) ||
+         (code >= 0x20A0 && code <= 0x20CF) || (code >= 0x2190 && code <= 0x23FF) ||
+         (code >= 0x2500 && code <= 0x27BF) || (code >= 0x2900 && code <= 0x2BFF) ||
+         (code >= 0x3000 && code <= 0x30FF) || (code >= 0x31F0 && code <= 0x31FF) ||
+         (code >= 0x3400 && code <= 0x4DBF) || (code >= 0x4E00 && code <= 0x9FFF) ||
+         (code >= 0xF900 && code <= 0xFAFF) || (code >= 0xFE30 && code <= 0xFE4F) ||
+         (code >= 0xFF00 && code <= 0xFFEF) || (code >= 0x1F000 && code <= 0x1FAFF) ||
+         (code >= 0x20000 && code <= 0x2FA1F);
+}
+
+// True for malformed UTF-8 and for text a lexicon cannot read; the argument is normalized text.
+[[nodiscard]] inline bool HasUnreadableCharacters(std::string_view normalized) {
+  for (std::size_t index = 0; index < normalized.size();) {
+    char32_t code = 0;
+    std::size_t length = 1;
+    if (!DecodeUtf8(normalized, index, &code, &length)) return true;
+    if (code >= 0x80 && !IsReadableNonAscii(code)) return true;
+    index += length;
   }
   return false;
 }
 
-// A lexicon term as bytes. The u8 literals are UTF-8; the haystack is UTF-8 in plain chars.
+// An extension as the platform names it: leading and trailing dots and blanks dropped, ASCII
+// folded. Windows ignores trailing dots and spaces in a file name, so "setup.exe." still runs.
+[[nodiscard]] inline std::string NormalizeExtension(std::string_view extension) {
+  std::string text = NormalizeForMatch(extension);
+  const auto trim = [](char character) {
+    return character == '.' || character == ' ' || character == '\t';
+  };
+  while (!text.empty() && trim(text.front())) text.erase(text.begin());
+  while (!text.empty() && trim(text.back())) text.pop_back();
+  return text;
+}
+
+// A plain extension: one to 32 of [a-z0-9_+-]. Anything else is treated as unknown.
+[[nodiscard]] inline bool IsPlainExtension(std::string_view extension) {
+  if (extension.empty() || extension.size() > 32) return false;
+  for (const char character : extension)
+    if (!((character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+          character == '_' || character == '+' || character == '-'))
+      return false;
+  return true;
+}
+
 [[nodiscard]] inline std::string_view TermBytes(std::u8string_view term) {
   return std::string_view(reinterpret_cast<const char *>(term.data()), term.size());
 }
@@ -529,20 +621,31 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return true;
 }
 
-// Text the lexicon can read: some label exists, nothing in it imitates Latin letters, and the
-// caller says the language is one the lexicon covers.
+// Text the lexicon can read: the caller says the language is one it covers; nothing readable-less
+// (malformed UTF-8, or letters that imitate Latin ones) appears anywhere in the chain or the
+// neighbours; and the control the action lands on has a label. For a click or invoke that control
+// is the target up to the nearest actionable ancestor (a window title does not label a button);
+// for text entry it is the field itself, or, in a browser, a caption near it.
 [[nodiscard]] inline bool TextIsClassifiable(const EffectFacts &facts) {
   if (!facts.text_language_supported) return false;
-  bool any_label = false;
-  for (const NodeFacts &node : facts.chain) {
-    if (HasLookAlikeScript(node.label) || HasLookAlikeScript(node.role) ||
-        HasLookAlikeScript(node.subrole))
+  for (const NodeFacts &node : facts.chain)
+    if (HasUnreadableCharacters(NormalizeForMatch(node.label)) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.role)) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.subrole)))
       return false;
-    if (!NormalizeForMatch(node.label).empty()) any_label = true;
-  }
   for (const std::string &label : facts.neighbor_labels)
-    if (HasLookAlikeScript(label)) return false;
-  return any_label;
+    if (HasUnreadableCharacters(NormalizeForMatch(label))) return false;
+  if (IsTextEntry(facts)) {
+    if (!NormalizeForMatch(facts.chain.front().label).empty()) return true;
+    if (facts.origin == OriginState::kNotApplicable) return false;
+    for (const std::string &label : facts.neighbor_labels)
+      if (!NormalizeForMatch(label).empty()) return true;
+    return false;
+  }
+  const std::size_t span = ActionableSpan(facts);
+  for (std::size_t index = 0; index < span; ++index)
+    if (!NormalizeForMatch(facts.chain[index].label).empty()) return true;
+  return false;
 }
 
 } // namespace effect_detail
@@ -559,13 +662,15 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
     return Takeover();
 
   const bool entering_text = IsTextEntry(facts);
-  if (ChainContains(facts, kSecureTerms, Mode::kSubstring) ||
-      ChainContains(facts, kSecureBoundedTerms, Mode::kBounded) ||
+  // A scroll cannot enter a secret, so words in a window title around it do not stop it.
+  const bool can_enter = facts.action != ActionKind::kScroll;
+  if ((can_enter && (ChainContains(facts, kSecureTerms, Mode::kSubstring) ||
+                     ChainContains(facts, kSecureBoundedTerms, Mode::kBounded))) ||
       (entering_text && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kSecureBoundedTerms, Mode::kBounded))))
     return Make(EffectClass::kSecure, DecisionKind::kBlocked, DecisionReason::kSecure);
-  if (ChainContains(facts, kCredentialTerms, Mode::kSubstring) ||
-      ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix) ||
+  if ((can_enter && (ChainContains(facts, kCredentialTerms, Mode::kSubstring) ||
+                     ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix))) ||
       (entering_text && (NeighborsContain(facts, kCredentialTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kCredentialPrefixTerms, Mode::kPrefix))))
     return Make(EffectClass::kCredential, DecisionKind::kBlocked, DecisionReason::kCredential);
@@ -574,8 +679,10 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 
   // Executable and installer extensions (E1, E4) are refused for anything that might open the
   // item, wherever it is shown, and whether or not the target is the item itself.
-  const std::string extension = NormalizeForMatch(facts.extension);
-  if ((MayOpen(facts) || facts.action == ActionKind::kToggle) && facts.extension_known &&
+  // An extension that is not plain ([a-z0-9_+-], after trimming dots and blanks) is unknown.
+  const std::string extension = NormalizeExtension(facts.extension);
+  const bool extension_known = facts.extension_known && IsPlainExtension(extension);
+  if ((MayOpen(facts) || facts.action == ActionKind::kToggle) && extension_known &&
       InSet(extension, kExecutableExtensions)) {
     return Make(InSet(extension, kInstallerExtensions) ? EffectClass::kE4InstallerLaunch
                                                        : EffectClass::kE1ExecutableOpen,
@@ -606,9 +713,12 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
       listed_surface && MayOpen(facts) &&
       (facts.target_is_file_item || ActionableContains(facts, kOpenTerms));
   // A file item opened from any other surface still needs its extension.
-  const bool opens_unlisted_item = !listed_surface && MayOpen(facts) && facts.target_is_file_item;
+  // A file item, or a control that says "open", on any other surface needs its extension too.
+  const bool opens_unlisted_item =
+      !listed_surface && MayOpen(facts) &&
+      (facts.target_is_file_item || ActionableContains(facts, kOpenTerms));
   if (opens_item || opens_unlisted_item) {
-    if (!facts.extension_known) return Takeover();
+    if (!extension_known) return Takeover();
     if (opens_item) {
       if (facts.mode == SessionMode::kObserveOnly)
         return Make(EffectClass::kOrdinary, DecisionKind::kBlocked, DecisionReason::kObserveOnly);
