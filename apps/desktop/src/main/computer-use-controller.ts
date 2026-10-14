@@ -3648,6 +3648,8 @@ export class ComputerUseController {
     action: ComputerUseAction,
   ): Promise<ToolAuthorizationDecision> {
     const approvalId = randomUUID();
+    // One reading of the clock: a card's lifetime must not depend on how often the clock advances.
+    const createdAtMs = this.now();
     const targetId = 'targetId' in action ? action.targetId : null;
     const targetSignature =
       targetId === null ? undefined : record.observation?.targetSignatures?.[targetId];
@@ -3686,8 +3688,8 @@ export class ComputerUseController {
       decision: null,
       revision: 0,
       challenge,
-      createdAt: new Date(this.now()).toISOString(),
-      expiresAt: new Date(this.now() + 60 * 60 * 1_000).toISOString(),
+      createdAt: new Date(createdAtMs).toISOString(),
+      expiresAt: new Date(createdAtMs + 60 * 60 * 1_000).toISOString(),
     });
     record.status = this.status(
       record,
@@ -4142,6 +4144,8 @@ export class ComputerUseController {
     remainingMs: number,
   ): Promise<NativeApprovalOutcome> {
     const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
+    // One reading of the clock, so expiresAt - createdAt is exactly the lifetime.
+    const createdAtMs = this.now();
     const approval = computerUseApprovalSchema.parse({
       id: approvalId,
       sessionId: record.status.sessionId,
@@ -4161,8 +4165,8 @@ export class ComputerUseController {
       decision: null,
       revision: 0,
       challenge: `${randomUUID()}${randomUUID()}`,
-      createdAt: new Date(this.now()).toISOString(),
-      expiresAt: new Date(this.now() + lifetimeMs).toISOString(),
+      createdAt: new Date(createdAtMs).toISOString(),
+      expiresAt: new Date(createdAtMs + lifetimeMs).toISOString(),
     });
     record.status = this.status(
       record,
