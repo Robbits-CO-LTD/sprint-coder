@@ -1,17 +1,28 @@
-# Computer Use simplified on-device acceptance (#387)
+# Computer Use simplified on-device acceptance
 
 This is the simplified acceptance the owner approved on 2026-09-19: run the journeys by hand on a
-real macOS device and a real Windows x64 device, and record the outcomes in Issue #387. It is
-**not** the external final gate. It produces no schema-v4 evidence JSON, no attestation, and no
-canonical `*_V1` PASS evidence code, and it does not move any row in
-`tasks/issue-333-computer-use-final-gate.md` out of `FAIL`. The canonical requirements stay there.
+real macOS device and a real Windows x64 device, and record the outcomes in the tracking Issue. It
+is **not** the external final gate. It produces no schema-v4 evidence JSON, no attestation, and no
+canonical `*_V1` PASS evidence code.
+
+**Status (2026-10-14).** The Issues this document was written for are closed as NOT_PLANNED: #387
+(the simplified acceptance), #333 (the final gate; its `tasks/issue-333-computer-use-final-gate.md`
+rows are no longer a dependency) and #732 (the first on-device acceptance Issue). They are not
+where results go any more. The sections below still describe the **V1** flow (register an
+application through the picker, then bind a window). The V2 flow (the agent lists running
+applications, one in-conversation approval card per application, `SPRINT_CODER_COMPUTER_USE_AGENT_DRIVEN_V2=1`)
+has no journey here yet. Writing it is slice **S9a** of
+`tasks/designs/adr-computer-use-agent-driven-v2.md` §9. S9a runs **before** the V1 removal (S8),
+with V1 left in place, and a new [human] acceptance Issue is opened when S9a completes; until then
+there is no Issue to record results in. Do not start an on-device run from the V1 journeys below
+expecting it to count as the V2 acceptance.
 
 Two packages are used, and they are not symmetric:
 
-| OS | Package | Why |
-| --- | --- | --- |
-| macOS | The Developer ID-signed, notarized package produced by `release-beta.yml` | macOS verification is unchanged; an ad-hoc local package is still denied with `MACOS_SIGNATURE_REQUIRED` |
-| Windows x64 | The unsigned acceptance package from `.github/workflows/computer-use-acceptance-build.yml` | Windows code signing happens at the formal release; this build waives signer identity only |
+| OS          | Package                                                                                    | Why                                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| macOS       | The Developer ID-signed, notarized package produced by `release-beta.yml`                  | macOS verification is unchanged; an ad-hoc local package is still denied with `MACOS_SIGNATURE_REQUIRED` |
+| Windows x64 | The unsigned acceptance package from `.github/workflows/computer-use-acceptance-build.yml` | Windows code signing happens at the formal release; this build waives signer identity only               |
 
 The Windows acceptance package must never be distributed. It is the only build in which Windows
 signer identity is not verified, so the only reason to trust it is that we built it ourselves from
@@ -52,9 +63,12 @@ release workflow independently refuses to publish such a build.
 
 **Windows x64**
 
-1. Windows 10 build 18362 or later. Classic direct-process `notepad.exe` must be available; the
+1. Windows 10 build 18362 or later. The V1 journeys need classic direct-process `notepad.exe`; the
    Store/UWP Notepad hosted by `ApplicationFrameHost.exe` is unsupported and makes the row `FAIL`,
-   not `SKIP`.
+   not `SKIP`. Windows 11 may redirect `notepad.exe` to the packaged (MSIX) Notepad through an app
+   execution alias, so check which one actually runs (process tree and window class) before
+   starting. How the V2 journeys treat packaged applications is decided by S6 (ADR §9) and is not
+   settled here.
 2. SmartScreen blocks an unsigned installer: choose **More info → Run anyway** each time. If
    Defender or an endpoint agent quarantines the helper, record that and stop — do not disable
    protection silently.
@@ -112,7 +126,7 @@ attempted — blocked by the unsigned acceptance mode**, never as passed or as a
 
 ## 4. Safety journeys
 
-Run these on both OSes unless noted. Every one must stop *before* any native input reaches the
+Run these on both OSes unless noted. Every one must stop _before_ any native input reaches the
 target; record what the UI showed.
 
 1. Move foreground focus away after an observation — input is blocked.
@@ -138,7 +152,7 @@ target; record what the UI showed.
     keeps `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` honest, and it must be run on the same commit.
 15. macOS: confirm an ad-hoc (locally packaged, unsigned) build is likewise unavailable.
 
-## 5. What to record in the Issue
+## 5. What to record in the acceptance Issue
 
 - The exact commit, and for each OS: OS version, package file name and its SHA-256.
 - Windows: the contents of `computer-use-acceptance-build.json` and a note that the acceptance
