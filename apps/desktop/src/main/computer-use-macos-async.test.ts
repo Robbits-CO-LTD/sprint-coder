@@ -778,7 +778,7 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         ),
         sourceBetween('bool FreshVisualPatchMatches(', 'bool RevalidateVisualPointBeforePost('),
         sourceBetween(
-          'NativePreflightReceipt PerformNativePreflight(',
+          'NativePreflightReceipt PerformNativePreflightV1(',
           'bool GenerateOrdinaryTicketToken(',
         ),
         sourceBetween('bool ReserveNativePreflightLocked(', 'struct AsyncNativePreflightWork {'),

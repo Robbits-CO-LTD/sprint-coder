@@ -733,10 +733,18 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return IsValueChangingRole(NormalizeForMatch(node.role) + " " + NormalizeForMatch(node.subrole));
 }
 
+// The root of a web page (AX web area, UI Automation document): its name is the page title, which
+// is the page's, not the scrolled control's, exactly like the window's.
+[[nodiscard]] inline bool IsPageRoot(const NodeFacts &node) {
+  const std::string role = NormalizeForMatch(node.role);
+  return role == "document" || role.find("webarea") != std::string::npos;
+}
+
 // How many nodes, from the target up, a scroll is judged on: the control it lands on (up to the
 // nearest actionable ancestor), up to the nearest value-changing ancestor (a combobox around a
 // text field), and, when that control carries no label of its own, up to the first labeled node,
-// but never the last node, which is the window around it. A wheel can change the value of a
+// but never the last node, which is the window around it, nor a page root (the page title is not
+// a caption). Scrolling the page itself is judged on nothing. A wheel can change the value of a
 // combobox or a number field whose caption sits on a group or a combobox above it.
 [[nodiscard]] inline std::size_t ScrollScope(const EffectFacts &facts) {
   const std::size_t span = ActionableSpan(facts);
@@ -746,7 +754,13 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
       first_labeled = index;
       break;
     }
-  const std::size_t below_window = facts.chain.size() > 1 ? facts.chain.size() - 1 : 1;
+  std::size_t below_window = facts.chain.size() > 1 ? facts.chain.size() - 1 : 1;
+  for (std::size_t index = 0; index < facts.chain.size(); ++index)
+    if (IsPageRoot(facts.chain[index])) {
+      if (index == 0) return 0;
+      if (index < below_window) below_window = index;
+      break;
+    }
   const std::size_t labeled_end = first_labeled + 1 < below_window ? first_labeled + 1 : below_window;
   std::size_t value_end = 0;
   for (std::size_t index = 0; index < below_window && index < facts.chain.size(); ++index)
