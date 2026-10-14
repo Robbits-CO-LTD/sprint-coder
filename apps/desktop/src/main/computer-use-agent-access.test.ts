@@ -233,6 +233,8 @@ function createFixture(
     agentDrivenEnabled?: boolean;
     publish?: boolean;
     startSessionGate?: Promise<void>;
+    /** What the controller is told the effective eligibility mode is (default: unset). */
+    effectiveEligibilityMode?: () => 'v1-allowlist' | 'v2-denylist';
     /** Consulted before every native enumeration, so a test can hold one of them in particular. */
     listWindowsGate?: (call: number) => Promise<void> | undefined;
     /** Stands in for the provider preflight: Main builds the planner here. */
@@ -258,6 +260,7 @@ function createFixture(
   let policyEpoch = 0;
   let activeTurnId: string | null = context.turnId;
   let startedSessions = 0;
+  const startRoutes: Array<'v1' | 'v2' | undefined> = [];
   let observationRevision = 0;
   let closedSessions = 0;
   let listWindowCalls = 0;
@@ -276,6 +279,7 @@ function createFixture(
     startSession: async (input) => {
       await options.startSessionGate;
       startedSessions += 1;
+      startRoutes.push(input.classifierRoute);
       const profile = profiles.find((candidate) => candidate.id === input.profile.id)!;
       return {
         sessionId: input.sessionId,
@@ -367,6 +371,9 @@ function createFixture(
     native,
     featureEnabled: () => true,
     agentDrivenEnabled: () => options.agentDrivenEnabled !== false,
+    ...(options.effectiveEligibilityMode === undefined
+      ? {}
+      : { effectiveEligibilityMode: options.effectiveEligibilityMode }),
     // Where the Turn ships to. Every Turn in this file ships to the same place unless a test says
     // otherwise; which Turn a token belongs to is enforced by the token binding, not by this.
     providerEgressBindingFor: () =>
@@ -412,6 +419,7 @@ function createFixture(
     grants: grantStore.grants,
     accessRequests: grantStore.accessRequests,
     startedSessions: () => startedSessions,
+    startRoutes,
     audits: () => [...audits.values()],
     approvals,
     /** Why the last session ended, as the status stream published it. */
@@ -1491,6 +1499,21 @@ describe('computer_start', () => {
     expect(fixture.startedSessions()).toBe(1);
     // Using the grant is what marks it used, not asking about it.
     expect([...fixture.grants.values()][0]?.lastUsedAt).not.toBeNull();
+  });
+
+  it.each([
+    ['no effective mode is wired', undefined, 'v1'],
+    ['the effective mode is v1-allowlist', () => 'v1-allowlist' as const, 'v1'],
+    ['the effective mode is v2-denylist', () => 'v2-denylist' as const, 'v2'],
+  ])('binds an agent session to the %s route', async (_name, mode, route) => {
+    const fixture = createFixture({
+      ...(mode === undefined ? {} : { effectiveEligibilityMode: mode }),
+    });
+    const target = await grantAndList(fixture);
+    await settle(
+      fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+    );
+    expect(fixture.startRoutes).toEqual([route]);
   });
 
   it('returns a projection narrow enough to write into the conversation', async () => {

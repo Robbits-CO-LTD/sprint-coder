@@ -14,6 +14,7 @@ import {
 import {
   COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV,
   checkComputerUseEligibility,
+  computerUseClassifierRoute,
   effectiveComputerUseEligibilityMode,
 } from './computer-use-eligibility';
 
@@ -322,6 +323,17 @@ describe('Computer Use eligibility contract (D7-1)', () => {
           }),
         ).toBe('v1-allowlist');
       }
+    });
+  });
+
+  describe('classifier route (C3)', () => {
+    it('is v2 only for an agent session under an effective v2-denylist', () => {
+      const route = computerUseClassifierRoute;
+      expect(route({ agent: true, effectiveMode: 'v2-denylist' })).toBe('v2');
+      // The panel keeps the classification it always had, whatever the mode.
+      expect(route({ agent: false, effectiveMode: 'v2-denylist' })).toBe('v1');
+      expect(route({ agent: false, effectiveMode: 'v1-allowlist' })).toBe('v1');
+      expect(route({ agent: true, effectiveMode: 'v1-allowlist' })).toBe('v1');
     });
   });
 });

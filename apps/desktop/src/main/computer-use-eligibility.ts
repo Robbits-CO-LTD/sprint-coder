@@ -65,6 +65,22 @@ export function checkComputerUseEligibility(input: {
   return compiled.ticketRequired ? 'ok' : 'ticket_unattested';
 }
 
+/** Which classifier a session is bound to: the panel's v1, or an agent session's v2 (ADR v2 D7). */
+export type ComputerUseClassifierRoute = 'v1' | 'v2';
+
+/**
+ * The classifier route Main asks for when it creates a session. Only a Main agent session under an
+ * effective v2-denylist asks for v2; the panel path keeps the classification it always had. The
+ * native side then expects v2 only if the build also attested classifier 2 (see the host), so this
+ * asks and the attest decides. Nothing the model, the Renderer or the environment says reaches it.
+ */
+export function computerUseClassifierRoute(input: {
+  agent: boolean;
+  effectiveMode: ComputerUseEligibilityMode;
+}): ComputerUseClassifierRoute {
+  return input.agent && input.effectiveMode === 'v2-denylist' ? 'v2' : 'v1';
+}
+
 /**
  * The mode a session may use. `v2-denylist` only for a build compiled as v2, with the V2 flag on,
  * and without `FORCE_V1_ALLOWLIST=1`. A v1 build is v1 whatever the flag or the environment says,

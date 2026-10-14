@@ -141,8 +141,19 @@ function build(
     ),
     dispatch: fn('dispatch', (input) => (overrides['dispatch'] ?? result)(input)),
     cancel: () => undefined,
-    close: () => undefined,
+    close: fn('close', (i) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: i['sessionId'],
+      cancelEpoch: i['cancelEpoch'],
+      inputAttemptCount: 0,
+    })),
   };
+  // A test may replace how the fake native starts or closes a session.
+  for (const name of ['startSession', 'close'] as const) {
+    const replacement = overrides[name];
+    if (replacement !== undefined) methods[name] = fn(name, replacement);
+  }
   for (const name of options.omit ?? []) delete methods[name];
   const platform = options.platform ?? 'darwin';
   const binding = {
@@ -394,6 +405,214 @@ describe('Computer Use native host: approval path', () => {
     const closed = build({});
     await expect(
       closed.host.dispatch(request(await sessionOf(closed.host), 'd-3', { mainHighImpact: true })),
+    ).resolves.toMatchObject({ result: 'completed' });
+  });
+});
+
+// C3: the classifier route a session is bound to decides which classifierVersion Main accepts.
+describe('Computer Use native host: classifier route (C3)', () => {
+  type Route = 'v1' | 'v2';
+  const startWith = async (host: ComputerUseNativeHost, route?: Route, sessionId = 'session-1') => {
+    await host.listWindows(profile);
+    return host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      ...(route === undefined ? {} : { classifierRoute: route }),
+    });
+  };
+  const withClassifier =
+    (classifierVersion: number, extra: Record<string, unknown> = {}) =>
+    (input: Record<string, unknown>) => ({
+      decision: 'ordinary',
+      reasonCode: null,
+      deniedResult: null,
+      ticket,
+      classifierVersion,
+      inputAttemptCount: 0,
+      requestId: input['requestId'],
+      sessionId: input['sessionId'],
+      cancelEpoch: input['cancelEpoch'],
+      observationRevision: input['observationRevision'],
+      ...extra,
+    });
+  const offerReceipt = (input: Record<string, unknown>) => ({
+    ...withClassifier(2, { receiptVersion: 2 })(input),
+    decision: 'single_use_approval',
+    ticket: null,
+    approvalGeneration: 3,
+    remainingMs: 30_000,
+    effect: 'supervised_action',
+  });
+  const run = async (
+    options: { attested?: boolean },
+    route: Route | undefined,
+    preflight: (input: Record<string, unknown>) => unknown,
+  ) => {
+    const built = build(options, { preflight });
+    const session = await startWith(built.host, route);
+    return { built, session, result: await built.host.dispatch(request(session, 'c-1')) };
+  };
+  const invalid = { result: 'rejected', reasonCode: 'native_preflight_invalid' };
+
+  it('keeps a v1 route exactly as before: classifier 1 passes, anything else is invalid', async () => {
+    const ok = await run({ attested: true }, 'v1', withClassifier(1));
+    expect(ok.result).toMatchObject({ result: 'completed' });
+    expect(ok.built.calls['dispatch']).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId: 'c-1', ticket }),
+    );
+    // Golden: the same receipt on an unbound session gives the same outcome.
+    const unbound = await run({ attested: true }, undefined, withClassifier(1));
+    expect(unbound.result).toEqual(ok.result);
+    // A receipt that claims classifier 2 is not what this route expects, even when well formed.
+    const wrong = await run({ attested: true }, 'v1', withClassifier(2));
+    expect(wrong.result).toMatchObject(invalid);
+    expect(wrong.built.calls['dispatch']).not.toHaveBeenCalled();
+    // And a v2 approval offer never reaches a v1-route session.
+    const offer = await run({ attested: true }, 'v1', offerReceipt);
+    expect(offer.result).toMatchObject(invalid);
+    expect(offer.result).not.toHaveProperty('approvalOffer');
+  });
+
+  it('expects classifier 2 on a v2 route only when the build attested classifier 2', async () => {
+    const ok = await run({ attested: true }, 'v2', withClassifier(2));
+    expect(ok.result).toMatchObject({ result: 'completed' });
+    const offer = await run({ attested: true }, 'v2', offerReceipt);
+    expect(offer.result).toMatchObject({ approvalOffer: { approvalGeneration: 3 } });
+    // A classifier 1 receipt on a v2 route is a mismatch.
+    const old = await run({ attested: true }, 'v2', withClassifier(1));
+    expect(old.result).toMatchObject(invalid);
+    expect(old.built.calls['dispatch']).not.toHaveBeenCalled();
+    // Without the attest the route falls back to v1: classifier 1 only.
+    const unattested = await run({ attested: false }, 'v2', withClassifier(1));
+    expect(unattested.result).toMatchObject({ result: 'completed' });
+    const unattestedV2 = await run({ attested: false }, 'v2', withClassifier(2));
+    expect(unattestedV2.result).toMatchObject(invalid);
+    expect(unattestedV2.built.calls['dispatch']).not.toHaveBeenCalled();
+  });
+
+  it('cannot change the route of a session after it was bound', async () => {
+    const built = build({ attested: true }, { preflight: withClassifier(1) });
+    await startWith(built.host, 'v1');
+    // Another route for the same session is refused; the same route, or none, is fine (resume).
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/route/u);
+    await expect(startWith(built.host, 'v1')).resolves.toBeDefined();
+    await expect(startWith(built.host)).resolves.toBeDefined();
+  });
+
+  it('keeps the bound route through a start that names none (a resume)', async () => {
+    // An approval offer is only acceptable to a session that is not bound to v1. If a start that
+    // names no route dropped or replaced the binding, the offer would be accepted again.
+    const built = build({ attested: true }, { preflight: offerReceipt });
+    const session = await startWith(built.host, 'v1');
+    await startWith(built.host);
+    const result = await built.host.dispatch(request(session, 'c-2'));
+    expect(result).toMatchObject(invalid);
+    expect(result).not.toHaveProperty('approvalOffer');
+    // The same offer is accepted by a session that was never bound, so the case does tell them apart.
+    const unbound = build({ attested: true }, { preflight: offerReceipt });
+    const free = await startWith(unbound.host);
+    await expect(unbound.host.dispatch(request(free, 'c-3'))).resolves.toHaveProperty(
+      'approvalOffer',
+    );
+  });
+
+  it('binds before it awaits, so two racing starts cannot end with two routes', async () => {
+    const built = build({ attested: true });
+    await built.host.listWindows(profile);
+    const base = {
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-race',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    } as const;
+    const results = await Promise.allSettled([
+      built.host.startSession({ ...base, classifierRoute: 'v1' }),
+      built.host.startSession({ ...base, classifierRoute: 'v2' }),
+    ]);
+    expect(results.map((entry) => entry.status).sort()).toEqual(['fulfilled', 'rejected']);
+  });
+
+  it('leaves no binding behind when the native start fails', async () => {
+    let fail = true;
+    const built = build(
+      { attested: true },
+      {
+        startSession: (i) => {
+          if (fail) throw new Error('native start failed');
+          return {
+            inputAttemptCount: 0,
+            sessionId: i['sessionId'],
+            platform: 'darwin',
+            appIdentityDigest: identityDigest,
+            windowIdentityDigest: zero('d'),
+            windowId: 'window-1',
+            profileRevision: 1,
+            cancelEpoch: 0,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+            screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+            pid: 42,
+          };
+        },
+      },
+    );
+    await expect(startWith(built.host, 'v1')).rejects.toThrow();
+    fail = false;
+    await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
+  });
+
+  it('forgets the route when the session is closed, so the id can be bound again', async () => {
+    const built = build({ attested: true });
+    const session = await startWith(built.host, 'v1');
+    await built.host.close(session);
+    await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
+  });
+
+  it('keeps the route when the close is not confirmed', async () => {
+    const built = build(
+      { attested: true },
+      { close: () => ({ result: 'closed', drained: false }) },
+    );
+    const session = await startWith(built.host, 'v1');
+    await expect(built.host.close(session)).rejects.toThrow();
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/route/u);
+  });
+
+  it('refuses the approval calls to a session bound to a route that does not expect classifier 2', async () => {
+    // Bound to v1: even with the path open, approvalApprove and dispatchApproved are refused here,
+    // before the native is called; approvalDiscard (no input capability) is still allowed.
+    const v1 = build({ attested: true });
+    const bound = await startWith(v1.host, 'v1');
+    await expect(
+      v1.host.approvalApprove!({ ...request(bound, 'a-1'), approvalGeneration: 4 }),
+    ).resolves.toMatchObject({ kind: 'refused', reasonCode: 'native_approval_route_forbidden' });
+    await expect(
+      v1.host.dispatchApproved!({ ...request(bound, 'a-2'), approvalGeneration: 4 }),
+    ).rejects.toThrow();
+    await v1.host.approvalDiscard!({ session: bound, approvalGeneration: 4 });
+    expect(v1.calls['approvalApprove']).not.toHaveBeenCalled();
+    expect(v1.calls['dispatchApproved']).not.toHaveBeenCalled();
+    expect(v1.calls['approvalDiscard']).toHaveBeenCalledTimes(1);
+    // A v2 route on a build that did not attest 2 expects v1, so it is refused the same way.
+    const unattested = build({ attested: false });
+    const fallback = await startWith(unattested.host, 'v2');
+    await expect(
+      unattested.host.approvalApprove!({ ...request(fallback, 'a-3'), approvalGeneration: 4 }),
+    ).resolves.toMatchObject({ kind: 'refused' });
+    // A v2 route on an attested build, and a session never bound, may use them.
+    const v2 = build({ attested: true });
+    const open = await startWith(v2.host, 'v2');
+    await expect(
+      v2.host.approvalApprove!({ ...request(open, 'a-4'), approvalGeneration: 4 }),
+    ).resolves.toEqual({ kind: 'approved' });
+    await expect(
+      v2.host.dispatchApproved!({ ...request(open, 'a-5'), approvalGeneration: 4 }),
     ).resolves.toMatchObject({ result: 'completed' });
   });
 });
