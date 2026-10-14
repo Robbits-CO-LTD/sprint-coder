@@ -426,6 +426,10 @@ function createFixture(
         reasonCode: input.reasonCode ?? null,
         nativeRequestId: input.nativeRequestId,
         policyEpoch: input.policyEpoch,
+        approvalId: input.approvalId ?? null,
+        approvalParentRequestId: input.approvalParentRequestId ?? null,
+        approvalOutcome: null,
+        approvalEffect: input.approvalEffect ?? null,
         createdAt,
         updatedAt: createdAt,
       };
