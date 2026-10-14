@@ -742,8 +742,19 @@ classifier v2 は、承認経路を本番で開くための最後の前提であ
    - secure / credential が祖先のウィンドウタイトルの語（`1Password`、`Change password` など）でクリック・入力を止める。対象・作用する部品・入力欄の近傍に限る案。
    - origin を読めないブラウザで、閲覧・スクロールまで takeover になる（ADR §3.5-3 は閲覧の続行を許す）。
    - ファイルブラウザ・ダウンロード面の視覚クリックとキーをすべて「開く」とみなす点（実機での効果の確認後に、選択だけのクリックを閲覧に戻せるか）。
+   - 日本語の語間空白の除去（C1 の追加）が過剰拒否を生む（`送 金額を表示`、`未決 済み一覧`、`開 く` のような、ラベルの途中の空白でつながった別の語）。実測後に、除去を語の境界を保つ形に絞れるか見直す。
+   - 値を変える祖先（combobox・popupbutton・listbox など）の中のクリックが、近傍ラベルの取得が不完全というだけで takeover になる（ARIA listbox の項目、popupbutton `View`）。クリックの対象を値を選ぶ部品（option / menuitem）に絞るか、listbox を値を変える祖先から外す。
 
 8. **Windows（S5）との境界**。コア、lexicon、ruleset は両 OS で共有し、C1 は Windows の harness（MSVC）でもコンパイルして通す。Windows の facts 取得（UIA、`ConsoleWindowClass` 等の面判定、実行トリガ）と、Windows の preflight / ticket / approve は S5 の範囲で、それまで Windows は v1 のみを attest し、classifier 2 を名乗らない（D7 の判断 2-A）。C2〜C5 は macOS のみである。
+
+9. **classifier v2 の shadow（C2）の実装契約**。C2 は mac の preflight で v2 用の facts を AX から取得し、v2 の判定を v1 と並べて記録するだけで、何も決めない。
+   - **何を足すか**。`computer_use_effect_shadow.h`（portable。AX を読んだ結果の素の文字列 `ShadowAxCapture` から `EffectFacts` を作る `BuildShadowFacts`、コアを呼ぶ `ShadowClassify`、列挙値だけの `ShadowRecord`、64 件の有界リング `EffectShadowLog`）と、`computer_use_macos.mm` の `BEGIN/END effect shadow capture` の区間（AX の読み取り）。v1 の `PerformNativePreflight` は `PerformNativePreflightV1` に改名して本文を変えず、新しい `PerformNativePreflight` が V1 のレシートをそのまま返しながら `RecordEffectShadow` を呼ぶ。シャドウの失敗（例外、AX の失敗）は呼び出し元に見えない。
+   - **決めないこと**。レシート、版（classifierVersion は 1 のまま）、ticket、dispatch のガード、`input_api_attempts`、承認経路はどれも変えない。シャドウは入力 API、AX の action、AX の書き込み、フォーカス変更を一切呼ばない。`.mm` に `single_use_approval` を書かない。
+   - **読む属性（閉じた集合）**。role・subrole・title・description・help・identifier・placeholder・親・子・URL・ファイル名・フォーカス中のウィンドウと要素。値（AXValue）は AXStaticText（フォームのキャプション）に限り、編集できる部品の値は読まない。
+   - **facts の組み立て**。chain は対象から親へ、ウィンドウ（なければアプリケーション要素）まで、最大 9 ノード（アプリケーション要素は読んだ後に捨て、ウィンドウを最後のノードにする）。ラベルは title・description・help・placeholder・identifier・（キャプションの）value を空白でつないだもので、1 つでも 512 バイトを超えたらメタデータ不完全。近傍ラベルは対象の親の他の子（最大 16 個。超える・読めない子があれば不完全）で、click を含むすべての操作で集める。面は実行ファイルのパスから（ターミナル系は shell_like、Finder は file_browser、Raycast / Alfred は command_palette）、AXWebArea の URL が `devtools:` なら devtools_console。origin は AXWebArea があるとき URL の scheme（http / https / file は ordinary、devtools は ordinary、それ以外と読めない URL は unknown）、なければ not_applicable。拡張子は AXURL（file:）の最後の要素、なければ AXFilename から（末尾が `/` のフォルダはパッケージ拡張子でない限り項目としない。拡張子のない項目は不明）。言語対応は、セッションの policy_language が en / ja のとき。モードはセッションの最大モードから。
+   - **記録**。`ShadowRecord` は列挙値と数だけ（操作・効果クラス・判定・理由・欠落の bit・v1 が ordinary だったか）で、ラベル・title・URL・パスを持たない（trivially copyable で固定）。リングに残し、同じ要約を `os_log_info` で 1 行出す。v2 のほうが厳しい・緩いは `V2IsStricter` / `V2IsLooser` で数える。
+   - **この PR で入れた分類器の変更（持ち越しの C2 分）**。ブラウザのページスクロールでは、AXWebArea / UIA Document の名前（ページのタイトル）を、ウィンドウと同じくスクロールの範囲外にする。ページ自体のスクロール（対象が web area）は何も照合しない。
+   - **実機（#777）で測る事項**。AX から facts が実際に取れるか。Finder の項目に AXURL / AXFilename が付くか（リスト表示・アイコン表示・サイドバー）、Chromium / Electron / Safari の AXWebArea の展開と URL、ダウンロード面の role（ここでは download_panel を判定しない）、キャプションが親の子にあるとは限らない（祖父の子や aria-labelledby）、sensitive な origin の判定（ここでは測らない）、1 回の取得に必要な AX 呼び出しの数と時間（近傍 16 個 × 属性 7 つ）、518 バイトから 4096 バイトの文字列と、それ以上を読み飛ばす点（4096 を超える文字列は欠落ではなく空になる）。
 
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 

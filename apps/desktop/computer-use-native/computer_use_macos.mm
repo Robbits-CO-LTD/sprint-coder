@@ -23,6 +23,7 @@
 #include <mutex>
 #include <limits>
 #include <memory>
+#include <os/log.h>
 #include <set>
 #include <string>
 #include <string_view>
@@ -36,6 +37,7 @@
 #include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
+#include "computer_use_effect_shadow.h"
 
 @interface SprintCoderCaptureOutput : NSObject <SCStreamOutput>
 @property(nonatomic, strong) dispatch_semaphore_t frameSemaphore;
@@ -4813,7 +4815,7 @@ NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request
 // posts an event, performs an AX action, sets an AX value, activates an app, or increments the
 // input attempt counter. Dispatch still re-runs every guard (RiskOutcome included) after a ticket is
 // consumed; a ticket is a typed preflight proof, never permission to skip a guard.
-NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
+NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& request) {
   NativeTargetValidation validation = RevalidateBoundTarget(request);
   if (validation != NativeTargetValidation::kValid)
     return PreflightReceiptFromOutcome(OutcomeForValidation(validation, false));
@@ -4856,6 +4858,229 @@ NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& reque
     return PreflightReceiptFromOutcome(OutcomeForValidation(validation, false));
   // The ticket itself is attached at issue time under the state lock.
   return MakeNullReceipt("ordinary");
+}
+
+// BEGIN effect shadow capture (classifier v2 C2)
+// The v2 effect classifier runs here in shadow: it reads the same target the v1 preflight just
+// judged, builds the portable facts, classifies, and keeps an enum-only summary in a bounded ring
+// and one os_log line. Nothing here decides anything: the v1 receipt returned to the caller is the
+// one PerformNativePreflightV1 produced, an exception is swallowed, and no input API, AX action,
+// AX write or focus change is reachable from this section. It reads only role, subrole, title,
+// description, help, identifier, placeholder, the value of static text, parent, children, URL and
+// file name, all with the existing read helpers.
+sprint_coder::computer_use::EffectShadowLog& EffectShadowRing() {
+  static sprint_coder::computer_use::EffectShadowLog ring;
+  return ring;
+}
+
+bool CopyShadowUrlString(AXUIElementRef element, CFStringRef attribute, std::string* output) {
+  CFTypeRef value = nullptr;
+  if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess ||
+      value == nullptr) {
+    if (value != nullptr) CFRelease(value);
+    return false;
+  }
+  CFStringRef text = nullptr;
+  if (CFGetTypeID(value) == CFURLGetTypeID()) {
+    text = CFURLGetString(static_cast<CFURLRef>(value));
+  } else if (CFGetTypeID(value) == CFStringGetTypeID()) {
+    text = static_cast<CFStringRef>(value);
+  }
+  bool copied = false;
+  if (text != nullptr) {
+    const CFIndex length = CFStringGetLength(text);
+    const CFIndex maximum = CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) + 1;
+    if (maximum > 0 && maximum <= 4096) {
+      std::string buffer(static_cast<std::size_t>(maximum), '\0');
+      if (CFStringGetCString(text, buffer.data(), maximum, kCFStringEncodingUTF8)) {
+        buffer.resize(std::char_traits<char>::length(buffer.c_str()));
+        *output = std::move(buffer);
+        copied = true;
+      }
+    }
+  }
+  CFRelease(value);
+  return copied;
+}
+
+sprint_coder::computer_use::ShadowAxNode ReadShadowNode(AXUIElementRef element,
+                                                        bool read_static_text_value) {
+  sprint_coder::computer_use::ShadowAxNode node;
+  CopyAccessibilityString(element, kAXRoleAttribute, &node.role);
+  CopyAccessibilityString(element, kAXSubroleAttribute, &node.subrole);
+  CopyAccessibilityString(element, kAXTitleAttribute, &node.title);
+  CopyAccessibilityString(element, kAXDescriptionAttribute, &node.description);
+  CopyAccessibilityString(element, kAXHelpAttribute, &node.help);
+  if (@available(macOS 10.10, *))
+    CopyAccessibilityString(element, kAXIdentifierAttribute, &node.identifier);
+  CopyAccessibilityString(element, kAXPlaceholderValueAttribute, &node.placeholder);
+  // The text of a caption. An editable control's value is never read.
+  if (read_static_text_value && node.role == "AXStaticText")
+    CopyAccessibilityString(element, kAXValueAttribute, &node.value);
+  return node;
+}
+
+// The element the action lands on, found the way the v1 preflight finds it. The caller releases it.
+AXUIElementRef CopyShadowTarget(const NativeDispatchRequest& request) {
+  if (request.kind == "invoke" || request.kind == "set_text" || request.kind == "select" ||
+      request.kind == "toggle" || request.kind == "expand_collapse") {
+    AXUIElementRef application =
+        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
+    if (application == nullptr) return nullptr;
+    AXUIElementRef focused_window =
+        CopyAccessibilityElementAttribute(application, kAXFocusedWindowAttribute);
+    CFRelease(application);
+    if (focused_window == nullptr) return nullptr;
+    int matches = 0;
+    AXUIElementRef target =
+        FindAccessibilityTarget(focused_window, request.target_id, 0, &matches);
+    CFRelease(focused_window);
+    if (target != nullptr && matches != 1) {
+      CFRelease(target);
+      return nullptr;
+    }
+    return target;
+  }
+  if (request.kind == "click" || request.kind == "scroll") {
+    const CGPoint point = CGPointMake(
+        request.observation_bounds.origin.x +
+            request.x * std::max<CGFloat>(0, request.observation_bounds.size.width - 1),
+        request.observation_bounds.origin.y +
+            request.y * std::max<CGFloat>(0, request.observation_bounds.size.height - 1));
+    AXUIElementRef application =
+        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
+    if (application == nullptr) return nullptr;
+    AXUIElementRef element = nullptr;
+    const AXError copied = AXUIElementCopyElementAtPosition(
+        application, static_cast<float>(point.x), static_cast<float>(point.y), &element);
+    CFRelease(application);
+    if (copied != kAXErrorSuccess || element == nullptr) {
+      if (element != nullptr) CFRelease(element);
+      return nullptr;
+    }
+    return element;
+  }
+  if (request.kind == "type" || request.kind == "key") {
+    AXUIElementRef application =
+        AXUIElementCreateApplication(static_cast<pid_t>(request.session->pid));
+    if (application == nullptr) return nullptr;
+    AXUIElementRef focused = nullptr;
+    const AXError copied = AXUIElementCopyAttributeValue(
+        application, kAXFocusedUIElementAttribute, reinterpret_cast<CFTypeRef*>(&focused));
+    CFRelease(application);
+    if (copied != kAXErrorSuccess || focused == nullptr) {
+      if (focused != nullptr) CFRelease(focused);
+      return nullptr;
+    }
+    return focused;
+  }
+  return nullptr;
+}
+
+// The target and its parents up to the window (or the application element), at most
+// kShadowMaxCaptureNodes nodes.
+void CaptureShadowChain(AXUIElementRef target, sprint_coder::computer_use::ShadowAxCapture* capture) {
+  CFRetain(target);
+  AXUIElementRef current = target;
+  for (std::size_t depth = 0;
+       current != nullptr && depth < sprint_coder::computer_use::kShadowMaxCaptureNodes; ++depth) {
+    capture->chain.push_back(ReadShadowNode(current, false));
+    const std::string role = capture->chain.back().role;
+    if (role == "AXWebArea" && !capture->web_area_url_read)
+      capture->web_area_url_read = CopyShadowUrlString(current, kAXURLAttribute, &capture->web_area_url);
+    if (role == "AXWindow" || role == "AXApplication") {
+      capture->chain_reached_root = true;
+      CFRelease(current);
+      current = nullptr;
+      break;
+    }
+    AXUIElementRef parent = CopyAccessibilityElementAttribute(current, kAXParentAttribute);
+    CFRelease(current);
+    current = parent;
+    if (current == nullptr) capture->chain_reached_root = true;
+  }
+  if (current != nullptr) CFRelease(current);
+}
+
+// The other children of the target's parent, for the captions a page puts beside a field.
+void CaptureShadowNeighbors(AXUIElementRef target,
+                            sprint_coder::computer_use::ShadowAxCapture* capture) {
+  capture->neighbors_complete = false;
+  AXUIElementRef parent = CopyAccessibilityElementAttribute(target, kAXParentAttribute);
+  if (parent == nullptr) return;
+  CFTypeRef children_value = nullptr;
+  if (AXUIElementCopyAttributeValue(parent, kAXChildrenAttribute, &children_value) !=
+          kAXErrorSuccess ||
+      children_value == nullptr || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != nullptr) CFRelease(children_value);
+    CFRelease(parent);
+    return;
+  }
+  const CFArrayRef children = static_cast<CFArrayRef>(children_value);
+  const CFIndex count = CFArrayGetCount(children);
+  bool complete = true;
+  for (CFIndex index = 0; index < count; ++index) {
+    if (capture->neighbors.size() >= sprint_coder::computer_use::kEffectMaxNeighborLabels) {
+      complete = false;
+      break;
+    }
+    const void* child = CFArrayGetValueAtIndex(children, index);
+    if (child == nullptr || CFGetTypeID(child) != AXUIElementGetTypeID()) {
+      complete = false;
+      continue;
+    }
+    if (CFEqual(child, target)) continue;
+    capture->neighbors.push_back(
+        ReadShadowNode(static_cast<AXUIElementRef>(const_cast<void*>(child)), true));
+  }
+  capture->neighbors_complete = complete;
+  CFRelease(children_value);
+  CFRelease(parent);
+}
+
+void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary) noexcept {
+  try {
+    sprint_coder::computer_use::ShadowAxCapture capture;
+    AXUIElementRef target = CopyShadowTarget(request);
+    if (target != nullptr) {
+      capture.target_found = true;
+      CaptureShadowChain(target, &capture);
+      CaptureShadowNeighbors(target, &capture);
+      std::string url;
+      if (CopyShadowUrlString(target, kAXURLAttribute, &url)) {
+        capture.url_present = true;
+        capture.url = std::move(url);
+      }
+      CopyAccessibilityString(target, kAXFilenameAttribute, &capture.filename);
+      CFRelease(target);
+    }
+    sprint_coder::computer_use::ShadowRequestInfo info;
+    info.kind = request.kind;
+    info.key = request.key;
+    info.maximum_mode = request.session->maximum_mode;
+    info.policy_language = request.session->policy_language;
+    info.executable_path = request.session->executable_path;
+    const sprint_coder::computer_use::ShadowRecord record =
+        sprint_coder::computer_use::ShadowClassify(capture, info, v1_ordinary);
+    EffectShadowRing().Record(record);
+    // Enum values and counters only: never a label, a title, a URL or a path.
+    os_log_info(OS_LOG_DEFAULT,
+                "computer-use effect shadow action=%{public}u class=%{public}u kind=%{public}u "
+                "reason=%{public}u gaps=%{public}u v1_ordinary=%{public}d",
+                static_cast<unsigned>(record.action), static_cast<unsigned>(record.effect_class),
+                static_cast<unsigned>(record.kind), static_cast<unsigned>(record.reason),
+                static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
+  } catch (...) {
+    // A shadow failure is invisible to the caller.
+  }
+}
+// END effect shadow capture
+
+// The v1 preflight decides; the shadow only watches. The receipt is returned exactly as v1 built it.
+NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
+  NativePreflightReceipt receipt = PerformNativePreflightV1(request);
+  RecordEffectShadow(request, receipt.decision == "ordinary");
+  return receipt;
 }
 
 // 32 bytes from the system CSPRNG, lowercase hex. There is deliberately no fallback: a failure

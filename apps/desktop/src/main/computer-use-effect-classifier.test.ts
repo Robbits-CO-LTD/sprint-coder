@@ -70,7 +70,7 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
     expect(table.versions).toEqual({ rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 });
   });
 
-  it('is called by tests only: no native source includes it yet', () => {
+  it('is included by no native source directly (macOS reaches it only through the shadow)', () => {
     for (const name of ['computer_use_macos.mm', 'computer_use_windows_host.cc'])
       expect(read(name), name).not.toContain('computer_use_effect_classifier.h');
     expect(harness).toContain('#include "computer_use_effect_classifier.h"');
