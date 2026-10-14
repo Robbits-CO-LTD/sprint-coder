@@ -1317,7 +1317,9 @@ describe('macOS native capture boundary', () => {
     expect(harness).toContain('#include "computer_use_native_ticket.h"');
     // Same single source file and include directory: no new dependency or build input.
     expect(gyp).toContain('"sources": ["computer_use_macos.mm"]');
-    expect(gyp).toContain('"include_dirs": ["."]');
+    // "generated" holds the per-build eligibility header (D7-2); it is outside node-gyp's cleaned
+    // build directory and is rewritten by the build script on every build.
+    expect(gyp).toContain('"include_dirs": [".", "generated"]');
     // N2b-1 lets only the Main host adapter and the addon type use preflight/ticket. The loader,
     // handshake, protocol and the Windows host still do not know it.
     for (const name of [

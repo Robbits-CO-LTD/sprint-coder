@@ -72,6 +72,7 @@
 
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
+#include "computer_use_native_eligibility.h"
 
 namespace {
 
@@ -4338,6 +4339,16 @@ std::string ProbeJson(const BackendProbe &probe) {
          ",\"uiAutomation\":" + (probe.ui_automation ? "true" : "false") +
          ",\"graphicsCapture\":" + (probe.graphics_capture ? "true" : "false") +
          ",\"sendInput\":" + (probe.send_input ? "true" : "false") +
+         "},\"eligibility\":{\"mode\":\"" +
+         std::string(sprint_coder::computer_use::kNativeEligibilityModeName) +
+         "\",\"rulesetVersion\":" +
+         std::to_string(sprint_coder::computer_use::kNativeEligibilityRulesetVersion) +
+         ",\"classifierVersion\":" +
+         std::to_string(sprint_coder::computer_use::kNativeEligibilityClassifierVersion) +
+         ",\"lexiconVersion\":" +
+         std::to_string(sprint_coder::computer_use::kNativeEligibilityLexiconVersion) +
+         ",\"ticketRequired\":" +
+         (sprint_coder::computer_use::kNativeEligibilityTicketRequired ? "true" : "false") +
          "},\"reason\":\"" + reason + "\"}\n";
 }
 
