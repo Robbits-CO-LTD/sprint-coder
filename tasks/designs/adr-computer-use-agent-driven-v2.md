@@ -661,6 +661,46 @@ S4 は macOS native だけで完結しない。`computer-use-controller.ts` の�
 
 **N2b-3の着地点**: 上記のpending → ready → consumedを、privateなportable C++ policy型と実際にコンパイルするharnessで証明する。この段階ではMain-facing export、公開receipt、controller、UI、manifest/flag、対象適格性を変えない。現行の `single_use_approval` はN2b-2の入力しないpauseを保つ。N2b-4でtrusted activation・復帰/再preflight・失効・監査相関とnative側の必須ticketを接続し、精密classifierとS4 interlockが揃うまでV2入力を公開しない。pure型の試験は実機でのAX/CG入力・署名・人の承認の証明とは分ける。
 
+### S4-4 補遺: N2b-4 の Main 接続契約（2026-10-14 案。再レビュー前）
+
+上の N2b-3 は native の private な policy 型（pending → ready → consumed）までを決めた。N2b-4 は、これを Main の trusted activation と native の dispatch に接続する。以下は実装済みの N1 / N2a（PR #726 / #728）と N2b-1 / N2b-2（PR #736 / #740）の形に合わせた契約で、N2b-4 の実装に入る前に再レビューを受ける。
+
+**前提となる現在の実装（main）**: Main の native adapter（`computer-use-native-host.ts`）は、macOS で addon が `preflight` を export するとき、dispatch の前に preflight を呼ぶ。受領レシートは固定 10 キー（`decision` / `reasonCode` / `deniedResult` / `ticket` / `classifierVersion` / `inputAttemptCount` / `requestId` / `sessionId` / `cancelEpoch` / `observationRevision`）で、`classifierVersion` は 1、requestId・sessionId・cancelEpoch・observationRevision が呼び出しと一致しなければ `native_preflight_invalid`。`ordinary` のときだけ 64 桁 hex の ticket を持ち、dispatch に添える。`single_use_approval` は現在、ticket・reasonCode・deniedResult がすべて null の固定 tuple だけを受け付け、入力せずに `paused` / `native_single_use_approval_unavailable` として確定記録する。Windows と ticket を返さない native は旧経路のままである。
+
+1. **発行主体と、Main に渡すもの**
+   - intent token と execution token は native だけが発行する（N2b-3 の 1）。Main は発行も検証もしない。
+   - 承認が必要な操作の preflight は、新しい版の受領レシート（`classifierVersion: 2` かつ別のキー集合）で `single_use_approval` を返し、次を載せる。承認待ちの `approvalGeneration`（0 でない）、native の単調時計で測った残り待機時間（ミリ秒。60 秒以下）、効果クラス（`NativeApprovalEffect`）。token そのものは Main に渡さず、native adapter 内部の opaque handle として保持する。
+   - 版 1 のレシートは、現在の固定 tuple のまま無入力の pause を保つ。Main が知らない版・キー・効果クラスは `native_preflight_invalid`（入力しない）。新しい native と古い Main の組合せは、これで fail closed になる。
+2. **trusted activation との接続（Main）**
+   - 承認カードは、approval ID、revision、challenge、決定、Task、Turn に束縛された既存の trusted activation だけで操作できる。カードを作るときに、`approvalGeneration` と効果クラスを承認レコードへ固定する。
+   - **オーナー決定（2026-10-14）**: 60 秒の期限は ticket を伴う承認のカードだけに適用する。V1 の操作承認カード（現在 60 分）は変えない。V1 は S8 で撤去する。
+   - カードの期限は、native が返した残り待機時間と既存のカード期限の短い方とする。native の期限（最大 60 秒）が権威で、Main の時計は短縮にだけ使う。期限を過ぎたクリック、すでに処理済みの承認、Task / Turn / policy epoch が変わった承認は、native を呼ばずに拒否する。
+   - Main が native の承認遷移を呼べるのは、trusted activation の消費に成功した後の一箇所だけにする。モデルの引数、ツール結果、画面上の文言、Renderer からの通常の IPC からは到達できない。
+3. **承認後の再 preflight の条件（native が測る）**: 次のどれかが欠ける、または変わった場合は、新しい承認を自動で作らず、入力せずに拒否する（分類不能や対象の変化は takeover）。
+   - 対象の identity: 実行中 PID の動的コード署名（macOS は `SecCode`）、正規化した実行ファイルのパス、プロセス世代、bundle id（署名者）。署名済みでないアプリは実行ファイル digest の完全一致。helper や XPC への主体変更も不一致として扱う。
+   - ウィンドウ: window identity digest、geometry、フォーカス、標準ウィンドウかどうか、面の判定（§3.7）。
+   - 操作の範囲: action digest と payload digest が intent と同一であること。`type` は 1 つの Unicode scalar だけ。複数文字、複数操作、別の対象への包括許可にしない。
+   - 対象要素と祖先、効果クラス、authority digest。精密分類（classifier v2）で、承認対象外、secure、分類不能に変わったら拒否する。
+   - 版: classifier / ruleset / lexicon の版、build mode、manifest の attest。
+   - 新しい観測 revision と ticket generation が元より大きく、dispatch の request ID が元の承認の request ID と異なること。
+   - cancel epoch、approval generation、Stop、emergency stop、Task / Turn / policy epoch、grant の失効、provider binding。
+4. **execution ticket の交換**: 再 preflight に成功した場合だけ、native が intent を消費して execution token を発行する（有効期間は最大 5 秒と、元の残り時間の短い方）。Main は、そのまま同じ呼び出しの中で dispatch に添える。execution token は、保存・再送・再利用をしない。ordinary ticket との交換や、待機 token と同じ値は拒否する。
+5. **native 側で ticket を必須にすること**
+   - `v2-denylist` ビルドの native は、`dispatch` が ticket を欠く、形式が不正、期限切れ、消費済み、世代違いのいずれでも、旧経路（ticket なしの dispatch）へ戻らず、入力せずに拒否する。これは ordinary ticket にも同じに適用する。
+   - ticket の要否は、D7 の build 時定数と manifest の attest で決め、実行時の env では変えない。`v1-allowlist` ビルドの旧経路は、V1 の回帰として残す。
+   - Main は、`v2-denylist` の native が ticket 必須であることを handshake の attest で確認できない場合、capability を閉じる。
+6. **失敗したら拒否する条件（一覧）**: 発行の失敗、レシートの形式・キー・版の不一致、requestId / sessionId / cancelEpoch / observationRevision の不一致、承認クラス外の効果、期限切れ（逆行、期限丁度、加算 overflow、世代 0 を含む）、trusted activation の不一致または二重消費、再 preflight の不一致、Stop / close / Task / Turn / policy / identity / geometry / 対象の変化、native の応答不能。いずれも、入力せず、slot を破棄し、`paused`、`rejected`、`canceled` のいずれかで確定記録する（`unknown_effect` にしない。入力が始まっていないため）。dispatch を始めた後の失敗だけが `unknown_effect` になる。
+7. **監査の相関**
+   - **オーナー決定（2026-10-14）**: 相関は `computer_action_audits` に NULL 可の列を追加して保存する（migration あり。承認レコード側だけでの結合にはしない）。(c) の行がこの列で (a)(b) を参照する。列の追加は MAC / 改ざん検出の対象の見直しを含め、N2b-4 の PR で扱う。
+   - 3 つの ID を別々に記録し、混ぜない。(a) Main の元のツール呼び出しと承認 ID、(b) 承認待ちになった元の native request ID（preflight が `single_use_approval` を返した操作）、(c) 承認後の dispatch の新しい native request ID。
+   - (b) の操作は、承認待ちの行として確定記録する。(c) は別の監査行として、(a)(b) への参照を持つ。結果は元のツール呼び出しへ返すが、native の request ID をすり替えて一致させない。
+   - 監査には、token、入力本文、authority digest、context digest を記録しない。承認の結果（許可 / 拒否 / 期限切れ / 取り消し）と効果クラスだけを記録する。
+8. **Windows**: 同じ契約を S5 で Windows の preflight / ticket として実装する。それまでの Windows は旧経路で、V2 入力を公開しない。
+
+**INV-3 との関係**: N2b-4 は承認の接続であり、適格性を広げない。新しい候補への入力は公開しない。したがって INV-3 の順序制約（§9）に反しないかぎり、interlock・面 deny・ListTargets とは別 PR で先行して merge してよい。ただし、native の ticket 必須化は、ListTargets による適格性の拡大より前に入れる。逆順（適格性の拡大が先で、ticket 必須化が後）は認めない。
+
+**N2b-4 の PR で通すテスト**: レシートの版違い・余分なキー・不一致の拒否、trusted activation 消費前の native 承認呼び出しの拒否、期限切れ・二重消費・世代違いの拒否、再 preflight の各不一致で入力 0 件、execution ticket の使い回し拒否、ticket 欠落時に旧経路へ戻らないこと、監査の 3 つの ID の相関と秘密の非記録。.mm 側は macOS CI のコンパイル済み harness（ASan / UBSan 含む）で確かめ、実機の AX と署名の証明とは分ける。
+
 ---
 
 ## 10. オーナー決定と実装前の残件
