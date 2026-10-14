@@ -47,16 +47,70 @@ describe('macOS running-process identity (D12)', () => {
     expect(running).toContain('kSecGuestAttributePid');
     expect(running).toContain('SecCodeCopyGuestWithAttributes(');
     expect(running).toContain('kSecCSStrictValidate');
-    expect(running).toContain('SecCodeCheckValidity(code, strict, nullptr)');
-    expect(running).toContain('SecCodeCopyDesignatedRequirement(');
-    expect(running).toContain('SecCodeCheckValidity(code, strict, requirement)');
+    expect(running).toContain('SecCodeCheckValidity(code, kRunningValidityFlags, nullptr)');
+    expect(running).toContain('SecCodeCheckValidity(code, kRunningValidityFlags, requirement)');
+    // The requirement is built from the BOUND signer, never copied from the running code itself.
+    expect(running).toContain('SecRequirementCreateWithString(');
+    expect(running).not.toContain('SecCodeCopyDesignatedRequirement(');
+    expect(running).toContain(
+      'RequirementTextForBoundSigner(bound.signing_identifier, bound.team_id)',
+    );
+    expect(running).toContain('anchor apple generic and identifier');
+    expect(running).toContain('certificate leaf[subject.OU]');
     expect(running).toContain('proc_pidpath(');
+    // The call that measures the running process is made with the bound signer and the real result
+    // is judged by the portable table, with the reason kept for diagnostics.
+    expect(running).toContain('MeasureRunningSignature(pid, bound_requirement, &observed)');
+    expect(running).toContain('expected.cd_hash = bound.cd_hash;');
+    expect(running).toContain('SameMacExecutablePath(running, bound.executable_path)');
+    expect(running).toContain('NativeIdentityVerdictName(verdict)');
     expect(running).toContain('kSecCodeInfoUnique');
     // The verdict is the portable one, and only an exact match lets input through.
     expect(running).toContain('CheckRunningIdentity(expected, observed)');
     expect(running).toContain('NativeIdentityAllowsInput(');
-    // An image bound as unsigned is held to its exact bytes.
+    // An image bound as unsigned is held to its bytes on disk (and to its code directory if it had one).
     expect(running).toContain('FileDigest(running)');
+  });
+
+  it('passes the dynamic check only flags that SecCodeCheckValidity accepts', () => {
+    // SecCodeCheckValidity rejects any flag outside this set with errSecCSInvalidFlags on every call,
+    // so a signed target would be refused for good. kSecCSCheckAllArchitectures is static-only.
+    const allowed = new Set([
+      'kSecCSDefaultFlags',
+      'kSecCSConsiderExpiration',
+      'kSecCSStrictValidate',
+      'kSecCSStrictValidateStructure',
+      'kSecCSRestrictSidebandData',
+      'kSecCSEnforceRevocationChecks',
+      'kSecCSAllowNetworkAccess',
+      'kSecCSNoNetworkAccess',
+    ]);
+    const code = source.replace(/\/\*[\s\S]*?\*\//gu, '').replace(/\/\/[^\n]*/gu, '');
+    const calls = [...code.matchAll(/SecCodeCheckValidity\(\s*[A-Za-z_]+\s*,\s*([^,]+?)\s*,/gu)];
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    // Resolve the flag expression of every dynamic call to the flags it is made of.
+    const flagsOf = (expression: string): string[] => {
+      const names = expression.split('|').map((part) => part.trim());
+      return names.flatMap((name) => {
+        if (/^kSecCS/u.test(name)) return [name];
+        const definition = new RegExp(
+          'constexpr SecCSFlags ' + name + '\\s*=\\s*([^;]+);',
+          'u',
+        ).exec(code);
+        expect(definition, name).not.toBeNull();
+        return flagsOf(definition![1]!);
+      });
+    };
+    for (const call of calls)
+      for (const flag of flagsOf(call[1]!)) expect(allowed.has(flag), flag).toBe(true);
+    // The static check keeps its own flags; the dynamic section never names the static-only one.
+    const running = between(
+      code,
+      'bool ReadRunningImagePath(',
+      'bool CurrentApplicationMatchesIdentityNative(',
+    );
+    expect(running).not.toContain('kSecCSCheckAllArchitectures');
+    expect(code).toContain('SecStaticCodeCheckValidity(code, validation_flags, nullptr)');
   });
 
   it('only measures: no input, no accessibility action, no focus change, no preflight', () => {

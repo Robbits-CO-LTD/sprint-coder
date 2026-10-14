@@ -15,8 +15,10 @@
 #include <atomic>
 #include <CommonCrypto/CommonDigest.h>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <dispatch/dispatch.h>
 #include <libproc.h>
@@ -806,8 +808,35 @@ bool ReadRunningImagePath(std::uint32_t pid, std::string* path) {
   return !path->empty();
 }
 
+// Flags for the DYNAMIC check (SecCodeCheckValidity on a running code object). Security accepts only
+// kSecCSConsiderExpiration, kSecCSStrictValidate, kSecCSStrictValidateStructure,
+// kSecCSRestrictSidebandData, kSecCSEnforceRevocationChecks and the network flags here; anything else,
+// notably the static-only kSecCSCheckAllArchitectures, fails with errSecCSInvalidFlags on every call.
+constexpr SecCSFlags kRunningValidityFlags = kSecCSStrictValidate;
+
+// The requirement the running code must satisfy, built from the BOUND signer (never from the running
+// code itself): Apple-anchored chain, this identifier, this team. Empty when the bound facts cannot
+// be written into a requirement safely (then the check cannot pass: fail-closed).
+std::string RequirementTextForBoundSigner(const std::string& identifier, const std::string& team) {
+  const auto safe = [](const std::string& value) {
+    if (value.empty() || value.size() > 128) return false;
+    for (const char c : value) {
+      const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                      c == '.' || c == '-' || c == '_';
+      if (!ok) return false;
+    }
+    return true;
+  };
+  if (!safe(identifier) || !safe(team)) return {};
+  return "anchor apple generic and identifier \"" + identifier +
+         "\" and certificate leaf[subject.OU] = \"" + team + "\"";
+}
+
 // Signing facts of the running process's own code object (kSecGuestAttributePid), not of a file.
-void MeasureRunningSignature(std::uint32_t pid,
+// bound_requirement is checked in the same call as validity (one SecCode validation per measurement,
+// because a check with a requirement already includes the plain validity check); with none, the
+// plain strict validity is measured.
+void MeasureRunningSignature(std::uint32_t pid, const std::string& bound_requirement,
                              sprint_coder::computer_use::NativeRunningObservation* observed) {
   const int32_t pid_value = static_cast<int32_t>(pid);
   CFNumberRef pid_number = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pid_value);
@@ -824,14 +853,23 @@ void MeasureRunningSignature(std::uint32_t pid,
   CFRelease(attributes);
   if (guest != errSecSuccess || code == nullptr) return;
   observed->dynamic_signature_checked = true;
-  const SecCSFlags strict = kSecCSStrictValidate | kSecCSCheckAllArchitectures;
-  observed->dynamic_signature_valid = SecCodeCheckValidity(code, strict, nullptr) == errSecSuccess;
-  SecRequirementRef requirement = nullptr;
-  if (SecCodeCopyDesignatedRequirement(code, kSecCSDefaultFlags, &requirement) == errSecSuccess &&
-      requirement != nullptr) {
-    observed->designated_requirement_satisfied =
-        SecCodeCheckValidity(code, strict, requirement) == errSecSuccess;
-    CFRelease(requirement);
+  if (bound_requirement.empty()) {
+    observed->dynamic_signature_valid =
+        SecCodeCheckValidity(code, kRunningValidityFlags, nullptr) == errSecSuccess;
+  } else {
+    CFStringRef text =
+        CFStringCreateWithCString(nullptr, bound_requirement.c_str(), kCFStringEncodingUTF8);
+    SecRequirementRef requirement = nullptr;
+    if (text != nullptr &&
+        SecRequirementCreateWithString(text, kSecCSDefaultFlags, &requirement) == errSecSuccess &&
+        requirement != nullptr) {
+      const bool satisfied =
+          SecCodeCheckValidity(code, kRunningValidityFlags, requirement) == errSecSuccess;
+      observed->dynamic_signature_valid = satisfied;
+      observed->designated_requirement_satisfied = satisfied;
+    }
+    if (requirement != nullptr) CFRelease(requirement);
+    if (text != nullptr) CFRelease(text);
   }
   CFDictionaryRef information = nullptr;
   if (SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information) == errSecSuccess &&
@@ -853,8 +891,16 @@ void MeasureRunningSignature(std::uint32_t pid,
   CFRelease(code);
 }
 
+// What this measures, honestly: the running process's own code object is validated strictly (the
+// kernel's code directory against the disk, which is what catches a binary swapped in after launch
+// and a file restored afterwards) and held to the BOUND signer. A truly unsigned image has no code
+// directory to ask the kernel about, so only the bytes on disk can be compared; the mapped image is
+// not read (recorded as a residual risk in the ADR). The code directory hash is compared per slice:
+// a universal binary run under Rosetta runs another slice than the one measured at bind time, and
+// that is refused (fail-closed) rather than guessed at.
 bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& bound) {
   using namespace sprint_coder::computer_use;
+  const auto started = std::chrono::steady_clock::now();
   NativeRunningObservation observed;
   std::string running_path;
   if (ReadRunningImagePath(pid, &running_path)) {
@@ -862,20 +908,37 @@ bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& 
     NSString* running = [NSString stringWithUTF8String:running_path.c_str()];
     observed.path_matches = SameMacExecutablePath(running, bound.executable_path);
     if (!bound.signed_target && observed.path_matches) {
-      // No signer to compare: the bytes of the image that is running must be the bound bytes.
+      // No signer to compare: the file at the running path must be the bound bytes.
       const std::string digest = FileDigest(running);
       observed.image_digest_measured = !digest.empty();
       observed.image_digest = digest;
     }
   }
-  MeasureRunningSignature(pid, &observed);
+  const std::string bound_requirement =
+      bound.signed_target ? RequirementTextForBoundSigner(bound.signing_identifier, bound.team_id)
+                          : std::string();
+  MeasureRunningSignature(pid, bound_requirement, &observed);
   NativeIdentityExpectation expected;
   expected.signed_target = bound.signed_target;
   expected.team_id = bound.team_id;
   expected.signing_identifier = bound.signing_identifier;
   expected.cd_hash = bound.cd_hash;
   expected.executable_digest = bound.executable_digest;
-  return NativeIdentityAllowsInput(CheckRunningIdentity(expected, observed));
+  const NativeIdentityVerdict verdict = CheckRunningIdentity(expected, observed);
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+  // Measurement point: every identity re-check runs on the serial lane, so its cost is a Stop delay.
+  // A refusal names its reason (never a path or a hash); a slow measurement is reported over the
+  // threshold so the real cost on a signed app can be read off a person's run (HA item).
+  if (!NativeIdentityAllowsInput(verdict))
+    fprintf(stderr, "[computer-use] running identity refused: %s (%lld ms)\n",
+            std::string(NativeIdentityVerdictName(verdict)).c_str(),
+            static_cast<long long>(elapsed_ms));
+  else if (elapsed_ms > 250)
+    fprintf(stderr, "[computer-use] running identity check slow: %lld ms\n",
+            static_cast<long long>(elapsed_ms));
+  return NativeIdentityAllowsInput(verdict);
 }
 
 bool CurrentApplicationMatchesIdentityNative(

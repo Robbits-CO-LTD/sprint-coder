@@ -1185,12 +1185,54 @@ bool CheckNativeRunningIdentity() {
       !Check(CheckRunningIdentity(no_digest, image) == NativeIdentityVerdict::kUnavailable,
              "identity-unsigned-no-bound-digest"))
     return false;
-  // An unsigned image with an invalid (ad hoc) signature still has to match its bytes.
+  // A truly unsigned binding (no code directory) with a signature that is valid but has no team
+  // (nothing to compare) still matches on its bytes.
   NativeRunningObservation adhoc = image;
   adhoc.dynamic_signature_checked = true;
   adhoc.dynamic_signature_valid = true;
   if (!Check(CheckRunningIdentity(unsigned_app, adhoc) == NativeIdentityVerdict::kMatch,
              "identity-adhoc-without-team-matches-bytes"))
+    return false;
+  // A signature that is broken or tampered while it still names a team is not "became signed"
+  // (that needs a valid one); the bytes decide.
+  NativeRunningObservation broken_team = image;
+  broken_team.dynamic_signature_checked = true;
+  broken_team.dynamic_signature_valid = false;
+  broken_team.team_id = "TEAMID";
+  if (!Check(CheckRunningIdentity(unsigned_app, broken_team) == NativeIdentityVerdict::kMatch,
+             "identity-unsigned-broken-signature-with-team-uses-bytes"))
+    return false;
+  // Bound unsigned but with a code directory (ad hoc, linker or platform signature): the running
+  // process must be strictly valid and carry that code directory hash, whatever the file digest says.
+  NativeIdentityExpectation adhoc_bound = unsigned_app;
+  adhoc_bound.cd_hash = "cdhash-a";
+  NativeRunningObservation adhoc_running = image;
+  adhoc_running.dynamic_signature_checked = true;
+  adhoc_running.dynamic_signature_valid = true;
+  adhoc_running.cd_hash = "cdhash-a";
+  NativeRunningObservation adhoc_swapped = adhoc_running;
+  adhoc_swapped.cd_hash = "cdhash-b";
+  NativeRunningObservation adhoc_invalid = adhoc_running;
+  adhoc_invalid.dynamic_signature_valid = false;
+  NativeRunningObservation adhoc_unchecked = adhoc_running;
+  adhoc_unchecked.dynamic_signature_checked = false;
+  if (!Check(CheckRunningIdentity(adhoc_bound, adhoc_running) == NativeIdentityVerdict::kMatch,
+             "identity-adhoc-bound-match") ||
+      !Check(CheckRunningIdentity(adhoc_bound, adhoc_swapped) == NativeIdentityVerdict::kCodeDirectoryMismatch,
+             "identity-adhoc-bound-swapped-image-refused") ||
+      !Check(CheckRunningIdentity(adhoc_bound, adhoc_invalid) == NativeIdentityVerdict::kSignatureInvalid,
+             "identity-adhoc-bound-kernel-disk-disagree-refused") ||
+      !Check(CheckRunningIdentity(adhoc_bound, adhoc_unchecked) == NativeIdentityVerdict::kUnavailable,
+             "identity-adhoc-bound-unchecked-refused"))
+    return false;
+  // Verdict names are stable diagnostics, one per verdict.
+  if (!Check(NativeIdentityVerdictName(NativeIdentityVerdict::kMatch) == "match" &&
+                 NativeIdentityVerdictName(NativeIdentityVerdict::kSignatureInvalid) == "signature_invalid" &&
+                 NativeIdentityVerdictName(NativeIdentityVerdict::kCodeDirectoryMismatch) ==
+                     "code_directory_mismatch" &&
+                 NativeIdentityVerdictName(NativeIdentityVerdict::kImageDigestMismatch) ==
+                     "image_digest_mismatch",
+             "identity-verdict-names"))
     return false;
   // The signing-state cap: unsigned is never above supervised, and nothing else is changed.
   if (!Check(CapModeForSigningState(false, "full_access_app") == "supervised" &&

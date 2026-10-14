@@ -8,11 +8,15 @@
 // Fail-closed rules:
 //   * anything that could not be measured is a refusal, never a pass;
 //   * a signed application is checked against the running process's own code signature (strict
-//     validity and its designated requirement), not against the file on disk alone, and the
+//     validity and a requirement built from the bound signer), not against the file on disk alone, and the
 //     running code directory hash must be the one that was validated on disk, so a binary that was
 //     replaced after launch is refused;
-//   * an application that was bound as unsigned has no signer to compare, so the running image
-//     bytes must be exactly the bytes it was bound to, and it must not have become signed;
+//   * an application that was bound as unsigned has no signer to compare. When its image carried a
+//     code directory at bind time (ad hoc, linker or platform signature), the running process must
+//     still be strictly valid and carry that same code directory hash, so the kernel's copy and the
+//     disk agree (a replaced binary is refused). A truly unsigned image can only be held to the
+//     bytes on disk (a file read, not a read of the mapped image; the residual risk is recorded in
+//     the ADR), and it must not have become signed;
 //   * the normalized path of the running image must be the bound path.
 
 #include <string>
@@ -40,7 +44,7 @@ struct NativeRunningObservation {
   std::string team_id;
   std::string signing_identifier;
   std::string cd_hash;
-  // For a target bound as unsigned: the digest of the running image's bytes, when it could be read.
+  // For a target bound as unsigned: the digest of the file at the running image's path, when read.
   bool image_digest_measured = false;
   std::string image_digest;
 };
@@ -55,6 +59,30 @@ enum class NativeIdentityVerdict {
   kBecameSigned,
   kImageDigestMismatch,
 };
+
+// A stable name for a verdict, for diagnostics only (never user-visible text, never a decision).
+[[nodiscard]] constexpr std::string_view
+NativeIdentityVerdictName(NativeIdentityVerdict verdict) noexcept {
+  switch (verdict) {
+  case NativeIdentityVerdict::kMatch:
+    return "match";
+  case NativeIdentityVerdict::kUnavailable:
+    return "unavailable";
+  case NativeIdentityVerdict::kPathMismatch:
+    return "path_mismatch";
+  case NativeIdentityVerdict::kSignatureInvalid:
+    return "signature_invalid";
+  case NativeIdentityVerdict::kSignerMismatch:
+    return "signer_mismatch";
+  case NativeIdentityVerdict::kCodeDirectoryMismatch:
+    return "code_directory_mismatch";
+  case NativeIdentityVerdict::kBecameSigned:
+    return "became_signed";
+  case NativeIdentityVerdict::kImageDigestMismatch:
+    return "image_digest_mismatch";
+  }
+  return "unknown";
+}
 
 [[nodiscard]] inline NativeIdentityVerdict
 CheckRunningIdentity(const NativeIdentityExpectation &expected,
@@ -85,6 +113,17 @@ CheckRunningIdentity(const NativeIdentityExpectation &expected,
   if (observed.dynamic_signature_checked && observed.dynamic_signature_valid &&
       !observed.team_id.empty())
     return NativeIdentityVerdict::kBecameSigned;
+  // The image had a code directory when it was bound (ad hoc, linker or platform signature): the
+  // kernel's copy is compared with the disk by the strict dynamic check, and the hash must be the
+  // bound one. A binary swapped in after launch and restored on disk is caught here.
+  if (!expected.cd_hash.empty()) {
+    if (!observed.dynamic_signature_checked)
+      return NativeIdentityVerdict::kUnavailable;
+    if (!observed.dynamic_signature_valid)
+      return NativeIdentityVerdict::kSignatureInvalid;
+    if (observed.cd_hash != expected.cd_hash)
+      return NativeIdentityVerdict::kCodeDirectoryMismatch;
+  }
   if (observed.image_digest != expected.executable_digest)
     return NativeIdentityVerdict::kImageDigestMismatch;
   return NativeIdentityVerdict::kMatch;
