@@ -2196,6 +2196,16 @@ export class ComputerUseController {
       }),
     );
     const maxMode = state.maxMode ?? 'observe_only';
+    // `paused` is final from this call's side: only a person resumes it, and the resume route needs
+    // an idle Task, which this Turn is not. Left in `sessions` it would hold the single-session slot
+    // and the Task's own check, so the model's next list -> start would be refused with nothing it
+    // could stop. The status it is told about stays `paused`; the record is what gets released.
+    const conclude = async (
+      settled: ComputerUseSessionStatus,
+    ): Promise<ComputerStartToolOutput> => {
+      if (settled.state === 'paused') await this.stop(settled.sessionId, 'user_takeover');
+      return computerStartToolOutput(settled);
+    };
     // Installed before `start`, so no status published while the session is coming up can be
     // missed — including a session that ends before `start` has even returned. Only one session
     // exists at a time, and this call is holding that slot, so every status seen here is ours.
@@ -2241,7 +2251,7 @@ export class ComputerUseController {
       // Nothing runs between `start` resolving and this line, so anything the session has already
       // published is in `seen`, and anything later arrives through `onSettled`.
       const already = seen.get(status.sessionId) ?? status;
-      if (computerUseSessionStateIsSettled(already.state)) return computerStartToolOutput(already);
+      if (computerUseSessionStateIsSettled(already.state)) return await conclude(already);
       return await new Promise<ComputerStartToolOutput>((resolve, reject) => {
         const abandon = (): void => {
           onSettled = null;
@@ -2260,7 +2270,7 @@ export class ComputerUseController {
           if (settled.sessionId !== status.sessionId) return;
           onSettled = null;
           signal?.removeEventListener('abort', abandon);
-          resolve(computerStartToolOutput(settled));
+          conclude(settled).then(resolve, reject);
         };
         if (signal?.aborted === true) {
           abandon();

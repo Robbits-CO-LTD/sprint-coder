@@ -1603,6 +1603,62 @@ describe('computer_start', () => {
     ).toMatchObject({ state: 'paused', stopReason: null, mode: 'observe_only' });
   });
 
+  it('releases the session slot when it returns paused, so the same Turn can list and start again', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const first = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(first).toMatchObject({ state: 'paused' });
+    // The same-Task check: the paused record must not still count as "running for this Task".
+    const second = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(second).toMatchObject({ state: 'paused' });
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(fixture.startedSessions()).toBe(2);
+  });
+
+  it('releases the single-session slot when it returns paused, so another Task can start', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    // The slot check in `start`: a session nobody can resume must not block the next one.
+    const otherTask = { ...context, taskId: 'task-2' };
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture, otherTask)).targetToken, goal: 'x' },
+          otherTask,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    expect(fixture.startedSessions()).toBe(2);
+  });
+
   it('refuses a token that is unknown, expired, or from another Task or Turn', async () => {
     const fixture = createFixture();
     const target = await grantAndList(fixture);
