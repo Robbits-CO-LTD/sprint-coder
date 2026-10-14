@@ -12,6 +12,7 @@ import {
   type ComputerAppGrantRequest,
   type ComputerAppIdentity,
   type ComputerUseAction,
+  type ComputerUseApproval,
   type ComputerUseAvailability,
   type ComputerUseSessionStatus,
   type SelectableComputerTarget,
@@ -238,6 +239,17 @@ function createFixture(
     plannerFactory?: (input: { signal: AbortSignal }) => Promise<void>;
     /** What the inner planner answers each round. The default finishes the first round. */
     plan?: (round: number) => Promise<ComputerUseAction>;
+    /** Every observation reports the focused element as a secure field. */
+    focusedSecure?: boolean;
+    /** Stands in for the Task permission policy that `deps.authorize` consults. */
+    authorize?: (request: { capability: string }) => Promise<{
+      decision: 'allow' | 'deny' | 'approval_required';
+      reason: string;
+    }>;
+    /** Runs when the planner is asked to re-check the Turn's provider binding before an action. */
+    revalidate?: () => Promise<void>;
+    /** Runs every time an action audit row is recorded. */
+    onAuditRecord?: () => void;
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -252,6 +264,7 @@ function createFixture(
   const audits = new Map<string, Record<string, unknown>>();
   let plannedRounds = 0;
   const statuses: ComputerUseSessionStatus[] = [];
+  const approvals: ComputerUseApproval[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
     pickApplication: async () => null,
@@ -279,12 +292,15 @@ function createFixture(
     },
     observe: async (session) => {
       observationRevision += 1;
-      return observation(
+      const observed = observation(
         session.sessionId,
         observationRevision,
         Date.now(),
         session.appIdentityDigest,
       );
+      return options.focusedSecure === true
+        ? { ...observed, focusedElementSecure: true }
+        : observed;
     },
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
@@ -306,6 +322,7 @@ function createFixture(
     // A real enough audit store: `act` records before dispatch and completes afterwards, so a stub
     // that answers undefined turns every round into an error and hides what the test is about.
     recordComputerActionAudit: (input: Record<string, unknown>) => {
+      options.onAuditRecord?.();
       const existing = [...audits.values()].find(
         (audit) =>
           audit['sessionId'] === input['sessionId'] &&
@@ -359,6 +376,8 @@ function createFixture(
     currentPolicyEpoch: () => policyEpoch,
     repositionEmergencyStop: () => true,
     publishStatus: (status) => statuses.push(status),
+    publishApproval: (approval) => approvals.push(approval as ComputerUseApproval),
+    ...(options.authorize === undefined ? {} : { authorize: options.authorize }),
     ...(options.plannerFactory === undefined
       ? {}
       : {
@@ -380,6 +399,7 @@ function createFixture(
         plannedRounds += 1;
         return (await options.plan?.(plannedRounds)) ?? { type: 'finish' };
       },
+      ...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
     },
     ...(options.publish === false
       ? {}
@@ -392,6 +412,11 @@ function createFixture(
     grants: grantStore.grants,
     accessRequests: grantStore.accessRequests,
     startedSessions: () => startedSessions,
+    audits: () => [...audits.values()],
+    approvals,
+    /** Why the last session ended, as the status stream published it. */
+    finalStopReason: () =>
+      statuses.filter((status) => status.state === 'stopped').at(-1)?.stopReason,
     plannedRounds: () => plannedRounds,
     closedSessions: () => closedSessions,
     listWindowCalls: () => listWindowCalls,
@@ -1601,6 +1626,213 @@ describe('computer_start', () => {
         fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
       ),
     ).toMatchObject({ state: 'paused', stopReason: null, mode: 'observe_only' });
+  });
+
+  it('still records the audit row of the action that paused the session', async () => {
+    // A hard boundary publishes `paused` and only then records the refused action. Ending the
+    // session in the publisher's own synchronous run would clear the observation that row needs.
+    const fixture = createFixture({
+      focusedSecure: true,
+      plan: async () => ({ type: 'type', text: 'a' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const output = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(output).toMatchObject({ state: 'paused' });
+    expect(fixture.audits()).toEqual([
+      expect.objectContaining({ state: 'rejected', reasonCode: 'hard_boundary' }),
+    ]);
+  });
+
+  describe('the stop reason of a session that paused', () => {
+    const click = async (): Promise<ComputerUseAction> => ({
+      type: 'click',
+      x: 0.5,
+      y: 0.5,
+      button: 'left',
+    });
+
+    async function run(
+      options: Parameters<typeof createFixture>[0],
+      maxMode: 'supervised' | 'full_access_app',
+      beforeSettle?: (fixture: ReturnType<typeof createFixture>) => Promise<void>,
+    ): Promise<ReturnType<typeof createFixture>> {
+      const fixture = createFixture({ plan: click, ...options });
+      fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+        maxMode,
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      const running = fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      );
+      await beforeSettle?.(fixture);
+      expect(await settle(running)).toMatchObject({ state: 'paused' });
+      return fixture;
+    }
+
+    it('is user_takeover when the person denies the approval card', async () => {
+      const fixture = await run(
+        {
+          authorize: async (request) =>
+            request.capability === 'computer.observe'
+              ? { decision: 'allow', reason: 'observe' }
+              : { decision: 'approval_required', reason: 'needs_approval' },
+        },
+        'supervised',
+        async (current) => {
+          for (let step = 0; step < 20 && current.approvals.length === 0; step += 1)
+            await vi.advanceTimersByTimeAsync(100);
+          const card = current.approvals.find((approval) => approval.state === 'pending')!;
+          await current.controller.resolveApproval({
+            approvalId: card.id,
+            expectedRevision: card.revision,
+            decision: 'deny',
+            challenge: card.challenge,
+          });
+        },
+      );
+      expect(fixture.finalStopReason()).toBe('user_takeover');
+    });
+
+    it('is policy_changed when the Task policy denies the action', async () => {
+      const fixture = await run(
+        {
+          authorize: async (request) =>
+            request.capability === 'computer.observe'
+              ? { decision: 'allow', reason: 'observe' }
+              : { decision: 'deny', reason: 'policy_says_no' },
+        },
+        'full_access_app',
+      );
+      expect(fixture.finalStopReason()).toBe('policy_changed');
+    });
+
+    it('is policy_changed when the Turn provider binding changed before the action', async () => {
+      const fixture = await run(
+        {
+          revalidate: async () => {
+            throw new Error('binding changed');
+          },
+        },
+        'full_access_app',
+      );
+      expect(fixture.finalStopReason()).toBe('policy_changed');
+    });
+
+    it('is stale_observation when the observation expires while the action is being recorded', async () => {
+      let recorded = 0;
+      const fixture = await run(
+        {
+          onAuditRecord: () => {
+            recorded += 1;
+            if (recorded === 1) vi.setSystemTime(Date.now() + 60_000);
+          },
+        },
+        'full_access_app',
+      );
+      expect(fixture.finalStopReason()).toBe('stale_observation');
+    });
+  });
+
+  it('releases the session slot when it returns paused, so the same Turn can list and start again', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const first = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(first).toMatchObject({ state: 'paused' });
+    // The same-Task check: the paused record must not still count as "running for this Task".
+    const second = await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+        context,
+      ),
+    );
+    expect(second).toMatchObject({ state: 'paused' });
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(fixture.startedSessions()).toBe(2);
+  });
+
+  it('also releases the slot when the session had already paused before start returned', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    // `start` resolving only after the session has settled is the path that never waits for a
+    // status: it has to release the slot itself.
+    const start = fixture.controller.start.bind(fixture.controller);
+    const delayed = vi
+      .spyOn(fixture.controller, 'start')
+      .mockImplementation(async (...args: Parameters<typeof start>) => {
+        const status = await start(...args);
+        await vi.advanceTimersByTimeAsync(5_000);
+        return status;
+      });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    delayed.mockRestore();
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+  });
+
+  it('releases the single-session slot when it returns paused, so another Task can start', async () => {
+    const fixture = createFixture({
+      plan: async () => ({ type: 'click', x: 0.5, y: 0.5, button: 'left' }),
+    });
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'observe_only',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture)).targetToken, goal: 'x' },
+          context,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    // The slot check in `start`: a session nobody can resume must not block the next one.
+    const otherTask = { ...context, taskId: 'task-2' };
+    expect(
+      await settle(
+        fixture.controller.startForAgent(
+          { targetToken: (await listOne(fixture, otherTask)).targetToken, goal: 'x' },
+          otherTask,
+        ),
+      ),
+    ).toMatchObject({ state: 'paused' });
+    expect(fixture.startedSessions()).toBe(2);
   });
 
   it('refuses a token that is unknown, expired, or from another Task or Turn', async () => {

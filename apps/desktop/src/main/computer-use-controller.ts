@@ -623,6 +623,8 @@ export class ComputerUseController {
   /** Cards raised per Turn, for the T8 ceiling. A Turn does not outlive the process. */
   private readonly accessRequestsByTurn = new Map<string, number>();
   private readonly statusRevisionBySession = new Map<string, number>();
+  /** Why a session paused, where a more specific stop reason than the default exists. */
+  private readonly pauseReasons = new Map<string, ComputerUseStopReason>();
   private readonly startingSessions = new Map<
     string,
     {
@@ -2196,6 +2198,25 @@ export class ComputerUseController {
       }),
     );
     const maxMode = state.maxMode ?? 'observe_only';
+    // `paused` is final from this call's side: only a person resumes it, and the resume route needs
+    // an idle Task, which this Turn is not. Left in `sessions` it would hold the single-session slot
+    // and the Task's own check, so the model's next list -> start would be refused with nothing it
+    // could stop. The status it is told about stays `paused`; the record is what gets released.
+    const conclude = async (
+      settled: ComputerUseSessionStatus,
+    ): Promise<ComputerStartToolOutput> => {
+      if (settled.state === 'paused') {
+        // Not in the same synchronous run as the `paused` publish: the code that published it goes
+        // on to record the audit row for the refused or paused action, and that needs the
+        // observation which `completeStop` clears before its first await. A macrotask later, the
+        // publishing path has finished.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        const reason = this.pauseReasons.get(settled.sessionId) ?? 'user_takeover';
+        this.pauseReasons.delete(settled.sessionId);
+        await this.stop(settled.sessionId, reason);
+      }
+      return computerStartToolOutput(settled);
+    };
     // Installed before `start`, so no status published while the session is coming up can be
     // missed — including a session that ends before `start` has even returned. Only one session
     // exists at a time, and this call is holding that slot, so every status seen here is ours.
@@ -2241,7 +2262,7 @@ export class ComputerUseController {
       // Nothing runs between `start` resolving and this line, so anything the session has already
       // published is in `seen`, and anything later arrives through `onSettled`.
       const already = seen.get(status.sessionId) ?? status;
-      if (computerUseSessionStateIsSettled(already.state)) return computerStartToolOutput(already);
+      if (computerUseSessionStateIsSettled(already.state)) return await conclude(already);
       return await new Promise<ComputerStartToolOutput>((resolve, reject) => {
         const abandon = (): void => {
           onSettled = null;
@@ -2260,7 +2281,7 @@ export class ComputerUseController {
           if (settled.sessionId !== status.sessionId) return;
           onSettled = null;
           signal?.removeEventListener('abort', abandon);
-          resolve(computerStartToolOutput(settled));
+          conclude(settled).then(resolve, reject);
         };
         if (signal?.aborted === true) {
           abandon();
@@ -2992,6 +3013,7 @@ export class ComputerUseController {
     this.emit(record.status);
     this.sessions.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
+    this.pauseReasons.delete(sessionId);
   }
 
   async stopForTask(
@@ -3448,6 +3470,10 @@ export class ComputerUseController {
       )
         this.planGrantAuthorizedCalls.add(`${sessionId}\0${request.callId}`);
       if (authorized.decision === 'deny') {
+        // A person's own answer to the card (deny, focus restore failed, expired) stays the default
+        // takeover; only a deny that `deps.authorize` or the controller itself decided is a policy one.
+        if (!authorized.reason.startsWith('computer_approval_'))
+          this.pauseReasons.set(record.status.sessionId, 'policy_changed');
         record.status = this.status(
           record,
           'paused',
@@ -3659,6 +3685,7 @@ export class ComputerUseController {
       } catch {
         if (record.controller.signal.aborted || signal?.aborted)
           throw new Error('Computer Use is canceled');
+        this.pauseReasons.set(record.status.sessionId, 'policy_changed');
         record.status = this.status(
           record,
           'paused',
@@ -3730,6 +3757,7 @@ export class ComputerUseController {
         reasonCode: 'stale_observation',
         updatedAt: new Date(this.now()).toISOString(),
       });
+      this.pauseReasons.set(sessionId, 'stale_observation');
       record.status = this.status(
         record,
         'paused',
