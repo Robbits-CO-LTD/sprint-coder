@@ -2075,6 +2075,115 @@ bool CheckEffectClassifierCore() {
       return false;
   }
 
+  // A label of only whitespace is no label: a button, a field, a caption near a field and a
+  // value-changing scroll all treat it as empty.
+  for (const std::string &blank : std::vector<std::string>{
+           " ", " \t\n", "\xC2\xA0", "\xE3\x80\x80", "\xE2\x80\xA8", " \xE2\x80\x8B ", "\xE2\x80\xAF\xC2\x85"}) {
+    if (!Check(EffTakeover(EffLabel(blank, ActionKind::kClick)), "effect-blank-button")) return false;
+    if (!Check(EffTakeover(EffLabel(blank, ActionKind::kType)), "effect-blank-field")) return false;
+    EffectFacts browser = EffLabel("", ActionKind::kType);
+    browser.origin = OriginState::kOrdinary;
+    browser.neighbor_labels = {blank};
+    browser.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(browser), "effect-blank-neighbor-caption")) return false;
+    browser.neighbor_labels = {blank, "Name"};
+    if (!Check(ClassifyEffect(browser).kind != DecisionKind::kTakeover, "effect-blank-neighbor-with-real-caption"))
+      return false;
+    EffectFacts scroll = EffBase();
+    scroll.chain = {{"axcombobox", "", blank}, {"axwindow", "", "Pay"}};
+    scroll.action = ActionKind::kScroll;
+    if (!Check(EffTakeover(scroll), "effect-blank-value-scroll")) return false;
+    scroll.origin = OriginState::kOrdinary;
+    scroll.neighbor_labels = {blank};
+    scroll.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(scroll), "effect-blank-value-scroll-neighbor")) return false;
+  }
+
+  // A value-changing scroll in a browser reads the captions near the control, as typing does.
+  {
+    for (const std::string &caption : std::vector<std::string>{"Card expiration date", "Security code",
+                                                               "Password", "\xE3\x82\xAB\xE3\x83\xBC\xE3\x83\x89\xE7\x95\xAA\xE5\x8F\xB7"}) {
+      EffectFacts facts = EffBase();
+      facts.chain = {{"axcombobox", "", "Year"}, {"axwindow", "", "Checkout"}};
+      facts.action = ActionKind::kScroll;
+      facts.origin = OriginState::kOrdinary;
+      facts.neighbor_labels = {caption};
+      facts.neighbor_labels_complete = true;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-value-scroll-neighbor-blocks"))
+        return false;
+      // A neighbouring caption that could not be read completely is a person's decision.
+      facts.neighbor_labels = {"Year"};
+      facts.neighbor_labels_complete = false;
+      if (!Check(EffTakeover(facts), "effect-value-scroll-neighbors-incomplete")) return false;
+      facts.neighbor_labels_complete = true;
+      if (!Check(ClassifyEffect(facts).kind != DecisionKind::kTakeover, "effect-value-scroll-neighbors-complete"))
+        return false;
+    }
+    EffectFacts unreadable = EffBase();
+    unreadable.chain = {{"axcombobox", "", "Year"}, {"axwindow", "", "Checkout"}};
+    unreadable.action = ActionKind::kScroll;
+    unreadable.origin = OriginState::kOrdinary;
+    unreadable.neighbor_labels = {"Expir\xD0\xB0tion date"};
+    unreadable.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(unreadable), "effect-value-scroll-neighbor-unreadable")) return false;
+    // Browsing keeps ignoring what is next to it.
+    EffectFacts browse = EffBase();
+    browse.chain = {{"axscrollarea", "", "Results"}, {"axwindow", "", "Help"}};
+    browse.action = ActionKind::kScroll;
+    browse.origin = OriginState::kOrdinary;
+    browse.neighbor_labels = {"Card number", "Expir\xD0\xB0tion date"};
+    browse.neighbor_labels_complete = false;
+    if (!Check(ClassifyEffect(browse).kind == DecisionKind::kOrdinary, "effect-browse-scroll-ignores-neighbors"))
+      return false;
+  }
+
+  // Pickers, drop-downs and list boxes are value-changing too.
+  for (const char *role : {"axdatepicker", "AXTimePicker", "ColorPicker", "axdropdown", "DropDown",
+                           "axlistbox", "ListBox"}) {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axtextfield", "", "2026"}, {role, "", "Expiration year"}, {"axwindow", "", "Pay"}};
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-picker-ancestor-in-scope"))
+      return false;
+    facts.chain = {{"axtextfield", "", ""}, {role, "", ""}, {"axwindow", "", "Pay"}};
+    facts.text_language_supported = false;
+    if (!Check(EffTakeover(facts), "effect-scroll-picker-needs-readable-language")) return false;
+  }
+
+  // Japanese does not put blanks between words: a blank between two Japanese characters goes.
+  for (const std::string &label : std::vector<std::string>{
+           "\xE3\x82\xAB\xE3\x83\xBC\xE3\x83\x89\xE3\x80\x80\xE7\x95\xAA\xE5\x8F\xB7",
+           "\xE3\x82\xAB\xE3\x83\xBC\xE3\x83\x89 \xE7\x95\xAA\xE5\x8F\xB7",
+           "\xE3\x82\xAB\xE3\x83\xBC\xE3\x83\x89\n\n\xE7\x95\xAA\xE5\x8F\xB7",
+           "\xE3\x82\xAB\xE3\x83\xBC\xE3\x83\x89\xC2\xA0\xE7\x95\xAA\xE5\x8F\xB7",
+           "\xE3\x82\xAB\xE3\x83\xBC \xE3\x83\x89\xE7\x95\xAA\xE5\x8F\xB7",
+           "\xE6\x9C\x89\xE5\x8A\xB9 \xE6\x9C\x9F\xE9\x99\x90",
+           "\xE3\x82\xBB\xE3\x82\xAD\xE3\x83\xA5\xE3\x83\xAA\xE3\x83\x86\xE3\x82\xA3\xE3\x80\x80\xE3\x82\xB3\xE3\x83\xBC\xE3\x83\x89"}) {
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kType)).kind == DecisionKind::kBlocked,
+               "effect-cjk-whitespace-credential")) return false;
+  }
+  // The same gap between Latin words stays one blank; a Japanese-Latin gap is not joined.
+  if (!Check(NormalizeForMatch("a \xE3\x81\x82 b") == "a \xE3\x81\x82 b", "effect-cjk-whitespace-keeps-latin-gaps"))
+    return false;
+  if (!Check(NormalizeForMatch("\xE3\x81\x82\xE3\x80\x80\xE3\x81\x84") == "\xE3\x81\x82\xE3\x81\x84",
+             "effect-cjk-whitespace-joins-japanese")) return false;
+  if (!Check(NormalizeForMatch("  a  b \t") == "a b", "effect-normalize-trims-and-collapses")) return false;
+
+  // In a browser the caption of a value-changing scroll may be only a neighbour; nothing at all is
+  // not a label.
+  {
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axcombobox", "", ""}, {"axwindow", "", ""}};
+    facts.action = ActionKind::kScroll;
+    facts.origin = OriginState::kOrdinary;
+    facts.neighbor_labels = {"Sort by"};
+    facts.neighbor_labels_complete = true;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-value-scroll-neighbor-is-the-label"))
+      return false;
+    facts.neighbor_labels.clear();
+    if (!Check(EffTakeover(facts), "effect-value-scroll-browser-without-any-label")) return false;
+  }
+
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
   // always carries a valid native effect; everything else carries none.
   {

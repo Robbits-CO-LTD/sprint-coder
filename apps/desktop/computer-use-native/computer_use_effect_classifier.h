@@ -390,13 +390,30 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
          code == 0x202F || code == 0x205F || code == 0x3000;
 }
 
+// Kana and ideographs: Japanese does not put blanks between words, so a blank between two of
+// them is layout ("カード　番号" is "カード番号").
+[[nodiscard]] constexpr bool IsCjkCharacter(char32_t code) {
+  return (code >= 0x3040 && code <= 0x30FF) || (code >= 0x31F0 && code <= 0x31FF) ||
+         (code >= 0x3400 && code <= 0x4DBF) || (code >= 0x4E00 && code <= 0x9FFF) ||
+         (code >= 0xF900 && code <= 0xFAFF) || (code >= 0xFF66 && code <= 0xFF9F) ||
+         code == 0x3005 || code == 0x3006 || code == 0x3007;
+}
+
 // Drops the default-ignorable code points, so a label cannot hide a word behind them, folds ASCII
-// case and turns every run of whitespace into one blank ("Place  order" and "Card\nnumber" are the
-// words they look like). Malformed UTF-8 bytes are kept as they are; TextIsClassifiable refuses
-// text that is malformed before this runs.
+// case and turns every run of whitespace into one blank ("Place  order" is "place order"). Blanks at
+// either end are dropped, so a label of only blanks is empty, and a
+// blank between two Japanese characters is dropped. Malformed UTF-8 bytes are kept as they are;
+// TextIsClassifiable refuses text that is malformed before this runs.
 [[nodiscard]] inline std::string NormalizeForMatch(std::string_view text) {
   std::string output;
   output.reserve(text.size());
+  bool pending_blank = false;
+  char32_t previous = 0;
+  const auto flush_blank = [&](char32_t next) {
+    if (pending_blank && !output.empty() && !(IsCjkCharacter(previous) && IsCjkCharacter(next)))
+      output.push_back(' ');
+    pending_blank = false;
+  };
   for (std::size_t index = 0; index < text.size();) {
     char32_t code = 0;
     std::size_t length = 1;
@@ -406,10 +423,12 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
         continue;
       }
       if (IsWhitespace(code)) {
-        if (output.empty() || output.back() != ' ') output.push_back(' ');
+        pending_blank = true;
         index += length;
         continue;
       }
+      flush_blank(code);
+      previous = code;
       if (length == 1) {
         char character = text[index];
         if (character >= 'A' && character <= 'Z')
@@ -420,6 +439,8 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
       }
       index += length;
     } else {
+      flush_blank(0);
+      previous = 0;
       output.push_back(text[index]);
       ++index;
     }
@@ -748,15 +769,21 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return false;
 }
 
-// The label requirement of a value-changing scroll: the caller says the language is covered and some
-// node in scope has a label.
+// The label requirement of a value-changing scroll: the caller says the language is covered, the
+// neighbouring captions are readable, and some node in scope (or, in a browser, a caption near it)
+// has a label.
 [[nodiscard]] inline bool ScrollValueTextIsClassifiable(const EffectFacts &facts, std::size_t limit) {
   if (!facts.text_language_supported) return false;
+  for (const std::string &label : facts.neighbor_labels)
+    if (!IsValidUtf8(label) || HasUnreadableCharacters(NormalizeForMatch(label))) return false;
   std::size_t index = 0;
   for (const NodeFacts &node : facts.chain) {
     if (index++ >= limit) break;
     if (!NormalizeForMatch(node.label).empty()) return true;
   }
+  if (facts.origin == OriginState::kNotApplicable) return false;
+  for (const std::string &label : facts.neighbor_labels)
+    if (!NormalizeForMatch(label).empty()) return true;
   return false;
 }
 
@@ -794,14 +821,18 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   // number field.
   const std::size_t scope =
       facts.action == ActionKind::kScroll ? ScrollScope(facts) : facts.chain.size();
+  // A wheel over a combobox or a number field changes a value: its caption may sit next to it in a
+  // browser, as it does for a text field.
+  const bool value_scroll = facts.action == ActionKind::kScroll && ScrollChangesValue(facts, scope);
+  const bool reads_neighbors = entering_text || value_scroll;
   if (ChainContains(facts, kSecureTerms, Mode::kSubstring, scope) ||
       ChainContains(facts, kSecureBoundedTerms, Mode::kBounded, scope) ||
-      (entering_text && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
+      (reads_neighbors && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kSecureBoundedTerms, Mode::kBounded))))
     return Make(EffectClass::kSecure, DecisionKind::kBlocked, DecisionReason::kSecure);
   if (ChainContains(facts, kCredentialTerms, Mode::kSubstring, scope) ||
       ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix, scope) ||
-      (entering_text && (NeighborsContain(facts, kCredentialTerms, Mode::kSubstring) ||
+      (reads_neighbors && (NeighborsContain(facts, kCredentialTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kCredentialPrefixTerms, Mode::kPrefix))))
     return Make(EffectClass::kCredential, DecisionKind::kBlocked, DecisionReason::kCredential);
   if (IsCommandSurface(facts.surface) || ChainContains(facts, kSurfaceTerms, Mode::kBounded))
@@ -824,7 +855,7 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   if (facts.action != ActionKind::kScroll && !TextIsClassifiable(facts)) return Takeover();
   if (facts.action == ActionKind::kScroll &&
       (!ScopeIsReadable(facts, scope) ||
-       (ScrollChangesValue(facts, scope) && !ScrollValueTextIsClassifiable(facts, scope))))
+       (value_scroll && !ScrollValueTextIsClassifiable(facts, scope))))
     return Takeover();
 
   if (IsActivating(facts) && ActionableContains(facts, kInstallerTerms))
@@ -836,7 +867,7 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   if (facts.origin == OriginState::kUnknown) return Takeover();
   if (facts.origin == OriginState::kSensitive)
     return Make(EffectClass::kSurface, DecisionKind::kTakeover, DecisionReason::kSensitiveOrigin);
-  if (entering_text && facts.origin != OriginState::kNotApplicable &&
+  if (reads_neighbors && facts.origin != OriginState::kNotApplicable &&
       !facts.neighbor_labels_complete)
     return Takeover();
 
