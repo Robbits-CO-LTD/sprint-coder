@@ -10,6 +10,7 @@ import {
   loadComputerUseNative,
   parseComputerUseNativeManifest,
 } from './computer-use-native';
+import { computerUseNativeCompiledPin } from './computer-use-native-provenance';
 import {
   COMPUTER_USE_NATIVE_FRAME_HEADER_BYTES,
   COMPUTER_USE_NATIVE_MAX_BINARY_BYTES,
@@ -46,6 +47,7 @@ function packageFixture(
     platform?: 'darwin' | 'win32';
     trust?: 'developer-id' | 'authenticode' | 'ad-hoc' | 'unsigned';
     bytes?: string;
+    eligibility?: Record<string, unknown>;
   }> = {},
 ) {
   const platform = options.platform ?? 'darwin';
@@ -77,6 +79,7 @@ function packageFixture(
       binaryDigest: createHash('sha256').update(bytes).digest('hex'),
       signerDigest: trust === 'developer-id' || trust === 'authenticode' ? 'a'.repeat(64) : null,
       capabilities: ['observe', 'capture', 'accessibility', 'input'],
+      ...(options.eligibility === undefined ? {} : { eligibility: options.eligibility }),
     }),
   );
   return { root, resources, packagedDirname, artifactPath };
@@ -1548,6 +1551,84 @@ describe('Computer Use native manifest and runtime gate', () => {
       }
     },
   );
+
+  describe('D7 eligibility through the loader', () => {
+    const v1 = {
+      mode: 'v1-allowlist',
+      rulesetVersion: 1,
+      classifierVersion: 1,
+      lexiconVersion: 1,
+      ticketRequired: true,
+    };
+    const v2 = { ...v1, mode: 'v2-denylist' };
+    const load = (
+      manifestEligibility: Record<string, unknown> | undefined,
+      attestation: Record<string, unknown> | undefined,
+      compiledEligibility?: Record<string, unknown>,
+    ) => {
+      const fixture = packageFixture(
+        manifestEligibility === undefined ? {} : { eligibility: manifestEligibility },
+      );
+      const manifest = parseComputerUseNativeManifest(
+        JSON.parse(
+          readFileSync(join(fixture.resources, 'computer-use-native.manifest.json'), 'utf8'),
+        ),
+      );
+      const pin = computerUseNativeCompiledPin(manifest);
+      return loadComputerUseNative({
+        environment: { [COMPUTER_USE_NATIVE_FEATURE_FLAG]: '1' },
+        dirname: fixture.packagedDirname,
+        resourcesPath: fixture.resources,
+        platform: 'darwin',
+        architecture: 'arm64',
+        ...(compiledEligibility === undefined
+          ? {}
+          : { compiledPin: { ...pin, eligibility: compiledEligibility } as unknown as typeof pin }),
+        requireAddon: () => ({
+          probe: () => ({ protocolVersion: 1, apiVersion: 2, available: true, backend: 'fixture' }),
+          handshake: () => ({
+            protocolVersion: 1,
+            apiVersion: 2,
+            platform: 'darwin',
+            napiVersion: 10,
+            ...(attestation === undefined ? {} : { eligibility: attestation }),
+          }),
+        }),
+        verifySignature: () => 'a'.repeat(64),
+      });
+    };
+
+    it('opens for a legacy artifact that declares nothing (V1 does not regress)', () => {
+      const binding = load(undefined, undefined);
+      expect(binding.probe.available).toBe(true);
+      expect(binding.addon).not.toBeNull();
+    });
+
+    it('opens for a v1 artifact that declares and attests v1, and closes on a differing attestation', () => {
+      expect(load(v1, v1).probe.available).toBe(true);
+      const mismatch = load(v1, v2);
+      expect(mismatch.probe).toMatchObject({ available: false, reason: 'ELIGIBILITY_MISMATCH' });
+      expect(mismatch.addon).toBeNull();
+    });
+
+    it('closes a legacy Main for a v2 manifest', () => {
+      const closed = load(v2, v2);
+      expect(closed.probe).toMatchObject({ available: false, reason: 'ELIGIBILITY_MISMATCH' });
+      expect(closed.addon).toBeNull();
+    });
+
+    it('opens a v2 Main only for a v2 manifest and attestation, and closes without the attestation', () => {
+      expect(load(v2, v2, v2).probe.available).toBe(true);
+      expect(load(v2, undefined, v2).probe).toMatchObject({
+        available: false,
+        reason: 'ELIGIBILITY_MISMATCH',
+      });
+      expect(load(v1, v1, v2).probe).toMatchObject({
+        available: false,
+        reason: 'ELIGIBILITY_MISMATCH',
+      });
+    });
+  });
 
   it.each([
     { buildMode: 'v2-denylist' },

@@ -5,9 +5,12 @@ import { createRequire } from 'node:module';
 import { lstatSync, readFileSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import {
+  computerUseEligibilitySchema,
   computerUseNativeManifestSchema,
+  type ComputerUseEligibility,
   type ComputerUseNativeManifest,
 } from '@sprint-coder/contracts';
+import { checkComputerUseEligibility } from './computer-use-eligibility';
 import { computerUseWindowsSignerWaived } from './computer-use-acceptance-mode';
 import {
   knownNativeProbeReason,
@@ -158,6 +161,9 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
     return DENIED_PROBE('MANIFEST_INVALID');
   }
   if (parsed.platform !== value['platform']) return DENIED_PROBE('ARTIFACT_UNAVAILABLE');
+  // The eligibility compiled into Main (ADR v2 D7). No pin, or a pin built before D7, is a legacy
+  // Main: it means the v1 allow-list.
+  let compiledEligibility: ComputerUseEligibility | null = null;
   if (Object.prototype.hasOwnProperty.call(value, 'compiledPin')) {
     let compiledPin: ComputerUseNativeCompiledPin;
     try {
@@ -165,6 +171,7 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
     } catch {
       return DENIED_PROBE('COMPILED_PROVENANCE_UNAVAILABLE');
     }
+    compiledEligibility = compiledPin.eligibility ?? null;
     const candidateDigest = value['artifactDigest'];
     if (
       typeof candidateDigest !== 'string' ||
@@ -190,6 +197,22 @@ export function evaluateComputerUseNativeGate(input: unknown): ComputerUseNative
   // Otherwise an unverified module's own reason would be the first thing shown to the user.
   const artifactDigest = parsed.platform === 'darwin' ? parsed.moduleDigest : parsed.binaryDigest;
   if (value['artifactDigest'] !== artifactDigest) return DENIED_PROBE('ARTIFACT_DIGEST_MISMATCH');
+  // The artifact is the one the manifest describes, so what it and its manifest declare about
+  // eligibility can be compared with what Main was compiled for. This sits before the probe's own
+  // refusal: a build that disagrees about the safety boundary is closed whatever else it says.
+  let attestedEligibility: ComputerUseEligibility | undefined;
+  if (Object.prototype.hasOwnProperty.call(value, 'eligibilityAttestation')) {
+    const attestation = computerUseEligibilitySchema.safeParse(value['eligibilityAttestation']);
+    if (!attestation.success) return DENIED_PROBE('HANDSHAKE_INVALID');
+    attestedEligibility = attestation.data;
+  }
+  const eligibility = checkComputerUseEligibility({
+    compiled: compiledEligibility,
+    manifest: parsed.eligibility,
+    attested: attestedEligibility,
+  });
+  if (eligibility === 'mismatch') return DENIED_PROBE('ELIGIBILITY_MISMATCH');
+  if (eligibility === 'ticket_unattested') return DENIED_PROBE('ELIGIBILITY_TICKET_UNATTESTED');
   // Only now is the package fully verified, so the native probe's own refusal is the most specific
   // fact available. Only a reason this build knows about is forwarded, and it names a closed gate:
   // observe/control stay false either way.
@@ -320,7 +343,7 @@ export function loadComputerUseNative(
     const nativeProbe = parseNativeProbe(raw.probe());
     const handshake = raw.handshake?.({ protocolVersion: 1, apiVersion: 2, featureFlag: true });
     if (handshake === undefined) throw new Error('HANDSHAKE_UNAVAILABLE');
-    parseNativeHandshake(handshake, platform);
+    const attestedEligibility = parseNativeHandshake(handshake, platform);
     const result = evaluateComputerUseNativeGate({
       featureFlag: true,
       packaged: true,
@@ -330,6 +353,7 @@ export function loadComputerUseNative(
       artifactDigest: digest,
       artifactPath,
       ...(compiledPin.required ? { compiledPin: compiledPin.value } : {}),
+      ...(attestedEligibility === null ? {} : { eligibilityAttestation: attestedEligibility }),
     });
     if (!result.available)
       return Object.freeze({
@@ -380,6 +404,15 @@ function resolveComputerUseNativeCompiledPin(options: ComputerUseNativeLoadOptio
   } catch {
     return { required: true, value: null };
   }
+}
+
+/**
+ * The eligibility this Main was compiled for, or null for a Main built without one (the legacy
+ * allow-list). It comes from the build-time pin only, never from the environment.
+ */
+export function computerUseCompiledEligibility(): ComputerUseEligibility | null {
+  const pin = resolveComputerUseNativeCompiledPin({});
+  return pin.value?.eligibility ?? null;
 }
 
 export function verifyComputerUseNativeSignature(

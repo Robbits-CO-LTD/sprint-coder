@@ -1,10 +1,19 @@
-export function parseNativeHandshake(value: unknown, platform: NodeJS.Platform): void {
+import { computerUseEligibilitySchema, type ComputerUseEligibility } from '@sprint-coder/contracts';
+
+/**
+ * Validates the native handshake and returns the eligibility the native attests, or null when it
+ * attests nothing (a native built before D7). Any other extension claim is still refused.
+ */
+export function parseNativeHandshake(
+  value: unknown,
+  platform: NodeJS.Platform,
+): ComputerUseEligibility | null {
   if (typeof value !== 'object' || value === null || Array.isArray(value))
     throw new Error('HANDSHAKE_INVALID');
   const handshake = value as Record<string, unknown>;
   // Current native builds implement V1 only. Do not ignore extension claims that a future
   // native could otherwise make before the coordinated mode/ruleset handshake is implemented.
-  const keys = ['protocolVersion', 'apiVersion', 'platform', 'napiVersion'];
+  const keys = ['protocolVersion', 'apiVersion', 'platform', 'napiVersion', 'eligibility'];
   if (platform === 'win32')
     keys.push('sourceCommit', 'backend', 'architecture', 'available', 'capabilities', 'reason');
   if (Reflect.ownKeys(handshake).some((key) => typeof key !== 'string' || !keys.includes(key)))
@@ -46,4 +55,8 @@ export function parseNativeHandshake(value: unknown, platform: NodeJS.Platform):
         throw new Error('HANDSHAKE_INVALID');
     }
   }
+  if (!Reflect.ownKeys(handshake).includes('eligibility')) return null;
+  const eligibility = computerUseEligibilitySchema.safeParse(handshake['eligibility']);
+  if (!eligibility.success) throw new Error('HANDSHAKE_INVALID');
+  return eligibility.data;
 }
