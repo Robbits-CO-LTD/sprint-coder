@@ -2835,7 +2835,8 @@ napi_value Handshake(napi_env env, napi_callback_info info) {
   napi_set_named_property(env, result, "napiVersion", NumberValue(env, NAPI_VERSION));
   // What this native was compiled as (ADR v2 D7). Main compares it with its own compiled constant
   // and the manifest. The values are constants of the build and nothing at run time can change
-  // them. `ticketRequired` is false until the native requires a ticket for every input.
+  // them. `ticketRequired` is true: dispatch refuses any input without a ticket (see
+  // ReserveNativeDispatchRequestLocked), and dispatchApproved needs a held execution ticket.
   napi_value eligibility;
   napi_create_object(env, &eligibility);
   napi_set_named_property(
@@ -5201,7 +5202,10 @@ bool ReserveNativeDispatchRequestLocked(const NativeDispatchRequest* request,
   // the ticket key at all, whatever its value, takes this branch and never falls back to the
   // legacy path. The slot is consumed (and so burned) before any further check, then every binding
   // must match: the 7 request fields, the TTL, the current ticket generation and the cancel epoch.
-  // N2b note: a "ticket required" rule must be placed after the replay/in-flight checks above.
+  // A ticket is required for every input (ADR v2 S4-4 addendum 5). The rule sits after the
+  // replay/in-flight checks above, so a replay still answers from the cache with no ticket. A
+  // request without the key never falls back to a ticket-free path: it is refused here, before any
+  // reservation, and the ordinary slot is left untouched.
   if (request->ticket_key.present) {
     std::uint64_t now_ns = 0;
     const bool have_clock = ReadNativeMonotonicNs(&now_ns);
@@ -5223,6 +5227,9 @@ bool ReserveNativeDispatchRequestLocked(const NativeDispatchRequest* request,
       *replay = MakeDispatchOutcome("rejected", "native_ticket_invalid");
       return false;
     }
+  } else {
+    *replay = MakeDispatchOutcome("rejected", "native_ticket_invalid");
+    return false;
   }
   if (session.inflight_dispatches.size() >= kMaxInflightDispatchEntries) {
     *replay = MakeDispatchOutcome("rejected", "native_dispatch_busy");

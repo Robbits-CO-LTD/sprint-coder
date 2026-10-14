@@ -5,7 +5,7 @@
     "lexiconVersion": 1
   },
   "ticketRequired": {
-    "darwin": false,
+    "darwin": true,
     "win32": false
   }
 }

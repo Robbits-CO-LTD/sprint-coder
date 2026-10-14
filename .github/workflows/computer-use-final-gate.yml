@@ -578,8 +578,8 @@ jobs:
           if (JSON.stringify(actual) !== JSON.stringify(expected)) {
             throw new Error('macOS Computer Use native manifest has unexpected keys.');
           }
-          // A distributed package is always the v1 allow-list; the native claims no ticket
-          // requirement until it demands one (ADR v2 D7).
+          // A distributed package is always the v1 allow-list. The macOS native refuses every input
+          // without a ticket (N2b-4 PR 5), so it claims the ticket requirement (ADR v2 D7).
           const eligibility = value.eligibility;
           const eligibilityKeys = ['classifierVersion', 'lexiconVersion', 'mode', 'rulesetVersion', 'ticketRequired'];
           if (
@@ -589,7 +589,7 @@ jobs:
             eligibility.rulesetVersion !== 1 ||
             eligibility.classifierVersion !== 1 ||
             eligibility.lexiconVersion !== 1 ||
-            eligibility.ticketRequired !== false
+            eligibility.ticketRequired !== true
           ) {
             throw new Error('macOS Computer Use native manifest eligibility is invalid.');
           }

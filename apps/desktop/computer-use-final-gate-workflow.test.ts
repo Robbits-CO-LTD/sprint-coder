@@ -712,13 +712,14 @@ describe('Computer Use external final gate', () => {
     });
 
     it('expects the eligibility object the build writes and the v1 values a package ships with', () => {
-      // A distributed package is the v1 allow-list at the table's v1 numbers, claiming no ticket.
+      // A distributed package is the v1 allow-list at the table's v1 numbers. Only the macOS native
+      // claims a ticket requirement (N2b-4 PR 5); Windows stays false until S5.
       expect(eligibilityTable.versions).toEqual({
         rulesetVersion: 1,
         classifierVersion: 1,
         lexiconVersion: 1,
       });
-      expect(eligibilityTable.ticketRequired).toEqual({ darwin: false, win32: false });
+      expect(eligibilityTable.ticketRequired).toEqual({ darwin: true, win32: false });
       for (const key of [
         'classifierVersion',
         'lexiconVersion',
@@ -740,7 +741,7 @@ describe('Computer Use external final gate', () => {
       expect(workflow).toContain('-not ($eligibility.ticketRequired -is [bool])');
       expect(workflow).toContain('$eligibility.ticketRequired -ne $false');
       expect(workflow).toContain("eligibility.mode !== 'v1-allowlist'");
-      expect(workflow).toContain('eligibility.ticketRequired !== false');
+      expect(workflow).toContain('eligibility.ticketRequired !== true');
       expect(workflow).toContain('Windows Computer Use native manifest eligibility is invalid.');
       expect(workflow).toContain('macOS Computer Use native manifest eligibility is invalid.');
     });
@@ -833,7 +834,7 @@ describe('Computer Use external final gate', () => {
             rulesetVersion: 1,
             classifierVersion: 1,
             lexiconVersion: 1,
-            ticketRequired: false,
+            ticketRequired: true,
           },
           ...overrides,
         });
@@ -856,7 +857,7 @@ describe('Computer Use external final gate', () => {
               rulesetVersion: 1,
               classifierVersion: 1,
               lexiconVersion: 1,
-              ticketRequired: false,
+              ticketRequired: true,
               ...change,
             },
           });
@@ -865,8 +866,8 @@ describe('Computer Use external final gate', () => {
           { rulesetVersion: 2 },
           { classifierVersion: 2 },
           { lexiconVersion: 2 },
-          { ticketRequired: true },
-          { ticketRequired: 'false' },
+          { ticketRequired: false },
+          { ticketRequired: 'true' },
           { extra: true },
         ])
           expect(run(eligibility(change)), JSON.stringify(change)).not.toBe(0);
