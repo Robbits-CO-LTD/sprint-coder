@@ -15,11 +15,14 @@
 #include <atomic>
 #include <CommonCrypto/CommonDigest.h>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <dispatch/dispatch.h>
 #include <libproc.h>
+#include <mach/machine.h>
 #include <mutex>
 #include <limits>
 #include <memory>
@@ -31,6 +34,7 @@
 #include <vector>
 
 #include "computer_use_native_binding.h"
+#include "computer_use_native_identity.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
@@ -646,7 +650,7 @@ std::string PolicyLanguageForMacExecutable(NSString* executable) {
   return PolicyLanguageForMacBundle(MacBundleForExecutable(executable));
 }
 
-std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
+std::string UncappedMaximumModeForIdentityFacts(const IdentityFacts& facts) {
   const bool policy_language_attested =
       facts.policy_language == "en" || facts.policy_language == "ja";
   if (IsExactSystemTextEdit(
@@ -659,6 +663,17 @@ std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
                                  facts.signing_identifier))
     return "supervised";
   return "observe_only";
+}
+
+// An application with no signer to hold it to never gets more than a person's approval for every
+// operation. The exact system TextEdit is an Apple platform binary that carries no team id, so the
+// exact-path rule above is what binds it and it keeps the mode it always had.
+std::string MaximumModeForIdentityFacts(const IdentityFacts& facts) {
+  const std::string mode = UncappedMaximumModeForIdentityFacts(facts);
+  if (IsExactSystemTextEdit([NSString stringWithUTF8String:facts.bundle_id.c_str()],
+                            [NSString stringWithUTF8String:facts.executable_path.c_str()]))
+    return mode;
+  return std::string(sprint_coder::computer_use::CapModeForSigningState(facts.signed_target, mode));
 }
 
 void SetScreenBoundsProperty(napi_env env, napi_value object,
@@ -780,6 +795,217 @@ napi_value IdentityObjectFromBundle(napi_env env, NSURL* bundle_url, std::uint32
   return IdentityObjectFromFacts(env, facts, pid);
 }
 
+// ---- Running-process identity (ADR v2 D12, section 6.2.1) -------------------------------------
+// The static check above validates the file on disk. Here the process that is running now is
+// measured and judged by CheckRunningIdentity, so "the file I validated" and "the process I am
+// controlling" cannot drift apart (a binary replaced after launch, a process that changed owner
+// image, an unsigned image whose bytes changed). Every measurement is read-only; nothing here sends
+// input, changes focus or performs an accessibility action.
+
+bool ReadRunningImagePath(std::uint32_t pid, std::string* path) {
+  char buffer[PROC_PIDPATHINFO_MAXSIZE] = {};
+  if (pid == 0 || proc_pidpath(static_cast<int>(pid), buffer, sizeof(buffer)) <= 0) return false;
+  *path = buffer;
+  return !path->empty();
+}
+
+// The architecture the process is running as, as the kernel reports it (a process translated by
+// Rosetta reports x86_64). A universal binary carries one code directory per slice, so the bound
+// hash has to be the one of the slice that is actually running.
+bool ReadRunningArchitecture(std::uint32_t pid, cpu_type_t* cputype) {
+  struct proc_archinfo info = {};
+  if (pid == 0 || proc_pidinfo(static_cast<int>(pid), PROC_PIDARCHINFO, 0, &info,
+                               static_cast<int>(sizeof(info))) != static_cast<int>(sizeof(info)))
+    return false;
+  *cputype = info.p_cputype;
+  return true;
+}
+
+// The code directory hash of the file's slice for one architecture (SecStaticCode.h:
+// kSecCodeAttributeArchitecture selects the slice of a universal binary). False when the file has no
+// such slice or no signature to read.
+bool CopyStaticCdHashForArchitecture(NSString* executable, cpu_type_t cputype, std::string* cd_hash) {
+  CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:executable];
+  const int32_t architecture_value = static_cast<int32_t>(cputype);
+  CFNumberRef architecture = CFNumberCreate(nullptr, kCFNumberSInt32Type, &architecture_value);
+  if (architecture == nullptr) return false;
+  const void* keys[] = {kSecCodeAttributeArchitecture};
+  const void* values[] = {architecture};
+  CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 1,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+  CFRelease(architecture);
+  if (attributes == nullptr) return false;
+  SecStaticCodeRef code = nullptr;
+  const OSStatus created =
+      SecStaticCodeCreateWithPathAndAttributes(url, kSecCSDefaultFlags, attributes, &code);
+  CFRelease(attributes);
+  if (created != errSecSuccess || code == nullptr) return false;
+  CFDictionaryRef information = nullptr;
+  const OSStatus copied = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information);
+  CFRelease(code);
+  if (copied != errSecSuccess || information == nullptr) {
+    if (information != nullptr) CFRelease(information);
+    return false;
+  }
+  const auto hash_data = static_cast<CFDataRef>(CFDictionaryGetValue(information, kSecCodeInfoUnique));
+  const bool found = hash_data != nullptr && CFGetTypeID(hash_data) == CFDataGetTypeID();
+  if (found)
+    *cd_hash = HexDigest(CFDataGetBytePtr(hash_data),
+                         static_cast<std::size_t>(CFDataGetLength(hash_data)));
+  CFRelease(information);
+  return found && !cd_hash->empty();
+}
+
+// Flags for the DYNAMIC check (SecCodeCheckValidity on a running code object). Security accepts only
+// kSecCSConsiderExpiration, kSecCSStrictValidate, kSecCSStrictValidateStructure,
+// kSecCSRestrictSidebandData, kSecCSEnforceRevocationChecks and the network flags here; anything else,
+// notably the static-only kSecCSCheckAllArchitectures, fails with errSecCSInvalidFlags on every call.
+constexpr SecCSFlags kRunningValidityFlags = kSecCSStrictValidate;
+
+// The requirement the running code must satisfy, built from the BOUND signer (never from the running
+// code itself): Apple-anchored chain, this identifier, this team. Empty when the bound facts cannot
+// be written into a requirement safely (then the check cannot pass: fail-closed). A Mac App Store
+// app is signed with Apple's shared leaf certificate whose OU is not the team, so that chain is
+// accepted through its marker OID; the team itself is still compared from the code directory
+// (kSignerMismatch), so the extra branch does not loosen who may be controlled.
+std::string RequirementTextForBoundSigner(const std::string& identifier, const std::string& team) {
+  const auto safe = [](const std::string& value) {
+    if (value.empty() || value.size() > 128) return false;
+    for (const char c : value) {
+      const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                      c == '.' || c == '-' || c == '_';
+      if (!ok) return false;
+    }
+    return true;
+  };
+  if (!safe(identifier) || !safe(team)) return {};
+  return "anchor apple generic and identifier \"" + identifier +
+         "\" and (certificate leaf[field.1.2.840.113635.100.6.1.9] or certificate leaf[subject.OU] = \"" +
+         team + "\")";
+}
+
+// Signing facts of the running process's own code object (kSecGuestAttributePid), not of a file.
+// bound_requirement is checked in the same call as validity (one SecCode validation per measurement,
+// because a check with a requirement already includes the plain validity check); with none, the
+// plain strict validity is measured.
+void MeasureRunningSignature(std::uint32_t pid, const std::string& bound_requirement,
+                             sprint_coder::computer_use::NativeRunningObservation* observed) {
+  const int32_t pid_value = static_cast<int32_t>(pid);
+  CFNumberRef pid_number = CFNumberCreate(nullptr, kCFNumberSInt32Type, &pid_value);
+  if (pid_number == nullptr) return;
+  const void* keys[] = {kSecGuestAttributePid};
+  const void* values[] = {pid_number};
+  CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 1,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+  CFRelease(pid_number);
+  if (attributes == nullptr) return;
+  SecCodeRef code = nullptr;
+  const OSStatus guest = SecCodeCopyGuestWithAttributes(nullptr, attributes, kSecCSDefaultFlags, &code);
+  CFRelease(attributes);
+  if (guest != errSecSuccess || code == nullptr) return;
+  observed->dynamic_signature_checked = true;
+  if (bound_requirement.empty()) {
+    observed->dynamic_signature_valid =
+        SecCodeCheckValidity(code, kRunningValidityFlags, nullptr) == errSecSuccess;
+  } else {
+    CFStringRef text =
+        CFStringCreateWithCString(nullptr, bound_requirement.c_str(), kCFStringEncodingUTF8);
+    SecRequirementRef requirement = nullptr;
+    if (text != nullptr &&
+        SecRequirementCreateWithString(text, kSecCSDefaultFlags, &requirement) == errSecSuccess &&
+        requirement != nullptr) {
+      const bool satisfied =
+          SecCodeCheckValidity(code, kRunningValidityFlags, requirement) == errSecSuccess;
+      observed->dynamic_signature_valid = satisfied;
+      observed->designated_requirement_satisfied = satisfied;
+    }
+    if (requirement != nullptr) CFRelease(requirement);
+    if (text != nullptr) CFRelease(text);
+  }
+  CFDictionaryRef information = nullptr;
+  if (SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information) == errSecSuccess &&
+      information != nullptr) {
+    const auto copyString = [&](const void* key, std::string* output) {
+      const auto value = static_cast<CFStringRef>(CFDictionaryGetValue(information, key));
+      if (value == nullptr || CFGetTypeID(value) != CFStringGetTypeID()) return;
+      char buffer[257] = {};
+      if (CFStringGetCString(value, buffer, sizeof(buffer), kCFStringEncodingUTF8)) *output = buffer;
+    };
+    copyString(kSecCodeInfoIdentifier, &observed->signing_identifier);
+    copyString(kSecCodeInfoTeamIdentifier, &observed->team_id);
+    const auto hash_data = static_cast<CFDataRef>(CFDictionaryGetValue(information, kSecCodeInfoUnique));
+    if (hash_data != nullptr && CFGetTypeID(hash_data) == CFDataGetTypeID())
+      observed->cd_hash = HexDigest(CFDataGetBytePtr(hash_data),
+                                    static_cast<std::size_t>(CFDataGetLength(hash_data)));
+    CFRelease(information);
+  }
+  CFRelease(code);
+}
+
+// What this measures, honestly: the running process's own code object is validated strictly (the
+// kernel's code directory against the disk, which is what catches a binary swapped in after launch
+// and a file restored afterwards) and held to the BOUND signer. A truly unsigned image has no code
+// directory to ask the kernel about, so only the bytes on disk can be compared; the mapped image is
+// not read (recorded as a residual risk in the ADR). The code directory hash is compared per slice:
+// a universal binary run under Rosetta runs another slice than the host architecture, so the bound
+// hash is read for the running architecture; when that cannot be read the check refuses.
+bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& bound) {
+  using namespace sprint_coder::computer_use;
+  const auto started = std::chrono::steady_clock::now();
+  NativeRunningObservation observed;
+  std::string running_path;
+  if (ReadRunningImagePath(pid, &running_path)) {
+    observed.path_measured = true;
+    NSString* running = [NSString stringWithUTF8String:running_path.c_str()];
+    observed.path_matches = SameMacExecutablePath(running, bound.executable_path);
+    if (!bound.signed_target && observed.path_matches) {
+      // No signer to compare: the file at the running path must be the bound bytes.
+      const std::string digest = FileDigest(running);
+      observed.image_digest_measured = !digest.empty();
+      observed.image_digest = digest;
+    }
+  }
+  const std::string bound_requirement =
+      bound.signed_target ? RequirementTextForBoundSigner(bound.signing_identifier, bound.team_id)
+                          : std::string();
+  MeasureRunningSignature(pid, bound_requirement, &observed);
+  // The bound code directory hash is the one of the slice that is running (Rosetta, universal
+  // binaries). If the running architecture or that slice cannot be read, nothing is compared: refuse.
+  std::string expected_cd_hash = bound.cd_hash;
+  if (!bound.cd_hash.empty()) {
+    cpu_type_t running_architecture = 0;
+    NSString* bound_path = [NSString stringWithUTF8String:bound.executable_path.c_str()];
+    if (bound_path == nil || !ReadRunningArchitecture(pid, &running_architecture) ||
+        !CopyStaticCdHashForArchitecture(bound_path, running_architecture, &expected_cd_hash)) {
+      fprintf(stderr, "[computer-use] running identity refused: architecture_unavailable\n");
+      return false;
+    }
+  }
+  NativeIdentityExpectation expected;
+  expected.signed_target = bound.signed_target;
+  expected.team_id = bound.team_id;
+  expected.signing_identifier = bound.signing_identifier;
+  expected.cd_hash = expected_cd_hash;
+  expected.executable_digest = bound.executable_digest;
+  const NativeIdentityVerdict verdict = CheckRunningIdentity(expected, observed);
+  const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - started)
+                              .count();
+  // Measurement point: every identity re-check runs on the serial lane, so its cost is a Stop delay.
+  // A refusal names its reason (never a path or a hash); a slow measurement is reported over the
+  // threshold so the real cost on a signed app can be read off a person's run (HA item).
+  if (!NativeIdentityAllowsInput(verdict))
+    fprintf(stderr, "[computer-use] running identity refused: %s (%lld ms)\n",
+            std::string(NativeIdentityVerdictName(verdict)).c_str(),
+            static_cast<long long>(elapsed_ms));
+  else if (elapsed_ms > 250)
+    fprintf(stderr, "[computer-use] running identity check slow: %lld ms\n",
+            static_cast<long long>(elapsed_ms));
+  return NativeIdentityAllowsInput(verdict);
+}
+
 bool CurrentApplicationMatchesIdentityNative(
     std::uint32_t pid, std::string_view expected_identity,
     std::string_view expected_executable_path = {}) {
@@ -790,9 +1016,11 @@ bool CurrentApplicationMatchesIdentityNative(
        !SameMacExecutablePath(application.executableURL.path, expected_executable_path)))
     return false;
   IdentityFacts facts;
+  // The static facts say what the file on disk is; the running process must also be that (D12).
   return BuildIdentityFacts(application.executableURL.path, application.bundleIdentifier,
                             application.localizedName, &facts) &&
-         facts.identity_digest == expected_identity;
+         facts.identity_digest == expected_identity &&
+         RunningProcessMatchesBoundIdentity(pid, facts);
 }
 
 bool CurrentApplicationMatchesIdentity(napi_env env, std::uint32_t pid,
