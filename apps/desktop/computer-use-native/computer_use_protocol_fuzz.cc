@@ -6,6 +6,7 @@
 #include "computer_use_native_identity.h"
 #include "computer_use_effect_classifier.h"
 #include "computer_use_effect_shadow.h"
+#include "computer_use_windows_shadow.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -1951,6 +1952,27 @@ bool CheckEffectShadowFolding() {
     if (!Check(ShadowClassify(subrole, ShadowRequest("type"), true).effect_class == EffectClass::kSecure,
                "shadow-fullwidth-subrole-is-secure")) return false;
   }
+  // The ideographic space and the voiced half-width W row fold like NFKC does.
+  {
+    if (!Check(CompatFold(u8"ﾜﾞ"_u8) == u8"ヷ"_u8, "shadow-fold-va")) return false;
+    if (!Check(CompatFold(u8"ｦﾞ"_u8) == u8"ヺ"_u8, "shadow-fold-vo")) return false;
+    if (!Check(CompatFold(u8"a　b"_u8) == "a b", "shadow-fold-ideographic-space")) return false;
+    ShadowAxCapture spaced = ShadowBase();
+    spaced.chain[0] = ShadowNode("AXTextField", u8"カード　番号"_u8);
+    if (!Check(BuildShadowFacts(spaced, ShadowRequest("type")).facts.chain[0].label == u8"カード 番号"_u8,
+               "shadow-fold-ideographic-space-in-label")) return false;
+  }
+  // The root and the page are recognized after folding, like every other role.
+  {
+    ShadowAxCapture app = ShadowBase();
+    app.chain.push_back(ShadowNode(u8"ＡＸＡｐｐｌｉｃａｔｉｏｎ"_u8, "App"));
+    if (!Check(BuildShadowFacts(app, ShadowRequest("type")).facts.chain.size() == 2,
+               "shadow-fullwidth-application-root-is-dropped")) return false;
+    ShadowAxCapture page = ShadowBase();
+    page.chain.insert(page.chain.begin() + 1, ShadowNode(u8"ＡＸＷｅｂＡｒｅａ"_u8, "Page"));
+    if (!Check(BuildShadowFacts(page, ShadowRequest("type")).facts.origin == OriginState::kUnknown,
+               "shadow-fullwidth-web-area-is-a-page")) return false;
+  }
   // A capture that was not taken because another was running is not a comparison.
   {
     const ShadowRecord busy = ShadowSkippedRecord("click", kShadowGapBusy, true);
@@ -1959,6 +1981,357 @@ bool CheckEffectShadowFolding() {
                "shadow-busy-record")) return false;
   }
   std::cout << "Computer Use native effect shadow folding: PASS\n";
+  return true;
+}
+
+using sprint_coder::computer_use::ShadowUiaNode;
+using sprint_coder::computer_use::ShadowUiaCapture;
+using sprint_coder::computer_use::ShadowItemKind;
+using sprint_coder::computer_use::BuildWindowsShadowFacts;
+using sprint_coder::computer_use::WindowsShadowClassify;
+using sprint_coder::computer_use::kShadowGapOsPromptSurface;
+using sprint_coder::computer_use::ShadowCheckText;
+using sprint_coder::computer_use::ShadowReadResult;
+using sprint_coder::computer_use::ShadowSettle;
+using sprint_coder::computer_use::ShadowUnitsTooLong;
+using sprint_coder::computer_use::ShadowGate;
+using sprint_coder::computer_use::ProcessShadowLog;
+using sprint_coder::computer_use::kShadowMaxAxCalls;
+using sprint_coder::computer_use::kShadowDeadlineNs;
+using sprint_coder::computer_use::kShadowGapCanceled;
+using sprint_coder::computer_use::kShadowGapBudget;
+using sprint_coder::computer_use::kShadowGapTargetMissing;
+using sprint_coder::computer_use::kShadowGapOversize;
+using sprint_coder::computer_use::kShadowGapReadFailed;
+using sprint_coder::computer_use::kShadowGapChainTruncated;
+using sprint_coder::computer_use::kShadowGapExtensionUnknown;
+using sprint_coder::computer_use::kShadowGapBusy;
+using sprint_coder::computer_use::EffectShadowLog;
+using sprint_coder::computer_use::ShadowSkippedRecord;
+
+// ---- Windows shadow core (S5-b-1): UIA facts, reads, gate and surfaces, all portable ------------
+
+ShadowUiaNode UiaNode(const std::string &control_type, const std::string &name = "") {
+  ShadowUiaNode node;
+  node.control_type = control_type;
+  node.name = name;
+  return node;
+}
+
+// A Notepad-like capture: a button in a window of an ordinary process.
+ShadowUiaCapture UiaBase() {
+  ShadowUiaCapture capture;
+  capture.target_found = true;
+  capture.chain = {UiaNode("Button", "Save"), UiaNode("Window", "Untitled - Notepad")};
+  capture.chain_reached_root = true;
+  capture.neighbors_complete = true;
+  capture.window_class_read = true;
+  capture.window_class = "Notepad";
+  capture.process_path_read = true;
+  capture.process_path = "C:\\Windows\\System32\\notepad.exe";
+  return capture;
+}
+
+ShadowRequestInfo UiaRequest(std::string_view kind = "invoke") {
+  ShadowRequestInfo request;
+  request.kind = kind;
+  request.maximum_mode = "full_access_app";
+  request.policy_language = "en";
+  return request;
+}
+
+bool CheckWindowsShadowCore() {
+  // A complete capture is a complete fact set and an ordinary decision.
+  {
+    const ShadowFacts built = BuildWindowsShadowFacts(UiaBase(), UiaRequest());
+    if (!Check(built.gaps == 0 && built.facts.metadata_complete && built.facts.chain_complete &&
+                   built.facts.chain.size() == 2 && built.facts.chain[0].role == "Button" &&
+                   built.facts.chain[0].label == "Save" && built.facts.chain[1].role == "Window" &&
+                   built.facts.surface == SurfaceKind::kOrdinary &&
+                   built.facts.origin == OriginState::kNotApplicable && !built.facts.target_is_file_item,
+               "winshadow-complete-capture")) return false;
+    const ShadowRecord record = WindowsShadowClassify(UiaBase(), UiaRequest(), true);
+    if (!Check(record.kind == DecisionKind::kOrdinary && record.gaps == 0 && !record.V2IsStricter() &&
+                   !record.V2IsLooser(),
+               "winshadow-complete-capture-classifies")) return false;
+  }
+  // The same bounds and gaps as the macOS shadow: nothing is ever truncated or emptied.
+  {
+    ShadowUiaCapture missing = UiaBase();
+    missing.target_found = false;
+    missing.chain.clear();
+    if (!Check((BuildWindowsShadowFacts(missing, UiaRequest()).gaps & kShadowGapTargetMissing) != 0,
+               "winshadow-target-missing")) return false;
+    ShadowUiaCapture oversize = UiaBase();
+    oversize.chain[0].oversize = true;
+    const ShadowFacts built = BuildWindowsShadowFacts(oversize, UiaRequest());
+    if (!Check((built.gaps & kShadowGapOversize) != 0 && !built.facts.metadata_complete &&
+                   WindowsShadowClassify(oversize, UiaRequest(), true).kind == DecisionKind::kTakeover,
+               "winshadow-oversize-is-a-gap")) return false;
+    ShadowUiaCapture too_long = UiaBase();
+    too_long.chain[0].name = std::string(kEffectMaxLabelBytes + 1, 'a');
+    if (!Check((BuildWindowsShadowFacts(too_long, UiaRequest()).gaps & kShadowGapOversize) != 0,
+               "winshadow-long-name-is-oversize")) return false;
+    ShadowUiaCapture failed = UiaBase();
+    failed.chain[0].read_failed = true;
+    if (!Check((BuildWindowsShadowFacts(failed, UiaRequest()).gaps & kShadowGapReadFailed) != 0,
+               "winshadow-read-failed-is-a-gap")) return false;
+    ShadowUiaCapture cut = UiaBase();
+    cut.chain_reached_root = false;
+    if (!Check((BuildWindowsShadowFacts(cut, UiaRequest()).gaps & kShadowGapChainTruncated) != 0 &&
+                   !BuildWindowsShadowFacts(cut, UiaRequest()).facts.chain_complete,
+               "winshadow-cut-chain")) return false;
+    ShadowUiaCapture budget = UiaBase();
+    budget.budget_exhausted = true;
+    if (!Check((BuildWindowsShadowFacts(budget, UiaRequest()).gaps & kShadowGapBudget) != 0 &&
+                   !BuildWindowsShadowFacts(budget, UiaRequest()).facts.metadata_complete,
+               "winshadow-budget-gap")) return false;
+  }
+  // A password control is secure whatever its name says; a Win32 class name is the subrole.
+  {
+    ShadowUiaCapture password = UiaBase();
+    password.chain[0] = UiaNode("Edit", "Name");
+    password.chain[0].is_password = true;
+    const ShadowRecord record = WindowsShadowClassify(password, UiaRequest("type"), true);
+    if (!Check(record.kind == DecisionKind::kBlocked && record.effect_class == EffectClass::kSecure,
+               "winshadow-password-control-is-secure")) return false;
+    ShadowUiaCapture box = UiaBase();
+    box.chain[0] = UiaNode("Edit", "Name");
+    box.chain[0].class_name = "PasswordBox";
+    if (!Check(WindowsShadowClassify(box, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-password-class-is-secure")) return false;
+    // Half-width katakana in a name are folded before the core reads them.
+    ShadowUiaCapture kana = UiaBase();
+    kana.chain[0] = UiaNode("Edit", u8"ﾊﾟｽﾜｰﾄﾞ"_u8);
+    if (!Check(WindowsShadowClassify(kana, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-halfwidth-password")) return false;
+    // The ideographic space is a space: a caption split by it still reads as its words.
+    ShadowUiaCapture spaced = UiaBase();
+    spaced.chain[0] = UiaNode("Edit", u8"カード\u3000番号"_u8);
+    if (!Check(BuildWindowsShadowFacts(spaced, UiaRequest("type")).facts.chain[0].label == u8"カード 番号"_u8,
+               "winshadow-ideographic-space")) return false;
+  }
+  // The surface of the window.
+  {
+    const auto surface_of = [](const std::string &window_class, const std::string &process) {
+      ShadowUiaCapture capture = UiaBase();
+      capture.window_class = window_class;
+      capture.process_path = process;
+      return BuildWindowsShadowFacts(capture, UiaRequest("type"));
+    };
+    if (!Check(surface_of("ConsoleWindowClass", "C:\\Windows\\System32\\conhost.exe").facts.surface ==
+                   SurfaceKind::kShellLike,
+               "winshadow-console-window-class")) return false;
+    if (!Check(surface_of("CASCADIA_HOSTING_WINDOW_CLASS", "C:\\x\\WindowsTerminal.exe").facts.surface ==
+                   SurfaceKind::kShellLike,
+               "winshadow-windows-terminal")) return false;
+    if (!Check(surface_of("SomeClass", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
+                       .facts.surface == SurfaceKind::kShellLike,
+               "winshadow-powershell-process")) return false;
+    if (!Check(surface_of("PseudoConsoleWindow", "C:\\a\\unknown.exe").facts.surface ==
+                   SurfaceKind::kShellLike,
+               "winshadow-pseudo-console")) return false;
+    if (!Check(surface_of("CabinetWClass", "C:\\Windows\\explorer.exe").facts.surface ==
+                   SurfaceKind::kFileBrowser,
+               "winshadow-explorer")) return false;
+    if (!Check(surface_of("Chrome_WidgetWin_1", "C:\\PowerToys\\PowerToys.PowerLauncher.exe")
+                       .facts.surface == SurfaceKind::kCommandPalette,
+               "winshadow-command-launcher")) return false;
+    if (!Check(surface_of("Window", "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\PowerShell_ISE.exe")
+                       .facts.surface == SurfaceKind::kScriptInput,
+               "winshadow-script-input")) return false;
+    // OS prompts are not classified here: unknown surface, own gap, a takeover.
+    for (const auto &entry : std::vector<std::pair<std::string, std::string>>{
+             {"Credential Dialog Xaml Host", "C:\\Windows\\System32\\CredentialUIBroker.exe"},
+             {"NativeHWNDHost", "C:\\Windows\\System32\\consent.exe"}}) {
+      const ShadowFacts prompt = surface_of(entry.first, entry.second);
+      if (!Check(prompt.facts.surface == SurfaceKind::kUnknown &&
+                     (prompt.gaps & kShadowGapOsPromptSurface) != 0 && !prompt.facts.metadata_complete,
+                 "winshadow-os-prompt-surface")) return false;
+    }
+    // Names are compared after folding and without case.
+    if (!Check(surface_of("consolewindowclass", "C:\\x\\a.exe").facts.surface == SurfaceKind::kShellLike,
+               "winshadow-surface-ignores-case")) return false;
+    // A window that could not be measured is not an ordinary one.
+    ShadowUiaCapture blind = UiaBase();
+    blind.window_class_read = false;
+    blind.process_path_read = false;
+    const ShadowFacts unmeasured = BuildWindowsShadowFacts(blind, UiaRequest("type"));
+    if (!Check(unmeasured.facts.surface == SurfaceKind::kUnknown &&
+                   (unmeasured.gaps & kShadowGapReadFailed) != 0 && !unmeasured.facts.metadata_complete,
+               "winshadow-unmeasured-window")) return false;
+    ShadowUiaCapture half = UiaBase();
+    half.process_path_read = false;
+    const ShadowFacts partly = BuildWindowsShadowFacts(half, UiaRequest("type"));
+    if (!Check((partly.gaps & kShadowGapReadFailed) != 0 && !partly.facts.metadata_complete,
+               "winshadow-half-measured-window")) return false;
+    // A console is a shell: a typed input there is refused by the core.
+    ShadowUiaCapture console = UiaBase();
+    console.window_class = "ConsoleWindowClass";
+    console.chain[0] = UiaNode("Edit", "Command line");
+    const ShadowRecord shell = WindowsShadowClassify(console, UiaRequest("type"), true);
+    if (!Check(shell.kind == DecisionKind::kBlocked && shell.effect_class == EffectClass::kSurface,
+               "winshadow-console-input-is-blocked")) return false;
+  }
+  // The page: a Document in the chain is a page; its URL decides the origin and the download list.
+  {
+    ShadowUiaCapture page = UiaBase();
+    page.chain = {UiaNode("Edit", "Search"), UiaNode("Document", "Shop"), UiaNode("Window", "Browser")};
+    if (!Check(BuildWindowsShadowFacts(page, UiaRequest("type")).facts.origin == OriginState::kUnknown &&
+                   (BuildWindowsShadowFacts(page, UiaRequest("type")).gaps & kShadowGapOrigin) != 0,
+               "winshadow-page-without-url-is-unknown-origin")) return false;
+    page.document_url_read = true;
+    page.document_url = "https://example.com/";
+    if (!Check(BuildWindowsShadowFacts(page, UiaRequest("type")).facts.origin == OriginState::kOrdinary,
+               "winshadow-page-origin")) return false;
+    page.document_url = "chrome://downloads/";
+    const ShadowFacts downloads = BuildWindowsShadowFacts(page, UiaRequest("invoke"));
+    if (!Check(downloads.facts.surface == SurfaceKind::kDownloadPanel, "winshadow-download-page"))
+      return false;
+    page.document_url = "devtools://devtools/bundled/inspector.html";
+    if (!Check(BuildWindowsShadowFacts(page, UiaRequest("type")).facts.surface == SurfaceKind::kDevToolsConsole,
+               "winshadow-devtools-page")) return false;
+    page.document_url = "ftp://example.com/";
+    if (!Check(BuildWindowsShadowFacts(page, UiaRequest("type")).facts.origin == OriginState::kUnknown,
+               "winshadow-unknown-scheme")) return false;
+  }
+  // The item an action would open: a file by its name, a folder by browsing, an unnamed one unknown.
+  {
+    ShadowUiaCapture item = UiaBase();
+    item.window_class = "CabinetWClass";
+    item.process_path = "C:\\Windows\\explorer.exe";
+    item.chain = {UiaNode("ListItem", "setup.exe"), UiaNode("Window", "Downloads")};
+    item.item_kind = ShadowItemKind::kFile;
+    item.item_name_read = true;
+    item.item_name = "C:\\Users\\a.b\\Downloads\\Setup.EXE";
+    const ShadowFacts file = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
+    if (!Check(file.facts.target_is_file_item && file.facts.extension_known && file.facts.extension == "exe" &&
+                   file.facts.surface == SurfaceKind::kFileBrowser,
+               "winshadow-file-item")) return false;
+    item.item_name = "C:\\dir.v2\\README";
+    const ShadowFacts bare = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
+    if (!Check(bare.facts.target_is_file_item && !bare.facts.extension_known &&
+                   (bare.gaps & kShadowGapExtensionUnknown) != 0,
+               "winshadow-hidden-extension-is-unknown")) return false;
+    item.item_kind = ShadowItemKind::kFolder;
+    item.item_name = "C:\\Users\\a\\Downloads";
+    if (!Check(!BuildWindowsShadowFacts(item, UiaRequest("invoke")).facts.target_is_file_item,
+               "winshadow-folder-is-not-an-item")) return false;
+    item.item_kind = ShadowItemKind::kFile;
+    item.item_name_read = false;
+    const ShadowFacts unnamed = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
+    if (!Check(unnamed.facts.target_is_file_item && !unnamed.facts.extension_known &&
+                   (unnamed.gaps & kShadowGapExtensionUnknown) != 0,
+               "winshadow-unnamed-file-item")) return false;
+    // Opening an executable from the file manager is not ordinary.
+    item.item_name_read = true;
+    item.item_name = "Setup.exe";
+    if (!Check(WindowsShadowClassify(item, UiaRequest("invoke"), true).kind != DecisionKind::kOrdinary,
+               "winshadow-executable-open-is-not-ordinary")) return false;
+  }
+  // An unsupported action kind is a gap and never ordinary.
+  {
+    const ShadowFacts odd = BuildWindowsShadowFacts(UiaBase(), UiaRequest("drag"));
+    if (!Check((odd.gaps & kShadowGapUnsupportedAction) != 0 && !odd.facts.metadata_complete,
+               "winshadow-unsupported-action")) return false;
+  }
+  std::cout << "Computer Use native Windows shadow core: PASS\n";
+  return true;
+}
+
+// ---- The shared read helpers: one string, one gate, one ring -----------------------------------
+
+bool CheckShadowReadHelpers() {
+  // The byte bound is on the converted UTF-8, never truncated, never emptied.
+  std::string out;
+  const std::string japanese_170 = [] {
+    std::string text;
+    for (int index = 0; index < 170; ++index) text += u8"あ"_u8;
+    return text;
+  }();
+  const std::string japanese_171 = japanese_170 + u8"あ"_u8;
+  if (!Check(japanese_170.size() == 510 && japanese_171.size() == 513, "shadowread-fixture")) return false;
+  if (!Check(ShadowCheckText(japanese_170, kEffectMaxLabelBytes, &out) == ShadowReadResult::kOk &&
+                 out == japanese_170,
+             "shadowread-fits-by-bytes")) return false;
+  out = "keep";
+  if (!Check(ShadowCheckText(japanese_171, kEffectMaxLabelBytes, &out) == ShadowReadResult::kTooLong &&
+                 out == "keep",
+             "shadowread-too-long-by-bytes-and-untouched")) return false;
+  if (!Check(ShadowCheckText(std::string(kEffectMaxLabelBytes, 'a'), kEffectMaxLabelBytes, &out) ==
+                 ShadowReadResult::kOk,
+             "shadowread-exact-bound")) return false;
+  if (!Check(ShadowCheckText(std::string(kEffectMaxLabelBytes + 1, 'a'), kEffectMaxLabelBytes, &out) ==
+                 ShadowReadResult::kTooLong,
+             "shadowread-bound-plus-one")) return false;
+  if (!Check(ShadowCheckText("", kEffectMaxLabelBytes, &out) == ShadowReadResult::kAbsent,
+             "shadowread-empty-is-absent")) return false;
+  if (!Check(ShadowCheckText(std::string("a\xE3\x81"), kEffectMaxLabelBytes, &out) == ShadowReadResult::kFailed,
+             "shadowread-malformed-is-failed")) return false;
+  if (!Check(!ShadowUnitsTooLong(512, 512) && ShadowUnitsTooLong(513, 512), "shadowread-units")) return false;
+
+  // Settle: only kOk is true; everything but absent leaves a flag, and a too-long one is kept apart
+  // when the caller keeps one.
+  for (const ShadowReadResult result : {ShadowReadResult::kOk, ShadowReadResult::kAbsent,
+                                        ShadowReadResult::kFailed, ShadowReadResult::kTooLong,
+                                        ShadowReadResult::kStopped}) {
+    bool failed = false;
+    bool too_long = false;
+    const bool ok = ShadowSettle(result, &failed, &too_long);
+    const bool expect_ok = result == ShadowReadResult::kOk;
+    const bool expect_failed = result == ShadowReadResult::kFailed || result == ShadowReadResult::kStopped;
+    const bool expect_long = result == ShadowReadResult::kTooLong;
+    if (!Check(ok == expect_ok && failed == expect_failed && too_long == expect_long, "shadowread-settle"))
+      return false;
+    bool failed_only = false;
+    (void)ShadowSettle(result, &failed_only);
+    if (!Check(failed_only == (expect_failed || expect_long), "shadowread-settle-without-too-long-flag"))
+      return false;
+  }
+
+  // The gate: admits while the action is valid and the budget lasts, refuses for good after.
+  {
+    ShadowGate gate(1'000);
+    if (!Check(gate.Step(1'000, true) && gate.Calls() == 1 && gate.Gaps() == 0, "shadowgate-first-step"))
+      return false;
+    if (!Check(!gate.Step(1'001, false) && gate.Canceled() && (gate.Gaps() & kShadowGapCanceled) != 0,
+               "shadowgate-cancel")) return false;
+    if (!Check(!gate.Step(1'002, true), "shadowgate-stays-stopped-after-cancel")) return false;
+  }
+  {
+    ShadowGate gate(0);
+    bool all = true;
+    for (std::uint32_t call = 0; call < kShadowMaxAxCalls; ++call) all = all && gate.Step(1, true);
+    if (!Check(all && gate.Calls() == kShadowMaxAxCalls && !gate.BudgetExhausted(), "shadowgate-spends-all-calls"))
+      return false;
+    if (!Check(!gate.Step(2, true) && gate.BudgetExhausted() && (gate.Gaps() & kShadowGapBudget) != 0 &&
+                   !gate.Canceled(),
+               "shadowgate-call-budget")) return false;
+    if (!Check(!gate.Step(3, true), "shadowgate-budget-is-final")) return false;
+  }
+  {
+    ShadowGate gate(10);
+    if (!Check(gate.Step(10 + kShadowDeadlineNs, true), "shadowgate-at-deadline")) return false;
+    if (!Check(!gate.Step(11 + kShadowDeadlineNs, true) && (gate.Gaps() & kShadowGapBudget) != 0,
+               "shadowgate-deadline")) return false;
+  }
+  {
+    // A canceled action wins over an exhausted budget only when it was seen first; both are gaps.
+    ShadowGate gate(0);
+    if (!Check(!gate.Step(kShadowDeadlineNs + 1, true) && gate.BudgetExhausted() && !gate.Canceled(),
+               "shadowgate-deadline-first")) return false;
+  }
+
+  // The ring of the process is one object that is never destroyed.
+  {
+    EffectShadowLog &first = ProcessShadowLog();
+    EffectShadowLog &second = ProcessShadowLog();
+    const std::uint64_t before = first.Total();
+    first.Record(ShadowSkippedRecord("click", kShadowGapBusy, true));
+    if (!Check(&first == &second && second.Total() == before + 1, "shadowlog-process-ring-is-one-object"))
+      return false;
+  }
+  std::cout << "Computer Use native shadow read helpers: PASS\n";
   return true;
 }
 
@@ -3153,6 +3526,8 @@ int main() {
   if (!CheckEffectShadow()) return 1;
   if (!CheckEffectShadowBounds()) return 1;
   if (!CheckEffectShadowFolding()) return 1;
+  if (!CheckWindowsShadowCore()) return 1;
+  if (!CheckShadowReadHelpers()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

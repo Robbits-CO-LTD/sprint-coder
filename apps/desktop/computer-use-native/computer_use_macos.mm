@@ -5107,9 +5107,9 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
 // capture that arrives while one is still running is not taken (a busy record). Its own bounds
 // still apply, so the queue is not occupied longer than it needs to be:
 //   * it does not read at all when v1 could not re-validate the bound target (closed, canceled,
-//     identity, generation, eligibility, focus or stale observation), when the session is gone or
-//     when the cancellation epoch has moved (the check is made when it is scheduled and again when
-//     it starts, and before every AX call);
+//     identity, generation, eligibility, focus or stale observation) or when the session is gone
+//     (checked when it is scheduled); the cancellation epoch is checked when the capture starts and
+//     before every AX call, not when it is scheduled;
 //   * before every AX call it checks the cancellation epoch and spends one call of a budget of
 //     kShadowMaxAxCalls calls and kShadowDeadlineNs on a monotonic clock, and stops at the first
 //     refusal; a stopped capture is incomplete, and incomplete is a takeover for the core;
@@ -5146,9 +5146,10 @@ class ShadowCfRef {
   CFTypeRef ref_ = nullptr;
 };
 
+// The shared, leaked ring: a queued capture block may still run while the process exits, and a
+// static with a destructor would already be gone by then.
 sprint_coder::computer_use::EffectShadowLog& EffectShadowRing() {
-  static sprint_coder::computer_use::EffectShadowLog ring;
-  return ring;
+  return sprint_coder::computer_use::ProcessShadowLog();
 }
 
 enum class ShadowRead { kOk, kAbsent, kFailed, kTooLong, kStopped };
