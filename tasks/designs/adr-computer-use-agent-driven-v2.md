@@ -650,29 +650,29 @@ D7-1 の実装（TS のみ）に合わせて、上の方針を次のとおり固
    | `lexiconVersion`    | 同上                                                                |
    | `ticketRequired`    | boolean。native がすべての入力に ticket を要求するか（S4-4 補遺 5） |
 
-   `eligibility` を持たない manifest、pin、handshake は「旧成果物」で、`v1-allowlist` と各版 1 を意味する。それ以外の拡張 claim（`buildMode`、`ruleset` など）は従来どおり `HANDSHAKE_INVALID`。Windows の manifest が `v2-denylist` を名乗ることは、S5 までは schema が拒否する。
+   `eligibility` を持たない manifest、pin、handshake は「旧成果物」で、`v1-allowlist` として扱う。旧成果物は版について何も主張しない。v1 の Main は、自分の版にかかわらず未宣言を受け入れ、未宣言を版 1 とみなして比較することはしない（3-A）。`rulesetVersion` / `classifierVersion` / `lexiconVersion` は、上の方針の `computerUseEligibilityRulesetVersion` / `sensitiveClassifierVersion` / `sensitiveLexiconVersion` に対応する。それ以外の拡張 claim（`buildMode`、`ruleset` など）は従来どおり `HANDSHAKE_INVALID`。Windows の manifest が `v2-denylist` を名乗ることは、S5 までは schema が拒否する。
 
 2. **3 者の照合**。Main のコンパイル済み定数（pin。旧 Main は未宣言で v1）、manifest、handshake の attest を、artifact digest の検証の後、probe 自身の拒否理由より前に照合する。
 
    | Main の定数 | 受け入れる条件                                                                                                                     | 閉じる条件（理由）                                                                                                            |
    | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-   | v1          | manifest と attest のそれぞれが「未宣言」、または Main と mode と各版が同一の v1（pin が宣言を持つときは `ticketRequired` も同一） | v2 や、版が違う宣言が 1 つでもある（`ELIGIBILITY_MISMATCH`）                                                                  |
+   | v1          | manifest と attest のそれぞれが「未宣言」、または Main と mode と各版が同一の v1（pin が宣言を持つときは `ticketRequired` も同一） | v2 の宣言、版の違う宣言、`ticketRequired` が一致しない宣言のどれかが 1 つでもある（`ELIGIBILITY_MISMATCH`）                   |
    | v2          | manifest と attest の両方があり、全項目が Main と完全に一致し、`ticketRequired` が true                                            | どちらかの欠落、不一致（`ELIGIBILITY_MISMATCH`）。一致していても `ticketRequired` が false（`ELIGIBILITY_TICKET_UNATTESTED`） |
 
-   attest の欠落は、v2 Main では不一致である。deny-list を「たぶん v2」と推測しない。
+   pin と manifest の食い違いは、`manifestDigest` が `eligibility` を含むため、provenance の検査（`COMPILED_PROVENANCE_MISMATCH`）が先に閉じる。`ELIGIBILITY_MISMATCH` が出るのは主に attest の食い違いのときである。attest の欠落は、v2 Main では不一致である。deny-list を「たぶん v2」と推測しない。
 
 3. **実効モード**。`effectiveComputerUseEligibilityMode` は、次のすべてを満たすときだけ `v2-denylist` を返す: コンパイル済みの mode が `v2-denylist`、V2 flag が ON、`SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST` が `1` でない。それ以外は `v1-allowlist`。v1 ビルドは、flag や環境変数の値にかかわらず v1 である。環境変数は v2 ビルドを v1 に下げるだけで、v1 ビルドを上げる経路はない。
 
-4. **判断（親の判断、2026-10-14）**。いずれも、既存の成果物と V1 の利用者を壊さず、新しい経路を閉じたまま始める選択である。
+4. **判断（2026-10-14）**。B 案（Main の定数を独立した build 時 env から取る / win32 でも v2 をコンパイルする / attest を直ちに必須にする）は、取り違えや既存成果物の起動不能を招くので採らない。いずれも、既存の成果物と V1 の利用者を壊さず、新しい経路を閉じたまま始める選択である。
    - **1-A: Main のコンパイル済み定数は、既存の pin と同じく、ビルド済みの manifest から Vite の define で取る**。手順は `--eligibility` の 1 本で済み、成果物（digest・sourceCommit）と同じ束縛になる。native 本体と manifest のずれは handshake の attest が検出する。独立した build 時 env は設けない（渡し忘れの事故が増えるため）。
    - **2-A: win32 の `--eligibility=v2` は S5 まで build script で拒否する**。Windows helper は v1 を attest するだけで、S5 の前に「v2 を名乗る Windows 成果物」を作れないようにする。
    - **3-A: attest のない旧成果物は、Main が v1 のときだけ受け入れる**。既存の release、beta、ローカルビルド、Windows 受入ビルドが起動できなくならない。attest の必須化は、別の PR で後から行う。
 
    - **D7-2 の実装判断（2026-10-14）**:
      - 既定の v1 ビルドでも、manifest に `eligibility` を書く（attest ありの v1 にする）。
-     - mac の `ticketRequired` は、native の ticket 必須化（N2b-4 の PR 5）が merge されるまで名乗らない。D7-2 では mac も `ticketRequired: false` を attest し、PR 5 で true に切り替える。attest を実装より先に出さないためである。v2 の Main は `ticketRequired` が false なら `ELIGIBILITY_TICKET_UNATTESTED` で閉じるので、安全側に倒れる。Windows は S5 まで false のまま。
-     - Windows で spawn ごとに行う handshake の attest も、manifest と照合する。
-     - mac のビルドで gyp 変数が node-gyp に渡らない場合は、生成ヘッダを build ディレクトリの外に置く方式に切り替える（macOS CI で確認する）。
+     - mac の `ticketRequired` は、native の ticket 必須化（N2b-4 の PR 5）が merge されるまで名乗らない。D7-2 では mac も `ticketRequired: false` を attest し、PR 5 で true に切り替える。attest を実装より先に出さないためである。v2 の Main は `ticketRequired` が false なら `ELIGIBILITY_TICKET_UNATTESTED` で閉じるので、安全側に倒れる。Windows は S5 まで false のまま。 v2 の Main はこの間閉じる（pin も false なら `ELIGIBILITY_TICKET_UNATTESTED`、pin が true なら `ELIGIBILITY_MISMATCH`）。S4-4 補遺 5 の「D7 より先に入れる」は、「D7 に依存せずに入れられる」の意味に読み替える。D7 が先に入っても v2 は閉じたままなので、INV-3 に反しない。
+     - Windows で spawn ごとに行う handshake の attest も照合する。照合には gate と同じ `checkComputerUseEligibility` を使い、pin・manifest・attest の 3 者を比べる。最初の probe で attest があった helper が spawn 時に attest を返さなければ閉じる。
+     - mac のビルドで gyp 変数が node-gyp に渡らない場合は、生成ヘッダを build ディレクトリの外に置く方式に切り替える（macOS CI で確認する）。native の値は、生成ヘッダ（または `-D`）の定数だけから作り、env も引数も読まない。D7-2 の実装では、生成ヘッダの方式を採った。生成ヘッダが無い場合の既定は legacy v1 とし、v2 を既定にはしない。
 
 5. **分割**。
    - **D7-1**（TS のみ。PR #769）: contracts の型と schema、handshake のパーサ、compiled pin、gate の照合、`effectiveComputerUseEligibilityMode`、`computerUseCompiledEligibility`。native には触れない。
