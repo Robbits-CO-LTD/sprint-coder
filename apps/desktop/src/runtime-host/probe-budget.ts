@@ -1,9 +1,13 @@
+import { GROK_WINDOWS_PROCESS_TREE_STOP_BUDGET_MS } from './stop-budget';
+
 // Main must wait longer than the Runtime Host's sequential version and authentication probes.
 // Keep these budgets in one module so adding another probe cannot silently outrun the hello timer.
 export const RUNTIME_VERSION_PROBE_TIMEOUT_MS = 5_000;
 export const RUNTIME_AUTH_PROBE_TIMEOUT_MS = 3_000;
-// Grok adds an ACP initialize before authentication, then confirms probe-process exit.
-export const GROK_PROBE_BUDGET_MS = 2 * 2_000 + 3_000 + 2_000 + 4_000;
+// Grok adds an ACP initialize before authentication, then confirms probe-process exit. The probe
+// stops its CLI like a Turn does (awaiting the forced taskkill), so it may take the Windows budget.
+export const GROK_PROBE_BUDGET_MS =
+  2 * 2_000 + 3_000 + 2_000 + GROK_WINDOWS_PROCESS_TREE_STOP_BUDGET_MS;
 export const GROK_HOST_HELLO_TIMEOUT_MS = GROK_PROBE_BUDGET_MS + 2_000;
 // Candidate discovery may compare several Desktop installations and then try a fallback.
 // Bound the entire search rather than multiplying Main's wait by an unbounded candidate count.

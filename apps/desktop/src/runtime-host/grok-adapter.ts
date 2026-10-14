@@ -201,12 +201,22 @@ export class GrokProbeLeftovers {
 
 export const grokProbeLeftovers = new GrokProbeLeftovers();
 
+/**
+ * The probe stops its CLI the way a Turn does (issue #749): the final exit window opens after the
+ * forced taskkill has finished. Counted from its spawn, the 2 s window closed just before the root's
+ * exit arrived (taskkill /f needs about 2 s here), so 3 of 5 probes reported an unconfirmed stop
+ * although the CLI was gone 0.2 s later. Only Turns had this since #665.
+ */
+const GROK_PROBE_STOP_OPTIONS = { awaitTaskkill: true } as const;
+
 /** The probe's own stop confirmation, without signaling a root that has already exited: by then
  * its PID may belong to an unrelated process. */
 async function grokProbeStopped(leftover: GrokProbeLeftover): Promise<boolean> {
   const { child } = leftover;
   if (child.exitCode === null && child.signalCode === null)
-    return terminateRuntimeProcessTree(child, leftover.environment).catch(() => false);
+    return terminateRuntimeProcessTree(child, leftover.environment, GROK_PROBE_STOP_OPTIONS).catch(
+      () => false,
+    );
   // Windows confirms a stop by the root's exit alone (process-tree.ts). On POSIX the probe leads
   // its own process group (`detached`), and that group must also be empty.
   if (process.platform === 'win32' || child.pid === undefined) return true;
@@ -283,7 +293,9 @@ export async function probeGrok(
     const environment = grokEnvironment(source);
     if (
       child === undefined ||
-      (await terminateRuntimeProcessTree(child, environment).catch(() => false))
+      (await terminateRuntimeProcessTree(child, environment, GROK_PROBE_STOP_OPTIONS).catch(
+        () => false,
+      ))
     )
       cleanupGrokIsolation(isolation);
     else {
