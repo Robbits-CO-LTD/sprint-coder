@@ -1,0 +1,62 @@
+name: Node libuv watch
+
+# Issue #734: libuv 1.53.0 を含む公式 Node が公開されたら、追跡 Issue を1件だけ起こす。
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: node-libuv-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out the watcher script
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: apps/desktop/scripts/node-libuv-watch.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Find official Node releases with the fixed libuv
+        id: find
+        run: |
+          fixed="$(node apps/desktop/scripts/node-libuv-watch.mjs --run)"
+          echo "fixed=${fixed}" >> "$GITHUB_OUTPUT"
+          echo "count=$(jq 'length' <<< "${fixed}")" >> "$GITHUB_OUTPUT"
+
+      - name: Open a single tracking issue
+        if: steps.find.outputs.count != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FIXED: ${{ steps.find.outputs.fixed }}
+        run: |
+          marker='node-libuv-watch:1.53.0'
+          existing="$(gh issue list --repo "$GITHUB_REPOSITORY" --state all --search "\"${marker}\" in:body" --json number --jq 'length')"
+          if [ "${existing}" != "0" ]; then
+            echo "Tracking issue already exists."
+            exit 0
+          fi
+          table="$(jq -r '.[] | "| \(.version) | \(.date) | \(.uv) | \(.lts) |"' <<< "${FIXED}")"
+          body="$(printf '%s\n' \
+            "libuv 1.53.0 以上を含む公式 Node が公開されました（#734 の監視）。" \
+            "" \
+            "| Node | 公開日 | libuv | LTS |" \
+            "|---|---|---|---|" \
+            "${table}" \
+            "" \
+            "#734 の手順2〜4を実施してください: Windows サンドボックスでの実機確認、NODE_LAST_RELEASE_WITH_OLD_LIBUV の確定、利用者向けの Node 更新案内。" \
+            "" \
+            "監視マーカー: ${marker}")"
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "[human] libuv 修正入りの Node が公開された: Windows サンドボックスでの確認と更新案内を行う" \
+            --label windows --label human --body "${body}"
