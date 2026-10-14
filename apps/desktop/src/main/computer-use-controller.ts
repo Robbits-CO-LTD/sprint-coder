@@ -3470,7 +3470,10 @@ export class ComputerUseController {
       )
         this.planGrantAuthorizedCalls.add(`${sessionId}\0${request.callId}`);
       if (authorized.decision === 'deny') {
-        this.pauseReasons.set(record.status.sessionId, 'policy_changed');
+        // A person's own answer to the card (deny, focus restore failed, expired) stays the default
+        // takeover; only a deny that `deps.authorize` or the controller itself decided is a policy one.
+        if (!authorized.reason.startsWith('computer_approval_'))
+          this.pauseReasons.set(record.status.sessionId, 'policy_changed');
         record.status = this.status(
           record,
           'paused',
