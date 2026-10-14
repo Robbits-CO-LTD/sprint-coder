@@ -108,11 +108,18 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
+        # ADR v2 D7-3: macOS is built and checked in both eligibility modes. Windows has no
+        # deny-list until S5, so it is built as v1 only. Only v1 ever ships (release-beta builds v1).
         include:
           - label: macOS
             os: macos-latest
+            eligibility: v1
+          - label: macOS v2
+            os: macos-latest
+            eligibility: v2
           - label: Windows
             os: windows-2022
+            eligibility: v1
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -137,7 +144,10 @@ jobs:
           arch: x64
 
       - name: Compile and manifest native artifact
-        run: npm run build:computer-use-native
+        run: npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}
+
+      - name: Verify the built artifact attests what its manifest declares
+        run: node verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require --report=${{ runner.temp }}/computer-use-eligibility-report.json
 
       - name: Build deterministic Win32 acceptance fixture
         if: runner.os == 'Windows'
@@ -157,6 +167,7 @@ jobs:
             -std=c++20 -O1 -g -fno-omit-frame-pointer \
             -fsanitize=address,undefined \
             -I apps/desktop/computer-use-native \
+            -I apps/desktop/computer-use-native/generated \
             apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
             -o "${harness}"
           ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
@@ -189,9 +200,13 @@ jobs:
 
       - name: Verify Gate 0 loader tests
         working-directory: apps/desktop
+        env:
+          COMPUTER_USE_ELIGIBILITY_REPORT: ${{ runner.temp }}/computer-use-eligibility-report.json
         run: >-
           npx vitest run
           src/main/computer-use-native.test.ts
+          src/main/computer-use-eligibility-artifact.test.ts
+          verify-computer-use-eligibility.test.mjs
           computer-use-native/fixtures/win32-acceptance/win32_acceptance_fixture.test.ts
       - name: Test Windows sandbox working directory and access boundary
         if: runner.os == 'Windows'

@@ -262,4 +262,38 @@ describe('workflow security boundaries', () => {
     expect(macosPackage).not.toContain('GH_TOKEN');
     expect(macosPackage).not.toContain('gh attestation verify');
   });
+
+  it('builds and checks the native in both eligibility modes on macOS, v1 only on Windows, and ships only v1', () => {
+    const ci = workflows['.github/workflows/ci.yml'];
+    const gate = jobBlock(ci, 'computer-use-native-gate');
+    const entries = [...gate.matchAll(/- label: (.+)\n\s+os: (.+)\n\s+eligibility: (v[12])/gu)].map(
+      (match) => [match[1], match[2], match[3]],
+    );
+    expect(entries).toEqual([
+      ['macOS', 'macos-latest', 'v1'],
+      ['macOS v2', 'macos-latest', 'v2'],
+      ['Windows', 'windows-2022', 'v1'],
+    ]);
+    expect(stepBlock(gate, 'Compile and manifest native artifact')).toContain(
+      'npm run build:computer-use-native -- --eligibility=${{ matrix.eligibility }}',
+    );
+    const verify = stepBlock(gate, 'Verify the built artifact attests what its manifest declares');
+    expect(verify).toContain(
+      'verify-computer-use-eligibility.mjs --expect=${{ matrix.eligibility }} --require',
+    );
+    expect(verify).toContain('--report=${{ runner.temp }}/computer-use-eligibility-report.json');
+    const loaderTests = stepBlock(gate, 'Verify Gate 0 loader tests');
+    expect(loaderTests).toContain(
+      'COMPUTER_USE_ELIGIBILITY_REPORT: ${{ runner.temp }}/computer-use-eligibility-report.json',
+    );
+    expect(loaderTests).toContain('src/main/computer-use-eligibility-artifact.test.ts');
+    expect(loaderTests).toContain('verify-computer-use-eligibility.test.mjs');
+    // The macOS harness sees the generated header of the mode that was just built.
+    expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
+    // No distributed build passes a deny-list request.
+    expect(workflows['.github/workflows/release-beta.yml']).not.toContain('--eligibility');
+    for (const [name, script] of Object.entries(desktopPackage.scripts))
+      if (script.includes('build:computer-use-native'))
+        expect(script, name).not.toContain('--eligibility');
+  });
 });
