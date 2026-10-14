@@ -749,6 +749,10 @@ std::string IssueTicketFor(const NativeDispatchRequest& request) {
   if (current->dispatch_replay_cache.contains(request.request_id) ||
       current->inflight_dispatches.contains(request.request_id))
     return std::string();
+  // A real preflight advances the generation before it issues, so an issued ticket never carries
+  // generation 0 (the slot refuses it). A fresh session starts at 0; do the same advance here.
+  if (current->ticket_generation.load(std::memory_order_acquire) == 0)
+    current->ticket_generation.fetch_add(1, std::memory_order_acq_rel);
   ticketns::NativeOrdinaryTicketBinding binding;
   binding.session_id = request.session_id;
   binding.request_id = request.request_id;
