@@ -21,6 +21,8 @@ import {
 import {
   createComputerUseNativeHost,
   deriveComputerUseTargetFacts,
+  NATIVE_APPROVAL_CLASSIFIER_VERSION,
+  NATIVE_APPROVAL_EFFECTS,
 } from './computer-use-native-host';
 import {
   assertWindowsComputerUseHelperHandshake,
@@ -1337,8 +1339,9 @@ describe('macOS native capture boundary', () => {
     expect(approvalBranch).toContain("result: 'paused'");
     expect(approvalBranch).toContain('reasonCode: NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE');
     expect(approvalBranch).not.toMatch(/\bticket\b/u);
-    // Exactly the branch condition and the named constant mention the decision.
-    expect(hostSource.match(/single_use_approval/gu)).toHaveLength(2);
+    // The named constant, the version 2 format doc, the version 2 offer gate, the version 2
+    // rejection of a non-offer shape, and the version 1 branch are the only mentions.
+    expect(hostSource.match(/single_use_approval/gu)).toHaveLength(5);
     expect(hostSource).toContain(
       "NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable'",
     );
@@ -1380,7 +1383,27 @@ describe('macOS native capture boundary', () => {
     for (const decision of ['ordinary', 'replay', 'blocked', 'takeover', 'denied'])
       expect(host).toContain(`decision === '${decision}'`);
     expect(classifier).toContain('kNativePreflightClassifierVersion = 1;');
-    expect(host).toContain("record['classifierVersion'] !== 1");
+    expect(host).toContain("record['classifierVersion'] !== expectedClassifierVersion");
+    expect(host).toContain('NATIVE_PREFLIGHT_CLASSIFIER_VERSION = 1;');
+  });
+
+  it('keeps the version 2 approval offer constants in step with the native approval header', () => {
+    const header = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_native_approval_ticket.h'),
+      'utf8',
+    );
+    const host = readFileSync(join(__dirname, 'computer-use-native-host.ts'), 'utf8');
+    // Main's fixed approval classifier version is the one the native intent requires.
+    expect(header).toContain('binding.classifier_version == 2');
+    expect(NATIVE_APPROVAL_CLASSIFIER_VERSION).toBe(2);
+    expect(host).toContain('NATIVE_APPROVAL_CLASSIFIER_VERSION = 2;');
+    // `effect` strings are the native enum minus kInvalid, in snake case.
+    const enumBody = /enum class NativeApprovalEffect[^{]*\{([^}]*)\}/u.exec(header)?.[1] ?? '';
+    const native = [...enumBody.matchAll(/\bk([A-Za-z]+)\b/gu)]
+      .map((match) => match[1]!)
+      .filter((name) => name !== 'Invalid')
+      .map((name) => name.replace(/([a-z])([A-Z])/gu, '$1_$2').toLowerCase());
+    expect([...NATIVE_APPROVAL_EFFECTS]).toEqual(native);
   });
 
   it('recaptures and compares an observation-bound local visual patch before click or scroll', () => {

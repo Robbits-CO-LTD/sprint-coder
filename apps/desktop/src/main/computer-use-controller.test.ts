@@ -860,7 +860,7 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
-    it('still records a malformed approval receipt as unknown_effect (comparison)', async () => {
+    it('records a malformed approval receipt as a typed rejection, not unknown_effect', async () => {
       const host = createPreflightHost((request) => ({
         ...approvalReceipt(request),
         reasonCode: 'native_x',
@@ -873,7 +873,7 @@ describe('ComputerUseController', () => {
       await fixture.controller.observe(started.sessionId);
       await expect(
         fixture.controller.act(started.sessionId, planAction, 'malformed-1'),
-      ).resolves.toMatchObject({ result: 'unknown_effect' });
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'native_preflight_invalid' });
       expect(host.nativeDispatch).not.toHaveBeenCalled();
       await fixture.controller.stop(started.sessionId);
     });
