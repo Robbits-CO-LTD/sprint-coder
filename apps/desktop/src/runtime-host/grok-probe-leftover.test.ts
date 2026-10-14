@@ -144,6 +144,25 @@ describe('Grok capability probe whose CLI exit is not confirmed (issue #581)', (
     },
   );
 
+  it('waits for the forced taskkill when it stops its CLI and when it reclaims a leftover (issue #749)', async () => {
+    // Counted from the taskkill's spawn, the last 2 s window closed just before the root's exit
+    // arrived, so 3 of 5 real probes on Windows reported an unconfirmed stop (#749).
+    const leftovers = new GrokProbeLeftovers();
+    fakeProbeCli(['cached_token']);
+    mocks.stop.mockResolvedValue(false);
+    await probeGrok('/fixture/grok', source, leftovers);
+    expect(mocks.stop).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), {
+      awaitTaskkill: true,
+    });
+
+    mocks.stop.mockClear();
+    await leftovers.reclaim();
+    expect(mocks.stop).toHaveBeenCalledTimes(1);
+    expect(mocks.stop).toHaveBeenLastCalledWith(expect.anything(), expect.anything(), {
+      awaitTaskkill: true,
+    });
+  });
+
   it('reports no stop uncertainty and leaves nothing behind when the exit is confirmed', async () => {
     const leftovers = new GrokProbeLeftovers();
     fakeProbeCli(['cached_token']);
