@@ -4923,6 +4923,8 @@ sprint_coder::computer_use::EffectShadowLog& EffectShadowRing() {
   return ring;
 }
 
+enum class ShadowRead { kOk, kAbsent, kFailed, kTooLong, kStopped };
+
 struct ShadowReader {
   const NativeDispatchRequest& request;
   sprint_coder::computer_use::ShadowBudget budget;
@@ -4942,14 +4944,37 @@ struct ShadowReader {
     }
     return budget.Spend(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
   }
+
+  // Every read result passes through here. Only kOk and "absent" (no value / unsupported) leave no
+  // trace; a failed read, a string over its bound and a read that was stopped (canceled or out of
+  // budget) set a flag the caller owns, so none of them can become an empty answer. A too-long
+  // string sets `too_long` when the caller keeps one apart (a node's oversize), else `failed`.
+  // True only for kOk.
+  bool Settle(ShadowRead result, bool* failed, bool* too_long = nullptr) {
+    switch (result) {
+      case ShadowRead::kOk:
+        return true;
+      case ShadowRead::kAbsent:
+        return false;
+      case ShadowRead::kTooLong:
+        *(too_long != nullptr ? too_long : failed) = true;
+        return false;
+      case ShadowRead::kFailed:
+      case ShadowRead::kStopped:
+        *failed = true;
+        return false;
+    }
+    return false;
+  }
 };
 
-enum class ShadowRead { kOk, kAbsent, kFailed, kTooLong, kStopped };
-
 // A string attribute. "No value" and "unsupported" are an absent attribute; any other error is a
-// failed read; a string longer than `maximum_units` is too long (never truncated, never empty).
+// failed read; a string over its bound is too long (never truncated, never empty). The bound is
+// in UTF-8 bytes (`maximum_bytes`, what the core counts), checked on the converted string, after
+// normalization; `maximum_units` (UTF-16 units) only spares converting something far too long.
 ShadowRead ReadShadowString(ShadowReader& reader, AXUIElementRef element, CFStringRef attribute,
-                            std::size_t maximum_units, std::string* output, bool normalize) {
+                            std::size_t maximum_units, std::size_t maximum_bytes,
+                            std::string* output, bool normalize) {
   if (!reader.Step()) return ShadowRead::kStopped;
   CFTypeRef value = nullptr;
   const AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
@@ -4985,7 +5010,26 @@ ShadowRead ReadShadowString(ShadowReader& reader, AXUIElementRef element, CFStri
   if (!CFStringGetCString(text, buffer.data(), maximum, kCFStringEncodingUTF8))
     return ShadowRead::kFailed;
   buffer.resize(std::char_traits<char>::length(buffer.c_str()));
+  if (buffer.size() > maximum_bytes) return ShadowRead::kTooLong;
   *output = std::move(buffer);
+  return ShadowRead::kOk;
+}
+
+// The element at a point of the screen. "Nothing there" is absent; any other error is a failed read.
+ShadowRead ReadShadowElementAtPosition(ShadowReader& reader, AXUIElementRef application,
+                                       CGPoint point, ShadowCfRef* output) {
+  if (!reader.Step()) return ShadowRead::kStopped;
+  AXUIElementRef element = nullptr;
+  const AXError error = AXUIElementCopyElementAtPosition(
+      application, static_cast<float>(point.x), static_cast<float>(point.y), &element);
+  ShadowCfRef holder(element);
+  if (error == kAXErrorNoValue || error == kAXErrorAttributeUnsupported ||
+      error == kAXErrorNotImplemented)
+    return ShadowRead::kAbsent;
+  if (error != kAXErrorSuccess) return ShadowRead::kFailed;
+  if (element == nullptr) return ShadowRead::kAbsent;
+  CFRetain(element);
+  output->Reset(element);
   return ShadowRead::kOk;
 }
 
@@ -5012,17 +5056,9 @@ sprint_coder::computer_use::ShadowAxNode ReadShadowNode(ShadowReader& reader,
   using sprint_coder::computer_use::kEffectMaxLabelBytes;
   sprint_coder::computer_use::ShadowAxNode node;
   const auto read = [&](CFStringRef attribute, std::string* output) {
-    switch (ReadShadowString(reader, element, attribute, kEffectMaxLabelBytes, output, true)) {
-      case ShadowRead::kTooLong:
-        node.oversize = true;
-        break;
-      case ShadowRead::kFailed:
-      case ShadowRead::kStopped:
-        node.read_failed = true;
-        break;
-      default:
-        break;
-    }
+    reader.Settle(ReadShadowString(reader, element, attribute, kEffectMaxLabelBytes,
+                                   kEffectMaxLabelBytes, output, true),
+                  &node.read_failed, &node.oversize);
   };
   read(kAXRoleAttribute, &node.role);
   read(kAXSubroleAttribute, &node.subrole);
@@ -5043,24 +5079,25 @@ ShadowCfRef FindShadowSemanticTarget(ShadowReader& reader, AXUIElementRef elemen
   if (element == nullptr || depth > 16 || *matches > 1) return ShadowCfRef();
   // v1 reads these through a 4096-byte string helper (at most 1365 UTF-16 units); the same bound.
   constexpr std::size_t kSearchStringUnits = 1365;
+  constexpr std::size_t kSearchStringBytes = 4096;
   std::string text;
-  ShadowRead read = ReadShadowString(reader, element, kAXIdentifierAttribute, kSearchStringUnits, &text, false);
-  if (read == ShadowRead::kOk && text == target_id) {
+  if (reader.Settle(ReadShadowString(reader, element, kAXIdentifierAttribute, kSearchStringUnits,
+                                     kSearchStringBytes, &text, false),
+                    &reader.search_incomplete) &&
+      text == target_id) {
     ++*matches;
     CFRetain(element);
     return ShadowCfRef(element);
   }
-  if (read == ShadowRead::kFailed || read == ShadowRead::kTooLong || read == ShadowRead::kStopped)
-    reader.search_incomplete = true;
   text.clear();
-  read = ReadShadowString(reader, element, kAXTitleAttribute, kSearchStringUnits, &text, false);
-  if (read == ShadowRead::kOk && text == target_id) {
+  if (reader.Settle(ReadShadowString(reader, element, kAXTitleAttribute, kSearchStringUnits,
+                                     kSearchStringBytes, &text, false),
+                    &reader.search_incomplete) &&
+      text == target_id) {
     ++*matches;
     CFRetain(element);
     return ShadowCfRef(element);
   }
-  if (read == ShadowRead::kFailed || read == ShadowRead::kTooLong || read == ShadowRead::kStopped)
-    reader.search_incomplete = true;
   if (!reader.Step()) {
     reader.search_incomplete = true;
     return ShadowCfRef();
@@ -5100,8 +5137,9 @@ ShadowCfRef CopyShadowTarget(ShadowReader& reader) {
   if (request.kind == "invoke" || request.kind == "set_text" || request.kind == "select" ||
       request.kind == "toggle" || request.kind == "expand_collapse") {
     ShadowCfRef focused_window;
-    if (ReadShadowElement(reader, application.Element(), kAXFocusedWindowAttribute,
-                          &focused_window) != ShadowRead::kOk)
+    if (!reader.Settle(ReadShadowElement(reader, application.Element(),
+                                         kAXFocusedWindowAttribute, &focused_window),
+                       &reader.search_incomplete))
       return ShadowCfRef();
     int matches = 0;
     ShadowCfRef target = FindShadowSemanticTarget(reader, focused_window.Element(),
@@ -5114,17 +5152,17 @@ ShadowCfRef CopyShadowTarget(ShadowReader& reader) {
             request.x * std::max<CGFloat>(0, request.observation_bounds.size.width - 1),
         request.observation_bounds.origin.y +
             request.y * std::max<CGFloat>(0, request.observation_bounds.size.height - 1));
-    if (!reader.Step()) return ShadowCfRef();
-    AXUIElementRef element = nullptr;
-    const AXError copied = AXUIElementCopyElementAtPosition(
-        application.Element(), static_cast<float>(point.x), static_cast<float>(point.y), &element);
-    ShadowCfRef holder(element);
-    return copied == kAXErrorSuccess && element != nullptr ? std::move(holder) : ShadowCfRef();
+    ShadowCfRef element;
+    if (!reader.Settle(ReadShadowElementAtPosition(reader, application.Element(), point, &element),
+                       &reader.search_incomplete))
+      return ShadowCfRef();
+    return element;
   }
   if (request.kind == "type" || request.kind == "key") {
     ShadowCfRef focused;
-    if (ReadShadowElement(reader, application.Element(), kAXFocusedUIElementAttribute,
-                          &focused) != ShadowRead::kOk)
+    if (!reader.Settle(ReadShadowElement(reader, application.Element(),
+                                         kAXFocusedUIElementAttribute, &focused),
+                       &reader.search_incomplete))
       return ShadowCfRef();
     return focused;
   }
@@ -5145,8 +5183,9 @@ void CaptureShadowChain(ShadowReader& reader, AXUIElementRef target,
     const std::string role = capture->chain.back().role;
     if (role == "AXWebArea" && !capture->web_area_url_read) {
       std::string url;
-      if (ReadShadowString(reader, current.Element(), kAXURLAttribute, 2048, &url, false) ==
-          ShadowRead::kOk) {
+      if (reader.Settle(ReadShadowString(reader, current.Element(), kAXURLAttribute, 2048, 2048,
+                                         &url, false),
+                        &capture->read_failed)) {
         capture->web_area_url_read = true;
         capture->web_area_url = std::move(url);
       }
@@ -5156,8 +5195,8 @@ void CaptureShadowChain(ShadowReader& reader, AXUIElementRef target,
       return;
     }
     ShadowCfRef parent;
-    if (ReadShadowElement(reader, current.Element(), kAXParentAttribute, &parent) !=
-        ShadowRead::kOk)
+    if (!reader.Settle(ReadShadowElement(reader, current.Element(), kAXParentAttribute, &parent),
+                       &capture->read_failed))
       return;
     current = std::move(parent);
   }
@@ -5168,7 +5207,9 @@ void CaptureShadowNeighbors(ShadowReader& reader, AXUIElementRef target,
                             sprint_coder::computer_use::ShadowAxCapture* capture) {
   capture->neighbors_complete = false;
   ShadowCfRef parent;
-  if (ReadShadowElement(reader, target, kAXParentAttribute, &parent) != ShadowRead::kOk) return;
+  if (!reader.Settle(ReadShadowElement(reader, target, kAXParentAttribute, &parent),
+                     &capture->read_failed))
+    return;
   if (!reader.Step()) return;
   CFTypeRef children_value = nullptr;
   const AXError error =
@@ -5228,23 +5269,23 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
     ShadowReader reader(request);
     ShadowAxCapture capture;
     ShadowCfRef target = CopyShadowTarget(reader);
+    // A lookup that failed or was cut off is a read gap, not "the target was not there".
     if (reader.search_incomplete) capture.read_failed = true;
     if (target.Get() != nullptr) {
       capture.target_found = true;
       CaptureShadowChain(reader, target.Element(), &capture);
       CaptureShadowNeighbors(reader, target.Element(), &capture);
       std::string url;
-      const ShadowRead url_read = ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, &url, false);
-      if (url_read == ShadowRead::kOk) {
+      if (reader.Settle(ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, 2048,
+                                         &url, false),
+                        &capture.read_failed)) {
         capture.url_present = true;
         capture.url = std::move(url);
-      } else if (url_read == ShadowRead::kFailed || url_read == ShadowRead::kTooLong) {
-        capture.read_failed = true;
       }
-      const ShadowRead name_read = ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
-                                                    kEffectMaxLabelBytes, &capture.filename, true);
-      if (name_read == ShadowRead::kFailed || name_read == ShadowRead::kTooLong)
-        capture.read_failed = true;
+      reader.Settle(ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
+                                     kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture.filename,
+                                     true),
+                    &capture.read_failed);
     }
     if (reader.canceled) {
       EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapCanceled, v1_ordinary));

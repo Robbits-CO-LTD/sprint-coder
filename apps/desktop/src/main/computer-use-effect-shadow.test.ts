@@ -81,10 +81,12 @@ const ALLOWED_CALLS = new Set([
   'EmitShadowRecord',
   'FindShadowSemanticTarget',
   'ReadShadowElement',
+  'ReadShadowElementAtPosition',
   'ReadShadowNode',
   'ReadShadowString',
   'RecordEffectShadow',
   'ScheduleEffectShadow',
+  'Settle',
   'ShadowCfRef',
   'ShadowInFlight',
   'ShadowQueue',
@@ -327,8 +329,8 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     for (const name of [
       'ReadShadowString',
       'ReadShadowElement',
+      'ReadShadowElementAtPosition',
       'FindShadowSemanticTarget',
-      'CopyShadowTarget',
       'CaptureShadowNeighbors',
     ]) {
       const definition = new RegExp(`\\n[\\w:<>&* ]*\\b${name}\\([\\s\\S]*?\\n\\}\\n`, 'u').exec(
@@ -357,9 +359,14 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(search).not.toBeNull();
     // An identifier or title that failed, was too long or was cut off, a children read that
     // failed, and an exhausted budget each make the search incomplete.
+    expect(search![0].match(/&reader\.search_incomplete\)/gu)).toHaveLength(2);
     expect(search![0].match(/reader\.search_incomplete = true;/gu)!.length).toBeGreaterThanOrEqual(
-      4,
+      2,
     );
+    // The focused window / element and the element at a point are lookups of the same kind.
+    const lookup = /ShadowCfRef CopyShadowTarget\([\s\S]*?\n\}\n/u.exec(section);
+    expect(lookup).not.toBeNull();
+    expect(lookup![0].match(/&reader\.search_incomplete\)/gu)).toHaveLength(3);
     expect(section).toContain('matches == 1 && !reader.search_incomplete');
     expect(section).toContain('if (reader.search_incomplete) capture.read_failed = true;');
   });
@@ -372,14 +379,54 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(section).toMatch(
       /error == kAXErrorNoValue \|\| error == kAXErrorAttributeUnsupported \|\|\s*error == kAXErrorNotImplemented/u,
     );
-    expect(section).toContain('node.oversize = true;');
-    expect(section).toContain('node.read_failed = true;');
-    expect(section).toContain('capture.read_failed = true;');
+    expect(section).toContain('&node.read_failed, &node.oversize');
+    expect(section).toContain('&capture->read_failed');
+    expect(section).toContain('&capture.read_failed');
     // The old read helpers, which returned false (empty) over 4096, are not used by the shadow.
     expect(shadowCode()).not.toContain('CopyAccessibilityString');
     expect(shadowCode()).not.toContain('CopyAccessibilityElementAttribute');
     // The chain reaches the root only at a window or the application element.
     expect(section.match(/chain_reached_root = true;/gu)).toHaveLength(1);
+  });
+
+  it('settles every read: nothing but a good read can leave without a flag', () => {
+    const code = shadowCode();
+    // Every call of a read helper is the argument of reader.Settle(...), whose flag is a variable
+    // the caller owns; a result that is compared, switched on or dropped does not pass.
+    const calls = [
+      ...code.matchAll(/\b(ReadShadowString|ReadShadowElementAtPosition|ReadShadowElement)\(/gu),
+    ];
+    let called = 0;
+    for (const match of calls) {
+      const before = code.slice(0, match.index);
+      // Skip the definitions (a return type directly before the name).
+      if (/\bShadowRead\s*$/u.test(before)) continue;
+      called += 1;
+      expect(before, `${match[1]} at ${match.index}`).toMatch(/\bSettle\(\s*$/u);
+    }
+    expect(called).toBe(11);
+    // Settle: only kOk is true, and every other result but "absent" sets a flag.
+    const settle = /bool Settle\(ShadowRead result[\s\S]*?\n  \}\n/u.exec(shadowSection());
+    expect(settle).not.toBeNull();
+    expect(settle![0]).toMatch(/case ShadowRead::kOk:\s*return true;/u);
+    expect(settle![0]).toMatch(/case ShadowRead::kAbsent:\s*return false;/u);
+    expect(settle![0]).toMatch(
+      /case ShadowRead::kTooLong:\s*\*\(too_long != nullptr \? too_long : failed\) = true;\s*return false;/u,
+    );
+    expect(settle![0]).toMatch(
+      /case ShadowRead::kFailed:\s*case ShadowRead::kStopped:\s*\*failed = true;\s*return false;/u,
+    );
+    // Results are never compared with kOk by hand, never switched on outside Settle.
+    expect(code.replace(settle![0], '')).not.toMatch(/==\s*ShadowRead::kOk|!=\s*ShadowRead::kOk/u);
+    expect(code.replace(settle![0], '')).not.toMatch(/switch\s*\(\s*ReadShadow/u);
+    // Where the flags go: a lookup of the target, a node, the capture.
+    for (const flag of [
+      '&reader.search_incomplete',
+      '&node.read_failed',
+      '&capture->read_failed',
+      '&capture.read_failed',
+    ])
+      expect(code).toContain(flag);
   });
 
   it('keeps the bounds of the core: nodes, label bytes and neighbours', () => {
@@ -453,21 +500,26 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(reader![0]).toMatch(
       /if \(normalize\) \{[\s\S]*?CFStringNormalize\(copy, kCFStringNormalizationFormKC\);/u,
     );
-    // It can lengthen a string, so the bound is checked after.
+    // It can lengthen a string, so the bound is checked after. The bound is in UTF-8 bytes of the
+    // converted string; the UTF-16 length only spares converting something far too long.
     expect(reader![0].match(/> maximum_units\) return ShadowRead::kTooLong;/gu)).toHaveLength(2);
+    expect(reader![0]).toContain('if (buffer.size() > maximum_bytes) return ShadowRead::kTooLong;');
+    expect(reader![0].indexOf('buffer.resize(')).toBeLessThan(
+      reader![0].indexOf('buffer.size() > maximum_bytes'),
+    );
     // Which reads are folded: the node's words and the file name; not the target's identifier or
     // title (compared with the id v1 gave), and not URLs.
     const calls = [
-      ...shadowCode().matchAll(/ReadShadowString\(reader, ([^;]*?), (true|false)\)/gu),
+      ...shadowCode().matchAll(/ReadShadowString\(reader, ([^;]*?),\s*(true|false)\)/gu),
     ].map((entry) => `${entry[1]!.replace(/\s+/gu, ' ')}|${entry[2]}`);
     expect(calls.sort()).toEqual(
       [
-        'element, attribute, kEffectMaxLabelBytes, output|true',
-        'element, kAXIdentifierAttribute, kSearchStringUnits, &text|false',
-        'element, kAXTitleAttribute, kSearchStringUnits, &text|false',
-        'current.Element(), kAXURLAttribute, 2048, &url|false',
-        'target.Element(), kAXURLAttribute, 2048, &url|false',
-        'target.Element(), kAXFilenameAttribute, kEffectMaxLabelBytes, &capture.filename|true',
+        'element, attribute, kEffectMaxLabelBytes, kEffectMaxLabelBytes, output|true',
+        'element, kAXIdentifierAttribute, kSearchStringUnits, kSearchStringBytes, &text|false',
+        'element, kAXTitleAttribute, kSearchStringUnits, kSearchStringBytes, &text|false',
+        'current.Element(), kAXURLAttribute, 2048, 2048, &url|false',
+        'target.Element(), kAXURLAttribute, 2048, 2048, &url|false',
+        'target.Element(), kAXFilenameAttribute, kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture.filename|true',
       ].sort(),
     );
     // The portable half folds again, so it does not depend on the platform having done it.
