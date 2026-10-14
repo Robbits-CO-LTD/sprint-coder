@@ -12297,6 +12297,85 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
 
+    it('enforces the v99 CHECK constraints and trigger in raw SQL on INSERT and UPDATE', () => {
+      const { fixture, base } = seed();
+      const row = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('raw-base'),
+        approvalId: 'approval-raw',
+        approvalEffect: 'download_open',
+      });
+      const plain = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('raw-plain'),
+      });
+      fixture.persistence.close();
+      const db = new Database(fixture.path);
+      const copyColumns =
+        'task_id, turn_id, session_id, profile_id, profile_revision, app_identity_digest, ' +
+        'window_identity_digest, observation_revision, observation_digest, client_width, ' +
+        'client_height, action_digest, action_kind, route, state, reason_code, policy_epoch, ' +
+        'created_at, updated_at';
+      let counter = 0;
+      const insertWith = (column: string, value: string) =>
+        db
+          .prepare(
+            `INSERT INTO computer_action_audits(id, native_request_id, ${copyColumns}, ${column})
+             SELECT ?, ?, ${copyColumns}, ? FROM computer_action_audits WHERE id = ?`,
+          )
+          .run(`raw-${counter++}`, bindingDigest(`raw-${counter}`), value, plain.id);
+      const updateWith = (column: string, value: string) =>
+        db
+          .prepare(`UPDATE computer_action_audits SET ${column} = ? WHERE id = ?`)
+          .run(value, plain.id);
+      try {
+        const invalid: [string, string][] = [
+          ['approval_parent_request_id', 'A'.repeat(64)],
+          ['approval_parent_request_id', 'a'.repeat(63)],
+          ['approval_parent_request_id', 'a'.repeat(65)],
+          ['approval_parent_request_id', 'g'.repeat(64)],
+          ['approval_effect', 'kInvalid'],
+          ['approval_id', ''],
+          ['approval_id', 'x'.repeat(129)],
+          ['approval_outcome', 'pending'],
+        ];
+        for (const [column, value] of invalid) {
+          expect(() => insertWith(column, value), `INSERT ${column}=${value.slice(0, 8)}`).toThrow(
+            /CHECK constraint failed/,
+          );
+          expect(() => updateWith(column, value), `UPDATE ${column}=${value.slice(0, 8)}`).toThrow(
+            // BEFORE UPDATE triggers run ahead of CHECKs: the write-once trigger may win on a row.
+            /CHECK constraint failed|write-once/,
+          );
+        }
+        // On a row that has an approval id the trigger lets NULL -> value through, so the
+        // CHECK itself is what refuses a value outside the set.
+        expect(() =>
+          db
+            .prepare("UPDATE computer_action_audits SET approval_outcome = 'pending' WHERE id = ?")
+            .run(row.id),
+        ).toThrow(/CHECK constraint failed/);
+        // The trigger refuses an outcome on a row without an approval id.
+        expect(() => updateWith('approval_outcome', 'approved')).toThrow(/write-once/);
+        // Boundary: a 128-character approval id is accepted.
+        const long = 'x'.repeat(128);
+        expect(() => insertWith('approval_id', long)).not.toThrow();
+        expect(
+          db
+            .prepare('SELECT count(*) AS n FROM computer_action_audits WHERE approval_id = ?')
+            .get(long),
+        ).toEqual({ n: 1 });
+        // The trigger does not block the legitimate first write on a row that has an approval id.
+        expect(
+          db
+            .prepare("UPDATE computer_action_audits SET approval_outcome = 'denied' WHERE id = ?")
+            .run(row.id).changes,
+        ).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
     it('never lets correlation columns influence duplicate detection or completion', () => {
       const { fixture, base } = seed();
       const first = fixture.persistence.recordComputerActionAudit({
@@ -12336,92 +12415,93 @@ if (runsWithElectronAbi)
     });
   });
 
-describe('Computer Use profile and action persistence', () => {
-  it('persists only stable profile identity and privacy-safe action audit metadata', () => {
-    const fixture = createPersistence();
-    const task = fixture.persistence.createTask('computer use persistence');
-    const profile = fixture.persistence.createComputerAppProfile({
-      id: 'computer-profile-1',
-      platform: 'darwin',
-      kind: 'macos-bundle',
-      label: 'Fixture App',
-      canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
-      appUrl: null,
-      identity: {
+if (runsWithElectronAbi)
+  describe('Computer Use profile and action persistence', () => {
+    it('persists only stable profile identity and privacy-safe action audit metadata', () => {
+      const fixture = createPersistence();
+      const task = fixture.persistence.createTask('computer use persistence');
+      const profile = fixture.persistence.createComputerAppProfile({
+        id: 'computer-profile-1',
         platform: 'darwin',
+        kind: 'macos-bundle',
+        label: 'Fixture App',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: {
+          platform: 'darwin',
+          identityDigest: 'a'.repeat(64),
+          executablePath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+          executableDigest: 'b'.repeat(64),
+          teamId: 'TEAMID',
+        },
         identityDigest: 'a'.repeat(64),
-        executablePath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        version: null,
         executableDigest: 'b'.repeat(64),
-        teamId: 'TEAMID',
-      },
-      identityDigest: 'a'.repeat(64),
-      version: null,
-      executableDigest: 'b'.repeat(64),
-      mode: 'full_access_app',
-      connectionId: 'connection-1',
-      modelId: 'model-1',
-      providerEgressConsent: true,
-      remember: true,
-    });
-    expect(profile.revision).toBe(1);
-    expect(fixture.persistence.listComputerAppProfiles()).toEqual([profile]);
-    const audit = fixture.persistence.recordComputerActionAudit({
-      taskId: task.id,
-      turnId: '1'.repeat(64),
-      sessionId: '2'.repeat(64),
-      profileId: profile.id,
-      profileRevision: profile.revision,
-      appIdentityDigest: 'a'.repeat(64),
-      windowIdentityDigest: 'c'.repeat(64),
-      observationRevision: 1,
-      observationDigest: 'e'.repeat(64),
-      clientWidth: 800,
-      clientHeight: 600,
-      actionDigest: 'd'.repeat(64),
-      actionKind: 'set_text',
-      route: 'semantic',
-      nativeRequestId: '3'.repeat(64),
-      policyEpoch: 0,
-    });
-    expect(
-      fixture.persistence.completeComputerActionAudit({
-        auditId: audit.id,
-        state: 'unknown_effect',
-        reasonCode: 'native_ack_unknown',
-        updatedAt: '2026-08-29T00:00:01.000Z',
-      }),
-    ).toMatchObject({ state: 'unknown_effect', reasonCode: 'native_ack_unknown' });
-    fixture.persistence.close();
-
-    const reopened = new SqlitePersistenceClient(fixture.path);
-    expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
-      id: profile.id,
-      identityDigest: 'a'.repeat(64),
-      revision: 1,
-    });
-    expect(reopened.listComputerActionAudits(task.id)).toMatchObject([
-      expect.objectContaining({
-        state: 'unknown_effect',
-        actionKind: 'set_text',
+        mode: 'full_access_app',
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: true,
+        remember: true,
+      });
+      expect(profile.revision).toBe(1);
+      expect(fixture.persistence.listComputerAppProfiles()).toEqual([profile]);
+      const audit = fixture.persistence.recordComputerActionAudit({
+        taskId: task.id,
+        turnId: '1'.repeat(64),
+        sessionId: '2'.repeat(64),
+        profileId: profile.id,
+        profileRevision: profile.revision,
         appIdentityDigest: 'a'.repeat(64),
+        windowIdentityDigest: 'c'.repeat(64),
+        observationRevision: 1,
         observationDigest: 'e'.repeat(64),
         clientWidth: 800,
         clientHeight: 600,
-      }),
-    ]);
-    reopened.close();
-    const db = new Database(fixture.path, { readonly: true });
-    const serialized = JSON.stringify(db.prepare('SELECT * FROM computer_action_audits').all());
-    expect(serialized).not.toContain('SUPER_SECRET_SOURCE');
-    db.close();
-  });
+        actionDigest: 'd'.repeat(64),
+        actionKind: 'set_text',
+        route: 'semantic',
+        nativeRequestId: '3'.repeat(64),
+        policyEpoch: 0,
+      });
+      expect(
+        fixture.persistence.completeComputerActionAudit({
+          auditId: audit.id,
+          state: 'unknown_effect',
+          reasonCode: 'native_ack_unknown',
+          updatedAt: '2026-08-29T00:00:01.000Z',
+        }),
+      ).toMatchObject({ state: 'unknown_effect', reasonCode: 'native_ack_unknown' });
+      fixture.persistence.close();
 
-  it('migrates a v78 profile with valid selection sentinels through v81', () => {
-    const fixture = createPersistence();
-    fixture.persistence.close();
-    const legacy = new Database(fixture.path);
-    legacy.exec('DROP TABLE computer_action_audits; DROP TABLE computer_app_profiles;');
-    legacy.exec(`
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: profile.id,
+        identityDigest: 'a'.repeat(64),
+        revision: 1,
+      });
+      expect(reopened.listComputerActionAudits(task.id)).toMatchObject([
+        expect.objectContaining({
+          state: 'unknown_effect',
+          actionKind: 'set_text',
+          appIdentityDigest: 'a'.repeat(64),
+          observationDigest: 'e'.repeat(64),
+          clientWidth: 800,
+          clientHeight: 600,
+        }),
+      ]);
+      reopened.close();
+      const db = new Database(fixture.path, { readonly: true });
+      const serialized = JSON.stringify(db.prepare('SELECT * FROM computer_action_audits').all());
+      expect(serialized).not.toContain('SUPER_SECRET_SOURCE');
+      db.close();
+    });
+
+    it('migrates a v78 profile with valid selection sentinels through v81', () => {
+      const fixture = createPersistence();
+      fixture.persistence.close();
+      const legacy = new Database(fixture.path);
+      legacy.exec('DROP TABLE computer_action_audits; DROP TABLE computer_app_profiles;');
+      legacy.exec(`
         CREATE TABLE computer_app_profiles (
           id TEXT PRIMARY KEY,
           platform TEXT NOT NULL CHECK (platform IN ('win32', 'darwin')),
@@ -12452,53 +12532,53 @@ describe('Computer Use profile and action persistence', () => {
         );
         DELETE FROM schema_migrations WHERE version IN (80, 81);
       `);
-    legacy.close();
+      legacy.close();
 
-    const reopened = new SqlitePersistenceClient(fixture.path);
-    expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
-      id: 'legacy-computer-profile',
-      connectionId: 'unselected',
-      modelId: 'unselected',
-    });
-    reopened.close();
-  });
-
-  it('enforces the bounded profile count before insert', () => {
-    const fixture = createPersistence();
-    const profile = {
-      platform: 'darwin' as const,
-      kind: 'macos-bundle' as const,
-      label: 'Fixture',
-      canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
-      appUrl: null,
-      identity: { platform: 'darwin', identityDigest: 'a'.repeat(64) },
-      version: null,
-      executableDigest: 'b'.repeat(64),
-      mode: 'full_access_app' as const,
-      connectionId: 'connection-1',
-      modelId: 'model-1',
-      providerEgressConsent: false,
-      remember: false,
-    };
-    for (let index = 0; index < 64; index += 1)
-      fixture.persistence.createComputerAppProfile({
-        ...profile,
-        id: `computer-profile-${index}`,
-        label: `Fixture ${index}`,
-        identity: { ...profile.identity, identityDigest: index.toString(16).padStart(64, '0') },
-        identityDigest: index.toString(16).padStart(64, '0'),
+      const reopened = new SqlitePersistenceClient(fixture.path);
+      expect(reopened.listComputerAppProfiles()[0]).toMatchObject({
+        id: 'legacy-computer-profile',
+        connectionId: 'unselected',
+        modelId: 'unselected',
       });
-    expect(() =>
-      fixture.persistence.createComputerAppProfile({
-        ...profile,
-        id: 'computer-profile-over-limit',
-        identity: { ...profile.identity, identityDigest: 'f'.repeat(64) },
-        identityDigest: 'f'.repeat(64),
-      }),
-    ).toThrow('profile limit');
-    fixture.persistence.close();
+      reopened.close();
+    });
+
+    it('enforces the bounded profile count before insert', () => {
+      const fixture = createPersistence();
+      const profile = {
+        platform: 'darwin' as const,
+        kind: 'macos-bundle' as const,
+        label: 'Fixture',
+        canonicalPath: '/Applications/Fixture.app/Contents/MacOS/Fixture',
+        appUrl: null,
+        identity: { platform: 'darwin', identityDigest: 'a'.repeat(64) },
+        version: null,
+        executableDigest: 'b'.repeat(64),
+        mode: 'full_access_app' as const,
+        connectionId: 'connection-1',
+        modelId: 'model-1',
+        providerEgressConsent: false,
+        remember: false,
+      };
+      for (let index = 0; index < 64; index += 1)
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: `computer-profile-${index}`,
+          label: `Fixture ${index}`,
+          identity: { ...profile.identity, identityDigest: index.toString(16).padStart(64, '0') },
+          identityDigest: index.toString(16).padStart(64, '0'),
+        });
+      expect(() =>
+        fixture.persistence.createComputerAppProfile({
+          ...profile,
+          id: 'computer-profile-over-limit',
+          identity: { ...profile.identity, identityDigest: 'f'.repeat(64) },
+          identityDigest: 'f'.repeat(64),
+        }),
+      ).toThrow('profile limit');
+      fixture.persistence.close();
+    });
   });
-});
 
 if (runsWithElectronAbi)
   describe('Computer Use application grants (ADR v2 §6.2)', () => {
