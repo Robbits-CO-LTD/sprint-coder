@@ -167,6 +167,9 @@ describe('Computer Use native protocol', () => {
       expect(workflow).toContain('-fsanitize=address,undefined');
       expect(workflow).toContain('/fsanitize=address');
       expect(workflow).toContain('Windows ASan: SKIP');
+      // The harness carries CJK lexicon terms, so MSVC must read it as UTF-8 in both builds.
+      expect(workflow).toContain('/W4 /GS /sdl /utf-8');
+      expect(workflow).toContain('/Zi /utf-8 /fsanitize=address');
     }
   });
 });

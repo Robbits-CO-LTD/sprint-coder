@@ -681,6 +681,59 @@ D7-1 の実装（TS のみ）に合わせて、上の方針を次のとおり固
 
 6. **S4-4 補遺の「承認経路が有効」の条件との関係**。D7 が入っても、承認経路は開かない。「有効」の条件のうち、handshake で classifier v2（`NATIVE_APPROVAL_CLASSIFIER_VERSION`）が確認できることは、D7 の attest（`classifierVersion`）で初めて判定できるようになる。しかし v2 モードのビルドも、classifier v2 が入るまでは `classifierVersion` として 1 を attest する。したがって、classifier v2 が入るまでは、D7 が入った後もこの条件は満たされず、承認経路は閉じたままである。`ticketRequired` の attest は、ticket 必須化が実際に入っていることの確認であり、それ自体は承認経路を開かない。
 
+**classifier v2 の実装契約と判断（2026-10-14）**
+
+classifier v2 は、承認経路を本番で開くための最後の前提である。現行の native の分類は `classified` / `secure` / `high_impact` の 3 つの bool だけで、E1〜E5、§3.5 の確定操作、§3.7 の面を区別できず、結果は常に takeover になる。次の契約で置き換える。
+
+1. **構造**。両 OS で共有する純粋な（portable な）分類器コアを、native から独立に持つ。入力は native が測った構造化 facts（対象と祖先の descriptor、拡張子、ウィンドウの面、取得の完全性、アクション、セッションのモード、ブラウザの origin の状態）、出力は固定の効果クラスと判定（ordinary / single_use_approval(効果) / blocked / takeover）。facts の取得（AX / UIA）は OS ごとで、実機での検証が要る。コアは環境変数やプロセスを読まない。lexicon（en / ja）と ruleset は版管理した表で、表の digest を定数にして、黙って編集されたら harness が落ちる。
+
+2. **効果クラスと判定**。上にあるものが優先する。
+
+   | 効果クラス                            | 条件                                                                                                       | 判定                                                        | 承認の効果                 |
+   | ------------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------- | -------------------------- |
+   | 分類不能                              | 読む以外の操作で、対象の metadata・祖先の walk・面のどれかが欠ける。origin を読めない                      | takeover（`ordinary` にしない。D13）                        | なし                       |
+   | secure                                | パスワード・PIN 欄（role / ラベル、祖先を含む）                                                            | blocked                                                     | なし                       |
+   | credential                            | カード番号・セキュリティコード・有効期限                                                                   | blocked（承認も出さない）                                   | なし                       |
+   | 面（§3.7）                            | ターミナル様・DevTools console・スクリプト入力面・コマンドパレット（面の種別またはラベルの語）             | blocked                                                     | なし                       |
+   | E1 実行可能ファイルを開く             | 開く系の操作で、ファイル項目の拡張子が版管理辞書に一致                                                     | blocked（E2 / E3 より優先）                                 | なし                       |
+   | E4 インストーラの起動                 | 拡張子 `.pkg .dmg .msi .msix`、または「インストール」系のラベルの確定操作                                  | blocked                                                     | なし                       |
+   | 機微な origin                         | ブラウザの origin が sensitive に分類された                                                                | takeover                                                    | なし                       |
+   | E2 ダウンロードの「開く」             | ダウンロード面の開く系の操作（拡張子が取れていること）                                                     | 承認（ruleset で有効のとき）。拡張子が取れなければ takeover | `download_open`            |
+   | E3 ファイルマネージャの既定アクション | ファイルブラウザのファイル項目への invoke / ダブルクリック / Enter。フォルダ・選択・リネーム・移動は対象外 | 承認（ruleset で有効のとき）。拡張子が取れなければ takeover | `file_manager_open`        |
+   | 確定操作（§3.5）                      | 送金・購入・権限付与・「削除して続行」の確定ラベル（保存・送信・公開・削除のような日常の語は対象外）       | 承認                                                        | `high_impact_confirmation` |
+   | supervised の一般操作                 | モードが supervised の入力操作                                                                             | 承認                                                        | `supervised_action`        |
+   | ordinary                              | 上のいずれにも該当しない                                                                                   | ordinary                                                    | なし                       |
+
+   observe_only のセッションでの入力は、承認クラスに到達した時点で blocked。承認の効果を ruleset が有効にしていなければ、承認ではなく blocked（`approval_not_enabled`）になる。E5（スクリプト実行面への投入）は面の blocked に含まれる。
+
+3. **判断（親の判断、2026-10-14。いずれも A を採る）**。
+   - **1-A: 分類器 v1 と v2 の共存は、セッションの route で選ぶ**。v2 ビルドは両方の分類器を持ち、V1 経路（パネル）のセッションは従来の分類のまま、agent 経路だけが v2 を使う。S4 実装契約 1（V2 flag OFF なら V1 の allow-list を通る）と整合し、V1 利用者の挙動が変わらない。**B（v2 分類器への一本化）は採らない**。V2 ビルドでパネル経路の挙動（takeover だった操作が承認になる等）が変わり、契約 1 に反するため。
+   - **2-A: 最初に有効化する承認は `high_impact_confirmation` と `supervised_action` だけ**。E2 / E3 は、Finder とダウンロード UI の各入力経路（invoke、Enter、ダブルクリック、視覚クリック、メニュー、ドラッグ）の効果を実機で観察して根拠が出る C6 まで、拒否（`approval_not_enabled`）のままにする。**B（4 つの同時有効化）は採らない**。実機の根拠なしに承認を出すことになり、S4 の「実機で証明できない経路は拒否を維持する」に反するため。
+   - **3-A: Main の投影による highImpact は strengthen にだけ使う**。広めの Main の分類は、拒否・takeover に倒す方向にだけ働き、承認を出す根拠にしない。native と Main の分類が食い違ったら安全側になる。**B（Main の投影の廃止）は採らない**。native が取りこぼした面を Main が拾えなくなるため。
+
+4. **分割**。
+
+   | PR  | 内容                                                                                                                                                | 規模 |
+   | --- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---- |
+   | C1  | 純粋な分類器コア、lexicon、ruleset、harness。呼び出し元なし。版は上げない                                                                           | M    |
+   | C2  | mac の facts 取得を shadow で追加（v1 の判定は変えず、v2 の判定を並べて記録するだけ）                                                               | M    |
+   | C3  | セッションの route の束縛。Main の版 2 レシートの検証が `classifierVersion` を route の期待値（attest 値）と照合                                    | S〜M |
+   | C4  | MeasureNativeApproval の実測化（serial レーン、authority digest）と、preflight での intent 発行。`approvalApprove` / `dispatchApproved` の async 化 | L    |
+   | C5  | 有効化。版を 2 に上げ（`eligibility.json` を mode ごとの版表にする）、「承認経路が有効」の述語を実装し、観測 metadata の highImpact を分ける        | M    |
+   | C6  | E2 / E3 の有効化と lexicon の実測調整（実機の根拠が要る。[human] 受入 Issue の範囲）                                                                | 小   |
+
+5. **版を 2 に上げるタイミング**。コアが持つ版（classifier 2 / ruleset 2 / lexicon 2）は、C5 が attest するまでの候補で、`kNativePreflightClassifierVersion`、`eligibility.json`、handshake の attest は C1〜C4 の間ずっと 1 のままである。C5 で `eligibility.json` を mode ごとの版表にし、`v1-allowlist` は 1/1/1 のまま、`v2-denylist` だけを 2/2/2 にする。D7 の 3 者照合は mode ごとに完全一致を要求するので、V1 の attest は変わらない。承認 intent は `classifier_version == 2` を要求する（`IsValidNativeApprovalIntent`）ので、v1 の分類のままでは intent が発行されない。
+
+6. **本番で `single_use_approval` を返し始める 6 条件（すべて満たす）**。
+   1. N2b-4 の controller（PR 4）と native の ticket 必須化（PR 5）、D7-2 / D7-3 が merge 済み。
+   2. ビルド、Main のコンパイル済み定数、handshake の attest が、いずれも `v2-denylist` / classifier 2 / `ticketRequired: true` で完全に一致している。
+   3. 実効モードが `v2-denylist`（V2 flag が ON で、`FORCE_V1_ALLOWLIST` が立っていない）で、そのセッションが agent 経路（route v2）に束縛されている。
+   4. 対象の効果クラスが、その ruleset で承認可能と有効化されている（判断 2-A のとおり、最初は確定操作と supervised だけ）。
+   5. 対象の `highImpact` が native の facts 由来である（判断 3-A）。
+   6. INV-3: macOS の ListTargets による適格性の拡大の PR は、ticket 必須化と interlock の後に入れる。
+
+7. **Windows（S5）との境界**。コア、lexicon、ruleset は両 OS で共有し、C1 は Windows の harness（MSVC）でもコンパイルして通す。Windows の facts 取得（UIA、`ConsoleWindowClass` 等の面判定、実行トリガ）と、Windows の preflight / ticket / approve は S5 の範囲で、それまで Windows は v1 のみを attest し、classifier 2 を名乗らない（D7 の判断 2-A）。C2〜C5 は macOS のみである。
+
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 
 S4 は macOS native だけで完結しない。`computer-use-controller.ts` の列挙・開始、native host、manifest と handshake、grant 照合を同じ安全境界として変更する。以下の契約と拒否テストが揃うまで、新しい候補へ入力する経路は公開しない。

@@ -3,6 +3,7 @@
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
+#include "computer_use_effect_classifier.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -1121,6 +1122,427 @@ bool CheckNativeEligibility() {
   return true;
 }
 
+using sprint_coder::computer_use::ActionKind;
+using sprint_coder::computer_use::ClassifyEffect;
+using sprint_coder::computer_use::DecisionKind;
+using sprint_coder::computer_use::DecisionReason;
+using sprint_coder::computer_use::EffectClass;
+using sprint_coder::computer_use::EffectDecision;
+using sprint_coder::computer_use::EffectFacts;
+using sprint_coder::computer_use::EffectRuleset;
+using sprint_coder::computer_use::NodeFacts;
+using sprint_coder::computer_use::OriginState;
+using sprint_coder::computer_use::SessionMode;
+using sprint_coder::computer_use::SurfaceKind;
+
+// A complete, ordinary click in a full-access session on a control that says "ok".
+EffectFacts EffBase() {
+  EffectFacts facts;
+  facts.metadata_complete = true;
+  facts.chain_complete = true;
+  facts.surface = SurfaceKind::kOrdinary;
+  facts.action = ActionKind::kClick;
+  facts.mode = SessionMode::kFullAccess;
+  facts.origin = OriginState::kNotApplicable;
+  facts.chain.push_back(NodeFacts{"axbutton", "", "ok"});
+  return facts;
+}
+
+EffectFacts EffLabel(const std::string &label, ActionKind action = ActionKind::kClick) {
+  EffectFacts facts = EffBase();
+  facts.chain[0].label = label;
+  facts.action = action;
+  return facts;
+}
+
+// Every approval a rule set can authorize is enabled here, to prove the table itself.
+EffectRuleset EffAllEnabled() {
+  EffectRuleset ruleset;
+  ruleset.download_open = true;
+  ruleset.file_manager_open = true;
+  ruleset.high_impact_confirmation = true;
+  ruleset.supervised_action = true;
+  return ruleset;
+}
+
+bool EffIs(const EffectDecision &decision, DecisionKind kind, DecisionReason reason,
+           EffectClass effect_class) {
+  return decision.kind == kind && decision.reason == reason &&
+         decision.effect_class == effect_class;
+}
+
+bool CheckEffectClassifierCore() {
+  using namespace sprint_coder::computer_use;
+
+  // Candidate versions the enabling change will attest. The attested versions are still 1.
+  if (!Check(kEffectClassifierVersion == 2 && kEffectRulesetVersion == 2 &&
+                 kEffectLexiconVersion == 2 && kNativePreflightClassifierVersion == 1,
+             "effect-versions-not-yet-attested")) return false;
+
+  // An ordinary click is ordinary; reading is ordinary even when nothing could be classified.
+  {
+    const auto decision = ClassifyEffect(EffBase());
+    if (!Check(EffIs(decision, DecisionKind::kOrdinary, DecisionReason::kNone,
+                     EffectClass::kOrdinary) &&
+                   decision.approval_effect == NativeApprovalEffect::kInvalid,
+               "effect-ordinary")) return false;
+    EffectFacts blind;
+    blind.action = ActionKind::kObserve;
+    if (!Check(ClassifyEffect(blind).kind == DecisionKind::kOrdinary, "effect-observe-never-blocked"))
+      return false;
+  }
+
+  // Incomplete facts never become ordinary (D13).
+  for (const ActionKind action :
+       {ActionKind::kClick, ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kSetText,
+        ActionKind::kType, ActionKind::kKey, ActionKind::kScroll, ActionKind::kSelect,
+        ActionKind::kToggle, ActionKind::kExpandCollapse}) {
+    for (int missing = 0; missing < 3; ++missing) {
+      EffectFacts facts = EffBase();
+      facts.action = action;
+      if (missing == 0) facts.metadata_complete = false;
+      if (missing == 1) facts.chain_complete = false;
+      if (missing == 2) facts.chain.clear();
+      if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kTakeover,
+                       DecisionReason::kUnclassified, EffectClass::kUnclassified),
+                 "effect-incomplete-takeover")) return false;
+    }
+  }
+
+  // Secure fields are blocked outright, by role or by words (en / ja), also from an ancestor.
+  for (const char *label : {"securetextfield", "password", "passcode", "pin code", "パスワード",
+                            "暗証番号"}) {
+    EffectFacts facts = EffLabel(label, ActionKind::kType);
+    if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kBlocked, DecisionReason::kSecure,
+                     EffectClass::kSecure), "effect-secure")) return false;
+    EffectFacts ancestor = EffBase();
+    ancestor.action = ActionKind::kType;
+    ancestor.chain.push_back(NodeFacts{"axgroup", "", label});
+    if (!Check(ClassifyEffect(ancestor).reason == DecisionReason::kSecure, "effect-secure-ancestor"))
+      return false;
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kSetText;
+    facts.chain[0].subrole = "axsecuretextfield";
+    if (!Check(ClassifyEffect(facts).reason == DecisionReason::kSecure, "effect-secure-subrole"))
+      return false;
+  }
+
+  // Card numbers, security codes and expiry fields are refused with no approval for any input.
+  for (const char *label : {"card number", "cvv", "cvc", "security code", "expiration date",
+                            "カード番号", "セキュリティコード", "有効期限"}) {
+    for (const ActionKind action : {ActionKind::kSetText, ActionKind::kType, ActionKind::kKey,
+                                    ActionKind::kClick, ActionKind::kSelect}) {
+      if (!Check(EffIs(ClassifyEffect(EffLabel(label, action), EffAllEnabled()),
+                       DecisionKind::kBlocked, DecisionReason::kCredential,
+                       EffectClass::kCredential), "effect-credential")) return false;
+    }
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kObserve)).kind == DecisionKind::kOrdinary,
+               "effect-credential-observe")) return false;
+  }
+
+  // Command surfaces refuse input, whether the surface kind or the words say so.
+  for (const SurfaceKind surface :
+       {SurfaceKind::kShellLike, SurfaceKind::kScriptInput, SurfaceKind::kCommandPalette,
+        SurfaceKind::kDevToolsConsole}) {
+    for (const ActionKind action : {ActionKind::kType, ActionKind::kKey, ActionKind::kSetText,
+                                    ActionKind::kInvoke, ActionKind::kClick}) {
+      EffectFacts facts = EffBase();
+      facts.surface = surface;
+      facts.action = action;
+      if (!Check(EffIs(ClassifyEffect(facts, EffAllEnabled()), DecisionKind::kBlocked,
+                       DecisionReason::kSurface, EffectClass::kSurface), "effect-surface"))
+        return false;
+    }
+  }
+  for (const char *label : {"integrated terminal", "terminal", "powershell", "command prompt",
+                            "run script", "shell script", "ターミナル", "コンソール",
+                            "コマンドプロンプト", "スクリプトを実行"}) {
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kType)).reason == DecisionReason::kSurface,
+               "effect-surface-words")) return false;
+  }
+
+  // E1: an executable extension is refused outright for every opening action, and it wins over
+  // E2 / E3 and over a fully enabled rule set.
+  for (const char *ext : {"command", "sh", "bash", "zsh", "app", "pkg", "dmg", "scpt", "scptd",
+                          "applescript", "jar", "bat", "cmd", "com", "exe", "msi", "msix", "ps1",
+                          "vbs", "wsf", "reg", "lnk", "scr", "hta"}) {
+    for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+      for (const ActionKind action : {ActionKind::kInvoke, ActionKind::kDoubleClick,
+                                      ActionKind::kKey}) {
+        EffectFacts facts = EffBase();
+        facts.surface = surface;
+        facts.action = action;
+        facts.key_is_activation = true;
+        facts.target_is_file_item = true;
+        facts.extension_known = true;
+        facts.extension = ext;
+        if (!Check(EffIs(ClassifyEffect(facts, EffAllEnabled()), DecisionKind::kBlocked,
+                         DecisionReason::kExecutionTrigger, ClassifyEffect(facts).effect_class) &&
+                       (ClassifyEffect(facts).effect_class == EffectClass::kE1ExecutableOpen ||
+                        ClassifyEffect(facts).effect_class == EffectClass::kE4InstallerLaunch),
+                   "effect-e1-e4-extension")) return false;
+      }
+    }
+  }
+  // An uppercase extension from the platform is the same extension.
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kFileBrowser;
+    facts.action = ActionKind::kInvoke;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "EXE";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).kind == DecisionKind::kBlocked,
+               "effect-e1-extension-case")) return false;
+  }
+  // E4: installers by extension and by label.
+  for (const char *ext : {"pkg", "dmg", "msi", "msix"}) {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kFileBrowser;
+    facts.action = ActionKind::kInvoke;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = ext;
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kE4InstallerLaunch,
+               "effect-e4-extension")) return false;
+  }
+  for (const char *label : {"install", "install application", "インストール"}) {
+    if (!Check(EffIs(ClassifyEffect(EffLabel(label, ActionKind::kInvoke), EffAllEnabled()),
+                     DecisionKind::kBlocked, DecisionReason::kExecutionTrigger,
+                     EffectClass::kE4InstallerLaunch), "effect-e4-label")) return false;
+  }
+
+  // E2: a download panel's open control, with a harmless extension, is an approval when the rule
+  // set enables it, a refusal while it does not, and a takeover when the extension is unknown.
+  {
+    EffectFacts facts = EffLabel("open", ActionKind::kInvoke);
+    facts.surface = SurfaceKind::kDownloadPanel;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "pdf";
+    const auto enabled = ClassifyEffect(facts, EffAllEnabled());
+    if (!Check(EffIs(enabled, DecisionKind::kApproval, DecisionReason::kNone,
+                     EffectClass::kE2DownloadOpen) &&
+                   enabled.approval_effect == NativeApprovalEffect::kDownloadOpen,
+               "effect-e2-approval")) return false;
+    if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kBlocked,
+                     DecisionReason::kApprovalNotEnabled, EffectClass::kE2DownloadOpen),
+               "effect-e2-not-enabled-by-default")) return false;
+    facts.extension_known = false;
+    if (!Check(EffIs(ClassifyEffect(facts, EffAllEnabled()), DecisionKind::kTakeover,
+                     DecisionReason::kUnclassified, EffectClass::kUnclassified),
+               "effect-e2-unknown-extension")) return false;
+  }
+  // E3: opening a file in a file manager. Browsing, selecting and renaming need no approval.
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kFileBrowser;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "txt";
+    for (const ActionKind action : {ActionKind::kInvoke, ActionKind::kDoubleClick}) {
+      facts.action = action;
+      const auto decision = ClassifyEffect(facts, EffAllEnabled());
+      if (!Check(EffIs(decision, DecisionKind::kApproval, DecisionReason::kNone,
+                       EffectClass::kE3FileManagerOpen) &&
+                     decision.approval_effect == NativeApprovalEffect::kFileManagerOpen,
+                 "effect-e3-approval")) return false;
+      if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kBlocked,
+                       DecisionReason::kApprovalNotEnabled, EffectClass::kE3FileManagerOpen),
+                 "effect-e3-not-enabled-by-default")) return false;
+    }
+    facts.action = ActionKind::kKey;
+    facts.key_is_activation = true;
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kE3FileManagerOpen,
+               "effect-e3-enter")) return false;
+    facts.key_is_activation = false;
+    for (const ActionKind action : {ActionKind::kClick, ActionKind::kSelect, ActionKind::kSetText,
+                                    ActionKind::kScroll, ActionKind::kKey}) {
+      facts.action = action;
+      if (!Check(ClassifyEffect(facts, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+                 "effect-e3-browsing-ordinary")) return false;
+    }
+    facts.action = ActionKind::kInvoke;
+    facts.extension_known = false;
+    if (!Check(EffIs(ClassifyEffect(facts, EffAllEnabled()), DecisionKind::kTakeover,
+                     DecisionReason::kUnclassified, EffectClass::kUnclassified),
+               "effect-e3-unknown-extension")) return false;
+  }
+
+  // §3.5 confirmations are approvals by default; everyday labels are not (v1 policy).
+  for (const char *label : {"pay now", "place order", "buy now", "wire transfer", "send money",
+                            "grant access", "authorize", "delete and continue", "送金", "振込",
+                            "決済", "購入確定", "注文を確定", "アクセスを許可", "権限を付与",
+                            "削除して続行"}) {
+    for (const ActionKind action : {ActionKind::kClick, ActionKind::kInvoke}) {
+      const auto decision = ClassifyEffect(EffLabel(label, action));
+      if (!Check(EffIs(decision, DecisionKind::kApproval, DecisionReason::kNone,
+                       EffectClass::kConfirm) &&
+                     decision.approval_effect == NativeApprovalEffect::kHighImpactConfirmation,
+                 "effect-confirm")) return false;
+    }
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kObserve)).kind == DecisionKind::kOrdinary,
+               "effect-confirm-observe")) return false;
+  }
+  for (const char *label : {"save", "send", "publish", "delete", "submit", "ok", "cancel", "保存",
+                            "送信", "公開", "削除", "payload", "payment history viewer settings"}) {
+    // "payload" must not match the bounded term "pay"; the rest are everyday labels.
+    const auto decision = ClassifyEffect(EffLabel(label, ActionKind::kInvoke));
+    if (!Check(decision.kind == DecisionKind::kOrdinary ||
+                   std::string_view(label) == "payment history viewer settings",
+               "effect-everyday-labels")) return false;
+  }
+  if (!Check(ClassifyEffect(EffLabel("please pay now to continue")).effect_class == EffectClass::kConfirm &&
+                 ClassifyEffect(EffLabel("repay")).kind == DecisionKind::kOrdinary,
+             "effect-bounded-terms")) return false;
+
+  // Session modes: a supervised session gets an approval for any ordinary input; a full-access
+  // one does not; observe-only refuses input.
+  {
+    EffectFacts facts = EffBase();
+    facts.mode = SessionMode::kSupervised;
+    const auto decision = ClassifyEffect(facts);
+    if (!Check(EffIs(decision, DecisionKind::kApproval, DecisionReason::kNone,
+                     EffectClass::kOrdinary) &&
+                   decision.approval_effect == NativeApprovalEffect::kSupervisedAction,
+               "effect-supervised")) return false;
+    EffectRuleset off;
+    off.supervised_action = false;
+    if (!Check(EffIs(ClassifyEffect(facts, off), DecisionKind::kBlocked,
+                     DecisionReason::kApprovalNotEnabled, EffectClass::kOrdinary),
+               "effect-supervised-not-enabled")) return false;
+    facts.mode = SessionMode::kObserveOnly;
+    if (!Check(EffIs(ClassifyEffect(facts), DecisionKind::kBlocked, DecisionReason::kObserveOnly,
+                     EffectClass::kOrdinary), "effect-observe-only")) return false;
+    facts.action = ActionKind::kObserve;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-observe-only-read"))
+      return false;
+  }
+
+  // A browser whose origin could not be read, or is sensitive, never gets an ordinary dangerous
+  // action: it is taken over by a person.
+  {
+    EffectFacts facts = EffLabel("pay now", ActionKind::kInvoke);
+    facts.origin = OriginState::kUnknown;
+    if (!Check(EffIs(ClassifyEffect(facts, EffAllEnabled()), DecisionKind::kTakeover,
+                     DecisionReason::kUnclassified, EffectClass::kUnclassified),
+               "effect-origin-unknown")) return false;
+    facts.origin = OriginState::kSensitive;
+    facts.chain[0].label = "ok";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).kind == DecisionKind::kTakeover,
+               "effect-origin-sensitive")) return false;
+    facts.action = ActionKind::kObserve;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-origin-observe"))
+      return false;
+  }
+
+  // Precedence: secure > credential > surface > execution triggers > confirmation > supervised.
+  {
+    EffectFacts facts = EffLabel("password card number pay now install", ActionKind::kInvoke);
+    facts.mode = SessionMode::kSupervised;
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).reason == DecisionReason::kSecure,
+               "effect-precedence-secure")) return false;
+    facts.chain[0].label = "card number pay now install";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).reason == DecisionReason::kCredential,
+               "effect-precedence-credential")) return false;
+    facts.chain[0].label = "terminal pay now install";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).reason == DecisionReason::kSurface,
+               "effect-precedence-surface")) return false;
+    facts.chain[0].label = "pay now install";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kE4InstallerLaunch,
+               "effect-precedence-execution")) return false;
+    facts.chain[0].label = "pay now";
+    if (!Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kConfirm,
+               "effect-precedence-confirm")) return false;
+  }
+
+  // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
+  // always carries a valid native effect; everything else carries none.
+  {
+    const char *labels[] = {"ok", "pay now", "open", "install", "card number", "terminal",
+                            "password", "save"};
+    const char *extensions[] = {"", "txt", "pdf", "exe", "pkg"};
+    for (const char *label : labels)
+      for (const SurfaceKind surface :
+           {SurfaceKind::kOrdinary, SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel,
+            SurfaceKind::kShellLike, SurfaceKind::kUnknown})
+        for (const ActionKind action :
+             {ActionKind::kObserve, ActionKind::kClick, ActionKind::kDoubleClick,
+              ActionKind::kInvoke, ActionKind::kType, ActionKind::kKey, ActionKind::kSetText})
+          for (const SessionMode mode :
+               {SessionMode::kObserveOnly, SessionMode::kSupervised, SessionMode::kFullAccess})
+            for (const char *ext : extensions)
+              for (const OriginState origin :
+                   {OriginState::kNotApplicable, OriginState::kUnknown, OriginState::kSensitive})
+                for (int complete = 0; complete < 2; ++complete) {
+                  EffectFacts facts = EffLabel(label, action);
+                  facts.surface = surface;
+                  facts.mode = mode;
+                  facts.origin = origin;
+                  facts.metadata_complete = complete == 1;
+                  facts.target_is_file_item = std::string_view(ext).size() > 0;
+                  facts.extension_known = std::string_view(ext).size() > 0;
+                  facts.extension = ext;
+                  facts.key_is_activation = action == ActionKind::kKey;
+                  const auto decision = ClassifyEffect(facts, EffAllEnabled());
+                  const bool approval = decision.kind == DecisionKind::kApproval;
+                  const bool valid_effect =
+                      decision.approval_effect == NativeApprovalEffect::kDownloadOpen ||
+                      decision.approval_effect == NativeApprovalEffect::kFileManagerOpen ||
+                      decision.approval_effect == NativeApprovalEffect::kHighImpactConfirmation ||
+                      decision.approval_effect == NativeApprovalEffect::kSupervisedAction;
+                  if (!Check(approval == valid_effect, "effect-sweep-effect-iff-approval"))
+                    return false;
+                  if (approval) {
+                    if (!Check(complete == 1 && action != ActionKind::kObserve &&
+                                   mode != SessionMode::kObserveOnly &&
+                                   origin == OriginState::kNotApplicable &&
+                                   decision.effect_class != EffectClass::kSecure &&
+                                   decision.effect_class != EffectClass::kCredential &&
+                                   decision.effect_class != EffectClass::kSurface &&
+                                   decision.effect_class != EffectClass::kE1ExecutableOpen &&
+                                   decision.effect_class != EffectClass::kE4InstallerLaunch &&
+                                   decision.effect_class != EffectClass::kE5ScriptSurface &&
+                                   decision.effect_class != EffectClass::kUnclassified,
+                               "effect-sweep-approval-preconditions")) return false;
+                  }
+                  if (complete == 0 && action != ActionKind::kObserve &&
+                      !Check(decision.kind != DecisionKind::kOrdinary && !approval,
+                             "effect-sweep-incomplete")) return false;
+                  if (decision.kind != DecisionKind::kOrdinary &&
+                      !Check(decision.classifier_version == kEffectClassifierVersion &&
+                                 decision.ruleset_version == kEffectRulesetVersion &&
+                                 decision.lexicon_version == kEffectLexiconVersion,
+                             "effect-sweep-versions")) return false;
+                }
+  }
+
+  // The default rule set enables exactly the two approval kinds the first release trusts.
+  {
+    const EffectRuleset defaults;
+    if (!Check(!defaults.download_open && !defaults.file_manager_open &&
+                   defaults.high_impact_confirmation && defaults.supervised_action,
+               "effect-default-ruleset")) return false;
+  }
+
+  // The tables are versioned data: editing one without updating the digest and the versions is a
+  // failure, and every entry is the shape the matcher assumes.
+  if (!Check(kEffectTablesDigest == 0xb17e8c7bdddefa81ULL, "effect-tables-digest")) return false;
+  for (const auto &table : kEffectLexiconTables) {
+    if (!Check(!table.empty(), "effect-table-nonempty")) return false;
+    for (const std::string_view term : table) {
+      if (!Check(!term.empty() && term.find('\0') == std::string_view::npos, "effect-term-shape"))
+        return false;
+      for (const char character : term)
+        if (!Check(!(character >= 'A' && character <= 'Z'), "effect-term-lowercase"))
+          return false;
+    }
+  }
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -1129,6 +1551,7 @@ int main() {
   if (!CheckNativeApprovalTicket()) return 1;
   if (!CheckNativeApprovalFlow()) return 1;
   if (!CheckNativeEligibility()) return 1;
+  if (!CheckEffectClassifierCore()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
   std::cout << "Computer Use native ordinary ticket slot: PASS\n";
