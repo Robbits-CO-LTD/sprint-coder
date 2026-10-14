@@ -11,8 +11,11 @@
 //   * It never begins an intent by itself. `Offer` is the only way in and exists for the classifier
 //     v2 change and for the harness; the macOS addon does not call it, so a production native has
 //     no pending approval and every approve / dispatchApproved fails closed.
-//   * Approve and ConsumeApproved never issue a new intent. A reclassification that is no longer
-//     the approved effect, or whose authority changed, is a refusal.
+//   * Approve and ConsumeApproved never issue a new intent. A fresh classification that still is
+//     `single_use_approval` is NOT a reason to refuse: the approved action is exactly that. It is
+//     accepted, once, only when it matches the bound ticket (target, payload, authority, effect
+//     class, versions, generations). A missing, spent or expired ticket, or any mismatch, is a
+//     refusal, and still without a new intent.
 //   * Approve and ConsumeApproved have no input capability. They return a decision only; whether
 //     to post an event is the caller's business after ConsumeApproved says yes.
 //   * A generation that does not match the stored one changes nothing, so a stale or foreign

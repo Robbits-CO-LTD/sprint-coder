@@ -933,8 +933,11 @@ bool CheckNativeApprovalFlow() {
     return false;
   if (!Check(flow.Approve(FlowFacts(), FlowMeasured(), execution_token, kApproved).ok &&
                  flow.ready() && !flow.pending(), "flow-approve")) return false;
+  // The fresh classification is still approval-eligible (it is the very action that was approved):
+  // that alone is not a refusal. It matches the bound ticket, so it consumes once and begins no
+  // new intent.
   if (!Check(flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved).ok &&
-                 !flow.occupied(), "flow-consume-once")) return false;
+                 !flow.occupied() && !flow.pending(), "flow-consume-once")) return false;
   {
     const auto again = flow.ConsumeApproved(FlowFacts(), FlowMeasured(), kApproved);
     if (!Check(!again.ok && again.failure == NativeApprovalFailure::kUnavailable &&

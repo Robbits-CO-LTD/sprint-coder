@@ -5652,8 +5652,9 @@ napi_value ApprovalDiscard(napi_env env, napi_callback_info info) {
 // Reservation of an approved dispatch. The caller holds the state lock returned by
 // ParseNativeDispatchRequest. Replay and in-flight hits come first, like the ordinary path. Then
 // the execution ticket held in the slot is consumed against a fresh measurement; it is burned on
-// every attempt. This never begins an intent: a reclassification that is not the approved effect
-// is a refusal, not a new approval. PerformNativeDispatch still re-runs every guard afterwards.
+// every attempt. This never begins an intent. A fresh classification that is still the approved
+// `single_use_approval` is not refused for that reason alone: it is accepted once when it matches the
+// bound ticket, and anything else is a refusal, not a new approval. PerformNativeDispatch still re-runs every guard afterwards.
 bool ReserveNativeApprovedDispatchLocked(const NativeDispatchRequest* request,
                                          std::uint64_t approval_generation,
                                          NativeDispatchOutcome* replay) {
