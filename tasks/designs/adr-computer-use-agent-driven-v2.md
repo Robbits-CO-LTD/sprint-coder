@@ -636,6 +636,45 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 - 環境変数は **より厳しい側へ倒す方向にだけ**使える。`SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST=1` は v2 ビルドでも allow-list に落とせるが、v1 ビルドを env で deny-list に上げることはできない。
 - **開発中の切り替え方法**: モードは build 時に決まるので、`npm run prepare:desktop` 相当のビルドスクリプトに `--eligibility=v1|v2` を受け取らせ、native と Main を**同じ値で同時にビルド**する（片方だけ切り替えると fail closed になり、それが正しい挙動）。S1〜S3 は適格性に触れないので `v1-allowlist` のままで開発でき、S4 以降のみ `v2-denylist` ビルドが要る。CI は両モードをビルドして、モード不一致が fail closed になることをテストする。
 
+**D7 の実装契約と判断（2026-10-14）**
+
+D7-1 の実装（TS のみ）に合わせて、上の方針を次のとおり固定する。
+
+1. **attest の値の集合**。native は自分がコンパイルされた値を、handshake の `eligibility` キー 1 つ（厳密なオブジェクト）で返す。manifest の optional な `eligibility` も同じ形で、Main の compiled pin にも同じ値が載る。
+
+   | 項目                | 型と範囲                                                            |
+   | ------------------- | ------------------------------------------------------------------- |
+   | `mode`              | `v1-allowlist` または `v2-denylist`                                 |
+   | `rulesetVersion`    | 1 以上 65535 以下の整数                                             |
+   | `classifierVersion` | 同上                                                                |
+   | `lexiconVersion`    | 同上                                                                |
+   | `ticketRequired`    | boolean。native がすべての入力に ticket を要求するか（S4-4 補遺 5） |
+
+   `eligibility` を持たない manifest、pin、handshake は「旧成果物」で、`v1-allowlist` と各版 1 を意味する。それ以外の拡張 claim（`buildMode`、`ruleset` など）は従来どおり `HANDSHAKE_INVALID`。Windows の manifest が `v2-denylist` を名乗ることは、S5 までは schema が拒否する。
+
+2. **3 者の照合**。Main のコンパイル済み定数（pin。旧 Main は未宣言で v1）、manifest、handshake の attest を、artifact digest の検証の後、probe 自身の拒否理由より前に照合する。
+
+   | Main の定数 | 受け入れる条件                                                                                                                     | 閉じる条件（理由）                                                                                                            |
+   | ----------- | ---------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+   | v1          | manifest と attest のそれぞれが「未宣言」、または Main と mode と各版が同一の v1（pin が宣言を持つときは `ticketRequired` も同一） | v2 や、版が違う宣言が 1 つでもある（`ELIGIBILITY_MISMATCH`）                                                                  |
+   | v2          | manifest と attest の両方があり、全項目が Main と完全に一致し、`ticketRequired` が true                                            | どちらかの欠落、不一致（`ELIGIBILITY_MISMATCH`）。一致していても `ticketRequired` が false（`ELIGIBILITY_TICKET_UNATTESTED`） |
+
+   attest の欠落は、v2 Main では不一致である。deny-list を「たぶん v2」と推測しない。
+
+3. **実効モード**。`effectiveComputerUseEligibilityMode` は、次のすべてを満たすときだけ `v2-denylist` を返す: コンパイル済みの mode が `v2-denylist`、V2 flag が ON、`SPRINT_CODER_COMPUTER_USE_FORCE_V1_ALLOWLIST` が `1` でない。それ以外は `v1-allowlist`。v1 ビルドは、flag や環境変数の値にかかわらず v1 である。環境変数は v2 ビルドを v1 に下げるだけで、v1 ビルドを上げる経路はない。
+
+4. **判断（親の判断、2026-10-14）**。いずれも、既存の成果物と V1 の利用者を壊さず、新しい経路を閉じたまま始める選択である。
+   - **1-A: Main のコンパイル済み定数は、既存の pin と同じく、ビルド済みの manifest から Vite の define で取る**。手順は `--eligibility` の 1 本で済み、成果物（digest・sourceCommit）と同じ束縛になる。native 本体と manifest のずれは handshake の attest が検出する。独立した build 時 env は設けない（渡し忘れの事故が増えるため）。
+   - **2-A: win32 の `--eligibility=v2` は S5 まで build script で拒否する**。Windows helper は v1 を attest するだけで、S5 の前に「v2 を名乗る Windows 成果物」を作れないようにする。
+   - **3-A: attest のない旧成果物は、Main が v1 のときだけ受け入れる**。既存の release、beta、ローカルビルド、Windows 受入ビルドが起動できなくならない。attest の必須化は、別の PR で後から行う。
+
+5. **分割**。
+   - **D7-1**（TS のみ。PR #769）: contracts の型と schema、handshake のパーサ、compiled pin、gate の照合、`effectiveComputerUseEligibilityMode`、`computerUseCompiledEligibility`。native には触れない。
+   - **D7-2**（build script と native。macOS CI が必要。#768 の merge 後）: `--eligibility=v1|v2`（既定 v1。win32 の v2 は拒否）、mac の `Handshake` と Windows の handshake 応答への attest、portable な定数ヘッダ、manifest への書き込み、harness と source 契約テスト。native が返す値は `-D` で渡された定数だけから作り、環境変数や引数は読まない。`preflight` を export する mac native は `ticketRequired` を true にする。
+   - **D7-3**（CI）: `computer-use-native-gate` に eligibility の行列を足す。macOS は v1 と v2 の両方をビルドし、実際の `.node` の handshake の attest が manifest と一致することを検証するスクリプトを実行する。Windows は v1 のみ。Main と native のモードが食い違う組合せが、閉じることを確認する。
+
+6. **S4-4 補遺の「承認経路が有効」の条件との関係**。D7 が入っても、承認経路は開かない。「有効」の条件のうち、handshake で classifier v2（`NATIVE_APPROVAL_CLASSIFIER_VERSION`）が確認できることは、D7 の attest（`classifierVersion`）で初めて判定できるようになる。しかし v2 モードのビルドも、classifier v2 が入るまでは `classifierVersion` として 1 を attest する。したがって、classifier v2 が入るまでは、D7 が入った後もこの条件は満たされず、承認経路は閉じたままである。`ticketRequired` の attest は、ticket 必須化が実際に入っていることの確認であり、それ自体は承認経路を開かない。
+
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 
 S4 は macOS native だけで完結しない。`computer-use-controller.ts` の列挙・開始、native host、manifest と handshake、grant 照合を同じ安全境界として変更する。以下の契約と拒否テストが揃うまで、新しい候補へ入力する経路は公開しない。
