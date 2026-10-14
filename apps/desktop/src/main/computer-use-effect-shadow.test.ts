@@ -406,7 +406,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     }
     expect(called).toBe(11);
     // Settle: only kOk is true, and every other result but "absent" sets a flag.
-    const settle = /bool Settle\(ShadowRead result[\s\S]*?\n  \}\n/u.exec(shadowSection());
+    const settle = /bool Settle\(ShadowRead result[\s\S]*?\n {2}\}\n/u.exec(shadowSection());
     expect(settle).not.toBeNull();
     expect(settle![0]).toMatch(/case ShadowRead::kOk:\s*return true;/u);
     expect(settle![0]).toMatch(/case ShadowRead::kAbsent:\s*return false;/u);
