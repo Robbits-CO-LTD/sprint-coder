@@ -207,6 +207,12 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(code).not.toMatch(
       /\bkAX\w*Action\b|CFSTR\s*\(|SetAttributeValue|PerformAction|PostKeyboardEvent/u,
     );
+    // Not by Objective-C either: no message send, no bridged NSAccessibility attribute, no
+    // AppKit / Quartz event or workspace type. The only bracket is the lambda capture.
+    expect(code.replaceAll('[&]', '')).not.toMatch(/[[\]]/u);
+    expect(code).not.toMatch(
+      /NSAccessibility\w*|__bridge|activateWithOptions|NSEvent|CGEvent|NSWorkspace|NSRunningApplication|NSAppleScript|NSTask|NSURLSession|\bsystem\s*\(|\bpopen\s*\(/u,
+    );
     expect(code).not.toMatch(
       /input_api_attempts|state_mutex|state_lock|\bticket\b|Perform\w*Dispatch|MakeDispatchOutcome|RevalidateBoundTarget|IssueOrdinaryTicket/u,
     );
@@ -248,9 +254,10 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     // Exactly one logging call in the whole section, and no other way out of the process.
     expect(
       code.match(
-        /\b(?:os_log\w*|NSLog|printf|fprintf|syslog|puts|fputs|std::cout|std::cerr|write)\s*\(/gu,
+        /\b(?:os_log\w*|NSLog|v?f?printf|dprintf|syslog|f?puts|perror)\b|std::(?:cout|cerr|clog)\b/gu,
       ),
-    ).toEqual(['os_log_info(']);
+    ).toEqual(['os_log_info']);
+    expect(code).not.toMatch(/\bf?write\s*\(|std::o?fstream|\bfopen\s*\(/u);
     const log = /os_log_info\(([\s\S]*?)\);/u.exec(shadowSection());
     expect(log).not.toBeNull();
     const call = log![1]!;
@@ -326,11 +333,26 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     const reads = [...code.matchAll(/AXUIElementCopy(?:Attribute|ElementAt)\w*\(/gu)];
     expect(reads).toHaveLength(5);
     for (const read of reads) {
-      const before = code.slice(Math.max(0, read.index - 400), read.index);
-      expect(before.slice(before.lastIndexOf('}') + 1)).toContain('reader.Step()');
+      const before = code.slice(0, read.index);
+      expect(before.slice(before.lastIndexOf('\n}') + 2)).toContain('reader.Step()');
     }
     // Loops over children stop when the budget does.
     expect(section).toContain('reader.canceled || reader.budget.Exhausted()');
+  });
+
+  it('searches for a semantic target with the bound v1 uses, and a failed read is no match', () => {
+    const section = shadowSection();
+    expect(section).toContain('constexpr std::size_t kSearchStringUnits = 1365;');
+    expect(section).not.toMatch(/kAX(?:Identifier|Title)Attribute, 256/u);
+    const search = /ShadowCfRef FindShadowSemanticTarget\([\s\S]*?\n\}\n/u.exec(section);
+    expect(search).not.toBeNull();
+    // An identifier or title that failed, was too long or was cut off, a children read that
+    // failed, and an exhausted budget each make the search incomplete.
+    expect(search![0].match(/reader\.search_incomplete = true;/gu)!.length).toBeGreaterThanOrEqual(
+      4,
+    );
+    expect(section).toContain('matches == 1 && !reader.search_incomplete');
+    expect(section).toContain('if (reader.search_incomplete) capture.read_failed = true;');
   });
 
   it('never turns a long or failed attribute into an empty string', () => {

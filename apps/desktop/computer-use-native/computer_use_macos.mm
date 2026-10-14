@@ -4919,6 +4919,9 @@ struct ShadowReader {
   const NativeDispatchRequest& request;
   sprint_coder::computer_use::ShadowBudget budget;
   bool canceled = false;
+  // The semantic search could not read a node or its children, so "exactly one match" proves
+  // nothing: the target is treated as not found, with a read gap.
+  bool search_incomplete = false;
 
   explicit ShadowReader(const NativeDispatchRequest& source)
       : request(source), budget(clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)) {}
@@ -5018,26 +5021,41 @@ sprint_coder::computer_use::ShadowAxNode ReadShadowNode(ShadowReader& reader,
 ShadowCfRef FindShadowSemanticTarget(ShadowReader& reader, AXUIElementRef element,
                                      std::string_view target_id, int depth, int* matches) {
   if (element == nullptr || depth > 16 || *matches > 1) return ShadowCfRef();
+  // v1 reads these through a 4096-byte string helper (at most 1365 UTF-16 units); the same bound.
+  constexpr std::size_t kSearchStringUnits = 1365;
   std::string text;
-  if (ReadShadowString(reader, element, kAXIdentifierAttribute, 256, &text) == ShadowRead::kOk &&
-      text == target_id) {
+  ShadowRead read = ReadShadowString(reader, element, kAXIdentifierAttribute, kSearchStringUnits, &text);
+  if (read == ShadowRead::kOk && text == target_id) {
     ++*matches;
     CFRetain(element);
     return ShadowCfRef(element);
   }
+  if (read == ShadowRead::kFailed || read == ShadowRead::kTooLong || read == ShadowRead::kStopped)
+    reader.search_incomplete = true;
   text.clear();
-  if (ReadShadowString(reader, element, kAXTitleAttribute, 256, &text) == ShadowRead::kOk &&
-      text == target_id) {
+  read = ReadShadowString(reader, element, kAXTitleAttribute, kSearchStringUnits, &text);
+  if (read == ShadowRead::kOk && text == target_id) {
     ++*matches;
     CFRetain(element);
     return ShadowCfRef(element);
   }
-  if (!reader.Step()) return ShadowCfRef();
+  if (read == ShadowRead::kFailed || read == ShadowRead::kTooLong || read == ShadowRead::kStopped)
+    reader.search_incomplete = true;
+  if (!reader.Step()) {
+    reader.search_incomplete = true;
+    return ShadowCfRef();
+  }
   CFTypeRef children_value = nullptr;
   const AXError error = AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value);
   ShadowCfRef children_holder(children_value);
-  if (error != kAXErrorSuccess || children_value == nullptr ||
-      CFGetTypeID(children_value) != CFArrayGetTypeID())
+  if (error == kAXErrorNoValue || error == kAXErrorAttributeUnsupported ||
+      error == kAXErrorNotImplemented)
+    return ShadowCfRef();
+  if (error != kAXErrorSuccess) {
+    reader.search_incomplete = true;
+    return ShadowCfRef();
+  }
+  if (children_value == nullptr || CFGetTypeID(children_value) != CFArrayGetTypeID())
     return ShadowCfRef();
   ShadowCfRef match;
   const CFArrayRef children = static_cast<CFArrayRef>(children_value);
@@ -5068,7 +5086,7 @@ ShadowCfRef CopyShadowTarget(ShadowReader& reader) {
     int matches = 0;
     ShadowCfRef target = FindShadowSemanticTarget(reader, focused_window.Element(),
                                                   request.target_id, 0, &matches);
-    return matches == 1 ? std::move(target) : ShadowCfRef();
+    return matches == 1 && !reader.search_incomplete ? std::move(target) : ShadowCfRef();
   }
   if (request.kind == "click" || request.kind == "scroll") {
     const CGPoint point = CGPointMake(
@@ -5190,6 +5208,7 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
     ShadowReader reader(request);
     ShadowAxCapture capture;
     ShadowCfRef target = CopyShadowTarget(reader);
+    if (reader.search_incomplete) capture.read_failed = true;
     if (target.Get() != nullptr) {
       capture.target_found = true;
       CaptureShadowChain(reader, target.Element(), &capture);
