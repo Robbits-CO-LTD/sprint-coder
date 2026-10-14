@@ -4599,6 +4599,28 @@ const migrations = [
       END;
     `,
   },
+  {
+    version: 100,
+    checksum: 'computer-use-v100-audit-approval-set-at-completion',
+    // The (b) row is recorded pending before dispatch, when no approval exists yet. Main learns the
+    // approval id and effect only after native offers an approval, so they must be settable once
+    // (NULL -> value) at completion. The parent digest stays immutable; the outcome stays write-once
+    // and still requires an approval id.
+    sql: `
+      DROP TRIGGER computer_action_audits_approval_correlation_guard;
+      CREATE TRIGGER computer_action_audits_approval_correlation_guard
+      BEFORE UPDATE OF approval_id, approval_parent_request_id, approval_outcome, approval_effect
+      ON computer_action_audits
+      WHEN (OLD.approval_id IS NOT NULL AND OLD.approval_id IS NOT NEW.approval_id)
+        OR OLD.approval_parent_request_id IS NOT NEW.approval_parent_request_id
+        OR (OLD.approval_effect IS NOT NULL AND OLD.approval_effect IS NOT NEW.approval_effect)
+        OR (OLD.approval_outcome IS NOT NULL AND OLD.approval_outcome IS NOT NEW.approval_outcome)
+        OR (NEW.approval_outcome IS NOT NULL AND NEW.approval_id IS NULL)
+      BEGIN
+        SELECT RAISE(ABORT, 'computer action audit approval correlation is write-once');
+      END;
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -5812,6 +5834,9 @@ export interface PersistenceClient {
     auditId: string;
     state: Exclude<ComputerActionAuditState, 'pending'>;
     reasonCode?: string | null;
+    /** Set once, with the terminal state, on the (b) row that records an offered approval. */
+    approvalId?: string | null;
+    approvalEffect?: ComputerActionApprovalEffect | null;
     updatedAt: string;
   }): ComputerActionAuditRecord;
   recordComputerActionApprovalOutcome(input: {
@@ -15829,9 +15854,22 @@ export class SqlitePersistenceClient implements PersistenceClient {
     auditId: string;
     state: Exclude<ComputerActionAuditState, 'pending'>;
     reasonCode?: string | null;
+    approvalId?: string | null;
+    approvalEffect?: ComputerActionApprovalEffect | null;
     updatedAt: string;
   }): ComputerActionAuditRecord {
     const updatedAt = canonicalTimestamp(input.updatedAt);
+    if (
+      (input.approvalId !== undefined &&
+        input.approvalId !== null &&
+        (typeof input.approvalId !== 'string' ||
+          input.approvalId.length < 1 ||
+          input.approvalId.length > 128)) ||
+      (input.approvalEffect !== undefined &&
+        input.approvalEffect !== null &&
+        !COMPUTER_ACTION_APPROVAL_EFFECTS.includes(input.approvalEffect))
+    )
+      throw new Error('Invalid Computer Use action audit');
     const row = this.db
       .prepare('SELECT * FROM computer_action_audits WHERE id = ?')
       .get(input.auditId) as ComputerActionAuditRow | undefined;
@@ -15849,10 +15887,19 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const result = this.db
       .prepare(
         `UPDATE computer_action_audits
-         SET state = ?, reason_code = ?, updated_at = ?
+         SET state = ?, reason_code = ?, updated_at = ?,
+             approval_id = COALESCE(?, approval_id),
+             approval_effect = COALESCE(?, approval_effect)
          WHERE id = ? AND state = 'pending'`,
       )
-      .run(input.state, reasonCode, updatedAt, input.auditId);
+      .run(
+        input.state,
+        reasonCode,
+        updatedAt,
+        input.approvalId ?? null,
+        input.approvalEffect ?? null,
+        input.auditId,
+      );
     if (result.changes !== 1) throw new OperationConflictError();
     return toComputerActionAudit(
       this.db

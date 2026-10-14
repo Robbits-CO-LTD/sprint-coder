@@ -10388,6 +10388,7 @@ if (runsWithElectronAbi)
         { version: 97 },
         { version: 98 },
         { version: 99 },
+        { version: 100 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12099,9 +12100,11 @@ if (runsWithElectronAbi)
           dflt_value: null,
         });
       }
-      expect(db.prepare('SELECT version FROM schema_migrations WHERE version = 99').get()).toEqual({
-        version: 99,
-      });
+      expect(db.prepare('SELECT version FROM schema_migrations WHERE version = 100').get()).toEqual(
+        {
+          version: 100,
+        },
+      );
       // Simulate a pre-v99 database: remove the columns and the migration record, keep a
       // legacy-shaped row, then reopen. The migration must add the columns back as NULL.
       db.exec(`
@@ -12110,7 +12113,7 @@ if (runsWithElectronAbi)
         ALTER TABLE computer_action_audits DROP COLUMN approval_parent_request_id;
         ALTER TABLE computer_action_audits DROP COLUMN approval_outcome;
         ALTER TABLE computer_action_audits DROP COLUMN approval_effect;
-        DELETE FROM schema_migrations WHERE version = 99;
+        DELETE FROM schema_migrations WHERE version IN (99, 100);
       `);
       db.close();
       const reopened = new SqlitePersistenceClient(fixture.path);
@@ -12371,6 +12374,59 @@ if (runsWithElectronAbi)
             .prepare("UPDATE computer_action_audits SET approval_outcome = 'denied' WHERE id = ?")
             .run(row.id).changes,
         ).toBe(1);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('sets approval id and effect once, with the terminal state, on a pending row (v100)', () => {
+      const { fixture, base } = seed();
+      const pending = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('late'),
+      });
+      const done = fixture.persistence.completeComputerActionAudit({
+        auditId: pending.id,
+        state: 'rejected',
+        reasonCode: 'native_approval_required',
+        approvalId: 'approval-late',
+        approvalEffect: 'high_impact_confirmation',
+        updatedAt: '2026-10-14T00:00:01.000Z',
+      });
+      expect(done).toMatchObject({
+        state: 'rejected',
+        approvalId: 'approval-late',
+        approvalEffect: 'high_impact_confirmation',
+        approvalOutcome: null,
+      });
+      expect(() =>
+        fixture.persistence.completeComputerActionAudit({
+          auditId: pending.id,
+          state: 'rejected',
+          approvalId: 'approval-late',
+          approvalEffect: 'bad' as never,
+          updatedAt: '2026-10-14T00:00:02.000Z',
+        }),
+      ).toThrow('Invalid Computer Use action audit');
+      expect(
+        fixture.persistence.recordComputerActionApprovalOutcome({
+          auditId: pending.id,
+          outcome: 'expired',
+          updatedAt: '2026-10-14T00:00:03.000Z',
+        }).approvalOutcome,
+      ).toBe('expired');
+      fixture.persistence.close();
+      const db = new Database(fixture.path);
+      try {
+        // Once set, neither value can change, and the parent digest is never settable afterwards.
+        for (const sql of [
+          "UPDATE computer_action_audits SET approval_id = 'other' WHERE id = ?",
+          "UPDATE computer_action_audits SET approval_effect = 'download_open' WHERE id = ?",
+          "UPDATE computer_action_audits SET approval_parent_request_id = '" +
+            'e'.repeat(64) +
+            "' WHERE id = ?",
+        ])
+          expect(() => db.prepare(sql).run(pending.id)).toThrow(/write-once/);
       } finally {
         db.close();
       }
