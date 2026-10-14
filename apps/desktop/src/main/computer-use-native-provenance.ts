@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
-import type { ComputerUseNativeManifest } from '@sprint-coder/contracts';
+import {
+  computerUseEligibilitySchema,
+  type ComputerUseEligibility,
+  type ComputerUseNativeManifest,
+} from '@sprint-coder/contracts';
 
 export type ComputerUseNativeCompiledPin = Readonly<{
   version: 1;
@@ -8,6 +12,11 @@ export type ComputerUseNativeCompiledPin = Readonly<{
   architecture: string;
   artifactDigest: string;
   manifestDigest: string;
+  /**
+   * The eligibility the packaged native was built with, fixed at Main's build time from the same
+   * manifest (ADR v2 D7). Absent on a pin built before D7, which means the legacy allow-list.
+   */
+  eligibility?: ComputerUseEligibility;
 }>;
 
 export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManifest): string {
@@ -23,6 +32,18 @@ export function computerUseNativeManifestDigest(manifest: ComputerUseNativeManif
     manifest.binaryDigest,
     manifest.signerDigest,
     [...manifest.capabilities].sort(),
+    // Appended only when present, so the digest of a manifest without one is unchanged.
+    ...(manifest.eligibility === undefined
+      ? []
+      : [
+          [
+            manifest.eligibility.mode,
+            manifest.eligibility.rulesetVersion,
+            manifest.eligibility.classifierVersion,
+            manifest.eligibility.lexiconVersion,
+            manifest.eligibility.ticketRequired,
+          ],
+        ]),
   ]);
   return createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
@@ -39,6 +60,7 @@ export function computerUseNativeCompiledPin(
     architecture: manifest.architecture,
     artifactDigest: manifest.platform === 'darwin' ? manifest.moduleDigest : manifest.binaryDigest,
     manifestDigest: computerUseNativeManifestDigest(manifest),
+    ...(manifest.eligibility === undefined ? {} : { eligibility: manifest.eligibility }),
   });
 }
 
@@ -60,6 +82,12 @@ export function parseComputerUseNativeCompiledPin(value: unknown): ComputerUseNa
     !/^[0-9a-f]{64}$/u.test(pin['manifestDigest'])
   )
     throw new Error('Computer Use native compile pin is invalid');
+  let eligibility: ComputerUseEligibility | undefined;
+  if (pin['eligibility'] !== undefined) {
+    const parsed = computerUseEligibilitySchema.safeParse(pin['eligibility']);
+    if (!parsed.success) throw new Error('Computer Use native compile pin is invalid');
+    eligibility = parsed.data;
+  }
   return Object.freeze({
     version: 1,
     sourceCommit: pin['sourceCommit'],
@@ -67,6 +95,7 @@ export function parseComputerUseNativeCompiledPin(value: unknown): ComputerUseNa
     architecture: pin['architecture'],
     artifactDigest: pin['artifactDigest'],
     manifestDigest: pin['manifestDigest'],
+    ...(eligibility === undefined ? {} : { eligibility }),
   });
 }
 

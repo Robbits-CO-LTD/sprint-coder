@@ -6458,6 +6458,36 @@ export const computerUseNativeCapabilitySchema = z.enum([
   'accessibility',
   'input',
 ]);
+/**
+ * How a native build decides which applications are eligible (ADR v2 D7). It is fixed when the
+ * native is compiled and recorded in the manifest; Main compiles the same value in, the native
+ * attests it in its handshake, and any disagreement closes the capability. It is never chosen by
+ * an environment variable at run time.
+ */
+export const computerUseEligibilityModeSchema = z.enum(['v1-allowlist', 'v2-denylist']);
+export type ComputerUseEligibilityMode = z.infer<typeof computerUseEligibilityModeSchema>;
+export const computerUseEligibilitySchema = z
+  .object({
+    mode: computerUseEligibilityModeSchema,
+    rulesetVersion: z.number().int().positive().max(0xffff),
+    classifierVersion: z.number().int().positive().max(0xffff),
+    lexiconVersion: z.number().int().positive().max(0xffff),
+    // The native requires a ticket for every input (ADR S4-4 addendum).
+    ticketRequired: z.boolean(),
+  })
+  .strict();
+export type ComputerUseEligibility = z.infer<typeof computerUseEligibilitySchema>;
+/**
+ * What a build that predates D7 means: the allow-list, with version 1 of everything. A manifest,
+ * pin or handshake without an eligibility is read as this, and only a v1 Main accepts it.
+ */
+export const COMPUTER_USE_LEGACY_ELIGIBILITY = Object.freeze({
+  mode: 'v1-allowlist',
+  rulesetVersion: 1,
+  classifierVersion: 1,
+  lexiconVersion: 1,
+} as const);
+
 export const computerUseNativeManifestSchema = z
   .object({
     version: z.literal(1),
@@ -6471,11 +6501,18 @@ export const computerUseNativeManifestSchema = z
     binaryDigest: computerUseDigestSchema,
     signerDigest: computerUseDigestSchema.nullable(),
     capabilities: z.array(computerUseNativeCapabilitySchema).min(1).max(4),
+    // Absent on a manifest written before D7 (read as the legacy allow-list).
+    eligibility: computerUseEligibilitySchema.optional(),
   })
   .strict()
   .superRefine((manifest, context) => {
     if (new Set(manifest.capabilities).size !== manifest.capabilities.length)
       context.addIssue({ code: 'custom', message: 'Native capabilities must be unique' });
+    if (manifest.platform === 'win32' && manifest.eligibility?.mode === 'v2-denylist')
+      context.addIssue({
+        code: 'custom',
+        message: 'Windows Computer Use has no deny-list eligibility until S5',
+      });
     if (manifest.platform === 'win32' && manifest.architecture !== 'x64')
       context.addIssue({ code: 'custom', message: 'Windows Computer Use is x64-only' });
   });
