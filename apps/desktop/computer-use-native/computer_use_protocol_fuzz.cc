@@ -2,6 +2,7 @@
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_ticket.h"
 #include "computer_use_native_approval_flow.h"
+#include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -1095,6 +1096,31 @@ bool CheckNativeApprovalFlow() {
   return true;
 }
 
+bool CheckNativeEligibility() {
+  using namespace sprint_coder::computer_use;
+  const std::string_view name = kNativeEligibilityModeName;
+  // The only two names the contract knows, and the flag agrees with the name.
+  if (!Check(name == "v1-allowlist" || name == "v2-denylist", "eligibility-mode-name") ||
+      !Check((name == "v2-denylist") == kNativeEligibilityIsV2, "eligibility-mode-flag"))
+    return false;
+  // Every version is a positive 16-bit number and a ticket claim is a plain boolean.
+  if (!Check(kNativeEligibilityRulesetVersion > 0 && kNativeEligibilityRulesetVersion <= 0xffff &&
+                 kNativeEligibilityClassifierVersion > 0 &&
+                 kNativeEligibilityClassifierVersion <= 0xffff &&
+                 kNativeEligibilityLexiconVersion > 0 && kNativeEligibilityLexiconVersion <= 0xffff,
+             "eligibility-versions")) return false;
+  // The classifier version the native attests is the one its classifier actually is.
+  if (!Check(kNativeEligibilityClassifierVersion == kNativePreflightClassifierVersion,
+             "eligibility-classifier-version-matches-classifier")) return false;
+#if !defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
+  // The harness is compiled without the generated header: the legacy v1 defaults apply, and no
+  // ticket is claimed until the native requires one.
+  if (!Check(name == "v1-allowlist" && !kNativeEligibilityIsV2 &&
+                 !kNativeEligibilityTicketRequired, "eligibility-defaults")) return false;
+#endif
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -1102,6 +1128,7 @@ int main() {
   std::cout << "Computer Use native binding canonical framing: PASS\n";
   if (!CheckNativeApprovalTicket()) return 1;
   if (!CheckNativeApprovalFlow()) return 1;
+  if (!CheckNativeEligibility()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
   std::cout << "Computer Use native ordinary ticket slot: PASS\n";

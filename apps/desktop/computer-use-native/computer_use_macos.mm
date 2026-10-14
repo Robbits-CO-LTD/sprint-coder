@@ -33,6 +33,7 @@
 #include "computer_use_native_binding.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
+#include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -2832,6 +2833,27 @@ napi_value Handshake(napi_env env, napi_callback_info info) {
   napi_set_named_property(env, result, "apiVersion", NumberValue(env, kApiVersion));
   napi_set_named_property(env, result, "platform", StringValue(env, "darwin"));
   napi_set_named_property(env, result, "napiVersion", NumberValue(env, NAPI_VERSION));
+  // What this native was compiled as (ADR v2 D7). Main compares it with its own compiled constant
+  // and the manifest. The values are constants of the build and nothing at run time can change
+  // them. `ticketRequired` is false until the native requires a ticket for every input.
+  napi_value eligibility;
+  napi_create_object(env, &eligibility);
+  napi_set_named_property(
+      env, eligibility, "mode",
+      StringValue(env, sprint_coder::computer_use::kNativeEligibilityModeName));
+  napi_set_named_property(
+      env, eligibility, "rulesetVersion",
+      NumberValue(env, sprint_coder::computer_use::kNativeEligibilityRulesetVersion));
+  napi_set_named_property(
+      env, eligibility, "classifierVersion",
+      NumberValue(env, sprint_coder::computer_use::kNativeEligibilityClassifierVersion));
+  napi_set_named_property(
+      env, eligibility, "lexiconVersion",
+      NumberValue(env, sprint_coder::computer_use::kNativeEligibilityLexiconVersion));
+  napi_set_named_property(
+      env, eligibility, "ticketRequired",
+      BoolValue(env, sprint_coder::computer_use::kNativeEligibilityTicketRequired));
+  napi_set_named_property(env, result, "eligibility", eligibility);
   return result;
 }
 

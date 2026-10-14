@@ -9,6 +9,11 @@ import {
   sanitizedNativeBuildEnvironment,
 } from './native-build-environment.mjs';
 export { sanitizedNativeBuildEnvironment } from './native-build-environment.mjs';
+import {
+  eligibilityBuildHeader,
+  eligibilityDeclaration,
+  parseEligibilityMode,
+} from './build-computer-use-eligibility.mjs';
 
 const repositoryDirectory = dirname(fileURLToPath(import.meta.url));
 const nativeDirectory = join(repositoryDirectory, 'apps', 'desktop', 'computer-use-native');
@@ -38,6 +43,10 @@ if (target === 'darwin' && !['arm64', 'x64'].includes(architecture))
   throw new Error(`Computer Use macOS native architecture is unsupported: ${architecture}`);
 if (target === 'win32' && architecture !== 'x64')
   throw new Error(`Computer Use Windows native architecture is unsupported: ${architecture}`);
+
+// ADR v2 D7: the eligibility mode is fixed here, by the build argument alone, and recorded in the
+// manifest and compiled into the native. `--eligibility=v1|v2` defaults to v1.
+const eligibilityMode = parseEligibilityMode(process.argv, target);
 
 mkdirSync(outputDirectory, { recursive: true });
 
@@ -179,8 +188,19 @@ if (sanitizerSelfCheckOnly) {
   console.log(`[computer-use-native] ${target}-${architecture}: disabled (PLATFORM_UNSUPPORTED)`);
 } else {
   const sourceCommit = computerUseSourceCommit();
+  const declaration = eligibilityDeclaration(eligibilityMode, target);
   let artifact;
   if (target === 'darwin') {
+    // The generated header sits outside the build directory (node-gyp rebuild cleans that one) and
+    // is found through binding.gyp's include_dirs. It is rewritten on every build, so it can never
+    // be stale.
+    const generatedDirectory = join(nativeDirectory, 'generated');
+    mkdirSync(generatedDirectory, { recursive: true });
+    writeFileSync(
+      join(generatedDirectory, 'computer_use_build_eligibility.h'),
+      eligibilityBuildHeader(declaration),
+      { mode: 0o600 },
+    );
     const nodeGypPath = require.resolve('@electron/node-gyp/bin/node-gyp.js');
     const environment = {
       ...process.env,
@@ -217,6 +237,8 @@ if (sanitizerSelfCheckOnly) {
       `#pragma once\n#define SPRINT_CODER_SOURCE_COMMIT "${sourceCommit}"\n`,
       { mode: 0o600 },
     );
+    const eligibilityHeader = join(outputDirectory, 'computer_use_build_eligibility.h');
+    writeFileSync(eligibilityHeader, eligibilityBuildHeader(declaration), { mode: 0o600 });
     const compiler = process.env['CXX'] ?? process.env['CC'] ?? 'cl.exe';
     // The Windows runner is intentionally built with the host's MSVC developer environment.  A
     // missing compiler is an explicit Gate 0 failure; falling back to a PATH binary would make the
@@ -238,6 +260,7 @@ if (sanitizerSelfCheckOnly) {
       '/D_WIN32_WINNT=0x0A00',
       '/DSPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE=1',
       `/FI${provenanceHeader}`,
+      `/FI${eligibilityHeader}`,
       `/I${nativeDirectory}`,
       join(nativeDirectory, 'computer_use_windows_host.cc'),
       `/Fe:${executable}`,
@@ -293,6 +316,8 @@ if (sanitizerSelfCheckOnly) {
     // variables are never treated as proof of a certificate or Developer ID identity.
     signerDigest: null,
     capabilities: ['observe', 'capture', 'accessibility', 'input'],
+    // Main compiles the same value in (from this manifest) and the native attests it at handshake.
+    eligibility: declaration,
   };
   const manifestPath = join(outputDirectory, 'computer-use-native.manifest.json');
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });

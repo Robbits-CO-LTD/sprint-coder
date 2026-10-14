@@ -1,4 +1,5 @@
 import { parseNativeHandshake } from './computer-use-native-handshake';
+import type { ComputerUseEligibility } from '@sprint-coder/contracts';
 import { createHash, randomBytes } from 'node:crypto';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { createConnection, type Socket } from 'node:net';
@@ -31,6 +32,11 @@ export type WindowsComputerUseHelperTrust = Readonly<{
    */
   signerDigest: string | null;
   sourceCommit: string;
+  /**
+   * What the manifest declares about eligibility (ADR v2 D7). The helper's own handshake over the
+   * pipe has to say the same thing: both declared and equal, or neither declared.
+   */
+  eligibility?: ComputerUseEligibility;
 }>;
 export type WindowsComputerUseHelperAttestation = Readonly<{
   imagePath: string;
@@ -503,7 +509,19 @@ export function assertWindowsComputerUseHelperHandshake(
     throw new Error('Computer Use Windows helper handshake mismatch');
   if (handshake['sourceCommit'] !== expected.sourceCommit)
     throw new Error('Computer Use Windows helper source commit mismatch');
-  parseNativeHandshake(handshake, 'win32');
+  const attested = parseNativeHandshake(handshake, 'win32');
+  const declared = expected.eligibility;
+  if (
+    (declared === undefined) !== (attested === null) ||
+    (declared !== undefined &&
+      attested !== null &&
+      (declared.mode !== attested.mode ||
+        declared.rulesetVersion !== attested.rulesetVersion ||
+        declared.classifierVersion !== attested.classifierVersion ||
+        declared.lexiconVersion !== attested.lexiconVersion ||
+        declared.ticketRequired !== attested.ticketRequired))
+  )
+    throw new Error('Computer Use Windows helper eligibility mismatch');
 }
 
 function attestSpawnedWindowsComputerUseHelper(pid: number): WindowsComputerUseHelperAttestation {

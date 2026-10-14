@@ -1,0 +1,11 @@
+{
+  "versions": {
+    "rulesetVersion": 1,
+    "classifierVersion": 1,
+    "lexiconVersion": 1
+  },
+  "ticketRequired": {
+    "darwin": false,
+    "win32": false
+  }
+}

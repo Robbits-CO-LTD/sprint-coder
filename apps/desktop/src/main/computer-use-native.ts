@@ -529,6 +529,7 @@ function loadRawBinding(
     binaryDigest: manifest.binaryDigest,
     signerDigest: manifest.signerDigest,
     sourceCommit: manifest.sourceCommit,
+    ...(manifest.eligibility === undefined ? {} : { eligibility: manifest.eligibility }),
   });
 }
 

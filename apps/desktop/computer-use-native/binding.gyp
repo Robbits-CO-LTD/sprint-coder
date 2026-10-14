@@ -4,7 +4,7 @@
       "target_name": "sprint_coder_computer_use_native",
       "sources": ["computer_use_macos.mm"],
       "defines": ["NAPI_VERSION=10"],
-      "include_dirs": ["."],
+      "include_dirs": [".", "generated"],
       "conditions": [
         ["OS!='mac'", {
           "type": "none"
