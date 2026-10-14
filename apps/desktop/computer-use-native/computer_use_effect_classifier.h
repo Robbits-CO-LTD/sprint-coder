@@ -30,7 +30,8 @@
 //     Otherwise the classifier could not be applied and the round is a takeover (ADR section 4).
 //   * A scroll cannot enter a secret, so secure and credential words in the window around the
 //     scrolled control do not stop it; the words on the control itself (up to its nearest
-//     actionable ancestor) still do.
+//     actionable ancestor, or up to the first labeled node when the control has no label, never
+//     the window) still do, and that text must be readable like any other.
 //   * A refusal class always wins over an approval class, in this order: secure, credential,
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
@@ -679,6 +680,38 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return false;
 }
 
+// How many nodes, from the target up, a scroll is judged on: the control it lands on (up to the
+// nearest actionable ancestor) and, when that control carries no label of its own, up to the first
+// labeled node, but never the last node, which is the window around it. A wheel can change the
+// value of a combobox or a number field whose caption sits on an unlabeled group above it.
+[[nodiscard]] inline std::size_t ScrollScope(const EffectFacts &facts) {
+  const std::size_t span = ActionableSpan(facts);
+  std::size_t first_labeled = facts.chain.size();
+  for (std::size_t index = 0; index < facts.chain.size(); ++index)
+    if (!NormalizeForMatch(facts.chain[index].label).empty()) {
+      first_labeled = index;
+      break;
+    }
+  const std::size_t below_window = facts.chain.size() > 1 ? facts.chain.size() - 1 : 1;
+  const std::size_t labeled_end = first_labeled + 1 < below_window ? first_labeled + 1 : below_window;
+  return span > labeled_end ? span : labeled_end;
+}
+
+// A scroll needs no label, but the text it is judged on (the nodes within `limit`) must be readable:
+// malformed UTF-8 or letters that imitate Latin ones could hide a secret's caption.
+[[nodiscard]] inline bool ScopeIsReadable(const EffectFacts &facts, std::size_t limit) {
+  std::size_t index = 0;
+  for (const NodeFacts &node : facts.chain) {
+    if (index++ >= limit) break;
+    if (!IsValidUtf8(node.label) || !IsValidUtf8(node.role) || !IsValidUtf8(node.subrole) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.label)) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.role)) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.subrole)))
+      return false;
+  }
+  return true;
+}
+
 } // namespace effect_detail
 
 [[nodiscard]] inline EffectDecision ClassifyEffect(const EffectFacts &facts,
@@ -694,10 +727,10 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 
   const bool entering_text = IsTextEntry(facts);
   // A scroll cannot enter a secret, so words in the window around it do not stop it. The scrolled
-  // control itself (up to its nearest actionable ancestor) is still looked at: a wheel can change
-  // the value of a combobox or a number field.
+  // control itself is still looked at (ScrollScope): a wheel can change the value of a combobox or a
+  // number field.
   const std::size_t scope =
-      facts.action == ActionKind::kScroll ? ActionableSpan(facts) : facts.chain.size();
+      facts.action == ActionKind::kScroll ? ScrollScope(facts) : facts.chain.size();
   if (ChainContains(facts, kSecureTerms, Mode::kSubstring, scope) ||
       ChainContains(facts, kSecureBoundedTerms, Mode::kBounded, scope) ||
       (entering_text && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
@@ -726,6 +759,7 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   // Text the lexicon cannot read is a round the classifier could not be applied to (ADR section
   // 4). A scroll cannot confirm, open or run anything, so it does not need readable text.
   if (facts.action != ActionKind::kScroll && !TextIsClassifiable(facts)) return Takeover();
+  if (facts.action == ActionKind::kScroll && !ScopeIsReadable(facts, scope)) return Takeover();
 
   if (IsActivating(facts) && ActionableContains(facts, kInstallerTerms))
     return Make(EffectClass::kE4InstallerLaunch, DecisionKind::kBlocked,

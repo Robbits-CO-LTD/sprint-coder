@@ -1252,8 +1252,10 @@ bool CheckEffectClassifierCore() {
     roleOnly.chain[0] = NodeFacts{"axbutton", "axpress", ""};
     for (const EffectFacts *facts : {&blank, &unsupported, &lookalike, &greek, &roleOnly}) {
       if (action == ActionKind::kScroll) {
-        if (!Check(ClassifyEffect(*facts).kind == DecisionKind::kOrdinary, "effect-scroll-needs-no-text"))
-          return false;
+        // A scroll needs no label or language, but the text it is judged on must be readable.
+        const bool unreadable = facts == &lookalike || facts == &greek;
+        if (!Check((ClassifyEffect(*facts).kind == DecisionKind::kTakeover) == unreadable,
+                   "effect-scroll-needs-no-text-but-readable-text")) return false;
       } else if (!Check(EffTakeover(*facts, EffAllEnabled()), "effect-unreadable-text-takeover")) {
         return false;
       }
@@ -1808,7 +1810,7 @@ bool CheckEffectClassifierCore() {
            "\xED\x8C\x8C\xEC\x9D\xB4", "pay\xC3", "pay\xC0\xAF now", "\xED\xA0\x80 pay", "pay \xF4\x90\x80\x80"}) {
     if (!Check(EffTakeover(EffLabel(label, ActionKind::kClick), EffAllEnabled()), "effect-unreadable-characters"))
       return false;
-    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kScroll)).kind == DecisionKind::kOrdinary,
+    if (!Check(EffTakeover(EffLabel(label, ActionKind::kScroll), EffAllEnabled()),
                "effect-unreadable-characters-scroll")) return false;
   }
   for (const std::string &label : std::vector<std::string>{
@@ -1943,6 +1945,61 @@ bool CheckEffectClassifierCore() {
            "\xE2\x8C\x98" "S", "\xF0\x9F\x8E\x81 gift", "\xEF\xBC\x81 pay now"}) {
     if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kClick)).kind != DecisionKind::kTakeover,
                "effect-readable-neighbours-of-the-stand-ins")) return false;
+  }
+
+  // The scope of a scroll reaches an unlabeled control's caption on the groups above it, up to the
+  // first labeled node and never the window; text in that scope must be readable too.
+  {
+    for (const std::vector<NodeFacts> &chain : std::vector<std::vector<NodeFacts>>{
+             {{"axcombobox", "", ""}, {"axgroup", "", "Expiration year"}, {"axwindow", "", "Pay"}},
+             {{"axtextfield", "", ""}, {"axgroup", "", ""}, {"axgroup", "", "Card number"},
+              {"axwindow", "", "Pay"}},
+             {{"axsecuretextfield", "", ""}, {"axwindow", "", "Pay"}}}) {
+      EffectFacts facts = EffBase();
+      facts.chain = chain;
+      facts.action = ActionKind::kScroll;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-scope-first-labeled"))
+        return false;
+    }
+    // A labeled window is still outside it, and so is anything beyond the first labeled node.
+    EffectFacts window = EffBase();
+    window.chain = {{"axscrollarea", "", ""}, {"axwindow", "", "Card expiration FAQ"}};
+    window.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(window).kind == DecisionKind::kOrdinary, "effect-scroll-scope-stops-before-window"))
+      return false;
+    EffectFacts beyond = EffBase();
+    beyond.chain = {{"axscrollarea", "", "Results"}, {"axgroup", "", "Password tips"}, {"axwindow", "", "Help"}};
+    beyond.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(beyond).kind == DecisionKind::kOrdinary, "effect-scroll-scope-stops-at-first-label"))
+      return false;
+    EffectFacts accented = EffBase();
+    accented.chain = {{"axscrollarea", "", ""}, {"axwindow", "", "Caf\xC3\xA9"}};
+    accented.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(accented).kind == DecisionKind::kOrdinary, "effect-scroll-ignores-window-title-text"))
+      return false;
+    // A look-alike letter in the scrolled control's caption cannot be read.
+    for (const std::vector<NodeFacts> &chain : std::vector<std::vector<NodeFacts>>{
+             {{"axcombobox", "", "Expir\xC2\xAAtion year"}, {"axwindow", "", "Pay"}},
+             {{"axcombobox", "", ""}, {"axgroup", "", "Expir\xC2\xAAtion year"}, {"axwindow", "", "Pay"}},
+             {{"axcombobox", "", "Expir\xD0\xB0tion year"}, {"axwindow", "", "Pay"}},
+             {{"axcombobox", "", "Expir\xC3"}, {"axwindow", "", "Pay"}},
+             {{"axscrollarea", "\xD0\xB0x", ""}, {"axwindow", "", "Pay"}}}) {
+      EffectFacts facts = EffBase();
+      facts.chain = chain;
+      facts.action = ActionKind::kScroll;
+      if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-scroll-scope-unreadable")) return false;
+    }
+    EffectFacts subrole = EffBase();
+    subrole.action = ActionKind::kScroll;
+    subrole.chain[0].subrole = "ax\xE3\xE2\x80\x8B\x81\x82";
+    if (!Check(EffTakeover(subrole), "effect-scroll-scope-malformed-subrole")) return false;
+  }
+
+  // Malformed UTF-8 in a subrole is refused like the same in a role.
+  {
+    EffectFacts subrole = EffBase();
+    subrole.chain[0].subrole = "ax\xE3\xE2\x80\x8B\x81\x82";
+    if (!Check(EffTakeover(subrole), "effect-raw-malformed-subrole")) return false;
   }
 
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
