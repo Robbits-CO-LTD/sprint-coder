@@ -1878,6 +1878,73 @@ bool CheckEffectClassifierCore() {
       return false;
   }
 
+  // The exemption for a scroll stops at the window around the scrolled control: the control itself
+  // (up to its nearest actionable ancestor) is still checked, since a wheel can change a value.
+  for (const std::vector<NodeFacts> &chain : std::vector<std::vector<NodeFacts>>{
+           {{"axtextfield", "", "Card expiration month"}, {"axwindow", "", "Pay"}},
+           {{"axcombobox", "", "Expiration year"}, {"axwindow", "", "Pay"}},
+           {{"axsecuretextfield", "", "Password"}, {"axwindow", "", "Pay"}},
+           {{"axgroup", "", ""}, {"axbutton", "", "Account number"}, {"axwindow", "", "Pay"}},
+           {{"axtextfield", "", "CVV2"}, {"axwindow", "", "Pay"}}}) {
+    for (const SessionMode mode : {SessionMode::kFullAccess, SessionMode::kSupervised}) {
+      EffectFacts facts = EffBase();
+      facts.chain = chain;
+      facts.action = ActionKind::kScroll;
+      facts.mode = mode;
+      if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-checks-the-control"))
+        return false;
+    }
+  }
+  {
+    // Above the actionable ancestor the same words are only a window title.
+    EffectFacts facts = EffBase();
+    facts.chain = {{"axgroup", "", ""},
+                   {"axbutton", "", "Read more"},
+                   {"axwindow", "", "Card expiration FAQ"}};
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kOrdinary, "effect-scroll-window-above-the-control"))
+      return false;
+  }
+
+  // Malformed UTF-8 is unreadable in the raw text too: removing an invisible code point from
+  // between broken bytes must not join them into a character that was never there.
+  {
+    for (const std::string &label : std::vector<std::string>{
+             "pa\xE3\xE2\x80\x8B\x81\x82ss", "p\xE0\x81\xA1y now", "p\xE0\x80\xAFy now",
+             "pay\xE2\x80\x8B\xC3", "pa\xC3\xE2\x81\xA6\xA9y now"}) {
+      if (!Check(EffTakeover(EffLabel(label, ActionKind::kType), EffAllEnabled()), "effect-raw-malformed-utf8"))
+        return false;
+    }
+    EffectFacts role = EffBase();
+    role.chain[0].role = "ax\xE3\xE2\x80\x8B\x81\x82";
+    if (!Check(EffTakeover(role), "effect-raw-malformed-role")) return false;
+    EffectFacts neighbor = EffLabel("input", ActionKind::kType);
+    neighbor.origin = OriginState::kOrdinary;
+    neighbor.neighbor_labels = {"pa\xE3\xE2\x80\x8B\x81\x82ss"};
+    neighbor.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(neighbor), "effect-raw-malformed-neighbor")) return false;
+    EffectFacts extension = EffItem(SurfaceKind::kOrdinary, ActionKind::kClick, "tx\xC3");
+    if (!Check(EffTakeover(extension, EffAllEnabled()), "effect-raw-malformed-extension")) return false;
+  }
+
+  // Characters that stand in for Latin letters are unreadable: ordinal indicators, superscripts,
+  // micro sign, circled / squared / regional-indicator letters, APL letters, halfwidth Hangul.
+  for (const std::string &label : std::vector<std::string>{
+           "p\xC2\xAAy now", "P\xC2\xAAssword", "\xC2\xB5 pay now", "pay\xC2\xB2", "pay now\xC2\xB3",
+           "\xC2\xB9 pay now", "pay n\xC2\xBA" "w", "\xF0\x9F\x85\xBF\xF0\x9F\x84\xB0ssword",
+           "\xF0\x9F\x87\xB5\xF0\x9F\x87\xA6y now", "\xF0\x9F\x85\x9F" "ay now", "p\xE2\x8D\xBAy now",
+           "\xE2\x8D\xB6 pay now", "\xEF\xBE\xA1 pay now", "\xEF\xBF\x9C pay now"}) {
+    if (!Check(EffTakeover(EffLabel(label, ActionKind::kClick), EffAllEnabled()), "effect-latin-stand-ins"))
+      return false;
+  }
+  // The punctuation, symbols and emoji next to them stay readable.
+  for (const std::string &label : std::vector<std::string>{
+           "\xC2\xA9 2026", "\xC2\xAB" "pay now\xC2\xBB", "\xC2\xB7 pay now", "\xE2\x86\x90 back",
+           "\xE2\x8C\x98" "S", "\xF0\x9F\x8E\x81 gift", "\xEF\xBC\x81 pay now"}) {
+    if (!Check(ClassifyEffect(EffLabel(label, ActionKind::kClick)).kind != DecisionKind::kTakeover,
+               "effect-readable-neighbours-of-the-stand-ins")) return false;
+  }
+
   // Invariant sweep: an approval is only ever offered for a complete, non-refused fact set, and
   // always carries a valid native effect; everything else carries none.
   {

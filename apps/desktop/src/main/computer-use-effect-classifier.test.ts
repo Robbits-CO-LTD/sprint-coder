@@ -167,6 +167,7 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
       '3-A: Main の投影による highImpact は strengthen にだけ使う',
       '本番で `single_use_approval` を返し始める 6 条件',
       '| C6  |',
+      'C2 で実際の facts を測ったあとに調整する事項',
     ])
       expect(adr).toContain(marker);
   });

@@ -22,9 +22,15 @@
 // Fail-closed rules:
 //   * Only `ActionKind::kObserve` is exempt. Any other action with incomplete facts (target
 //     metadata, the ancestor walk, the window surface, bounded sizes) is a takeover, never
-//     ordinary. Any action but a scroll also needs text it can read: no label anywhere, a label in
-//     a language the lexicon does not cover, or a script that can imitate Latin letters is a
-//     takeover ("the classifier could not be applied", ADR section 4).
+//     ordinary. Any action but a scroll also needs text it can read: the control the action
+//     lands on (the target up to its nearest actionable ancestor, a text field itself or, in a
+//     browser, a caption near it) must have a label, in a language the lexicon covers, with no
+//     malformed UTF-8 and no letters outside what it can read (accented or look-alike Latin,
+//     Greek, Cyrillic, Hangul, fullwidth Latin and the like). A window title is not a label.
+//     Otherwise the classifier could not be applied and the round is a takeover (ADR section 4).
+//   * A scroll cannot enter a secret, so secure and credential words in the window around the
+//     scrolled control do not stop it; the words on the control itself (up to its nearest
+//     actionable ancestor) still do.
 //   * A refusal class always wins over an approval class, in this order: secure, credential,
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
@@ -373,7 +379,8 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 }
 
 // Drops the default-ignorable code points, so a label cannot hide a word behind them, and folds
-// ASCII case. Malformed UTF-8 bytes are kept as they are (TextIsClassifiable refuses such text).
+// ASCII case. Malformed UTF-8 bytes are kept as they are; TextIsClassifiable refuses text that is
+// malformed before this runs.
 [[nodiscard]] inline std::string NormalizeForMatch(std::string_view text) {
   std::string output;
   output.reserve(text.size());
@@ -404,19 +411,24 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 
 // Non-ASCII code points the lexicon can read: Japanese text (kana, ideographs, CJK punctuation,
 // fullwidth punctuation and signs), punctuation, symbols, arrows, currency and emoji. Letters of
-// other scripts (accented Latin, IPA, Greek, Cyrillic, Armenian, Hangul, fullwidth Latin) can
-// imitate or replace Latin letters, so text carrying them is not classified.
+// other scripts (accented Latin, IPA, Greek, Cyrillic, Armenian, Hangul and halfwidth Hangul,
+// fullwidth Latin) and symbols that stand in for Latin letters (the ordinal indicators and
+// superscript digits, circled, squared and regional-indicator letters, APL letters) can imitate
+// or replace Latin letters, so text carrying them is not classified.
 [[nodiscard]] constexpr bool IsReadableNonAscii(char32_t code) {
   if ((code >= 0xFF10 && code <= 0xFF19) || (code >= 0xFF21 && code <= 0xFF3A) ||
       (code >= 0xFF41 && code <= 0xFF5A))
     return false;
-  return (code >= 0x00A0 && code <= 0x00BF) || (code >= 0x2000 && code <= 0x206F) ||
-         (code >= 0x20A0 && code <= 0x20CF) || (code >= 0x2190 && code <= 0x23FF) ||
+  return (code >= 0x00A0 && code <= 0x00A9) || (code >= 0x00AB && code <= 0x00B1) ||
+         code == 0x00B4 || (code >= 0x00B6 && code <= 0x00B8) || (code >= 0x00BB && code <= 0x00BF) ||
+         (code >= 0x2000 && code <= 0x206F) || (code >= 0x20A0 && code <= 0x20CF) ||
+         (code >= 0x2190 && code <= 0x2335) || (code >= 0x237B && code <= 0x23FF) ||
          (code >= 0x2500 && code <= 0x27BF) || (code >= 0x2900 && code <= 0x2BFF) ||
          (code >= 0x3000 && code <= 0x30FF) || (code >= 0x31F0 && code <= 0x31FF) ||
          (code >= 0x3400 && code <= 0x4DBF) || (code >= 0x4E00 && code <= 0x9FFF) ||
          (code >= 0xF900 && code <= 0xFAFF) || (code >= 0xFE30 && code <= 0xFE4F) ||
-         (code >= 0xFF00 && code <= 0xFFEF) || (code >= 0x1F000 && code <= 0x1FAFF) ||
+         (code >= 0xFF00 && code <= 0xFF9F) || (code >= 0xFFDD && code <= 0xFFEF) ||
+         (code >= 0x1F000 && code <= 0x1F0FF) || (code >= 0x1F200 && code <= 0x1FAFF) ||
          (code >= 0x20000 && code <= 0x2FA1F);
 }
 
@@ -430,6 +442,19 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
     index += length;
   }
   return false;
+}
+
+// True when `text` is well-formed UTF-8. The raw text is checked as well as the normalized one:
+// stripping an invisible code point from between malformed bytes can join them into a valid
+// character that was never there.
+[[nodiscard]] inline bool IsValidUtf8(std::string_view text) {
+  for (std::size_t index = 0; index < text.size();) {
+    char32_t code = 0;
+    std::size_t length = 1;
+    if (!DecodeUtf8(text, index, &code, &length)) return false;
+    index += length;
+  }
+  return true;
 }
 
 // An extension as the platform names it: leading and trailing dots and blanks dropped, ASCII
@@ -517,10 +542,15 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return facts.chain.empty() ? 0 : 1;
 }
 
+// The nodes from the target up to `limit` (the whole chain by default).
 [[nodiscard]] inline bool ChainContains(const EffectFacts &facts,
-                                        std::span<const std::u8string_view> terms, MatchMode mode) {
-  for (const NodeFacts &node : facts.chain)
+                                        std::span<const std::u8string_view> terms, MatchMode mode,
+                                        std::size_t limit = static_cast<std::size_t>(-1)) {
+  std::size_t index = 0;
+  for (const NodeFacts &node : facts.chain) {
+    if (index++ >= limit) break;
     if (ContainsAnyTerm(NodeText(node), terms, mode)) return true;
+  }
   return false;
 }
 
@@ -629,12 +659,13 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 [[nodiscard]] inline bool TextIsClassifiable(const EffectFacts &facts) {
   if (!facts.text_language_supported) return false;
   for (const NodeFacts &node : facts.chain)
-    if (HasUnreadableCharacters(NormalizeForMatch(node.label)) ||
+    if (!IsValidUtf8(node.label) || !IsValidUtf8(node.role) || !IsValidUtf8(node.subrole) ||
+        HasUnreadableCharacters(NormalizeForMatch(node.label)) ||
         HasUnreadableCharacters(NormalizeForMatch(node.role)) ||
         HasUnreadableCharacters(NormalizeForMatch(node.subrole)))
       return false;
   for (const std::string &label : facts.neighbor_labels)
-    if (HasUnreadableCharacters(NormalizeForMatch(label))) return false;
+    if (!IsValidUtf8(label) || HasUnreadableCharacters(NormalizeForMatch(label))) return false;
   if (IsTextEntry(facts)) {
     if (!NormalizeForMatch(facts.chain.front().label).empty()) return true;
     if (facts.origin == OriginState::kNotApplicable) return false;
@@ -662,15 +693,18 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
     return Takeover();
 
   const bool entering_text = IsTextEntry(facts);
-  // A scroll cannot enter a secret, so words in a window title around it do not stop it.
-  const bool can_enter = facts.action != ActionKind::kScroll;
-  if ((can_enter && (ChainContains(facts, kSecureTerms, Mode::kSubstring) ||
-                     ChainContains(facts, kSecureBoundedTerms, Mode::kBounded))) ||
+  // A scroll cannot enter a secret, so words in the window around it do not stop it. The scrolled
+  // control itself (up to its nearest actionable ancestor) is still looked at: a wheel can change
+  // the value of a combobox or a number field.
+  const std::size_t scope =
+      facts.action == ActionKind::kScroll ? ActionableSpan(facts) : facts.chain.size();
+  if (ChainContains(facts, kSecureTerms, Mode::kSubstring, scope) ||
+      ChainContains(facts, kSecureBoundedTerms, Mode::kBounded, scope) ||
       (entering_text && (NeighborsContain(facts, kSecureTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kSecureBoundedTerms, Mode::kBounded))))
     return Make(EffectClass::kSecure, DecisionKind::kBlocked, DecisionReason::kSecure);
-  if ((can_enter && (ChainContains(facts, kCredentialTerms, Mode::kSubstring) ||
-                     ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix))) ||
+  if (ChainContains(facts, kCredentialTerms, Mode::kSubstring, scope) ||
+      ChainContains(facts, kCredentialPrefixTerms, Mode::kPrefix, scope) ||
       (entering_text && (NeighborsContain(facts, kCredentialTerms, Mode::kSubstring) ||
                          NeighborsContain(facts, kCredentialPrefixTerms, Mode::kPrefix))))
     return Make(EffectClass::kCredential, DecisionKind::kBlocked, DecisionReason::kCredential);
