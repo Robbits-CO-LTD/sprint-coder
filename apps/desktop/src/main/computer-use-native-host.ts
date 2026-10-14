@@ -163,9 +163,11 @@ export function createComputerUseNativeHost(
   const inputAttemptsBySession = new Map<string, number>();
   // The classifier route each session was bound to at creation, and the classifierVersion that
   // route makes Main accept. Never changed after the first binding; dropped on a verified close.
+  // `starts` holds one owner token per start of the session that is still in flight, so a failed
+  // start takes the binding back only when it is the last one and no session came of it.
   const classifierBindings = new Map<
     string,
-    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 2 }>
+    Readonly<{ route: 'v1' | 'v2'; expectedVersion: 1 | 2; starts: Set<symbol> }>
   >();
   const stopEpochs = new Map<string, number>();
   const confirmedClosed = new Set<string>();
@@ -330,8 +332,18 @@ export function createComputerUseNativeHost(
     });
   };
 
+  // The route the native is told for a session (C4): the one Main will accept receipts for, which
+  // is v2 only when the build attested classifier 2. The native keeps it for the life of the
+  // session. Only the macOS addon reads it, and a session that was never bound sends nothing.
+  const nativeRouteField = (
+    platform: NativePlatform,
+    route: 'v1' | 'v2' | undefined,
+  ): Record<string, unknown> =>
+    platform === 'darwin' && route !== undefined ? { classifierRoute: route } : {};
+
   const startNative = async (
     input: Omit<Parameters<ComputerUseNativeHost['startSession']>[0], 'classifierRoute'>,
+    nativeRoute: 'v1' | 'v2' | undefined,
   ): Promise<ComputerUseNativeSession> => {
     const existing = sessions.get(input.sessionId);
     if (existing !== undefined) {
@@ -350,6 +362,7 @@ export function createComputerUseNativeHost(
         windowIdentityDigest: existing.windowIdentityDigest,
         resume: input.resume === true,
         expectedPolicyLanguage: existing.policyLanguage,
+        ...nativeRouteField(existing.platform, nativeRoute),
       };
       const value = await invoke('startSession', request);
       const raw = asRecord(value, 'native_session_invalid');
@@ -407,6 +420,7 @@ export function createComputerUseNativeHost(
       expectedPolicyLanguage: nativePolicyLanguage(selectedRecord),
       maximumMode: expectedMaximumMode,
       expectedMaximumMode,
+      ...nativeRouteField(input.profile.platform, nativeRoute),
     };
     const value = await invoke('startSession', request);
     const raw = asRecord(value, 'native_session_invalid');
@@ -530,28 +544,46 @@ export function createComputerUseNativeHost(
     },
 
     startSession: async (startInput): Promise<ComputerUseNativeSession> => {
-      // C3: the native is still v1-only, so the route stays in Main and is not sent to it. C4 passes
-      // the bound route to the native, which then issues an approval intent only for route v2.
       const { classifierRoute, ...input } = startInput;
-      const bound = classifierBindings.get(input.sessionId);
-      if (bound !== undefined && classifierRoute !== undefined && classifierRoute !== bound.route)
+      let binding = classifierBindings.get(input.sessionId);
+      if (
+        binding !== undefined &&
+        classifierRoute !== undefined &&
+        classifierRoute !== binding.route
+      )
         throw new ComputerUseNativeUnavailableError('native_classifier_route_forbidden');
       // Bound before the first await, so two starts of one new session cannot both pass the check
       // above with different routes. The route asks; the attest decides: v2 is expected only from
       // a build that attested classifier 2.
-      const created = bound === undefined && classifierRoute !== undefined;
-      if (created)
-        classifierBindings.set(input.sessionId, {
+      if (binding === undefined && classifierRoute !== undefined) {
+        binding = {
           route: classifierRoute,
           expectedVersion:
             classifierRoute === 'v2' && options.classifierV2Attested === true ? 2 : 1,
-        });
+          starts: new Set<symbol>(),
+        };
+        classifierBindings.set(input.sessionId, binding);
+      }
+      // This start's owner token. The binding of a session that never came to exist goes when the
+      // last start of it ends, not when the first one that created it fails: another start of the
+      // same route may still be on its way to making the session.
+      const owner = Symbol('classifier-route-start');
+      binding?.starts.add(owner);
       try {
-        return await startNative(input);
-      } catch (error) {
-        // A start that did not produce a session leaves no binding behind.
-        if (created && !sessions.has(input.sessionId)) classifierBindings.delete(input.sessionId);
-        throw error;
+        return await startNative(
+          input,
+          binding === undefined ? undefined : binding.expectedVersion === 2 ? 'v2' : 'v1',
+        );
+      } finally {
+        if (binding !== undefined) {
+          binding.starts.delete(owner);
+          if (
+            binding.starts.size === 0 &&
+            !sessions.has(input.sessionId) &&
+            classifierBindings.get(input.sessionId) === binding
+          )
+            classifierBindings.delete(input.sessionId);
+        }
       }
     },
 

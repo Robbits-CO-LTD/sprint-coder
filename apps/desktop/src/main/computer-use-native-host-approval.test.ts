@@ -615,4 +615,153 @@ describe('Computer Use native host: classifier route (C3)', () => {
       v2.host.dispatchApproved!({ ...request(open, 'a-5'), approvalGeneration: 4 }),
     ).resolves.toMatchObject({ result: 'completed' });
   });
+
+  // C4-0: the bound route is handed to the native, so it can pick its classifier by it later.
+  it('hands the effective route to the native on every start of a session, and omits it when unbound', async () => {
+    const sent = async (options: Parameters<typeof build>[0], route: Route | undefined) => {
+      const built = build(options);
+      await startWith(built.host, route);
+      return built.calls['startSession']!.mock.calls[0]![0] as Record<string, unknown>;
+    };
+    // The route asks; the attest decides: v2 reaches the native only from a build that attested 2.
+    expect((await sent({ attested: true }, 'v2'))['classifierRoute']).toBe('v2');
+    expect((await sent({ attested: false }, 'v2'))['classifierRoute']).toBe('v1');
+    expect((await sent({}, 'v2'))['classifierRoute']).toBe('v1');
+    expect((await sent({ attested: true }, 'v1'))['classifierRoute']).toBe('v1');
+    // Main always binds a route; a session that was never bound sends nothing (the pre-C3 shape).
+    expect(await sent({ attested: true }, undefined)).not.toHaveProperty('classifierRoute');
+  });
+
+  it('repeats the same route on a later start of the same session', async () => {
+    const built = build({ attested: true });
+    const first = await startWith(built.host, 'v2');
+    await built.host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId: first.sessionId,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      resume: true,
+      classifierRoute: 'v2',
+    });
+    const routes = built.calls['startSession']!.mock.calls.map(
+      (call) => (call[0] as Record<string, unknown>)['classifierRoute'],
+    );
+    expect(routes).toEqual(['v2', 'v2']);
+    // A different route for the bound session is refused before the native is asked.
+    await expect(
+      built.host.startSession({
+        profile,
+        windowId: 'window-1',
+        sessionId: first.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        classifierRoute: 'v1',
+      }),
+    ).rejects.toThrow(/route/u);
+    expect(built.calls['startSession']).toHaveBeenCalledTimes(2);
+  });
+
+  // C4-0: a failed start takes the route binding back only when no other start of the session
+  // is still in flight or has produced the session.
+  it('keeps the binding when the start that created it fails before a racing start of the same route finishes', async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let call = 0;
+    const built = build(
+      { attested: true },
+      {
+        preflight: offerReceipt,
+        startSession: async (i) => {
+          call += 1;
+          // The first start (the one that created the binding) fails at once; the second waits.
+          if (call === 1) throw new Error('native start failed');
+          await gate;
+          return {
+            inputAttemptCount: 0,
+            sessionId: i['sessionId'],
+            platform: 'darwin',
+            appIdentityDigest: identityDigest,
+            windowIdentityDigest: zero('d'),
+            windowId: 'window-1',
+            profileRevision: 1,
+            cancelEpoch: 0,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+            screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+            pid: 42,
+          };
+        },
+      },
+    );
+    await built.host.listWindows(profile);
+    const base = {
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-race',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      classifierRoute: 'v1',
+    } as const;
+    const first = built.host.startSession(base);
+    const second = built.host.startSession(base);
+    await expect(first).rejects.toThrow(/native start failed/u);
+    release!();
+    const session = await second;
+    // The session is still bound to v1: a receipt that offers an approval is invalid for it (an
+    // unbound session would accept the same offer), and another route is still refused.
+    await expect(built.host.dispatch(request(session, 'r-1'))).resolves.toMatchObject({
+      result: 'rejected',
+      reasonCode: 'native_preflight_invalid',
+    });
+    await expect(built.host.startSession({ ...base, classifierRoute: 'v2' })).rejects.toThrow(
+      /route/u,
+    );
+  });
+
+  it('still takes the binding back when the only start of a session fails', async () => {
+    const built = build(
+      { attested: true },
+      {
+        startSession: () => {
+          throw new Error('native start failed');
+        },
+      },
+    );
+    await expect(startWith(built.host, 'v1')).rejects.toThrow();
+    // Nothing is left bound, so the id may be bound to another route.
+    await expect(startWith(built.host, 'v2')).rejects.toThrow(/native start failed/u);
+  });
+
+  it('does not let a failed start drop a binding another start of the session still needs', async () => {
+    // Two starts of one new session and route are in flight; both fail. The binding goes only
+    // with the last one, so a later start with a different route is not refused by a stale binding.
+    const built = build(
+      { attested: true },
+      {
+        startSession: () => {
+          throw new Error('native start failed');
+        },
+      },
+    );
+    await built.host.listWindows(profile);
+    const base = {
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-two',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      classifierRoute: 'v1',
+    } as const;
+    await Promise.allSettled([built.host.startSession(base), built.host.startSession(base)]);
+    await expect(built.host.startSession({ ...base, classifierRoute: 'v2' })).rejects.toThrow(
+      /native start failed/u,
+    );
+  });
 });
