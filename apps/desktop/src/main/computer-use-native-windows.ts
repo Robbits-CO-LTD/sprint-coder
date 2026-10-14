@@ -105,6 +105,20 @@ export function createWindowsComputerUseNativeAddon(
         stringField(value, 'requestId'),
       );
     },
+    // The side-effect-free check that precedes every dispatch and answers with its one-time ticket
+    // (ADR v2 S4-4 addendum 5). It travels as its own message type, so it can never be mistaken for
+    // a dispatch, and under its own request key, so its answer is never confused with the
+    // dispatch's cached result.
+    preflight: (input) => {
+      const value = record(input);
+      return client.call(
+        'preflight',
+        'preflight',
+        value,
+        stringField(value, 'sessionId'),
+        `preflight:${stringField(value, 'requestId')}`,
+      );
+    },
     dispatch: (input) => {
       const value = record(input);
       return client.call(
@@ -696,6 +710,8 @@ function responseTypeFor(requestType: ComputerUseNativeMessageType): ComputerUse
     case 'dispatch':
     case 'cancel':
       return 'dispatch_result';
+    case 'preflight':
+      return 'preflight_result';
     default:
       throw new Error(`Unsupported Computer Use Windows request type: ${requestType}`);
   }

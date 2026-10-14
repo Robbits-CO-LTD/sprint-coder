@@ -77,6 +77,9 @@ enum class MessageType : std::uint16_t {
   kDispatchResult = 8,
   kCancel = 9,
   kError = 10,
+  // A side-effect-free check that precedes a dispatch and answers with its one-time ticket.
+  kPreflight = 11,
+  kPreflightResult = 12,
 };
 
 struct Frame {
@@ -87,7 +90,7 @@ struct Frame {
 
 [[nodiscard]] inline bool IsKnownMessageType(std::uint16_t value) noexcept {
   return value >= static_cast<std::uint16_t>(MessageType::kHandshake) &&
-         value <= static_cast<std::uint16_t>(MessageType::kError);
+         value <= static_cast<std::uint16_t>(MessageType::kPreflightResult);
 }
 
 [[nodiscard]] inline bool ValidateHeader(const FrameHeader &header) noexcept {

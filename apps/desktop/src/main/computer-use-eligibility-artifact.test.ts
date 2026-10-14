@@ -31,7 +31,7 @@ describe('Computer Use eligibility: Main against a built native (D7-3)', () => {
   it('opens a v1 Main for a v1 Windows helper, and a v2 Main never opens for it', () => {
     const v1 = declaration('v1-allowlist', 'win32');
     expect(verdict(v1, v1)).toBe('ok');
-    // The Windows helper claims no ticket and builds only v1, so a v2 Main cannot agree with it.
+    // The Windows helper builds only v1 until S5-c, so a v2 Main cannot agree with it.
     const v2Main = { ...declaration('v2-denylist', 'darwin'), ticketRequired: false };
     expect(verdict(v2Main, v1)).toBe('mismatch');
     expect(verdict(declaration('v2-denylist', 'darwin'), v1)).toBe('mismatch');

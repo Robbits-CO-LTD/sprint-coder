@@ -368,7 +368,7 @@ jobs:
             throw 'Windows Computer Use native manifest has unexpected keys.'
           }
           # A distributed package is always the v1 allow-list: no deny-list build ships, and the
-          # native claims no ticket requirement until it demands one (ADR v2 D7).
+          # helper refuses every input without a ticket (S5-a), so it claims the requirement (ADR v2 D7).
           $eligibility = $nativeManifest.eligibility
           $eligibilityKeys = @($eligibility.PSObject.Properties.Name | Sort-Object)
           $expectedEligibilityKeys = @(
@@ -389,7 +389,7 @@ jobs:
             $eligibility.mode -cne 'v1-allowlist' -or
             -not $eligibilityVersionsAreOne -or
             -not ($eligibility.ticketRequired -is [bool]) -or
-            $eligibility.ticketRequired -ne $false
+            $eligibility.ticketRequired -ne $true
           ) {
             throw 'Windows Computer Use native manifest eligibility is invalid.'
           }

@@ -20,7 +20,9 @@ export type ComputerUseNativeMessageType =
   | 'dispatch'
   | 'dispatch_result'
   | 'cancel'
-  | 'error';
+  | 'error'
+  | 'preflight'
+  | 'preflight_result';
 
 const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Object.freeze({
   handshake: 1,
@@ -33,6 +35,8 @@ const MESSAGE_TYPES: Readonly<Record<ComputerUseNativeMessageType, number>> = Ob
   dispatch_result: 8,
   cancel: 9,
   error: 10,
+  preflight: 11,
+  preflight_result: 12,
 });
 const MESSAGE_TYPES_BY_NUMBER = new Map(
   Object.entries(MESSAGE_TYPES).map(([name, value]) => [

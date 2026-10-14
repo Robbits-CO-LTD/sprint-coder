@@ -713,11 +713,12 @@ export function createComputerUseNativeHost(
         cancelEpoch: input.cancelEpoch,
         actionDigest,
       };
-      // macOS native that exports preflight (N2a): every dispatch is preceded by a side-effect-free
-      // preflight and carries the single-use ordinary ticket it returns. The capability is the
-      // presence of the exported method; Windows and older native builds keep the legacy path.
+      // A native that exports preflight (macOS N2a, Windows S5-a): every dispatch is preceded by a
+      // side-effect-free preflight and carries the single-use ordinary ticket it returns. The
+      // capability is the presence of the exported method; an older native build keeps the legacy
+      // path, and the native itself then refuses an input that carries no ticket.
       let ticket: string | null = null;
-      if (internal.platform === 'darwin' && hasMethod(addon, 'preflight')) {
+      if (hasMethod(addon, 'preflight')) {
         let receipt: unknown;
         try {
           receipt = await invoke('preflight', dispatchRequest);

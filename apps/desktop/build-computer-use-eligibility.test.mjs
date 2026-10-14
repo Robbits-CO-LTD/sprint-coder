@@ -51,7 +51,7 @@ describe('Computer Use native --eligibility argument', () => {
 });
 
 describe('Computer Use native eligibility declaration', () => {
-  it('comes from the single eligibility.json; only the macOS native claims a ticket', () => {
+  it('comes from the single eligibility.json; both natives claim a ticket', () => {
     const table = JSON.parse(
       readFileSync(resolve(desktopDirectory, 'computer-use-native', 'eligibility.json'), 'utf8'),
     );
@@ -64,9 +64,8 @@ describe('Computer Use native eligibility declaration', () => {
         lexiconVersion: table.versions.lexiconVersion,
         ticketRequired: table.ticketRequired[platform],
       });
-      // The macOS native refuses every input without a ticket (N2b-4 PR 5); the Windows helper
-      // claims none until S5.
-      expect(v1.ticketRequired).toBe(platform === 'darwin');
+      // Each native refuses every input without a ticket (macOS: N2b-4 PR 5, Windows: S5-a).
+      expect(v1.ticketRequired).toBe(true);
     }
     expect(eligibilityDeclaration('v2-denylist', 'darwin')).toEqual({
       ...eligibilityDeclaration('v1-allowlist', 'darwin'),
@@ -93,7 +92,7 @@ describe('Computer Use native eligibility declaration', () => {
       '#define SPRINT_CODER_ELIGIBILITY_V2 0',
     );
     expect(eligibilityBuildHeader(eligibilityDeclaration('v1-allowlist', 'win32'))).toContain(
-      '#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 0',
+      '#define SPRINT_CODER_ELIGIBILITY_TICKET_REQUIRED 1',
     );
   });
 

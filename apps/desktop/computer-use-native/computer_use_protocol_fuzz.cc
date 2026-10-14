@@ -1123,15 +1123,9 @@ bool CheckNativeEligibility() {
 #endif
 #if !defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
   // The harness is compiled without the generated header: the legacy v1 defaults apply. The
-  // ticket claim follows the platform: the macOS native requires a ticket for every input, the
-  // Windows helper does not until S5.
-#if defined(__APPLE__)
-  constexpr bool kExpectedTicketRequired = true;
-#else
-  constexpr bool kExpectedTicketRequired = false;
-#endif
+  // ticket claim is true on both platforms: each native requires a ticket for every input.
   if (!Check(name == "v1-allowlist" && !kNativeEligibilityIsV2 &&
-                 kNativeEligibilityTicketRequired == kExpectedTicketRequired,
+                 kNativeEligibilityTicketRequired,
              "eligibility-defaults")) return false;
 #endif
   return true;
@@ -2420,6 +2414,23 @@ int main() {
     return 1;
   cancel_header.cancel_id.bytes[0] = 3;
   if (!Check(!EncodeFrame(cancel_header, metadata).empty(), "cancel-id-valid"))
+    return 1;
+
+  // The preflight pair (S5-a) is part of the wire vocabulary, and the next number is not.
+  for (const auto type : {MessageType::kPreflight, MessageType::kPreflightResult}) {
+    auto preflight_header = ValidHeader();
+    preflight_header.message_type = static_cast<std::uint16_t>(type);
+    if (!Check(!EncodeFrame(preflight_header, metadata).empty() &&
+                   DecodeFrame(EncodeFrame(preflight_header, metadata)).has_value(),
+               "preflight-message-type-known"))
+      return 1;
+  }
+  auto unknown_type_header = ValidHeader();
+  unknown_type_header.message_type =
+      static_cast<std::uint16_t>(MessageType::kPreflightResult) + 1;
+  if (!Check(EncodeFrame(unknown_type_header, metadata).empty() ||
+                 !DecodeFrame(EncodeFrame(unknown_type_header, metadata)).has_value(),
+             "message-type-after-preflight-unknown"))
     return 1;
 
   std::vector<std::uint8_t> too_large_metadata(kMaxMetadataBytes + 1, 'x');

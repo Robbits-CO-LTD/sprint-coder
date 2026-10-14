@@ -192,3 +192,34 @@ test('disconnecting during an incomplete request releases the pending read and e
     await delay(50);
   });
 });
+
+test('a preflight or dispatch for a session that was never started is refused without a ticket or an effect (S5-a)', async () => {
+  await withHelper(async ({ send }) => {
+    const action = {
+      type: 'click',
+      x: 0.5,
+      y: 0.5,
+      requestId: 'request-1',
+      actionDigest: 'a'.repeat(64),
+      cancelEpoch: 0,
+      observationRevision: 1,
+    };
+    // The preflight is a known message of its own (type 11) and answers an error, never a result.
+    const preflight = await send(11, { operation: 'preflight', ...action });
+    assert.equal(preflight.type, 10);
+    assert.equal(preflight.metadata.code, 'session_missing');
+    assert.equal(preflight.metadata.accepted, false);
+    assert.equal('ticket' in preflight.metadata, false);
+    // A dispatch with a ticket-shaped value, still for no session, never reaches an input call.
+    const dispatch = await send(7, {
+      operation: 'dispatch',
+      ...action,
+      ticket: 'b'.repeat(64),
+    });
+    assert.equal(dispatch.type, 10);
+    assert.equal(dispatch.metadata.code, 'session_missing');
+    assert.equal(dispatch.metadata.accepted, false);
+    // The helper stays healthy after both.
+    assert.equal((await send(3, { operation: 'probe' })).type, 4);
+  });
+});
