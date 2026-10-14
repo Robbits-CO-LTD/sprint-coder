@@ -290,10 +290,47 @@ describe('workflow security boundaries', () => {
     expect(loaderTests).toContain('verify-computer-use-eligibility.test.mjs');
     // The macOS harness sees the generated header of the mode that was just built.
     expect(gate).toContain('-I apps/desktop/computer-use-native/generated');
-    // No distributed build passes a deny-list request.
-    expect(workflows['.github/workflows/release-beta.yml']).not.toContain('--eligibility');
-    for (const [name, script] of Object.entries(desktopPackage.scripts))
-      if (script.includes('build:computer-use-native'))
-        expect(script, name).not.toContain('--eligibility');
+    // The harness is told which mode its matrix row built, and asserts it.
+    expect(gate).toContain(
+      "-DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }}",
+    );
+    const harness = readFileSync(
+      resolve(repositoryRoot, 'apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc'),
+      'utf8',
+    );
+    expect(harness).toContain('SPRINT_CODER_EXPECT_ELIGIBILITY_V2');
+    expect(harness).toContain('eligibility-mode-matches-matrix');
+  });
+
+  it('never asks a distributed or acceptance build for the deny-list', () => {
+    // Every route that builds the Computer Use native for a package, by either spelling of its
+    // name, must leave the mode at its v1 default. Only the CI gate chooses a mode.
+    const rootPackage = JSON.parse(
+      readFileSync(resolve(repositoryRoot, 'package.json'), 'utf8'),
+    ) as { scripts: Record<string, string> };
+    const builders = (scripts: Record<string, string>) =>
+      Object.entries(scripts).filter(([, script]) => /build[-:]computer-use-native/u.test(script));
+    // The guard must not be vacuous: the routes it is about really exist.
+    expect(builders(rootPackage.scripts).map(([name]) => name)).toContain(
+      'build:computer-use-native',
+    );
+    expect(builders(desktopPackage.scripts).map(([name]) => name)).toContain('prepare:desktop');
+    for (const [name, script] of [
+      ...builders(rootPackage.scripts),
+      ...builders(desktopPackage.scripts),
+    ])
+      expect(script, name).not.toContain('--eligibility');
+    const forge = readFileSync(resolve(repositoryRoot, 'apps/desktop/forge.config.ts'), 'utf8');
+    expect(forge).toContain('build-computer-use-native.mjs');
+    expect(forge).not.toContain('--eligibility');
+    for (const file of [
+      '.github/workflows/release-beta.yml',
+      '.github/workflows/computer-use-acceptance-build.yml',
+      '.github/workflows/computer-use-final-gate.yml',
+      '.github/workflows/computer-use-evidence-harness.yml',
+    ] as const)
+      expect(workflows[file], file).not.toContain('--eligibility');
+    // The one workflow that does pass it is the CI gate.
+    expect(workflows['.github/workflows/ci.yml']).toContain('--eligibility=');
   });
 });

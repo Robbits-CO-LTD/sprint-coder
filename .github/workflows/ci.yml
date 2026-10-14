@@ -168,6 +168,7 @@ jobs:
             -fsanitize=address,undefined \
             -I apps/desktop/computer-use-native \
             -I apps/desktop/computer-use-native/generated \
+            -DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }} \
             apps/desktop/computer-use-native/computer_use_protocol_fuzz.cc \
             -o "${harness}"
           ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \

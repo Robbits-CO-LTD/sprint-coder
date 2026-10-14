@@ -70,13 +70,16 @@ function sha256File(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function readAttestation(platform, directory, artifactFile) {
-  const artifact = join(directory, artifactFile);
-  if (!existsSync(artifact)) throw new Error(`built artifact is missing: ${artifactFile}`);
+function readAttestation(platform, artifact, manifest) {
   if (platform === 'darwin') {
+    // The handshake asks for the protocol the build says it implements, so a later protocol bump
+    // cannot turn this check red for a reason that has nothing to do with eligibility.
+    const { protocolVersion, apiVersion } = manifest;
+    if (!Number.isSafeInteger(protocolVersion) || !Number.isSafeInteger(apiVersion))
+      throw new Error('manifest protocolVersion or apiVersion is not an integer');
     const addon = createRequire(import.meta.url)(artifact);
     if (typeof addon.handshake !== 'function') throw new Error('native has no handshake export');
-    const handshake = addon.handshake({ protocolVersion: 1, apiVersion: 2, featureFlag: true });
+    const handshake = addon.handshake({ protocolVersion, apiVersion, featureFlag: true });
     if (!isPlainRecord(handshake)) throw new Error('native handshake is not an object');
     return handshake['eligibility'];
   }
@@ -98,6 +101,12 @@ export function main(argv, platform = process.platform) {
   }
   const require_ = argv.includes('--require');
   if (platform !== 'darwin' && platform !== 'win32') {
+    if (require_) {
+      console.error(
+        `[verify-eligibility] FAIL: ${platform} is outside the Computer Use contract (--require)`,
+      );
+      return 1;
+    }
     console.log(`[verify-eligibility] SKIP: ${platform} is outside the Computer Use contract`);
     return 0;
   }
@@ -120,10 +129,12 @@ export function main(argv, platform = process.platform) {
       platform === 'darwin'
         ? 'sprint_coder_computer_use_native.node'
         : 'sprint-coder-computer-use-host.exe';
+    const artifact = join(directory, artifactFile);
+    if (!existsSync(artifact)) throw new Error(`built artifact is missing: ${artifactFile}`);
     const digest = platform === 'darwin' ? manifest['moduleDigest'] : manifest['binaryDigest'];
-    if (digest !== sha256File(join(directory, artifactFile)))
+    if (digest !== sha256File(artifact))
       throw new Error('manifest digest does not match the built artifact');
-    const attested = readAttestation(platform, directory, artifactFile);
+    const attested = readAttestation(platform, artifact, manifest);
     const problems = eligibilityProblems({
       platform,
       expectedMode,

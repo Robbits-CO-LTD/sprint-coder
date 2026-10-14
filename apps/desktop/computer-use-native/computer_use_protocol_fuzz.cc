@@ -1112,6 +1112,14 @@ bool CheckNativeEligibility() {
   // The classifier version the native attests is the one its classifier actually is.
   if (!Check(kNativeEligibilityClassifierVersion == kNativePreflightClassifierVersion,
              "eligibility-classifier-version-matches-classifier")) return false;
+#if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)
+  // CI names the mode the harness was compiled for (the matrix row), so a harness built against
+  // the wrong generated header cannot pass on self-consistency alone.
+  static_assert(SPRINT_CODER_EXPECT_ELIGIBILITY_V2 == 0 || SPRINT_CODER_EXPECT_ELIGIBILITY_V2 == 1,
+                "The expected eligibility mode is v1 (0) or v2 (1).");
+  if (!Check(kNativeEligibilityIsV2 == (SPRINT_CODER_EXPECT_ELIGIBILITY_V2 == 1),
+             "eligibility-mode-matches-matrix")) return false;
+#endif
 #if !defined(SPRINT_CODER_ELIGIBILITY_FROM_BUILD)
   // The harness is compiled without the generated header: the legacy v1 defaults apply. The
   // ticket claim follows the platform: the macOS native requires a ticket for every input, the

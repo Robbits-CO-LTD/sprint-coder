@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -119,15 +120,24 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
         JSON.stringify(bad),
       ).toBeGreaterThan(0);
     }
-    // A string for a boolean or a number is a different value, not a loose match.
-    expect(
-      eligibilityProblems({
-        platform: 'darwin',
-        expectedMode: 'v1',
-        manifest: declaration,
-        attested: { ...declaration, ticketRequired: 'true', rulesetVersion: '1' },
-      }).length,
-    ).toBeGreaterThan(0);
+    // A string for a boolean or a number is a different value, not a loose match. Each field is
+    // its own case: a loosened comparison on one type must not be hidden by the other.
+    for (const [key, value] of [
+      ['rulesetVersion', '1'],
+      ['classifierVersion', '1'],
+      ['lexiconVersion', '1'],
+      ['ticketRequired', 'true'],
+      ['ticketRequired', 1],
+    ])
+      expect(
+        eligibilityProblems({
+          platform: 'darwin',
+          expectedMode: 'v1',
+          manifest: declaration,
+          attested: { ...declaration, [key]: value },
+        }).join(', '),
+        key + ' as ' + JSON.stringify(value),
+      ).toContain('attested eligibility.' + key + ' is');
   });
 
   it('refuses a Windows deny-list request outright', () => {
@@ -144,27 +154,56 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
 
   describe('command line', () => {
     const directories = [];
+    let errors = [];
     afterEach(() => {
       vi.restoreAllMocks();
       for (const directory of directories.splice(0))
         rmSync(directory, { recursive: true, force: true });
     });
     const quiet = () => {
+      errors = [];
       vi.spyOn(console, 'log').mockImplementation(() => undefined);
-      vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      vi.spyOn(console, 'error').mockImplementation((message) => {
+        errors.push(String(message));
+      });
     };
     const emptyDirectory = () => {
       const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-eligibility-'));
       directories.push(directory);
       return directory;
     };
+    const nodeFile = 'sprint_coder_computer_use_native.node';
+    const sha = (text) => createHash('sha256').update(text).digest('hex');
+    const writeManifest = (directory, overrides = {}) =>
+      writeFileSync(
+        join(directory, 'computer-use-native.manifest.json'),
+        JSON.stringify({
+          platform: 'darwin',
+          protocolVersion: 1,
+          apiVersion: 2,
+          moduleDigest: sha('placeholder addon'),
+          binaryDigest: sha('placeholder addon'),
+          eligibility: declare('v1', 'darwin'),
+          ...overrides,
+        }),
+      );
+    const run = (directory, extra = [], platform = 'darwin') =>
+      main(['--expect=v1', `--dir=${directory}`, ...extra], platform);
 
     it('skips where there is no built artifact, and fails there only when one is required', () => {
       quiet();
       const directory = emptyDirectory();
-      expect(main(['--expect=v1', `--dir=${directory}`], 'darwin')).toBe(0);
-      expect(main(['--expect=v1', `--dir=${directory}`, '--require'], 'darwin')).toBe(1);
-      expect(main(['--expect=v1', '--require'], 'linux')).toBe(0);
+      expect(run(directory)).toBe(0);
+      expect(errors).toEqual([]);
+      expect(run(directory, ['--require'])).toBe(1);
+      expect(errors.join('\n')).toContain('no built manifest');
+    });
+
+    it('does not let --require pass over a platform outside the contract', () => {
+      quiet();
+      expect(main(['--expect=v1'], 'linux')).toBe(0);
+      expect(main(['--expect=v1', '--require'], 'linux')).toBe(1);
+      expect(errors.join('\n')).toContain('outside the Computer Use contract');
     });
 
     it('requires the mode it is to verify', () => {
@@ -173,30 +212,65 @@ describe('Computer Use built-artifact eligibility verification (D7-3)', () => {
       expect(main(['--expect=v3'], 'darwin')).toBe(2);
     });
 
-    it('fails on a manifest whose artifact cannot be the one it describes', () => {
+    // Each guard is reached alone: the failing message names the guard that fired, and every case
+    // up to it is otherwise valid, so removing one guard turns exactly one case green or changes
+    // its message.
+    it('refuses a manifest written for another platform', () => {
       quiet();
       const directory = emptyDirectory();
-      const declaration = declare('v1', 'darwin');
-      writeFileSync(
-        join(directory, 'computer-use-native.manifest.json'),
-        JSON.stringify({
-          platform: 'darwin',
-          moduleDigest: 'a'.repeat(64),
-          binaryDigest: 'a'.repeat(64),
-          eligibility: declaration,
-        }),
-      );
-      // No .node at all.
-      expect(main(['--expect=v1', `--dir=${directory}`], 'darwin')).toBe(1);
-      // A .node whose bytes do not match the manifest digest.
-      writeFileSync(join(directory, 'sprint_coder_computer_use_native.node'), 'not a real addon');
-      expect(main(['--expect=v1', `--dir=${directory}`], 'darwin')).toBe(1);
-      // A manifest for another platform.
-      writeFileSync(
-        join(directory, 'computer-use-native.manifest.json'),
-        JSON.stringify({ platform: 'win32', eligibility: declaration }),
-      );
-      expect(main(['--expect=v1', `--dir=${directory}`], 'darwin')).toBe(1);
+      writeFileSync(join(directory, nodeFile), 'placeholder addon');
+      writeManifest(directory, { platform: 'win32' });
+      expect(run(directory)).toBe(1);
+      expect(errors.join('\n')).toContain('platform differs');
+    });
+
+    it('refuses a manifest whose artifact was not built', () => {
+      quiet();
+      const directory = emptyDirectory();
+      writeManifest(directory);
+      expect(run(directory)).toBe(1);
+      expect(errors.join('\n')).toContain('built artifact is missing');
+    });
+
+    it('refuses an artifact whose bytes are not the ones the manifest names', () => {
+      quiet();
+      const directory = emptyDirectory();
+      writeFileSync(join(directory, nodeFile), 'a different addon');
+      writeManifest(directory);
+      expect(run(directory)).toBe(1);
+      expect(errors.join('\n')).toContain('digest does not match');
+    });
+
+    it('gets past every guard before it for an artifact that matches, then fails to load it', () => {
+      quiet();
+      const directory = emptyDirectory();
+      writeFileSync(join(directory, nodeFile), 'placeholder addon');
+      writeManifest(directory);
+      expect(run(directory)).toBe(1);
+      const text = errors.join('\n');
+      expect(text).toContain('FAIL');
+      for (const guard of [
+        'platform differs',
+        'built artifact is missing',
+        'digest does not match',
+      ])
+        expect(text).not.toContain(guard);
+    });
+
+    it('asks the native for the protocol the manifest names, and refuses a manifest without one', () => {
+      quiet();
+      const directory = emptyDirectory();
+      writeFileSync(join(directory, nodeFile), 'placeholder addon');
+      for (const bad of [
+        { protocolVersion: '1' },
+        { apiVersion: undefined },
+        { apiVersion: 2.5 },
+      ]) {
+        writeManifest(directory, bad);
+        errors = [];
+        expect(run(directory), JSON.stringify(bad)).toBe(1);
+        expect(errors.join('\n')).toContain('protocolVersion or apiVersion is not an integer');
+      }
     });
   });
 });
