@@ -579,6 +579,10 @@ export function createComputerUseNativeHost(
           result: outcome.result,
           reasonCode: outcome.reasonCode,
         });
+      // Unlike preflight (which throws on a regressed count), this is a typed rejection: approvalApprove
+      // has no input capability, so nothing can have been input. A regressed receipt does not update
+      // inputAttemptsBySession, so every later receipt still compares against the old count, regresses
+      // too, and throws before any input.
       try {
         inputReceipt(
           {
