@@ -22,6 +22,7 @@
 #include <deque>
 #include <dispatch/dispatch.h>
 #include <libproc.h>
+#include <mach/machine.h>
 #include <mutex>
 #include <limits>
 #include <memory>
@@ -808,6 +809,54 @@ bool ReadRunningImagePath(std::uint32_t pid, std::string* path) {
   return !path->empty();
 }
 
+// The architecture the process is running as, as the kernel reports it (a process translated by
+// Rosetta reports x86_64). A universal binary carries one code directory per slice, so the bound
+// hash has to be the one of the slice that is actually running.
+bool ReadRunningArchitecture(std::uint32_t pid, cpu_type_t* cputype) {
+  struct proc_archinfo info = {};
+  if (pid == 0 || proc_pidinfo(static_cast<int>(pid), PROC_PIDARCHINFO, 0, &info,
+                               static_cast<int>(sizeof(info))) != static_cast<int>(sizeof(info)))
+    return false;
+  *cputype = info.p_cputype;
+  return true;
+}
+
+// The code directory hash of the file's slice for one architecture (SecStaticCode.h:
+// kSecCodeAttributeArchitecture selects the slice of a universal binary). False when the file has no
+// such slice or no signature to read.
+bool CopyStaticCdHashForArchitecture(NSString* executable, cpu_type_t cputype, std::string* cd_hash) {
+  CFURLRef url = (__bridge CFURLRef)[NSURL fileURLWithPath:executable];
+  const int32_t architecture_value = static_cast<int32_t>(cputype);
+  CFNumberRef architecture = CFNumberCreate(nullptr, kCFNumberSInt32Type, &architecture_value);
+  if (architecture == nullptr) return false;
+  const void* keys[] = {kSecCodeAttributeArchitecture};
+  const void* values[] = {architecture};
+  CFDictionaryRef attributes = CFDictionaryCreate(nullptr, keys, values, 1,
+                                                  &kCFTypeDictionaryKeyCallBacks,
+                                                  &kCFTypeDictionaryValueCallBacks);
+  CFRelease(architecture);
+  if (attributes == nullptr) return false;
+  SecStaticCodeRef code = nullptr;
+  const OSStatus created =
+      SecStaticCodeCreateWithPathAndAttributes(url, kSecCSDefaultFlags, attributes, &code);
+  CFRelease(attributes);
+  if (created != errSecSuccess || code == nullptr) return false;
+  CFDictionaryRef information = nullptr;
+  const OSStatus copied = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &information);
+  CFRelease(code);
+  if (copied != errSecSuccess || information == nullptr) {
+    if (information != nullptr) CFRelease(information);
+    return false;
+  }
+  const auto hash_data = static_cast<CFDataRef>(CFDictionaryGetValue(information, kSecCodeInfoUnique));
+  const bool found = hash_data != nullptr && CFGetTypeID(hash_data) == CFDataGetTypeID();
+  if (found)
+    *cd_hash = HexDigest(CFDataGetBytePtr(hash_data),
+                         static_cast<std::size_t>(CFDataGetLength(hash_data)));
+  CFRelease(information);
+  return found && !cd_hash->empty();
+}
+
 // Flags for the DYNAMIC check (SecCodeCheckValidity on a running code object). Security accepts only
 // kSecCSConsiderExpiration, kSecCSStrictValidate, kSecCSStrictValidateStructure,
 // kSecCSRestrictSidebandData, kSecCSEnforceRevocationChecks and the network flags here; anything else,
@@ -900,8 +949,8 @@ void MeasureRunningSignature(std::uint32_t pid, const std::string& bound_require
 // and a file restored afterwards) and held to the BOUND signer. A truly unsigned image has no code
 // directory to ask the kernel about, so only the bytes on disk can be compared; the mapped image is
 // not read (recorded as a residual risk in the ADR). The code directory hash is compared per slice:
-// a universal binary run under Rosetta runs another slice than the one measured at bind time, and
-// that is refused (fail-closed) rather than guessed at.
+// a universal binary run under Rosetta runs another slice than the host architecture, so the bound
+// hash is read for the running architecture; when that cannot be read the check refuses.
 bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& bound) {
   using namespace sprint_coder::computer_use;
   const auto started = std::chrono::steady_clock::now();
@@ -922,11 +971,23 @@ bool RunningProcessMatchesBoundIdentity(std::uint32_t pid, const IdentityFacts& 
       bound.signed_target ? RequirementTextForBoundSigner(bound.signing_identifier, bound.team_id)
                           : std::string();
   MeasureRunningSignature(pid, bound_requirement, &observed);
+  // The bound code directory hash is the one of the slice that is running (Rosetta, universal
+  // binaries). If the running architecture or that slice cannot be read, nothing is compared: refuse.
+  std::string expected_cd_hash = bound.cd_hash;
+  if (!bound.cd_hash.empty()) {
+    cpu_type_t running_architecture = 0;
+    NSString* bound_path = [NSString stringWithUTF8String:bound.executable_path.c_str()];
+    if (bound_path == nil || !ReadRunningArchitecture(pid, &running_architecture) ||
+        !CopyStaticCdHashForArchitecture(bound_path, running_architecture, &expected_cd_hash)) {
+      fprintf(stderr, "[computer-use] running identity refused: architecture_unavailable\n");
+      return false;
+    }
+  }
   NativeIdentityExpectation expected;
   expected.signed_target = bound.signed_target;
   expected.team_id = bound.team_id;
   expected.signing_identifier = bound.signing_identifier;
-  expected.cd_hash = bound.cd_hash;
+  expected.cd_hash = expected_cd_hash;
   expected.executable_digest = bound.executable_digest;
   const NativeIdentityVerdict verdict = CheckRunningIdentity(expected, observed);
   const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

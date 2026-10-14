@@ -65,7 +65,15 @@ describe('macOS running-process identity (D12)', () => {
     // The call that measures the running process is made with the bound signer and the real result
     // is judged by the portable table, with the reason kept for diagnostics.
     expect(running).toContain('MeasureRunningSignature(pid, bound_requirement, &observed)');
-    expect(running).toContain('expected.cd_hash = bound.cd_hash;');
+    expect(running).toContain('expected.cd_hash = expected_cd_hash;');
+    // The bound code directory hash is read for the slice that is running (Rosetta, universal
+    // binaries); an architecture that cannot be read refuses instead of comparing another slice.
+    expect(running).toContain('PROC_PIDARCHINFO');
+    expect(running).toContain('SecStaticCodeCreateWithPathAndAttributes(');
+    expect(running).toContain('const void* keys[] = {kSecCodeAttributeArchitecture};');
+    expect(running).toContain('ReadRunningArchitecture(pid, &running_architecture)');
+    expect(running).toContain('CopyStaticCdHashForArchitecture(bound_path, running_architecture');
+    expect(running).toContain('architecture_unavailable');
     expect(running).toContain('SameMacExecutablePath(running, bound.executable_path)');
     expect(running).toContain('NativeIdentityVerdictName(verdict)');
     expect(running).toContain('kSecCodeInfoUnique');
