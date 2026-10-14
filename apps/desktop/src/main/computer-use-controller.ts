@@ -213,6 +213,15 @@ export type ComputerUseNativeActionResult = Readonly<{
   result: ComputerUseActionResult['result'];
   reasonCode: string | null;
   inputReceipt?: ComputerUseNativeInputReceipt;
+  /** A version 2 approval offer the native made instead of dispatching; not acted on yet. */
+  approvalOffer?: ComputerUseNativeApprovalOffer;
+}>;
+
+/** What a native approval offer tells Main (ADR v2 S4-4 addendum). No token ever crosses here. */
+export type ComputerUseNativeApprovalOffer = Readonly<{
+  approvalGeneration: number;
+  remainingMs: number;
+  effect: 'download_open' | 'file_manager_open' | 'high_impact_confirmation' | 'supervised_action';
 }>;
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
