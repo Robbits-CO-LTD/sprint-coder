@@ -421,9 +421,10 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       // (`.load`) but never raise it.
       const approvals = sourceBetween(
         '// What native measures *now* for an approval.',
-        'napi_value DispatchApproved(',
+        'napi_value Cancel(',
       );
       expect(approvals).toContain('napi_value ApprovalApprove(');
+      expect(approvals).toContain('napi_value DispatchApproved(');
       expect(approvals).toContain('napi_value ApprovalDiscard(');
       expect(approvals).not.toMatch(
         /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts(?!\.load\()|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
@@ -563,9 +564,11 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         /approval\.|ticket_generation|ordinary_ticket/u,
       );
       // A consume that does not succeed returns before busy and before the insert.
-      expect(reserve.indexOf('if (!outcome.ok) {')).toBeLessThan(
-        reserve.indexOf('kMaxInflightDispatchEntries'),
-      );
+      const failedConsume = reserve.indexOf('if (!outcome.ok) {');
+      expect(failedConsume).toBeGreaterThan(reserve.indexOf('session.approval.ConsumeApproved('));
+      expect(failedConsume).toBeLessThan(reserve.indexOf('kMaxInflightDispatchEntries'));
+      const failedBlock = reserve.slice(failedConsume, reserve.indexOf('}', failedConsume));
+      expect(failedBlock).toContain('return false;');
       // The reservation never begins an intent and never reads a presented ticket.
       expect(reserve).not.toMatch(/\.Offer\(|\.Begin\(|ticket_key/u);
     });
