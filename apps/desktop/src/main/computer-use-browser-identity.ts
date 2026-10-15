@@ -10,7 +10,7 @@
  * keeps them), and a web view inside another application (Electron and the like). Those are listed
  * as acceptance items for enabling the feature (T15-E).
  */
-export const COMPUTER_USE_BROWSER_IDENTITY_TABLE_VERSION = 1 as const;
+export const COMPUTER_USE_BROWSER_IDENTITY_TABLE_VERSION = 2 as const;
 
 /** macOS bundle identifiers, compared whole and case-insensitively. */
 const BROWSER_BUNDLE_IDS: ReadonlySet<string> = new Set([
@@ -30,7 +30,34 @@ const BROWSER_BUNDLE_IDS: ReadonlySet<string> = new Set([
   'company.thebrowser.browser',
   'com.operasoftware.opera',
   'com.vivaldi.vivaldi',
+  'org.chromium.chromium',
+  'com.google.chrome.for.testing',
+  'org.mozilla.nightly',
+  'org.torproject.torbrowser',
+  'com.kagi.kagimacos',
+  'com.duckduckgo.macos.browser',
+  'com.operasoftware.operagx',
+  'company.thebrowser.dia',
+  'app.zen-browser.zen',
+  'net.waterfox.waterfox',
+  'one.ablaze.floorp',
+  'io.gitlab.librewolf-community.librewolf',
 ]);
+
+/**
+ * A web app or PWA that a browser installs as its own application keeps the browser's bundle id as a
+ * prefix (`com.google.Chrome.app.<id>`), and is as much a web page as the browser is.
+ */
+const BROWSER_BUNDLE_ID_PREFIXES: readonly string[] = [
+  'com.google.chrome.app.',
+  'com.microsoft.edgemac.app.',
+  'com.apple.safari.webapp.',
+  'org.chromium.chromium.app.',
+  'com.brave.browser.app.',
+  'com.vivaldi.vivaldi.app.',
+  'company.thebrowser.browser.app.',
+  'com.operasoftware.opera.app.',
+];
 
 /** Windows executable file names, compared whole and case-insensitively. */
 const BROWSER_EXECUTABLE_NAMES: ReadonlySet<string> = new Set([
@@ -41,7 +68,18 @@ const BROWSER_EXECUTABLE_NAMES: ReadonlySet<string> = new Set([
   'arc.exe',
   'opera.exe',
   'vivaldi.exe',
+  'chromium.exe',
+  'iexplore.exe',
+  'librewolf.exe',
+  'waterfox.exe',
+  'floorp.exe',
+  'zen.exe',
+  'whale.exe',
+  'duckduckgo.exe',
 ]);
+
+/** Yandex Browser is `browser.exe`, a name too general to match on its own: its folder says. */
+const YANDEX_PATH = /[\\/]yandex[\\/]/iu;
 
 /**
  * Whether a Computer Use application profile is a browser: its macOS bundle id, or the file name of
@@ -52,7 +90,12 @@ export function isComputerUseBrowserApplication(
   profile: Readonly<{ canonicalPath: string; identity: Readonly<Record<string, unknown>> }>,
 ): boolean {
   const bundleId = profile.identity['bundleId'];
-  if (typeof bundleId === 'string' && BROWSER_BUNDLE_IDS.has(bundleId.toLowerCase())) return true;
+  if (typeof bundleId === 'string') {
+    const id = bundleId.toLowerCase();
+    if (BROWSER_BUNDLE_IDS.has(id)) return true;
+    if (BROWSER_BUNDLE_ID_PREFIXES.some((prefix) => id.startsWith(prefix))) return true;
+  }
   const name = profile.canonicalPath.split(/[\\/]/u).at(-1)?.toLowerCase() ?? '';
+  if (name === 'browser.exe' && YANDEX_PATH.test(profile.canonicalPath)) return true;
   return BROWSER_EXECUTABLE_NAMES.has(name);
 }

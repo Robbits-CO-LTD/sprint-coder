@@ -12,7 +12,7 @@ const windows = (canonicalPath: string) => ({ canonicalPath, identity: {} });
 
 describe('browser identity table (#785 T15-7, R14)', () => {
   it('is versioned', () => {
-    expect(COMPUTER_USE_BROWSER_IDENTITY_TABLE_VERSION).toBe(1);
+    expect(COMPUTER_USE_BROWSER_IDENTITY_TABLE_VERSION).toBe(2);
   });
 
   it.each([
@@ -26,6 +26,15 @@ describe('browser identity table (#785 T15-7, R14)', () => {
     'com.operasoftware.Opera',
     'com.vivaldi.Vivaldi',
     'COM.GOOGLE.CHROME',
+    'org.chromium.Chromium',
+    'com.google.chrome.for.testing',
+    'org.mozilla.nightly',
+    'org.torproject.torbrowser',
+    'com.kagi.kagimacOS',
+    'com.duckduckgo.macos.browser',
+    'com.operasoftware.OperaGX',
+    'company.thebrowser.dia',
+    'app.zen-browser.zen',
   ])('recognises the macOS browser %s', (bundleId) => {
     expect(isComputerUseBrowserApplication(mac(bundleId))).toBe(true);
   });
@@ -38,12 +47,31 @@ describe('browser identity table (#785 T15-7, R14)', () => {
     'C:\\Users\\a\\AppData\\Local\\Programs\\Opera\\opera.exe',
     'C:\\Users\\a\\AppData\\Local\\Vivaldi\\Application\\vivaldi.exe',
     'C:\\Users\\a\\AppData\\Local\\Arc\\arc.exe',
+    'C:\\Windows\\System32\\iexplore.exe',
+    'C:\\Program Files\\LibreWolf\\librewolf.exe',
+    'C:\\Program Files\\Waterfox\\waterfox.exe',
+    'C:\\Program Files\\Floorp\\floorp.exe',
+    'C:\\Program Files\\Zen Browser\\zen.exe',
+    'C:\\Program Files\\Naver\\Whale\\whale.exe',
+    'C:\\Program Files\\DuckDuckGo\\DuckDuckGo.exe',
+    'C:\\Users\\a\\AppData\\Local\\Yandex\\YandexBrowser\\Application\\browser.exe',
   ])('recognises the Windows browser %s', (path) => {
     expect(isComputerUseBrowserApplication(windows(path))).toBe(true);
   });
 
   it.each([
+    'com.google.Chrome.app.abcdefghijklmnop',
+    'com.microsoft.edgemac.app.xyz',
+    'com.apple.Safari.WebApp.ABC123',
+    'com.brave.Browser.app.zzz',
+  ])('recognises the web app shim %s as part of its browser', (bundleId) => {
+    expect(isComputerUseBrowserApplication(mac(bundleId))).toBe(true);
+  });
+
+  it.each([
     mac('com.apple.TextEdit'),
+    mac('com.google.Chrome.helper'),
+    windows('C:\\Tools\\browser.exe'),
     mac('com.google.ChromeRemoteDesktop'),
     mac('com.example.chromeish'),
     windows('C:\\Windows\\System32\\notepad.exe'),

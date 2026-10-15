@@ -3858,7 +3858,11 @@ export class ComputerUseController {
       if (paste !== undefined && action?.success && authorized.decision !== 'deny') {
         if (this.preDispatchBoundary(action.data, record.observation))
           return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
+        // Whatever the Task's authorizer wanted checked again just before the input stays.
+        const recheck = authorized.beforeExecute;
         authorized = await this.awaitApproval(record, request.callId, action.data, paste);
+        if (authorized.decision === 'allow' && recheck !== undefined)
+          authorized = { ...authorized, beforeExecute: recheck };
       }
       if (authorized.decision === 'approval_required' && action?.success) {
         if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
@@ -4449,6 +4453,8 @@ export class ComputerUseController {
     snapshot: NativeApprovalSnapshot,
     approvalId: string,
     remainingMs: number,
+    /** What a paste shows instead of its text: the planner's own words, with the artifact id. */
+    display?: ComputerUseArtifactAction,
   ): Promise<NativeApprovalOutcome> {
     const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
     // One reading of the clock, so expiresAt - createdAt is exactly the lifetime.
@@ -4462,7 +4468,7 @@ export class ComputerUseController {
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
-      preview: safeActionPreview(action),
+      preview: safeActionPreview(display ?? action),
       risk: 'high',
       policyEpoch: snapshot.policyEpoch,
       observationRevision: record.observation?.revision ?? record.status.observationRevision,
@@ -4649,6 +4655,7 @@ export class ComputerUseController {
       snapshot,
       approvalId,
       offer.remainingMs,
+      this.artifactPasteCalls.get(`${sessionId}\0${requestId}`)?.display,
     );
     if (decision !== 'approved') return refuse(decision);
 

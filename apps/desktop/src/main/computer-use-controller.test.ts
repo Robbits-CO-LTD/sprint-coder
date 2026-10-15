@@ -176,6 +176,8 @@ function createFixture(
     /** Full-input native dispatch (used to route through the real Main host over a fake addon). */
     nativeDispatch?: ComputerUseNativeHost['dispatch'];
     authorizationRequired?: boolean;
+    /** The Task permission policy, in full (instead of the approval-required stand-in). */
+    authorize?: ComputerUseControllerDeps['authorize'];
     startSessionGate?: Promise<void>;
     revalidateWindowsGate?: Promise<void>;
     failFocusRestore?: boolean;
@@ -585,7 +587,8 @@ function createFixture(
     currentPolicyEpoch: () => policyEpoch,
     publishStatus: (status) => statuses.push(status),
     publishApproval: (approval) => approvals.push(approval as ComputerUseApproval),
-    ...(options.authorizationRequired === true
+    ...(options.authorize !== undefined ? { authorize: options.authorize } : {}),
+    ...(options.authorize === undefined && options.authorizationRequired === true
       ? {
           authorize: async (request: { capability: string }) =>
             request.capability === 'computer.observe'
@@ -2957,18 +2960,25 @@ describe('ComputerUseController', () => {
       });
     };
 
+    // What the Task's permission policy may say: nothing, "ask", or "yes" (an Auto / Full preset).
+    const authorizers = {
+      none: {},
+      ask: { authorizationRequired: true },
+      allow: {
+        authorize: async () => ({ decision: 'allow' as const, reason: 'preset_allows' }),
+      },
+    } as const;
     it.each([
-      ['supervised', false],
-      ['supervised', true],
-      ['full_access_app', false],
-      ['full_access_app', true],
+      ['supervised', 'none'],
+      ['supervised', 'ask'],
+      ['supervised', 'allow'],
+      ['full_access_app', 'none'],
+      ['full_access_app', 'ask'],
+      ['full_access_app', 'allow'],
     ] as const)(
       'N21: raises a card for every paste in %s (authorizer: %s), and only allow_once or deny',
       async (mode, authorizer) => {
-        const { fixture } = await pasteSession({
-          mode,
-          extra: authorizer ? { authorizationRequired: true } : {},
-        });
+        const { fixture } = await pasteSession({ mode, extra: authorizers[authorizer] });
         await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
         const card = pending(fixture)!;
         expect(card).toMatchObject({
@@ -3075,6 +3085,93 @@ describe('ComputerUseController', () => {
         state: 'rejected',
         reasonCode: 'artifact_paste_refused',
       });
+      await fixture.controller.dispose();
+    });
+
+    it('F3: keeps the re-check the Task policy asked for just before the input', async () => {
+      for (const valid of [true, false]) {
+        const recheck = vi.fn(() => valid);
+        const { fixture } = await pasteSession({
+          extra: {
+            authorize: async (request: { capability: string }) => ({
+              decision: 'allow' as const,
+              reason: 'preset_allows',
+              ...(request.capability === 'computer.control' ? { beforeExecute: recheck } : {}),
+            }),
+          },
+        });
+        await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+        expect(recheck).not.toHaveBeenCalled();
+        await answer(fixture, 'allow_once');
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        expect(recheck).toHaveBeenCalledTimes(1);
+        // A re-check that fails stops the input, as it does for any other action.
+        expect(typedText(fixture)).toBe(valid ? 'Total 42' : '');
+        await fixture.controller.dispose();
+      }
+    });
+
+    it('F4: never offers allow_plan for a paste, even where the same set_text would', async () => {
+      const metadata = {
+        targetSignatures: { 'node-1': 'a'.repeat(64) },
+        targetMetadata: { 'node-1': { secure: false, highImpact: false } },
+      };
+      const written = await pasteSession({
+        mode: 'supervised',
+        extra: { authorizationRequired: true, observationOverrides: metadata },
+        planned: () => ({ type: 'set_text', targetId: 'node-1', text: 'Total 42' }),
+      });
+      await vi.waitFor(() => expect(pending(written.fixture)).toBeDefined());
+      // Control: a written set_text on this very target can be made a plan.
+      expect(pending(written.fixture)!.allowedDecisions).toContain('allow_plan');
+      await answer(written.fixture, 'deny');
+      await written.fixture.controller.dispose();
+      const pasted = await pasteSession({
+        mode: 'supervised',
+        extra: { authorizationRequired: true, observationOverrides: metadata },
+        planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+      });
+      await vi.waitFor(() => expect(pending(pasted.fixture)).toBeDefined());
+      expect(pending(pasted.fixture)).toMatchObject({
+        eligibleForPlan: false,
+        allowedDecisions: ['allow_once', 'deny'],
+      });
+      await answer(pasted.fixture, 'deny');
+      await pasted.fixture.controller.dispose();
+    });
+
+    it('F1: keeps the value out of the native approval card as well', async () => {
+      const { fixture } = await pasteSession({
+        text: 'SECRETVALUE',
+        planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+        extra: {
+          nativeApproval: {},
+          nativeDispatch: async () => ({
+            result: 'paused',
+            reasonCode: 'native_single_use_approval_unavailable',
+            approvalOffer: {
+              kind: 'approval_required',
+              approvalGeneration: 7,
+              remainingMs: 30_000,
+              effect: 'supervised_action',
+            },
+          }),
+        },
+      });
+      // Main's own card first.
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      const mainCard = pending(fixture)!;
+      await answer(fixture, 'allow_once');
+      // Then the native offer raises the second card.
+      await vi.waitFor(() => expect(pending(fixture)?.id).not.toBe(mainCard.id));
+      const nativeCard = pending(fixture)!;
+      expect(nativeCard.preview).toContain('artifactRef');
+      expect(nativeCard.actionDigest).toBe(mainCard.actionDigest);
+      await answer(fixture, 'deny');
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('paused'));
+      expect(
+        JSON.stringify([fixture.approvals, fixture.statuses, [...fixture.audits.values()]]),
+      ).not.toContain('SECRETVALUE');
       await fixture.controller.dispose();
     });
 
