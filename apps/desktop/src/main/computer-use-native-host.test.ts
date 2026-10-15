@@ -263,7 +263,18 @@ describe('Computer Use native Main adapter', () => {
     ]);
   });
 
-  const win32TicketScenario = async (withPreflight: boolean) => {
+  const win32TicketScenario = async (withPreflight: boolean, classifierRoute?: 'v1' | 'v2') => {
+    const startSession = vi.fn((_input: unknown) => ({
+      sessionId: 'session-w',
+      windowId: '100',
+      appIdentityDigest: digest('a'),
+      windowIdentityDigest: digest('c'),
+      profileRevision: 1,
+      cancelEpoch: 0,
+      screenBounds: { x: 300, y: 150, width: 1_200, height: 900 },
+      maximumMode: 'full_access_app',
+      inputAttemptCount: 0,
+    }));
     const appIdentityDigest = digest('a');
     const windowIdentityDigest = digest('c');
     const screen = { x: 300, y: 150, width: 1_200, height: 900 };
@@ -316,17 +327,7 @@ describe('Computer Use native Main adapter', () => {
           maximumMode: 'full_access_app',
         },
       ],
-      startSession: () => ({
-        sessionId: 'session-w',
-        windowId: '100',
-        appIdentityDigest,
-        windowIdentityDigest,
-        profileRevision: 1,
-        cancelEpoch: 0,
-        screenBounds: screen,
-        maximumMode: 'full_access_app',
-        inputAttemptCount: 0,
-      }),
+      startSession,
       observe: () => ({}),
       ...(withPreflight ? { preflight } : {}),
       dispatch,
@@ -373,6 +374,7 @@ describe('Computer Use native Main adapter', () => {
       taskId: 'task-1',
       turnId: 'turn-1',
       cancelEpoch: 0,
+      ...(classifierRoute === undefined ? {} : { classifierRoute }),
     });
     await expect(
       host.dispatch({
@@ -384,8 +386,19 @@ describe('Computer Use native Main adapter', () => {
         signal: new AbortController().signal,
       }),
     ).resolves.toMatchObject({ result: 'completed' });
-    return { preflight, dispatch, winTicket };
+    return { preflight, dispatch, winTicket, startSession };
   };
+
+  // C4-0: the Windows helper does not know the key until S5, so the route is bound in Main and
+  // never sent there, whichever route was asked for.
+  it.each(['v1', 'v2'] as const)(
+    'does not send the classifier route (%s) to a win32 addon (C4-0)',
+    async (route) => {
+      const { startSession } = await win32TicketScenario(true, route);
+      expect(startSession).toHaveBeenCalledTimes(1);
+      expect(startSession.mock.calls[0]![0]).not.toHaveProperty('classifierRoute');
+    },
+  );
 
   it('preflights on win32 and dispatches with the ordinary ticket it returns (S5-a)', async () => {
     const { preflight, dispatch, winTicket } = await win32TicketScenario(true);

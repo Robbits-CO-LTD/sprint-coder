@@ -771,6 +771,11 @@ classifier v2 は、承認経路を本番で開くための最後の前提であ
    - **この PR で入れた分類器の変更（持ち越しの C2 分）**。ブラウザのページスクロールでは、AXWebArea / UIA Document の名前（ページのタイトル）を、ウィンドウと同じくスクロールの範囲外にする。ページ自体のスクロール（対象が web area）は何も照合しない。
    - **実機（#777）で測る事項**。AX から facts が実際に取れるか。Finder の項目に AXURL / AXFilename が付くか（リスト表示・アイコン表示・サイドバー）、Chromium / Electron / Safari の AXWebArea の展開と URL、ダウンロード面の role（ここでは download_panel を判定しない）、キャプションが親の子にあるとは限らない（祖父の子や aria-labelledby）、sensitive な origin の判定（ここでは測らない）、1 回の取得に必要な AX 呼び出しの数と時間（近傍 16 個 × 属性 7 つ）、予算（上記）の妥当性（ふつうの取得が 640 回・150 ms に収まるか、収まらない場合の割合）、semantic 操作での木の探索（予算つきの再走査）の時間、shadow の queue が busy になる割合（応答しない対象で取得が重なる頻度）。
 
+10. **route の受け渡し（C4-0）**。C4 は 3 つに分ける（C4-0 route の受け渡しと rollback、C4-1 portable な measurement と authority digest、C4-2 mac の実測化と intent の発行・async 化）。C4-0 は挙動を変えない。
+    - Main は、束縛した route の実効値（`v2` は classifier 2 を attest した build でだけ。それ以外は `v1`）を、macOS addon の `startSession` に `classifierRoute` として毎回渡す。route を束縛していないセッションと Windows には渡さない（Windows は S5 までこのキーを知らない）。
+    - native は `classifierRoute` を任意で読み、無ければ `v1`、あれば `v1` / `v2` のちょうどどちらか（それ以外は INVALID_SESSION）。セッションの作成時に 1 度だけ書き（Task/Turn id と同じ位置）、以後は変えない。再 start で値が違う（無い場合は `v1` 扱い）ときは、OS を読む前に `CLASSIFIER_ROUTE_CHANGED` で拒否する。この値を読んで何かを決める箇所は、C4-2 まで無い（source 契約で縛る）。
+    - 束縛を作るのは、セッションを作る start だけである。route を付けずに作ったセッションに後から route 付きで start しても束縛は作らず（native にも送らない）、そのセッションは束縛なしのまま扱う。束縛の rollback は所有者トークンで行う。start ごとにトークンを持ち、失敗した start が束縛を取り下げるのは、同じセッションの他の start が残っておらず、セッションも作られていないときだけにする（同一の新しい sessionId・同じ route の並行 start で、先に失敗した側が、後から成功する側の束縛を消してしまう競合の修正）。
+
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 
 S4 は macOS native だけで完結しない。`computer-use-controller.ts` の列挙・開始、native host、manifest と handshake、grant 照合を同じ安全境界として変更する。以下の契約と拒否テストが揃うまで、新しい候補へ入力する経路は公開しない。

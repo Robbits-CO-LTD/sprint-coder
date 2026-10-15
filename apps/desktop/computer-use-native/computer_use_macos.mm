@@ -98,6 +98,10 @@ struct MacComputerUseSession {
   std::string turn_id;
   std::string policy_language = "unknown";
   std::string maximum_mode = "observe_only";
+  // The classifier route Main bound this session to ("v1" or "v2"), written once at creation
+  // together with the Task/Turn ids and never again. Nothing reads it to decide anything yet: the
+  // classifier v2 change that issues approval intents is the first reader.
+  std::string classifier_route = "v1";
   std::uint32_t pid = 0;
   std::uint32_t window_id = 0;
   CGRect expected_bounds{};
@@ -304,7 +308,28 @@ bool ReadOptionalNamedBool(napi_env env, napi_value object, const char* name,
 }
 
 bool ReadNamedString(napi_env env, napi_value object, const char* name, std::string* output,
-                     std::size_t maximum = 256) {
+                     std::size_t maximum = 256);
+
+// The optional `classifierRoute` of a session start. Absent means "v1" (a Main that does not send
+// it); present, it must be exactly "v1" or "v2".
+bool ReadOptionalClassifierRoute(napi_env env, napi_value object, std::string* output) {
+  bool has_property = false;
+  if (napi_has_named_property(env, object, "classifierRoute", &has_property) != napi_ok)
+    return false;
+  if (!has_property) {
+    *output = "v1";
+    return true;
+  }
+  std::string value;
+  if (!ReadNamedString(env, object, "classifierRoute", &value, 2) ||
+      (value != "v1" && value != "v2"))
+    return false;
+  *output = std::move(value);
+  return true;
+}
+
+bool ReadNamedString(napi_env env, napi_value object, const char* name, std::string* output,
+                     std::size_t maximum) {
   napi_value value;
   if (napi_get_named_property(env, object, name, &value) != napi_ok) return false;
   size_t length = 0;
@@ -1547,6 +1572,7 @@ struct NativeStartSessionRequest {
   std::string executable_path;
   std::string task_id;
   std::string turn_id;
+  std::string classifier_route = "v1";
   CGRect requested_bounds{};
   std::uint64_t requested_cancel_epoch = 0;
   bool explicit_resume = false;
@@ -1613,12 +1639,14 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
                        &request.requested_cancel_epoch) ||
       !ReadOptionalNamedBool(env, argv[0], "resume",
                              &request.explicit_resume) ||
+      !ReadOptionalClassifierRoute(env, argv[0], &request.classifier_route) ||
       request.requested_bounds.size.width <= 0 ||
       request.requested_bounds.size.height <= 0)
     return ThrowNativeError(env, "INVALID_SESSION",
                             "A valid native session target is required");
 
   bool session_ids_reused = false;
+  bool classifier_route_changed = false;
   {
     std::lock_guard<std::mutex> sessions_lock(mac_sessions_mutex);
     const auto existing = mac_sessions.find(request.session_id);
@@ -1631,6 +1659,9 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       session_ids_reused = !binding::NativeBindingIdsMatch(
           work->session->task_id, work->session->turn_id, request.task_id,
           request.turn_id);
+      // The route is bound for the life of the session: a later start repeats it, and a different
+      // one (or a missing one, which means "v1") is refused before any OS read.
+      classifier_route_changed = work->session->classifier_route != request.classifier_route;
     } else {
       if (mac_pending_sessions.contains(request.session_id))
         return ThrowNativeError(env, "SESSION_BUSY",
@@ -1652,6 +1683,7 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
       // The only write of the immutable Task/Turn ids, before pending registration.
       work->session->task_id = request.task_id;
       work->session->turn_id = request.turn_id;
+      work->session->classifier_route = request.classifier_route;
       work->session->pid = request.pid;
       work->session->window_id = request.window_id;
       work->session->expected_bounds = request.requested_bounds;
@@ -1666,6 +1698,9 @@ napi_value StartSession(napi_env env, napi_callback_info info) {
   if (session_ids_reused)
     return ThrowNativeError(env, "SESSION_ID_REUSE",
                             "The native session binding changed");
+  if (classifier_route_changed)
+    return ThrowNativeError(env, "CLASSIFIER_ROUTE_CHANGED",
+                            "The native session classifier route changed");
 
   napi_value promise;
   if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
