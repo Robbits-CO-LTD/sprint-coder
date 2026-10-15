@@ -67,6 +67,19 @@ NativeApprovalEffectName(NativeApprovalEffect effect) noexcept {
   return {};
 }
 
+// The largest approval generation that is offered: Main reads it as a JavaScript number and accepts
+// a safe integer only (Number.MAX_SAFE_INTEGER = 2^53 - 1).
+inline constexpr std::uint64_t kNativeApprovalGenerationMax = (std::uint64_t{1} << 53) - 1;
+
+// The next approval generation after `current` (0: none yet). False when there is none left, and then
+// nothing is offered.
+[[nodiscard]] constexpr bool NextNativeApprovalGeneration(std::uint64_t current,
+                                                          std::uint64_t *next) noexcept {
+  if (next == nullptr || current >= kNativeApprovalGenerationMax) return false;
+  *next = current + 1;
+  return true;
+}
+
 // What an offer says: which approval (the generation), how long it still waits, which effect.
 struct NativeApprovalOffer {
   std::uint64_t approval_generation = 0;
@@ -78,7 +91,8 @@ struct NativeApprovalOffer {
 // and at most the bound, an effect that has a word. (The receipt around it has no ticket, no reason
 // and no denied result; the macOS receipt maker adds that.)
 [[nodiscard]] constexpr bool NativeApprovalOfferIsClosed(const NativeApprovalOffer &offer) noexcept {
-  return offer.approval_generation >= 1 && offer.remaining_ms >= 1 &&
+  return offer.approval_generation >= 1 && offer.approval_generation <= kNativeApprovalGenerationMax &&
+         offer.remaining_ms >= 1 &&
          offer.remaining_ms <= kNativeApprovalOfferMaxMs &&
          !NativeApprovalEffectName(offer.effect).empty();
 }
@@ -138,6 +152,62 @@ struct NativeApprovalOfferContext {
   if (!IsValidNativeApprovalIntent(built)) return false;
   *binding = std::move(built);
   return true;
+}
+
+// ---- What a route v2 preflight does with the v1 answer ---------------------------------------------
+// v1 runs first and decides, exactly as it does for a route v1 session. Only two v1 answers are
+// measured for an approval: an ordinary control (v2 may find that it needs an approval, or a person),
+// and a control v1 stopped as high impact for CONFIRMATION words alone (a purchase button an approval
+// may let through). Everything else v1 said stands: a secure field, an unclassified target, a command
+// surface or any other high-impact word, every denial, and a replay. v2 only strengthens, except for
+// that one confirmation case, where it offers an approval instead of the v1 pause.
+
+enum class PreflightV2Action : std::uint8_t {
+  kKeepV1,   // the v1 receipt stands
+  kTakeover, // an ordinary control that needs a person (the measurement could not be made whole)
+  kOffer,    // an approval is offered (no ordinary ticket)
+};
+
+// What the v1 preflight said and what it read. The risk bits are the v1 classification of the target
+// (the element and its parents), recorded when the preflight reached it.
+struct V1PreflightFacts {
+  bool ordinary = false;
+  // v1's answer is the high-impact takeover (the one reason that can be an approval).
+  bool high_impact_takeover = false;
+  bool risk_recorded = false;
+  bool classified = false;
+  bool secure = false;
+  bool high_impact = false;
+  bool confirmation = false;
+  bool other = false;
+};
+
+// v1 stopped this control for confirmation words alone: classified, not secure, high impact, and no
+// other high-impact word anywhere on the element or its parents.
+[[nodiscard]] constexpr bool V1StoppedOnlyByConfirmation(const V1PreflightFacts &facts) noexcept {
+  return facts.high_impact_takeover && facts.risk_recorded && facts.classified && !facts.secure &&
+         facts.high_impact && facts.confirmation && !facts.other;
+}
+
+[[nodiscard]] constexpr bool PreflightMayBeMeasured(const V1PreflightFacts &facts) noexcept {
+  return facts.ordinary || V1StoppedOnlyByConfirmation(facts);
+}
+
+[[nodiscard]] inline PreflightV2Action DecidePreflightV2(const V1PreflightFacts &facts,
+                                                         const NativeApprovalMeasurement &measured) {
+  if (!PreflightMayBeMeasured(facts)) return PreflightV2Action::kKeepV1;
+  // A measurement that needs a person turns an ordinary control into a pause; where v1 already
+  // paused there is nothing to add.
+  if (measured.takeover) return facts.ordinary ? PreflightV2Action::kTakeover : PreflightV2Action::kKeepV1;
+  if (measured.eligible) {
+    // Where v1 paused for confirmation words, an offer can only be for a confirmation: the dispatch
+    // lets nothing else through those words, so an approval of another effect (a supervised action, a
+    // file open) would be spent on a dispatch that must pause again. v1's pause stands.
+    if (!facts.ordinary && measured.effect != NativeApprovalEffect::kHighImpactConfirmation)
+      return PreflightV2Action::kKeepV1;
+    return PreflightV2Action::kOffer;
+  }
+  return PreflightV2Action::kKeepV1;
 }
 
 } // namespace sprint_coder::computer_use

@@ -1410,9 +1410,16 @@ describe('macOS native capture boundary', () => {
     expect(keysStart).toBeGreaterThanOrEqual(0);
     const hostBlock = host.slice(keysStart, host.indexOf('] as const;', keysStart));
     const mainKeys = [...hostBlock.matchAll(/'([A-Za-z]+)'/gu)].map((match) => match[1]!);
-    expect(nativeKeys).toHaveLength(10);
+    // The ten keys of every receipt, and the four an approval offer (receipt version 2) adds.
     expect(mainKeys).toHaveLength(10);
-    expect(new Set(nativeKeys)).toEqual(new Set(mainKeys));
+    expect(nativeKeys).toHaveLength(14);
+    expect(new Set(nativeKeys.slice(0, 10))).toEqual(new Set(mainKeys));
+    expect(nativeKeys.slice(10)).toEqual([
+      'receiptVersion',
+      'approvalGeneration',
+      'remainingMs',
+      'effect',
+    ]);
     // Decision strings native produces must be the ones the Main parser accepts.
     expect(source).toContain('MakeNullReceipt("ordinary")');
     expect(source).toContain('MakeNullReceipt("replay")');
@@ -1469,9 +1476,18 @@ describe('macOS native capture boundary', () => {
     };
     for (const name of ['approvalApprove', 'approvalDiscard', 'dispatchApproved'])
       expect(source).toContain(`{"${name}", nullptr,`);
-    // Nothing in the addon begins an intent: a production session never holds an approval, so every
-    // approve and approved dispatch fails closed until classifier v2 measures something approvable.
-    expect(source).not.toMatch(/approval\.Offer\(|\.Begin\(/u);
+    // The addon begins an intent in exactly one place: the preflight's approval offer (C4-2c-2), only for
+    // a session on route v2 whose measurement is an approval-eligible effect. A build that attests
+    // classifier 1 measures nothing eligible, so a production session never holds an approval and every
+    // approve and approved dispatch fails closed.
+    expect(source.match(/approval\.Offer\(/gu)).toHaveLength(1);
+    expect(source).not.toMatch(/\.Begin\(/u);
+    expect(
+      source.slice(
+        source.indexOf('NativePreflightReceipt IssueApprovalOffer('),
+        source.indexOf('NativePreflightReceipt ApplyApprovalOffer('),
+      ),
+    ).toContain('session.approval.Offer(');
     expect(source).toContain('NativeApprovalMeasurement\nMeasureNativeApproval(');
     const measure = section('MeasureNativeApproval(', 'NativeApprovalFactsLocked(');
     expect(measure).toContain('return {};');

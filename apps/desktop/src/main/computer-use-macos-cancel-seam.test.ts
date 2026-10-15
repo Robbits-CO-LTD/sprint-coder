@@ -133,7 +133,7 @@ ${functionSource(
 ).replaceAll('@autoreleasepool {', '{')}
 ${reservationDriver
   .replace('int main() {', `${approvalSeamCases}\nint main() {`)
-  .replace('  std::cout << "{', '  ApprovalSeam();\n  std::cout << "{')}`,
+  .replace('  std::cout << "{', '  ApprovalSeam();\n  OfferSeam();\n  std::cout << "{')}`,
         );
         execFileSync(
           'clang++',
@@ -289,6 +289,7 @@ struct NativeDispatchRequest {
   int delta_y = 0, delta_x = 0;
   std::string kind = "click";
   std::set<std::string> visual_control_signatures{"control"};
+  int approved_effect = 0;
 };
 enum class NativeTargetValidation { kValid, kCanceled };
 NativeTargetValidation RevalidateBoundTarget(const NativeDispatchRequest&) {
@@ -299,7 +300,7 @@ NativeDispatchOutcome OutcomeForValidation(NativeTargetValidation, bool) { retur
 NativeDispatchOutcome MakeDispatchOutcome(const char* result, const char*, bool = false, bool = false) { return {result}; }
 enum class AxRiskClassification { kNone };
 AxRiskClassification ClassifyElementAtPoint(int, CGPoint, std::string* signature) { *signature = "control"; return AxRiskClassification::kNone; }
-bool RiskOutcome(AxRiskClassification, NativeDispatchOutcome*) { return false; }
+bool RiskOutcome(AxRiskClassification, NativeDispatchOutcome*, int) { return false; }
 bool RevalidateVisualPointBeforePost(const NativeDispatchRequest&, CGPoint, NativeDispatchOutcome*) {
   if (cancelAfterValidation) injectCancel();
   return true;
@@ -544,6 +545,8 @@ const reservationPreamble = String.raw`
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_sha256.h"
 #include "computer_use_preflight_classifier.h"
+#include "computer_use_native_approved_risk.h"
+#include "computer_use_native_approval_offer.h"
 struct CGRect { struct { double x, y; } origin; struct { double width, height; } size; };
 struct MacDispatchReplayEntry {
   std::string envelope_digest, result, reason_code;
@@ -563,6 +566,7 @@ struct MacComputerUseSession {
   std::string classifier_route = "v1";
   sprint_coder::computer_use::NativeApprovalFlow approval;
   std::uint64_t approval_busy_generation = 0;
+  std::uint64_t approval_generation_counter = 0;
   std::mutex state_mutex;
   bool has_observation = true;
   std::uint64_t observation_revision = 7, dialog_set_revision = 4;
@@ -705,10 +709,18 @@ bool GenerateOrdinaryTicketToken(std::string* output) {
   for (unsigned index = 0; index < 8; ++index) token[63 - index] = hex[(value >> (4 * index)) & 0xfu];
   *output = token; return true;
 }
-NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest&) {
+// What v1 read of the target, as the route v2 step of a preflight sees it (inert here).
+struct AxRiskClassification {
+  bool classified = false, secure = false, high_impact = false;
+  bool high_impact_confirmation = false, high_impact_other = false;
+};
+struct PreflightRiskTrace { bool recorded = false; AxRiskClassification risk; };
+PreflightRiskTrace preflightTrace;
+NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest&, PreflightRiskTrace* trace = nullptr) {
   if (failPreflightEffect) throw std::runtime_error("inert_preflight_failure");
   ++preflights;
   if (preflightHook != nullptr) preflightHook();
+  if (trace != nullptr) *trace = preflightTrace;
   return preflightResult;
 }
 napi_value PreflightReceiptValue(napi_env, const NativeDispatchRequest&, const NativePreflightReceipt& receipt) {
@@ -747,8 +759,10 @@ NativeDispatchOutcome lastOutcome;
 napi_value DispatchResultValue(napi_env, const NativeDispatchRequest&, const NativeDispatchOutcome& outcome) {
   lastOutcome = outcome; return &resultValue;
 }
+sprint_coder::computer_use::NativeApprovalEffect lastApprovedEffect = sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
 NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request) {
   RequireStateUnlocked();  // the input entry never runs under the state lock
+  lastApprovedEffect = request.approved_effect;
   if (failEffect) throw std::runtime_error("inert_worker_failure");
   if (!DispatchCancellationStillValid(request))
     return MakeDispatchOutcome("canceled", "native_canceled_pre_dispatch");
@@ -1036,6 +1050,219 @@ void ApprovalSeam() {
   Check(effects == 0 && !current->approval.occupied() && current->inflight_dispatches.empty() &&
     lastOutcome.result == "unknown_effect" && measureCalls == 1, "dispatch_approved_failed_completion_ends_the_approval");
 }
+
+// ---- C4-2c-2: the preflight's approval step (production ExecuteNativePreflight / ApplyApprovalOffer /
+// IssueApprovalOffer bodies; the v1 preflight, the measurement and the clock are inert) ----
+using sprint_coder::computer_use::NativePreflightKind;
+namespace offerns = sprint_coder::computer_use;
+void OfferReset() {
+  ApprovalReset();
+  input.strings["requestId"] = "offer-1";
+  measurement = GoodMeasurement();
+}
+void RunPreflight() {
+  Check(Preflight(&input, nullptr) == &promiseValue, "offer_preflight_queued");
+  Drain();
+}
+NativePreflightReceipt TakeoverFor(const char* result, const char* reason) {
+  return PreflightReceiptFromOutcome(MakeDispatchOutcome(result, reason));
+}
+void BumpTicketGeneration() { current->ticket_generation.fetch_add(1); }
+void OfferSeam() {
+  const auto approvalName = std::string(offerns::NativePreflightDecisionName(NativePreflightKind::kSingleUseApproval));
+  // 1. A route v2 session, v1 passes it, the measurement is an approval: an offer, no ordinary ticket.
+  OfferReset();
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && lastReceipt.reason_code.empty() && lastReceipt.denied_result.empty() &&
+    lastReceipt.ticket.empty() && lastReceipt.approval_generation == 1 && lastReceipt.remaining_ms == 60000 &&
+    lastReceipt.effect == NativeApprovalEffect::kHighImpactConfirmation &&
+    NativePreflightReceiptIsClosed(lastReceipt),
+    "offer_is_a_closed_version_2_receipt");
+  Check(measureCalls == 1 && preflights == 1 && current->approval.pending() && current->approval.approval_generation() == 1 &&
+    current->approval_generation_counter == 1 && !current->ordinary_ticket.occupied() && current->preflight_owner == 0 &&
+    effects == 0 && current->input_api_attempts.load() == 0, "offer_holds_the_intent_and_no_ordinary_ticket");
+  // 2. Another offer replaces the waiting one and takes the next generation.
+  input.strings["requestId"] = "offer-2";
+  measurement = GoodMeasurement();
+  RunPreflight();
+  Check(lastReceipt.approval_generation == 2 && current->approval.approval_generation() == 2 && current->approval.pending(),
+    "second_offer_replaces_the_first");
+  // 3. A route v1 session is v1: not measured, an ordinary ticket, nothing waiting.
+  OfferReset();
+  current->classifier_route = "v1";
+  RunPreflight();
+  Check(measureCalls == 0 && lastReceipt.decision == "ordinary" && offerns::IsValidNativeOrdinaryTicketToken(lastReceipt.ticket) &&
+    !current->approval.occupied() && current->approval_generation_counter == 0, "route_v1_is_v1_unchanged");
+  // 4. v2, v1 passes, the measurement is not an approval and needs no person: the ordinary ticket stands.
+  OfferReset();
+  measurement = NativeApprovalMeasurement{};
+  RunPreflight();
+  Check(measureCalls == 1 && lastReceipt.decision == "ordinary" && offerns::IsValidNativeOrdinaryTicketToken(lastReceipt.ticket) &&
+    !current->approval.occupied(), "v2_not_an_approval_keeps_the_ordinary_ticket");
+  // 5. v2, v1 passes, the measurement needs a person: a pause, no ticket, nothing waiting.
+  OfferReset();
+  measurement = NativeApprovalMeasurement{};
+  measurement.takeover = true;
+  RunPreflight();
+  Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_target_unclassified" &&
+    lastReceipt.denied_result == "rejected" && lastReceipt.ticket.empty() && !current->approval.occupied() &&
+    !current->ordinary_ticket.occupied(), "v2_takeover_pauses_an_ordinary_control");
+  // 6. v1 stopped the control for confirmation words alone: an eligible measurement offers; anything else keeps v1.
+  const auto confirmationOnly = [] {
+    preflightResult = TakeoverFor("paused", "native_high_impact_user_takeover");
+    preflightTrace.recorded = true;
+    preflightTrace.risk.classified = true;
+    preflightTrace.risk.high_impact = true;
+    preflightTrace.risk.high_impact_confirmation = true;
+  };
+  OfferReset();
+  confirmationOnly();
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && current->approval.pending() && measureCalls == 1,
+    "v1_confirmation_pause_becomes_an_offer");
+  OfferReset();
+  confirmationOnly();
+  measurement = NativeApprovalMeasurement{};
+  RunPreflight();
+  Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_high_impact_user_takeover" &&
+    !current->approval.occupied(), "v1_confirmation_pause_stands_when_not_an_approval");
+  OfferReset();
+  confirmationOnly();
+  measurement = NativeApprovalMeasurement{};
+  measurement.takeover = true;
+  RunPreflight();
+  Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_high_impact_user_takeover" &&
+    !current->approval.occupied(), "v1_pause_is_not_rewritten_by_a_v2_takeover");
+  // Over a v1 pause for confirmation words only a confirmation is offered: another effect would be
+  // approved for a dispatch that must pause again.
+  for (NativeApprovalEffect other : {NativeApprovalEffect::kSupervisedAction, NativeApprovalEffect::kFileManagerOpen,
+                                     NativeApprovalEffect::kDownloadOpen}) {
+    OfferReset();
+    confirmationOnly();
+    measurement = GoodMeasurement();
+    measurement.effect = other;
+    RunPreflight();
+    Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_high_impact_user_takeover" &&
+      !current->approval.occupied() && current->approval_generation_counter == 0,
+      "v1_confirmation_pause_is_not_offered_for_another_effect");
+  }
+  // An ordinary control may still be offered another effect (a supervised action).
+  OfferReset();
+  measurement.effect = NativeApprovalEffect::kSupervisedAction;
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && lastReceipt.effect == NativeApprovalEffect::kSupervisedAction,
+    "ordinary_control_is_offered_a_supervised_action");
+  // A receipt that does not leave takes its offer back: the completion failed after the offer was made.
+  OfferReset();
+  Check(Preflight(&input, nullptr) == &promiseValue && queue.size() == 1, "offer_completion_queued");
+  {
+    auto* work = queue.front(); queue.pop_front();
+    work->execute(&input, work->data);
+    Check(current->approval.pending() && current->approval.approval_generation() == 1, "offer_made_before_the_failed_completion");
+    work->complete(&input, 1, work->data);
+  }
+  Check(lastReceipt.decision == "denied" && lastReceipt.reason_code == "native_async_completion_failed" &&
+    !current->approval.occupied() && current->preflight_owner == 0, "failed_completion_takes_the_offer_back");
+  // ...and a completion that succeeds leaves it waiting for the answer the receipt asks for.
+  OfferReset();
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && current->approval.pending() && current->approval.approval_generation() == 1,
+    "reported_offer_stays_waiting");
+  for (int variant = 0; variant < 5; ++variant) {
+    OfferReset();
+    confirmationOnly();
+    switch (variant) {
+      case 0: preflightTrace.risk.high_impact_other = true; break;
+      case 1: preflightTrace.risk.secure = true; break;
+      case 2: preflightTrace.risk.classified = false; break;
+      case 3: preflightTrace.recorded = false; break;
+      default: preflightResult = TakeoverFor("rejected", "native_target_unclassified"); break;
+    }
+    RunPreflight();
+    Check(measureCalls == 0 && lastReceipt.decision == "takeover" && !current->approval.occupied(),
+      "v1_pause_for_anything_else_is_not_measured");
+  }
+  OfferReset();
+  preflightResult = TakeoverFor("rejected", "native_secure_field_blocked");
+  RunPreflight();
+  Check(measureCalls == 0 && lastReceipt.decision == "blocked" && !current->approval.occupied(), "v1_block_is_not_measured");
+  OfferReset();
+  preflightResult = MakeDeniedReceipt("rejected", "native_stale_observation");
+  RunPreflight();
+  Check(measureCalls == 0 && lastReceipt.decision == "denied" && !current->approval.occupied(), "v1_denial_is_not_measured");
+  // 7. The issue conditions are checked under the state lock, like the ordinary ticket's.
+  OfferReset();
+  preflightHook = [] { BumpTicketGeneration(); };
+  RunPreflight();
+  Check(lastReceipt.decision == "denied" && lastReceipt.reason_code == "native_ticket_superseded" && !current->approval.occupied() &&
+    current->approval_generation_counter == 0, "offer_superseded_is_refused");
+  OfferReset();
+  Check(Preflight(&input, nullptr) == &promiseValue, "offer_cancel_queued");
+  current->cancel_epoch.store(1);
+  Drain();
+  Check(lastReceipt.decision == "denied" && lastReceipt.denied_result == "canceled" && !current->approval.occupied(), "offer_canceled_is_refused");
+  OfferReset();
+  current->approval_generation_counter = offerns::kNativeApprovalGenerationMax;
+  RunPreflight();
+  Check(lastReceipt.decision == "denied" && lastReceipt.reason_code == "native_ticket_unavailable" && !current->approval.occupied() &&
+    current->approval_generation_counter == offerns::kNativeApprovalGenerationMax, "no_generation_left_offers_nothing");
+  OfferReset();
+  current->approval_generation_counter = offerns::kNativeApprovalGenerationMax - 1;
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && lastReceipt.approval_generation == offerns::kNativeApprovalGenerationMax,
+    "the_last_generation_is_a_safe_integer");
+  for (int failure = 0; failure < 2; ++failure) {
+    OfferReset();
+    (failure == 0 ? failTokenGen : failClock) = true;
+    RunPreflight();
+    Check(lastReceipt.decision == "denied" && lastReceipt.reason_code == "native_ticket_unavailable" && !current->approval.occupied(),
+      "offer_without_a_secret_or_a_clock_is_refused");
+  }
+  OfferReset();
+  measureThrows = true;
+  RunPreflight();
+  Check(lastReceipt.decision == "takeover" || lastReceipt.decision == "denied", "offer_measure_failure_is_a_refusal");
+  Check(!current->approval.occupied() && !current->ordinary_ticket.occupied(), "offer_measure_failure_leaves_nothing_waiting");
+  // 8. offer -> approve -> dispatchApproved: the approved effect is set after the ticket is consumed, for that dispatch only.
+  OfferReset();
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName, "through_offer");
+  BumpTicketGeneration();  // an observation happens while the person decides
+  input.strings["requestId"] = "fresh";
+  input.numbers["observationRevision"] = 8;
+  current->observation_revision = 8;
+  input.numbers["approvalGeneration"] = 1;
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  Check(lastApprove.ok && current->approval.ready(), "through_approve");
+  DispatchApproved(&input, nullptr);
+  Check(lastApprovedEffect == NativeApprovalEffect::kInvalid && effects == 0, "approved_effect_is_not_set_before_the_ticket_is_consumed");
+  Drain();
+  Check(effects == 1 && lastOutcome.result == "completed" && lastApprovedEffect == NativeApprovalEffect::kHighImpactConfirmation &&
+    !current->approval.occupied(), "approved_dispatch_carries_the_approved_effect");
+  // An ordinary dispatch never carries one.
+  Reset();
+  DispatchD();
+  Drain();
+  Check(effects == 1 && lastApprovedEffect == NativeApprovalEffect::kInvalid, "ordinary_dispatch_carries_no_approved_effect");
+  // A refused approved dispatch never carries one either.
+  OfferReset();
+  RunPreflight();
+  BumpTicketGeneration();
+  input.strings["requestId"] = "fresh";
+  input.numbers["observationRevision"] = 8;
+  current->observation_revision = 8;
+  input.numbers["approvalGeneration"] = 1;
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  measurement = GoodMeasurement();
+  measurement.authority_digest = std::string(64, 'd');
+  DispatchApproved(&input, nullptr);
+  Drain();
+  Check(effects == 0 && lastApprovedEffect == NativeApprovalEffect::kInvalid, "refused_approved_dispatch_carries_no_approved_effect");
+}
 `;
 
 const reservationDriver = String.raw`
@@ -1054,6 +1281,8 @@ void Reset() {
   preflights = 0;
   preflightHook = nullptr;
   preflightResult = MakeNullReceipt("ordinary");
+  preflightTrace = PreflightRiskTrace{};
+  lastApprovedEffect = sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
   lastReceipt = NativePreflightReceipt{};
   input.ticketKind = "absent";
   input.ticketValue.clear();

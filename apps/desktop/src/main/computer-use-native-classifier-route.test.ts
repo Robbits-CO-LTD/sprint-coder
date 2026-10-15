@@ -77,8 +77,16 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
       ).matchAll(/classifier_route/gu),
     ].length;
     expect(measureUses).toBe(1);
-    // Declaration + request member + the start path + that gate; nowhere else.
-    expect(uses).toBe(startUses + declarationUses + requestUses + measureUses);
+    // Declaration + request member + the start path + those two gates; nowhere else.
+    // ...and the route v2 step of a preflight (C4-2c-2), which only decides whether to ask for an approval.
+    const preflightUses = [
+      ...between(
+        'void ExecuteNativePreflight(napi_env env, void* data) {',
+        'void CompleteNativePreflight(',
+      ).matchAll(/classifier_route/gu),
+    ].length;
+    expect(preflightUses).toBe(1);
+    expect(uses).toBe(startUses + declarationUses + requestUses + measureUses + preflightUses);
     expect(macos).not.toContain('single_use_approval');
   });
 

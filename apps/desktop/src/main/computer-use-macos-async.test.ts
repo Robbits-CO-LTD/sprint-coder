@@ -370,7 +370,7 @@ describe('macOS Computer Use asynchronous native boundary', () => {
     );
     expect(pointValidation).toContain('RevalidateBoundTarget(request)');
     expect(pointValidation).toContain('ClassifyElementAtPoint(request.session->pid, point');
-    expect(pointValidation).toContain('RiskOutcome(risk, failure)');
+    expect(pointValidation).toContain('RiskOutcome(risk, failure, request.approved_effect)');
     expect(pointValidation).toContain(
       'request.visual_control_signatures.contains(control_signature)',
     );
@@ -463,6 +463,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
 
     it('leaves the dispatch effect functions byte-for-byte as they were before N2a', () => {
       // If N2b has to change these, update the expected digests together with a reviewed diff.
+      // (C4-2c-2: the dispatch guards' RiskOutcome calls pass request.approved_effect, which is kInvalid
+      // for every ordinary dispatch; that is the whole difference.)
       const spans: Array<[string, string, string]> = [
         [
           'NativeDispatchOutcome PerformSemanticDispatch(',
@@ -472,12 +474,12 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         [
           'NativeDispatchOutcome PerformVisualDispatch(',
           'NativeDispatchOutcome PerformFocusedInputDispatch(',
-          '202ab7a471e750e0',
+          'cca29b1bc2804e8e',
         ],
         [
           'NativeDispatchOutcome PerformFocusedInputDispatch(',
           'NativeDispatchOutcome PerformNativeDispatch(',
-          '8f0351989686557e',
+          'fc91615b578b20ca',
         ],
         [
           'NativeDispatchOutcome PerformNativeDispatch(',
@@ -748,9 +750,18 @@ describe('macOS Computer Use asynchronous native boundary', () => {
         '"sessionId"',
         '"cancelEpoch"',
         '"observationRevision"',
+        // Only an approval offer (receipt version 2) adds the next four.
+        '"receiptVersion"',
+        '"approvalGeneration"',
+        '"remainingMs"',
+        '"effect"',
       ]);
       expect(source).not.toContain('single_use_approval');
-      expect(source).not.toContain('SingleUseApproval');
+      // The enum value is named only as the argument of the decision-name function (C4-2c-2).
+      expect(source.replace(/NativePreflightKind::kSingleUseApproval/gu, '')).not.toContain(
+        'SingleUseApproval',
+      );
+      expect(source.match(/NativePreflightKind::kSingleUseApproval/gu)).toHaveLength(5);
       const dispatchResult = sourceBetween('napi_value DispatchResultValue(', 'bool RiskOutcome(');
       expect(dispatchResult).not.toMatch(/ticket/u);
       // The presented secret is scrubbed right after the reservation and a minted one after use.

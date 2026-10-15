@@ -189,18 +189,40 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
     expect(squashed).toContain(
       'ClassifyNativeRisk( {risk.classified, risk.secure, risk.high_impact, risk.high_impact_confirmation, risk.high_impact_other}, approved_effect);',
     );
-    // Every call site passes two arguments (the effect is the default). THIS IS RELAXED IN C4-2c-2,
-    // where the approved dispatch is the only caller that passes an effect.
+    // The two v1 preflight calls pass two arguments (the effect is the default, so they are v1). The
+    // dispatch guards pass the request's own effect, which is kInvalid unless a person approved this
+    // dispatch; nothing else is ever passed.
     const calls = [...macos.matchAll(/\bRiskOutcome\(([^;]*?)\)\) /gu)].map((match) => match[1]!);
-    expect(calls.length).toBeGreaterThanOrEqual(7);
-    for (const args of calls) expect(args.split(',').length, args).toBe(2);
-    // The request carries it, defaulted; no code assigns it (the producer is C4-2c-2, after the
-    // execution ticket is consumed).
+    expect(calls).toHaveLength(7);
+    const withEffect = calls.filter((args) => args.split(',').length === 3);
+    expect(withEffect).toHaveLength(5);
+    for (const args of withEffect)
+      expect(args.endsWith('request.approved_effect'), args).toBe(true);
+    const preflight = /NativePreflightReceipt PerformNativePreflightV1\([\s\S]*?\n\}\n/u.exec(
+      macos,
+    )![0];
+    expect(preflight.match(/RiskOutcome\(risk, &outcome\)/gu)).toHaveLength(2);
+    expect(preflight).not.toContain('approved_effect');
+    // The request carries it, defaulted, and exactly one line assigns it: the approved dispatch, right
+    // after the execution ticket was consumed against the fresh measurement (never for a preflight).
     expect(macos).toMatch(
       /sprint_coder::computer_use::NativeApprovalEffect approved_effect =\s*sprint_coder::computer_use::NativeApprovalEffect::kInvalid;/u,
     );
-    expect(code(macos)).not.toMatch(/\.approved_effect\s*=[^=]/u);
-    expect(code(macos)).not.toMatch(/->approved_effect\s*=[^=]/u);
+    expect(code(macos).match(/\bapproved_effect\s*=[^=]/gu)).toHaveLength(3); // member default, RiskOutcome default, the one assignment
+    const assignments = [...macos.matchAll(/\.approved_effect\s*=[^=]/gu)];
+    expect(assignments).toHaveLength(1);
+    const worker = /void ExecuteNativeApprovedDispatch\([\s\S]*?\n\}\n/u.exec(macos)![0];
+    expect(worker).toContain('work->request.approved_effect = measured.effect;');
+    expect(worker.indexOf('consumed = true;')).toBeLessThan(
+      worker.indexOf('work->request.approved_effect = measured.effect;'),
+    );
+    expect(worker.indexOf('work->request.approved_effect = measured.effect;')).toBeLessThan(
+      worker.indexOf('PerformNativeDispatch(work->request)'),
+    );
+    // Only after ConsumeApproved succeeded.
+    expect(worker.indexOf('ConsumeApproved(')).toBeLessThan(
+      worker.indexOf('work->request.approved_effect = measured.effect;'),
+    );
   });
 
   it('writes the approval decision word in one native place only, and offers nothing from the addon yet', () => {
@@ -213,9 +235,14 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
         expect(text).toContain('return "single_use_approval";');
       else expect(text, name).not.toContain('single_use_approval');
     }
-    // The macOS addon does not use the offer header yet (C4-2c-2 wires it).
-    expect(macos).not.toContain('computer_use_native_approval_offer.h');
-    expect(macos).not.toMatch(/BuildApprovalIntentBinding|NativeApprovalRemainingMs|\.Offer\(/u);
+    // The macOS addon uses the offer header in exactly one function, the preflight's approval offer.
+    expect(macos).toContain('#include "computer_use_native_approval_offer.h"');
+    const issue = /NativePreflightReceipt IssueApprovalOffer\([\s\S]*?\n\}\n/u.exec(macos)![0];
+    expect(issue).toContain('BuildApprovalIntentBinding(measured, context, &intent)');
+    expect(issue).toContain('NativeApprovalRemainingMs(');
+    expect(issue).toContain('NextNativeApprovalGeneration(session.approval_generation_counter');
+    expect(macos.match(/BuildApprovalIntentBinding\(/gu)).toHaveLength(1);
+    expect(macos.match(/\.Offer\(/gu)).toHaveLength(1);
   });
 
   it('spells the offer receipt the way Main parses it', () => {
