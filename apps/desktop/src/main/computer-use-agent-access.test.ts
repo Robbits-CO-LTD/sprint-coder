@@ -2737,8 +2737,88 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     // A copy, then an action the planner may not take: the session ends badly.
     plans.push({ type: 'copy', targetId: 'node-1' }, { type: 'copy', targetId: 'missing' });
     const out = await startA(fixture);
+    // Not vacuous: the copy that did happen is listed.
+    expect(out.artifacts).toHaveLength(1);
     for (const artifact of out.artifacts ?? [])
       expect(Object.keys(artifact).sort()).toEqual(['artifactId', 'kind', 'sizeClass']);
     expect(JSON.stringify([out, fixture.statuses, fixture.audits()])).not.toContain('Total 42');
+  });
+
+  it('lists only what this session made, not another session of the same Turn (T15-8)', async () => {
+    const store = newStore();
+    const fixture = createFixture({
+      artifactRead: { store },
+      plan: async () => {
+        const mine = fixture.statuses.at(-1)!.sessionId;
+        store.create({ ...turnOwner, sourceSessionId: mine }, 'Mine 1');
+        store.create({ ...turnOwner, sourceSessionId: 'session-other' }, 'Not mine');
+        return { type: 'finish' };
+      },
+    });
+    grant(fixture);
+    const out = await startA(fixture);
+    expect(out.artifacts).toHaveLength(1);
+    const other = store.referencesMadeBy('session-other', taskBinding);
+    expect(other).toHaveLength(1);
+    expect(out.artifacts![0]!.artifactId).not.toBe(other[0]!.artifactId);
+  });
+
+  it('checks the carry against the current policy epoch, not epoch 0 (T15-8)', async () => {
+    const store = newStore();
+    const { fixture } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    const row = await target(fixture);
+    fixture.setPolicyEpoch(3);
+    const old = store.create(turnOwner, 'old epoch')!.artifactId;
+    await expect(
+      fixture.controller.startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: old }] },
+        context,
+      ),
+    ).rejects.toThrow(carryRefused);
+    // (Creating under epoch 3 drops the epoch-0 one, so this comes after the refusal above.)
+    const current = store.create({ ...turnOwner, policyEpoch: 3 }, 'epoch 3')!.artifactId;
+    // The artifact of the current epoch passes the carry check (the stale token is refused later,
+    // and with a different message).
+    const error = await fixture.controller
+      .startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: current }] },
+        context,
+      )
+      .then(
+        () => null,
+        (thrown: unknown) => thrown as Error,
+      );
+    expect(error?.message).not.toBe(carryRefused);
+  });
+
+  it('leaves nothing attached when the session fails to start (T15-8)', async () => {
+    const store = newStore();
+    const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    plans.push({ type: 'copy', targetId: 'node-1' });
+    const outA = await startA(fixture);
+    const artifactId = outA.artifacts![0]!.artifactId;
+    const internals = fixture.controller as unknown as {
+      broker: { startTurn: (...args: unknown[]) => unknown };
+      attachedArtifacts: Map<string, unknown>;
+    };
+    const spy = vi.spyOn(internals.broker, 'startTurn').mockImplementation(() => {
+      throw new Error('start failed');
+    });
+    await expect(
+      fixture.controller.startForAgent(
+        {
+          targetToken: (await target(fixture)).targetToken,
+          goal: 'x',
+          carry: [{ artifactId }],
+        },
+        context,
+      ),
+    ).rejects.toThrow('start failed');
+    spy.mockRestore();
+    expect(internals.attachedArtifacts.size).toBe(0);
+    // And the carried artifact was not used up by the failed start.
+    expect(store.describe([artifactId], taskBinding)).not.toBeNull();
   });
 });

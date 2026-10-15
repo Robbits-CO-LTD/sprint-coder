@@ -3084,7 +3084,6 @@ export class ComputerUseController {
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
-    this.attachCarriedArtifacts(record, input.agent?.carry);
     // Bound before any round can start. Digest of the limits only; no policy body or identifier.
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
@@ -3126,6 +3125,8 @@ export class ComputerUseController {
       await this.deps.disarmEmergencyStop?.(sessionId);
       throw error;
     }
+    // After startTurn, so a failed start leaves no attachment behind. No await before run().
+    this.attachCarriedArtifacts(record, input.agent?.carry);
     this.emit(status);
     void this.run(record).catch((error) => {
       if (!controller.signal.aborted) void this.stop(sessionId, 'error');
@@ -3666,7 +3667,9 @@ export class ComputerUseController {
   /**
    * Gives the new session the carried references, once it exists and before its first round. The
    * store is asked again (time has passed), and the taker must not be the maker: a session never
-   * pastes what it copied itself (design 4.2). If anything no longer holds, nothing is attached and
+   * pastes what it copied itself (design 4.2). The maker check is defence in depth: the taker's id is
+   * minted for this start, so no stored artifact can name it and the branch is not reachable from
+   * outside. If anything no longer holds, nothing is attached and
    * a paste is refused like any paste of something the session was not given.
    */
   private attachCarriedArtifacts(
