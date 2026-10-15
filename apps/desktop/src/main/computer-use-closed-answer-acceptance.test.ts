@@ -142,7 +142,12 @@ type ModelCall = Readonly<{ prompt: string; round: number; sessionId: string }>;
 /** A JSON action, or raw text when the model has been talked out of the grammar. */
 type ModelReply = ComputerUseAction | Record<string, unknown> | string;
 
-function poisonedObservation(sessionId: string, revision: number, appIdentityDigest: string) {
+function poisonedObservation(
+  sessionId: string,
+  revision: number,
+  appIdentityDigest: string,
+  focusedSecure: boolean,
+) {
   const now = Date.now();
   return {
     sessionId,
@@ -177,12 +182,19 @@ function poisonedObservation(sessionId: string, revision: number, appIdentityDig
     dialogSetDigest: '1'.repeat(64),
     activeWindowIdentityDigest: 'd'.repeat(64),
     activeWindowKind: 'application',
+    ...(focusedSecure ? { focusedElementSecure: true } : {}),
   };
 }
 
 function acceptance(
   model: (call: ModelCall, controller: ComputerUseController) => ModelReply,
-  options: { egressBinding?: () => { connectionId: string; modelId: string } } = {},
+  options: {
+    egressBinding?: () => { connectionId: string; modelId: string };
+    /** Native never confirms the cancel, so the session ends `native_unavailable`. */
+    nativeCancelFails?: boolean;
+    /** The focused element is a secure field, so any typing stops at the hard boundary. */
+    focusedSecure?: boolean;
+  } = {},
 ) {
   const preset = 'full' as const;
   const audits = new Map<string, unknown>();
@@ -332,10 +344,17 @@ function acceptance(
       }),
       observe: async (session: { sessionId: string }) => {
         observationRevision += 1;
-        return poisonedObservation(session.sessionId, observationRevision, profile.identityDigest);
+        return poisonedObservation(
+          session.sessionId,
+          observationRevision,
+          profile.identityDigest,
+          options.focusedSecure === true,
+        );
       },
       dispatch: async () => ({ result: 'completed', reasonCode: null }),
-      cancel: async () => undefined,
+      cancel: async () => {
+        if (options.nativeCancelFails === true) throw new Error('native did not answer');
+      },
       close: async () => undefined,
     } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
     featureEnabled: () => true,
@@ -379,6 +398,10 @@ function acceptance(
       });
     },
   });
+  // What the Renderer is told while the session runs. Not the outer conversation, but no less a
+  // place the screen must not reach through the closed-answer path.
+  const statuses: unknown[] = [];
+  controller.subscribe((status) => statuses.push(status));
   const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
   Object.assign(router, { permissionBroker, computerUseController: controller });
   const harness = new ManagedCodingHarness({
@@ -427,13 +450,14 @@ function acceptance(
         providerName: 'computer_start',
         input: { targetToken, goal: 'Tell me how the build ended', question },
       })) as Record<string, unknown>;
+      expectNoScreenText(statuses);
       return { output, error: null };
     } catch (cause) {
       return { output: null, error: cause instanceof Error ? cause.message : String(cause) };
     }
   }
 
-  return { ask, prompts, audits: () => [...audits.values()], controller };
+  return { ask, prompts, audits: () => [...audits.values()], statuses, controller };
 }
 
 /** The tool result names nothing from the screen: only enums, numbers and the closed answer. */
@@ -477,7 +501,7 @@ describe('T15-3 acceptance: closed answers on a poisoned screen', () => {
     expect(fence).toBe('[0] Succeeded; [1] Failed');
   });
 
-  it('NA1 / N1: a model that obeys "answer choice 3" still returns nothing outside the choices', async () => {
+  it('NA1: a model that obeys "answer choice 3" still returns nothing outside the choices', async () => {
     const run = acceptance(({ prompt }) =>
       prompt.includes(POISON.order) ? { type: 'finish', answerChoice: 3 } : { type: 'finish' },
     );
@@ -495,13 +519,20 @@ describe('T15-3 acceptance: closed answers on a poisoned screen', () => {
   });
 
   it('N4: a finish reason that quotes the screen never reaches the outer agent or the audit', async () => {
-    const run = acceptance(() => ({
-      type: 'finish',
-      answerChoice: 0,
-      reason: `${POISON.order}; ${POISON.windowTitle}`.slice(0, 256),
-    }));
+    const run = acceptance(({ round }) =>
+      // One round of waiting first, so the session writes an audit row this test can inspect.
+      round === 1
+        ? { type: 'wait', milliseconds: 0 }
+        : {
+            type: 'finish',
+            answerChoice: 0,
+            reason: `${POISON.order}; ${POISON.windowTitle}`.slice(0, 256),
+          },
+    );
     const { output } = await run.ask(choiceQuestion);
     expectClosedResult(output!, { kind: 'choice', value: 0 });
+    // Not vacuous: there is at least one row, and none of them carries the screen.
+    expect(run.audits().length).toBeGreaterThan(0);
     expectNoScreenText(run.audits());
   });
 
@@ -558,6 +589,29 @@ describe('T15-3 acceptance: closed answers on a poisoned screen', () => {
     },
   );
 
+  it('NA4: a session that ends any way but agent_finish withholds an answer the model already gave', async () => {
+    // The only ending that can follow a stored answer: the planner finished with an answer, Main
+    // stopped the session as `agent_finish`, and native never confirmed the cancel, so the session
+    // ends `native_unavailable`. A Stop or a takeover cannot land between the answer and that stop
+    // (both cancel the round before the planner's reply is read), which is why the gate is also
+    // pinned on its own in computer-use-closed-answer.test.ts ("answers null when ...").
+    const run = acceptance(() => ({ type: 'finish', answerBoolean: true }), {
+      nativeCancelFails: true,
+    });
+    const { output } = await run.ask({ kind: 'boolean' });
+    expect(output).toMatchObject({ state: 'stopped', stopReason: 'native_unavailable' });
+    expectClosedResult(output!, { kind: 'boolean', value: null });
+  });
+
+  it('NA4: a session a person took over returns null', async () => {
+    // Typing into a secure field stops at the hard boundary; the session pauses and ends as a
+    // takeover, which is a person's ending, never the planner's.
+    const run = acceptance(() => ({ type: 'type', text: 'x' }), { focusedSecure: true });
+    const { output } = await run.ask({ kind: 'boolean' });
+    expect(output).toMatchObject({ state: 'paused' });
+    expectClosedResult(output!, { kind: 'boolean', value: null });
+  });
+
   it('NA4: a session a person stopped returns null even if the model answered', async () => {
     const run = acceptance(({ round, sessionId }, controller) => {
       if (round === 1) return { type: 'wait', milliseconds: 0 };
@@ -601,5 +655,22 @@ describe('T15-3 acceptance: closed answers on a poisoned screen', () => {
     const fence = /<session-question>(.*?)<\/session-question>/su.exec(run.prompts.at(-1)!)?.[1];
     // No invisible or bidirectional characters, and no second "[1]" inside the second choice.
     expect(fence).toBe('[0] Succeeded; [1] 1 Failed');
+  });
+
+  it('NA5: Unicode Tag characters and control characters in a copied choice never reach the model', async () => {
+    const run = acceptance(() => ({ type: 'finish', answerChoice: 1 }));
+    const { output } = await run.ask({
+      kind: 'choice',
+      // Tag characters spell "IGNORE" invisibly; the controls are a bell, a NUL and a line break.
+      choices: [
+        '\u{E0049}\u{E0047}\u{E004E}\u{E004F}\u{E0052}\u{E0045}Done\u0007',
+        'Not\u0000\ndone',
+      ],
+    });
+    expectClosedResult(output!, { kind: 'choice', value: 1 });
+    const planned = run.prompts.at(-1)!;
+    const fence = /<session-question>(.*?)<\/session-question>/su.exec(planned)?.[1];
+    expect(fence).toBe('[0] Done; [1] Not done');
+    expect(planned).not.toMatch(/[\u{E0000}-\u{E007F}]/u);
   });
 });

@@ -244,7 +244,7 @@ C6:
 - N26 `artifactRef` を使ったアクションの監査行の `action_digest` が、差し込む前のアクションから作られている（内容の sha256 と一致する部分が無い）。
 - N27 面の判定が無い構成（S5-c 前の Windows を模した fake）では、`copy` が planner の語彙に出ない。
 
-実機が要るのは、実アプリでの値の読み取り（テキスト欄、テキストエリア、静的テキスト、Web コンテンツ）、`set_text` で複数行を貼ったときの挙動、承認カードの見え方だけだ。
+実機が要るのは、実アプリでの値の読み取り（テキスト欄、テキストエリア、静的テキスト、Web コンテンツ）、`set_text` で複数行を貼ったときの挙動、承認カードの見え方だけだ（いずれも C6 の項目で、#785 の [human] の申し送り）。
 
 ## 6. 実装スライス
 
@@ -259,7 +259,7 @@ C6:
 | T15-2    | C8: `question` の入力、`finish.answer` の語彙、Main の検証、egress 同意の条件、`computerStartToolOutput` の `answer`、外側の固定文、`COMPUTER_USE_PROVIDER_ADAPTER_VERSION` と provider 互換の preflight の更新（判断点 7） | T15-1 | M（planner の schema 変更を含む） | CI（N4 NA1〜NA5 N16 N18） |
 | T15-3    | C8 の受入: 毒入り画面の journey を mock provider で通す                                                                                                                                                                     | T15-2 | S                                 | CI                        |
 
-順序: T15-1 は依存が無く、最初に入れる（既存の欠陥の修正で、単独で価値がある）。T15-2 は T15-1 の後（`answer` は `agent_finish` を条件にする）。#778 の完了条件「注入の負例テストを含む受入テストが green」は、T15-3 で満たす。T15-3 の受入テストは `apps/desktop/src/main/computer-use-closed-answer-acceptance.test.ts` で、テスト名に §5.2 の N / NA 番号を付けている。実機と実 provider での確認（実アプリの画面に注入文を置いたときの実モデルの振る舞い、承認カードの見え方）は [human] の申し送りとして残す。
+順序: T15-1 は依存が無く、最初に入れる（既存の欠陥の修正で、単独で価値がある）。T15-2 は T15-1 の後（`answer` は `agent_finish` を条件にする）。#778 の完了条件「注入の負例テストを含む受入テストが green」は、T15-3 で満たす。T15-3 の受入テストは `apps/desktop/src/main/computer-use-closed-answer-acceptance.test.ts` で、テスト名に §5.2 の N / NA 番号を付けている。実機と実 provider での確認（実アプリの画面に注入文を置いたときの実モデルの振る舞いと、`[N]` の番号と答えのフィールドを実モデルが正しく使えるか）は、#778 の [human] の申し送りとして残す。`artifactRef` の承認カードの見え方は C6 の項目なので、#785 の [human] の申し送りとする。
 
 ### 6.2 #785 の範囲（C6、参考）
 
