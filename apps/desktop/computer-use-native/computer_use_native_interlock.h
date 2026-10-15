@@ -24,7 +24,7 @@
 //     The same file opened INSIDE an application (a script in an editor's file tree) is not an
 //     execution trigger and is not refused here.
 //   * opening a file from a file manager or a download list (E2, E3) while the approval path is
-//     closed (the core's "approval not enabled")  -> blocked, native_execution_trigger_blocked
+//     closed (the core's "approval not enabled")  -> blocked, native_approval_not_enabled
 //     Once the rule set trusts the approval, the core says "approval" and the approval decides.
 // Everything else the core says (secure and credential fields, confirmations, supervised actions,
 // sensitive origins, observe-only, unclassified) is not an interlock and is left to v1.
@@ -51,9 +51,23 @@ struct InterlockVerdict {
     case InterlockReason::kShellSurface:
       return "native_shell_surface_blocked";
     case InterlockReason::kExecutionTrigger:
-    case InterlockReason::kApprovalClosed:
       return "native_execution_trigger_blocked";
+    case InterlockReason::kApprovalClosed:
+      // Its own code, so that one code means one (decision, result) pair in the receipt table.
+      return "native_approval_not_enabled";
     case InterlockReason::kNone:
+      break;
+    }
+    return {};
+  }
+  // The receipt's decision for this refusal (the first column of the receipt table).
+  [[nodiscard]] std::string_view DecisionName() const {
+    switch (outcome) {
+    case InterlockOutcome::kBlocked:
+      return "blocked";
+    case InterlockOutcome::kTakeover:
+      return "takeover";
+    case InterlockOutcome::kNone:
       break;
     }
     return {};

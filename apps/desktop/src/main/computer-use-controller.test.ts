@@ -950,6 +950,60 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    it.each([
+      ['blocked', 'native_shell_surface_blocked', 'rejected'],
+      ['blocked', 'native_approval_not_enabled', 'rejected'],
+      ['takeover', 'native_execution_trigger_blocked', 'paused'],
+    ] as const)(
+      'closes an interlock refusal (%s, %s) with no input, the reason in the audit and a paused session',
+      async (decision, reasonCode, deniedResult) => {
+        const host = createPreflightHost((request, callIndex) => ({
+          ...approvalReceipt(request, callIndex),
+          decision,
+          reasonCode,
+          deniedResult,
+        }));
+        const fixture = createFixture({
+          observationOverrides: planObservation,
+          nativeDispatch: host.dispatch,
+        });
+        const started = await start(fixture, 'full_access_app');
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, planAction, 'interlock-1'),
+        ).resolves.toMatchObject({ result: deniedResult, reasonCode });
+        expect(host.nativeDispatch).not.toHaveBeenCalled();
+        expect([...fixture.audits.values()]).toEqual([expect.objectContaining({ reasonCode })]);
+        expect(fixture.controller.getStatus(started.sessionId)?.state).toBe('paused');
+        // The same request id replays the recorded audit and never reaches native again.
+        await expect(
+          fixture.controller.act(started.sessionId, planAction, 'interlock-1'),
+        ).resolves.toMatchObject({ reasonCode });
+        expect(host.preflight).toHaveBeenCalledTimes(1);
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it('rejects an interlock reason carried in the wrong decision before any input', async () => {
+      const host = createPreflightHost((request, callIndex) => ({
+        ...approvalReceipt(request, callIndex),
+        decision: 'takeover',
+        reasonCode: 'native_shell_surface_blocked',
+        deniedResult: 'rejected',
+      }));
+      const fixture = createFixture({
+        observationOverrides: planObservation,
+        nativeDispatch: host.dispatch,
+      });
+      const started = await start(fixture, 'full_access_app');
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, planAction, 'interlock-bad'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'native_preflight_invalid' });
+      expect(host.nativeDispatch).not.toHaveBeenCalled();
+      await fixture.controller.stop(started.sessionId);
+    });
+
     it('records a malformed approval receipt as a typed rejection, not unknown_effect', async () => {
       const host = createPreflightHost((request) => ({
         ...approvalReceipt(request),

@@ -539,6 +539,7 @@ const reservationPreamble = String.raw`
 #include <unordered_map>
 #include <vector>
 #include "computer_use_native_binding.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_sha256.h"
@@ -1569,6 +1570,9 @@ int main() {
       {"native_secure_field_blocked", "rejected", "blocked"},
       {"native_high_impact_user_takeover", "paused", "takeover"},
       {"native_target_unclassified", "rejected", "takeover"},
+      {"native_shell_surface_blocked", "rejected", "blocked"},
+      {"native_approval_not_enabled", "rejected", "blocked"},
+      {"native_execution_trigger_blocked", "paused", "takeover"},
       {"native_stale_observation", "rejected", "denied"},
       {"native_made_up_reason", "rejected", "denied"},
     };
@@ -1581,6 +1585,18 @@ int main() {
       Check(lastReceipt.decision == (unknown ? "denied" : entry.decision) &&
         lastReceipt.reason_code == (unknown ? "native_dispatch_failed" : entry.reason) &&
         lastReceipt.ticket.empty() && !current->ordinary_ticket.occupied() && current->preflight_owner == 0, entry.reason);
+    }
+    // A reason of the table with a result of another row is not a refusal: the maker does not match
+    // on the reason alone, so these stay denied receipts, which are not closed.
+    const struct { const char* reason; const char* result; } wrongResult[] = {
+      {"native_secure_field_blocked", "paused"}, {"native_shell_surface_blocked", "paused"},
+      {"native_approval_not_enabled", "paused"}, {"native_high_impact_user_takeover", "rejected"},
+      {"native_target_unclassified", "paused"}, {"native_execution_trigger_blocked", "rejected"},
+    };
+    for (const auto& entry : wrongResult) {
+      const NativePreflightReceipt made = PreflightReceiptFromOutcome(MakeDispatchOutcome(entry.result, entry.reason));
+      Check(made.decision == "denied" && made.reason_code == entry.reason && made.denied_result == entry.result &&
+        made.ticket.empty() && !NativePreflightReceiptIsClosed(made), entry.reason);
     }
     const auto closedReceipt = [](const char* decision, const char* reason, const char* result, const std::string& ticket) {
       NativePreflightReceipt receipt;
@@ -1607,6 +1623,19 @@ int main() {
       !closedReceipt("denied", "native_secure_field_blocked", "rejected", "") &&
       !closedReceipt("denied", "native_high_impact_user_takeover", "paused", "") &&
       !closedReceipt("denied", "native_made_up_reason", "rejected", ""), "receipt_blocked_takeover_replay_closed");
+    // The interlock reasons (S4-1a) are closed pairs: one decision and one result each.
+    Check(closedReceipt("blocked", "native_shell_surface_blocked", "rejected", "") &&
+      closedReceipt("blocked", "native_approval_not_enabled", "rejected", "") &&
+      closedReceipt("takeover", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("blocked", "native_shell_surface_blocked", "paused", "") &&
+      !closedReceipt("takeover", "native_shell_surface_blocked", "rejected", "") &&
+      !closedReceipt("blocked", "native_approval_not_enabled", "paused", "") &&
+      !closedReceipt("takeover", "native_approval_not_enabled", "rejected", "") &&
+      !closedReceipt("takeover", "native_execution_trigger_blocked", "rejected", "") &&
+      !closedReceipt("blocked", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("denied", "native_shell_surface_blocked", "rejected", "") &&
+      !closedReceipt("denied", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("blocked", "native_shell_surface_blocked", "rejected", goodToken), "receipt_interlock_pairs_closed");
     for (const auto& entry : kNativePreflightDeniedTable) {
       const std::string result = entry.result;
       Check((result == "rejected" || result == "paused" || result == "canceled") &&

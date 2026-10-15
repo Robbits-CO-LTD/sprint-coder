@@ -36,6 +36,7 @@
 
 #include "computer_use_native_binding.h"
 #include "computer_use_native_identity.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
@@ -4417,6 +4418,12 @@ struct NativePreflightDeniedEntry {
   const char* result;
 };
 
+// The closed set of blocked and takeover receipts (decision, reason, result) is the portable table
+// in computer_use_native_refusal_table.h: the receipt maker and the closed-receipt check both read it,
+// so a reason can only be returned together with the decision and result it belongs to. Main keeps
+// the same table (NATIVE_PREFLIGHT_REFUSALS). The interlock rows are in it and nothing returns them yet.
+using sprint_coder::computer_use::kNativePreflightRefusalTable;
+
 constexpr NativePreflightDeniedEntry kNativePreflightDeniedTable[] = {
     {"native_canceled_pre_dispatch", "canceled"},
     {"native_capability_unavailable", "rejected"},
@@ -4466,20 +4473,14 @@ NativePreflightReceipt MakeNullReceipt(const char* decision) {
 
 // Maps a guard outcome onto a receipt. Only the classifier outcomes become blocked/takeover.
 NativePreflightReceipt PreflightReceiptFromOutcome(const NativeDispatchOutcome& outcome) {
-  if (outcome.reason_code == "native_secure_field_blocked" && outcome.result == "rejected") {
-    NativePreflightReceipt receipt;
-    receipt.decision = "blocked";
-    receipt.reason_code = outcome.reason_code;
-    receipt.denied_result = outcome.result;
-    return receipt;
-  }
-  if ((outcome.reason_code == "native_high_impact_user_takeover" && outcome.result == "paused") ||
-      (outcome.reason_code == "native_target_unclassified" && outcome.result == "rejected")) {
-    NativePreflightReceipt receipt;
-    receipt.decision = "takeover";
-    receipt.reason_code = outcome.reason_code;
-    receipt.denied_result = outcome.result;
-    return receipt;
+  for (const auto& entry : kNativePreflightRefusalTable) {
+    if (outcome.reason_code == entry.reason_code && outcome.result == entry.result) {
+      NativePreflightReceipt receipt;
+      receipt.decision = entry.decision;
+      receipt.reason_code = outcome.reason_code;
+      receipt.denied_result = outcome.result;
+      return receipt;
+    }
   }
   return MakeDeniedReceipt(outcome.result, outcome.reason_code);
 }
@@ -4491,14 +4492,14 @@ bool NativePreflightReceiptIsClosed(const NativePreflightReceipt& receipt) {
   if (!receipt.ticket.empty()) return false;
   if (receipt.decision == "replay")
     return receipt.reason_code.empty() && receipt.denied_result.empty();
-  if (receipt.decision == "blocked")
-    return receipt.reason_code == "native_secure_field_blocked" &&
-           receipt.denied_result == "rejected";
-  if (receipt.decision == "takeover")
-    return (receipt.reason_code == "native_high_impact_user_takeover" &&
-            receipt.denied_result == "paused") ||
-           (receipt.reason_code == "native_target_unclassified" &&
-            receipt.denied_result == "rejected");
+  if (receipt.decision == "blocked" || receipt.decision == "takeover") {
+    for (const auto& entry : kNativePreflightRefusalTable) {
+      if (receipt.decision == entry.decision && receipt.reason_code == entry.reason_code &&
+          receipt.denied_result == entry.result)
+        return true;
+    }
+    return false;
+  }
   if (receipt.decision == "denied") {
     for (const auto& entry : kNativePreflightDeniedTable) {
       if (receipt.reason_code == entry.reason_code && receipt.denied_result == entry.result)

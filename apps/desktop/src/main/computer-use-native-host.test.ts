@@ -799,6 +799,10 @@ describe('Computer Use native Main adapter', () => {
       ['blocked', 'native_secure_field_blocked', 'rejected'],
       ['takeover', 'native_high_impact_user_takeover', 'paused'],
       ['denied', 'native_stale_observation', 'rejected'],
+      // Interlock refusals (S4-1a): nothing returns them yet, but the receipt table knows them.
+      ['blocked', 'native_shell_surface_blocked', 'rejected'],
+      ['blocked', 'native_approval_not_enabled', 'rejected'],
+      ['takeover', 'native_execution_trigger_blocked', 'paused'],
     ] as const) {
       const before = dispatchCalls();
       preflight.mockImplementationOnce((input) =>
@@ -808,6 +812,39 @@ describe('Computer Use native Main adapter', () => {
         result: deniedResult,
         reasonCode,
         inputReceipt: { sessionId: session.sessionId, cancelEpoch: 0, inputAttemptCount: 2 },
+      });
+      expect(dispatchCalls()).toBe(before);
+    }
+    // A blocked or takeover receipt is one of the closed pairs and no other: the decision, the reason
+    // and the result agree, so a reason cannot be carried into a decision it does not belong to.
+    for (const [decision, reasonCode, deniedResult] of [
+      ['blocked', 'native_high_impact_user_takeover', 'paused'],
+      ['blocked', 'native_execution_trigger_blocked', 'paused'],
+      ['blocked', 'native_shell_surface_blocked', 'paused'],
+      ['blocked', 'native_approval_not_enabled', 'paused'],
+      ['takeover', 'native_secure_field_blocked', 'rejected'],
+      ['takeover', 'native_shell_surface_blocked', 'rejected'],
+      ['takeover', 'native_execution_trigger_blocked', 'rejected'],
+      ['takeover', 'native_approval_not_enabled', 'rejected'],
+      ['takeover', 'native_target_unclassified', 'paused'],
+      ['blocked', 'native_unlisted_reason', 'rejected'],
+      ['takeover', 'native_unlisted_reason', 'paused'],
+      ['blocked', 'native_shell_surface_blocked', 'canceled'],
+      // A refusal reason is only valid in its own decision: not in a denied receipt either.
+      ['denied', 'native_secure_field_blocked', 'rejected'],
+      ['denied', 'native_shell_surface_blocked', 'rejected'],
+      ['denied', 'native_approval_not_enabled', 'rejected'],
+      ['denied', 'native_high_impact_user_takeover', 'paused'],
+      ['denied', 'native_target_unclassified', 'rejected'],
+      ['denied', 'native_execution_trigger_blocked', 'paused'],
+    ] as const) {
+      const before = dispatchCalls();
+      preflight.mockImplementationOnce((input) =>
+        receipt(input, { decision, reasonCode, deniedResult, ticket: null }),
+      );
+      await expect(preflightAction('pf-bad-pair')).resolves.toEqual({
+        result: 'rejected',
+        reasonCode: 'native_preflight_invalid',
       });
       expect(dispatchCalls()).toBe(before);
     }
