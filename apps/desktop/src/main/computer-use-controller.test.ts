@@ -34,6 +34,7 @@ import {
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
+import type { ComputerUsePlannedAction } from '@sprint-coder/contracts';
 import { ComputerUseRuntimeCapture } from './computer-use-runtime-capture';
 import { preflightComputerUseProvider, ProviderComputerUsePlanner } from './computer-use-planner';
 import type { ComputerUseNativeBinding } from './computer-use-native';
@@ -46,6 +47,7 @@ import {
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ComputerUseArtifactStore } from './computer-use-artifact';
+import { computerUseActionDigest } from './computer-use-action';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -163,7 +165,7 @@ function createFixture(
     observationOverridesForRevision?: (revision: number) => Partial<ComputerUseObservation>;
     policyEpoch?: number;
     planner?: {
-      plan: (input: unknown) => Promise<ComputerUseAction>;
+      plan: (input: unknown) => Promise<ComputerUsePlannedAction>;
       revalidate?: (signal: AbortSignal) => Promise<void>;
       cancel?: (executionId: string) => Promise<void>;
     };
@@ -215,6 +217,8 @@ function createFixture(
       ) => Promise<ComputerUseNativeNodeValue>;
     };
     artifactStore?: ComputerUseArtifactStore;
+    /** A fake host that can paste an artifact (#785 T15-7); a production host never reports it. */
+    artifactPaste?: { supported?: boolean };
     /** Opens the native approval path on the fake host (a production host never reports it). */
     nativeApproval?: {
       enabled?: boolean;
@@ -381,6 +385,9 @@ function createFixture(
               ? { ...observed, focusedElementSignature: 'e'.repeat(64) }
               : observed;
     },
+    ...(options.artifactPaste === undefined
+      ? {}
+      : { artifactPasteSupported: () => options.artifactPaste!.supported !== false }),
     ...(options.artifactRead === undefined
       ? {}
       : {
@@ -2860,6 +2867,301 @@ describe('ComputerUseController', () => {
         expect(fixture.controller.copiedArtifactReferences(started.sessionId), end).toEqual([]);
         await fixture.controller.stop(started.sessionId);
       }
+    });
+  });
+
+  describe('pasting an artifact (#785 T15-7)', () => {
+    const withNode = { targetSignatures: { 'node-1': 'a'.repeat(64) } };
+    const written = { type: 'type', text: 'Total 42' } as const;
+
+    /**
+     * A session whose planner waits until an artifact is in the store and attached, then answers
+     * with `planned`, then finishes.
+     */
+    async function pasteSession(
+      options: {
+        mode?: 'supervised' | 'full_access_app';
+        text?: string;
+        planned?: (artifactId: string) => ComputerUsePlannedAction;
+        extra?: Parameters<typeof createFixture>[0];
+        attach?: boolean;
+        beforeRelease?: (
+          controller: ReturnType<typeof createFixture>['controller'],
+          held: {
+            sessionId: string;
+            store: ComputerUseArtifactStore;
+            owner: Parameters<ComputerUseArtifactStore['create']>[0];
+          },
+        ) => void;
+        fixedId?: boolean;
+      } = {},
+    ) {
+      const mode = options.mode ?? 'full_access_app';
+      const store = new ComputerUseArtifactStore({
+        now: () => performance.now(),
+        ...(options.fixedId === true ? { randomId: () => 'fixed-artifact' } : {}),
+      });
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => (release = resolve));
+      const plans: ComputerUsePlannedAction[] = [];
+      const inputs: unknown[] = [];
+      const fixture = createFixture({
+        mode,
+        observationOverrides: withNode,
+        artifactPaste: {},
+        artifactStore: store,
+        planner: {
+          plan: async (input) => {
+            inputs.push(input);
+            await ready;
+            return plans.shift() ?? { type: 'finish' };
+          },
+        },
+        ...options.extra,
+      });
+      const started = await start(fixture, mode);
+      const owner = {
+        taskId: 'task-1',
+        turnId: `computer-turn:${started.sessionId}`,
+        policyEpoch: 0,
+        sourceSessionId: 'session-a',
+      };
+      const reference = store.create(owner, options.text ?? 'Total 42')!;
+      if (options.attach !== false)
+        fixture.controller.attachArtifacts(started.sessionId, [reference]);
+      plans.push(
+        options.planned?.(reference.artifactId) ?? {
+          type: 'type',
+          artifactRef: reference.artifactId,
+        },
+      );
+      options.beforeRelease?.(fixture.controller, { sessionId: started.sessionId, store, owner });
+      release();
+      return { fixture, store, reference, owner, started, inputs };
+    }
+    /** A `type` is sent to the native one character at a time. */
+    const typedText = (fixture: ReturnType<typeof createFixture>) =>
+      fixture
+        .dispatchedActions()
+        .map((action) => (action.type === 'type' ? action.text : ''))
+        .join('');
+    const pending = (fixture: ReturnType<typeof createFixture>) =>
+      fixture.approvals.filter((approval) => approval.state === 'pending').at(-1);
+    const answer = (fixture: ReturnType<typeof createFixture>, decision: 'allow_once' | 'deny') => {
+      const card = pending(fixture)!;
+      return fixture.controller.resolveApproval({
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        decision,
+        challenge: card.challenge,
+      });
+    };
+
+    it.each([
+      ['supervised', false],
+      ['supervised', true],
+      ['full_access_app', false],
+      ['full_access_app', true],
+    ] as const)(
+      'N21: raises a card for every paste in %s (authorizer: %s), and only allow_once or deny',
+      async (mode, authorizer) => {
+        const { fixture } = await pasteSession({
+          mode,
+          extra: authorizer ? { authorizationRequired: true } : {},
+        });
+        await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+        const card = pending(fixture)!;
+        expect(card).toMatchObject({
+          actionType: 'type',
+          eligibleForPlan: false,
+          allowedDecisions: ['allow_once', 'deny'],
+        });
+        // Nothing has been typed while the card is open.
+        expect(fixture.dispatchCount()).toBe(0);
+        await answer(fixture, 'deny');
+        await fixture.controller.dispose();
+      },
+    );
+
+    it('N26: types exactly what the card was about, one digest everywhere, and keeps the value out of every record', async () => {
+      const { fixture, store, owner, reference } = await pasteSession();
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      const card = pending(fixture)!;
+      expect(card.actionDigest).toBe(computerUseActionDigest(written));
+      // The card names the artifact, not its value (the excerpt is T15-9).
+      expect(JSON.stringify(card)).not.toContain('Total');
+      expect(card.preview).toContain(reference.artifactId);
+      await answer(fixture, 'allow_once');
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(typedText(fixture)).toBe('Total 42');
+      const audit = [...fixture.audits.values()].find((row) => row.actionKind === 'type')!;
+      expect(audit).toMatchObject({ state: 'applied', actionDigest: card.actionDigest });
+      const everything = JSON.stringify([
+        [...fixture.audits.values()],
+        fixture.statuses,
+        fixture.approvals,
+      ]);
+      expect(everything).not.toContain('Total');
+      expect(everything).not.toContain(createHash('sha256').update('Total 42').digest('hex'));
+      // Used up by the paste.
+      expect(store.take([reference.artifactId], owner)).toBeNull();
+      await fixture.controller.dispose();
+    });
+
+    it('does not use the artifact up when the card is denied', async () => {
+      const { fixture, store, owner, reference } = await pasteSession();
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      await answer(fixture, 'deny');
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('paused'));
+      expect(fixture.dispatchCount()).toBe(0);
+      expect(store.take([reference.artifactId], owner)).toEqual(['Total 42']);
+      await fixture.controller.dispose();
+    });
+
+    it('N22: refuses a browser as the destination before any card, and keeps the artifact', async () => {
+      const { fixture, store, owner, reference } = await pasteSession({
+        extra: { bundleId: 'com.google.Chrome' },
+      });
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(fixture.dispatchCount()).toBe(0);
+      expect([...fixture.audits.values()]).toEqual([
+        expect.objectContaining({
+          actionKind: 'type',
+          state: 'rejected',
+          reasonCode: 'artifact_paste_refused',
+        }),
+      ]);
+      expect(store.take([reference.artifactId], owner)).toEqual(['Total 42']);
+      await fixture.controller.dispose();
+    });
+
+    it('N24: a value with a line feed cannot be typed but can be set', async () => {
+      const typed = await pasteSession({ text: 'a\nb' });
+      await vi.waitFor(() => expect(typed.fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(typed.fixture.approvals).toEqual([]);
+      expect([...typed.fixture.audits.values()][0]).toMatchObject({
+        state: 'rejected',
+        reasonCode: 'artifact_paste_refused',
+      });
+      await typed.fixture.controller.dispose();
+      const set = await pasteSession({
+        text: 'a\nb',
+        planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+      });
+      await vi.waitFor(() => expect(pending(set.fixture)).toBeDefined());
+      expect(pending(set.fixture)).toMatchObject({ actionType: 'set_text' });
+      await answer(set.fixture, 'allow_once');
+      await vi.waitFor(() => expect(set.fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(set.fixture.dispatchedActions()).toEqual([
+        { type: 'set_text', targetId: 'node-1', text: 'a\nb' },
+      ]);
+      await set.fixture.controller.dispose();
+    });
+
+    it.each([
+      ['the host cannot paste', { extra: { artifactPaste: { supported: false } } }],
+      ['the artifact was never attached to this session', { attach: false }],
+      [
+        'the planner names an artifact it was not given',
+        { planned: () => ({ type: 'type', artifactRef: 'nope' }) as const },
+      ],
+    ])('says one thing and shows no card when %s', async (_name, options) => {
+      const { fixture } = await pasteSession(options as Parameters<typeof pasteSession>[0]);
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(fixture.dispatchCount()).toBe(0);
+      expect([...fixture.audits.values()][0]).toMatchObject({
+        state: 'rejected',
+        reasonCode: 'artifact_paste_refused',
+      });
+      await fixture.controller.dispose();
+    });
+
+    it('refuses an artifact of another Turn', async () => {
+      const store = new ComputerUseArtifactStore({ now: () => performance.now() });
+      const other = store.create(
+        { taskId: 'task-1', turnId: 'another-turn', policyEpoch: 0, sourceSessionId: 's' },
+        'Total 42',
+      )!;
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => (release = resolve));
+      const plans: ComputerUsePlannedAction[] = [{ type: 'type', artifactRef: other.artifactId }];
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactPaste: {},
+        artifactStore: store,
+        planner: {
+          plan: async () => {
+            await ready;
+            return plans.shift() ?? { type: 'finish' };
+          },
+        },
+      });
+      const started = await start(fixture);
+      fixture.controller.attachArtifacts(started.sessionId, [other]);
+      release();
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(fixture.dispatchCount()).toBe(0);
+      await fixture.controller.dispose();
+    });
+
+    it('N15: a value the planner writes itself is an ordinary typed text, with no card of its own', async () => {
+      const { fixture } = await pasteSession({ planned: () => written });
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(typedText(fixture)).toBe('Total 42');
+      await fixture.controller.dispose();
+    });
+
+    it('offers the planner the id and the size class, never the value', async () => {
+      const { fixture, inputs, reference } = await pasteSession();
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      expect(inputs[0]).toMatchObject({
+        artifacts: [{ artifactId: reference.artifactId, sizeClass: 'le_256' }],
+      });
+      expect(JSON.stringify(inputs)).not.toContain('Total');
+      await answer(fixture, 'deny');
+      await fixture.controller.dispose();
+    });
+
+    it('refuses a paste once the Task has been closed', async () => {
+      const { fixture, store, owner, reference } = await pasteSession({
+        beforeRelease: (controller) => controller.taskClosed('task-1'),
+      });
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(fixture.dispatchCount()).toBe(0);
+      // The Task's artifacts went with it.
+      expect(store.take([reference.artifactId], owner)).toBeNull();
+      await fixture.controller.dispose();
+    });
+
+    it('refuses a paste with an artifact made again after the Task was closed (same id, new generation)', async () => {
+      const { fixture } = await pasteSession({
+        fixedId: true,
+        beforeRelease: (controller, { sessionId, store, owner }) => {
+          controller.taskClosed('task-1');
+          // Made again and attached again: only the session's own generation says it is too late.
+          controller.attachArtifacts(sessionId, [store.create(owner, 'Total 42')!]);
+        },
+      });
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect(fixture.approvals).toEqual([]);
+      expect(fixture.dispatchCount()).toBe(0);
+      await fixture.controller.dispose();
+    });
+
+    it('has no caller of attachArtifacts outside this file before T15-8', () => {
+      const directory = resolve(__dirname);
+      for (const name of readdirSync(directory).filter(
+        (file) => /\.tsx?$/u.test(file) && !/\.test\.tsx?$/u.test(file),
+      ))
+        if (name !== 'computer-use-controller.ts')
+          expect(readFileSync(resolve(directory, name), 'utf8'), name).not.toContain(
+            'attachArtifacts(',
+          );
     });
   });
 

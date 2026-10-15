@@ -3,11 +3,13 @@ import {
   COMPUTER_START_CHOICE_MAX_CHARACTERS,
   COMPUTER_START_MAX_CHOICES,
   computerUseActionSchema,
+  computerUsePlannedActionSchema,
   computerUseObservationSchema,
   COMPUTER_USE_LIMITS,
   type ComputerStartQuestion,
   providerExecutionRequestSchema,
   type ComputerUseAction,
+  type ComputerUsePlannedAction,
   type ComputerUseMode,
   type ProviderConnection,
   type ProviderExecutionRequest,
@@ -87,6 +89,7 @@ const COMPUTER_USE_BASE_ACTION_TYPES = [
 
 function buildComputerUseActionJsonSchema(
   actionTypes: readonly string[],
+  withArtifactRef = false,
 ): ProviderStructuredOutput['schema'] {
   return {
     type: 'object',
@@ -127,6 +130,7 @@ function buildComputerUseActionJsonSchema(
       answerBoolean: { type: 'boolean' },
       answerChoice: { type: 'integer', minimum: 0, maximum: COMPUTER_START_MAX_CHOICES - 1 },
       answerNumber: { type: 'string', maxLength: 32 },
+      ...(withArtifactRef ? { artifactRef: { type: 'string', maxLength: 128 } } : {}),
     },
     required: ['type'],
     additionalProperties: false,
@@ -144,10 +148,16 @@ export const computerUseActionJsonSchema = buildComputerUseActionJsonSchema(
  */
 export function computerUseActionJsonSchemaFor(
   artifactReadSupported: boolean,
+  /** `artifactRef` is offered: the host can paste and the session holds an artifact (T15-7). */
+  artifactPasteOffered = false,
 ): ProviderStructuredOutput['schema'] {
-  return artifactReadSupported
-    ? buildComputerUseActionJsonSchema([...COMPUTER_USE_BASE_ACTION_TYPES, 'copy'])
-    : computerUseActionJsonSchema;
+  if (!artifactReadSupported && !artifactPasteOffered) return computerUseActionJsonSchema;
+  return buildComputerUseActionJsonSchema(
+    artifactReadSupported
+      ? [...COMPUTER_USE_BASE_ACTION_TYPES, 'copy']
+      : COMPUTER_USE_BASE_ACTION_TYPES,
+    artifactPasteOffered,
+  );
 }
 
 export type ComputerUseCompatibilityPermit = Readonly<{
@@ -196,6 +206,11 @@ export type ComputerUseProviderPlannerDeps = Readonly<{
   /** Main must set this only after the selected model's capability has been confirmed. */
   structuredOutputSupported?: boolean;
   /**
+   * Whether the host can paste an artifact (#785 T15-7). Absent means false: `artifactRef` is in
+   * neither the grammar nor the instruction, and one the provider returns anyway is invalid.
+   */
+  artifactPasteSupported?: boolean;
+  /**
    * Whether the native can read one node's value, so that `copy` may be offered (#785 T15-6b).
    * Absent means false: the grammar and the instruction do not mention `copy`, and a `copy` the
    * provider returns anyway is an invalid action.
@@ -214,7 +229,7 @@ export type ComputerUseProviderPlannerDeps = Readonly<{
 export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
   constructor(private readonly deps: ComputerUseProviderPlannerDeps) {}
 
-  async plan(input: ComputerUsePlannerInput): Promise<ComputerUseAction> {
+  async plan(input: ComputerUsePlannerInput): Promise<ComputerUsePlannedAction> {
     const observation = providerSafeObservation(input.observation);
     assertComputerUseCompatibilityPermit(
       this.deps.compatibilityPermit,
@@ -227,12 +242,16 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     validatePlannerInput({ ...input, observation });
     input.signal.throwIfAborted();
     const executionId = `computer:${observation.sessionId}:${observation.revision}:${input.round}`;
+    // `artifactRef` is in the grammar only while the host can paste and the session holds something.
+    const pasteOffered =
+      this.deps.artifactPasteSupported === true && (input.artifacts?.length ?? 0) > 0;
     const trustedInstruction = plannerInstruction(
       this.deps.task,
       this.deps.mode,
       this.deps.sessionGoal ?? null,
       input.question ?? null,
       this.deps.artifactReadSupported === true,
+      pasteOffered ? (input.artifacts ?? []) : [],
     );
     const prompt = plannerPrompt(observation);
     const egressPrompt = `${trustedInstruction}\n${prompt}`;
@@ -288,7 +307,10 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
         ? {
             structuredOutput: {
               name: 'computer_use_action_v1',
-              schema: computerUseActionJsonSchemaFor(this.deps.artifactReadSupported === true),
+              schema: computerUseActionJsonSchemaFor(
+                this.deps.artifactReadSupported === true,
+                pasteOffered,
+              ),
               strict: true,
             },
           }
@@ -348,8 +370,10 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
     }
     if (!completed || !resolved || output.trim() === '')
       throw new ComputerUsePlannerError('planner_no_action');
-    const action = parseComputerUseAction(output);
+    const action = parsePlannedComputerUseAction(output);
     if (action.type === 'copy' && this.deps.artifactReadSupported !== true)
+      throw new ComputerUsePlannerError('planner_action_schema_invalid');
+    if ('artifactRef' in action && !pasteOffered)
       throw new ComputerUsePlannerError('planner_action_schema_invalid');
     assertComputerUseCompatibilityPermit(
       this.deps.compatibilityPermit,
@@ -739,6 +763,28 @@ export class ComputerUsePlannerError extends Error {
   }
 }
 
+/** The planner's reply with an artifact paste allowed (#785 T15-7); the preflight keeps the strict one. */
+export function parsePlannedComputerUseAction(value: unknown): ComputerUsePlannedAction {
+  let decoded = value;
+  if (typeof value === 'string') {
+    if (Buffer.byteLength(value, 'utf8') > COMPUTER_USE_MAX_ACTION_JSON_BYTES)
+      throw new ComputerUsePlannerError('planner_output_too_large');
+    try {
+      decoded = JSON.parse(value) as unknown;
+    } catch {
+      throw new ComputerUsePlannerError('planner_output_not_json');
+    }
+  }
+  try {
+    const parsed = computerUsePlannedActionSchema.parse(decoded);
+    if (Buffer.byteLength(JSON.stringify(parsed), 'utf8') > COMPUTER_USE_MAX_ACTION_JSON_BYTES)
+      throw new Error('oversize');
+    return Object.freeze(parsed);
+  } catch {
+    throw new ComputerUsePlannerError('planner_action_schema_invalid');
+  }
+}
+
 export function parseComputerUseAction(value: unknown): ComputerUseAction {
   if (
     typeof value === 'string' &&
@@ -867,6 +913,7 @@ function plannerInstruction(
   sessionGoal: string | null = null,
   sessionQuestion: ComputerStartQuestion | null = null,
   artifactReadSupported = false,
+  artifacts: readonly Readonly<{ artifactId: string; sizeClass: string }>[] = [],
 ): string {
   const objective = (task.goal ?? task.title).normalize('NFKC').slice(0, 4_096);
   // Normalised here rather than trusting the caller to have done it. This string reaches a provider
@@ -892,6 +939,15 @@ function plannerInstruction(
         ? 'Mode is observe_only. Return only wait, copy or finish; never propose input.'
         : 'Mode is observe_only. Return only wait or finish; never propose input.'
       : `Mode is ${mode}. Main policy decides whether an input action is allowed.`,
+    ...(artifacts.length > 0
+      ? [
+          'type and set_text may take artifactRef instead of text: the id of a value kept for this session. Each paste is shown to a person first, and you are not shown the value.',
+          ...artifacts.map(
+            (artifact) =>
+              `artifact ${JSON.stringify(artifact.artifactId)} size ${artifact.sizeClass}`,
+          ),
+        ]
+      : []),
     ...(artifactReadSupported
       ? [
           'copy takes a targetId and keeps the value of that one displayed text or ordinary input field for a later session. It is not input, and the value is never shown to you.',

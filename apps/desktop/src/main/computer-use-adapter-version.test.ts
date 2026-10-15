@@ -31,7 +31,7 @@ async function rootModule(name: string): Promise<Record<string, unknown>> {
 
 describe('Computer Use adapter version', () => {
   it('is the grammar that carries the closed answer (T15-2, decision 7)', () => {
-    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v3');
+    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v4');
     expect(PLANNER_ADAPTER_VERSION).toBe(COMPUTER_USE_PROVIDER_ADAPTER_VERSION);
   });
 

@@ -13,7 +13,7 @@ const fail = () => {
  * speaks v2 must not call itself v1, and the gate accepts only the current grammar, because a run
  * recorded against one grammar says nothing about a build that speaks another.
  */
-export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v3';
+export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v4';
 /**
  * Emitted together with the preflight `bindingDigest`. They are NOT recomputable from it: the
  * producer's binding digest commits to raw permit identity (session/connection/model/endpoint/

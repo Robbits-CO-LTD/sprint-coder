@@ -603,7 +603,7 @@ describe('ProviderComputerUsePlanner', () => {
   });
 
   it('versions the provider grammar that now carries the closed answer (decision 7)', () => {
-    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v3');
+    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v4');
     const properties = (computerUseActionJsonSchema as { properties: Record<string, unknown> })
       .properties;
     expect(properties['answerBoolean']).toEqual({ type: 'boolean' });
@@ -695,6 +695,91 @@ describe('ProviderComputerUsePlanner', () => {
           expect.any(Object),
         ],
       });
+    });
+  });
+
+  describe('artifactRef is offered only to a host that can paste, for a session that holds one (#785 T15-7)', () => {
+    const properties = (schema: unknown) =>
+      (schema as { properties: Record<string, unknown> }).properties;
+    const artifacts = [{ artifactId: 'artifact-1', sizeClass: 'le_256' }];
+    const ask = (
+      runtime: ProviderRuntime,
+      extra: { artifactPasteSupported?: boolean },
+      input: { artifacts?: typeof artifacts } = {},
+    ) =>
+      new ProviderComputerUsePlanner({ ...deps(runtime, true), ...extra }).plan({
+        observation,
+        round: 1,
+        signal: new AbortController().signal,
+        ...input,
+      });
+
+    it('puts artifactRef in the grammar only when asked to, and moves nothing else', () => {
+      expect(properties(computerUseActionJsonSchemaFor(false))).not.toHaveProperty('artifactRef');
+      expect(properties(computerUseActionJsonSchemaFor(false, true))).toHaveProperty(
+        'artifactRef',
+        {
+          type: 'string',
+          maxLength: 128,
+        },
+      );
+      const { artifactRef: _a, ...rest } = properties(computerUseActionJsonSchemaFor(false, true));
+      expect(rest).toEqual(properties(computerUseActionJsonSchema));
+    });
+
+    it.each([
+      ['the host can paste and the session holds an artifact', true, artifacts, true],
+      ['the host cannot paste', false, artifacts, false],
+      ['the session holds nothing', true, [], false],
+    ])('with %s, the provider is told about it: %s', async (_name, supported, held, told) => {
+      let seen: unknown;
+      await ask(
+        runtimeFor((request) => (seen = request), '{"type":"finish"}'),
+        { artifactPasteSupported: supported },
+        { artifacts: held },
+      );
+      const request = JSON.stringify(seen);
+      expect(request.includes('artifactRef')).toBe(told);
+      expect(request.includes('artifact-1')).toBe(told);
+    });
+
+    it('accepts an artifactRef the provider returns only when it was offered', async () => {
+      const reply = '{"type":"set_text","targetId":"node-1","artifactRef":"artifact-1"}';
+      await expect(
+        ask(
+          runtimeFor(() => undefined, reply),
+          { artifactPasteSupported: true },
+          { artifacts },
+        ),
+      ).resolves.toEqual({ type: 'set_text', targetId: 'node-1', artifactRef: 'artifact-1' });
+      for (const [extra, input] of [
+        [{}, { artifacts }],
+        [{ artifactPasteSupported: true }, {}],
+      ] as const)
+        await expect(
+          ask(
+            runtimeFor(() => undefined, reply),
+            extra,
+            input,
+          ),
+        ).rejects.toMatchObject({
+          code: 'planner_action_schema_invalid',
+        });
+    });
+
+    it('rejects text and artifactRef together, and an artifactRef on any other action', async () => {
+      for (const reply of [
+        '{"type":"type","text":"x","artifactRef":"artifact-1"}',
+        '{"type":"click","x":0.5,"y":0.5,"artifactRef":"artifact-1"}',
+        '{"type":"type","artifactRef":""}',
+      ])
+        await expect(
+          ask(
+            runtimeFor(() => undefined, reply),
+            { artifactPasteSupported: true },
+            { artifacts },
+          ),
+        ).rejects.toMatchObject({ code: 'planner_action_schema_invalid' });
     });
   });
 
