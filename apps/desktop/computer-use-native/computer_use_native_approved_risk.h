@@ -20,7 +20,7 @@
 // open) are judged exactly as v1 judges them. Nothing sets the approved effect yet (the producer is
 // C4-2c-2); the default is no effect, which is v1.
 //
-// The words are lowercase ASCII or UTF-8, matched against one lowercase text (role, subrole, title,
+// The words are lowercase ASCII or UTF-8 (u8 literals; the file also carries a BOM), matched against one lowercase text (role, subrole, title,
 // description, help, identifier and placeholder joined by newlines), like v1 does. Words that are
 // "bounded" must not touch an ASCII letter or digit on either side.
 
@@ -36,32 +36,51 @@ namespace sprint_coder::computer_use {
 namespace high_impact_terms {
 
 // CONFIRMATION words, matched anywhere in the text.
-inline constexpr std::array<std::string_view, 15> kConfirmationSubstring = {
-    "payment", "checkout", "purchase", "billing", "credit card", "card number", "wire transfer",
-    "contract", "agreement", "sign agreement", "決済", "支払い", "支払う", "購入",
-    "注文を確定"};
-inline constexpr std::array<std::string_view, 5> kConfirmationSubstringJa = {
-    "注文する", "請求", "送金", "契約", "署名"};
+inline constexpr std::array<std::u8string_view, 15> kConfirmationSubstring = {
+    u8"payment", u8"checkout", u8"purchase", u8"billing", u8"credit card", u8"card number", u8"wire transfer",
+    u8"contract", u8"agreement", u8"sign agreement", u8"決済", u8"支払い", u8"支払う", u8"購入",
+    u8"注文を確定"};
+inline constexpr std::array<std::u8string_view, 5> kConfirmationSubstringJa = {
+    u8"注文する", u8"請求", u8"送金", u8"契約", u8"署名"};
 // CONFIRMATION words that must stand alone (bounded).
-inline constexpr std::array<std::string_view, 15> kConfirmationBounded = {
-    "pay",      "pay now",    "place order", "submit order", "complete order",
-    "buy now",  "pagar",      "comprar",     "acheter",      "bestellen",
-    "bezahlen", "pagare",     "acquistare",  "betalen",      "kopen"};
+inline constexpr std::array<std::u8string_view, 15> kConfirmationBounded = {
+    u8"pay",      u8"pay now",    u8"place order", u8"submit order", u8"complete order",
+    u8"buy now",  u8"pagar",      u8"comprar",     u8"acheter",      u8"bestellen",
+    u8"bezahlen", u8"pagare",     u8"acquistare",  u8"betalen",      u8"kopen"};
 
 // Everything else v1 calls high impact: never relaxed.
-inline constexpr std::array<std::string_view, 12> kOtherSubstring = {
-    "installer", "install application", "administrator", "admin privileges", "sudo",
-    "root access", "security settings", "privacy settings", "firewall",
-    "accessibility permission", "screen recording permission", "インストール"};
-inline constexpr std::array<std::string_view, 4> kOtherSubstringJa = {
-    "管理者", "セキュリティ", "プライバシー", "ファイアウォール"};
+inline constexpr std::array<std::u8string_view, 12> kOtherSubstring = {
+    u8"installer", u8"install application", u8"administrator", u8"admin privileges", u8"sudo",
+    u8"root access", u8"security settings", u8"privacy settings", u8"firewall",
+    u8"accessibility permission", u8"screen recording permission", u8"インストール"};
+inline constexpr std::array<std::u8string_view, 4> kOtherSubstringJa = {
+    u8"管理者", u8"セキュリティ", u8"プライバシー", u8"ファイアウォール"};
 // Command surfaces, bounded.
-inline constexpr std::array<std::string_view, 12> kOtherBounded = {
-    "integrated terminal", "terminal", "terminal.app", "console", "shell", "powershell",
-    "powershell.exe", "command prompt", "cmd.exe", "run script", "shell script",
-    "script console"};
-inline constexpr std::array<std::string_view, 5> kOtherSurfaceJa = {
-    "ターミナル", "コンソール", "シェル", "コマンドプロンプト", "スクリプトを実行"};
+inline constexpr std::array<std::u8string_view, 12> kOtherBounded = {
+    u8"integrated terminal", u8"terminal", u8"terminal.app", u8"console", u8"shell", u8"powershell",
+    u8"powershell.exe", u8"command prompt", u8"cmd.exe", u8"run script", u8"shell script",
+    u8"script console"};
+inline constexpr std::array<std::u8string_view, 5> kOtherSurfaceJa = {
+    u8"ターミナル", u8"コンソール", u8"シェル", u8"コマンドプロンプト", u8"スクリプトを実行"};
+
+// No word is empty (an empty word would match every text).
+template <std::size_t N>
+[[nodiscard]] constexpr bool NoEmptyWord(const std::array<std::u8string_view, N> &words) {
+  for (const std::u8string_view word : words)
+    if (word.empty()) return false;
+  return true;
+}
+static_assert(NoEmptyWord(kConfirmationSubstring) && NoEmptyWord(kConfirmationSubstringJa) &&
+                  NoEmptyWord(kConfirmationBounded) && NoEmptyWord(kOtherSubstring) &&
+                  NoEmptyWord(kOtherSubstringJa) && NoEmptyWord(kOtherBounded) &&
+                  NoEmptyWord(kOtherSurfaceJa),
+              "an empty high-impact word would match every text");
+
+// The words are u8 literals (like the classifier's lexicon), so no compiler character set can misread
+// them; they are matched as bytes.
+[[nodiscard]] inline std::string_view Bytes(std::u8string_view term) {
+  return std::string_view(reinterpret_cast<const char *>(term.data()), term.size());
+}
 
 [[nodiscard]] inline bool IsTermContinuation(unsigned char character) {
   return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9');
@@ -87,17 +106,17 @@ inline constexpr std::array<std::string_view, 5> kOtherSurfaceJa = {
 
 template <std::size_t N>
 [[nodiscard]] inline bool AnySubstring(std::string_view haystack,
-                                       const std::array<std::string_view, N> &needles) {
-  for (const std::string_view needle : needles)
-    if (ContainsSubstring(haystack, needle)) return true;
+                                       const std::array<std::u8string_view, N> &needles) {
+  for (const std::u8string_view needle : needles)
+    if (ContainsSubstring(haystack, Bytes(needle))) return true;
   return false;
 }
 
 template <std::size_t N>
 [[nodiscard]] inline bool AnyBounded(std::string_view haystack,
-                                     const std::array<std::string_view, N> &needles) {
-  for (const std::string_view needle : needles)
-    if (ContainsBounded(haystack, needle)) return true;
+                                     const std::array<std::u8string_view, N> &needles) {
+  for (const std::u8string_view needle : needles)
+    if (ContainsBounded(haystack, Bytes(needle))) return true;
   return false;
 }
 

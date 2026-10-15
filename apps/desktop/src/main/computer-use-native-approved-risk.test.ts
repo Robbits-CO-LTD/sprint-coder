@@ -59,10 +59,72 @@ describe('approved risk and approval offer (classifier v2, C4-2c-1)', () => {
     }
   });
 
-  it('carries the Japanese words of the table in a way no compiler character set can misread (BOM)', () => {
+  it('writes every word of the table as a u8 literal, and the file starts with a BOM like the classifier header', () => {
     expect(
       readFileSync(join(nativeDirectory, 'computer_use_native_approved_risk.h')).subarray(0, 3),
     ).toEqual(Buffer.from([0xef, 0xbb, 0xbf]));
+  });
+
+  it('has no narrow string literal in the word table, and no word outside the u8 arrays', () => {
+    const table = /namespace high_impact_terms \{[\s\S]*?\} \/\/ namespace high_impact_terms/u.exec(
+      risk,
+    )![0];
+    const literals = [...table.matchAll(/(u8)?"([^"\n]*)"/gu)];
+    expect(literals.length).toBeGreaterThan(60);
+    // (the compile-time message of the empty-word check is the one narrow literal)
+    for (const literal of literals.filter((entry) => !entry[2]!.includes('empty high-impact word')))
+      expect(literal[1], literal[0]).toBe('u8');
+    expect(table).not.toMatch(/std::array<std::string_view/u);
+    // An empty word would match every text; the header refuses it at compile time.
+    expect(risk).toContain('NoEmptyWord(kConfirmationSubstring)');
+    expect(literals.some((literal) => literal[2] === '')).toBe(false);
+  });
+
+  it('has the same words in the ADR classification table as in the header, group by group', () => {
+    const adr = readFileSync(
+      join(__dirname, '../../../../tasks/designs/adr-computer-use-agent-driven-v2.md'),
+      'utf8',
+    );
+    const wordsOf = (name: string): string[] => {
+      const body = new RegExp(`${name} = \\{([\\s\\S]*?)\\};`, 'u').exec(risk)![1]!;
+      return [...body.matchAll(/u8"([^"]*)"/gu)].map((match) => match[1]!);
+    };
+    const adrWords = (label: string): string[] => {
+      const line = adr.split(/\r?\n/u).find((entry) => entry.includes(label));
+      expect(line, label).toBeDefined();
+      // The words follow the label's colon (the label itself may name a word in backticks).
+      const words = line!.slice(line!.indexOf(': ') + 2);
+      return [...words.matchAll(/`([^`]+)`/gu)].map((match) => match[1]!);
+    };
+    const same = (adrSide: string[], headerSide: string[], what: string): void => {
+      expect(new Set(adrSide).size, `${what}: duplicate in the ADR`).toBe(adrSide.length);
+      expect([...adrSide].sort(), what).toEqual([...headerSide].sort());
+    };
+    same(
+      adrWords('確定・部分一致:'),
+      [...wordsOf('kConfirmationSubstring'), ...wordsOf('kConfirmationSubstringJa')],
+      'confirmation (substring)',
+    );
+    same(adrWords('確定・単独の語'), wordsOf('kConfirmationBounded'), 'confirmation (bounded)');
+    same(
+      adrWords('緩めない・曖昧語'),
+      [...wordsOf('kOtherSubstring'), ...wordsOf('kOtherSubstringJa')],
+      'ambiguous',
+    );
+    same(
+      adrWords('緩めない・実行面'),
+      [...wordsOf('kOtherBounded'), ...wordsOf('kOtherSurfaceJa')],
+      'surface',
+    );
+  });
+
+  it('keeps the ADR bullets of C4-2b and C4-2c-1 on their own lines', () => {
+    const adr = readFileSync(
+      join(__dirname, '../../../../tasks/designs/adr-computer-use-agent-driven-v2.md'),
+      'utf8',
+    );
+    for (const lead of ['**C4-2b の契約', '**C4-2c-1 の契約', '**高影響語の分類表'])
+      expect(adr, lead).toMatch(new RegExp(`(^|\\n) {4}- ${lead.replace(/\*/gu, '\\*')}`, 'u'));
   });
 
   it('moves no version', () => {

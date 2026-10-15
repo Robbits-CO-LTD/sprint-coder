@@ -6667,43 +6667,75 @@ bool HighImpact(std::string_view text) {
 bool CheckNativeApprovedRisk() {
   using namespace sprint_coder::computer_use;
 
-  // The words: the union of the two sides is the frozen v1 vocabulary, nothing is on both sides and
-  // nothing is lost or added. Substring and bounded words are kept apart (the matching differs).
+  // The words. Four groups, each compared whole (==) with the ADR's classification table; a word that
+  // moves from one group to another, is added or is dropped fails here. The union of the groups is
+  // the frozen v1 vocabulary, and nothing is on two sides.
   {
-    std::set<std::string> confirmation_substring;
-    std::set<std::string> confirmation_bounded;
-    std::set<std::string> other_substring;
-    std::set<std::string> other_bounded;
-    for (const auto term : high_impact_terms::kConfirmationSubstring) confirmation_substring.insert(std::string(term));
-    for (const auto term : high_impact_terms::kConfirmationSubstringJa) confirmation_substring.insert(std::string(term));
-    for (const auto term : high_impact_terms::kConfirmationBounded) confirmation_bounded.insert(std::string(term));
-    for (const auto term : high_impact_terms::kOtherSubstring) other_substring.insert(std::string(term));
-    for (const auto term : high_impact_terms::kOtherSubstringJa) other_substring.insert(std::string(term));
-    for (const auto term : high_impact_terms::kOtherSurfaceJa) other_substring.insert(std::string(term));
-    for (const auto term : high_impact_terms::kOtherBounded) other_bounded.insert(std::string(term));
+    using high_impact_terms::Bytes;
+    const auto to_set = [](const auto &first, const auto &second) {
+      std::set<std::string> out;
+      for (const auto term : first) out.insert(std::string(Bytes(term)));
+      for (const auto term : second) out.insert(std::string(Bytes(term)));
+      return out;
+    };
+    const std::array<std::u8string_view, 0> none{};
+    const std::set<std::string> confirmation_substring =
+        to_set(high_impact_terms::kConfirmationSubstring, high_impact_terms::kConfirmationSubstringJa);
+    const std::set<std::string> confirmation_bounded = to_set(high_impact_terms::kConfirmationBounded, none);
+    const std::set<std::string> ambiguous = to_set(high_impact_terms::kOtherSubstring, high_impact_terms::kOtherSubstringJa);
+    const std::set<std::string> surface_substring = to_set(high_impact_terms::kOtherSurfaceJa, none);
+    const std::set<std::string> surface_bounded = to_set(high_impact_terms::kOtherBounded, none);
+    const std::set<std::string> expected_confirmation_substring = {
+        "payment", "checkout", "purchase", "billing", "credit card", "card number", "wire transfer",
+        "contract", "agreement", "sign agreement", u8"決済"_u8, u8"支払い"_u8, u8"支払う"_u8, u8"購入"_u8,
+        u8"注文を確定"_u8, u8"注文する"_u8, u8"請求"_u8, u8"送金"_u8, u8"契約"_u8, u8"署名"_u8};
+    const std::set<std::string> expected_confirmation_bounded = {
+        "pay", "pay now", "place order", "submit order", "complete order", "buy now", "pagar", "comprar",
+        "acheter", "bestellen", "bezahlen", "pagare", "acquistare", "betalen", "kopen"};
+    const std::set<std::string> expected_ambiguous = {
+        "installer", "install application", "administrator", "admin privileges", "sudo", "root access",
+        "security settings", "privacy settings", "firewall", "accessibility permission",
+        "screen recording permission", u8"インストール"_u8, u8"管理者"_u8, u8"セキュリティ"_u8,
+        u8"プライバシー"_u8, u8"ファイアウォール"_u8};
+    const std::set<std::string> expected_surface_substring = {
+        u8"ターミナル"_u8, u8"コンソール"_u8, u8"シェル"_u8, u8"コマンドプロンプト"_u8, u8"スクリプトを実行"_u8};
+    const std::set<std::string> expected_surface_bounded = {
+        "integrated terminal", "terminal", "terminal.app", "console", "shell", "powershell", "powershell.exe",
+        "command prompt", "cmd.exe", "run script", "shell script", "script console"};
+    if (!Check(confirmation_substring == expected_confirmation_substring, "approved-risk-confirmation-substring-set")) return false;
+    if (!Check(confirmation_bounded == expected_confirmation_bounded, "approved-risk-confirmation-bounded-set")) return false;
+    if (!Check(ambiguous == expected_ambiguous, "approved-risk-ambiguous-set")) return false;
+    if (!Check(surface_substring == expected_surface_substring, "approved-risk-surface-substring-set")) return false;
+    if (!Check(surface_bounded == expected_surface_bounded, "approved-risk-surface-bounded-set")) return false;
+    // No empty word (it would match everything) and no duplicate inside an array.
+    for (const auto *group : {&confirmation_substring, &confirmation_bounded, &ambiguous, &surface_substring,
+                              &surface_bounded})
+      if (!Check(group->find("") == group->end(), "approved-risk-no-empty-word")) return false;
+    if (!Check(high_impact_terms::kConfirmationSubstring.size() + high_impact_terms::kConfirmationSubstringJa.size() ==
+                       confirmation_substring.size() &&
+                   high_impact_terms::kConfirmationBounded.size() == confirmation_bounded.size() &&
+                   high_impact_terms::kOtherSubstring.size() + high_impact_terms::kOtherSubstringJa.size() ==
+                       ambiguous.size() &&
+                   high_impact_terms::kOtherSurfaceJa.size() == surface_substring.size() &&
+                   high_impact_terms::kOtherBounded.size() == surface_bounded.size(),
+               "approved-risk-no-duplicate-word")) return false;
+    // The union of the groups is the frozen v1 vocabulary, and no word is on two sides.
+    std::set<std::string> union_substring = confirmation_substring;
+    union_substring.insert(ambiguous.begin(), ambiguous.end());
+    union_substring.insert(surface_substring.begin(), surface_substring.end());
+    std::set<std::string> union_bounded = confirmation_bounded;
+    union_bounded.insert(surface_bounded.begin(), surface_bounded.end());
     std::set<std::string> old_substring;
     std::set<std::string> old_bounded;
-    for (const auto term : frozen_v1::kSubstring) old_substring.insert(std::string(term));
-    for (const auto term : frozen_v1::kSubstringSurfaceJa) old_substring.insert(std::string(term));
-    for (const auto term : frozen_v1::kBoundedPay) old_bounded.insert(std::string(term));
-    for (const auto term : frozen_v1::kBoundedSurface) old_bounded.insert(std::string(term));
-    std::set<std::string> union_substring = confirmation_substring;
-    union_substring.insert(other_substring.begin(), other_substring.end());
-    std::set<std::string> union_bounded = confirmation_bounded;
-    union_bounded.insert(other_bounded.begin(), other_bounded.end());
+    for (const auto &term : frozen_v1::kSubstring) old_substring.insert(term);
+    for (const auto &term : frozen_v1::kSubstringSurfaceJa) old_substring.insert(term);
+    for (const auto &term : frozen_v1::kBoundedPay) old_bounded.insert(term);
+    for (const auto &term : frozen_v1::kBoundedSurface) old_bounded.insert(term);
     if (!Check(union_substring == old_substring && union_bounded == old_bounded,
                "approved-risk-union-is-the-v1-vocabulary")) return false;
-    if (!Check(union_substring.size() == confirmation_substring.size() + other_substring.size() &&
-                   union_bounded.size() == confirmation_bounded.size() + other_bounded.size(),
+    if (!Check(union_substring.size() == confirmation_substring.size() + ambiguous.size() + surface_substring.size() &&
+                   union_bounded.size() == confirmation_bounded.size() + surface_bounded.size(),
                "approved-risk-no-word-on-both-sides")) return false;
-    // The ambiguous words are on the side that is never relaxed.
-    for (const std::string &word : std::vector<std::string>{"security settings", "administrator", "admin privileges", "installer",
-                             "install application", u8"インストール"_u8, u8"管理者"_u8, u8"セキュリティ"_u8})
-      if (!Check(other_substring.contains(word), "approved-risk-ambiguous-word-is-never-relaxed")) return false;
-    for (const std::string &word : std::vector<std::string>{"payment", "checkout", "purchase", "billing", "credit card", "card number",
-                             "wire transfer", "contract", "agreement", "sign agreement", u8"決済"_u8, u8"購入"_u8,
-                             u8"送金"_u8, u8"契約"_u8, u8"署名"_u8})
-      if (!Check(confirmation_substring.contains(word), "approved-risk-confirmation-word")) return false;
   }
 
   // The text judgement equals the frozen v1 one on a corpus: every word alone and with every kind of
