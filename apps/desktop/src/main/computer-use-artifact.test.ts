@@ -148,6 +148,9 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['a 17-digit card number', '47777777777777777'],
     ['an 18-digit card number', '477777777777777776'],
     ['a 19-digit card number', '4777777777777777775'],
+    ['a card number followed by an expiry date', '4111 1111 1111 1111 12/28'],
+    ['a card number followed by a CVV', '4111 1111 1111 1111 123'],
+    ['a card number after a short number', '1 4111 1111 1111 1111'],
     ['a six-digit code', '482913'],
     ['an eight-digit code with spaces around', '  12345678 '],
   ])('flags %s', (_name, text) => {
@@ -161,7 +164,7 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['a code inside a sentence', 'Order 482913 shipped'],
     ['a 16-digit number that fails Luhn', '4111 1111 1111 1112'],
     ['a 12-digit number that passes Luhn', '477777777772'],
-    ['a 20-digit number that passes Luhn', '47777777777777777774'],
+    ['an unseparated 18-digit run that fails Luhn as a whole', '411111111111111112'],
     ['sk- glued to a word', 'task-aaaaaaaaaaaaaaaaaaaaaa'],
     ['sk- after an underscore', 'my_sk-aaaaaaaaaaaaaaaaaaaaaa'],
     ['a dotted version', '1.2.3'],
