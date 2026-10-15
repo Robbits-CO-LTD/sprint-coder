@@ -183,13 +183,13 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
 
   it('returns the v1 receipt exactly as built, and cannot throw out of the shadow', () => {
     const wrapper =
-      /NativePreflightReceipt PerformNativePreflight\(const NativeDispatchRequest& request\) \{\s*NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;\s*NativePreflightReceipt receipt = PerformNativePreflightV1\(request, &v1_validation\);\s*ScheduleEffectShadow\(request, receipt\.decision == "ordinary", v1_validation\);\s*return receipt;\s*\}/u;
+      /NativePreflightReceipt PerformNativePreflight\(const NativeDispatchRequest& request,\s*PreflightRiskTrace\* trace = nullptr\) \{\s*NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;\s*NativePreflightReceipt receipt = PerformNativePreflightV1\(request, &v1_validation, trace\);\s*ScheduleEffectShadow\(request, receipt\.decision == "ordinary", v1_validation\);\s*return receipt;\s*\}/u;
     expect(macos).toMatch(wrapper);
     expect(shadowSection()).toContain('NativeTargetValidation v1_validation) noexcept {');
     expect(shadowSection()).toContain('catch (...)');
     // Nothing else calls the shadow, and the preflight worker still issues the ticket from the receipt.
     expect(macos.match(/RecordEffectShadow\(/gu)).toHaveLength(2);
-    expect(macos).toContain('work->receipt = PerformNativePreflight(work->request);');
+    expect(macos).toContain('work->receipt = PerformNativePreflight(work->request, &trace);');
     expect(macos).toContain('work->receipt = IssueOrdinaryTicket(work->request, work->owner);');
   });
 

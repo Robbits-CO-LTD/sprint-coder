@@ -43,6 +43,7 @@
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_native_approved_risk.h"
+#include "computer_use_native_approval_offer.h"
 #include "computer_use_effect_shadow.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_effect_measurement.h"
@@ -156,6 +157,9 @@ struct MacComputerUseSession {
   // state_mutex. It keeps a second approvalApprove of the same generation from being measured while
   // the first is, without burning the waiting intent.
   std::uint64_t approval_busy_generation = 0;
+  // The last approval generation an offer used (0: none). Only touched under state_mutex; the next
+  // one is NextNativeApprovalGeneration of it, and an offer is never made once none is left.
+  std::uint64_t approval_generation_counter = 0;
 };
 
 // The caller holds state_mutex. Any state change a ticket could depend on supersedes it.
@@ -4384,6 +4388,11 @@ struct NativePreflightReceipt {
   std::string reason_code = "native_dispatch_failed";
   std::string denied_result = "rejected";
   std::string ticket;
+  // Only an approval offer (receipt version 2) carries these three.
+  std::uint64_t approval_generation = 0;
+  std::uint32_t remaining_ms = 0;
+  sprint_coder::computer_use::NativeApprovalEffect effect =
+      sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
 };
 
 struct NativePreflightDeniedEntry {
@@ -4463,6 +4472,14 @@ bool NativePreflightReceiptIsClosed(const NativePreflightReceipt& receipt) {
     return receipt.reason_code.empty() && receipt.denied_result.empty() &&
            sprint_coder::computer_use::IsValidNativeOrdinaryTicketToken(receipt.ticket);
   if (!receipt.ticket.empty()) return false;
+  // An approval offer: no ticket, no reason, no denied result, and a closed offer (a real
+  // generation Main can read as a number, a wait of 1 to 60,000 ms, an effect that has a word).
+  if (receipt.decision ==
+      sprint_coder::computer_use::NativePreflightDecisionName(
+          sprint_coder::computer_use::NativePreflightKind::kSingleUseApproval))
+    return receipt.reason_code.empty() && receipt.denied_result.empty() &&
+           sprint_coder::computer_use::NativeApprovalOfferIsClosed(
+               {receipt.approval_generation, receipt.remaining_ms, receipt.effect});
   if (receipt.decision == "replay")
     return receipt.reason_code.empty() && receipt.denied_result.empty();
   if (receipt.decision == "blocked" || receipt.decision == "takeover") {
@@ -4693,7 +4710,7 @@ AXUIElementRef FindBoundSemanticTarget(const NativeDispatchRequest& request,
     return nullptr;
   }
   *risk = ClassifyAccessibilityElement(target);
-  if (RiskOutcome(*risk, outcome)) {
+  if (RiskOutcome(*risk, outcome, request.approved_effect)) {
     CFRelease(target);
     return nullptr;
   }
@@ -4877,7 +4894,7 @@ bool RevalidateVisualPointBeforePost(const NativeDispatchRequest& request,
   std::string control_signature;
   const AxRiskClassification risk =
       ClassifyElementAtPoint(request.session->pid, point, &control_signature);
-  if (RiskOutcome(risk, failure)) return false;
+  if (RiskOutcome(risk, failure, request.approved_effect)) return false;
   if (control_signature.empty() ||
       !request.visual_control_signatures.contains(control_signature)) {
     *failure = MakeDispatchOutcome("rejected", "native_stale_observation");
@@ -4895,7 +4912,7 @@ bool RevalidateVisualPointBeforePost(const NativeDispatchRequest& request,
   control_signature.clear();
   const AxRiskClassification final_risk =
       ClassifyElementAtPoint(request.session->pid, point, &control_signature);
-  if (RiskOutcome(final_risk, failure)) return false;
+  if (RiskOutcome(final_risk, failure, request.approved_effect)) return false;
   if (control_signature.empty() ||
       !request.visual_control_signatures.contains(control_signature)) {
     *failure = MakeDispatchOutcome("rejected", "native_stale_observation");
@@ -4921,7 +4938,7 @@ NativeDispatchOutcome PerformVisualDispatch(const NativeDispatchRequest& request
   const AxRiskClassification risk =
       ClassifyElementAtPoint(request.session->pid, point, &control_signature);
   NativeDispatchOutcome outcome;
-  if (RiskOutcome(risk, &outcome)) return outcome;
+  if (RiskOutcome(risk, &outcome, request.approved_effect)) return outcome;
   if (control_signature.empty() ||
       !request.visual_control_signatures.contains(control_signature))
     return MakeDispatchOutcome("rejected", "native_stale_observation");
@@ -4980,7 +4997,7 @@ NativeDispatchOutcome PerformFocusedInputDispatch(
   const AxRiskClassification risk = ClassifyFocusedElement(
       request.session->pid, &current_control_signature);
   NativeDispatchOutcome outcome;
-  if (RiskOutcome(risk, &outcome)) return outcome;
+  if (RiskOutcome(risk, &outcome, request.approved_effect)) return outcome;
   if (request.focused_control_signature.empty() ||
       current_control_signature != request.focused_control_signature)
     return MakeDispatchOutcome("rejected", "native_stale_observation");
@@ -5061,8 +5078,23 @@ NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request
 // posts an event, performs an AX action, sets an AX value, activates an app, or increments the
 // input attempt counter. Dispatch still re-runs every guard (RiskOutcome included) after a ticket is
 // consumed; a ticket is a typed preflight proof, never permission to skip a guard.
+// The v1 classification of the target the preflight reached (the element and its parents), kept for
+// the route v2 step of a preflight, which needs to know WHY v1 stopped a control. Only a pointer the
+// caller passes is written; v1 itself reads nothing back and its answer does not depend on it.
+struct PreflightRiskTrace {
+  bool recorded = false;
+  AxRiskClassification risk;
+};
+
+void RecordPreflightRisk(PreflightRiskTrace* trace, const AxRiskClassification& risk) {
+  if (trace == nullptr) return;
+  trace->recorded = true;
+  trace->risk = risk;
+}
+
 NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& request,
-                                               NativeTargetValidation* initial_validation) {
+                                               NativeTargetValidation* initial_validation,
+                                               PreflightRiskTrace* trace = nullptr) {
   NativeTargetValidation validation = RevalidateBoundTarget(request);
   // Reported for the shadow only: whether the bound target could be re-validated at all.
   *initial_validation = validation;
@@ -5073,6 +5105,7 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
       request.kind == "toggle" || request.kind == "expand_collapse") {
     AxRiskClassification risk;
     AXUIElementRef target = FindBoundSemanticTarget(request, &risk, &outcome);
+    RecordPreflightRisk(trace, risk);
     if (target == nullptr) return PreflightReceiptFromOutcome(outcome);
     // FindBoundSemanticTarget returns a retained element.
     CFRelease(target);
@@ -5085,6 +5118,7 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
     std::string control_signature;
     const AxRiskClassification risk =
         ClassifyElementAtPoint(request.session->pid, point, &control_signature);
+    RecordPreflightRisk(trace, risk);
     if (RiskOutcome(risk, &outcome)) return PreflightReceiptFromOutcome(outcome);
     if (control_signature.empty() ||
         !request.visual_control_signatures.contains(control_signature))
@@ -5095,6 +5129,7 @@ NativePreflightReceipt PerformNativePreflightV1(const NativeDispatchRequest& req
     std::string current_control_signature;
     const AxRiskClassification risk =
         ClassifyFocusedElement(request.session->pid, &current_control_signature);
+    RecordPreflightRisk(trace, risk);
     if (RiskOutcome(risk, &outcome)) return PreflightReceiptFromOutcome(outcome);
     if (request.focused_control_signature.empty() ||
         current_control_signature != request.focused_control_signature)
@@ -5616,9 +5651,10 @@ void ScheduleEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary
 // END effect shadow capture
 
 // The v1 preflight decides; the shadow only watches. The receipt is returned exactly as v1 built it.
-NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request) {
+NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& request,
+                                              PreflightRiskTrace* trace = nullptr) {
   NativeTargetValidation v1_validation = NativeTargetValidation::kStaleObservation;
-  NativePreflightReceipt receipt = PerformNativePreflightV1(request, &v1_validation);
+  NativePreflightReceipt receipt = PerformNativePreflightV1(request, &v1_validation, trace);
   ScheduleEffectShadow(request, receipt.decision == "ordinary", v1_validation);
   return receipt;
 }
@@ -5872,10 +5908,17 @@ napi_value PreflightReceiptValue(napi_env env, const NativeDispatchRequest& requ
   napi_set_named_property(env, result, "deniedResult",
                          NullableStringValue(env, receipt.denied_result));
   napi_set_named_property(env, result, "ticket", NullableStringValue(env, receipt.ticket));
+  // An approval offer is a version 2 receipt of the core's own classifier version; every other
+  // receipt keeps the version 1 shape and the version 1 classifier.
+  const bool offer =
+      receipt.decision ==
+      sprint_coder::computer_use::NativePreflightDecisionName(
+          sprint_coder::computer_use::NativePreflightKind::kSingleUseApproval);
   napi_set_named_property(
       env, result, "classifierVersion",
       NumberValue(env, static_cast<double>(
-                           sprint_coder::computer_use::kNativePreflightClassifierVersion)));
+                           offer ? sprint_coder::computer_use::kNativeApprovalOfferClassifierVersion
+                                 : sprint_coder::computer_use::kNativePreflightClassifierVersion)));
   napi_set_named_property(env, result, "inputAttemptCount", NumberValue(env,
       static_cast<double>(request.session->input_api_attempts.load(std::memory_order_acquire))));
   napi_set_named_property(env, result, "requestId",
@@ -5887,6 +5930,17 @@ napi_value PreflightReceiptValue(napi_env env, const NativeDispatchRequest& requ
   napi_set_named_property(
       env, result, "observationRevision",
       NumberValue(env, static_cast<double>(request.observation_revision)));
+  if (offer) {
+    napi_set_named_property(
+        env, result, "receiptVersion",
+        NumberValue(env, static_cast<double>(sprint_coder::computer_use::kNativePreflightReceiptVersion)));
+    napi_set_named_property(env, result, "approvalGeneration",
+                            NumberValue(env, static_cast<double>(receipt.approval_generation)));
+    napi_set_named_property(env, result, "remainingMs",
+                            NumberValue(env, static_cast<double>(receipt.remaining_ms)));
+    const std::string_view effect = sprint_coder::computer_use::NativeApprovalEffectName(receipt.effect);
+    napi_set_named_property(env, result, "effect", StringValue(env, std::string(effect).c_str()));
+  }
   return result;
 }
 
@@ -6381,13 +6435,116 @@ NativePreflightReceipt IssueOrdinaryTicket(const NativeDispatchRequest& request,
   return receipt;
 }
 
+// What native measures *now* for an approval; defined below with the approval workers.
+sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApproval(
+    const NativeDispatchRequest& request);
+
+// Offers one approval: a waiting intent in the session's approval slot, and the version 2 receipt that
+// says so. Under the state lock, like IssueOrdinaryTicket: not canceled, this preflight still owns
+// the slot, a generation Main can read as a number is left, and the binding is valid as a whole. No
+// ordinary ticket is made for it. The intent token never leaves this function; the person's answer
+// comes back as approvalApprove for the generation in the receipt.
+NativePreflightReceipt IssueApprovalOffer(
+    const NativeDispatchRequest& request, std::uint64_t owner,
+    const sprint_coder::computer_use::NativeApprovalMeasurement& measured) {
+  namespace binding = sprint_coder::computer_use;
+  std::string token;
+  if (!GenerateOrdinaryTicketToken(&token))
+    return MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+  MacComputerUseSession& session = *request.session;
+  std::lock_guard<std::mutex> state_lock(session.state_mutex);
+  if (!DispatchCancellationStillValid(request)) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("canceled", "native_canceled_pre_dispatch");
+  }
+  if (session.preflight_owner != owner ||
+      session.ticket_generation.load(std::memory_order_acquire) != owner) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("rejected", "native_ticket_superseded");
+  }
+  std::uint64_t now_ns = 0;
+  std::uint64_t generation = 0;
+  binding::NativeApprovalOfferContext context;
+  context.session_id = request.session_id;
+  context.task_id = session.task_id;
+  context.turn_id = session.turn_id;
+  context.approval_request_id = request.request_id;
+  context.action_digest = request.action_digest;
+  context.payload_digest = request.payload_digest;
+  context.cancel_epoch = request.cancel_epoch;
+  context.observation_revision = request.observation_revision;
+  context.ticket_generation = owner;
+  binding::NativeApprovalIntentBinding intent;
+  if (!ReadNativeMonotonicNs(&now_ns) ||
+      !binding::NextNativeApprovalGeneration(session.approval_generation_counter, &generation)) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+  }
+  context.approval_generation = generation;
+  if (!binding::BuildApprovalIntentBinding(measured, context, &intent) ||
+      !session.approval.Offer(token, std::move(intent), now_ns,
+                              binding::kNativeApprovalWaitMaxNs)) {
+    binding::ScrubNativeTicketString(&token);
+    return MakeDeniedReceipt("rejected", "native_ticket_unavailable");
+  }
+  binding::ScrubNativeTicketString(&token);
+  session.approval_generation_counter = generation;
+  NativePreflightReceipt receipt = MakeNullReceipt("");
+  receipt.decision = std::string(
+      binding::NativePreflightDecisionName(binding::NativePreflightKind::kSingleUseApproval));
+  receipt.approval_generation = generation;
+  receipt.remaining_ms =
+      binding::NativeApprovalRemainingMs(now_ns, now_ns + binding::kNativeApprovalWaitMaxNs);
+  receipt.effect = measured.effect;
+  return receipt;
+}
+
+// The route v2 step of a preflight. v1 has already decided (and a route v1 session never gets here:
+// the caller checks the route). A control v1 passed, or stopped for confirmation words alone, is
+// measured for an approval on the lane (no state lock); a measurement that needs a person pauses an
+// ordinary control, and one that is an approval-eligible effect becomes an offer instead of an
+// ordinary ticket. Everything else v1 said stands. The measurement is not eligible in a build that
+// attests classifier 1, so this offers nothing in production.
+NativePreflightReceipt ApplyApprovalOffer(const NativeDispatchRequest& request, std::uint64_t owner,
+                                          NativePreflightReceipt v1_receipt,
+                                          const PreflightRiskTrace& trace) {
+  namespace binding = sprint_coder::computer_use;
+  binding::V1PreflightFacts facts;
+  facts.ordinary = v1_receipt.decision == "ordinary";
+  facts.high_impact_takeover = v1_receipt.decision == "takeover" &&
+                               v1_receipt.reason_code == "native_high_impact_user_takeover";
+  facts.risk_recorded = trace.recorded;
+  facts.classified = trace.risk.classified;
+  facts.secure = trace.risk.secure;
+  facts.high_impact = trace.risk.high_impact;
+  facts.confirmation = trace.risk.high_impact_confirmation;
+  facts.other = trace.risk.high_impact_other;
+  if (!binding::PreflightMayBeMeasured(facts)) return v1_receipt;
+  const binding::NativeApprovalMeasurement measured = MeasureNativeApproval(request);
+  switch (binding::DecidePreflightV2(facts, measured)) {
+    case binding::PreflightV2Action::kOffer:
+      sprint_coder::computer_use::ScrubNativeTicketString(&v1_receipt.ticket);
+      return IssueApprovalOffer(request, owner, measured);
+    case binding::PreflightV2Action::kTakeover:
+      return PreflightReceiptFromOutcome(
+          MakeDispatchOutcome("rejected", "native_target_unclassified"));
+    case binding::PreflightV2Action::kKeepV1:
+      break;
+  }
+  return v1_receipt;
+}
+
 void ExecuteNativePreflight(napi_env env, void* data) {
   (void)env;
   auto* work = static_cast<AsyncNativePreflightWork*>(data);
   std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
   @autoreleasepool {
     try {
-      work->receipt = PerformNativePreflight(work->request);
+      PreflightRiskTrace trace;
+      work->receipt = PerformNativePreflight(work->request, &trace);
+      // Only a session bound to route v2 gets the approval step; route v1 is v1, unchanged.
+      if (work->request.session->classifier_route == "v2")
+        work->receipt = ApplyApprovalOffer(work->request, work->owner, std::move(work->receipt), trace);
       if (work->receipt.decision == "ordinary")
         work->receipt = IssueOrdinaryTicket(work->request, work->owner);
     } catch (...) {
@@ -6807,6 +6964,10 @@ void ExecuteNativeApprovedDispatch(napi_env env, void* data) {
         }
         if (outcome.ok) {
           consumed = true;
+          // The one place an approved effect is set: this dispatch was approved for exactly the
+          // effect the fresh measurement just matched against the held ticket. It lets only the
+          // confirmation words of RiskOutcome through, for this dispatch and no other.
+          work->request.approved_effect = measured.effect;
           // A dispatch that goes on to run supersedes any ordinary ticket measured before it.
           session.ticket_generation.fetch_add(1, std::memory_order_acq_rel);
           session.ordinary_ticket.Invalidate();

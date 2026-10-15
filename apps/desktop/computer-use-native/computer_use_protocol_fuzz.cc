@@ -7078,6 +7078,83 @@ bool CheckNativeApprovalOffer() {
   return true;
 }
 
+// ---- Classifier v2, C4-2c-2: what a route v2 preflight does with the v1 answer (portable part) -----
+
+bool CheckNativePreflightV2() {
+  using namespace sprint_coder::computer_use;
+
+  // The approval generation: counted from 1, never past the largest safe integer, never wrapping.
+  {
+    std::uint64_t next = 99;
+    if (!Check(NextNativeApprovalGeneration(0, &next) && next == 1, "v2-generation-first")) return false;
+    if (!Check(NextNativeApprovalGeneration(41, &next) && next == 42, "v2-generation-next")) return false;
+    if (!Check(NextNativeApprovalGeneration(kNativeApprovalGenerationMax - 1, &next) &&
+                   next == kNativeApprovalGenerationMax && next == 9'007'199'254'740'991ULL,
+               "v2-generation-last-safe-integer")) return false;
+    next = 5;
+    if (!Check(!NextNativeApprovalGeneration(kNativeApprovalGenerationMax, &next) && next == 5 &&
+                   !NextNativeApprovalGeneration(std::numeric_limits<std::uint64_t>::max(), &next) && next == 5 &&
+                   !NextNativeApprovalGeneration(1, nullptr),
+               "v2-generation-exhausted")) return false;
+    NativeApprovalOffer offer{kNativeApprovalGenerationMax, 1, NativeApprovalEffect::kSupervisedAction};
+    if (!Check(NativeApprovalOfferIsClosed(offer), "v2-offer-at-the-largest-generation")) return false;
+    offer.approval_generation = kNativeApprovalGenerationMax + 1;
+    if (!Check(!NativeApprovalOfferIsClosed(offer), "v2-offer-past-the-largest-generation")) return false;
+  }
+
+  // The decision, over every combination of what v1 said and read, and of the measurement.
+  int offers = 0;
+  int takeovers = 0;
+  for (unsigned mask = 0; mask < 256; ++mask) {
+    V1PreflightFacts facts;
+    facts.ordinary = (mask & 1u) != 0;
+    facts.high_impact_takeover = (mask & 2u) != 0;
+    facts.risk_recorded = (mask & 4u) != 0;
+    facts.classified = (mask & 8u) != 0;
+    facts.secure = (mask & 16u) != 0;
+    facts.high_impact = (mask & 32u) != 0;
+    facts.confirmation = (mask & 64u) != 0;
+    facts.other = (mask & 128u) != 0;
+    // v1 cannot have been both ordinary and a pause; the table must still not offer anything for it.
+    const bool consistent = !(facts.ordinary && facts.high_impact_takeover);
+    const bool only_confirmation = facts.high_impact_takeover && facts.risk_recorded && facts.classified &&
+                                   !facts.secure && facts.high_impact && facts.confirmation && !facts.other;
+    if (!Check(V1StoppedOnlyByConfirmation(facts) == only_confirmation, "v2-stopped-only-by-confirmation"))
+      return false;
+    if (!Check(PreflightMayBeMeasured(facts) == (facts.ordinary || only_confirmation), "v2-may-be-measured"))
+      return false;
+    for (unsigned flags = 0; flags < 4; ++flags) {
+      NativeApprovalMeasurement measured;
+      measured.eligible = (flags & 1u) != 0;
+      measured.takeover = (flags & 2u) != 0;
+      const PreflightV2Action action = DecidePreflightV2(facts, measured);
+      PreflightV2Action expected = PreflightV2Action::kKeepV1;
+      if (facts.ordinary || only_confirmation) {
+        if (measured.takeover)
+          expected = facts.ordinary ? PreflightV2Action::kTakeover : PreflightV2Action::kKeepV1;
+        else if (measured.eligible)
+          expected = PreflightV2Action::kOffer;
+      }
+      if (!Check(action == expected, "v2-decision-table")) return false;
+      if (consistent && action == PreflightV2Action::kOffer) ++offers;
+      if (consistent && action == PreflightV2Action::kTakeover) ++takeovers;
+      // v2 never loosens a refusal: a secure, unclassified, command-surface or other pause is kept.
+      if (facts.secure || !facts.classified || facts.other || !facts.risk_recorded) {
+        if (!facts.ordinary && !Check(action == PreflightV2Action::kKeepV1, "v2-never-loosens-a-refusal"))
+          return false;
+      }
+      // A denial, a block and a replay (none of ordinary, nor the confirmation pause) are never measured.
+      if (!facts.ordinary && !facts.high_impact_takeover &&
+          !Check(action == PreflightV2Action::kKeepV1, "v2-keeps-every-other-v1-answer")) return false;
+    }
+  }
+  // Offers come from an ordinary control (any risk bits) and from the confirmation pause only.
+  if (!Check(offers > 0 && takeovers > 0, "v2-table-is-not-empty")) return false;
+
+  std::cout << "Computer Use native preflight v2 step: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -7103,6 +7180,7 @@ int main() {
   if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
+  if (!CheckNativePreflightV2()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
