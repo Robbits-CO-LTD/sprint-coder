@@ -742,6 +742,7 @@ function sessionView(
         : status.state === 'failed'
           ? '利用者の操作を待っています'
           : null,
+    copied: status.copied,
   };
 }
 
@@ -762,6 +763,17 @@ function approvalView(
     targetLabel: approval.targetLabel,
     impactLabel: approval.risk === 'high' ? '対象アプリ内を変更します' : '対象を観測します',
     escapedPreview: approval.preview === '' ? null : approval.preview,
+    ...(approval.transfer === undefined
+      ? {}
+      : {
+          transfer: {
+            sourceLabel: approval.transfer.sourceLabel,
+            destinationLabel: approval.transfer.destinationLabel,
+            destinationTarget: approval.transfer.destinationTarget ?? null,
+            sizeClass: approval.transfer.sizeClass,
+            excerpt: approval.transfer.excerpt,
+          },
+        }),
     allowedDecisions: approval.allowedDecisions,
     activationIntents,
   };

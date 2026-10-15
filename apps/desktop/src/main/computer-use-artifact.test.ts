@@ -6,7 +6,9 @@ import {
 } from '@sprint-coder/contracts';
 import {
   ComputerUseArtifactStore,
+  computerUseArtifactExcerpt,
   computerUseArtifactSizeClass,
+  computerUseDisplayLabel,
   looksLikeComputerUseSecret,
   normalizeComputerUseArtifactText,
   prepareComputerUseArtifactText,
@@ -105,6 +107,68 @@ describe('prepareComputerUseArtifactText', () => {
     const grows = '①'.repeat(COMPUTER_USE_ARTIFACT_LIMITS.maxBytes / 2);
     expect(Buffer.byteLength(grows, 'utf8')).toBeGreaterThan(COMPUTER_USE_ARTIFACT_LIMITS.maxBytes);
     expect(prepareComputerUseArtifactText(grows)).toMatchObject({ ok: true });
+  });
+});
+
+/** One code point, spelled by number so the source holds no invisible character. */
+const cp = (value: number): string => String.fromCodePoint(value);
+
+describe('what a person is shown of a value (N23, design 4.5, R13)', () => {
+  it.each([
+    ['LF and TAB become symbols', 'a\nb\tc', 'a⏎b⇥c'],
+    ['CRLF and a lone CR are one line symbol each', 'a\r\nb\rc', 'a⏎b⏎c'],
+    ['Hangul filler U+3164 (NFKC makes it U+1160)', `a${cp(0x3164)}b`, 'a⟦U+1160⟧b'],
+    ['Hangul choseong filler U+115F', `a${cp(0x115f)}b`, 'a⟦U+115F⟧b'],
+    ['Braille blank U+2800', `a${cp(0x2800)}b`, 'a⟦U+2800⟧b'],
+    ['half-width Hangul filler (via NFKC)', `a${cp(0xffa0)}b`, 'a⟦U+1160⟧b'],
+    ['zero-width space', `a${cp(0x200b)}b`, 'a⟦U+200B⟧b'],
+    ['right-to-left override', `a${cp(0x202e)}b`, 'a⟦U+202E⟧b'],
+    ['isolate marks', `a${cp(0x2066)}b${cp(0x2069)}`, 'a⟦U+2066⟧b⟦U+2069⟧'],
+    ['a Tag character', `a${cp(0xe0041)}b`, 'a⟦U+E0041⟧b'],
+    ['a variation selector', `a${cp(0xfe0f)}b`, 'a⟦U+FE0F⟧b'],
+    ['line and paragraph separators', `a${cp(0x2028)}b${cp(0x2029)}c`, 'a⟦U+2028⟧b⟦U+2029⟧c'],
+    ['a private-use character', `a${cp(0xe000)}b`, 'a⟦U+E000⟧b'],
+    ['a control character', `a${cp(7)}b`, 'a⟦U+0007⟧b'],
+    ['a lone surrogate', `a${String.fromCharCode(0xd800)}b`, 'a⟦U+D800⟧b'],
+    [
+      'combining marks beyond two in a row',
+      `e${cp(0x301)}${cp(0x302)}${cp(0x303)}${cp(0x304)}`,
+      `é${cp(0x302)}${cp(0x303)}⟦U+0304⟧`,
+    ],
+    ['a combining mark with nothing before it', `${cp(0x301)}a`, '⟦U+0301⟧a'],
+    ['the combining grapheme joiner', `a${cp(0x34f)}b`, 'a⟦U+034F⟧b'],
+  ])('%s', (_name, raw, expected) => {
+    expect(computerUseArtifactExcerpt(raw)).toBe(expected);
+  });
+
+  it('leaves ordinary text, accents and Japanese alone', () => {
+    for (const text of ['Total 42', 'café', 'こんにちは 世界', 'ก็ ที่']) {
+      expect(computerUseArtifactExcerpt(text)).toBe(text.normalize('NFKC'));
+    }
+  });
+
+  it('cuts at 256 code points of the source and says so', () => {
+    expect(computerUseArtifactExcerpt('x'.repeat(256))).toBe('x'.repeat(256));
+    expect(computerUseArtifactExcerpt('x'.repeat(257))).toBe(`${'x'.repeat(256)}…`);
+    // Counted in characters, not UTF-16 units: an astral character is one.
+    expect(computerUseArtifactExcerpt('😀'.repeat(256))).toBe('😀'.repeat(256));
+    // Escapes do not eat the budget of the characters after them.
+    expect(computerUseArtifactExcerpt(cp(0x200b).repeat(300))).toBe(`${'⟦U+200B⟧'.repeat(256)}…`);
+  });
+
+  it('shows what is pasted: no escaped character is ever shown plainly', () => {
+    const text = `pay ${cp(0x202e)}evil${cp(0x2066)} to ${cp(0x3164)}bob`;
+    const shown = computerUseArtifactExcerpt(text);
+    expect(shown).not.toContain(cp(0x202e));
+    expect(shown).not.toContain(cp(0x2066));
+    expect(shown).not.toContain(cp(0x1160));
+    expect(shown.replace(/⟦U\+[0-9A-F]+⟧/gu, '')).toBe('pay evil to bob');
+  });
+
+  it('labels from the screen are escaped and cut shorter', () => {
+    expect(computerUseDisplayLabel(`Bank${cp(0x202e)}.app`)).toBe('Bank⟦U+202E⟧.app');
+    expect(computerUseDisplayLabel('a'.repeat(65))).toBe(`${'a'.repeat(64)}…`);
+    expect(computerUseDisplayLabel('line\nbreak')).toBe('line⏎break');
   });
 });
 

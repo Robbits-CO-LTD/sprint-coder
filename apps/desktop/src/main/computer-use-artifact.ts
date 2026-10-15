@@ -58,6 +58,68 @@ export function normalizeComputerUseArtifactText(raw: string): NormalizedCompute
     ) as NormalizedComputerUseText;
 }
 
+// What a person is shown of a value (design 4.5, R13). Visible escapes for what would otherwise
+// make the screen say one thing and the paste another.
+const EXCERPT_LIMIT = 256;
+const LABEL_LIMIT = 64;
+// Invisible without being a space: Hangul fillers, Braille blank, Mongolian vowel separator,
+// combining grapheme joiner. (NFKC already turns the width variants into these.)
+const INVISIBLE_FILLERS = /(?:\u115F|\u1160|\u3164|\uFFA0|\u2800|\u180E|\u034F)/u;
+const VARIATION_SELECTOR = /[\uFE00-\uFE0F\u{E0100}-\u{E01EF}]/u;
+const ESCAPED_CLASS = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}]/u;
+const COMBINING = /\p{M}/u;
+
+/** `⟦U+XXXX⟧` for one code point. */
+function escapeCodePoint(codePoint: number): string {
+  return `⟦U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}⟧`;
+}
+
+/**
+ * Text made safe to look at: LF and TAB become `⏎` and `⇥`; control, format (bidirectional marks,
+ * zero-width characters, Tag characters), private-use, unassigned, line and paragraph separators,
+ * the fillers above, variation selectors, and combining marks beyond two in a row (or with nothing
+ * to combine with) become `⟦U+XXXX⟧`. Cut to `limit` code points of the source, with `…` if cut.
+ */
+function escapeForDisplay(raw: string, limit: number): string {
+  const characters = [...raw.normalize('NFKC').replace(/\r\n/gu, '\n')];
+  const shown = characters.slice(0, limit);
+  let output = '';
+  let marks = 0;
+  for (const character of shown) {
+    const codePoint = character.codePointAt(0)!;
+    if (
+      COMBINING.test(character) &&
+      !VARIATION_SELECTOR.test(character) &&
+      !INVISIBLE_FILLERS.test(character)
+    ) {
+      marks += 1;
+      output += marks > 2 || output === '' ? escapeCodePoint(codePoint) : character;
+      continue;
+    }
+    marks = 0;
+    if (character === '\n' || character === '\r') output += '⏎';
+    else if (character === '\t') output += '⇥';
+    else if (
+      ESCAPED_CLASS.test(character) ||
+      INVISIBLE_FILLERS.test(character) ||
+      VARIATION_SELECTOR.test(character)
+    )
+      output += escapeCodePoint(codePoint);
+    else output += character;
+  }
+  return characters.length > limit ? `${output}…` : output;
+}
+
+/** The excerpt of a value a person is asked about, or shown after a `copy` (256 code points). */
+export function computerUseArtifactExcerpt(text: string): string {
+  return escapeForDisplay(text, EXCERPT_LIMIT);
+}
+
+/** An application or window name from the screen, made safe to show next to an excerpt. */
+export function computerUseDisplayLabel(raw: string): string {
+  return escapeForDisplay(raw, LABEL_LIMIT);
+}
+
 /** The size the outer agent is told, in three steps (design §2.2 item 12). */
 export function computerUseArtifactSizeClass(text: string): ComputerUseArtifactSizeClass {
   const bytes = Buffer.byteLength(text, 'utf8');
@@ -160,7 +222,14 @@ export type ComputerUseArtifactReference = Readonly<{
 }>;
 
 type StoredArtifact = Readonly<
-  ComputerUseArtifactBinding & { sourceSessionId: string; text: string; expiresAt: number }
+  ComputerUseArtifactBinding & {
+    sourceSessionId: string;
+    /** Where the value was read from, as the screen named it. Untrusted; for display only. */
+    sourceLabel: string;
+    sizeClass: ComputerUseArtifactSizeClass;
+    text: string;
+    expiresAt: number;
+  }
 >;
 
 /**
@@ -188,7 +257,7 @@ export class ComputerUseArtifactStore {
    * needs no wiring to an epoch-change signal.
    */
   create(
-    owner: ComputerUseArtifactBinding & Readonly<{ sourceSessionId: string }>,
+    owner: ComputerUseArtifactBinding & Readonly<{ sourceSessionId: string; sourceLabel?: string }>,
     raw: string,
   ): ComputerUseArtifactReference | null {
     this.dropExpired();
@@ -210,6 +279,8 @@ export class ComputerUseArtifactStore {
       turnId: owner.turnId,
       policyEpoch: owner.policyEpoch,
       sourceSessionId: owner.sourceSessionId,
+      sourceLabel: owner.sourceLabel ?? '',
+      sizeClass: prepared.sizeClass,
       text: prepared.text,
       expiresAt: this.deps.now() + COMPUTER_USE_ARTIFACT_LIMITS.ttlMs,
     });
@@ -246,6 +317,23 @@ export class ComputerUseArtifactStore {
     binding: ComputerUseArtifactBinding,
   ): readonly string[] | null {
     return this.lookup(artifactIds, binding)?.map((artifact) => artifact.text) ?? null;
+  }
+
+  /**
+   * What a person is told about artifacts, without their text: where each came from (untrusted,
+   * to be escaped before it is shown) and how large it is. Same refusals as `take`. The value is
+   * not in the result, so it can go where a label can.
+   */
+  describe(
+    artifactIds: readonly string[],
+    binding: ComputerUseArtifactBinding,
+  ): readonly Readonly<{ sourceLabel: string; sizeClass: ComputerUseArtifactSizeClass }>[] | null {
+    return (
+      this.lookup(artifactIds, binding)?.map(({ sourceLabel, sizeClass }) => ({
+        sourceLabel,
+        sizeClass,
+      })) ?? null
+    );
   }
 
   private lookup(

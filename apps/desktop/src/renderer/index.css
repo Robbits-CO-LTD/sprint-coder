@@ -9570,6 +9570,20 @@ button.composer-permission-chip[aria-expanded='true'] {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
+.computer-use-approval__excerpt,
+.computer-use-rail__copied code {
+  display: block;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.computer-use-rail__copied {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
 .computer-use-approval__actions {
   display: flex;
   align-items: end;

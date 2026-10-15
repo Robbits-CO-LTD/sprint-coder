@@ -2547,6 +2547,32 @@ describe('Computer Use contracts', () => {
     });
   });
 
+  it('carries a transfer on an approval and the copied values on a status, both optional (#785 T15-7b)', () => {
+    const transfer = {
+      sourceLabel: 'Notes',
+      destinationLabel: 'Form',
+      destinationTarget: 'control:field',
+      sizeClass: 'le_256',
+      excerpt: 'Total⇥42',
+    };
+    expect(contracts.computerUseApprovalTransferSchema.parse(transfer)).toEqual(transfer);
+    const { destinationTarget: _target, ...withoutTarget } = transfer;
+    expect(contracts.computerUseApprovalTransferSchema.parse(withoutTarget)).toEqual(withoutTarget);
+    for (const bad of [
+      { ...transfer, sizeClass: 'huge' },
+      { ...transfer, extra: 1 },
+      { ...transfer, excerpt: 'x'.repeat(4_097) },
+      { sourceLabel: 'a' },
+    ])
+      expect(() => contracts.computerUseApprovalTransferSchema.parse(bad)).toThrow();
+    expect(
+      contracts.computerUseCopiedValueSchema.parse({ sizeClass: 'le_1k', excerpt: 'x' }),
+    ).toEqual({ sizeClass: 'le_1k', excerpt: 'x' });
+    expect(() =>
+      contracts.computerUseCopiedValueSchema.parse({ sizeClass: 'le_1k', excerpt: 'x', text: 'y' }),
+    ).toThrow();
+  });
+
   it('rejects injected control and Apple function-key characters in type actions', () => {
     for (const text of [
       '\0',
@@ -2638,6 +2664,8 @@ describe('Computer Use contracts', () => {
     });
     expect(approval.allowedDecisions).toContain('allow_plan');
     expect(approval.allowedDecisions).toContain('deny');
+    // A card from before transfers existed has none (#785 T15-7b).
+    expect(approval.transfer).toBeUndefined();
     expect(() =>
       contracts.computerUseApprovalSchema.parse({
         ...approval,
@@ -2743,6 +2771,8 @@ describe('Computer Use contracts', () => {
       pendingApproval: null,
     });
     expect(status.pendingApproval).toBeNull();
+    // A status from before `copied` existed has no copied values (#785 T15-9).
+    expect(status.copied).toEqual([]);
     expect(contracts.computerUseRoundLimitSchema.parse(3)).toBe(3);
     const receipt = { sessionId: 'native-session', cancelEpoch: 1, inputAttemptCount: 2 };
     expect(contracts.computerUseNativeInputReceiptSchema.parse(receipt)).toEqual(receipt);

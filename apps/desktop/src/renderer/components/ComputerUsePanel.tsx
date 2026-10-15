@@ -89,7 +89,26 @@ export type ComputerUseSessionView = Readonly<{
   observedAt: string | null;
   pauseReason: string | null;
   resumable?: boolean;
+  /** Values `copy` has kept in this session: size and an escaped excerpt (live-only). */
+  copied?: readonly Readonly<{ sizeClass: ComputerUseArtifactSizeClassView; excerpt: string }>[];
 }>;
+
+export type ComputerUseArtifactSizeClassView = 'le_256' | 'le_1k' | 'le_4k';
+
+/** Where a pasted value comes from and goes to, and what it is (design 4.4, 4.5). */
+export type ComputerUseApprovalTransferView = Readonly<{
+  sourceLabel: string;
+  destinationLabel: string;
+  destinationTarget: string | null;
+  sizeClass: ComputerUseArtifactSizeClassView;
+  excerpt: string;
+}>;
+
+const ARTIFACT_SIZE_LABELS: Readonly<Record<ComputerUseArtifactSizeClassView, string>> = {
+  le_256: '256バイト以下',
+  le_1k: '1KB以下',
+  le_4k: '4KB以下',
+};
 
 export type ComputerUseApprovalView = Readonly<{
   id: string;
@@ -97,6 +116,8 @@ export type ComputerUseApprovalView = Readonly<{
   targetLabel: string;
   impactLabel: string;
   escapedPreview: string | null;
+  /** Only for a paste of a value copied elsewhere. */
+  transfer?: ComputerUseApprovalTransferView;
   allowedDecisions: readonly ComputerUseApprovalDecision[];
   activationIntents?: Readonly<Partial<Record<ComputerUseApprovalDecision, string>>>;
 }>;
@@ -1255,6 +1276,15 @@ export function ComputerUseSessionRail({
         {session.pauseReason === null ? null : (
           <span className="computer-use-rail__pause">{session.pauseReason}</span>
         )}
+        {(session.copied ?? []).length === 0 ? null : (
+          <ul className="computer-use-rail__copied" aria-label="コピーした内容">
+            {(session.copied ?? []).map((value, index) => (
+              <li key={index}>
+                <span>{ARTIFACT_SIZE_LABELS[value.sizeClass]}</span> <code>{value.excerpt}</code>
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
       <div className="computer-use-rail__actions">
         <button
@@ -1302,6 +1332,30 @@ export function ComputerUseSessionRail({
                 <dd>{approval.impactLabel}</dd>
               </div>
             </dl>
+            {approval.transfer === undefined ? null : (
+              <div className="computer-use-approval__transfer" aria-label="貼り付ける内容">
+                <dl>
+                  <div>
+                    <dt>コピー元</dt>
+                    <dd>{approval.transfer.sourceLabel}</dd>
+                  </div>
+                  <div>
+                    <dt>貼り付け先</dt>
+                    <dd>
+                      {approval.transfer.destinationLabel}
+                      {approval.transfer.destinationTarget === null
+                        ? ''
+                        : ` · ${approval.transfer.destinationTarget}`}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>大きさ</dt>
+                    <dd>{ARTIFACT_SIZE_LABELS[approval.transfer.sizeClass]}</dd>
+                  </div>
+                </dl>
+                <code className="computer-use-approval__excerpt">{approval.transfer.excerpt}</code>
+              </div>
+            )}
             {approval.escapedPreview === null ? null : (
               <code className="computer-use-approval__preview">{approval.escapedPreview}</code>
             )}

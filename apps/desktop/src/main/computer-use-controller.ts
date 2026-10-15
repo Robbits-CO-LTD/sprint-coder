@@ -44,6 +44,7 @@ import {
   type SelectableComputerTarget,
   type ComputerAppProfile,
   type ComputerUseAction,
+  type ComputerUseApprovalTransfer,
   type ComputerUseArtifactAction,
   type ComputerUsePlannedAction,
   type ComputerUseActionResult,
@@ -120,6 +121,8 @@ import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-h
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
   ComputerUseArtifactStore,
+  computerUseArtifactExcerpt,
+  computerUseDisplayLabel,
   type ComputerUseArtifactReference,
 } from './computer-use-artifact';
 import {
@@ -661,6 +664,8 @@ type SessionRecord = {
 type ArtifactPasteCall = Readonly<{
   display: ComputerUseArtifactAction;
   artifactIds: readonly string[];
+  /** What a person is shown on either card; the only place the value reaches a screen. */
+  transfer: ComputerUseApprovalTransfer;
 }>;
 const ARTIFACT_PASTE_REFUSED = 'artifact_paste_refused';
 const ARTIFACT_PASTE_MAX_ATTACHED = 3;
@@ -3969,6 +3974,7 @@ export class ComputerUseController {
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
       preview,
+      ...(paste === undefined ? {} : { transfer: paste.transfer }),
       risk:
         action.type === 'wait' || action.type === 'finish' || action.type === 'copy'
           ? 'low'
@@ -4453,8 +4459,8 @@ export class ComputerUseController {
     snapshot: NativeApprovalSnapshot,
     approvalId: string,
     remainingMs: number,
-    /** What a paste shows instead of its text: the planner's own words, with the artifact id. */
-    display?: ComputerUseArtifactAction,
+    /** A paste shows the planner's own words (the artifact id) as its preview, and the excerpt apart. */
+    paste?: ArtifactPasteCall,
   ): Promise<NativeApprovalOutcome> {
     const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
     // One reading of the clock, so expiresAt - createdAt is exactly the lifetime.
@@ -4468,7 +4474,8 @@ export class ComputerUseController {
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
-      preview: safeActionPreview(display ?? action),
+      preview: safeActionPreview(paste?.display ?? action),
+      ...(paste === undefined ? {} : { transfer: paste.transfer }),
       risk: 'high',
       policyEpoch: snapshot.policyEpoch,
       observationRevision: record.observation?.revision ?? record.status.observationRevision,
@@ -4655,7 +4662,7 @@ export class ComputerUseController {
       snapshot,
       approvalId,
       offer.remainingMs,
-      this.artifactPasteCalls.get(`${sessionId}\0${requestId}`)?.display,
+      this.artifactPasteCalls.get(`${sessionId}\0${requestId}`),
     );
     if (decision !== 'approved') return refuse(decision);
 
@@ -4782,6 +4789,24 @@ export class ComputerUseController {
   }
 
   /**
+   * Adds the excerpt of a value `copy` just kept to the session card. The only copy of the text that
+   * leaves the store goes in `status.copied`, which Main publishes to the Renderer and nowhere else
+   * (it is not in `computerStartToolOutput`, an audit row or a log) and empties when the session ends.
+   */
+  private showCopied(record: SessionRecord, reference: ComputerUseArtifactReference): void {
+    const texts = this.artifacts.peek([reference.artifactId], this.artifactBinding(record));
+    if (texts === null || texts.length !== 1) return;
+    record.status = {
+      ...record.status,
+      copied: [
+        ...record.status.copied,
+        { sizeClass: reference.sizeClass, excerpt: computerUseArtifactExcerpt(texts[0]!) },
+      ].slice(-3),
+    };
+    this.emit(record.status);
+  }
+
+  /**
    * The checks a paste passes before a card is raised (#785 T15-7). Null for any failure, and the
    * caller says one thing whichever it was: the host cannot paste, the artifact is not one this
    * session was given, the Task ended since the session began, the destination is a browser (R14),
@@ -4805,9 +4830,24 @@ export class ComputerUseController {
         : { type: 'set_text', targetId: planned.targetId, text: texts[0] };
     const checked = computerUseActionSchema.safeParse(written);
     if (!checked.success) return null;
+    const described = this.artifacts.describe([planned.artifactRef], this.artifactBinding(record));
+    if (described === null || described.length !== 1) return null;
     return {
       action: checked.data,
-      call: { display: planned, artifactIds: [planned.artifactRef] },
+      call: {
+        display: planned,
+        artifactIds: [planned.artifactRef],
+        transfer: {
+          // Names from the screen: escaped and cut the same way as the excerpt before they are shown.
+          sourceLabel: computerUseDisplayLabel(described[0]!.sourceLabel),
+          destinationLabel: computerUseDisplayLabel(record.profile.label),
+          ...(planned.type === 'set_text'
+            ? { destinationTarget: `control:${computerUseDisplayLabel(planned.targetId)}` }
+            : {}),
+          sizeClass: described[0]!.sizeClass,
+          excerpt: computerUseArtifactExcerpt(texts[0]!),
+        },
+      },
     };
   }
 
@@ -4884,10 +4924,12 @@ export class ComputerUseController {
         turnId: record.turnId,
         policyEpoch: record.status.policyEpoch,
         sourceSessionId: record.status.sessionId,
+        sourceLabel: record.profile.label,
       },
       value.text,
     );
     if (reference === null) return refuse();
+    this.showCopied(record, reference);
     const kept = this.copiedArtifacts.get(record.status.sessionId);
     this.copiedArtifacts.set(record.status.sessionId, {
       taskId: record.status.taskId,
@@ -5329,6 +5371,8 @@ export class ComputerUseController {
       ...record.status,
       state,
       stopReason: state === 'stopped' ? stopReason : null,
+      // What was copied is for the card while the session lives; it goes with the session.
+      copied: state === 'stopped' ? [] : record.status.copied,
       pendingApproval,
       observationRevision,
       round: Math.min(record.status.maxRounds, round),

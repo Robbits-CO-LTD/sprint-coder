@@ -5163,6 +5163,38 @@ const computerUseUtf8TextSchema = z
   );
 const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 256 characters');
 
+/**
+ * #785 T15-7b / T15-9: what a person is shown about a value that moves between applications.
+ *
+ * The `excerpt` is the only place a copied value's text reaches a screen. Main has already cut it
+ * to 256 characters and made every invisible or confusing character visible; it is live-only like
+ * the approval's `preview`, and it is never part of an audit row, a log, a tool result or the
+ * status the outer agent is given. The labels come from the screen (an application name), so they
+ * are escaped and cut the same way before they get here.
+ */
+export const computerUseArtifactSizeClassForDisplaySchema = z.enum(['le_256', 'le_1k', 'le_4k']);
+const computerUseExcerptSchema = z.string().max(4_096);
+const computerUseTransferLabelSchema = z.string().max(512);
+export const computerUseApprovalTransferSchema = z
+  .object({
+    sourceLabel: computerUseTransferLabelSchema,
+    destinationLabel: computerUseTransferLabelSchema,
+    /** The control the text goes into, or absent for typing into the focused one. */
+    destinationTarget: computerUseTransferLabelSchema.optional(),
+    sizeClass: computerUseArtifactSizeClassForDisplaySchema,
+    excerpt: computerUseExcerptSchema,
+  })
+  .strict();
+export type ComputerUseApprovalTransfer = z.infer<typeof computerUseApprovalTransferSchema>;
+/** A value kept by `copy`, as the session card shows it. */
+export const computerUseCopiedValueSchema = z
+  .object({
+    sizeClass: computerUseArtifactSizeClassForDisplaySchema,
+    excerpt: computerUseExcerptSchema,
+  })
+  .strict();
+export type ComputerUseCopiedValue = z.infer<typeof computerUseCopiedValueSchema>;
+
 /** Native-side identity. It is never accepted from a renderer registration request. */
 export const computerWindowsAppIdentitySchema = z
   .object({
@@ -6233,6 +6265,11 @@ export const computerUseSessionStatusSchema = z
     expiresAt: timestampSchema,
     lastObservationAt: timestampSchema.nullable(),
     stopReason: computerUseStopReasonSchema.nullable(),
+    /**
+     * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
+     * it when the session ends, and it is never persisted, logged or given to the outer agent.
+     */
+    copied: z.array(computerUseCopiedValueSchema).max(3).default([]),
     /** Ephemeral card for the current action; Main must never persist its preview. */
     pendingApproval: z
       .lazy(() => computerUseApprovalSchema)
@@ -6613,6 +6650,8 @@ export const computerUseApprovalSchema = z
     actionDigest: computerUseDigestSchema,
     targetLabel: computerUseLabelSchema,
     preview: computerUsePreviewSchema,
+    /** Present only for a paste of an artifact (#785 T15-7b). Optional: older cards have none. */
+    transfer: computerUseApprovalTransferSchema.optional(),
     risk: toolRiskSchema,
     policyEpoch: z.number().int().nonnegative(),
     observationRevision: z.number().int().nonnegative(),
