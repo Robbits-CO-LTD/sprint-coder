@@ -3529,6 +3529,67 @@ bool CheckNativeInterlockMap() {
     facts.action = ActionKind::kType;
     if (!none(facts, "interlock-typing-near-install-is-no-verdict")) return false;
   }
+  {
+    // The installer control is a trigger on any surface even when an executable extension comes with
+    // it: the extension must not make the refusal go away (the core says E4 either way).
+    for (const char *extension : {"pkg", "sh", "exe", "dmg"}) {
+      EffectFacts facts = EffBase();
+      facts.surface = SurfaceKind::kOrdinary;
+      facts.action = ActionKind::kClick;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-button-with-an-extension-is-a-takeover")) return false;
+    }
+    // Without a known extension it is the same button, with the same answer.
+    EffectFacts unknown = EffBase();
+    unknown.action = ActionKind::kClick;
+    unknown.extension_known = false;
+    unknown.extension = "sh";
+    unknown.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!trigger_takeover(unknown, "interlock-install-button-with-an-unknown-extension")) return false;
+    // An extension that is not plain is no extension at all: the button still decides.
+    EffectFacts odd = unknown;
+    odd.extension_known = true;
+    odd.extension = "s h";
+    if (!trigger_takeover(odd, "interlock-install-button-with-an-odd-extension")) return false;
+    // The installer rule is the core's: the control must be activated, and its words must be readable.
+    EffectFacts typed = EffBase();
+    typed.action = ActionKind::kKey;
+    typed.key_is_activation = false;
+    typed.extension_known = true;
+    typed.extension = "sh";
+    typed.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!none(typed, "interlock-a-key-that-does-not-activate-is-not-an-installer")) return false;
+    EffectFacts unreadable = EffBase();
+    unreadable.action = ActionKind::kClick;
+    unreadable.text_language_supported = false;
+    unreadable.extension_known = true;
+    unreadable.extension = "sh";
+    unreadable.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!none(unreadable, "interlock-unreadable-words-are-not-an-installer")) return false;
+    // A toggle in an application, aimed at an item with an executable extension, is not a launch.
+    EffectFacts toggle = EffBase();
+    toggle.action = ActionKind::kToggle;
+    toggle.target_is_file_item = true;
+    toggle.extension_known = true;
+    toggle.extension = "sh";
+    toggle.chain = {{"axcheckbox", "", "install.sh"}, {"axwindow", "", "Editor"}};
+    if (!none(toggle, "interlock-toggle-in-an-app-is-not-a-launch")) return false;
+    // The core's extension rule without an extension behind it is not an extension verdict: a claimed
+    // E1 on an ordinary surface with no known extension has no editor excuse.
+    EffectFacts claim = EffBase();
+    claim.action = ActionKind::kClick;
+    claim.extension_known = false;
+    claim.extension = "sh";
+    EffectDecision e1;
+    e1.effect_class = EffectClass::kE1ExecutableOpen;
+    e1.kind = DecisionKind::kBlocked;
+    e1.reason = DecisionReason::kExecutionTrigger;
+    if (!Check(MapEffectToInterlock(claim, e1).Refuses(), "interlock-e1-claim-without-a-known-extension")) return false;
+    claim.extension_known = true;
+    if (!Check(!MapEffectToInterlock(claim, e1).Refuses(), "interlock-e1-claim-by-extension-in-an-app")) return false;
+  }
 
   // E2 / E3: opening from a download list or a file manager needs an approval, and the approval
   // path is closed, so it is refused; once the rule set trusts it, the approval decides, not this.
@@ -3579,8 +3640,9 @@ bool CheckNativeInterlockMap() {
     if (!none(facts, "interlock-observe-only-mode-is-not-this-map")) return false;
   }
 
-  // The map takes the core's decision and the facts; a decision that does not fit the facts is not
-  // trusted (a surface verdict needs a complete, known surface behind it).
+  // The map takes the core's decision and the facts. It does not re-derive the decision: it checks
+  // the facts gate (complete metadata and chain, a known surface) and that the class comes with its
+  // own reason, and takes a decision that passes both as given.
   {
     EffectFacts facts = EffBase();
     facts.action = ActionKind::kClick;

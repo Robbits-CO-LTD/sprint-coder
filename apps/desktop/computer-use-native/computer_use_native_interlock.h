@@ -83,7 +83,9 @@ namespace interlock_detail {
   return verdict;
 }
 
-// The facts every interlock stands on: the same gate the core applies before it classifies.
+// The facts every interlock stands on: complete metadata, a complete non-empty chain and a known
+// surface. This is a part of the gate the core applies before it classifies (the core also checks
+// the bounds, which a decision that came from it has already passed; they are not repeated here).
 [[nodiscard]] inline bool FactsAreComplete(const EffectFacts &facts) {
   return facts.metadata_complete && facts.chain_complete && !facts.chain.empty() &&
          facts.surface != SurfaceKind::kUnknown;
@@ -93,13 +95,23 @@ namespace interlock_detail {
   return surface == SurfaceKind::kFileBrowser || surface == SurfaceKind::kDownloadPanel;
 }
 
-// The core refused because of the extension of an item (not because of a control's words): exactly
-// the condition the core applies.
+// The core's extension rule applies to these facts: exactly the condition the core uses to refuse
+// because of the extension of an item.
 [[nodiscard]] inline bool RefusedByExtension(const EffectFacts &facts) {
   using namespace effect_detail;
   const std::string extension = NormalizeExtension(facts.extension);
   return (MayOpen(facts) || facts.action == ActionKind::kToggle) && facts.extension_known &&
          IsPlainExtension(extension) && InSet(extension, kExecutableExtensions);
+}
+
+// An installer control activated: the core's label rule (E4), independent of any extension that
+// happens to be known for the item.
+[[nodiscard]] inline bool InstallerControlActivated(const EffectFacts &facts) {
+  using namespace effect_detail;
+  // An item of a list that is named like an installer ("install.sh" in a file tree) is a file, not
+  // a control: the extension rule judges it.
+  return !facts.target_is_file_item && IsActivating(facts) && TextIsClassifiable(facts) &&
+         ActionableContains(facts, kInstallerTerms);
 }
 
 } // namespace interlock_detail
@@ -123,7 +135,10 @@ namespace interlock_detail {
       if (decision.reason != DecisionReason::kExecutionTrigger) return {};
       // An extension is a trigger where opening the item runs or installs it. Inside an
       // application the same file merely opens (a script in an editor's tree): not refused here.
-      if (RefusedByExtension(facts) && !IsListedSurface(facts.surface)) return {};
+      // (An installer control is a trigger wherever it is, with or without an extension.)
+      if (RefusedByExtension(facts) && !IsListedSurface(facts.surface) &&
+          !InstallerControlActivated(facts))
+        return {};
       return Refusal(InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger,
                      decision.effect_class);
     case EffectClass::kE2DownloadOpen:

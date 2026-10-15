@@ -63,7 +63,11 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     );
     // An executable name opened inside an application is not a trigger.
     expect(squashed).toContain(
-      'if (RefusedByExtension(facts) && !IsListedSurface(facts.surface)) return {};',
+      'if (RefusedByExtension(facts) && !IsListedSurface(facts.surface) && !InstallerControlActivated(facts)) return {};',
+    );
+    // ...except an installer control, which is a trigger wherever it is, extension or not.
+    expect(squashed).toContain(
+      'return !facts.target_is_file_item && IsActivating(facts) && TextIsClassifiable(facts) && ActionableContains(facts, kInstallerTerms);',
     );
     // The approval that is closed refuses; the secure and credential classes are not this map's.
     expect(squashed).toContain('if (decision.reason == DecisionReason::kApprovalNotEnabled)');

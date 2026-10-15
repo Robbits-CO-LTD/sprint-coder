@@ -644,6 +644,13 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 - secure、credential、確認、supervised の承認待ち、sensitive origin、observe-only、分類不能は interlock ではなく、v1 に任せる。
 - 拒否は強める方向だけに使う。コアの lexicon は版 2 の候補（未 attest）を使ってよいが、承認の根拠には使わない。版は上げない。
 
+申し送り（S4-1-0 のレビュー結果。S4-1a / S4-1b / S4-3 で扱う）:
+
+- **理由コード `native_execution_trigger_blocked` は 2 通りの組で使われる**: E1 / E4 は takeover / paused、E2 / E3（承認が閉じている間）は blocked / rejected。受領書の閉じた表には組として登録される。ADR の `approval_not_enabled`（§9 の N2b 系の記述）との関係は、**S4-1a で決める**（同じコードに畳むか、E2 / E3 に別のコードを与えるか）。
+- **コアの `MayOpen` は、Finder での単純なクリックや矢印キーも「開く操作」に数える**（実機で各入力経路の効果が分かるまでの保守側の扱い、S4 契約 5）。E1 / E3 の対象になる範囲が広いことを前提に、S4-3 の受入で見直す。一方、**Mail の添付のように ordinary な面で `.command` を開く操作は、S4-1 では「判定なし」になる**（リスト面でないため）。これも S4-3 の受入で見直す。
+- **面の語がウィンドウタイトルにあると rejected になる**: チェーンの面の語（`terminal` など）は blocked / rejected で、v1 の `native_high_impact_user_takeover`（paused）が rejected に変わる。**S4-1b の前に、C2 の shadow の内訳（`V2IsStricter`）で、TextEdit と VS Code の通常 journey で起きないことを確かめる**。
+- インストーラのコントロール（ラベルの語で活性化）は、拡張子が付いていても拒否の対象のままである（拡張子の有無で結果が変わらない）。ファイルツリーの項目（`install.sh` のような名前の `target_is_file_item`）は、コントロールではなくファイルとして拡張子の規則で判定する。
+
 **S6 の前提（2026-10-14）**: UWP / `ApplicationFrameHost` の identity と束縛（UIA によるコンテンツ HWND の解決、package family name と publisher の検証、native identity digest への束縛、package に限るパス比較の免除、プロセス入れ替わりの検出）は、設計を ADR に追記して敵対的レビューを受けるまで実装しない。レビューが出るまでは、`ApplicationFrameHost` 配下は従来どおり拒否する。Windows 11 の既定 Notepad のような packaged app が `ApplicationFrameHost` 配下か、packaged Win32 かは、プロセスツリーとウィンドウクラスの実測で確かめてから S6 の必要性を判断する。
 
 **S9a / S9b と S8 の順序（2026-10-14）**: S9a（受入 journey の V2 化）→ 両 OS の実機受入 PASS → S8（V1 撤去）→ S9b の順に進める。実機受入は V1 が残った状態の V2 flag ON で行うので、受入が S8 を待つ循環は生じない。S9a の完了時に新しい [human] 受入 Issue を起こす（macOS の署名・notarize 済みパッケージの実機、Windows の受入パッケージ、正式 release 時の Windows 署名者検証を含む）。
