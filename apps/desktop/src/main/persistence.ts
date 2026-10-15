@@ -1542,6 +1542,52 @@ const LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY = 'legacy-runtime-diagnostics-
 const COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL =
   'UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));';
 const COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION = 101;
+/**
+ * The live-database form of the scrub (migration v101). Overwriting the digest in place is not
+ * enough: the row was inserted, split across pages and updated in earlier versions, and every one
+ * of those left a copy of the old digest in a page's unused space, which an UPDATE never touches.
+ * So the table is emptied (its pages are freed and, with secure_delete on, zeroed) and the rows are
+ * put back with new digests, which writes the table and its indexes into clean pages. The rows
+ * wait in a temp table that only ever holds the new digests. Every column but the digest is copied
+ * as it was, rowid included. Written for the table as it is at v101 (v80 plus the v99 columns).
+ */
+const COMPUTER_USE_AUDIT_TABLE_COLUMNS = [
+  'id',
+  'task_id',
+  'turn_id',
+  'session_id',
+  'profile_id',
+  'profile_revision',
+  'app_identity_digest',
+  'window_identity_digest',
+  'observation_revision',
+  'observation_digest',
+  'client_width',
+  'client_height',
+  'action_digest',
+  'action_kind',
+  'route',
+  'state',
+  'reason_code',
+  'native_request_id',
+  'policy_epoch',
+  'created_at',
+  'updated_at',
+  'approval_id',
+  'approval_parent_request_id',
+  'approval_outcome',
+  'approval_effect',
+].join(', ');
+const COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL = `
+  CREATE TEMP TABLE computer_action_audit_digest_scrub AS
+    SELECT rowid AS audit_rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS.replace('action_digest', 'lower(hex(randomblob(32))) AS action_digest')}
+    FROM computer_action_audits;
+  DELETE FROM computer_action_audits;
+  INSERT INTO computer_action_audits(rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS})
+    SELECT audit_rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audit_digest_scrub
+    ORDER BY audit_rowid;
+  DROP TABLE computer_action_audit_digest_scrub;
+`;
 
 const migrations = [
   {
@@ -4640,12 +4686,15 @@ const migrations = [
     // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
     // The pre-migration backup taken on the same start still holds the old values; runMigrations
     // scrubs and VACUUMs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
-    // Known limit: the live database is not VACUUMed here, so some old digest bytes can stay in
-    // its free pages until SQLite reuses them. A VACUUM rewrites the whole database — Task history
-    // and image blobs included, about 8 ms per MB measured, with up to twice the file size in
-    // temporary disk — inside every first start after the upgrade, which is not a cost to impose
-    // on start-up for a residue only a same-user reader of the file can reach (ADR, #786).
-    sql: COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL,
+    // The live database is not VACUUMed (a VACUUM rewrites Task history and image blobs too, about
+    // 8 ms per MB with up to twice the file size in temporary disk, on every first start after the
+    // upgrade). Instead the audit table is rewritten into clean pages with secure_delete on (see
+    // COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL), and runMigrations checkpoints the log afterwards so
+    // neither the -wal file nor the main file keeps the old page images. Measured: 50,000 rows in
+    // about 2 s. What this does not reach: pages of other tables or the freelist that held an
+    // audit row earlier (for example the audit rows of a Task deleted before the upgrade), and
+    // copies below the file (SSD wear levelling, backups made by other tools, the OS page cache).
+    sql: COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL,
   },
 ];
 
@@ -7335,26 +7384,60 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // outside applyMigration's transaction) or dropping a table other rows still reference
       // would cascade-delete them. foreign_key_check afterward guards against a migration
       // silently leaving the database inconsistent.
-      if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
-        this.db.pragma('foreign_keys = OFF');
-        try {
+      // #786: v101 overwrites digests in place. With secure_delete on, SQLite zeroes whatever the
+      // statement frees or moves, so the old digest does not linger in free space of the live file.
+      // The flag is per connection: read it first and put it back afterwards.
+      const priorSecureDelete =
+        migration.version === COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION
+          ? (this.db.pragma('secure_delete', { simple: true }) as number)
+          : null;
+      if (priorSecureDelete !== null) this.db.pragma('secure_delete = ON');
+      try {
+        if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
+          this.db.pragma('foreign_keys = OFF');
+          try {
+            applyMigration();
+            const danglingForeignKeys = this.db.pragma('foreign_key_check');
+            if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
+              throw new Error(`Migration ${migration.version} left dangling foreign keys`);
+          } finally {
+            this.db.pragma('foreign_keys = ON');
+          }
+        } else {
           applyMigration();
-          const danglingForeignKeys = this.db.pragma('foreign_key_check');
-          if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
-            throw new Error(`Migration ${migration.version} left dangling foreign keys`);
-        } finally {
-          this.db.pragma('foreign_keys = ON');
         }
-      } else {
-        applyMigration();
+      } finally {
+        if (priorSecureDelete !== null) this.db.pragma(`secure_delete = ${priorSecureDelete}`);
       }
       appliedNow.add(migration.version);
     }
-    if (
-      (backedUp && appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION)) ||
-      existsSync(backupDigestScrubPendingPath(databasePath))
-    )
+    const digestScrubApplied = appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION);
+    const digestScrubOwed = existsSync(backupDigestScrubPendingPath(databasePath));
+    if ((backedUp && digestScrubApplied) || digestScrubOwed)
       this.scrubPreMigrationBackupAuditDigests(databasePath);
+    if (digestScrubApplied || digestScrubOwed) this.flushAuditDigestScrub(databasePath);
+  }
+
+  /**
+   * #786: in WAL mode the pages v101 rewrote sit in the -wal file, and the main file still holds
+   * the old ones until a checkpoint. Copy them over and truncate the log. If a reader keeps the
+   * checkpoint from finishing, leave the marker so the next start tries again.
+   */
+  private flushAuditDigestScrub(databasePath: string): void {
+    try {
+      const result = this.db.pragma('wal_checkpoint(TRUNCATE)') as { busy?: number }[];
+      if (result[0]?.busy === 0) return;
+    } catch (error) {
+      secureLogger.warn('Checkpoint after the Computer Use digest scrub failed', error, {
+        category: 'system',
+        event: 'computer_use_digest_scrub_checkpoint_failed',
+      });
+    }
+    try {
+      writeFileSync(backupDigestScrubPendingPath(databasePath), '');
+    } catch {
+      // Nothing more to do; the next migration or checkpoint will still flush the log.
+    }
   }
 
   /**

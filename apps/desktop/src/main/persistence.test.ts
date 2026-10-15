@@ -12195,6 +12195,45 @@ if (runsWithElectronAbi)
       expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(false);
     });
 
+    it('leaves no old digest in the live database file or its write-ahead log after v101 (#786)', () => {
+      const { fixture, base } = seed();
+      const old = Array.from({ length: 300 }, (_, index) =>
+        createHash('sha256').update(`live-before-786-${index}`).digest('hex'),
+      );
+      for (const [index, actionDigest] of old.entries())
+        fixture.persistence.recordComputerActionAudit({
+          ...base,
+          nativeRequestId: bindingDigest(`live-${index}`),
+          actionKind: 'type',
+          actionDigest,
+        });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      // What a database that has been in use looks like: rows rewritten several times (each leaves
+      // the old row image in the page's unused space) and some rows removed (cells freed).
+      for (let round = 0; round < 3; round += 1)
+        raw.exec(
+          `UPDATE computer_action_audits SET reason_code = 'round-${round}', updated_at = 'u${round}';`,
+        );
+      raw.exec('DELETE FROM computer_action_audits WHERE rowid % 7 = 0;');
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      // Read the files while the migrated client is still open: closing it would checkpoint and
+      // hide what the migration itself left behind.
+      const client = new SqlitePersistenceClient(fixture.path);
+      try {
+        for (const file of [fixture.path, `${fixture.path}-wal`]) {
+          const bytes = existsSync(file) ? readFileSync(file).toString('latin1') : '';
+          expect(
+            old.filter((digest) => bytes.includes(digest)),
+            file,
+          ).toEqual([]);
+        }
+      } finally {
+        client.close();
+      }
+    });
+
     it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
       const { fixture, base } = seed();
       // What the pre-#786 code wrote for a typed six-digit code: guessable in at most 10^6 tries.
