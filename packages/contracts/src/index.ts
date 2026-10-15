@@ -5947,6 +5947,10 @@ export const computerUseStopReasonSchema = z.enum([
   // so the audit trail, and the Renderer's focus restore, can tell a person's click apart from a
   // model's tool call.
   'agent_stop',
+  // The inner planner of a session `computer_start` created chose `finish`. Distinct from
+  // `user_stop` and `agent_stop`: the screen can induce a finish, and neither a person nor the Task
+  // agent stopped the session. Never persisted; a person-started session still ends as `user_stop`.
+  'agent_finish',
   'emergency_stop',
   'task_changed',
   'turn_started',

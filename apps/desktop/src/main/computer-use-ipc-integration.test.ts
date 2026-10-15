@@ -1508,7 +1508,7 @@ describe('Computer Use target tools end to end', () => {
     // Through the broker, which validates the reduced projection against the tool's own output
     // schema — including `stopReason: null`, which an `enum` with no `type` has to accept.
     expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
-    expect(output).toMatchObject({ state: 'stopped', stopReason: 'user_stop', round: 1 });
+    expect(output).toMatchObject({ state: 'stopped', stopReason: 'agent_finish', round: 1 });
   });
 
   it('stops both control calls when computer.control is revoked, and leaves enumeration alone', async () => {

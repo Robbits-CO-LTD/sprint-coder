@@ -2069,6 +2069,16 @@ describe('ComputerUseController', () => {
     expect(runtimeCapture.snapshot().finalGateEligible).toBe(false);
   });
 
+  it('keeps a person-started session that the planner finishes reported as user_stop', async () => {
+    // T15-1 separates `agent_finish` only for sessions `computer_start` created. A session a person
+    // started keeps its V1 meaning, which the Renderer's focus restore relies on.
+    const fixture = createFixture({ planner: { plan: async () => ({ type: 'finish' }) } });
+    await start(fixture);
+    await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+    expect(fixture.statuses.at(-1)?.stopReason).toBe('user_stop');
+    await fixture.controller.dispose();
+  });
+
   it('observes the final bounded action without adding a Provider plan', async () => {
     const plan = vi.fn(async () => click);
     const fixture = createFixture({ planner: { plan } });

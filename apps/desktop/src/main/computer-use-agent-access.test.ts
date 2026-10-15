@@ -1491,7 +1491,8 @@ describe('computer_start', () => {
     expect(output).toEqual({
       sessionId: expect.any(String),
       state: 'stopped',
-      stopReason: 'user_stop',
+      // The inner planner ended the session (T15-1): not a person's click, not `computer_stop`.
+      stopReason: 'agent_finish',
       mode: 'full_access_app',
       round: 1,
       maxRounds: 25,
@@ -1566,7 +1567,9 @@ describe('computer_start', () => {
     expect(settled).toBe(false);
     expect(fixture.controller.getStatus(runningSessionId(fixture))).not.toBeNull();
     planner.release();
-    expect(await settle(running)).toMatchObject({ state: 'stopped', stopReason: 'user_stop' });
+    expect(await settle(running)).toMatchObject({ state: 'stopped', stopReason: 'agent_finish' });
+    // The status the UI sees says the same thing as the tool result.
+    expect(fixture.statuses.at(-1)).toMatchObject({ state: 'stopped', stopReason: 'agent_finish' });
   });
 
   it('stops the session and rejects when the Turn is canceled', async () => {
