@@ -6365,6 +6365,12 @@ type RecoveryBundleManifest = {
 
 let recoveryCrashCheckpointForTesting: ((checkpoint: RecoveryCrashCheckpoint) => void) | null =
   null;
+let backupScrubFailureForTesting: ((step: 'scrub' | 'remove') => void) | null = null;
+
+/** #786: present while the pre-migration backup may still hold unscrubbed action digests. */
+function backupDigestScrubPendingPath(databasePath: string): string {
+  return `${databasePath}.pre-migration.bak.digest-scrub-pending`;
+}
 
 function syncFile(path: string): void {
   // Windows requires a writable descriptor for FlushFileBuffers. Both callers pass a regular,
@@ -6756,6 +6762,10 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
 
 export const __persistenceRecoveryTestables = {
   supportsDirectorySync: supportsRecoveryDirectorySync,
+  /** #786: throws at a step of the backup digest scrub, to drive its failure paths. */
+  setBackupScrubFailureForTesting(callback: ((step: 'scrub' | 'remove') => void) | null) {
+    backupScrubFailureForTesting = callback;
+  },
   setCrashCheckpointForTesting(callback: ((checkpoint: RecoveryCrashCheckpoint) => void) | null) {
     recoveryCrashCheckpointForTesting = callback;
   },
@@ -7329,7 +7339,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       }
       appliedNow.add(migration.version);
     }
-    if (backedUp && appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION))
+    if (
+      (backedUp && appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION)) ||
+      existsSync(backupDigestScrubPendingPath(databasePath))
+    )
       this.scrubPreMigrationBackupAuditDigests(databasePath);
   }
 
@@ -7338,39 +7351,51 @@ export class SqlitePersistenceClient implements PersistenceClient {
    * so it would keep every guessable digest next to the scrubbed database. Apply the same scrub to
    * a copy of the backup, VACUUM the copy, and install it in its place. VACUUM matters: an UPDATE
    * leaves the old bytes in pages SQLite no longer uses (measured: some survive even with
-   * secure_delete), and only rewriting the file drops them. The copy is private to this method, so
-   * rewriting it costs nothing but time proportional to the backup. Only the digest column changes;
-   * the backup still restores every other fact, and a database restored from it has no v101
-   * record, so v101 runs again.
+   * secure_delete), and only rewriting the file drops them. Only the digest column changes; the
+   * backup still restores every other fact, and a database restored from it has no v101 record,
+   * so v101 runs again.
    *
-   * If the backup cannot be scrubbed, the backup is retaken from the migrated database, the same
-   * way (copied, scrubbed, VACUUMed). If that fails too, the old backup stays and the failure is
-   * logged: a backup that still holds old digests is not a reason to refuse to start.
+   * The backup is never replaced with anything but itself, scrubbed: a copy of the migrated
+   * database would silently stop being a pre-migration snapshot. If it cannot be scrubbed, it is
+   * removed — keeping the digests out of reach is the point of v101, and the next migration takes
+   * a new backup. Nothing here fails the start. Until the backup is scrubbed or gone, a marker
+   * beside it says so, and every start tries again.
    */
   private scrubPreMigrationBackupAuditDigests(databasePath: string): void {
     const backupPath = `${databasePath}.pre-migration.bak`;
-    if (!existsSync(backupPath)) return;
+    const pendingPath = backupDigestScrubPendingPath(databasePath);
+    const settle = (): void => rmSync(pendingPath, { force: true });
     try {
-      installScrubbedMigrationBackup(backupPath, backupPath);
-      return;
-    } catch {
-      // Fall through to retaking the backup from the migrated database.
-    }
-    try {
-      const checkpoint = this.db.pragma('wal_checkpoint(TRUNCATE)') as {
-        busy?: number;
-        log?: number;
-        checkpointed?: number;
-      }[];
-      const result = checkpoint[0];
-      if (result === undefined || result.busy !== 0 || result.log !== result.checkpointed)
-        throw new Error('Could not checkpoint database before retaking the migration backup');
-      installScrubbedMigrationBackup(databasePath, backupPath);
+      if (!existsSync(backupPath)) {
+        settle();
+        return;
+      }
+      try {
+        writeFileSync(pendingPath, '');
+      } catch {
+        // The attempt below still runs; only the retry on a later start depends on the marker.
+      }
+      try {
+        backupScrubFailureForTesting?.('scrub');
+        installScrubbedMigrationBackup(backupPath, backupPath);
+        settle();
+        return;
+      } catch (error) {
+        secureLogger.warn(
+          'Pre-migration backup could not be scrubbed of old Computer Use action digests; removing it',
+          error,
+          { category: 'system', event: 'computer_use_backup_scrub_failed' },
+        );
+      }
+      backupScrubFailureForTesting?.('remove');
+      rmSync(backupPath, { force: true });
+      rmSync(`${backupPath}.previous`, { force: true });
+      settle();
     } catch (error) {
       secureLogger.warn(
-        'Pre-migration backup could not be scrubbed of old Computer Use action digests',
+        'Pre-migration backup still holds old Computer Use action digests; retrying at next start',
         error,
-        { category: 'system', event: 'computer_use_backup_scrub_failed' },
+        { category: 'system', event: 'computer_use_backup_scrub_deferred' },
       );
     }
   }

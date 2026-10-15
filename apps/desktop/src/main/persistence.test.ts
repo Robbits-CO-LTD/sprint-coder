@@ -68,6 +68,7 @@ import {
   TurnActiveError,
   validateCanvasCamera,
   validateCanvasNodePositions,
+  __persistenceRecoveryTestables,
 } from './persistence';
 import { computerAppGrantIdentityFrom } from './computer-use-grant-identity';
 import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
@@ -12106,6 +12107,69 @@ if (runsWithElectronAbi)
       } finally {
         restored.close();
       }
+    });
+
+    /** A database from before v101 with one typed row, reopened so v101 applies. */
+    function reopenBeforeV101(): { path: string; oldDigest: string } {
+      const { fixture, base } = seed();
+      const oldDigest = createHash('sha256').update('old-digest-before-786').digest('hex');
+      fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('typed-before-786-failure'),
+        actionKind: 'type',
+        actionDigest: oldDigest,
+      });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      return { path: fixture.path, oldDigest };
+    }
+
+    it('removes, never replaces, a migration backup it cannot scrub, and still starts (#786)', () => {
+      const { path } = reopenBeforeV101();
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting((step) => {
+        if (step === 'scrub') throw new Error('injected: no space left on device');
+      });
+      try {
+        // Starting succeeds: a backup that cannot be scrubbed is not a reason to refuse.
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      // Not swapped for a copy of the migrated database (that would no longer be a pre-migration
+      // snapshot), and not kept with the old digests: gone.
+      expect(existsSync(`${path}.pre-migration.bak`)).toBe(false);
+      expect(existsSync(`${path}.pre-migration.bak.previous`)).toBe(false);
+      expect(existsSync(`${path}.pre-migration.bak.digest-scrub-pending`)).toBe(false);
+      const migrated = new Database(path, { readonly: true });
+      try {
+        expect(
+          migrated.prepare('SELECT version FROM schema_migrations WHERE version = 101').get(),
+        ).toEqual({ version: 101 });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('retries the backup scrub on the next start when it could neither scrub nor remove it (#786)', () => {
+      const { path, oldDigest } = reopenBeforeV101();
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting(() => {
+        throw new Error('injected: backup locked');
+      });
+      try {
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      const backupPath = `${path}.pre-migration.bak`;
+      // Left as it was, with a marker saying the work is not done.
+      expect(readFileSync(backupPath).toString('latin1')).toContain(oldDigest);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(true);
+      // The next start has no pending migration, and still finishes the job.
+      new SqlitePersistenceClient(path).close();
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(false);
+      expect(readFileSync(backupPath).toString('latin1')).not.toContain(oldDigest);
     });
 
     it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
