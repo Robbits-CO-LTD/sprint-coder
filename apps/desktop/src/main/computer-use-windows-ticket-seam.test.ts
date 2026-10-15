@@ -641,7 +641,13 @@ function cutShadowWiring(text: string): string {
   const endMarker = '// END effect shadow wiring';
   const to = text.indexOf(endMarker, from);
   if (from < 0 || to < 0) throw new Error('Shadow wiring markers changed');
-  return text.slice(0, from) + text.slice(to + endMarker.length);
+  const withoutShadow = text.slice(0, from) + text.slice(to + endMarker.length);
+  // The synchronous interlock entry (S5-c-1) is not called by anything: cut out like the wiring.
+  const entryFrom = withoutShadow.indexOf('// BEGIN sync interlock entry');
+  const entryEnd = '// END sync interlock entry';
+  const entryTo = withoutShadow.indexOf(entryEnd, entryFrom);
+  if (entryFrom < 0 || entryTo < 0) throw new Error('Sync interlock entry markers changed');
+  return withoutShadow.slice(0, entryFrom) + withoutShadow.slice(entryTo + entryEnd.length);
 }
 
 function assembled(): string {

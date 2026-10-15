@@ -173,8 +173,11 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
       '.Capture(',
     ])
       expect(text, name).not.toContain(name);
-    // The UI Automation source is created only inside the open_source function the shadow thread runs.
-    expect(text.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
+    // The UI Automation source is created inside the open_source function the shadow thread runs, and
+    // (S5-c-1) once more in the synchronous interlock entry, which nothing calls yet (its own contract
+    // is in computer-use-windows-interlock-capture.test.ts).
+    expect(text.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(2);
+    expect(wiring.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
     expect(wiring).toMatch(
       /environment\.open_source = \[window, point, still_valid, point_known, needs_point\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*if \(needs_point && !point_known\)\s*return nullptr;\s*return WindowsUiaShadowSource::Create\(window, point, still_valid\);/u,
     );

@@ -78,6 +78,7 @@
 #include "computer_use_native_eligibility.h"
 #include "computer_use_windows_uia_source.h"
 #include "computer_use_windows_shadow_scheduler.h"
+#include "computer_use_windows_interlock_capture.h"
 
 namespace {
 
@@ -4813,6 +4814,68 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
   }
 }
 // END effect shadow wiring
+
+// BEGIN sync interlock entry (classifier v2 S5-c-1)
+// The shadow's capture, called synchronously: the same UI Automation source and the same reader and
+// gate (a cancellation check before every call, a budget of kShadowMaxAxCalls calls and
+// kShadowDeadlineNs, and the end-of-capture check), answered by the portable
+// EvaluateWindowsInterlockOnSource. A canceled or out-of-budget capture, a failed read and
+// incomplete facts are NO VERDICT (the answer carries the reason): never a refusal and never an
+// approval, so the V1 preflight decides.
+//
+// Behaviour-neutral: NOTHING calls this yet. The preflight and the dispatch guard are wired in
+// S5-c-2, on the serial lane, after a Windows real-machine check and a decision on how long the
+// lane may be held (the gate bounds the number and the start of calls, not the length of one: a UI
+// Automation call has its own 1500 ms timeout). The caller must have COM initialized on its thread
+// (the shadow's thread does it in LaunchWindowsShadowThread). It holds no lock, calls no input API,
+// writes nothing, and never throws; the shadow wiring above is not touched.
+[[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
+    const WindowsSession &session, const std::string &metadata, const std::string &kind,
+    const sprint_coder::computer_use::EffectRuleset &ruleset) noexcept {
+  using namespace sprint_coder::computer_use;
+  InterlockEvaluation unavailable;
+  unavailable.no_verdict = InterlockNoVerdict::kIncomplete;
+  try {
+    std::string key;
+    std::string target_id;
+    (void)ReadJsonString(metadata, "key", &key);
+    (void)ReadJsonString(metadata, "targetId", &target_id);
+    POINT point{0, 0};
+    double x = 0;
+    double y = 0;
+    bool point_known = false;
+    if (ReadJsonDouble(metadata, "x", &x) && ReadJsonDouble(metadata, "y", &y) &&
+        x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      point_known = true;
+      const RECT bounds = session.observation_bounds;
+      point.x = bounds.left + static_cast<LONG>(std::lround(
+                                  x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
+      point.y = bounds.top + static_cast<LONG>(std::lround(
+                                 y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
+    }
+    // A click or scroll whose point is not a point of the window is not looked up at the screen's
+    // origin.
+    if ((kind == "click" || kind == "scroll") && !point_known)
+      return unavailable;
+    const std::uint64_t expected_epoch = session.cancel_epoch;
+    const auto still_valid = [expected_epoch]() {
+      return cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
+    };
+    std::unique_ptr<ShadowUiaSource> source =
+        WindowsUiaShadowSource::Create(session.active_window, point, still_valid);
+    if (source == nullptr)
+      return unavailable;
+    ShadowRequestInfo info;
+    info.kind = kind;
+    info.key = key;
+    info.maximum_mode = session.maximum_mode;
+    info.policy_language = session.policy_language;
+    return EvaluateWindowsInterlockOnSource(*source, kind, target_id, info, ruleset);
+  } catch (...) {
+    return unavailable;
+  }
+}
+// END sync interlock entry
 
 bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
                             const std::string &metadata) {

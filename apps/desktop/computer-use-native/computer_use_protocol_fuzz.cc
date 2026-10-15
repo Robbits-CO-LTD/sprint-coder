@@ -12,6 +12,7 @@
 #include "computer_use_effect_measurement.h"
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
+#include "computer_use_windows_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -6340,6 +6341,140 @@ bool CheckNativeInterlockCapture() {
   return true;
 }
 
+// ---- Classifier v2, S5-c-1: the Windows synchronous interlock evaluation (nothing calls it yet) ---
+
+bool CheckWindowsInterlockCapture() {
+  using namespace sprint_coder::computer_use;
+  const auto no_verdict = [](const InterlockEvaluation &evaluation, InterlockNoVerdict why,
+                             const char *code) {
+    return Check(!evaluation.Refuses() && !evaluation.verdict.Refuses() &&
+                     evaluation.no_verdict == why && evaluation.verdict.ReasonCode().empty(),
+                 code);
+  };
+  const auto evaluate = [](FakeUia &source, std::string_view kind, std::string_view target_id = "",
+                           const EffectRuleset &ruleset = EffectRuleset{}) {
+    return EvaluateWindowsInterlockOnSource(source, kind, target_id, UiaRequest(kind), ruleset);
+  };
+
+  // An ordinary window: asked, and nothing to refuse.
+  {
+    FakeForm form;
+    if (!no_verdict(evaluate(form.source, "invoke", "name"), InterlockNoVerdict::kNone,
+                    "winlane-ordinary-is-no-refusal")) return false;
+  }
+  // A console window is a command surface: blocked, the map's own verdict.
+  for (const auto &entry : std::vector<std::pair<const char *, const char *>>{
+           {"ConsoleWindowClass", "C:\\Windows\\System32\\conhost.exe"},
+           {"CASCADIA_HOSTING_WINDOW_CLASS", "C:\\x\\WindowsTerminal.exe"}}) {
+    FakeForm form;
+    form.Node(form.window).class_name = entry.first;
+    form.source.process_path = entry.second;
+    const InterlockEvaluation evaluation = evaluate(form.source, "type");
+    if (!Check(evaluation.Refuses() && evaluation.no_verdict == InterlockNoVerdict::kNone &&
+                   evaluation.verdict.outcome == InterlockOutcome::kBlocked &&
+                   evaluation.verdict.reason == InterlockReason::kShellSurface,
+               "winlane-console-window-is-blocked")) return false;
+  }
+  // An executable opened from a file manager is an execution trigger (E1): takeover.
+  {
+    FakeExplorer script("run.bat");
+    script.GiveRealPath("C:\\Users\\me\\run.bat");
+    const InterlockEvaluation evaluation = evaluate(script.form.source, "click");
+    if (!Check(evaluation.Refuses() && evaluation.verdict.outcome == InterlockOutcome::kTakeover &&
+                   evaluation.verdict.reason == InterlockReason::kExecutionTrigger,
+               "winlane-file-manager-script-is-a-takeover")) return false;
+  }
+  // The result is the map's: the evaluation equals the map on the facts of the same capture.
+  {
+    FakeExplorer script("run.bat");
+    script.GiveRealPath("C:\\Users\\me\\run.bat");
+    WindowsShadowReader reader(script.form.source);
+    const ShadowUiaCapture capture = reader.Capture("click", "");
+    const ShadowFacts built = BuildWindowsShadowFacts(capture, UiaRequest("click"));
+    const InterlockVerdict direct = InterlockForFacts(built.facts);
+    FakeExplorer again("run.bat");
+    again.GiveRealPath("C:\\Users\\me\\run.bat");
+    const InterlockEvaluation evaluation = evaluate(again.form.source, "click");
+    if (!Check(evaluation.verdict.outcome == direct.outcome && evaluation.verdict.reason == direct.reason,
+               "winlane-equals-the-map")) return false;
+  }
+  // A rule set other than the default is honored: opening a file from a file manager is refused
+  // while the approval is closed, and is no refusal once the rule set trusts it.
+  {
+    FakeExplorer closed("invoice.pdf");
+    closed.GiveRealPath("C:\\Users\\me\\invoice.pdf");
+    const InterlockEvaluation refused = evaluate(closed.form.source, "click");
+    if (!Check(refused.Refuses() && refused.verdict.reason == InterlockReason::kApprovalClosed,
+               "winlane-default-ruleset-approval-closed")) return false;
+    FakeExplorer trusted("invoice.pdf");
+    trusted.GiveRealPath("C:\\Users\\me\\invoice.pdf");
+    EffectRuleset ruleset;
+    ruleset.file_manager_open = true;
+    if (!no_verdict(evaluate(trusted.form.source, "click", "", ruleset), InterlockNoVerdict::kNone,
+                    "winlane-trusting-ruleset-is-no-refusal")) return false;
+  }
+  // Canceled while the capture ran: no verdict, even where the facts would refuse.
+  {
+    FakeForm form;
+    form.Node(form.window).class_name = "ConsoleWindowClass";
+    form.source.process_path = "C:\\Windows\\System32\\conhost.exe";
+    form.source.cancel_after = 3;
+    if (!no_verdict(evaluate(form.source, "type"), InterlockNoVerdict::kCanceled,
+                    "winlane-canceled-is-no-verdict")) return false;
+  }
+  // Out of time: no verdict. Every call takes 20 ms, so the 150 ms deadline passes mid-capture.
+  {
+    FakeForm form;
+    form.Node(form.window).class_name = "ConsoleWindowClass";
+    form.source.process_path = "C:\\Windows\\System32\\conhost.exe";
+    form.source.step_ns = 20'000'000;
+    if (!no_verdict(evaluate(form.source, "type"), InterlockNoVerdict::kBudget,
+                    "winlane-deadline-is-no-verdict")) return false;
+  }
+  // The deadline passes inside the LAST call (a slow shell lookup): Finish makes it a budget answer.
+  {
+    FakeExplorer script("run.bat");
+    script.GiveRealPath("C:\\Users\\me\\run.bat");
+    script.form.source.item_delay_ns = kShadowDeadlineNs + 1;
+    if (!no_verdict(evaluate(script.form.source, "click"), InterlockNoVerdict::kBudget,
+                    "winlane-late-shell-lookup-is-no-verdict")) return false;
+  }
+  // The call budget: a search through more nodes than 640 calls can read never refuses.
+  {
+    FakeForm form;
+    for (int index = 0; index < 700; ++index) form.source.Add(form.pane, "Text", "x");
+    const InterlockEvaluation evaluation = evaluate(form.source, "invoke", "no-such-id");
+    if (!Check(!evaluation.Refuses(), "winlane-many-nodes-never-refuses")) return false;
+  }
+  // Incomplete facts never map to a refusal.
+  {
+    FakeForm lost;
+    lost.Node(lost.window).class_name = "ConsoleWindowClass";
+    lost.source.process_path = "C:\\Windows\\System32\\conhost.exe";
+    lost.source.root_result = ShadowReadResult::kFailed;
+    if (!no_verdict(evaluate(lost.source, "invoke", "name"), InterlockNoVerdict::kIncomplete,
+                    "winlane-no-window-is-no-verdict")) return false;
+    FakeForm cut;
+    cut.Node(cut.window).class_name = "ConsoleWindowClass";
+    cut.source.process_path = "C:\\Windows\\System32\\conhost.exe";
+    cut.Node(cut.pane).parent_result = ShadowReadResult::kFailed;
+    if (!no_verdict(evaluate(cut.source, "type"), InterlockNoVerdict::kIncomplete,
+                    "winlane-cut-chain-is-no-verdict")) return false;
+    FakeForm none;
+    none.Node(none.window).class_name = "ConsoleWindowClass";
+    none.source.process_path = "C:\\Windows\\System32\\conhost.exe";
+    none.source.focused = -1;
+    if (!no_verdict(evaluate(none.source, "type"), InterlockNoVerdict::kIncomplete,
+                    "winlane-no-target-is-no-verdict")) return false;
+    FakeForm unknown;
+    if (!no_verdict(evaluate(unknown.source, "observe"), InterlockNoVerdict::kIncomplete,
+                    "winlane-unknown-kind-is-no-verdict")) return false;
+  }
+
+  std::cout << "Computer Use native Windows interlock capture: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -6361,6 +6496,7 @@ int main() {
   if (!CheckEffectMeasurementBinding()) return 1;
   if (!CheckNativeInterlockMap()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
+  if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
