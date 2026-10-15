@@ -6116,8 +6116,18 @@ export const computerUseSessionStatusInputSchema = z
   .object({ sessionId: computerUseIdSchema })
   .strict();
 export type ComputerUseSessionStatusInput = z.infer<typeof computerUseSessionStatusInputSchema>;
+/**
+ * The reasons the Renderer may give when it asks Main to stop a session: a person's Stop click and
+ * the selected Task changing. Every other reason is Main's own finding. `agent_stop` and
+ * `agent_finish` in particular say a model ended the session; if the Renderer could claim them, the
+ * stop reason could no longer tell a person's click apart from a model's (T15-1).
+ */
+export const computerUseRendererStopReasonSchema = computerUseStopReasonSchema.extract([
+  'user_stop',
+  'task_changed',
+]);
 export const computerUseStopInputSchema = z
-  .object({ sessionId: computerUseIdSchema, reason: computerUseStopReasonSchema })
+  .object({ sessionId: computerUseIdSchema, reason: computerUseRendererStopReasonSchema })
   .strict();
 export type ComputerUseStopInput = z.infer<typeof computerUseStopInputSchema>;
 
