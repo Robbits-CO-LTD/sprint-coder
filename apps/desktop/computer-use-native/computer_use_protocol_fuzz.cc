@@ -2742,6 +2742,12 @@ using sprint_coder::computer_use::ApprovalAuthorityDigest;
 using sprint_coder::computer_use::ApprovalAuthorityFrame;
 using sprint_coder::computer_use::ApprovalAuthorityIdentity;
 using sprint_coder::computer_use::ApprovalMeasurementInput;
+using sprint_coder::computer_use::ApprovalAuthorityBinding;
+using sprint_coder::computer_use::ApprovalTargetFrame;
+using sprint_coder::computer_use::DeriveAuthorityBinding;
+using sprint_coder::computer_use::NormalizeOrigin;
+using sprint_coder::computer_use::RulesetEnables;
+using sprint_coder::computer_use::kAuthorityFrameGrid;
 using sprint_coder::computer_use::AuthorityString;
 using sprint_coder::computer_use::ClassifierRoute;
 using sprint_coder::computer_use::HighImpactSource;
@@ -2779,6 +2785,8 @@ ApprovalMeasurementInput MeasureInput(const ShadowAxCapture &capture) {
   input.ruleset = EffectRuleset{};
   input.route = ClassifierRoute::kV2;
   input.source = HighImpactSource::kNativeFacts;
+  input.attested_classifier_version = 2;
+  input.target_frame = ApprovalTargetFrame{true, 30, 60, 100, 24};
   return input;
 }
 
@@ -2802,6 +2810,170 @@ NativeApprovalIntentBinding MeasureIntent(const NativeApprovalMeasurement &measu
   return binding;
 }
 
+// The binding that keeps an approval to the page and, for a confirmation, to what the person saw.
+bool CheckEffectMeasurementBinding() {
+  // Origin normalization.
+  if (!Check(NormalizeOrigin("https://Shop.Example/checkout?a=1#x") == "https://shop.example" &&
+                 NormalizeOrigin("https://shop.example:443/") == "https://shop.example" &&
+                 NormalizeOrigin("http://shop.example:80") == "http://shop.example" &&
+                 NormalizeOrigin("http://shop.example:8080/a") == "http://shop.example:8080" &&
+                 NormalizeOrigin("https://shop.example:80/") == "https://shop.example:80" &&
+                 NormalizeOrigin("HTTPS://user:pw@Shop.Example/") == "https://shop.example" &&
+                 NormalizeOrigin("https://[::1]:8443/x") == "https://[::1]:8443" &&
+                 NormalizeOrigin("file:///Users/me/a.html") == "file://",
+             "binding-origin-normalization")) return false;
+  if (!Check(NormalizeOrigin("").empty() && NormalizeOrigin("shop.example/a").empty() &&
+                 NormalizeOrigin("https:///x").empty() && NormalizeOrigin("https://host:12a/").empty() &&
+                 NormalizeOrigin("://host").empty() && NormalizeOrigin("https://[::1/").empty() &&
+                 NormalizeOrigin("data:text/html,x").empty(),
+             "binding-origin-rejects-non-origins")) return false;
+  // The page of a web control: the same control on another host is another authority.
+  const auto web = [](const std::string &url, const std::string &caption) {
+    ShadowAxCapture capture = MeasureCapture();
+    capture.chain.insert(capture.chain.begin() + 1, ShadowNode("AXWebArea", "Checkout"));
+    capture.web_area_url_read = true;
+    capture.web_area_url = url;
+    capture.neighbors = {ShadowNode("AXStaticText")};
+    capture.neighbors[0].value = caption;
+    return capture;
+  };
+  const ShadowAxCapture shop = web("https://shop.example/checkout", "Total: $5");
+  const NativeApprovalMeasurement base = MeasureApproval(MeasureInput(shop));
+  if (!Check(base.eligible, "binding-fixture-is-eligible")) return false;
+  const ShadowAxCapture elsewhere = web("https://attacker.example/checkout", "Total: $5");
+  if (!Check(MeasureApproval(MeasureInput(elsewhere)).eligible &&
+                 MeasureApproval(MeasureInput(elsewhere)).authority_digest != base.authority_digest,
+             "binding-host-change-moves-the-digest")) return false;
+  for (const char *url : {"https://shop.example:8443/checkout", "http://shop.example/checkout",
+                          "https://shop.example.evil/checkout", "https://sub.shop.example/checkout"}) {
+    if (!Check(MeasureApproval(MeasureInput(web(url, "Total: $5"))).authority_digest != base.authority_digest,
+               "binding-origin-parts-move-the-digest")) return false;
+  }
+  // The path, the query and the host's case or default port do not.
+  for (const char *url : {"https://SHOP.example/other/page?x=1#top", "https://shop.example:443/checkout"}) {
+    if (!Check(MeasureApproval(MeasureInput(web(url, "Total: $5"))).authority_digest == base.authority_digest,
+               "binding-path-does-not-move-the-digest")) return false;
+  }
+  // A URL that cannot be read is no origin: the facts say unknown and the measurement is a person's.
+  {
+    ShadowAxCapture unreadable = shop;
+    unreadable.web_area_url_read = false;
+    unreadable.web_area_url.clear();
+    const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(unreadable));
+    if (!Check(measured.takeover && !measured.eligible, "binding-unreadable-url-is-a-takeover")) return false;
+    ShadowAxCapture odd = web("data:text/html,x", "Total: $5");
+    if (!Check(!MeasureApproval(MeasureInput(odd)).eligible, "binding-non-origin-url-is-not-eligible")) return false;
+  }
+
+  // A confirmation is bound to what the person saw and to where the control was.
+  if (!Check(MeasureApproval(MeasureInput(web("https://shop.example/checkout", "Total: $5000"))).authority_digest !=
+                 base.authority_digest,
+             "binding-caption-change-moves-the-digest")) return false;
+  {
+    ShadowAxCapture more = shop;
+    more.neighbors.push_back(ShadowNode("AXStaticText"));
+    more.neighbors.back().value = "Free shipping";
+    if (!Check(MeasureApproval(MeasureInput(more)).authority_digest != base.authority_digest, "binding-extra-caption")) return false;
+    ShadowAxCapture reordered = more;
+    std::swap(reordered.neighbors[0], reordered.neighbors[1]);
+    if (!Check(MeasureApproval(MeasureInput(reordered)).authority_digest != MeasureApproval(MeasureInput(more)).authority_digest,
+               "binding-caption-order")) return false;
+    ShadowAxCapture split = shop;
+    split.neighbors[0].value = "Total: ";
+    split.neighbors.push_back(ShadowNode("AXStaticText"));
+    split.neighbors.back().value = "$5";
+    if (!Check(MeasureApproval(MeasureInput(split)).authority_digest != base.authority_digest, "binding-captions-are-not-concatenated"))
+      return false;
+    // The same number of captions with the boundary moved is another content.
+    ShadowAxCapture ab_c = shop;
+    ab_c.neighbors = {ShadowNode("AXStaticText"), ShadowNode("AXStaticText")};
+    ab_c.neighbors[0].value = "ab";
+    ab_c.neighbors[1].value = "c";
+    ShadowAxCapture a_bc = ab_c;
+    a_bc.neighbors[0].value = "a";
+    a_bc.neighbors[1].value = "bc";
+    if (!Check(MeasureApproval(MeasureInput(ab_c)).authority_digest != MeasureApproval(MeasureInput(a_bc)).authority_digest,
+               "binding-caption-boundary")) return false;
+  }
+  // The place is window-relative and rounded: a window that moved with its control is the same;
+  // a control that moved by a grid step, or changed size, is not; less than a step is.
+  {
+    const auto place = [&](std::int64_t window_x, std::int64_t window_y, ApprovalTargetFrame frame) {
+      ApprovalMeasurementInput input = MeasureInput(shop);
+      input.identity.x = window_x;
+      input.identity.y = window_y;
+      input.target_frame = frame;
+      return MeasureApproval(input).authority_digest;
+    };
+    const std::string at_rest = place(10, 20, ApprovalTargetFrame{true, 30, 60, 100, 24});
+    // (the window's own position is in the identity's geometry, so a moved window is another authority;
+    // what the relative frame removes is the dependence on the control's absolute position)
+    ApprovalMeasurementInput moved_window = MeasureInput(shop);
+    moved_window.identity.x = 110;
+    moved_window.identity.y = 70;
+    moved_window.target_frame = ApprovalTargetFrame{true, 130, 110, 100, 24};
+    ApprovalMeasurementInput rest = MeasureInput(shop);
+    const auto digest_without_window = [&](ApprovalMeasurementInput input) {
+      const ShadowFacts built = BuildShadowFacts(*input.capture, input.request);
+      const EffectDecision decision = ClassifyEffect(built.facts, input.ruleset);
+      return DeriveAuthorityBinding(*input.capture, input.identity, input.target_frame, built.facts, decision).binding;
+    };
+    const ApprovalAuthorityBinding a = digest_without_window(moved_window);
+    const ApprovalAuthorityBinding b = digest_without_window(rest);
+    if (!Check(a.relative_x == b.relative_x && a.relative_y == b.relative_y && a.relative_width == b.relative_width &&
+                   a.relative_height == b.relative_height,
+               "binding-frame-is-window-relative")) return false;
+    if (!Check(place(10, 20, ApprovalTargetFrame{true, 30 + kAuthorityFrameGrid, 60, 100, 24}) != at_rest &&
+                   place(10, 20, ApprovalTargetFrame{true, 30, 60 + kAuthorityFrameGrid, 100, 24}) != at_rest &&
+                   place(10, 20, ApprovalTargetFrame{true, 30, 60, 100 + kAuthorityFrameGrid, 24}) != at_rest &&
+                   place(10, 20, ApprovalTargetFrame{true, 30, 60, 100, 24 + kAuthorityFrameGrid}) != at_rest,
+               "binding-frame-grid-step-moves-the-digest")) return false;
+    if (!Check(place(10, 20, ApprovalTargetFrame{true, 31, 61, 101, 25}) == at_rest, "binding-frame-below-the-grid-is-rounded"))
+      return false;
+    // Rounding is a floor, also below zero.
+    if (!Check(DeriveAuthorityBinding(shop, MeasureIdentity(), ApprovalTargetFrame{true, 7, 17, 100, 24},
+                                      BuildShadowFacts(shop, ShadowRequest("invoke")).facts,
+                                      ClassifyEffect(BuildShadowFacts(shop, ShadowRequest("invoke")).facts, EffectRuleset{}))
+                       .binding.relative_x == -1,
+               "binding-frame-floor-below-zero")) return false;
+  }
+  // The captions and the place must be whole for a confirmation, else it is a person's.
+  {
+    ShadowAxCapture partial = shop;
+    partial.neighbors_complete = false;
+    const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(partial));
+    if (!Check(measured.takeover && !measured.eligible, "binding-partial-captions-are-a-takeover")) return false;
+    ApprovalMeasurementInput no_frame = MeasureInput(shop);
+    no_frame.target_frame = ApprovalTargetFrame{};
+    const NativeApprovalMeasurement unplaced = MeasureApproval(no_frame);
+    if (!Check(unplaced.takeover && !unplaced.eligible, "binding-unknown-frame-is-a-takeover")) return false;
+  }
+  // Other effects are not bound to the captions or the place: a supervised action is the same
+  // authority whatever is near it and wherever the control sits.
+  {
+    ShadowAxCapture save = ShadowBase();
+    save.neighbors = {ShadowNode("AXStaticText")};
+    save.neighbors[0].value = "Draft";
+    ApprovalMeasurementInput supervised = MeasureInput(save);
+    supervised.request.maximum_mode = "supervised";
+    supervised.request.kind = "click";
+    supervised.source = HighImpactSource::kNone;
+    const NativeApprovalMeasurement first = MeasureApproval(supervised);
+    save.neighbors[0].value = "Final";
+    supervised.target_frame = ApprovalTargetFrame{true, 300, 400, 10, 10};
+    const NativeApprovalMeasurement second = MeasureApproval(supervised);
+    if (!Check(first.eligible && second.eligible && first.effect == NativeApprovalEffect::kSupervisedAction &&
+                   first.authority_digest == second.authority_digest,
+               "binding-supervised-is-not-content-bound")) return false;
+    // ...and it does not need a frame or whole captions.
+    supervised.target_frame = ApprovalTargetFrame{};
+    save.neighbors_complete = false;
+    if (!Check(MeasureApproval(supervised).eligible, "binding-supervised-needs-neither")) return false;
+  }
+  std::cout << "Computer Use native effect measurement binding: PASS\n";
+  return true;
+}
+
 bool CheckEffectMeasurement() {
   // SHA-256, so the digest does not depend on a platform library.
   if (!Check(Sha256Hex("") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" &&
@@ -2820,16 +2992,20 @@ bool CheckEffectMeasurement() {
     const ShadowAxCapture capture = MeasureCapture();
     const ShadowFacts built = BuildShadowFacts(capture, ShadowRequest("invoke"));
     const EffectDecision decision = ClassifyEffect(built.facts, EffectRuleset{});
-    const std::string frame = ApprovalAuthorityFrame(MeasureIdentity(), built.facts, decision);
+    const ApprovalAuthorityBinding binding =
+        DeriveAuthorityBinding(capture, MeasureIdentity(), ApprovalTargetFrame{true, 30, 60, 100, 24},
+                               built.facts, decision)
+            .binding;
+    const std::string frame = ApprovalAuthorityFrame(MeasureIdentity(), binding, built.facts, decision);
     if (!Check(kApprovalAuthorityDomain == "approval-authority-v1" &&
                    frame.rfind("21:approval-authority-v1", 0) == 0,
                "measure-frame-domain")) return false;
-    if (!Check(frame == ApprovalAuthorityFrame(MeasureIdentity(), built.facts, decision), "measure-frame-deterministic"))
+    if (!Check(frame == ApprovalAuthorityFrame(MeasureIdentity(), binding, built.facts, decision), "measure-frame-deterministic"))
       return false;
     // What is not authority is not in it.
     for (const char *name : {"observation", "ticket", "revision"})
       if (!Check(frame.find(name) == std::string::npos, "measure-frame-has-no-revision")) return false;
-    const std::string digest = ApprovalAuthorityDigest(MeasureIdentity(), built.facts, decision);
+    const std::string digest = ApprovalAuthorityDigest(MeasureIdentity(), binding, built.facts, decision);
     if (!Check(digest.size() == 64 && digest == Sha256Hex(frame), "measure-digest-is-sha256-of-frame")) return false;
 
     // Every field moves the digest.
@@ -2867,7 +3043,7 @@ bool CheckEffectMeasurement() {
       EffectFacts facts = built.facts;
       EffectDecision changed = decision;
       mutation.apply(&identity, &facts, &changed);
-      if (!Check(ApprovalAuthorityDigest(identity, facts, changed) != digest, mutation.name)) return false;
+      if (!Check(ApprovalAuthorityDigest(identity, binding, facts, changed) != digest, mutation.name)) return false;
     }
 
     // Absent is not empty, and neighbouring strings do not run into each other.
@@ -2875,32 +3051,55 @@ bool CheckEffectMeasurement() {
     absent.process_generation = AuthorityString{};
     ApprovalAuthorityIdentity empty = MeasureIdentity();
     empty.process_generation = AuthorityString{true, ""};
-    if (!Check(ApprovalAuthorityDigest(absent, built.facts, decision) !=
-                   ApprovalAuthorityDigest(empty, built.facts, decision),
+    if (!Check(ApprovalAuthorityDigest(absent, binding, built.facts, decision) !=
+                   ApprovalAuthorityDigest(empty, binding, built.facts, decision),
                "measure-absent-is-not-empty")) return false;
+    // A value that looks like the next field's framing cannot take its place: with the lengths
+    // left out these two frames are the same string.
     ApprovalAuthorityIdentity left = MeasureIdentity();
-    left.process_generation = AuthorityString{true, "ab"};
+    left.process_generation = AuthorityString{true, "a6:windowPb"};
     left.window_identity = AuthorityString{true, "c"};
     ApprovalAuthorityIdentity right = MeasureIdentity();
     right.process_generation = AuthorityString{true, "a"};
-    right.window_identity = AuthorityString{true, "bc"};
-    if (!Check(ApprovalAuthorityDigest(left, built.facts, decision) !=
-                   ApprovalAuthorityDigest(right, built.facts, decision),
+    right.window_identity = AuthorityString{true, "b6:windowPc"};
+    if (!Check(ApprovalAuthorityDigest(left, binding, built.facts, decision) !=
+                   ApprovalAuthorityDigest(right, binding, built.facts, decision),
                "measure-adjacent-strings")) return false;
-    // A value that contains the framing characters cannot forge another field.
-    ApprovalAuthorityIdentity forged = MeasureIdentity();
-    forged.process_generation = AuthorityString{true, "a\n3:bc"};
-    ApprovalAuthorityIdentity plain = MeasureIdentity();
-    plain.process_generation = AuthorityString{true, "a"};
-    plain.window_identity = AuthorityString{true, "bc"};
-    if (!Check(ApprovalAuthorityDigest(forged, built.facts, decision) !=
-                   ApprovalAuthorityDigest(plain, built.facts, decision),
-               "measure-framing-characters")) return false;
+    ApprovalAuthorityIdentity moved_boundary_left = MeasureIdentity();
+    moved_boundary_left.app_identity = AuthorityString{true, "ab"};
+    moved_boundary_left.process_generation = AuthorityString{true, "c"};
+    ApprovalAuthorityIdentity moved_boundary_right = MeasureIdentity();
+    moved_boundary_right.app_identity = AuthorityString{true, "a"};
+    moved_boundary_right.process_generation = AuthorityString{true, "bc"};
+    if (!Check(ApprovalAuthorityDigest(moved_boundary_left, binding, built.facts, decision) !=
+                   ApprovalAuthorityDigest(moved_boundary_right, binding, built.facts, decision),
+               "measure-moved-boundary")) return false;
+    // Inside one node: the same text moved between the role, the subrole and the label.
+    const auto digest_of_node = [&](const NodeFacts &node) {
+      EffectFacts facts = built.facts;
+      facts.chain[0] = node;
+      return ApprovalAuthorityDigest(MeasureIdentity(), binding, facts, decision);
+    };
+    if (!Check(digest_of_node(NodeFacts{"AXButton", "", "Place order"}) !=
+                   digest_of_node(NodeFacts{"AXButton", "Place order", ""}),
+               "measure-node-subrole-label-swap")) return false;
+    if (!Check(digest_of_node(NodeFacts{"AB", "", "x"}) != digest_of_node(NodeFacts{"A", "B", "x"}) &&
+                   digest_of_node(NodeFacts{"A", "B", ""}) != digest_of_node(NodeFacts{"A", "", "B"}) &&
+                   digest_of_node(NodeFacts{"", "AB", "C"}) != digest_of_node(NodeFacts{"", "A", "BC"}),
+               "measure-node-boundaries")) return false;
+    // Nodes of the chain are told apart from one longer node.
+    EffectFacts joined_nodes = built.facts;
+    joined_nodes.chain = {NodeFacts{"AXButton", "", "Place order"}, NodeFacts{"AXWindow", "", "Notes"}};
+    EffectFacts one_node = built.facts;
+    one_node.chain = {NodeFacts{"AXButton", "", "Place orderAXWindowNotes"}};
+    if (!Check(ApprovalAuthorityDigest(MeasureIdentity(), binding, joined_nodes, decision) !=
+                   ApprovalAuthorityDigest(MeasureIdentity(), binding, one_node, decision),
+               "measure-node-count-boundary")) return false;
     // Neighbouring labels and the action are not authority: the same effect on the same control.
     EffectFacts with_neighbors = built.facts;
     with_neighbors.neighbor_labels = {"Total"};
     with_neighbors.action = ActionKind::kClick;
-    if (!Check(ApprovalAuthorityDigest(MeasureIdentity(), with_neighbors, decision) == digest,
+    if (!Check(ApprovalAuthorityDigest(MeasureIdentity(), binding, with_neighbors, decision) == digest,
                "measure-neighbors-are-not-authority")) return false;
   }
 
@@ -2910,34 +3109,53 @@ bool CheckEffectMeasurement() {
     const EffectDecision confirm = ClassifyEffect(built.facts, EffectRuleset{});
     if (!Check(confirm.kind == DecisionKind::kApproval && confirm.approval_effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-fixture-is-a-confirmation")) return false;
-    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts);
+    const auto offered = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 2);
     if (!Check(offered.offer && offered.refusal == IntentRefusal::kNone &&
                    offered.effect == NativeApprovalEffect::kHighImpactConfirmation,
                "measure-offer-all-conditions")) return false;
-    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts);
+    const auto v1 = JudgeIntentOffer(ClassifierRoute::kV1, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, 2);
     if (!Check(!v1.offer && v1.refusal == IntentRefusal::kRouteNotV2 && v1.effect == NativeApprovalEffect::kInvalid,
                "measure-offer-needs-route-v2")) return false;
     for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kMainProjection}) {
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, source, 2);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotNativeFacts, "measure-offer-needs-native-facts"))
         return false;
     }
     EffectRuleset closed;
     closed.high_impact_confirmation = false;
-    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts);
+    const auto disabled = JudgeIntentOffer(ClassifierRoute::kV2, closed, confirm, HighImpactSource::kNativeFacts, 2);
     if (!Check(!disabled.offer && disabled.refusal == IntentRefusal::kNotEnabled, "measure-offer-needs-enabled-effect"))
       return false;
+    // The build must attest the version the core has.
+    for (const std::uint32_t attested : {0u, 1u, 3u}) {
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, confirm, HighImpactSource::kNativeFacts, attested);
+      if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAttested, "measure-offer-needs-the-attested-version"))
+        return false;
+    }
+    // A supervised action is not about high impact: it needs no claim, and Main's projection never grants.
+    EffectDecision supervised_decision = confirm;
+    supervised_decision.effect_class = EffectClass::kOrdinary;
+    supervised_decision.approval_effect = NativeApprovalEffect::kSupervisedAction;
+    for (const HighImpactSource source : {HighImpactSource::kNone, HighImpactSource::kNativeFacts}) {
+      if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, source, 2).offer,
+                 "measure-supervised-needs-no-high-impact-claim")) return false;
+    }
+    {
+      const auto projected = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, supervised_decision, HighImpactSource::kMainProjection, 2);
+      if (!Check(!projected.offer && projected.refusal == IntentRefusal::kNotNativeFacts, "measure-projection-never-grants"))
+        return false;
+    }
     // Anything that is not an approval is not offered, whatever else is true.
     for (const DecisionKind kind : {DecisionKind::kOrdinary, DecisionKind::kBlocked, DecisionKind::kTakeover}) {
       EffectDecision other = confirm;
       other.kind = kind;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 2);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotAnApproval, "measure-offer-needs-an-approval"))
         return false;
     }
     EffectDecision no_effect = confirm;
     no_effect.approval_effect = NativeApprovalEffect::kInvalid;
-    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts).refusal ==
+    if (!Check(JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, no_effect, HighImpactSource::kNativeFacts, 2).refusal ==
                    IntentRefusal::kNotAnApproval,
                "measure-offer-needs-an-effect")) return false;
     // A decision made by another version of the core is not trusted.
@@ -2946,15 +3164,43 @@ bool CheckEffectMeasurement() {
       if (field == 0) other.classifier_version += 1;
       if (field == 1) other.ruleset_version += 1;
       if (field == 2) other.lexicon_version += 1;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, other, HighImpactSource::kNativeFacts, 2);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kVersionMismatch, "measure-offer-needs-current-versions"))
         return false;
+    }
+    // Each flag enables its own effect and no other.
+    {
+      EffectRuleset download;
+      download.download_open = true;
+      EffectRuleset files;
+      files.file_manager_open = true;
+      if (!Check(RulesetEnables(download, NativeApprovalEffect::kDownloadOpen) &&
+                     !RulesetEnables(download, NativeApprovalEffect::kFileManagerOpen) &&
+                     RulesetEnables(files, NativeApprovalEffect::kFileManagerOpen) &&
+                     !RulesetEnables(files, NativeApprovalEffect::kDownloadOpen) &&
+                     !RulesetEnables(EffectRuleset{}, NativeApprovalEffect::kDownloadOpen) &&
+                     !RulesetEnables(EffectRuleset{}, NativeApprovalEffect::kFileManagerOpen) &&
+                     RulesetEnables(EffectRuleset{}, NativeApprovalEffect::kHighImpactConfirmation) &&
+                     RulesetEnables(EffectRuleset{}, NativeApprovalEffect::kSupervisedAction) &&
+                     !RulesetEnables(EffectRuleset{}, NativeApprovalEffect::kInvalid),
+                 "measure-ruleset-flags-map-to-effects")) return false;
+      // Widening the rule set without a new ruleset version does not widen what is offered.
+      EffectDecision download_open = confirm;
+      download_open.effect_class = EffectClass::kE2DownloadOpen;
+      download_open.approval_effect = NativeApprovalEffect::kDownloadOpen;
+      const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, 2);
+      if (!Check(!widened.offer && widened.refusal == IntentRefusal::kNotEnabled, "measure-ruleset-is-the-versions-own"))
+        return false;
+      EffectRuleset also_files;
+      also_files.file_manager_open = true;
+      if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, 2).offer,
+                 "measure-ruleset-widened-refuses-everything")) return false;
     }
     // The first release's rule set offers only the two approvals; E2 / E3 stay refused (decision 2-A).
     for (const NativeApprovalEffect effect : {NativeApprovalEffect::kDownloadOpen, NativeApprovalEffect::kFileManagerOpen}) {
       EffectDecision file = confirm;
       file.approval_effect = effect;
-      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts);
+      const auto refused = JudgeIntentOffer(ClassifierRoute::kV2, EffectRuleset{}, file, HighImpactSource::kNativeFacts, 2);
       if (!Check(!refused.offer && refused.refusal == IntentRefusal::kNotEnabled, "measure-file-effects-stay-closed"))
         return false;
     }
@@ -2995,10 +3241,50 @@ bool CheckEffectMeasurement() {
     stopped.budget_exhausted = true;
     const NativeApprovalMeasurement person = MeasureApproval(MeasureInput(stopped));
     if (!Check(person.takeover && !person.eligible, "measure-incomplete-is-a-takeover")) return false;
+    // An approval whose identity could not be measured whole is a person's; an ordinary control with
+    // the same gaps is simply not an approval.
+    {
+      const ShadowAxCapture capture_with_gaps = MeasureCapture();
+      for (int field = 0; field < 4; ++field) {
+        ApprovalMeasurementInput input = MeasureInput(capture_with_gaps);
+        if (field == 0) input.identity.app_identity = AuthorityString{};
+        if (field == 1) input.identity.process_generation = AuthorityString{};
+        if (field == 2) input.identity.window_identity = AuthorityString{};
+        if (field == 3) input.identity.geometry_present = false;
+        const NativeApprovalMeasurement gap = MeasureApproval(input);
+        if (!Check(gap.takeover && !gap.eligible && gap.authority_digest.empty(), "measure-identity-gap-is-a-takeover"))
+          return false;
+      }
+      ApprovalMeasurementInput plain = MeasureInput(ordinary);
+      plain.identity.app_identity = AuthorityString{};
+      if (!Check(!MeasureApproval(plain).takeover && !MeasureApproval(plain).eligible, "measure-identity-gap-on-an-ordinary-control"))
+        return false;
+    }
+    // No capture is a person's, and a v1 route is "no" before the capture is looked at.
+    {
+      ApprovalMeasurementInput none = MeasureInput(ordinary);
+      none.capture = nullptr;
+      if (!Check(MeasureApproval(none).takeover && !MeasureApproval(none).eligible, "measure-no-capture-is-a-takeover"))
+        return false;
+      ShadowAxCapture broken = MeasureCapture();
+      broken.budget_exhausted = true;
+      ApprovalMeasurementInput v1_broken = MeasureInput(broken);
+      v1_broken.route = ClassifierRoute::kV1;
+      const NativeApprovalMeasurement v1_result = MeasureApproval(v1_broken);
+      if (!Check(!v1_result.takeover && !v1_result.eligible, "measure-v1-route-before-the-capture")) return false;
+      ApprovalMeasurementInput unattested = MeasureInput(capture);
+      unattested.attested_classifier_version = 1;
+      if (!Check(!MeasureApproval(unattested).eligible && !MeasureApproval(unattested).takeover, "measure-unattested-is-not-eligible"))
+        return false;
+      ApprovalMeasurementInput widened = MeasureInput(capture);
+      widened.ruleset.file_manager_open = true;
+      if (!Check(!MeasureApproval(widened).eligible, "measure-widened-ruleset-is-not-eligible")) return false;
+    }
     // The versions and the effect are the core's, not the caller's.
     ApprovalMeasurementInput supervised = MeasureInput(ordinary);
     supervised.request.maximum_mode = "supervised";
     supervised.request.kind = "click";
+    supervised.source = HighImpactSource::kNone;
     const NativeApprovalMeasurement supervised_measured = MeasureApproval(supervised);
     if (!Check(supervised_measured.eligible && supervised_measured.effect == NativeApprovalEffect::kSupervisedAction &&
                    supervised_measured.authority_digest != measured.authority_digest,
@@ -4289,6 +4575,7 @@ int main() {
   if (!CheckWindowsShadowCore()) return 1;
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckEffectMeasurement()) return 1;
+  if (!CheckEffectMeasurementBinding()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

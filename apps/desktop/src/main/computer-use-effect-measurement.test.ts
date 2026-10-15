@@ -62,13 +62,25 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     expect(signature).toContain('EffectFacts');
     expect(signature).toContain('EffectDecision');
     expect(signature).not.toMatch(/NativeApprovalFacts|Request|Session/u);
-    expect(frame).not.toMatch(/observation|ticket|revision|action|neighbor/u);
+    expect(frame.replaceAll('binding.neighbors_digest', '')).not.toMatch(
+      /observation|ticket|revision|action|neighbor/u,
+    );
+    // The page's origin, and, for a confirmation, the captions and the place, are bound; every node
+    // of the chain is length-prefixed field by field.
+    for (const needle of [
+      'AppendString(&frame, "site", binding.origin);',
+      'if (binding.content_bound) {',
+      'AppendLengthPrefixed(&frame, node.role);',
+      'AppendLengthPrefixed(&frame, node.subrole);',
+      'AppendLengthPrefixed(&frame, node.label);',
+    ])
+      expect(frame, needle).toContain(needle);
     // Absent is told from empty by a marker, and every value is length-prefixed.
     expect(measurement).toContain("output->push_back(field.present ? 'P' : 'A');");
     expect(measurement).toContain("output->push_back(':');");
     // The digest is the SHA-256 of the frame, from the portable implementation.
     expect(functionBody(measurement, 'inline std::string ApprovalAuthorityDigest(')).toContain(
-      'Sha256Hex(ApprovalAuthorityFrame(identity, facts, decision))',
+      'Sha256Hex(ApprovalAuthorityFrame(identity, binding, facts, decision))',
     );
   });
 
@@ -76,7 +88,10 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     const judge = functionBody(measurement, 'inline IntentVerdict JudgeIntentOffer(');
     for (const needle of [
       'route != ClassifierRoute::kV2',
+      'attested_classifier_version != kEffectClassifierVersion',
+      'source == HighImpactSource::kMainProjection) return refuse(IntentRefusal::kNotNativeFacts)',
       'source != HighImpactSource::kNativeFacts',
+      'RulesetIsTheVersionsOwn(ruleset)',
       'decision.kind != DecisionKind::kApproval',
       'decision.approval_effect == NativeApprovalEffect::kInvalid',
       'kEffectClassifierVersion',
@@ -89,7 +104,35 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     expect(
       functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval('),
     ).not.toContain('kMainProjection');
-    expect(judge).not.toContain('kMainProjection');
+    // The order is the contract: the route, then the attest, then the decision.
+    expect(judge.indexOf('ClassifierRoute::kV2')).toBeLessThan(
+      judge.indexOf('attested_classifier_version != kEffectClassifierVersion'),
+    );
+    expect(judge.indexOf('attested_classifier_version != kEffectClassifierVersion')).toBeLessThan(
+      judge.indexOf('decision.kind != DecisionKind::kApproval'),
+    );
+  });
+
+  it('binds the content and the place of a confirmation only, and keeps a v1 route out first', () => {
+    const derive = functionBody(measurement, 'DeriveAuthorityBinding(');
+    expect(derive).toContain(
+      'decision.approval_effect != NativeApprovalEffect::kHighImpactConfirmation) return derived;',
+    );
+    expect(derive).toContain('NormalizeOrigin(capture.web_area_url)');
+    const measure = functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval(');
+    const order = [
+      'input.capture == nullptr',
+      'input.route != ClassifierRoute::kV2',
+      'BuildShadowFacts(',
+      'DecisionKind::kTakeover',
+      'AuthorityIdentityIsWhole(input.identity)',
+      'JudgeIntentOffer(',
+      'DeriveAuthorityBinding(',
+      '!derived.complete',
+      'measured.eligible = true;',
+    ].map((needle) => measure.indexOf(needle));
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
   it('is recorded in the ADR with the C4-1 contract', () => {
