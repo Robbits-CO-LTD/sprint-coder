@@ -72,9 +72,13 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     // The approval that is closed refuses; the secure and credential classes are not this map's.
     // A control is told from an item by its role, never by whether a file is attached to it, and
     // only an allow list of passive items, matched whole, is an exception (fail closed).
-    expect(squashed).toContain('if (!RefusedByExtension(facts) && ItemInSpan(facts)) return {};');
+    expect(squashed).toContain('if (!RefusedByExtension(facts) && ItemInSpan(facts)) {');
     expect(squashed).toContain('if (name == item) return true;');
     expect(header).not.toContain('ControlInSpan');
+    // A passive item opened from a file manager or a download list stays an E2 / E3 refusal.
+    expect(squashed).toContain(
+      'if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known)',
+    );
     // The walk goes up to the nearest KNOWN container, through allow-listed roles only.
     expect(squashed).toContain('if (RoleIsKnownContainer(node.role)) return index > 0;');
     expect(squashed).toContain('if (!RoleIsPassiveItem(node.role)) return false;');

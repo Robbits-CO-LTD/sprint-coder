@@ -191,7 +191,18 @@ namespace interlock_detail {
       // Refused for the words of the control, not for an extension: only a control has those words
       // in the sense that matters. A row or a text that is KNOWN to be one ("install.sh" in a file
       // tree) is a file, judged by its extension; a role nobody listed is a control.
-      if (!RefusedByExtension(facts) && ItemInSpan(facts)) return {};
+      if (!RefusedByExtension(facts) && ItemInSpan(facts)) {
+        // A passive item opened from a file manager or a download list is an opening that needs an
+        // approval (E2 / E3), whatever word its name carries: the core may call it E4 for "install" in
+        // the name, and the answer must not be weaker than the approval's. It needs the extension the
+        // E2 / E3 rule needs; without it the round stays with v1. Inside an application (any other
+        // surface) the file is a file in an editor and is not refused here.
+        if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known)
+          return Refusal(InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed,
+                         facts.surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
+                                                                      : EffectClass::kE3FileManagerOpen);
+        return {};
+      }
       return Refusal(InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger,
                      decision.effect_class);
     case EffectClass::kE2DownloadOpen:

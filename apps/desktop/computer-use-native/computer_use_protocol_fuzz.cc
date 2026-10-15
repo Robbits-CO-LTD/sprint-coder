@@ -3727,6 +3727,66 @@ bool CheckNativeInterlockMap() {
         }
       }
     }
+    {
+      // A file named like an installer, opened from a file manager or a download list, is an opening
+      // that needs an approval (E2 / E3): refused while the approval path is closed. The core may
+      // call it E4 for the word in the name; the answer does not get weaker for that.
+      for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+        for (const bool item_flag : {true, false}) {
+          for (const ActionKind action : {ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kClick}) {
+            EffectFacts facts = EffBase();
+            facts.surface = surface;
+            facts.action = action;
+            facts.target_is_file_item = item_flag;
+            facts.extension_known = true;
+            facts.extension = "txt";
+            facts.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+            if (!trigger_blocked(facts, "interlock-installer-named-file-opened-from-a-list")) return false;
+            if (!Check(InterlockForFacts(facts).effect_class ==
+                           (surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
+                                                                   : EffectClass::kE3FileManagerOpen),
+                       "interlock-listed-opening-names-its-class")) return false;
+          }
+        }
+        // Browsing it is not opening it.
+        EffectFacts browse = EffBase();
+        browse.surface = surface;
+        browse.action = ActionKind::kSelect;
+        browse.target_is_file_item = true;
+        browse.extension_known = true;
+        browse.extension = "txt";
+        browse.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+        if (!none(browse, "interlock-installer-named-file-selected-in-a-list")) return false;
+        // An unknown extension stays with v1 (a person decides), as for any other name.
+        EffectFacts unknown = browse;
+        unknown.action = ActionKind::kDoubleClick;
+        unknown.extension_known = false;
+        unknown.extension = "";
+        unknown.chain = {{"axrow", "", "Installer.dmg"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+        if (!none(unknown, "interlock-installer-named-file-with-an-unknown-extension-in-a-list")) return false;
+      }
+      // The same name opened inside an application is a file in an editor, not refused.
+      EffectFacts editor = EffBase();
+      editor.surface = SurfaceKind::kOrdinary;
+      editor.action = ActionKind::kDoubleClick;
+      editor.target_is_file_item = true;
+      editor.extension_known = true;
+      editor.extension = "txt";
+      editor.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+      if (!none(editor, "interlock-installer-named-file-opened-in-an-editor")) return false;
+      // From UI Automation: an Explorer ListItem.
+      ShadowUiaCapture explorer = UiaBase();
+      explorer.window_class = "CabinetWClass";
+      explorer.process_path = "C:\\Windows\\explorer.exe";
+      explorer.chain = {UiaNode("ListItem", "install.txt"), UiaNode("List", "Items View"), UiaNode("Window", "Downloads")};
+      explorer.item_kind = ShadowItemKind::kFile;
+      explorer.item_name_read = true;
+      explorer.item_name_is_real_path = true;
+      explorer.item_name = "C:\\Users\\a\\Downloads\\install.txt";
+      explorer.chain[1].class_name = "UIItemsView";
+      if (!trigger_blocked(BuildWindowsShadowFacts(explorer, UiaRequest("invoke")).facts,
+                           "interlock-windows-installer-named-file-in-explorer")) return false;
+    }
     // The installer rule is the core's: the control must be activated, and its words must be readable.
     EffectFacts typed = EffBase();
     typed.action = ActionKind::kKey;
