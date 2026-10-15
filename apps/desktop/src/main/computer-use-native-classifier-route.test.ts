@@ -54,7 +54,7 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
     );
   });
 
-  it('is only stored: no decision, receipt, measurement or dispatch reads it yet', () => {
+  it('is stored, and read once: by the gate that decides whether an approval is measured', () => {
     const uses = [...macos.matchAll(/classifier_route/gu)].length;
     const start = between('napi_value StartSession(', 'napi_value promise;');
     const declarations = between('struct MacComputerUseSession {', 'std::uint32_t pid = 0;');
@@ -69,8 +69,16 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
       ).matchAll(/classifier_route/gu),
     ].length;
     expect(parserUses).toBe(0);
-    // Declaration + request member + the start path; nowhere else.
-    expect(uses).toBe(startUses + declarationUses + requestUses);
+    // The one decision it feeds (C4-2b): whether anything is measured for an approval at all.
+    const measureUses = [
+      ...between(
+        'MeasureNativeApproval(const NativeDispatchRequest& request) {',
+        'sprint_coder::computer_use::NativeApprovalFacts NativeApprovalFactsLocked(',
+      ).matchAll(/classifier_route/gu),
+    ].length;
+    expect(measureUses).toBe(1);
+    // Declaration + request member + the start path + that gate; nowhere else.
+    expect(uses).toBe(startUses + declarationUses + requestUses + measureUses);
     expect(macos).not.toContain('single_use_approval');
   });
 

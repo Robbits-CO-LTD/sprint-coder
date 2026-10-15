@@ -149,6 +149,10 @@ struct MacComputerUseSession {
   // close and the deadline do. Nothing in this addon begins an intent yet (that is classifier v2),
   // so a production session never holds one and every approve / dispatchApproved fails closed.
   sprint_coder::computer_use::NativeApprovalFlow approval;
+  // The approval generation an approvalApprove is measuring right now (0: none). Only touched under
+  // state_mutex. It keeps a second approvalApprove of the same generation from being measured while
+  // the first is, without burning the waiting intent.
+  std::uint64_t approval_busy_generation = 0;
 };
 
 // The caller holds state_mutex. Any state change a ticket could depend on supersedes it.
@@ -6172,6 +6176,8 @@ struct AsyncNativeDispatchWork {
   napi_deferred deferred = nullptr;
   NativeDispatchRequest request;
   NativeDispatchOutcome outcome;
+  // Only an approved dispatch (dispatchApproved) carries one; an ordinary dispatch leaves it 0.
+  std::uint64_t approval_generation = 0;
 };
 
 void ExecuteNativeDispatch(napi_env env, void* data) {
@@ -6453,14 +6459,18 @@ napi_value Preflight(napi_env env, napi_callback_info info) {
   return promise;
 }
 
-// What native measures *now* for an approval. Classifier v2 does not exist yet, so nothing is
-// ever approvable here: a pending approval can therefore never be approved or consumed by this
-// addon. The classifier v2 change replaces this with a real measurement (and moves it onto the
-// serial lane, because it will read the accessibility tree).
+// What native measures *now* for an approval. Only a session bound to route v2 is measured; a
+// session on v1 (every panel session, and every session of a build that did not attest classifier 2)
+// measures nothing approvable, exactly as before. The build attests classifier version 1 until the
+// change that raises it, so even a v2 session is "not attested" here and nothing is eligible: an
+// approval is reachable only from a test that supplies its own measurement. This is called on the
+// serial lane by the approval workers, with no state lock held.
 sprint_coder::computer_use::NativeApprovalMeasurement
 MeasureNativeApproval(const NativeDispatchRequest& request) {
-  (void)request;
-  return {};
+  if (request.session == nullptr || request.session->classifier_route != "v2") return {};
+  return MeasureNativeApprovalOnLane(request, sprint_coder::computer_use::ClassifierRoute::kV2,
+                                     sprint_coder::computer_use::EffectRuleset{},
+                                     sprint_coder::computer_use::kNativePreflightClassifierVersion);
 }
 
 // The request and the session as the approval flow needs them. The caller holds the state lock.
@@ -6513,9 +6523,100 @@ napi_value ApprovalApproveReceiptValue(napi_env env, const NativeDispatchRequest
 // approvalApprove: revalidates, then exchanges the waiting intent for an execution ticket. It has
 // no input capability: it never posts an event, performs an accessibility action or touches the
 // input attempt counter. The request is a dispatch request plus `approvalGeneration` and must not
-// carry a ticket. The execution token is generated here and never leaves the addon. This is
-// synchronous because today's measurement is trivial; it moves onto the serial lane with the real
-// measurement.
+// carry a ticket. The execution token is generated on the worker and never leaves the addon.
+//
+// It is asynchronous, in four steps, so that the accessibility tree is read neither on the JS
+// thread nor under the state lock:
+//   1. (JS thread, state lock) parse; refuse at once, without burning anything, when no intent is
+//      waiting for this generation or one is already being measured; otherwise mark the generation
+//      busy and release the lock;
+//   2. (worker, serial lane, NO state lock) measure what native sees now (MeasureNativeApproval,
+//      which is bounded and gives way to a cancellation);
+//   3. (worker, serial lane, state lock) take the facts again and run the flow's Approve with that
+//      measurement and a fresh execution token; clear the busy mark;
+//   4. (JS thread) build the receipt and resolve the promise.
+// The worker calls no N-API function; N-API values are made on the JS thread only.
+struct AsyncNativeApprovalWork {
+  napi_env env = nullptr;
+  napi_async_work work = nullptr;
+  napi_deferred deferred = nullptr;
+  NativeDispatchRequest request;
+  std::uint64_t approval_generation = 0;
+  bool ok = false;
+  std::string reason_code;
+  std::string denied_result;
+};
+
+void SetNativeApprovalDenial(AsyncNativeApprovalWork* work,
+                             sprint_coder::computer_use::NativeApprovalFailure failure) {
+  const sprint_coder::computer_use::NativeApprovalDenial denial =
+      sprint_coder::computer_use::NativeApprovalDenialFor(failure);
+  work->ok = false;
+  work->reason_code = denial.reason_code;
+  work->denied_result = denial.result;
+}
+
+// Ends an approval that cannot go on: the waiting intent is discarded (only this generation) and
+// the busy mark is cleared. Takes the state lock itself.
+void AbandonNativeApproval(const NativeDispatchRequest& request, std::uint64_t approval_generation) {
+  if (request.session == nullptr) return;
+  std::lock_guard<std::mutex> state_lock(request.session->state_mutex);
+  request.session->approval.Discard(approval_generation);
+  if (request.session->approval_busy_generation == approval_generation)
+    request.session->approval_busy_generation = 0;
+}
+
+void ExecuteNativeApprovalApprove(napi_env env, void* data) {
+  (void)env;
+  namespace binding = sprint_coder::computer_use;
+  auto* work = static_cast<AsyncNativeApprovalWork*>(data);
+  std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
+  @autoreleasepool {
+    try {
+      // The accessibility tree is read here, with no state lock held.
+      const binding::NativeApprovalMeasurement measured = MeasureNativeApproval(work->request);
+      MacComputerUseSession& session = *work->request.session;
+      std::string token;
+      std::uint64_t now_ns = 0;
+      binding::NativeApprovalOutcome outcome;
+      {
+        std::lock_guard<std::mutex> state_lock(session.state_mutex);
+        if (!GenerateOrdinaryTicketToken(&token) || !ReadNativeMonotonicNs(&now_ns)) {
+          // No secret, no approval: the waiting intent ends with it.
+          session.approval.Discard(work->approval_generation);
+          outcome = {false, binding::NativeApprovalFailure::kTicketUnavailable};
+        } else {
+          outcome = session.approval.Approve(
+              NativeApprovalFactsLocked(work->request, work->approval_generation), measured,
+              token, now_ns);
+        }
+        if (session.approval_busy_generation == work->approval_generation)
+          session.approval_busy_generation = 0;
+      }
+      binding::ScrubNativeTicketString(&token);
+      work->ok = outcome.ok;
+      if (!outcome.ok) SetNativeApprovalDenial(work, outcome.failure);
+    } catch (...) {
+      // Nothing was approved. The intent ends with the failure, like any failed attempt.
+      AbandonNativeApproval(work->request, work->approval_generation);
+      SetNativeApprovalDenial(work, binding::NativeApprovalFailure::kUnavailable);
+    }
+  }
+}
+
+void CompleteNativeApprovalApprove(napi_env env, napi_status status, void* data) {
+  std::unique_ptr<AsyncNativeApprovalWork> work(static_cast<AsyncNativeApprovalWork*>(data));
+  if (status != napi_ok) {
+    // Execute may not have run, or its result cannot be trusted: nothing is approved.
+    AbandonNativeApproval(work->request, work->approval_generation);
+    SetNativeApprovalDenial(work.get(), sprint_coder::computer_use::NativeApprovalFailure::kUnavailable);
+  }
+  napi_value result = ApprovalApproveReceiptValue(env, work->request, work->approval_generation,
+                                                  work->ok, work->reason_code, work->denied_result);
+  napi_resolve_deferred(env, work->deferred, result);
+  napi_delete_async_work(env, work->work);
+}
+
 napi_value ApprovalApprove(napi_env env, napi_callback_info info) {
   namespace binding = sprint_coder::computer_use;
   size_t argc = 1;
@@ -6523,7 +6624,9 @@ napi_value ApprovalApprove(napi_env env, napi_callback_info info) {
   if (napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr) != napi_ok || argc != 1 ||
       !IsObject(env, argv[0]))
     return ThrowNativeError(env, "INVALID_ACTION", "An approval request is required");
-  NativeDispatchRequest request;
+  auto work = std::make_unique<AsyncNativeApprovalWork>();
+  work->env = env;
+  NativeDispatchRequest& request = work->request;
   if (!ReadNativeTicketKey(env, argv[0], &request.ticket_key))
     return ThrowNativeError(env, "INVALID_ACTION_ENVELOPE",
                             "The native action ticket key could not be read");
@@ -6534,42 +6637,53 @@ napi_value ApprovalApprove(napi_env env, napi_callback_info info) {
       approval_generation == 0)
     return ThrowNativeError(env, "INVALID_ACTION_ENVELOPE",
                             "An approval generation is required");
-  bool ok = false;
-  std::string reason_code;
-  std::string denied_result;
+  work->approval_generation = approval_generation;
+  bool parsed = false;
+  bool queue_it = false;
   std::string error_code;
   std::string error_message;
-  bool parsed = false;
   {
     std::unique_lock<std::mutex> state_lock;
     parsed = ParseNativeDispatchRequest(env, argv[0], &request, state_lock, &error_code,
                                         &error_message);
     if (parsed) {
-      std::string token;
-      std::uint64_t now_ns = 0;
-      binding::NativeApprovalOutcome outcome;
-      if (!GenerateOrdinaryTicketToken(&token) || !ReadNativeMonotonicNs(&now_ns)) {
-        // No secret, no approval: the waiting intent ends with it.
-        request.session->approval.Discard(approval_generation);
-        outcome = {false, binding::NativeApprovalFailure::kTicketUnavailable};
+      MacComputerUseSession& session = *request.session;
+      if (session.approval.pending() && session.approval.approval_generation() == approval_generation &&
+          session.approval_busy_generation == 0) {
+        session.approval_busy_generation = approval_generation;
+        queue_it = true;
       } else {
-        outcome = request.session->approval.Approve(
-            NativeApprovalFactsLocked(request, approval_generation),
-            MeasureNativeApproval(request), token, now_ns);
-      }
-      binding::ScrubNativeTicketString(&token);
-      ok = outcome.ok;
-      if (!ok) {
-        const binding::NativeApprovalDenial denial =
-            binding::NativeApprovalDenialFor(outcome.failure);
-        reason_code = denial.reason_code;
-        denied_result = denial.result;
+        // No intent is waiting for this generation, or one is being measured: nothing to burn.
+        SetNativeApprovalDenial(work.get(), binding::NativeApprovalFailure::kUnavailable);
       }
     }
   }
   if (!parsed) return ThrowNativeError(env, error_code.c_str(), error_message.c_str());
-  return ApprovalApproveReceiptValue(env, request, approval_generation, ok, reason_code,
-                                     denied_result);
+  if (!queue_it)
+    return ApprovalApproveReceiptValue(env, request, approval_generation, work->ok,
+                                       work->reason_code, work->denied_result);
+
+  napi_value promise;
+  if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
+    AbandonNativeApproval(request, approval_generation);
+    return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
+                            "Could not create the native approval promise");
+  }
+  napi_value resource_name = StringValue(env, "SprintCoderComputerUseApprovalApprove");
+  if (napi_create_async_work(env, nullptr, resource_name, ExecuteNativeApprovalApprove,
+                             CompleteNativeApprovalApprove, work.get(), &work->work) != napi_ok ||
+      napi_queue_async_work(env, work->work) != napi_ok) {
+    if (work->work != nullptr) napi_delete_async_work(env, work->work);
+    AbandonNativeApproval(request, approval_generation);
+    // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
+    // which would leave the caller holding a Promise that can never be resolved or rejected.
+    napi_value error = NativeErrorValue(env, "ASYNC_UNAVAILABLE",
+                                        "Could not queue the serial native approval");
+    napi_reject_deferred(env, work->deferred, error);
+    return promise;
+  }
+  work.release();
+  return promise;
 }
 
 // approvalDiscard: ends the approval of exactly this generation, nothing else. It has no input
@@ -6603,10 +6717,11 @@ napi_value ApprovalDiscard(napi_env env, napi_callback_info info) {
 
 // Reservation of an approved dispatch. The caller holds the state lock returned by
 // ParseNativeDispatchRequest. Replay and in-flight hits come first, like the ordinary path. Then
-// the execution ticket held in the slot is consumed against a fresh measurement; it is burned on
-// every attempt. This never begins an intent. A fresh classification that still requires the same
-// one-time approval is not refused for that reason alone: it is accepted once when it matches the
-// bound ticket, and anything else is a refusal, not a new approval. PerformNativeDispatch still re-runs every guard afterwards.
+// the call is refused, without burning anything, unless an execution ticket is held for this
+// generation and the in-flight slot is free; the in-flight entry is then taken. The ticket itself is
+// consumed on the worker (ExecuteNativeApprovedDispatch), against a fresh measurement, because
+// measuring reads the accessibility tree and the state lock is never held for that. This never
+// begins an intent. PerformNativeDispatch still re-runs every guard afterwards.
 bool ReserveNativeApprovedDispatchLocked(const NativeDispatchRequest* request,
                                          std::uint64_t approval_generation,
                                          NativeDispatchOutcome* replay) {
@@ -6630,19 +6745,9 @@ bool ReserveNativeApprovedDispatchLocked(const NativeDispatchRequest* request,
                         : "native_request_id_conflict");
     return false;
   }
-  std::uint64_t now_ns = 0;
-  binding::NativeApprovalOutcome outcome;
-  if (!ReadNativeMonotonicNs(&now_ns)) {
-    session.approval.Discard(approval_generation);
-    outcome = {false, binding::NativeApprovalFailure::kTicketUnavailable};
-  } else {
-    outcome = session.approval.ConsumeApproved(
-        NativeApprovalFactsLocked(*request, approval_generation),
-        MeasureNativeApproval(*request), now_ns);
-  }
-  if (!outcome.ok) {
+  if (!session.approval.ready() || session.approval.approval_generation() != approval_generation) {
     const binding::NativeApprovalDenial denial =
-        binding::NativeApprovalDenialFor(outcome.failure);
+        binding::NativeApprovalDenialFor(binding::NativeApprovalFailure::kUnavailable);
     *replay = MakeDispatchOutcome(denial.result, denial.reason_code);
     return false;
   }
@@ -6651,15 +6756,69 @@ bool ReserveNativeApprovedDispatchLocked(const NativeDispatchRequest* request,
     return false;
   }
   session.inflight_dispatches.emplace(request->request_id, request->envelope_digest);
-  // A reservation that goes on to run supersedes any ordinary ticket measured before it.
-  session.ticket_generation.fetch_add(1, std::memory_order_acq_rel);
-  session.ordinary_ticket.Invalidate();
   return true;
+}
+
+// The worker of an approved dispatch, in the order the ADR fixes: measure what native sees now (no
+// state lock), consume the execution ticket against that measurement (state lock, no tree read), and
+// only then run the dispatch with every one of its own guards. A refusal, or a failure before the
+// ticket was consumed, ends the approval and is cached like any outcome; a failure after it is an
+// unknown effect, as for an ordinary dispatch.
+void ExecuteNativeApprovedDispatch(napi_env env, void* data) {
+  (void)env;
+  namespace binding = sprint_coder::computer_use;
+  auto* work = static_cast<AsyncNativeDispatchWork*>(data);
+  std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
+  @autoreleasepool {
+    bool consumed = false;
+    try {
+      const binding::NativeApprovalMeasurement measured = MeasureNativeApproval(work->request);
+      {
+        MacComputerUseSession& session = *work->request.session;
+        std::lock_guard<std::mutex> state_lock(session.state_mutex);
+        std::uint64_t now_ns = 0;
+        binding::NativeApprovalOutcome outcome;
+        if (!ReadNativeMonotonicNs(&now_ns)) {
+          session.approval.Discard(work->approval_generation);
+          outcome = {false, binding::NativeApprovalFailure::kTicketUnavailable};
+        } else {
+          outcome = session.approval.ConsumeApproved(
+              NativeApprovalFactsLocked(work->request, work->approval_generation), measured,
+              now_ns);
+        }
+        if (outcome.ok) {
+          consumed = true;
+          // A dispatch that goes on to run supersedes any ordinary ticket measured before it.
+          session.ticket_generation.fetch_add(1, std::memory_order_acq_rel);
+          session.ordinary_ticket.Invalidate();
+        } else {
+          const binding::NativeApprovalDenial denial =
+              binding::NativeApprovalDenialFor(outcome.failure);
+          work->outcome = MakeDispatchOutcome(denial.result, denial.reason_code);
+        }
+      }
+      if (consumed) work->outcome = PerformNativeDispatch(work->request);
+    } catch (...) {
+      if (consumed) {
+        // Work entered the serial effect lane: retry safety cannot be proven.
+        work->outcome = MakeDispatchOutcome(
+            "unknown_effect", "native_dispatch_exception_unknown_effect", true, true);
+      } else {
+        AbandonNativeApproval(work->request, work->approval_generation);
+        const binding::NativeApprovalDenial denial =
+            binding::NativeApprovalDenialFor(binding::NativeApprovalFailure::kUnavailable);
+        work->outcome = MakeDispatchOutcome(denial.result, denial.reason_code);
+      }
+    }
+    CacheDispatchOutcome(work->request, work->outcome);
+  }
 }
 
 // dispatchApproved: the input entry that follows approvalApprove. It is a separate path from
 // dispatch, the TypeScript side never calls preflight for it, and it asks for `approvalGeneration`
-// only: a request that carries a ticket at all is refused before anything is read.
+// only: a request that carries a ticket at all is refused before anything is read. It is
+// asynchronous like dispatch: the JS thread parses and reserves (state lock, no tree read, no
+// N-API under the lock); the worker measures, consumes the ticket and dispatches.
 napi_value DispatchApproved(napi_env env, napi_callback_info info) {
   size_t argc = 1;
   napi_value argv[1];
@@ -6679,6 +6838,7 @@ napi_value DispatchApproved(napi_env env, napi_callback_info info) {
       approval_generation == 0)
     return ThrowNativeError(env, "INVALID_ACTION_ENVELOPE",
                             "An approval generation is required");
+  work->approval_generation = approval_generation;
   NativeDispatchOutcome replay;
   bool parsed = false;
   bool reserved = false;
@@ -6696,19 +6856,23 @@ napi_value DispatchApproved(napi_env env, napi_callback_info info) {
 
   napi_value promise;
   if (napi_create_promise(env, &work->deferred, &promise) != napi_ok) {
-    std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
-    work->request.session->inflight_dispatches.erase(work->request.request_id);
+    {
+      std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
+      work->request.session->inflight_dispatches.erase(work->request.request_id);
+      work->request.session->approval.Discard(approval_generation);
+    }
     return ThrowNativeError(env, "ASYNC_UNAVAILABLE",
                             "Could not create the native dispatch promise");
   }
   napi_value resource_name = StringValue(env, "SprintCoderComputerUseDispatch");
-  if (napi_create_async_work(env, nullptr, resource_name, ExecuteNativeDispatch,
+  if (napi_create_async_work(env, nullptr, resource_name, ExecuteNativeApprovedDispatch,
                              CompleteNativeDispatch, work.get(), &work->work) != napi_ok ||
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
     {
       std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
       work->request.session->inflight_dispatches.erase(work->request.request_id);
+      work->request.session->approval.Discard(approval_generation);
     }
     // The deferred is already live here. Settle it and hand back its Promise instead of throwing,
     // which would leave the caller holding a Promise that can never be resolved or rejected.

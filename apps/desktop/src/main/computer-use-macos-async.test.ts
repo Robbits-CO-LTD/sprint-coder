@@ -138,8 +138,8 @@ describe('macOS Computer Use asynchronous native boundary', () => {
 
   it('settles every deferred it created when the async work cannot be created or queued', () => {
     const sites = [...source.matchAll(/napi_create_promise\(env, &work->deferred, &promise\)/gu)];
-    // StartSession, Observe, Dispatch, Preflight and DispatchApproved (N2b-4).
-    expect(sites).toHaveLength(6);
+    // StartSession, Observe, Dispatch, Preflight, ApprovalApprove and DispatchApproved (N2b-4, C4-2b).
+    expect(sites).toHaveLength(7);
 
     for (const site of sites) {
       const promiseOffset = site.index;
@@ -429,7 +429,19 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       expect(approvals).not.toMatch(
         /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts(?!\.load\()|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
       );
-      expect(approvals).not.toMatch(/Perform(Native|Semantic|Visual|FocusedInput)Dispatch\(/u);
+      // The one input entry an approval reaches is the approved dispatch's worker, and only after
+      // its ticket was consumed (C4-2b): nothing else in the approval calls performs a dispatch.
+      const worker = sourceBetween(
+        'void ExecuteNativeApprovedDispatch(',
+        'napi_value DispatchApproved(',
+      );
+      expect(worker.match(/PerformNativeDispatch\(/gu)).toHaveLength(1);
+      expect(worker.indexOf('PerformNativeDispatch(')).toBeGreaterThan(
+        worker.indexOf('session.approval.ConsumeApproved('),
+      );
+      expect(approvals.replace(worker, '')).not.toMatch(
+        /Perform(Native|Semantic|Visual|FocusedInput)Dispatch\(/u,
+      );
       for (const part of [preflight, callbacks]) {
         expect(part).not.toMatch(
           /CGEventPost|CGEventCreate|AXUIElementPerformAction|AXUIElementSetAttributeValue|input_api_attempts|ActivateAndRaise|activateWithOptions|NSRunningApplication/u,
@@ -571,31 +583,34 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       expect(entry).toContain('work->request.ticket_key.present');
     });
 
-    it('orders the approved Reserve as replay, in-flight, approval consume, busy, insert', () => {
+    it('orders the approved Reserve as replay, in-flight, a held ticket, busy, insert', () => {
       const reserve = sourceBetween(
         'bool ReserveNativeApprovedDispatchLocked(',
-        'napi_value DispatchApproved(',
+        'void ExecuteNativeApprovedDispatch(',
       );
       const order = [
         'session.dispatch_replay_cache.find(',
         'session.inflight_dispatches.find(',
-        'session.approval.ConsumeApproved(',
+        'session.approval.ready()',
         'kMaxInflightDispatchEntries',
         'inflight_dispatches.emplace(',
       ].map((marker) => reserve.indexOf(marker));
       expect(order.every((offset) => offset > 0)).toBe(true);
       expect([...order].sort((left, right) => left - right)).toEqual(order);
       // Replay and in-flight returns must not touch the approval slot or the ticket generation.
-      const beforeConsume = reserve.slice(0, reserve.indexOf('session.approval.ConsumeApproved('));
-      expect(beforeConsume.slice(0, beforeConsume.indexOf('std::uint64_t now_ns'))).not.toMatch(
-        /approval\.|ticket_generation|ordinary_ticket/u,
+      const beforeReady = reserve.slice(0, reserve.indexOf('session.approval.ready()'));
+      expect(beforeReady).not.toMatch(/approval\.|ticket_generation|ordinary_ticket/u);
+      // C4-2b: the ticket is consumed on the worker, against a fresh measurement, never here: the
+      // reservation does not read the accessibility tree and does not burn the ticket.
+      expect(reserve).not.toMatch(
+        /ConsumeApproved\(|MeasureNativeApproval|ticket_generation|ordinary_ticket|\.Discard\(/u,
       );
-      // A consume that does not succeed returns before busy and before the insert.
-      const failedConsume = reserve.indexOf('if (!outcome.ok) {');
-      expect(failedConsume).toBeGreaterThan(reserve.indexOf('session.approval.ConsumeApproved('));
-      expect(failedConsume).toBeLessThan(reserve.indexOf('kMaxInflightDispatchEntries'));
-      const failedBlock = reserve.slice(failedConsume, reserve.indexOf('}', failedConsume));
-      expect(failedBlock).toContain('return false;');
+      // A call with no ticket held for the generation is refused before busy and before the insert.
+      const refused = reserve.indexOf('if (!session.approval.ready()');
+      expect(refused).toBeGreaterThan(reserve.indexOf('session.inflight_dispatches.find('));
+      expect(refused).toBeLessThan(reserve.indexOf('kMaxInflightDispatchEntries'));
+      const refusedBlock = reserve.slice(refused, reserve.indexOf('\n  }\n', refused));
+      expect(refusedBlock).toContain('return false;');
       // The reservation never begins an intent and never reads a presented ticket.
       expect(reserve).not.toMatch(/\.Offer\(|\.Begin\(|ticket_key/u);
     });
