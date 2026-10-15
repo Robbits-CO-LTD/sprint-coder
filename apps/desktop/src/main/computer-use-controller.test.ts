@@ -2503,7 +2503,7 @@ describe('ComputerUseController', () => {
       fixture.controller.policyEpochChanged('task-2');
       const references = fixture.controller.copiedArtifactReferences(started.sessionId);
       expect(references).toHaveLength(1);
-      expect(store.take([references[0]!.artifactId], owners[0]!)).toEqual(['Total	42']);
+      expect(store.take([references[0]!.artifactId], owners[0]!)).toEqual(['Total\t42']);
       await fixture.controller.stop(started.sessionId);
     });
 
