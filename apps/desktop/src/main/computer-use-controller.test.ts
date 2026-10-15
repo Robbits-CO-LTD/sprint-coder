@@ -26,6 +26,7 @@ import {
   type ComputerUseNativeActionResult,
   type ComputerUseNativeApprovalApproveResult,
   type ComputerUseNativeApprovalOffer,
+  approvedObservationEquivalent,
   nativeApprovalObservationEquivalent,
   type ComputerUseNativeHost,
   type ComputerUseNativeObservation,
@@ -1382,6 +1383,40 @@ describe('ComputerUseController', () => {
       expect(ok(next({ windowIdentityDigest: '9'.repeat(64) }))).toBe(false);
       expect(ok(next({ targetSignatures: { button: 'e'.repeat(64) } }))).toBe(false);
       expect(ok(observation(1, nativeFacts))).toBe(false);
+    });
+
+    it('(c) never passes a re-observation whose target became a surface (S4-1c)', () => {
+      const plainMeta = { button: { secure: false, highImpact: false } };
+      const surfaceMeta = { button: { secure: false, highImpact: false, surface: true } };
+      const before = observation(1, { ...nativeFacts, targetMetadata: plainMeta });
+      const after = (metadata: typeof plainMeta | typeof surfaceMeta) =>
+        observation(2, { ...nativeFacts, targetMetadata: metadata });
+      const ok = (current: ComputerUseNativeObservation) =>
+        nativeApprovalObservationEquivalent(
+          before,
+          current,
+          buttonAction,
+          'supervised_action',
+          Date.now(),
+        );
+      expect(ok(after(plainMeta))).toBe(true);
+      expect(ok(after(surfaceMeta))).toBe(false);
+    });
+
+    it('(d2) approvedObservationEquivalent never passes a target that became a surface (S4-1c)', () => {
+      const plainMeta = { button: { secure: false, highImpact: false } };
+      const before = observation(1, { ...nativeFacts, targetMetadata: plainMeta });
+      const check = (
+        metadata: Record<string, { secure: boolean; highImpact: boolean; surface?: boolean }>,
+      ) =>
+        approvedObservationEquivalent(
+          before,
+          observation(2, { ...nativeFacts, targetMetadata: metadata }),
+          buttonAction,
+          Date.now(),
+        );
+      expect(check(plainMeta)).toBe(true);
+      expect(check({ button: { secure: false, highImpact: false, surface: true } })).toBe(false);
     });
 
     it('records an approvalApprove refusal as a rejected (c), never unknown_effect, and offers no new card', async () => {
@@ -3378,6 +3413,92 @@ describe('ComputerUseController', () => {
         'surface-golden',
       ),
     ).resolves.not.toMatchObject({ reasonCode: 'hard_boundary' });
+    expect(fixture.dispatchCount()).toBe(1);
+    await fixture.controller.stop(started.sessionId);
+  });
+
+  it('(d) an approval is revoked when the re-observation after it shows a surface (S4-1c)', async () => {
+    let surfaceOn = false;
+    const fixture = createFixture({
+      mode: 'supervised',
+      authorizationRequired: true,
+      observationOverrides: {
+        targetSignatures: { button: 'c'.repeat(64) },
+        targetMetadata: { button: { secure: false, highImpact: false } },
+      },
+      observationOverridesForRevision: () =>
+        surfaceOn
+          ? { targetMetadata: { button: { secure: false, highImpact: false, surface: true } } }
+          : {},
+    });
+    const started = await start(fixture, 'supervised');
+    await fixture.controller.observe(started.sessionId);
+    const action: ComputerUseAction = {
+      type: 'invoke',
+      targetId: 'button',
+      name: 'activate',
+      arguments: {},
+    };
+    const acting = fixture.controller.act(started.sessionId, action, 'surface-reobserve');
+    await viWait();
+    const card = fixture.approvals.find((value) => value.state === 'pending')!;
+    surfaceOn = true;
+    await fixture.controller.resolveApproval({
+      approvalId: card.id,
+      expectedRevision: card.revision,
+      decision: 'allow_once',
+      challenge: card.challenge,
+    });
+    await acting.catch(() => undefined);
+    expect(fixture.dispatchCount()).toBe(0);
+    await fixture.controller.stop(started.sessionId);
+  });
+
+  it('(e) a plan grant stops when the next observation shows a surface (S4-1c)', async () => {
+    let surfaceOn = false;
+    const fixture = createFixture({
+      mode: 'supervised',
+      authorizationRequired: true,
+      observationOverrides: {
+        targetSignatures: { button: 'c'.repeat(64) },
+        targetMetadata: { button: { secure: false, highImpact: false } },
+      },
+      observationOverridesForRevision: () =>
+        surfaceOn
+          ? { targetMetadata: { button: { secure: false, highImpact: false, surface: true } } }
+          : {},
+    });
+    const started = await start(fixture, 'supervised');
+    await fixture.controller.observe(started.sessionId);
+    const action: ComputerUseAction = {
+      type: 'invoke',
+      targetId: 'button',
+      name: 'activate',
+      arguments: {},
+    };
+    const first = fixture.controller.act(started.sessionId, action, 'surface-plan-first');
+    await viWait();
+    const card = fixture.approvals.find((value) => value.state === 'pending')!;
+    await fixture.controller.resolveApproval({
+      approvalId: card.id,
+      expectedRevision: card.revision,
+      decision: 'allow_plan',
+      challenge: card.challenge,
+    });
+    await expect(first).resolves.toMatchObject({ result: 'completed' });
+    surfaceOn = true;
+    await fixture.controller.observe(started.sessionId, 'surface-plan-observe');
+    const internals = fixture.controller as unknown as {
+      sessions: Map<string, { observation: ComputerUseObservation | null }>;
+      isHardBoundary: (a: ComputerUseAction, o: ComputerUseObservation | null) => boolean;
+    };
+    // The plan-grant checks use the stricter isHardBoundary: a surface is one.
+    expect(
+      internals.isHardBoundary(action, internals.sessions.get(started.sessionId)!.observation),
+    ).toBe(true);
+    await expect(
+      fixture.controller.act(started.sessionId, action, 'surface-plan-second'),
+    ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
     expect(fixture.dispatchCount()).toBe(1);
     await fixture.controller.stop(started.sessionId);
   });

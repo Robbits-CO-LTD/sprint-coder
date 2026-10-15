@@ -10,26 +10,36 @@ const HIGH_IMPACT_TEXT =
 /**
  * Structure words of a command surface (a terminal, a shell; the command palette is deliberately NOT here until #777 observes it). Matched against
  * the role, subrole and identifier only (never a title, description or value), as whole words after
- * splitting on non-alphanumerics and camelCase, so 'terminalPanel' and 'integrated-terminal' match
+ * NFKC-normalizing and splitting on non-alphanumerics, camelCase and letter/digit boundaries ('Terminal2', 'PWSH7'), so 'terminalPanel' and 'integrated-terminal' match
  * and 'terminalbank' or 'app-shell' do not. Main's own, native-independent evidence for the S4-1c
  * deny: a positive match only. An element without such a word is never a surface here (native and
  * v1 still judge it).
  */
 const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh']);
+// Words that a case split cuts in two ('PowerShell', 'XTerm', 'TermControl' of Windows Terminal).
+const SURFACE_WORD_PAIRS: readonly (readonly [string, string])[] = [
+  ['power', 'shell'],
+  ['x', 'term'],
+  ['term', 'control'],
+];
 
 export function hasSurfaceStructureWord(...fields: readonly (string | undefined)[]): boolean {
   for (const field of fields) {
     if (field === undefined || field === '') continue;
     const words = field
+      .normalize('NFKC')
       .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
       .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
+      .replace(/(\p{L})(\p{N})/gu, '$1 $2')
+      .replace(/(\p{N})(\p{L})/gu, '$1 $2')
       .toLowerCase()
       .split(/[^\p{L}\p{N}]+/u)
       .filter((word) => word !== '');
     for (let index = 0; index < words.length; index += 1) {
       const word = words[index]!;
       if (SURFACE_WORDS.has(word)) return true;
-      if (word === 'power' && words[index + 1] === 'shell') return true;
+      for (const [first, second] of SURFACE_WORD_PAIRS)
+        if (word === first && words[index + 1] === second) return true;
     }
   }
   return false;

@@ -5287,7 +5287,7 @@ function computerUseAuditBindingDigest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function approvedObservationEquivalent(
+export function approvedObservationEquivalent(
   previous: ComputerUseNativeObservation,
   current: ComputerUseNativeObservation,
   action: ComputerUseAction,
