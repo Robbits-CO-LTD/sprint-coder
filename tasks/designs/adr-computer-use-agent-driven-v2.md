@@ -637,6 +637,7 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 2. **S4-3（適格性の拡大）は、新たに適格になる候補について不完全な facts を fail-closed（takeover）にする**。S4-1 の写像は S4-3 の規則ではない。S4-3 の受入条件に、不完全な facts を拒否する規則と、native / Main の attest に「interlock が有効」であることを含める。INV-3 の順序（interlock が先）はこれで保たれる。
 
 写像の細部（S4-1-0。portable な `computer_use_native_interlock.h`、harness で網羅。どこからも呼ばない。配線は S4-1a / S4-1b）:
+
 - 面（シェル、スクリプト入力、コマンドパレット、DevTools console、チェーン内の面の語）→ blocked / rejected、`native_shell_surface_blocked`。
 - E1 / E4 → takeover / paused、`native_execution_trigger_blocked`。**拡張子で E1 / E4 を拒否するのは、ファイルマネージャーとダウンロード一覧の「開く操作」に限る**（開くことが実行・インストールになる場所）。エディタのファイルツリーで `.sh` を開く操作のように、アプリの中で開くだけのものは拒否しない（VS Code の挙動は HA の観察項目）。インストーラのコントロール（ラベルの語）の活性化は、どの面でも拒否する。
 - E2 / E3 → 承認経路が閉じている間は blocked / rejected、`native_execution_trigger_blocked`。rule set が承認を信頼したら、コアが承認を返し、この写像は判定なしになる（承認が決める）。
