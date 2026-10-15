@@ -269,13 +269,13 @@ run on a Windows package that carries no Authenticode signature. It waives exact
 — **the identity of the Windows signer** — and only when the packaged manifest's `signerDigest` is
 `null`:
 
-| Waived in an acceptance build | Unchanged in an acceptance build |
-| --- | --- |
-| `WINDOWS_SIGNATURE_REQUIRED` for a manifest with no signer | `binaryDigest`/`moduleDigest` re-measurement of the packaged helper |
-| The packaged app/helper Authenticode verification and its `sha256(thumbprint) == signerDigest` equality | The spawned helper's measured image digest, image path, and `sourceCommit` handshake |
-| The spawned helper's Authenticode status and signer digest comparison | Manifest schema and target match, compiled provenance pin, protocol/API/N-API handshake, quarantine |
-| — | `MACOS_SIGNATURE_REQUIRED`, ad-hoc macOS refusal, and every macOS behaviour |
-| — | A *signed* Windows package: its signer verification still runs and still fails closed |
+| Waived in an acceptance build                                                                           | Unchanged in an acceptance build                                                                    |
+| ------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `WINDOWS_SIGNATURE_REQUIRED` for a manifest with no signer                                              | `binaryDigest`/`moduleDigest` re-measurement of the packaged helper                                 |
+| The packaged app/helper Authenticode verification and its `sha256(thumbprint) == signerDigest` equality | The spawned helper's measured image digest, image path, and `sourceCommit` handshake                |
+| The spawned helper's Authenticode status and signer digest comparison                                   | Manifest schema and target match, compiled provenance pin, protocol/API/N-API handshake, quarantine |
+| —                                                                                                       | `MACOS_SIGNATURE_REQUIRED`, ad-hoc macOS refusal, and every macOS behaviour                         |
+| —                                                                                                       | A _signed_ Windows package: its signer verification still runs and still fails closed               |
 
 The mode is fixed at build time. `apps/desktop/vite.main.config.ts` bakes it into the Main bundle
 from `SPRINT_CODER_COMPUTER_USE_ACCEPTANCE_BUILD`, and Main reads only that compiled constant. No
@@ -291,7 +291,7 @@ never attests, tags, or publishes.
 
 Consequences for the tables below:
 
-- `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` is unchanged and still true. An *ordinary* unsigned Windows
+- `AC-29-UNSIGNED-WINDOWS-FAIL-CLOSED` is unchanged and still true. An _ordinary_ unsigned Windows
   package is built without the mode, so it still exposes neither observe nor control.
 - The Windows side of `AC-17, INV-9` stays **unsatisfied**. An acceptance build establishes which
   bytes ran, not who signed them, so the row must be re-run on a signed Windows package at the
@@ -553,5 +553,6 @@ successful built-in fixed-marker preflight and exactly three attempted/completed
 fallback or credential change. No endpoint, credential, model, or adapter fallback is allowed. Any
 extra attempt, retry, implicit fallback, or binding change keeps the three Provider Core rows
 `FAIL`. A completed artifact must set `providerBinding.adapterVersion` to the exact source adapter
-version `computer-use-v1`; the template-only `PENDING` value is rejected without
-`--allow-incomplete`.
+version `computer-use-v2`; the template-only `PENDING` value is rejected without
+`--allow-incomplete`. Since the adapter became v2 (#778 T15-2), evidence captured under
+`computer-use-v1` is no longer accepted; capture it again from a v2 build.
