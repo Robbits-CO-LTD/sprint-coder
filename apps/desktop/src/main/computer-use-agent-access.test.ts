@@ -2493,6 +2493,29 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
       await vi.advanceTimersByTimeAsync(10);
     expect(pendingCard(fixture)).toBeDefined();
   };
+  /**
+   * The text of a copied value reaches a screen only as the escaped excerpt in `status.copied` and
+   * in the live approval card's `transfer` (T15-9). The outer agent's result, the audit and every other field of
+   * the status never hold it, and the result never names `copied`, `transfer` or `sourceLabel`.
+   */
+  const expectNoBodyOutside = (fixture: Fixture, out: Record<string, unknown>): void => {
+    const outer = JSON.stringify([out, fixture.audits()]);
+    for (const secret of ['Total 42', 'Notes', 'com.example.notes'])
+      expect(outer).not.toContain(secret);
+    for (const key of ['copied', 'transfer', 'sourceLabel', 'excerpt'])
+      expect(Object.keys(out), key).not.toContain(key);
+    // The two places made for it: `copied` and the live card's `transfer`. Nothing else.
+    const rest = JSON.stringify(
+      fixture.statuses.map(({ copied: _copied, pendingApproval, ...others }) => ({
+        ...others,
+        pendingApproval:
+          pendingApproval === undefined || pendingApproval === null
+            ? pendingApproval
+            : (({ transfer: _transfer, ...card }) => card)(pendingApproval),
+      })),
+    );
+    for (const secret of ['Total 42', 'com.example.notes']) expect(rest).not.toContain(secret);
+  };
   const typedText = (fixture: Fixture): string =>
     fixture
       .dispatchedActions()
@@ -2532,9 +2555,7 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     ]);
     expect(Object.keys(outA.artifacts![0]!).sort()).toEqual(['artifactId', 'kind', 'sizeClass']);
     expect(computerStartToolOutputSchema.parse(outA)).toEqual(outA);
-    const everything = JSON.stringify([outA, fixture.statuses, fixture.audits()]);
-    for (const secret of ['Total 42', 'Notes', 'com.example.notes'])
-      expect(everything).not.toContain(secret);
+    expectNoBodyOutside(fixture, outA);
     const artifactId = outA.artifacts![0]!.artifactId;
 
     // B: the artifact is carried in, and pasting it raises a card every time.
@@ -2559,7 +2580,7 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     expect(outB).not.toHaveProperty('artifacts');
     // Used up by the paste: nothing of it is left to carry again.
     expect(store.describeReference([artifactId], taskBinding)).toBeNull();
-    expect(JSON.stringify([outB, fixture.statuses, fixture.audits()])).not.toContain('Total 42');
+    expectNoBodyOutside(fixture, outB);
   });
 
   it('pastes nothing when the card is denied, and discards the artifact when B ends (one session uses it up)', async () => {
@@ -2741,7 +2762,7 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     expect(out.artifacts).toHaveLength(1);
     for (const artifact of out.artifacts ?? [])
       expect(Object.keys(artifact).sort()).toEqual(['artifactId', 'kind', 'sizeClass']);
-    expect(JSON.stringify([out, fixture.statuses, fixture.audits()])).not.toContain('Total 42');
+    expectNoBodyOutside(fixture, out);
   });
 
   it('lists only what this session made, not another session of the same Turn (T15-8)', async () => {
@@ -2819,6 +2840,6 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     spy.mockRestore();
     expect(internals.attachedArtifacts.size).toBe(0);
     // And the carried artifact was not used up by the failed start.
-    expect(store.describe([artifactId], taskBinding)).not.toBeNull();
+    expect(store.describeReference([artifactId], taskBinding)).not.toBeNull();
   });
 });

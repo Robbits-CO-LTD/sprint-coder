@@ -5625,7 +5625,7 @@ export function computerStartToolOutput(
     // Only for a call that asked a question, so a call that did not gets exactly what it used to.
     ...(answer === undefined ? {} : { answer }),
     // Named field by field, like the status above: an id, a kind and a size bucket, never more. Only
-    // when something was copied, so a call that copied nothing gets exactly what it used to.
+    // when the session kept something, so a call that kept nothing gets exactly what it used to.
     ...(artifacts === undefined || artifacts.length === 0
       ? {}
       : {

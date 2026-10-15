@@ -595,10 +595,10 @@ describe('ComputerUseArtifactStore (§4.2)', () => {
       { ...binding, policyEpoch: 4 },
     ]) {
       artifacts.discard([id], other);
-      expect(artifacts.describe([id], binding)).not.toBeNull();
+      expect(artifacts.describeReference([id], binding)).not.toBeNull();
     }
     artifacts.discard([id], binding);
-    expect(artifacts.describe([id], binding)).toBeNull();
+    expect(artifacts.describeReference([id], binding)).toBeNull();
   });
 
   it('referencesMadeBy lists only what that session made, under that binding (T15-8)', () => {
