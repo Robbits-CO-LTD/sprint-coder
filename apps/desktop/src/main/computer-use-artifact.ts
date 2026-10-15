@@ -99,7 +99,7 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
   // A card number: 13 to 19 digits passing Luhn, as a run of digit groups with single spaces or
   // hyphens between them. Every run of whole groups is tried (not only the whole chain), because
   // a number followed by an expiry date or a CVV, or preceded by a short number, is still a card
-  // number. Windows begin and end at group boundaries only: cutting inside an unseparated group
+  // number. Windows begin and end at group boundaries only, and every group but the last has at least 4 digits (card numbers print as 4-4-4-4, 4-6-5 and the like; only the tail may be short), so runs of short numbers such as phone numbers are not read as cards: cutting inside an unseparated group
   // would let a long id that merely contains a Luhn-valid slice be flagged. Bounded work: at most
   // ~2,000 groups per 4,096 bytes, each window at most 19 digits.
   for (const chain of text.matchAll(/\d(?:[ -]?\d)*/gu)) {
@@ -107,6 +107,8 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
     for (let first = 0; first < groups.length; first += 1) {
       let digits = '';
       for (let last = first; last < groups.length; last += 1) {
+        // Only the last group of a window may be short (4-4-4-4-3, 4-4-4-1).
+        if (last > first && groups[last - 1]!.length < 4) break;
         digits += groups[last];
         if (digits.length > 19) break;
         if (digits.length >= 13 && passesLuhn(digits)) return true;
