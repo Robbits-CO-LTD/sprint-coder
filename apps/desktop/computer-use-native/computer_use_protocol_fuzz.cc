@@ -3333,6 +3333,17 @@ bool CheckWindowsShadowReader() {
     if (!Check(too_long.item_kind == ShadowItemKind::kFile && !too_long.item_name_is_real_path && too_long.read_failed,
                "winreader-too-long-path-is-a-gap")) return false;
   }
+  // A search that is cut off by its depth bound is incomplete: a second match below it is unknown.
+  {
+    FakeForm deep;
+    int tip = deep.pane;
+    for (int level = 0; level < 17; ++level) tip = deep.source.Add(tip, "Group");
+    const int twin = deep.source.Add(tip, "Edit", "Twin");
+    deep.Node(twin).automation_id = "name";
+    WindowsShadowReader deep_reader(deep.source);
+    const ShadowUiaCapture cut = deep_reader.Capture("invoke", "name");
+    if (!Check(!cut.target_found && cut.read_failed, "winreader-depth-bound-makes-the-search-incomplete")) return false;
+  }
   // Failures of single calls are gaps, never an ordinary capture.
   {
     FakeForm lost_point;
@@ -3619,6 +3630,8 @@ bool CheckWindowsShadowScheduler() {
     scheduler.Schedule(SchedulerJob(), false, world.Environment());
     scheduler.Schedule(SchedulerJob(), true, world.Environment());
     scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    // The records made on the caller's side (V1 invalid, busy) are kept at once but not announced there.
+    if (!Check(seen.empty() && ring.Total() == 2, "winsched-observer-is-not-called-on-the-callers-thread")) return false;
     launcher.RunAll();
     world.unavailable = true;
     scheduler.Schedule(SchedulerJob(), true, world.Environment());
@@ -3628,12 +3641,21 @@ bool CheckWindowsShadowScheduler() {
     scheduler.Schedule(SchedulerJob(), true, world.Environment());
     launcher.RunAll();
     const std::vector<ShadowRecord> kept = ring.Snapshot();
-    bool same = kept.size() == seen.size();
-    for (std::size_t index = 0; same && index < kept.size(); ++index)
-      same = kept[index].gaps == seen[index].gaps && kept[index].kind == seen[index].kind &&
-             kept[index].effect_class == seen[index].effect_class &&
-             kept[index].reason == seen[index].reason && kept[index].action == seen[index].action &&
-             kept[index].v1_ordinary == seen[index].v1_ordinary;
+    // The shadow's thread passes the caller-side records on after its own, so compare as sets.
+    const auto order = [](const ShadowRecord &left, const ShadowRecord &right) {
+      return left.gaps != right.gaps ? left.gaps < right.gaps
+                                     : static_cast<unsigned>(left.kind) < static_cast<unsigned>(right.kind);
+    };
+    std::vector<ShadowRecord> sorted_kept = kept;
+    std::vector<ShadowRecord> sorted_seen = seen;
+    std::sort(sorted_kept.begin(), sorted_kept.end(), order);
+    std::sort(sorted_seen.begin(), sorted_seen.end(), order);
+    bool same = sorted_kept.size() == sorted_seen.size();
+    for (std::size_t index = 0; same && index < sorted_kept.size(); ++index)
+      same = sorted_kept[index].gaps == sorted_seen[index].gaps && sorted_kept[index].kind == sorted_seen[index].kind &&
+             sorted_kept[index].effect_class == sorted_seen[index].effect_class &&
+             sorted_kept[index].reason == sorted_seen[index].reason && sorted_kept[index].action == sorted_seen[index].action &&
+             sorted_kept[index].v1_ordinary == sorted_seen[index].v1_ordinary;
     if (!Check(kept.size() == 5 && same && !scheduler.InFlight(), "winsched-observer-sees-every-record-the-ring-keeps"))
       return false;
   }

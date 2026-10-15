@@ -250,8 +250,9 @@ describe('Windows UI Automation source only reads', () => {
       'ILFree',
       'CoTaskMemFree',
       'GetAncestor',
-      // the shell lookup of the item path (a function of this file, not a Win32 call)
+      // the shell lookup of the item path (functions of this file, not Win32 calls)
       'ShellItemPathByName',
+      'ShellLookupRunning',
     ]);
     for (const name of win32) expect(allowedWin32.has(name), name).toBe(true);
     // The process is opened with the least right that answers.
@@ -296,7 +297,9 @@ describe('Windows UI Automation source only reads', () => {
     const platform = [
       'CloseHandle',
       'CoCreateInstance',
+      'CoInitializeEx',
       'CoTaskMemFree',
+      'CoUninitialize',
       'FAILED',
       'GetAncestor',
       'GetLastError',
@@ -343,6 +346,7 @@ describe('Windows UI Automation source only reads', () => {
       'ShadowTextFromUtf16',
       'ShadowUnitsTooLong',
       'ShellItemPathByName',
+      'ShellLookupRunning',
       'Text',
       'View',
       'Widen',
@@ -399,6 +403,40 @@ describe('Windows UI Automation source only reads', () => {
     // and the reader asks only for an item it could trace back to the bound window.
     const reader_item = between(reader, 'void CaptureItem(', 'ShadowUiaSource &source_;');
     expect(reader_item).toContain('capture->chain_reached_root &&');
+  });
+
+  it('does not guess at an item it could not read, and does not wait on Explorer for ever', () => {
+    const body = between(
+      source,
+      'ShellItemPathByName(HWND tab',
+      '} // namespace windows_uia_source_detail',
+    );
+    // A failed read of any item (the item, the shell item, its display name) is a failed lookup: it
+    // leaves the uniqueness of the name unknown. None of them is skipped.
+    const items = between(
+      body,
+      'for (int index = 0; index < items; ++index) {',
+      'if (matched.Get() == nullptr)',
+    );
+    // (the one `continue` left is for a readable item whose name differs)
+    expect(code(items).replace('if (!same) continue;', '')).not.toMatch(/\bcontinue;/u);
+    expect(items.match(/return ShadowReadResult::kFailed;/gu)?.length).toBeGreaterThanOrEqual(3);
+    // Explorer's calls have no timeout: the lookup runs on its own thread, the caller waits a bounded
+    // time, an unanswered lookup is abandoned, and no second one starts while one is stuck.
+    const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
+    expect(item).toContain('running.exchange(true)) return ShadowReadResult::kAbsent;');
+    expect(item).toContain('}).detach();');
+    expect(item).toContain('wait_for(lock, windows_uia_source_detail::kShellLookupWait');
+    expect(item).toMatch(/\)\)\s*return ShadowReadResult::kAbsent;/u);
+    expect(item.indexOf('running.exchange(true)')).toBeLessThan(item.indexOf('std::thread('));
+    // Nothing of this object is used on that thread (it may outlive the object).
+    const thread = between(item, 'std::thread([', '}).detach();');
+    expect(thread).not.toMatch(/\bthis\b|window_|still_valid_|walker_|automation_/u);
+    expect(thread).toContain('CoInitializeEx(nullptr, COINIT_MULTITHREADED)');
+    expect(thread).toContain('running.store(false);');
+    expect(source).toContain(
+      'static std::atomic<bool> *const running = new std::atomic<bool>(false);',
+    );
   });
 
   it('looks the item path up read-only, bounded, and only when the name is unique', () => {

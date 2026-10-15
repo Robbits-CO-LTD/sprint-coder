@@ -31,11 +31,15 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <functional>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #pragma comment(lib, "normaliz.lib")
@@ -249,14 +253,19 @@ constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;
     if (!limits.still_valid()) return ShadowReadResult::kStopped;
     if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
     PITEMID_CHILD child = nullptr;
-    if (FAILED(folder_view.Get()->Item(index, &child)) || child == nullptr) continue;
+    // An item that cannot be read leaves the uniqueness of the name unknown: the whole lookup is
+    // not obtained (a readable file beside an unreadable .lnk of the same display name would
+    // otherwise be taken for the target).
+    if (FAILED(folder_view.Get()->Item(index, &child)) || child == nullptr)
+      return ShadowReadResult::kFailed;
     ComRef<IShellItem> item;
     const HRESULT made =
         SHCreateItemWithParent(nullptr, folder.Get(), child, IID_PPV_ARGS(item.Receive()));
     ILFree(child);
-    if (FAILED(made) || item.Get() == nullptr) continue;
+    if (FAILED(made) || item.Get() == nullptr) return ShadowReadResult::kFailed;
     PWSTR shown = nullptr;
-    if (FAILED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) || shown == nullptr) continue;
+    if (FAILED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) || shown == nullptr)
+      return ShadowReadResult::kFailed;
     const bool same = std::wstring_view(shown) == display_name;
     CoTaskMemFree(shown);
     if (!same) continue;
@@ -276,6 +285,25 @@ constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;
   // An archive is both a folder and a stream: it is a file with an extension.
   answer->is_folder = (attributes & SFGAO_FOLDER) != 0 && (attributes & SFGAO_STREAM) == 0;
   return ShadowReadResult::kOk;
+}
+
+// The shell lookup talks to Explorer, whose calls have no timeout: an Explorer window that does not
+// answer would hold the caller for good. So the lookup runs on a thread of its own and the caller
+// waits for it a bounded time; a lookup that has not come back is abandoned (kAbsent), and until it
+// does no second one is started, so at most one thread can ever be stuck.
+struct ShellLookupPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool done = false;
+  ShadowReadResult result = ShadowReadResult::kAbsent;
+  ShellItemAnswer answer;
+};
+constexpr std::chrono::milliseconds kShellLookupWait{150};
+
+// Never destroyed: an abandoned lookup may finish after the process has started to exit.
+[[nodiscard]] inline std::atomic<bool> &ShellLookupRunning() {
+  static std::atomic<bool> *const running = new std::atomic<bool>(false);
+  return *running;
 }
 
 } // namespace windows_uia_source_detail
@@ -485,14 +513,51 @@ public:
     }
     // Only a tab of the bound window: an item of any other Explorer window is not read.
     if (tab != nullptr && GetAncestor(tab, GA_ROOT) != window_) return ShadowReadResult::kAbsent;
-    windows_uia_source_detail::ShellLookupLimits limits;
-    limits.still_valid = [this] { return ActionStillValid(); };
-    limits.now_ns = [this] { return NowNs(); };
-    limits.deadline_ns = NowNs() + windows_uia_source_detail::kShellLookupBudgetNs;
+    // The lookup runs on its own thread (see ShellLookupPending); nothing of this object is used there.
+    std::atomic<bool> &running = windows_uia_source_detail::ShellLookupRunning();
+    if (running.exchange(true)) return ShadowReadResult::kAbsent;
+    auto pending = std::make_shared<windows_uia_source_detail::ShellLookupPending>();
+    const HWND top = window_;
+    const StillValid valid = still_valid_;
+    const std::wstring display_name(name.View());
+    try {
+      std::thread([pending, tab, top, display_name, valid, &running]() {
+        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const auto now = [] {
+          return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                std::chrono::steady_clock::now().time_since_epoch())
+                                                .count());
+        };
+        windows_uia_source_detail::ShellLookupLimits limits;
+        limits.still_valid = [valid] { return valid == nullptr || valid(); };
+        limits.now_ns = now;
+        limits.deadline_ns = now() + windows_uia_source_detail::kShellLookupBudgetNs;
+        windows_uia_source_detail::ShellItemAnswer answer;
+        const ShadowReadResult result = windows_uia_source_detail::ShellItemPathByName(
+            tab, top, display_name, limits, &answer);
+        if (SUCCEEDED(initialized)) CoUninitialize();
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          pending->result = result;
+          pending->answer = std::move(answer);
+          pending->done = true;
+        }
+        running.store(false);
+        pending->ready.notify_one();
+      }).detach();
+    } catch (...) {
+      running.store(false);
+      return ShadowReadResult::kFailed;
+    }
     windows_uia_source_detail::ShellItemAnswer answer;
-    const ShadowReadResult found = windows_uia_source_detail::ShellItemPathByName(
-        tab, window_, name.View(), limits, &answer);
-    if (found != ShadowReadResult::kOk) return found;
+    {
+      std::unique_lock<std::mutex> lock(pending->mutex);
+      if (!pending->ready.wait_for(lock, windows_uia_source_detail::kShellLookupWait,
+                                   [&pending] { return pending->done; }))
+        return ShadowReadResult::kAbsent;
+      if (pending->result != ShadowReadResult::kOk) return pending->result;
+      answer = std::move(pending->answer);
+    }
     const ShadowReadResult text =
         windows_uia_source_detail::ShadowTextFromUtf16(answer.path, false, maximum_bytes, path);
     if (text == ShadowReadResult::kOk) *is_folder = answer.is_folder;

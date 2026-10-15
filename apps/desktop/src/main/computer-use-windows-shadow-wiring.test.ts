@@ -42,16 +42,18 @@ describe('Windows shadow scheduler decides nothing and reads nothing itself', ()
       '<atomic>',
       '<functional>',
       '<memory>',
+      '<mutex>',
       '<string>',
       '<string_view>',
       '<utility>',
+      '<vector>',
     ]);
     for (const match of scheduler.matchAll(/^\s*#\s*include\s+(\S+)/gmu))
       expect(allowedIncludes.has(match[1]!), match[1]).toBe(true);
     const text = code(scheduler);
     expect(text).not.toMatch(/#\s*if(n?def)?\s+.*(_WIN32|__APPLE__|__linux__|_MSC_VER)/u);
     expect(text).not.toMatch(
-      /windows\.h|UIAutomation|IUIAutomation|CoCreateInstance|CoInitialize|<thread>|std::thread|<mutex>|chrono|<random>|fstream|getenv|SetThreadPriority/iu,
+      /windows\.h|UIAutomation|IUIAutomation|CoCreateInstance|CoInitialize|<thread>|std::thread|chrono|<random>|fstream|getenv|SetThreadPriority/iu,
     );
     expect(text).not.toMatch(/single_use_approval|SingleUseApproval|ticket|approve/iu);
     // The ring is handed in, not reached for; the process ring is the host's to name.
@@ -95,22 +97,42 @@ describe('Windows shadow scheduler decides nothing and reads nothing itself', ()
     expect(run).toMatch(/noexcept/u);
     expect(run).toContain('} catch (...) {');
     // Whatever is recorded is an enum-only ShadowRecord: the capture's strings stay in this function.
-    expect(run).toMatch(/Emit\(WindowsShadowClassify\(capture, info, job\.v1_ordinary\)\)/u);
+    expect(run).toMatch(
+      /EmitFromShadow\(WindowsShadowClassify\(capture, info, job\.v1_ordinary\)\)/u,
+    );
     // The cancel is looked at after the last call of the capture too, not only by the gate.
     expect(run).toContain('reader.Canceled() || !environment.still_valid()');
   });
 
-  it('keeps every record in the ring and tells the observer, in one place', () => {
+  it("keeps every record in the ring at once and never tells the observer on the caller's thread", () => {
     const text = code(scheduler);
-    // Every record goes through Emit; only Emit touches the ring and the observer.
+    // The ring is written in one place and the observer called in one place.
     expect(text.match(/ring_\.Record\(/gu)?.length).toBe(1);
     expect(text.match(/observer_\(record\)/gu)?.length).toBe(1);
-    const emit = between(
+    // The records the caller's side makes (V1 invalid, busy) only wait; the observer is never called
+    // there, because its output may block on something outside the helper (the debug-output reader).
+    const caller = between(
       text,
-      'void Emit(const ShadowRecord &record) noexcept {',
-      'EffectShadowLog &ring_;',
+      'void EmitFromCaller(const ShadowRecord &record) noexcept {',
+      'void EmitFromShadow(',
     );
-    expect(emit.indexOf('ring_.Record(record)')).toBeLessThan(emit.indexOf('observer_(record)'));
+    expect(caller).toContain('Keep(record);');
+    expect(caller).not.toContain('Notify');
+    expect(caller).not.toContain('observer_');
+    const schedule = between(text, 'void Schedule(', 'private:');
+    expect(schedule).toContain('EmitFromCaller(');
+    expect(schedule).not.toMatch(/EmitFromShadow|Notify|observer_/u);
+    // The shadow's thread keeps, announces, and then passes on what the caller's side left waiting.
+    const shadow = between(
+      text,
+      'void EmitFromShadow(const ShadowRecord &record) noexcept {',
+      'static constexpr',
+    );
+    expect(shadow.indexOf('Keep(record)')).toBeLessThan(shadow.indexOf('Notify(record)'));
+    expect(shadow.indexOf('Notify(record)')).toBeLessThan(shadow.indexOf('Notify(earlier)'));
+    // Run (the shadow's thread) never uses the caller's path.
+    const run = between(text, 'void Run(', 'void Keep(');
+    expect(run).not.toContain('EmitFromCaller');
     // The observer sees a ShadowRecord, which is enums and counters (trivially copyable) and nothing else.
     expect(text).toContain(
       'using WindowsShadowObserver = std::function<void(const ShadowRecord &)>;',

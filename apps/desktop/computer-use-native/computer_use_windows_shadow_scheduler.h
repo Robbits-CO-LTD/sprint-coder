@@ -24,9 +24,11 @@
 #include <atomic>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace sprint_coder::computer_use {
 
@@ -72,11 +74,11 @@ public:
     bool handed_over = false;
     try {
       if (!v1_valid) {
-        Emit(ShadowSkippedRecord(job.kind, kShadowGapV1Invalid, job.v1_ordinary));
+        EmitFromCaller(ShadowSkippedRecord(job.kind, kShadowGapV1Invalid, job.v1_ordinary));
         return;
       }
       if (in_flight_.exchange(true)) {
-        Emit(ShadowSkippedRecord(job.kind, kShadowGapBusy, job.v1_ordinary));
+        EmitFromCaller(ShadowSkippedRecord(job.kind, kShadowGapBusy, job.v1_ordinary));
         return;
       }
       claimed = true;
@@ -99,21 +101,21 @@ private:
     try {
       // The action may have been canceled between the schedule and the start: nothing is read.
       if (!environment.still_valid || !environment.still_valid()) {
-        Emit(ShadowSkippedRecord(job.kind, kShadowGapCanceled, job.v1_ordinary));
+        EmitFromShadow(ShadowSkippedRecord(job.kind, kShadowGapCanceled, job.v1_ordinary));
         return;
       }
       std::unique_ptr<ShadowUiaSource> source =
           environment.open_source ? environment.open_source() : nullptr;
       if (source == nullptr) {
         // UI Automation could not be created: the shadow has no facts, which is a read gap.
-        Emit(ShadowSkippedRecord(job.kind, kShadowGapReadFailed, job.v1_ordinary));
+        EmitFromShadow(ShadowSkippedRecord(job.kind, kShadowGapReadFailed, job.v1_ordinary));
         return;
       }
       WindowsShadowReader reader(*source);
       const ShadowUiaCapture capture = reader.Capture(job.kind, job.target_id);
       // Canceled while it ran, or right after its last call: not a classification of a stale target.
       if (reader.Canceled() || !environment.still_valid()) {
-        Emit(ShadowSkippedRecord(job.kind, kShadowGapCanceled, job.v1_ordinary));
+        EmitFromShadow(ShadowSkippedRecord(job.kind, kShadowGapCanceled, job.v1_ordinary));
         return;
       }
       ShadowRequestInfo info;
@@ -121,29 +123,56 @@ private:
       info.key = job.key;
       info.maximum_mode = job.maximum_mode;
       info.policy_language = job.policy_language;
-      Emit(WindowsShadowClassify(capture, info, job.v1_ordinary));
+      EmitFromShadow(WindowsShadowClassify(capture, info, job.v1_ordinary));
     } catch (...) {
       // A shadow failure is invisible to the caller.
     }
   }
 
-  // The one place a record is kept: the ring first, then the observer. An observer that throws is
-  // swallowed; the record is already kept.
-  void Emit(const ShadowRecord &record) noexcept {
+  // A record is kept in the ring at once, wherever it comes from. The observer (the host's debug
+  // output) may wait on something outside the helper, so it is NEVER called on the caller's thread:
+  // a record made there (V1 invalid, busy) waits in a small list and is passed on by the next
+  // record the shadow's own thread makes.
+  void Keep(const ShadowRecord &record) noexcept {
     try {
       ring_.Record(record);
     } catch (...) {
-      return;
     }
+  }
+  void Notify(const ShadowRecord &record) noexcept {
     try {
       if (observer_) observer_(record);
     } catch (...) {
     }
   }
+  void EmitFromCaller(const ShadowRecord &record) noexcept {
+    Keep(record);
+    try {
+      std::lock_guard<std::mutex> lock(deferred_mutex_);
+      if (deferred_.size() >= kDeferredLimit) deferred_.erase(deferred_.begin());
+      deferred_.push_back(record);
+    } catch (...) {
+    }
+  }
+  void EmitFromShadow(const ShadowRecord &record) noexcept {
+    Keep(record);
+    Notify(record);
+    std::vector<ShadowRecord> waiting;
+    try {
+      std::lock_guard<std::mutex> lock(deferred_mutex_);
+      waiting.swap(deferred_);
+    } catch (...) {
+    }
+    for (const ShadowRecord &earlier : waiting) Notify(earlier);
+  }
+
+  static constexpr std::size_t kDeferredLimit = 64;
 
   EffectShadowLog &ring_;
   WindowsShadowLauncher launcher_;
   WindowsShadowObserver observer_;
+  std::mutex deferred_mutex_;
+  std::vector<ShadowRecord> deferred_;
   std::atomic<bool> in_flight_{false};
 };
 

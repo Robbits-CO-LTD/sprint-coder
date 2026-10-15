@@ -220,7 +220,13 @@ private:
   void Search(Element element, std::string_view target_id, std::size_t depth, int *matches,
               Element *found, bool *incomplete) {
     using namespace windows_shadow_reader_detail;
-    if (depth > kSearchMaxDepth || *matches > 1) return;
+    if (*matches > 1) return;
+    // Below the depth bound nothing was looked at, so "exactly one match" proves nothing: like V1's
+    // search, a cut-off is a failed search, not a smaller tree.
+    if (depth > kSearchMaxDepth) {
+      *incomplete = true;
+      return;
+    }
     std::string automation_id;
     ShadowSettle(Text(element, ShadowUiaText::kAutomationId, false, kSearchStringBytes,
                       &automation_id),
