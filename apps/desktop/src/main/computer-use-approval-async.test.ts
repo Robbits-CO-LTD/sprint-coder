@@ -133,7 +133,9 @@ describe('Computer Use approval async work (classifier v2, C4-2b)', () => {
     const js = approveJs();
     expect(js).toContain('session.approval.pending()');
     expect(js).toContain('session.approval.approval_generation() == approval_generation');
-    expect(js).toContain('session.approval_busy_generation == 0');
+    // A busy mark of another generation does not hold this one back; only the same one does.
+    expect(js).toContain('session.approval_busy_generation != approval_generation');
+    expect(js).not.toContain('session.approval_busy_generation == 0');
     expect(js).toContain('session.approval_busy_generation = approval_generation;');
     // A promise that could not be created, and work that could not be queued, end the approval and
     // clear the busy mark; the queue failure settles the live deferred.
@@ -144,6 +146,13 @@ describe('Computer Use approval async work (classifier v2, C4-2b)', () => {
     expect(abandon).toContain('request.session->approval_busy_generation = 0;');
     // The worker clears it on every way out, and the completion callback on a failed status.
     expect(code(approveWorker())).toContain('session.approval_busy_generation = 0;');
+    // The execution secret is declared outside the try and wiped in the catch as well.
+    const worker = approveWorker();
+    expect(worker.indexOf('std::string token;')).toBeGreaterThan(0);
+    expect(worker.indexOf('std::string token;')).toBeLessThan(worker.indexOf('try {'));
+    expect(worker.slice(worker.indexOf('catch (...) {'))).toContain(
+      'binding::ScrubNativeTicketString(&token);',
+    );
     expect(code(approveWorker())).toContain(
       'AbandonNativeApproval(work->request, work->approval_generation);',
     );
@@ -156,6 +165,18 @@ describe('Computer Use approval async work (classifier v2, C4-2b)', () => {
     const js = dispatchJs();
     expect(js).toContain('work->approval_generation = approval_generation;');
     expect(js).toContain('ExecuteNativeApprovedDispatch,');
+    expect(js).toContain('CompleteNativeApprovedDispatch,');
+    expect(js).not.toContain('CompleteNativeDispatch,');
+    // A work that never ran ends its approval: the completion discards the generation, then runs
+    // the ordinary completion.
+    const complete = fn('void CompleteNativeApprovedDispatch(');
+    expect(complete).toContain(
+      'status != napi_ok && work->outcome.reason_code == "native_dispatch_failed"',
+    );
+    expect(complete).toContain('approval.Discard(work->approval_generation);');
+    expect(complete.indexOf('approval.Discard(')).toBeLessThan(
+      complete.indexOf('CompleteNativeDispatch(env, status, data);'),
+    );
     expect(js).not.toContain('ExecuteNativeDispatch,');
     expect(js.match(/approval\.Discard\(approval_generation\);/gu)).toHaveLength(2);
     expect(macos).toContain('std::uint64_t approval_generation = 0;');

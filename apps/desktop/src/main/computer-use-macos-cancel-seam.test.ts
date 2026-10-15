@@ -787,7 +787,7 @@ NativeApprovalMeasurement GoodMeasurement() {
 }
 // An intent the production facts of this input will match: the digests are the ones the production
 // parser computes for it.
-bool OfferIntent(const NativeApprovalMeasurement& good) {
+bool OfferIntent(const NativeApprovalMeasurement& good, std::uint64_t generation = 9) {
   NativeDispatchRequest probe;
   {
     std::unique_lock<std::mutex> lock;
@@ -803,7 +803,7 @@ bool OfferIntent(const NativeApprovalMeasurement& good) {
   binding.payload_digest = probe.payload_digest;
   binding.authority_digest = good.authority_digest;
   binding.cancel_epoch = 0;
-  binding.approval_generation = 9;
+  binding.approval_generation = generation;
   binding.observation_revision = 6;
   binding.ticket_generation = 2;
   binding.classifier_version = good.classifier_version;
@@ -979,6 +979,61 @@ void ApprovalSeam() {
   current->inflight_dispatches.emplace("someone-else", "digest");
   DispatchApproved(&input, nullptr);
   Check(queue.empty() && lastOutcome.reason_code == "native_dispatch_busy" && current->approval.ready(), "dispatch_approved_busy_does_not_burn");
+  // 10. No secret and no clock: the worker ends the approval with the same reason as the dispatch path.
+  for (bool token : {true, false}) {
+    ApprovalReset();
+    Check(OfferIntent(GoodMeasurement()), "approve_offer_no_secret");
+    measurement = GoodMeasurement();
+    ApprovalApprove(&input, nullptr);
+    (token ? failTokenGen : failClock) = true;
+    Drain();
+    Check(!lastApprove.ok && lastApprove.reason == "native_ticket_unavailable" && !current->approval.occupied() &&
+      current->approval_busy_generation == 0, "approve_without_a_secret_or_a_clock_ends_the_approval");
+  }
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_clock");
+  DispatchApproved(&input, nullptr);
+  failClock = true;
+  Drain();
+  Check(effects == 0 && lastOutcome.reason_code == "native_ticket_unavailable" && lastOutcome.result == "rejected" &&
+    !current->approval.occupied() && current->inflight_dispatches.empty(), "dispatch_approved_without_a_clock_ends_the_approval");
+  // 11. Another generation neither approves nor is dispatched, and burns nothing.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_other_generation");
+  input.numbers["approvalGeneration"] = 10;
+  ApprovalApprove(&input, nullptr);
+  Check(queue.empty() && current->approval.pending() && !lastApprove.ok && lastApprove.reason == "native_approval_unavailable" &&
+    current->approval_busy_generation == 0, "approve_other_generation_is_refused_without_burning");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_other_generation");
+  input.numbers["approvalGeneration"] = 10;
+  DispatchApproved(&input, nullptr);
+  Check(queue.empty() && current->approval.ready() && lastOutcome.reason_code == "native_approval_unavailable" &&
+    current->inflight_dispatches.empty() && effects == 0, "dispatch_approved_other_generation_is_refused_without_burning");
+  // 12. A busy mark left by a generation that was discarded while it waited does not hold the next one back.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_before_discard");
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 1 && current->approval_busy_generation == 9, "approve_busy_for_the_first_generation");
+  current->approval.Discard(9);
+  Check(OfferIntent(GoodMeasurement(), 10), "approve_offer_next_generation");
+  input.numbers["approvalGeneration"] = 10;
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 2 && current->approval_busy_generation == 10 && current->approval.pending(), "approve_next_generation_is_not_held_back");
+  Drain();
+  Check(measureCalls == 2 && lastApprove.ok && current->approval.ready() && current->approval_busy_generation == 0 &&
+    resolutions == 2, "approve_stale_work_burns_nothing_and_the_next_generation_is_approved");
+  // 13. An approved dispatch whose work never ran ends its approval, like the other approval paths.
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_failed_completion");
+  DispatchApproved(&input, nullptr);
+  {
+    auto* work = queue.front(); queue.pop_front();
+    work->complete(&input, 1, work->data);  // the completion deletes the work
+  }
+  Check(effects == 0 && !current->approval.occupied() && current->inflight_dispatches.empty() &&
+    lastOutcome.result == "unknown_effect" && measureCalls == 1, "dispatch_approved_failed_completion_ends_the_approval");
 }
 `;
 

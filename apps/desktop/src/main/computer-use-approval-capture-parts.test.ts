@@ -123,7 +123,7 @@ describe('Computer Use approval measurement capture (classifier v2, C4-2a)', () 
     expect(text).not.toMatch(
       /\bkAX\w*Action\b|CFSTR\s*\(|SetAttributeValue|PerformAction|PostKeyboardEvent|CGEvent|NSEvent|NSWorkspace|activateWithOptions|input_api_attempts|dispatch_async|dispatch_sync/u,
     );
-    expect(text.replaceAll('[&]', '').replaceAll('[[maybe_unused]]', '')).not.toMatch(/[[\]]/u);
+    expect(text.replaceAll('[&]', '')).not.toMatch(/[[\]]/u);
   });
 
   it('passes the AX value kinds as AXValueType: the constants are not that type in C++', () => {

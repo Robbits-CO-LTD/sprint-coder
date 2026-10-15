@@ -5740,7 +5740,7 @@ sprint_coder::computer_use::ApprovalAuthorityIdentity ReadApprovalAuthorityIdent
 // canceled (the flow ends it as canceled on its own); a takeover when the measure could not be
 // made whole. `route`, the rule set and the build's attested classifier version are the caller's:
 // the session's route (C4-0), the version's own rule set, and what the build attests.
-[[maybe_unused]] sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLane(
+sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLane(
     const NativeDispatchRequest& request, sprint_coder::computer_use::ClassifierRoute route,
     const sprint_coder::computer_use::EffectRuleset& ruleset,
     std::uint32_t attested_classifier_version) noexcept {
@@ -6572,11 +6572,12 @@ void ExecuteNativeApprovalApprove(napi_env env, void* data) {
   auto* work = static_cast<AsyncNativeApprovalWork*>(data);
   std::lock_guard<std::mutex> serial_lock(mac_dispatch_serial_mutex);
   @autoreleasepool {
+    // Declared outside the try: the execution secret is wiped on every way out, a throw included.
+    std::string token;
     try {
       // The accessibility tree is read here, with no state lock held.
       const binding::NativeApprovalMeasurement measured = MeasureNativeApproval(work->request);
       MacComputerUseSession& session = *work->request.session;
-      std::string token;
       std::uint64_t now_ns = 0;
       binding::NativeApprovalOutcome outcome;
       {
@@ -6597,6 +6598,7 @@ void ExecuteNativeApprovalApprove(napi_env env, void* data) {
       work->ok = outcome.ok;
       if (!outcome.ok) SetNativeApprovalDenial(work, outcome.failure);
     } catch (...) {
+      binding::ScrubNativeTicketString(&token);
       // Nothing was approved. The intent ends with the failure, like any failed attempt.
       AbandonNativeApproval(work->request, work->approval_generation);
       SetNativeApprovalDenial(work, binding::NativeApprovalFailure::kUnavailable);
@@ -6648,8 +6650,10 @@ napi_value ApprovalApprove(napi_env env, napi_callback_info info) {
                                         &error_message);
     if (parsed) {
       MacComputerUseSession& session = *request.session;
+      // A busy mark of ANOTHER generation (an approval that was discarded while it waited for the
+      // lane) does not hold this one back: only a second call for the same generation is refused.
       if (session.approval.pending() && session.approval.approval_generation() == approval_generation &&
-          session.approval_busy_generation == 0) {
+          session.approval_busy_generation != approval_generation) {
         session.approval_busy_generation = approval_generation;
         queue_it = true;
       } else {
@@ -6814,6 +6818,18 @@ void ExecuteNativeApprovedDispatch(napi_env env, void* data) {
   }
 }
 
+// The completion of an approved dispatch. A work that did not run to the point of consuming the
+// ticket (the framework reports a failed status and the outcome was never set) ends the approval of
+// its generation too; everything else is the ordinary completion.
+void CompleteNativeApprovedDispatch(napi_env env, napi_status status, void* data) {
+  auto* work = static_cast<AsyncNativeDispatchWork*>(data);
+  if (status != napi_ok && work->outcome.reason_code == "native_dispatch_failed") {
+    std::lock_guard<std::mutex> state_lock(work->request.session->state_mutex);
+    work->request.session->approval.Discard(work->approval_generation);
+  }
+  CompleteNativeDispatch(env, status, data);
+}
+
 // dispatchApproved: the input entry that follows approvalApprove. It is a separate path from
 // dispatch, the TypeScript side never calls preflight for it, and it asks for `approvalGeneration`
 // only: a request that carries a ticket at all is refused before anything is read. It is
@@ -6866,7 +6882,7 @@ napi_value DispatchApproved(napi_env env, napi_callback_info info) {
   }
   napi_value resource_name = StringValue(env, "SprintCoderComputerUseDispatch");
   if (napi_create_async_work(env, nullptr, resource_name, ExecuteNativeApprovedDispatch,
-                             CompleteNativeDispatch, work.get(), &work->work) != napi_ok ||
+                             CompleteNativeApprovedDispatch, work.get(), &work->work) != napi_ok ||
       napi_queue_async_work(env, work->work) != napi_ok) {
     if (work->work != nullptr) napi_delete_async_work(env, work->work);
     {
