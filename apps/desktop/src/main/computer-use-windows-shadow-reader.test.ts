@@ -360,7 +360,7 @@ describe('Windows UI Automation source only reads', () => {
       );
     }
     expect(code(source)).not.toMatch(
-      /(ShowWindow|BringWindowToTop|SetActiveWindow|AttachThreadInput|PostThreadMessage\w*|SwitchToThisWindow|SetForegroundWindow|SendInput)\s*\(/u,
+      /\b(ShowWindow|BringWindowToTop|SetActiveWindow|AttachThreadInput|PostThreadMessage\w*|SwitchToThisWindow|SetForegroundWindow|SendInput)\s*\(/u,
     );
   });
 
