@@ -156,8 +156,13 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['a card number in 5-5-6 groups', '41111 11111 111111'],
     ['an Amex number printed 4-6-5', '3782 822463 10005'],
     ['a card number followed by one more digit', '5555 5555 5555 4444 1'],
+    ['a card number split by tabs', '4111\t1111\t1111\t1111'],
+    ['a card number split across lines', '4111\n1111\n1111\n1111'],
     ['a six-digit code', '482913'],
     ['an eight-digit code with spaces around', '  12345678 '],
+    ['a six-digit code shown as 3 + 3', '482 913'],
+    ['a six-digit code with a hyphen', '482-913'],
+    ['an eight-digit code shown as 4 + 4', '1234 5678'],
   ])('flags %s', (_name, text) => {
     expect(looksSecret(text)).toBe(true);
   });
@@ -166,6 +171,9 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['ordinary text', 'The build finished in 12 minutes.'],
     ['a five-digit number', '48291'],
     ['a nine-digit number', '123456789'],
+    ['a nine-digit number shown as 3 + 3 + 3', '123 456 789'],
+    ['a five-digit number with a space', '12 345'],
+    ['a code separated by two spaces', '482  913'],
     ['a code inside a sentence', 'Order 482913 shipped'],
     ['a 16-digit number that fails Luhn', '4111 1111 1111 1112'],
     ['a 12-digit number that passes Luhn', '477777777772'],

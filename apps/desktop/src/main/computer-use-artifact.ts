@@ -94,16 +94,20 @@ const SECRET_PATTERNS: readonly RegExp[] = [
  */
 export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
-  // A one-time code: the whole value is 6 to 8 digits.
-  if (/^\s*\d{6,8}\s*$/u.test(text)) return true;
-  // A card number: 13 to 19 digits passing Luhn, as a run of digit groups with single spaces or
-  // hyphens between them. Every run of whole groups is tried (not only the whole chain), because
-  // a number followed by an expiry date or a CVV, or preceded by a short number, is still a card
-  // number. Windows begin and end at group boundaries only, and every group but the last has at least 4 digits (card numbers print as 4-4-4-4, 4-6-5 and the like; only the tail may be short), so runs of short numbers such as phone numbers are not read as cards: cutting inside an unseparated group
-  // would let a long id that merely contains a Luhn-valid slice be flagged. Bounded work: at most
-  // ~2,000 groups per 4,096 bytes, each window at most 19 digits.
-  for (const chain of text.matchAll(/\d(?:[ -]?\d)*/gu)) {
-    const groups = chain[0].split(/[ -]/u);
+  // A one-time code: the whole value is 6 to 8 digits, as authenticator apps and SMS show them —
+  // run together or split by single spaces or hyphens (`482913`, `482 913`, `1234-5678`).
+  if (/^\s*\d(?:[ -]?\d){5,7}\s*$/u.test(text)) return true;
+  // A card number: 13 to 19 digits passing Luhn, as a run of digit groups with a single space,
+  // TAB, line feed or hyphen between them (a multi-line field may break a number across lines).
+  // Every run of whole groups is tried (not only the whole chain), because a number followed by an
+  // expiry date or a CVV, or preceded by a short number, is still a card number. Windows begin and
+  // end at group boundaries only, and every group but the last has at least 4 digits (card numbers
+  // print as 4-4-4-4, 4-6-5 and the like; only the tail may be short), so runs of short numbers
+  // such as phone numbers are not read as cards. Cutting inside an unseparated group would let a
+  // long id that merely contains a Luhn-valid slice be flagged. Bounded work: at most ~2,000 groups
+  // per 4,096 bytes, each window at most 19 digits.
+  for (const chain of text.matchAll(/\d(?:[ \t\n-]?\d)*/gu)) {
+    const groups = chain[0].split(/[ \t\n-]/u);
     for (let first = 0; first < groups.length; first += 1) {
       let digits = '';
       for (let last = first; last < groups.length; last += 1) {
