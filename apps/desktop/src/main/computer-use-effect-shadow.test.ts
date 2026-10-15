@@ -80,6 +80,7 @@ const ALLOWED_CALLS = new Set([
   'EffectShadowRing',
   'sprint_coder::computer_use::ProcessShadowLog',
   'EmitShadowRecord',
+  'CaptureShadowTargetFacts',
   'FindShadowSemanticTarget',
   'ReadShadowElement',
   'ReadShadowElementAtPosition',
@@ -307,7 +308,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     const body = record![0];
     const skip = body.indexOf('v1_validation != NativeTargetValidation::kValid');
     const cancel = body.indexOf('!DispatchCancellationStillValid(request)');
-    const firstRead = body.indexOf('CopyShadowTarget(reader)');
+    const firstRead = body.indexOf('CaptureShadowTargetFacts(reader, &capture)');
     expect(skip).toBeGreaterThan(0);
     expect(cancel).toBeGreaterThan(skip);
     expect(firstRead).toBeGreaterThan(cancel);
@@ -369,7 +370,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(lookup).not.toBeNull();
     expect(lookup![0].match(/&reader\.search_incomplete\)/gu)).toHaveLength(3);
     expect(section).toContain('matches == 1 && !reader.search_incomplete');
-    expect(section).toContain('if (reader.search_incomplete) capture.read_failed = true;');
+    expect(section).toContain('if (reader.search_incomplete) capture->read_failed = true;');
   });
 
   it('never turns a long or failed attribute into an empty string', () => {
@@ -382,7 +383,6 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     );
     expect(section).toContain('&node.read_failed, &node.oversize');
     expect(section).toContain('&capture->read_failed');
-    expect(section).toContain('&capture.read_failed');
     // The old read helpers, which returned false (empty) over 4096, are not used by the shadow.
     expect(shadowCode()).not.toContain('CopyAccessibilityString');
     expect(shadowCode()).not.toContain('CopyAccessibilityElementAttribute');
@@ -421,12 +421,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
     expect(code.replace(settle![0], '')).not.toMatch(/==\s*ShadowRead::kOk|!=\s*ShadowRead::kOk/u);
     expect(code.replace(settle![0], '')).not.toMatch(/switch\s*\(\s*ReadShadow/u);
     // Where the flags go: a lookup of the target, a node, the capture.
-    for (const flag of [
-      '&reader.search_incomplete',
-      '&node.read_failed',
-      '&capture->read_failed',
-      '&capture.read_failed',
-    ])
+    for (const flag of ['&reader.search_incomplete', '&node.read_failed', '&capture->read_failed'])
       expect(code).toContain(flag);
   });
 
@@ -520,7 +515,7 @@ describe('Computer Use effect shadow (classifier v2, C2)', () => {
         'element, kAXTitleAttribute, kSearchStringUnits, kSearchStringBytes, &text|false',
         'current.Element(), kAXURLAttribute, 2048, 2048, &url|false',
         'target.Element(), kAXURLAttribute, 2048, 2048, &url|false',
-        'target.Element(), kAXFilenameAttribute, kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture.filename|true',
+        'target.Element(), kAXFilenameAttribute, kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture->filename|true',
       ].sort(),
     );
     // The portable half folds again, so it does not depend on the platform having done it.

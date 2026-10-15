@@ -42,6 +42,7 @@
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_effect_shadow.h"
+#include "computer_use_effect_measurement.h"
 
 @interface SprintCoderCaptureOutput : NSObject <SCStreamOutput>
 @property(nonatomic, strong) dispatch_semaphore_t frameSemaphore;
@@ -5517,6 +5518,35 @@ void EmitShadowRecord(const sprint_coder::computer_use::ShadowRecord& record) {
               static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
 }
 
+// The target of the request and what is read around it: its chain, its neighbours, its URL and file
+// name. Shared by the shadow and by the approval measurement (C4-2a), so both see the same facts.
+// The caller owns the reader (its cancellation and budget) and the capture; the target is returned
+// so that a caller may read more of it (the measurement reads its frame).
+ShadowCfRef CaptureShadowTargetFacts(ShadowReader& reader,
+                                     sprint_coder::computer_use::ShadowAxCapture* capture) {
+  using sprint_coder::computer_use::kEffectMaxLabelBytes;
+  ShadowCfRef target = CopyShadowTarget(reader);
+  // A lookup that failed or was cut off is a read gap, not "the target was not there".
+  if (reader.search_incomplete) capture->read_failed = true;
+  if (target.Get() != nullptr) {
+    capture->target_found = true;
+    CaptureShadowChain(reader, target.Element(), capture);
+    CaptureShadowNeighbors(reader, target.Element(), capture);
+    std::string url;
+    if (reader.Settle(ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, 2048, &url,
+                                       false),
+                      &capture->read_failed)) {
+      capture->url_present = true;
+      capture->url = std::move(url);
+    }
+    reader.Settle(ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
+                                   kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture->filename,
+                                   true),
+                  &capture->read_failed);
+  }
+  return target;
+}
+
 void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
                         NativeTargetValidation v1_validation) noexcept {
   using namespace sprint_coder::computer_use;
@@ -5532,25 +5562,8 @@ void RecordEffectShadow(const NativeDispatchRequest& request, bool v1_ordinary,
     }
     ShadowReader reader(request);
     ShadowAxCapture capture;
-    ShadowCfRef target = CopyShadowTarget(reader);
-    // A lookup that failed or was cut off is a read gap, not "the target was not there".
-    if (reader.search_incomplete) capture.read_failed = true;
-    if (target.Get() != nullptr) {
-      capture.target_found = true;
-      CaptureShadowChain(reader, target.Element(), &capture);
-      CaptureShadowNeighbors(reader, target.Element(), &capture);
-      std::string url;
-      if (reader.Settle(ReadShadowString(reader, target.Element(), kAXURLAttribute, 2048, 2048,
-                                         &url, false),
-                        &capture.read_failed)) {
-        capture.url_present = true;
-        capture.url = std::move(url);
-      }
-      reader.Settle(ReadShadowString(reader, target.Element(), kAXFilenameAttribute,
-                                     kEffectMaxLabelBytes, kEffectMaxLabelBytes, &capture.filename,
-                                     true),
-                    &capture.read_failed);
-    }
+    const ShadowCfRef target = CaptureShadowTargetFacts(reader, &capture);
+    (void)target;
     if (reader.canceled) {
       EmitShadowRecord(ShadowSkippedRecord(request.kind, kShadowGapCanceled, v1_ordinary));
       return;
@@ -5627,6 +5640,139 @@ NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& reque
   ScheduleEffectShadow(request, receipt.decision == "ordinary", v1_validation);
   return receipt;
 }
+
+// BEGIN approval measurement capture (classifier v2 C4-2a)
+// What native measures *now* for an approval, on the serial lane. Nothing calls it yet: the addon's
+// own MeasureNativeApproval is still the empty measurement, so nothing is approvable and no
+// production path changes. The change that wires it (C4-2b) calls it from the approval worker.
+//
+// It is the capture the shadow takes (CaptureShadowTargetFacts), plus the target's frame and the
+// session's identity, handed to the portable MeasureApproval. The caller holds the serial lane
+// (mac_dispatch_serial_mutex) and NO state lock: this section takes neither, calls no N-API and
+// makes no write, action or event. Every AX call is stepped (cancellation, then the call and time
+// budget of the shadow) and every result is settled into a flag, so a read that failed, ran out of
+// budget or was canceled is never an empty answer: the measurement is then incomplete, and
+// incomplete is a takeover for the core.
+
+// The one way a length or a position becomes a whole number for the authority digest. A value that
+// is not a number, or is absurdly large, is refused (the read counts as failed).
+bool RoundAuthorityUnit(double value, std::int64_t* output) {
+  if (!std::isfinite(value) || std::fabs(value) > 1.0e9) return false;
+  *output = static_cast<std::int64_t>(std::llround(value));
+  return true;
+}
+
+// A CGPoint or CGSize attribute (an AXValue). "No value" and "unsupported" are absent; any other
+// error, or a value of the wrong kind, is a failed read.
+ShadowRead ReadShadowGeometry(ShadowReader& reader, AXUIElementRef element, CFStringRef attribute,
+                              AXValueType type, void* output) {
+  if (!reader.Step()) return ShadowRead::kStopped;
+  CFTypeRef value = nullptr;
+  const AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
+  ShadowCfRef holder(value);
+  if (error == kAXErrorNoValue || error == kAXErrorAttributeUnsupported ||
+      error == kAXErrorNotImplemented)
+    return ShadowRead::kAbsent;
+  if (error != kAXErrorSuccess) return ShadowRead::kFailed;
+  if (value == nullptr) return ShadowRead::kAbsent;
+  if (CFGetTypeID(value) != AXValueGetTypeID()) return ShadowRead::kFailed;
+  const AXValueRef packed = static_cast<AXValueRef>(const_cast<void*>(value));
+  if (AXValueGetType(packed) != type || !AXValueGetValue(packed, type, output))
+    return ShadowRead::kFailed;
+  return ShadowRead::kOk;
+}
+
+// The target's frame in whole screen units. Not present when either read is absent; a failed read
+// (or a frame that is not a number) sets *failed.
+sprint_coder::computer_use::ApprovalTargetFrame ReadApprovalTargetFrame(ShadowReader& reader,
+                                                                         AXUIElementRef target,
+                                                                         bool* failed) {
+  sprint_coder::computer_use::ApprovalTargetFrame frame;
+  CGPoint origin{};
+  CGSize size{};
+  const bool have_origin = reader.Settle(
+      ReadShadowGeometry(reader, target, kAXPositionAttribute, kAXValueCGPointType, &origin),
+      failed);
+  const bool have_size = reader.Settle(
+      ReadShadowGeometry(reader, target, kAXSizeAttribute, kAXValueCGSizeType, &size), failed);
+  if (!have_origin || !have_size) return frame;
+  if (RoundAuthorityUnit(origin.x, &frame.x) && RoundAuthorityUnit(origin.y, &frame.y) &&
+      RoundAuthorityUnit(size.width, &frame.width) && RoundAuthorityUnit(size.height, &frame.height) &&
+      frame.width >= 0 && frame.height >= 0) {
+    frame.present = true;
+  } else {
+    *failed = true;
+  }
+  return frame;
+}
+
+// Who the approval is for: the application, the process generation and the window the session was
+// bound to (fixed at creation), and the window's bounds now. A part that is empty or could not be
+// read is absent, and the portable measurement turns an absent part into a takeover.
+sprint_coder::computer_use::ApprovalAuthorityIdentity ReadApprovalAuthorityIdentity(
+    ShadowReader& reader, const MacComputerUseSession& session) {
+  using sprint_coder::computer_use::AuthorityString;
+  sprint_coder::computer_use::ApprovalAuthorityIdentity identity;
+  if (!session.app_identity.empty()) identity.app_identity = AuthorityString{true, session.app_identity};
+  if (!session.process_generation.empty())
+    identity.process_generation = AuthorityString{true, session.process_generation};
+  if (!session.window_identity.empty())
+    identity.window_identity = AuthorityString{true, session.window_identity};
+  CGRect bounds{};
+  if (reader.Step() && ReadWindowBounds(session.window_id, &bounds)) {
+    if (RoundAuthorityUnit(bounds.origin.x, &identity.x) &&
+        RoundAuthorityUnit(bounds.origin.y, &identity.y) &&
+        RoundAuthorityUnit(bounds.size.width, &identity.width) &&
+        RoundAuthorityUnit(bounds.size.height, &identity.height))
+      identity.geometry_present = true;
+  }
+  return identity;
+}
+
+// The measurement of this request, now. Not eligible and not a takeover when the action was
+// canceled (the flow ends it as canceled on its own); a takeover when the measure could not be
+// made whole. `route`, the rule set and the build's attested classifier version are the caller's:
+// the session's route (C4-0), the version's own rule set, and what the build attests.
+sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLane(
+    const NativeDispatchRequest& request, sprint_coder::computer_use::ClassifierRoute route,
+    const sprint_coder::computer_use::EffectRuleset& ruleset,
+    std::uint32_t attested_classifier_version) noexcept {
+  using namespace sprint_coder::computer_use;
+  NativeApprovalMeasurement measured;
+  try {
+    if (request.session == nullptr) {
+      measured.takeover = true;
+      return measured;
+    }
+    if (!DispatchCancellationStillValid(request)) return measured;
+    ShadowReader reader(request);
+    ShadowAxCapture capture;
+    const ShadowCfRef target = CaptureShadowTargetFacts(reader, &capture);
+    ApprovalMeasurementInput input;
+    if (target.Get() != nullptr)
+      input.target_frame = ReadApprovalTargetFrame(reader, target.Element(), &capture.read_failed);
+    input.identity = ReadApprovalAuthorityIdentity(reader, *request.session);
+    if (reader.canceled) return NativeApprovalMeasurement();
+    capture.budget_exhausted = reader.budget.Exhausted();
+    input.capture = &capture;
+    input.request.kind = request.kind;
+    input.request.key = request.key;
+    input.request.maximum_mode = request.session->maximum_mode;
+    input.request.policy_language = request.session->policy_language;
+    input.request.executable_path = request.session->executable_path;
+    input.ruleset = ruleset;
+    input.route = route;
+    input.attested_classifier_version = attested_classifier_version;
+    // A confirmation rests on native's own high-impact judgement; a supervised action claims none.
+    input.source = HighImpactSourceFor(capture, input.request, ruleset);
+    return MeasureApproval(input);
+  } catch (...) {
+    NativeApprovalMeasurement person;
+    person.takeover = true;
+    return person;
+  }
+}
+// END approval measurement capture
 
 // 32 bytes from the system CSPRNG, lowercase hex. There is deliberately no fallback: a failure
 // means no ticket.

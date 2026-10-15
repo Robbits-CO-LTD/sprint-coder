@@ -33,12 +33,16 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     }
   });
 
-  it('is not wired: no native source includes it, so no production path uses it', () => {
-    for (const name of ['computer_use_macos.mm', 'computer_use_windows_host.cc']) {
-      const source = read(name);
-      expect(source, name).not.toContain('computer_use_effect_measurement.h');
-      expect(source, name).not.toContain('computer_use_sha256.h');
-    }
+  it('is not wired: only the measurement parts include it, and nothing calls those yet', () => {
+    // Windows does not know it. The macOS addon includes it for the C4-2a measurement parts, whose
+    // only caller does not exist yet (see computer-use-approval-capture-parts.test.ts).
+    const windows = read('computer_use_windows_host.cc');
+    expect(windows).not.toContain('computer_use_effect_measurement.h');
+    expect(windows).not.toContain('computer_use_sha256.h');
+    const macos = read('computer_use_macos.mm');
+    expect(macos).toContain('#include "computer_use_effect_measurement.h"');
+    expect(macos.match(/\bMeasureApproval\(/gu)).toHaveLength(1);
+    expect(macos.match(/\bMeasureNativeApprovalOnLane\(/gu)).toHaveLength(1);
     expect(harness).toContain('#include "computer_use_effect_measurement.h"');
     expect(harness).toContain('Computer Use native effect measurement: PASS');
   });
