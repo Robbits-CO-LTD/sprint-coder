@@ -88,7 +88,10 @@ describe('Windows shadow reader is portable and decides nothing', () => {
     const calls: string[] = [];
     for (const line of gated.split('\n')) {
       if (!/source_\./u.test(line)) continue;
-      if (/gate_\.Step\(source_\.NowNs\(\), source_\.ActionStillValid\(\)\)/u.test(line)) continue;
+      // The admission of a call (Step) and the admission of the end of the capture (Finish) ask the
+      // gate with the clock and the validity; they read nothing of the target.
+      if (/gate_\.(Step|Finish)\(source_\.NowNs\(\), source_\.ActionStillValid\(\)\)/u.test(line))
+        continue;
       const match = /^\s*return Gated\(\[&\] \{ return source_\.(\w+)\([^;]*\); \}\);$/u.exec(line);
       expect(match, line).not.toBeNull();
       calls.push(match![1]!);
@@ -403,6 +406,33 @@ describe('Windows UI Automation source only reads', () => {
     // and the reader asks only for an item it could trace back to the bound window.
     const reader_item = between(reader, 'void CaptureItem(', 'ShadowUiaSource &source_;');
     expect(reader_item).toContain('capture->chain_reached_root &&');
+  });
+
+  it('walks nothing of its own for the shell tab, and closes a capture with a final admission', () => {
+    // The tab is an element of the walk the reader already paid for (gated); the source reads only its
+    // window handle. No parent walk (and no class-name reads) hides in ItemPath.
+    const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
+    expect(code(item)).not.toMatch(/GetParentElement|get_CurrentClassName|FindFirst|FindAll/u);
+    expect(item).toContain('get_CurrentNativeWindowHandle(&native)');
+    expect(reader).toContain('Element tab = ShadowUiaSource::kNoElement;');
+    expect(reader).toContain('"shelltabwindowclass"');
+    // The last gated call succeeding is not enough: after it the gate is asked once more (a deadline
+    // passed during that call, or a cancel after it, makes the capture late or canceled), and that
+    // admission spends no call.
+    const capture = between(reader, 'ShadowUiaCapture Capture(', 'private:');
+    expect(capture.indexOf('Finish();')).toBeGreaterThan(capture.indexOf('CaptureItem('));
+    expect(capture.indexOf('Finish();')).toBeLessThan(
+      capture.indexOf('capture.budget_exhausted ='),
+    );
+    const finish = between(
+      sharedShadow,
+      'bool Finish(std::uint64_t now_ns',
+      'bool Canceled() const',
+    );
+    expect(finish).toContain('PastDeadline(now_ns)');
+    expect(finish).not.toContain('Spend(');
+    expect(harness).toContain('winreader-late-last-call-is-over-budget');
+    expect(harness).toContain('winreader-cancel-after-the-last-call-is-canceled');
   });
 
   it('does not guess at an item it could not read, and does not wait on Explorer for ever', () => {

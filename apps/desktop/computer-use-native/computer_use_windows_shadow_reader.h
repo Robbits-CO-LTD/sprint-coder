@@ -39,6 +39,8 @@ enum class ShadowUiaText : std::uint8_t { kControlType, kClassName, kName, kAuto
 class ShadowUiaSource {
 public:
   using Element = std::uint32_t;
+  // "No element" (an argument that is not there).
+  static constexpr Element kNoElement = 0xFFFFFFFFu;
   virtual ~ShadowUiaSource() = default;
 
   // Not platform reads of the target: the cancellation / validity check of the action, and the
@@ -73,8 +75,9 @@ public:
                                                  std::string *output) = 0;
   // The REAL path of a shell item (its parsing / file-system path), and whether it is a folder.
   // kAbsent when the element is not a shell item or the path cannot be known.
-  virtual ShadowReadResult ItemPath(Element element, std::size_t maximum_bytes, std::string *path,
-                                    bool *is_folder) = 0;
+  // `tab` is the shell tab that shows the item (an element of the walk) or kNoElement.
+  virtual ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes,
+                                    std::string *path, bool *is_folder) = 0;
 };
 
 namespace windows_shadow_reader_detail {
@@ -137,6 +140,7 @@ public:
       CaptureNeighbors(&capture);
       CaptureItem(&capture);
     }
+    Finish();
     capture.budget_exhausted = gate_.BudgetExhausted();
     return capture;
   }
@@ -190,10 +194,12 @@ private:
                                          std::string *output) {
     return Gated([&] { return source_.CoreWindowProcessPath(window, maximum_bytes, output); });
   }
-  ShadowReadResult ItemPath(Element element, std::size_t maximum_bytes, std::string *path,
+  ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes, std::string *path,
                             bool *is_folder) {
-    return Gated([&] { return source_.ItemPath(element, maximum_bytes, path, is_folder); });
+    return Gated([&] { return source_.ItemPath(element, tab, maximum_bytes, path, is_folder); });
   }
+  // The capture is over: a cancel, or a deadline passed during the last call, makes it incomplete.
+  void Finish() { (void)gate_.Finish(source_.NowNs(), source_.ActionStillValid()); }
   // END gated source calls
 
   // The node's properties. The password flag is read for every node: a failed read is an
@@ -388,12 +394,20 @@ private:
     if (index >= capture->chain.size() || index >= chain_elements_.size()) return;
     if (windows_shadow_detail::SurfaceForWindow(*capture).kind != SurfaceKind::kFileBrowser) return;
     capture->item_kind = ShadowItemKind::kFile;
+    // The shell tab that shows the item is its nearest ShellTabWindowClass ancestor in the walk.
+    Element tab = ShadowUiaSource::kNoElement;
+    for (std::size_t at = index; at < capture->chain.size() && at < chain_elements_.size(); ++at)
+      if (windows_shadow_detail::Lowercase(shadow_detail::CompatFold(capture->chain[at].class_name)) ==
+          "shelltabwindowclass") {
+        tab = chain_elements_[at];
+        break;
+      }
     std::string path;
     bool is_folder = false;
     // The shell is asked only about an item of the bound window: a target the walk could not trace
     // back to it (another window on top, the focus elsewhere) is not looked up.
     if (capture->chain_reached_root &&
-        ShadowSettle(ItemPath(chain_elements_[index], kPathBytes, &path, &is_folder),
+        ShadowSettle(ItemPath(chain_elements_[index], tab, kPathBytes, &path, &is_folder),
                      &capture->read_failed)) {
       capture->item_name_read = true;
       capture->item_name_is_real_path = true;

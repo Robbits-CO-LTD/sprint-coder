@@ -2801,6 +2801,9 @@ public:
   long core_calls = 0;
   long item_calls = 0;
   long url_calls = 0;
+  Element last_tab = kNoElement;
+  // Time that passes inside the shell lookup (a slow Explorer).
+  std::uint64_t item_delay_ns = 0;
 
   int Add(int parent, const std::string &control, const std::string &name = "",
           const std::string &class_name = "") {
@@ -2914,10 +2917,12 @@ public:
     if (core_result != ShadowReadResult::kOk) return core_result;
     return ShadowCheckText(core_path, maximum_bytes, output);
   }
-  ShadowReadResult ItemPath(Element element, std::size_t maximum_bytes, std::string *path,
+  ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes, std::string *path,
                             bool *is_folder) override {
     Tick();
     ++item_calls;
+    last_tab = tab;
+    now += item_delay_ns;
     const FakeUiaNode &node = nodes[element];
     if (node.item_result != ShadowReadResult::kOk) return node.item_result;
     if (!node.has_item) return ShadowReadResult::kAbsent;
@@ -2967,10 +2972,16 @@ struct FakeForm {
 struct FakeExplorer {
   FakeForm form;
   int item = 0;
-  explicit FakeExplorer(const std::string &name) {
+  int tab = -1;
+  explicit FakeExplorer(const std::string &name, bool with_tab = false) {
     form.Node(form.window).class_name = "CabinetWClass";
     form.source.process_path = "C:\\Windows\\explorer.exe";
-    const int list = form.source.Add(form.window, "List", "Items", "UIItemsView");
+    int parent = form.window;
+    if (with_tab) {
+      tab = form.source.Add(form.window, "Pane", "Tab", "ShellTabWindowClass");
+      parent = tab;
+    }
+    const int list = form.source.Add(parent, "List", "Items", "UIItemsView");
     item = form.source.Add(list, "ListItem", name, "UIItem");
     form.source.point = item;
   }
@@ -3409,6 +3420,46 @@ bool CheckWindowsShadowReader() {
     const ShadowUiaCapture failed = failed_reader.Capture("click", "");
     if (!Check(failed.item_kind == ShadowItemKind::kFile && !failed.item_name_is_real_path && failed.read_failed,
                "winreader-failed-shell-lookup-is-a-gap")) return false;
+  }
+  // The shell tab is an element the walk already reached; no walk of the source's own is needed.
+  {
+    FakeExplorer tabbed("invoice.pdf", true);
+    tabbed.GiveRealPath("C:\\Users\\a\\invoice.pdf");
+    WindowsShadowReader tab_reader(tabbed.form.source);
+    const ShadowUiaCapture with_tab = tab_reader.Capture("click", "");
+    if (!Check(with_tab.item_name_is_real_path && tabbed.form.source.last_tab == static_cast<ShadowUiaSource::Element>(tabbed.tab),
+               "winreader-item-gets-its-shell-tab-from-the-walk")) return false;
+    FakeExplorer untabbed("invoice.pdf");
+    untabbed.GiveRealPath("C:\\Users\\a\\invoice.pdf");
+    WindowsShadowReader untabbed_reader(untabbed.form.source);
+    (void)untabbed_reader.Capture("click", "");
+    if (!Check(untabbed.form.source.last_tab == ShadowUiaSource::kNoElement, "winreader-no-tab-without-one-in-the-chain"))
+      return false;
+  }
+  // The last call decides nothing alone: a shell lookup that returns after the deadline, or a cancel
+  // that arrives after it, makes the capture late or canceled, not a complete one.
+  {
+    FakeExplorer slow("invoice.pdf");
+    slow.GiveRealPath("C:\\Users\\a\\invoice.pdf");
+    slow.form.source.item_delay_ns = kShadowDeadlineNs * 2;
+    WindowsShadowReader slow_reader(slow.form.source);
+    const ShadowUiaCapture late = slow_reader.Capture("click", "");
+    if (!Check(late.budget_exhausted && late.item_name_is_real_path, "winreader-late-last-call-is-over-budget")) return false;
+    const ShadowRecord late_record = WindowsShadowClassify(late, UiaRequest("click"), true);
+    if (!Check((late_record.gaps & kShadowGapBudget) != 0 && late_record.kind != DecisionKind::kOrdinary,
+               "winreader-late-last-call-is-not-ordinary")) return false;
+    FakeExplorer counted("invoice.pdf");
+    counted.GiveRealPath("C:\\Users\\a\\invoice.pdf");
+    WindowsShadowReader count_reader(counted.form.source);
+    (void)count_reader.Capture("click", "");
+    const long total = counted.form.source.calls;
+    FakeExplorer canceled("invoice.pdf");
+    canceled.GiveRealPath("C:\\Users\\a\\invoice.pdf");
+    canceled.form.source.cancel_after = total;
+    WindowsShadowReader cancel_reader(canceled.form.source);
+    (void)cancel_reader.Capture("click", "");
+    if (!Check(cancel_reader.Canceled() && canceled.form.source.calls == total, "winreader-cancel-after-the-last-call-is-canceled"))
+      return false;
   }
   // A label is passed through as read (the core reads the words, the reader does not).
   {

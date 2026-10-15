@@ -485,31 +485,22 @@ public:
   // The REAL path of the file-browser item (UI Automation publishes only its display name, and
   // Explorer hides known extensions): the item is looked up by that display name in the shell view of
   // its tab. See ShellItemPathByName for when this is "not known".
-  ShadowReadResult ItemPath(Element element, std::size_t maximum_bytes, std::string *path,
-                            bool *is_folder) override {
+  ShadowReadResult ItemPath(Element element, Element tab_element, std::size_t maximum_bytes,
+                            std::string *path, bool *is_folder) override {
     IUIAutomationElement *item = At(element);
     if (item == nullptr) return ShadowReadResult::kFailed;
     windows_uia_source_detail::BstrHolder name;
     if (FAILED(item->get_CurrentName(name.Receive()))) return ShadowReadResult::kFailed;
     if (name.View().empty()) return ShadowReadResult::kAbsent;
-    // The shell tab that shows the item is its nearest ShellTabWindowClass ancestor.
+    // The shell tab is an element the reader already walked to (and paid for); only its window
+    // handle is read here.
     HWND tab = nullptr;
-    {
-      item->AddRef();
-      windows_uia_source_detail::ComRef<IUIAutomationElement> cursor(item);
-      for (int hops = 0; hops < 16 && cursor.Get() != nullptr; ++hops) {
-        windows_uia_source_detail::BstrHolder class_name;
-        if (SUCCEEDED(cursor.Get()->get_CurrentClassName(class_name.Receive())) &&
-            class_name.View() == L"ShellTabWindowClass") {
-          UIA_HWND native = nullptr;
-          if (SUCCEEDED(cursor.Get()->get_CurrentNativeWindowHandle(&native)))
-            tab = reinterpret_cast<HWND>(native);
-          break;
-        }
-        windows_uia_source_detail::ComRef<IUIAutomationElement> parent;
-        if (FAILED(walker_.Get()->GetParentElement(cursor.Get(), parent.Receive()))) break;
-        cursor = std::move(parent);
-      }
+    if (tab_element != kNoElement) {
+      IUIAutomationElement *tab_node = At(tab_element);
+      if (tab_node == nullptr) return ShadowReadResult::kFailed;
+      UIA_HWND native = nullptr;
+      if (FAILED(tab_node->get_CurrentNativeWindowHandle(&native))) return ShadowReadResult::kFailed;
+      tab = reinterpret_cast<HWND>(native);
     }
     // Only a tab of the bound window: an item of any other Explorer window is not read.
     if (tab != nullptr && GetAncestor(tab, GA_ROOT) != window_) return ShadowReadResult::kAbsent;
