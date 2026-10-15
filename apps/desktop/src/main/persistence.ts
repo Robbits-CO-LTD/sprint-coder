@@ -1534,6 +1534,14 @@ const LEGACY_IMAGE_ATTACHMENT_COMPATIBILITY_KEY = 'legacy-image-attachment-v64-c
 const LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM = 'runtime-failure-diagnostics-v66';
 const LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY = 'legacy-runtime-diagnostics-v66-collision-v1';
 
+/**
+ * #786: replaces every stored action digest with a random value of the same shape. Used by
+ * migration v101 and, on the start that applies it, on the pre-migration backup as well.
+ */
+const COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL =
+  'UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));';
+const COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION = 101;
+
 const migrations = [
   {
     version: 1,
@@ -4629,9 +4637,9 @@ const migrations = [
     // Nothing compares a stored digest with one computed in a later process, so the old values
     // are replaced with random ones of the same shape: the row, its kind, state and every other
     // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
-    sql: `
-      UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));
-    `,
+    // The pre-migration backup taken on the same start still holds the old values; runMigrations
+    // scrubs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
+    sql: COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL,
   },
 ];
 
@@ -6749,6 +6757,24 @@ export const __persistenceRecoveryTestables = {
 
 const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 
+/**
+ * Installs a validated snapshot as the migration backup. The previous backup stays recoverable
+ * until the new one is in place, including on Windows where a rename cannot replace an existing
+ * destination atomically.
+ */
+function installMigrationBackup(temporaryPath: string, backupPath: string): void {
+  const previousPath = `${backupPath}.previous`;
+  rmSync(previousPath, { force: true });
+  if (existsSync(backupPath)) renameSync(backupPath, previousPath);
+  try {
+    renameSync(temporaryPath, backupPath);
+  } catch (error) {
+    if (!existsSync(backupPath) && existsSync(previousPath)) renameSync(previousPath, backupPath);
+    throw error;
+  }
+  rmSync(previousPath, { force: true });
+}
+
 function removeValidationSnapshotFiles(temporaryPath: string): void {
   let firstFailure: unknown;
   for (const candidate of [temporaryPath, `${temporaryPath}-wal`, `${temporaryPath}-shm`]) {
@@ -7195,14 +7221,14 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const legacyImageAttachmentCollision = this.isLegacyImageAttachmentCollision(applied);
     const legacyRuntimeDiagnosticCollision = this.isLegacyRuntimeDiagnosticCollision(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
-    if (
+    const backedUp =
       (hadPendingMigrations ||
         legacyImageAttachmentCollision ||
         legacyRuntimeDiagnosticCollision) &&
       existsSync(databasePath) &&
-      applied.size > 0
-    )
-      this.createPreMigrationBackup(databasePath);
+      applied.size > 0;
+    if (backedUp) this.createPreMigrationBackup(databasePath);
+    const appliedNow = new Set<number>();
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
       applied = this.readAppliedMigrations();
@@ -7257,12 +7283,61 @@ export class SqlitePersistenceClient implements PersistenceClient {
       } else {
         applyMigration();
       }
+      appliedNow.add(migration.version);
+    }
+    if (backedUp && appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION))
+      this.scrubPreMigrationBackupAuditDigests(databasePath);
+  }
+
+  /**
+   * #786: the backup taken just before v101 is a byte copy of the database v101 exists to clean,
+   * so it would keep every guessable digest next to the scrubbed database. Apply the same scrub to
+   * a copy of the backup and install that copy in its place. Only the digest column changes; the
+   * backup still restores every other fact, and a database restored from it has no v101 record,
+   * so v101 runs again. If the copy cannot be scrubbed, the backup is retaken from the migrated
+   * database instead: still a valid restore point, and one without the old digests.
+   */
+  private scrubPreMigrationBackupAuditDigests(databasePath: string): void {
+    const backupPath = `${databasePath}.pre-migration.bak`;
+    if (!existsSync(backupPath)) return;
+    const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
+    let snapshot: Database.Database | null = null;
+    const closeSnapshot = (): void => {
+      const handle = snapshot;
+      snapshot = null;
+      handle?.close();
+    };
+    try {
+      copyFileSync(backupPath, temporaryPath);
+      snapshot = new Database(temporaryPath, { fileMustExist: true });
+      const hasAudits =
+        snapshot
+          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+          .get('computer_action_audits') !== undefined;
+      if (hasAudits) snapshot.exec(COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL);
+      snapshot.pragma('wal_checkpoint(TRUNCATE)');
+      const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+      const first = rows[0];
+      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+      if (verdict !== 'ok') throw new Error('Scrubbed migration backup failed integrity check');
+      closeSnapshot();
+      installMigrationBackup(temporaryPath, backupPath);
+    } catch {
+      closeSnapshot();
+      removeValidationSnapshotFiles(temporaryPath);
+      this.createPreMigrationBackup(databasePath);
+      return;
+    } finally {
+      try {
+        closeSnapshot();
+      } finally {
+        removeValidationSnapshotFiles(temporaryPath);
+      }
     }
   }
 
   private createPreMigrationBackup(databasePath: string): void {
     const backupPath = `${databasePath}.pre-migration.bak`;
-    const previousPath = `${backupPath}.previous`;
     const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
     // A byte copy of the main DB file is incomplete while committed pages still live in WAL.
     // Checkpoint first, validate the copied snapshot, then rotate it into place. The previous
@@ -7297,16 +7372,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // Windows cannot rotate an open SQLite file, so close before installing the snapshot while
       // retaining the outer finally as the failure-path owner.
       closeSnapshot();
-      rmSync(previousPath, { force: true });
-      if (existsSync(backupPath)) renameSync(backupPath, previousPath);
-      try {
-        renameSync(temporaryPath, backupPath);
-      } catch (error) {
-        if (!existsSync(backupPath) && existsSync(previousPath))
-          renameSync(previousPath, backupPath);
-        throw error;
-      }
-      rmSync(previousPath, { force: true });
+      installMigrationBackup(temporaryPath, backupPath);
     } finally {
       try {
         closeSnapshot();

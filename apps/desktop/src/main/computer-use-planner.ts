@@ -35,6 +35,7 @@ import {
   computerUseActionDigest,
   computerUseActionKind,
   computerUseActionRoute,
+  computerUseKeyedDigest,
 } from './computer-use-action';
 import type {
   ComputerUsePlannerInput,
@@ -338,7 +339,8 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
         bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
         actionDigest: computerUseActionDigest(action),
         actionClass: action.type,
-        responseDigest: computerUseCaptureDigest(output),
+        // The raw reply is the action JSON, text included: keyed like the action digest (#786).
+        responseDigest: computerUseKeyedDigest('provider-response', output),
         responseBytes: Buffer.byteLength(output),
         latencyMs: Math.max(0, Math.round(performance.now() - startedAt)),
       }),

@@ -12129,6 +12129,29 @@ if (runsWithElectronAbi)
       } finally {
         verified.close();
       }
+      // The backup this start took before v101 is a copy of the old database. It must not keep
+      // the guessable digests either, while still restoring every row.
+      const backupPath = `${fixture.path}.pre-migration.bak`;
+      expect(existsSync(backupPath)).toBe(true);
+      expect(existsSync(`${backupPath}.previous`)).toBe(false);
+      const backup = new Database(backupPath, { readonly: true, fileMustExist: true });
+      try {
+        const backupRows = backup
+          .prepare('SELECT id, action_digest, action_kind FROM computer_action_audits ORDER BY id')
+          .all() as { id: string; action_digest: string; action_kind: string }[];
+        expect(backupRows.map((row) => row.id).sort()).toEqual([typed.id, clicked.id].sort());
+        for (const row of backupRows) {
+          expect(row.action_digest).toMatch(/^[0-9a-f]{64}$/u);
+          expect([typed.actionDigest, clicked.actionDigest]).not.toContain(row.action_digest);
+        }
+        // Still the pre-v101 snapshot: a restore from it runs v101 again.
+        expect(
+          backup.prepare('SELECT version FROM schema_migrations WHERE version = 101').get(),
+        ).toBeUndefined();
+        expect(backup.pragma('quick_check', { simple: true })).toBe('ok');
+      } finally {
+        backup.close();
+      }
     });
 
     it('adds four nullable columns and keeps legacy rows NULL across an upgrade', () => {
