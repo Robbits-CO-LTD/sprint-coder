@@ -2597,6 +2597,46 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    it('keeps nothing when the Task was closed while the windows were being listed again', async () => {
+      const { store, owners } = spiedStore();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+        revalidateWindowsGate: gate,
+      });
+      const starting = start(fixture);
+      // The start has asked for the windows a second time and waits for the answer.
+      await viWait();
+      fixture.controller.taskClosed('task-1');
+      release();
+      const started = await starting;
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(owners).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('notes the generation before the first await of every start path', () => {
+      const source = readFileSync(resolve(__dirname, 'computer-use-controller.ts'), 'utf8').replace(
+        /\s+/gu,
+        ' ',
+      );
+      // startForAgent notes it first thing and hands it on; start notes it before startInternal.
+      expect(source).toMatch(
+        /Promise<ComputerStartToolOutput> \{ \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
+      );
+      expect(source).toContain('signal, artifactGeneration, );');
+      expect(source).toContain(
+        'notedArtifactGeneration ?? this.artifactGenerations.get(input.taskId) ?? 0; if (this.disposed)',
+      );
+      expect(source).toContain('this.startInternal(input, controller, artifactGeneration)');
+    });
+
     it('lets a session started after the Task was closed and reopened copy', async () => {
       const { store, owners } = spiedStore();
       const fixture = createFixture({

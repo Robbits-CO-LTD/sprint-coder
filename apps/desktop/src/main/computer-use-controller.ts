@@ -2327,6 +2327,9 @@ export class ComputerUseController {
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<ComputerStartToolOutput> {
+    // Noted before the first await of this call (the grant refetch, the window listing, the start
+    // itself): a Task closed during any of them must not leave a session that noted a later value.
+    const artifactGeneration = this.artifactGenerations.get(context.taskId) ?? 0;
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     if (this.deps.agentDrivenEnabled?.() !== true)
       throw new Error('Computer Use agent-driven targets are unavailable');
@@ -2488,6 +2491,7 @@ export class ComputerUseController {
         // Carried into the start path so an abort during start-up reaches native's cleanup, the
         // provider preflight and the first planner call, rather than being noticed only afterwards.
         signal,
+        artifactGeneration,
       );
       // Only a session that actually started counts as use (§6.2.1).
       if (state.scope === 'grant') this.touchAppGrantUsed(observed.identity);
@@ -2564,7 +2568,12 @@ export class ComputerUseController {
   async start(
     input: ComputerUseStartRequest,
     externalSignal?: AbortSignal,
+    /** Set only by `startForAgent`, which noted it before its own earlier awaits. */
+    notedArtifactGeneration?: number,
   ): Promise<ComputerUseSessionStatus> {
+    // Noted before any await of this start, or taken from the caller that already did.
+    const artifactGeneration =
+      notedArtifactGeneration ?? this.artifactGenerations.get(input.taskId) ?? 0;
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     input = {
       ...input,
@@ -2592,7 +2601,7 @@ export class ComputerUseController {
     if (externalSignal?.aborted === true) forward();
     else externalSignal?.addEventListener('abort', forward, { once: true });
     try {
-      return await this.startInternal(input, controller);
+      return await this.startInternal(input, controller, artifactGeneration);
     } catch (error) {
       if (!controller.signal.aborted)
         controller.abort(error instanceof Error ? error : new Error('Computer Use start failed'));
@@ -2736,6 +2745,7 @@ export class ComputerUseController {
   private async startInternal(
     input: ComputerUseStartRequest,
     controller: AbortController,
+    artifactGeneration: number,
   ): Promise<ComputerUseSessionStatus> {
     const availability = this.availability();
     if (!availability.available) throw new Error('Computer Use native boundary is unavailable');
@@ -2846,10 +2856,6 @@ export class ComputerUseController {
       effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
     });
     const turnId = input.turnId ?? `computer-turn:${sessionId}`;
-    // Noted here, where the start is registered and before any await below (the emergency stop,
-    // the native start, the planner): a Task closed while the start is in flight must leave a
-    // session that can no longer store copied values, not one that noted the later generation.
-    const artifactGeneration = this.artifactGenerations.get(input.taskId) ?? 0;
     const starting = {
       controller,
       reason: null as ComputerUseStopReason | null,
