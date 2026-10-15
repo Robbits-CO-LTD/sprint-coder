@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace sprint_coder::computer_use {
 
@@ -14,6 +15,23 @@ enum class NativePreflightKind : std::uint8_t {
   kBlocked,
   kTakeover,
 };
+
+// The receipt's decision word for each kind. The native addon asks for the approval word here
+// and never spells "single_use_approval" itself.
+[[nodiscard]] constexpr std::string_view
+NativePreflightDecisionName(NativePreflightKind kind) noexcept {
+  switch (kind) {
+  case NativePreflightKind::kOrdinary:
+    return "ordinary";
+  case NativePreflightKind::kSingleUseApproval:
+    return "single_use_approval";
+  case NativePreflightKind::kBlocked:
+    return "blocked";
+  case NativePreflightKind::kTakeover:
+    return "takeover";
+  }
+  return {};
+}
 
 enum class NativePreflightReason : std::uint8_t {
   kNone,

@@ -14,6 +14,8 @@
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_native_approved_risk.h"
+#include "computer_use_native_approval_offer.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -6603,6 +6605,381 @@ bool CheckWindowsInterlockCapture() {
   return true;
 }
 
+// ---- Classifier v2, C4-2c-1: the split high-impact vocabulary and the approved-effect judgement ----
+// The v1 vocabulary as it was before the split, frozen here byte for byte (the lists, and the two
+// matching rules). The table in computer_use_native_approved_risk.h must say exactly the same when
+// no effect was approved; it is the golden for "v1 route behaves as before".
+
+namespace frozen_v1 {
+
+const std::vector<std::string> kSubstring = {
+    "payment", "checkout", "purchase", "billing", "credit card", "card number", "wire transfer",
+    "contract", "agreement", "sign agreement", "installer", "install application",
+    "administrator", "admin privileges", "sudo", "root access", "security settings",
+    "privacy settings", "firewall", "accessibility permission", "screen recording permission",
+    u8"決済"_u8, u8"支払い"_u8, u8"支払う"_u8, u8"購入"_u8, u8"注文を確定"_u8, u8"注文する"_u8, u8"請求"_u8, u8"送金"_u8, u8"契約"_u8, u8"署名"_u8,
+    u8"インストール"_u8, u8"管理者"_u8, u8"セキュリティ"_u8, u8"プライバシー"_u8, u8"ファイアウォール"_u8};
+const std::vector<std::string> kBoundedPay = {
+    "pay", "pay now", "place order", "submit order", "complete order", "buy now",
+    "pagar", "comprar", "acheter", "bestellen", "bezahlen", "pagare",
+    "acquistare", "betalen", "kopen"};
+const std::vector<std::string> kBoundedSurface = {
+    "integrated terminal", "terminal", "terminal.app", "console", "shell",
+    "powershell", "powershell.exe", "command prompt", "cmd.exe", "run script",
+    "shell script", "script console"};
+const std::vector<std::string> kSubstringSurfaceJa = {
+    u8"ターミナル"_u8, u8"コンソール"_u8, u8"シェル"_u8, u8"コマンドプロンプト"_u8, u8"スクリプトを実行"_u8};
+
+bool IsContinuation(unsigned char character) {
+  return (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9');
+}
+
+bool ContainsBounded(std::string_view haystack, std::string_view needle) {
+  for (std::size_t position = haystack.find(needle); position != std::string_view::npos;
+       position = haystack.find(needle, position + 1)) {
+    const bool before = position == 0 || !IsContinuation(static_cast<unsigned char>(haystack[position - 1]));
+    const std::size_t end = position + needle.size();
+    const bool after = end == haystack.size() || !IsContinuation(static_cast<unsigned char>(haystack[end]));
+    if (before && after) return true;
+  }
+  return false;
+}
+
+bool ContainsAny(std::string_view haystack, const std::vector<std::string> &needles) {
+  for (const auto needle : needles)
+    if (haystack.find(needle) != std::string_view::npos) return true;
+  return false;
+}
+
+bool ContainsAnyBounded(std::string_view haystack, const std::vector<std::string> &needles) {
+  for (const auto needle : needles)
+    if (ContainsBounded(haystack, needle)) return true;
+  return false;
+}
+
+bool HighImpact(std::string_view text) {
+  return ContainsAny(text, kSubstring) || ContainsAnyBounded(text, kBoundedPay) ||
+         ContainsAnyBounded(text, kBoundedSurface) || ContainsAny(text, kSubstringSurfaceJa);
+}
+
+} // namespace frozen_v1
+
+bool CheckNativeApprovedRisk() {
+  using namespace sprint_coder::computer_use;
+
+  // The words: the union of the two sides is the frozen v1 vocabulary, nothing is on both sides and
+  // nothing is lost or added. Substring and bounded words are kept apart (the matching differs).
+  {
+    std::set<std::string> confirmation_substring;
+    std::set<std::string> confirmation_bounded;
+    std::set<std::string> other_substring;
+    std::set<std::string> other_bounded;
+    for (const auto term : high_impact_terms::kConfirmationSubstring) confirmation_substring.insert(std::string(term));
+    for (const auto term : high_impact_terms::kConfirmationSubstringJa) confirmation_substring.insert(std::string(term));
+    for (const auto term : high_impact_terms::kConfirmationBounded) confirmation_bounded.insert(std::string(term));
+    for (const auto term : high_impact_terms::kOtherSubstring) other_substring.insert(std::string(term));
+    for (const auto term : high_impact_terms::kOtherSubstringJa) other_substring.insert(std::string(term));
+    for (const auto term : high_impact_terms::kOtherSurfaceJa) other_substring.insert(std::string(term));
+    for (const auto term : high_impact_terms::kOtherBounded) other_bounded.insert(std::string(term));
+    std::set<std::string> old_substring;
+    std::set<std::string> old_bounded;
+    for (const auto term : frozen_v1::kSubstring) old_substring.insert(std::string(term));
+    for (const auto term : frozen_v1::kSubstringSurfaceJa) old_substring.insert(std::string(term));
+    for (const auto term : frozen_v1::kBoundedPay) old_bounded.insert(std::string(term));
+    for (const auto term : frozen_v1::kBoundedSurface) old_bounded.insert(std::string(term));
+    std::set<std::string> union_substring = confirmation_substring;
+    union_substring.insert(other_substring.begin(), other_substring.end());
+    std::set<std::string> union_bounded = confirmation_bounded;
+    union_bounded.insert(other_bounded.begin(), other_bounded.end());
+    if (!Check(union_substring == old_substring && union_bounded == old_bounded,
+               "approved-risk-union-is-the-v1-vocabulary")) return false;
+    if (!Check(union_substring.size() == confirmation_substring.size() + other_substring.size() &&
+                   union_bounded.size() == confirmation_bounded.size() + other_bounded.size(),
+               "approved-risk-no-word-on-both-sides")) return false;
+    // The ambiguous words are on the side that is never relaxed.
+    for (const std::string &word : std::vector<std::string>{"security settings", "administrator", "admin privileges", "installer",
+                             "install application", u8"インストール"_u8, u8"管理者"_u8, u8"セキュリティ"_u8})
+      if (!Check(other_substring.contains(word), "approved-risk-ambiguous-word-is-never-relaxed")) return false;
+    for (const std::string &word : std::vector<std::string>{"payment", "checkout", "purchase", "billing", "credit card", "card number",
+                             "wire transfer", "contract", "agreement", "sign agreement", u8"決済"_u8, u8"購入"_u8,
+                             u8"送金"_u8, u8"契約"_u8, u8"署名"_u8})
+      if (!Check(confirmation_substring.contains(word), "approved-risk-confirmation-word")) return false;
+  }
+
+  // The text judgement equals the frozen v1 one on a corpus: every word alone and with every kind of
+  // neighbour (the bounded rule), every pair of words, and ordinary text.
+  {
+    std::vector<std::string> words;
+    for (const auto *list : {&frozen_v1::kSubstring, &frozen_v1::kBoundedPay, &frozen_v1::kBoundedSurface,
+                             &frozen_v1::kSubstringSurfaceJa})
+      for (const auto term : *list) words.emplace_back(term);
+    for (const std::string &plain : std::vector<std::string>{"save", "open", "ok", "name", "play", "payload", "repay", "paying", "shells",
+                              "consoles", "x", "", " ", "axbutton\nsave", "pay2", "2pay", "pay-now", "_pay_",
+                              "terminalx", "xterminal", "console1", u8"契約書"_u8, u8"お支払い方法"_u8, u8"ご購入ありがとう"_u8})
+      words.emplace_back(plain);
+    std::vector<std::string> corpus;
+    for (const std::string &word : words) {
+      corpus.push_back(word);
+      corpus.push_back("x" + word);
+      corpus.push_back(word + "x");
+      corpus.push_back("1" + word);
+      corpus.push_back(word + "1");
+      corpus.push_back(" " + word + " ");
+      corpus.push_back("axbutton\n" + word + "\nsave");
+      corpus.push_back("-" + word + "-");
+      corpus.push_back("_" + word + "_");
+    }
+    for (std::size_t a = 0; a < words.size(); a += 3)
+      for (std::size_t b = 0; b < words.size(); b += 5) corpus.push_back(words[a] + "\n" + words[b]);
+    for (const std::string &text : corpus) {
+      const HighImpactTextBits bits = ClassifyHighImpactText(text);
+      if (!Check((bits.confirmation || bits.other) == frozen_v1::HighImpact(text),
+                 "approved-risk-text-equals-frozen-v1")) {
+        std::cerr << "text: " << text << '\n';
+        return false;
+      }
+    }
+    // Both sides can be present, and each side is found alone.
+    if (!Check(ClassifyHighImpactText("pay now").confirmation && !ClassifyHighImpactText("pay now").other,
+               "approved-risk-confirmation-alone")) return false;
+    if (!Check(ClassifyHighImpactText("integrated terminal").other && !ClassifyHighImpactText("integrated terminal").confirmation,
+               "approved-risk-surface-alone")) return false;
+    if (!Check(ClassifyHighImpactText("pay now terminal").confirmation && ClassifyHighImpactText("pay now terminal").other,
+               "approved-risk-both-sides")) return false;
+  }
+
+  // The judgement over every combination of bits and every effect. With no effect, or any effect but
+  // the confirmation, it is exactly ClassifyNativePreflightFacts of the v1 bits (the golden). With
+  // the approved confirmation it differs in one case only: high impact by confirmation words alone.
+  {
+    const NativeApprovalEffect effects[] = {
+        NativeApprovalEffect::kInvalid, NativeApprovalEffect::kDownloadOpen,
+        NativeApprovalEffect::kFileManagerOpen, NativeApprovalEffect::kHighImpactConfirmation,
+        NativeApprovalEffect::kSupervisedAction};
+    int relaxed_cases = 0;
+    for (unsigned mask = 0; mask < 32; ++mask) {
+      NativeRiskBits bits;
+      bits.classified = (mask & 1u) != 0;
+      bits.secure = (mask & 2u) != 0;
+      bits.high_impact = (mask & 4u) != 0;
+      bits.confirmation = (mask & 8u) != 0;
+      bits.other = (mask & 16u) != 0;
+      const NativePreflightDecision v1 =
+          ClassifyNativePreflightFacts({true, bits.classified, bits.secure, bits.high_impact});
+      for (const NativeApprovalEffect effect : effects) {
+        const NativePreflightDecision got = ClassifyNativeRisk(bits, effect);
+        const bool relaxes = effect == NativeApprovalEffect::kHighImpactConfirmation && bits.high_impact &&
+                             bits.confirmation && !bits.other;
+        if (!relaxes) {
+          if (!Check(got.kind == v1.kind && got.reason == v1.reason &&
+                         got.classifier_version == v1.classifier_version,
+                     "approved-risk-equals-v1-unless-relaxed")) return false;
+        } else {
+          const NativePreflightDecision expected =
+              ClassifyNativePreflightFacts({true, bits.classified, bits.secure, false});
+          if (!Check(got.kind == expected.kind && got.reason == expected.reason, "approved-risk-relaxed-case"))
+            return false;
+          ++relaxed_cases;
+          // Secure and unclassified are never relaxed.
+          if (bits.secure && bits.classified && !Check(got.kind == NativePreflightKind::kBlocked, "approved-risk-secure-never-relaxed"))
+            return false;
+          if (!bits.classified && !Check(got.reason == NativePreflightReason::kUnclassified,
+                                         "approved-risk-unclassified-never-relaxed")) return false;
+        }
+        // The default argument is the v1 judgement.
+        if (effect == NativeApprovalEffect::kInvalid) {
+          const NativePreflightDecision by_default = ClassifyNativeRisk(bits);
+          if (!Check(by_default.kind == got.kind && by_default.reason == got.reason, "approved-risk-default-is-no-effect"))
+            return false;
+        }
+        // Only an ordinary result allows a dispatch, as before.
+        if (!Check(NativePreflightAllowsDispatch(got) == (got.kind == NativePreflightKind::kOrdinary &&
+                                                          got.reason == NativePreflightReason::kNone),
+                   "approved-risk-allows-only-ordinary")) return false;
+      }
+    }
+    // The cases that relax: high impact by confirmation words alone (4 = classified x secure; of those
+    // only a classified, non-secure target ends up ordinary).
+    if (!Check(relaxed_cases == 4, "approved-risk-only-confirmation-words-alone-relax")) return false;
+    // A concrete one: "Pay now" relaxes; "Pay now" inside a terminal does not; a secure one does not.
+    const auto from_text = [](std::string_view text, bool secure) {
+      const HighImpactTextBits text_bits = ClassifyHighImpactText(text);
+      NativeRiskBits bits;
+      bits.classified = true;
+      bits.secure = secure;
+      bits.high_impact = text_bits.confirmation || text_bits.other;
+      bits.confirmation = text_bits.confirmation;
+      bits.other = text_bits.other;
+      return bits;
+    };
+    const NativeApprovalEffect confirm = NativeApprovalEffect::kHighImpactConfirmation;
+    if (!Check(NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("pay now", false), confirm)) &&
+                   !NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("pay now", false))) &&
+                   !NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("pay now\nintegrated terminal", false), confirm)) &&
+                   !NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("pay now\nsecuretextfield", true), confirm)) &&
+                   !NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("install application", false), confirm)) &&
+                   !NativePreflightAllowsDispatch(ClassifyNativeRisk(from_text("pay now", false), NativeApprovalEffect::kSupervisedAction)),
+               "approved-risk-concrete-cases")) return false;
+  }
+
+  std::cout << "Computer Use native approved risk: PASS\n";
+  return true;
+}
+
+// ---- Classifier v2, C4-2c-1: the approval offer (receipt model, binding, remaining time) ----------
+
+bool CheckNativeApprovalOffer() {
+  using namespace sprint_coder::computer_use;
+
+  // The decision words.
+  if (!Check(NativePreflightDecisionName(NativePreflightKind::kOrdinary) == "ordinary" &&
+                 NativePreflightDecisionName(NativePreflightKind::kSingleUseApproval) == "single_use_approval" &&
+                 NativePreflightDecisionName(NativePreflightKind::kBlocked) == "blocked" &&
+                 NativePreflightDecisionName(NativePreflightKind::kTakeover) == "takeover",
+             "offer-decision-names")) return false;
+  if (!Check(kNativePreflightClassifierVersion == 1 && kNativePreflightReceiptVersion == 2 &&
+                 kNativeApprovalOfferClassifierVersion == 2 && kNativeApprovalOfferMaxMs == 60'000u,
+             "offer-constants")) return false;
+
+  // The key sets: v1 is the original ten; v2 adds one; an offer adds three more. All distinct.
+  {
+    const std::set<std::string_view> v1(kNativePreflightReceiptKeysV1.begin(), kNativePreflightReceiptKeysV1.end());
+    const std::set<std::string_view> v2(kNativePreflightReceiptKeysV2.begin(), kNativePreflightReceiptKeysV2.end());
+    const std::set<std::string_view> offer(kNativeApprovalOfferReceiptKeys.begin(), kNativeApprovalOfferReceiptKeys.end());
+    if (!Check(v1.size() == 10 && v2.size() == 11 && offer.size() == 14, "offer-key-sets-have-no-duplicates"))
+      return false;
+    std::set<std::string_view> v2_expected = v1;
+    v2_expected.insert("receiptVersion");
+    std::set<std::string_view> offer_expected = v2;
+    for (const char *key : {"approvalGeneration", "remainingMs", "effect"}) offer_expected.insert(key);
+    if (!Check(v2 == v2_expected && offer == offer_expected, "offer-key-sets-are-nested")) return false;
+  }
+
+  // The effect words are the four Main spells, and an invalid effect has none.
+  if (!Check(NativeApprovalEffectName(NativeApprovalEffect::kDownloadOpen) == "download_open" &&
+                 NativeApprovalEffectName(NativeApprovalEffect::kFileManagerOpen) == "file_manager_open" &&
+                 NativeApprovalEffectName(NativeApprovalEffect::kHighImpactConfirmation) == "high_impact_confirmation" &&
+                 NativeApprovalEffectName(NativeApprovalEffect::kSupervisedAction) == "supervised_action" &&
+                 NativeApprovalEffectName(NativeApprovalEffect::kInvalid).empty(),
+             "offer-effect-names")) return false;
+
+  // The remaining time: rounded up, never zero while live, capped, zero once expired.
+  if (!Check(NativeApprovalRemainingMs(0, 1) == 1 && NativeApprovalRemainingMs(0, 999'999) == 1 &&
+                 NativeApprovalRemainingMs(0, 1'000'000) == 1 && NativeApprovalRemainingMs(0, 1'000'001) == 2 &&
+                 NativeApprovalRemainingMs(100, 100) == 0 && NativeApprovalRemainingMs(101, 100) == 0 &&
+                 NativeApprovalRemainingMs(0, kNativeApprovalWaitMaxNs) == 60'000u &&
+                 NativeApprovalRemainingMs(0, kNativeApprovalWaitMaxNs + 5'000'000'000ULL) == 60'000u &&
+                 NativeApprovalRemainingMs(1'000, kNativeApprovalWaitMaxNs + 1'000) == 60'000u,
+             "offer-remaining-ms")) return false;
+
+  // A closed offer.
+  {
+    NativeApprovalOffer offer{7, 30'000, NativeApprovalEffect::kHighImpactConfirmation};
+    if (!Check(NativeApprovalOfferIsClosed(offer), "offer-closed")) return false;
+    NativeApprovalOffer bad = offer;
+    bad.approval_generation = 0;
+    if (!Check(!NativeApprovalOfferIsClosed(bad), "offer-generation-zero")) return false;
+    bad = offer;
+    bad.remaining_ms = 0;
+    if (!Check(!NativeApprovalOfferIsClosed(bad), "offer-remaining-zero")) return false;
+    bad.remaining_ms = 60'001;
+    if (!Check(!NativeApprovalOfferIsClosed(bad), "offer-remaining-too-long")) return false;
+    bad = offer;
+    bad.effect = NativeApprovalEffect::kInvalid;
+    if (!Check(!NativeApprovalOfferIsClosed(bad), "offer-effect-invalid")) return false;
+    bad.remaining_ms = 60'000;
+    bad.effect = NativeApprovalEffect::kSupervisedAction;
+    if (!Check(NativeApprovalOfferIsClosed(bad), "offer-remaining-at-bound")) return false;
+  }
+
+  // The binding from a measurement: Offer -> Approve -> ConsumeApproved, through the real flow, with
+  // the measurement the core makes of a purchase button.
+  {
+    const ShadowAxCapture capture = MeasureCapture();
+    const NativeApprovalMeasurement measured = MeasureApproval(MeasureInput(capture));
+    if (!Check(measured.eligible && measured.effect == NativeApprovalEffect::kHighImpactConfirmation,
+               "offer-fixture-is-a-confirmation")) return false;
+    NativeApprovalOfferContext context;
+    context.session_id = "session";
+    context.task_id = "task";
+    context.turn_id = "turn";
+    context.approval_request_id = "original-request";
+    context.action_digest = std::string(64, 'a');
+    context.payload_digest = std::string(64, 'b');
+    context.cancel_epoch = 3;
+    context.approval_generation = 7;
+    context.observation_revision = 10;
+    context.ticket_generation = 12;
+    NativeApprovalIntentBinding binding;
+    if (!Check(BuildApprovalIntentBinding(measured, context, &binding), "offer-binding-built")) return false;
+    if (!Check(binding.authority_digest == measured.authority_digest && binding.effect == measured.effect &&
+                   binding.classifier_version == measured.classifier_version &&
+                   binding.ruleset_version == measured.ruleset_version &&
+                   binding.lexicon_version == measured.lexicon_version && IsValidNativeApprovalIntent(binding) &&
+                   NativeApprovalIntentBindingsEqual(binding, MeasureIntent(measured)),
+               "offer-binding-fields")) return false;
+    // The binding is refused for anything that is not an eligible approval, or not valid as a whole.
+    NativeApprovalIntentBinding untouched;
+    NativeApprovalMeasurement not_eligible = measured;
+    not_eligible.eligible = false;
+    NativeApprovalMeasurement taken_over = measured;
+    taken_over.takeover = true;
+    NativeApprovalMeasurement no_effect = measured;
+    no_effect.effect = NativeApprovalEffect::kInvalid;
+    NativeApprovalMeasurement old_version = measured;
+    old_version.classifier_version = 1;
+    NativeApprovalMeasurement no_digest = measured;
+    no_digest.authority_digest.clear();
+    for (const NativeApprovalMeasurement *refused :
+         {&not_eligible, &taken_over, &no_effect, &old_version, &no_digest})
+      if (!Check(!BuildApprovalIntentBinding(*refused, context, &untouched) && untouched.session_id.empty(),
+                 "offer-binding-refused")) return false;
+    if (!Check(!BuildApprovalIntentBinding(measured, context, nullptr), "offer-binding-needs-an-output")) return false;
+    for (int field = 0; field < 7; ++field) {
+      NativeApprovalOfferContext broken = context;
+      switch (field) {
+      case 0: broken.session_id.clear(); break;
+      case 1: broken.approval_request_id.clear(); break;
+      case 2: broken.action_digest = "short"; break;
+      case 3: broken.payload_digest.clear(); break;
+      case 4: broken.approval_generation = 0; break;
+      case 5: broken.observation_revision = 0; break;
+      default: broken.ticket_generation = 0; break;
+      }
+      if (!Check(!BuildApprovalIntentBinding(measured, broken, &untouched), "offer-binding-invalid-context")) return false;
+    }
+
+    // The flow: the offer holds the binding; the approval re-measures and exchanges it; the
+    // execution consumes once. The same fresh measurement serves both (nothing changed).
+    NativeApprovalFlow flow;
+    const std::string intent_token(64, 'e');
+    const std::string execution_token(64, 'f');
+    if (!Check(flow.Offer(intent_token, binding, 100, kNativeApprovalWaitMaxNs) && flow.pending() &&
+                   flow.approval_generation() == 7,
+               "offer-flow-offer")) return false;
+    NativeApprovalFacts facts = FlowFacts();
+    const NativeApprovalMeasurement fresh = MeasureApproval(MeasureInput(capture));
+    if (!Check(flow.Approve(facts, fresh, execution_token, 120).ok && flow.ready(), "offer-flow-approve"))
+      return false;
+    if (!Check(flow.ConsumeApproved(facts, fresh, 130).ok && !flow.occupied(), "offer-flow-consume")) return false;
+    // A different page or window is another authority: the exchange fails and burns the offer.
+    NativeApprovalFlow other;
+    if (!Check(other.Offer(intent_token, binding, 100, kNativeApprovalWaitMaxNs), "offer-flow-offer-2")) return false;
+    ApprovalMeasurementInput changed = MeasureInput(capture);
+    changed.identity.x += 1;
+    const NativeApprovalMeasurement moved = MeasureApproval(changed);
+    if (!Check(moved.eligible && !other.Approve(facts, moved, execution_token, 120).ok && !other.occupied(),
+               "offer-flow-moved-window-burns")) return false;
+    // The remaining time of that offer, as the receipt would carry it.
+    if (!Check(NativeApprovalRemainingMs(100, 100 + kNativeApprovalWaitMaxNs) == 60'000u &&
+                   NativeApprovalRemainingMs(100 + kNativeApprovalWaitMaxNs - 1, 100 + kNativeApprovalWaitMaxNs) == 1u,
+               "offer-flow-remaining")) return false;
+  }
+
+  std::cout << "Computer Use native approval offer: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -6626,6 +7003,8 @@ int main() {
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
+  if (!CheckNativeApprovedRisk()) return 1;
+  if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
