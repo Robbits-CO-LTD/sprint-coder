@@ -16,9 +16,10 @@ const HIGH_IMPACT_TEXT =
  * v1 still judge it).
  */
 const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh']);
-// Words that a case split cuts in two ('PowerShell'): matched anywhere in a segment.
+// 'power' + 'shell' ('PowerShell', 'power-shell-script', 'power_shell'): matched anywhere, also
+// across a separator.
 const SURFACE_WORD_PAIRS: readonly (readonly [string, string])[] = [['power', 'shell']];
-// ...and the ones that are only a surface at the START of a segment ('XTermView', 'TermControl' of
+// The pairs that are only a surface at the START of a segment ('XTermView', 'TermControl' of
 // Windows Terminal), so 'long-term-control', 'shortTermControl' and 'axis-x-term' are not.
 const SURFACE_LEADING_PAIRS: readonly (readonly [string, string])[] = [
   ['x', 'term'],
@@ -30,6 +31,7 @@ export function hasSurfaceStructureWord(...fields: readonly (string | undefined)
     if (field === undefined || field === '') continue;
     // A segment is what lies between non-alphanumerics; words are cut inside it by case and by
     // letter/digit boundaries.
+    const flat: string[] = [];
     for (const segment of field.normalize('NFKC').split(/[^\p{L}\p{N}]+/u)) {
       const words = segment
         .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
@@ -39,16 +41,14 @@ export function hasSurfaceStructureWord(...fields: readonly (string | undefined)
         .toLowerCase()
         .split(' ')
         .filter((word) => word !== '');
-      for (let index = 0; index < words.length; index += 1) {
-        const word = words[index]!;
-        if (SURFACE_WORDS.has(word)) return true;
-        for (const [first, second] of SURFACE_WORD_PAIRS)
-          if (word === first && words[index + 1] === second) return true;
-        if (index === 0)
-          for (const [first, second] of SURFACE_LEADING_PAIRS)
-            if (word === first && words[1] === second) return true;
-      }
+      flat.push(...words);
+      if (words.some((word) => SURFACE_WORDS.has(word))) return true;
+      for (const [first, second] of SURFACE_LEADING_PAIRS)
+        if (words[0] === first && words[1] === second) return true;
     }
+    for (let index = 0; index < flat.length; index += 1)
+      for (const [first, second] of SURFACE_WORD_PAIRS)
+        if (flat[index] === first && flat[index + 1] === second) return true;
   }
   return false;
 }
