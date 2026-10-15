@@ -3522,7 +3522,10 @@ export class ComputerUseController {
       this.assertSessionLive(record);
       if (!this.observationIsFresh(record)) continue;
       if (action.type === 'finish') {
-        await this.stop(sessionId, 'user_stop');
+        // An agent session ends as `agent_finish`, so neither the tool result nor the UI reads a
+        // planner's finish (possibly induced by the screen) as a person's click (T15-1). A session
+        // a person started keeps its V1 reason.
+        await this.stop(sessionId, record.agent === null ? 'user_stop' : 'agent_finish');
         return;
       }
       if (record.status.mode === 'observe_only' && action.type !== 'wait') {

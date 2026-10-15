@@ -7595,6 +7595,37 @@ describe('IPC channel registry stays in sync with the adversarial fuzz table', (
   });
 });
 
+describe('Computer Use stop channel', () => {
+  // The schema ipc.ts registers for the stop channel and preload validates against (T15-1).
+  const envelope = commandEnvelopeSchema(computerUseStopInputSchema);
+  const stop = (reason: string) =>
+    envelope.safeParse({
+      requestId: 'r1',
+      operationId: 'o1',
+      payload: { sessionId: 'session-1', reason },
+    }).success;
+
+  it('accepts the reasons the Renderer actually sends', () => {
+    // useComputerUse.tsx sends `user_stop` (the Stop button) and `task_changed` (Task switch).
+    expect(stop('user_stop')).toBe(true);
+    expect(stop('task_changed')).toBe(true);
+  });
+
+  it.each(['agent_stop', 'agent_finish'])(
+    'refuses %s from the Renderer, so a model-ended session cannot be claimed or faked',
+    (reason) => {
+      expect(stop(reason)).toBe(false);
+    },
+  );
+
+  it.each(['emergency_stop', 'renderer_reloaded', 'limit_reached', 'policy_changed'])(
+    'refuses Main-only reason %s from the Renderer',
+    (reason) => {
+      expect(stop(reason)).toBe(false);
+    },
+  );
+});
+
 describe('every registered IPC channel rejects adversarial envelopes', () => {
   const channels = Object.entries(CHANNEL_INPUT_SCHEMAS);
 
