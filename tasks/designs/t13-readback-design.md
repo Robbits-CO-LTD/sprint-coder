@@ -284,6 +284,9 @@ C6:
   - 当面読めないもの: Electron アプリ（macOS の AXWebArea を持つもの、Windows の Chrome_WidgetWin_*）と、Windows の Document（Word の本文など）。shadow の origin 計算（`computer_use_windows_shadow.h` の NodeInPage / ApplyShadowOrigin）と組み合わさると origin が kNotApplicable でなくなり、ブラウザ窓として常に拒否される見込み。安全側なので判定は変えない。扱いは T15-4m / T15-4w で、ブラウザ identity と origin を分けて決める。
   - T15-4m / T15-4w の受入条件: 判定は role だけを見て subrole を見ない。パスワード欄の拒否は配線が渡す `facts.secure` に依る。subrole を読めないのに `metadata_complete=true` にしてはならない。
   - T15-4w は既存の `UiaRole`（"UIATextField" など）ではなく ControlTypeName 系（Text / Edit / Document）を role として渡す。
+- T15-6 は 2 本に分けた（2026-10-15、親の判断）。**T15-6a（入った）**: 監査表の `action_kind` に `copy` を足す migration v102（表の作り直し。列・制約・index・approval correlation guard・rowid を保つ。列は足さない）と `ComputerActionKind` の拡張。生産者は無い。**T15-6b（後）**: contracts の `copy` と kind、planner の文法（能力フラグが true のときだけ `copy` を出す）、adapter v3 と証跡側の定数、controller（`observe_only` で許可、非入力として扱う、能力が無ければ拒否）、native の型と fake、ストアの持ち主と `dropTask`、runtime capture。
+  - 能力フラグ `artifactReadSupported`（既定 false）と、ノードの値を読む async の口（型のみ）は、Main の `ComputerUseNativeHost` の型に持つ。fake native だけが true を返し、実機の host は「未対応」（拒否）を返す。handshake の wire は変えない。wire の attest は C5。
+  - `copy` の監査 digest は `computerUseActionDigest({ type: 'copy', targetId })`（HMAC）のまま。監査行に `artifactId` の列は足さず、本文も本文のハッシュも残さない。
 - 外側に新しい口を開く T15-8 を、内側の検査（T15-6、T15-7）の後に置く。INV-3 と同じ考え方で、外側の口が先に開かないようにする。
 - T15-6 は、成果物の抽出が適格な窓でしか起きないよう、S4-3 / S5-c の適格性拡大より後でよい。T15-4 の Windows 側は S5-c（面の判定）が前提で、それまでは N27 のとおり `copy` を出さない。
 - `copy` / `artifactRef` を語彙に足すときも、判断点 7 と同じく adapter の版を上げる。

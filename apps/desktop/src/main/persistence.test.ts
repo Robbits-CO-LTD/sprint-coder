@@ -10391,6 +10391,7 @@ if (runsWithElectronAbi)
         { version: 99 },
         { version: 100 },
         { version: 101 },
+        { version: 102 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12724,6 +12725,240 @@ if (runsWithElectronAbi)
         approvalParentRequestId: first.nativeRequestId,
       });
       fixture.persistence.close();
+    });
+
+    describe('migration v102: the audit action_kind list learns copy (#785 T15-6a)', () => {
+      // The table before v102 is built from the real lineage: the v80 CREATE, the v99 ALTERs and
+      // trigger and the v100 trigger, read from the migration list itself, not from v102's text.
+      const persistenceSource = readFileSync(join(__dirname, 'persistence.ts'), 'utf8');
+      function sqlOfVersion(version: number): string {
+        const at = persistenceSource.indexOf(`version: ${version},`);
+        const start = persistenceSource.indexOf('sql: `', at) + 'sql: `'.length;
+        return persistenceSource.slice(start, persistenceSource.indexOf('`', start));
+      }
+
+      const normalise = (text: string | null | undefined) =>
+        (text ?? '').replace(/\s+/gu, ' ').trim();
+      /** The top-level comma-separated items of a CREATE TABLE body, whitespace and quotes gone. */
+      function tableItems(createSql: string): string[] {
+        const body = createSql.slice(createSql.indexOf('(') + 1, createSql.lastIndexOf(')'));
+        const items: string[] = [];
+        let depth = 0;
+        let quote = '';
+        let current = '';
+        for (const character of body) {
+          if (quote !== '') {
+            if (character === quote) quote = '';
+          } else if (character === "'") quote = character;
+          else if (character === '(') depth += 1;
+          else if (character === ')') depth -= 1;
+          if (character === ',' && depth === 0 && quote === '') {
+            items.push(current);
+            current = '';
+          } else current += character;
+        }
+        items.push(current);
+        return items
+          .map((item) => item.replace(/"/gu, '').replace(/\s+/gu, '').replace(/,/gu, ', '))
+          .sort();
+      }
+
+      function snapshot(path: string) {
+        const raw = new Database(path, { readonly: true });
+        try {
+          const indexes = (
+            raw.prepare("PRAGMA index_list('computer_action_audits')").all() as {
+              name: string;
+            }[]
+          )
+            .map((index) => ({
+              ...index,
+              // An automatic index is named after the table it was built for.
+              name: index.name.replace(/_v102/u, ''),
+              columns: raw.prepare(`PRAGMA index_xinfo('${index.name}')`).all(),
+            }))
+            .sort((a, b) => a.name.localeCompare(b.name));
+          return {
+            columns: raw.prepare("PRAGMA table_xinfo('computer_action_audits')").all(),
+            foreignKeys: raw.prepare("PRAGMA foreign_key_list('computer_action_audits')").all(),
+            indexes,
+            triggers: (
+              raw
+                .prepare(
+                  "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'computer_action_audits'",
+                )
+                .all() as { name: string; tbl_name: string; sql: string }[]
+            ).map((trigger) => ({ ...trigger, sql: normalise(trigger.sql) })),
+            objects: raw
+              .prepare(
+                "SELECT type, name, tbl_name FROM sqlite_master WHERE tbl_name LIKE 'computer_action_audits%' AND name NOT LIKE 'sqlite_autoindex%' ORDER BY type, name",
+              )
+              .all(),
+            rows: raw
+              .prepare('SELECT rowid AS r, * FROM computer_action_audits ORDER BY rowid')
+              .all(),
+            tableSql: (
+              raw
+                .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+                .get('computer_action_audits') as { sql: string }
+            ).sql,
+          };
+        } finally {
+          raw.close();
+        }
+      }
+
+      /**
+       * A database whose audit table is exactly what v80, v99 and v100 leave, with rows (some
+       * deleted, so the rowids have gaps), waiting for v102.
+       */
+      function databaseBeforeV102() {
+        const { fixture, base } = seed();
+        fixture.persistence.close();
+        const raw = new Database(fixture.path);
+        const kinds = [
+          'invoke',
+          'set_text',
+          'select',
+          'toggle',
+          'expand_collapse',
+          'scroll',
+          'click',
+          'type',
+          'key',
+          'wait',
+          'finish',
+        ];
+        try {
+          raw.exec('DROP TABLE computer_action_audits;');
+          for (const version of [80, 99, 100]) raw.exec(sqlOfVersion(version));
+          raw.exec('DELETE FROM schema_migrations WHERE version = 102;');
+          const insert = raw.prepare(
+            `INSERT INTO computer_action_audits(id, task_id, turn_id, session_id, profile_id,
+               profile_revision, app_identity_digest, window_identity_digest, observation_revision,
+               observation_digest, client_width, client_height, action_digest, action_kind, route,
+               state, reason_code, native_request_id, policy_epoch, created_at, updated_at,
+               approval_id, approval_parent_request_id, approval_outcome, approval_effect)
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, 1, ?, 800, 600, ?, ?, 'none', 'applied', ?, ?, 0, ?, ?,
+               ?, ?, ?, ?)`,
+          );
+          for (let index = 0; index < 40; index += 1)
+            insert.run(
+              `row-${index}`,
+              base.taskId,
+              base.turnId,
+              base.sessionId,
+              base.profileId,
+              base.appIdentityDigest,
+              base.windowIdentityDigest,
+              base.observationDigest,
+              bindingDigest(`digest-${index}`),
+              kinds[index % kinds.length],
+              index % 3 === 0 ? 'reason' : null,
+              bindingDigest(`request-${index}`),
+              `2026-01-01T00:00:${String(index).padStart(2, '0')}Z`,
+              `2026-01-01T00:01:${String(index).padStart(2, '0')}Z`,
+              index % 4 === 0 ? `approval-${index}` : null,
+              index % 5 === 0 ? bindingDigest('parent') : null,
+              index === 0 ? 'approved' : null,
+              index % 4 === 0 ? 'supervised_action' : null,
+            );
+          raw.exec("DELETE FROM computer_action_audits WHERE id IN ('row-3', 'row-17');");
+        } finally {
+          raw.close();
+        }
+        return { path: fixture.path, base };
+      }
+
+      it('changes the table by the copy kind only: columns, keys, indexes, trigger, rows and rowids', () => {
+        const { path } = databaseBeforeV102();
+        const before = snapshot(path);
+        expect(before.rows).toHaveLength(38);
+        // Where it starts from is the lineage: the old kind list, and the v100 trigger.
+        expect(before.tableSql).not.toContain("'copy'");
+        expect(before.triggers).toHaveLength(1);
+
+        new SqlitePersistenceClient(path).close();
+        const after = snapshot(path);
+
+        expect(after.columns).toEqual(before.columns);
+        expect(after.foreignKeys).toEqual(before.foreignKeys);
+        expect(after.indexes).toEqual(before.indexes);
+        expect(after.objects).toEqual(before.objects);
+        expect(after.triggers).toEqual(before.triggers);
+        // The v100 definition, with all five conditions of the write-once guard.
+        const v100Trigger = normalise(
+          /CREATE TRIGGER[\s\S]*?END;/u.exec(sqlOfVersion(100))![0].replace(/;$/u, ''),
+        );
+        expect(after.triggers[0]!.sql).toBe(v100Trigger.replace(/;$/u, ''));
+        expect(after.rows).toEqual(before.rows);
+        // The table text differs by the copy kind and nothing else (item order and layout aside).
+        expect(tableItems(after.tableSql.replace("'finish', 'copy'", "'finish'"))).toEqual(
+          tableItems(before.tableSql),
+        );
+        expect(after.tableSql).toContain("'finish', 'copy'");
+      });
+
+      it('then accepts copy, still rejects any other kind, and keeps the write-once guard', () => {
+        const { path, base } = databaseBeforeV102();
+        const migrated = new SqlitePersistenceClient(path);
+        try {
+          const copied = migrated.recordComputerActionAudit({
+            ...base,
+            actionKind: 'copy',
+            route: 'semantic',
+            actionDigest: bindingDigest('copy-digest'),
+            nativeRequestId: bindingDigest('copy-request'),
+          });
+          expect(copied.actionKind).toBe('copy');
+          expect(() =>
+            migrated.recordComputerActionAudit({
+              ...base,
+              actionKind: 'paste' as never,
+              nativeRequestId: bindingDigest('paste-request'),
+            }),
+          ).toThrow('Invalid Computer Use action audit');
+        } finally {
+          migrated.close();
+        }
+        const raw = new Database(path);
+        try {
+          const insert = (id: string, kind: string, request: string) =>
+            raw
+              .prepare(
+                `INSERT INTO computer_action_audits(id, task_id, turn_id, session_id, profile_id,
+                   profile_revision, app_identity_digest, window_identity_digest,
+                   observation_revision, observation_digest, client_width, client_height,
+                   action_digest, action_kind, route, state, native_request_id, policy_epoch,
+                   created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 1, ?, ?, 1, ?, 800, 600, ?, ?, 'none', 'pending', ?, 0,
+                   'now', 'now')`,
+              )
+              .run(
+                id,
+                base.taskId,
+                base.turnId,
+                base.sessionId,
+                base.profileId,
+                base.appIdentityDigest,
+                base.windowIdentityDigest,
+                base.observationDigest,
+                bindingDigest(`d-${id}`),
+                kind,
+                bindingDigest(request),
+              );
+          expect(() => insert('raw-paste', 'paste', 'n-1')).toThrow(/CHECK constraint/u);
+          expect(() => insert('raw-copy', 'copy', 'n-2')).not.toThrow();
+          expect(() => insert('raw-copy-2', 'copy', 'n-2')).toThrow(/UNIQUE/u);
+          expect(() =>
+            raw
+              .prepare("UPDATE computer_action_audits SET approval_id = 'other' WHERE id = 'row-0'")
+              .run(),
+          ).toThrow('write-once');
+        } finally {
+          raw.close();
+        }
+      });
     });
   });
 
