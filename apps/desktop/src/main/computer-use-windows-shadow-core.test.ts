@@ -17,14 +17,30 @@ const windowsHost = read('computer_use_windows_host.cc');
 const harness = read('computer_use_protocol_fuzz.cc');
 
 describe('Windows shadow core (classifier v2, S5-b-1)', () => {
-  it('is portable: no Windows or UI Automation header, no clock, no I/O, no approval vocabulary', () => {
+  it('is portable: only standard and shadow includes, no platform conditional, no clock, no I/O, no approval vocabulary', () => {
     expect(windowsShadow).toContain('#pragma once');
     expect(windowsShadow).toContain('#include "computer_use_effect_shadow.h"');
+    const allowedIncludes = new Set([
+      '"computer_use_effect_shadow.h"',
+      '"computer_use_effect_classifier.h"',
+      '<array>',
+      '<cstddef>',
+      '<cstdint>',
+      '<iterator>',
+      '<mutex>',
+      '<string>',
+      '<string_view>',
+      '<type_traits>',
+      '<vector>',
+    ]);
     for (const header of [sharedShadow, windowsShadow]) {
+      for (const match of header.matchAll(/^\s*#\s*include\s+(\S+)/gmu))
+        expect(allowedIncludes.has(match[1]!), match[1]).toBe(true);
+      expect(header).not.toMatch(/#\s*if(n?def)?\s+.*(_WIN32|__APPLE__|__linux__|_MSC_VER)/u);
       expect(header).not.toMatch(
-        /<windows\.h>|UIAutomation|IUIAutomation|CoCreateInstance|NormalizeString|<chrono>|<thread>|<random>|<fstream>|getenv|fopen|clock_gettime|QueryPerformanceCounter/u,
+        /windows\.h|UIAutomation|IUIAutomation|CoCreateInstance|NormalizeString|chrono|<thread>|<random>|fstream|getenv|fopen|clock_gettime|QueryPerformanceCounter/iu,
       );
-      expect(header).not.toMatch(/single_use_approval|SingleUseApproval|ticket/u);
+      expect(header).not.toMatch(/single_use_approval|SingleUseApproval|ticket/iu);
     }
   });
 
@@ -40,7 +56,10 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     expect(JSON.stringify(eligibility)).not.toMatch(/"classifier[A-Za-z]*":\s*2\b/u);
   });
 
-  it('shares the read helpers with the macOS shadow instead of copying them', () => {
+  it('defines the read helpers in the shared header, and builds the Windows facts on the shared builder', () => {
+    // The macOS reader still has its own copy of Settle / Step (same meaning, different corners: an
+    // empty string, malformed UTF-8, a stopped state). Converging them, or tying them with a
+    // harness, is S5-b-2's job (see the ADR).
     for (const name of [
       'enum class ShadowReadResult',
       'inline bool ShadowSettle(',
@@ -93,6 +112,35 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
       expect(harness, line).toContain(line);
     expect(harness).toContain('CheckWindowsShadowCore()');
     expect(harness).toContain('CheckShadowReadHelpers()');
+  });
+
+  it('keeps a page-written class name out of the subrole, and a display name out of the extension', () => {
+    // Chromium publishes the HTML class attribute as ClassName; a subrole may only be a known native
+    // class, and never inside a page.
+    expect(windowsShadow).toContain('IsKnownNativeClass(');
+    expect(windowsShadow).toContain(
+      '!in_page && windows_shadow_detail::IsKnownNativeClass(node.class_name)',
+    );
+    // An extension is known only for the item's real name or path.
+    expect(windowsShadow).toContain('item_name_is_real_path');
+    expect(windowsShadow).toContain('!(capture.item_name_read && capture.item_name_is_real_path)');
+  });
+
+  it('judges a UWP window by the process that owns its CoreWindow, and treats command entries as such', () => {
+    for (const name of [
+      'applicationframewindow',
+      'applicationframehost.exe',
+      'core_window_process_read',
+      'sechealthui.exe',
+      'systemsettings.exe',
+      'taskmgr.exe',
+      '#32770',
+      'address band root',
+      'shelldll_defview',
+    ])
+      expect(windowsShadow, name).toContain(name);
+    expect(windowsShadow).toContain('kShadowGapOsPromptSurface');
+    expect(windowsShadow).toContain('static_assert((kShadowGapOsPromptSurface');
   });
 
   it('maps the Windows surfaces by name, not by title', () => {

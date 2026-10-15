@@ -565,7 +565,8 @@ private:
   return *log;
 }
 
-// ---- Reading one string, the same way on every platform --------------------------------------
+// ---- Reading one string (used by the Windows shadow; the macOS reader keeps its own copy of the
+// same rules for now, see the ADR) ------------------------------------------------------------
 // A platform read ends in exactly one of these, and every one of them is Settled into a flag, so a
 // failed, over-long or stopped read can never become an empty answer.
 enum class ShadowReadResult : std::uint8_t { kOk, kAbsent, kFailed, kTooLong, kStopped };

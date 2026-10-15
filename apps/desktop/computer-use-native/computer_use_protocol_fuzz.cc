@@ -2203,6 +2203,7 @@ bool CheckWindowsShadowCore() {
     item.chain = {UiaNode("ListItem", "setup.exe"), UiaNode("Window", "Downloads")};
     item.item_kind = ShadowItemKind::kFile;
     item.item_name_read = true;
+    item.item_name_is_real_path = true;
     item.item_name = "C:\\Users\\a.b\\Downloads\\Setup.EXE";
     const ShadowFacts file = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
     if (!Check(file.facts.target_is_file_item && file.facts.extension_known && file.facts.extension == "exe" &&
@@ -2225,9 +2226,208 @@ bool CheckWindowsShadowCore() {
                "winshadow-unnamed-file-item")) return false;
     // Opening an executable from the file manager is not ordinary.
     item.item_name_read = true;
+    item.item_name_is_real_path = true;
     item.item_name = "Setup.exe";
     if (!Check(WindowsShadowClassify(item, UiaRequest("invoke"), true).kind != DecisionKind::kOrdinary,
                "winshadow-executable-open-is-not-ordinary")) return false;
+  }
+  // A class name inside a page is the page's string, never a subrole: an icon whose class says
+  // "button" or "link" must not cut the span short and hide the "Place order" it sits in.
+  {
+    const auto order = [](const std::string &icon_class) {
+      ShadowUiaCapture capture = UiaBase();
+      ShadowUiaNode icon = UiaNode("Image", "arrow_forward");
+      icon.class_name = icon_class;
+      capture.chain = {icon, UiaNode("Button", "Place order"), UiaNode("Document", "Shop"),
+                       UiaNode("Pane", "Chrome Legacy Window"), UiaNode("Window", "Browser")};
+      capture.document_url_read = true;
+      capture.document_url = "https://example.com/";
+      return WindowsShadowClassify(capture, UiaRequest("click"), true);
+    };
+    const ShadowRecord plain = order("");
+    if (!Check(plain.kind == DecisionKind::kApproval, "winshadow-place-order-needs-approval"))
+      return false;
+    for (const char *icon_class : {"material-icons mdc-button__icon", "link-arrow", "Button",
+                                   "listitem tabitem", "HyperlinkButton"}) {
+      const ShadowRecord record = order(icon_class);
+      if (!Check(record.kind == plain.kind && record.effect_class == plain.effect_class,
+                 "winshadow-page-class-name-cannot-shorten-the-span")) return false;
+    }
+    // The same class outside a page, on a native control, is the control's own subrole.
+    ShadowUiaCapture native = UiaBase();
+    native.chain[0] = UiaNode("Pane", "Place order");
+    native.chain[0].class_name = "Button";
+    if (!Check(BuildWindowsShadowFacts(native, UiaRequest("click")).facts.chain[0].subrole == "Button",
+               "winshadow-native-class-is-a-subrole")) return false;
+    native.chain[0].class_name = "SomeAppDefinedClass";
+    if (!Check(BuildWindowsShadowFacts(native, UiaRequest("click")).facts.chain[0].subrole.empty(),
+               "winshadow-unknown-class-is-no-subrole")) return false;
+    // A neighbor of a target inside a page is in the page as well.
+    ShadowUiaCapture caption = UiaBase();
+    caption.chain = {UiaNode("Edit", "Year"), UiaNode("Document", "Checkout"), UiaNode("Window", "B")};
+    caption.document_url_read = true;
+    caption.document_url = "https://example.com/";
+    caption.neighbors = {UiaNode("Text", "Card number")};
+    caption.neighbors[0].class_name = "Button";
+    if (!Check(BuildWindowsShadowFacts(caption, UiaRequest("type")).facts.neighbor_labels.size() == 1 &&
+                   WindowsShadowClassify(caption, UiaRequest("type"), true).effect_class ==
+                       EffectClass::kCredential,
+               "winshadow-neighbor-caption-in-a-page")) return false;
+  }
+  // Command entries other than a terminal: Run (a #32770 owned by explorer.exe), the Explorer
+  // address bar, and the Task Manager's "Run new task".
+  {
+    ShadowUiaCapture run = UiaBase();
+    run.window_class = "#32770";
+    run.process_path = "C:\\Windows\\explorer.exe";
+    run.chain = {UiaNode("Edit", "Open:"), UiaNode("Window", "Run")};
+    if (!Check(BuildWindowsShadowFacts(run, UiaRequest("type")).facts.surface == SurfaceKind::kCommandPalette &&
+                   WindowsShadowClassify(run, UiaRequest("type"), true).kind == DecisionKind::kBlocked,
+               "winshadow-run-dialog-is-a-command-entry")) return false;
+    run.chain = {UiaNode("Button", "OK"), UiaNode("Window", "Run")};
+    if (!Check(WindowsShadowClassify(run, UiaRequest("click"), true).kind != DecisionKind::kOrdinary,
+               "winshadow-run-dialog-ok-is-not-ordinary")) return false;
+    ShadowUiaCapture address = UiaBase();
+    address.window_class = "CabinetWClass";
+    address.process_path = "C:\\Windows\\explorer.exe";
+    address.chain = {UiaNode("Edit", "Address"), UiaNode("ComboBox", "Address"),
+                     UiaNode("Pane", "Address Band Root"), UiaNode("Window", "Downloads")};
+    address.chain[2].class_name = "Address Band Root";
+    if (!Check(BuildWindowsShadowFacts(address, UiaRequest("type")).facts.surface == SurfaceKind::kCommandPalette &&
+                   WindowsShadowClassify(address, UiaRequest("type"), true).kind == DecisionKind::kBlocked,
+               "winshadow-explorer-address-bar")) return false;
+    ShadowUiaCapture task = UiaBase();
+    task.window_class = "#32770";
+    task.process_path = "C:\\Windows\\System32\\Taskmgr.exe";
+    task.chain = {UiaNode("Edit", "Open"), UiaNode("Window", "Create new task")};
+    if (!Check(BuildWindowsShadowFacts(task, UiaRequest("type")).facts.surface == SurfaceKind::kCommandPalette,
+               "winshadow-task-manager-run-new-task")) return false;
+    // A file manager nobody listed is still one when it hosts a shell view.
+    ShadowUiaCapture other = UiaBase();
+    other.window_class = "TTOTAL_CMD";
+    other.process_path = "C:\\Tools\\TOTALCMD64.EXE";
+    other.chain = {UiaNode("ListItem", "setup.exe"), UiaNode("Pane", "FolderView"), UiaNode("Window", "TC")};
+    other.chain[1].class_name = "DirectUIHWND";
+    if (!Check(BuildWindowsShadowFacts(other, UiaRequest("invoke")).facts.surface == SurfaceKind::kFileBrowser,
+               "winshadow-shell-view-is-a-file-browser")) return false;
+  }
+  // A UWP window is judged by the process that owns its CoreWindow child; unreadable is unknown.
+  {
+    ShadowUiaCapture uwp = UiaBase();
+    uwp.window_class = "ApplicationFrameWindow";
+    uwp.process_path = "C:\\Windows\\System32\\ApplicationFrameHost.exe";
+    uwp.chain = {UiaNode("Button", "Real-time protection"), UiaNode("Window", "Windows Security")};
+    const ShadowFacts unread = BuildWindowsShadowFacts(uwp, UiaRequest("toggle"));
+    if (!Check(unread.facts.surface == SurfaceKind::kUnknown && (unread.gaps & kShadowGapReadFailed) != 0 &&
+                   (unread.gaps & kShadowGapOsPromptSurface) != 0 && !unread.facts.metadata_complete,
+               "winshadow-frame-host-without-core-window-is-unknown")) return false;
+    uwp.core_window_process_read = true;
+    uwp.core_window_process_path = "C:\\Windows\\SystemApps\\Microsoft.Windows.SecHealthUI_x\\SecHealthUI.exe";
+    const ShadowFacts security = BuildWindowsShadowFacts(uwp, UiaRequest("toggle"));
+    if (!Check(security.facts.surface == SurfaceKind::kUnknown && (security.gaps & kShadowGapOsPromptSurface) != 0 &&
+                   WindowsShadowClassify(uwp, UiaRequest("toggle"), true).kind == DecisionKind::kTakeover,
+               "winshadow-windows-security-is-a-prompt-surface")) return false;
+    uwp.core_window_process_path = "C:\\Windows\\ImmersiveControlPanel\\SystemSettings.exe";
+    if (!Check((BuildWindowsShadowFacts(uwp, UiaRequest("toggle")).gaps & kShadowGapOsPromptSurface) != 0,
+               "winshadow-settings-is-a-prompt-surface")) return false;
+    uwp.core_window_process_path = "C:\\Program Files\\WindowsApps\\Calculator\\CalculatorApp.exe";
+    const ShadowFacts calculator = BuildWindowsShadowFacts(uwp, UiaRequest("invoke"));
+    if (!Check(calculator.facts.surface == SurfaceKind::kOrdinary && calculator.facts.metadata_complete,
+               "winshadow-hosted-app-by-its-own-process")) return false;
+    // Also by the host's process alone, whatever the window class says.
+    ShadowUiaCapture host = UiaBase();
+    host.window_class = "Windows.UI.Core.CoreWindow";
+    host.process_path = "C:\\Windows\\System32\\ApplicationFrameHost.exe";
+    if (!Check(BuildWindowsShadowFacts(host, UiaRequest("invoke")).facts.surface == SurfaceKind::kUnknown,
+               "winshadow-frame-host-process-alone")) return false;
+  }
+  // Every property of a node reaches the core: a secret word that only the automation id, the help
+  // text or a neighbor carries is found, and a failed read of the capture is never ignored.
+  {
+    ShadowUiaCapture by_id = UiaBase();
+    by_id.chain[0] = UiaNode("Edit", "Field");
+    by_id.chain[0].automation_id = "PasswordInput";
+    if (!Check(WindowsShadowClassify(by_id, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-automation-id-reaches-the-core")) return false;
+    ShadowUiaCapture by_help = UiaBase();
+    by_help.chain[0] = UiaNode("Edit", "Field");
+    by_help.chain[0].help_text = "Enter your password";
+    if (!Check(WindowsShadowClassify(by_help, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-help-text-reaches-the-core")) return false;
+    ShadowUiaCapture by_neighbor = UiaBase();
+    by_neighbor.chain = {UiaNode("Edit", "Field"), UiaNode("Document", "Login"), UiaNode("Window", "B")};
+    by_neighbor.document_url_read = true;
+    by_neighbor.document_url = "https://example.com/";
+    by_neighbor.neighbors = {UiaNode("Text", "Password")};
+    if (!Check(WindowsShadowClassify(by_neighbor, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-neighbor-reaches-the-core")) return false;
+    ShadowUiaCapture by_value = UiaBase();
+    by_value.chain = {UiaNode("Edit", "Field"), UiaNode("Document", "Login"), UiaNode("Window", "B")};
+    by_value.document_url_read = true;
+    by_value.document_url = "https://example.com/";
+    by_value.neighbors = {UiaNode("Text", "")};
+    by_value.neighbors[0].value = "Password";
+    if (!Check(WindowsShadowClassify(by_value, UiaRequest("type"), true).effect_class == EffectClass::kSecure,
+               "winshadow-static-text-value-reaches-the-core")) return false;
+    ShadowUiaCapture capture_failed = UiaBase();
+    capture_failed.read_failed = true;
+    const ShadowRecord failed_record = WindowsShadowClassify(capture_failed, UiaRequest("invoke"), true);
+    if (!Check(failed_record.kind == DecisionKind::kTakeover && (failed_record.gaps & kShadowGapReadFailed) != 0,
+               "winshadow-capture-read-failed-is-a-takeover")) return false;
+    ShadowUiaCapture bad_neighbor = UiaBase();
+    bad_neighbor.neighbors = {UiaNode("Text", "x")};
+    bad_neighbor.neighbors[0].read_failed = true;
+    if (!Check((BuildWindowsShadowFacts(bad_neighbor, UiaRequest("invoke")).gaps & kShadowGapNeighborsIncomplete) != 0,
+               "winshadow-unreadable-neighbor-is-incomplete")) return false;
+  }
+  // Surface signals count one at a time: either the class or the process is enough, a full-width
+  // spelling folds, and a path may use either separator.
+  {
+    const auto surface = [](bool class_read, const std::string &window_class, bool process_read,
+                            const std::string &process) {
+      ShadowUiaCapture capture = UiaBase();
+      capture.window_class_read = class_read;
+      capture.window_class = window_class;
+      capture.process_path_read = process_read;
+      capture.process_path = process;
+      return BuildWindowsShadowFacts(capture, UiaRequest("type")).facts.surface;
+    };
+    if (!Check(surface(true, "CASCADIA_HOSTING_WINDOW_CLASS", true, "C:\\x\\other.exe") == SurfaceKind::kShellLike &&
+                   surface(true, "Other", true, "C:\\x\\WindowsTerminal.exe") == SurfaceKind::kShellLike,
+               "winshadow-terminal-class-or-process")) return false;
+    if (!Check(surface(true, "Credential Dialog Xaml Host", true, "C:\\x\\other.exe") == SurfaceKind::kUnknown &&
+                   surface(true, "Other", true, "C:\\x\\CredentialUIBroker.exe") == SurfaceKind::kUnknown,
+               "winshadow-prompt-class-or-process")) return false;
+    if (!Check(surface(true, "Other", true, "C:\\Windows\\explorer.exe") == SurfaceKind::kFileBrowser,
+               "winshadow-explorer-by-process-alone")) return false;
+    if (!Check(surface(true, u8"Ｃｏｎｓｏｌｅ\uFF37ｉｎｄｏｗＣｌａｓｓ"_u8, true, "C:\\x\\a.exe") == SurfaceKind::kShellLike,
+               "winshadow-fullwidth-class-is-folded")) return false;
+    if (!Check(surface(false, "", true, "C:/Windows/System32/cmd.exe") == SurfaceKind::kShellLike,
+               "winshadow-forward-slash-path")) return false;
+  }
+  // A display name never gives a known extension: only the item's real name or path does.
+  {
+    ShadowUiaCapture item = UiaBase();
+    item.window_class = "#32770";
+    item.process_path = "C:\\Tools\\app.exe";
+    item.chain = {UiaNode("ListItem", "invoice.pdf"), UiaNode("Window", "Open")};
+    item.item_kind = ShadowItemKind::kFile;
+    item.item_name_read = true;
+    item.item_name = "invoice.pdf";
+    const ShadowFacts display = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
+    if (!Check(display.facts.target_is_file_item && !display.facts.extension_known &&
+                   (display.gaps & kShadowGapExtensionUnknown) != 0,
+               "winshadow-display-name-gives-no-extension")) return false;
+    if (!Check(WindowsShadowClassify(item, UiaRequest("invoke"), true).kind != DecisionKind::kOrdinary,
+               "winshadow-display-name-open-is-not-ordinary")) return false;
+    item.item_name_is_real_path = true;
+    item.item_name = "C:\\Users\\a\\invoice.pdf.exe";
+    const ShadowFacts real = BuildWindowsShadowFacts(item, UiaRequest("invoke"));
+    if (!Check(real.facts.extension_known && real.facts.extension == "exe", "winshadow-real-name-gives-the-extension"))
+      return false;
+    item.item_name = "C:/Users/a/readme.txt.lnk";
+    if (!Check(BuildWindowsShadowFacts(item, UiaRequest("invoke")).facts.extension == "lnk",
+               "winshadow-forward-slash-item-path")) return false;
   }
   // An unsupported action kind is a gap and never ordinary.
   {
@@ -2316,7 +2516,12 @@ bool CheckShadowReadHelpers() {
                "shadowgate-deadline")) return false;
   }
   {
-    // A canceled action wins over an exhausted budget only when it was seen first; both are gaps.
+    // A canceled action that is also past the deadline is a cancel (checked first): the record is
+    // skipped, not a comparison.
+    ShadowGate both(0);
+    if (!Check(!both.Step(kShadowDeadlineNs + 1, false) && both.Canceled() && !both.BudgetExhausted() &&
+                   (both.Gaps() & kShadowGapBudget) == 0,
+               "shadowgate-cancel-before-budget")) return false;
     ShadowGate gate(0);
     if (!Check(!gate.Step(kShadowDeadlineNs + 1, true) && gate.BudgetExhausted() && !gate.Canceled(),
                "shadowgate-deadline-first")) return false;

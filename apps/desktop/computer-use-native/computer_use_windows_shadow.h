@@ -28,10 +28,14 @@
 
 namespace sprint_coder::computer_use {
 
-// The window or process belongs to an OS prompt (UAC consent, the credential dialogs, Windows
-// Security). It is not classified here: the surface is "unknown", which is a takeover, and the
-// refusal of such windows is a later step (S5-c).
+// The window or process belongs to an OS prompt or an OS settings app (UAC consent, the credential
+// dialogs, the Windows Security and Settings apps). It is not classified here: the surface is
+// "unknown", which is a takeover, and the refusal of such windows is a later step (S5-c). A UWP
+// app's top-level window is an ApplicationFrameWindow owned by ApplicationFrameHost.exe, so it is
+// judged by the process that owns its CoreWindow child; when that cannot be read it is unknown too.
 constexpr std::uint32_t kShadowGapOsPromptSurface = 1u << 14;
+static_assert((kShadowGapOsPromptSurface & ((1u << 14) - 1u)) == 0,
+              "the Windows gap bit must not overlap a shared gap bit");
 
 // One UI Automation element as read. An absent or unreadable property is empty.
 struct ShadowUiaNode {
@@ -69,10 +73,19 @@ struct ShadowUiaCapture {
   std::string window_class;
   bool process_path_read = false;
   std::string process_path;
-  // The item the action would open (an Explorer list item, a download row). The name is the file
-  // name or a path; Explorer often hides the extension, which is then an unknown extension.
+  // A UWP window is hosted by ApplicationFrameHost.exe; the app is the process that owns its
+  // CoreWindow child. Read only for such a window.
+  bool core_window_process_read = false;
+  std::string core_window_process_path;
+  // The item the action would open (an Explorer list item, a download row).
+  // CONTRACT: an extension is known only when `item_name` is the REAL file name or path of the item
+  // (`item_name_is_real_path`, e.g. the shell item's parsing name), never a display name. Explorer
+  // hides known extensions, and always hides .lnk / .url / .pif / .scf, so "invoice.pdf" may be
+  // "invoice.pdf.exe" and "readme.txt" may be "readme.txt.lnk". A display name alone gives an unknown
+  // extension (kShadowGapExtensionUnknown).
   ShadowItemKind item_kind = ShadowItemKind::kNone;
   bool item_name_read = false;
+  bool item_name_is_real_path = false;
   std::string item_name;
   // The URL of the page (the Document in the chain), when there is one and it could be read.
   bool document_url_read = false;
@@ -106,6 +119,16 @@ struct WindowSurface {
   std::uint32_t gaps = 0;
 };
 
+[[nodiscard]] inline bool ClassIsOneOf(const ShadowUiaCapture &capture, const std::string_view *names,
+                                   std::size_t count) {
+  for (const ShadowUiaNode &node : capture.chain)
+    if (OneOf(Lowercase(CompatFold(node.class_name)), names, count)) return true;
+  return false;
+}
+
+// The surface of the window around the target. The window class and the owning process name it
+// (never the title); the class names of ancestors tighten it (a shell view is a file browser, an
+// address band is a command entry). Whatever could not be measured is unknown, never ordinary.
 [[nodiscard]] inline WindowSurface SurfaceForWindow(const ShadowUiaCapture &capture) {
   WindowSurface result;
   if (!capture.window_class_read && !capture.process_path_read) {
@@ -115,13 +138,23 @@ struct WindowSurface {
   }
   const std::string window_class =
       capture.window_class_read ? Lowercase(CompatFold(capture.window_class)) : std::string();
-  const std::string process = capture.process_path_read
-                                  ? Lowercase(CompatFold(BaseName(capture.process_path)))
-                                  : std::string();
-  // OS prompts first: they win over everything, and are not classified here.
+  std::string process = capture.process_path_read
+                            ? Lowercase(CompatFold(BaseName(capture.process_path)))
+                            : std::string();
+  // A UWP window: the app is whoever owns the CoreWindow child. If that is not known, nothing is.
+  if (window_class == "applicationframewindow" || process == "applicationframehost.exe") {
+    if (!capture.core_window_process_read) {
+      result.kind = SurfaceKind::kUnknown;
+      result.gaps |= kShadowGapReadFailed | kShadowGapOsPromptSurface;
+      return result;
+    }
+    process = Lowercase(CompatFold(BaseName(capture.core_window_process_path)));
+  }
+  // OS prompts and OS settings first: they win over everything, and are not classified here.
   static constexpr std::string_view kPromptProcesses[] = {
-      "consent.exe", "credentialuibroker.exe", "credentialenrollmentmanager.exe",
-      "windowsdefender.exe", "securityhealthsystray.exe", "logonui.exe", "winlogon.exe"};
+      "consent.exe",        "credentialuibroker.exe", "credentialenrollmentmanager.exe",
+      "windowsdefender.exe", "securityhealthsystray.exe", "sechealthui.exe", "systemsettings.exe",
+      "logonui.exe",        "winlogon.exe"};
   static constexpr std::string_view kPromptClasses[] = {
       "credential dialog xaml host", "$$$secure uap dummy window class for interop"};
   if (OneOf(process, kPromptProcesses, std::size(kPromptProcesses)) ||
@@ -148,18 +181,30 @@ struct WindowSurface {
     result.kind = SurfaceKind::kScriptInput;
     return result;
   }
+  // Command entries: launchers, the Task Manager (its "Run new task" starts any program), and the
+  // Run dialog, which is a #32770 dialog owned by explorer.exe.
   static constexpr std::string_view kPaletteProcesses[] = {
       "powertoys.powerlauncher.exe", "flow.launcher.exe", "searchhost.exe", "searchapp.exe",
-      "keypirinha.exe", "wox.exe", "ueli.exe"};
-  if (OneOf(process, kPaletteProcesses, std::size(kPaletteProcesses))) {
+      "keypirinha.exe", "wox.exe", "ueli.exe", "taskmgr.exe"};
+  if (OneOf(process, kPaletteProcesses, std::size(kPaletteProcesses)) ||
+      (process == "explorer.exe" && window_class == "#32770")) {
     result.kind = SurfaceKind::kCommandPalette;
     return result;
   }
+  // The address bar of Explorer runs programs too (a typed path or command line).
+  static constexpr std::string_view kAddressClasses[] = {"address band root", "breadcrumb parent"};
+  if (ClassIsOneOf(capture, kAddressClasses, std::size(kAddressClasses))) {
+    result.kind = SurfaceKind::kCommandPalette;
+    return result;
+  }
+  // A file browser by its name, or by its structure: any window that hosts a shell view (Explorer,
+  // the common file dialogs, other file managers built on the shell) lists items that open.
   static constexpr std::string_view kExplorerClasses[] = {"cabinetwclass", "explorewclass",
-                                                          "progman", "workerw",
-                                                          "shell_traywnd"};
+                                                          "progman", "workerw", "shell_traywnd"};
+  static constexpr std::string_view kShellViewClasses[] = {"shelldll_defview", "directuihwnd"};
   if (OneOf(window_class, kExplorerClasses, std::size(kExplorerClasses)) ||
-      process == "explorer.exe") {
+      process == "explorer.exe" ||
+      ClassIsOneOf(capture, kShellViewClasses, std::size(kShellViewClasses))) {
     result.kind = SurfaceKind::kFileBrowser;
     return result;
   }
@@ -182,12 +227,40 @@ struct WindowSurface {
 
 } // namespace windows_shadow_detail
 
-[[nodiscard]] inline ShadowAxNode ShadowUiaAsAxNode(const ShadowUiaNode &node) {
+namespace windows_shadow_detail {
+
+// The Win32 / WinUI class names that may become a subrole. A class name inside a web page is a
+// string the page wrote (Chromium publishes the HTML class attribute as ClassName: "mdc-button__icon"
+// would otherwise cut the actionable span short and let "Place order" through), so it is never a
+// subrole there, and outside a page only this closed set counts.
+[[nodiscard]] inline bool IsKnownNativeClass(std::string_view class_name) {
+  const std::string name = Lowercase(CompatFold(class_name));
+  static constexpr std::string_view kKnown[] = {
+      "button", "edit", "combobox", "comboboxex32", "listbox", "static", "scrollbar", "syslistview32",
+      "systreeview32", "systabcontrol32", "toolbarwindow32", "richedit20w", "richedit50w",
+      "passwordbox", "textbox", "richeditbox", "toggleswitch", "checkbox", "radiobutton",
+      "hyperlinkbutton", "togglebutton", "splitbutton", "appbarbutton", "slider", "listview",
+      "gridview", "menuflyoutitem", "textblock"};
+  return OneOf(name, kKnown, std::size(kKnown));
+}
+
+[[nodiscard]] inline bool ChainHasPage(const std::vector<ShadowUiaNode> &chain) {
+  for (const ShadowUiaNode &node : chain)
+    if (Lowercase(CompatFold(node.control_type)) == "document") return true;
+  return false;
+}
+
+} // namespace windows_shadow_detail
+
+[[nodiscard]] inline ShadowAxNode ShadowUiaAsAxNode(const ShadowUiaNode &node, bool in_page) {
   ShadowAxNode ax;
   ax.role = node.control_type;
-  // A password control is a secure text field whatever its name says; otherwise the class name is
-  // the subrole (Win32 class names such as "Button", "Edit", "PasswordBox" carry meaning).
-  ax.subrole = node.is_password ? std::string("SecureTextField") : node.class_name;
+  // A password control is a secure text field whatever its name says. Otherwise the class name is
+  // the subrole only for a known native class outside a page (see IsKnownNativeClass).
+  if (node.is_password)
+    ax.subrole = "SecureTextField";
+  else if (!in_page && windows_shadow_detail::IsKnownNativeClass(node.class_name))
+    ax.subrole = node.class_name;
   ax.title = node.name;
   ax.help = node.help_text;
   ax.identifier = node.automation_id;
@@ -203,8 +276,17 @@ struct WindowSurface {
   ShadowAxCapture ax;
   ax.target_found = capture.target_found;
   ax.chain_reached_root = capture.chain_reached_root;
-  for (const ShadowUiaNode &node : capture.chain) ax.chain.push_back(ShadowUiaAsAxNode(node));
-  for (const ShadowUiaNode &node : capture.neighbors) ax.neighbors.push_back(ShadowUiaAsAxNode(node));
+  // A node is "in a page" when a Document is above it (or is it); the neighbors share the target's
+  // place. The Document itself is the page root and carries no class.
+  const bool target_in_page = ChainHasPage(capture.chain);
+  for (std::size_t index = 0; index < capture.chain.size(); ++index) {
+    bool in_page = false;
+    for (std::size_t above = index; above < capture.chain.size(); ++above)
+      if (Lowercase(CompatFold(capture.chain[above].control_type)) == "document") in_page = true;
+    ax.chain.push_back(ShadowUiaAsAxNode(capture.chain[index], in_page));
+  }
+  for (const ShadowUiaNode &node : capture.neighbors)
+    ax.neighbors.push_back(ShadowUiaAsAxNode(node, target_in_page));
   ax.neighbors_complete = capture.neighbors_complete;
   ax.web_area_url_read = capture.document_url_read;
   ax.web_area_url = capture.document_url;
@@ -212,7 +294,9 @@ struct WindowSurface {
   ax.read_failed = capture.read_failed;
   // The item: a folder opens by browsing into it and is not an item; a file is judged by the name
   // after the last separator. The name is never passed as a URL.
-  if (capture.item_kind == ShadowItemKind::kFile && capture.item_name_read)
+  // Only the real file name or path gives a known extension; a display name never does.
+  if (capture.item_kind == ShadowItemKind::kFile && capture.item_name_read &&
+      capture.item_name_is_real_path)
     ax.filename = std::string(BaseName(capture.item_name));
 
   ShadowRequestInfo shared = request;
@@ -220,8 +304,10 @@ struct WindowSurface {
   ShadowFacts result = BuildShadowFacts(ax, shared);
   EffectFacts &facts = result.facts;
 
-  // A file whose name could not be read is a file item with an unknown extension.
-  if (capture.item_kind == ShadowItemKind::kFile && !capture.item_name_read) {
+  // A file whose real name could not be read (nothing, or only a display name) is a file item with
+  // an unknown extension.
+  if (capture.item_kind == ShadowItemKind::kFile &&
+      !(capture.item_name_read && capture.item_name_is_real_path)) {
     facts.target_is_file_item = true;
     facts.extension_known = false;
     result.gaps |= kShadowGapExtensionUnknown;
