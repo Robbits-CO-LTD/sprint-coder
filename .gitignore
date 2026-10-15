@@ -11,6 +11,7 @@ apps/desktop/managed-local/cache/
 apps/desktop/managed-local/build/
 apps/desktop/.vite-user-data/
 *.log
+*.pdb
 test-results/
 playwright-report/
 .dev-data/

@@ -291,6 +291,7 @@ void Reset() {
   response_cache_order.clear();
   response_cache_bytes = 0;
   g_sent.clear();
+  g_shadow.clear();
   g_validate_ok = true;
   g_revalidate_ok = true;
   g_focus_ok = true;
@@ -358,6 +359,8 @@ int main() {
             g_sent.back().payload.find("\"cancelEpoch\":3") != std::string::npos &&
             g_sent.back().payload.find("\"observationRevision\":7") != std::string::npos,
         "receipt_echoes_binding");
+  Check(g_shadow.size() == 1 && g_shadow[0].kind == "click" && g_shadow[0].v1_valid && g_shadow[0].v1_ordinary,
+        "shadow_gets_an_issued_ticket_as_ordinary");
   Check(Consume(Meta("", ticket)), "matching_dispatch_consumes");
   Check(!Consume(Meta("", ticket)), "second_use_refused");
 
@@ -492,6 +495,8 @@ int main() {
   Check(ticket.empty() && HasDecision("denied") &&
             g_sent.back().payload.find("native_invalid_action") != std::string::npos,
         "stale_observation_revision_denied");
+  Check(g_shadow.size() == 1 && g_shadow[0].kind == "click" && !g_shadow[0].v1_valid && !g_shadow[0].v1_ordinary,
+        "shadow_gets_a_failed_binding_as_not_valid");
 
   // 8. Malformed requests are errors with no ticket and no echoed binding.
   Reset();
@@ -499,6 +504,11 @@ int main() {
   Check(ticket.empty() && !g_sent.empty() && g_sent.back().type == MessageType::kError &&
             g_sent.back().payload.find("invalid_action") != std::string::npos,
         "non_hex_action_digest_error");
+  Check(g_shadow.empty(), "malformed_request_schedules_no_shadow");
+  // A request without a type is denied by V1 and leaves nothing for the shadow to record.
+  Reset();
+  ticket = Preflight("{\"requestId\":\"request-1\",\"actionDigest\":\"" + kDigest + "\",\"cancelEpoch\":3,\"observationRevision\":7}");
+  Check(ticket.empty() && HasDecision("denied") && g_shadow.empty(), "typeless_request_schedules_no_shadow");
   Check(!ticket_states.at(kSessionKey).slot.occupied(), "non_hex_digest_leaves_slot_empty");
   Reset();
   g_sent.clear();
@@ -508,6 +518,7 @@ int main() {
   Check(!g_sent.empty() && g_sent.back().type == MessageType::kError &&
             g_sent.back().payload.find("session_missing") != std::string::npos,
         "unknown_session_error");
+  Check(g_shadow.empty(), "unknown_session_schedules_no_shadow");
 
   // 9. A failing RNG issues nothing.
   Reset();
@@ -517,6 +528,8 @@ int main() {
             g_sent.back().payload.find("native_ticket_unavailable") != std::string::npos &&
             !ticket_states.at(kSessionKey).slot.occupied(),
         "rng_failure_issues_nothing");
+  Check(g_shadow.size() == 1 && g_shadow[0].v1_valid && !g_shadow[0].v1_ordinary,
+        "shadow_gets_a_denied_ticket_as_not_ordinary");
   g_rng_ok = true;
   const std::string first = Preflight(Meta());
   g_rng_fill = 0x40;
@@ -543,6 +556,7 @@ int main() {
               g_sent.back().payload.find("\"ticket\":null") != std::string::npos,
           "finished_request_answers_replay");
     Check(!ticket_states.at(kSessionKey).slot.occupied(), "replay_issues_no_ticket");
+    Check(g_shadow.empty(), "replay_schedules_no_shadow");
     // A different request id is not a replay.
     Check(!Preflight(Meta("", "", "request-2")).empty(), "other_request_is_not_replay");
   }
@@ -609,6 +623,27 @@ int main() {
 }
 `;
 
+const shadowStub = String.raw`
+// The v2 shadow (S5-b-2b) is a separate seam; here only WHAT the V1 preflight hands it is recorded:
+// whether V1 could re-validate the binding, and whether it issued its ordinary ticket.
+struct ShadowCall { std::string kind; bool v1_valid; bool v1_ordinary; };
+std::vector<ShadowCall> g_shadow;
+void ScheduleWindowsEffectShadow(const WindowsSession &, const std::string &, const std::string &kind,
+                                 bool v1_valid, bool v1_ordinary) noexcept {
+  g_shadow.push_back({kind, v1_valid, v1_ordinary});
+}
+`;
+
+// The shadow wiring has its own seam (a real run against UI Automation); it is cut out here and
+// replaced by the recording stub above, so this seam compiles only the V1 preflight.
+function cutShadowWiring(text: string): string {
+  const from = text.indexOf('// BEGIN effect shadow wiring');
+  const endMarker = '// END effect shadow wiring';
+  const to = text.indexOf(endMarker, from);
+  if (from < 0 || to < 0) throw new Error('Shadow wiring markers changed');
+  return text.slice(0, from) + text.slice(to + endMarker.length);
+}
+
 function assembled(): string {
   const cutClock = (text: string): string => {
     const from = text.indexOf('std::uint64_t MonotonicNowNs() {');
@@ -626,7 +661,8 @@ function assembled(): string {
     between('std::string ResponseCacheKey(', 'bool RevalidateWindowsTarget('),
     between('bool RespondAndCache(', 'WindowsSession *FindWindowsSession('),
     cutClock(between('bool ValidateWindowsDispatchBinding(', 'bool DispatchWindowsAction(')),
-    between('std::string WindowsPreflightReceipt(', 'bool ObserveWindowsWindow('),
+    shadowStub,
+    cutShadowWiring(between('std::string WindowsPreflightReceipt(', 'bool ObserveWindowsWindow(')),
     '}  // namespace\n',
     driver,
   ].join('\n');

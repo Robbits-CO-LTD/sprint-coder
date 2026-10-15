@@ -76,6 +76,8 @@
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_native_eligibility.h"
+#include "computer_use_windows_uia_source.h"
+#include "computer_use_windows_shadow_scheduler.h"
 
 namespace {
 
@@ -4714,6 +4716,104 @@ bool DispatchFrameIdFor(const std::string &request_id,
 // preflight for an existing session first voids the ticket it holds, whatever its own outcome, and
 // a request whose dispatch already finished answers `replay` (the dispatch is then answered from
 // the cache and needs no ticket).
+// BEGIN effect shadow wiring (classifier v2 S5-b-2b)
+// The v2 effect classifier runs here in SHADOW: after the V1 preflight has its answer, the request
+// is handed to a low-priority thread of its own, which reads the target through UI Automation,
+// classifies, and keeps an enum-only summary in the shadow ring. Nothing here decides anything: the
+// V1 receipt is built before this is called and is returned exactly as V1 built it. This function
+// reads nothing through UI Automation (that is the shadow thread's work, one capture at a time),
+// holds no lock, calls no input API, and never throws.
+//
+// It is called only from HandleWindowsPreflight, once, after ValidateWindowsDispatchBinding: a
+// binding that could not be re-validated leaves a skipped record and reads nothing. The shadow gives
+// way to everything else: the capture stops at the first refusal of its gate (cancel epoch, call
+// and time budget) and a hung target costs only the shadow's own thread.
+void LaunchWindowsShadowThread(std::function<void()> work) {
+  std::thread([work = std::move(work)]() mutable {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    work();
+    if (SUCCEEDED(initialized))
+      CoUninitialize();
+  }).detach();
+}
+
+// Enum values and counters only, to the debug output (the macOS shadow does the same to os_log):
+// never a label, a title, a URL or a path. A ShadowRecord holds none of them.
+void ReportWindowsEffectShadow(const sprint_coder::computer_use::ShadowRecord &record) {
+  char line[160];
+  const int length = std::snprintf(
+      line, sizeof(line),
+      "computer-use effect shadow action=%u class=%u kind=%u reason=%u gaps=%u v1_ordinary=%d\n",
+      static_cast<unsigned>(record.action), static_cast<unsigned>(record.effect_class),
+      static_cast<unsigned>(record.kind), static_cast<unsigned>(record.reason),
+      static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
+  if (length > 0)
+    OutputDebugStringA(line);
+}
+
+// Never destroyed: a capture still running when the process exits must not find it torn down.
+sprint_coder::computer_use::WindowsShadowScheduler &WindowsEffectShadow() {
+  static sprint_coder::computer_use::WindowsShadowScheduler *const scheduler =
+      new sprint_coder::computer_use::WindowsShadowScheduler(
+          sprint_coder::computer_use::ProcessShadowLog(), LaunchWindowsShadowThread,
+          ReportWindowsEffectShadow);
+  return *scheduler;
+}
+
+void ScheduleWindowsEffectShadow(const WindowsSession &session,
+                                 const std::string &metadata,
+                                 const std::string &kind, bool v1_valid,
+                                 bool v1_ordinary) noexcept {
+  using namespace sprint_coder::computer_use;
+  try {
+    WindowsShadowJob job;
+    job.kind = kind;
+    job.v1_ordinary = v1_ordinary;
+    job.maximum_mode = session.maximum_mode;
+    job.policy_language = session.policy_language;
+    (void)ReadJsonString(metadata, "key", &job.key);
+    (void)ReadJsonString(metadata, "targetId", &job.target_id);
+    // The point a click or scroll lands on, computed as the dispatch computes it.
+    POINT point{0, 0};
+    double x = 0;
+    double y = 0;
+    bool point_known = false;
+    if (ReadJsonDouble(metadata, "x", &x) && ReadJsonDouble(metadata, "y", &y) &&
+        x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      point_known = true;
+      const RECT bounds = session.observation_bounds;
+      point.x = bounds.left + static_cast<LONG>(std::lround(
+                                  x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
+      point.y = bounds.top + static_cast<LONG>(std::lround(
+                                 y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
+    }
+    const HWND window = session.active_window;
+    const std::uint64_t expected_epoch = session.cancel_epoch;
+    // Valid while the cancellation epoch is the one the preflight was bound to (a cancel and the
+    // death of the parent both move it).
+    const auto still_valid = [expected_epoch]() {
+      return cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
+    };
+    WindowsShadowEnvironment environment;
+    environment.still_valid = still_valid;
+    // A click or scroll whose point is not a point of the window is not looked up at the screen's
+    // origin: no source, so the capture is recorded as skipped.
+    const bool needs_point = kind == "click" || kind == "scroll";
+    environment.open_source = [window, point, still_valid, point_known, needs_point]()
+        -> std::unique_ptr<ShadowUiaSource> {
+      if (needs_point && !point_known)
+        return nullptr;
+      return WindowsUiaShadowSource::Create(window, point, still_valid);
+    };
+    WindowsEffectShadow().Schedule(std::move(job), v1_valid,
+                                   std::move(environment));
+  } catch (...) {
+    // A shadow failure is invisible to the caller.
+  }
+}
+// END effect shadow wiring
+
 bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
                             const std::string &metadata) {
   const std::string session_key = FrameIdKey(request.header.session_id);
@@ -4750,11 +4850,18 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   RECT bounds{};
   std::string reason;
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds,
-                                      &reason))
-    return Respond(pipe, request, MessageType::kPreflightResult,
-                   WindowsPreflightReceipt(session, request_id, cancel_epoch,
-                                           observation_revision, "denied",
-                                           "native_" + reason, ""));
+                                      &reason)) {
+    const bool denied_sent =
+        Respond(pipe, request, MessageType::kPreflightResult,
+                WindowsPreflightReceipt(session, request_id, cancel_epoch,
+                                        observation_revision, "denied",
+                                        "native_" + reason, ""));
+    // V1 could not re-validate the bound target and its denial is out: the shadow only records
+    // that it read nothing.
+    if (!kind.empty())
+      ScheduleWindowsEffectShadow(session, metadata, kind, false, false);
+    return denied_sent;
+  }
   std::string token;
   const bool issued =
       GenerateTicketToken(&token) &&
@@ -4774,6 +4881,8 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   // The secret only needs to live until it is on the wire (the slot keeps its own copy).
   ScrubString(&token);
   ScrubString(&receipt);
+  // The V1 answer is out; the v2 classifier only watches (see the shadow wiring above).
+  ScheduleWindowsEffectShadow(session, metadata, kind, true, issued);
   return sent;
 }
 

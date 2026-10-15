@@ -117,6 +117,9 @@ public:
   }
   [[nodiscard]] bool Exhausted() const { return exhausted_; }
   [[nodiscard]] std::uint32_t Calls() const { return calls_; }
+  // The deadline has passed (spends no call). Used once the last call has returned.
+  [[nodiscard]] bool PastDeadline(std::uint64_t now_ns) const { return now_ns > deadline_ns_; }
+  void MarkExhausted() { exhausted_ = true; }
 
 private:
   std::uint64_t deadline_ns_;
@@ -630,7 +633,26 @@ public:
     }
     return true;
   }
+  // The capture is over: it is still good only if it was not canceled and not late. A last call that
+  // succeeded after the deadline (or a cancel) must not pass for a complete, timely capture. Spends
+  // no call.
+  [[nodiscard]] bool Finish(std::uint64_t now_ns, bool action_still_valid) {
+    if (stopped_) return false;
+    if (!action_still_valid) {
+      canceled_ = true;
+      stopped_ = true;
+      return false;
+    }
+    if (budget_.PastDeadline(now_ns)) {
+      budget_.MarkExhausted();
+      stopped_ = true;
+      return false;
+    }
+    return true;
+  }
   [[nodiscard]] bool Canceled() const { return canceled_; }
+  // Refused once (canceled or out of budget): nothing more may be read.
+  [[nodiscard]] bool Stopped() const { return stopped_; }
   [[nodiscard]] bool BudgetExhausted() const { return budget_.Exhausted(); }
   [[nodiscard]] std::uint32_t Calls() const { return budget_.Calls(); }
   // The gap bits this gate accounts for.
