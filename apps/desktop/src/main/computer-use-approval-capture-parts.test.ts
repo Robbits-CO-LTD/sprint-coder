@@ -118,7 +118,15 @@ describe('Computer Use approval measurement capture (classifier v2, C4-2a)', () 
     expect(text).not.toMatch(
       /\bkAX\w*Action\b|CFSTR\s*\(|SetAttributeValue|PerformAction|PostKeyboardEvent|CGEvent|NSEvent|NSWorkspace|activateWithOptions|input_api_attempts|dispatch_async|dispatch_sync/u,
     );
-    expect(text.replaceAll('[&]', '')).not.toMatch(/[[\]]/u);
+    expect(text.replaceAll('[&]', '').replaceAll('[[maybe_unused]]', '')).not.toMatch(/[[\]]/u);
+  });
+
+  it('passes the AX value kinds as AXValueType: the constants are not that type in C++', () => {
+    const text = code(section());
+    const uses = [...text.matchAll(/kAXValueCG(?:Point|Size)Type/gu)];
+    expect(uses).toHaveLength(2);
+    for (const use of uses)
+      expect(text.slice(Math.max(0, use.index - 25), use.index)).toBe('static_cast<AXValueType>(');
   });
 
   it('reads only the position and size of the target beyond the shared capture', () => {
@@ -200,6 +208,19 @@ describe('Computer Use approval measurement capture (classifier v2, C4-2a)', () 
     expect(measure).not.toBeNull();
     const body = measure![0];
     expect(body).toContain('noexcept');
+    // No session is a person's, and so is a measurement that threw.
+    expect(body).toMatch(
+      /if \(request\.session == nullptr\) \{\s*measured\.takeover = true;\s*return measured;\s*\}/u,
+    );
+    expect(body).toMatch(
+      /catch \(\.\.\.\) \{\s*NativeApprovalMeasurement person;\s*person\.takeover = true;\s*return person;\s*\}/u,
+    );
+    // A frame that could not be read only leaves the frame absent (a confirmation then is a
+    // person's); it does not make the capture of an ordinary control incomplete.
+    expect(body).toContain('ReadApprovalTargetFrame(reader, target.Element(), &frame_failed)');
+    expect(body).not.toContain(
+      'ReadApprovalTargetFrame(reader, target.Element(), &capture.read_failed)',
+    );
     // No session is a person's; a canceled action is neither eligible nor a takeover; both come
     // before anything is read.
     expect(body.indexOf('request.session == nullptr')).toBeGreaterThan(0);

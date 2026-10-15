@@ -5691,10 +5691,13 @@ sprint_coder::computer_use::ApprovalTargetFrame ReadApprovalTargetFrame(ShadowRe
   CGPoint origin{};
   CGSize size{};
   const bool have_origin = reader.Settle(
-      ReadShadowGeometry(reader, target, kAXPositionAttribute, kAXValueCGPointType, &origin),
+      ReadShadowGeometry(reader, target, kAXPositionAttribute,
+                         static_cast<AXValueType>(kAXValueCGPointType), &origin),
       failed);
   const bool have_size = reader.Settle(
-      ReadShadowGeometry(reader, target, kAXSizeAttribute, kAXValueCGSizeType, &size), failed);
+      ReadShadowGeometry(reader, target, kAXSizeAttribute,
+                         static_cast<AXValueType>(kAXValueCGSizeType), &size),
+      failed);
   if (!have_origin || !have_size) return frame;
   if (RoundAuthorityUnit(origin.x, &frame.x) && RoundAuthorityUnit(origin.y, &frame.y) &&
       RoundAuthorityUnit(size.width, &frame.width) && RoundAuthorityUnit(size.height, &frame.height) &&
@@ -5733,7 +5736,7 @@ sprint_coder::computer_use::ApprovalAuthorityIdentity ReadApprovalAuthorityIdent
 // canceled (the flow ends it as canceled on its own); a takeover when the measure could not be
 // made whole. `route`, the rule set and the build's attested classifier version are the caller's:
 // the session's route (C4-0), the version's own rule set, and what the build attests.
-sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLane(
+[[maybe_unused]] sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLane(
     const NativeDispatchRequest& request, sprint_coder::computer_use::ClassifierRoute route,
     const sprint_coder::computer_use::EffectRuleset& ruleset,
     std::uint32_t attested_classifier_version) noexcept {
@@ -5749,8 +5752,12 @@ sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLan
     ShadowAxCapture capture;
     const ShadowCfRef target = CaptureShadowTargetFacts(reader, &capture);
     ApprovalMeasurementInput input;
+    // A frame that could not be read leaves the frame absent: that makes a confirmation a person's
+    // (it cannot be bound), and leaves an ordinary control's capture whole.
+    bool frame_failed = false;
     if (target.Get() != nullptr)
-      input.target_frame = ReadApprovalTargetFrame(reader, target.Element(), &capture.read_failed);
+      input.target_frame = ReadApprovalTargetFrame(reader, target.Element(), &frame_failed);
+    if (frame_failed) input.target_frame.present = false;
     input.identity = ReadApprovalAuthorityIdentity(reader, *request.session);
     if (reader.canceled) return NativeApprovalMeasurement();
     capture.budget_exhausted = reader.budget.Exhausted();
