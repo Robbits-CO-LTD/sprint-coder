@@ -5163,6 +5163,46 @@ const computerUseUtf8TextSchema = z
   );
 const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 256 characters');
 
+/**
+ * #785 T15-7b / T15-9: what a person is shown about a value that moves between applications.
+ *
+ * The `excerpt` is the only place a copied value's text reaches a screen. Main has already cut it
+ * to 256 characters and made every invisible or confusing character visible; it is live-only like
+ * the approval's `preview`, and it is never part of an audit row, a log, a tool result or the
+ * status the outer agent is given. The labels come from the screen (an application name), so they
+ * are escaped and cut the same way before they get here.
+ */
+/** A size in three steps rather than a count, so the outer agent learns as little as it can. */
+export const computerUseArtifactSizeClassSchema = z.enum(['le_256', 'le_1k', 'le_4k']);
+/**
+ * The most characters of what is shown. Main cuts what it makes to these (after escaping, so an
+ * escape is never half there), and the schemas hold it to the same numbers: a card whose label ran
+ * over would not parse, and the session would stop with an error instead of asking.
+ */
+export const COMPUTER_USE_EXCERPT_MAX = 3_072;
+export const COMPUTER_USE_TRANSFER_LABEL_MAX = 256;
+const computerUseExcerptSchema = z.string().max(COMPUTER_USE_EXCERPT_MAX);
+const computerUseTransferLabelSchema = z.string().max(COMPUTER_USE_TRANSFER_LABEL_MAX);
+export const computerUseApprovalTransferSchema = z
+  .object({
+    sourceLabel: computerUseTransferLabelSchema,
+    destinationLabel: computerUseTransferLabelSchema,
+    /** The control the text goes into, or absent for typing into the focused one. */
+    destinationTarget: computerUseTransferLabelSchema.optional(),
+    sizeClass: computerUseArtifactSizeClassSchema,
+    excerpt: computerUseExcerptSchema,
+  })
+  .strict();
+export type ComputerUseApprovalTransfer = z.infer<typeof computerUseApprovalTransferSchema>;
+/** A value kept by `copy`, as the session card shows it. */
+export const computerUseCopiedValueSchema = z
+  .object({
+    sizeClass: computerUseArtifactSizeClassSchema,
+    excerpt: computerUseExcerptSchema,
+  })
+  .strict();
+export type ComputerUseCopiedValue = z.infer<typeof computerUseCopiedValueSchema>;
+
 /** Native-side identity. It is never accepted from a renderer registration request. */
 export const computerWindowsAppIdentitySchema = z
   .object({
@@ -6233,6 +6273,11 @@ export const computerUseSessionStatusSchema = z
     expiresAt: timestampSchema,
     lastObservationAt: timestampSchema.nullable(),
     stopReason: computerUseStopReasonSchema.nullable(),
+    /**
+     * What `copy` has kept in this session, for the session card (#785 T15-9). Live-only: Main empties
+     * it when the session ends, and it is never persisted, logged or given to the outer agent.
+     */
+    copied: z.array(computerUseCopiedValueSchema).max(3).default([]),
     /** Ephemeral card for the current action; Main must never persist its preview. */
     pendingApproval: z
       .lazy(() => computerUseApprovalSchema)
@@ -6613,6 +6658,8 @@ export const computerUseApprovalSchema = z
     actionDigest: computerUseDigestSchema,
     targetLabel: computerUseLabelSchema,
     preview: computerUsePreviewSchema,
+    /** Present only for a paste of an artifact (#785 T15-7b). Optional: older cards have none. */
+    transfer: computerUseApprovalTransferSchema.optional(),
     risk: toolRiskSchema,
     policyEpoch: z.number().int().nonnegative(),
     observationRevision: z.number().int().nonnegative(),
@@ -6842,8 +6889,6 @@ export const COMPUTER_USE_ARTIFACT_LIMITS = Object.freeze({
 } as const);
 export const computerUseArtifactKindSchema = z.enum(['text']);
 export type ComputerUseArtifactKind = z.infer<typeof computerUseArtifactKindSchema>;
-/** A size in three steps rather than a count, so the outer agent learns as little as it can. */
-export const computerUseArtifactSizeClassSchema = z.enum(['le_256', 'le_1k', 'le_4k']);
 export type ComputerUseArtifactSizeClass = z.infer<typeof computerUseArtifactSizeClassSchema>;
 
 export type ComputerUseApi = {

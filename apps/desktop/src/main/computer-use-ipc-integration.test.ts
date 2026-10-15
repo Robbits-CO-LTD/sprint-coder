@@ -37,6 +37,7 @@ import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
+import { secureLogger } from './secure-logger';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { PermissionBroker } from './permission-broker';
@@ -323,6 +324,91 @@ function captureComputerUseHandlers(): {
 }
 
 describe('Computer Use Main IPC integration', () => {
+  it('T15-9 (N19): an excerpt reaches the Renderer on the status channel and nowhere else', async () => {
+    const fixture = captureComputerUseHandlers();
+    const sent: Array<{ channel: string; payload: unknown }> = [];
+    const window = {
+      isDestroyed: vi.fn(() => false),
+      isVisible: vi.fn(() => true),
+      show: vi.fn(),
+      showInactive: vi.fn(),
+      focus: vi.fn(),
+      flashFrame: vi.fn(),
+      webContents: {
+        isDestroyed: vi.fn(() => false),
+        send: vi.fn((channel: string, payload: unknown) => sent.push({ channel, payload })),
+      },
+    };
+    Object.assign(fixture.router, {
+      window,
+      computerUsePendingApprovalBySession: new Map(),
+      computerUsePendingGrantRequestIds: new Set(),
+      computerUseAttentionFlashing: false,
+      computerUseSessionByTask: new Map(),
+    });
+    // Everything the logger is asked to write, at any level.
+    const logged: unknown[][] = [];
+    for (const level of ['debug', 'info', 'warn', 'error'] as const)
+      vi.spyOn(secureLogger, level).mockImplementation((...args: unknown[]) => {
+        logged.push(args);
+      });
+    const marker = 'MARKER-EXCERPT-4242';
+    const status = computerUseSessionStatusSchema.parse({
+      ...(await fixture.controller.start!()),
+      state: 'awaiting_approval',
+      copied: [{ sizeClass: 'le_256', excerpt: marker }],
+    });
+    const router = fixture.router as unknown as {
+      publishComputerUseStatus(status: ComputerUseSessionStatus): void;
+      publishComputerUseApproval(approval: unknown): void;
+    };
+    router.publishComputerUseStatus(status);
+    router.publishComputerUseApproval(
+      computerUseApprovalSchema.parse({
+        id: 'approval-1',
+        sessionId: status.sessionId,
+        taskId: status.taskId,
+        actionType: 'set_text',
+        actionDigest: 'a'.repeat(64),
+        targetLabel: 'control:field',
+        preview: '{"type":"set_text","artifactRef":"artifact-1"}',
+        transfer: {
+          sourceLabel: 'Notes',
+          destinationLabel: 'Form',
+          sizeClass: 'le_256',
+          excerpt: marker,
+        },
+        risk: 'high',
+        policyEpoch: 0,
+        observationRevision: 0,
+        eligibleForPlan: false,
+        allowedDecisions: ['allow_once', 'deny'],
+        state: 'pending',
+        decision: null,
+        revision: 0,
+        challenge: 'challenge-1',
+        createdAt: '2026-08-29T12:00:00.000Z',
+        expiresAt: '2026-08-29T13:00:00.000Z',
+      }),
+    );
+    const withoutExcerpts = (key: string, value: unknown) =>
+      key === 'excerpt' ? undefined : value;
+    // The Renderer is told, on the status channel, and gets the excerpt there...
+    const events = sent.filter((entry) => entry.channel === IPC_CHANNELS.computerUseStatusEvent);
+    expect(events.length).toBeGreaterThan(0);
+    expect(JSON.stringify(events.at(-1)!.payload)).toContain(marker);
+    // ...and nothing else leaves: every other channel, and every other field, is clean.
+    for (const entry of sent) {
+      const body = JSON.stringify(entry.payload, withoutExcerpts);
+      expect(body, entry.channel).not.toContain(marker);
+      if (entry.channel !== IPC_CHANNELS.computerUseStatusEvent)
+        expect(JSON.stringify(entry.payload), entry.channel).not.toContain(marker);
+    }
+    // Nothing reached the logger, whole status or part.
+    expect(JSON.stringify(logged)).not.toContain(marker);
+    vi.restoreAllMocks();
+  });
+
   it('announces an asynchronous action approval without taking keyboard focus', async () => {
     const fixture = captureComputerUseHandlers();
     let visible = false;

@@ -342,6 +342,128 @@ describe('ComputerUseSessionRail', () => {
   });
 });
 
+describe('a pasted value is shown with where it came from and goes to (#785 T15-7b, T15-9)', () => {
+  const session = {
+    sessionId: 'session-1',
+    appName: 'TextEdit',
+    windowLabel: 'Untitled',
+    mode: 'supervised' as const,
+    providerLabel: 'Local Vision',
+    state: 'awaiting_approval' as const,
+    round: 1,
+    maxRounds: 25,
+    expiresAt: '2026-08-30T00:00:00.000Z',
+    observedAt: '2026-08-29T12:00:00.000Z',
+    pauseReason: null,
+  };
+  const approval = {
+    id: 'approval-1',
+    actionLabel: '文字を設定',
+    targetLabel: 'control:field',
+    impactLabel: '対象アプリ内を変更します',
+    escapedPreview: '{"type":"set_text","targetId":"field","artifactRef":"artifact-1"}',
+    transfer: {
+      sourceLabel: 'Notes',
+      destinationLabel: 'Form',
+      destinationTarget: 'control:field',
+      sizeClass: 'le_1k' as const,
+      excerpt: 'Total⇥42⏎⟦U+202E⟧end',
+    },
+    allowedDecisions: ['allow_once', 'deny'] as const,
+  };
+  const render = (view: typeof approval | Omit<typeof approval, 'transfer'>) =>
+    renderToStaticMarkup(
+      <ComputerUseSessionRail
+        session={session}
+        approval={view}
+        stopping={false}
+        onStop={() => {}}
+        onApproval={() => {}}
+      />,
+    );
+
+  it('shows the source, the destination with its control, the size and the escaped excerpt', () => {
+    const html = render(approval);
+    expect(html).toContain('コピー元');
+    expect(html).toContain('Notes');
+    expect(html).toContain('貼り付け先');
+    expect(html).toContain('Form · control:field');
+    expect(html).toContain('1KB以下');
+    // The escapes arrive as the text they are, not as markup or as the invisible character.
+    expect(html).toContain('Total⇥42⏎⟦U+202E⟧end');
+    expect(html).toContain('computer-use-approval__excerpt');
+    // It is a labelled group a screen reader can find, and the excerpt has a heading of its own.
+    expect(html).toContain('role="group" aria-label="貼り付ける内容"');
+    expect(html).toContain('<dt>内容</dt>');
+    // What the marks mean is said in words.
+    expect(html).toContain('目に見えない文字');
+    expect(html).toContain('⏎ は改行、⇥ はタブです');
+    expect(html).not.toContain('文字種が混在');
+  });
+
+  it('explains the mixed-script mark when an excerpt has one', () => {
+    const html = render({
+      ...approval,
+      transfer: { ...approval.transfer, excerpt: '⚠pаy now' },
+    });
+    expect(html).toContain('⚠pаy now');
+    expect(html).toContain('⚠ は、その語に文字種が混在していることを示します');
+  });
+
+  it('shows nothing of the kind for a card that moves no value', () => {
+    const { transfer: _transfer, ...plain } = approval;
+    const html = render(plain);
+    expect(html).not.toContain('コピー元');
+    expect(html).not.toContain('computer-use-approval__excerpt');
+  });
+
+  it('does not turn an excerpt into markup', () => {
+    const html = render({
+      ...approval,
+      transfer: { ...approval.transfer, excerpt: '<img src=x onerror=alert(1)>' },
+    });
+    expect(html).not.toContain('<img');
+    expect(html).toContain('&lt;img');
+  });
+
+  it('lists what was copied on the session card, with size and excerpt', () => {
+    const html = renderToStaticMarkup(
+      <ComputerUseSessionRail
+        session={{
+          ...session,
+          state: 'planning',
+          copied: [
+            { sizeClass: 'le_256', excerpt: 'Total⇥42' },
+            { sizeClass: 'le_4k', excerpt: 'long…' },
+          ],
+        }}
+        approval={null}
+        stopping={false}
+        onStop={() => {}}
+        onApproval={() => {}}
+      />,
+    );
+    expect(html).toContain('role="group" aria-label="コピーした内容"');
+    expect(html).toContain('⏎ は改行、⇥ はタブです');
+    expect(html).toContain('256バイト以下');
+    expect(html).toContain('Total⇥42');
+    expect(html).toContain('4KB以下');
+  });
+
+  it('lists nothing when nothing was copied', () => {
+    const html = renderToStaticMarkup(
+      <ComputerUseSessionRail
+        session={{ ...session, state: 'planning' }}
+        approval={null}
+        stopping={false}
+        onStop={() => {}}
+        onApproval={() => {}}
+      />,
+    );
+    expect(html).not.toContain('コピーした内容');
+  });
+});
+
 describe('Computer Use acceptance build notice', () => {
   it('stays hidden for an ordinary build', () => {
     expect(renderToStaticMarkup(<ComputerUseAcceptanceBuildNotice acceptanceMode={null} />)).toBe(

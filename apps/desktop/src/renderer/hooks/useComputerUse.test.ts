@@ -97,6 +97,7 @@ describe('Computer Use renderer projection', () => {
       expiresAt: '2026-08-29T01:00:00.000Z',
       lastObservationAt: '2026-08-29T00:00:01.000Z',
       stopReason: null,
+      copied: [],
       pendingApproval: null,
     };
     const push: { current: ((value: ComputerUseSessionStatus) => void) | null } = { current: null };

@@ -30,6 +30,7 @@ import {
   nativeApprovalObservationEquivalent,
   type ComputerUseNativeHost,
   type ComputerUseNativeNodeValue,
+  computerStartToolOutput,
   type ComputerUseNativeObservation,
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
@@ -48,6 +49,7 @@ import {
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { computerUseActionDigest } from './computer-use-action';
+import { computerUseDisplayLabel } from './computer-use-artifact';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -831,6 +833,9 @@ const completedNativeResult = (
 
 const click: ComputerUseAction = { type: 'click', x: 0.5, y: 0.5, button: 'left' };
 const plainType: ComputerUseAction = { type: 'type', text: 'hello' };
+
+/** The `excerpt` fields are where a value may reach a screen (T15-9); everything else must be clean. */
+const withoutExcerpts = (key: string, value: unknown) => (key === 'excerpt' ? undefined : value);
 
 describe('ComputerUseController', () => {
   describe('native single_use_approval (N2b-2: closed no-input pause)', () => {
@@ -2526,7 +2531,11 @@ describe('ComputerUseController', () => {
       expect(audit).toMatchObject({ actionKind: 'copy', route: 'semantic', state: 'applied' });
       expect(audit!.actionDigest).toMatch(/^[0-9a-f]{64}$/u);
       // Neither the value nor a hash of it is anywhere a record or a result could carry it.
-      const everything = JSON.stringify([[...fixture.audits.values()], result, fixture.statuses]);
+      // The excerpt shown on the session card is the one place it may be (T15-9); nowhere else.
+      const everything = JSON.stringify(
+        [[...fixture.audits.values()], result, fixture.statuses],
+        withoutExcerpts,
+      );
       expect(everything).not.toContain('Total');
       expect(everything).not.toContain(createHash('sha256').update('Total\t42').digest('hex'));
       const references = fixture.controller.copiedArtifactReferences(started.sessionId);
@@ -2722,6 +2731,41 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    it('T15-9: the session card shows what was copied, until the session ends (N19)', async () => {
+      const { store } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: { read: async () => ({ ok: true, text: 'Total\t42\u200B' }) },
+        artifactStore: store,
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      expect(fixture.controller.getStatus(started.sessionId)?.copied).toEqual([
+        { sizeClass: 'le_256', excerpt: 'Total⇥42' },
+      ]);
+      // The projection written into a conversation has no field for it.
+      expect(
+        JSON.stringify(computerStartToolOutput(fixture.controller.getStatus(started.sessionId)!)),
+      ).not.toContain('Total');
+      // The audit has neither the value nor the excerpt.
+      expect(JSON.stringify([...fixture.audits.values()])).not.toContain('Total');
+      await fixture.controller.stop(started.sessionId);
+      for (const status of fixture.statuses.filter((candidate) => candidate.state === 'stopped'))
+        expect(status.copied).toEqual([]);
+      expect(fixture.controller.getStatus(started.sessionId)?.copied ?? []).toEqual([]);
+    });
+
+    it('keeps the screen-given source name with the value, escaped and without the value', async () => {
+      const store = new ComputerUseArtifactStore({ now: () => 0 });
+      const owner = { taskId: 'task-1', turnId: 'turn-1', policyEpoch: 0, sourceSessionId: 's' };
+      const created = store.create({ ...owner, sourceLabel: 'Bank\u202E.app' }, 'Total 42')!;
+      const described = store.describe([created.artifactId], owner);
+      expect(described).toEqual([{ sourceLabel: 'Bank\u202E.app', sizeClass: 'le_256' }]);
+      expect(JSON.stringify(described)).not.toContain('Total');
+      expect(store.describe([created.artifactId], { ...owner, taskId: 'other' })).toBeNull();
+    });
+
     it('forgets its references when the session ends', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);
@@ -2897,6 +2941,8 @@ describe('ComputerUseController', () => {
           },
         ) => void;
         fixedId?: boolean;
+        /** What the screen called the application the value was read from. */
+        sourceLabel?: string;
       } = {},
     ) {
       const mode = options.mode ?? 'full_access_app';
@@ -2928,6 +2974,7 @@ describe('ComputerUseController', () => {
         turnId: `computer-turn:${started.sessionId}`,
         policyEpoch: 0,
         sourceSessionId: 'session-a',
+        sourceLabel: options.sourceLabel ?? 'Notes',
       };
       const reference = store.create(owner, options.text ?? 'Total 42')!;
       if (options.attach !== false)
@@ -2998,19 +3045,18 @@ describe('ComputerUseController', () => {
       await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
       const card = pending(fixture)!;
       expect(card.actionDigest).toBe(computerUseActionDigest(written));
-      // The card names the artifact, not its value (the excerpt is T15-9).
-      expect(JSON.stringify(card)).not.toContain('Total');
+      // The card names the artifact in its preview; the value is only in its excerpt.
+      expect(JSON.stringify(card, withoutExcerpts)).not.toContain('Total');
       expect(card.preview).toContain(reference.artifactId);
       await answer(fixture, 'allow_once');
       await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
       expect(typedText(fixture)).toBe('Total 42');
       const audit = [...fixture.audits.values()].find((row) => row.actionKind === 'type')!;
       expect(audit).toMatchObject({ state: 'applied', actionDigest: card.actionDigest });
-      const everything = JSON.stringify([
-        [...fixture.audits.values()],
-        fixture.statuses,
-        fixture.approvals,
-      ]);
+      const everything = JSON.stringify(
+        [[...fixture.audits.values()], fixture.statuses, fixture.approvals],
+        withoutExcerpts,
+      );
       expect(everything).not.toContain('Total');
       expect(everything).not.toContain(createHash('sha256').update('Total 42').digest('hex'));
       // Used up by the paste.
@@ -3170,8 +3216,13 @@ describe('ComputerUseController', () => {
       await answer(fixture, 'deny');
       await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('paused'));
       expect(
-        JSON.stringify([fixture.approvals, fixture.statuses, [...fixture.audits.values()]]),
+        JSON.stringify(
+          [fixture.approvals, fixture.statuses, [...fixture.audits.values()]],
+          withoutExcerpts,
+        ),
       ).not.toContain('SECRETVALUE');
+      // And no audit row carries it at all, excerpt or not.
+      expect(JSON.stringify([...fixture.audits.values()])).not.toContain('SECRETVALUE');
       await fixture.controller.dispose();
     });
 
@@ -3215,6 +3266,115 @@ describe('ComputerUseController', () => {
         await fixture.controller.dispose();
       },
     );
+
+    it.each(['none', 'allow'] as const)(
+      'C5-1: asks the approval path about this session, not another one (authorizer: %s)',
+      async (authorizer) => {
+        let me = '';
+        const { fixture } = await pasteSession({
+          planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+          extra: {
+            ...authorizers[authorizer],
+            observationOverrides: {
+              targetSignatures: { 'node-1': 'a'.repeat(64) },
+              targetMetadata: {
+                'node-1': { secure: false, highImpact: true, highImpactNative: true },
+              },
+            },
+            // Open for every session but this one.
+            nativeApproval: { pathFor: (sessionId) => sessionId !== me },
+          },
+          beforeRelease: (_controller, held) => {
+            me = held.sessionId;
+          },
+        });
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('paused'));
+        // Closed for this session: a hard boundary, no card, nothing typed.
+        expect(fixture.approvals).toEqual([]);
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.dispose();
+      },
+    );
+
+    it('T15-7b: the card says where the value came from, where it goes and how large it is, and shows an escaped excerpt', async () => {
+      const { fixture } = await pasteSession({
+        text: 'line one\n\tline two',
+        planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+      });
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      const card = pending(fixture)!;
+      expect(card.transfer).toEqual({
+        sourceLabel: 'Notes',
+        destinationLabel: computerUseDisplayLabel(fixture.currentProfile().label),
+        destinationTarget: 'control:node-1',
+        sizeClass: 'le_256',
+        excerpt: 'line one⏎⇥line two',
+      });
+      // The preview is still only what the planner wrote; the value is in the excerpt alone.
+      expect(card.preview).not.toContain('line one');
+      await answer(fixture, 'deny');
+      await fixture.controller.dispose();
+    });
+
+    it('T15-7b: a name that came from the screen is escaped before it is put on a card', async () => {
+      const { fixture } = await pasteSession({
+        sourceLabel: `Bank${String.fromCodePoint(0x202e)}.app${'x'.repeat(100)}`,
+      });
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      const label = pending(fixture)!.transfer!.sourceLabel;
+      expect(label.startsWith('Bank⟦U+202E⟧.app')).toBe(true);
+      expect(label.endsWith('…')).toBe(true);
+      expect(label).not.toContain(String.fromCodePoint(0x202e));
+      await answer(fixture, 'deny');
+      await fixture.controller.dispose();
+    });
+
+    it.each([
+      ['64 Tag characters', String.fromCodePoint(0xe0041).repeat(64)],
+      ['65 private-use characters', String.fromCodePoint(0xe000).repeat(65)],
+      ['64 zero-width characters', String.fromCodePoint(0x200b).repeat(64)],
+    ])(
+      'L1: a source name of %s still gives a card, not a failed session',
+      async (_name, sourceLabel) => {
+        const { fixture } = await pasteSession({
+          sourceLabel,
+          planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+        });
+        await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+        expect(pending(fixture)!.transfer!.sourceLabel.length).toBeLessThanOrEqual(256);
+        expect(fixture.statuses.some((status) => status.state === 'failed')).toBe(false);
+        await answer(fixture, 'deny');
+        await fixture.controller.dispose();
+      },
+    );
+
+    it('T15-7b: the native approval card carries the same transfer', async () => {
+      const { fixture } = await pasteSession({
+        text: 'SECRETVALUE',
+        planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+        extra: {
+          nativeApproval: {},
+          nativeDispatch: async () => ({
+            result: 'paused',
+            reasonCode: 'native_single_use_approval_unavailable',
+            approvalOffer: {
+              kind: 'approval_required',
+              approvalGeneration: 7,
+              remainingMs: 30_000,
+              effect: 'supervised_action',
+            },
+          }),
+        },
+      });
+      await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+      const mainCard = pending(fixture)!;
+      await answer(fixture, 'allow_once');
+      await vi.waitFor(() => expect(pending(fixture)?.id).not.toBe(mainCard.id));
+      expect(pending(fixture)!.transfer).toEqual(mainCard.transfer);
+      expect(pending(fixture)!.transfer?.excerpt).toBe('SECRETVALUE');
+      await answer(fixture, 'deny');
+      await fixture.controller.dispose();
+    });
 
     it('refuses an artifact of another Turn', async () => {
       const store = new ComputerUseArtifactStore({ now: () => performance.now() });
@@ -4649,7 +4809,7 @@ describe('ComputerUseController', () => {
     await viWait();
     const approval = fixture.approvals.find((value) => value.state === 'pending');
     expect(approval?.targetLabel).not.toContain('\u202e');
-    expect(approval?.targetLabel).toContain('\\u202e');
+    expect(approval?.targetLabel).toContain('⟦U+202E⟧');
     expect(approval?.preview).not.toContain('\n');
     await fixture.controller.resolveApproval({
       approvalId: approval!.id,

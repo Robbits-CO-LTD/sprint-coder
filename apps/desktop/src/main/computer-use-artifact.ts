@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import {
   COMPUTER_USE_ARTIFACT_LIMITS,
+  COMPUTER_USE_EXCERPT_MAX,
+  COMPUTER_USE_TRANSFER_LABEL_MAX,
   type ComputerUseArtifactKind,
   type ComputerUseArtifactSizeClass,
 } from '@sprint-coder/contracts';
@@ -56,6 +58,145 @@ export function normalizeComputerUseArtifactText(raw: string): NormalizedCompute
     .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
       character === '\n' || character === '\t' ? character : '',
     ) as NormalizedComputerUseText;
+}
+
+// What a person is shown of a value (design 4.5, R13). Visible escapes for what would otherwise
+// make the screen say one thing and the paste another.
+const EXCERPT_LIMIT = 256;
+// What is shown is cut to the contract's size, less the cut mark; a label also gets `control:` in
+// front of it for a destination target.
+const EXCERPT_OUTPUT_LIMIT = COMPUTER_USE_EXCERPT_MAX - 1;
+const LABEL_LIMIT = 64;
+const LABEL_OUTPUT_LIMIT = COMPUTER_USE_TRANSFER_LABEL_MAX - 'control:'.length - 1;
+// Not a space, not Default_Ignorable, and still empty on screen: the Braille blank.
+const INVISIBLE_BLANK = /\u2800/u;
+// Default_Ignorable_Code_Point covers the format characters, the variation selectors, the Hangul
+// fillers, the Mongolian free variation selectors, the Khmer inherent vowels and the combining
+// grapheme joiner; several of those are nonspacing marks, so they are checked before marks.
+const DEFAULT_IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
+const ESCAPED_CLASS = /[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Cs}\p{Zl}\p{Zp}]/u;
+const COMBINING = /\p{M}/u;
+// The marks this display draws itself: a value that already contains one must not pass for ours.
+const DISPLAY_SYMBOLS = new Set(['⟦', '⟧', '⏎', '⇥', '⚠']);
+const WORD_CHARACTER = /[\p{L}\p{N}\p{M}\p{Default_Ignorable_Code_Point}\p{Cf}]/u;
+// Scripts whose letters pass for one another (Latin a, Cyrillic а, Greek ο, Armenian օ, Lisu ꓮ, ...). Han,
+// Hiragana and Katakana are absent on purpose: Japanese text beside Latin letters is ordinary.
+const CONFUSABLE_SCRIPTS: readonly RegExp[] = [
+  /\p{Script=Latin}/u,
+  /\p{Script=Cyrillic}/u,
+  /\p{Script=Greek}/u,
+  /\p{Script=Armenian}/u,
+  /\p{Script=Cherokee}/u,
+  /\p{Script=Coptic}/u,
+  /\p{Script=Lisu}/u,
+];
+const MIXED_SCRIPT_MARK = '⚠';
+
+/** `⟦U+XXXX⟧` for one code point. */
+function escapeCodePoint(codePoint: number): string {
+  return `⟦U+${codePoint.toString(16).toUpperCase().padStart(4, '0')}⟧`;
+}
+
+/**
+ * For each character, whether it starts a word that mixes letters of scripts that look alike
+ * (Latin with Cyrillic, Greek, Armenian, ...). A word is a run of letters, digits, marks and
+ * invisible characters, so a zero-width character inside a word does not split it.
+ */
+function mixedScriptWordStarts(characters: readonly string[]): ReadonlySet<number> {
+  const starts = new Set<number>();
+  let index = 0;
+  while (index < characters.length) {
+    if (!WORD_CHARACTER.test(characters[index]!)) {
+      index += 1;
+      continue;
+    }
+    const start = index;
+    const scripts = new Set<number>();
+    while (index < characters.length && WORD_CHARACTER.test(characters[index]!)) {
+      const character = characters[index]!;
+      if (/\p{L}/u.test(character))
+        CONFUSABLE_SCRIPTS.forEach((script, which) => {
+          if (script.test(character)) scripts.add(which);
+        });
+      index += 1;
+    }
+    if (scripts.size >= 2) starts.add(start);
+  }
+  return starts;
+}
+
+/**
+ * Text made safe to look at:
+ *  - LF and CR become `⏎`, TAB becomes `⇥`;
+ *  - control, format (bidirectional marks, zero-width characters, Tag characters), every
+ *    Default_Ignorable character, private-use, unassigned, line and paragraph separators, the
+ *    Braille blank, the surrogates, and combining marks beyond two in a row (or with nothing to
+ *    combine with) become `⟦U+XXXX⟧`;
+ *  - the display's own symbols (`⟦ ⟧ ⏎ ⇥ ⚠`) in the text become `⟦U+XXXX⟧` too, so a value cannot
+ *    draw a line break or an escape of its own;
+ *  - a word that mixes letters of look-alike scripts (design 4.5, homoglyphs) is marked with `⚠`
+ *    in front of it. Full-width forms are already ordinary after NFKC.
+ * Cut to `limit` characters of the source and to `outputLimit` characters of what is shown, with
+ * `…` if cut. The second bound is what the contract's field sizes rest on.
+ */
+function escapeForDisplay(raw: string, limit: number, outputLimit: number): string {
+  const characters = [...raw.normalize('NFKC').replace(/\r\n/gu, '\n')];
+  const shown = characters.slice(0, limit);
+  const wordStarts = mixedScriptWordStarts(shown);
+  let output = '';
+  let cut = characters.length > limit;
+  let marks = 0;
+  let plainBase = false;
+  for (const [index, character] of shown.entries()) {
+    const codePoint = character.codePointAt(0)!;
+    let piece: string;
+    if (character === '\n' || character === '\r') {
+      piece = '⏎';
+      plainBase = false;
+      marks = 0;
+    } else if (character === '\t') {
+      piece = '⇥';
+      plainBase = false;
+      marks = 0;
+    } else if (DISPLAY_SYMBOLS.has(character)) {
+      piece = escapeCodePoint(codePoint);
+      plainBase = false;
+      marks = 0;
+    } else if (
+      ESCAPED_CLASS.test(character) ||
+      DEFAULT_IGNORABLE.test(character) ||
+      INVISIBLE_BLANK.test(character)
+    ) {
+      piece = escapeCodePoint(codePoint);
+      // An invisible character between a letter and its marks does not make the marks visible.
+      marks = 0;
+      plainBase = false;
+    } else if (COMBINING.test(character)) {
+      marks += 1;
+      piece = plainBase && marks <= 2 ? character : escapeCodePoint(codePoint);
+    } else {
+      piece = character;
+      marks = 0;
+      plainBase = true;
+    }
+    if (wordStarts.has(index)) piece = `${MIXED_SCRIPT_MARK}${piece}`;
+    if (output.length + piece.length > outputLimit) {
+      cut = true;
+      break;
+    }
+    output += piece;
+  }
+  return cut ? `${output}…` : output;
+}
+
+/** The excerpt of a value a person is asked about, or shown after a `copy` (256 code points). */
+export function computerUseArtifactExcerpt(text: string): string {
+  return escapeForDisplay(text, EXCERPT_LIMIT, EXCERPT_OUTPUT_LIMIT);
+}
+
+/** An application or window name from the screen, made safe to show next to an excerpt. */
+export function computerUseDisplayLabel(raw: string): string {
+  return escapeForDisplay(raw, LABEL_LIMIT, LABEL_OUTPUT_LIMIT);
 }
 
 /** The size the outer agent is told, in three steps (design §2.2 item 12). */
@@ -160,7 +301,14 @@ export type ComputerUseArtifactReference = Readonly<{
 }>;
 
 type StoredArtifact = Readonly<
-  ComputerUseArtifactBinding & { sourceSessionId: string; text: string; expiresAt: number }
+  ComputerUseArtifactBinding & {
+    sourceSessionId: string;
+    /** Where the value was read from, as the screen named it. Untrusted; for display only. */
+    sourceLabel: string;
+    sizeClass: ComputerUseArtifactSizeClass;
+    text: string;
+    expiresAt: number;
+  }
 >;
 
 /**
@@ -188,7 +336,7 @@ export class ComputerUseArtifactStore {
    * needs no wiring to an epoch-change signal.
    */
   create(
-    owner: ComputerUseArtifactBinding & Readonly<{ sourceSessionId: string }>,
+    owner: ComputerUseArtifactBinding & Readonly<{ sourceSessionId: string; sourceLabel?: string }>,
     raw: string,
   ): ComputerUseArtifactReference | null {
     this.dropExpired();
@@ -210,6 +358,8 @@ export class ComputerUseArtifactStore {
       turnId: owner.turnId,
       policyEpoch: owner.policyEpoch,
       sourceSessionId: owner.sourceSessionId,
+      sourceLabel: owner.sourceLabel ?? '',
+      sizeClass: prepared.sizeClass,
       text: prepared.text,
       expiresAt: this.deps.now() + COMPUTER_USE_ARTIFACT_LIMITS.ttlMs,
     });
@@ -246,6 +396,23 @@ export class ComputerUseArtifactStore {
     binding: ComputerUseArtifactBinding,
   ): readonly string[] | null {
     return this.lookup(artifactIds, binding)?.map((artifact) => artifact.text) ?? null;
+  }
+
+  /**
+   * What a person is told about artifacts, without their text: where each came from (untrusted,
+   * to be escaped before it is shown) and how large it is. Same refusals as `take`. The value is
+   * not in the result, so it can go where a label can.
+   */
+  describe(
+    artifactIds: readonly string[],
+    binding: ComputerUseArtifactBinding,
+  ): readonly Readonly<{ sourceLabel: string; sizeClass: ComputerUseArtifactSizeClass }>[] | null {
+    return (
+      this.lookup(artifactIds, binding)?.map(({ sourceLabel, sizeClass }) => ({
+        sourceLabel,
+        sizeClass,
+      })) ?? null
+    );
   }
 
   private lookup(
