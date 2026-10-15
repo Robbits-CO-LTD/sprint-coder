@@ -6789,6 +6789,22 @@ export const COMPUTER_USE_LIMITS = Object.freeze({
   maxWaitMs: 5_000,
 } as const);
 
+/**
+ * #785 (design C6): what one artifact copied out of an application may be. The byte bound is the
+ * input path's own, so nothing that can be copied is refused when it is pasted; the count and the
+ * lifetime bound how much a Task can hold and for how long (design §7.1).
+ */
+export const COMPUTER_USE_ARTIFACT_LIMITS = Object.freeze({
+  maxBytes: COMPUTER_USE_LIMITS.maxTextActionBytes,
+  maxConcurrentPerTask: 3,
+  ttlMs: 10 * 60_000,
+} as const);
+export const computerUseArtifactKindSchema = z.enum(['text']);
+export type ComputerUseArtifactKind = z.infer<typeof computerUseArtifactKindSchema>;
+/** A size in three steps rather than a count, so the outer agent learns as little as it can. */
+export const computerUseArtifactSizeClassSchema = z.enum(['le_256', 'le_1k', 'le_4k']);
+export type ComputerUseArtifactSizeClass = z.infer<typeof computerUseArtifactSizeClassSchema>;
+
 export type ComputerUseApi = {
   availability(): Promise<ComputerUseAvailability>;
   openPermissionSettings(
