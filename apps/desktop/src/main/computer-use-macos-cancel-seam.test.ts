@@ -1133,6 +1133,41 @@ void OfferSeam() {
   RunPreflight();
   Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_high_impact_user_takeover" &&
     !current->approval.occupied(), "v1_pause_is_not_rewritten_by_a_v2_takeover");
+  // Over a v1 pause for confirmation words only a confirmation is offered: another effect would be
+  // approved for a dispatch that must pause again.
+  for (NativeApprovalEffect other : {NativeApprovalEffect::kSupervisedAction, NativeApprovalEffect::kFileManagerOpen,
+                                     NativeApprovalEffect::kDownloadOpen}) {
+    OfferReset();
+    confirmationOnly();
+    measurement = GoodMeasurement();
+    measurement.effect = other;
+    RunPreflight();
+    Check(lastReceipt.decision == "takeover" && lastReceipt.reason_code == "native_high_impact_user_takeover" &&
+      !current->approval.occupied() && current->approval_generation_counter == 0,
+      "v1_confirmation_pause_is_not_offered_for_another_effect");
+  }
+  // An ordinary control may still be offered another effect (a supervised action).
+  OfferReset();
+  measurement.effect = NativeApprovalEffect::kSupervisedAction;
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && lastReceipt.effect == NativeApprovalEffect::kSupervisedAction,
+    "ordinary_control_is_offered_a_supervised_action");
+  // A receipt that does not leave takes its offer back: the completion failed after the offer was made.
+  OfferReset();
+  Check(Preflight(&input, nullptr) == &promiseValue && queue.size() == 1, "offer_completion_queued");
+  {
+    auto* work = queue.front(); queue.pop_front();
+    work->execute(&input, work->data);
+    Check(current->approval.pending() && current->approval.approval_generation() == 1, "offer_made_before_the_failed_completion");
+    work->complete(&input, 1, work->data);
+  }
+  Check(lastReceipt.decision == "denied" && lastReceipt.reason_code == "native_async_completion_failed" &&
+    !current->approval.occupied() && current->preflight_owner == 0, "failed_completion_takes_the_offer_back");
+  // ...and a completion that succeeds leaves it waiting for the answer the receipt asks for.
+  OfferReset();
+  RunPreflight();
+  Check(lastReceipt.decision == approvalName && current->approval.pending() && current->approval.approval_generation() == 1,
+    "reported_offer_stays_waiting");
   for (int variant = 0; variant < 5; ++variant) {
     OfferReset();
     confirmationOnly();

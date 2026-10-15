@@ -761,7 +761,7 @@ describe('macOS Computer Use asynchronous native boundary', () => {
       expect(source.replace(/NativePreflightKind::kSingleUseApproval/gu, '')).not.toContain(
         'SingleUseApproval',
       );
-      expect(source.match(/NativePreflightKind::kSingleUseApproval/gu)).toHaveLength(3);
+      expect(source.match(/NativePreflightKind::kSingleUseApproval/gu)).toHaveLength(5);
       const dispatchResult = sourceBetween('napi_value DispatchResultValue(', 'bool RiskOutcome(');
       expect(dispatchResult).not.toMatch(/ticket/u);
       // The presented secret is scrubbed right after the reservation and a minted one after use.

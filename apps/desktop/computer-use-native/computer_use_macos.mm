@@ -4316,8 +4316,8 @@ struct NativeTicketKeyInput {
 struct NativeDispatchRequest {
   std::shared_ptr<MacComputerUseSession> session;
   // The effect a person approved for THIS dispatch. kInvalid for every ordinary preflight and
-  // dispatch; it relaxes only the confirmation words of RiskOutcome and nothing else. Nothing sets
-  // it yet: the one place that will is the approved dispatch, after the execution ticket is consumed.
+  // dispatch; it relaxes only the confirmation words of RiskOutcome and nothing else. The one place
+  // that sets it is the approved dispatch, right after the execution ticket was consumed.
   sprint_coder::computer_use::NativeApprovalEffect approved_effect =
       sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
   std::string request_id;
@@ -5660,9 +5660,9 @@ NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest& reque
 }
 
 // BEGIN approval measurement capture (classifier v2 C4-2a)
-// What native measures *now* for an approval, on the serial lane. Nothing calls it yet: the addon's
-// own MeasureNativeApproval is still the empty measurement, so nothing is approvable and no
-// production path changes. The change that wires it (C4-2b) calls it from the approval worker.
+// What native measures *now* for an approval, on the serial lane. The addon's MeasureNativeApproval
+// calls it for a session bound to route v2 only, from the approval workers and from the preflight's
+// approval step; the build attests classifier 1, so nothing it measures is eligible in production.
 //
 // It is the capture the shadow takes (CaptureShadowTargetFacts), plus the target's frame and the
 // session's identity, handed to the portable MeasureApproval. The caller holds the serial lane
@@ -6383,6 +6383,9 @@ struct AsyncNativePreflightWork {
   NativeDispatchRequest request;
   NativePreflightReceipt receipt;
   std::uint64_t owner = 0;
+  // The approval generation of the offer this preflight made (0: none). The receipt that finally
+  // leaves must carry it; if it does not, the waiting intent is taken back.
+  std::uint64_t offered_generation = 0;
 };
 
 // Releases the preflight slot only when this preflight still owns it, and drops a ticket only if
@@ -6394,6 +6397,14 @@ void ReleaseNativePreflightOwner(const NativeDispatchRequest& request, std::uint
   std::lock_guard<std::mutex> state_lock(request.session->state_mutex);
   if (request.session->preflight_owner == owner) request.session->preflight_owner = 0;
   if (drop_ticket) request.session->ordinary_ticket.InvalidateIfGeneration(owner);
+}
+
+// Takes back the waiting intent of an offer whose receipt did not leave: the intent is the person's
+// to answer only through the receipt that names its generation. Ends exactly that generation.
+void DiscardUnreportedOffer(const NativeDispatchRequest& request, std::uint64_t generation) {
+  if (request.session == nullptr || generation == 0) return;
+  std::lock_guard<std::mutex> state_lock(request.session->state_mutex);
+  request.session->approval.Discard(generation);
 }
 
 // Issues the ticket under the state lock, so the TTL starts here and the issue conditions are
@@ -6547,6 +6558,10 @@ void ExecuteNativePreflight(napi_env env, void* data) {
         work->receipt = ApplyApprovalOffer(work->request, work->owner, std::move(work->receipt), trace);
       if (work->receipt.decision == "ordinary")
         work->receipt = IssueOrdinaryTicket(work->request, work->owner);
+      else if (work->receipt.decision ==
+               sprint_coder::computer_use::NativePreflightDecisionName(
+                   sprint_coder::computer_use::NativePreflightKind::kSingleUseApproval))
+        work->offered_generation = work->receipt.approval_generation;
     } catch (...) {
       // Preflight performs no effect, so an escaped exception is a plain denial and never an
       // unknown effect.
@@ -6567,6 +6582,15 @@ void CompleteNativePreflight(napi_env env, napi_status status, void* data) {
     work->receipt = MakeDeniedReceipt("rejected", "native_async_completion_failed");
   }
   SealNativePreflightReceipt(&work->receipt);
+  // An offer that does not leave in this receipt (the completion failed, or the receipt was replaced
+  // by a denial) is taken back, like the other failed approval paths: nothing waits for an answer
+  // nobody was asked for.
+  if (work->offered_generation != 0 &&
+      !(work->receipt.decision ==
+            sprint_coder::computer_use::NativePreflightDecisionName(
+                sprint_coder::computer_use::NativePreflightKind::kSingleUseApproval) &&
+        work->receipt.approval_generation == work->offered_generation))
+    DiscardUnreportedOffer(work->request, work->offered_generation);
   napi_value result = PreflightReceiptValue(env, work->request, work->receipt);
   napi_resolve_deferred(env, work->deferred, result);
   napi_delete_async_work(env, work->work);

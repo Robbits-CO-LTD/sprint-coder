@@ -141,6 +141,36 @@ describe('preflight approval offer (classifier v2, C4-2c-2)', () => {
     );
   });
 
+  it('takes an offer back when its receipt does not leave (a failed or replaced completion)', () => {
+    // The worker remembers the generation of the offer it made, only for an offer.
+    const worker = code(execute);
+    expect(worker).toContain('work->offered_generation = work->receipt.approval_generation;');
+    expect(worker.indexOf('IssueOrdinaryTicket(')).toBeLessThan(
+      worker.indexOf('work->offered_generation ='),
+    );
+    const complete = between('void CompleteNativePreflight(', 'napi_value Preflight(');
+    const body = code(complete);
+    // After the receipt is sealed (a closed offer stays, anything else replaced it), before it leaves.
+    const seal = body.indexOf('SealNativePreflightReceipt(&work->receipt);');
+    const discard = body.indexOf(
+      'DiscardUnreportedOffer(work->request, work->offered_generation);',
+    );
+    const value = body.indexOf('PreflightReceiptValue(env, work->request, work->receipt)');
+    expect(seal).toBeGreaterThan(0);
+    expect(discard).toBeGreaterThan(seal);
+    expect(value).toBeGreaterThan(discard);
+    expect(body).toContain('work->receipt.approval_generation == work->offered_generation');
+    // It ends exactly that generation, under the state lock.
+    const discarder = between(
+      'void DiscardUnreportedOffer(',
+      'NativePreflightReceipt IssueOrdinaryTicket(',
+    );
+    expect(discarder).toContain(
+      'std::lock_guard<std::mutex> state_lock(request.session->state_mutex);',
+    );
+    expect(discarder).toContain('request.session->approval.Discard(generation);');
+  });
+
   it('attests nothing: the measurement still names classifier 1, so a production session is offered nothing', () => {
     const measure = between(
       'MeasureNativeApproval(const NativeDispatchRequest& request) {',

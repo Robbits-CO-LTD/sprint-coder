@@ -115,7 +115,8 @@ struct NativeApprovalOutcome {
 
 class NativeApprovalFlow {
 public:
-  // Begins the waiting intent. Not reachable from the production addon.
+  // Begins the waiting intent. The addon calls it from one place, the preflight's approval offer
+  // (route v2 only); a build that attests classifier 1 measures nothing eligible, so production never does.
   [[nodiscard]] bool Offer(std::string_view intent_token,
                            NativeApprovalIntentBinding binding,
                            std::uint64_t now_ns, std::uint64_t ttl_ns) {

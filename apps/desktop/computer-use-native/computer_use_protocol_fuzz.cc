@@ -7123,17 +7123,25 @@ bool CheckNativePreflightV2() {
       return false;
     if (!Check(PreflightMayBeMeasured(facts) == (facts.ordinary || only_confirmation), "v2-may-be-measured"))
       return false;
-    for (unsigned flags = 0; flags < 4; ++flags) {
+    for (unsigned flags = 0; flags < 16; ++flags) {
       NativeApprovalMeasurement measured;
       measured.eligible = (flags & 1u) != 0;
       measured.takeover = (flags & 2u) != 0;
+      const NativeApprovalEffect effects[] = {
+          NativeApprovalEffect::kHighImpactConfirmation, NativeApprovalEffect::kSupervisedAction,
+          NativeApprovalEffect::kFileManagerOpen, NativeApprovalEffect::kDownloadOpen};
+      measured.effect = effects[flags >> 2];
       const PreflightV2Action action = DecidePreflightV2(facts, measured);
       PreflightV2Action expected = PreflightV2Action::kKeepV1;
       if (facts.ordinary || only_confirmation) {
         if (measured.takeover)
           expected = facts.ordinary ? PreflightV2Action::kTakeover : PreflightV2Action::kKeepV1;
         else if (measured.eligible)
-          expected = PreflightV2Action::kOffer;
+          // Over a v1 pause for confirmation words only a confirmation is offered: the dispatch
+          // lets nothing else through, so any other approval would be spent for nothing.
+          expected = (facts.ordinary || measured.effect == NativeApprovalEffect::kHighImpactConfirmation)
+                         ? PreflightV2Action::kOffer
+                         : PreflightV2Action::kKeepV1;
       }
       if (!Check(action == expected, "v2-decision-table")) return false;
       if (consistent && action == PreflightV2Action::kOffer) ++offers;

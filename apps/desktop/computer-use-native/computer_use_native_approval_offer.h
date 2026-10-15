@@ -199,7 +199,14 @@ struct V1PreflightFacts {
   // A measurement that needs a person turns an ordinary control into a pause; where v1 already
   // paused there is nothing to add.
   if (measured.takeover) return facts.ordinary ? PreflightV2Action::kTakeover : PreflightV2Action::kKeepV1;
-  if (measured.eligible) return PreflightV2Action::kOffer;
+  if (measured.eligible) {
+    // Where v1 paused for confirmation words, an offer can only be for a confirmation: the dispatch
+    // lets nothing else through those words, so an approval of another effect (a supervised action, a
+    // file open) would be spent on a dispatch that must pause again. v1's pause stands.
+    if (!facts.ordinary && measured.effect != NativeApprovalEffect::kHighImpactConfirmation)
+      return PreflightV2Action::kKeepV1;
+    return PreflightV2Action::kOffer;
+  }
   return PreflightV2Action::kKeepV1;
 }
 
