@@ -104,34 +104,47 @@ namespace interlock_detail {
          IsPlainExtension(extension) && InSet(extension, kExecutableExtensions);
 }
 
-// Whether the control the action lands on is a control (a button, a link, a menu item, a check box:
-// something that is pressed) rather than an item of a list or a text (a row, a cell, an outline item,
-// a list item, static text: something that is named). The control is the target up to the nearest
-// actionable ancestor, the same range the core reads its words from, so the label inside a button
-// is inside the control. This is decided by the ROLE, not by whether a file is attached: a button can
-// carry an AXURL or a file name and is still a button, and a file's row is still a row. The macOS
-// roles (AXButton, AXMenuItem, ...) and the Windows control types (Button, MenuItem, ...) both
-// contain these words once lowercased.
-[[nodiscard]] inline bool ControlInSpan(const EffectFacts &facts) {
+// Whether a role names a passive item of a list or a text (a row, a cell, an outline row, a list
+// item, a tree item, a data item, static text). An ALLOW LIST, matched whole after lowercasing and
+// dropping the macOS "ax" prefix, so the Windows control types (ListItem, DataItem, TreeItem, Text)
+// and the macOS roles (AXRow, AXOutlineRow, AXStaticText, ...) name the same things.
+[[nodiscard]] inline bool RoleIsPassiveItem(std::string_view role) {
   using namespace effect_detail;
-  static constexpr std::string_view kControls[] = {
-      "button",   "link",       "menuitem", "checkbox",  "radiobutton", "switch",
-      "popupbutton", "menubutton", "hyperlink", "tabitem", "splitbutton", "toggle"};
-  const std::size_t span = ActionableSpan(facts);
-  for (std::size_t index = 0; index < span && index < facts.chain.size(); ++index) {
-    const std::string role = NormalizeForMatch(facts.chain[index].role) + " " +
-                             NormalizeForMatch(facts.chain[index].subrole);
-    for (const std::string_view name : kControls)
-      if (role.find(name) != std::string::npos) return true;
-  }
+  std::string name = NormalizeForMatch(role);
+  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
+  static constexpr std::string_view kItems[] = {"row",      "cell",     "outlinerow", "listitem",
+                                                "treeitem", "dataitem", "statictext", "text"};
+  for (const std::string_view item : kItems)
+    if (name == item) return true;
   return false;
+}
+
+// Whether what the action lands on is KNOWN to be a passive item: every node of the target up to the
+// nearest actionable ancestor (the range the core reads its words from, so the label inside a
+// button is inside the control) has an allow-listed role, and no subrole other than an allow-listed
+// one. Everything else is treated as a control: an unknown or custom role, a control nobody listed
+// (AXGroup that a page makes clickable, AXComboBox, AXIncrementor, AXDisclosureTriangle,
+// AXMenuBarItem, a split button, a Custom or Spinner), and a role that only CONTAINS an item's name
+// ("axrowcustom", "axtextarea"). This fails closed on purpose: a role this list does not know is
+// refused, not excused. The decision is by ROLE, never by whether a file is attached: a button can
+// carry an AXURL or a file name and is still a button, and a file's row is still a row.
+[[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
+  using namespace effect_detail;
+  const std::size_t span = ActionableSpan(facts);
+  if (span == 0 || span > facts.chain.size()) return false;
+  for (std::size_t index = 0; index < span; ++index) {
+    const NodeFacts &node = facts.chain[index];
+    if (!RoleIsPassiveItem(node.role)) return false;
+    if (!NormalizeForMatch(node.subrole).empty() && !RoleIsPassiveItem(node.subrole)) return false;
+  }
+  return true;
 }
 
 // An installer control activated: the core's label rule (E4), independent of any extension that
 // happens to be known for the item the control carries.
 [[nodiscard]] inline bool InstallerControlActivated(const EffectFacts &facts) {
   using namespace effect_detail;
-  return ControlInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) &&
+  return !ItemInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) &&
          ActionableContains(facts, kInstallerTerms);
 }
 
@@ -161,9 +174,9 @@ namespace interlock_detail {
           !InstallerControlActivated(facts))
         return {};
       // Refused for the words of the control, not for an extension: only a control has those words
-      // in the sense that matters. A row or a text named like an installer ("install.sh" in a file
-      // tree) is a file, judged by its extension.
-      if (!RefusedByExtension(facts) && !ControlInSpan(facts)) return {};
+      // in the sense that matters. A row or a text that is KNOWN to be one ("install.sh" in a file
+      // tree) is a file, judged by its extension; a role nobody listed is a control.
+      if (!RefusedByExtension(facts) && ItemInSpan(facts)) return {};
       return Refusal(InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger,
                      decision.effect_class);
     case EffectClass::kE2DownloadOpen:

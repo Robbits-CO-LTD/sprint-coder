@@ -67,12 +67,17 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     );
     // ...except an installer control, which is a trigger wherever it is, extension or not.
     expect(squashed).toContain(
-      'return ControlInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) && ActionableContains(facts, kInstallerTerms);',
+      'return !ItemInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) && ActionableContains(facts, kInstallerTerms);',
     );
     // The approval that is closed refuses; the secure and credential classes are not this map's.
-    // A control is told from an item by its role, never by whether a file is attached to it.
+    // A control is told from an item by its role, never by whether a file is attached to it, and
+    // only an allow list of passive items, matched whole, is an exception (fail closed).
+    expect(squashed).toContain('if (!RefusedByExtension(facts) && ItemInSpan(facts)) return {};');
+    expect(squashed).toContain('if (name == item) return true;');
+    expect(header).not.toContain('ControlInSpan');
+    expect(header).not.toMatch(/name\.find\(item\)/u);
     expect(squashed).toContain(
-      'if (!RefusedByExtension(facts) && !ControlInSpan(facts)) return {};',
+      'static constexpr std::string_view kItems[] = {"row", "cell", "outlinerow", "listitem", "treeitem", "dataitem", "statictext", "text"};',
     );
     expect(header).not.toContain('target_is_file_item');
     expect(squashed).toContain('if (decision.reason == DecisionReason::kApprovalNotEnabled)');

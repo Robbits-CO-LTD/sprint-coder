@@ -3576,7 +3576,7 @@ bool CheckNativeInterlockMap() {
     }
     // A row, a cell or a text that is named like an installer is a file in a list, judged by its
     // extension and, inside an application, not refused: with or without an extension known.
-    for (const char *role : {"axrow", "axcell", "axstatictext", "axoutline", "listitem"}) {
+    for (const char *role : {"axrow", "axcell", "axoutlinerow", "axstatictext", "listitem", "treeitem", "dataitem", "text"}) {
       for (const bool known : {true, false}) {
         EffectFacts facts = EffBase();
         facts.action = ActionKind::kInvoke;
@@ -3608,6 +3608,65 @@ bool CheckNativeInterlockMap() {
       list_item.item_name = "C:\\Apps\\install.sh";
       if (!none(BuildWindowsShadowFacts(list_item, UiaRequest("invoke")).facts,
                 "interlock-windows-installer-named-list-item")) return false;
+    }
+    // Fail closed: a role that is not known to be a passive item is a control. Unknown and custom
+    // roles, and the controls that were never listed, are refused when the words or the extension say
+    // install, and the allow list is matched whole, not by a word inside the role.
+    for (const char *role : {"axcustomwidget", "AXDisclosureTriangle", "axcombobox", "axrowcustom", "axtextarea",
+                             "axcellrenderer", "axsplitbutton", "axoutline", "AXGroup", "AXMenuBarItem",
+                             "AXIncrementor", "AXButton", "AXLink", "AXMenuItem", "AXCheckBox",
+                             "AXPopUpButton", "AXRadioButton", "AXTabGroup"}) {
+      EffectFacts by_label = EffBase();
+      by_label.action = ActionKind::kClick;
+      by_label.chain = {{role, "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(by_label, "interlock-unknown-role-install-label")) return false;
+      EffectFacts by_extension = by_label;
+      by_extension.extension_known = true;
+      by_extension.extension = "pkg";
+      if (!trigger_takeover(by_extension, "interlock-unknown-role-install-label-with-an-extension")) return false;
+    }
+    {
+      // The Windows control types that are not in the allow list.
+      ShadowUiaCapture split = UiaBase();
+      split.window_class = "SomeAppClass";
+      split.process_path = "C:\\Apps\\app.exe";
+      split.chain = {UiaNode("SplitButton", "Install"), UiaNode("Window", "App")};
+      if (!trigger_takeover(BuildWindowsShadowFacts(split, UiaRequest("click")).facts,
+                            "interlock-windows-split-button-install")) return false;
+      for (const char *control_type : {"Custom", "ComboBox", "Spinner", "Button", "Hyperlink", "MenuItem",
+                                       "CheckBox", "Group", "Pane", "TabItem"}) {
+        ShadowUiaCapture custom = split;
+        custom.chain = {UiaNode(control_type, "Install"), UiaNode("Window", "App")};
+        if (!trigger_takeover(BuildWindowsShadowFacts(custom, UiaRequest("click")).facts,
+                              "interlock-windows-control-type-install")) return false;
+      }
+    }
+    {
+      // A role in the allow list with a subrole that says button is not a passive item.
+      EffectFacts mixed = EffBase();
+      mixed.action = ActionKind::kClick;
+      mixed.chain = {{"axrow", "axbutton", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(mixed, "interlock-item-role-with-a-control-subrole")) return false;
+    }
+    {
+      // A toggle aimed at a file with an executable extension, in an application, by a control that is
+      // not an installer, is not a launch (the extension rule covers the toggle, and the editor
+      // excuse applies to it like to any other opening in an application).
+      EffectFacts toggle_control = EffBase();
+      toggle_control.action = ActionKind::kToggle;
+      toggle_control.target_is_file_item = true;
+      toggle_control.extension_known = true;
+      toggle_control.extension = "sh";
+      toggle_control.chain = {{"axcheckbox", "", "keep"}, {"axwindow", "", "Editor"}};
+      if (!none(toggle_control, "interlock-toggle-control-in-an-app-is-not-a-launch")) return false;
+      // A download row whose extension is not known stays with v1 (a person decides): no verdict.
+      EffectFacts dmg = EffBase();
+      dmg.surface = SurfaceKind::kDownloadPanel;
+      dmg.action = ActionKind::kDoubleClick;
+      dmg.target_is_file_item = true;
+      dmg.extension_known = false;
+      dmg.chain = {{"axrow", "", "Installer.dmg"}, {"axwindow", "", "Downloads"}};
+      if (!none(dmg, "interlock-download-row-with-an-unknown-extension-is-no-verdict")) return false;
     }
     // The installer rule is the core's: the control must be activated, and its words must be readable.
     EffectFacts typed = EffBase();
