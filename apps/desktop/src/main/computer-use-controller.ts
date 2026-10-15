@@ -798,6 +798,15 @@ export class ComputerUseController {
     { taskId: string; references: ComputerUseArtifactReference[] }
   >();
   private readonly artifacts: ComputerUseArtifactStore;
+  /**
+   * A counter per Task, moved when the Task is closed or its policy epoch changes. `copy` reads
+   * the node first and stores afterwards; if the counter moved in between, the Task ended (or its
+   * permissions changed) while the native was reading, and the value must not be put into the
+   * store of a Task that no longer holds artifacts. `taskClosed` does not stop the Task's
+   * sessions, and `assertSessionLive` does not look at an archived Task, so this check is what
+   * keeps "a closed Task keeps nothing" true for a read that finishes late.
+   */
+  private readonly artifactGenerations = new Map<string, number>();
   private readonly startingSessions = new Map<
     string,
     {
@@ -3529,6 +3538,7 @@ export class ComputerUseController {
   }
 
   private forgetCopiedArtifactReferences(taskId: string): void {
+    this.artifactGenerations.set(taskId, (this.artifactGenerations.get(taskId) ?? 0) + 1);
     for (const [sessionId, kept] of this.copiedArtifacts)
       if (kept.taskId === taskId) this.copiedArtifacts.delete(sessionId);
   }
@@ -4652,6 +4662,7 @@ export class ComputerUseController {
       return refuse();
     const targetSignature = record.observation?.targetSignatures?.[action.targetId];
     if (targetSignature === undefined || targetSignature.length === 0) return refuse();
+    const generation = this.artifactGenerations.get(record.status.taskId) ?? 0;
     let value: ComputerUseNativeNodeValue;
     try {
       value = await native.readNodeValue({
@@ -4670,6 +4681,8 @@ export class ComputerUseController {
     signal?.throwIfAborted();
     this.assertSessionLive(record);
     if (!this.observationIsFresh(record) || !value.ok) return refuse();
+    // The Task was closed or its policy epoch changed while the native was reading: drop the value.
+    if ((this.artifactGenerations.get(record.status.taskId) ?? 0) !== generation) return refuse();
     const reference = this.artifacts.create(
       {
         taskId: record.status.taskId,

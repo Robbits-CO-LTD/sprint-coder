@@ -2507,6 +2507,44 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    it.each(['taskClosed', 'policyEpochChanged'] as const)(
+      'keeps nothing when the Task ends (%s) while the native is still reading',
+      async (end) => {
+        const { store, owners } = spiedStore();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const fixture = createFixture({
+          observationOverrides: withNode,
+          artifactStore: store,
+          artifactRead: {
+            read: async () => {
+              await gate;
+              return { ok: true, text: 'Total 42' };
+            },
+          },
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        const acting = fixture.controller.act(started.sessionId, copy, 'copy-1');
+        await vi.waitFor(() => expect(fixture.readInputs).toHaveLength(1));
+        fixture.controller[end]('task-1');
+        release();
+        // The value arrived after the Task ended: it is dropped before it reaches the store.
+        const outcome = await acting.then(
+          (result) => result,
+          () => null,
+        );
+        if (outcome !== null)
+          expect(outcome).toMatchObject({
+            result: 'rejected',
+            reasonCode: 'artifact_copy_refused',
+          });
+        expect(owners).toEqual([]);
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+        await fixture.controller.stop(started.sessionId).catch(() => undefined);
+      },
+    );
+
     it('forgets its references when the session ends', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);
