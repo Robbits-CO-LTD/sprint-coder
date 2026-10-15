@@ -20,6 +20,7 @@ import {
   ProviderComputerUsePlanner,
   type ComputerUsePlannerObservation,
 } from './computer-use-planner';
+import { computerUseKeyedDigest } from './computer-use-action';
 
 const marker = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -257,9 +258,14 @@ describe('Computer Use provider preflight', () => {
     expect(snapshot.events.at(-1)).toMatchObject({
       type: 'parsed',
       actionClass: 'type',
-      responseDigest: computerUseCaptureDigest(response),
+      // Keyed per process (#786): the reply is the typed action, so an unkeyed digest of it would
+      // hand the text back to anyone who guesses.
+      responseDigest: computerUseKeyedDigest('provider-response', response),
       responseBytes: Buffer.byteLength(response),
     });
+    expect(Reflect.get(snapshot.events.at(-1)!, 'responseDigest')).not.toBe(
+      computerUseCaptureDigest(response),
+    );
     const serialized = JSON.stringify(snapshot);
     for (const body of [
       'PRIVATE_FIXTURE_TEXT',

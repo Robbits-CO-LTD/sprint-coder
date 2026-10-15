@@ -133,7 +133,7 @@ ADR 本体に節を足さず、この別ファイルにした。理由は 3 つ�
 
 - 保持先は Main のメモリだけ。SQLite、監査、診断ログ、クラッシュレポート、Renderer の永続ストアに本文を置かない。
 - **監査に内容のハッシュを残さない**。初版は `artifactId / 文字数 / sha256` を残すとしていたが、塩の無い sha256 は 6 桁の OTP や短い ID なら総当たりで戻せる。監査行は再起動後も残るので、R6 の「再起動で消える」に反する。監査に残すのは `artifactId`（ランダム値）と大きさのバケットだけにする。プロセスごとの使い捨て鍵の HMAC も検討したが、プロセス内の突き合わせは `artifactId` で足りるので、ハッシュ自体を持たない方を選んだ。
-- `artifactRef` を使う `type` / `set_text` の監査 digest は、**差し込む前の planner のアクション**（`artifactRef` を含み、`text` を含まない形）から作る。差し込んだ後の文字列を `computerUseActionDigest` に通さない（通すと、既存の `{byteLength, sha256}` で内容のハッシュが監査に入る、`computer-use-action.ts:31-39`）。
+- `artifactRef` を使う `type` / `set_text` の監査 digest は、**差し込む前の planner のアクション**（`artifactRef` を含み、`text` を含まない形）から作る。差し込んだ後の文字列を `computerUseActionDigest` に通さない（通すと、プロセス鍵の HMAC（ドメイン分離つき、#786 で導入）の対象が差し込み後の文字列になる。鍵付きなので総当たりでは戻せないが、監査に残す値は内容に依存させない方針なので通さない、`computer-use-action.ts` の `computerUseActionDigest`）。
 - 束縛: `taskId`、`turnId`、`policyEpoch`、作成元セッション。ほかの Task からは存在しないものとして扱う（`resolveComputerTargetToken` と同じく、理由を区別して返さない、`computer-use-target-model.ts:156-165`）。
 - 寿命: TTL 10 分［推測: token の TTL（`COMPUTER_USE_WINDOW_CANDIDATE_TTL_MS`）より長く、貼り付けの往復に足りる値。実機で見直す］。Task の終了、policy epoch の変更、プロセス終了で消える。再起動をまたがない。
 - `artifactId` は推測できないランダム値（token と同じ作り）。

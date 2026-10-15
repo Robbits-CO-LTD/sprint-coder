@@ -68,6 +68,7 @@ import {
   TurnActiveError,
   validateCanvasCamera,
   validateCanvasNodePositions,
+  __persistenceRecoveryTestables,
 } from './persistence';
 import { computerAppGrantIdentityFrom } from './computer-use-grant-identity';
 import { loadNativeSafeFs, nativeSafeFsAddonPath, NativeSafeFsError } from './native-safe-fs';
@@ -10389,6 +10390,7 @@ if (runsWithElectronAbi)
         { version: 98 },
         { version: 99 },
         { version: 100 },
+        { version: 101 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12074,6 +12076,260 @@ if (runsWithElectronAbi)
       };
       return { fixture, task, base };
     }
+
+    it('leaves no byte of an old digest anywhere in the scrubbed migration backup (#786)', () => {
+      const { fixture, base } = seed();
+      // Enough rows that an UPDATE alone leaves some old values in freed pages (measured: 39 of
+      // 300 survive without VACUUM, even with secure_delete).
+      const old = Array.from({ length: 300 }, (_, index) =>
+        createHash('sha256').update(`typed-before-786-${index}`).digest('hex'),
+      );
+      for (const [index, actionDigest] of old.entries())
+        fixture.persistence.recordComputerActionAudit({
+          ...base,
+          nativeRequestId: bindingDigest(`bulk-${index}`),
+          actionKind: 'type',
+          actionDigest,
+        });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      new SqlitePersistenceClient(fixture.path).close();
+      const backup = readFileSync(`${fixture.path}.pre-migration.bak`).toString('latin1');
+      expect(old.filter((digest) => backup.includes(digest))).toEqual([]);
+      // Still a whole backup: every row is in it.
+      const restored = new Database(`${fixture.path}.pre-migration.bak`, { readonly: true });
+      try {
+        expect(restored.prepare('SELECT count(*) AS n FROM computer_action_audits').get()).toEqual({
+          n: 300,
+        });
+      } finally {
+        restored.close();
+      }
+    });
+
+    /** A database from before v101 with one typed row, reopened so v101 applies. */
+    function reopenBeforeV101(): { path: string; oldDigest: string } {
+      const { fixture, base } = seed();
+      const oldDigest = createHash('sha256').update('old-digest-before-786').digest('hex');
+      fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('typed-before-786-failure'),
+        actionKind: 'type',
+        actionDigest: oldDigest,
+      });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      return { path: fixture.path, oldDigest };
+    }
+
+    it('removes, never replaces, a migration backup it cannot scrub, and still starts (#786)', () => {
+      const { path } = reopenBeforeV101();
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting((step) => {
+        if (step === 'scrub') throw new Error('injected: no space left on device');
+      });
+      try {
+        // Starting succeeds: a backup that cannot be scrubbed is not a reason to refuse.
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      // Not swapped for a copy of the migrated database (that would no longer be a pre-migration
+      // snapshot), and not kept with the old digests: gone.
+      expect(existsSync(`${path}.pre-migration.bak`)).toBe(false);
+      expect(existsSync(`${path}.pre-migration.bak.previous`)).toBe(false);
+      expect(existsSync(`${path}.pre-migration.bak.digest-scrub-pending`)).toBe(false);
+      const migrated = new Database(path, { readonly: true });
+      try {
+        expect(
+          migrated.prepare('SELECT version FROM schema_migrations WHERE version = 101').get(),
+        ).toEqual({ version: 101 });
+      } finally {
+        migrated.close();
+      }
+    });
+
+    it('retries the backup scrub on the next start when it could neither scrub nor remove it (#786)', () => {
+      const { path, oldDigest } = reopenBeforeV101();
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting(() => {
+        throw new Error('injected: backup locked');
+      });
+      try {
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      const backupPath = `${path}.pre-migration.bak`;
+      // Left as it was, with a marker saying the work is not done.
+      expect(readFileSync(backupPath).toString('latin1')).toContain(oldDigest);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(true);
+      // The next start has no pending migration, and still finishes the job.
+      new SqlitePersistenceClient(path).close();
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(false);
+      expect(readFileSync(backupPath).toString('latin1')).not.toContain(oldDigest);
+    });
+
+    it.each([
+      ['OFF', 0],
+      ['ON', 1],
+      ['FAST', 2],
+    ] as const)('puts secure_delete back to %s after v101 (#786)', (name, mode) => {
+      const db = new Database(':memory:');
+      try {
+        db.pragma(`secure_delete = ${name}`);
+        const read = db.pragma('secure_delete', { simple: true });
+        expect(read).toBe(mode);
+        db.pragma('secure_delete = ON');
+        db.pragma(__persistenceRecoveryTestables.secureDeleteAssignment(mode));
+        // Reading 2 and assigning it back as a number would have left it ON.
+        expect(db.pragma('secure_delete', { simple: true })).toBe(mode);
+      } finally {
+        db.close();
+      }
+    });
+
+    it('removes a previous backup left by a crash between the two renames (#786)', () => {
+      const { path, oldDigest } = reopenBeforeV101();
+      const backupPath = `${path}.pre-migration.bak`;
+      // First start: neither scrub nor removal works, so the unscrubbed backup and the marker stay.
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting(() => {
+        throw new Error('injected: backup locked');
+      });
+      try {
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      // installMigrationBackup renamed backup -> .previous and died before tmp -> backup: only the
+      // unscrubbed .previous remains.
+      renameSync(backupPath, `${backupPath}.previous`);
+      expect(readFileSync(`${backupPath}.previous`).toString('latin1')).toContain(oldDigest);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(true);
+      new SqlitePersistenceClient(path).close();
+      expect(existsSync(`${backupPath}.previous`)).toBe(false);
+      expect(existsSync(backupPath)).toBe(false);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(false);
+    });
+
+    it('leaves no old digest in the live database file or its write-ahead log after v101 (#786)', () => {
+      const { fixture, base } = seed();
+      const old = Array.from({ length: 300 }, (_, index) =>
+        createHash('sha256').update(`live-before-786-${index}`).digest('hex'),
+      );
+      for (const [index, actionDigest] of old.entries())
+        fixture.persistence.recordComputerActionAudit({
+          ...base,
+          nativeRequestId: bindingDigest(`live-${index}`),
+          actionKind: 'type',
+          actionDigest,
+        });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      // What a database that has been in use looks like: rows rewritten several times (each leaves
+      // the old row image in the page's unused space) and some rows removed (cells freed).
+      for (let round = 0; round < 3; round += 1)
+        raw.exec(
+          `UPDATE computer_action_audits SET reason_code = 'round-${round}', updated_at = 'u${round}';`,
+        );
+      raw.exec('DELETE FROM computer_action_audits WHERE rowid % 7 = 0;');
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      // Read the files while the migrated client is still open: closing it would checkpoint and
+      // hide what the migration itself left behind.
+      const client = new SqlitePersistenceClient(fixture.path);
+      try {
+        for (const file of [fixture.path, `${fixture.path}-wal`]) {
+          const bytes = existsSync(file) ? readFileSync(file).toString('latin1') : '';
+          expect(
+            old.filter((digest) => bytes.includes(digest)),
+            file,
+          ).toEqual([]);
+        }
+      } finally {
+        client.close();
+      }
+    });
+
+    it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
+      const { fixture, base } = seed();
+      // What the pre-#786 code wrote for a typed six-digit code: guessable in at most 10^6 tries.
+      const unkeyed = createHash('sha256').update('{"text":"482913","type":"type"}').digest('hex');
+      const typed = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('typed-before-786'),
+        actionKind: 'type',
+        actionDigest: unkeyed,
+      });
+      const clicked = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('clicked-before-786'),
+      });
+      fixture.persistence.close();
+      // A database from before v101: the migration record removed, the old digests in place.
+      const old = new Database(fixture.path);
+      old.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      old.close();
+      const migrated = new SqlitePersistenceClient(fixture.path);
+      try {
+        const rows = migrated.listComputerActionAudits(base.taskId, 10);
+        const typedRow = rows.find((row) => row.id === typed.id)!;
+        const clickedRow = rows.find((row) => row.id === clicked.id)!;
+        for (const [before, after] of [
+          [typed, typedRow],
+          [clicked, clickedRow],
+        ] as const) {
+          expect(after.actionDigest).toMatch(/^[0-9a-f]{64}$/u);
+          expect(after.actionDigest).not.toBe(before.actionDigest);
+          // Only the digest moved. (Reopening also settles a pending row as an application restart,
+          // which is the existing startup rule, not this migration.)
+          const facts = ({
+            actionDigest: _digest,
+            state: _state,
+            reasonCode: _reason,
+            updatedAt: _updated,
+            ...rest
+          }: typeof after) => rest;
+          expect(facts(after)).toEqual(facts(before));
+        }
+        expect(typedRow.actionDigest).not.toBe(clickedRow.actionDigest);
+      } finally {
+        migrated.close();
+      }
+      const verified = new Database(fixture.path);
+      try {
+        expect(
+          verified.prepare('SELECT checksum FROM schema_migrations WHERE version = 101').get(),
+        ).toEqual({ checksum: 'computer-use-v101-audit-action-digest-scrub' });
+      } finally {
+        verified.close();
+      }
+      // The backup this start took before v101 is a copy of the old database. It must not keep
+      // the guessable digests either, while still restoring every row.
+      const backupPath = `${fixture.path}.pre-migration.bak`;
+      expect(existsSync(backupPath)).toBe(true);
+      expect(existsSync(`${backupPath}.previous`)).toBe(false);
+      const backup = new Database(backupPath, { readonly: true, fileMustExist: true });
+      try {
+        const backupRows = backup
+          .prepare('SELECT id, action_digest, action_kind FROM computer_action_audits ORDER BY id')
+          .all() as { id: string; action_digest: string; action_kind: string }[];
+        expect(backupRows.map((row) => row.id).sort()).toEqual([typed.id, clicked.id].sort());
+        for (const row of backupRows) {
+          expect(row.action_digest).toMatch(/^[0-9a-f]{64}$/u);
+          expect([typed.actionDigest, clicked.actionDigest]).not.toContain(row.action_digest);
+        }
+        // Still the pre-v101 snapshot: a restore from it runs v101 again.
+        expect(
+          backup.prepare('SELECT version FROM schema_migrations WHERE version = 101').get(),
+        ).toBeUndefined();
+        expect(backup.pragma('quick_check', { simple: true })).toBe('ok');
+      } finally {
+        backup.close();
+      }
+    });
 
     it('adds four nullable columns and keeps legacy rows NULL across an upgrade', () => {
       const { fixture, task, base } = seed();

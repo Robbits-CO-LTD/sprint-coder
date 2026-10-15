@@ -5,6 +5,8 @@ import {
   type ComputerUseAction,
   type ComputerUseObservation,
 } from '@sprint-coder/contracts';
+// Keyed per process (#786): the capture becomes evidence, so a typed text must not be guessable from it.
+import { computerUseActionDigest } from './computer-use-action';
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const integer = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -319,7 +321,7 @@ export class ComputerUseRuntimeCapture {
       type: 'action_result',
       sessionDigest: computerUseCaptureDigest(sessionId),
       revision,
-      actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+      actionDigest: computerUseActionDigest(action),
       result,
       reasonDigest: computerUseCaptureDigest(reason ?? ''),
     });

@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { secureLogger } from './secure-logger';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
 import {
@@ -1533,6 +1534,67 @@ const LEGACY_IMAGE_ATTACHMENT_CHECKSUM = 'image-attachment-drafts-v64';
 const LEGACY_IMAGE_ATTACHMENT_COMPATIBILITY_KEY = 'legacy-image-attachment-v64-collision-v1';
 const LEGACY_RUNTIME_DIAGNOSTIC_CHECKSUM = 'runtime-failure-diagnostics-v66';
 const LEGACY_RUNTIME_DIAGNOSTIC_COMPATIBILITY_KEY = 'legacy-runtime-diagnostics-v66-collision-v1';
+
+/**
+ * #786: replaces every stored action digest with a random value of the same shape. Used by
+ * migration v101 and, on the start that applies it, on the pre-migration backup as well.
+ */
+const COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL =
+  'UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));';
+const COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION = 101;
+/**
+ * PRAGMA secure_delete reads back 0, 1 or 2 but accepts 2 only as a name: `= 2` would set ON, not
+ * FAST. Turns what was read into the statement that sets the same mode again.
+ */
+function secureDeleteAssignment(mode: number): string {
+  return `secure_delete = ${mode === 2 ? 'FAST' : mode === 1 ? 'ON' : 'OFF'}`;
+}
+/**
+ * The live-database form of the scrub (migration v101). Overwriting the digest in place is not
+ * enough: the row was inserted, split across pages and updated in earlier versions, and every one
+ * of those left a copy of the old digest in a page's unused space, which an UPDATE never touches.
+ * So the table is emptied (its pages are freed and, with secure_delete on, zeroed) and the rows are
+ * put back with new digests, which writes the table and its indexes into clean pages. The rows
+ * wait in a temp table that only ever holds the new digests. Every column but the digest is copied
+ * as it was, rowid included. Written for the table as it is at v101 (v80 plus the v99 columns).
+ */
+const COMPUTER_USE_AUDIT_TABLE_COLUMNS = [
+  'id',
+  'task_id',
+  'turn_id',
+  'session_id',
+  'profile_id',
+  'profile_revision',
+  'app_identity_digest',
+  'window_identity_digest',
+  'observation_revision',
+  'observation_digest',
+  'client_width',
+  'client_height',
+  'action_digest',
+  'action_kind',
+  'route',
+  'state',
+  'reason_code',
+  'native_request_id',
+  'policy_epoch',
+  'created_at',
+  'updated_at',
+  'approval_id',
+  'approval_parent_request_id',
+  'approval_outcome',
+  'approval_effect',
+].join(', ');
+const COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL = `
+  CREATE TEMP TABLE computer_action_audit_digest_scrub AS
+    SELECT rowid AS audit_rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS.replace('action_digest', 'lower(hex(randomblob(32))) AS action_digest')}
+    FROM computer_action_audits;
+  DELETE FROM computer_action_audits;
+  INSERT INTO computer_action_audits(rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS})
+    SELECT audit_rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audit_digest_scrub
+    ORDER BY audit_rowid;
+  DROP TABLE computer_action_audit_digest_scrub;
+`;
 
 const migrations = [
   {
@@ -4621,6 +4683,32 @@ const migrations = [
       END;
     `,
   },
+  {
+    version: 101,
+    checksum: 'computer-use-v101-audit-action-digest-scrub',
+    // #786: action digests are now keyed per process. Rows written before were unkeyed, so a short
+    // text the planner typed (a six-digit code, a PIN) could be recovered from them by guessing.
+    // Nothing compares a stored digest with one computed in a later process, so the old values
+    // are replaced with random ones of the same shape: the row, its kind, state and every other
+    // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
+    // The pre-migration backup taken on the same start still holds the old values; runMigrations
+    // scrubs and VACUUMs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
+    // The rows wait in a TEMP table, which SQLite places under the OS temp directory by default. If
+    // that disk is full this migration rolls back and the start fails; no data is lost, and the
+    // pre-migration backup copy fails under the same condition, so this is not a new kind of risk.
+    // Putting the rows back needs their parents: a row with no parent (a foreign key violation)
+    // would fail the insert, which cannot normally exist because foreign keys are on from the moment
+    // the database opens and migrations that turn them off check foreign_key_check afterwards.
+    // The live database is not VACUUMed (a VACUUM rewrites Task history and image blobs too, about
+    // 8 ms per MB with up to twice the file size in temporary disk, on every first start after the
+    // upgrade). Instead the audit table is rewritten into clean pages with secure_delete on (see
+    // COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL), and runMigrations checkpoints the log afterwards so
+    // neither the -wal file nor the main file keeps the old page images. Measured: 50,000 rows in
+    // about 2 s. What this does not reach: pages of other tables or the freelist that held an
+    // audit row earlier (for example the audit rows of a Task deleted before the upgrade), and
+    // copies below the file (SSD wear levelling, backups made by other tools, the OS page cache).
+    sql: COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
@@ -6339,6 +6427,12 @@ type RecoveryBundleManifest = {
 
 let recoveryCrashCheckpointForTesting: ((checkpoint: RecoveryCrashCheckpoint) => void) | null =
   null;
+let backupScrubFailureForTesting: ((step: 'scrub' | 'remove') => void) | null = null;
+
+/** #786: present while the pre-migration backup may still hold unscrubbed action digests. */
+function backupDigestScrubPendingPath(databasePath: string): string {
+  return `${databasePath}.pre-migration.bak.digest-scrub-pending`;
+}
 
 function syncFile(path: string): void {
   // Windows requires a writable descriptor for FlushFileBuffers. Both callers pass a regular,
@@ -6729,13 +6823,74 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
 }
 
 export const __persistenceRecoveryTestables = {
+  secureDeleteAssignment,
   supportsDirectorySync: supportsRecoveryDirectorySync,
+  /** #786: throws at a step of the backup digest scrub, to drive its failure paths. */
+  setBackupScrubFailureForTesting(callback: ((step: 'scrub' | 'remove') => void) | null) {
+    backupScrubFailureForTesting = callback;
+  },
   setCrashCheckpointForTesting(callback: ((checkpoint: RecoveryCrashCheckpoint) => void) | null) {
     recoveryCrashCheckpointForTesting = callback;
   },
 };
 
 const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
+
+/**
+ * #786: copies `sourcePath`, replaces every Computer Use action digest in the copy, VACUUMs it so
+ * no freed page still holds an old digest, checks it, and installs it as the migration backup.
+ */
+function installScrubbedMigrationBackup(sourcePath: string, backupPath: string): void {
+  const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
+  let snapshot: Database.Database | null = null;
+  const closeSnapshot = (): void => {
+    const handle = snapshot;
+    snapshot = null;
+    handle?.close();
+  };
+  try {
+    copyFileSync(sourcePath, temporaryPath);
+    snapshot = new Database(temporaryPath, { fileMustExist: true });
+    const hasAudits =
+      snapshot
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('computer_action_audits') !== undefined;
+    if (hasAudits) snapshot.exec(COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL);
+    snapshot.pragma('wal_checkpoint(TRUNCATE)');
+    snapshot.exec('VACUUM');
+    snapshot.pragma('wal_checkpoint(TRUNCATE)');
+    const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+    const first = rows[0];
+    const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+    if (verdict !== 'ok') throw new Error('Scrubbed migration backup failed integrity check');
+    closeSnapshot();
+    installMigrationBackup(temporaryPath, backupPath);
+  } finally {
+    try {
+      closeSnapshot();
+    } finally {
+      removeValidationSnapshotFiles(temporaryPath);
+    }
+  }
+}
+
+/**
+ * Installs a validated snapshot as the migration backup. The previous backup stays recoverable
+ * until the new one is in place, including on Windows where a rename cannot replace an existing
+ * destination atomically.
+ */
+function installMigrationBackup(temporaryPath: string, backupPath: string): void {
+  const previousPath = `${backupPath}.previous`;
+  rmSync(previousPath, { force: true });
+  if (existsSync(backupPath)) renameSync(backupPath, previousPath);
+  try {
+    renameSync(temporaryPath, backupPath);
+  } catch (error) {
+    if (!existsSync(backupPath) && existsSync(previousPath)) renameSync(previousPath, backupPath);
+    throw error;
+  }
+  rmSync(previousPath, { force: true });
+}
 
 function removeValidationSnapshotFiles(temporaryPath: string): void {
   let firstFailure: unknown;
@@ -7183,14 +7338,25 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const legacyImageAttachmentCollision = this.isLegacyImageAttachmentCollision(applied);
     const legacyRuntimeDiagnosticCollision = this.isLegacyRuntimeDiagnosticCollision(applied);
     const hadPendingMigrations = migrations.some((migration) => !applied.has(migration.version));
-    if (
+    const backedUp =
       (hadPendingMigrations ||
         legacyImageAttachmentCollision ||
         legacyRuntimeDiagnosticCollision) &&
       existsSync(databasePath) &&
-      applied.size > 0
-    )
+      applied.size > 0;
+    if (backedUp) {
       this.createPreMigrationBackup(databasePath);
+      // Mark the new backup as unscrubbed before v101 can commit, so a crash between that commit
+      // and the end of the loop still gets the backup scrubbed on the next start.
+      if (!applied.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION)) {
+        try {
+          writeFileSync(backupDigestScrubPendingPath(databasePath), '');
+        } catch {
+          // Best effort: the scrub after the loop still runs when v101 applies in this start.
+        }
+      }
+    }
+    const appliedNow = new Set<number>();
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
       applied = this.readAppliedMigrations();
@@ -7232,25 +7398,122 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // outside applyMigration's transaction) or dropping a table other rows still reference
       // would cascade-delete them. foreign_key_check afterward guards against a migration
       // silently leaving the database inconsistent.
-      if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
-        this.db.pragma('foreign_keys = OFF');
-        try {
+      // #786: v101 empties the audit table and puts the rows back (see
+      // COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL). With secure_delete on, SQLite zeroes every page and
+      // cell that statement frees, so the old digest does not linger in the live file. The flag is
+      // per connection: read it first and put it back afterwards.
+      const priorSecureDelete =
+        migration.version === COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION
+          ? (this.db.pragma('secure_delete', { simple: true }) as number)
+          : null;
+      if (priorSecureDelete !== null) this.db.pragma('secure_delete = ON');
+      try {
+        if ('requiresForeignKeysOff' in migration && migration.requiresForeignKeysOff === true) {
+          this.db.pragma('foreign_keys = OFF');
+          try {
+            applyMigration();
+            const danglingForeignKeys = this.db.pragma('foreign_key_check');
+            if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
+              throw new Error(`Migration ${migration.version} left dangling foreign keys`);
+          } finally {
+            this.db.pragma('foreign_keys = ON');
+          }
+        } else {
           applyMigration();
-          const danglingForeignKeys = this.db.pragma('foreign_key_check');
-          if (Array.isArray(danglingForeignKeys) && danglingForeignKeys.length > 0)
-            throw new Error(`Migration ${migration.version} left dangling foreign keys`);
-        } finally {
-          this.db.pragma('foreign_keys = ON');
         }
-      } else {
-        applyMigration();
+      } finally {
+        if (priorSecureDelete !== null) this.db.pragma(secureDeleteAssignment(priorSecureDelete));
       }
+      appliedNow.add(migration.version);
+    }
+    const digestScrubApplied = appliedNow.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION);
+    const digestScrubOwed = existsSync(backupDigestScrubPendingPath(databasePath));
+    if ((backedUp && digestScrubApplied) || digestScrubOwed)
+      this.scrubPreMigrationBackupAuditDigests(databasePath);
+    if (digestScrubApplied || digestScrubOwed) this.flushAuditDigestScrub(databasePath);
+  }
+
+  /**
+   * #786: in WAL mode the pages v101 rewrote sit in the -wal file, and the main file still holds
+   * the old ones until a checkpoint. Copy them over and truncate the log. If a reader keeps the
+   * checkpoint from finishing, leave the marker so the next start tries again.
+   */
+  private flushAuditDigestScrub(databasePath: string): void {
+    try {
+      const result = this.db.pragma('wal_checkpoint(TRUNCATE)') as { busy?: number }[];
+      if (result[0]?.busy === 0) return;
+    } catch (error) {
+      secureLogger.warn('Checkpoint after the Computer Use digest scrub failed', error, {
+        category: 'system',
+        event: 'computer_use_digest_scrub_checkpoint_failed',
+      });
+    }
+    try {
+      writeFileSync(backupDigestScrubPendingPath(databasePath), '');
+    } catch {
+      // Nothing more to do; the next migration or checkpoint will still flush the log.
+    }
+  }
+
+  /**
+   * #786: the backup taken just before v101 is a byte copy of the database v101 exists to clean,
+   * so it would keep every guessable digest next to the scrubbed database. Apply the same scrub to
+   * a copy of the backup, VACUUM the copy, and install it in its place. VACUUM matters: an UPDATE
+   * leaves the old bytes in pages SQLite no longer uses (measured: some survive even with
+   * secure_delete), and only rewriting the file drops them. Only the digest column changes; the
+   * backup still restores every other fact, and a database restored from it has no v101 record,
+   * so v101 runs again.
+   *
+   * The backup is never replaced with anything but itself, scrubbed: a copy of the migrated
+   * database would silently stop being a pre-migration snapshot. If it cannot be scrubbed, it is
+   * removed — keeping the digests out of reach is the point of v101, and the next migration takes
+   * a new backup. Nothing here fails the start. Until the backup is scrubbed or gone, a marker
+   * beside it says so, and every start tries again.
+   */
+  private scrubPreMigrationBackupAuditDigests(databasePath: string): void {
+    const backupPath = `${databasePath}.pre-migration.bak`;
+    const pendingPath = backupDigestScrubPendingPath(databasePath);
+    const settle = (): void => rmSync(pendingPath, { force: true });
+    try {
+      if (!existsSync(backupPath)) {
+        // A crash between the two renames in installMigrationBackup leaves only the previous,
+        // not yet scrubbed backup. Remove it too; if that fails the marker stays for next start.
+        rmSync(`${backupPath}.previous`, { force: true });
+        settle();
+        return;
+      }
+      try {
+        writeFileSync(pendingPath, '');
+      } catch {
+        // The attempt below still runs; only the retry on a later start depends on the marker.
+      }
+      try {
+        backupScrubFailureForTesting?.('scrub');
+        installScrubbedMigrationBackup(backupPath, backupPath);
+        settle();
+        return;
+      } catch (error) {
+        secureLogger.warn(
+          'Pre-migration backup could not be scrubbed of old Computer Use action digests; removing it',
+          error,
+          { category: 'system', event: 'computer_use_backup_scrub_failed' },
+        );
+      }
+      backupScrubFailureForTesting?.('remove');
+      rmSync(backupPath, { force: true });
+      rmSync(`${backupPath}.previous`, { force: true });
+      settle();
+    } catch (error) {
+      secureLogger.warn(
+        'Pre-migration backup still holds old Computer Use action digests; retrying at next start',
+        error,
+        { category: 'system', event: 'computer_use_backup_scrub_deferred' },
+      );
     }
   }
 
   private createPreMigrationBackup(databasePath: string): void {
     const backupPath = `${databasePath}.pre-migration.bak`;
-    const previousPath = `${backupPath}.previous`;
     const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
     // A byte copy of the main DB file is incomplete while committed pages still live in WAL.
     // Checkpoint first, validate the copied snapshot, then rotate it into place. The previous
@@ -7285,16 +7548,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // Windows cannot rotate an open SQLite file, so close before installing the snapshot while
       // retaining the outer finally as the failure-path owner.
       closeSnapshot();
-      rmSync(previousPath, { force: true });
-      if (existsSync(backupPath)) renameSync(backupPath, previousPath);
-      try {
-        renameSync(temporaryPath, backupPath);
-      } catch (error) {
-        if (!existsSync(backupPath) && existsSync(previousPath))
-          renameSync(previousPath, backupPath);
-        throw error;
-      }
-      rmSync(previousPath, { force: true });
+      installMigrationBackup(temporaryPath, backupPath);
     } finally {
       try {
         closeSnapshot();
