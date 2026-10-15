@@ -174,6 +174,6 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
       expect(windowsShadow, name).toContain(name);
     // The window title is a label for the core; it never decides a surface here.
     const surface = /SurfaceForWindow\([\s\S]*?\n\}/u.exec(windowsShadow)?.[0] ?? '';
-    expect(surface).not.toMatch(/\.name\b|chain\[|title/u);
+    expect(surface).not.toMatch(/\.name\b|title|help_text|automation_id|\.value\b/u);
   });
 });
