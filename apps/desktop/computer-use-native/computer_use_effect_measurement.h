@@ -338,6 +338,20 @@ static_assert(sizeof(EffectRuleset) == 4 * sizeof(bool),
   return IntentVerdict{true, IntentRefusal::kNone, decision.approval_effect};
 }
 
+// Where the high-impact judgement of this action comes from, for the offer rules: a confirmation
+// rests on native's own facts (the core classified it so), and a supervised action, which is not
+// about high impact, claims none. Decided here from the same capture and rule set the measurement
+// uses, so a caller cannot state a source the core did not reach.
+[[nodiscard]] inline HighImpactSource HighImpactSourceFor(const ShadowAxCapture &capture,
+                                                          const ShadowRequestInfo &request,
+                                                          const EffectRuleset &ruleset) {
+  const ShadowFacts built = BuildShadowFacts(capture, request);
+  const EffectDecision decision = ClassifyEffect(built.facts, ruleset);
+  return decision.approval_effect == NativeApprovalEffect::kHighImpactConfirmation
+             ? HighImpactSource::kNativeFacts
+             : HighImpactSource::kNone;
+}
+
 struct ApprovalMeasurementInput {
   // The capture the facts are built from; not owned, and not kept.
   const ShadowAxCapture *capture = nullptr;

@@ -2990,6 +2990,23 @@ bool CheckEffectMeasurementBinding() {
     save.neighbors_complete = false;
     if (!Check(MeasureApproval(supervised).eligible, "binding-supervised-needs-neither")) return false;
   }
+  // The high-impact source is the core's own reading of the capture, not a caller's statement.
+  {
+    using sprint_coder::computer_use::HighImpactSourceFor;
+    const ShadowAxCapture confirmation = MeasureCapture();
+    if (!Check(HighImpactSourceFor(confirmation, ShadowRequest("invoke"), EffectRuleset{}) == HighImpactSource::kNativeFacts,
+               "source-confirmation-is-native-facts")) return false;
+    ShadowRequestInfo supervised = ShadowRequest("click");
+    supervised.maximum_mode = "supervised";
+    if (!Check(HighImpactSourceFor(ShadowBase(), supervised, EffectRuleset{}) == HighImpactSource::kNone,
+               "source-supervised-claims-none")) return false;
+    if (!Check(HighImpactSourceFor(ShadowBase(), ShadowRequest("invoke"), EffectRuleset{}) == HighImpactSource::kNone,
+               "source-ordinary-claims-none")) return false;
+    EffectRuleset closed;
+    closed.high_impact_confirmation = false;
+    if (!Check(HighImpactSourceFor(confirmation, ShadowRequest("invoke"), closed) == HighImpactSource::kNone,
+               "source-closed-ruleset-claims-none")) return false;
+  }
   std::cout << "Computer Use native effect measurement binding: PASS\n";
   return true;
 }
