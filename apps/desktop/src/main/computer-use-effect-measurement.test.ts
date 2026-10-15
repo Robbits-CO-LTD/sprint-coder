@@ -1,0 +1,103 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+// Classifier v2, C4-1: the measurement an approval is judged on, as portable pure functions. The
+// behaviour is in the harness; this is the source contract around it: portable, not wired, no
+// version raised, and the authority digest not knowing what changes between approval and input.
+
+const nativeDirectory = join(__dirname, '../../computer-use-native');
+const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
+const measurement = read('computer_use_effect_measurement.h');
+const sha256 = read('computer_use_sha256.h');
+const harness = read('computer_use_protocol_fuzz.cc');
+
+function functionBody(source: string, signature: string): string {
+  const from = source.indexOf(signature);
+  expect(from, signature).toBeGreaterThanOrEqual(0);
+  const to = source.indexOf('\n}\n', from);
+  expect(to, signature).toBeGreaterThan(from);
+  return source.slice(from, to);
+}
+
+describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
+  it('is portable: standard headers only, nothing that reads the process or a clock', () => {
+    for (const source of [measurement, sha256]) {
+      const includes = [...source.matchAll(/^#include <([^>]+)>/gmu)].map((entry) => entry[1]);
+      for (const include of includes)
+        expect(['array', 'cstddef', 'cstdint', 'string', 'string_view']).toContain(include);
+      expect(source).not.toMatch(
+        /getenv|environ|argv|napi|<chrono>|<random>|<mutex>|#import|CoreGraphics|clock_gettime|CommonCrypto/u,
+      );
+      expect(source).not.toContain('single_use_approval');
+    }
+  });
+
+  it('is not wired: no native source includes it, so no production path uses it', () => {
+    for (const name of ['computer_use_macos.mm', 'computer_use_windows_host.cc']) {
+      const source = read(name);
+      expect(source, name).not.toContain('computer_use_effect_measurement.h');
+      expect(source, name).not.toContain('computer_use_sha256.h');
+    }
+    expect(harness).toContain('#include "computer_use_effect_measurement.h"');
+    expect(harness).toContain('Computer Use native effect measurement: PASS');
+  });
+
+  it('raises no version and attests nothing', () => {
+    expect(read('computer_use_preflight_classifier.h')).toContain(
+      'kNativePreflightClassifierVersion = 1;',
+    );
+    const table = JSON.parse(read('eligibility.json')) as { versions: Record<string, number> };
+    expect(table.versions).toEqual({ rulesetVersion: 1, classifierVersion: 1, lexiconVersion: 1 });
+  });
+
+  it('frames the authority under its domain, and the frame does not know the revisions', () => {
+    expect(measurement).toContain('kApprovalAuthorityDomain = "approval-authority-v1"');
+    const frame = functionBody(measurement, 'inline std::string ApprovalAuthorityFrame(');
+    expect(frame).toContain('AppendLengthPrefixed(&frame, kApprovalAuthorityDomain);');
+    // Its inputs are the identity, the facts and the core's decision: no request, session or
+    // approval facts, and so no observation revision or ticket generation to include.
+    const signature = /ApprovalAuthorityFrame\(([^)]*)\)/u.exec(measurement)![1]!;
+    expect(signature).toContain('ApprovalAuthorityIdentity');
+    expect(signature).toContain('EffectFacts');
+    expect(signature).toContain('EffectDecision');
+    expect(signature).not.toMatch(/NativeApprovalFacts|Request|Session/u);
+    expect(frame).not.toMatch(/observation|ticket|revision|action|neighbor/u);
+    // Absent is told from empty by a marker, and every value is length-prefixed.
+    expect(measurement).toContain("output->push_back(field.present ? 'P' : 'A');");
+    expect(measurement).toContain("output->push_back(':');");
+    // The digest is the SHA-256 of the frame, from the portable implementation.
+    expect(functionBody(measurement, 'inline std::string ApprovalAuthorityDigest(')).toContain(
+      'Sha256Hex(ApprovalAuthorityFrame(identity, facts, decision))',
+    );
+  });
+
+  it('offers an intent only for route v2, an enabled approval, native facts and current versions', () => {
+    const judge = functionBody(measurement, 'inline IntentVerdict JudgeIntentOffer(');
+    for (const needle of [
+      'route != ClassifierRoute::kV2',
+      'source != HighImpactSource::kNativeFacts',
+      'decision.kind != DecisionKind::kApproval',
+      'decision.approval_effect == NativeApprovalEffect::kInvalid',
+      'kEffectClassifierVersion',
+      'kEffectRulesetVersion',
+      'kEffectLexiconVersion',
+      'RulesetEnables(ruleset, decision.approval_effect)',
+    ])
+      expect(judge, needle).toContain(needle);
+    // The Main projection can only strengthen: nothing grants from it.
+    expect(
+      functionBody(measurement, 'inline NativeApprovalMeasurement MeasureApproval('),
+    ).not.toContain('kMainProjection');
+    expect(judge).not.toContain('kMainProjection');
+  });
+
+  it('is recorded in the ADR with the C4-1 contract', () => {
+    const adr = readFileSync(
+      join(__dirname, '../../../../tasks/designs/adr-computer-use-agent-driven-v2.md'),
+      'utf8',
+    );
+    expect(adr).toContain('C4-1');
+    expect(adr).toContain('approval-authority-v1');
+  });
+});

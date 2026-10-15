@@ -776,6 +776,11 @@ classifier v2 は、承認経路を本番で開くための最後の前提であ
     - Main は、束縛した route の実効値（`v2` は classifier 2 を attest した build でだけ。それ以外は `v1`）を、macOS addon の `startSession` に `classifierRoute` として毎回渡す。route を束縛していないセッションと Windows には渡さない（Windows は S5 までこのキーを知らない）。
     - native は `classifierRoute` を任意で読み、無ければ `v1`、あれば `v1` / `v2` のちょうどどちらか（それ以外は INVALID_SESSION）。セッションの作成時に 1 度だけ書き（Task/Turn id と同じ位置）、以後は変えない。再 start で値が違う（無い場合は `v1` 扱い）ときは、OS を読む前に `CLASSIFIER_ROUTE_CHANGED` で拒否する。この値を読んで何かを決める箇所は、C4-2 まで無い（source 契約で縛る）。
     - 束縛を作るのは、セッションを作る start だけである。route を付けずに作ったセッションに後から route 付きで start しても束縛は作らず（native にも送らない）、そのセッションは束縛なしのまま扱う。束縛の rollback は所有者トークンで行う。start ごとにトークンを持ち、失敗した start が束縛を取り下げるのは、同じセッションの他の start が残っておらず、セッションも作られていないときだけにする（同一の新しい sessionId・同じ route の並行 start で、先に失敗した側が、後から成功する側の束縛を消してしまう競合の修正）。
+    - **C4-1 の契約（portable。wiring なし）**。`computer_use_effect_measurement.h` と `computer_use_sha256.h`（どちらも `.mm` から include しない。harness だけが呼ぶ）。
+      - **authority digest**。ドメイン `approval-authority-v1` の下で、すべての値を `<バイト数>:<文字列>` に長さ前置きしてフレーム化し（隣り合う文字列が混ざらない）、文字列は存在する（`P`）か無い（`A`）かの印を付ける（absent と empty が区別できる）。フレームの内容は、アプリ identity・process generation・window identity・geometry・対象と祖先の descriptor（role / subrole / label）・面・origin・ファイル項目か・拡張子・効果クラス・承認の効果・分類器 / ruleset / lexicon の版。**observation revision と ticket generation、近傍ラベル、操作の種類は含めない**（承認から入力までの間に変わるが authority は変わらないため）。digest はそのフレームの SHA-256（portable な実装。公開テストベクタで確かめる）。どのフィールドを 1 つ変えても digest が変わることを harness で確かめる。
+      - **intent を出してよいか（`JudgeIntentOffer`）**。すべて満たすときだけ。route が v2、分類器コアの判定が承認（効果が有効）で ruleset がその効果を有効にしている、highImpact の根拠が native の facts（Main の投影は strengthen にだけ使い、根拠にしない — 判断 3-A）、判定をしたコアの 3 つの版が現行。
+      - **measurement（`MeasureApproval`）**。capture から facts を作り、コアで分類し、人の判断が要る判定（不完全な capture など）は `takeover`、intent を出してよい承認は `eligible`（効果・digest・3 つの版つき）、それ以外（通常の操作、拒否、v1 の route、Main の投影）は `eligible=false`（効果も digest も持たない）。
+      - **flow の確認**。実測した measurement で Offer → Approve → ConsumeApproved が 1 回通ること、ラベル・祖先・window・app・process generation・geometry・面・モード・route・根拠・ruleset・版のどれかが変わると、Approve でも ConsumeApproved でも拒否されること、観測 revision と ticket generation が進んでも digest は変わらないことを harness で確かめる。
 
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 
