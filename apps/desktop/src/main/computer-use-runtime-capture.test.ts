@@ -90,6 +90,23 @@ function stop(capture: ComputerUseRuntimeCapture) {
 }
 
 describe('Computer Use runtime observation (unit fixtures are never acceptance)', () => {
+  it.each(['wait', 'finish', 'copy'] as const)(
+    'does not count a %s round as a native input journey',
+    (actionClass) => {
+      const capture = captureFixture();
+      for (let round = 1; round <= 3; round++) {
+        const events = roundEvents(round);
+        if (round === 1) {
+          const parsed = events[1]!;
+          if (parsed.type === 'parsed') parsed.actionClass = actionClass;
+        }
+        events.forEach((event) => capture.record(event));
+      }
+      stop(capture);
+      expect(capture.snapshot().exactThreeRoundJourneyObserved).toBe(false);
+    },
+  );
+
   it('accepts multiple scalar dispatches in one canonical typing round', () => {
     const capture = captureFixture();
     for (let round = 1; round <= 3; round++) {

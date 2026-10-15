@@ -87,6 +87,7 @@ const eventSchema = z.discriminatedUnion('type', [
         'key',
         'wait',
         'finish',
+        'copy',
       ]),
       responseDigest: digest,
       responseBytes: integer,
@@ -400,6 +401,9 @@ export class ComputerUseRuntimeCapture {
             event.revision !== revision ||
             event.actionClass === 'wait' ||
             event.actionClass === 'finish' ||
+            // A copy reads a node and moves no input: like wait and finish it is not a native
+            // completion, so a session that ran one is not evidence for the input gate.
+            event.actionClass === 'copy' ||
             stopping
           )
             consistent = false;

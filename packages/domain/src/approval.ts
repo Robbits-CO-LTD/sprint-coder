@@ -18,7 +18,8 @@ export type ComputerUseApprovalAction =
   | 'type'
   | 'key'
   | 'wait'
-  | 'finish';
+  | 'finish'
+  | 'copy';
 export type ComputerUseApprovalState = ApprovalState;
 
 export type ComputerUseApprovalRecord = Readonly<{
@@ -117,6 +118,7 @@ const COMPUTER_USE_ACTIONS = [
   'key',
   'wait',
   'finish',
+  'copy',
 ] as const satisfies readonly ComputerUseApprovalAction[];
 
 const COMPUTER_USE_PLAN_ACTIONS: readonly ComputerUseApprovalAction[] = [

@@ -82,6 +82,7 @@ const actions = new Set([
   'key',
   'wait',
   'finish',
+  'copy',
 ]);
 const results = new Set(['completed', 'rejected', 'paused', 'unknown_effect', 'canceled']);
 const hash = (value) => createHash('sha256').update(value).digest('hex');

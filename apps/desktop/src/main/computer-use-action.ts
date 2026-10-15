@@ -12,6 +12,7 @@ export function computerUseActionKind(action: ComputerUseAction): ComputerUseAct
 export function computerUseActionRoute(action: ComputerUseAction): 'semantic' | 'visual' | 'none' {
   if (action.type === 'wait' || action.type === 'finish') return 'none';
   if (
+    action.type === 'copy' ||
     action.type === 'invoke' ||
     action.type === 'set_text' ||
     action.type === 'select' ||

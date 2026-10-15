@@ -116,6 +116,10 @@ import {
 } from './computer-use-action';
 import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
 import {
+  ComputerUseArtifactStore,
+  type ComputerUseArtifactReference,
+} from './computer-use-artifact';
+import {
   closedAnswerFromFinish,
   computerStartAnswerFor,
   normalizeComputerStartQuestion,
@@ -222,6 +226,8 @@ export type ComputerUseNativeSession = Readonly<{
   screenBounds: Readonly<{ x: number; y: number; width: number; height: number }>;
 }>;
 export type ComputerUseNativeObservation = ComputerUseObservation;
+export type ComputerUseNativeNodeValue =
+  Readonly<{ ok: true; text: string }> | Readonly<{ ok: false }>;
 export type ComputerUseNativeActionResult = Readonly<{
   result: ComputerUseActionResult['result'];
   reasonCode: string | null;
@@ -308,6 +314,30 @@ export interface ComputerUseNativeHost {
    * v2. D7 does not exist yet, so a production host never reports true.
    */
   nativeApprovalPathEnabled?(): boolean;
+  /**
+   * #785 T15-6b: whether the native can read the value of one node for `copy`. Absent means false.
+   * A production host reports false until the native read exists (T15-4m / T15-4w) and its attest
+   * is carried in the handshake (C5); only a fake native reports true today. While false, the
+   * planner is not offered `copy` and the controller refuses it.
+   */
+  artifactReadSupported?(): boolean;
+  /**
+   * Reads the value of the one node `targetId` names, under the signature the last observation
+   * gave it. Every way of not reading (secure, high-impact, a sensitive surface, a browser, a role
+   * that may not be read, a missing fact) is the same `{ ok: false }`, so the planner learns
+   * nothing from which one it was. Present only together with `artifactReadSupported`.
+   */
+  readNodeValue?(
+    input: Readonly<{
+      session: ComputerUseNativeSession;
+      requestId: string;
+      targetId: string;
+      targetSignature: string;
+      observationRevision: number;
+      cancelEpoch: number;
+      signal: AbortSignal;
+    }>,
+  ): Promise<ComputerUseNativeNodeValue>;
   /** Revalidates and exchanges the waiting approval; no input capability. */
   approvalApprove?(
     input: Readonly<{
@@ -469,6 +499,8 @@ export type ComputerUseControllerDeps = Readonly<{
     turnId: string,
   ) => Readonly<{ connectionId: string; modelId: string }> | null;
   now?: () => number;
+  /** Where copied values are held. Absent means a store of the controller's own. */
+  artifactStore?: ComputerUseArtifactStore;
   currentPolicyEpoch?: (taskId: string) => number;
   /**
    * Whether the Task is in a state a session may begin in.
@@ -754,6 +786,12 @@ export class ComputerUseController {
   private readonly pauseReasons = new Map<string, ComputerUseStopReason>();
   /** A planner's closed answer, held from its `finish` until `startForAgent` returns (T15-2). */
   private readonly agentAnswers = new Map<string, ComputerStartAnswerCandidate>();
+  /**
+   * What `copy` kept in this session (#785 T15-6b): opaque references only, never the text. The
+   * text is in `artifacts`, bound to the Task, Turn and policy epoch, in memory, for a few minutes.
+   */
+  private readonly copiedArtifacts = new Map<string, ComputerUseArtifactReference[]>();
+  private readonly artifacts: ComputerUseArtifactStore;
   private readonly startingSessions = new Map<
     string,
     {
@@ -779,6 +817,9 @@ export class ComputerUseController {
 
   constructor(private readonly deps: ComputerUseControllerDeps) {
     this.now = deps.now ?? Date.now;
+    // A monotonic clock, not the wall clock above: the store measures a lifetime.
+    this.artifacts =
+      deps.artifactStore ?? new ComputerUseArtifactStore({ now: () => performance.now() });
     this.registry = new ComputerUseToolRegistry();
     this.registry.register(COMPUTER_OBSERVE_TOOL);
     this.registry.register(COMPUTER_ACT_TOOL);
@@ -3471,9 +3512,17 @@ export class ComputerUseController {
     this.withdrawAppGrantCardFor((pending) => pending.taskId === taskId);
     this.taskScopedGrants.delete(taskId);
     this.revokeTargetTokens(taskId);
+    this.artifacts.dropTask(taskId);
+  }
+
+  /** The references `copy` produced in a session, in order; empty for any other session. */
+  copiedArtifactReferences(sessionId: string): readonly ComputerUseArtifactReference[] {
+    return this.copiedArtifacts.get(sessionId) ?? [];
   }
 
   policyEpochChanged(taskId: string): void {
+    // An artifact is bound to the epoch it was copied under; a changed epoch ends it (design 4.2).
+    this.artifacts.dropTask(taskId);
     // Tokens are bound to the epoch they were issued under, so they are already unusable; dropping
     // them here keeps the map from holding references the agent can no longer spend.
     this.revokeTargetTokens(taskId);
@@ -3587,7 +3636,11 @@ export class ComputerUseController {
         await this.stop(sessionId, record.agent === null ? 'user_stop' : 'agent_finish');
         return;
       }
-      if (record.status.mode === 'observe_only' && action.type !== 'wait') {
+      if (
+        record.status.mode === 'observe_only' &&
+        action.type !== 'wait' &&
+        action.type !== 'copy'
+      ) {
         this.completeNonNativeAction(
           record,
           action,
@@ -3656,7 +3709,10 @@ export class ComputerUseController {
       );
     // wait/finish never call the native input executor. They remain valid in observe-only mode
     // even though they share the action schema and ToolBroker entry with controlled actions.
-    if (action?.success && (action.data.type === 'wait' || action.data.type === 'finish'))
+    if (
+      action?.success &&
+      (action.data.type === 'wait' || action.data.type === 'finish' || action.data.type === 'copy')
+    )
       return { decision: 'allow', reason: 'computer_non_input_action' };
     if (capability === 'computer.control' && record.status.mode === 'observe_only')
       return { decision: 'deny', reason: 'computer_observe_only' };
@@ -3767,7 +3823,10 @@ export class ComputerUseController {
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
       preview,
-      risk: action.type === 'wait' || action.type === 'finish' ? 'low' : 'high',
+      risk:
+        action.type === 'wait' || action.type === 'finish' || action.type === 'copy'
+          ? 'low'
+          : 'high',
       policyEpoch: record.status.policyEpoch,
       observationRevision: record.observation?.revision ?? record.status.observationRevision,
       eligibleForPlan,
@@ -3889,6 +3948,7 @@ export class ComputerUseController {
       return this.completeNonNativeAction(record, action, requestId, 'completed', null);
     if (action.type === 'finish')
       return this.completeNonNativeAction(record, action, requestId, 'completed', null);
+    if (action.type === 'copy') return this.executeCopy(record, action, requestId, signal);
     if (record.status.mode === 'observe_only') throw new Error('Computer Use is observe-only');
     if (this.preDispatchBoundary(action, record.observation)) {
       record.status = this.status(
@@ -4557,6 +4617,60 @@ export class ComputerUseController {
     );
   }
 
+  /**
+   * `copy` (#785 T15-6b): reads one node's value into an artifact. Not input, so it needs no
+   * approval and observe-only sessions may use it; it reads only when the native says it can. Every
+   * way it can fail is the same rejection, so neither the planner nor the outer agent learns
+   * whether the node was secure, the text looked secret, the store was full or the native could
+   * not read. The text is never put in an audit row, a status or a result: only the opaque
+   * reference is kept, in `copiedArtifacts`.
+   */
+  private async executeCopy(
+    record: SessionRecord,
+    action: Extract<ComputerUseAction, { type: 'copy' }>,
+    requestId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ComputerUseActionResult> {
+    const refuse = (): ComputerUseActionResult =>
+      this.completeNonNativeAction(record, action, requestId, 'rejected', ARTIFACT_COPY_REFUSED);
+    const native = this.deps.native;
+    if (native.artifactReadSupported?.() !== true || native.readNodeValue === undefined)
+      return refuse();
+    const targetSignature = record.observation?.targetSignatures?.[action.targetId];
+    if (targetSignature === undefined || targetSignature.length === 0) return refuse();
+    let value: ComputerUseNativeNodeValue;
+    try {
+      value = await native.readNodeValue({
+        session: record.native,
+        requestId,
+        targetId: action.targetId,
+        targetSignature,
+        observationRevision: record.observation!.revision,
+        cancelEpoch: record.native.cancelEpoch,
+        signal: signal ?? record.controller.signal,
+      });
+    } catch {
+      signal?.throwIfAborted();
+      return refuse();
+    }
+    signal?.throwIfAborted();
+    this.assertSessionLive(record);
+    if (!this.observationIsFresh(record) || !value.ok) return refuse();
+    const reference = this.artifacts.create(
+      {
+        taskId: record.status.taskId,
+        turnId: record.turnId,
+        policyEpoch: record.status.policyEpoch,
+        sourceSessionId: record.status.sessionId,
+      },
+      value.text,
+    );
+    if (reference === null) return refuse();
+    const kept = this.copiedArtifacts.get(record.status.sessionId) ?? [];
+    this.copiedArtifacts.set(record.status.sessionId, [...kept, reference]);
+    return this.completeNonNativeAction(record, action, requestId, 'completed', null);
+  }
+
   private completeNonNativeAction(
     record: SessionRecord,
     action: ComputerUseAction,
@@ -4603,7 +4717,7 @@ export class ComputerUseController {
     action: ComputerUseAction,
     callId: string,
   ): boolean {
-    if (action.type === 'wait' || action.type === 'finish') return true;
+    if (action.type === 'wait' || action.type === 'finish' || action.type === 'copy') return true;
     if (record.status.mode === 'observe_only') return false;
     if (
       record.status.mode === 'full_access_app' &&
@@ -4892,7 +5006,7 @@ export class ComputerUseController {
   }
 
   private actionMayNeedApproval(record: SessionRecord, action: ComputerUseAction): boolean {
-    if (action.type === 'wait' || action.type === 'finish') return false;
+    if (action.type === 'wait' || action.type === 'finish' || action.type === 'copy') return false;
     if (this.preDispatchBoundary(action, record.observation)) return false;
     if (record.status.mode === 'supervised') return true;
     if (record.status.mode === 'full_access_app') return false;
@@ -5426,6 +5540,9 @@ export function nativeApprovalObservationEquivalent(
     );
   return false;
 }
+
+/** The one reason `copy` gives for every refusal (#785 T15-6b). */
+const ARTIFACT_COPY_REFUSED = 'artifact_copy_refused';
 
 function actionResultFromAudit(
   audit: ComputerActionAuditRecord,

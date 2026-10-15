@@ -162,7 +162,7 @@ function passingEvidence(): EvidenceTemplate {
     endpointDigest: 'f'.repeat(64),
     catalogDigest: '1'.repeat(64),
     policyEpoch: 7,
-    adapterVersion: 'computer-use-v2',
+    adapterVersion: 'computer-use-v3',
     sessionIdDigest: '2'.repeat(64),
     selectedFromCurrentTask: true,
     bindingStable: true,
@@ -1145,7 +1145,7 @@ describe('Computer Use external final gate', () => {
     const rejectedAdapter = validateFixture(pendingAdapter);
     expect(rejectedAdapter.status).not.toBe(0);
     expect(rejectedAdapter.stderr).toContain(
-      'providerBinding.adapterVersion must be computer-use-v2',
+      'providerBinding.adapterVersion must be computer-use-v3',
     );
 
     const ambiguousPath = passingEvidence();

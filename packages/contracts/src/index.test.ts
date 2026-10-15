@@ -2505,6 +2505,23 @@ describe('Computer Use contracts', () => {
     ).toThrow();
   });
 
+  it('knows copy as an action that names a node and nothing else (#785 T15-6b)', () => {
+    expect(contracts.computerUseActionSchema.parse({ type: 'copy', targetId: 'node-1' })).toEqual({
+      type: 'copy',
+      targetId: 'node-1',
+    });
+    expect(contracts.computerUseActionKindSchema.parse('copy')).toBe('copy');
+    for (const bad of [
+      { type: 'copy' },
+      { type: 'copy', targetId: '' },
+      { type: 'copy', targetId: 'x'.repeat(129) },
+      // The value is never part of the action.
+      { type: 'copy', targetId: 'node-1', text: 'secret' },
+      { type: 'copy', targetId: 'node-1', value: 'secret' },
+    ])
+      expect(() => contracts.computerUseActionSchema.parse(bad)).toThrow();
+  });
+
   it('rejects injected control and Apple function-key characters in type actions', () => {
     for (const text of [
       '\0',
