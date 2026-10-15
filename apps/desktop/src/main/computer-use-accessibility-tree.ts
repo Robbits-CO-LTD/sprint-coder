@@ -7,6 +7,34 @@ const BOUNDED_PAYMENT_TEXT =
   /(?:^|[^\p{L}\p{N}])(?:pay(?:[\s_-]+now)?|place[\s_-]+order|submit[\s_-]+order|complete[\s_-]+order|buy[\s_-]+now|pagar|comprar|acheter|bestellen|bezahlen|pagare|acquistare|betalen|kopen)(?=$|[^\p{L}\p{N}])/iu;
 const HIGH_IMPACT_TEXT =
   /(payment|purchase|checkout|contract|agreement|install|administrator|security|password|credential|\bterminal\b|\bshell\b|command prompt|powershell|\bconsole\b|決済|支払い|支払う|購入|注文を確定|注文する|請求|送金|契約|インストール|管理者|セキュリティ|パスワード|ターミナル|シェル)/iu;
+/**
+ * Structure words of a command surface (a terminal, a shell, the command palette). Matched against
+ * the role, subrole and identifier only (never a title, description or value), as whole words after
+ * splitting on non-alphanumerics and camelCase, so 'terminalPanel' and 'integrated-terminal' match
+ * and 'terminalbank' or 'app-shell' do not. Main's own, native-independent evidence for the S4-1c
+ * deny: a positive match only. An element without such a word is never a surface here (native and
+ * v1 still judge it).
+ */
+const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh', 'commandpalette']);
+
+export function hasSurfaceStructureWord(...fields: readonly (string | undefined)[]): boolean {
+  for (const field of fields) {
+    if (field === undefined || field === '') continue;
+    const words = field
+      .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+      .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
+      .toLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .filter((word) => word !== '');
+    for (let index = 0; index < words.length; index += 1) {
+      const word = words[index]!;
+      if (SURFACE_WORDS.has(word)) return true;
+      if (word === 'command' && words[index + 1] === 'palette') return true;
+      if (word === 'power' && words[index + 1] === 'shell') return true;
+    }
+  }
+  return false;
+}
 const SECURE_ROLES = new Set(['AXSecureTextField', 'AXPasswordField']);
 const OPTIONAL_TEXT_FIELDS = ['subrole', 'value', 'description', 'help', 'placeholder'] as const;
 const TREE_NODE_KEYS = new Set([
@@ -36,7 +64,9 @@ export type ComputerUseAccessibilityTreeProjection = Readonly<{
   depth: number;
   nodeCount: number;
   signatures: Readonly<Record<string, string>>;
-  metadata: Readonly<Record<string, Readonly<{ secure: boolean; highImpact: boolean }>>>;
+  metadata: Readonly<
+    Record<string, Readonly<{ secure: boolean; highImpact: boolean; surface?: boolean }>>
+  >;
 }>;
 
 export class ComputerUseAccessibilityTreeError extends Error {
@@ -68,9 +98,11 @@ export function projectComputerUseAccessibilityTree(
   }
 
   const signatures: Record<string, string> = Object.create(null) as Record<string, string>;
-  const metadata: Record<string, { secure: boolean; highImpact: boolean }> = Object.create(
-    null,
-  ) as Record<string, { secure: boolean; highImpact: boolean }>;
+  const metadata: Record<string, { secure: boolean; highImpact: boolean; surface?: boolean }> =
+    Object.create(null) as Record<
+      string,
+      { secure: boolean; highImpact: boolean; surface?: boolean }
+    >;
   const duplicates = new Set<string>();
   let nodeCount = 0;
   let maximumDepth = 0;
@@ -79,6 +111,7 @@ export function projectComputerUseAccessibilityTree(
     value: unknown,
     depth: number,
     ancestors: readonly string[],
+    inSurface: boolean,
   ): ProjectedTreeNode => {
     if (depth > COMPUTER_USE_LIMITS.maxTreeDepth)
       throw new ComputerUseAccessibilityTreeError('tree_invalid');
@@ -96,6 +129,8 @@ export function projectComputerUseAccessibilityTree(
     );
     const highImpact = HIGH_IMPACT_TEXT.test(policyText) || BOUNDED_PAYMENT_TEXT.test(policyText);
     const sensitive = secure || highImpact;
+    // A surface word on this element or on any ancestor (a terminal panel holds its own children).
+    const surface = inSurface || hasSurfaceStructureWord(role, subrole, node.identifier);
     const targetId = node.identifier || node.title;
     if (targetId !== '' && targetId.length <= 128) {
       if (Object.hasOwn(signatures, targetId)) duplicates.add(targetId);
@@ -108,7 +143,7 @@ export function projectComputerUseAccessibilityTree(
             ancestors: [...ancestors, role],
           }),
         );
-        metadata[targetId] = { secure, highImpact };
+        metadata[targetId] = { secure, highImpact, ...(surface ? { surface: true } : {}) };
       }
     }
 
@@ -124,12 +159,12 @@ export function projectComputerUseAccessibilityTree(
       title: sensitive ? REDACTED_ACCESSIBILITY_TEXT : node.title,
       identifier: sensitive ? REDACTED_ACCESSIBILITY_TEXT : node.identifier,
       children: Object.freeze(
-        node.children.map((child) => visit(child, depth + 1, [...ancestors, role])),
+        node.children.map((child) => visit(child, depth + 1, [...ancestors, role], surface)),
       ),
     });
   };
 
-  const projected = visit(decoded, 0, []);
+  const projected = visit(decoded, 0, [], false);
   for (const duplicate of duplicates) {
     delete signatures[duplicate];
     delete metadata[duplicate];

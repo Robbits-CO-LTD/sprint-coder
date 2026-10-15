@@ -3333,6 +3333,55 @@ describe('ComputerUseController', () => {
     }
   });
 
+  it('stops a target Main sees under a command-surface structure word, whatever native said (S4-1c)', async () => {
+    for (const mode of ['supervised', 'full_access_app'] as const) {
+      const fixture = createFixture({
+        mode,
+        authorizationRequired: mode === 'supervised',
+        observationOverrides: {
+          targetSignatures: { sink: 'e'.repeat(64) },
+          // Native judged nothing (no highImpactNative); Main's projection saw a terminal panel.
+          targetMetadata: { sink: { secure: false, highImpact: false, surface: true } },
+        },
+      });
+      const started = await start(fixture, mode);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(
+          started.sessionId,
+          { type: 'invoke', targetId: 'sink', name: 'activate', arguments: {} },
+          `surface-${mode}`,
+        ),
+      ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+      expect(fixture.approvals).toHaveLength(0);
+      expect(fixture.dispatchCount()).toBe(0);
+      // The audit and the status carry the code only, never the element's text.
+      expect(JSON.stringify(fixture.statuses)).not.toMatch(/terminal/iu);
+      await fixture.controller.stop(started.sessionId);
+    }
+  });
+
+  it('does not stop an ordinary target without a surface word (V1 golden: TextEdit, VS Code editor)', async () => {
+    const fixture = createFixture({
+      mode: 'full_access_app',
+      observationOverrides: {
+        targetSignatures: { sink: 'e'.repeat(64) },
+        targetMetadata: { sink: { secure: false, highImpact: false } },
+      },
+    });
+    const started = await start(fixture, 'full_access_app');
+    await fixture.controller.observe(started.sessionId);
+    await expect(
+      fixture.controller.act(
+        started.sessionId,
+        { type: 'invoke', targetId: 'sink', name: 'activate', arguments: {} },
+        'surface-golden',
+      ),
+    ).resolves.not.toMatchObject({ reasonCode: 'hard_boundary' });
+    expect(fixture.dispatchCount()).toBe(1);
+    await fixture.controller.stop(started.sessionId);
+  });
+
   it('keeps ordinary actions card-free for any registered signed application in full access', async () => {
     const fixture = createFixture({
       bundleId: 'com.example.SignedEditor',

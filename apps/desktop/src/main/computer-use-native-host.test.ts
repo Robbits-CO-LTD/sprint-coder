@@ -1955,3 +1955,57 @@ describe('Computer Use native OS permission availability', () => {
       expect(parseNativeApprovalApproveReceipt(notAnObject, expected)).toEqual(invalid);
   });
 });
+
+describe('Main surface structure words (S4-1c)', () => {
+  const tree = (...nodes: Array<[string, string]>): string => {
+    let node: unknown = { role: 'AXButton', title: 'Run', identifier: 'run', children: [] };
+    for (const [role, identifier] of [...nodes].reverse())
+      node = { role, title: '', identifier, children: [node] };
+    return JSON.stringify(node);
+  };
+
+  it('marks a target under a terminal or command palette structure word, by its ancestors too', () => {
+    for (const identifier of [
+      'terminal',
+      'integratedTerminal',
+      'workbench.panel.terminal',
+      'xterm-screen',
+      'quick-command-palette',
+      'CommandPalette',
+      'PowerShell',
+    ]) {
+      const projection = projectComputerUseAccessibilityTree(
+        tree(['AXWindow', 'main'], ['AXGroup', identifier]),
+      );
+      expect(projection.metadata['run'], identifier).toMatchObject({ surface: true });
+    }
+    expect(
+      projectComputerUseAccessibilityTree(tree(['AXTerminalView', 'x'])).metadata['run'],
+    ).toMatchObject({ surface: true });
+  });
+
+  it('is a positive match only: titles, other words and an ordinary editor never match', () => {
+    for (const identifier of [
+      'editor',
+      'app-shell',
+      'terminalbank',
+      'console',
+      'workbench.parts.editor',
+    ]) {
+      const projection = projectComputerUseAccessibilityTree(
+        tree(['AXWindow', 'main'], ['AXTextArea', identifier]),
+      );
+      expect(projection.metadata['run'], identifier).not.toHaveProperty('surface');
+    }
+    // A title is not evidence (v1 and the high-impact words handle labels).
+    const titled = projectComputerUseAccessibilityTree(
+      JSON.stringify({
+        role: 'AXWindow',
+        title: 'Terminal notes',
+        identifier: '',
+        children: [{ role: 'AXButton', title: 'Save', identifier: 'save', children: [] }],
+      }),
+    );
+    expect(titled.metadata['save']).not.toHaveProperty('surface');
+  });
+});

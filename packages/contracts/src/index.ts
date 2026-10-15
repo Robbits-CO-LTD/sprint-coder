@@ -6458,6 +6458,8 @@ export const computerUseObservationSchema = z
             highImpact: z.boolean().optional(),
             /** True only when native's own facts said high-impact; Main's projection never sets it. */
             highImpactNative: z.boolean().optional(),
+            /** Main's own evidence of a command surface (structure words); never set by native. */
+            surface: z.boolean().optional(),
           })
           .strict(),
       )
