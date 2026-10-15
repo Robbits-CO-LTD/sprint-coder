@@ -12172,6 +12172,25 @@ if (runsWithElectronAbi)
       expect(readFileSync(backupPath).toString('latin1')).not.toContain(oldDigest);
     });
 
+    it.each([
+      ['OFF', 0],
+      ['ON', 1],
+      ['FAST', 2],
+    ] as const)('puts secure_delete back to %s after v101 (#786)', (name, mode) => {
+      const db = new Database(':memory:');
+      try {
+        db.pragma(`secure_delete = ${name}`);
+        const read = db.pragma('secure_delete', { simple: true });
+        expect(read).toBe(mode);
+        db.pragma('secure_delete = ON');
+        db.pragma(__persistenceRecoveryTestables.secureDeleteAssignment(mode));
+        // Reading 2 and assigning it back as a number would have left it ON.
+        expect(db.pragma('secure_delete', { simple: true })).toBe(mode);
+      } finally {
+        db.close();
+      }
+    });
+
     it('removes a previous backup left by a crash between the two renames (#786)', () => {
       const { path, oldDigest } = reopenBeforeV101();
       const backupPath = `${path}.pre-migration.bak`;

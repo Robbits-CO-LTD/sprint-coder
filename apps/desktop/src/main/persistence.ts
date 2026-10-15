@@ -1543,6 +1543,13 @@ const COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL =
   'UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));';
 const COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION = 101;
 /**
+ * PRAGMA secure_delete reads back 0, 1 or 2 but accepts 2 only as a name: `= 2` would set ON, not
+ * FAST. Turns what was read into the statement that sets the same mode again.
+ */
+function secureDeleteAssignment(mode: number): string {
+  return `secure_delete = ${mode === 2 ? 'FAST' : mode === 1 ? 'ON' : 'OFF'}`;
+}
+/**
  * The live-database form of the scrub (migration v101). Overwriting the digest in place is not
  * enough: the row was inserted, split across pages and updated in earlier versions, and every one
  * of those left a copy of the old digest in a page's unused space, which an UPDATE never touches.
@@ -4686,6 +4693,12 @@ const migrations = [
     // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
     // The pre-migration backup taken on the same start still holds the old values; runMigrations
     // scrubs and VACUUMs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
+    // The rows wait in a TEMP table, which SQLite places under the OS temp directory by default. If
+    // that disk is full this migration rolls back and the start fails; no data is lost, and the
+    // pre-migration backup copy fails under the same condition, so this is not a new kind of risk.
+    // Putting the rows back needs their parents: a row with no parent (a foreign key violation)
+    // would fail the insert, which cannot normally exist because foreign keys are on from the moment
+    // the database opens and migrations that turn them off check foreign_key_check afterwards.
     // The live database is not VACUUMed (a VACUUM rewrites Task history and image blobs too, about
     // 8 ms per MB with up to twice the file size in temporary disk, on every first start after the
     // upgrade). Instead the audit table is rewritten into clean pages with secure_delete on (see
@@ -6810,6 +6823,7 @@ function recoverDatabaseIfCorrupt(databasePath: string): DatabaseRecoveryReport 
 }
 
 export const __persistenceRecoveryTestables = {
+  secureDeleteAssignment,
   supportsDirectorySync: supportsRecoveryDirectorySync,
   /** #786: throws at a step of the backup digest scrub, to drive its failure paths. */
   setBackupScrubFailureForTesting(callback: ((step: 'scrub' | 'remove') => void) | null) {
@@ -7384,9 +7398,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
       // outside applyMigration's transaction) or dropping a table other rows still reference
       // would cascade-delete them. foreign_key_check afterward guards against a migration
       // silently leaving the database inconsistent.
-      // #786: v101 overwrites digests in place. With secure_delete on, SQLite zeroes whatever the
-      // statement frees or moves, so the old digest does not linger in free space of the live file.
-      // The flag is per connection: read it first and put it back afterwards.
+      // #786: v101 empties the audit table and puts the rows back (see
+      // COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL). With secure_delete on, SQLite zeroes every page and
+      // cell that statement frees, so the old digest does not linger in the live file. The flag is
+      // per connection: read it first and put it back afterwards.
       const priorSecureDelete =
         migration.version === COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION
           ? (this.db.pragma('secure_delete', { simple: true }) as number)
@@ -7407,7 +7422,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
           applyMigration();
         }
       } finally {
-        if (priorSecureDelete !== null) this.db.pragma(`secure_delete = ${priorSecureDelete}`);
+        if (priorSecureDelete !== null) this.db.pragma(secureDeleteAssignment(priorSecureDelete));
       }
       appliedNow.add(migration.version);
     }
