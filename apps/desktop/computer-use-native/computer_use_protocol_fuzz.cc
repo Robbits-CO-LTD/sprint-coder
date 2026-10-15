@@ -6413,6 +6413,38 @@ bool CheckWindowsInterlockCapture() {
     if (!no_verdict(evaluate(trusted.form.source, "click", "", ruleset), InterlockNoVerdict::kNone,
                     "winlane-trusting-ruleset-is-no-refusal")) return false;
   }
+  // The real path of a file item could not be read (lookup abandoned or refused, shell slot busy):
+  // only a display name is known, the extension is unknown, and that is NO VERDICT. It must not look
+  // like "nothing to refuse" (which would drop the E1 / E4 and the closed-approval refusals).
+  {
+    FakeExplorer abandoned_script("run.bat");
+    if (!no_verdict(evaluate(abandoned_script.form.source, "click"), InterlockNoVerdict::kIncomplete,
+                    "winlane-unread-path-script-is-no-verdict")) return false;
+    FakeExplorer abandoned_pdf("invoice.pdf");
+    if (!no_verdict(evaluate(abandoned_pdf.form.source, "click"), InterlockNoVerdict::kIncomplete,
+                    "winlane-unread-path-document-is-no-verdict")) return false;
+    FakeExplorer refused_lookup("run.bat");
+    refused_lookup.GiveRealPath("C:\Users\me\run.bat");
+    refused_lookup.form.Node(refused_lookup.item).item_result = ShadowReadResult::kFailed;
+    if (!no_verdict(evaluate(refused_lookup.form.source, "click"), InterlockNoVerdict::kIncomplete,
+                    "winlane-failed-lookup-is-no-verdict")) return false;
+    // With the real path the same item is refused as the map says.
+    FakeExplorer known_script("run.bat");
+    known_script.GiveRealPath("C:\Users\me\run.bat");
+    if (!Check(evaluate(known_script.form.source, "click").Refuses(), "winlane-known-path-script-refuses"))
+      return false;
+  }
+  // Canceled and out of budget together: canceled wins, as on macOS.
+  {
+    ShadowUiaCapture capture = UiaBase();
+    capture.budget_exhausted = true;
+    capture.window_class = "ConsoleWindowClass";
+    capture.process_path = "C:\Windows\System32\conhost.exe";
+    if (!no_verdict(EvaluateWindowsInterlockFromCapture(capture, UiaRequest("type"), true),
+                    InterlockNoVerdict::kCanceled, "winlane-canceled-before-budget")) return false;
+    if (!no_verdict(EvaluateWindowsInterlockFromCapture(capture, UiaRequest("type"), false),
+                    InterlockNoVerdict::kBudget, "winlane-budget-without-cancel")) return false;
+  }
   // Canceled while the capture ran: no verdict, even where the facts would refuse.
   {
     FakeForm form;

@@ -4826,8 +4826,11 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // Behaviour-neutral: NOTHING calls this yet. The preflight and the dispatch guard are wired in
 // S5-c-2, on the serial lane, after a Windows real-machine check and a decision on how long the
 // lane may be held (the gate bounds the number and the start of calls, not the length of one: a UI
-// Automation call has its own 1500 ms timeout). The caller must have COM initialized on its thread
-// (the shadow's thread does it in LaunchWindowsShadowThread). It holds no lock, calls no input API,
+// Automation call has its own 1500 ms timeout, and Create is outside the gate). The caller must have
+// COM initialized on its thread (the shadow's thread does it in LaunchWindowsShadowThread), and must
+// call this only AFTER the V1 re-validation of the bound target succeeded (ValidateWindowsDispatchBinding):
+// the point below is the third copy of the click / scroll mapping (dispatch, shadow, here), and it is
+// only right for a binding that is still valid. It holds no lock, calls no input API,
 // writes nothing, and never throws; the shadow wiring above is not touched.
 [[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     const WindowsSession &session, const std::string &metadata, const std::string &kind,
@@ -4861,6 +4864,11 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     const auto still_valid = [expected_epoch]() {
       return cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
     };
+    // Canceled before anything is created or read: no verdict, and no UI Automation object.
+    if (!still_valid()) {
+      unavailable.no_verdict = InterlockNoVerdict::kCanceled;
+      return unavailable;
+    }
     std::unique_ptr<ShadowUiaSource> source =
         WindowsUiaShadowSource::Create(session.active_window, point, still_valid);
     if (source == nullptr)

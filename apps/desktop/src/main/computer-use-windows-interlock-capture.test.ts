@@ -62,6 +62,12 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(budget).toBeGreaterThan(cancel);
     expect(complete).toBeGreaterThan(budget);
     expect(map).toBeGreaterThan(complete);
+    // A file item of a file manager whose real path is unknown is no verdict, asked before the map.
+    const item = squashed.indexOf(
+      'capture.item_kind == ShadowItemKind::kFile && !(capture.item_name_read && capture.item_name_is_real_path)',
+    );
+    expect(item).toBeGreaterThan(complete);
+    expect(map).toBeGreaterThan(item);
     expect(squashed).toContain('result.no_verdict = InterlockNoVerdict::kCanceled;');
     expect(squashed).toContain('result.no_verdict = InterlockNoVerdict::kBudget;');
     expect(squashed).toContain('result.no_verdict = InterlockNoVerdict::kIncomplete;');
@@ -105,6 +111,17 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(body).not.toMatch(
       /lock_guard|unique_lock|scoped_lock|mutex|SendInput|mouse_event|keybd_event|SetForegroundWindow|SetFocus|PostMessage|SendMessage|WriteFile|std::thread/u,
     );
+  });
+
+  it('does not schedule the shadow, and looks at the cancellation before it creates anything', () => {
+    const body = code(entry);
+    expect(body).not.toMatch(
+      /\.Schedule\(|WindowsEffectShadow|ScheduleWindowsEffectShadow|ProcessShadowLog/u,
+    );
+    const canceled = body.indexOf('if (!still_valid()) {');
+    const create = body.indexOf('WindowsUiaShadowSource::Create(');
+    expect(canceled).toBeGreaterThan(0);
+    expect(create).toBeGreaterThan(canceled);
   });
 
   it('leaves the shadow wiring as it was: the scheduler, the ring and the observer only', () => {

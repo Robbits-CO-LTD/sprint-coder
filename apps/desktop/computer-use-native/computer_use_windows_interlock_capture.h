@@ -41,6 +41,16 @@ EvaluateWindowsInterlockFromCapture(const ShadowUiaCapture &capture, const Shado
     result.no_verdict = InterlockNoVerdict::kIncomplete;
     return result;
   }
+  // A file item of a file manager whose REAL path could not be read (the shell lookup was abandoned or
+  // refused, or only the display name is known): its extension is unknown, and the map would then say
+  // "nothing to refuse" for it, silently dropping the E1 / E4 refusal and the closed-approval refusal.
+  // That is not a verdict: V1 decides. (Explorer hides known extensions, so a display name proves
+  // nothing; see the contract of ShadowUiaCapture::item_name.)
+  if (capture.item_kind == ShadowItemKind::kFile &&
+      !(capture.item_name_read && capture.item_name_is_real_path)) {
+    result.no_verdict = InterlockNoVerdict::kIncomplete;
+    return result;
+  }
   result.verdict = InterlockForFacts(built.facts, ruleset);
   return result;
 }
