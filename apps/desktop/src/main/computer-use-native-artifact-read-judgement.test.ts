@@ -73,7 +73,12 @@ describe('artifact read judgement (#785 T15-4p)', () => {
       'return name == "statictext" || name == "textfield" || name == "textarea";',
     );
     expect(squashed).toContain(
-      'unstripped == "text" || unstripped == "edit" || unstripped == "document"',
+      'return unstripped == "text" || unstripped == "edit" || unstripped == "document";',
+    );
+    expect(squashed).toContain('if (platform != ArtifactReadPlatform::kWindows) return false;');
+    // The macOS list is closed as well: it ends at the three roles.
+    expect(squashed).toContain(
+      'return name == "statictext" || name == "textfield" || name == "textarea"; }',
     );
     // The facts default to a refusal: unknown surface, unknown origin, nothing checked.
     expect(squashed).toContain('SurfaceKind surface = SurfaceKind::kUnknown;');

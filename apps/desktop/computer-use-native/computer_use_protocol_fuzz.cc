@@ -4444,7 +4444,11 @@ bool CheckArtifactReadJudgement() {
       "AXDocument",   "AXEdit",      "AXText",     "Text",              "Edit",       "Document",
       "TextBox",      "TextArea",    "TextField",  "StaticText",        "DataItem",   "Table",
       "Pane",         "Group",       "Custom",     "ComboBox",          "Hyperlink",  "",
-      "Texts",        "AXStaticTextX", "Text ",    "EDIT",              "document"};
+      "Texts",        "AXStaticTextX", "Text ",    "EDIT",              "document",
+      "ListItem",     "List",        "MenuItem",   "Image",             "Button",     "Hyperlink",
+      "AXList",       "AXLink",      "AXImage",    "AXMenuItem",        "AXCheckBox", "AXSlider",
+      "AXOutline",    "AXOutlineRow", "AXLayoutArea", "TreeItem",       "Header",     "Tab",
+      "ToolBar",      "ScrollBar",   "Window",     "Spinner",           "Calendar",   "Thumb"};
   const auto allowed = [](ArtifactReadPlatform platform, const std::string &role) {
     if (platform == ArtifactReadPlatform::kMacOs)
       return role == "AXStaticText" || role == "AXTextField" || role == "AXTextArea" ||
@@ -4461,6 +4465,18 @@ bool CheckArtifactReadJudgement() {
   constexpr ArtifactReadPlatform platforms[] = {ArtifactReadPlatform::kMacOs,
                                                 ArtifactReadPlatform::kWindows};
   std::size_t reads = 0;
+  // A platform value outside the two is refused for every role and every fact set.
+  {
+    ArtifactReadFacts facts;
+    facts.platform = static_cast<ArtifactReadPlatform>(7);
+    facts.metadata_complete = true;
+    facts.surface = SurfaceKind::kOrdinary;
+    facts.origin = OriginState::kNotApplicable;
+    facts.browser_identity_checked = true;
+    for (const char *role : {"Text", "Edit", "Document", "AXStaticText", "AXTextField"})
+      if (!Check(!JudgeArtifactRead(facts, role).MayRead(), "artifact-read-unknown-platform-refuses"))
+        return false;
+  }
   for (const ArtifactReadPlatform platform : platforms)
     for (const std::string &role : roles)
       for (unsigned bits = 0; bits < 32; ++bits)

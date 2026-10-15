@@ -20,6 +20,13 @@
 // the macOS "ax" prefix dropped), and per platform: Windows "Edit" is not a macOS role and macOS
 // "TextArea" is not a Windows control type, so a role string that exists on only one platform cannot
 // open the other.
+// Known gaps, on purpose (safe side): an Electron application (macOS AXWebArea, Windows
+// Chrome_WidgetWin_*) and a Windows Document (the body of a word processor) come with an origin other
+// than "not applicable" once the shadow's origin is computed, so they are refused as browser windows
+// for now. How to tell a browser from those is decided in T15-4m / T15-4w, with the browser identity
+// and the origin kept apart. The judgement reads the ROLE only, never the subrole: that a password
+// field is refused depends on the caller passing facts.secure, so a caller must not set
+// metadata_complete when it could not read the subrole.
 // What is refused whatever the role: a secure node, a high-impact node (the native's lexicon), a
 // surface that is not ordinary, an origin that is sensitive or unknown, a browser window (R14 / N22b:
 // the browser is refused as a source at first; it is opened after S7 and #777 measured it), and any
@@ -80,11 +87,13 @@ namespace artifact_read_detail {
 }
 
 [[nodiscard]] inline bool RoleIsReadable(ArtifactReadPlatform platform, std::string_view role) {
-  const std::string name = NormalizedRole(role);
-  if (platform == ArtifactReadPlatform::kMacOs)
+  if (platform == ArtifactReadPlatform::kMacOs) {
+    const std::string name = NormalizedRole(role);
     return name == "statictext" || name == "textfield" || name == "textarea";
-  // Windows control types; the "ax" prefix does not exist there, so a role that still starts with it
-  // (and was stripped above) cannot be one of these three: compare the unstripped form.
+  }
+  // Windows control types; the "ax" prefix does not exist there, so the unstripped form is compared.
+  // Any other platform value is not a platform: refused.
+  if (platform != ArtifactReadPlatform::kWindows) return false;
   const std::string unstripped = effect_detail::NormalizeForMatch(role);
   return unstripped == "text" || unstripped == "edit" || unstripped == "document";
 }
