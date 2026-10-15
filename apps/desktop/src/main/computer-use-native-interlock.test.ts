@@ -28,7 +28,13 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
   it('is not called by any native source yet, and moves no version', () => {
     const sources = readdirSync(nativeDirectory).filter((name) => /\.(h|cc|mm)$/u.test(name));
     for (const name of sources) {
-      if (name === 'computer_use_native_interlock.h' || name === 'computer_use_protocol_fuzz.cc')
+      // The portable synchronous evaluation (S4-1b-1) is the one other reader; its own contract is
+      // in computer-use-native-interlock-capture.test.ts (the .mm reaches the map only through it).
+      if (
+        name === 'computer_use_native_interlock.h' ||
+        name === 'computer_use_native_interlock_capture.h' ||
+        name === 'computer_use_protocol_fuzz.cc'
+      )
         continue;
       expect(read(name), name).not.toContain('computer_use_native_interlock.h');
       expect(read(name), name).not.toContain('MapEffectToInterlock');
