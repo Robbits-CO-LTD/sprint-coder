@@ -2489,6 +2489,24 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it('N9: closing or re-epoching another Task leaves the references of this one and artifacts', async () => {
+      const { store, owners } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      fixture.controller.taskClosed('task-2');
+      fixture.controller.policyEpochChanged('task-2');
+      const references = fixture.controller.copiedArtifactReferences(started.sessionId);
+      expect(references).toHaveLength(1);
+      expect(store.take([references[0]!.artifactId], owners[0]!)).toEqual(['Total	42']);
+      await fixture.controller.stop(started.sessionId);
+    });
+
     it('forgets its references when the session ends', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);
