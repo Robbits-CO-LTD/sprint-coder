@@ -8,6 +8,7 @@
 #include "computer_use_effect_shadow.h"
 #include "computer_use_windows_shadow.h"
 #include "computer_use_windows_shadow_reader.h"
+#include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_effect_measurement.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -19,6 +20,7 @@
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <set>
 #include <span>
 #include <string>
@@ -2001,6 +2003,10 @@ using sprint_coder::computer_use::ShadowCheckText;
 using sprint_coder::computer_use::ShadowUiaSource;
 using sprint_coder::computer_use::ShadowUiaText;
 using sprint_coder::computer_use::WindowsShadowReader;
+using sprint_coder::computer_use::WindowsShadowScheduler;
+using sprint_coder::computer_use::WindowsShadowJob;
+using sprint_coder::computer_use::WindowsShadowEnvironment;
+using sprint_coder::computer_use::WindowsShadowLauncher;
 using sprint_coder::computer_use::kShadowMaxCaptureNodes;
 using sprint_coder::computer_use::kEffectMaxNeighborLabels;
 using sprint_coder::computer_use::ProcessShadowLog;
@@ -3176,7 +3182,7 @@ bool CheckWindowsShadowReader() {
   {
     FakeForm form;
     form.Node(form.window).class_name = "Chrome_WidgetWin_1";
-    form.source.process_path = "C:\Program Files\Google\Chrome\Application\chrome.exe";
+    form.source.process_path = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     const int document = form.source.Add(form.window, "Document", "Page");
     form.Node(document).has_url = true;
     form.Node(document).url = "https://example.com/form";
@@ -3189,7 +3195,7 @@ bool CheckWindowsShadowReader() {
                "winreader-document-url")) return false;
     FakeForm silent;
     silent.Node(silent.window).class_name = "Chrome_WidgetWin_1";
-    silent.source.process_path = "C:\Program Files\Google\Chrome\Application\chrome.exe";
+    silent.source.process_path = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
     const int silent_doc = silent.source.Add(silent.window, "Document", "Page");
     const int silent_field = silent.source.Add(silent_doc, "Edit", "Email");
     silent.source.point = silent_field;
@@ -3305,6 +3311,199 @@ bool CheckWindowsShadowReader() {
     if (!Check(capture.chain[0].name == "Place order", "winreader-label-is-passed-through")) return false;
   }
   std::cout << "Computer Use native Windows shadow reader: PASS\n";
+  return true;
+}
+
+// ---- Windows shadow scheduler (S5-b-2b): when the shadow may run, and what it records ----------
+// The launcher, the clock-free environment and the source are all fakes: the scheduler is portable.
+
+struct QueuedLauncher {
+  std::vector<std::function<void()>> queued;
+  bool throws = false;
+  WindowsShadowLauncher Get() {
+    return [this](std::function<void()> work) {
+      if (throws) throw 1;
+      queued.push_back(std::move(work));
+    };
+  }
+  void RunAll() {
+    std::vector<std::function<void()>> work;
+    work.swap(queued);
+    for (auto &item : work) item();
+  }
+};
+
+WindowsShadowJob SchedulerJob(const std::string &kind = "click") {
+  WindowsShadowJob job;
+  job.kind = kind;
+  job.maximum_mode = "full_access_app";
+  job.policy_language = "en";
+  job.v1_ordinary = true;
+  return job;
+}
+
+struct SchedulerWorld {
+  FakeForm form;
+  int opened = 0;
+  bool valid = true;
+  bool unavailable = false;
+  bool open_throws = false;
+  WindowsShadowEnvironment Environment() {
+    WindowsShadowEnvironment environment;
+    environment.still_valid = [this] { return valid; };
+    environment.open_source = [this]() -> std::unique_ptr<ShadowUiaSource> {
+      ++opened;
+      if (open_throws) throw 1;
+      if (unavailable) return nullptr;
+      return std::make_unique<FakeUia>(form.source);
+    };
+    return environment;
+  }
+};
+
+bool CheckWindowsShadowScheduler() {
+  // V1 could not re-validate the bound target: nothing is read, nothing is opened, one skipped record.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    scheduler.Schedule(SchedulerJob(), false, world.Environment());
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && (records[0].gaps & kShadowGapV1Invalid) != 0 && records[0].v1_ordinary &&
+                   launcher.queued.empty() && world.opened == 0 && !scheduler.InFlight(),
+               "winsched-v1-invalid-reads-nothing")) return false;
+  }
+  // The happy path: the caller's thread reads nothing (the capture is only handed over), and the
+  // work records exactly one classification, identical to classifying the same capture directly.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    if (!Check(launcher.queued.size() == 1 && ring.Total() == 0 && world.opened == 0 && scheduler.InFlight(),
+               "winsched-schedule-reads-nothing-on-the-callers-thread")) return false;
+    launcher.RunAll();
+    FakeForm direct;
+    WindowsShadowReader reader(direct.source);
+    ShadowRequestInfo info = UiaRequest("click");
+    const ShadowRecord expected = WindowsShadowClassify(reader.Capture("click", ""), info, true);
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && records[0].gaps == expected.gaps && records[0].kind == expected.kind &&
+                   records[0].effect_class == expected.effect_class && records[0].v1_ordinary &&
+                   world.opened == 1 && !scheduler.InFlight(),
+               "winsched-records-one-classification")) return false;
+  }
+  // One capture in flight: another is recorded as busy, not queued; once it ends, the next is taken.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    const std::vector<ShadowRecord> busy = ring.Snapshot();
+    if (!Check(launcher.queued.size() == 1 && busy.size() == 1 && (busy[0].gaps & kShadowGapBusy) != 0,
+               "winsched-second-capture-is-busy")) return false;
+    launcher.RunAll();
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    if (!Check(launcher.queued.size() == 1 && scheduler.InFlight(), "winsched-next-capture-after-the-first"))
+      return false;
+    launcher.RunAll();
+    if (!Check(ring.Total() == 3 && !scheduler.InFlight(), "winsched-three-records")) return false;
+  }
+  // Canceled between the schedule and the start: nothing is opened or read.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    world.valid = false;
+    launcher.RunAll();
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && records[0].gaps == kShadowGapCanceled && world.opened == 0 && !scheduler.InFlight(),
+               "winsched-canceled-before-start-reads-nothing")) return false;
+  }
+  // UI Automation cannot be created: a read gap, never a classification.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    world.unavailable = true;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && records[0].gaps == kShadowGapReadFailed && !scheduler.InFlight(),
+               "winsched-no-uia-is-a-read-gap")) return false;
+  }
+  // Canceled while the capture runs: a skipped record, never a (partial) classification.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    world.form.source.cancel_after = 4;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && records[0].gaps == kShadowGapCanceled && !scheduler.InFlight(),
+               "winsched-canceled-mid-capture-is-skipped")) return false;
+  }
+  // Out of budget: the classification stands, with the budget gap (incomplete is a takeover).
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    for (int extra = 0; extra < 2000; ++extra) world.form.source.Add(world.form.pane, "Group");
+    WindowsShadowJob job = SchedulerJob("invoke");
+    job.target_id = "no-such-target";
+    scheduler.Schedule(std::move(job), true, world.Environment());
+    launcher.RunAll();
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && (records[0].gaps & kShadowGapBudget) != 0 &&
+                   (records[0].gaps & kShadowGapCanceled) == 0 && records[0].kind != DecisionKind::kOrdinary,
+               "winsched-budget-is-a-classification-with-a-gap")) return false;
+  }
+  // A failure of the shadow is invisible and frees the slot: an exception in the source, an
+  // exception in the launcher.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    world.open_throws = true;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    if (!Check(ring.Total() == 0 && !scheduler.InFlight(), "winsched-source-exception-is-swallowed")) return false;
+    world.open_throws = false;
+    launcher.throws = true;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    if (!Check(!scheduler.InFlight() && ring.Total() == 0, "winsched-launcher-exception-frees-the-slot")) return false;
+    launcher.throws = false;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    if (!Check(ring.Total() == 1, "winsched-works-after-failures")) return false;
+  }
+  // The V1 verdict is carried into every kind of record.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    WindowsShadowJob job = SchedulerJob();
+    job.v1_ordinary = false;
+    scheduler.Schedule(job, false, world.Environment());
+    scheduler.Schedule(job, true, world.Environment());
+    launcher.RunAll();
+    bool all_false = true;
+    for (const ShadowRecord &record : ring.Snapshot()) all_false = all_false && !record.v1_ordinary;
+    if (!Check(ring.Total() == 2 && all_false, "winsched-v1-verdict-is-carried")) return false;
+  }
+  std::cout << "Computer Use native Windows shadow scheduler: PASS\n";
   return true;
 }
 
@@ -5194,6 +5393,7 @@ int main() {
   if (!CheckWindowsShadowCore()) return 1;
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckWindowsShadowReader()) return 1;
+  if (!CheckWindowsShadowScheduler()) return 1;
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
   if (!CheckEffectPageScroll()) return 1;

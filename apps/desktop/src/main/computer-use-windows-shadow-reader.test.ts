@@ -276,18 +276,16 @@ describe('Windows UI Automation source only reads', () => {
     expect(item).toContain('return ShadowReadResult::kAbsent;');
   });
 
-  it('is included by the host but not called: nothing is wired yet', () => {
+  it('is included by the host, and the reader is reached only through the scheduler (S5-b-2b)', () => {
     expect(host).toContain('#include "computer_use_windows_uia_source.h"');
+    // The host names neither the reader, the classifier nor the gate: the scheduler owns them.
     for (const name of [
       'WindowsShadowReader',
-      'WindowsUiaShadowSource',
       'WindowsShadowClassify',
       'BuildWindowsShadowFacts',
-      'ProcessShadowLog',
-      'ShadowUiaCapture',
       'ShadowGate',
     ])
-      expect(host, name).not.toContain(name);
+      expect(code(host), name).not.toContain(name);
     // The version stays where the V1 preflight puts it, and the win32 v2 refusal is untouched.
     expect(host).toContain('kNativePreflightClassifierVersion');
     expect(host).not.toMatch(
