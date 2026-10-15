@@ -505,6 +505,10 @@ int main() {
             g_sent.back().payload.find("invalid_action") != std::string::npos,
         "non_hex_action_digest_error");
   Check(g_shadow.empty(), "malformed_request_schedules_no_shadow");
+  // A request without a type is denied by V1 and leaves nothing for the shadow to record.
+  Reset();
+  ticket = Preflight("{\"requestId\":\"request-1\",\"actionDigest\":\"" + kDigest + "\",\"cancelEpoch\":3,\"observationRevision\":7}");
+  Check(ticket.empty() && HasDecision("denied") && g_shadow.empty(), "typeless_request_schedules_no_shadow");
   Check(!ticket_states.at(kSessionKey).slot.occupied(), "non_hex_digest_leaves_slot_empty");
   Reset();
   g_sent.clear();

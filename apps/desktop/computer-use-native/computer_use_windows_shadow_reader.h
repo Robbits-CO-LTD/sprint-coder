@@ -384,7 +384,10 @@ private:
     capture->item_kind = ShadowItemKind::kFile;
     std::string path;
     bool is_folder = false;
-    if (ShadowSettle(ItemPath(chain_elements_[index], kPathBytes, &path, &is_folder),
+    // The shell is asked only about an item of the bound window: a target the walk could not trace
+    // back to it (another window on top, the focus elsewhere) is not looked up.
+    if (capture->chain_reached_root &&
+        ShadowSettle(ItemPath(chain_elements_[index], kPathBytes, &path, &is_folder),
                      &capture->read_failed)) {
       capture->item_name_read = true;
       capture->item_name_is_real_path = true;

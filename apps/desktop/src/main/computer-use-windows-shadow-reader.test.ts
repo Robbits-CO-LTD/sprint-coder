@@ -229,7 +229,7 @@ describe('Windows UI Automation source only reads', () => {
     const win32 = new Set(
       [
         ...source.matchAll(
-          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|SH\w+|Shell\w+)\(/gu,
+          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|GetAncestor|SH\w+|Shell\w+)\(/gu,
         ),
       ].map((match) => match[1]!),
     );
@@ -249,6 +249,7 @@ describe('Windows UI Automation source only reads', () => {
       'SHCreateItemWithParent',
       'ILFree',
       'CoTaskMemFree',
+      'GetAncestor',
       // the shell lookup of the item path (a function of this file, not a Win32 call)
       'ShellItemPathByName',
     ]);
@@ -285,6 +286,113 @@ describe('Windows UI Automation source only reads', () => {
     ])
       expect(source).toContain(property);
     expect((source.match(/ShadowTextFromUtf16\(/gu) ?? []).length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('calls a closed set of free functions: every capitalized call is listed, none of them acts on a window', () => {
+    const calls = new Set(
+      [...code(source).matchAll(/(?<![\w.>:])([A-Z]\w*)\(/gu)].map((match) => match[1]!),
+    );
+    // Win32 / COM / macros the source may use.
+    const platform = [
+      'CloseHandle',
+      'CoCreateInstance',
+      'CoTaskMemFree',
+      'FAILED',
+      'GetAncestor',
+      'GetLastError',
+      'IID_PPV_ARGS',
+      'ILFree',
+      'NormalizeString',
+      'OpenProcess',
+      'QueryFullProcessImageNameW',
+      'SHCreateItemWithParent',
+      'SUCCEEDED',
+      'SysAllocString',
+      'SysFreeString',
+      'SysStringLen',
+      'VariantClear',
+      'VariantInit',
+      'WideCharToMultiByte',
+    ];
+    // The shared shadow helpers and this file's own functions and methods.
+    const own = [
+      'ActionStillValid',
+      'At',
+      'AtPoint',
+      'BstrHolder',
+      'ComRef',
+      'ControlTypeName',
+      'CoreWindowProcessPath',
+      'Create',
+      'DocumentUrl',
+      'FirstChild',
+      'Focused',
+      'Get',
+      'IsPassword',
+      'ItemPath',
+      'Keep',
+      'NextSibling',
+      'NowNs',
+      'Parent',
+      'ProcessPathOf',
+      'Receive',
+      'Reset',
+      'Root',
+      'Same',
+      'ShadowCheckText',
+      'ShadowTextFromUtf16',
+      'ShadowUnitsTooLong',
+      'ShellItemPathByName',
+      'Text',
+      'View',
+      'Widen',
+      'WindowProcessPath',
+      'WindowsUiaShadowSource',
+    ];
+    const allowed = new Set([...platform, ...own]);
+    for (const name of calls) expect(allowed.has(name), name).toBe(true);
+    // None of these acts on a window, the focus, the input or another process.
+    for (const name of platform)
+      expect(name).not.toMatch(
+        /^(Show|Bring|SetActive|SetForeground|SetFocus|SetWindow|SetCursor|Send|Post|Attach|SwitchTo|SystemParameters|Terminate|CreateProcess|Shell)/u,
+      );
+  });
+
+  it('creates UI Automation with its call timeouts as a precondition', () => {
+    const create = between(
+      source,
+      'static std::unique_ptr<WindowsUiaShadowSource> Create(',
+      'WindowsUiaShadowSource(const',
+    );
+    // CUIAutomation8 is the only coclass with IUIAutomation2 (ConnectionTimeout / TransactionTimeout);
+    // with the original CUIAutomation a call to a hung app never returns (measured).
+    expect(create).toContain('CLSID_CUIAutomation8');
+    expect(code(create)).not.toMatch(/CLSID_CUIAutomation\b(?!8)/u);
+    expect(create).toContain('ComRef<IUIAutomation2> bounded;');
+    expect(create).toContain('put_ConnectionTimeout(kTimeoutMilliseconds)');
+    expect(create).toContain('put_TransactionTimeout(kTimeoutMilliseconds)');
+    expect(code(source)).not.toContain('IUIAutomation6');
+    // Failing to set either is "no source" (the capture is skipped), never a call without a bound.
+    expect(create).toMatch(
+      /FAILED\(bounded\.Get\(\)->put_ConnectionTimeout\(kTimeoutMilliseconds\)\) \|\|\s*FAILED\(bounded\.Get\(\)->put_TransactionTimeout\(kTimeoutMilliseconds\)\)\)\s*return nullptr;/u,
+    );
+    expect(create.indexOf('put_TransactionTimeout')).toBeLessThan(
+      create.indexOf('get_RawViewWalker'),
+    );
+    expect(source).toMatch(/kTimeoutMilliseconds = 1500;/u);
+  });
+
+  it('asks the shell only about a tab of the bound window', () => {
+    const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
+    expect(item).toContain(
+      'GetAncestor(tab, GA_ROOT) != window_) return ShadowReadResult::kAbsent;',
+    );
+    expect(item.indexOf('GetAncestor(tab, GA_ROOT)')).toBeLessThan(
+      item.indexOf('ShellItemPathByName('),
+    );
+    // and the reader asks only for an item it could trace back to the bound window.
+    const reader_item = between(reader, 'void CaptureItem(', 'ShadowUiaSource &source_;');
+    expect(reader_item).toContain('capture->chain_reached_root &&');
   });
 
   it('looks the item path up read-only, bounded, and only when the name is unique', () => {

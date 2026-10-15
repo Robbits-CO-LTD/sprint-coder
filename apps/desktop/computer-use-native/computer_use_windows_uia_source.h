@@ -290,23 +290,25 @@ public:
   [[nodiscard]] static std::unique_ptr<WindowsUiaShadowSource> Create(HWND window, POINT point,
                                                                     StillValid still_valid) {
     using windows_uia_source_detail::ComRef;
+    // CUIAutomation8 (Windows 8 and later) is the only coclass that implements IUIAutomation2, whose
+    // ConnectionTimeout / TransactionTimeout bound a call to an app that does not answer. The
+    // original CUIAutomation does not, and a call to a hung app then never returns (measured), which
+    // would hold the shadow's thread and its one slot for the life of the helper. So the timeouts are
+    // a precondition: without them there is no source, and the capture is recorded as skipped.
     ComRef<IUIAutomation> automation;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(automation.Receive()))) ||
         automation.Get() == nullptr)
+      return nullptr;
+    ComRef<IUIAutomation2> bounded;
+    if (FAILED(automation.Get()->QueryInterface(IID_PPV_ARGS(bounded.Receive()))) ||
+        bounded.Get() == nullptr ||
+        FAILED(bounded.Get()->put_ConnectionTimeout(kTimeoutMilliseconds)) ||
+        FAILED(bounded.Get()->put_TransactionTimeout(kTimeoutMilliseconds)))
       return nullptr;
     ComRef<IUIAutomationTreeWalker> walker;
     if (FAILED(automation.Get()->get_RawViewWalker(walker.Receive())) || walker.Get() == nullptr)
       return nullptr;
-    // A hung target app may hold one call for a long time; where this system lets the client bound
-    // it, bound it (IUIAutomation6, Windows 10 1809 and later). Not relied on: the shadow runs off
-    // the serial lane and its own budget still applies.
-    ComRef<IUIAutomation6> bounded;
-    if (SUCCEEDED(automation.Get()->QueryInterface(IID_PPV_ARGS(bounded.Receive()))) &&
-        bounded.Get() != nullptr) {
-      (void)bounded.Get()->put_ConnectionTimeout(kTimeoutMilliseconds);
-      (void)bounded.Get()->put_TransactionTimeout(kTimeoutMilliseconds);
-    }
     return std::unique_ptr<WindowsUiaShadowSource>(new WindowsUiaShadowSource(
         std::move(automation), std::move(walker), window, point, std::move(still_valid)));
   }
@@ -481,6 +483,8 @@ public:
         cursor = std::move(parent);
       }
     }
+    // Only a tab of the bound window: an item of any other Explorer window is not read.
+    if (tab != nullptr && GetAncestor(tab, GA_ROOT) != window_) return ShadowReadResult::kAbsent;
     windows_uia_source_detail::ShellLookupLimits limits;
     limits.still_valid = [this] { return ActionStillValid(); };
     limits.now_ns = [this] { return NowNs(); };

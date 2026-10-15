@@ -55,7 +55,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     }
   });
 
-  it('is not wired into the Windows host yet, and changes no version', () => {
+  it('does not name the shadow headers in the host directly, and changes no version', () => {
     // S5-b-2a added the reader and the UI Automation source (S5-b-2b wires them); the host reaches the shadow only through that source header.
     expect(windowsHost).not.toContain('computer_use_windows_shadow.h');
     expect(windowsHost).not.toContain('computer_use_effect_shadow.h');

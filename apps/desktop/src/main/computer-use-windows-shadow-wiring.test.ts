@@ -95,8 +95,28 @@ describe('Windows shadow scheduler decides nothing and reads nothing itself', ()
     expect(run).toMatch(/noexcept/u);
     expect(run).toContain('} catch (...) {');
     // Whatever is recorded is an enum-only ShadowRecord: the capture's strings stay in this function.
-    expect(run).toMatch(
-      /ring_\.Record\(WindowsShadowClassify\(capture, info, job\.v1_ordinary\)\)/u,
+    expect(run).toMatch(/Emit\(WindowsShadowClassify\(capture, info, job\.v1_ordinary\)\)/u);
+    // The cancel is looked at after the last call of the capture too, not only by the gate.
+    expect(run).toContain('reader.Canceled() || !environment.still_valid()');
+  });
+
+  it('keeps every record in the ring and tells the observer, in one place', () => {
+    const text = code(scheduler);
+    // Every record goes through Emit; only Emit touches the ring and the observer.
+    expect(text.match(/ring_\.Record\(/gu)?.length).toBe(1);
+    expect(text.match(/observer_\(record\)/gu)?.length).toBe(1);
+    const emit = between(
+      text,
+      'void Emit(const ShadowRecord &record) noexcept {',
+      'EffectShadowLog &ring_;',
+    );
+    expect(emit.indexOf('ring_.Record(record)')).toBeLessThan(emit.indexOf('observer_(record)'));
+    // The observer sees a ShadowRecord, which is enums and counters (trivially copyable) and nothing else.
+    expect(text).toContain(
+      'using WindowsShadowObserver = std::function<void(const ShadowRecord &)>;',
+    );
+    expect(read('computer_use_effect_shadow.h')).toMatch(
+      /static_assert\(std::is_trivially_copyable_v<ShadowRecord>/u,
     );
   });
 
@@ -134,7 +154,7 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     // The UI Automation source is created only inside the open_source function the shadow thread runs.
     expect(text.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
     expect(wiring).toMatch(
-      /environment\.open_source = \[window, point, still_valid\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*return WindowsUiaShadowSource::Create\(window, point, still_valid\);/u,
+      /environment\.open_source = \[window, point, still_valid, point_known, needs_point\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*if \(needs_point && !point_known\)\s*return nullptr;\s*return WindowsUiaShadowSource::Create\(window, point, still_valid\);/u,
     );
     // The process ring is named in exactly one place: the wiring.
     expect(text.match(/ProcessShadowLog\(\)/gu)?.length).toBe(1);
@@ -149,6 +169,7 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(inPreflight.length).toBe(2);
     const text = code(preflight);
     const validate = text.indexOf('ValidateWindowsDispatchBinding(');
+    const deniedSent = text.indexOf('const bool denied_sent =');
     const denied = text.indexOf(
       'ScheduleWindowsEffectShadow(session, metadata, kind, false, false)',
     );
@@ -159,9 +180,15 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     );
     expect(validate).toBeGreaterThanOrEqual(0);
     // Without a valid V1 binding the shadow only records that it read nothing, and the denial stays.
-    expect(denied).toBeGreaterThan(validate);
+    expect(deniedSent).toBeGreaterThan(validate);
+    expect(denied).toBeGreaterThan(deniedSent);
     expect(denied).toBeLessThan(receipt);
-    expect(text.slice(denied, receipt)).toContain('"denied"');
+    // The denial is on the wire BEFORE the shadow is told: the shadow never holds the V1 answer.
+    expect(text.slice(deniedSent, denied)).toContain('"denied"');
+    expect(text.slice(deniedSent, denied)).toContain(
+      'Respond(pipe, request, MessageType::kPreflightResult',
+    );
+    expect(text.slice(denied, receipt)).toContain('return denied_sent;');
     // With one, it is scheduled after the receipt has been built AND sent: it cannot change it.
     expect(receipt).toBeGreaterThan(denied);
     expect(respond).toBeGreaterThan(receipt);
@@ -187,8 +214,32 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(launch.indexOf('work();')).toBeLessThan(launch.indexOf('CoUninitialize()'));
     // The scheduler and the launcher live for the life of the process (a capture may outlive main).
     expect(text).toMatch(
-      /static sprint_coder::computer_use::WindowsShadowScheduler \*const scheduler =\s*new sprint_coder::computer_use::WindowsShadowScheduler\(\s*sprint_coder::computer_use::ProcessShadowLog\(\), LaunchWindowsShadowThread\)/u,
+      /static sprint_coder::computer_use::WindowsShadowScheduler \*const scheduler =\s*new sprint_coder::computer_use::WindowsShadowScheduler\(\s*sprint_coder::computer_use::ProcessShadowLog\(\), LaunchWindowsShadowThread,\s*ReportWindowsEffectShadow\);/u,
     );
+  });
+
+  it('reports each record to the debug output as enums and counters only', () => {
+    const report = between(
+      code(wiring),
+      'void ReportWindowsEffectShadow(',
+      'WindowsEffectShadow() {',
+    );
+    // The line carries the numbers of the record and nothing else: no string argument, no %s.
+    expect(report).toContain('OutputDebugStringA(line)');
+    const format = /"(computer-use effect shadow[^"]*)"/u.exec(report)?.[1];
+    expect(format).toBeDefined();
+    expect(format).not.toMatch(/%(?![ud])/u);
+    expect(format).not.toMatch(/%s|%ls|%S/u);
+    expect(format!.match(/%[ud]/gu)?.length).toBe(6);
+    const args = [
+      ...report.matchAll(/static_cast<unsigned>\(record\.(\w+)\)|record\.(\w+) \? 1 : 0/gu),
+    ].map((match) => match[1] ?? match[2]);
+    expect(args).toEqual(['action', 'effect_class', 'kind', 'reason', 'gaps', 'v1_ordinary']);
+    // Exactly the six numbers, and no other argument (the only string after a comma is the format).
+    expect(report.match(/record\./gu)?.length).toBe(6);
+    expect(report.match(/,\s*"/gu)?.length).toBe(1);
+    // Nothing of the capture (strings, paths, names) is in reach of this function.
+    expect(report).not.toMatch(/ShadowUiaCapture|document_url|item_name|process_path|\.name\b/u);
   });
 
   it('copies what the capture needs by value, holds no lock, and touches no host state', () => {

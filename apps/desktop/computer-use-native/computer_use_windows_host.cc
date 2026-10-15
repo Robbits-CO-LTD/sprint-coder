@@ -4738,11 +4738,26 @@ void LaunchWindowsShadowThread(std::function<void()> work) {
   }).detach();
 }
 
+// Enum values and counters only, to the debug output (the macOS shadow does the same to os_log):
+// never a label, a title, a URL or a path. A ShadowRecord holds none of them.
+void ReportWindowsEffectShadow(const sprint_coder::computer_use::ShadowRecord &record) {
+  char line[160];
+  const int length = std::snprintf(
+      line, sizeof(line),
+      "computer-use effect shadow action=%u class=%u kind=%u reason=%u gaps=%u v1_ordinary=%d\n",
+      static_cast<unsigned>(record.action), static_cast<unsigned>(record.effect_class),
+      static_cast<unsigned>(record.kind), static_cast<unsigned>(record.reason),
+      static_cast<unsigned>(record.gaps), record.v1_ordinary ? 1 : 0);
+  if (length > 0)
+    OutputDebugStringA(line);
+}
+
 // Never destroyed: a capture still running when the process exits must not find it torn down.
 sprint_coder::computer_use::WindowsShadowScheduler &WindowsEffectShadow() {
   static sprint_coder::computer_use::WindowsShadowScheduler *const scheduler =
       new sprint_coder::computer_use::WindowsShadowScheduler(
-          sprint_coder::computer_use::ProcessShadowLog(), LaunchWindowsShadowThread);
+          sprint_coder::computer_use::ProcessShadowLog(), LaunchWindowsShadowThread,
+          ReportWindowsEffectShadow);
   return *scheduler;
 }
 
@@ -4763,8 +4778,10 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     POINT point{0, 0};
     double x = 0;
     double y = 0;
+    bool point_known = false;
     if (ReadJsonDouble(metadata, "x", &x) && ReadJsonDouble(metadata, "y", &y) &&
         x >= 0 && x <= 1 && y >= 0 && y <= 1) {
+      point_known = true;
       const RECT bounds = session.observation_bounds;
       point.x = bounds.left + static_cast<LONG>(std::lround(
                                   x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
@@ -4780,8 +4797,13 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     };
     WindowsShadowEnvironment environment;
     environment.still_valid = still_valid;
-    environment.open_source = [window, point, still_valid]()
+    // A click or scroll whose point is not a point of the window is not looked up at the screen's
+    // origin: no source, so the capture is recorded as skipped.
+    const bool needs_point = kind == "click" || kind == "scroll";
+    environment.open_source = [window, point, still_valid, point_known, needs_point]()
         -> std::unique_ptr<ShadowUiaSource> {
+      if (needs_point && !point_known)
+        return nullptr;
       return WindowsUiaShadowSource::Create(window, point, still_valid);
     };
     WindowsEffectShadow().Schedule(std::move(job), v1_valid,
@@ -4829,13 +4851,16 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
   std::string reason;
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds,
                                       &reason)) {
-    // V1 could not re-validate the bound target: the shadow only records that it read nothing.
+    const bool denied_sent =
+        Respond(pipe, request, MessageType::kPreflightResult,
+                WindowsPreflightReceipt(session, request_id, cancel_epoch,
+                                        observation_revision, "denied",
+                                        "native_" + reason, ""));
+    // V1 could not re-validate the bound target and its denial is out: the shadow only records
+    // that it read nothing.
     if (!kind.empty())
       ScheduleWindowsEffectShadow(session, metadata, kind, false, false);
-    return Respond(pipe, request, MessageType::kPreflightResult,
-                   WindowsPreflightReceipt(session, request_id, cancel_epoch,
-                                           observation_revision, "denied",
-                                           "native_" + reason, ""));
+    return denied_sent;
   }
   std::string token;
   const bool issued =

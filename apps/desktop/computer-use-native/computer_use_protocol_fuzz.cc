@@ -2775,6 +2775,8 @@ struct FakeUiaNode {
   ShadowReadResult password_result = ShadowReadResult::kOk;
   ShadowReadResult parent_result = ShadowReadResult::kOk;
   ShadowReadResult children_result = ShadowReadResult::kOk;
+  ShadowReadResult url_result = ShadowReadResult::kOk;
+  ShadowReadResult item_result = ShadowReadResult::kOk;
 };
 
 class FakeUia final : public ShadowUiaSource {
@@ -2788,6 +2790,10 @@ public:
   std::string core_path;
   ShadowReadResult core_result = ShadowReadResult::kOk;
   ShadowReadResult root_result = ShadowReadResult::kOk;
+  ShadowReadResult point_result = ShadowReadResult::kOk;
+  ShadowReadResult focus_result = ShadowReadResult::kOk;
+  // A comparison that involves this node fails (-1 = none).
+  int same_fails_with = -1;
   std::uint64_t now = 1'000'000;
   std::uint64_t step_ns = 0;
   long cancel_after = -1;
@@ -2818,8 +2824,8 @@ public:
     *output = static_cast<Element>(root);
     return ShadowReadResult::kOk;
   }
-  ShadowReadResult AtPoint(Element *output) override { return Pick(point, output); }
-  ShadowReadResult Focused(Element *output) override { return Pick(focused, output); }
+  ShadowReadResult AtPoint(Element *output) override { return Pick(point, point_result, output); }
+  ShadowReadResult Focused(Element *output) override { return Pick(focused, focus_result, output); }
   ShadowReadResult Parent(Element element, Element *output) override {
     Tick();
     const FakeUiaNode &node = nodes[element];
@@ -2850,6 +2856,9 @@ public:
   }
   ShadowReadResult Same(Element first, Element second, bool *same) override {
     Tick();
+    if (same_fails_with >= 0 && (static_cast<int>(first) == same_fails_with ||
+                                 static_cast<int>(second) == same_fails_with))
+      return ShadowReadResult::kFailed;
     *same = first == second;
     return ShadowReadResult::kOk;
   }
@@ -2888,6 +2897,7 @@ public:
     Tick();
     ++url_calls;
     const FakeUiaNode &node = nodes[element];
+    if (node.url_result != ShadowReadResult::kOk) return node.url_result;
     if (!node.has_url) return ShadowReadResult::kAbsent;
     return ShadowCheckText(node.url, maximum_bytes, output);
   }
@@ -2909,6 +2919,7 @@ public:
     Tick();
     ++item_calls;
     const FakeUiaNode &node = nodes[element];
+    if (node.item_result != ShadowReadResult::kOk) return node.item_result;
     if (!node.has_item) return ShadowReadResult::kAbsent;
     *is_folder = node.item_is_folder;
     return ShadowCheckText(node.item_path, maximum_bytes, path);
@@ -2919,8 +2930,9 @@ private:
     ++calls;
     now += step_ns;
   }
-  ShadowReadResult Pick(int index, Element *output) {
+  ShadowReadResult Pick(int index, ShadowReadResult result, Element *output) {
     Tick();
+    if (result != ShadowReadResult::kOk) return result;
     if (index < 0) return ShadowReadResult::kAbsent;
     *output = static_cast<Element>(index);
     return ShadowReadResult::kOk;
@@ -3321,6 +3333,72 @@ bool CheckWindowsShadowReader() {
     if (!Check(too_long.item_kind == ShadowItemKind::kFile && !too_long.item_name_is_real_path && too_long.read_failed,
                "winreader-too-long-path-is-a-gap")) return false;
   }
+  // Failures of single calls are gaps, never an ordinary capture.
+  {
+    FakeForm lost_point;
+    lost_point.source.point_result = ShadowReadResult::kFailed;
+    WindowsShadowReader point_reader(lost_point.source);
+    const ShadowUiaCapture no_point = point_reader.Capture("click", "");
+    if (!Check(!no_point.target_found && no_point.read_failed, "winreader-failed-point-lookup-is-a-gap")) return false;
+    FakeForm lost_focus;
+    lost_focus.source.focus_result = ShadowReadResult::kFailed;
+    WindowsShadowReader focus_reader(lost_focus.source);
+    const ShadowUiaCapture no_focus = focus_reader.Capture("type", "");
+    if (!Check(!no_focus.target_found && no_focus.read_failed, "winreader-failed-focus-lookup-is-a-gap")) return false;
+    // A comparison with the bound window that fails ends the chain there, with a gap.
+    FakeForm same_target;
+    same_target.source.same_fails_with = same_target.edit;
+    WindowsShadowReader same_reader(same_target.source);
+    const ShadowUiaCapture cut = same_reader.Capture("click", "");
+    if (!Check(cut.chain.size() == 1 && !cut.chain_reached_root && cut.read_failed,
+               "winreader-failed-comparison-ends-the-chain")) return false;
+    // A comparison of a sibling that fails makes the neighbors incomplete.
+    FakeForm same_sibling;
+    same_sibling.source.same_fails_with = same_sibling.hint;
+    WindowsShadowReader sibling_reader(same_sibling.source);
+    const ShadowUiaCapture partial = sibling_reader.Capture("click", "");
+    if (!Check(!partial.neighbors_complete && partial.read_failed && partial.chain_reached_root,
+               "winreader-failed-sibling-comparison-is-incomplete")) return false;
+    // A Document value that fails to read in a web window is a failed read, not an unknown origin.
+    FakeForm web;
+    web.Node(web.window).class_name = "Chrome_WidgetWin_1";
+    const int page = web.source.Add(web.window, "Document", "Page");
+    web.Node(page).url_result = ShadowReadResult::kFailed;
+    web.source.point = page;
+    WindowsShadowReader web_reader(web.source);
+    const ShadowUiaCapture unreadable = web_reader.Capture("click", "");
+    if (!Check(!unreadable.document_url_read && unreadable.read_failed, "winreader-failed-url-read-is-a-gap")) return false;
+    // A UWP frame is recognized by its host process alone as well.
+    FakeForm frame;
+    frame.source.process_path = "C:\\Windows\\System32\\ApplicationFrameHost.exe";
+    frame.source.core_path = "C:\\Program Files\\WindowsApps\\App.exe";
+    WindowsShadowReader frame_reader(frame.source);
+    (void)frame_reader.Capture("click", "");
+    if (!Check(frame.source.core_calls == 1, "winreader-uwp-by-process-alone")) return false;
+  }
+  // The shell is asked only about an item of the bound window: a target the walk could not trace
+  // back to it is a file with an unknown extension and nothing is looked up.
+  {
+    FakeExplorer foreign("invoice.pdf");
+    const int other_window = foreign.form.source.Add(-1, "Window", "Other", "CabinetWClass");
+    const int other_list = foreign.form.source.Add(other_window, "List", "Items", "UIItemsView");
+    const int other_item = foreign.form.source.Add(other_list, "ListItem", "secret.docx", "UIItem");
+    foreign.form.source.nodes[static_cast<std::size_t>(other_item)].has_item = true;
+    foreign.form.source.nodes[static_cast<std::size_t>(other_item)].item_path = "C:\\Other\\secret.docx";
+    foreign.form.source.point = other_item;
+    WindowsShadowReader foreign_reader(foreign.form.source);
+    const ShadowUiaCapture outside = foreign_reader.Capture("click", "");
+    if (!Check(!outside.chain_reached_root && outside.item_kind == ShadowItemKind::kFile &&
+                   !outside.item_name_is_real_path && foreign.form.source.item_calls == 0,
+               "winreader-no-shell-lookup-outside-the-bound-window")) return false;
+    // A failed shell lookup is a gap and a display name only.
+    FakeExplorer failed_lookup("a.txt");
+    failed_lookup.form.Node(failed_lookup.item).item_result = ShadowReadResult::kFailed;
+    WindowsShadowReader failed_reader(failed_lookup.form.source);
+    const ShadowUiaCapture failed = failed_reader.Capture("click", "");
+    if (!Check(failed.item_kind == ShadowItemKind::kFile && !failed.item_name_is_real_path && failed.read_failed,
+               "winreader-failed-shell-lookup-is-a-gap")) return false;
+  }
   // A label is passed through as read (the core reads the words, the reader does not).
   {
     FakeForm form;
@@ -3365,11 +3443,17 @@ struct SchedulerWorld {
   FakeForm form;
   int opened = 0;
   bool valid = true;
+  // How many times still_valid answers yes before it says no (-1 = always yes while valid).
+  int valid_answers = -1;
   bool unavailable = false;
   bool open_throws = false;
   WindowsShadowEnvironment Environment() {
     WindowsShadowEnvironment environment;
-    environment.still_valid = [this] { return valid; };
+    environment.still_valid = [this] {
+      if (!valid) return false;
+      if (valid_answers < 0) return true;
+      return valid_answers-- > 0;
+    };
     environment.open_source = [this]() -> std::unique_ptr<ShadowUiaSource> {
       ++opened;
       if (open_throws) throw 1;
@@ -3506,6 +3590,52 @@ bool CheckWindowsShadowScheduler() {
     scheduler.Schedule(SchedulerJob(), true, world.Environment());
     launcher.RunAll();
     if (!Check(ring.Total() == 1, "winsched-works-after-failures")) return false;
+  }
+  // Canceled right after the last call of the capture: still not a classification of a stale target.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    WindowsShadowScheduler scheduler(ring, launcher.Get());
+    SchedulerWorld world;
+    world.valid_answers = 1;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    const std::vector<ShadowRecord> records = ring.Snapshot();
+    if (!Check(records.size() == 1 && records[0].gaps == kShadowGapCanceled && world.opened == 1,
+               "winsched-canceled-after-the-last-call-is-skipped")) return false;
+  }
+  // Every record the ring keeps is also given to the observer, unchanged, and an observer that
+  // throws does not lose the record or the slot.
+  {
+    EffectShadowLog ring;
+    QueuedLauncher launcher;
+    std::vector<ShadowRecord> seen;
+    bool observer_throws = false;
+    WindowsShadowScheduler scheduler(ring, launcher.Get(), [&](const ShadowRecord &record) {
+      seen.push_back(record);
+      if (observer_throws) throw 1;
+    });
+    SchedulerWorld world;
+    scheduler.Schedule(SchedulerJob(), false, world.Environment());
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    world.unavailable = true;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    observer_throws = true;
+    world.unavailable = false;
+    scheduler.Schedule(SchedulerJob(), true, world.Environment());
+    launcher.RunAll();
+    const std::vector<ShadowRecord> kept = ring.Snapshot();
+    bool same = kept.size() == seen.size();
+    for (std::size_t index = 0; same && index < kept.size(); ++index)
+      same = kept[index].gaps == seen[index].gaps && kept[index].kind == seen[index].kind &&
+             kept[index].effect_class == seen[index].effect_class &&
+             kept[index].reason == seen[index].reason && kept[index].action == seen[index].action &&
+             kept[index].v1_ordinary == seen[index].v1_ordinary;
+    if (!Check(kept.size() == 5 && same && !scheduler.InFlight(), "winsched-observer-sees-every-record-the-ring-keeps"))
+      return false;
   }
   // The V1 verdict is carried into every kind of record.
   {
