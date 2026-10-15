@@ -3175,6 +3175,47 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it.each([
+      ['Main alone saw a high-impact target', { highImpact: true }, undefined, false],
+      [
+        'native says high-impact but its approval path is closed',
+        { highImpact: true, highImpactNative: true },
+        undefined,
+        false,
+      ],
+      [
+        'native says high-impact and its approval path is open for this session',
+        { highImpact: true, highImpactNative: true },
+        {},
+        true,
+      ],
+    ] as const)(
+      'C5-1: a paste to a target where %s takes the session approval path into account',
+      async (_name, metadata, nativeApproval, card) => {
+        const { fixture } = await pasteSession({
+          extra: {
+            observationOverrides: {
+              targetSignatures: { 'node-1': 'a'.repeat(64) },
+              targetMetadata: { 'node-1': { secure: false, ...metadata } },
+            },
+            ...(nativeApproval === undefined ? {} : { nativeApproval }),
+          },
+          planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+        });
+        if (card) {
+          await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+          expect(pending(fixture)).toMatchObject({ allowedDecisions: ['allow_once', 'deny'] });
+          await answer(fixture, 'deny');
+        } else {
+          // A hard boundary: a person takes over, no card is raised and nothing is typed.
+          await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('paused'));
+          expect(fixture.approvals).toEqual([]);
+        }
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.dispose();
+      },
+    );
+
     it('refuses an artifact of another Turn', async () => {
       const store = new ComputerUseArtifactStore({ now: () => performance.now() });
       const other = store.create(

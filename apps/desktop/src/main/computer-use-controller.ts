@@ -3856,7 +3856,7 @@ export class ComputerUseController {
       // A paste is shown to a person every time: the Task's permission may still say no, but no
       // permission, grant or mode says yes in the person's place (§4.4, N21).
       if (paste !== undefined && action?.success && authorized.decision !== 'deny') {
-        if (this.preDispatchBoundary(action.data, record.observation))
+        if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
           return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
         // Whatever the Task's authorizer wanted checked again just before the input stays.
         const recheck = authorized.beforeExecute;
@@ -3916,7 +3916,7 @@ export class ComputerUseController {
     }
     if (capability === 'computer.observe') return { decision: 'allow', reason: 'computer_observe' };
     if (action?.success && paste !== undefined) {
-      if (this.preDispatchBoundary(action.data, record.observation))
+      if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
         return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
       return this.awaitApproval(record, request.callId, action.data, paste);
     }
