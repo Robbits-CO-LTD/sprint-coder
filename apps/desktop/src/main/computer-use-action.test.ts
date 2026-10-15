@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import type { ComputerUseAction, ProviderConnection, TaskSummary } from '@sprint-coder/contracts';
 import { computerUseActionDigest } from './computer-use-action';
@@ -88,6 +88,29 @@ describe('Computer Use action digest (#786)', () => {
     const fresh = await import('./computer-use-action');
     expect(fresh.computerUseActionDigest(typed)).not.toBe(computerUseActionDigest(typed));
     vi.resetModules();
+  });
+
+  it('separates the domain from the value with a NUL byte, written as an escape in the source', async () => {
+    // The separator is part of the digest. Pin it against an independent HMAC under a fixed key, so
+    // rewriting the literal (it used to be a raw NUL, which made git treat the file as binary) can
+    // never change what an audit row or a native ticket compares.
+    vi.resetModules();
+    vi.doMock('node:crypto', async (importOriginal) => ({
+      ...(await importOriginal<Record<string, unknown>>()),
+      randomBytes: () => Buffer.alloc(32, 7),
+    }));
+    try {
+      const fixed = await import('./computer-use-action');
+      const expected = createHmac('sha256', Buffer.alloc(32, 7))
+        .update('action')
+        .update('\u0000')
+        .update('{"milliseconds":0,"type":"wait"}')
+        .digest('hex');
+      expect(fixed.computerUseActionDigest({ type: 'wait', milliseconds: 0 })).toBe(expected);
+    } finally {
+      vi.doUnmock('node:crypto');
+      vi.resetModules();
+    }
   });
 
   it.each([

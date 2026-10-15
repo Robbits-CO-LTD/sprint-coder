@@ -7281,7 +7281,18 @@ export class SqlitePersistenceClient implements PersistenceClient {
         legacyRuntimeDiagnosticCollision) &&
       existsSync(databasePath) &&
       applied.size > 0;
-    if (backedUp) this.createPreMigrationBackup(databasePath);
+    if (backedUp) {
+      this.createPreMigrationBackup(databasePath);
+      // Mark the new backup as unscrubbed before v101 can commit, so a crash between that commit
+      // and the end of the loop still gets the backup scrubbed on the next start.
+      if (!applied.has(COMPUTER_USE_AUDIT_DIGEST_SCRUB_VERSION)) {
+        try {
+          writeFileSync(backupDigestScrubPendingPath(databasePath), '');
+        } catch {
+          // Best effort: the scrub after the loop still runs when v101 applies in this start.
+        }
+      }
+    }
     const appliedNow = new Set<number>();
     if (legacyLineage) {
       this.applyLegacyMigrationBridge();
@@ -7367,6 +7378,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
     const settle = (): void => rmSync(pendingPath, { force: true });
     try {
       if (!existsSync(backupPath)) {
+        // A crash between the two renames in installMigrationBackup leaves only the previous,
+        // not yet scrubbed backup. Remove it too; if that fails the marker stays for next start.
+        rmSync(`${backupPath}.previous`, { force: true });
         settle();
         return;
       }

@@ -12172,6 +12172,29 @@ if (runsWithElectronAbi)
       expect(readFileSync(backupPath).toString('latin1')).not.toContain(oldDigest);
     });
 
+    it('removes a previous backup left by a crash between the two renames (#786)', () => {
+      const { path, oldDigest } = reopenBeforeV101();
+      const backupPath = `${path}.pre-migration.bak`;
+      // First start: neither scrub nor removal works, so the unscrubbed backup and the marker stay.
+      __persistenceRecoveryTestables.setBackupScrubFailureForTesting(() => {
+        throw new Error('injected: backup locked');
+      });
+      try {
+        new SqlitePersistenceClient(path).close();
+      } finally {
+        __persistenceRecoveryTestables.setBackupScrubFailureForTesting(null);
+      }
+      // installMigrationBackup renamed backup -> .previous and died before tmp -> backup: only the
+      // unscrubbed .previous remains.
+      renameSync(backupPath, `${backupPath}.previous`);
+      expect(readFileSync(`${backupPath}.previous`).toString('latin1')).toContain(oldDigest);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(true);
+      new SqlitePersistenceClient(path).close();
+      expect(existsSync(`${backupPath}.previous`)).toBe(false);
+      expect(existsSync(backupPath)).toBe(false);
+      expect(existsSync(`${backupPath}.digest-scrub-pending`)).toBe(false);
+    });
+
     it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
       const { fixture, base } = seed();
       // What the pre-#786 code wrote for a typed six-digit code: guessable in at most 10^6 tries.
