@@ -227,6 +227,7 @@ int main() {
     const ShadowRecord record = ProcessShadowLog().Snapshot().front();
     Check(record.v1_ordinary, "record_carries_the_v1_verdict");
     Check((record.gaps & (kShadowGapV1Invalid | kShadowGapBusy)) == 0, "the_capture_ran");
+    Check((record.gaps & kShadowGapReadFailed) == 0, "the_capture_read_without_failure");
   }
 
   // V1 could not re-validate: exactly one skipped record, nothing read.
@@ -256,32 +257,48 @@ int main() {
 }
 `;
 
+// Nothing is created, searched for or compiled off Windows. On Windows without a compiler the test is
+// skipped, except in CI, where a runner that cannot compile must fail loudly, not pass silently.
+const onWindows = process.platform === 'win32';
 const build = (() => {
+  if (!onWindows) return null;
   const scratch = mkdtempSync(join(tmpdir(), 'computer-use-shadow-live-seam-'));
   const source = join(scratch, 'seam.cc');
   const binary = join(scratch, 'seam.exe');
   return { scratch, source, binary, compiler: findBuild(source, binary) };
 })();
 
-describe.skipIf(build.compiler === null && process.env['CI'] === undefined)(
+describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
   'Windows shadow wiring, live against UI Automation (S5-b-2)',
   () => {
     it('hands a capture over, records exactly, and the process survives', () => {
+      expect(build, 'a Windows build context').not.toBeNull();
+      const context = build!;
       try {
-        writeFileSync(build.source, program.replace('//@@BLOCK@@', wiringBlock()));
-        const compiler = build.compiler!;
+        expect(context.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+        writeFileSync(context.source, program.replace('//@@BLOCK@@', wiringBlock()));
+        const compiler = context.compiler!;
         const built = spawnSync(compiler.file, compiler.args, {
           encoding: 'utf8',
           windowsVerbatimArguments: compiler.verbatim,
           timeout: 180_000,
           env: { ...process.env, VSLANG: '1033' },
         });
-        expect(built.status, `${compiler.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(build.binary, [], { encoding: 'utf8', timeout: 60_000 });
-        expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
+        expect(
+          built.status,
+          `${compiler.name}
+${built.stdout}
+${built.stderr}`,
+        ).toBe(0);
+        const run = spawnSync(context.binary, [], { encoding: 'utf8', timeout: 60_000 });
+        expect(
+          run.status,
+          `${run.stdout}
+${run.stderr}`,
+        ).toBe(0);
         expect(run.stdout).toContain('OK');
       } finally {
-        rmSync(build.scratch, { recursive: true, force: true });
+        rmSync(context.scratch, { recursive: true, force: true });
       }
     }, 300_000);
   },

@@ -290,7 +290,7 @@ describe('Windows UI Automation source only reads', () => {
 
   it('calls a closed set of free functions: every capitalized call is listed, none of them acts on a window', () => {
     const calls = new Set(
-      [...code(source).matchAll(/(?<![\w.>:])([A-Z]\w*)\(/gu)].map((match) => match[1]!),
+      [...code(source).matchAll(/(?<![\w.>])([A-Z]\w*)\(/gu)].map((match) => match[1]!),
     );
     // Win32 / COM / macros the source may use.
     const platform = [
@@ -351,11 +351,17 @@ describe('Windows UI Automation source only reads', () => {
     ];
     const allowed = new Set([...platform, ...own]);
     for (const name of calls) expect(allowed.has(name), name).toBe(true);
-    // None of these acts on a window, the focus, the input or another process.
-    for (const name of platform)
+    // What the source actually calls from outside itself acts on no window, focus, input or process:
+    // checked on the extracted calls (including ::Name forms), not on the list above.
+    for (const name of calls) {
+      if (own.includes(name)) continue;
       expect(name).not.toMatch(
         /^(Show|Bring|SetActive|SetForeground|SetFocus|SetWindow|SetCursor|Send|Post|Attach|SwitchTo|SystemParameters|Terminate|CreateProcess|Shell)/u,
       );
+    }
+    expect(code(source)).not.toMatch(
+      /(ShowWindow|BringWindowToTop|SetActiveWindow|AttachThreadInput|PostThreadMessage\w*|SwitchToThisWindow|SetForegroundWindow|SendInput)\s*\(/u,
+    );
   });
 
   it('creates UI Automation with its call timeouts as a precondition', () => {
