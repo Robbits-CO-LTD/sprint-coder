@@ -3284,6 +3284,25 @@ bool CheckWindowsShadowReader() {
     if (!Check(folder_reader.Capture("click", "").item_kind == ShadowItemKind::kFolder, "winreader-folder-item"))
       return false;
 
+    // A click on a cell of the details view lands under the ListItem: the item is that ListItem.
+    FakeExplorer cell("invoice.pdf");
+    cell.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    cell.form.source.point = cell.form.source.Add(cell.item, "Edit", "Date modified", "UIProperty");
+    WindowsShadowReader cell_reader(cell.form.source);
+    const ShadowUiaCapture in_cell = cell_reader.Capture("click", "");
+    if (!Check(in_cell.item_kind == ShadowItemKind::kFile && in_cell.item_name_is_real_path &&
+                   in_cell.item_name == "C:\\Users\\a\\invoice.pdf.exe",
+               "winreader-item-of-a-cell")) return false;
+    // Further than the target's two parents is not the target's item.
+    FakeExplorer far_item("invoice.pdf");
+    far_item.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    int tip = far_item.item;
+    for (int level = 0; level < 3; ++level) tip = far_item.form.source.Add(tip, "Group");
+    far_item.form.source.point = tip;
+    WindowsShadowReader far_reader(far_item.form.source);
+    if (!Check(far_reader.Capture("click", "").item_kind == ShadowItemKind::kNone && far_item.form.source.item_calls == 0,
+               "winreader-item-too-far-above-the-target")) return false;
+
     // A list item of an ordinary window is not a file: nothing is asked of the shell.
     FakeForm ordinary;
     const int ordinary_list = ordinary.source.Add(ordinary.pane, "List", "Entries");

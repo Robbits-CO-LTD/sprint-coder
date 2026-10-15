@@ -25,6 +25,11 @@
 
 #include <ole2.h>
 #include <UIAutomation.h>
+#include <exdisp.h>
+#include <servprov.h>
+#include <shlguid.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 
 #include <chrono>
 #include <functional>
@@ -150,6 +155,128 @@ public:
 private:
   BSTR text_ = nullptr;
 };
+
+
+// What the shell knows about an item: the path in the file system, and whether it opens by browsing.
+struct ShellItemAnswer {
+  std::wstring path;
+  bool is_folder = false;
+};
+
+// How long, and for how many items, the shell lookup may go on. It is ONE gated call of the reader,
+// so it keeps its own limits: the action still being valid, a deadline, and a cap on the items it
+// goes through. A folder bigger than the cap, or a lookup past the deadline, is "not known".
+struct ShellLookupLimits {
+  std::function<bool()> still_valid;
+  std::function<std::uint64_t()> now_ns;
+  std::uint64_t deadline_ns = 0;
+};
+constexpr int kShellLookupMaxItems = 512;
+constexpr int kShellLookupMaxWindows = 64;
+constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;
+
+// The path of the item a file browser shows under `display_name`, found in the shell view of the
+// tab (or of the window) by its display name. Read-only: windows and views are asked for, never
+// navigated, selected or invoked. kAbsent when there is no such view, the name is not unique in the
+// view (a hidden extension can make two items look alike), the item has no file-system path
+// (a search, This PC, a library), the folder is too big to look through, or the deadline passed.
+[[nodiscard]] inline ShadowReadResult ShellItemPathByName(HWND tab, HWND top,
+                                                          std::wstring_view display_name,
+                                                          const ShellLookupLimits &limits,
+                                                          ShellItemAnswer *answer) {
+  ComRef<IShellWindows> windows;
+  if (FAILED(CoCreateInstance(CLSID_ShellWindows, nullptr, CLSCTX_LOCAL_SERVER,
+                              IID_PPV_ARGS(windows.Receive()))) ||
+      windows.Get() == nullptr)
+    return ShadowReadResult::kFailed;
+  long count = 0;
+  if (FAILED(windows.Get()->get_Count(&count))) return ShadowReadResult::kFailed;
+  // The view of the tab that holds the item; failing that, the only view of the window.
+  ComRef<IShellView> view;
+  int top_matches = 0;
+  ComRef<IShellView> top_view;
+  for (long index = 0; index < count && index < kShellLookupMaxWindows; ++index) {
+    if (!limits.still_valid()) return ShadowReadResult::kStopped;
+    VARIANT position;
+    VariantInit(&position);
+    position.vt = VT_I4;
+    position.lVal = index;
+    ComRef<IDispatch> dispatch;
+    if (FAILED(windows.Get()->Item(position, dispatch.Receive())) || dispatch.Get() == nullptr)
+      continue;
+    ComRef<IWebBrowserApp> application;
+    if (FAILED(dispatch.Get()->QueryInterface(IID_PPV_ARGS(application.Receive()))) ||
+        application.Get() == nullptr)
+      continue;
+    SHANDLE_PTR handle = 0;
+    if (FAILED(application.Get()->get_HWND(&handle))) continue;
+    const HWND candidate = reinterpret_cast<HWND>(static_cast<LONG_PTR>(handle));
+    const bool exact = tab != nullptr && candidate == tab;
+    const bool whole_window = candidate == top;
+    if (!exact && !whole_window) continue;
+    ComRef<IServiceProvider> services;
+    ComRef<IShellBrowser> browser;
+    ComRef<IShellView> candidate_view;
+    if (FAILED(application.Get()->QueryInterface(IID_PPV_ARGS(services.Receive()))) ||
+        services.Get() == nullptr ||
+        FAILED(services.Get()->QueryService(SID_STopLevelBrowser, IID_PPV_ARGS(browser.Receive()))) ||
+        browser.Get() == nullptr ||
+        FAILED(browser.Get()->QueryActiveShellView(candidate_view.Receive())) ||
+        candidate_view.Get() == nullptr)
+      continue;
+    if (exact) {
+      view = std::move(candidate_view);
+      break;
+    }
+    ++top_matches;
+    top_view = std::move(candidate_view);
+  }
+  if (view.Get() == nullptr && top_matches == 1) view = std::move(top_view);
+  if (view.Get() == nullptr) return ShadowReadResult::kAbsent;
+
+  ComRef<IFolderView2> folder_view;
+  ComRef<IShellFolder> folder;
+  if (FAILED(view.Get()->QueryInterface(IID_PPV_ARGS(folder_view.Receive()))) ||
+      folder_view.Get() == nullptr ||
+      FAILED(folder_view.Get()->GetFolder(IID_PPV_ARGS(folder.Receive()))) || folder.Get() == nullptr)
+    return ShadowReadResult::kAbsent;
+  int items = 0;
+  if (FAILED(folder_view.Get()->ItemCount(SVGIO_ALLVIEW, &items))) return ShadowReadResult::kFailed;
+  if (items <= 0 || items > kShellLookupMaxItems) return ShadowReadResult::kAbsent;
+
+  ComRef<IShellItem> matched;
+  for (int index = 0; index < items; ++index) {
+    if (!limits.still_valid()) return ShadowReadResult::kStopped;
+    if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
+    PITEMID_CHILD child = nullptr;
+    if (FAILED(folder_view.Get()->Item(index, &child)) || child == nullptr) continue;
+    ComRef<IShellItem> item;
+    const HRESULT made =
+        SHCreateItemWithParent(nullptr, folder.Get(), child, IID_PPV_ARGS(item.Receive()));
+    ILFree(child);
+    if (FAILED(made) || item.Get() == nullptr) continue;
+    PWSTR shown = nullptr;
+    if (FAILED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) || shown == nullptr) continue;
+    const bool same = std::wstring_view(shown) == display_name;
+    CoTaskMemFree(shown);
+    if (!same) continue;
+    // Two items with the same display name (a hidden extension): which one was meant is not known.
+    if (matched.Get() != nullptr) return ShadowReadResult::kAbsent;
+    matched = std::move(item);
+  }
+  if (matched.Get() == nullptr) return ShadowReadResult::kAbsent;
+  PWSTR file_path = nullptr;
+  if (FAILED(matched.Get()->GetDisplayName(SIGDN_FILESYSPATH, &file_path)) || file_path == nullptr)
+    return ShadowReadResult::kAbsent;
+  answer->path = file_path;
+  CoTaskMemFree(file_path);
+  SFGAOF attributes = 0;
+  if (FAILED(matched.Get()->GetAttributes(SFGAO_FOLDER | SFGAO_STREAM, &attributes)))
+    return ShadowReadResult::kFailed;
+  // An archive is both a folder and a stream: it is a file with an extension.
+  answer->is_folder = (attributes & SFGAO_FOLDER) != 0 && (attributes & SFGAO_STREAM) == 0;
+  return ShadowReadResult::kOk;
+}
 
 } // namespace windows_uia_source_detail
 
@@ -325,11 +452,47 @@ public:
     return ProcessPathOf(core.Get(), maximum_bytes, output);
   }
 
-  // The path of a shell item cannot be read from UI Automation alone (an Explorer item publishes
-  // its display name); S5-b-2c measures what Explorer publishes. Until a source of the REAL path is
-  // established this is absent, which the reader turns into "a file whose extension is unknown".
-  ShadowReadResult ItemPath(Element, std::size_t, std::string *, bool *) override {
-    return ShadowReadResult::kAbsent;
+  // The REAL path of the file-browser item (UI Automation publishes only its display name, and
+  // Explorer hides known extensions): the item is looked up by that display name in the shell view of
+  // its tab. See ShellItemPathByName for when this is "not known".
+  ShadowReadResult ItemPath(Element element, std::size_t maximum_bytes, std::string *path,
+                            bool *is_folder) override {
+    IUIAutomationElement *item = At(element);
+    if (item == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::BstrHolder name;
+    if (FAILED(item->get_CurrentName(name.Receive()))) return ShadowReadResult::kFailed;
+    if (name.View().empty()) return ShadowReadResult::kAbsent;
+    // The shell tab that shows the item is its nearest ShellTabWindowClass ancestor.
+    HWND tab = nullptr;
+    {
+      item->AddRef();
+      windows_uia_source_detail::ComRef<IUIAutomationElement> cursor(item);
+      for (int hops = 0; hops < 16 && cursor.Get() != nullptr; ++hops) {
+        windows_uia_source_detail::BstrHolder class_name;
+        if (SUCCEEDED(cursor.Get()->get_CurrentClassName(class_name.Receive())) &&
+            class_name.View() == L"ShellTabWindowClass") {
+          UIA_HWND native = nullptr;
+          if (SUCCEEDED(cursor.Get()->get_CurrentNativeWindowHandle(&native)))
+            tab = reinterpret_cast<HWND>(native);
+          break;
+        }
+        windows_uia_source_detail::ComRef<IUIAutomationElement> parent;
+        if (FAILED(walker_.Get()->GetParentElement(cursor.Get(), parent.Receive()))) break;
+        cursor = std::move(parent);
+      }
+    }
+    windows_uia_source_detail::ShellLookupLimits limits;
+    limits.still_valid = [this] { return ActionStillValid(); };
+    limits.now_ns = [this] { return NowNs(); };
+    limits.deadline_ns = NowNs() + windows_uia_source_detail::kShellLookupBudgetNs;
+    windows_uia_source_detail::ShellItemAnswer answer;
+    const ShadowReadResult found = windows_uia_source_detail::ShellItemPathByName(
+        tab, window_, name.View(), limits, &answer);
+    if (found != ShadowReadResult::kOk) return found;
+    const ShadowReadResult text =
+        windows_uia_source_detail::ShadowTextFromUtf16(answer.path, false, maximum_bytes, path);
+    if (text == ShadowReadResult::kOk) *is_folder = answer.is_folder;
+    return text;
   }
 
 private:

@@ -135,7 +135,7 @@ public:
       CaptureWindow(have_root, root, &capture);
       CaptureChain(target, have_root, root, &capture);
       CaptureNeighbors(&capture);
-      CaptureItem(target, &capture);
+      CaptureItem(&capture);
     }
     capture.budget_exhausted = gate_.BudgetExhausted();
     return capture;
@@ -362,20 +362,30 @@ private:
     }
   }
 
-  // The item the action would open: a list item of a file browser. Its REAL path (the shell item's
-  // parsing path) is read; without it the name is only a display name, which never gives an
-  // extension. Folders open by browsing.
-  void CaptureItem(Element target, ShadowUiaCapture *capture) {
+  // The item the action would open: a list item of a file browser. A click lands on the item or on
+  // one of its cells (a column of the details view is an Edit under the ListItem), so the item is
+  // the nearest ListItem / DataItem among the target and its two parents. Its REAL path (the shell
+  // item's file-system path) is read; without it the name is only a display name, which never gives
+  // an extension. Folders open by browsing.
+  void CaptureItem(ShadowUiaCapture *capture) {
     using namespace windows_shadow_reader_detail;
-    if (capture->chain.empty()) return;
-    const std::string control =
-        windows_shadow_detail::Lowercase(shadow_detail::CompatFold(capture->chain[0].control_type));
-    if (control != "listitem" && control != "dataitem") return;
+    constexpr std::size_t kItemSearchDepth = 3;
+    std::size_t index = capture->chain.size();
+    for (std::size_t at = 0; at < capture->chain.size() && at < kItemSearchDepth; ++at) {
+      const std::string control = windows_shadow_detail::Lowercase(
+          shadow_detail::CompatFold(capture->chain[at].control_type));
+      if (control == "listitem" || control == "dataitem") {
+        index = at;
+        break;
+      }
+    }
+    if (index >= capture->chain.size() || index >= chain_elements_.size()) return;
     if (windows_shadow_detail::SurfaceForWindow(*capture).kind != SurfaceKind::kFileBrowser) return;
     capture->item_kind = ShadowItemKind::kFile;
     std::string path;
     bool is_folder = false;
-    if (ShadowSettle(ItemPath(target, kPathBytes, &path, &is_folder), &capture->read_failed)) {
+    if (ShadowSettle(ItemPath(chain_elements_[index], kPathBytes, &path, &is_folder),
+                     &capture->read_failed)) {
       capture->item_name_read = true;
       capture->item_name_is_real_path = true;
       capture->item_name = std::move(path);
@@ -383,9 +393,9 @@ private:
       return;
     }
     // Only the display name is known.
-    capture->item_name_read = !capture->chain[0].name.empty();
+    capture->item_name_read = !capture->chain[index].name.empty();
     capture->item_name_is_real_path = false;
-    capture->item_name = capture->chain[0].name;
+    capture->item_name = capture->chain[index].name;
   }
 
   ShadowUiaSource &source_;

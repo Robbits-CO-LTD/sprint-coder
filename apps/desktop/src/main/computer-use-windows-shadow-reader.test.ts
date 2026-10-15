@@ -197,6 +197,17 @@ describe('Windows UI Automation source only reads', () => {
       'get_CurrentHelpText',
       'get_CurrentIsPassword',
       'get_CurrentProcessId',
+      'get_CurrentNativeWindowHandle',
+      // the shell: windows and views are asked for (read-only), never navigated or invoked
+      'get_Count',
+      'Item',
+      'get_HWND',
+      'QueryService',
+      'QueryActiveShellView',
+      'GetFolder',
+      'ItemCount',
+      'GetDisplayName',
+      'GetAttributes',
       'GetCurrentPatternAs',
       'get_CurrentValue',
       'CreatePropertyCondition',
@@ -218,7 +229,7 @@ describe('Windows UI Automation source only reads', () => {
     const win32 = new Set(
       [
         ...source.matchAll(
-          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow)\(/gu,
+          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|SH\w+|Shell\w+)\(/gu,
         ),
       ].map((match) => match[1]!),
     );
@@ -235,6 +246,11 @@ describe('Windows UI Automation source only reads', () => {
       'OpenProcess',
       'QueryFullProcessImageNameW',
       'CloseHandle',
+      'SHCreateItemWithParent',
+      'ILFree',
+      'CoTaskMemFree',
+      // the shell lookup of the item path (a function of this file, not a Win32 call)
+      'ShellItemPathByName',
     ]);
     for (const name of win32) expect(allowedWin32.has(name), name).toBe(true);
     // The process is opened with the least right that answers.
@@ -271,9 +287,38 @@ describe('Windows UI Automation source only reads', () => {
     expect((source.match(/ShadowTextFromUtf16\(/gu) ?? []).length).toBeGreaterThanOrEqual(5);
   });
 
-  it('keeps the shell item path unestablished (absent) until S5-b-2c measures what Explorer publishes', () => {
+  it('looks the item path up read-only, bounded, and only when the name is unique', () => {
+    const lookup = between(source, 'ShellItemPathByName(HWND tab', 'ComRef<IShellView> view;');
+    expect(lookup.length).toBeGreaterThan(50);
+    const body = between(
+      source,
+      'ShellItemPathByName(HWND tab',
+      '} // namespace windows_uia_source_detail',
+    );
+    // Windows and views are asked for; nothing is navigated, selected, invoked, renamed or changed.
+    expect(code(body)).not.toMatch(
+      /navigate|SelectItem|SelectAndPositionItems|InvokeCommand|InvokeVerb|DoVerb|Execute|Refresh|Rename|Delete|SetCurrent|SetViewModeAndIconSize|ShellExecute|SetFocus/iu,
+    );
+    // Its own limits, because it is one gated call: the action, a deadline, and a cap on the items.
+    expect(source).toContain('constexpr int kShellLookupMaxItems = 512;');
+    expect(source).toContain("constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;");
+    // Both the walk over the shell windows and the walk over the items stop on a cancel.
+    expect(
+      body.match(/if \(!limits\.still_valid\(\)\) return ShadowReadResult::kStopped;/gu)?.length,
+    ).toBe(2);
+    expect(body).toContain(
+      'if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;',
+    );
+    expect(body).toContain('items > kShellLookupMaxItems) return ShadowReadResult::kAbsent;');
+    // Two items with the same display name are not known; so is an item without a file-system path.
+    expect(body).toContain('if (matched.Get() != nullptr) return ShadowReadResult::kAbsent;');
+    expect(body).toContain('SIGDN_FILESYSPATH');
+    expect(body).toContain('SFGAO_STREAM');
+    // The path is a string like any other: UTF-8, bound in bytes, never emptied.
     const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
-    expect(item).toContain('return ShadowReadResult::kAbsent;');
+    expect(item).toContain('ShadowTextFromUtf16(answer.path, false, maximum_bytes, path)');
+    expect(item).toContain('ShellItemPathByName(');
+    expect((code(source).match(/ShellItemPathByName\(/gu) ?? []).length).toBe(2);
   });
 
   it('is included by the host, and the reader is reached only through the scheduler (S5-b-2b)', () => {
