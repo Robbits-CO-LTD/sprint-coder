@@ -16,6 +16,17 @@ const macos = read('computer_use_macos.mm');
 const windowsHost = read('computer_use_windows_host.cc');
 const harness = read('computer_use_protocol_fuzz.cc');
 
+/** The body of one function, or a failure: an extraction that finds nothing must not pass. */
+function bodyOf(text: string, signature: string): string {
+  const start = text.indexOf(signature);
+  expect(start, signature).toBeGreaterThanOrEqual(0);
+  const end = text.indexOf('\n}', start);
+  expect(end, signature).toBeGreaterThan(start);
+  const body = text.slice(start, end + 2);
+  expect(body.length, signature).toBeGreaterThan(signature.length + 20);
+  return body;
+}
+
 describe('Windows shadow core (classifier v2, S5-b-1)', () => {
   it('is portable: only standard and shadow includes, no platform conditional, no clock, no I/O, no approval vocabulary', () => {
     expect(windowsShadow).toContain('#pragma once');
@@ -73,7 +84,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     // The Windows header builds on BuildShadowFacts rather than a second copy of the rules.
     expect(windowsShadow).toContain('BuildShadowFacts(ax, shared)');
     // The byte bound is on UTF-8 and nothing is truncated: the check refuses, it never cuts.
-    const check = /ShadowCheckText\([\s\S]*?\n\}/u.exec(sharedShadow)?.[0] ?? '';
+    const check = bodyOf(sharedShadow, 'ShadowCheckText(std::string_view normalized_utf8,');
     expect(check).toContain('normalized_utf8.size() > maximum_bytes');
     expect(check).toContain('IsValidUtf8');
     expect(check).not.toMatch(/substr|resize|erase|truncate/u);
@@ -188,7 +199,17 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     ])
       expect(windowsShadow, name).toContain(name);
     // The window title is a label for the core; it never decides a surface here.
-    const surface = /SurfaceForWindow\([\s\S]*?\n\}/u.exec(windowsShadow)?.[0] ?? '';
-    expect(surface).not.toMatch(/\.name\b|title|help_text|automation_id|\.value\b/u);
+    // The rules live in SurfaceForWindowOnce; the wrapper only adds the read gap. Both are looked at,
+    // and an extraction that finds nothing fails instead of passing.
+    for (const signature of [
+      'inline WindowSurface SurfaceForWindowOnce(const ShadowUiaCapture &capture) {',
+      'inline WindowSurface SurfaceForWindow(const ShadowUiaCapture &capture) {',
+    ]) {
+      const surface = bodyOf(windowsShadow, signature);
+      expect(surface).not.toMatch(/\.name\b|title|help_text|automation_id|\.value\b/u);
+    }
+    expect(bodyOf(windowsShadow, 'inline WindowSurface SurfaceForWindowOnce(')).toContain(
+      'consolewindowclass',
+    );
   });
 });
