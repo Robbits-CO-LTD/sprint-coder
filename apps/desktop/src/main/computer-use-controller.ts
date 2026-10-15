@@ -639,6 +639,12 @@ type SessionRecord = {
   planner: ComputerUsePlannerPort | null;
   expiryTimer: ReturnType<typeof setTimeout> | null;
   stopPromise: Promise<void> | null;
+  /**
+   * The Task's artifact generation when this session began (#785 T15-6b). `copy` stores only if
+   * the Task is still at this generation, so a Task closed or re-epoched after the session began
+   * never receives a value, whether the read was in flight at that moment or started after it.
+   */
+  readonly artifactGeneration: number;
 };
 type PlanGrant = {
   maxRounds: number;
@@ -799,12 +805,13 @@ export class ComputerUseController {
   >();
   private readonly artifacts: ComputerUseArtifactStore;
   /**
-   * A counter per Task, moved when the Task is closed or its policy epoch changes. `copy` reads
-   * the node first and stores afterwards; if the counter moved in between, the Task ended (or its
-   * permissions changed) while the native was reading, and the value must not be put into the
-   * store of a Task that no longer holds artifacts. `taskClosed` does not stop the Task's
-   * sessions, and `assertSessionLive` does not look at an archived Task, so this check is what
-   * keeps "a closed Task keeps nothing" true for a read that finishes late.
+   * A counter per Task, moved when the Task is closed or its policy epoch changes. A session notes
+   * the value when it begins, and `copy` stores only while the Task is still at that value: once
+   * the Task has been closed or re-epoched, no session that began before then can add to it, for a
+   * read that was in flight and for one that starts afterwards. (`taskClosed` does not stop the
+   * Task's sessions and `assertSessionLive` does not look at an archived Task, so the session
+   * itself would otherwise go on storing.) The entry is never removed: removing it would send the
+   * counter back to 0, and a session that began at 0 would pass again.
    */
   private readonly artifactGenerations = new Map<string, number>();
   private readonly startingSessions = new Map<
@@ -3009,6 +3016,7 @@ export class ComputerUseController {
       planner,
       expiryTimer: null,
       stopPromise: null,
+      artifactGeneration: this.artifactGenerations.get(status.taskId) ?? 0,
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
@@ -4662,7 +4670,6 @@ export class ComputerUseController {
       return refuse();
     const targetSignature = record.observation?.targetSignatures?.[action.targetId];
     if (targetSignature === undefined || targetSignature.length === 0) return refuse();
-    const generation = this.artifactGenerations.get(record.status.taskId) ?? 0;
     let value: ComputerUseNativeNodeValue;
     try {
       value = await native.readNodeValue({
@@ -4681,8 +4688,9 @@ export class ComputerUseController {
     signal?.throwIfAborted();
     this.assertSessionLive(record);
     if (!this.observationIsFresh(record) || !value.ok) return refuse();
-    // The Task was closed or its policy epoch changed while the native was reading: drop the value.
-    if ((this.artifactGenerations.get(record.status.taskId) ?? 0) !== generation) return refuse();
+    // The Task was closed or its policy epoch changed since this session began: drop the value.
+    if ((this.artifactGenerations.get(record.status.taskId) ?? 0) !== record.artifactGeneration)
+      return refuse();
     const reference = this.artifacts.create(
       {
         taskId: record.status.taskId,

@@ -2545,6 +2545,34 @@ describe('ComputerUseController', () => {
       },
     );
 
+    it.each(['taskClosed', 'policyEpochChanged'] as const)(
+      'keeps nothing from a copy that starts after the Task ended (%s) in a session still running',
+      async (end) => {
+        const { store, owners } = spiedStore();
+        const fixture = createFixture({
+          observationOverrides: withNode,
+          artifactRead: {},
+          artifactStore: store,
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        // The Task ends, but this session is not stopped by it (taskClosed) or has not stopped yet.
+        fixture.controller[end]('task-1');
+        const outcome = await fixture.controller.act(started.sessionId, copy, 'copy-late').then(
+          (result) => result,
+          () => null,
+        );
+        if (outcome !== null)
+          expect(outcome).toMatchObject({
+            result: 'rejected',
+            reasonCode: 'artifact_copy_refused',
+          });
+        expect(owners).toEqual([]);
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+        await fixture.controller.stop(started.sessionId).catch(() => undefined);
+      },
+    );
+
     it('forgets its references when the session ends', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);
