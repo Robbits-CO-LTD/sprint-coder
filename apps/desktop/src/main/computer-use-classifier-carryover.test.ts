@@ -59,17 +59,24 @@ describe('classifier carry-over (Low items without a real machine)', () => {
     // No static with a destructor (a string, a vector, a mutex, a log by value) in the shadow block.
     const begin = macos.indexOf('// BEGIN effect shadow capture');
     const end = macos.indexOf('// END effect shadow capture');
+    // A missing marker must fail, not leave an empty section that passes every check below.
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(begin);
     const section = macos.slice(begin, end);
-    expect(section).not.toMatch(
-      /static\s+(?:const\s+)?(?:std::(?:string|vector|map|set|mutex|unique_ptr|shared_ptr)|sprint_coder::computer_use::EffectShadowLog)\b[^*]/u,
-    );
+    // Every static in the block is one of the two trivially destructible ones named above.
+    const statics = section.match(/^\s*static\s+[^(;=]*/gmu) ?? [];
+    expect(statics.length).toBeGreaterThan(0);
+    for (const declaration of statics)
+      expect(declaration.trim()).toMatch(
+        /^static (?:std::atomic<bool> in_flight|dispatch_queue_t queue)\b/u,
+      );
   });
 
   it('is exercised by the harness', () => {
     for (const name of [
       'shadow-blank-role-is-missing',
       'shadow-blank-label-field-is-a-takeover',
-      'shadow-fold-ideographic-space',
+      'shadow-fold-ideographic-space-alone',
       'effect-scroll-bare-picker-role-in-scope',
       'effect-native-value-scroll-neighbor-only-is-a-takeover',
       'effect-browser-value-scroll-neighbor-labels-it',

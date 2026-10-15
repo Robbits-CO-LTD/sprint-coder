@@ -1574,7 +1574,7 @@ bool CheckEffectShadow() {
       }
     }
     // The fold itself: the ideographic space is a plain space, a half-width WA + voiced mark is VA.
-    if (!Check(sprint_coder::computer_use::shadow_detail::CompatFold("\xE3\x80\x80") == " ", "shadow-fold-ideographic-space")) return false;
+    if (!Check(sprint_coder::computer_use::shadow_detail::CompatFold("\xE3\x80\x80") == " ", "shadow-fold-ideographic-space-alone")) return false;
   }
 
   // The label joins title, description, help, placeholder, identifier and static text in order.
