@@ -1976,6 +1976,10 @@ describe('Main surface structure words (S4-1c)', () => {
       'Terminal2',
       'PWSH7',
       'TermControl',
+      'TermControlView',
+      'workbench.XTermView',
+      'long-terminal-panel',
+      'x.TermControl',
       'ｔｅｒｍｉｎａｌ',
     ]) {
       const projection = projectComputerUseAccessibilityTree(
@@ -1994,6 +1998,11 @@ describe('Main surface structure words (S4-1c)', () => {
       'app-shell',
       'terminalbank',
       'terminalbank2',
+      'long-term-control',
+      'shortTermControl',
+      'LongTermControl',
+      'axis-x-term',
+      'x_term_count',
       'console',
       'command-palette',
       'CommandPalette',

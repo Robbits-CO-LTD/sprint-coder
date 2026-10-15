@@ -16,9 +16,11 @@ const HIGH_IMPACT_TEXT =
  * v1 still judge it).
  */
 const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh']);
-// Words that a case split cuts in two ('PowerShell', 'XTerm', 'TermControl' of Windows Terminal).
-const SURFACE_WORD_PAIRS: readonly (readonly [string, string])[] = [
-  ['power', 'shell'],
+// Words that a case split cuts in two ('PowerShell'): matched anywhere in a segment.
+const SURFACE_WORD_PAIRS: readonly (readonly [string, string])[] = [['power', 'shell']];
+// ...and the ones that are only a surface at the START of a segment ('XTermView', 'TermControl' of
+// Windows Terminal), so 'long-term-control', 'shortTermControl' and 'axis-x-term' are not.
+const SURFACE_LEADING_PAIRS: readonly (readonly [string, string])[] = [
   ['x', 'term'],
   ['term', 'control'],
 ];
@@ -26,20 +28,26 @@ const SURFACE_WORD_PAIRS: readonly (readonly [string, string])[] = [
 export function hasSurfaceStructureWord(...fields: readonly (string | undefined)[]): boolean {
   for (const field of fields) {
     if (field === undefined || field === '') continue;
-    const words = field
-      .normalize('NFKC')
-      .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
-      .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
-      .replace(/(\p{L})(\p{N})/gu, '$1 $2')
-      .replace(/(\p{N})(\p{L})/gu, '$1 $2')
-      .toLowerCase()
-      .split(/[^\p{L}\p{N}]+/u)
-      .filter((word) => word !== '');
-    for (let index = 0; index < words.length; index += 1) {
-      const word = words[index]!;
-      if (SURFACE_WORDS.has(word)) return true;
-      for (const [first, second] of SURFACE_WORD_PAIRS)
-        if (word === first && words[index + 1] === second) return true;
+    // A segment is what lies between non-alphanumerics; words are cut inside it by case and by
+    // letter/digit boundaries.
+    for (const segment of field.normalize('NFKC').split(/[^\p{L}\p{N}]+/u)) {
+      const words = segment
+        .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+        .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, '$1 $2')
+        .replace(/(\p{L})(\p{N})/gu, '$1 $2')
+        .replace(/(\p{N})(\p{L})/gu, '$1 $2')
+        .toLowerCase()
+        .split(' ')
+        .filter((word) => word !== '');
+      for (let index = 0; index < words.length; index += 1) {
+        const word = words[index]!;
+        if (SURFACE_WORDS.has(word)) return true;
+        for (const [first, second] of SURFACE_WORD_PAIRS)
+          if (word === first && words[index + 1] === second) return true;
+        if (index === 0)
+          for (const [first, second] of SURFACE_LEADING_PAIRS)
+            if (word === first && words[1] === second) return true;
+      }
     }
   }
   return false;
