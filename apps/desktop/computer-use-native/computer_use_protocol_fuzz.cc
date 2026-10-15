@@ -10,6 +10,7 @@
 #include "computer_use_windows_shadow_reader.h"
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_effect_measurement.h"
+#include "computer_use_artifact_read_judgement.h"
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
@@ -4426,6 +4427,101 @@ bool CheckEffectMeasurement() {
 
 // ---- Classifier v2, S4-1-0: the interlock map (pure; nothing calls it yet) ----------------------
 
+// #785 T15-4p: the artifact read judgement, every role against every condition. The expected
+// answer is written out here from the owner's decision (design section 7.1), not taken from the
+// header: a role that may be read, a node that is neither secure nor high-impact, an ordinary
+// surface, an origin with no web content, no browser identity match, and every fact present.
+bool CheckArtifactReadJudgement() {
+  using sprint_coder::computer_use::ArtifactReadFacts;
+  using sprint_coder::computer_use::ArtifactReadPlatform;
+  using sprint_coder::computer_use::ArtifactReadRefusal;
+  using sprint_coder::computer_use::JudgeArtifactRead;
+  using sprint_coder::computer_use::OriginState;
+  using sprint_coder::computer_use::SurfaceKind;
+  const std::vector<std::string> roles = {
+      "AXStaticText", "AXTextField", "AXTextArea", "AXSecureTextField", "AXComboBox", "AXGroup",
+      "AXCell",       "AXRow",       "AXTable",    "AXWebArea",         "AXButton",   "AXScrollArea",
+      "AXDocument",   "AXEdit",      "AXText",     "Text",              "Edit",       "Document",
+      "TextBox",      "TextArea",    "TextField",  "StaticText",        "DataItem",   "Table",
+      "Pane",         "Group",       "Custom",     "ComboBox",          "Hyperlink",  "",
+      "Texts",        "AXStaticTextX", "Text ",    "EDIT",              "document",
+      "ListItem",     "List",        "MenuItem",   "Image",             "Button",     "Hyperlink",
+      "AXList",       "AXLink",      "AXImage",    "AXMenuItem",        "AXCheckBox", "AXSlider",
+      "AXOutline",    "AXOutlineRow", "AXLayoutArea", "TreeItem",       "Header",     "Tab",
+      "ToolBar",      "ScrollBar",   "Window",     "Spinner",           "Calendar",   "Thumb"};
+  const auto allowed = [](ArtifactReadPlatform platform, const std::string &role) {
+    if (platform == ArtifactReadPlatform::kMacOs)
+      return role == "AXStaticText" || role == "AXTextField" || role == "AXTextArea" ||
+             role == "StaticText" || role == "TextField" || role == "TextArea";
+    return role == "Text" || role == "Edit" || role == "Document" || role == "EDIT" ||
+           role == "document" || role == "Text ";
+  };
+  constexpr SurfaceKind surfaces[] = {SurfaceKind::kUnknown,      SurfaceKind::kOrdinary,
+                                      SurfaceKind::kFileBrowser,  SurfaceKind::kDownloadPanel,
+                                      SurfaceKind::kShellLike,    SurfaceKind::kScriptInput,
+                                      SurfaceKind::kCommandPalette, SurfaceKind::kDevToolsConsole};
+  constexpr OriginState origins[] = {OriginState::kNotApplicable, OriginState::kOrdinary,
+                                     OriginState::kUnknown, OriginState::kSensitive};
+  constexpr ArtifactReadPlatform platforms[] = {ArtifactReadPlatform::kMacOs,
+                                                ArtifactReadPlatform::kWindows};
+  std::size_t reads = 0;
+  // A platform value outside the two is refused for every role and every fact set.
+  {
+    ArtifactReadFacts facts;
+    facts.platform = static_cast<ArtifactReadPlatform>(7);
+    facts.metadata_complete = true;
+    facts.surface = SurfaceKind::kOrdinary;
+    facts.origin = OriginState::kNotApplicable;
+    facts.browser_identity_checked = true;
+    for (const char *role : {"Text", "Edit", "Document", "AXStaticText", "AXTextField"})
+      if (!Check(!JudgeArtifactRead(facts, role).MayRead(), "artifact-read-unknown-platform-refuses"))
+        return false;
+  }
+  for (const ArtifactReadPlatform platform : platforms)
+    for (const std::string &role : roles)
+      for (unsigned bits = 0; bits < 32; ++bits)
+        for (const SurfaceKind surface : surfaces)
+          for (const OriginState origin : origins) {
+            ArtifactReadFacts facts;
+            facts.platform = platform;
+            facts.metadata_complete = (bits & 1U) != 0;
+            facts.secure = (bits & 2U) != 0;
+            facts.high_impact = (bits & 4U) != 0;
+            facts.browser_identity_checked = (bits & 8U) != 0;
+            facts.browser_identity_match = (bits & 16U) != 0;
+            facts.surface = surface;
+            facts.origin = origin;
+            const auto verdict = JudgeArtifactRead(facts, role);
+            const bool role_ok = allowed(platform, role);
+            const bool missing =
+                !facts.metadata_complete || surface == SurfaceKind::kUnknown || !facts.browser_identity_checked;
+            const bool origin_bad = origin == OriginState::kSensitive || origin == OriginState::kUnknown;
+            const bool browser = origin != OriginState::kNotApplicable || facts.browser_identity_match;
+            const bool expect_read = role_ok && !missing && !facts.secure && !facts.high_impact &&
+                                     surface == SurfaceKind::kOrdinary && !origin_bad && !browser;
+            if (!Check(verdict.MayRead() == expect_read, "artifact-read-may-read")) return false;
+            if (!Check(verdict.MayRead() == (verdict.refusals == 0), "artifact-read-refusals-are-the-answer"))
+              return false;
+            if (!Check(verdict.Has(ArtifactReadRefusal::kFactsMissing) == missing, "artifact-read-reason-missing") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kRoleNotAllowed) == !role_ok, "artifact-read-reason-role") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kSecure) == facts.secure, "artifact-read-reason-secure") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kHighImpact) == facts.high_impact, "artifact-read-reason-high-impact") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kSurfaceNotOrdinary) == (surface != SurfaceKind::kOrdinary),
+                       "artifact-read-reason-surface") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kOriginSensitiveOrUnknown) == origin_bad, "artifact-read-reason-origin") ||
+                !Check(verdict.Has(ArtifactReadRefusal::kBrowserWindow) == browser, "artifact-read-reason-browser"))
+              return false;
+            if (expect_read) ++reads;
+          }
+  // Reads happen: 6 macOS spellings of three roles + 6 Windows spellings of three types, each in exactly one fact combination.
+  if (!Check(reads == 6 + 6, "artifact-read-reads-are-exactly-the-allow-list")) return false;
+  // A default-constructed fact set refuses (fail closed).
+  if (!Check(!JudgeArtifactRead(ArtifactReadFacts{}, "AXStaticText").MayRead(), "artifact-read-default-refuses"))
+    return false;
+  std::cout << "Computer Use artifact read judgement: PASS\n";
+  return true;
+}
+
 bool CheckNativeInterlockMap() {
   using sprint_coder::computer_use::EffectDecision;
   using sprint_coder::computer_use::InterlockOutcome;
@@ -6360,6 +6456,7 @@ int main() {
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
   if (!CheckNativeInterlockMap()) return 1;
+  if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";

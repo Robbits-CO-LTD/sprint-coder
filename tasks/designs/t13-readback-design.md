@@ -280,6 +280,10 @@ C6:
 
 順序の制約（#785 向け）:
 
+- T15-4 のうち、読めるかの判定（portable、どこからも呼ばない）は T15-4p として先に入った（`computer_use_artifact_read_judgement.h` と harness）。許可 role（macOS は AXStaticText と secure でない AXTextField / AXTextArea、Windows は Text / Edit / Document）、secure、highImpact、面、origin、ブラウザ窓（R14 / N22b）、facts の欠落を、理由の集合つきで fail closed に判定する。native の読み取りと配線は T15-4m / T15-4w。
+  - 当面読めないもの: Electron アプリ（macOS の AXWebArea を持つもの、Windows の Chrome_WidgetWin_*）と、Windows の Document（Word の本文など）。shadow の origin 計算（`computer_use_windows_shadow.h` の NodeInPage / ApplyShadowOrigin）と組み合わさると origin が kNotApplicable でなくなり、ブラウザ窓として常に拒否される見込み。安全側なので判定は変えない。扱いは T15-4m / T15-4w で、ブラウザ identity と origin を分けて決める。
+  - T15-4m / T15-4w の受入条件: 判定は role だけを見て subrole を見ない。パスワード欄の拒否は配線が渡す `facts.secure` に依る。subrole を読めないのに `metadata_complete=true` にしてはならない。
+  - T15-4w は既存の `UiaRole`（"UIATextField" など）ではなく ControlTypeName 系（Text / Edit / Document）を role として渡す。
 - 外側に新しい口を開く T15-8 を、内側の検査（T15-6、T15-7）の後に置く。INV-3 と同じ考え方で、外側の口が先に開かないようにする。
 - T15-6 は、成果物の抽出が適格な窓でしか起きないよう、S4-3 / S5-c の適格性拡大より後でよい。T15-4 の Windows 側は S5-c（面の判定）が前提で、それまでは N27 のとおり `copy` を出さない。
 - `copy` / `artifactRef` を語彙に足すときも、判断点 7 と同じく adapter の版を上げる。
