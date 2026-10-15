@@ -539,6 +539,7 @@ const reservationPreamble = String.raw`
 #include <unordered_map>
 #include <vector>
 #include "computer_use_native_binding.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_sha256.h"
@@ -1584,6 +1585,18 @@ int main() {
       Check(lastReceipt.decision == (unknown ? "denied" : entry.decision) &&
         lastReceipt.reason_code == (unknown ? "native_dispatch_failed" : entry.reason) &&
         lastReceipt.ticket.empty() && !current->ordinary_ticket.occupied() && current->preflight_owner == 0, entry.reason);
+    }
+    // A reason of the table with a result of another row is not a refusal: the maker does not match
+    // on the reason alone, so these stay denied receipts, which are not closed.
+    const struct { const char* reason; const char* result; } wrongResult[] = {
+      {"native_secure_field_blocked", "paused"}, {"native_shell_surface_blocked", "paused"},
+      {"native_approval_not_enabled", "paused"}, {"native_high_impact_user_takeover", "rejected"},
+      {"native_target_unclassified", "paused"}, {"native_execution_trigger_blocked", "rejected"},
+    };
+    for (const auto& entry : wrongResult) {
+      const NativePreflightReceipt made = PreflightReceiptFromOutcome(MakeDispatchOutcome(entry.result, entry.reason));
+      Check(made.decision == "denied" && made.reason_code == entry.reason && made.denied_result == entry.result &&
+        made.ticket.empty() && !NativePreflightReceiptIsClosed(made), entry.reason);
     }
     const auto closedReceipt = [](const char* decision, const char* reason, const char* result, const std::string& ticket) {
       NativePreflightReceipt receipt;

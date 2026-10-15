@@ -830,6 +830,13 @@ describe('Computer Use native Main adapter', () => {
       ['blocked', 'native_unlisted_reason', 'rejected'],
       ['takeover', 'native_unlisted_reason', 'paused'],
       ['blocked', 'native_shell_surface_blocked', 'canceled'],
+      // A refusal reason is only valid in its own decision: not in a denied receipt either.
+      ['denied', 'native_secure_field_blocked', 'rejected'],
+      ['denied', 'native_shell_surface_blocked', 'rejected'],
+      ['denied', 'native_approval_not_enabled', 'rejected'],
+      ['denied', 'native_high_impact_user_takeover', 'paused'],
+      ['denied', 'native_target_unclassified', 'rejected'],
+      ['denied', 'native_execution_trigger_blocked', 'paused'],
     ] as const) {
       const before = dispatchCalls();
       preflight.mockImplementationOnce((input) =>

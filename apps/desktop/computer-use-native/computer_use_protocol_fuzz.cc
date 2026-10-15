@@ -9,6 +9,7 @@
 #include "computer_use_windows_shadow.h"
 #include "computer_use_effect_measurement.h"
 #include "computer_use_native_interlock.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -3445,24 +3446,34 @@ bool CheckNativeInterlockMap() {
                      verdict.DeniedResult().empty(),
                  name);
   };
-  const auto shell_blocked = [](const EffectFacts &facts, const char *name) {
+  // Every verdict this map gives is a row of the closed receipt table, looked up there and not
+  // written again here.
+  const auto is_receipt_pair = [](const InterlockVerdict &verdict) {
+    return Check(sprint_coder::computer_use::NativePreflightRefusalAllowed(
+                     verdict.DecisionName(), verdict.ReasonCode(), verdict.DeniedResult()),
+                 "interlock-verdict-is-a-receipt-pair");
+  };
+  const auto shell_blocked = [&](const EffectFacts &facts, const char *name) {
     const InterlockVerdict verdict = InterlockForFacts(facts);
+    if (verdict.Refuses() && !is_receipt_pair(verdict)) return false;
     return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
                      verdict.reason == InterlockReason::kShellSurface &&
                      verdict.ReasonCode() == "native_shell_surface_blocked" &&
                      verdict.DeniedResult() == "rejected",
                  name);
   };
-  const auto trigger_takeover = [](const EffectFacts &facts, const char *name) {
+  const auto trigger_takeover = [&](const EffectFacts &facts, const char *name) {
     const InterlockVerdict verdict = InterlockForFacts(facts);
+    if (verdict.Refuses() && !is_receipt_pair(verdict)) return false;
     return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover &&
                      verdict.reason == InterlockReason::kExecutionTrigger &&
                      verdict.ReasonCode() == "native_execution_trigger_blocked" &&
                      verdict.DeniedResult() == "paused",
                  name);
   };
-  const auto trigger_blocked = [](const EffectFacts &facts, const char *name) {
+  const auto trigger_blocked = [&](const EffectFacts &facts, const char *name) {
     const InterlockVerdict verdict = InterlockForFacts(facts);
+    if (verdict.Refuses() && !is_receipt_pair(verdict)) return false;
     return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
                      verdict.reason == InterlockReason::kApprovalClosed &&
                      verdict.ReasonCode() == "native_approval_not_enabled" &&
@@ -3962,6 +3973,19 @@ bool CheckNativeInterlockMap() {
     claimed.effect_class = EffectClass::kSecure;
     claimed.reason = DecisionReason::kSecure;
     if (!Check(!MapEffectToInterlock(facts, claimed).Refuses(), "interlock-other-blocked-class")) return false;
+  }
+  // The three reasons the map can give each have exactly one row, and the table has no row the map
+  // cannot explain: the interlock codes of the table are the codes of the map.
+  {
+    std::size_t interlock_rows = 0;
+    for (const auto &entry : sprint_coder::computer_use::kNativePreflightRefusalTable) {
+      const std::string_view code = entry.reason_code;
+      if (code == "native_shell_surface_blocked" || code == "native_execution_trigger_blocked" ||
+          code == "native_approval_not_enabled")
+        ++interlock_rows;
+    }
+    if (!Check(interlock_rows == 3 && sprint_coder::computer_use::kNativePreflightRefusalCount == 6,
+               "interlock-codes-have-one-row-each")) return false;
   }
   std::cout << "Computer Use native interlock map: PASS\n";
   return true;

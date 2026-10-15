@@ -965,7 +965,9 @@ const NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unava
  * - an execution trigger (ADR 3.6, E1 / E4): takeover / paused
  * - an opening that needs an approval while the approval path is closed (E2 / E3): blocked / rejected,
  *   a code of its own so that the pair of one code means one thing.
- * `denied` is a different, longer table and is not closed here.
+ * A reason of this table is valid only in its own row: carried in a different decision, or in a
+ * `denied` receipt, it is invalid. The rest of `denied` is a different, longer table (native
+ * closes it) and is not listed here.
  */
 export const NATIVE_PREFLIGHT_REFUSALS: readonly Readonly<{
   decision: 'blocked' | 'takeover';
@@ -1134,6 +1136,8 @@ function parseNativePreflightReceipt(
   if (
     decision === 'denied' &&
     typeof reasonCode === 'string' &&
+    // A refusal reason (v1 or interlock) belongs to blocked / takeover only.
+    !NATIVE_PREFLIGHT_REFUSALS.some((entry) => entry.reasonCode === reasonCode) &&
     (deniedResult === 'rejected' || deniedResult === 'paused' || deniedResult === 'canceled')
   )
     return { kind: 'refused', result: deniedResult, reasonCode, record };

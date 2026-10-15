@@ -36,6 +36,7 @@
 
 #include "computer_use_native_binding.h"
 #include "computer_use_native_identity.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_native_approval_flow.h"
 #include "computer_use_native_eligibility.h"
@@ -4417,25 +4418,11 @@ struct NativePreflightDeniedEntry {
   const char* result;
 };
 
-// The closed set of blocked and takeover receipts: (decision, reason, result). The receipt maker and
-// the closed-receipt check both read it, so a reason can only be returned together with the decision
-// and result it belongs to. Main keeps the same table (NATIVE_PREFLIGHT_REFUSALS). A shell-surface or
-// execution-trigger refusal, and the E2 / E3 opening that needs an approval while the approval path
-// is closed, are in the table, and nothing returns them yet.
-struct NativePreflightRefusalEntry {
-  const char* decision;
-  const char* reason_code;
-  const char* result;
-};
-
-constexpr NativePreflightRefusalEntry kNativePreflightRefusalTable[] = {
-    {"blocked", "native_secure_field_blocked", "rejected"},
-    {"blocked", "native_shell_surface_blocked", "rejected"},
-    {"blocked", "native_approval_not_enabled", "rejected"},
-    {"takeover", "native_high_impact_user_takeover", "paused"},
-    {"takeover", "native_target_unclassified", "rejected"},
-    {"takeover", "native_execution_trigger_blocked", "paused"},
-};
+// The closed set of blocked and takeover receipts (decision, reason, result) is the portable table
+// in computer_use_native_refusal_table.h: the receipt maker and the closed-receipt check both read it,
+// so a reason can only be returned together with the decision and result it belongs to. Main keeps
+// the same table (NATIVE_PREFLIGHT_REFUSALS). The interlock rows are in it and nothing returns them yet.
+using sprint_coder::computer_use::kNativePreflightRefusalTable;
 
 constexpr NativePreflightDeniedEntry kNativePreflightDeniedTable[] = {
     {"native_canceled_pre_dispatch", "canceled"},

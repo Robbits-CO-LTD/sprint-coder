@@ -60,6 +60,18 @@ struct InterlockVerdict {
     }
     return {};
   }
+  // The receipt's decision for this refusal (the first column of the receipt table).
+  [[nodiscard]] std::string_view DecisionName() const {
+    switch (outcome) {
+    case InterlockOutcome::kBlocked:
+      return "blocked";
+    case InterlockOutcome::kTakeover:
+      return "takeover";
+    case InterlockOutcome::kNone:
+      break;
+    }
+    return {};
+  }
   // The result the receipt carries: a block is rejected, a takeover is paused for a person.
   [[nodiscard]] std::string_view DeniedResult() const {
     switch (outcome) {
