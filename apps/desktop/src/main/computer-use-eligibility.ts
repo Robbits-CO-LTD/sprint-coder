@@ -126,18 +126,19 @@ export function computerUseClassifierV2Attested(input: {
 }
 
 /**
- * The route a session's native side is actually bound to: `unbound` for a session started without
- * a route (a direct host user; Main always binds one), `v2` only when the build attested classifier
- * 2 and the session asked for v2, `v1` otherwise.
+ * The route a session's native side is actually bound to: `v2` only when the build attested
+ * classifier 2 and the session asked for v2, `v1` otherwise. `unbound` is a session the host has
+ * no binding for (one started without a route, one whose binding was dropped by a verified close or
+ * a failed start): nothing is known about it, so it is never given an approval.
  */
 export type ComputerUseApprovalRoute = ComputerUseClassifierRoute | 'unbound';
 
 /**
  * "The native approval path is open" (ADR v2 S4-4 addendum, section 0; C5). All of these, nothing
  * less: macOS, the addon exports the whole approval surface, the handshake attests classifier 2, and
- * for a bound session the effective mode is the v2 deny-list and the route is v2. A session on v1
- * never has an approval, whatever the rest says; an unbound session keeps the rule from before
- * routes existed (the attest decides). Used by the host and, through it, by the controller.
+ * the session is bound to route v2 under the v2 deny-list. A session on v1 never has an approval,
+ * whatever the rest says, and neither does a session with no binding (fail closed). Used by the
+ * host and, through it, by the controller; there is no session-less answer.
  */
 export function computerUseApprovalPathEnabled(input: {
   platform: string;
@@ -152,6 +153,5 @@ export function computerUseApprovalPathEnabled(input: {
     input.attestedClassifierVersion !== COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION
   )
     return false;
-  if (input.route === 'unbound') return true;
   return input.route === 'v2' && input.effectiveMode === 'v2-denylist';
 }

@@ -275,24 +275,21 @@ export function createComputerUseNativeHost(
 
   // A session bound to a route whose expected classifier is not 2 (every panel session, and an
   // agent session of a build that did not attest 2) is refused the approval calls here as well as
-  // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session that was
-  // never bound (a direct host user; Main always binds) keeps the pre-C3 rule.
-  const approvalRouteAllowed = (sessionId: string): boolean => {
-    const binding = classifierBindings.get(sessionId);
-    return binding === undefined || binding.expectedVersion === 2;
-  };
+  // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session with no
+  // binding at all (started without a route, closed, or whose start failed) is refused too (C5-1).
+  const approvalRouteAllowed = (sessionId: string): boolean =>
+    classifierBindings.get(sessionId)?.expectedVersion === 2;
 
   // The "approval path is open" test (C5-1): platform, the exported surface, the attested classifier
-  // version, and, for a session, its mode and route (computerUseApprovalPathEnabled has the table).
-  // Without a session id it answers for the capability only (an unbound session keeps the rule from
-  // before routes existed); the controller always passes the session.
-  const approvalRouteOf = (sessionId: string | undefined): ComputerUseApprovalRoute => {
-    if (sessionId === undefined) return 'unbound';
+  // version, and the session's mode and route (computerUseApprovalPathEnabled has the table). It is
+  // asked about a session and nothing else: a session with no binding (never bound, closed, or whose
+  // start failed) is closed, so a missing binding can never open an approval.
+  const approvalRouteOf = (sessionId: string): ComputerUseApprovalRoute => {
     const binding = classifierBindings.get(sessionId);
     if (binding === undefined) return 'unbound';
     return binding.expectedVersion === 2 ? 'v2' : 'v1';
   };
-  const approvalPathEnabled = (sessionId?: string): boolean => {
+  const approvalPathEnabled = (sessionId: string): boolean => {
     const route = approvalRouteOf(sessionId);
     return computerUseApprovalPathEnabled({
       platform,
@@ -642,7 +639,7 @@ export function createComputerUseNativeHost(
       );
     },
 
-    nativeApprovalPathEnabled: (sessionId?: string): boolean => approvalPathEnabled(sessionId),
+    nativeApprovalPathEnabled: (sessionId: string): boolean => approvalPathEnabled(sessionId),
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
       const internal = sessions.get(input.session.sessionId);

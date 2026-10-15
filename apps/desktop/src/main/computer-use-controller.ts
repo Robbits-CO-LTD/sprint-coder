@@ -312,10 +312,10 @@ export interface ComputerUseNativeHost {
    * macOS native only. True when the native approval path is open: the addon exports preflight,
    * approvalApprove, approvalDiscard and dispatchApproved, and the handshake confirmed classifier
    * v2 (C5-1: derived from the eligibility compiled into Main, so false for every build while the
-   * versions are 1). With a session id it also requires that session to be bound to route v2 under
-   * the v2 deny-list; without one it answers for the capability only.
+   * versions are 1), and the session is bound to route v2 under the v2 deny-list. Asked about a
+   * session; a session the host has no binding for is closed.
    */
-  nativeApprovalPathEnabled?(sessionId?: string): boolean;
+  nativeApprovalPathEnabled?(sessionId: string): boolean;
   /**
    * #785 T15-6b: whether the native can read the value of one node for `copy`. Absent means false.
    * A production host reports false until the native read exists (T15-4m / T15-4w) and its attest
@@ -4930,6 +4930,8 @@ export class ComputerUseController {
   ): boolean {
     const facts = this.boundaryFacts(action, observation);
     if (facts.secure) return true;
+    // 3-A: a high impact only Main's projection saw stops the action; no approval path waives it.
+    if (facts.mainProjectionOnly) return true;
     // S4-1c: Main's own evidence of a command surface stops regardless of what native said, and
     // regardless of the approval path (a surface has no approval).
     if (facts.surface) return true;

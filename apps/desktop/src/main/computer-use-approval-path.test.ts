@@ -37,7 +37,7 @@ const eligibility = (
   }) as ComputerUseEligibility;
 
 describe('the approval path predicate (C5-1)', () => {
-  it('opens for exactly one combination of the bound-session terms, and for the capability alone when unbound', () => {
+  it('opens for exactly one combination: macOS, exported, attested 2, a session bound to v2 under the v2 deny-list', () => {
     const platforms = ['darwin', 'win32', 'linux'];
     const versions = [0, 1, 2, 3];
     const modes: ComputerUseEligibilityMode[] = ['v1-allowlist', 'v2-denylist'];
@@ -52,7 +52,8 @@ describe('the approval path predicate (C5-1)', () => {
                 platform === 'darwin' &&
                 methodsExported &&
                 attestedClassifierVersion === 2 &&
-                (route === 'unbound' || (route === 'v2' && effectiveMode === 'v2-denylist'));
+                route === 'v2' &&
+                effectiveMode === 'v2-denylist';
               const actual = computerUseApprovalPathEnabled({
                 platform,
                 methodsExported,
@@ -66,8 +67,9 @@ describe('the approval path predicate (C5-1)', () => {
               ).toBe(expected);
               if (actual) open += 1;
             }
-    // darwin, exported, attested 2: unbound (2 modes) + route v2 under the deny-list (1).
-    expect(open).toBe(3);
+    // Only darwin, exported, attested 2, route v2 under the deny-list. A session with no binding
+    // (unbound) never opens, whatever else is true.
+    expect(open).toBe(1);
     expect(COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION).toBe(NATIVE_APPROVAL_CLASSIFIER_VERSION);
   });
 
@@ -160,7 +162,7 @@ describe('the production wiring while every version is 1 (C5-1)', () => {
           const session = await startSession(built.host, asked);
           expect(built.sent()['classifierRoute']).toBe('v1');
           expect(built.host.nativeApprovalPathEnabled?.(session.sessionId)).toBe(false);
-          expect(built.host.nativeApprovalPathEnabled?.()).toBe(false);
+          expect(built.host.nativeApprovalPathEnabled?.('no-such-session')).toBe(false);
         }
     },
   );
@@ -175,12 +177,98 @@ describe('the production wiring while every version is 1 (C5-1)', () => {
     expect(built.host.nativeApprovalPathEnabled?.(agent.sessionId)).toBe(true);
     // The panel session is bound to v1: the attest does not open an approval for it.
     expect(built.host.nativeApprovalPathEnabled?.(panel.sessionId)).toBe(false);
-    // The capability alone (no session) is open; the V2 flag turned off afterwards closes the mode.
-    expect(built.host.nativeApprovalPathEnabled?.()).toBe(true);
+    // A session the host has no binding for is closed (fail closed), and so is one whose binding a
+    // verified close dropped, however much the build attests.
+    expect(built.host.nativeApprovalPathEnabled?.('no-such-session')).toBe(false);
+    await built.host.close(agent);
+    expect(built.host.nativeApprovalPathEnabled?.(agent.sessionId)).toBe(false);
+    // The V2 flag turned off afterwards closes the mode.
     const lowered = buildHost(true, () => 'v1-allowlist');
     const loweredAgent = await startSession(lowered.host, 'v2', 'session-agent');
     expect(lowered.host.nativeApprovalPathEnabled?.(loweredAgent.sessionId)).toBe(false);
   });
+});
+
+describe('a session the host has no binding for gets no approval (C5-1, fail closed)', () => {
+  it('refuses approvalApprove and dispatchApproved for a session started without a route', async () => {
+    const built = buildHost(true, () => 'v2-denylist');
+    await built.host.listWindows(profile);
+    const unbound = await built.host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-unbound',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    });
+    expect(built.sent('session-unbound')).not.toHaveProperty('classifierRoute');
+    expect(built.host.nativeApprovalPathEnabled?.(unbound.sessionId)).toBe(false);
+    const input = {
+      session: unbound,
+      requestId: 'request-1',
+      action: { type: 'click', x: 0.5, y: 0.5, button: 'left' } as const,
+      observationRevision: 1,
+      cancelEpoch: 0,
+      signal: new AbortController().signal,
+      approvalGeneration: 1,
+    };
+    await expect(built.host.approvalApprove!(input)).resolves.toMatchObject({
+      kind: 'refused',
+      reasonCode: 'native_approval_route_forbidden',
+    });
+    await expect(built.host.dispatchApproved!(input)).rejects.toThrow('native_approval_closed');
+  });
+});
+
+// The tripwire: the versions the repository declares today. While they are 1, no build attests
+// classifier 2, no session is bound to route v2 for the native, and no approval path opens, for
+// every mode the table can describe. A change of those versions is C5-2; if it lands in another
+// change, this fails and says why.
+describe('the declared versions keep the approval path closed (C5-1 tripwire)', () => {
+  const table = JSON.parse(
+    readFileSync(join(__dirname, '../../computer-use-native/eligibility.json'), 'utf8'),
+  ) as {
+    versions: { rulesetVersion: number; classifierVersion: number; lexiconVersion: number };
+    ticketRequired: Record<string, boolean>;
+  };
+
+  it('declares classifier version 1 (raising it is C5-2, after the #777 measurement)', () => {
+    expect(table.versions.classifierVersion, 'C5-2 raises this, not another change').toBe(1);
+    expect(table.versions.rulesetVersion).toBe(1);
+    expect(table.versions.lexiconVersion).toBe(1);
+  });
+
+  it.each(['v1-allowlist', 'v2-denylist'] as const)(
+    'a %s build declared by the table attests nothing, binds v1, opens no approval',
+    async (mode) => {
+      const compiled = {
+        mode,
+        ...table.versions,
+        ticketRequired: table.ticketRequired['darwin'] === true,
+      } as ComputerUseEligibility;
+      const wiring = createComputerUseEligibilityWiring({
+        compiled: () => compiled,
+        agentDrivenV2: () => true,
+        environment: () => ({}),
+      });
+      expect(wiring.classifierV2Attested(true)).toBe(false);
+      const built = buildHost(wiring.classifierV2Attested(true), wiring.effectiveEligibilityMode);
+      // An agent session asks for v2 under the v2 deny-list, a panel session asks for v1.
+      const agent = await startSession(
+        built.host,
+        computerUseClassifierRoute({
+          agent: true,
+          effectiveMode: wiring.effectiveEligibilityMode(),
+        }),
+        'session-agent',
+      );
+      const panel = await startSession(built.host, 'v1', 'session-panel');
+      expect(built.sent('session-agent')['classifierRoute']).toBe('v1');
+      expect(built.sent('session-panel')['classifierRoute']).toBe('v1');
+      expect(built.host.nativeApprovalPathEnabled?.(agent.sessionId)).toBe(false);
+      expect(built.host.nativeApprovalPathEnabled?.(panel.sessionId)).toBe(false);
+    },
+  );
 });
 
 describe('the high-impact flag has two sources (C5-1, 3-A)', () => {
@@ -295,7 +383,13 @@ function buildHost(attested: boolean, effectiveEligibilityMode: () => ComputerUs
     dispatchApproved: () => ({}),
     dispatch: () => ({}),
     cancel: () => ({}),
-    close: () => ({}),
+    close: (input: unknown) => ({
+      result: 'closed',
+      drained: true,
+      sessionId: (input as Record<string, unknown>)['sessionId'],
+      cancelEpoch: (input as Record<string, unknown>)['cancelEpoch'],
+      inputAttemptCount: 0,
+    }),
   };
   const binding = {
     manifest: {

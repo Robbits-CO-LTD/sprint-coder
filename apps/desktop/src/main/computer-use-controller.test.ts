@@ -218,6 +218,8 @@ function createFixture(
     /** Opens the native approval path on the fake host (a production host never reports it). */
     nativeApproval?: {
       enabled?: boolean;
+      /** Per-session answer (C5-1); default: `enabled` for every session. */
+      pathFor?: (sessionId: string) => boolean;
       approve?: (
         input: Parameters<NonNullable<ComputerUseNativeHost['approvalApprove']>>[0],
       ) => ComputerUseNativeApprovalApproveResult | Promise<ComputerUseNativeApprovalApproveResult>;
@@ -258,6 +260,8 @@ function createFixture(
   let nativeCloseCount = 0;
   /** Ordered record of the native calls the approval tests care about. */
   const nativeLog: string[] = [];
+  /** The session ids the controller asked whether the native approval path is open for. */
+  const approvalPathQueries: string[] = [];
   /** The classifier route every startSession (start, refocus, resume) was given. */
   const startRoutes: Array<'v1' | 'v2' | undefined> = [];
   const readInputs: Parameters<NonNullable<ComputerUseNativeHost['readNodeValue']>>[0][] = [];
@@ -390,7 +394,13 @@ function createFixture(
     ...(options.nativeApproval === undefined
       ? {}
       : {
-          nativeApprovalPathEnabled: () => options.nativeApproval!.enabled !== false,
+          nativeApprovalPathEnabled: (sessionId) => {
+            approvalPathQueries.push(sessionId);
+            return (
+              options.nativeApproval!.enabled !== false &&
+              (options.nativeApproval!.pathFor?.(sessionId) ?? true)
+            );
+          },
           approvalApprove: async (input) => {
             nativeLog.push('approvalApprove');
             approveInputs.push(input);
@@ -602,6 +612,7 @@ function createFixture(
       policyEpoch = next;
     },
     nativeLog,
+    approvalPathQueries,
     startRoutes,
     approveInputs,
     approvedDispatches,
@@ -658,6 +669,8 @@ function createPreflightHost(
     throw new Error('native dispatch must not run after a refused preflight');
   },
   hostOptions: Parameters<typeof createComputerUseNativeHost>[2] = {},
+  /** The route the host binds the session to (C5-1: an approval is asked about a bound session). */
+  route?: 'v1' | 'v2',
 ) {
   const zero = (digit: string): string => digit.repeat(64);
   const nativeDispatch = vi.fn((input: unknown) =>
@@ -757,6 +770,7 @@ function createPreflightHost(
         taskId: 'task-1',
         turnId: 'turn-1',
         cancelEpoch: input.cancelEpoch,
+        ...(route === undefined ? {} : { classifierRoute: route }),
       });
     }
     return host.dispatch(input);
@@ -1564,9 +1578,13 @@ describe('ComputerUseController', () => {
     });
 
     it('passes mainHighImpact to the host so an ordinary preflight stops with no input', async () => {
-      const host = createPreflightHost((request) => ordinaryReceipt(request, 0), undefined, {
-        classifierV2Attested: true,
-      });
+      // The session is bound to route v2 on an attested host, so its receipts carry classifier 2.
+      const host = createPreflightHost(
+        (request) => ({ ...ordinaryReceipt(request, 0), classifierVersion: 2 }),
+        undefined,
+        { classifierV2Attested: true },
+        'v2',
+      );
       const seen: Array<boolean | undefined> = [];
       const fixture = createFixture({
         mode: 'full_access_app',
@@ -1651,6 +1669,43 @@ describe('ComputerUseController', () => {
         expect(fixture.dispatchCount()).toBe(0);
         expect(fixture.approvals).toHaveLength(0);
         await fixture.controller.stop(started.sessionId);
+      });
+
+      it('asks about the session, and a path that is closed for this session stops what an open one would offer', async () => {
+        const open = createFixture({
+          mode: 'full_access_app',
+          observationOverrides: nativeFacts,
+          nativeApproval: { enabled: true },
+          nativeDispatch: async () => offer(),
+        });
+        const openStarted = await start(open);
+        await open.controller.observe(openStarted.sessionId);
+        const acting = open.controller.act(openStarted.sessionId, buttonAction, 'session-open-1');
+        await viWait();
+        await clickCard(open, 'deny');
+        await acting.catch(() => undefined);
+        // Every question names the session (never a session-less one).
+        expect(open.approvalPathQueries.length).toBeGreaterThan(0);
+        expect(new Set(open.approvalPathQueries)).toEqual(new Set([openStarted.sessionId]));
+        await open.controller.stop(openStarted.sessionId);
+
+        // The host says the path is open for another session only: for this one it is closed, so the
+        // native-flagged high-impact target stops before native, exactly as with a closed path.
+        const closed = createFixture({
+          mode: 'full_access_app',
+          observationOverrides: nativeFacts,
+          nativeApproval: { enabled: true, pathFor: () => false },
+          nativeDispatch: async () => offer(),
+        });
+        const closedStarted = await start(closed);
+        await closed.controller.observe(closedStarted.sessionId);
+        await expect(
+          closed.controller.act(closedStarted.sessionId, buttonAction, 'session-closed-1'),
+        ).resolves.toMatchObject({ result: 'paused', reasonCode: 'hard_boundary' });
+        expect(closed.dispatchCount()).toBe(0);
+        expect(closed.approvals).toHaveLength(0);
+        expect(closed.approvalPathQueries.length).toBeGreaterThan(0);
+        await closed.controller.stop(closedStarted.sessionId);
       });
 
       it('with no approval-capable host at all, high impact stops exactly as before', async () => {
