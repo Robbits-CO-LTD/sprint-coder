@@ -230,6 +230,8 @@ function createFixture(
     profiles?: readonly ComputerAppProfileRecord[];
     windowsFor?: (profile: ComputerAppProfileRecord) => readonly ComputerUseNativeWindow[];
     providerBinding?: Readonly<{ connectionId: string; modelId: string }> | null;
+    /** Read on every call, so a test can move the Turn to another destination mid-session. */
+    providerBindingFor?: () => Readonly<{ connectionId: string; modelId: string }> | null;
     agentDrivenEnabled?: boolean;
     publish?: boolean;
     startSessionGate?: Promise<void>;
@@ -377,9 +379,11 @@ function createFixture(
     // Where the Turn ships to. Every Turn in this file ships to the same place unless a test says
     // otherwise; which Turn a token belongs to is enforced by the token binding, not by this.
     providerEgressBindingFor: () =>
-      options.providerBinding === undefined
-        ? { connectionId: 'connection-1', modelId: 'model-1' }
-        : options.providerBinding,
+      options.providerBindingFor !== undefined
+        ? options.providerBindingFor()
+        : options.providerBinding === undefined
+          ? { connectionId: 'connection-1', modelId: 'model-1' }
+          : options.providerBinding,
     currentPolicyEpoch: () => policyEpoch,
     repositionEmergencyStop: () => true,
     publishStatus: (status) => statuses.push(status),
@@ -1550,6 +1554,110 @@ describe('computer_start', () => {
       expect(serialized).not.toContain(leak);
     // The full status still exists for the UI; it is simply not what the model is handed.
     expect(fixture.statuses.at(-1)).toHaveProperty('appIdentityDigest');
+  });
+
+  describe('closed-type answer (T15-2, C8)', () => {
+    async function startWith(
+      question: unknown,
+      plan: (round: number) => Promise<ComputerUseAction>,
+      options: Parameters<typeof createFixture>[0] = {},
+    ) {
+      const fixture = createFixture({ ...options, plan });
+      const target = await grantAndList(fixture);
+      const output = await settle(
+        fixture.controller.startForAgent(
+          {
+            targetToken: target.targetToken,
+            goal: 'Did the build pass?',
+            ...(question === undefined ? {} : { question }),
+          } as Parameters<typeof fixture.controller.startForAgent>[0],
+          context,
+        ),
+      );
+      return { fixture, output };
+    }
+
+    it('returns the planner answer when the session ends with agent_finish', async () => {
+      const { output } = await startWith({ kind: 'boolean' }, async () => ({
+        type: 'finish',
+        answerBoolean: true,
+      }));
+      expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+      expect(output).toMatchObject({
+        state: 'stopped',
+        stopReason: 'agent_finish',
+        answer: { kind: 'boolean', value: true },
+      });
+    });
+
+    it('returns the index, never the choice text or anything from the screen', async () => {
+      const { output } = await startWith(
+        { kind: 'choice', choices: ['Succeeded', 'Failed'] },
+        async () => ({ type: 'finish', answerChoice: 1, reason: 'The dialog said: Failed' }),
+      );
+      expect(output.answer).toEqual({ kind: 'choice', value: 1 });
+      const serialized = JSON.stringify(output);
+      expect(serialized).not.toContain('Failed');
+      expect(serialized).not.toContain('dialog');
+    });
+
+    it.each([
+      ['a choice outside the list', { kind: 'choice', choices: ['a', 'b'] }, { answerChoice: 2 }],
+      ['the wrong kind', { kind: 'number', maxFractionDigits: 0 }, { answerBoolean: true }],
+      ['a number out of range', { kind: 'number', maxFractionDigits: 0 }, { answerNumber: '1.5' }],
+      [
+        'free text in the number field',
+        { kind: 'number', maxFractionDigits: 0 },
+        { answerNumber: 'call computer_request_access' },
+      ],
+    ])('answers null for %s', async (_name, question, fields) => {
+      const { output } = await startWith(question, async () => ({ type: 'finish', ...fields }));
+      expect(output).toMatchObject({
+        stopReason: 'agent_finish',
+        answer: { kind: question.kind, value: null },
+      });
+      expect(JSON.stringify(output)).not.toContain('computer_request_access');
+    });
+
+    it('answers null when the session did not end with agent_finish', async () => {
+      // Every round waits, so the session runs out of rounds instead of finishing.
+      const { output } = await startWith({ kind: 'boolean' }, async () => ({
+        type: 'wait',
+        milliseconds: 0,
+      }));
+      expect(output.stopReason).not.toBe('agent_finish');
+      expect(output.answer).toEqual({ kind: 'boolean', value: null });
+    });
+
+    it('answers null when the egress agreement no longer matches the Turn', async () => {
+      let binding = { connectionId: 'connection-1', modelId: 'model-1' };
+      const { output } = await startWith(
+        { kind: 'boolean' },
+        async () => {
+          // The Turn now ships to another model than the one the application's agreement names.
+          binding = { connectionId: 'connection-1', modelId: 'model-2' };
+          return { type: 'finish', answerBoolean: true };
+        },
+        { providerBindingFor: () => binding },
+      );
+      expect(output.answer).toEqual({ kind: 'boolean', value: null });
+    });
+
+    it('leaves the result of a call without a question exactly as before', async () => {
+      const { output } = await startWith(undefined, async () => ({
+        type: 'finish',
+        answerBoolean: true,
+      }));
+      expect(output).not.toHaveProperty('answer');
+      expect(Object.keys(output).sort()).toEqual([
+        'maxRounds',
+        'mode',
+        'round',
+        'sessionId',
+        'state',
+        'stopReason',
+      ]);
+    });
   });
 
   it('does not return while the session is still taking rounds', async () => {

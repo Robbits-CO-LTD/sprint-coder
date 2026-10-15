@@ -1999,6 +1999,7 @@ export class IpcRouter {
         mode,
         policyEpoch,
         sessionGoal,
+        sessionQuestion,
         signal,
       }) => {
         const selected = this.persistence.getProviderConnection(connectionId);
@@ -2039,6 +2040,8 @@ export class IpcRouter {
           // What `computer_start` said this session is for, or nothing when a person started it
           // from the panel and the Task's own objective is the whole story.
           ...(sessionGoal === null ? {} : { sessionGoal }),
+          // The closed question `computer_start` asked (T15-2), already normalised by Main.
+          ...(sessionQuestion === null ? {} : { sessionQuestion }),
         } as const;
         const permit = await preflightComputerUseProvider(
           { ...plannerBaseDeps, sessionId, catalogRevision, policyEpoch },

@@ -35,6 +35,8 @@ import {
   type ComputerAppIdentity,
   type ComputerListTargetsOutput,
   type ComputerRequestAccessOutput,
+  type ComputerStartAnswer,
+  type ComputerStartQuestion,
   type ComputerStartToolOutput,
   type ComputerUseGrantListResult,
   type ComputerUseGrantPurgeResult,
@@ -113,6 +115,12 @@ import {
   computerUseActionRoute,
 } from './computer-use-action';
 import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
+import {
+  closedAnswerFromFinish,
+  computerStartAnswerFor,
+  normalizeComputerStartQuestion,
+  type ComputerStartAnswerCandidate,
+} from './computer-use-closed-answer';
 import type {
   ComputerUsePlannerObservation,
   ComputerUsePlannerPort,
@@ -394,6 +402,8 @@ export type ComputerUseStartRequest = Readonly<{
 export type ComputerUseAgentStartBinding = Readonly<{
   /** Model-authored, already normalised and bounded like a Task goal. */
   goal: string;
+  /** The closed question the call asked (T15-2), normalised; null when it asked none. */
+  question: ComputerStartQuestion | null;
   /** Which kind of grant authorised this session, so each round can re-check the same one. */
   grantScope: ComputerAppGrantScopeKind;
   grantId: string | null;
@@ -431,6 +441,8 @@ export type ComputerUseControllerDeps = Readonly<{
       policyEpoch: number;
       /** The agent's stated goal for this session, or null for a session a person started. */
       sessionGoal: string | null;
+      /** The agent's closed question (T15-2), or null when it asked none or a person started it. */
+      sessionQuestion: ComputerStartQuestion | null;
       signal: AbortSignal;
     }>,
   ) => Promise<ComputerUsePlannerPort> | ComputerUsePlannerPort;
@@ -742,6 +754,8 @@ export class ComputerUseController {
   private readonly statusRevisionBySession = new Map<string, number>();
   /** Why a session paused, where a more specific stop reason than the default exists. */
   private readonly pauseReasons = new Map<string, ComputerUseStopReason>();
+  /** A planner's closed answer, held from its `finish` until `startForAgent` returns (T15-2). */
+  private readonly agentAnswers = new Map<string, ComputerStartAnswerCandidate>();
   private readonly startingSessions = new Map<
     string,
     {
@@ -1623,6 +1637,23 @@ export class ComputerUseController {
     return true;
   }
 
+  /**
+   * Whether the application's egress agreement still names the destination of the Turn a closed
+   * answer would be returned into (T15-2). A profile that is gone agrees to nothing.
+   */
+  private answerEgressAgreed(profileId: string, context: ToolExecutionContext): boolean {
+    let profile: ComputerAppProfileRecord;
+    try {
+      profile = this.deps.persistence.getComputerAppProfile(profileId);
+    } catch {
+      return false;
+    }
+    return ComputerUseController.egressAgreed(
+      this.appGrantState(profile, context.taskId),
+      this.deps.providerEgressBindingFor?.(context.taskId, context.turnId) ?? null,
+    );
+  }
+
   /** Whether the agreement in force covers sending this application's screen to this destination. */
   private static egressAgreed(
     state: ComputerAppGrantState,
@@ -2227,13 +2258,20 @@ export class ComputerUseController {
    * each simply leads to a state the session cannot leave, which is what this returns.
    */
   async startForAgent(
-    input: Readonly<{ targetToken: string; goal: string }>,
+    input: Readonly<{
+      targetToken: string;
+      goal: string;
+      question?: ComputerStartQuestion | undefined;
+    }>,
     context: ToolExecutionContext,
     signal?: AbortSignal,
   ): Promise<ComputerStartToolOutput> {
     if (this.disposed) throw new Error('Computer Use controller is disposed');
     if (this.deps.agentDrivenEnabled?.() !== true)
       throw new Error('Computer Use agent-driven targets are unavailable');
+    // Before the token is spent: a question that cannot be asked fails the call, not the window.
+    const question =
+      input.question === undefined ? null : normalizeComputerStartQuestion(input.question);
     // Spent before the first await. Two calls racing with the same token must not both reach
     // native: whichever deletes the entry owns it, and the other sees an unknown token.
     const binding = this.targetTokenBinding(input.targetToken);
@@ -2332,7 +2370,22 @@ export class ComputerUseController {
         this.pauseReasons.delete(settled.sessionId);
         await this.stop(settled.sessionId, reason);
       }
-      return computerStartToolOutput(settled);
+      if (question === null) return computerStartToolOutput(settled);
+      // Taken out whatever happens next, so no candidate outlives the call that asked for it.
+      const candidate = this.agentAnswers.get(settled.sessionId) ?? null;
+      this.agentAnswers.delete(settled.sessionId);
+      return computerStartToolOutput(
+        settled,
+        computerStartAnswerFor({
+          question,
+          candidate,
+          state: settled.state,
+          stopReason: settled.stopReason,
+          // Read now, not at start: the answer leaves when the call returns, and the agreement or
+          // the Turn's destination may have moved while the session ran.
+          egressAgreed: candidate !== null && this.answerEgressAgreed(profile.id, context),
+        }),
+      );
     };
     // Installed before `start`, so no status published while the session is coming up can be
     // missed — including a session that ends before `start` has even returned. Only one session
@@ -2364,6 +2417,7 @@ export class ComputerUseController {
           expectedProfileRevision: observed.profile.revision,
           agent: {
             goal: computerUseAgentGoal(input.goal),
+            question,
             grantScope: state.scope ?? 'grant',
             grantId: state.grantId,
             grantIdentityDigest: identity.grantIdentityDigest,
@@ -2385,6 +2439,7 @@ export class ComputerUseController {
           onSettled = null;
           // The same reason `turnEnded` already uses for "the Turn that owned this session is
           // gone". A cancelled Turn is that event, reaching the controller through the broker.
+          this.agentAnswers.delete(status.sessionId);
           void this.stop(status.sessionId, 'turn_started').catch(() => undefined);
           reject(
             signal?.reason instanceof Error
@@ -2844,6 +2899,7 @@ export class ComputerUseController {
               mode: effectiveMode,
               policyEpoch,
               sessionGoal: input.agent?.goal ?? null,
+              sessionQuestion: input.agent?.question ?? null,
               signal: controller.signal,
             });
       controller.signal.throwIfAborted();
@@ -3522,6 +3578,10 @@ export class ComputerUseController {
       this.assertSessionLive(record);
       if (!this.observationIsFresh(record)) continue;
       if (action.type === 'finish') {
+        // Kept aside, not published: only `startForAgent` decides whether it may leave (T15-2).
+        const question = record.agent?.question ?? null;
+        const candidate = question === null ? null : closedAnswerFromFinish(question, action);
+        if (candidate !== null) this.agentAnswers.set(sessionId, candidate);
         // An agent session ends as `agent_finish`, so neither the tool result nor the UI reads a
         // planner's finish (possibly induced by the screen) as a person's click (T15-1). A session
         // a person started keeps its V1 reason.
@@ -5040,7 +5100,10 @@ export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
  * destructured with a rest, so a field added to the status is absent here until somebody decides it
  * belongs — the opposite of a spread, which would publish it by default.
  */
-export function computerStartToolOutput(status: ComputerUseSessionStatus): ComputerStartToolOutput {
+export function computerStartToolOutput(
+  status: ComputerUseSessionStatus,
+  answer?: ComputerStartAnswer,
+): ComputerStartToolOutput {
   return computerStartToolOutputSchema.parse({
     sessionId: status.sessionId,
     state: status.state,
@@ -5048,6 +5111,8 @@ export function computerStartToolOutput(status: ComputerUseSessionStatus): Compu
     mode: status.mode,
     round: status.round,
     maxRounds: status.maxRounds,
+    // Only for a call that asked a question, so a call that did not gets exactly what it used to.
+    ...(answer === undefined ? {} : { answer }),
   });
 }
 
