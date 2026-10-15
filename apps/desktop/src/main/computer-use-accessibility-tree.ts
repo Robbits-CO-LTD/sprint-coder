@@ -8,14 +8,14 @@ const BOUNDED_PAYMENT_TEXT =
 const HIGH_IMPACT_TEXT =
   /(payment|purchase|checkout|contract|agreement|install|administrator|security|password|credential|\bterminal\b|\bshell\b|command prompt|powershell|\bconsole\b|決済|支払い|支払う|購入|注文を確定|注文する|請求|送金|契約|インストール|管理者|セキュリティ|パスワード|ターミナル|シェル)/iu;
 /**
- * Structure words of a command surface (a terminal, a shell, the command palette). Matched against
+ * Structure words of a command surface (a terminal, a shell; the command palette is deliberately NOT here until #777 observes it). Matched against
  * the role, subrole and identifier only (never a title, description or value), as whole words after
  * splitting on non-alphanumerics and camelCase, so 'terminalPanel' and 'integrated-terminal' match
  * and 'terminalbank' or 'app-shell' do not. Main's own, native-independent evidence for the S4-1c
  * deny: a positive match only. An element without such a word is never a surface here (native and
  * v1 still judge it).
  */
-const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh', 'commandpalette']);
+const SURFACE_WORDS = new Set(['terminal', 'xterm', 'powershell', 'pwsh']);
 
 export function hasSurfaceStructureWord(...fields: readonly (string | undefined)[]): boolean {
   for (const field of fields) {
@@ -29,7 +29,6 @@ export function hasSurfaceStructureWord(...fields: readonly (string | undefined)
     for (let index = 0; index < words.length; index += 1) {
       const word = words[index]!;
       if (SURFACE_WORDS.has(word)) return true;
-      if (word === 'command' && words[index + 1] === 'palette') return true;
       if (word === 'power' && words[index + 1] === 'shell') return true;
     }
   }

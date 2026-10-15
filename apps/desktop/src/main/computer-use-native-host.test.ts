@@ -1964,14 +1964,12 @@ describe('Main surface structure words (S4-1c)', () => {
     return JSON.stringify(node);
   };
 
-  it('marks a target under a terminal or command palette structure word, by its ancestors too', () => {
+  it('marks a target under a terminal structure word, by its ancestors too', () => {
     for (const identifier of [
       'terminal',
       'integratedTerminal',
       'workbench.panel.terminal',
       'xterm-screen',
-      'quick-command-palette',
-      'CommandPalette',
       'PowerShell',
     ]) {
       const projection = projectComputerUseAccessibilityTree(
