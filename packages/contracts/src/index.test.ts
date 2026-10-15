@@ -2556,12 +2556,22 @@ describe('Computer Use contracts', () => {
       excerpt: 'Total⇥42',
     };
     expect(contracts.computerUseApprovalTransferSchema.parse(transfer)).toEqual(transfer);
+    // The sizes Main cuts to are the sizes the schema allows, to the character.
+    expect(
+      contracts.computerUseApprovalTransferSchema.parse({
+        ...transfer,
+        sourceLabel: 'x'.repeat(contracts.COMPUTER_USE_TRANSFER_LABEL_MAX),
+        excerpt: 'x'.repeat(contracts.COMPUTER_USE_EXCERPT_MAX),
+      }).excerpt,
+    ).toHaveLength(contracts.COMPUTER_USE_EXCERPT_MAX);
     const { destinationTarget: _target, ...withoutTarget } = transfer;
     expect(contracts.computerUseApprovalTransferSchema.parse(withoutTarget)).toEqual(withoutTarget);
     for (const bad of [
       { ...transfer, sizeClass: 'huge' },
       { ...transfer, extra: 1 },
-      { ...transfer, excerpt: 'x'.repeat(4_097) },
+      { ...transfer, excerpt: 'x'.repeat(3_073) },
+      { ...transfer, sourceLabel: 'x'.repeat(257) },
+      { ...transfer, destinationTarget: 'x'.repeat(257) },
       { sourceLabel: 'a' },
     ])
       expect(() => contracts.computerUseApprovalTransferSchema.parse(bad)).toThrow();

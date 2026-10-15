@@ -9579,7 +9579,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
-.computer-use-rail__copied {
+.computer-use-rail__copied ul {
   margin: 6px 0 0;
   padding: 0;
   list-style: none;

@@ -93,6 +93,22 @@ export type ComputerUseSessionView = Readonly<{
   copied?: readonly Readonly<{ sizeClass: ComputerUseArtifactSizeClassView; excerpt: string }>[];
 }>;
 
+/**
+ * Says what the marks in an excerpt mean, in words, so they do not have to be guessed from symbols
+ * (and so a screen reader has something to read). Shown only for marks that are there.
+ */
+function ExcerptLegend({ excerpts }: { excerpts: readonly string[] }) {
+  const joined = excerpts.join(' ');
+  const notes = [
+    joined.includes('⟦U+') ? '⟦U+…⟧ は目に見えない文字、または紛らわしい文字です' : null,
+    /[⏎⇥]/u.test(joined) ? '⏎ は改行、⇥ はタブです' : null,
+    joined.includes('⚠') ? '⚠ は、その語に文字種が混在していることを示します' : null,
+  ].filter((note): note is string => note !== null);
+  return notes.length === 0 ? null : (
+    <small className="computer-use-excerpt-legend">{notes.join(' / ')}</small>
+  );
+}
+
 export type ComputerUseArtifactSizeClassView = 'le_256' | 'le_1k' | 'le_4k';
 
 /** Where a pasted value comes from and goes to, and what it is (design 4.4, 4.5). */
@@ -1277,13 +1293,16 @@ export function ComputerUseSessionRail({
           <span className="computer-use-rail__pause">{session.pauseReason}</span>
         )}
         {(session.copied ?? []).length === 0 ? null : (
-          <ul className="computer-use-rail__copied" aria-label="コピーした内容">
-            {(session.copied ?? []).map((value, index) => (
-              <li key={index}>
-                <span>{ARTIFACT_SIZE_LABELS[value.sizeClass]}</span> <code>{value.excerpt}</code>
-              </li>
-            ))}
-          </ul>
+          <div className="computer-use-rail__copied" role="group" aria-label="コピーした内容">
+            <ul>
+              {(session.copied ?? []).map((value, index) => (
+                <li key={index}>
+                  <span>{ARTIFACT_SIZE_LABELS[value.sizeClass]}</span> <code>{value.excerpt}</code>
+                </li>
+              ))}
+            </ul>
+            <ExcerptLegend excerpts={(session.copied ?? []).map((value) => value.excerpt)} />
+          </div>
         )}
       </div>
       <div className="computer-use-rail__actions">
@@ -1333,7 +1352,11 @@ export function ComputerUseSessionRail({
               </div>
             </dl>
             {approval.transfer === undefined ? null : (
-              <div className="computer-use-approval__transfer" aria-label="貼り付ける内容">
+              <div
+                className="computer-use-approval__transfer"
+                role="group"
+                aria-label="貼り付ける内容"
+              >
                 <dl>
                   <div>
                     <dt>コピー元</dt>
@@ -1352,8 +1375,16 @@ export function ComputerUseSessionRail({
                     <dt>大きさ</dt>
                     <dd>{ARTIFACT_SIZE_LABELS[approval.transfer.sizeClass]}</dd>
                   </div>
+                  <div>
+                    <dt>内容</dt>
+                    <dd>
+                      <code className="computer-use-approval__excerpt">
+                        {approval.transfer.excerpt}
+                      </code>
+                    </dd>
+                  </div>
                 </dl>
-                <code className="computer-use-approval__excerpt">{approval.transfer.excerpt}</code>
+                <ExcerptLegend excerpts={[approval.transfer.excerpt]} />
               </div>
             )}
             {approval.escapedPreview === null ? null : (

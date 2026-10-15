@@ -392,8 +392,22 @@ describe('a pasted value is shown with where it came from and goes to (#785 T15-
     // The escapes arrive as the text they are, not as markup or as the invisible character.
     expect(html).toContain('Total⇥42⏎⟦U+202E⟧end');
     expect(html).toContain('computer-use-approval__excerpt');
-    // It is a labelled group a screen reader can find.
-    expect(html).toContain('aria-label="貼り付ける内容"');
+    // It is a labelled group a screen reader can find, and the excerpt has a heading of its own.
+    expect(html).toContain('role="group" aria-label="貼り付ける内容"');
+    expect(html).toContain('<dt>内容</dt>');
+    // What the marks mean is said in words.
+    expect(html).toContain('目に見えない文字');
+    expect(html).toContain('⏎ は改行、⇥ はタブです');
+    expect(html).not.toContain('文字種が混在');
+  });
+
+  it('explains the mixed-script mark when an excerpt has one', () => {
+    const html = render({
+      ...approval,
+      transfer: { ...approval.transfer, excerpt: '⚠pаy now' },
+    });
+    expect(html).toContain('⚠pаy now');
+    expect(html).toContain('⚠ は、その語に文字種が混在していることを示します');
   });
 
   it('shows nothing of the kind for a card that moves no value', () => {
@@ -429,7 +443,8 @@ describe('a pasted value is shown with where it came from and goes to (#785 T15-
         onApproval={() => {}}
       />,
     );
-    expect(html).toContain('aria-label="コピーした内容"');
+    expect(html).toContain('role="group" aria-label="コピーした内容"');
+    expect(html).toContain('⏎ は改行、⇥ はタブです');
     expect(html).toContain('256バイト以下');
     expect(html).toContain('Total⇥42');
     expect(html).toContain('4KB以下');

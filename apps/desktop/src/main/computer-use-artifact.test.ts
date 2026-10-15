@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   COMPUTER_USE_ARTIFACT_LIMITS,
+  COMPUTER_USE_EXCERPT_MAX,
+  COMPUTER_USE_TRANSFER_LABEL_MAX,
+  computerUseApprovalTransferSchema,
   COMPUTER_USE_LIMITS,
   computerUseArtifactSizeClassSchema,
 } from '@sprint-coder/contracts';
@@ -169,6 +172,132 @@ describe('what a person is shown of a value (N23, design 4.5, R13)', () => {
     expect(computerUseDisplayLabel(`Bank${cp(0x202e)}.app`)).toBe('Bank⟦U+202E⟧.app');
     expect(computerUseDisplayLabel('a'.repeat(65))).toBe(`${'a'.repeat(64)}…`);
     expect(computerUseDisplayLabel('line\nbreak')).toBe('line⏎break');
+  });
+});
+
+describe('what a person is shown, second pass (M1, M2, L1, L2, L5)', () => {
+  it('M1: every Default_Ignorable code point is made visible, whatever its category', () => {
+    const ignorable = /\p{Default_Ignorable_Code_Point}/u;
+    let seen = 0;
+    for (let value = 0; value <= 0x10ffff; value += 1) {
+      if (value >= 0xd800 && value <= 0xdfff) continue;
+      const character = cp(value);
+      if (!ignorable.test(character)) continue;
+      seen += 1;
+      const shown = computerUseArtifactExcerpt(`a${character}b`);
+      // Not drawn plainly, and not silently dropped: the reader sees that something is there.
+      if (shown === 'ab' || shown.includes(character)) throw new Error(`U+${value.toString(16)}`);
+      expect(shown.replace(/⟦U\+[0-9A-F]+⟧/gu, '')).toMatch(/^a.*b$/u);
+    }
+    expect(seen).toBeGreaterThan(300);
+  });
+
+  it.each([0x17b4, 0x17b5, 0x180b, 0x180c, 0x180d, 0x180f])(
+    'M1: the nonspacing invisible mark U+%s is escaped, not shown as nothing',
+    (value) => {
+      expect(computerUseArtifactExcerpt(`a${cp(value)}b`)).toBe(
+        `a⟦U+${value.toString(16).toUpperCase().padStart(4, '0')}⟧b`,
+      );
+    },
+  );
+
+  it('L5: an unassigned code point is escaped', () => {
+    expect(computerUseArtifactExcerpt(`a${cp(0x378)}b`)).toBe('a⟦U+0378⟧b');
+    expect(computerUseArtifactExcerpt(`a${cp(0x10ffff)}b`)).toBe('a⟦U+10FFFF⟧b');
+  });
+
+  it.each(['⟦', '⟧', '⏎', '⇥', '⚠'])(
+    'L2: the display symbol %s inside a value cannot pass for one of ours',
+    (symbol) => {
+      const shown = computerUseArtifactExcerpt(`a${symbol}b`);
+      expect(shown).toBe(`a⟦U+${symbol.codePointAt(0)!.toString(16).toUpperCase()}⟧b`);
+    },
+  );
+
+  it('L2: a value that spells out an escape or a line break does not look like one', () => {
+    const shown = computerUseArtifactExcerpt('⟦U+202E⟧⏎⇥');
+    expect(shown).toBe('⟦U+27E6⟧U+202E⟦U+27E7⟧⟦U+23CE⟧⟦U+21E5⟧');
+    // Our own line break and tab are only ever made from a real one.
+    expect(computerUseArtifactExcerpt('a\nb\tc')).toBe('a⏎b⇥c');
+  });
+
+  describe('M2: a word that mixes look-alike scripts is marked', () => {
+    const cyrillicA = cp(0x430);
+    const cyrillicO = cp(0x43e);
+    const greekOmicron = cp(0x3bf);
+    const armenianO = cp(0x585);
+    it.each([
+      ['Cyrillic а in a Latin word', `p${cyrillicA}y`, '⚠pаy'],
+      ['Greek ο in a Latin word', `g${greekOmicron}${greekOmicron}d`, '⚠gοοd'],
+      ['Armenian օ in a Latin word', `b${armenianO}b`, '⚠bօb'],
+      ['only the mixed word of a sentence', `pay p${cyrillicO}ypal now`, 'pay ⚠pоypal now'],
+      ['a mixed word after punctuation', `(ok) "p${cyrillicA}y"`, '(ok) "⚠pаy"'],
+      ['Cyrillic with Greek', `${cp(0x430)}${cp(0x3b1)}`, '⚠аα'],
+    ])('%s', (_name, text, expected) => {
+      expect(computerUseArtifactExcerpt(text)).toBe(expected);
+    });
+
+    it('a zero-width character inside the word does not hide the mix', () => {
+      expect(computerUseArtifactExcerpt(`p${cp(0x200b)}${cyrillicA}y`)).toBe('⚠p⟦U+200B⟧аy');
+    });
+
+    it.each([
+      ['plain Latin', 'Hello world 42'],
+      ['plain Cyrillic', 'привет мир'],
+      ['plain Greek', 'γειά σου'],
+      ['Japanese beside Latin letters', 'Appleを買う iPhone15 とiPad'],
+      ['Latin with digits and symbols', 'a1_b2-c3 $4.50'],
+      ['Cyrillic and Latin in different words', 'привет hello'],
+      ['Chinese beside Latin', '你好world'],
+    ])('leaves %s alone', (_name, text) => {
+      expect(computerUseArtifactExcerpt(text)).toBe(text);
+    });
+
+    it('does not read full-width letters as another script (NFKC makes them Latin)', () => {
+      expect(computerUseArtifactExcerpt(`ｐ${cyrillicA}ｙ`)).toBe('⚠pаy');
+      expect(computerUseArtifactExcerpt('ｐａｙ')).toBe('pay');
+    });
+  });
+
+  describe('L1: what is shown fits the contract, in the worst case', () => {
+    const transfer = (label: string, excerpt: string) =>
+      computerUseApprovalTransferSchema.parse({
+        sourceLabel: label,
+        destinationLabel: label,
+        destinationTarget: `control:${computerUseDisplayLabel(label)}`,
+        sizeClass: 'le_4k',
+        excerpt,
+      });
+
+    it.each([
+      ['64 Tag characters', cp(0xe0041).repeat(64)],
+      ['65 private-use characters', cp(0xe000).repeat(65)],
+      ['64 zero-width characters', cp(0x200b).repeat(64)],
+      ['64 of the longest escape', cp(0x10fffd).repeat(64)],
+      ['a long ordinary name', 'a'.repeat(500)],
+    ])('a label of %s', (_name, label) => {
+      const shown = computerUseDisplayLabel(label);
+      expect(shown.length).toBeLessThanOrEqual(COMPUTER_USE_TRANSFER_LABEL_MAX - 'control:'.length);
+      expect(() => transfer(shown, 'x')).not.toThrow();
+      expect(() => transfer(shown, computerUseArtifactExcerpt('x'))).not.toThrow();
+    });
+
+    it('a label cut by what is shown ends with the cut mark and never half an escape', () => {
+      const shown = computerUseDisplayLabel(cp(0x10fffd).repeat(64));
+      expect(shown.endsWith('…')).toBe(true);
+      expect(shown.slice(0, -1)).toMatch(/^(⟦U\+10FFFD⟧)+$/u);
+    });
+
+    it('an excerpt of the longest escapes still fits', () => {
+      const shown = computerUseArtifactExcerpt(cp(0x10fffd).repeat(300));
+      expect(shown.length).toBeLessThanOrEqual(COMPUTER_USE_EXCERPT_MAX);
+      expect(() => transfer('a', shown)).not.toThrow();
+    });
+
+    it('an excerpt full of marked words still fits', () => {
+      const text = Array.from({ length: 100 }, () => `p${cp(0x430)}y`).join(' ');
+      expect(() => transfer('a', computerUseArtifactExcerpt(text))).not.toThrow();
+    });
   });
 });
 

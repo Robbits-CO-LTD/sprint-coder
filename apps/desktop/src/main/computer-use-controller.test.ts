@@ -3329,6 +3329,25 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it.each([
+      ['64 Tag characters', String.fromCodePoint(0xe0041).repeat(64)],
+      ['65 private-use characters', String.fromCodePoint(0xe000).repeat(65)],
+      ['64 zero-width characters', String.fromCodePoint(0x200b).repeat(64)],
+    ])(
+      'L1: a source name of %s still gives a card, not a failed session',
+      async (_name, sourceLabel) => {
+        const { fixture } = await pasteSession({
+          sourceLabel,
+          planned: (artifactRef) => ({ type: 'set_text', targetId: 'node-1', artifactRef }),
+        });
+        await vi.waitFor(() => expect(pending(fixture)).toBeDefined());
+        expect(pending(fixture)!.transfer!.sourceLabel.length).toBeLessThanOrEqual(256);
+        expect(fixture.statuses.some((status) => status.state === 'failed')).toBe(false);
+        await answer(fixture, 'deny');
+        await fixture.controller.dispose();
+      },
+    );
+
     it('T15-7b: the native approval card carries the same transfer', async () => {
       const { fixture } = await pasteSession({
         text: 'SECRETVALUE',
@@ -4790,7 +4809,7 @@ describe('ComputerUseController', () => {
     await viWait();
     const approval = fixture.approvals.find((value) => value.state === 'pending');
     expect(approval?.targetLabel).not.toContain('\u202e');
-    expect(approval?.targetLabel).toContain('\\u202e');
+    expect(approval?.targetLabel).toContain('⟦U+202E⟧');
     expect(approval?.preview).not.toContain('\n');
     await fixture.controller.resolveApproval({
       approvalId: approval!.id,

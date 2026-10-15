@@ -5940,7 +5940,7 @@ function runBoundedComputerUseCleanup(
 }
 
 function actionTargetLabel(action: ComputerUseAction): string {
-  if ('targetId' in action) return `control:${safeUntrustedDisplayText(action.targetId, 128)}`;
+  if ('targetId' in action) return `control:${computerUseDisplayLabel(action.targetId)}`;
   if ('x' in action && 'y' in action) return `target:${action.x.toFixed(3)},${action.y.toFixed(3)}`;
   return action.type;
 }

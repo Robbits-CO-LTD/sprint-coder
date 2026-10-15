@@ -5172,16 +5172,24 @@ const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 2
  * status the outer agent is given. The labels come from the screen (an application name), so they
  * are escaped and cut the same way before they get here.
  */
-export const computerUseArtifactSizeClassForDisplaySchema = z.enum(['le_256', 'le_1k', 'le_4k']);
-const computerUseExcerptSchema = z.string().max(4_096);
-const computerUseTransferLabelSchema = z.string().max(512);
+/** A size in three steps rather than a count, so the outer agent learns as little as it can. */
+export const computerUseArtifactSizeClassSchema = z.enum(['le_256', 'le_1k', 'le_4k']);
+/**
+ * The most characters of what is shown. Main cuts what it makes to these (after escaping, so an
+ * escape is never half there), and the schemas hold it to the same numbers: a card whose label ran
+ * over would not parse, and the session would stop with an error instead of asking.
+ */
+export const COMPUTER_USE_EXCERPT_MAX = 3_072;
+export const COMPUTER_USE_TRANSFER_LABEL_MAX = 256;
+const computerUseExcerptSchema = z.string().max(COMPUTER_USE_EXCERPT_MAX);
+const computerUseTransferLabelSchema = z.string().max(COMPUTER_USE_TRANSFER_LABEL_MAX);
 export const computerUseApprovalTransferSchema = z
   .object({
     sourceLabel: computerUseTransferLabelSchema,
     destinationLabel: computerUseTransferLabelSchema,
     /** The control the text goes into, or absent for typing into the focused one. */
     destinationTarget: computerUseTransferLabelSchema.optional(),
-    sizeClass: computerUseArtifactSizeClassForDisplaySchema,
+    sizeClass: computerUseArtifactSizeClassSchema,
     excerpt: computerUseExcerptSchema,
   })
   .strict();
@@ -5189,7 +5197,7 @@ export type ComputerUseApprovalTransfer = z.infer<typeof computerUseApprovalTran
 /** A value kept by `copy`, as the session card shows it. */
 export const computerUseCopiedValueSchema = z
   .object({
-    sizeClass: computerUseArtifactSizeClassForDisplaySchema,
+    sizeClass: computerUseArtifactSizeClassSchema,
     excerpt: computerUseExcerptSchema,
   })
   .strict();
@@ -6881,8 +6889,6 @@ export const COMPUTER_USE_ARTIFACT_LIMITS = Object.freeze({
 } as const);
 export const computerUseArtifactKindSchema = z.enum(['text']);
 export type ComputerUseArtifactKind = z.infer<typeof computerUseArtifactKindSchema>;
-/** A size in three steps rather than a count, so the outer agent learns as little as it can. */
-export const computerUseArtifactSizeClassSchema = z.enum(['le_256', 'le_1k', 'le_4k']);
 export type ComputerUseArtifactSizeClass = z.infer<typeof computerUseArtifactSizeClassSchema>;
 
 export type ComputerUseApi = {
