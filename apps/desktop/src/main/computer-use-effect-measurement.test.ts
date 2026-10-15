@@ -135,6 +135,24 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     expect([...order].sort((a, b) => a - b)).toEqual(order);
   });
 
+  it('treats a page whose origin cannot be told as nobody to approve for', () => {
+    // The authority ends at "/", "?", "#" or a backslash; a local file has no host; an empty origin
+    // makes the binding incomplete (a takeover) instead of a shared "no origin".
+    expect(measurement).toContain('rest.find_first_of("/?#\\\\")');
+    expect(measurement).toContain('if (host.empty() || scheme == "file") return std::string();');
+    expect(measurement).toContain('if (origin.empty()) derived.complete = false;');
+    // A flag added to the rule set must be compared in RulesetIsTheVersionsOwn.
+    expect(measurement).toContain('static_assert(sizeof(EffectRuleset) == 4 * sizeof(bool),');
+    const own = functionBody(measurement, 'inline bool RulesetIsTheVersionsOwn(');
+    for (const flag of [
+      'download_open',
+      'file_manager_open',
+      'high_impact_confirmation',
+      'supervised_action',
+    ])
+      expect(own, flag).toContain(`ruleset.${flag} == canonical.${flag}`);
+  });
+
   it('is recorded in the ADR with the C4-1 contract', () => {
     const adr = readFileSync(
       join(__dirname, '../../../../tasks/designs/adr-computer-use-agent-driven-v2.md'),

@@ -2820,12 +2820,16 @@ bool CheckEffectMeasurementBinding() {
                  NormalizeOrigin("https://shop.example:80/") == "https://shop.example:80" &&
                  NormalizeOrigin("HTTPS://user:pw@Shop.Example/") == "https://shop.example" &&
                  NormalizeOrigin("https://[::1]:8443/x") == "https://[::1]:8443" &&
-                 NormalizeOrigin("file:///Users/me/a.html") == "file://",
+                 NormalizeOrigin("https://good.example\\evil.example/path") == "https://good.example" &&
+                 NormalizeOrigin("https://good.example:8443\\x") == "https://good.example:8443",
              "binding-origin-normalization")) return false;
   if (!Check(NormalizeOrigin("").empty() && NormalizeOrigin("shop.example/a").empty() &&
                  NormalizeOrigin("https:///x").empty() && NormalizeOrigin("https://host:12a/").empty() &&
                  NormalizeOrigin("://host").empty() && NormalizeOrigin("https://[::1/").empty() &&
-                 NormalizeOrigin("data:text/html,x").empty(),
+                 NormalizeOrigin("data:text/html,x").empty() && NormalizeOrigin("http:shop.example/x").empty() &&
+                 NormalizeOrigin("http:/x").empty() && NormalizeOrigin("https://\\x").empty() &&
+                 NormalizeOrigin("file:///Users/me/a.html").empty() && NormalizeOrigin("file://host/a").empty() &&
+                 NormalizeOrigin("FILE:///x").empty(),
              "binding-origin-rejects-non-origins")) return false;
   // The page of a web control: the same control on another host is another authority.
   const auto web = [](const std::string &url, const std::string &caption) {
@@ -2863,6 +2867,22 @@ bool CheckEffectMeasurementBinding() {
     if (!Check(measured.takeover && !measured.eligible, "binding-unreadable-url-is-a-takeover")) return false;
     ShadowAxCapture odd = web("data:text/html,x", "Total: $5");
     if (!Check(!MeasureApproval(MeasureInput(odd)).eligible, "binding-non-origin-url-is-not-eligible")) return false;
+    // A URL that reads as an origin-less page must not share the digest of another: it is a person's.
+    for (const char *url : {"http:a.example/x", "http:b.example/x", "http:/x", "https:///x", "https://\\x",
+                            "file:///Users/me/checkout.html", "file://host/checkout.html"}) {
+      const NativeApprovalMeasurement odd_measured = MeasureApproval(MeasureInput(web(url, "Total: $5")));
+      if (!Check(odd_measured.takeover && !odd_measured.eligible && odd_measured.authority_digest.empty(),
+                 "binding-unreadable-origin-is-a-takeover")) return false;
+    }
+    // The same for an approval that is not a confirmation (the origin is bound for every effect).
+    ShadowAxCapture odd_supervised = web("http:a.example/x", "Draft");
+    ApprovalMeasurementInput odd_input = MeasureInput(odd_supervised);
+    odd_input.request.maximum_mode = "supervised";
+    odd_input.request.kind = "click";
+    odd_input.source = HighImpactSource::kNone;
+    odd_input.capture = &odd_supervised;
+    odd_supervised.chain[0].title = "Save";
+    if (!Check(MeasureApproval(odd_input).takeover, "binding-unreadable-origin-for-every-effect")) return false;
   }
 
   // A confirmation is bound to what the person saw and to where the control was.
@@ -3191,6 +3211,16 @@ bool CheckEffectMeasurement() {
       const auto widened = JudgeIntentOffer(ClassifierRoute::kV2, download, download_open, HighImpactSource::kNativeFacts, 2);
       if (!Check(!widened.offer && widened.refusal == IntentRefusal::kNotEnabled, "measure-ruleset-is-the-versions-own"))
         return false;
+      // Any flag that is not the version's own refuses a confirmation too, whichever way it differs.
+      for (int flag = 0; flag < 4; ++flag) {
+        EffectRuleset other;
+        if (flag == 0) other.download_open = true;
+        if (flag == 1) other.file_manager_open = true;
+        if (flag == 2) other.high_impact_confirmation = false;
+        if (flag == 3) other.supervised_action = false;
+        if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, other, confirm, HighImpactSource::kNativeFacts, 2).offer,
+                   "measure-every-ruleset-flag-is-compared")) return false;
+      }
       EffectRuleset also_files;
       also_files.file_manager_open = true;
       if (!Check(!JudgeIntentOffer(ClassifierRoute::kV2, also_files, confirm, HighImpactSource::kNativeFacts, 2).offer,

@@ -125,14 +125,18 @@ inline void AppendNumber(std::string *output, std::string_view name, std::int64_
 } // namespace measurement_detail
 
 // scheme://host[:port], lowercase, the default port left out, no user information, no path, query
-// or fragment. Empty when the text is not a URL with an authority.
+// or fragment. Empty when the text is not a URL with an authority, and always empty for file: (a
+// local page has no host; an approval treats its origin as opaque and does not offer there). The
+// input is a URL the browser serialized (the AX URL attribute), so the authority ends at the first
+// "/", "?", "#" or backslash (browsers read a backslash as a slash in special schemes); it is not a
+// general URL parser, and anything it cannot read as scheme://host[:port] is empty.
 [[nodiscard]] inline std::string NormalizeOrigin(std::string_view url) {
   using measurement_detail::LowerAscii;
   const std::size_t marker = url.find("://");
   if (marker == std::string_view::npos || marker == 0) return std::string();
   const std::string scheme = LowerAscii(url.substr(0, marker));
   std::string_view rest = url.substr(marker + 3);
-  const std::size_t end = rest.find_first_of("/?#");
+  const std::size_t end = rest.find_first_of("/?#\\");
   std::string_view authority = end == std::string_view::npos ? rest : rest.substr(0, end);
   const std::size_t at = authority.rfind('@');
   if (at != std::string_view::npos) authority = authority.substr(at + 1);
@@ -154,7 +158,7 @@ inline void AppendNumber(std::string *output, std::string_view name, std::int64_
   for (const char digit : port)
     if (digit < '0' || digit > '9') return std::string();
   if ((scheme == "http" && port == "80") || (scheme == "https" && port == "443")) port.clear();
-  if (host.empty() && scheme != "file") return std::string();
+  if (host.empty() || scheme == "file") return std::string();
   std::string origin = scheme + "://" + host;
   if (!port.empty()) origin += ":" + port;
   return origin;
@@ -182,7 +186,10 @@ DeriveAuthorityBinding(const ShadowAxCapture &capture, const ApprovalAuthorityId
   DerivedAuthorityBinding derived;
   if (facts.origin == OriginState::kOrdinary && capture.web_area_url_read) {
     const std::string origin = NormalizeOrigin(capture.web_area_url);
-    if (!origin.empty()) derived.binding.origin = AuthorityString{true, origin};
+    // A page whose origin cannot be told (no authority, a local file) cannot be bound to one: a
+    // person decides, rather than two different pages sharing the digest of "no origin".
+    if (origin.empty()) derived.complete = false;
+    else derived.binding.origin = AuthorityString{true, origin};
   }
   if (decision.approval_effect != NativeApprovalEffect::kHighImpactConfirmation) return derived;
   derived.binding.content_bound = true;
@@ -293,6 +300,10 @@ struct IntentVerdict {
 
 // The rule set that classifier / ruleset version 2 names: the confirmation and the supervised
 // action, and no file open (decision 2-A). Enabling more is a new ruleset version, not a flag.
+// Every flag of the rule set is compared below; a flag added to it must be compared too.
+static_assert(sizeof(EffectRuleset) == 4 * sizeof(bool),
+              "EffectRuleset changed: compare the new flag in RulesetIsTheVersionsOwn");
+
 [[nodiscard]] inline bool RulesetIsTheVersionsOwn(const EffectRuleset &ruleset) {
   const EffectRuleset canonical;
   return ruleset.download_open == canonical.download_open &&
