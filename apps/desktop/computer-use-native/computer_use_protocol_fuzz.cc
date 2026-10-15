@@ -3668,6 +3668,65 @@ bool CheckNativeInterlockMap() {
       dmg.chain = {{"axrow", "", "Installer.dmg"}, {"axwindow", "", "Downloads"}};
       if (!none(dmg, "interlock-download-row-with-an-unknown-extension-is-no-verdict")) return false;
     }
+    {
+      // An unknown ancestor between the label and the nearest known container may be the control that
+      // is pressed (a page makes a group clickable): the passive item must reach a known container
+      // through allow-listed roles only.
+      EffectFacts group = EffBase();
+      group.action = ActionKind::kClick;
+      group.chain = {{"axstatictext", "", "Install"}, {"axgroup", "", ""}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(group, "interlock-label-under-an-unknown-group")) return false;
+      EffectFacts custom_group = EffBase();
+      custom_group.action = ActionKind::kClick;
+      custom_group.chain = {{"axstatictext", "", "Install"}, {"axcustomwidget", "", ""}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(custom_group, "interlock-label-under-a-custom-ancestor")) return false;
+      EffectFacts row_in_group = EffBase();
+      row_in_group.action = ActionKind::kInvoke;
+      row_in_group.chain = {{"axrow", "", "install.sh"}, {"axgroup", "", ""}, {"axoutline", "", "Explorer"},
+                            {"axwindow", "", "Editor"}};
+      if (!trigger_takeover(row_in_group, "interlock-row-under-an-unknown-group")) return false;
+      // A chain that never reaches a known container proves nothing about what it is under.
+      EffectFacts open_ended = EffBase();
+      open_ended.action = ActionKind::kClick;
+      open_ended.chain = {{"axrow", "", "Install"}, {"axrow", "", "Setup"}};
+      if (!trigger_takeover(open_ended, "interlock-chain-without-a-known-container")) return false;
+      // A container is not an item: the target itself being one is a control.
+      EffectFacts container = EffBase();
+      container.action = ActionKind::kClick;
+      container.chain = {{"axoutline", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(container, "interlock-container-as-the-target")) return false;
+      // The passive chain under the usual containers stays no verdict.
+      for (const char *container_role : {"axtable", "axlist", "axoutline", "axbrowser", "axscrollarea"}) {
+        EffectFacts row = EffBase();
+        row.action = ActionKind::kInvoke;
+        row.chain = {{"axstatictext", "", "install.sh"}, {"axrow", "", ""}, {container_role, "", "Explorer"},
+                     {"axwindow", "", "Editor"}};
+        if (!none(row, "interlock-statictext-in-a-row-in-a-container")) return false;
+      }
+      {
+        // The same shapes from UI Automation.
+        ShadowUiaCapture text = UiaBase();
+        text.window_class = "SomeAppClass";
+        text.process_path = "C:\\Apps\\app.exe";
+        text.chain = {UiaNode("Text", "Install"), UiaNode("Custom", ""), UiaNode("Window", "App")};
+        if (!trigger_takeover(BuildWindowsShadowFacts(text, UiaRequest("click")).facts,
+                              "interlock-windows-text-under-a-custom")) return false;
+        ShadowUiaCapture item = UiaBase();
+        item.window_class = "SomeAppClass";
+        item.process_path = "C:\\Apps\\app.exe";
+        item.chain = {UiaNode("Text", "install.sh"), UiaNode("ListItem", ""), UiaNode("List", "Files"),
+                      UiaNode("Window", "App")};
+        if (!none(BuildWindowsShadowFacts(item, UiaRequest("invoke")).facts,
+                  "interlock-windows-text-in-a-list-item")) return false;
+        for (const char *container_type : {"List", "Tree", "DataGrid", "Table", "Pane", "Document"}) {
+          ShadowUiaCapture in_container = item;
+          in_container.chain = {UiaNode("ListItem", "install.sh"), UiaNode(container_type, "Files"),
+                                UiaNode("Window", "App")};
+          if (!none(BuildWindowsShadowFacts(in_container, UiaRequest("invoke")).facts,
+                    "interlock-windows-list-item-in-a-container")) return false;
+        }
+      }
+    }
     // The installer rule is the core's: the control must be activated, and its words must be readable.
     EffectFacts typed = EffBase();
     typed.action = ActionKind::kKey;

@@ -119,25 +119,40 @@ namespace interlock_detail {
   return false;
 }
 
-// Whether what the action lands on is KNOWN to be a passive item: every node of the target up to the
-// nearest actionable ancestor (the range the core reads its words from, so the label inside a
-// button is inside the control) has an allow-listed role, and no subrole other than an allow-listed
-// one. Everything else is treated as a control: an unknown or custom role, a control nobody listed
-// (AXGroup that a page makes clickable, AXComboBox, AXIncrementor, AXDisclosureTriangle,
-// AXMenuBarItem, a split button, a Custom or Spinner), and a role that only CONTAINS an item's name
-// ("axrowcustom", "axtextarea"). This fails closed on purpose: a role this list does not know is
-// refused, not excused. The decision is by ROLE, never by whether a file is attached: a button can
-// carry an AXURL or a file name and is still a button, and a file's row is still a row.
-[[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
+// A known container: something items live in, which is never pressed itself (a list, an outline, a
+// table, a browser, a scroll area, a window, the application, a web area; UI Automation's List, Tree,
+// DataGrid, Table, Pane, Window and Document). Matched whole, like the items.
+[[nodiscard]] inline bool RoleIsKnownContainer(std::string_view role) {
   using namespace effect_detail;
-  const std::size_t span = ActionableSpan(facts);
-  if (span == 0 || span > facts.chain.size()) return false;
-  for (std::size_t index = 0; index < span; ++index) {
+  std::string name = NormalizeForMatch(role);
+  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
+  static constexpr std::string_view kContainers[] = {
+      "list", "outline", "table",  "browser", "scrollarea", "window", "application",
+      "webarea", "tree", "datagrid", "pane", "document"};
+  for (const std::string_view container : kContainers)
+    if (name == container) return true;
+  return false;
+}
+
+// Whether what the action lands on is KNOWN to be a passive item: walking up from the target, every
+// node has an allow-listed role (and no subrole other than an allow-listed one) until the nearest
+// KNOWN container is reached. Anything else is treated as a control: a role nobody listed anywhere on
+// the way up (an AXGroup a page made clickable, a Custom, a combo box, a disclosure triangle, a menu
+// bar item, a split button), a chain that never reaches a known container, and a target that is
+// itself a container. This fails closed on purpose. It does not stop at the core's nearest
+// actionable ancestor: the core does not recognize a group or a custom control as actionable, so a
+// label under one would look like an item on its own. The decision is by ROLE, never by whether a
+// file is attached: a button can carry an AXURL or a file name and is still a button, and a file's
+// row is still a row.
+[[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
+  for (std::size_t index = 0; index < facts.chain.size(); ++index) {
     const NodeFacts &node = facts.chain[index];
+    if (RoleIsKnownContainer(node.role)) return index > 0;
     if (!RoleIsPassiveItem(node.role)) return false;
-    if (!NormalizeForMatch(node.subrole).empty() && !RoleIsPassiveItem(node.subrole)) return false;
+    if (!effect_detail::NormalizeForMatch(node.subrole).empty() && !RoleIsPassiveItem(node.subrole))
+      return false;
   }
-  return true;
+  return false;
 }
 
 // An installer control activated: the core's label rule (E4), independent of any extension that

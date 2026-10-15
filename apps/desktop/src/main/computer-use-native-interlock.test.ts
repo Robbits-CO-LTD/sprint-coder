@@ -75,6 +75,11 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     expect(squashed).toContain('if (!RefusedByExtension(facts) && ItemInSpan(facts)) return {};');
     expect(squashed).toContain('if (name == item) return true;');
     expect(header).not.toContain('ControlInSpan');
+    // The walk goes up to the nearest KNOWN container, through allow-listed roles only.
+    expect(squashed).toContain('if (RoleIsKnownContainer(node.role)) return index > 0;');
+    expect(squashed).toContain('if (!RoleIsPassiveItem(node.role)) return false;');
+    expect(squashed).toContain('if (name == container) return true;');
+    expect(header).not.toContain('ActionableSpan');
     expect(header).not.toMatch(/name\.find\(item\)/u);
     expect(squashed).toContain(
       'static constexpr std::string_view kItems[] = {"row", "cell", "outlinerow", "listitem", "treeitem", "dataitem", "statictext", "text"};',
