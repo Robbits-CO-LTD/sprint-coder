@@ -1397,8 +1397,10 @@ describe('macOS native capture boundary', () => {
     // Decision strings native produces must be the ones the Main parser accepts.
     expect(source).toContain('MakeNullReceipt("ordinary")');
     expect(source).toContain('MakeNullReceipt("replay")');
-    expect(source).toContain('receipt.decision = "blocked"');
-    expect(source).toContain('receipt.decision = "takeover"');
+    // blocked / takeover come from the closed refusal table, whose decisions are those two.
+    expect(source).toContain('receipt.decision = entry.decision;');
+    expect(source).toContain('{"blocked", "native_secure_field_blocked", "rejected"}');
+    expect(source).toContain('{"takeover", "native_high_impact_user_takeover", "paused"}');
     expect(source).toContain('receipt.decision = "denied"');
     for (const decision of ['ordinary', 'replay', 'blocked', 'takeover', 'denied'])
       expect(host).toContain(`decision === '${decision}'`);

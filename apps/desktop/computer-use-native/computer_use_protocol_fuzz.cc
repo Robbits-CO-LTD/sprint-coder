@@ -3465,7 +3465,7 @@ bool CheckNativeInterlockMap() {
     const InterlockVerdict verdict = InterlockForFacts(facts);
     return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
                      verdict.reason == InterlockReason::kApprovalClosed &&
-                     verdict.ReasonCode() == "native_execution_trigger_blocked" &&
+                     verdict.ReasonCode() == "native_approval_not_enabled" &&
                      verdict.DeniedResult() == "rejected",
                  name);
   };

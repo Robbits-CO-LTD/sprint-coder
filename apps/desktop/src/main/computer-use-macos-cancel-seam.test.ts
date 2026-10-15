@@ -1569,6 +1569,9 @@ int main() {
       {"native_secure_field_blocked", "rejected", "blocked"},
       {"native_high_impact_user_takeover", "paused", "takeover"},
       {"native_target_unclassified", "rejected", "takeover"},
+      {"native_shell_surface_blocked", "rejected", "blocked"},
+      {"native_approval_not_enabled", "rejected", "blocked"},
+      {"native_execution_trigger_blocked", "paused", "takeover"},
       {"native_stale_observation", "rejected", "denied"},
       {"native_made_up_reason", "rejected", "denied"},
     };
@@ -1607,6 +1610,19 @@ int main() {
       !closedReceipt("denied", "native_secure_field_blocked", "rejected", "") &&
       !closedReceipt("denied", "native_high_impact_user_takeover", "paused", "") &&
       !closedReceipt("denied", "native_made_up_reason", "rejected", ""), "receipt_blocked_takeover_replay_closed");
+    // The interlock reasons (S4-1a) are closed pairs: one decision and one result each.
+    Check(closedReceipt("blocked", "native_shell_surface_blocked", "rejected", "") &&
+      closedReceipt("blocked", "native_approval_not_enabled", "rejected", "") &&
+      closedReceipt("takeover", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("blocked", "native_shell_surface_blocked", "paused", "") &&
+      !closedReceipt("takeover", "native_shell_surface_blocked", "rejected", "") &&
+      !closedReceipt("blocked", "native_approval_not_enabled", "paused", "") &&
+      !closedReceipt("takeover", "native_approval_not_enabled", "rejected", "") &&
+      !closedReceipt("takeover", "native_execution_trigger_blocked", "rejected", "") &&
+      !closedReceipt("blocked", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("denied", "native_shell_surface_blocked", "rejected", "") &&
+      !closedReceipt("denied", "native_execution_trigger_blocked", "paused", "") &&
+      !closedReceipt("blocked", "native_shell_surface_blocked", "rejected", goodToken), "receipt_interlock_pairs_closed");
     for (const auto& entry : kNativePreflightDeniedTable) {
       const std::string result = entry.result;
       Check((result == "rejected" || result == "paused" || result == "canceled") &&

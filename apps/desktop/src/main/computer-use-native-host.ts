@@ -955,6 +955,31 @@ const NATIVE_APPROVAL_WAIT_MAX_MS = 60_000;
 
 const NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE = 'native_single_use_approval_unavailable';
 
+/**
+ * The closed set of blocked and takeover receipts native may return, as (decision, reason, result).
+ * A reason is only valid together with the decision and result it belongs to, so a reason can not be
+ * carried into another kind of refusal. It mirrors `kNativePreflightRefusalTable` in the macOS native.
+ * - secure field: blocked / rejected (the person is not asked)
+ * - high impact and unclassified targets: takeover (a person decides)
+ * - shell, script and command surfaces (ADR 3.7): blocked / rejected
+ * - an execution trigger (ADR 3.6, E1 / E4): takeover / paused
+ * - an opening that needs an approval while the approval path is closed (E2 / E3): blocked / rejected,
+ *   a code of its own so that the pair of one code means one thing.
+ * `denied` is a different, longer table and is not closed here.
+ */
+export const NATIVE_PREFLIGHT_REFUSALS: readonly Readonly<{
+  decision: 'blocked' | 'takeover';
+  reasonCode: string;
+  deniedResult: 'rejected' | 'paused';
+}>[] = Object.freeze([
+  { decision: 'blocked', reasonCode: 'native_secure_field_blocked', deniedResult: 'rejected' },
+  { decision: 'blocked', reasonCode: 'native_shell_surface_blocked', deniedResult: 'rejected' },
+  { decision: 'blocked', reasonCode: 'native_approval_not_enabled', deniedResult: 'rejected' },
+  { decision: 'takeover', reasonCode: 'native_high_impact_user_takeover', deniedResult: 'paused' },
+  { decision: 'takeover', reasonCode: 'native_target_unclassified', deniedResult: 'rejected' },
+  { decision: 'takeover', reasonCode: 'native_execution_trigger_blocked', deniedResult: 'paused' },
+]);
+
 const NATIVE_PREFLIGHT_KEYS = [
   'decision',
   'reasonCode',
@@ -1088,8 +1113,26 @@ function parseNativePreflightReceipt(
     if (reasonCode !== null || deniedResult !== null) return invalid();
     return { kind: 'replay', record };
   }
+  if (decision === 'blocked' || decision === 'takeover') {
+    // Closed: only the listed (decision, reason, result) triples are receipts.
+    if (
+      !NATIVE_PREFLIGHT_REFUSALS.some(
+        (entry) =>
+          entry.decision === decision &&
+          entry.reasonCode === reasonCode &&
+          entry.deniedResult === deniedResult,
+      )
+    )
+      return invalid();
+    return {
+      kind: 'refused',
+      result: deniedResult as 'rejected' | 'paused',
+      reasonCode: reasonCode as string,
+      record,
+    };
+  }
   if (
-    (decision === 'blocked' || decision === 'takeover' || decision === 'denied') &&
+    decision === 'denied' &&
     typeof reasonCode === 'string' &&
     (deniedResult === 'rejected' || deniedResult === 'paused' || deniedResult === 'canceled')
   )
