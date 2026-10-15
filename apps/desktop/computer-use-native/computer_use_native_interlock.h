@@ -167,8 +167,9 @@ namespace interlock_detail {
 
 // Maps the core's decision for `facts` to an interlock verdict. `kNone` means "no verdict: v1
 // decides".
-[[nodiscard]] inline InterlockVerdict MapEffectToInterlock(const EffectFacts &facts,
-                                                           const EffectDecision &decision) {
+[[nodiscard]] inline InterlockVerdict
+MapEffectToInterlock(const EffectFacts &facts, const EffectDecision &decision,
+                     const EffectRuleset &ruleset = EffectRuleset{}) {
   using namespace interlock_detail;
   if (facts.action == ActionKind::kObserve || !FactsAreComplete(facts)) return {};
 
@@ -197,7 +198,12 @@ namespace interlock_detail {
         // the name, and the answer must not be weaker than the approval's. It needs the extension the
         // E2 / E3 rule needs; without it the round stays with v1. Inside an application (any other
         // surface) the file is a file in an editor and is not refused here.
-        if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known)
+        // The refusal says "the approval is closed", so it is only said while that is true for this
+        // surface: once the rule set trusts the approval, the approval decides and there is no verdict.
+        const bool approval_open = facts.surface == SurfaceKind::kDownloadPanel ? ruleset.download_open
+                                                                                 : ruleset.file_manager_open;
+        if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known &&
+            !approval_open)
           return Refusal(InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed,
                          facts.surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
                                                                       : EffectClass::kE3FileManagerOpen);
@@ -221,7 +227,7 @@ namespace interlock_detail {
 // The core's decision for `facts`, then the map.
 [[nodiscard]] inline InterlockVerdict InterlockForFacts(const EffectFacts &facts,
                                                         const EffectRuleset &ruleset = EffectRuleset{}) {
-  return MapEffectToInterlock(facts, ClassifyEffect(facts, ruleset));
+  return MapEffectToInterlock(facts, ClassifyEffect(facts, ruleset), ruleset);
 }
 
 } // namespace sprint_coder::computer_use

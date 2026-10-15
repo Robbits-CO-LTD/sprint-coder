@@ -77,7 +77,14 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     expect(header).not.toContain('ControlInSpan');
     // A passive item opened from a file manager or a download list stays an E2 / E3 refusal.
     expect(squashed).toContain(
-      'if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known)',
+      'if (IsListedSurface(facts.surface) && effect_detail::MayOpen(facts) && facts.extension_known && !approval_open)',
+    );
+    // ...and only while the rule set has not trusted the approval for that surface.
+    expect(squashed).toContain(
+      'facts.surface == SurfaceKind::kDownloadPanel ? ruleset.download_open : ruleset.file_manager_open',
+    );
+    expect(squashed).toContain(
+      'MapEffectToInterlock(facts, ClassifyEffect(facts, ruleset), ruleset)',
     );
     // The walk goes up to the nearest KNOWN container, through allow-listed roles only.
     expect(squashed).toContain('if (RoleIsKnownContainer(node.role)) return index > 0;');

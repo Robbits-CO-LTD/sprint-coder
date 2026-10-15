@@ -3748,6 +3748,33 @@ bool CheckNativeInterlockMap() {
                        "interlock-listed-opening-names-its-class")) return false;
           }
         }
+        // The refusal says "the approval is closed", so it is only true while it is: once the rule set
+        // trusts the approval for this surface, the approval decides and this map has no verdict.
+        for (const std::string &name : std::vector<std::string>{"install.txt", u8"インストール手順.pdf"_u8}) {
+          EffectFacts named = EffBase();
+          named.surface = surface;
+          named.action = ActionKind::kDoubleClick;
+          named.target_is_file_item = true;
+          named.extension_known = true;
+          named.extension = name.find("pdf") != std::string::npos ? "pdf" : "txt";
+          named.chain = {{"axrow", "", name}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+          if (!trigger_blocked(named, "interlock-closed-approval-refuses-an-installer-named-file")) return false;
+          EffectRuleset trusting;
+          trusting.download_open = true;
+          trusting.file_manager_open = true;
+          if (!Check(!InterlockForFacts(named, trusting).Refuses(), "interlock-open-approval-leaves-an-installer-named-file"))
+            return false;
+          // Only the rule for this surface counts.
+          EffectRuleset other;
+          other.download_open = surface != SurfaceKind::kDownloadPanel;
+          other.file_manager_open = surface != SurfaceKind::kFileBrowser;
+          if (!Check(InterlockForFacts(named, other).Refuses(), "interlock-the-other-surfaces-approval-does-not-count"))
+            return false;
+          EffectRuleset own;
+          own.download_open = surface == SurfaceKind::kDownloadPanel;
+          own.file_manager_open = surface == SurfaceKind::kFileBrowser;
+          if (!Check(!InterlockForFacts(named, own).Refuses(), "interlock-own-surfaces-approval-counts")) return false;
+        }
         // Browsing it is not opening it.
         EffectFacts browse = EffBase();
         browse.surface = surface;
