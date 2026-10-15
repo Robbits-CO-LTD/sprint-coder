@@ -218,6 +218,10 @@ static_assert(sizeof(kHalfWidthKana) / sizeof(kHalfWidthKana[0]) == 0xFF9D - 0xF
       continue;
     }
     index += length;
+    if (code == 0x3000) { // the ideographic space is a plain space under NFKC
+      output.push_back(' ');
+      continue;
+    }
     if (code >= 0xFF01 && code <= 0xFF5E) {
       output.push_back(static_cast<char>(code - 0xFF01 + 0x21));
       continue;
@@ -236,8 +240,12 @@ static_assert(sizeof(kHalfWidthKana) / sizeof(kHalfWidthKana[0]) == 0xFF9D - 0xF
       const bool voiceable = (folded >= 0x30AB && folded <= 0x30C1 && (folded - 0x30AB) % 2 == 0) ||
                              (folded >= 0x30C4 && folded <= 0x30C8 && (folded - 0x30C4) % 2 == 0) ||
                              (folded >= 0x30CF && folded <= 0x30DB && (folded - 0x30CF) % 3 == 0);
-      if (!semi && (voiceable || folded == 0x30A6)) {
-        folded = folded == 0x30A6 ? 0x30F4 : folded + 1;
+      if (!semi && (voiceable || folded == 0x30A6 || folded == 0x30EF || folded == 0x30F2)) {
+        // U+30A6 -> U+30F4 (vu), U+30EF -> U+30F7 (va), U+30F2 -> U+30FA (vo); the rest +1.
+        folded = folded == 0x30A6   ? 0x30F4
+                 : folded == 0x30EF ? 0x30F7
+                 : folded == 0x30F2 ? 0x30FA
+                                    : folded + 1;
         index += mark_length;
       } else if (semi && folded >= 0x30CF && folded <= 0x30DB && (folded - 0x30CF) % 3 == 0) {
         folded += 2;
@@ -349,6 +357,34 @@ struct ItemFacts {
   return false;
 }
 
+// Where a page is, from the URL of its web area (shared by every platform's capture). Not a page:
+// not applicable. A page whose URL could not be read, or whose scheme is not known, is unknown.
+inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page_url,
+                              EffectFacts *facts, std::uint32_t *gaps) {
+  using namespace shadow_detail;
+  if (!is_page) {
+    facts->origin = OriginState::kNotApplicable;
+    return;
+  }
+  if (!url_read) {
+    facts->origin = OriginState::kUnknown;
+    *gaps |= kShadowGapOrigin;
+    return;
+  }
+  const std::string url = Lowercase(page_url);
+  const std::size_t colon = url.find(':');
+  const std::string scheme = colon == std::string::npos ? std::string() : url.substr(0, colon);
+  if (scheme == "devtools" || scheme == "chrome-devtools") {
+    facts->origin = OriginState::kOrdinary;
+    facts->surface = SurfaceKind::kDevToolsConsole;
+  } else if (scheme == "http" || scheme == "https" || scheme == "file") {
+    facts->origin = OriginState::kOrdinary;
+  } else {
+    facts->origin = OriginState::kUnknown;
+    *gaps |= kShadowGapOrigin;
+  }
+}
+
 [[nodiscard]] inline ShadowFacts BuildShadowFacts(const ShadowAxCapture &capture,
                                                   const ShadowRequestInfo &request) {
   using namespace shadow_detail;
@@ -371,7 +407,10 @@ struct ItemFacts {
   // The chain: the target up to the window. The application element above a window is not a node.
   std::vector<ShadowAxNode> nodes = capture.chain;
   bool chain_reached_root = capture.chain_reached_root;
-  if (!nodes.empty() && Lowercase(nodes.back().role) == "axapplication") nodes.pop_back();
+  // Roles are compared after folding, like every other fact, so a full-width role cannot hide the
+  // application element or a page root.
+  if (!nodes.empty() && Lowercase(CompatFold(nodes.back().role)) == "axapplication")
+    nodes.pop_back();
   bool oversize = false;
   bool node_read_failed = false;
   if (nodes.size() > kEffectMaxChainNodes) {
@@ -392,7 +431,7 @@ struct ItemFacts {
       fact.role = CompatFold(node.role);
       fact.subrole = CompatFold(node.subrole);
     }
-    if (Lowercase(node.role) == "axwebarea") web_area = true;
+    if (Lowercase(fact.role) == "axwebarea" || Lowercase(fact.role) == "document") web_area = true;
     facts.chain.push_back(std::move(fact));
   }
   if (oversize) result.gaps |= kShadowGapOversize;
@@ -426,25 +465,7 @@ struct ItemFacts {
   // The surface and, in a page, where it is. Sensitive places are not measured yet.
   facts.surface = capture.target_found ? SurfaceForExecutable(request.executable_path)
                                        : SurfaceKind::kUnknown;
-  if (!web_area) {
-    facts.origin = OriginState::kNotApplicable;
-  } else if (!capture.web_area_url_read) {
-    facts.origin = OriginState::kUnknown;
-    result.gaps |= kShadowGapOrigin;
-  } else {
-    const std::string url = Lowercase(capture.web_area_url);
-    const std::size_t colon = url.find(':');
-    const std::string scheme = colon == std::string::npos ? std::string() : url.substr(0, colon);
-    if (scheme == "devtools" || scheme == "chrome-devtools") {
-      facts.origin = OriginState::kOrdinary;
-      facts.surface = SurfaceKind::kDevToolsConsole;
-    } else if (scheme == "http" || scheme == "https" || scheme == "file") {
-      facts.origin = OriginState::kOrdinary;
-    } else {
-      facts.origin = OriginState::kUnknown;
-      result.gaps |= kShadowGapOrigin;
-    }
-  }
+  ApplyShadowOrigin(web_area, capture.web_area_url_read, capture.web_area_url, &facts, &result.gaps);
 
   const ItemFacts item = ReadItem(capture);
   facts.target_is_file_item = item.is_item;
@@ -534,6 +555,93 @@ private:
   mutable std::mutex mutex_;
   std::array<ShadowRecord, kShadowLogCapacity> entries_{};
   std::uint64_t next_ = 0;
+};
+
+// The ring of the process. It is never destroyed: a capture block still queued when the process
+// exits must not touch a static that has already been torn down (destruction order at exit), so
+// the object is leaked on purpose and stays valid for the life of the process.
+[[nodiscard]] inline EffectShadowLog &ProcessShadowLog() {
+  static EffectShadowLog *const log = new EffectShadowLog();
+  return *log;
+}
+
+// ---- Reading one string (used by the Windows shadow; the macOS reader keeps its own copy of the
+// same rules for now, see the ADR) ------------------------------------------------------------
+// A platform read ends in exactly one of these, and every one of them is Settled into a flag, so a
+// failed, over-long or stopped read can never become an empty answer.
+enum class ShadowReadResult : std::uint8_t { kOk, kAbsent, kFailed, kTooLong, kStopped };
+
+// Only kOk is true. "Absent" (no value / unsupported) leaves no trace; a too-long string sets
+// `too_long` when the caller keeps one apart (a node's oversize), else `failed`; a failed or
+// stopped read sets `failed`.
+inline bool ShadowSettle(ShadowReadResult result, bool *failed, bool *too_long = nullptr) {
+  switch (result) {
+  case ShadowReadResult::kOk:
+    return true;
+  case ShadowReadResult::kAbsent:
+    return false;
+  case ShadowReadResult::kTooLong:
+    *(too_long != nullptr ? too_long : failed) = true;
+    return false;
+  case ShadowReadResult::kFailed:
+  case ShadowReadResult::kStopped:
+    *failed = true;
+    return false;
+  }
+  return false;
+}
+
+// A string already normalized to NFKC (by the platform, with its own NFKC call) and
+// converted to UTF-8, checked against the bound in UTF-8 BYTES. Never truncated, never emptied:
+// malformed UTF-8 is a failed read, an empty string is absent, a string over the bound is too long.
+[[nodiscard]] inline ShadowReadResult ShadowCheckText(std::string_view normalized_utf8,
+                                                      std::size_t maximum_bytes,
+                                                      std::string *output) {
+  if (normalized_utf8.size() > maximum_bytes) return ShadowReadResult::kTooLong;
+  if (!effect_detail::IsValidUtf8(normalized_utf8)) return ShadowReadResult::kFailed;
+  if (normalized_utf8.empty()) return ShadowReadResult::kAbsent;
+  output->assign(normalized_utf8);
+  return ShadowReadResult::kOk;
+}
+
+// A UTF-16 length is only a cheap cut before converting something huge: every unit is at least one
+// UTF-8 byte, so more units than the byte bound can never fit. Not a substitute for the byte count.
+[[nodiscard]] constexpr bool ShadowUnitsTooLong(std::size_t utf16_units,
+                                                std::size_t maximum_bytes) noexcept {
+  return utf16_units > maximum_bytes;
+}
+
+// Admission of one more platform call: refused once the action is no longer valid (canceled, the
+// target changed) or the budget is spent, and from then on always refused. Pure: the caller passes
+// the monotonic time and whether the action is still valid.
+class ShadowGate {
+public:
+  explicit ShadowGate(std::uint64_t start_ns) : budget_(start_ns) {}
+  [[nodiscard]] bool Step(std::uint64_t now_ns, bool action_still_valid) {
+    if (stopped_) return false;
+    if (!action_still_valid) {
+      canceled_ = true;
+      stopped_ = true;
+      return false;
+    }
+    if (!budget_.Spend(now_ns)) {
+      stopped_ = true;
+      return false;
+    }
+    return true;
+  }
+  [[nodiscard]] bool Canceled() const { return canceled_; }
+  [[nodiscard]] bool BudgetExhausted() const { return budget_.Exhausted(); }
+  [[nodiscard]] std::uint32_t Calls() const { return budget_.Calls(); }
+  // The gap bits this gate accounts for.
+  [[nodiscard]] std::uint32_t Gaps() const {
+    return (canceled_ ? kShadowGapCanceled : 0u) | (budget_.Exhausted() ? kShadowGapBudget : 0u);
+  }
+
+private:
+  ShadowBudget budget_;
+  bool canceled_ = false;
+  bool stopped_ = false;
 };
 
 } // namespace sprint_coder::computer_use

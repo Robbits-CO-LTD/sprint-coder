@@ -78,6 +78,7 @@ const ALLOWED_CALLS = new Set([
   'CopyShadowTarget',
   'DispatchCancellationStillValid',
   'EffectShadowRing',
+  'sprint_coder::computer_use::ProcessShadowLog',
   'EmitShadowRecord',
   'FindShadowSemanticTarget',
   'ReadShadowElement',
