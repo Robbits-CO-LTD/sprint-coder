@@ -31,7 +31,11 @@ import {
 } from './native-safe-fs';
 import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
 import { loadComputerUseNative } from './computer-use-native';
-import { createComputerUseNativeHost } from './computer-use-native-host';
+import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
+import {
+  createComputerUseNativeHost,
+  type ComputerUseNativeHostOptions,
+} from './computer-use-native-host';
 import { createComputerUseCaptureOutput } from './computer-use-capture-output';
 import {
   SealedPostImageUnsupportedError,
@@ -172,10 +176,16 @@ if (squirrelStartup || !hasLock) {
       // builds this produces a visible unavailable capability; no PATH or renderer fallback is
       // permitted to make desktop input reachable.
       const computerUseBinding = loadComputerUseNative();
-      const computerUseNativeHost = createComputerUseNativeHost(
-        computerUseBinding,
-        process.platform,
-        process.platform === 'win32'
+      // Typed explicitly so the callback inside the conditional spread is checked against the host
+      // options (its `bounds` parameter is contextually typed from them).
+      const computerUseNativeHostOptions: ComputerUseNativeHostOptions = {
+        // The approval path rests on the build's attest and the session's route (C5-1). While every
+        // version is 1 the attest is classifier 1: no session is bound to v2 and nothing opens.
+        classifierV2Attested: computerUseEligibilityWiring.classifierV2Attested(
+          computerUseBinding.probe.available === true,
+        ),
+        effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
+        ...(process.platform === 'win32'
           ? {
               windowsPhysicalBoundsToDip: (bounds) => {
                 const topLeft = screen.screenToDipPoint({ x: bounds.x, y: bounds.y });
@@ -191,7 +201,12 @@ if (squirrelStartup || !hasLock) {
                 };
               },
             }
-          : {},
+          : {}),
+      };
+      const computerUseNativeHost = createComputerUseNativeHost(
+        computerUseBinding,
+        process.platform,
+        computerUseNativeHostOptions,
       );
       const computerUseAcceptanceMode = computerUseCompiledAcceptanceMode();
       if (computerUseAcceptanceMode !== null)

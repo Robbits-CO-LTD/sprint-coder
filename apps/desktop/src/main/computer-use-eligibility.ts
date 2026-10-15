@@ -96,3 +96,62 @@ export function effectiveComputerUseEligibilityMode(input: {
   if (input.environment[COMPUTER_USE_FORCE_V1_ALLOWLIST_ENV] === '1') return 'v1-allowlist';
   return 'v2-denylist';
 }
+
+/**
+ * The classifier version that opens the native approval path (the core's own version 2). A build
+ * attests this only when it was compiled for it (C5-2); until then every build attests 1.
+ */
+export const COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION = 2 as const;
+
+/**
+ * Whether this build attests classifier v2 for the approval path (ADR v2 D7, C5). It is derived from
+ * the eligibility compiled into Main and nothing else: the handshake already had to equal it (a v2
+ * Main requires manifest and attest to be identical to its own declaration, or the gate is closed),
+ * so a Main compiled for classifier 2 whose gate is open has been attested classifier 2 by the
+ * native. A Main without a compiled eligibility, a v1 allow-list Main, and a v2 Main compiled for a
+ * classifier version below 2 are all "not attested". No environment variable and no flag is read.
+ */
+export function computerUseClassifierV2Attested(input: {
+  compiled: ComputerUseEligibility | null;
+  /** The native gate is open (package, signature, provenance and eligibility all passed). */
+  gateOpen: boolean;
+}): boolean {
+  const { compiled } = input;
+  return (
+    input.gateOpen &&
+    compiled !== null &&
+    compiled.mode === 'v2-denylist' &&
+    compiled.classifierVersion === COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION
+  );
+}
+
+/**
+ * The route a session's native side is actually bound to: `v2` only when the build attested
+ * classifier 2 and the session asked for v2, `v1` otherwise. `unbound` is a session the host has
+ * no binding for (one started without a route, one whose binding was dropped by a verified close or
+ * a failed start): nothing is known about it, so it is never given an approval.
+ */
+export type ComputerUseApprovalRoute = ComputerUseClassifierRoute | 'unbound';
+
+/**
+ * "The native approval path is open" (ADR v2 S4-4 addendum, section 0; C5). All of these, nothing
+ * less: macOS, the addon exports the whole approval surface, the handshake attests classifier 2, and
+ * the session is bound to route v2 under the v2 deny-list. A session on v1 never has an approval,
+ * whatever the rest says, and neither does a session with no binding (fail closed). Used by the
+ * host and, through it, by the controller; there is no session-less answer.
+ */
+export function computerUseApprovalPathEnabled(input: {
+  platform: string;
+  methodsExported: boolean;
+  attestedClassifierVersion: number;
+  effectiveMode: ComputerUseEligibilityMode;
+  route: ComputerUseApprovalRoute;
+}): boolean {
+  if (
+    input.platform !== 'darwin' ||
+    !input.methodsExported ||
+    input.attestedClassifierVersion !== COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION
+  )
+    return false;
+  return input.route === 'v2' && input.effectiveMode === 'v2-denylist';
+}

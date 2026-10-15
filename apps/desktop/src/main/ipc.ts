@@ -1,3 +1,4 @@
+import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
 import {
   graphStartActivationIntent,
   graphUpdateActivationIntent,
@@ -1977,6 +1978,10 @@ export class IpcRouter {
       native: computerUseNative,
       featureEnabled: () => computerUseDesktopV1Enabled(),
       agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
+      // The effective eligibility mode (C5-1): v2-denylist only for a build compiled as v2 with the V2
+      // flag on and no force-v1 variable. It decides which route a session asks the native for; the
+      // host binds v2 only when the build also attests classifier 2.
+      effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
       // The same `{connectionId, modelId}` pair `start` compares a profile's consent against, read
       // from the Turn that is calling rather than from the Task's mutable model setting: the Task
       // row can be pointed at a different connection mid-Turn while the running Turn keeps sending

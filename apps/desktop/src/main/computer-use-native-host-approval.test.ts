@@ -198,6 +198,9 @@ async function sessionOf(host: ComputerUseNativeHost): Promise<ComputerUseNative
     taskId: 'task-1',
     turnId: 'turn-1',
     cancelEpoch: 0,
+    // C5-1: an approval is asked about a session bound to route v2 (the attest decides whether the
+    // native is bound to it); a session with no binding has none.
+    classifierRoute: 'v2',
   });
 }
 
@@ -213,16 +216,22 @@ const request = (session: ComputerUseNativeSession, requestId: string, extra = {
 });
 
 describe('Computer Use native host: approval path', () => {
-  it('opens only for an attested classifier v2, a complete addon, on macOS', () => {
+  it('opens only for an attested classifier v2, a complete addon, on macOS', async () => {
     // Production never attests (there is no D7), so the path is closed however complete the addon.
-    expect(build({}).host.nativeApprovalPathEnabled?.()).toBe(false);
-    expect(build({ attested: false }).host.nativeApprovalPathEnabled?.()).toBe(false);
-    expect(build({ attested: true }).host.nativeApprovalPathEnabled?.()).toBe(true);
+    const opens = async (options: Parameters<typeof build>[0]): Promise<boolean> => {
+      const built = build(options);
+      const session = await sessionOf(built.host);
+      return built.host.nativeApprovalPathEnabled?.(session.sessionId) === true;
+    };
+    expect(await opens({})).toBe(false);
+    expect(await opens({ attested: false })).toBe(false);
+    expect(await opens({ attested: true })).toBe(true);
     for (const missing of ['preflight', 'approvalApprove', 'approvalDiscard', 'dispatchApproved'])
-      expect(
-        build({ attested: true, omit: [missing] }).host.nativeApprovalPathEnabled?.(),
-        missing,
-      ).toBe(false);
+      expect(await opens({ attested: true, omit: [missing] }), missing).toBe(false);
+    // A session the host knows nothing about is closed, whatever the build attests.
+    expect(build({ attested: true }).host.nativeApprovalPathEnabled?.('no-such-session')).toBe(
+      false,
+    );
   });
 
   it('answers approvalApprove with typed results and never throws for a pre-input failure', async () => {
@@ -387,7 +396,20 @@ describe('Computer Use native host: approval path', () => {
   });
 
   it('refuses an ordinary preflight for a target Main judged high-impact, with no input', async () => {
-    const open = build({ attested: true });
+    // A session bound to route v2 expects classifier 2 in every receipt.
+    const ordinaryAtTwo = (input: Record<string, unknown>) => ({
+      decision: 'ordinary',
+      reasonCode: null,
+      deniedResult: null,
+      ticket,
+      classifierVersion: 2,
+      inputAttemptCount: 0,
+      requestId: input['requestId'],
+      sessionId: input['sessionId'],
+      cancelEpoch: input['cancelEpoch'],
+      observationRevision: input['observationRevision'],
+    });
+    const open = build({ attested: true }, { preflight: ordinaryAtTwo });
     const session = await sessionOf(open.host);
     await expect(
       open.host.dispatch(request(session, 'd-1', { mainHighImpact: true })),

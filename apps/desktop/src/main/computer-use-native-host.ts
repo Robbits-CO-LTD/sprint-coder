@@ -13,6 +13,7 @@ import {
   computerUseWindowCandidateSchema,
   type ComputerAppIdentity,
   type ComputerUseAvailability,
+  type ComputerUseEligibilityMode,
   type ComputerUseNativeManifest,
   type ComputerUseObservation,
   type ComputerUsePolicyLanguage,
@@ -27,6 +28,11 @@ import type {
   ComputerUseNativeSession,
   ComputerUseNativeWindow,
 } from './computer-use-controller';
+import {
+  COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION,
+  computerUseApprovalPathEnabled,
+  type ComputerUseApprovalRoute,
+} from './computer-use-eligibility';
 import {
   computerUseCompiledAcceptanceMode,
   computerUseWindowsSignerWaived,
@@ -106,11 +112,18 @@ type ComputerUseNativeBounds = Readonly<{
 }>;
 export type ComputerUseNativeHostOptions = Readonly<{
   /**
-   * Whether the handshake confirmed classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). D7 does
-   * not exist yet, so production never sets this and the native approval path stays closed; tests
-   * inject it to drive the path (ADR v2 S4-4 addendum, section 0).
+   * Whether the build attests classifier v2 (`NATIVE_APPROVAL_CLASSIFIER_VERSION`). Production sets
+   * it from the eligibility compiled into Main (`computerUseClassifierV2Attested`, C5-1), which is
+   * false for every build while the versions are 1; tests inject it to drive the path (ADR v2 S4-4
+   * addendum, section 0).
    */
   classifierV2Attested?: boolean;
+  /**
+   * The effective eligibility mode, read at every use so that the V2 flag or the force-v1 variable
+   * closes the approval path of a running process. Absent: the mode is read from the route the
+   * session is bound to (a session is bound to v2 only when it was asked under the v2 deny-list).
+   */
+  effectiveEligibilityMode?: () => ComputerUseEligibilityMode;
   stopTimeoutMs?: number;
   windowsPhysicalBoundsToDip?: (bounds: ComputerUseNativeBounds) => ComputerUseNativeBounds;
 }>;
@@ -262,22 +275,36 @@ export function createComputerUseNativeHost(
 
   // A session bound to a route whose expected classifier is not 2 (every panel session, and an
   // agent session of a build that did not attest 2) is refused the approval calls here as well as
-  // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session that was
-  // never bound (a direct host user; Main always binds) keeps the pre-C3 rule.
-  const approvalRouteAllowed = (sessionId: string): boolean => {
-    const binding = classifierBindings.get(sessionId);
-    return binding === undefined || binding.expectedVersion === 2;
-  };
+  // at the receipt, so "no approval on a v1 route" does not rest on one layer. A session with no
+  // binding at all (started without a route, closed, or whose start failed) is refused too (C5-1).
+  const approvalRouteAllowed = (sessionId: string): boolean =>
+    classifierBindings.get(sessionId)?.expectedVersion === 2;
 
-  // Process-wide: it does not look at a session's route yet. Making the "approval path is open"
-  // test (here and in the controller) route-aware is part of C5, where the route v2 term joins it.
-  const approvalPathEnabled = (): boolean =>
-    platform === 'darwin' &&
-    options.classifierV2Attested === true &&
-    hasMethod(addon, 'preflight') &&
-    hasMethod(addon, 'approvalApprove') &&
-    hasMethod(addon, 'approvalDiscard') &&
-    hasMethod(addon, 'dispatchApproved');
+  // The "approval path is open" test (C5-1): platform, the exported surface, the attested classifier
+  // version, and the session's mode and route (computerUseApprovalPathEnabled has the table). It is
+  // asked about a session and nothing else: a session with no binding (never bound, closed, or whose
+  // start failed) is closed, so a missing binding can never open an approval.
+  const approvalRouteOf = (sessionId: string): ComputerUseApprovalRoute => {
+    const binding = classifierBindings.get(sessionId);
+    if (binding === undefined) return 'unbound';
+    return binding.expectedVersion === 2 ? 'v2' : 'v1';
+  };
+  const approvalPathEnabled = (sessionId: string): boolean => {
+    const route = approvalRouteOf(sessionId);
+    return computerUseApprovalPathEnabled({
+      platform,
+      methodsExported:
+        hasMethod(addon, 'preflight') &&
+        hasMethod(addon, 'approvalApprove') &&
+        hasMethod(addon, 'approvalDiscard') &&
+        hasMethod(addon, 'dispatchApproved'),
+      attestedClassifierVersion:
+        options.classifierV2Attested === true ? COMPUTER_USE_APPROVAL_CLASSIFIER_VERSION : 1,
+      effectiveMode:
+        options.effectiveEligibilityMode?.() ?? (route === 'v2' ? 'v2-denylist' : 'v1-allowlist'),
+      route,
+    });
+  };
 
   const parseDispatchRecord = (
     value: unknown,
@@ -612,7 +639,7 @@ export function createComputerUseNativeHost(
       );
     },
 
-    nativeApprovalPathEnabled: (): boolean => approvalPathEnabled(),
+    nativeApprovalPathEnabled: (sessionId: string): boolean => approvalPathEnabled(sessionId),
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
       const internal = sessions.get(input.session.sessionId);
@@ -641,7 +668,7 @@ export function createComputerUseNativeHost(
       };
       let receipt: unknown;
       try {
-        if (!approvalPathEnabled())
+        if (!approvalPathEnabled(input.session.sessionId))
           throw new ComputerUseNativeUnavailableError('native_approval_closed');
         receipt = await invoke('approvalApprove', request);
       } catch {
@@ -715,7 +742,10 @@ export function createComputerUseNativeHost(
       const internal = sessions.get(input.session.sessionId);
       if (internal === undefined)
         throw new ComputerUseNativeUnavailableError('native_session_missing');
-      if (!approvalPathEnabled() || !approvalRouteAllowed(input.session.sessionId))
+      if (
+        !approvalPathEnabled(input.session.sessionId) ||
+        !approvalRouteAllowed(input.session.sessionId)
+      )
         throw new ComputerUseNativeUnavailableError('native_approval_closed');
       const actionDigest = computerUseActionDigest(input.action);
       const request = {
@@ -795,7 +825,7 @@ export function createComputerUseNativeHost(
           // Defence in depth: Main judged this target high-impact and the approval path is open, yet
           // native called it ordinary. The vocabularies differ, so no input is made. The ordinary
           // ticket is never used; it expires in the native slot or is replaced by the next preflight.
-          if (input.mainHighImpact === true && approvalPathEnabled())
+          if (input.mainHighImpact === true && approvalPathEnabled(input.session.sessionId))
             return Object.freeze({
               result: 'paused',
               reasonCode: 'hard_boundary',
