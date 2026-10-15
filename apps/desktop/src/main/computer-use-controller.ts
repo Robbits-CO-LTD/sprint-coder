@@ -4695,7 +4695,12 @@ export class ComputerUseController {
   private boundaryFacts(
     action: ComputerUseAction,
     observation: ComputerUseNativeObservation | null,
-  ): Readonly<{ secure: boolean; highImpact: boolean; nativeHighImpact: boolean }> {
+  ): Readonly<{
+    secure: boolean;
+    highImpact: boolean;
+    nativeHighImpact: boolean;
+    surface: boolean;
+  }> {
     if (
       (action.type === 'invoke' ||
         action.type === 'set_text' ||
@@ -4709,6 +4714,7 @@ export class ComputerUseController {
         secure: metadata?.secure === true,
         highImpact: metadata?.highImpact === true,
         nativeHighImpact: metadata?.highImpactNative === true,
+        surface: metadata?.surface === true,
       };
     }
     if (action.type === 'type' || action.type === 'key') {
@@ -4718,9 +4724,10 @@ export class ComputerUseController {
         secure: observation?.focusedElementSecure === true,
         highImpact,
         nativeHighImpact: highImpact,
+        surface: false,
       };
     }
-    return { secure: false, highImpact: false, nativeHighImpact: false };
+    return { secure: false, highImpact: false, nativeHighImpact: false, surface: false };
   }
 
   /**
@@ -4736,6 +4743,9 @@ export class ComputerUseController {
   ): boolean {
     const facts = this.boundaryFacts(action, observation);
     if (facts.secure) return true;
+    // S4-1c: Main's own evidence of a command surface stops regardless of what native said, and
+    // regardless of the approval path (a surface has no approval).
+    if (facts.surface) return true;
     if (!facts.highImpact) return false;
     return !(this.nativeApprovalPathOpen() && facts.nativeHighImpact);
   }
@@ -4765,6 +4775,7 @@ export class ComputerUseController {
     )
       return (
         observation?.targetMetadata?.[action.targetId]?.secure === true ||
+        observation?.targetMetadata?.[action.targetId]?.surface === true ||
         observation?.targetMetadata?.[action.targetId]?.highImpact === true
       );
     if (action.type === 'type' || action.type === 'key')
@@ -5276,7 +5287,7 @@ function computerUseAuditBindingDigest(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function approvedObservationEquivalent(
+export function approvedObservationEquivalent(
   previous: ComputerUseNativeObservation,
   current: ComputerUseNativeObservation,
   action: ComputerUseAction,
@@ -5310,6 +5321,7 @@ function approvedObservationEquivalent(
       priorSignature !== undefined &&
       current.targetSignatures?.[action.targetId] === priorSignature &&
       current.targetMetadata?.[action.targetId]?.secure !== true &&
+      current.targetMetadata?.[action.targetId]?.surface !== true &&
       (unchangedHighImpact
         ? current.targetMetadata?.[action.targetId]?.highImpact ===
             previous.targetMetadata?.[action.targetId]?.highImpact &&
@@ -5386,6 +5398,7 @@ export function nativeApprovalObservationEquivalent(
       current.targetSignatures?.[action.targetId] === priorSignature &&
       before?.secure !== true &&
       after?.secure !== true &&
+      after?.surface !== true &&
       (before?.highImpactNative === true) === (after?.highImpactNative === true) &&
       highImpactAllowed(before?.highImpact === true, after?.highImpact === true)
     );

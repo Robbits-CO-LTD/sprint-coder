@@ -1616,7 +1616,7 @@ function sanitizeCanonicalObservationTree(
   const projection = projectNativeAccessibilityTree(observation.accessibilityTree);
   const targetMetadata: Record<
     string,
-    { secure: boolean; highImpact: boolean; highImpactNative?: boolean }
+    { secure: boolean; highImpact: boolean; highImpactNative?: boolean; surface?: boolean }
   > = { ...projection.metadata };
   for (const [targetId, facts] of Object.entries(observation.targetMetadata ?? {})) {
     const projectedFacts = targetMetadata[targetId];
@@ -1625,6 +1625,8 @@ function sanitizeCanonicalObservationTree(
       highImpact: projectedFacts?.highImpact === true || facts.highImpact === true,
       // The incoming observation is native's; only its own flag counts as native's judgement.
       highImpactNative: facts.highImpact === true,
+      // Main's own evidence only: native's metadata does not carry a surface.
+      ...(projectedFacts?.surface === true ? { surface: true } : {}),
     };
   }
   return computerUseObservationSchema.parse({

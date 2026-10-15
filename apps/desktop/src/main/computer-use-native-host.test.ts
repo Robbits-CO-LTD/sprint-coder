@@ -1955,3 +1955,233 @@ describe('Computer Use native OS permission availability', () => {
       expect(parseNativeApprovalApproveReceipt(notAnObject, expected)).toEqual(invalid);
   });
 });
+
+describe('Main surface structure words (S4-1c)', () => {
+  const tree = (...nodes: Array<[string, string]>): string => {
+    let node: unknown = { role: 'AXButton', title: 'Run', identifier: 'run', children: [] };
+    for (const [role, identifier] of [...nodes].reverse())
+      node = { role, title: '', identifier, children: [node] };
+    return JSON.stringify(node);
+  };
+
+  it('marks a target under a terminal structure word, by its ancestors too', () => {
+    for (const identifier of [
+      'terminal',
+      'integratedTerminal',
+      'workbench.panel.terminal',
+      'xterm-screen',
+      'PowerShell',
+      'XTerm',
+      'XTermView',
+      'Terminal2',
+      'PWSH7',
+      'TermControl',
+      'TermControlView',
+      'power-shell-script',
+      'Power Shell',
+      'power_shell',
+      'power.shell',
+      'workbench.XTermView',
+      'long-terminal-panel',
+      'x.TermControl',
+      'ｔｅｒｍｉｎａｌ',
+    ]) {
+      const projection = projectComputerUseAccessibilityTree(
+        tree(['AXWindow', 'main'], ['AXGroup', identifier]),
+      );
+      expect(projection.metadata['run'], identifier).toMatchObject({ surface: true });
+    }
+    expect(
+      projectComputerUseAccessibilityTree(tree(['AXTerminalView', 'x'])).metadata['run'],
+    ).toMatchObject({ surface: true });
+  });
+
+  it('is a positive match only: titles, other words and an ordinary editor never match', () => {
+    for (const identifier of [
+      'editor',
+      'app-shell',
+      'terminalbank',
+      'terminalbank2',
+      'long-term-control',
+      'shortTermControl',
+      'LongTermControl',
+      'axis-x-term',
+      'x_term_count',
+      'console',
+      'command-palette',
+      'CommandPalette',
+      'quick-command-palette',
+      'workbench.parts.editor',
+    ]) {
+      const projection = projectComputerUseAccessibilityTree(
+        tree(['AXWindow', 'main'], ['AXTextArea', identifier]),
+      );
+      expect(projection.metadata['run'], identifier).not.toHaveProperty('surface');
+    }
+    // A title is not evidence (v1 and the high-impact words handle labels).
+    const titled = projectComputerUseAccessibilityTree(
+      JSON.stringify({
+        role: 'AXWindow',
+        title: 'Terminal notes',
+        identifier: '',
+        children: [{ role: 'AXButton', title: 'Save', identifier: 'save', children: [] }],
+      }),
+    );
+    expect(titled.metadata['save']).not.toHaveProperty('surface');
+  });
+});
+
+describe('Main surface evidence reaches the observation (S4-1c wiring)', () => {
+  const appIdentityDigest = digest('a');
+  const windowIdentityDigest = digest('c');
+  const screenshot = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+    'base64',
+  );
+  const treeUnder = (identifier: string): string =>
+    JSON.stringify({
+      role: 'AXWindow',
+      title: 'Target',
+      identifier: '',
+      children: [
+        {
+          role: 'AXGroup',
+          title: '',
+          identifier,
+          children: [{ role: 'AXButton', title: 'Run', identifier: 'run', children: [] }],
+        },
+      ],
+    });
+
+  async function observeThrough(payloads: Array<() => Record<string, unknown>>) {
+    const screenBounds = { x: 0, y: 0, width: 100, height: 80 };
+    let call = 0;
+    const addon = {
+      probe: () => ({}),
+      pickApplication: () => ({
+        platform: 'darwin' as const,
+        identityDigest: appIdentityDigest,
+        executablePath: '/Applications/Target.app/Contents/MacOS/Target',
+        executableDigest: digest('b'),
+        bundleId: 'com.example.Target',
+        teamId: null,
+        signingIdentifier: null,
+        cdHash: null,
+        displayName: 'Target',
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+        pid: 42,
+      }),
+      listWindows: () => [
+        {
+          pid: 42,
+          windowId: 'window-1',
+          platform: 'darwin' as const,
+          appIdentityDigest,
+          windowIdentityDigest,
+          title: 'Target',
+          bounds: screenBounds,
+          screenBounds,
+          focused: true,
+          eligible: true,
+          ownerKind: 'application' as const,
+          modal: false,
+          revision: 4,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+        },
+      ],
+      startSession: () => ({
+        inputAttemptCount: 0,
+        sessionId: 'session-1',
+        platform: 'darwin' as const,
+        appIdentityDigest,
+        windowIdentityDigest,
+        windowId: 'window-1',
+        profileRevision: 3,
+        cancelEpoch: 0,
+        policyLanguage: 'en',
+        maximumMode: 'full_access_app',
+        screenBounds,
+        pid: 42,
+      }),
+      observe: () => payloads[Math.min(call++, payloads.length - 1)]!(),
+      dispatch: () => ({}),
+      cancel: () => ({}),
+      close: () => ({}),
+    };
+    const host = createComputerUseNativeHost(binding(addon), 'darwin', { stopTimeoutMs: 10 });
+    const identity = await host.pickApplication({
+      activationToken: 'main-issued-token',
+      pickerKind: 'application',
+    });
+    const profile = {
+      id: 'profile-1',
+      platform: 'darwin' as const,
+      kind: 'macos-bundle' as const,
+      label: 'Target',
+      canonicalPath: '/Applications/Target.app/Contents/MacOS/Target',
+      appUrl: null,
+      identity: identity!,
+      identityDigest: appIdentityDigest,
+      version: null,
+      executableDigest: digest('b'),
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: false,
+      revision: 3,
+      createdAt: '2026-08-29T00:00:00.000Z',
+      updatedAt: '2026-08-29T00:00:00.000Z',
+    };
+    const session = await host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+    });
+    const observe = () => host.observe(session, { requestId: `r-${call}`, cancelEpoch: 0 });
+    return { observe };
+  }
+
+  const lowLevel = (tree: string) => () => ({
+    pid: 42,
+    windowId: 'window-1',
+    captureWidth: 100,
+    captureHeight: 80,
+    screenshot,
+    screenshotMimeType: 'image/png',
+    tree,
+    treeNodeCount: 1,
+    treeDepth: 0,
+    policyLanguage: 'en',
+    maximumMode: 'full_access_app',
+    screenBounds: { x: 0, y: 0, width: 100, height: 80 },
+  });
+
+  it('(a) the low-level native payload carries surface for a target under a terminal ancestor', async () => {
+    const { observe } = await observeThrough([
+      lowLevel(treeUnder('xterm-screen')),
+      lowLevel(treeUnder('editor-pane')),
+    ]);
+    expect((await observe()).targetMetadata?.['run']).toMatchObject({ surface: true });
+    expect((await observe()).targetMetadata?.['run']).not.toHaveProperty('surface');
+  });
+
+  it('(b) a canonical native payload cannot clear it: native saying surface:false keeps Main true', async () => {
+    const first = lowLevel(treeUnder('xterm-screen'));
+    let canonical: Record<string, unknown> = {};
+    const { observe } = await observeThrough([first, () => canonical]);
+    const seen = await observe();
+    canonical = {
+      ...seen,
+      revision: seen.revision + 1,
+      targetMetadata: { run: { secure: false, highImpact: false, surface: false } },
+    };
+    const again = await observe();
+    expect(again.targetMetadata?.['run']).toMatchObject({ surface: true });
+  });
+});
