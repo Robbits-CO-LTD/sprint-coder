@@ -10,7 +10,7 @@
 //   * it never decides: the V1 receipt is already built when `Schedule` is called, nothing it does
 //     can change it, and an exception is swallowed;
 //   * it reads NOTHING when V1 could not re-validate the bound target, when the action was canceled
-//     (checked again when the capture starts, not only when it is scheduled), or when UI Automation
+//     (checked when the capture starts and before every platform call; Schedule itself does not check it), or when UI Automation
 //     cannot be created: each of these leaves a skipped record with its own gap bit, never a
 //     classification;
 //   * one capture is in flight at a time; another one is recorded as busy, not queued, so a hung

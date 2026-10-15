@@ -1547,6 +1547,34 @@ bool CheckEffectShadow() {
     const ShadowFacts blank_role = BuildShadowFacts(roleless, ShadowRequest());
     if (!Check(!blank_role.facts.metadata_complete && (blank_role.gaps & kShadowGapRoleMissing) != 0, "shadow-role-missing"))
       return false;
+    // A role of only blanks (an ideographic space, a no-break space, half-width spaces) is no role:
+    // it is judged on the folded value, so it cannot pass for a present role.
+    for (const std::string &blank_role_text :
+         std::vector<std::string>{"\xE3\x80\x80", "\xC2\xA0", " ", "\xE3\x80\x80 \xC2\xA0"}) {
+      ShadowAxCapture blanks = ShadowBase();
+      blanks.chain[0].role = blank_role_text;
+      const ShadowFacts blank_built = BuildShadowFacts(blanks, ShadowRequest());
+      if (!Check(!blank_built.facts.metadata_complete && (blank_built.gaps & kShadowGapRoleMissing) != 0,
+                 "shadow-blank-role-is-missing")) return false;
+      if (!Check(ShadowClassify(blanks, ShadowRequest(), true).kind == DecisionKind::kTakeover,
+                 "shadow-blank-role-is-a-takeover")) return false;
+    }
+    // A label of only blanks (title, NBSP, ideographic space) on a field a value is entered into is
+    // no label: takeover, whatever mix of blanks it is. The same capture with a real label is not.
+    for (const std::string &blank_label : std::vector<std::string>{
+             " ", "\xC2\xA0", "\xE3\x80\x80", " \xE3\x80\x80\xC2\xA0 ", "\xE2\x80\x8B\xE3\x80\x80"}) {
+      for (const char *kind : {"type", "set_text"}) {
+        ShadowAxCapture field = ShadowBase();
+        field.chain[0] = ShadowNode("AXTextField", blank_label);
+        if (!Check(ShadowClassify(field, ShadowRequest(kind), true).kind == DecisionKind::kTakeover,
+                   "shadow-blank-label-field-is-a-takeover")) return false;
+        field.chain[0].title = "Name";
+        if (!Check(ShadowClassify(field, ShadowRequest(kind), true).kind != DecisionKind::kTakeover,
+                   "shadow-labeled-field-is-not-a-takeover")) return false;
+      }
+    }
+    // The fold itself: the ideographic space is a plain space, a half-width WA + voiced mark is VA.
+    if (!Check(sprint_coder::computer_use::shadow_detail::CompatFold("\xE3\x80\x80") == " ", "shadow-fold-ideographic-space")) return false;
   }
 
   // The label joins title, description, help, placeholder, identifier and static text in order.
@@ -6046,6 +6074,44 @@ bool CheckEffectClassifierCore() {
     browse.neighbor_labels_complete = false;
     if (!Check(ClassifyEffect(browse).kind == DecisionKind::kOrdinary, "effect-browse-scroll-ignores-neighbors"))
       return false;
+  }
+
+  // The bare names of the value-changing roles, in the role and in the subrole, in AX and UIA
+  // spelling: each one is value-changing for a wheel, and a scroll over it needs a label.
+  for (const char *role : {"AXPicker", "Picker", "picker", "AXDropDown", "Dropdown", "dropdown", "AXListBox",
+                           "listbox", "ListBox"}) {
+    EffectFacts facts = EffBase();
+    facts.chain = {{role, "", "Expiration year"}, {"axwindow", "", "Pay"}};
+    facts.action = ActionKind::kScroll;
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-bare-picker-role-in-scope"))
+      return false;
+    facts.chain = {{"axgroup", role, "Expiration year"}, {"axwindow", "", "Pay"}};
+    if (!Check(ClassifyEffect(facts).kind == DecisionKind::kBlocked, "effect-scroll-bare-picker-subrole-in-scope"))
+      return false;
+    facts.chain = {{role, "", ""}, {"axwindow", "", "Pay"}};
+    if (!Check(EffTakeover(facts), "effect-scroll-bare-picker-needs-a-label")) return false;
+  }
+
+  // A value-changing scroll in a native application (origin not applicable): a caption NEXT to the
+  // control is not its label there (only a browser has captions beside a field), so a control with
+  // no label of its own is a takeover; in a browser the same caption labels it.
+  for (const char *role : {"axcombobox", "axpopupbutton", "axslider", "axdatepicker", "ComboBox"}) {
+    EffectFacts native = EffBase();
+    native.chain = {{role, "", ""}, {"axwindow", "", "Pay"}};
+    native.action = ActionKind::kScroll;
+    native.origin = OriginState::kNotApplicable;
+    native.neighbor_labels = {"Font size"};
+    native.neighbor_labels_complete = true;
+    if (!Check(EffTakeover(native), "effect-native-value-scroll-neighbor-only-is-a-takeover")) return false;
+    native.chain = {{role, "", "Font size"}, {"axwindow", "", "Pay"}};
+    if (!Check(!EffTakeover(native), "effect-native-value-scroll-own-label-is-judged")) return false;
+    EffectFacts browser = EffBase();
+    browser.chain = {{role, "", ""}, {"axwindow", "", "Pay"}};
+    browser.action = ActionKind::kScroll;
+    browser.origin = OriginState::kOrdinary;
+    browser.neighbor_labels = {"Font size"};
+    browser.neighbor_labels_complete = true;
+    if (!Check(!EffTakeover(browser), "effect-browser-value-scroll-neighbor-labels-it")) return false;
   }
 
   // Pickers, drop-downs and list boxes are value-changing too.

@@ -440,7 +440,11 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
   if (oversize) result.gaps |= kShadowGapOversize;
   if (node_read_failed || capture.read_failed) result.gaps |= kShadowGapReadFailed;
   if (capture.budget_exhausted) result.gaps |= kShadowGapBudget;
-  const bool role_present = !nodes.empty() && !nodes.front().role.empty();
+  // The role is judged on the folded value, like every other fact: a role of only blanks (U+3000, a
+  // no-break space) is no role. facts.chain[0] is the target's node, folded; an unbounded role was
+  // cleared there and is missing too.
+  const bool role_present = !facts.chain.empty() &&
+                            !effect_detail::NormalizeForMatch(facts.chain.front().role).empty();
   if (!nodes.empty() && !role_present) result.gaps |= kShadowGapRoleMissing;
   facts.metadata_complete = capture.target_found && role_present && !oversize &&
                             !node_read_failed && !capture.read_failed && !capture.budget_exhausted &&
