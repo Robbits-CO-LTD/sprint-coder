@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
@@ -655,6 +656,13 @@ describe('ProviderComputerUsePlanner', () => {
         ).toBe(mentioned);
       },
     );
+
+    it('hands the planner its capability from the host, true only when the host says so', () => {
+      const source = readFileSync(join(__dirname, 'ipc.ts'), 'utf8').replace(/\s+/gu, ' ');
+      expect(source).toContain(
+        'artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,',
+      );
+    });
 
     it('accepts a copy the provider returns only when it was offered', async () => {
       const copy = '{"type":"copy","targetId":"node-1"}';

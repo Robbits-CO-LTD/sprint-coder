@@ -2489,6 +2489,61 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
+    it('forgets its references when the session ends', async () => {
+      const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toHaveLength(1);
+      await fixture.controller.stop(started.sessionId);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+    });
+
+    it('keeps nothing when the observation went stale while the native was reading', async () => {
+      let now = Date.now();
+      const fixture = createFixture({
+        now: () => now,
+        observationOverrides: withNode,
+        artifactRead: {
+          read: async () => {
+            now += 60_000;
+            return { ok: true, text: 'Total 42' };
+          },
+        },
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(fixture.readInputs).toHaveLength(1);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it.each(['supervised', 'full_access_app'] as const)(
+      'never raises an approval for copy in %s mode',
+      async (mode) => {
+        const plans: ComputerUseAction[] = [copy, { type: 'finish' }];
+        const fixture = createFixture({
+          mode,
+          authorizationRequired: true,
+          observationOverrides: withNode,
+          artifactRead: {},
+          planner: { plan: async () => plans.shift()! },
+        });
+        await start(fixture, mode);
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        expect(fixture.approvals).toEqual([]);
+        expect(fixture.statuses.map((status) => status.state)).not.toContain('awaiting_approval');
+        expect(
+          [...fixture.audits.values()].map((audit) => [audit.actionKind, audit.state]),
+        ).toEqual([['copy', 'applied']]);
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.dispose();
+      },
+    );
+
     it('still refuses input in observe-only mode', async () => {
       const fixture = createFixture({
         mode: 'observe_only',
@@ -2578,6 +2633,8 @@ describe('ComputerUseController', () => {
         const [reference] = fixture.controller.copiedArtifactReferences(started.sessionId);
         fixture.controller[end]('task-1');
         expect(store.take([reference!.artifactId], owners[0]!), end).toBeNull();
+        // The list of references goes with the artifacts it named.
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId), end).toEqual([]);
         await fixture.controller.stop(started.sessionId);
       }
     });

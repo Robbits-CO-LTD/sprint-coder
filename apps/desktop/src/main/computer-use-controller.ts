@@ -789,8 +789,14 @@ export class ComputerUseController {
   /**
    * What `copy` kept in this session (#785 T15-6b): opaque references only, never the text. The
    * text is in `artifacts`, bound to the Task, Turn and policy epoch, in memory, for a few minutes.
+   * Forgotten when the store forgets (Task closed, policy epoch changed) and when the session ends,
+   * so it never lists a reference to something already gone. A later slice that hands references
+   * to the outer agent must read them before the session ends.
    */
-  private readonly copiedArtifacts = new Map<string, ComputerUseArtifactReference[]>();
+  private readonly copiedArtifacts = new Map<
+    string,
+    { taskId: string; references: ComputerUseArtifactReference[] }
+  >();
   private readonly artifacts: ComputerUseArtifactStore;
   private readonly startingSessions = new Map<
     string,
@@ -3232,6 +3238,7 @@ export class ComputerUseController {
     );
     this.emit(record.status);
     this.sessions.delete(sessionId);
+    this.copiedArtifacts.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
     this.pauseReasons.delete(sessionId);
   }
@@ -3513,16 +3520,23 @@ export class ComputerUseController {
     this.taskScopedGrants.delete(taskId);
     this.revokeTargetTokens(taskId);
     this.artifacts.dropTask(taskId);
+    this.forgetCopiedArtifactReferences(taskId);
   }
 
   /** The references `copy` produced in a session, in order; empty for any other session. */
   copiedArtifactReferences(sessionId: string): readonly ComputerUseArtifactReference[] {
-    return this.copiedArtifacts.get(sessionId) ?? [];
+    return this.copiedArtifacts.get(sessionId)?.references ?? [];
+  }
+
+  private forgetCopiedArtifactReferences(taskId: string): void {
+    for (const [sessionId, kept] of this.copiedArtifacts)
+      if (kept.taskId === taskId) this.copiedArtifacts.delete(sessionId);
   }
 
   policyEpochChanged(taskId: string): void {
     // An artifact is bound to the epoch it was copied under; a changed epoch ends it (design 4.2).
     this.artifacts.dropTask(taskId);
+    this.forgetCopiedArtifactReferences(taskId);
     // Tokens are bound to the epoch they were issued under, so they are already unusable; dropping
     // them here keeps the map from holding references the agent can no longer spend.
     this.revokeTargetTokens(taskId);
@@ -4666,8 +4680,11 @@ export class ComputerUseController {
       value.text,
     );
     if (reference === null) return refuse();
-    const kept = this.copiedArtifacts.get(record.status.sessionId) ?? [];
-    this.copiedArtifacts.set(record.status.sessionId, [...kept, reference]);
+    const kept = this.copiedArtifacts.get(record.status.sessionId);
+    this.copiedArtifacts.set(record.status.sessionId, {
+      taskId: record.status.taskId,
+      references: [...(kept?.references ?? []), reference],
+    });
     return this.completeNonNativeAction(record, action, requestId, 'completed', null);
   }
 
