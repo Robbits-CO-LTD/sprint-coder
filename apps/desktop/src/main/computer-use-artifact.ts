@@ -23,24 +23,39 @@ export type PreparedComputerUseArtifactText =
 /**
  * The text exactly as it would be pasted, or why it cannot be kept.
  *
- * NFKC; CR and CRLF become LF; LF and TAB stay (a copied block keeps its lines and columns); every
- * other control or format character goes, Unicode Tag characters included. Bytes are counted
+ * Normalised by `normalizeComputerUseArtifactText` (a copied block keeps its lines and columns;
+ * Unicode Tag characters go). Bytes are counted
  * after that, against the input path's own bound, and an oversized value is refused rather than
  * cut — a cut is where an injected sentence would be made to end. A value that looks like a
  * secret is refused outright (§7.1 decision 6).
  */
 export function prepareComputerUseArtifactText(raw: string): PreparedComputerUseArtifactText {
-  const text = raw
-    .normalize('NFKC')
-    .replace(/\r\n?/gu, '\n')
-    .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
-      character === '\n' || character === '\t' ? character : '',
-    );
+  const text = normalizeComputerUseArtifactText(raw);
   if (!/\S/u.test(text)) return { ok: false, reason: 'empty' };
   if (Buffer.byteLength(text, 'utf8') > COMPUTER_USE_ARTIFACT_LIMITS.maxBytes)
     return { ok: false, reason: 'too_large' };
   if (looksLikeComputerUseSecret(text)) return { ok: false, reason: 'secret' };
   return { ok: true, text, sizeClass: computerUseArtifactSizeClass(text) };
+}
+
+/** Text that has been through `normalizeComputerUseArtifactText`; secret detection takes only this. */
+export type NormalizedComputerUseText = string & {
+  readonly __normalizedComputerUseText: unique symbol;
+};
+
+/**
+ * NFKC; CR, CRLF, U+2028 and U+2029 become LF; LF and TAB stay; every other control or format
+ * character goes. Secrets are looked for in this form only: a full-width `ｇｈｐ＿…`, or a token
+ * with zero-width characters inside it, becomes the plain token here and would slip past a check
+ * made on the raw string.
+ */
+export function normalizeComputerUseArtifactText(raw: string): NormalizedComputerUseText {
+  return raw
+    .normalize('NFKC')
+    .replace(/\r\n|[\r\u2028\u2029]/gu, '\n')
+    .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+      character === '\n' || character === '\t' ? character : '',
+    ) as NormalizedComputerUseText;
 }
 
 /** The size the outer agent is told, in three steps (design §2.2 item 12). */
@@ -74,8 +89,10 @@ const SECRET_PATTERNS: readonly RegExp[] = [
  *
  * Deterministic patterns only — a model asked "is this secret?" can be talked out of it by the very
  * screen it is judging. A false positive means something cannot be copied, which is acceptable.
+ * Takes normalised text only (the type enforces it): on a raw string, full-width or zero-width
+ * spellings of a token do not match.
  */
-export function looksLikeComputerUseSecret(text: string): boolean {
+export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
   // A one-time code: the whole value is 6 to 8 digits.
   if (/^\s*\d{6,8}\s*$/u.test(text)) return true;
@@ -127,20 +144,38 @@ type StoredArtifact = Readonly<
 export class ComputerUseArtifactStore {
   private readonly artifacts = new Map<string, StoredArtifact>();
 
+  /**
+   * `now` must be a monotonic clock (for example `performance.now()`), not `Date.now()`: a wall
+   * clock that is adjusted would stretch or cut the TTL. Only differences are used.
+   */
   constructor(private readonly deps: Readonly<{ now: () => number; randomId?: () => string }>) {}
 
-  /** Keeps a copied value. Null when it cannot be kept; why is not for the outer agent. */
+  /**
+   * Keeps a copied value. Null when it cannot be kept; why is not for the outer agent.
+   *
+   * What the same Task holds under another Turn or policy epoch is dropped first (§4.2: a policy
+   * epoch change ends an artifact): `take` can never hand it over again, so it must not keep
+   * using up the Task's allowance until the TTL. Done here, not in a separate hook, so the store
+   * needs no wiring to an epoch-change signal.
+   */
   create(
     owner: ComputerUseArtifactBinding & Readonly<{ sourceSessionId: string }>,
     raw: string,
   ): ComputerUseArtifactReference | null {
     this.dropExpired();
     let held = 0;
-    for (const artifact of this.artifacts.values()) if (artifact.taskId === owner.taskId) held += 1;
+    for (const [artifactId, artifact] of this.artifacts) {
+      if (artifact.taskId !== owner.taskId) continue;
+      if (artifact.turnId !== owner.turnId || artifact.policyEpoch !== owner.policyEpoch)
+        this.artifacts.delete(artifactId);
+      else held += 1;
+    }
     if (held >= COMPUTER_USE_ARTIFACT_LIMITS.maxConcurrentPerTask) return null;
     const prepared = prepareComputerUseArtifactText(raw);
     if (!prepared.ok) return null;
     const artifactId = (this.deps.randomId ?? randomUUID)();
+    // An injected id that collides must not overwrite another artifact.
+    if (this.artifacts.has(artifactId)) return null;
     this.artifacts.set(artifactId, {
       taskId: owner.taskId,
       turnId: owner.turnId,
@@ -155,6 +190,11 @@ export class ComputerUseArtifactStore {
   /**
    * Hands the texts over and forgets them, all or nothing. Null unless every id names a live
    * artifact of this exact binding; a refusal consumes nothing.
+   *
+   * The creating session (`sourceSessionId`) is kept but not compared here: the taker is the new
+   * inner session created by `computer_start { carry }`, which is a different session from the
+   * one that copied by construction. Pinning that is the job of the slice that wires `carry`
+   * (T15-8, design §4.4), where the taker's session id exists.
    */
   take(
     artifactIds: readonly string[],
