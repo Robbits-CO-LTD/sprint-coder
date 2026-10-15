@@ -6424,13 +6424,13 @@ bool CheckWindowsInterlockCapture() {
     if (!no_verdict(evaluate(abandoned_pdf.form.source, "click"), InterlockNoVerdict::kIncomplete,
                     "winlane-unread-path-document-is-no-verdict")) return false;
     FakeExplorer refused_lookup("run.bat");
-    refused_lookup.GiveRealPath("C:\Users\me\run.bat");
+    refused_lookup.GiveRealPath("C:\\Users\\me\\run.bat");
     refused_lookup.form.Node(refused_lookup.item).item_result = ShadowReadResult::kFailed;
     if (!no_verdict(evaluate(refused_lookup.form.source, "click"), InterlockNoVerdict::kIncomplete,
                     "winlane-failed-lookup-is-no-verdict")) return false;
     // With the real path the same item is refused as the map says.
     FakeExplorer known_script("run.bat");
-    known_script.GiveRealPath("C:\Users\me\run.bat");
+    known_script.GiveRealPath("C:\\Users\\me\\run.bat");
     if (!Check(evaluate(known_script.form.source, "click").Refuses(), "winlane-known-path-script-refuses"))
       return false;
   }
@@ -6439,7 +6439,7 @@ bool CheckWindowsInterlockCapture() {
     ShadowUiaCapture capture = UiaBase();
     capture.budget_exhausted = true;
     capture.window_class = "ConsoleWindowClass";
-    capture.process_path = "C:\Windows\System32\conhost.exe";
+    capture.process_path = "C:\\Windows\\System32\\conhost.exe";
     if (!no_verdict(EvaluateWindowsInterlockFromCapture(capture, UiaRequest("type"), true),
                     InterlockNoVerdict::kCanceled, "winlane-canceled-before-budget")) return false;
     if (!no_verdict(EvaluateWindowsInterlockFromCapture(capture, UiaRequest("type"), false),
