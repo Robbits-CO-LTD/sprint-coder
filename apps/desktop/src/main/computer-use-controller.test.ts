@@ -2573,6 +2573,50 @@ describe('ComputerUseController', () => {
       },
     );
 
+    it('keeps nothing when the Task was closed while the session was still starting', async () => {
+      const { store, owners } = spiedStore();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+        startSessionGate: gate,
+      });
+      const starting = start(fixture);
+      await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+      fixture.controller.taskClosed('task-1');
+      release();
+      const started = await starting;
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(owners).toEqual([]);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('lets a session started after the Task was closed and reopened copy', async () => {
+      const { store, owners } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+      });
+      // The Task was closed (archived) and later reopened: a session begun now is a fresh one.
+      fixture.controller.taskClosed('task-1');
+      fixture.controller.policyEpochChanged('task-1');
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'completed', reasonCode: null });
+      expect(owners).toHaveLength(1);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toHaveLength(1);
+      await fixture.controller.stop(started.sessionId);
+    });
+
     it('forgets its references when the session ends', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);

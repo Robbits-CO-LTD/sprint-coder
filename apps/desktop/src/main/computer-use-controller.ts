@@ -2846,6 +2846,10 @@ export class ComputerUseController {
       effectiveMode: this.deps.effectiveEligibilityMode?.() ?? 'v1-allowlist',
     });
     const turnId = input.turnId ?? `computer-turn:${sessionId}`;
+    // Noted here, where the start is registered and before any await below (the emergency stop,
+    // the native start, the planner): a Task closed while the start is in flight must leave a
+    // session that can no longer store copied values, not one that noted the later generation.
+    const artifactGeneration = this.artifactGenerations.get(input.taskId) ?? 0;
     const starting = {
       controller,
       reason: null as ComputerUseStopReason | null,
@@ -3016,7 +3020,7 @@ export class ComputerUseController {
       planner,
       expiryTimer: null,
       stopPromise: null,
-      artifactGeneration: this.artifactGenerations.get(status.taskId) ?? 0,
+      artifactGeneration,
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
