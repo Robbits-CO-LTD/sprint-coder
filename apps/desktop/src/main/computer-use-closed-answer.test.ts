@@ -1,16 +1,22 @@
 import { describe, expect, it } from 'vitest';
 import {
+  COMPUTER_START_TOOL_INPUT_JSON_SCHEMA,
+  COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA,
   computerStartAnswerSchema,
   computerStartQuestionSchema,
   computerStartToolInputSchema,
+  computerUseActionSchema,
   type ComputerStartQuestion,
   type ComputerUseAction,
 } from '@sprint-coder/contracts';
+import { toolValueMatchesSchema } from '@sprint-coder/domain';
 import {
   closedAnswerFromFinish,
   computerStartAnswerFor,
   normalizeComputerStartQuestion,
+  sanitizeComputerStartChoice,
 } from './computer-use-closed-answer';
+import { COMPUTER_TARGET_SYSTEM_PROMPT } from './computer-use-target-model';
 
 const booleanQuestion: ComputerStartQuestion = { kind: 'boolean' };
 const choiceQuestion: ComputerStartQuestion = {
@@ -45,6 +51,22 @@ describe('computer_start question (T15-2, C8)', () => {
     expect(computerStartQuestionSchema.safeParse(question).success).toBe(false);
   });
 
+  it('is part of the strict computer_start input, so a call with a question is accepted', () => {
+    // The tool boundary parses with this schema before anything else; without the field there,
+    // every call that asks a question is refused as an unknown key.
+    for (const question of [booleanQuestion, choiceQuestion, numberQuestion])
+      expect(computerStartToolInputSchema.parse({ targetToken: 't', goal: 'g', question })).toEqual(
+        { targetToken: 't', goal: 'g', question },
+      );
+    expect(
+      computerStartToolInputSchema.safeParse({
+        targetToken: 't',
+        goal: 'g',
+        question: { kind: 'x' },
+      }).success,
+    ).toBe(false);
+  });
+
   it('keeps the question optional, so a call without one is unchanged', () => {
     expect(computerStartToolInputSchema.parse({ targetToken: 't', goal: 'g' })).toEqual({
       targetToken: 't',
@@ -59,6 +81,93 @@ describe('computer_start question (T15-2, C8)', () => {
     expect(() =>
       normalizeComputerStartQuestion({ kind: 'choice', choices: ['\u{E0041}\u{E0042}', 'ok'] }),
     ).toThrow(/choice/iu);
+  });
+
+  it('removes what the prompt uses to lay out the list, so a choice cannot fake an index', () => {
+    expect(sanitizeComputerStartChoice('A [1] B; C')).toBe('A 1 B C');
+    expect(normalizeComputerStartQuestion({ kind: 'choice', choices: ['A [1] B', 'C'] })).toEqual({
+      kind: 'choice',
+      choices: ['A 1 B', 'C'],
+    });
+  });
+
+  it('refuses choices that become the same text, so an index always names one choice', () => {
+    expect(() =>
+      normalizeComputerStartQuestion({ kind: 'choice', choices: ['Yes', 'Ｙｅｓ'] }),
+    ).toThrow(/repeat/iu);
+    expect(() =>
+      normalizeComputerStartQuestion({ kind: 'choice', choices: ['a;b', 'a b'] }),
+    ).toThrow(/repeat/iu);
+  });
+
+  it('refuses a choice that NFKC grows past the bound instead of cutting it', () => {
+    // 17 characters in, 68 after NFKC (each one becomes four).
+    expect(() =>
+      normalizeComputerStartQuestion({ kind: 'choice', choices: ['㍿'.repeat(17), 'ok'] }),
+    ).toThrow(/too long/iu);
+  });
+});
+
+describe('computer_start JSON schemas', () => {
+  const input = (question: unknown) =>
+    toolValueMatchesSchema(COMPUTER_START_TOOL_INPUT_JSON_SCHEMA, {
+      targetToken: 't',
+      goal: 'g',
+      question,
+    });
+  const output = (answer: unknown) =>
+    toolValueMatchesSchema(COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA, {
+      sessionId: 's',
+      state: 'stopped',
+      stopReason: 'agent_finish',
+      mode: 'full_access_app',
+      round: 1,
+      maxRounds: 25,
+      ...(answer === undefined ? {} : { answer }),
+    });
+
+  it('describes each question kind with exactly the fields zod accepts', () => {
+    expect(input(booleanQuestion)).toBe(true);
+    expect(input(choiceQuestion)).toBe(true);
+    expect(input(numberQuestion)).toBe(true);
+    for (const question of [
+      { kind: 'choice' },
+      { kind: 'number' },
+      { kind: 'boolean', choices: ['a', 'b'] },
+      { kind: 'boolean', maxFractionDigits: 1 },
+      { kind: 'choice', choices: ['a', 'b'], maxFractionDigits: 1 },
+      { kind: 'number', maxFractionDigits: 1, choices: ['a', 'b'] },
+    ]) {
+      expect(input(question)).toBe(false);
+      expect(computerStartQuestionSchema.safeParse(question).success).toBe(false);
+    }
+  });
+
+  it.each([
+    [{ kind: 'boolean', value: true }],
+    [{ kind: 'boolean', value: false }],
+    [{ kind: 'boolean', value: null }],
+    [{ kind: 'choice', value: 0 }],
+    [{ kind: 'choice', value: 7 }],
+    [{ kind: 'choice', value: null }],
+    [{ kind: 'number', value: '-12.5' }],
+    [{ kind: 'number', value: null }],
+    [undefined],
+  ])('lets the broker pass the answer %o', (answer) => {
+    expect(output(answer)).toBe(true);
+  });
+
+  it.each([
+    [{ kind: 'boolean', value: 'yes' }],
+    [{ kind: 'choice', value: 8 }],
+    [{ kind: 'choice', value: 'Succeeded' }],
+    [{ kind: 'number', value: 12 }],
+    [{ kind: 'number', value: true }],
+    [{ kind: 'text', value: null }],
+    [{ kind: 'boolean' }],
+    [{ kind: 'boolean', value: true, text: 'extra' }],
+  ])('makes the broker refuse the answer %o', (answer) => {
+    expect(output(answer)).toBe(false);
   });
 });
 
@@ -103,6 +212,22 @@ describe('closedAnswerFromFinish', () => {
     ],
   ])('returns nothing for %s', (_name, question, fields) => {
     expect(closedAnswerFromFinish(question, finish(fields))).toBeNull();
+  });
+
+  it.each([
+    [
+      'an index past the last choice the grammar allows',
+      choiceQuestion,
+      '{"type":"finish","answerChoice":8}',
+    ],
+    [
+      'a number longer than the grammar allows',
+      numberQuestion,
+      `{"type":"finish","answerNumber":"${'9'.repeat(40)}"}`,
+    ],
+  ])('parses %s as an unanswered finish, not a broken reply', (_name, question, raw) => {
+    const action = computerUseActionSchema.parse(JSON.parse(raw));
+    expect(closedAnswerFromFinish(question, action)).toBeNull();
   });
 
   it('returns nothing for an action that is not finish', () => {
@@ -166,5 +291,14 @@ describe('computerStartAnswerFor', () => {
       { kind: 'text', value: 'anything' },
     ])
       expect(computerStartAnswerSchema.safeParse(answer).success).toBe(false);
+  });
+});
+
+describe('outer system prompt (T15-2, design §4.3)', () => {
+  it('tells the outer agent that the answer can be wrong and is the only screen-derived value', () => {
+    expect(COMPUTER_TARGET_SYSTEM_PROMPT).toContain(
+      '`computer_start` の `answer` は、内側のセッションが画面から読んだ値です。',
+    );
+    expect(COMPUTER_TARGET_SYSTEM_PROMPT).toContain('取り消せない操作へ進まないでください');
   });
 });

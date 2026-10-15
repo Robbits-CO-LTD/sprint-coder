@@ -1,4 +1,5 @@
 import {
+  COMPUTER_START_CHOICE_MAX_CHARACTERS,
   COMPUTER_START_MAX_FRACTION_DIGITS,
   COMPUTER_START_NUMBER_PATTERN,
   computerStartAnswerSchema,
@@ -27,26 +28,42 @@ export type ComputerStartAnswerCandidate = Readonly<
 >;
 
 /**
+ * One choice as it may appear in the planner's prompt. The single rule for both Main and the
+ * planner, so the words Main checked are the words the planner reads.
+ *
+ * The goal's treatment (NFKC; control and format characters and both angle brackets turned into a
+ * space; whitespace collapsed) plus the characters the prompt uses to lay the list out: `[` and `]`
+ * frame each index, and `;` separates choices. With those gone a choice cannot fake an index label
+ * or a boundary, so `[1]` in the prompt can only be the label Main wrote.
+ */
+export function sanitizeComputerStartChoice(choice: string): string {
+  return choice
+    .normalize('NFKC')
+    .replace(/[\p{Cc}\p{Cf}<>[\];]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+/**
  * The question as the planner will see it.
  *
- * Choices are the outer agent's words and reach a provider prompt inside a fence, so they get the
- * session goal's treatment: NFKC, every control and format character and both angle brackets turned
- * into a space, whitespace collapsed. A choice that sanitises to nothing is refused rather than
- * silently dropped, because dropping it would shift every later index.
+ * A choice that sanitises to nothing, grows past the bound under NFKC, or becomes the same text as
+ * another choice is refused rather than repaired: dropping one would shift every later index, and
+ * two identical choices would make the index itself ambiguous.
  */
 export function normalizeComputerStartQuestion(
   question: ComputerStartQuestion,
 ): ComputerStartQuestion {
   if (question.kind !== 'choice') return question;
   const choices = question.choices.map((choice) => {
-    const normalized = choice
-      .normalize('NFKC')
-      .replace(/[\p{Cc}\p{Cf}<>]/gu, ' ')
-      .replace(/\s+/gu, ' ')
-      .trim();
+    const normalized = sanitizeComputerStartChoice(choice);
     if (normalized === '') throw new Error('Computer Use question choice is empty');
+    if ([...normalized].length > COMPUTER_START_CHOICE_MAX_CHARACTERS)
+      throw new Error('Computer Use question choice is too long');
     return normalized;
   });
+  if (new Set(choices).size !== choices.length)
+    throw new Error('Computer Use question choices repeat');
   return { kind: 'choice', choices };
 }
 

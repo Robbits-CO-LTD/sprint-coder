@@ -441,8 +441,6 @@ export type ComputerUseControllerDeps = Readonly<{
       policyEpoch: number;
       /** The agent's stated goal for this session, or null for a session a person started. */
       sessionGoal: string | null;
-      /** The agent's closed question (T15-2), or null when it asked none or a person started it. */
-      sessionQuestion: ComputerStartQuestion | null;
       signal: AbortSignal;
     }>,
   ) => Promise<ComputerUsePlannerPort> | ComputerUsePlannerPort;
@@ -2899,7 +2897,6 @@ export class ComputerUseController {
               mode: effectiveMode,
               policyEpoch,
               sessionGoal: input.agent?.goal ?? null,
-              sessionQuestion: input.agent?.question ?? null,
               signal: controller.signal,
             });
       controller.signal.throwIfAborted();
@@ -3570,10 +3567,12 @@ export class ComputerUseController {
       this.emit(record.status);
       const plannerObservation: ComputerUsePlannerObservation = observation;
       record.plannerExecutionId = `computer:${sessionId}:${observation.revision}:${round}`;
+      const question = record.agent?.question ?? null;
       const action = await record.planner.plan({
         observation: plannerObservation,
         round,
         signal: record.controller.signal,
+        ...(question === null ? {} : { question }),
       });
       this.assertSessionLive(record);
       if (!this.observationIsFresh(record)) continue;

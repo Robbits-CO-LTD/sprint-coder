@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
+import { COMPUTER_USE_CAPTURE_ADAPTER_VERSION } from './computer-use-capture-rounds.mjs';
 
 // These are references to required assertions, not additional journeys for every app/model pair.
 export const COMPUTER_USE_PARENT_COVERAGE = Object.freeze(
@@ -141,7 +142,7 @@ function validateRun(run, platform, context) {
   integer(binding.policyEpoch);
   if (
     binding.sessionIdDigest !== run.sessionIdDigest ||
-    binding.adapterVersion !== 'computer-use-v1' ||
+    binding.adapterVersion !== COMPUTER_USE_CAPTURE_ADAPTER_VERSION ||
     binding.selectedFromCurrentTask !== true ||
     binding.bindingStable !== true ||
     binding.preflightAttempts !== 1 ||

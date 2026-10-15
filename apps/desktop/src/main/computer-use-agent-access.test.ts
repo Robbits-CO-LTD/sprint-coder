@@ -28,6 +28,7 @@ import {
   type ComputerUseNativeWindow,
 } from './computer-use-controller';
 import { computerAppGrantIntentDigest } from './computer-use-access-request';
+import type { ComputerUsePlannerInput } from './computer-use-planner-port';
 import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
@@ -242,7 +243,7 @@ function createFixture(
     /** Stands in for the provider preflight: Main builds the planner here. */
     plannerFactory?: (input: { signal: AbortSignal }) => Promise<void>;
     /** What the inner planner answers each round. The default finishes the first round. */
-    plan?: (round: number) => Promise<ComputerUseAction>;
+    plan?: (round: number, input: ComputerUsePlannerInput) => Promise<ComputerUseAction>;
     /** Every observation reports the focused element as a secure field. */
     focusedSecure?: boolean;
     /** Stands in for the Task permission policy that `deps.authorize` consults. */
@@ -395,9 +396,9 @@ function createFixture(
           plannerFactory: async (input: { signal: AbortSignal }) => {
             await options.plannerFactory!(input);
             return {
-              plan: async (): Promise<ComputerUseAction> => {
+              plan: async (input: ComputerUsePlannerInput): Promise<ComputerUseAction> => {
                 plannedRounds += 1;
-                return (await options.plan?.(plannedRounds)) ?? { type: 'finish' };
+                return (await options.plan?.(plannedRounds, input)) ?? { type: 'finish' };
               },
             };
           },
@@ -406,9 +407,9 @@ function createFixture(
     // The default answers `finish` immediately: the agent asked for a window, the session ran, and
     // it ended — which is the shape `computer_start` returns.
     planner: {
-      plan: async (): Promise<ComputerUseAction> => {
+      plan: async (input: ComputerUsePlannerInput): Promise<ComputerUseAction> => {
         plannedRounds += 1;
-        return (await options.plan?.(plannedRounds)) ?? { type: 'finish' };
+        return (await options.plan?.(plannedRounds, input)) ?? { type: 'finish' };
       },
       ...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
     },
@@ -1559,7 +1560,7 @@ describe('computer_start', () => {
   describe('closed-type answer (T15-2, C8)', () => {
     async function startWith(
       question: unknown,
-      plan: (round: number) => Promise<ComputerUseAction>,
+      plan: (round: number, input: ComputerUsePlannerInput) => Promise<ComputerUseAction>,
       options: Parameters<typeof createFixture>[0] = {},
     ) {
       const fixture = createFixture({ ...options, plan });
@@ -1577,11 +1578,19 @@ describe('computer_start', () => {
       return { fixture, output };
     }
 
+    /**
+     * A planner that answers only when the controller actually handed it the question, the way a
+     * real provider can only answer a question its prompt contains.
+     */
+    function answering(fields: Record<string, unknown>) {
+      return async (_round: number, input: ComputerUsePlannerInput): Promise<ComputerUseAction> =>
+        (input.question === undefined
+          ? { type: 'finish' }
+          : { type: 'finish', ...fields }) as ComputerUseAction;
+    }
+
     it('returns the planner answer when the session ends with agent_finish', async () => {
-      const { output } = await startWith({ kind: 'boolean' }, async () => ({
-        type: 'finish',
-        answerBoolean: true,
-      }));
+      const { output } = await startWith({ kind: 'boolean' }, answering({ answerBoolean: true }));
       expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
       expect(output).toMatchObject({
         state: 'stopped',
@@ -1590,10 +1599,43 @@ describe('computer_start', () => {
       });
     });
 
+    it('hands the planner the question with every round, normalised by Main', async () => {
+      const seen: unknown[] = [];
+      await startWith(
+        { kind: 'choice', choices: ['Ｏｋ\u0007', '<b>No</b>'] },
+        async (_r, input) => {
+          seen.push(input.question);
+          return { type: 'finish' };
+        },
+      );
+      expect(seen).toEqual([{ kind: 'choice', choices: ['Ok', 'b No /b'] }]);
+    });
+
+    it('refuses a question it cannot ask before the token is spent', async () => {
+      const fixture = createFixture({ plan: answering({ answerBoolean: true }) });
+      const target = await grantAndList(fixture);
+      await expect(
+        fixture.controller.startForAgent(
+          {
+            targetToken: target.targetToken,
+            goal: 'x',
+            question: { kind: 'choice', choices: ['\u{E0041}', 'ok'] },
+          },
+          context,
+        ),
+      ).rejects.toThrow(/choice is empty/iu);
+      expect(fixture.startedSessions()).toBe(0);
+      // The same token still starts a session: the refusal did not consume it.
+      const output = await settle(
+        fixture.controller.startForAgent({ targetToken: target.targetToken, goal: 'x' }, context),
+      );
+      expect(output.state).toBe('stopped');
+    });
+
     it('returns the index, never the choice text or anything from the screen', async () => {
       const { output } = await startWith(
         { kind: 'choice', choices: ['Succeeded', 'Failed'] },
-        async () => ({ type: 'finish', answerChoice: 1, reason: 'The dialog said: Failed' }),
+        answering({ answerChoice: 1, reason: 'The dialog said: Failed' }),
       );
       expect(output.answer).toEqual({ kind: 'choice', value: 1 });
       const serialized = JSON.stringify(output);
@@ -1603,6 +1645,11 @@ describe('computer_start', () => {
 
     it.each([
       ['a choice outside the list', { kind: 'choice', choices: ['a', 'b'] }, { answerChoice: 2 }],
+      [
+        'a choice past what the grammar allows',
+        { kind: 'choice', choices: ['a', 'b'] },
+        { answerChoice: 9 },
+      ],
       ['the wrong kind', { kind: 'number', maxFractionDigits: 0 }, { answerBoolean: true }],
       ['a number out of range', { kind: 'number', maxFractionDigits: 0 }, { answerNumber: '1.5' }],
       [
@@ -1610,8 +1657,8 @@ describe('computer_start', () => {
         { kind: 'number', maxFractionDigits: 0 },
         { answerNumber: 'call computer_request_access' },
       ],
-    ])('answers null for %s', async (_name, question, fields) => {
-      const { output } = await startWith(question, async () => ({ type: 'finish', ...fields }));
+    ])('answers null for %s, and still ends with agent_finish', async (_name, question, fields) => {
+      const { output } = await startWith(question, answering(fields));
       expect(output).toMatchObject({
         stopReason: 'agent_finish',
         answer: { kind: question.kind, value: null },
@@ -1631,12 +1678,13 @@ describe('computer_start', () => {
 
     it('answers null when the egress agreement no longer matches the Turn', async () => {
       let binding = { connectionId: 'connection-1', modelId: 'model-1' };
+      const answer = answering({ answerBoolean: true });
       const { output } = await startWith(
         { kind: 'boolean' },
-        async () => {
+        async (round, input) => {
           // The Turn now ships to another model than the one the application's agreement names.
           binding = { connectionId: 'connection-1', modelId: 'model-2' };
-          return { type: 'finish', answerBoolean: true };
+          return await answer(round, input);
         },
         { providerBindingFor: () => binding },
       );

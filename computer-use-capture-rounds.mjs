@@ -4,8 +4,16 @@ const fail = () => {
   throw new Error('Computer Use round evidence is incomplete');
 };
 
-/** Fixed by this module's version, not measured: the schema pins the same adapter contract. */
-export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v1';
+/**
+ * Fixed by this module's version, not measured: the schema pins the same adapter contract.
+ *
+ * It has to name the grammar the app actually speaks, `COMPUTER_USE_PROVIDER_ADAPTER_VERSION` in
+ * apps/desktop/src/main/computer-use-adapter-version.ts. A test holds the two equal
+ * (computer-use-adapter-version.test.ts). v2 since T15-2 (#778): evidence captured from a build that
+ * speaks v2 must not call itself v1, and the gate accepts only the current grammar, because a run
+ * recorded against one grammar says nothing about a build that speaks another.
+ */
+export const COMPUTER_USE_CAPTURE_ADAPTER_VERSION = 'computer-use-v2';
 /**
  * Emitted together with the preflight `bindingDigest`. They are NOT recomputable from it: the
  * producer's binding digest commits to raw permit identity (session/connection/model/endpoint/

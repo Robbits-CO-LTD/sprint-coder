@@ -5567,7 +5567,13 @@ export const COMPUTER_START_TOOL_INPUT_JSON_SCHEMA = {
         kind: { type: 'string', enum: ['boolean', 'choice', 'number'] },
         choices: {
           type: 'array',
-          items: { type: 'string', minLength: 1, maxLength: COMPUTER_START_CHOICE_MAX_CHARACTERS },
+          items: {
+            type: 'string',
+            minLength: 1,
+            maxLength: COMPUTER_START_CHOICE_MAX_CHARACTERS,
+            // Not blank: the zod schema refuses a choice that trims to nothing.
+            pattern: '\\S',
+          },
           minItems: 2,
           maxItems: COMPUTER_START_MAX_CHOICES,
         },
@@ -5579,6 +5585,27 @@ export const COMPUTER_START_TOOL_INPUT_JSON_SCHEMA = {
       },
       required: ['kind'],
       additionalProperties: false,
+      // The same shape per kind as the strict discriminated union in zod: each kind requires its own
+      // field and refuses the other kind's, so a call built from this schema is a call zod accepts.
+      allOf: [
+        {
+          if: { properties: { kind: { const: 'boolean' } } },
+          then: {
+            allOf: [
+              { not: { required: ['choices'] } },
+              { not: { required: ['maxFractionDigits'] } },
+            ],
+          },
+        },
+        {
+          if: { properties: { kind: { const: 'choice' } } },
+          then: { required: ['choices'], not: { required: ['maxFractionDigits'] } },
+        },
+        {
+          if: { properties: { kind: { const: 'number' } } },
+          then: { required: ['maxFractionDigits'], not: { required: ['choices'] } },
+        },
+      ],
     },
   },
   required: ['targetToken', 'goal'],
@@ -6334,16 +6361,13 @@ const computerFinishActionSchema = z
   .object({
     type: z.literal('finish'),
     reason: z.string().trim().min(1).max(256).optional(),
-    // The answer to the session's closed question (T15-2). Bounded here, judged by Main against the
-    // question: a wrong kind, an index outside the choices, or anything but digits answers nothing.
+    // The answer to the session's closed question (T15-2). Only the type and a size bound are
+    // checked here, deliberately looser than the provider grammar: an index outside the choices or a
+    // number that is not plain digits is an unanswered question (Main returns null), not a broken
+    // planner reply that fails the whole session.
     answerBoolean: z.boolean().optional(),
-    answerChoice: z
-      .number()
-      .int()
-      .min(0)
-      .max(COMPUTER_START_MAX_CHOICES - 1)
-      .optional(),
-    answerNumber: z.string().max(32).optional(),
+    answerChoice: z.number().int().safe().optional(),
+    answerNumber: z.string().max(256).optional(),
   })
   .strict();
 

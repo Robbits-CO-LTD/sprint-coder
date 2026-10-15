@@ -17,6 +17,7 @@ import {
 } from '@sprint-coder/contracts';
 import type { PermissionBroker } from './permission-broker';
 import { COMPUTER_USE_PROVIDER_ADAPTER_VERSION } from './computer-use-adapter-version';
+import { sanitizeComputerStartChoice } from './computer-use-closed-answer';
 import { authorizeComputerUseProviderEgress, type ProviderEgressDecision } from './provider-egress';
 import type { ProviderRuntime } from './provider-runtime';
 import { ProviderStreamBudget } from './provider-stream-budget';
@@ -168,11 +169,6 @@ export type ComputerUseProviderPlannerDeps = Readonly<{
    * `computer_use_action_v1`, and a tool call is still `planner_tool_call_not_allowed` (§5.1).
    */
   sessionGoal?: string;
-  /**
-   * The closed question `computer_start` asked (T15-2), already normalised by Main. Its choices are
-   * the outer agent's words and are fenced like the goal; the planner answers only in `finish`.
-   */
-  sessionQuestion?: ComputerStartQuestion;
   /** Main must set this only after the selected model's capability has been confirmed. */
   structuredOutputSupported?: boolean;
   streamDeadlines?: Readonly<{ firstEventTimeoutMs: number; idleTimeoutMs: number }>;
@@ -205,7 +201,7 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
       this.deps.task,
       this.deps.mode,
       this.deps.sessionGoal ?? null,
-      this.deps.sessionQuestion ?? null,
+      input.question ?? null,
     );
     const prompt = plannerPrompt(observation);
     const egressPrompt = `${trustedInstruction}\n${prompt}`;
@@ -907,9 +903,9 @@ function plannerSessionQuestion(question: ComputerStartQuestion | null): string[
       return [
         intro,
         `<session-question>${question.choices
-          .map((choice, index) => `${index}: ${plannerQuestionChoice(choice)}`)
+          .map((choice, index) => `[${index}] ${plannerQuestionChoice(choice)}`)
           .join('; ')}</session-question>`,
-        'Answer with answerChoice: the number before the matching choice.',
+        'Answer with answerChoice: the number in brackets before the matching choice.',
       ];
     case 'number':
       return [
@@ -920,14 +916,9 @@ function plannerSessionQuestion(question: ComputerStartQuestion | null): string[
   }
 }
 
+/** Main's own rule, applied again at the prompt, then bounded so a prompt line stays bounded. */
 function plannerQuestionChoice(choice: string): string {
-  return [
-    ...choice
-      .normalize('NFKC')
-      .replace(/[\p{Cc}\p{Cf}<>;]/gu, ' ')
-      .replace(/\s+/gu, ' ')
-      .trim(),
-  ]
+  return [...sanitizeComputerStartChoice(choice)]
     .slice(0, COMPUTER_START_CHOICE_MAX_CHARACTERS)
     .join('');
 }
