@@ -311,9 +311,11 @@ export interface ComputerUseNativeHost {
   /**
    * macOS native only. True when the native approval path is open: the addon exports preflight,
    * approvalApprove, approvalDiscard and dispatchApproved, and the handshake confirmed classifier
-   * v2. D7 does not exist yet, so a production host never reports true.
+   * v2 (C5-1: derived from the eligibility compiled into Main, so false for every build while the
+   * versions are 1). With a session id it also requires that session to be bound to route v2 under
+   * the v2 deny-list; without one it answers for the capability only.
    */
-  nativeApprovalPathEnabled?(): boolean;
+  nativeApprovalPathEnabled?(sessionId?: string): boolean;
   /**
    * #785 T15-6b: whether the native can read the value of one node for `copy`. Absent means false.
    * A production host reports false until the native read exists (T15-4m / T15-4w) and its attest
@@ -3353,7 +3355,11 @@ export class ComputerUseController {
     let focusedSession: ComputerUseNativeSession | null = null;
     if (approved) {
       const ctx: { focusedSession: ComputerUseNativeSession | null } = { focusedSession: null };
-      const relaxHighImpact = this.relaxesHighImpact(pending.action, record.observation);
+      const relaxHighImpact = this.relaxesHighImpact(
+        pending.action,
+        record.observation,
+        record.status.sessionId,
+      );
       try {
         await this.refocusAndReobserve(
           record,
@@ -3772,7 +3778,7 @@ export class ComputerUseController {
     if (result !== undefined) {
       let authorized = await result;
       if (authorized.decision === 'approval_required' && action?.success) {
-        if (this.preDispatchBoundary(action.data, record.observation))
+        if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
           return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
         if (this.planGrantMatches(record, action.data)) {
           this.planGrantAuthorizedCalls.add(`${sessionId}\0${request.callId}`);
@@ -3793,7 +3799,7 @@ export class ComputerUseController {
         authorized.decision === 'approval_required' &&
         record.status.mode === 'full_access_app' &&
         action?.success &&
-        !this.preDispatchBoundary(action.data, record.observation)
+        !this.preDispatchBoundary(action.data, record.observation, record.status.sessionId)
       )
         authorized = { decision: 'allow', reason: 'computer_full_access_app' };
       if (approvalDecision === 'allow_plan' && action?.success)
@@ -3824,7 +3830,10 @@ export class ComputerUseController {
     if (capability === 'computer.observe') return { decision: 'allow', reason: 'computer_observe' };
     if (action?.success && this.safeSessionAction(record, action.data, request.callId))
       return { decision: 'allow', reason: 'computer_session_grant' };
-    if (action?.success && this.preDispatchBoundary(action.data, record.observation))
+    if (
+      action?.success &&
+      this.preDispatchBoundary(action.data, record.observation, record.status.sessionId)
+    )
       return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
     if (action?.success) return this.awaitApproval(record, request.callId, action.data);
     return { decision: 'deny', reason: 'computer_action_requires_approval' };
@@ -3992,7 +4001,7 @@ export class ComputerUseController {
       return this.completeNonNativeAction(record, action, requestId, 'completed', null);
     if (action.type === 'copy') return this.executeCopy(record, action, requestId, signal);
     if (record.status.mode === 'observe_only') throw new Error('Computer Use is observe-only');
-    if (this.preDispatchBoundary(action, record.observation)) {
+    if (this.preDispatchBoundary(action, record.observation, record.status.sessionId)) {
       record.status = this.status(
         record,
         'paused',
@@ -4117,7 +4126,8 @@ export class ComputerUseController {
         requestId,
         observation.revision,
         signal ?? record.controller.signal,
-        this.nativeApprovalPathOpen() && this.boundaryFacts(action, record.observation).highImpact,
+        this.nativeApprovalPathOpen(record.status.sessionId) &&
+          this.boundaryFacts(action, record.observation).highImpact,
       );
     } catch {
       this.planGrantAuthorizedCalls.delete(`${sessionId}\0${requestId}`);
@@ -4145,7 +4155,7 @@ export class ComputerUseController {
       nativeResult.approvalOffer !== undefined &&
       nativeResult.result === 'paused' &&
       nativeResult.reasonCode === NATIVE_SINGLE_USE_APPROVAL_UNAVAILABLE &&
-      this.nativeApprovalPathOpen()
+      this.nativeApprovalPathOpen(record.status.sessionId)
     )
       return this.runNativeApproval({
         record,
@@ -4282,7 +4292,10 @@ export class ComputerUseController {
           revision: observationRevision,
         }),
       );
-      if (result.approvalOffer !== undefined && this.nativeApprovalPathOpen()) {
+      if (
+        result.approvalOffer !== undefined &&
+        this.nativeApprovalPathOpen(record.status.sessionId)
+      ) {
         // An approval can be carried out only for one whole atomic action (ADR section 7).
         if (index > 0) {
           // Part of the text is already typed: no card, stop here with a partial effect.
@@ -4770,12 +4783,12 @@ export class ComputerUseController {
     if (
       record.status.mode === 'full_access_app' &&
       (!this.fullAccessLanguageAttested(record) ||
-        this.preDispatchBoundary(action, record.observation))
+        this.preDispatchBoundary(action, record.observation, record.status.sessionId))
     )
       return false;
     if (
       record.status.mode === 'full_access_app' &&
-      !this.preDispatchBoundary(action, record.observation)
+      !this.preDispatchBoundary(action, record.observation, record.status.sessionId)
     )
       return true;
     const allowed = this.planGrantMatches(record, action);
@@ -4845,14 +4858,15 @@ export class ComputerUseController {
   }
 
   /** Whether the native approval path is open (addon exports, classifier v2 confirmed). */
-  private nativeApprovalPathOpen(): boolean {
-    return this.deps.native.nativeApprovalPathEnabled?.() === true;
+  private nativeApprovalPathOpen(sessionId: string): boolean {
+    return this.deps.native.nativeApprovalPathEnabled?.(sessionId) === true;
   }
 
   /**
    * What the observation says about the thing an action would touch. `nativeHighImpact` is true only
    * when native's own facts said so; Main's projection (`HIGH_IMPACT_TEXT`) is broader and never
-   * counts as native's.
+   * counts as native's. `mainProjectionOnly` is the part Main alone saw (3-A, C5-1): it can only
+   * stop an action, never let one through.
    */
   private boundaryFacts(
     action: ComputerUseAction,
@@ -4861,6 +4875,7 @@ export class ComputerUseController {
     secure: boolean;
     highImpact: boolean;
     nativeHighImpact: boolean;
+    mainProjectionOnly: boolean;
     surface: boolean;
   }> {
     if (
@@ -4872,10 +4887,12 @@ export class ComputerUseController {
       'targetId' in action
     ) {
       const metadata = observation?.targetMetadata?.[action.targetId];
+      const split = splitHighImpact(metadata);
       return {
         secure: metadata?.secure === true,
-        highImpact: metadata?.highImpact === true,
-        nativeHighImpact: metadata?.highImpactNative === true,
+        highImpact: split.any,
+        nativeHighImpact: split.native,
+        mainProjectionOnly: split.mainProjectionOnly,
         surface: metadata?.surface === true,
       };
     }
@@ -4886,10 +4903,17 @@ export class ComputerUseController {
         secure: observation?.focusedElementSecure === true,
         highImpact,
         nativeHighImpact: highImpact,
+        mainProjectionOnly: false,
         surface: false,
       };
     }
-    return { secure: false, highImpact: false, nativeHighImpact: false, surface: false };
+    return {
+      secure: false,
+      highImpact: false,
+      nativeHighImpact: false,
+      mainProjectionOnly: false,
+      surface: false,
+    };
   }
 
   /**
@@ -4902,6 +4926,7 @@ export class ComputerUseController {
   private preDispatchBoundary(
     action: ComputerUseAction,
     observation: ComputerUseNativeObservation | null,
+    sessionId: string,
   ): boolean {
     const facts = this.boundaryFacts(action, observation);
     if (facts.secure) return true;
@@ -4909,17 +4934,21 @@ export class ComputerUseController {
     // regardless of the approval path (a surface has no approval).
     if (facts.surface) return true;
     if (!facts.highImpact) return false;
-    return !(this.nativeApprovalPathOpen() && facts.nativeHighImpact);
+    return !(this.nativeApprovalPathOpen(sessionId) && facts.nativeHighImpact);
   }
 
   /** True when this action's high-impact flag is waived only because native owns the judgement. */
   private relaxesHighImpact(
     action: ComputerUseAction,
     observation: ComputerUseNativeObservation | null,
+    sessionId: string,
   ): boolean {
     const facts = this.boundaryFacts(action, observation);
     return (
-      !facts.secure && facts.highImpact && facts.nativeHighImpact && this.nativeApprovalPathOpen()
+      !facts.secure &&
+      facts.highImpact &&
+      facts.nativeHighImpact &&
+      this.nativeApprovalPathOpen(sessionId)
     );
   }
 
@@ -5055,7 +5084,7 @@ export class ComputerUseController {
 
   private actionMayNeedApproval(record: SessionRecord, action: ComputerUseAction): boolean {
     if (action.type === 'wait' || action.type === 'finish' || action.type === 'copy') return false;
-    if (this.preDispatchBoundary(action, record.observation)) return false;
+    if (this.preDispatchBoundary(action, record.observation, record.status.sessionId)) return false;
     if (record.status.mode === 'supervised') return true;
     if (record.status.mode === 'full_access_app') return false;
     return true;
@@ -5512,6 +5541,23 @@ export function approvedObservationEquivalent(
       current.images.every((image, index) => image.digest === previous.images[index]?.digest)
     );
   return false;
+}
+
+/**
+ * The two sources of a target's high-impact flag (ADR v2 S4-4 addendum 0, C5-1 / 3-A). `highImpact`
+ * is the union Main has always kept (native's facts OR Main's projection); `highImpactNative` is
+ * set only from native's own facts. The part only Main's projection saw is used to STRENGTHEN a
+ * decision (it stops an action) and never to relax one: only `native` can be waived by an open
+ * approval path.
+ */
+export function splitHighImpact(
+  metadata:
+    | Readonly<{ highImpact?: boolean | undefined; highImpactNative?: boolean | undefined }>
+    | undefined,
+): Readonly<{ any: boolean; native: boolean; mainProjectionOnly: boolean }> {
+  const native = metadata?.highImpactNative === true;
+  const any = metadata?.highImpact === true || native;
+  return { any, native, mainProjectionOnly: any && !native };
 }
 
 /**

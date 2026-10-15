@@ -31,6 +31,7 @@ import {
 } from './native-safe-fs';
 import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
 import { loadComputerUseNative } from './computer-use-native';
+import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
 import { createComputerUseNativeHost } from './computer-use-native-host';
 import { createComputerUseCaptureOutput } from './computer-use-capture-output';
 import {
@@ -175,23 +176,31 @@ if (squirrelStartup || !hasLock) {
       const computerUseNativeHost = createComputerUseNativeHost(
         computerUseBinding,
         process.platform,
-        process.platform === 'win32'
-          ? {
-              windowsPhysicalBoundsToDip: (bounds) => {
-                const topLeft = screen.screenToDipPoint({ x: bounds.x, y: bounds.y });
-                const bottomRight = screen.screenToDipPoint({
-                  x: bounds.x + bounds.width,
-                  y: bounds.y + bounds.height,
-                });
-                return {
-                  x: topLeft.x,
-                  y: topLeft.y,
-                  width: bottomRight.x - topLeft.x,
-                  height: bottomRight.y - topLeft.y,
-                };
-              },
-            }
-          : {},
+        {
+          // The approval path rests on the build's attest and the session's route (C5-1). While every
+          // version is 1 the attest is classifier 1: no session is bound to v2 and nothing opens.
+          classifierV2Attested: computerUseEligibilityWiring.classifierV2Attested(
+            computerUseBinding.probe.available === true,
+          ),
+          effectiveEligibilityMode: computerUseEligibilityWiring.effectiveEligibilityMode,
+          ...(process.platform === 'win32'
+            ? {
+                windowsPhysicalBoundsToDip: (bounds) => {
+                  const topLeft = screen.screenToDipPoint({ x: bounds.x, y: bounds.y });
+                  const bottomRight = screen.screenToDipPoint({
+                    x: bounds.x + bounds.width,
+                    y: bounds.y + bounds.height,
+                  });
+                  return {
+                    x: topLeft.x,
+                    y: topLeft.y,
+                    width: bottomRight.x - topLeft.x,
+                    height: bottomRight.y - topLeft.y,
+                  };
+                },
+              }
+            : {}),
+        },
       );
       const computerUseAcceptanceMode = computerUseCompiledAcceptanceMode();
       if (computerUseAcceptanceMode !== null)
