@@ -2053,6 +2053,7 @@ export class IpcRouter {
           throw new Error('Computer Use provider preflight binding changed');
         return new ProviderComputerUsePlanner({
           ...plannerBaseDeps,
+          artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,
           compatibilityPermit: permit,
           currentCompatibilityBinding: async (currentSignal) => {
             const persisted = this.persistence.getProviderConnection(connectionId);

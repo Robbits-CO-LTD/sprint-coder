@@ -29,6 +29,7 @@ import {
   approvedObservationEquivalent,
   nativeApprovalObservationEquivalent,
   type ComputerUseNativeHost,
+  type ComputerUseNativeNodeValue,
   type ComputerUseNativeObservation,
   type ComputerUseNativeSession,
   type ComputerUseNativeWindow,
@@ -44,6 +45,7 @@ import {
   computerAppNativeIdentityDigest,
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
+import { ComputerUseArtifactStore } from './computer-use-artifact';
 
 const imageBytes = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
@@ -205,6 +207,14 @@ function createFixture(
     profileRecord?: ComputerAppProfileRecord;
     windowExecutableDigest?: string | null;
     effectiveEligibilityMode?: () => 'v1-allowlist' | 'v2-denylist';
+    /** A fake native that can read one node (#785 T15-6b); a production host never reports it. */
+    artifactRead?: {
+      supported?: boolean;
+      read?: (
+        input: Parameters<NonNullable<ComputerUseNativeHost['readNodeValue']>>[0],
+      ) => Promise<ComputerUseNativeNodeValue>;
+    };
+    artifactStore?: ComputerUseArtifactStore;
     /** Opens the native approval path on the fake host (a production host never reports it). */
     nativeApproval?: {
       enabled?: boolean;
@@ -250,6 +260,7 @@ function createFixture(
   const nativeLog: string[] = [];
   /** The classifier route every startSession (start, refocus, resume) was given. */
   const startRoutes: Array<'v1' | 'v2' | undefined> = [];
+  const readInputs: Parameters<NonNullable<ComputerUseNativeHost['readNodeValue']>>[0][] = [];
   const approveInputs: Parameters<NonNullable<ComputerUseNativeHost['approvalApprove']>>[0][] = [];
   const approvedDispatches: Parameters<
     NonNullable<ComputerUseNativeHost['dispatchApproved']>
@@ -366,6 +377,16 @@ function createFixture(
               ? { ...observed, focusedElementSignature: 'e'.repeat(64) }
               : observed;
     },
+    ...(options.artifactRead === undefined
+      ? {}
+      : {
+          artifactReadSupported: () => options.artifactRead!.supported !== false,
+          readNodeValue: async (input) => {
+            nativeLog.push('readNodeValue');
+            readInputs.push(input);
+            return (await options.artifactRead!.read?.(input)) ?? { ok: true, text: 'Total\t42' };
+          },
+        }),
     ...(options.nativeApproval === undefined
       ? {}
       : {
@@ -539,6 +560,7 @@ function createFixture(
     ...(options.plannerFactory === undefined ? {} : { plannerFactory: options.plannerFactory }),
     featureEnabled: () => true,
     agentDrivenEnabled: () => true,
+    ...(options.artifactStore === undefined ? {} : { artifactStore: options.artifactStore }),
     ...(options.effectiveEligibilityMode === undefined
       ? {}
       : { effectiveEligibilityMode: options.effectiveEligibilityMode }),
@@ -583,6 +605,7 @@ function createFixture(
     startRoutes,
     approveInputs,
     approvedDispatches,
+    readInputs,
     dispatchCount: () => dispatchCount,
     observationCount: () => revision,
     dispatchedActions: () => dispatchedActions,
@@ -2398,6 +2421,391 @@ describe('ComputerUseController', () => {
     ).resolves.toMatchObject({ result: 'completed' });
     expect(fixture.dispatchCount()).toBe(0);
     await fixture.controller.stop(started.sessionId);
+  });
+
+  describe('copy (#785 T15-6b)', () => {
+    const copy: ComputerUseAction = { type: 'copy', targetId: 'node-1' };
+    const withNode = { targetSignatures: { 'node-1': 'a'.repeat(64) } };
+
+    /** A store that remembers whom each artifact was created for, so a test can take it back. */
+    function spiedStore() {
+      const store = new ComputerUseArtifactStore({ now: () => performance.now() });
+      const owners: Parameters<ComputerUseArtifactStore['create']>[0][] = [];
+      const create = store.create.bind(store);
+      store.create = (owner, raw) => {
+        owners.push(owner);
+        return create(owner, raw);
+      };
+      return { store, owners };
+    }
+
+    it('keeps a value in observe-only mode without input, and leaves no text in the audit', async () => {
+      const { store, owners } = spiedStore();
+      const fixture = createFixture({
+        mode: 'observe_only',
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+      });
+      const started = await start(fixture, 'observe_only');
+      await fixture.controller.observe(started.sessionId);
+      const result = await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      expect(result).toMatchObject({ result: 'completed', reasonCode: null });
+      expect(fixture.dispatchCount()).toBe(0);
+      expect(fixture.readInputs).toHaveLength(1);
+      expect(fixture.readInputs[0]).toMatchObject({
+        targetId: 'node-1',
+        targetSignature: 'a'.repeat(64),
+      });
+      const [audit] = [...fixture.audits.values()];
+      expect(audit).toMatchObject({ actionKind: 'copy', route: 'semantic', state: 'applied' });
+      expect(audit!.actionDigest).toMatch(/^[0-9a-f]{64}$/u);
+      // Neither the value nor a hash of it is anywhere a record or a result could carry it.
+      const everything = JSON.stringify([[...fixture.audits.values()], result, fixture.statuses]);
+      expect(everything).not.toContain('Total');
+      expect(everything).not.toContain(createHash('sha256').update('Total\t42').digest('hex'));
+      const references = fixture.controller.copiedArtifactReferences(started.sessionId);
+      expect(references).toEqual([
+        { artifactId: expect.any(String), kind: 'text', sizeClass: 'le_256' },
+      ]);
+      expect(store.take([references[0]!.artifactId], owners[0]!)).toEqual(['Total\t42']);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('lets an observe-only planner copy and then finish, with no input', async () => {
+      const plans: ComputerUseAction[] = [copy, { type: 'finish' }];
+      const fixture = createFixture({
+        mode: 'observe_only',
+        observationOverrides: withNode,
+        artifactRead: {},
+        planner: { plan: async () => plans.shift()! },
+      });
+      await start(fixture, 'observe_only');
+      await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+      expect([...fixture.audits.values()].map((audit) => [audit.actionKind, audit.state])).toEqual([
+        ['copy', 'applied'],
+      ]);
+      expect(fixture.dispatchCount()).toBe(0);
+      await fixture.controller.dispose();
+    });
+
+    it('N9: closing or re-epoching another Task leaves the references of this one and artifacts', async () => {
+      const { store, owners } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      fixture.controller.taskClosed('task-2');
+      fixture.controller.policyEpochChanged('task-2');
+      const references = fixture.controller.copiedArtifactReferences(started.sessionId);
+      expect(references).toHaveLength(1);
+      expect(store.take([references[0]!.artifactId], owners[0]!)).toEqual(['Total\t42']);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it.each(['taskClosed', 'policyEpochChanged'] as const)(
+      'keeps nothing when the Task ends (%s) while the native is still reading',
+      async (end) => {
+        const { store, owners } = spiedStore();
+        let release!: () => void;
+        const gate = new Promise<void>((resolve) => (release = resolve));
+        const fixture = createFixture({
+          observationOverrides: withNode,
+          artifactStore: store,
+          artifactRead: {
+            read: async () => {
+              await gate;
+              return { ok: true, text: 'Total 42' };
+            },
+          },
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        const acting = fixture.controller.act(started.sessionId, copy, 'copy-1');
+        await vi.waitFor(() => expect(fixture.readInputs).toHaveLength(1));
+        fixture.controller[end]('task-1');
+        release();
+        // The value arrived after the Task ended: it is dropped before it reaches the store.
+        const outcome = await acting.then(
+          (result) => result,
+          () => null,
+        );
+        if (outcome !== null)
+          expect(outcome).toMatchObject({
+            result: 'rejected',
+            reasonCode: 'artifact_copy_refused',
+          });
+        expect(owners).toEqual([]);
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+        await fixture.controller.stop(started.sessionId).catch(() => undefined);
+      },
+    );
+
+    it.each(['taskClosed', 'policyEpochChanged'] as const)(
+      'keeps nothing from a copy that starts after the Task ended (%s) in a session still running',
+      async (end) => {
+        const { store, owners } = spiedStore();
+        const fixture = createFixture({
+          observationOverrides: withNode,
+          artifactRead: {},
+          artifactStore: store,
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        // The Task ends, but this session is not stopped by it (taskClosed) or has not stopped yet.
+        fixture.controller[end]('task-1');
+        const outcome = await fixture.controller.act(started.sessionId, copy, 'copy-late').then(
+          (result) => result,
+          () => null,
+        );
+        if (outcome !== null)
+          expect(outcome).toMatchObject({
+            result: 'rejected',
+            reasonCode: 'artifact_copy_refused',
+          });
+        expect(owners).toEqual([]);
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+        await fixture.controller.stop(started.sessionId).catch(() => undefined);
+      },
+    );
+
+    it('keeps nothing when the Task was closed while the session was still starting', async () => {
+      const { store, owners } = spiedStore();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+        startSessionGate: gate,
+      });
+      const starting = start(fixture);
+      await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+      fixture.controller.taskClosed('task-1');
+      release();
+      const started = await starting;
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(owners).toEqual([]);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('keeps nothing when the Task was closed while the windows were being listed again', async () => {
+      const { store, owners } = spiedStore();
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+        revalidateWindowsGate: gate,
+      });
+      const starting = start(fixture);
+      // The start has asked for the windows a second time and waits for the answer.
+      await viWait();
+      fixture.controller.taskClosed('task-1');
+      release();
+      const started = await starting;
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(owners).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('notes the generation before the first await of every start path', () => {
+      const source = readFileSync(resolve(__dirname, 'computer-use-controller.ts'), 'utf8').replace(
+        /\s+/gu,
+        ' ',
+      );
+      // startForAgent notes it first thing and hands it on; start notes it before startInternal.
+      expect(source).toMatch(
+        /Promise<ComputerStartToolOutput> \{ \/\/[^{}]*?const artifactGeneration = this\.artifactGenerations\.get\(context\.taskId\) \?\? 0; if \(this\.disposed\)/u,
+      );
+      expect(source).toContain('signal, artifactGeneration, );');
+      expect(source).toContain(
+        'notedArtifactGeneration ?? this.artifactGenerations.get(input.taskId) ?? 0; if (this.disposed)',
+      );
+      expect(source).toContain('this.startInternal(input, controller, artifactGeneration)');
+    });
+
+    it('lets a session started after the Task was closed and reopened copy', async () => {
+      const { store, owners } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: {},
+        artifactStore: store,
+      });
+      // The Task was closed (archived) and later reopened: a session begun now is a fresh one.
+      fixture.controller.taskClosed('task-1');
+      fixture.controller.policyEpochChanged('task-1');
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'completed', reasonCode: null });
+      expect(owners).toHaveLength(1);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toHaveLength(1);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('forgets its references when the session ends', async () => {
+      const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toHaveLength(1);
+      await fixture.controller.stop(started.sessionId);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+    });
+
+    it('keeps nothing when the observation went stale while the native was reading', async () => {
+      let now = Date.now();
+      const fixture = createFixture({
+        now: () => now,
+        observationOverrides: withNode,
+        artifactRead: {
+          read: async () => {
+            now += 60_000;
+            return { ok: true, text: 'Total 42' };
+          },
+        },
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(fixture.readInputs).toHaveLength(1);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it.each(['supervised', 'full_access_app'] as const)(
+      'never raises an approval for copy in %s mode',
+      async (mode) => {
+        const plans: ComputerUseAction[] = [copy, { type: 'finish' }];
+        const fixture = createFixture({
+          mode,
+          authorizationRequired: true,
+          observationOverrides: withNode,
+          artifactRead: {},
+          planner: { plan: async () => plans.shift()! },
+        });
+        await start(fixture, mode);
+        await vi.waitFor(() => expect(fixture.statuses.at(-1)?.state).toBe('stopped'));
+        expect(fixture.approvals).toEqual([]);
+        expect(fixture.statuses.map((status) => status.state)).not.toContain('awaiting_approval');
+        expect(
+          [...fixture.audits.values()].map((audit) => [audit.actionKind, audit.state]),
+        ).toEqual([['copy', 'applied']]);
+        expect(fixture.dispatchCount()).toBe(0);
+        await fixture.controller.dispose();
+      },
+    );
+
+    it('still refuses input in observe-only mode', async () => {
+      const fixture = createFixture({
+        mode: 'observe_only',
+        observationOverrides: withNode,
+        artifactRead: {},
+      });
+      const started = await start(fixture, 'observe_only');
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, { type: 'type', text: 'x' }, 'type-1'),
+      ).rejects.toThrow('computer_observe_only');
+      expect(fixture.dispatchCount()).toBe(0);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it.each([
+      ['a host that cannot read', undefined],
+      ['a host that says it cannot read', { supported: false }],
+    ])('refuses with %s, and never calls the native', async (_name, artifactRead) => {
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        ...(artifactRead === undefined ? {} : { artifactRead }),
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(fixture.readInputs).toHaveLength(0);
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it.each([
+      ['the native refuses the node', async () => ({ ok: false }) as const],
+      [
+        'the native throws',
+        async (): Promise<ComputerUseNativeNodeValue> => {
+          throw new Error('boom');
+        },
+      ],
+      [
+        'the value looks like a secret (N25)',
+        async () => ({ ok: true, text: 'ghp_0123456789abcdefghijABCDEFGHIJ' }) as const,
+      ],
+      ['the value is a one-time code (N25)', async () => ({ ok: true, text: '482913' }) as const],
+      ['the value is empty (N2)', async () => ({ ok: true, text: '\u200B\n' }) as const],
+      ['the value is too large (N8)', async () => ({ ok: true, text: 'x'.repeat(4_097) }) as const],
+    ])('keeps nothing and says one thing when %s', async (_name, read) => {
+      const { store } = spiedStore();
+      const fixture = createFixture({
+        observationOverrides: withNode,
+        artifactRead: { read },
+        artifactStore: store,
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      const result = await fixture.controller.act(started.sessionId, copy, 'copy-1');
+      // The same answer whatever the reason, so a planner cannot probe which rule it hit.
+      expect(result).toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(fixture.controller.copiedArtifactReferences(started.sessionId)).toEqual([]);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('refuses a node the last observation did not name, without asking the native', async () => {
+      const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, { type: 'copy', targetId: 'node-2' }, 'copy-2'),
+      ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+      expect(fixture.readInputs).toHaveLength(0);
+      await fixture.controller.stop(started.sessionId);
+    });
+
+    it('N10: loses what it kept when the Task is closed or the policy epoch changes', async () => {
+      for (const end of ['taskClosed', 'policyEpochChanged'] as const) {
+        const { store, owners } = spiedStore();
+        const fixture = createFixture({
+          observationOverrides: withNode,
+          artifactRead: {},
+          artifactStore: store,
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await fixture.controller.act(started.sessionId, copy, 'copy-1');
+        const [reference] = fixture.controller.copiedArtifactReferences(started.sessionId);
+        fixture.controller[end]('task-1');
+        expect(store.take([reference!.artifactId], owners[0]!), end).toBeNull();
+        // The list of references goes with the artifacts it named.
+        expect(fixture.controller.copiedArtifactReferences(started.sessionId), end).toEqual([]);
+        await fixture.controller.stop(started.sessionId);
+      }
+    });
   });
 
   it('keeps the displayed observation time bound to capture rather than a later action', async () => {

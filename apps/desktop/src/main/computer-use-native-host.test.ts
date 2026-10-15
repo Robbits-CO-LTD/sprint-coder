@@ -78,6 +78,14 @@ describe('Computer Use native Main adapter', () => {
     ).toBeNull();
   });
 
+  it('does not read node values: a production host offers no copy until T15-4m / T15-4w and C5', () => {
+    for (const platform of ['darwin', 'win32'] as const) {
+      const host = createComputerUseNativeHost(binding({ probe: () => ({}) }), platform);
+      expect(host.artifactReadSupported?.() ?? false).toBe(false);
+      expect(host.readNodeValue).toBeUndefined();
+    }
+  });
+
   it('keeps Gate 0 registration unavailable when the signed probe has no picker seam', async () => {
     const host = createComputerUseNativeHost(binding({ probe: () => ({}) }), 'darwin');
 

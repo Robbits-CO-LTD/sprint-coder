@@ -783,6 +783,7 @@ function actionLabel(
       key: 'キーを入力',
       wait: '待機',
       finish: '完了',
+      copy: '値を写す',
     } as const
   )[action];
 }

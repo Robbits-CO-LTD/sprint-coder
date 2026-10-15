@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { inflateSync } from 'node:zlib';
 import { describe, expect, it } from 'vitest';
@@ -14,6 +15,7 @@ import {
   COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
   COMPUTER_USE_PREFLIGHT_MARKER_PNG_BASE64,
   computerUseActionJsonSchema,
+  computerUseActionJsonSchemaFor,
   computerUseProviderEndpointRevision,
   parseComputerUseAction,
   preflightComputerUseProvider,
@@ -601,12 +603,99 @@ describe('ProviderComputerUsePlanner', () => {
   });
 
   it('versions the provider grammar that now carries the closed answer (decision 7)', () => {
-    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v2');
+    expect(COMPUTER_USE_PROVIDER_ADAPTER_VERSION).toBe('computer-use-v3');
     const properties = (computerUseActionJsonSchema as { properties: Record<string, unknown> })
       .properties;
     expect(properties['answerBoolean']).toEqual({ type: 'boolean' });
     expect(properties['answerChoice']).toEqual({ type: 'integer', minimum: 0, maximum: 7 });
     expect(properties['answerNumber']).toEqual({ type: 'string', maxLength: 32 });
+  });
+
+  describe('copy is offered only while the native can read a node (#785 T15-6b)', () => {
+    const typeEnum = (schema: unknown): readonly string[] =>
+      (schema as { properties: { type: { enum: readonly string[] } } }).properties.type.enum;
+
+    it('puts copy in the grammar only when the capability is on', () => {
+      expect(typeEnum(computerUseActionJsonSchemaFor(false))).not.toContain('copy');
+      expect(computerUseActionJsonSchemaFor(false)).toBe(computerUseActionJsonSchema);
+      expect(typeEnum(computerUseActionJsonSchemaFor(true))).toEqual([
+        ...typeEnum(computerUseActionJsonSchema),
+        'copy',
+      ]);
+      // Nothing else in the grammar moves.
+      const { type: _a, ...withoutCopy } = (
+        computerUseActionJsonSchemaFor(true) as { properties: Record<string, unknown> }
+      ).properties;
+      const { type: _b, ...base } = (
+        computerUseActionJsonSchema as { properties: Record<string, unknown> }
+      ).properties;
+      expect(withoutCopy).toEqual(base);
+    });
+
+    it.each([
+      [false, false],
+      [true, true],
+    ])(
+      'with the capability %s sends %s about copy to the provider',
+      async (supported, mentioned) => {
+        let seen: unknown;
+        const planner = new ProviderComputerUsePlanner({
+          ...deps(
+            runtimeFor((request) => (seen = request), '{"type":"finish"}'),
+            true,
+          ),
+          artifactReadSupported: supported,
+        });
+        await planner.plan({ observation, round: 1, signal: new AbortController().signal });
+        const request = JSON.stringify(seen);
+        expect(request.includes('copy')).toBe(mentioned);
+        expect(
+          typeEnum(
+            (seen as { structuredOutput: { schema: unknown } }).structuredOutput.schema,
+          ).includes('copy'),
+        ).toBe(mentioned);
+      },
+    );
+
+    it('hands the planner its capability from the host, true only when the host says so', () => {
+      const source = readFileSync(join(__dirname, 'ipc.ts'), 'utf8').replace(/\s+/gu, ' ');
+      expect(source).toContain(
+        'artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,',
+      );
+    });
+
+    it('accepts a copy the provider returns only when it was offered', async () => {
+      const copy = '{"type":"copy","targetId":"node-1"}';
+      const without = new ProviderComputerUsePlanner(deps(runtimeFor(() => undefined, copy)));
+      await expect(
+        without.plan({ observation, round: 1, signal: new AbortController().signal }),
+      ).rejects.toMatchObject({ code: 'planner_action_schema_invalid' });
+      const offered = new ProviderComputerUsePlanner({
+        ...deps(runtimeFor(() => undefined, copy)),
+        artifactReadSupported: true,
+      });
+      await expect(
+        offered.plan({ observation, round: 1, signal: new AbortController().signal }),
+      ).resolves.toEqual({ type: 'copy', targetId: 'node-1' });
+    });
+
+    it('lets an observe-only planner name copy only while it is offered', async () => {
+      let seen: unknown;
+      const base = deps(runtimeFor((request) => (seen = request), '{"type":"finish"}'));
+      const planner = new ProviderComputerUsePlanner({
+        ...base,
+        mode: 'observe_only',
+        artifactReadSupported: true,
+        compatibilityPermit: { ...base.compatibilityPermit, mode: 'observe_only' },
+      });
+      await planner.plan({ observation, round: 1, signal: new AbortController().signal });
+      expect(seen).toMatchObject({
+        messages: [
+          { content: expect.stringContaining('Return only wait, copy or finish') },
+          expect.any(Object),
+        ],
+      });
+    });
   });
 
   it('says nothing about a session goal when there is none', async () => {

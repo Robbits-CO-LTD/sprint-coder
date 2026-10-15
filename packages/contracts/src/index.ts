@@ -5120,6 +5120,7 @@ export const computerUseActionKindSchema = z.enum([
   'key',
   'wait',
   'finish',
+  'copy',
 ]);
 export type ComputerUseActionKind = z.infer<typeof computerUseActionKindSchema>;
 
@@ -6354,6 +6355,14 @@ const computerTypeActionSchema = z
 const computerKeyActionSchema = z
   .object({ type: z.literal('key'), key: computerUseKeySchema })
   .strict();
+/**
+ * #785 T15-6b: read one node's value into an artifact held in Main's memory. It names the node and
+ * nothing else: the value never appears in an action, a digest or an audit row. It is not input, so
+ * observe-only sessions may use it; a planner is offered it only when the native can read a node.
+ */
+const computerCopyActionSchema = z
+  .object({ type: z.literal('copy'), targetId: semanticTargetSchema })
+  .strict();
 const computerWaitActionSchema = z
   .object({ type: z.literal('wait'), milliseconds: z.number().int().min(0).max(5_000) })
   .strict();
@@ -6386,6 +6395,7 @@ const computerUseActionUnionSchema = z.discriminatedUnion('type', [
   computerKeyActionSchema,
   computerWaitActionSchema,
   computerFinishActionSchema,
+  computerCopyActionSchema,
 ]);
 
 /** V1 deliberately accepts one discriminator and rejects aliases or unknown fields. */
