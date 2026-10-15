@@ -119,10 +119,31 @@ struct WindowSurface {
   std::uint32_t gaps = 0;
 };
 
+// A browser or Electron window: everything inside is a page the page's author wrote, with or
+// without a Document node in the chain.
+[[nodiscard]] inline bool IsWebWindowClass(const ShadowUiaCapture &capture) {
+  if (!capture.window_class_read) return false;
+  const std::string name = Lowercase(CompatFold(capture.window_class));
+  return name.rfind("chrome_widgetwin_", 0) == 0 || name == "mozillawindowclass";
+}
+
+// Whether the node at `index` is in a page: in a web window, or at or below a Document.
+[[nodiscard]] inline bool NodeInPage(const ShadowUiaCapture &capture, std::size_t index) {
+  if (IsWebWindowClass(capture)) return true;
+  for (std::size_t above = index; above < capture.chain.size(); ++above)
+    if (Lowercase(CompatFold(capture.chain[above].control_type)) == "document") return true;
+  return false;
+}
+
+// A class name among `names` on a node of the chain. A node in a page is not looked at: its class
+// name is the page's string (it could only tighten a surface, but a page is not trusted to say what
+// the window around it is).
 [[nodiscard]] inline bool ClassIsOneOf(const ShadowUiaCapture &capture, const std::string_view *names,
                                    std::size_t count) {
-  for (const ShadowUiaNode &node : capture.chain)
-    if (OneOf(Lowercase(CompatFold(node.class_name)), names, count)) return true;
+  for (std::size_t index = 0; index < capture.chain.size(); ++index) {
+    if (NodeInPage(capture, index)) continue;
+    if (OneOf(Lowercase(CompatFold(capture.chain[index].class_name)), names, count)) return true;
+  }
   return false;
 }
 
@@ -143,7 +164,7 @@ struct WindowSurface {
                             : std::string();
   // A UWP window: the app is whoever owns the CoreWindow child. If that is not known, nothing is.
   if (window_class == "applicationframewindow" || process == "applicationframehost.exe") {
-    if (!capture.core_window_process_read) {
+    if (!capture.core_window_process_read || capture.core_window_process_path.empty()) {
       result.kind = SurfaceKind::kUnknown;
       result.gaps |= kShadowGapReadFailed | kShadowGapOsPromptSurface;
       return result;
@@ -198,10 +219,30 @@ struct WindowSurface {
     return result;
   }
   // A file browser by its name, or by its structure: any window that hosts a shell view (Explorer,
-  // the common file dialogs, other file managers built on the shell) lists items that open.
+  // the common file dialogs, other file managers built on the shell) lists items that open. The
+  // classes are the ones measured on Windows 11 (build 26200) as well as the older ones.
   static constexpr std::string_view kExplorerClasses[] = {"cabinetwclass", "explorewclass",
                                                           "progman", "workerw", "shell_traywnd"};
-  static constexpr std::string_view kShellViewClasses[] = {"shelldll_defview", "directuihwnd"};
+  static constexpr std::string_view kShellViewClasses[] = {
+      "shelldll_defview", "directuihwnd", "duilistview", "duiviewwndclassname", "uiitemsview",
+      "hwndview"};
+  // Windows 11 builds the Explorer address bar (and its search box) in XAML: an AutoSuggestBox, no
+  // Address Band Root. A text box in an Explorer window that is not inside a shell view (a rename
+  // inside the list is) is a command entry as well, since the address bar runs programs.
+  const bool explorer_window = process == "explorer.exe" || window_class == "cabinetwclass" ||
+                               window_class == "explorewclass";
+  if (explorer_window) {
+    static constexpr std::string_view kSuggestClasses[] = {"autosuggestbox"};
+    const bool in_suggest = ClassIsOneOf(capture, kSuggestClasses, std::size(kSuggestClasses));
+    const bool in_shell_view =
+        ClassIsOneOf(capture, kShellViewClasses, std::size(kShellViewClasses));
+    const bool target_is_edit =
+        !capture.chain.empty() && Lowercase(CompatFold(capture.chain[0].control_type)) == "edit";
+    if (in_suggest || (target_is_edit && !in_shell_view)) {
+      result.kind = SurfaceKind::kCommandPalette;
+      return result;
+    }
+  }
   if (OneOf(window_class, kExplorerClasses, std::size(kExplorerClasses)) ||
       process == "explorer.exe" ||
       ClassIsOneOf(capture, kShellViewClasses, std::size(kShellViewClasses))) {
@@ -278,13 +319,9 @@ namespace windows_shadow_detail {
   ax.chain_reached_root = capture.chain_reached_root;
   // A node is "in a page" when a Document is above it (or is it); the neighbors share the target's
   // place. The Document itself is the page root and carries no class.
-  const bool target_in_page = ChainHasPage(capture.chain);
-  for (std::size_t index = 0; index < capture.chain.size(); ++index) {
-    bool in_page = false;
-    for (std::size_t above = index; above < capture.chain.size(); ++above)
-      if (Lowercase(CompatFold(capture.chain[above].control_type)) == "document") in_page = true;
-    ax.chain.push_back(ShadowUiaAsAxNode(capture.chain[index], in_page));
-  }
+  const bool target_in_page = NodeInPage(capture, 0);
+  for (std::size_t index = 0; index < capture.chain.size(); ++index)
+    ax.chain.push_back(ShadowUiaAsAxNode(capture.chain[index], NodeInPage(capture, index)));
   for (const ShadowUiaNode &node : capture.neighbors)
     ax.neighbors.push_back(ShadowUiaAsAxNode(node, target_in_page));
   ax.neighbors_complete = capture.neighbors_complete;

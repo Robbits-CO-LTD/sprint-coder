@@ -143,6 +143,24 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     expect(windowsShadow).toContain('static_assert((kShadowGapOsPromptSurface');
   });
 
+  it('knows the Windows 11 Explorer (XAML address bar, DUI list) and trusts nothing a page wrote', () => {
+    for (const name of [
+      'autosuggestbox',
+      'duilistview',
+      'duiviewwndclassname',
+      'uiitemsview',
+      'hwndview',
+      'chrome_widgetwin_',
+      'mozillawindowclass',
+      'IsWebWindowClass(',
+      'NodeInPage(',
+      'core_window_process_path.empty()',
+    ])
+      expect(windowsShadow, name).toContain(name);
+    // A class name on a node inside a page is skipped when a surface is looked up.
+    expect(windowsShadow).toMatch(/if \(NodeInPage\(capture, index\)\) continue;/u);
+  });
+
   it('maps the Windows surfaces by name, not by title', () => {
     for (const name of [
       'consolewindowclass',

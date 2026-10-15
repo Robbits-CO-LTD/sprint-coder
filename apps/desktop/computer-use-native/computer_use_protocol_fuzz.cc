@@ -2429,6 +2429,98 @@ bool CheckWindowsShadowCore() {
     if (!Check(BuildWindowsShadowFacts(item, UiaRequest("invoke")).facts.extension == "lnk",
                "winshadow-forward-slash-item-path")) return false;
   }
+  // Windows 11 (build 26200) Explorer: the address bar is XAML, measured as
+  //   [Edit|TextBox] < [Group|AutoSuggestBox] < [Pane|InputSiteWindowClass]
+  //   < [Pane|Microsoft.UI.Content.DesktopChildSiteBridge] < [Window|CabinetWClass]
+  // with no Address Band Root, and the list is DUIListView / DUIViewWndClassName / UIItemsView.
+  {
+    const auto explorer = [](std::vector<ShadowUiaNode> chain) {
+      ShadowUiaCapture capture = UiaBase();
+      capture.window_class = "CabinetWClass";
+      capture.process_path = "C:\\Windows\\explorer.exe";
+      capture.chain = std::move(chain);
+      return capture;
+    };
+    const auto with_class = [](ShadowUiaNode node, const char *class_name) {
+      node.class_name = class_name;
+      return node;
+    };
+    const ShadowUiaCapture bar = explorer(
+        {with_class(UiaNode("Edit", u8"アドレス バー"_u8), "TextBox"),
+         with_class(UiaNode("Group", ""), "AutoSuggestBox"),
+         with_class(UiaNode("Pane", ""), "InputSiteWindowClass"),
+         with_class(UiaNode("Pane", ""), "Microsoft.UI.Content.DesktopChildSiteBridge"),
+         with_class(UiaNode("Window", "Downloads"), "CabinetWClass")});
+    if (!Check(BuildWindowsShadowFacts(bar, UiaRequest("type")).facts.surface == SurfaceKind::kCommandPalette &&
+                   WindowsShadowClassify(bar, UiaRequest("type"), true).kind == DecisionKind::kBlocked,
+               "winshadow-win11-address-bar")) return false;
+    // A click on its suggestion is inside the same box.
+    const ShadowUiaCapture suggestion = explorer(
+        {with_class(UiaNode("ListItem", "C:\\Windows"), "ListViewItem"),
+         with_class(UiaNode("Group", ""), "AutoSuggestBox"),
+         with_class(UiaNode("Window", "Downloads"), "CabinetWClass")});
+    if (!Check(BuildWindowsShadowFacts(suggestion, UiaRequest("click")).facts.surface == SurfaceKind::kCommandPalette,
+               "winshadow-win11-suggestion")) return false;
+    // A text box in an Explorer window that is not in the shell view is a command entry too.
+    const ShadowUiaCapture loose = explorer({UiaNode("Edit", "Search"), UiaNode("Window", "Downloads")});
+    if (!Check(BuildWindowsShadowFacts(loose, UiaRequest("type")).facts.surface == SurfaceKind::kCommandPalette,
+               "winshadow-explorer-edit-outside-the-shell-view")) return false;
+    // A rename inside the list is not.
+    const ShadowUiaCapture rename =
+        explorer({UiaNode("Edit", "Name"), with_class(UiaNode("List", "Items View"), "UIItemsView"),
+                  with_class(UiaNode("Pane", ""), "DUIListView"), UiaNode("Window", "Downloads")});
+    if (!Check(BuildWindowsShadowFacts(rename, UiaRequest("type")).facts.surface == SurfaceKind::kFileBrowser,
+               "winshadow-explorer-rename-in-the-list")) return false;
+    // The measured shell view classes make any window with one a file browser.
+    for (const char *view : {"DUIListView", "DUIViewWndClassName", "UIItemsView", "HWNDView"}) {
+      ShadowUiaCapture other = UiaBase();
+      other.window_class = "SomeFilerClass";
+      other.process_path = "C:\\Tools\\filer.exe";
+      other.chain = {UiaNode("ListItem", "setup.exe"), with_class(UiaNode("Pane", ""), view),
+                     UiaNode("Window", "Filer")};
+      if (!Check(BuildWindowsShadowFacts(other, UiaRequest("invoke")).facts.surface == SurfaceKind::kFileBrowser,
+                 "winshadow-measured-shell-view-class")) return false;
+    }
+  }
+  // The page is not trusted to say what its window is, and a web window is a page throughout.
+  {
+    ShadowUiaCapture page = UiaBase();
+    page.window_class = "Chrome_WidgetWin_1";
+    page.process_path = "C:\\Program Files\\Browser\\browser.exe";
+    page.document_url_read = true;
+    page.document_url = "https://example.com/";
+    page.chain = {UiaNode("Button", "Open"), UiaNode("Pane", "Files"), UiaNode("Document", "Page"),
+                  UiaNode("Window", "Browser")};
+    page.chain[1].class_name = "DUIListView";
+    if (!Check(BuildWindowsShadowFacts(page, UiaRequest("click")).facts.surface != SurfaceKind::kFileBrowser,
+               "winshadow-page-class-is-not-a-surface")) return false;
+    // No Document in the chain (an Electron app that did not expose one): still a page.
+    ShadowUiaCapture electron = UiaBase();
+    electron.window_class = "Chrome_WidgetWin_1";
+    electron.process_path = "C:\\Apps\\shop.exe";
+    ShadowUiaNode icon = UiaNode("Image", "arrow_forward");
+    icon.class_name = "material-icons mdc-button__icon";
+    electron.chain = {icon, UiaNode("Button", "Place order"), UiaNode("Pane", "Shop"), UiaNode("Window", "Shop")};
+    ShadowUiaCapture clean = electron;
+    clean.chain[0].class_name.clear();
+    const ShadowRecord with_class_name = WindowsShadowClassify(electron, UiaRequest("click"), true);
+    const ShadowRecord without = WindowsShadowClassify(clean, UiaRequest("click"), true);
+    if (!Check(with_class_name.kind == without.kind && with_class_name.effect_class == without.effect_class,
+               "winshadow-web-window-without-document-is-a-page")) return false;
+    ShadowUiaCapture button_class = electron;
+    button_class.chain[1].class_name = "Button";
+    if (!Check(BuildWindowsShadowFacts(button_class, UiaRequest("click")).facts.chain[1].subrole.empty(),
+               "winshadow-web-window-class-is-no-subrole")) return false;
+    // A UWP core window whose path is empty was not read.
+    ShadowUiaCapture uwp = UiaBase();
+    uwp.window_class = "ApplicationFrameWindow";
+    uwp.process_path = "C:\\Windows\\System32\\ApplicationFrameHost.exe";
+    uwp.core_window_process_read = true;
+    uwp.core_window_process_path = "";
+    const ShadowFacts empty_path = BuildWindowsShadowFacts(uwp, UiaRequest("invoke"));
+    if (!Check(empty_path.facts.surface == SurfaceKind::kUnknown && (empty_path.gaps & kShadowGapReadFailed) != 0,
+               "winshadow-empty-core-window-path-is-unread")) return false;
+  }
   // An unsupported action kind is a gap and never ordinary.
   {
     const ShadowFacts odd = BuildWindowsShadowFacts(UiaBase(), UiaRequest("drag"));
