@@ -43,6 +43,7 @@
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_effect_shadow.h"
+#include "computer_use_native_interlock_capture.h"
 #include "computer_use_effect_measurement.h"
 
 @interface SprintCoderCaptureOutput : NSObject <SCStreamOutput>
@@ -5785,6 +5786,43 @@ sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLan
   }
 }
 // END approval measurement capture
+
+// BEGIN sync interlock capture (classifier v2 S4-1b-1)
+// The shadow's capture, called synchronously: the same CaptureShadowTargetFacts, the same reader
+// (a cancellation check before every AX call, then one call of the budget of kShadowMaxAxCalls
+// calls and kShadowDeadlineNs), and the portable evaluation of the interlock map. A canceled or
+// out-of-budget capture, a failed read and incomplete facts are NO VERDICT (the answer carries the
+// reason); none of them is a refusal and none is an approval, so the v1 preflight decides.
+// The caller passes the rule set (as MeasureNativeApprovalOnLane does), so a rule set that trusts an
+// approval turns the "approval is closed" refusal into no verdict. Behaviour-neutral: NOTHING calls this yet. The preflight and the dispatch guard are wired
+// in S4-1b-2 (after the real-device check of #777), on the serial lane. It holds neither the state
+// lock nor the serial lane itself (its caller does), calls no N-API, and makes no write, AX action
+// or event: every call it reaches is a read of CaptureShadowTargetFacts.
+[[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateInterlockOnLane(
+    const NativeDispatchRequest& request,
+    const sprint_coder::computer_use::EffectRuleset& ruleset) noexcept {
+  using namespace sprint_coder::computer_use;
+  InterlockEvaluation unavailable;
+  unavailable.no_verdict = InterlockNoVerdict::kIncomplete;
+  try {
+    if (request.session == nullptr) return unavailable;
+    ShadowReader reader(request);
+    ShadowAxCapture capture;
+    const ShadowCfRef target = CaptureShadowTargetFacts(reader, &capture);
+    (void)target;
+    capture.budget_exhausted = reader.budget.Exhausted();
+    ShadowRequestInfo info;
+    info.kind = request.kind;
+    info.key = request.key;
+    info.maximum_mode = request.session->maximum_mode;
+    info.policy_language = request.session->policy_language;
+    info.executable_path = request.session->executable_path;
+    return EvaluateInterlockFromCapture(capture, info, reader.canceled, ruleset);
+  } catch (...) {
+    return unavailable;
+  }
+}
+// END sync interlock capture
 
 // 32 bytes from the system CSPRNG, lowercase hex. There is deliberately no fallback: a failure
 // means no ticket.

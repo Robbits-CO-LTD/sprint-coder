@@ -9,6 +9,7 @@
 #include "computer_use_windows_shadow.h"
 #include "computer_use_effect_measurement.h"
 #include "computer_use_native_interlock.h"
+#include "computer_use_native_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
@@ -5169,6 +5170,183 @@ bool CheckEffectClassifierCore() {
   return true;
 }
 
+// ---- Classifier v2, S4-1b-1: the synchronous interlock evaluation (pure; nothing calls it yet) ----
+
+bool CheckNativeInterlockCapture() {
+  using namespace sprint_coder::computer_use;
+  const auto terminal = [] {
+    ShadowRequestInfo request = ShadowRequest("invoke");
+    request.executable_path = "/System/Applications/Utilities/Terminal.app/Contents/MacOS/Terminal";
+    return request;
+  };
+  // A script in a file manager: a row in a list in a window, with a file URL.
+  const auto finder_script = [] {
+    ShadowAxCapture capture = ShadowBase();
+    capture.chain = {ShadowNode("AXRow", "run.sh"), ShadowNode("AXList"), ShadowNode("AXWindow", "Files")};
+    capture.url_present = true;
+    capture.url = "file:///Users/me/run.sh";
+    return capture;
+  };
+  const auto finder = [] {
+    ShadowRequestInfo request = ShadowRequest("invoke");
+    request.executable_path = "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder";
+    return request;
+  };
+  const auto no_verdict = [](const InterlockEvaluation &evaluation, InterlockNoVerdict why,
+                             const char *code) {
+    return Check(!evaluation.Refuses() && !evaluation.verdict.Refuses() &&
+                     evaluation.no_verdict == why && evaluation.verdict.ReasonCode().empty(),
+                 code);
+  };
+
+  // A complete capture of an ordinary target: asked, and nothing to refuse.
+  if (!no_verdict(EvaluateInterlockFromCapture(ShadowBase(), ShadowRequest(), false),
+                  InterlockNoVerdict::kNone, "capture-interlock-ordinary-is-no-refusal"))
+    return false;
+  // A complete capture of a command surface refuses, with the map's own verdict.
+  {
+    const InterlockEvaluation evaluation =
+        EvaluateInterlockFromCapture(ShadowBase(), terminal(), false);
+    if (!Check(evaluation.Refuses() && evaluation.no_verdict == InterlockNoVerdict::kNone &&
+                   evaluation.verdict.outcome == InterlockOutcome::kBlocked &&
+                   evaluation.verdict.reason == InterlockReason::kShellSurface,
+               "capture-interlock-shell-surface-refuses"))
+      return false;
+  }
+  // A complete capture of an executable opened from a file manager is an execution trigger (E1).
+  {
+    const InterlockEvaluation evaluation =
+        EvaluateInterlockFromCapture(finder_script(), finder(), false);
+    if (!Check(evaluation.Refuses() && evaluation.verdict.outcome == InterlockOutcome::kTakeover &&
+                   evaluation.verdict.reason == InterlockReason::kExecutionTrigger &&
+                   evaluation.verdict.effect_class == EffectClass::kE1ExecutableOpen,
+               "capture-interlock-file-manager-script-is-e1"))
+      return false;
+  }
+  // The result is exactly the map's: for each capture the evaluation equals the map on the same facts.
+  for (const auto &entry : std::vector<std::pair<ShadowAxCapture, ShadowRequestInfo>>{
+           {ShadowBase(), ShadowRequest()}, {ShadowBase(), terminal()}, {finder_script(), finder()}}) {
+    const ShadowFacts built = BuildShadowFacts(entry.first, entry.second);
+    const InterlockVerdict direct = InterlockForFacts(built.facts);
+    const InterlockEvaluation evaluation = EvaluateInterlockFromCapture(entry.first, entry.second, false);
+    if (!Check(evaluation.verdict.outcome == direct.outcome && evaluation.verdict.reason == direct.reason,
+               "capture-interlock-equals-the-map"))
+      return false;
+  }
+
+  // A rule set that trusts the file manager approval: the closed-approval refusal is not said.
+  {
+    ShadowAxCapture pdf = finder_script();
+    pdf.chain[0].title = "report.pdf";
+    pdf.url = "file:///Users/me/report.pdf";
+    const InterlockEvaluation closed = EvaluateInterlockFromCapture(pdf, finder(), false);
+    if (!Check(closed.Refuses() && closed.verdict.reason == InterlockReason::kApprovalClosed,
+               "capture-interlock-default-ruleset-approval-closed"))
+      return false;
+    EffectRuleset trusting;
+    trusting.file_manager_open = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(pdf, finder(), false, trusting),
+                    InterlockNoVerdict::kNone, "capture-interlock-trusting-ruleset-is-no-refusal"))
+      return false;
+  }
+
+  // Canceled: no verdict, even where the facts would refuse.
+  if (!no_verdict(EvaluateInterlockFromCapture(ShadowBase(), terminal(), true),
+                  InterlockNoVerdict::kCanceled, "capture-interlock-canceled-is-no-verdict"))
+    return false;
+  if (!no_verdict(EvaluateInterlockFromCapture(finder_script(), finder(), true),
+                  InterlockNoVerdict::kCanceled, "capture-interlock-canceled-trigger-is-no-verdict"))
+    return false;
+  // Canceled wins over a spent budget.
+  {
+    ShadowAxCapture capture = ShadowBase();
+    capture.budget_exhausted = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(capture, terminal(), true),
+                    InterlockNoVerdict::kCanceled, "capture-interlock-canceled-before-budget"))
+      return false;
+  }
+  // Budget spent: no verdict, even where the facts read so far would refuse.
+  {
+    ShadowAxCapture capture = ShadowBase();
+    capture.budget_exhausted = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(capture, terminal(), false),
+                    InterlockNoVerdict::kBudget, "capture-interlock-budget-is-no-verdict"))
+      return false;
+    ShadowAxCapture script = finder_script();
+    script.budget_exhausted = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(script, finder(), false),
+                    InterlockNoVerdict::kBudget, "capture-interlock-budget-trigger-is-no-verdict"))
+      return false;
+  }
+  // The real budget: 640 calls, the deadline and a cancellation end in no verdict through the same
+  // gate the platform readers use.
+  {
+    ShadowGate gate(0);
+    std::uint32_t admitted = 0;
+    while (gate.Step(1, true)) ++admitted;
+    ShadowAxCapture capture = finder_script();
+    capture.budget_exhausted = gate.BudgetExhausted();
+    if (!Check(admitted == kShadowMaxAxCalls && gate.BudgetExhausted(), "capture-interlock-gate-spends-640") ||
+        !no_verdict(EvaluateInterlockFromCapture(capture, finder(), gate.Canceled()),
+                    InterlockNoVerdict::kBudget, "capture-interlock-gate-budget-is-no-verdict"))
+      return false;
+    ShadowGate late(0);
+    const bool admitted_late = late.Step(kShadowDeadlineNs + 1, true);
+    capture.budget_exhausted = late.BudgetExhausted();
+    if (!Check(!admitted_late && late.BudgetExhausted(), "capture-interlock-gate-deadline") ||
+        !no_verdict(EvaluateInterlockFromCapture(capture, finder(), late.Canceled()),
+                    InterlockNoVerdict::kBudget, "capture-interlock-gate-deadline-is-no-verdict"))
+      return false;
+    ShadowGate canceled(0);
+    const bool admitted_canceled = canceled.Step(1, false);
+    if (!Check(!admitted_canceled && canceled.Canceled(), "capture-interlock-gate-cancel") ||
+        !no_verdict(EvaluateInterlockFromCapture(finder_script(), finder(), canceled.Canceled()),
+                    InterlockNoVerdict::kCanceled, "capture-interlock-gate-cancel-is-no-verdict"))
+      return false;
+  }
+
+  // Incomplete facts never map to a refusal: each gap, with a request that would refuse if complete.
+  {
+    ShadowAxCapture cut = ShadowBase();
+    cut.chain_reached_root = false;
+    if (!no_verdict(EvaluateInterlockFromCapture(cut, terminal(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-cut-chain-is-no-verdict"))
+      return false;
+    ShadowAxCapture failed = ShadowBase();
+    failed.read_failed = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(failed, terminal(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-read-failure-is-no-verdict"))
+      return false;
+    ShadowAxCapture missing = ShadowBase();
+    missing.target_found = false;
+    if (!no_verdict(EvaluateInterlockFromCapture(missing, terminal(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-missing-target-is-no-verdict"))
+      return false;
+    ShadowAxCapture oversize = ShadowBase();
+    oversize.chain[0].oversize = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(oversize, terminal(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-oversize-is-no-verdict"))
+      return false;
+    ShadowAxCapture node_failed = finder_script();
+    node_failed.chain[1].read_failed = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(node_failed, finder(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-node-read-failure-is-no-verdict"))
+      return false;
+    const ShadowAxCapture empty;
+    if (!no_verdict(EvaluateInterlockFromCapture(empty, terminal(), false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-empty-capture-is-no-verdict"))
+      return false;
+    ShadowRequestInfo unsupported = terminal();
+    unsupported.kind = "observe";
+    if (!no_verdict(EvaluateInterlockFromCapture(ShadowBase(), unsupported, false),
+                    InterlockNoVerdict::kIncomplete, "capture-interlock-unsupported-kind-is-no-verdict"))
+      return false;
+  }
+
+  std::cout << "Computer Use native interlock capture: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -5187,6 +5365,7 @@ int main() {
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
   if (!CheckNativeInterlockMap()) return 1;
+  if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
