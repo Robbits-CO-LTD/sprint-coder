@@ -574,6 +574,36 @@ describe('Computer Use native host: classifier route (C3)', () => {
     await expect(startWith(built.host, 'v2')).resolves.toBeDefined();
   });
 
+  it('binds only at the start that creates the session: a later route on an unbound session is ignored', async () => {
+    const built = build({ attested: true });
+    const first = await startWith(built.host, undefined);
+    await built.host.startSession({
+      profile,
+      windowId: 'window-1',
+      sessionId: first.sessionId,
+      taskId: 'task-1',
+      turnId: 'turn-1',
+      cancelEpoch: 0,
+      resume: true,
+      classifierRoute: 'v2',
+    });
+    for (const call of built.calls['startSession']!.mock.calls)
+      expect(call[0]).not.toHaveProperty('classifierRoute');
+    // Still unbound: a later start with another route is not refused either.
+    await expect(
+      built.host.startSession({
+        profile,
+        windowId: 'window-1',
+        sessionId: first.sessionId,
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        cancelEpoch: 0,
+        resume: true,
+        classifierRoute: 'v1',
+      }),
+    ).resolves.toBeDefined();
+  });
+
   it('keeps the route when the close is not confirmed', async () => {
     const built = build(
       { attested: true },
@@ -738,9 +768,11 @@ describe('Computer Use native host: classifier route (C3)', () => {
     await expect(startWith(built.host, 'v2')).rejects.toThrow(/native start failed/u);
   });
 
-  it('does not let a failed start drop a binding another start of the session still needs', async () => {
-    // Two starts of one new session and route are in flight; both fail. The binding goes only
-    // with the last one, so a later start with a different route is not refused by a stale binding.
+  it('leaves no binding behind when every concurrent start of a session fails', async () => {
+    // Two starts of one new session and route are in flight; both fail, so the binding goes with
+    // the last one and a later start with another route is not refused by a stale binding. What
+    // protects a binding that a racing start still needs is the test above (the one where the
+    // start that created it fails first); this one only pins that nothing is left over.
     const built = build(
       { attested: true },
       {

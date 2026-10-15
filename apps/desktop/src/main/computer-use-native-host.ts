@@ -555,7 +555,13 @@ export function createComputerUseNativeHost(
       // Bound before the first await, so two starts of one new session cannot both pass the check
       // above with different routes. The route asks; the attest decides: v2 is expected only from
       // a build that attested classifier 2.
-      if (binding === undefined && classifierRoute !== undefined) {
+      // A binding is made only by the start that creates the session: an existing session that
+      // was started without a route stays unbound (and is sent none), whatever a later start asks.
+      if (
+        binding === undefined &&
+        classifierRoute !== undefined &&
+        !sessions.has(input.sessionId)
+      ) {
         binding = {
           route: classifierRoute,
           expectedVersion:

@@ -774,7 +774,7 @@ classifier v2 は、承認経路を本番で開くための最後の前提であ
 10. **route の受け渡し（C4-0）**。C4 は 3 つに分ける（C4-0 route の受け渡しと rollback、C4-1 portable な measurement と authority digest、C4-2 mac の実測化と intent の発行・async 化）。C4-0 は挙動を変えない。
     - Main は、束縛した route の実効値（`v2` は classifier 2 を attest した build でだけ。それ以外は `v1`）を、macOS addon の `startSession` に `classifierRoute` として毎回渡す。route を束縛していないセッションと Windows には渡さない（Windows は S5 までこのキーを知らない）。
     - native は `classifierRoute` を任意で読み、無ければ `v1`、あれば `v1` / `v2` のちょうどどちらか（それ以外は INVALID_SESSION）。セッションの作成時に 1 度だけ書き（Task/Turn id と同じ位置）、以後は変えない。再 start で値が違う（無い場合は `v1` 扱い）ときは、OS を読む前に `CLASSIFIER_ROUTE_CHANGED` で拒否する。この値を読んで何かを決める箇所は、C4-2 まで無い（source 契約で縛る）。
-    - 束縛の rollback は所有者トークンで行う。start ごとにトークンを持ち、失敗した start が束縛を取り下げるのは、同じセッションの他の start が残っておらず、セッションも作られていないときだけにする（同一の新しい sessionId・同じ route の並行 start で、先に失敗した側が、後から成功する側の束縛を消してしまう競合の修正）。
+    - 束縛を作るのは、セッションを作る start だけである。route を付けずに作ったセッションに後から route 付きで start しても束縛は作らず（native にも送らない）、そのセッションは束縛なしのまま扱う。束縛の rollback は所有者トークンで行う。start ごとにトークンを持ち、失敗した start が束縛を取り下げるのは、同じセッションの他の start が残っておらず、セッションも作られていないときだけにする（同一の新しい sessionId・同じ route の並行 start で、先に失敗した側が、後から成功する側の束縛を消してしまう競合の修正）。
 
 ### S4 の実装契約（2026-09-29 の着手前レビューを反映）
 

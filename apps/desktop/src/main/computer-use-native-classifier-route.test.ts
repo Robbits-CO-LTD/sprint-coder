@@ -74,6 +74,37 @@ describe('macOS addon: the bound classifier route (C4-0)', () => {
     expect(macos).not.toContain('single_use_approval');
   });
 
+  it('touches the route in StartSession exactly three times: parsed, written, compared', () => {
+    const start = between('napi_value StartSession(', 'napi_value promise;');
+    // The parse call, the one write (two mentions) and the one comparison (two mentions).
+    expect(start.match(/classifier_route(?!_changed)/gu)).toHaveLength(5);
+    expect(start.match(/&request\.classifier_route/gu)).toHaveLength(1);
+    expect(start.match(/->classifier_route = /gu)).toHaveLength(1);
+    expect(start.match(/->classifier_route !=/gu)).toHaveLength(1);
+    // Nothing else is assigned through a pointer in StartSession, so the route cannot be made to
+    // matter by a write to another field next to it (a mode, a language).
+    const assigned = [...start.matchAll(/->(\w+) = /gu)].map((entry) => entry[1]);
+    expect(assigned.sort()).toEqual(
+      [
+        'session',
+        'creating_session',
+        'session',
+        'session_id',
+        'app_identity',
+        'executable_path',
+        'window_identity',
+        'task_id',
+        'turn_id',
+        'classifier_route',
+        'pid',
+        'window_id',
+        'expected_bounds',
+        'start_cancel_epoch',
+      ].sort(),
+    );
+    expect(start).not.toMatch(/maximum_mode|policy_language/u);
+  });
+
   it('is sent to the macOS addon only: the Windows host does not know the key', () => {
     expect(windows).not.toContain('classifierRoute');
     expect(windows).not.toContain('classifier_route');
