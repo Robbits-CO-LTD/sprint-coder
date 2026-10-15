@@ -2521,6 +2521,109 @@ bool CheckWindowsShadowCore() {
     if (!Check(empty_path.facts.surface == SurfaceKind::kUnknown && (empty_path.gaps & kShadowGapReadFailed) != 0,
                "winshadow-empty-core-window-path-is-unread")) return false;
   }
+  // BOT #784: a known download page is a known origin, so a complete capture reaches the core's
+  // download rule instead of stopping at an unknown origin.
+  {
+    for (const char *url : {"chrome://downloads/", "edge://downloads/", "brave://downloads", "about:downloads"}) {
+      ShadowUiaCapture downloads = UiaBase();
+      downloads.window_class = "Chrome_WidgetWin_1";
+      downloads.process_path = "C:\\Program Files\\Browser\\browser.exe";
+      downloads.chain = {UiaNode("Button", "Open"), UiaNode("Document", "Downloads"), UiaNode("Window", "Browser")};
+      downloads.document_url_read = true;
+      downloads.document_url = url;
+      downloads.item_kind = ShadowItemKind::kFile;
+      downloads.item_name_read = true;
+      downloads.item_name_is_real_path = true;
+      downloads.item_name = "C:\\Users\\a\\Downloads\\report.pdf";
+      const ShadowFacts facts = BuildWindowsShadowFacts(downloads, UiaRequest("click"));
+      if (!Check(facts.facts.surface == SurfaceKind::kDownloadPanel && facts.facts.origin == OriginState::kOrdinary &&
+                     (facts.gaps & kShadowGapOrigin) == 0,
+                 "winshadow-download-page-origin-is-known")) return false;
+      if (!Check(WindowsShadowClassify(downloads, UiaRequest("click"), true).effect_class == EffectClass::kE2DownloadOpen,
+                 "winshadow-download-page-reaches-e2")) return false;
+    }
+    // A page that merely looks similar is not one.
+    ShadowUiaCapture other = UiaBase();
+    other.window_class = "Chrome_WidgetWin_1";
+    other.process_path = "C:\\Program Files\\Browser\\browser.exe";
+    other.chain = {UiaNode("Button", "Open"), UiaNode("Document", "Page"), UiaNode("Window", "Browser")};
+    other.document_url_read = true;
+    other.document_url = "chrome://settings/";
+    if (!Check(BuildWindowsShadowFacts(other, UiaRequest("click")).facts.origin == OriginState::kUnknown,
+               "winshadow-other-browser-scheme-stays-unknown")) return false;
+  }
+  // BOT #784: a window class or process that was not read must leave a gap on every route to a
+  // surface, including the ones that return early (Run, the address bar, the Task Manager).
+  {
+    const auto run = [](bool class_read, bool process_read) {
+      ShadowUiaCapture capture = UiaBase();
+      capture.window_class_read = class_read;
+      capture.window_class = class_read ? "#32770" : "";
+      capture.process_path_read = process_read;
+      capture.process_path = process_read ? "C:\\Windows\\explorer.exe" : "";
+      capture.chain = {UiaNode("Edit", "Open:"), UiaNode("Window", "Run")};
+      return capture;
+    };
+    for (const auto &flags : std::vector<std::pair<bool, bool>>{{false, true}, {true, false}}) {
+      const ShadowUiaCapture capture = run(flags.first, flags.second);
+      const ShadowFacts facts = BuildWindowsShadowFacts(capture, UiaRequest("type"));
+      if (!Check((facts.gaps & kShadowGapReadFailed) != 0 && !facts.facts.metadata_complete &&
+                     WindowsShadowClassify(capture, UiaRequest("type"), true).kind != DecisionKind::kOrdinary,
+                 "winshadow-run-dialog-with-an-unread-class-or-process")) return false;
+    }
+    ShadowUiaCapture address = run(false, true);
+    address.chain = {UiaNode("Edit", "Address"), UiaNode("Pane", "Address Band Root"), UiaNode("Window", "Downloads")};
+    address.chain[1].class_name = "Address Band Root";
+    const ShadowFacts address_facts = BuildWindowsShadowFacts(address, UiaRequest("type"));
+    if (!Check(address_facts.facts.surface == SurfaceKind::kCommandPalette &&
+                   (address_facts.gaps & kShadowGapReadFailed) != 0 && !address_facts.facts.metadata_complete,
+               "winshadow-address-bar-with-an-unread-class")) return false;
+    ShadowUiaCapture task = UiaBase();
+    task.window_class_read = false;
+    task.window_class = "";
+    task.process_path = "C:\\Windows\\System32\\Taskmgr.exe";
+    task.chain = {UiaNode("Edit", "Open"), UiaNode("Window", "Create new task")};
+    const ShadowFacts task_facts = BuildWindowsShadowFacts(task, UiaRequest("type"));
+    if (!Check(task_facts.facts.surface == SurfaceKind::kCommandPalette &&
+                   (task_facts.gaps & kShadowGapReadFailed) != 0 && !task_facts.facts.metadata_complete,
+               "winshadow-task-manager-with-an-unread-class")) return false;
+    ShadowUiaCapture console = UiaBase();
+    console.window_class = "ConsoleWindowClass";
+    console.process_path_read = false;
+    console.process_path = "";
+    console.chain = {UiaNode("Edit", "Command line"), UiaNode("Window", "Console")};
+    const ShadowFacts console_facts = BuildWindowsShadowFacts(console, UiaRequest("type"));
+    if (!Check(console_facts.facts.surface == SurfaceKind::kShellLike &&
+                   (console_facts.gaps & kShadowGapReadFailed) != 0,
+               "winshadow-console-with-an-unread-process")) return false;
+  }
+  // BOT #784: a web window is a page whether or not a Document was exposed, so its origin is built
+  // the same way: a URL that was not read, or a missing near caption, is not "not applicable".
+  {
+    ShadowUiaCapture electron = UiaBase();
+    electron.window_class = "Chrome_WidgetWin_1";
+    electron.process_path = "C:\\Apps\\app.exe";
+    electron.chain = {UiaNode("Edit", "Field"), UiaNode("Pane", "App"), UiaNode("Window", "App")};
+    electron.neighbors_complete = false;
+    const ShadowFacts unread = BuildWindowsShadowFacts(electron, UiaRequest("type"));
+    if (!Check(unread.facts.origin == OriginState::kUnknown && (unread.gaps & kShadowGapOrigin) != 0 &&
+                   (unread.gaps & kShadowGapNeighborsIncomplete) != 0 &&
+                   WindowsShadowClassify(electron, UiaRequest("type"), true).kind != DecisionKind::kOrdinary,
+               "winshadow-web-window-without-document-has-an-origin")) return false;
+    electron.document_url_read = true;
+    electron.document_url = "https://example.com/";
+    if (!Check(BuildWindowsShadowFacts(electron, UiaRequest("type")).facts.origin == OriginState::kOrdinary,
+               "winshadow-web-window-origin-from-its-url")) return false;
+    ShadowUiaCapture firefox = electron;
+    firefox.window_class = "MozillaWindowClass";
+    firefox.document_url_read = false;
+    if (!Check(BuildWindowsShadowFacts(firefox, UiaRequest("type")).facts.origin == OriginState::kUnknown,
+               "winshadow-gecko-window-without-document-has-an-origin")) return false;
+    // A native window is not a page.
+    ShadowUiaCapture native = UiaBase();
+    if (!Check(BuildWindowsShadowFacts(native, UiaRequest("type")).facts.origin == OriginState::kNotApplicable,
+               "winshadow-native-window-has-no-origin")) return false;
+  }
   // An unsupported action kind is a gap and never ordinary.
   {
     const ShadowFacts odd = BuildWindowsShadowFacts(UiaBase(), UiaRequest("drag"));

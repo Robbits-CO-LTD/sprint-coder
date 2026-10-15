@@ -150,7 +150,7 @@ struct WindowSurface {
 // The surface of the window around the target. The window class and the owning process name it
 // (never the title); the class names of ancestors tighten it (a shell view is a file browser, an
 // address band is a command entry). Whatever could not be measured is unknown, never ordinary.
-[[nodiscard]] inline WindowSurface SurfaceForWindow(const ShadowUiaCapture &capture) {
+[[nodiscard]] inline WindowSurface SurfaceForWindowOnce(const ShadowUiaCapture &capture) {
   WindowSurface result;
   if (!capture.window_class_read && !capture.process_path_read) {
     result.kind = SurfaceKind::kUnknown;
@@ -255,6 +255,15 @@ struct WindowSurface {
   return result;
 }
 
+// The surface of the window, with the read gap added on EVERY route: a window class or process that
+// was not read leaves a gap whichever rule (a prompt, a console, Run, the address bar, the Task
+// Manager, a file browser) the rest of the capture happened to satisfy.
+[[nodiscard]] inline WindowSurface SurfaceForWindow(const ShadowUiaCapture &capture) {
+  WindowSurface result = SurfaceForWindowOnce(capture);
+  if (!capture.window_class_read || !capture.process_path_read) result.gaps |= kShadowGapReadFailed;
+  return result;
+}
+
 // A browser's own download list is a page: its URL says so.
 [[nodiscard]] inline bool IsDownloadPage(std::string_view url) {
   const std::string lowered = Lowercase(url);
@@ -350,6 +359,11 @@ namespace windows_shadow_detail {
     result.gaps |= kShadowGapExtensionUnknown;
   }
 
+  // A web window is a page whether or not a Document was exposed: its origin is built from its URL
+  // exactly like a Document's (a URL that was not read is an unknown origin, not "not applicable").
+  if (target_in_page && capture.target_found)
+    ApplyShadowOrigin(true, capture.document_url_read, capture.document_url, &facts, &result.gaps);
+
   // The surface. A page that is a browser's download list wins over the window around it.
   if (capture.target_found) {
     if (facts.surface == SurfaceKind::kOrdinary) {
@@ -360,8 +374,13 @@ namespace windows_shadow_detail {
       if (surface.kind == SurfaceKind::kUnknown) facts.metadata_complete = false;
     }
     if (capture.document_url_read && IsDownloadPage(capture.document_url) &&
-        facts.surface != SurfaceKind::kDevToolsConsole)
+        facts.surface != SurfaceKind::kDevToolsConsole) {
       facts.surface = SurfaceKind::kDownloadPanel;
+      // A browser's own download list is a known place, not an unknown scheme: the origin agrees
+      // with the surface, or the core would stop at the origin before it reaches the download rule.
+      facts.origin = OriginState::kOrdinary;
+      result.gaps &= ~kShadowGapOrigin;
+    }
   }
   return result;
 }

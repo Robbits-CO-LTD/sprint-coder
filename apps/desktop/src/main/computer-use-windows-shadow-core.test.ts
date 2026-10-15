@@ -161,6 +161,20 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     expect(windowsShadow).toMatch(/if \(NodeInPage\(capture, index\)\) continue;/u);
   });
 
+  it('keeps the origin, the read gap and the web window consistent with the surface (BOT #784)', () => {
+    // The read gap is added by the wrapper on every route, not at the end of the rules.
+    expect(windowsShadow).toContain('SurfaceForWindowOnce(capture)');
+    expect(windowsShadow).toMatch(
+      /WindowSurface result = SurfaceForWindowOnce(capture);s*if (!capture.window_class_read || !capture.process_path_read) result.gaps |= kShadowGapReadFailed;/u,
+    );
+    // A known download page agrees on the origin, and a web window builds its origin like a page.
+    expect(windowsShadow).toContain('facts.origin = OriginState::kOrdinary;');
+    expect(windowsShadow).toContain('result.gaps &= ~kShadowGapOrigin;');
+    expect(windowsShadow).toMatch(
+      /if (target_in_page && capture.target_found)s*ApplyShadowOrigin(true, capture.document_url_read/u,
+    );
+  });
+
   it('maps the Windows surfaces by name, not by title', () => {
     for (const name of [
       'consolewindowclass',
