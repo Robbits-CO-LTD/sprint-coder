@@ -553,7 +553,7 @@ successful built-in fixed-marker preflight and exactly three attempted/completed
 fallback or credential change. No endpoint, credential, model, or adapter fallback is allowed. Any
 extra attempt, retry, implicit fallback, or binding change keeps the three Provider Core rows
 `FAIL`. A completed artifact must set `providerBinding.adapterVersion` to the exact source adapter
-version `computer-use-v3`; the template-only `PENDING` value is rejected without
-`--allow-incomplete`. Since the adapter became v2 (#778 T15-2) and then v3 (#785 T15-6b, the `copy`
-action), evidence captured under an earlier adapter version is no longer accepted; capture it again
-from a v3 build.
+version `computer-use-v4`; the template-only `PENDING` value is rejected without
+`--allow-incomplete`. Since the adapter became v2 (#778 T15-2) then v3 (#785 T15-6b, the `copy`
+action) and v4 (#785 T15-7, `artifactRef`), evidence captured under an earlier adapter version is no longer accepted; capture it again
+from a v4 build.

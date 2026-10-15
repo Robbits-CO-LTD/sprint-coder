@@ -57,7 +57,7 @@ function fixture() {
       endpointDigest: hash(`${platform}:endpoint`),
       catalogDigest: hash(`${platform}:catalog`),
       policyEpoch: 2,
-      adapterVersion: 'computer-use-v3',
+      adapterVersion: 'computer-use-v4',
       sessionIdDigest,
       selectedFromCurrentTask: true,
       bindingStable: true,

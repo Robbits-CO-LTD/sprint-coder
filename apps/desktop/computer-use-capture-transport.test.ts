@@ -286,7 +286,7 @@ describe('Computer Use normal capture framing', () => {
     // schema field this stream cannot observe stays out entirely.
     expect(summary.binding).toEqual({
       ...bindingIdentity,
-      adapterVersion: 'computer-use-v3',
+      adapterVersion: 'computer-use-v4',
       sessionIdDigest: 'd'.repeat(64),
       selectedFromCurrentTask: true,
       bindingStable: true,

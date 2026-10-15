@@ -1,15 +1,17 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import {
   computerUseActionKindSchema,
-  type ComputerUseAction,
+  type ComputerUsePlannedAction,
   type ComputerUseActionKind,
 } from '@sprint-coder/contracts';
 
-export function computerUseActionKind(action: ComputerUseAction): ComputerUseActionKind {
+export function computerUseActionKind(action: ComputerUsePlannedAction): ComputerUseActionKind {
   return computerUseActionKindSchema.parse(action.type);
 }
 
-export function computerUseActionRoute(action: ComputerUseAction): 'semantic' | 'visual' | 'none' {
+export function computerUseActionRoute(
+  action: ComputerUsePlannedAction,
+): 'semantic' | 'visual' | 'none' {
   if (action.type === 'wait' || action.type === 'finish') return 'none';
   if (
     action.type === 'copy' ||
@@ -54,7 +56,7 @@ export function computerUseKeyedDigest(
     .digest('hex');
 }
 
-export function computerUseActionDigest(action: ComputerUseAction): string {
+export function computerUseActionDigest(action: ComputerUsePlannedAction): string {
   return computerUseKeyedDigest('action', stableStringify(action));
 }
 

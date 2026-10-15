@@ -1156,7 +1156,7 @@ function selfTest() {
         ...fixture,
         providerBinding: { ...fixture.providerBinding, adapterVersion: 'PENDING' },
       }),
-    /adapterVersion must be computer-use-v3/u,
+    /adapterVersion must be computer-use-v4/u,
   );
   assert.throws(
     () =>

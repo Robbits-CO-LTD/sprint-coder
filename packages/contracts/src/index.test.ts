@@ -2522,6 +2522,31 @@ describe('Computer Use contracts', () => {
       expect(() => contracts.computerUseActionSchema.parse(bad)).toThrow();
   });
 
+  it('knows a paste of an artifact only as a planned action, never as an executable one (#785 T15-7)', () => {
+    for (const planned of [
+      { type: 'type', artifactRef: 'artifact-1' },
+      { type: 'set_text', targetId: 'node-1', artifactRef: 'artifact-1' },
+    ]) {
+      expect(contracts.computerUsePlannedActionSchema.parse(planned)).toEqual(planned);
+      expect(contracts.computerUseArtifactActionSchema.parse(planned)).toEqual(planned);
+      // What is executed has its text; a reference is not an action that can be sent.
+      expect(() => contracts.computerUseActionSchema.parse(planned)).toThrow();
+    }
+    for (const bad of [
+      { type: 'type', text: 'x', artifactRef: 'artifact-1' },
+      { type: 'type', artifactRef: '' },
+      { type: 'type', artifactRef: 'x'.repeat(129) },
+      { type: 'set_text', artifactRef: 'artifact-1' },
+      { type: 'key', artifactRef: 'artifact-1' },
+    ])
+      expect(() => contracts.computerUsePlannedActionSchema.parse(bad)).toThrow();
+    // An executable action is still planned as before.
+    expect(contracts.computerUsePlannedActionSchema.parse({ type: 'type', text: 'x' })).toEqual({
+      type: 'type',
+      text: 'x',
+    });
+  });
+
   it('rejects injected control and Apple function-key characters in type actions', () => {
     for (const text of [
       '\0',

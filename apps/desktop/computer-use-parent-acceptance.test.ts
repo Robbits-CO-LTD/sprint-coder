@@ -64,7 +64,7 @@ function syntheticEvidence(): Evidence {
     endpointDigest: '1'.repeat(64),
     catalogDigest: '2'.repeat(64),
     sessionIdDigest: '3'.repeat(64),
-    adapterVersion: 'computer-use-v3',
+    adapterVersion: 'computer-use-v4',
     selectedFromCurrentTask: true,
     bindingStable: true,
     preflightAttempts: 1,

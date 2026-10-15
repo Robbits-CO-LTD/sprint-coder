@@ -19,6 +19,7 @@ import {
 } from '@sprint-coder/contracts';
 import { appGrantActivationIntent } from '../computer-use-activation-intent';
 import type { ComputerAppProfileRecord } from './persistence';
+import { ComputerUseArtifactStore } from './computer-use-artifact';
 import {
   ComputerUseController,
   COMPUTER_USE_DENY_RULESET_VERSION,
@@ -255,6 +256,8 @@ function createFixture(
     revalidate?: () => Promise<void>;
     /** Runs every time an action audit row is recorded. */
     onAuditRecord?: () => void;
+    /** A fake native that can read one node, and the store a copy goes to (#785 T15-6b). */
+    artifactRead?: { store: ComputerUseArtifactStore };
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -305,10 +308,20 @@ function createFixture(
         Date.now(),
         session.appIdentityDigest,
       );
+      const withNode =
+        options.artifactRead === undefined
+          ? observed
+          : { ...observed, targetSignatures: { 'node-1': 'a'.repeat(64) } };
       return options.focusedSecure === true
-        ? { ...observed, focusedElementSecure: true }
-        : observed;
+        ? { ...withNode, focusedElementSecure: true }
+        : withNode;
     },
+    ...(options.artifactRead === undefined
+      ? {}
+      : {
+          artifactReadSupported: () => true,
+          readNodeValue: async () => ({ ok: true as const, text: 'Total 42' }),
+        }),
     dispatch: async () => ({ result: 'completed', reasonCode: null }),
     cancel: async () => undefined,
     close: async () => {
@@ -374,6 +387,7 @@ function createFixture(
     native,
     featureEnabled: () => true,
     agentDrivenEnabled: () => options.agentDrivenEnabled !== false,
+    ...(options.artifactRead === undefined ? {} : { artifactStore: options.artifactRead.store }),
     ...(options.effectiveEligibilityMode === undefined
       ? {}
       : { effectiveEligibilityMode: options.effectiveEligibilityMode }),
@@ -2097,6 +2111,43 @@ describe('computer_start', () => {
     // No session was created at all: the abort was seen before native was asked to focus anything.
     expect(fixture.startedSessions()).toBe(0);
     expect(fixture.statuses).toEqual([]);
+  });
+
+  it('keeps nothing from a copy when the Task was closed while the start was still re-fetching (#785 T15-6b)', async () => {
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const store = new ComputerUseArtifactStore({ now: () => performance.now() });
+    const created: unknown[] = [];
+    const create = store.create.bind(store);
+    store.create = (owner, raw) => {
+      created.push(owner);
+      return create(owner, raw);
+    };
+    const fixture = createFixture({
+      artifactRead: { store },
+      // The first enumeration builds the target list; the one inside `startForAgent` is held.
+      listWindowsGate: (call) => (call === 1 ? undefined : held),
+      plan: async (round) =>
+        round === 1 ? { type: 'copy', targetId: 'node-1' } : { type: 'finish' },
+    });
+    const target = await grantAndList(fixture);
+    const running = fixture.controller
+      .startForAgent({ targetToken: target.targetToken, goal: 'x' }, context)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.listWindowCalls()).toBeGreaterThan(1);
+    // The Task is closed while the start waits for the second enumeration.
+    fixture.controller.taskClosed('task-1');
+    release();
+    await settle(running);
+    // Whether the start went on or was refused because its token went with the Task, nothing was
+    // kept for the closed Task.
+    expect(created).toEqual([]);
   });
 
   it('cancels native start-up and the provider preflight when the Turn is canceled', async () => {

@@ -293,6 +293,32 @@ describe('ComputerUseArtifactStore (§4.2)', () => {
     expect(artifacts.take([other.artifactId], { ...binding, taskId: 'task-2' })).toEqual(['g']);
   });
 
+  it('peek reads without using up, and refuses what take refuses', () => {
+    const { artifacts } = store();
+    const created = artifacts.create({ ...binding, sourceSessionId: 'session-a' }, 'Total 42')!;
+    expect(artifacts.peek([created.artifactId], binding)).toEqual(['Total 42']);
+    expect(artifacts.peek([created.artifactId], binding)).toEqual(['Total 42']);
+    for (const other of [
+      { ...binding, taskId: 'task-2' },
+      { ...binding, turnId: 'turn-2' },
+      { ...binding, policyEpoch: 4 },
+    ])
+      expect(artifacts.peek([created.artifactId], other)).toBeNull();
+    expect(artifacts.peek(['unknown'], binding)).toBeNull();
+    expect(artifacts.peek([], binding)).toBeNull();
+    expect(artifacts.peek([created.artifactId, created.artifactId], binding)).toBeNull();
+    // Only take uses it up.
+    expect(artifacts.take([created.artifactId], binding)).toEqual(['Total 42']);
+    expect(artifacts.peek([created.artifactId], binding)).toBeNull();
+  });
+
+  it('peek stops at the TTL like take', () => {
+    const { artifacts, advance } = store();
+    const created = artifacts.create({ ...binding, sourceSessionId: 'session-a' }, 'x')!;
+    advance(COMPUTER_USE_ARTIFACT_LIMITS.ttlMs);
+    expect(artifacts.peek([created.artifactId], binding)).toBeNull();
+  });
+
   it('N10: is gone when its Task ends', () => {
     const { artifacts } = store();
     const created = artifacts.create({ ...binding, sourceSessionId: 'session-a' }, 'x')!;

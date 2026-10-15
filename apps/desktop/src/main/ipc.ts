@@ -2059,6 +2059,7 @@ export class IpcRouter {
         return new ProviderComputerUsePlanner({
           ...plannerBaseDeps,
           artifactReadSupported: this.computerUseNative.artifactReadSupported?.() === true,
+          artifactPasteSupported: this.computerUseNative.artifactPasteSupported?.() === true,
           compatibilityPermit: permit,
           currentCompatibilityBinding: async (currentSignal) => {
             const persisted = this.persistence.getProviderConnection(connectionId);

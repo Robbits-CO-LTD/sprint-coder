@@ -229,6 +229,29 @@ export class ComputerUseArtifactStore {
     artifactIds: readonly string[],
     binding: ComputerUseArtifactBinding,
   ): readonly string[] | null {
+    const found = this.lookup(artifactIds, binding);
+    if (found === null) return null;
+    for (const artifactId of artifactIds) this.artifacts.delete(artifactId);
+    return found.map((artifact) => artifact.text);
+  }
+
+  /**
+   * Whether every id names a live artifact of this exact binding, and what each holds, without
+   * using any of them up. Main-internal: a paste needs the text to bind its card and its audit to
+   * the action it will really send, but only `take` ends an artifact, so a denied card loses
+   * nothing. Same refusal as `take` for any id that is not the caller's.
+   */
+  peek(
+    artifactIds: readonly string[],
+    binding: ComputerUseArtifactBinding,
+  ): readonly string[] | null {
+    return this.lookup(artifactIds, binding)?.map((artifact) => artifact.text) ?? null;
+  }
+
+  private lookup(
+    artifactIds: readonly string[],
+    binding: ComputerUseArtifactBinding,
+  ): readonly StoredArtifact[] | null {
     this.dropExpired();
     if (artifactIds.length === 0 || new Set(artifactIds).size !== artifactIds.length) return null;
     const found: StoredArtifact[] = [];
@@ -243,8 +266,7 @@ export class ComputerUseArtifactStore {
         return null;
       found.push(artifact);
     }
-    for (const artifactId of artifactIds) this.artifacts.delete(artifactId);
-    return found.map((artifact) => artifact.text);
+    return found;
   }
 
   /** The Task ended: everything it held goes with it. */

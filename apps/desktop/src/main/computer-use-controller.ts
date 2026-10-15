@@ -44,6 +44,8 @@ import {
   type SelectableComputerTarget,
   type ComputerAppProfile,
   type ComputerUseAction,
+  type ComputerUseArtifactAction,
+  type ComputerUsePlannedAction,
   type ComputerUseActionResult,
   type ComputerUseApproval,
   type ComputerUseAvailability,
@@ -115,6 +117,7 @@ import {
   computerUseActionRoute,
 } from './computer-use-action';
 import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
+import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
   ComputerUseArtifactStore,
   type ComputerUseArtifactReference,
@@ -323,6 +326,12 @@ export interface ComputerUseNativeHost {
    * planner is not offered `copy` and the controller refuses it.
    */
   artifactReadSupported?(): boolean;
+  /**
+   * #785 T15-7: whether the host can type or set a pasted artifact. Absent means false. Only a fake
+   * reports true until the native read and its attest exist; while false, the planner is not
+   * offered `artifactRef` and a session cannot paste one.
+   */
+  artifactPasteSupported?(): boolean;
   /**
    * Reads the value of the one node `targetId` names, under the signature the last observation
    * gave it. Every way of not reading (secure, high-impact, a sensitive surface, a browser, a role
@@ -648,6 +657,13 @@ type SessionRecord = {
    */
   readonly artifactGeneration: number;
 };
+/** A paste in flight: the action as the planner wrote it, and the artifact it names. */
+type ArtifactPasteCall = Readonly<{
+  display: ComputerUseArtifactAction;
+  artifactIds: readonly string[];
+}>;
+const ARTIFACT_PASTE_REFUSED = 'artifact_paste_refused';
+const ARTIFACT_PASTE_MAX_ATTACHED = 3;
 type PlanGrant = {
   maxRounds: number;
   actionType: ComputerUseAction['type'];
@@ -806,6 +822,20 @@ export class ComputerUseController {
     { taskId: string; references: ComputerUseArtifactReference[] }
   >();
   private readonly artifacts: ComputerUseArtifactStore;
+  /**
+   * What a session may paste (#785 T15-7): references only, attached by `attachArtifacts`. The only
+   * caller outside tests is the `carry` input of T15-8; until then nothing attaches in production.
+   */
+  private readonly attachedArtifacts = new Map<
+    string,
+    { taskId: string; references: ComputerUseArtifactReference[] }
+  >();
+  /**
+   * Calls whose action came from an `artifactRef`, by `sessionId\0callId`. Present only for the
+   * duration of the call. It is what makes the card compulsory: nothing else tells the authorizer
+   * that the text was not written by the planner.
+   */
+  private readonly artifactPasteCalls = new Map<string, ArtifactPasteCall>();
   /**
    * A counter per Task, moved when the Task is closed or its policy epoch changes. A session notes
    * the value when it begins, and `copy` stores only while the Task is still at that value: once
@@ -3268,6 +3298,7 @@ export class ComputerUseController {
     this.emit(record.status);
     this.sessions.delete(sessionId);
     this.copiedArtifacts.delete(sessionId);
+    this.attachedArtifacts.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
     this.pauseReasons.delete(sessionId);
   }
@@ -3561,10 +3592,25 @@ export class ComputerUseController {
     return this.copiedArtifacts.get(sessionId)?.references ?? [];
   }
 
+  /**
+   * Lets a session paste these artifacts (#785 T15-7): at most three, and only references. The
+   * references are checked again, against the store, every time one is used; attaching vouches for
+   * nothing. T15-8 calls this from `computer_start { carry }`.
+   */
+  attachArtifacts(sessionId: string, references: readonly ComputerUseArtifactReference[]): void {
+    const record = this.requireSession(sessionId);
+    this.attachedArtifacts.set(sessionId, {
+      taskId: record.status.taskId,
+      references: references.slice(0, ARTIFACT_PASTE_MAX_ATTACHED),
+    });
+  }
+
   private forgetCopiedArtifactReferences(taskId: string): void {
     this.artifactGenerations.set(taskId, (this.artifactGenerations.get(taskId) ?? 0) + 1);
     for (const [sessionId, kept] of this.copiedArtifacts)
       if (kept.taskId === taskId) this.copiedArtifacts.delete(sessionId);
+    for (const [sessionId, kept] of this.attachedArtifacts)
+      if (kept.taskId === taskId) this.attachedArtifacts.delete(sessionId);
   }
 
   policyEpochChanged(taskId: string): void {
@@ -3665,15 +3711,20 @@ export class ComputerUseController {
       const plannerObservation: ComputerUsePlannerObservation = observation;
       record.plannerExecutionId = `computer:${sessionId}:${observation.revision}:${round}`;
       const question = record.agent?.question ?? null;
-      const action = await record.planner.plan({
+      const attachedForPlanner = (this.attachedArtifacts.get(sessionId)?.references ?? []).map(
+        ({ artifactId, sizeClass }) => ({ artifactId, sizeClass }),
+      );
+      const planned = await record.planner.plan({
         observation: plannerObservation,
         round,
         signal: record.controller.signal,
         ...(question === null ? {} : { question }),
+        ...(attachedForPlanner.length === 0 ? {} : { artifacts: attachedForPlanner }),
       });
       this.assertSessionLive(record);
       if (!this.observationIsFresh(record)) continue;
-      if (action.type === 'finish') {
+      if (planned.type === 'finish') {
+        const action = planned;
         // Kept aside, not published: only `startForAgent` decides whether it may leave (T15-2).
         const question = record.agent?.question ?? null;
         const candidate = question === null ? null : closedAnswerFromFinish(question, action);
@@ -3686,12 +3737,12 @@ export class ComputerUseController {
       }
       if (
         record.status.mode === 'observe_only' &&
-        action.type !== 'wait' &&
-        action.type !== 'copy'
+        planned.type !== 'wait' &&
+        planned.type !== 'copy'
       ) {
         this.completeNonNativeAction(
           record,
-          action,
+          planned,
           `${sessionId}:action:${round}`,
           'rejected',
           'observe_only',
@@ -3700,16 +3751,40 @@ export class ComputerUseController {
         this.emit(record.status);
         return;
       }
+      // A paste: the artifact's text is put in here, and from then on the action is an ordinary
+      // type or set_text that every later check sees as such. The card is compulsory (see
+      // authorizeTool); the artifact is used up only just before the native is asked.
+      let action: ComputerUseAction;
+      let paste: ArtifactPasteCall | null = null;
+      if ('artifactRef' in planned) {
+        const prepared = this.prepareArtifactPaste(record, planned);
+        if (prepared === null) {
+          this.completeNonNativeAction(
+            record,
+            planned,
+            `${sessionId}:action:${round}`,
+            'rejected',
+            ARTIFACT_PASTE_REFUSED,
+          );
+          continue;
+        }
+        action = prepared.action;
+        paste = prepared.call;
+      } else action = planned;
       if (this.actionMayNeedApproval(record, action)) {
         record.status = this.status(record, 'awaiting_approval', null, observation.revision, round);
         this.emit(record.status);
       }
+      const pasteKey = `${sessionId}\0${sessionId}:action:${round}`;
+      if (paste !== null) this.artifactPasteCalls.set(pasteKey, paste);
       let result: ComputerUseActionResult;
       try {
         result = await this.act(sessionId, action, `${sessionId}:action:${round}`);
       } catch (error) {
         if (record.status.state === 'paused' || record.controller.signal.aborted) return;
         throw error;
+      } finally {
+        this.artifactPasteCalls.delete(pasteKey);
       }
       if (action.type === 'wait') await waitBounded(action.milliseconds, record.controller.signal);
       if (record.status.state === 'paused') return;
@@ -3764,6 +3839,7 @@ export class ComputerUseController {
       return { decision: 'allow', reason: 'computer_non_input_action' };
     if (capability === 'computer.control' && record.status.mode === 'observe_only')
       return { decision: 'deny', reason: 'computer_observe_only' };
+    const paste = this.artifactPasteCalls.get(`${sessionId}\0${request.callId}`);
     const result = this.deps.authorize?.({
       capability,
       context: request.context,
@@ -3777,6 +3853,17 @@ export class ComputerUseController {
     });
     if (result !== undefined) {
       let authorized = await result;
+      // A paste is shown to a person every time: the Task's permission may still say no, but no
+      // permission, grant or mode says yes in the person's place (§4.4, N21).
+      if (paste !== undefined && action?.success && authorized.decision !== 'deny') {
+        if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
+          return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
+        // Whatever the Task's authorizer wanted checked again just before the input stays.
+        const recheck = authorized.beforeExecute;
+        authorized = await this.awaitApproval(record, request.callId, action.data, paste);
+        if (authorized.decision === 'allow' && recheck !== undefined)
+          authorized = { ...authorized, beforeExecute: recheck };
+      }
       if (authorized.decision === 'approval_required' && action?.success) {
         if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
           return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
@@ -3828,6 +3915,11 @@ export class ComputerUseController {
       return authorized;
     }
     if (capability === 'computer.observe') return { decision: 'allow', reason: 'computer_observe' };
+    if (action?.success && paste !== undefined) {
+      if (this.preDispatchBoundary(action.data, record.observation, record.status.sessionId))
+        return this.userTakeover(record, 'computer_hard_boundary_user_takeover');
+      return this.awaitApproval(record, request.callId, action.data, paste);
+    }
     if (action?.success && this.safeSessionAction(record, action.data, request.callId))
       return { decision: 'allow', reason: 'computer_session_grant' };
     if (
@@ -3843,6 +3935,7 @@ export class ComputerUseController {
     record: SessionRecord,
     callId: string,
     action: ComputerUseAction,
+    paste?: ArtifactPasteCall,
   ): Promise<ToolAuthorizationDecision> {
     const approvalId = randomUUID();
     // One reading of the clock: a card's lifetime must not depend on how often the clock advances.
@@ -3853,6 +3946,7 @@ export class ComputerUseController {
     const targetMetadata =
       targetId === null ? undefined : record.observation?.targetMetadata?.[targetId];
     const eligibleForPlan =
+      paste === undefined &&
       isPlanEligibleComputerUseAction(action.type) &&
       targetId !== null &&
       targetSignature !== undefined &&
@@ -3863,7 +3957,8 @@ export class ComputerUseController {
       targetMetadata.highImpact !== true &&
       !this.isHardBoundary(action, record.observation);
     const challenge = `${randomUUID()}${randomUUID()}`;
-    const preview = safeActionPreview(action);
+    // A paste shows the planner's own words (the artifact id), not the value: the excerpt is T15-9.
+    const preview = safeActionPreview(paste === undefined ? action : paste.display);
     const approval = computerUseApprovalSchema.parse({
       id: approvalId,
       sessionId: record.status.sessionId,
@@ -4118,6 +4213,17 @@ export class ComputerUseController {
       this.emit(record.status);
       return actionResultFromAudit(completed, sessionId, requestId);
     }
+    const pasteCall = this.artifactPasteCalls.get(`${sessionId}\0${requestId}`);
+    if (pasteCall !== undefined && !this.takePastedArtifact(record, action, pasteCall)) {
+      this.planGrantAuthorizedCalls.delete(`${sessionId}\0${requestId}`);
+      const refused = this.deps.persistence.completeComputerActionAudit({
+        auditId: audit.id,
+        state: 'rejected',
+        reasonCode: ARTIFACT_PASTE_REFUSED,
+        updatedAt: new Date(this.now()).toISOString(),
+      });
+      return actionResultFromAudit(refused, sessionId, requestId);
+    }
     let nativeResult: ComputerUseNativeActionResult;
     try {
       nativeResult = await this.dispatchNativeAction(
@@ -4347,6 +4453,8 @@ export class ComputerUseController {
     snapshot: NativeApprovalSnapshot,
     approvalId: string,
     remainingMs: number,
+    /** What a paste shows instead of its text: the planner's own words, with the artifact id. */
+    display?: ComputerUseArtifactAction,
   ): Promise<NativeApprovalOutcome> {
     const lifetimeMs = Math.min(remainingMs, NATIVE_APPROVAL_CARD_MAX_MS);
     // One reading of the clock, so expiresAt - createdAt is exactly the lifetime.
@@ -4360,7 +4468,7 @@ export class ComputerUseController {
       actionType: action.type,
       actionDigest: computerUseActionDigest(action),
       targetLabel: actionTargetLabel(action),
-      preview: safeActionPreview(action),
+      preview: safeActionPreview(display ?? action),
       risk: 'high',
       policyEpoch: snapshot.policyEpoch,
       observationRevision: record.observation?.revision ?? record.status.observationRevision,
@@ -4547,6 +4655,7 @@ export class ComputerUseController {
       snapshot,
       approvalId,
       offer.remainingMs,
+      this.artifactPasteCalls.get(`${sessionId}\0${requestId}`)?.display,
     );
     if (decision !== 'approved') return refuse(decision);
 
@@ -4673,6 +4782,61 @@ export class ComputerUseController {
   }
 
   /**
+   * The checks a paste passes before a card is raised (#785 T15-7). Null for any failure, and the
+   * caller says one thing whichever it was: the host cannot paste, the artifact is not one this
+   * session was given, the Task ended since the session began, the destination is a browser (R14),
+   * the artifact is not the Task / Turn / epoch's own, or the text does not pass the schema of a
+   * written `type` / `set_text`. The artifact is read, not used up: a denied card loses nothing.
+   */
+  private prepareArtifactPaste(
+    record: SessionRecord,
+    planned: ComputerUseArtifactAction,
+  ): Readonly<{ action: ComputerUseAction; call: ArtifactPasteCall }> | null {
+    if (this.deps.native.artifactPasteSupported?.() !== true) return null;
+    const attached = this.attachedArtifacts.get(record.status.sessionId)?.references ?? [];
+    if (!attached.some((reference) => reference.artifactId === planned.artifactRef)) return null;
+    if (this.artifactGenerationMoved(record)) return null;
+    if (isComputerUseBrowserApplication(record.profile)) return null;
+    const texts = this.artifacts.peek([planned.artifactRef], this.artifactBinding(record));
+    if (texts === null || texts.length !== 1) return null;
+    const written =
+      planned.type === 'type'
+        ? { type: 'type', text: texts[0] }
+        : { type: 'set_text', targetId: planned.targetId, text: texts[0] };
+    const checked = computerUseActionSchema.safeParse(written);
+    if (!checked.success) return null;
+    return {
+      action: checked.data,
+      call: { display: planned, artifactIds: [planned.artifactRef] },
+    };
+  }
+
+  /** Uses the artifact up, once, just before the native is asked; false if it can no longer be used. */
+  private takePastedArtifact(
+    record: SessionRecord,
+    action: ComputerUseAction,
+    paste: ArtifactPasteCall,
+  ): boolean {
+    if (this.artifactGenerationMoved(record)) return false;
+    if (action.type !== 'type' && action.type !== 'set_text') return false;
+    const texts = this.artifacts.take(paste.artifactIds, this.artifactBinding(record));
+    // What is sent is exactly what the card was about: same text as when it was shown.
+    return texts !== null && texts.length === 1 && texts[0] === action.text;
+  }
+
+  private artifactBinding(record: SessionRecord) {
+    return {
+      taskId: record.status.taskId,
+      turnId: record.turnId,
+      policyEpoch: record.status.policyEpoch,
+    } as const;
+  }
+
+  private artifactGenerationMoved(record: SessionRecord): boolean {
+    return (this.artifactGenerations.get(record.status.taskId) ?? 0) !== record.artifactGeneration;
+  }
+
+  /**
    * `copy` (#785 T15-6b): reads one node's value into an artifact. Not input, so it needs no
    * approval and observe-only sessions may use it; it reads only when the native says it can. Every
    * way it can fail is the same rejection, so neither the planner nor the outer agent learns
@@ -4734,7 +4898,7 @@ export class ComputerUseController {
 
   private completeNonNativeAction(
     record: SessionRecord,
-    action: ComputerUseAction,
+    action: ComputerUsePlannedAction,
     requestId: string,
     result: ComputerUseActionResult['result'],
     reasonCode: string | null,
@@ -5737,7 +5901,7 @@ function actionTargetLabel(action: ComputerUseAction): string {
   return action.type;
 }
 
-function safeActionPreview(action: ComputerUseAction): string {
+function safeActionPreview(action: ComputerUsePlannedAction): string {
   const value = action as unknown as Record<string, unknown>;
   const redacted = Object.fromEntries(
     Object.entries(value).map(([key, nested]) => {

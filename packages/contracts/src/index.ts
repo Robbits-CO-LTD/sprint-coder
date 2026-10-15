@@ -6402,6 +6402,35 @@ const computerUseActionUnionSchema = z.discriminatedUnion('type', [
 export const computerUseActionSchema = computerUseActionUnionSchema;
 export type ComputerUseAction = z.infer<typeof computerUseActionSchema>;
 
+/**
+ * #785 T15-7: what a planner may write instead of `text` — the id of an artifact Main holds. It is
+ * never executed as it stands: Main swaps in the artifact's text and validates the result with
+ * `computerUseActionSchema`, so every rule of a typed or set text (the control and function-key
+ * refusal of `type`, the byte bound) applies to the pasted value as it does to a written one.
+ */
+const computerArtifactIdSchema = z.string().min(1).max(128);
+const computerTypeArtifactActionSchema = z
+  .object({ type: z.literal('type'), artifactRef: computerArtifactIdSchema })
+  .strict();
+const computerSetTextArtifactActionSchema = z
+  .object({
+    type: z.literal('set_text'),
+    targetId: semanticTargetSchema,
+    artifactRef: computerArtifactIdSchema,
+  })
+  .strict();
+export const computerUseArtifactActionSchema = z.union([
+  computerTypeArtifactActionSchema,
+  computerSetTextArtifactActionSchema,
+]);
+export type ComputerUseArtifactAction = z.infer<typeof computerUseArtifactActionSchema>;
+/** What a planner may answer: an executable action, or a paste of an artifact. */
+export const computerUsePlannedActionSchema = z.union([
+  computerUseActionSchema,
+  computerUseArtifactActionSchema,
+]);
+export type ComputerUsePlannedAction = z.infer<typeof computerUsePlannedActionSchema>;
+
 export const computerUseActionResultSchema = z
   .object({
     actionId: computerUseIdSchema,
