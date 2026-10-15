@@ -445,10 +445,17 @@ describe('Windows native helper compile boundary', () => {
       windows.indexOf('bool ContainsBoundedWindowsRiskTerm('),
       windows.indexOf('WindowsUiaRisk ClassifyWindowsUiaElementSelf('),
     );
-    const macosRisk = macos.slice(
-      macos.indexOf('AxRiskClassification ClassifyAccessibilityElementNode('),
-      macos.indexOf('constexpr std::size_t kMaxAccessibilityRiskParentDepth'),
+    // The macOS vocabulary lives in the portable table (C4-2c-1): one source for the addon and the harness.
+    const macosRisk = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_native_approved_risk.h'),
+      'utf8',
     );
+    expect(
+      macos.slice(
+        macos.indexOf('AxRiskClassification ClassifyAccessibilityElementNode('),
+        macos.indexOf('constexpr std::size_t kMaxAccessibilityRiskParentDepth'),
+      ),
+    ).toContain('ClassifyHighImpactText(normalized)');
 
     for (const term of [
       '"pay"',
@@ -470,7 +477,7 @@ describe('Windows native helper compile boundary', () => {
       expect(macosRisk).toContain(term);
     }
     expect(windowsRisk).toContain('ContainsBoundedWindowsRiskTerm(text, term)');
-    expect(macosRisk).toContain('ContainsAnyBoundedAsciiTerm');
+    expect(macosRisk).toContain('AnyBounded(lowercase_text, kConfirmationBounded)');
   });
 
   it('fails closed when the macOS AX risk parent chain exceeds its bound', () => {
@@ -954,11 +961,23 @@ describe('macOS native capture boundary', () => {
       'kAXHelpAttribute',
     ])
       expect(nodeClassifier).toContain(attribute);
-    expect(source).toContain('ContainsAnyBoundedAsciiTerm');
-    expect(source).toContain(
-      '"integrated terminal", "terminal", "terminal.app", "console", "shell"',
+    expect(nodeClassifier).toContain('ClassifyHighImpactText(normalized)');
+    const riskTable = readFileSync(
+      join(__dirname, '../../computer-use-native/computer_use_native_approved_risk.h'),
+      'utf8',
     );
-    expect(source).toContain('"powershell", "powershell.exe", "command prompt", "cmd.exe"');
+    for (const term of [
+      '"integrated terminal"',
+      '"terminal"',
+      '"terminal.app"',
+      '"console"',
+      '"shell"',
+      '"powershell"',
+      '"powershell.exe"',
+      '"command prompt"',
+      '"cmd.exe"',
+    ])
+      expect(riskTable).toContain(term);
     expect(nodeClassifier).not.toContain('kAXValueAttribute');
   });
 

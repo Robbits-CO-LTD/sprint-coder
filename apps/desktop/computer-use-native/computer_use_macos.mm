@@ -42,6 +42,7 @@
 #include "computer_use_native_eligibility.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
+#include "computer_use_native_approved_risk.h"
 #include "computer_use_effect_shadow.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_effect_measurement.h"
@@ -188,7 +189,12 @@ std::shared_ptr<MacComputerUseSession> FindCancelableMacSession(
 struct AxRiskClassification {
   bool classified = false;
   bool secure = false;
+  // v1's single bit: high_impact_confirmation || high_impact_other.
   bool high_impact = false;
+  // The two sides of it (computer_use_native_approved_risk.h): confirmation words, and everything
+  // else v1 calls high impact. Only the judgement of an approved effect reads them separately.
+  bool high_impact_confirmation = false;
+  bool high_impact_other = false;
 };
 
 enum class AxFocusedWindowBoundary {
@@ -3678,35 +3684,8 @@ bool ContainsAny(std::string_view haystack, const std::vector<std::string_view>&
   return false;
 }
 
-bool IsAsciiTermContinuation(unsigned char character) {
-  return (character >= 'a' && character <= 'z') ||
-         (character >= '0' && character <= '9');
-}
-
-bool ContainsBoundedAsciiTerm(std::string_view haystack,
-                              std::string_view needle) {
-  for (std::size_t position = haystack.find(needle);
-       position != std::string_view::npos;
-       position = haystack.find(needle, position + 1)) {
-    const bool bounded_before =
-        position == 0 || !IsAsciiTermContinuation(static_cast<unsigned char>(
-                             haystack[position - 1]));
-    const std::size_t end = position + needle.size();
-    const bool bounded_after =
-        end == haystack.size() ||
-        !IsAsciiTermContinuation(static_cast<unsigned char>(haystack[end]));
-    if (bounded_before && bounded_after)
-      return true;
-  }
-  return false;
-}
-
-bool ContainsAnyBoundedAsciiTerm(std::string_view haystack,
-                                 const std::vector<std::string_view>& needles) {
-  for (const auto needle : needles)
-    if (ContainsBoundedAsciiTerm(haystack, needle)) return true;
-  return false;
-}
+// The bounded-term matching of the high-impact vocabulary lives in
+// computer_use_native_approved_risk.h (one source for the addon and the harness).
 
 bool IsDialogAccessibilityDescriptor(std::string_view role, std::string_view subrole) {
   const std::string normalized = LowercaseAscii(std::string(role) + "\n" + std::string(subrole));
@@ -4070,29 +4049,13 @@ AxRiskClassification ClassifyAccessibilityElementNode(AXUIElementRef element) {
   // Versioned v1 policy intentionally excludes ordinary save/send/publish/delete labels. Those
   // are normal full-access app operations unless the target independently carries a protected
   // payment/contract/installer/admin/security meaning.
-  classification.high_impact = ContainsAny(
-      normalized,
-      {"payment", "checkout", "purchase", "billing", "credit card", "card number", "wire transfer",
-       "contract", "agreement", "sign agreement", "installer", "install application",
-       "administrator", "admin privileges", "sudo", "root access", "security settings",
-       "privacy settings", "firewall", "accessibility permission", "screen recording permission",
-       "決済", "支払い", "支払う", "購入", "注文を確定", "注文する", "請求", "送金", "契約", "署名",
-       "インストール", "管理者", "セキュリティ", "プライバシー", "ファイアウォール"});
-  classification.high_impact =
-      classification.high_impact ||
-      ContainsAnyBoundedAsciiTerm(
-          normalized,
-          {"pay", "pay now", "place order", "submit order", "complete order", "buy now",
-           "pagar", "comprar", "acheter", "bestellen", "bezahlen", "pagare",
-           "acquistare", "betalen", "kopen"}) ||
-      ContainsAnyBoundedAsciiTerm(
-          normalized,
-          {"integrated terminal", "terminal", "terminal.app", "console", "shell",
-           "powershell", "powershell.exe", "command prompt", "cmd.exe", "run script",
-           "shell script", "script console"}) ||
-      ContainsAny(normalized,
-                  {"ターミナル", "コンソール", "シェル", "コマンドプロンプト",
-                   "スクリプトを実行"});
+  // The words are in computer_use_native_approved_risk.h, split into confirmation words and the
+  // rest; their union is the v1 vocabulary (the harness proves it).
+  const sprint_coder::computer_use::HighImpactTextBits high_impact_bits =
+      sprint_coder::computer_use::ClassifyHighImpactText(normalized);
+  classification.high_impact_confirmation = high_impact_bits.confirmation;
+  classification.high_impact_other = high_impact_bits.other;
+  classification.high_impact = high_impact_bits.confirmation || high_impact_bits.other;
   (void)kHighImpactPolicyVersion;
   return classification;
 }
@@ -4114,6 +4077,10 @@ AxRiskClassification ClassifyAccessibilityElement(AXUIElementRef element) {
     classification.secure = classification.secure || current_classification.secure;
     classification.high_impact =
         classification.high_impact || current_classification.high_impact;
+    classification.high_impact_confirmation =
+        classification.high_impact_confirmation || current_classification.high_impact_confirmation;
+    classification.high_impact_other =
+        classification.high_impact_other || current_classification.high_impact_other;
     AXUIElementRef parent = CopyAccessibilityElementAttribute(current, kAXParentAttribute);
     CFRelease(current);
     current = parent;
@@ -4344,6 +4311,11 @@ struct NativeTicketKeyInput {
 
 struct NativeDispatchRequest {
   std::shared_ptr<MacComputerUseSession> session;
+  // The effect a person approved for THIS dispatch. kInvalid for every ordinary preflight and
+  // dispatch; it relaxes only the confirmation words of RiskOutcome and nothing else. Nothing sets
+  // it yet: the one place that will is the approved dispatch, after the execution ticket is consumed.
+  sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+      sprint_coder::computer_use::NativeApprovalEffect::kInvalid;
   std::string request_id;
   std::string session_id;
   std::string action_digest;
@@ -4664,10 +4636,14 @@ napi_value DispatchResultValue(napi_env env, const NativeDispatchRequest& reques
   return result;
 }
 
-bool RiskOutcome(const AxRiskClassification& risk, NativeDispatchOutcome* outcome) {
+bool RiskOutcome(const AxRiskClassification& risk, NativeDispatchOutcome* outcome,
+                 sprint_coder::computer_use::NativeApprovalEffect approved_effect =
+                     sprint_coder::computer_use::NativeApprovalEffect::kInvalid) {
   using namespace sprint_coder::computer_use;
-  const auto decision = ClassifyNativePreflightFacts(
-      {true, risk.classified, risk.secure, risk.high_impact});
+  const auto decision = ClassifyNativeRisk(
+      {risk.classified, risk.secure, risk.high_impact, risk.high_impact_confirmation,
+       risk.high_impact_other},
+      approved_effect);
   if (NativePreflightAllowsDispatch(decision)) return false;
   switch (decision.reason) {
     case NativePreflightReason::kSecure:
