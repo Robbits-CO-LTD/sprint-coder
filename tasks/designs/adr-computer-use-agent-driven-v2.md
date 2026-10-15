@@ -649,7 +649,7 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 - **理由コード `native_execution_trigger_blocked` は 2 通りの組で使われる**: E1 / E4 は takeover / paused、E2 / E3（承認が閉じている間）は blocked / rejected。受領書の閉じた表には組として登録される。ADR の `approval_not_enabled`（§9 の N2b 系の記述）との関係は、**S4-1a で決める**（同じコードに畳むか、E2 / E3 に別のコードを与えるか）。
 - **コアの `MayOpen` は、Finder での単純なクリックや矢印キーも「開く操作」に数える**（実機で各入力経路の効果が分かるまでの保守側の扱い、S4 契約 5）。E1 / E3 の対象になる範囲が広いことを前提に、S4-3 の受入で見直す。一方、**Mail の添付のように ordinary な面で `.command` を開く操作は、S4-1 では「判定なし」になる**（リスト面でないため）。これも S4-3 の受入で見直す。
 - **面の語がウィンドウタイトルにあると rejected になる**: チェーンの面の語（`terminal` など）は blocked / rejected で、v1 の `native_high_impact_user_takeover`（paused）が rejected に変わる。**S4-1b の前に、C2 の shadow の内訳（`V2IsStricter`）で、TextEdit と VS Code の通常 journey で起きないことを確かめる**。
-- インストーラのコントロール（ラベルの語で活性化）は、拡張子が付いていても拒否の対象のままである（拡張子の有無で結果が変わらない）。ファイルツリーの項目（`install.sh` のような名前の `target_is_file_item`）は、コントロールではなくファイルとして拡張子の規則で判定する。
+- インストーラの扱い: **コントロールか項目かは role で決め、ファイルが付いているかでは決めない**（実際の facts では、ボタンでも AXURL や AXFilename を持てば項目になり、`target_is_file_item` が真になるため）。ボタン・リンク・メニュー項目・チェックボックスなどのコントロール（対象から最も近い操作可能な祖先まで。ボタンの中のラベルを含む）を、インストーラの語で活性化した場合は、拡張子の有無・ファイルが付いているかにかかわらず、どの面でも拒否する（takeover）。行・セル・アウトラインの項目・テキスト・リスト項目は、`install.sh` のような名前でもファイルとして扱い、拡張子の規則で判定する（アプリの中では拒否しない）。Windows の ControlType（`Button` / `MenuItem` / `ListItem` など）も、小文字にして同じ語で区別する。
 
 **S6 の前提（2026-10-14）**: UWP / `ApplicationFrameHost` の identity と束縛（UIA によるコンテンツ HWND の解決、package family name と publisher の検証、native identity digest への束縛、package に限るパス比較の免除、プロセス入れ替わりの検出）は、設計を ADR に追記して敵対的レビューを受けるまで実装しない。レビューが出るまでは、`ApplicationFrameHost` 配下は従来どおり拒否する。Windows 11 の既定 Notepad のような packaged app が `ApplicationFrameHost` 配下か、packaged Win32 かは、プロセスツリーとウィンドウクラスの実測で確かめてから S6 の必要性を判断する。
 

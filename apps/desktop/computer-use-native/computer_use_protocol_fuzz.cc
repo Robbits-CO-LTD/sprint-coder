@@ -3553,6 +3553,62 @@ bool CheckNativeInterlockMap() {
     odd.extension_known = true;
     odd.extension = "s h";
     if (!trigger_takeover(odd, "interlock-install-button-with-an-odd-extension")) return false;
+    // The shape facts really have: a button that also carries a file (an AXURL / AXFilename makes
+    // it an item) is still a control, and is judged as one.
+    for (const char *extension : {"pkg", "sh", "exe"}) {
+      EffectFacts facts = EffBase();
+      facts.action = ActionKind::kClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-button-that-is-also-an-item")) return false;
+    }
+    {
+      // The label inside the button is inside the control.
+      EffectFacts facts = EffBase();
+      facts.action = ActionKind::kClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = "pkg";
+      facts.chain = {{"axstatictext", "", "Install"}, {"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-label-inside-a-button")) return false;
+    }
+    // A row, a cell or a text that is named like an installer is a file in a list, judged by its
+    // extension and, inside an application, not refused: with or without an extension known.
+    for (const char *role : {"axrow", "axcell", "axstatictext", "axoutline", "listitem"}) {
+      for (const bool known : {true, false}) {
+        EffectFacts facts = EffBase();
+        facts.action = ActionKind::kInvoke;
+        facts.target_is_file_item = known;
+        facts.extension_known = known;
+        facts.extension = known ? "sh" : "";
+        facts.chain = {{role, "", "install.sh"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+        if (!none(facts, "interlock-installer-named-item-in-an-app-is-not-refused")) return false;
+      }
+    }
+    {
+      // The same on Windows, from the UIA facts the helper builds: a Button is a control, a ListItem
+      // is a file.
+      const auto windows = [](const char *control_type, const char *name) {
+        ShadowUiaCapture capture = UiaBase();
+        capture.window_class = "SomeAppClass";
+        capture.process_path = "C:\\Apps\\app.exe";
+        capture.chain = {UiaNode(control_type, name), UiaNode("Window", "App")};
+        capture.item_kind = ShadowItemKind::kFile;
+        capture.item_name_read = true;
+        capture.item_name_is_real_path = true;
+        capture.item_name = "C:\\Apps\\setup.pkg";
+        return capture;
+      };
+      const ShadowUiaCapture button = windows("Button", "Install");
+      if (!trigger_takeover(BuildWindowsShadowFacts(button, UiaRequest("click")).facts,
+                            "interlock-windows-install-button-that-is-also-an-item")) return false;
+      ShadowUiaCapture list_item = windows("ListItem", "install.sh");
+      list_item.item_name = "C:\\Apps\\install.sh";
+      if (!none(BuildWindowsShadowFacts(list_item, UiaRequest("invoke")).facts,
+                "interlock-windows-installer-named-list-item")) return false;
+    }
     // The installer rule is the core's: the control must be activated, and its words must be readable.
     EffectFacts typed = EffBase();
     typed.action = ActionKind::kKey;
@@ -3574,7 +3630,7 @@ bool CheckNativeInterlockMap() {
     toggle.target_is_file_item = true;
     toggle.extension_known = true;
     toggle.extension = "sh";
-    toggle.chain = {{"axcheckbox", "", "install.sh"}, {"axwindow", "", "Editor"}};
+    toggle.chain = {{"axrow", "", "install.sh"}, {"axwindow", "", "Editor"}};
     if (!none(toggle, "interlock-toggle-in-an-app-is-not-a-launch")) return false;
     // The core's extension rule without an extension behind it is not an extension verdict: a claimed
     // E1 on an ordinary surface with no known extension has no editor excuse.

@@ -67,9 +67,14 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     );
     // ...except an installer control, which is a trigger wherever it is, extension or not.
     expect(squashed).toContain(
-      'return !facts.target_is_file_item && IsActivating(facts) && TextIsClassifiable(facts) && ActionableContains(facts, kInstallerTerms);',
+      'return ControlInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) && ActionableContains(facts, kInstallerTerms);',
     );
     // The approval that is closed refuses; the secure and credential classes are not this map's.
+    // A control is told from an item by its role, never by whether a file is attached to it.
+    expect(squashed).toContain(
+      'if (!RefusedByExtension(facts) && !ControlInSpan(facts)) return {};',
+    );
+    expect(header).not.toContain('target_is_file_item');
     expect(squashed).toContain('if (decision.reason == DecisionReason::kApprovalNotEnabled)');
     expect(header).not.toContain('EffectClass::kSecure:');
     expect(header).not.toContain('EffectClass::kCredential:');

@@ -104,13 +104,34 @@ namespace interlock_detail {
          IsPlainExtension(extension) && InSet(extension, kExecutableExtensions);
 }
 
+// Whether the control the action lands on is a control (a button, a link, a menu item, a check box:
+// something that is pressed) rather than an item of a list or a text (a row, a cell, an outline item,
+// a list item, static text: something that is named). The control is the target up to the nearest
+// actionable ancestor, the same range the core reads its words from, so the label inside a button
+// is inside the control. This is decided by the ROLE, not by whether a file is attached: a button can
+// carry an AXURL or a file name and is still a button, and a file's row is still a row. The macOS
+// roles (AXButton, AXMenuItem, ...) and the Windows control types (Button, MenuItem, ...) both
+// contain these words once lowercased.
+[[nodiscard]] inline bool ControlInSpan(const EffectFacts &facts) {
+  using namespace effect_detail;
+  static constexpr std::string_view kControls[] = {
+      "button",   "link",       "menuitem", "checkbox",  "radiobutton", "switch",
+      "popupbutton", "menubutton", "hyperlink", "tabitem", "splitbutton", "toggle"};
+  const std::size_t span = ActionableSpan(facts);
+  for (std::size_t index = 0; index < span && index < facts.chain.size(); ++index) {
+    const std::string role = NormalizeForMatch(facts.chain[index].role) + " " +
+                             NormalizeForMatch(facts.chain[index].subrole);
+    for (const std::string_view name : kControls)
+      if (role.find(name) != std::string::npos) return true;
+  }
+  return false;
+}
+
 // An installer control activated: the core's label rule (E4), independent of any extension that
-// happens to be known for the item.
+// happens to be known for the item the control carries.
 [[nodiscard]] inline bool InstallerControlActivated(const EffectFacts &facts) {
   using namespace effect_detail;
-  // An item of a list that is named like an installer ("install.sh" in a file tree) is a file, not
-  // a control: the extension rule judges it.
-  return !facts.target_is_file_item && IsActivating(facts) && TextIsClassifiable(facts) &&
+  return ControlInSpan(facts) && IsActivating(facts) && TextIsClassifiable(facts) &&
          ActionableContains(facts, kInstallerTerms);
 }
 
@@ -139,6 +160,10 @@ namespace interlock_detail {
       if (RefusedByExtension(facts) && !IsListedSurface(facts.surface) &&
           !InstallerControlActivated(facts))
         return {};
+      // Refused for the words of the control, not for an extension: only a control has those words
+      // in the sense that matters. A row or a text named like an installer ("install.sh" in a file
+      // tree) is a file, judged by its extension.
+      if (!RefusedByExtension(facts) && !ControlInSpan(facts)) return {};
       return Refusal(InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger,
                      decision.effect_class);
     case EffectClass::kE2DownloadOpen:
