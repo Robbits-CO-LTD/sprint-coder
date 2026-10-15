@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3';
+import { secureLogger } from './secure-logger';
 import { graphMissionConstraintUpdate } from '@sprint-coder/domain';
 import { graphMissionRecordSchema } from './graph-mission-record';
 import {
@@ -4638,7 +4639,12 @@ const migrations = [
     // are replaced with random ones of the same shape: the row, its kind, state and every other
     // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
     // The pre-migration backup taken on the same start still holds the old values; runMigrations
-    // scrubs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
+    // scrubs and VACUUMs it too once this migration has applied (scrubPreMigrationBackupAuditDigests).
+    // Known limit: the live database is not VACUUMed here, so some old digest bytes can stay in
+    // its free pages until SQLite reuses them. A VACUUM rewrites the whole database — Task history
+    // and image blobs included, about 8 ms per MB measured, with up to twice the file size in
+    // temporary disk — inside every first start after the upgrade, which is not a cost to impose
+    // on start-up for a residue only a same-user reader of the file can reach (ADR, #786).
     sql: COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL,
   },
 ];
@@ -6758,6 +6764,44 @@ export const __persistenceRecoveryTestables = {
 const UUID_FILE_COMPONENT = '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}';
 
 /**
+ * #786: copies `sourcePath`, replaces every Computer Use action digest in the copy, VACUUMs it so
+ * no freed page still holds an old digest, checks it, and installs it as the migration backup.
+ */
+function installScrubbedMigrationBackup(sourcePath: string, backupPath: string): void {
+  const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
+  let snapshot: Database.Database | null = null;
+  const closeSnapshot = (): void => {
+    const handle = snapshot;
+    snapshot = null;
+    handle?.close();
+  };
+  try {
+    copyFileSync(sourcePath, temporaryPath);
+    snapshot = new Database(temporaryPath, { fileMustExist: true });
+    const hasAudits =
+      snapshot
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+        .get('computer_action_audits') !== undefined;
+    if (hasAudits) snapshot.exec(COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL);
+    snapshot.pragma('wal_checkpoint(TRUNCATE)');
+    snapshot.exec('VACUUM');
+    snapshot.pragma('wal_checkpoint(TRUNCATE)');
+    const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
+    const first = rows[0];
+    const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
+    if (verdict !== 'ok') throw new Error('Scrubbed migration backup failed integrity check');
+    closeSnapshot();
+    installMigrationBackup(temporaryPath, backupPath);
+  } finally {
+    try {
+      closeSnapshot();
+    } finally {
+      removeValidationSnapshotFiles(temporaryPath);
+    }
+  }
+}
+
+/**
  * Installs a validated snapshot as the migration backup. The previous backup stays recoverable
  * until the new one is in place, including on Windows where a rename cannot replace an existing
  * destination atomically.
@@ -7292,47 +7336,42 @@ export class SqlitePersistenceClient implements PersistenceClient {
   /**
    * #786: the backup taken just before v101 is a byte copy of the database v101 exists to clean,
    * so it would keep every guessable digest next to the scrubbed database. Apply the same scrub to
-   * a copy of the backup and install that copy in its place. Only the digest column changes; the
-   * backup still restores every other fact, and a database restored from it has no v101 record,
-   * so v101 runs again. If the copy cannot be scrubbed, the backup is retaken from the migrated
-   * database instead: still a valid restore point, and one without the old digests.
+   * a copy of the backup, VACUUM the copy, and install it in its place. VACUUM matters: an UPDATE
+   * leaves the old bytes in pages SQLite no longer uses (measured: some survive even with
+   * secure_delete), and only rewriting the file drops them. The copy is private to this method, so
+   * rewriting it costs nothing but time proportional to the backup. Only the digest column changes;
+   * the backup still restores every other fact, and a database restored from it has no v101
+   * record, so v101 runs again.
+   *
+   * If the backup cannot be scrubbed, the backup is retaken from the migrated database, the same
+   * way (copied, scrubbed, VACUUMed). If that fails too, the old backup stays and the failure is
+   * logged: a backup that still holds old digests is not a reason to refuse to start.
    */
   private scrubPreMigrationBackupAuditDigests(databasePath: string): void {
     const backupPath = `${databasePath}.pre-migration.bak`;
     if (!existsSync(backupPath)) return;
-    const temporaryPath = `${backupPath}.tmp-${randomUUID()}`;
-    let snapshot: Database.Database | null = null;
-    const closeSnapshot = (): void => {
-      const handle = snapshot;
-      snapshot = null;
-      handle?.close();
-    };
     try {
-      copyFileSync(backupPath, temporaryPath);
-      snapshot = new Database(temporaryPath, { fileMustExist: true });
-      const hasAudits =
-        snapshot
-          .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
-          .get('computer_action_audits') !== undefined;
-      if (hasAudits) snapshot.exec(COMPUTER_USE_AUDIT_DIGEST_SCRUB_SQL);
-      snapshot.pragma('wal_checkpoint(TRUNCATE)');
-      const rows = snapshot.pragma('quick_check') as { quick_check?: string }[] | string[];
-      const first = rows[0];
-      const verdict = typeof first === 'string' ? first : (first?.quick_check ?? '');
-      if (verdict !== 'ok') throw new Error('Scrubbed migration backup failed integrity check');
-      closeSnapshot();
-      installMigrationBackup(temporaryPath, backupPath);
-    } catch {
-      closeSnapshot();
-      removeValidationSnapshotFiles(temporaryPath);
-      this.createPreMigrationBackup(databasePath);
+      installScrubbedMigrationBackup(backupPath, backupPath);
       return;
-    } finally {
-      try {
-        closeSnapshot();
-      } finally {
-        removeValidationSnapshotFiles(temporaryPath);
-      }
+    } catch {
+      // Fall through to retaking the backup from the migrated database.
+    }
+    try {
+      const checkpoint = this.db.pragma('wal_checkpoint(TRUNCATE)') as {
+        busy?: number;
+        log?: number;
+        checkpointed?: number;
+      }[];
+      const result = checkpoint[0];
+      if (result === undefined || result.busy !== 0 || result.log !== result.checkpointed)
+        throw new Error('Could not checkpoint database before retaking the migration backup');
+      installScrubbedMigrationBackup(databasePath, backupPath);
+    } catch (error) {
+      secureLogger.warn(
+        'Pre-migration backup could not be scrubbed of old Computer Use action digests',
+        error,
+        { category: 'system', event: 'computer_use_backup_scrub_failed' },
+      );
     }
   }
 

@@ -12076,6 +12076,38 @@ if (runsWithElectronAbi)
       return { fixture, task, base };
     }
 
+    it('leaves no byte of an old digest anywhere in the scrubbed migration backup (#786)', () => {
+      const { fixture, base } = seed();
+      // Enough rows that an UPDATE alone leaves some old values in freed pages (measured: 39 of
+      // 300 survive without VACUUM, even with secure_delete).
+      const old = Array.from({ length: 300 }, (_, index) =>
+        createHash('sha256').update(`typed-before-786-${index}`).digest('hex'),
+      );
+      for (const [index, actionDigest] of old.entries())
+        fixture.persistence.recordComputerActionAudit({
+          ...base,
+          nativeRequestId: bindingDigest(`bulk-${index}`),
+          actionKind: 'type',
+          actionDigest,
+        });
+      fixture.persistence.close();
+      const raw = new Database(fixture.path);
+      raw.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      raw.close();
+      new SqlitePersistenceClient(fixture.path).close();
+      const backup = readFileSync(`${fixture.path}.pre-migration.bak`).toString('latin1');
+      expect(old.filter((digest) => backup.includes(digest))).toEqual([]);
+      // Still a whole backup: every row is in it.
+      const restored = new Database(`${fixture.path}.pre-migration.bak`, { readonly: true });
+      try {
+        expect(restored.prepare('SELECT count(*) AS n FROM computer_action_audits').get()).toEqual({
+          n: 300,
+        });
+      } finally {
+        restored.close();
+      }
+    });
+
     it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
       const { fixture, base } = seed();
       // What the pre-#786 code wrote for a typed six-digit code: guessable in at most 10^6 tries.
