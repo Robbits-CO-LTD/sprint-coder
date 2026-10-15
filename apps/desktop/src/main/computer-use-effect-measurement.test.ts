@@ -42,7 +42,7 @@ describe('Computer Use approval measurement (classifier v2, C4-1)', () => {
     const macos = read('computer_use_macos.mm');
     expect(macos).toContain('#include "computer_use_effect_measurement.h"');
     expect(macos.match(/\bMeasureApproval\(/gu)).toHaveLength(1);
-    expect(macos.match(/\bMeasureNativeApprovalOnLane\(/gu)).toHaveLength(1);
+    expect(macos.match(/\bMeasureNativeApprovalOnLane\(/gu)).toHaveLength(2);
     expect(harness).toContain('#include "computer_use_effect_measurement.h"');
     expect(harness).toContain('Computer Use native effect measurement: PASS');
   });

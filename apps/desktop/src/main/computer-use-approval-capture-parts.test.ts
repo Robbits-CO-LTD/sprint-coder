@@ -88,20 +88,25 @@ const ALLOWED_CALLS = new Set([
 ]);
 
 describe('Computer Use approval measurement capture (classifier v2, C4-2a)', () => {
-  it('is defined and called by nobody yet', () => {
-    expect(macos.match(/MeasureNativeApprovalOnLane\(/gu)).toHaveLength(1);
+  it('is called by one function only: the addon measurement, which gates on route v2', () => {
+    expect(macos.match(/MeasureNativeApprovalOnLane\(/gu)).toHaveLength(2);
     for (const name of [
       'ReadApprovalTargetFrame',
       'ReadApprovalAuthorityIdentity',
       'ReadShadowGeometry',
     ])
       expect(macos.match(new RegExp(`\\b${name}\\(`, 'gu'))!.length, name).toBeLessThanOrEqual(3);
-    // The addon's own measurement is still the empty one: nothing is approvable.
-    const empty =
+    // The addon's own measurement: a session on v1 measures nothing approvable; a v2 session is
+    // measured on the lane with the version's own rule set and what the build attests (classifier 1
+    // until the version is raised, so nothing is eligible in a production build).
+    const measure =
       /MeasureNativeApproval\(const NativeDispatchRequest& request\) \{[\s\S]*?\n\}/u.exec(macos);
-    expect(empty).not.toBeNull();
-    expect(empty![0]).toContain('(void)request;');
-    expect(empty![0]).toContain('return {};');
+    expect(measure).not.toBeNull();
+    expect(measure![0]).toContain('request.session->classifier_route != "v2") return {};');
+    expect(measure![0]).toContain('MeasureNativeApprovalOnLane(request,');
+    expect(measure![0]).toContain('sprint_coder::computer_use::ClassifierRoute::kV2');
+    expect(measure![0]).toContain('sprint_coder::computer_use::EffectRuleset{}');
+    expect(measure![0]).toContain('sprint_coder::computer_use::kNativePreflightClassifierVersion');
     expect(macos).not.toContain('single_use_approval');
   });
 
@@ -118,7 +123,7 @@ describe('Computer Use approval measurement capture (classifier v2, C4-2a)', () 
     expect(text).not.toMatch(
       /\bkAX\w*Action\b|CFSTR\s*\(|SetAttributeValue|PerformAction|PostKeyboardEvent|CGEvent|NSEvent|NSWorkspace|activateWithOptions|input_api_attempts|dispatch_async|dispatch_sync/u,
     );
-    expect(text.replaceAll('[&]', '').replaceAll('[[maybe_unused]]', '')).not.toMatch(/[[\]]/u);
+    expect(text.replaceAll('[&]', '')).not.toMatch(/[[\]]/u);
   });
 
   it('passes the AX value kinds as AXValueType: the constants are not that type in C++', () => {

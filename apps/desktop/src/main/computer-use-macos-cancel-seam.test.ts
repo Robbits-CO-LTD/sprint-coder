@@ -115,10 +115,25 @@ ${functionSource('void CacheDispatchOutcome(', 'napi_value DispatchResultValue('
 ${reservationEffects}
 ${functionSource(
   'bool ParseNativeDispatchRequest(',
-  // The approval calls (N2b-4) sit between Preflight and Cancel and are not part of this seam.
+  // The real measurement (it reads the accessibility tree) is not part of this seam; the seam
+  // supplies an inert one that also checks the lane is held and no state lock is.
   '// What native measures *now* for an approval.',
 ).replaceAll('@autoreleasepool {', '{')}
-${reservationDriver}`,
+${functionSource(
+  'sprint_coder::computer_use::NativeApprovalFacts NativeApprovalFactsLocked(',
+  '// The `approvalApprove` receipt: a fixed set of nine keys.',
+)}
+${functionSource(
+  '// approvalApprove: revalidates, then exchanges',
+  '// approvalDiscard: ends the approval of exactly this generation',
+).replaceAll('@autoreleasepool {', '{')}
+${functionSource(
+  '// Reservation of an approved dispatch.',
+  'napi_value Cancel(napi_env env, napi_callback_info info) {',
+).replaceAll('@autoreleasepool {', '{')}
+${reservationDriver
+  .replace('int main() {', `${approvalSeamCases}\nint main() {`)
+  .replace('  std::cout << "{', '  ApprovalSeam();\n  std::cout << "{')}`,
         );
         execFileSync(
           'clang++',
@@ -525,6 +540,8 @@ const reservationPreamble = String.raw`
 #include <vector>
 #include "computer_use_native_binding.h"
 #include "computer_use_native_ticket.h"
+#include "computer_use_native_approval_flow.h"
+#include "computer_use_sha256.h"
 #include "computer_use_preflight_classifier.h"
 struct CGRect { struct { double x, y; } origin; struct { double width, height; } size; };
 struct MacDispatchReplayEntry {
@@ -542,6 +559,9 @@ struct MacComputerUseSession {
   std::atomic<std::uint64_t> input_api_attempts{0};
   sprint_coder::computer_use::NativeOrdinaryTicketSlot ordinary_ticket;
   std::uint64_t preflight_owner = 0;
+  std::string classifier_route = "v1";
+  sprint_coder::computer_use::NativeApprovalFlow approval;
+  std::uint64_t approval_busy_generation = 0;
   std::mutex state_mutex;
   bool has_observation = true;
   std::uint64_t observation_revision = 7, dialog_set_revision = 4;
@@ -569,7 +589,10 @@ std::shared_ptr<MacComputerUseSession> FindMacSession(const std::string& id) {
 // Digest measurement is inert here: replay cases test production comparison/cache ownership, not
 // SHA-256 authenticity. The identity stub keeps every distinct canonical input distinct, so the
 // production IsLowerHexDigest check must never be applied to these internal digests.
-std::string StringDigest(const std::string& value) { return value; }
+bool hexDigests = false;  // the approval cases need real 64-hex digests; the others never do
+std::string StringDigest(const std::string& value) {
+  return hexDigests ? sprint_coder::computer_use::Sha256Hex(value) : value;
+}
 std::string AccessibilityTargetLookupDigest(const std::string& value) { return value; }
 struct FakeValue {
   std::unordered_map<std::string, std::string> strings;
@@ -690,16 +713,327 @@ NativePreflightReceipt PerformNativePreflight(const NativeDispatchRequest&) {
 napi_value PreflightReceiptValue(napi_env, const NativeDispatchRequest&, const NativePreflightReceipt& receipt) {
   lastReceipt = receipt; return &resultValue;
 }
+// The measurement of an approval reads the accessibility tree: here it is inert, and it checks what
+// the production worker promises, that the serial lane is held and no state lock is.
+unsigned measureCalls = 0, approvalReceipts = 0;
+bool measureThrows = false;
+sprint_coder::computer_use::NativeApprovalMeasurement measurement;
+struct ApproveRecord { bool ok = false; std::string reason, denied; };
+ApproveRecord lastApprove;
+void RequireSerialLaneHeld() {
+  std::atomic<bool> held{false};
+  std::thread contender([&] {
+    if (mac_dispatch_serial_mutex.try_lock()) mac_dispatch_serial_mutex.unlock(); else held.store(true);
+  });
+  contender.join();
+  if (!held.load()) throw std::runtime_error("measure_without_the_serial_lane");
+}
+sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApproval(const NativeDispatchRequest&) {
+  ++measureCalls;
+  RequireStateUnlocked();
+  RequireSerialLaneHeld();
+  if (measureThrows) throw std::runtime_error("inert_measure_failure");
+  return measurement;
+}
+napi_value ApprovalApproveReceiptValue(napi_env, const NativeDispatchRequest&, std::uint64_t, bool ok,
+                                       const std::string& reason, const std::string& denied) {
+  RequireStateUnlocked();
+  ++approvalReceipts;
+  lastApprove = ApproveRecord{ok, reason, denied};
+  return &resultValue;
+}
 NativeDispatchOutcome lastOutcome;
 napi_value DispatchResultValue(napi_env, const NativeDispatchRequest&, const NativeDispatchOutcome& outcome) {
   lastOutcome = outcome; return &resultValue;
 }
 NativeDispatchOutcome PerformNativeDispatch(const NativeDispatchRequest& request) {
+  RequireStateUnlocked();  // the input entry never runs under the state lock
   if (failEffect) throw std::runtime_error("inert_worker_failure");
   if (!DispatchCancellationStillValid(request))
     return MakeDispatchOutcome("canceled", "native_canceled_pre_dispatch");
   ++effects;
   return MakeDispatchOutcome("completed", "", true, true);
+}
+`;
+
+const approvalSeamCases = String.raw`
+// ---- C4-2b: approvalApprove and dispatchApproved as asynchronous work (production bodies) ----
+using sprint_coder::computer_use::NativeApprovalIntentBinding;
+using sprint_coder::computer_use::NativeApprovalMeasurement;
+using sprint_coder::computer_use::NativeApprovalEffect;
+void ApprovalReset() {
+  Reset();
+  hexDigests = true;
+  measureCalls = 0;
+  measurement = NativeApprovalMeasurement{};
+  measureThrows = false;
+  approvalReceipts = 0;
+  lastApprove = ApproveRecord{};
+  lastOutcome = NativeDispatchOutcome{};
+  current->classifier_route = "v2";
+  current->ticket_generation.store(3);
+  input.strings["requestId"] = "fresh";
+  input.numbers["approvalGeneration"] = 9;
+}
+NativeApprovalMeasurement GoodMeasurement() {
+  NativeApprovalMeasurement good;
+  good.eligible = true;
+  good.effect = NativeApprovalEffect::kHighImpactConfirmation;
+  good.authority_digest = std::string(64, 'c');
+  good.classifier_version = 2;
+  good.ruleset_version = 2;
+  good.lexicon_version = 2;
+  return good;
+}
+// An intent the production facts of this input will match: the digests are the ones the production
+// parser computes for it.
+bool OfferIntent(const NativeApprovalMeasurement& good, std::uint64_t generation = 9) {
+  NativeDispatchRequest probe;
+  {
+    std::unique_lock<std::mutex> lock;
+    std::string error, message;
+    if (!ParseNativeDispatchRequest(&input, &input, &probe, lock, &error, &message)) return false;
+  }
+  NativeApprovalIntentBinding binding;
+  binding.session_id = "seam";
+  binding.task_id = "task";
+  binding.turn_id = "turn";
+  binding.approval_request_id = "original";
+  binding.action_digest = probe.action_digest;
+  binding.payload_digest = probe.payload_digest;
+  binding.authority_digest = good.authority_digest;
+  binding.cancel_epoch = 0;
+  binding.approval_generation = generation;
+  binding.observation_revision = 6;
+  binding.ticket_generation = 2;
+  binding.classifier_version = good.classifier_version;
+  binding.ruleset_version = good.ruleset_version;
+  binding.lexicon_version = good.lexicon_version;
+  binding.effect = good.effect;
+  return current->approval.Offer(std::string(64, 'e'), binding, fakeNowNs,
+                                 sprint_coder::computer_use::kNativeApprovalWaitMaxNs);
+}
+std::string ThrownBy(napi_value (*call)(napi_env, napi_callback_info)) {
+  try { call(&input, nullptr); } catch (const std::runtime_error& failure) { return failure.what(); }
+  return std::string();
+}
+// An approval that is waiting, then approved through the production worker.
+bool ApproveThroughWorker(const NativeApprovalMeasurement& good) {
+  if (!OfferIntent(good)) return false;
+  measurement = good;
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  return lastApprove.ok && current->approval.ready();
+}
+void ApprovalSeam() {
+  // 1. Nothing waiting: refused at once, nothing measured, nothing queued, nothing burned.
+  ApprovalReset();
+  ApprovalApprove(&input, nullptr);
+  Check(queue.empty() && promises == 0 && measureCalls == 0 && approvalReceipts == 1 && !lastApprove.ok &&
+    lastApprove.reason == "native_approval_unavailable" && current->approval_busy_generation == 0,
+    "approve_without_intent_is_refused_at_once");
+  // 2. A waiting intent: queued, marked busy, measured on the worker only, then approved.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer");
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 1 && promises == 1 && measureCalls == 0 && current->approval.pending() &&
+    current->approval_busy_generation == 9 && approvalReceipts == 0, "approve_queues_without_measuring");
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 1 && promises == 1 && measureCalls == 0 && current->approval.pending() &&
+    approvalReceipts == 1 && !lastApprove.ok && lastApprove.reason == "native_approval_unavailable",
+    "second_approve_while_busy_is_refused_without_burning");
+  Drain();
+  Check(measureCalls == 1 && lastApprove.ok && current->approval.ready() && current->approval_busy_generation == 0 &&
+    resolutions == 1 && deletions == 1 && approvalReceipts == 2 && queue.empty(), "approve_measures_on_the_worker_then_approves");
+  // 3. A measurement that is not the approved one, and one that needs a person.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_ineligible");
+  measurement = NativeApprovalMeasurement{};
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  Check(measureCalls == 1 && !lastApprove.ok && lastApprove.reason == "native_approval_revalidation_failed" &&
+    lastApprove.denied == "rejected" && !current->approval.occupied() && current->approval_busy_generation == 0,
+    "approve_ineligible_burns");
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_takeover");
+  measurement = NativeApprovalMeasurement{};
+  measurement.takeover = true;
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  Check(!lastApprove.ok && lastApprove.denied == "paused" && !current->approval.occupied(), "approve_takeover_pauses");
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_changed_authority");
+  measurement = GoodMeasurement();
+  measurement.authority_digest = std::string(64, 'd');
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  Check(!lastApprove.ok && !current->approval.occupied(), "approve_changed_authority_burns");
+  // 4. A measurement that throws, a canceled action, and a completion that failed.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_throw");
+  measureThrows = true;
+  ApprovalApprove(&input, nullptr);
+  Drain();
+  Check(!lastApprove.ok && lastApprove.reason == "native_approval_unavailable" && !current->approval.occupied() &&
+    current->approval_busy_generation == 0, "approve_measure_failure_ends_the_approval");
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_cancel");
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  current->cancel_epoch.store(1);
+  Drain();
+  Check(!lastApprove.ok && lastApprove.reason == "native_canceled_pre_dispatch" && lastApprove.denied == "canceled" &&
+    !current->approval.occupied(), "approve_canceled_before_the_worker");
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_status");
+  ApprovalApprove(&input, nullptr);
+  {
+    auto* work = queue.front(); queue.pop_front();
+    work->complete(&input, 1, work->data);  // the completion deletes the work
+  }
+  Check(!lastApprove.ok && lastApprove.reason == "native_approval_unavailable" && !current->approval.occupied() &&
+    current->approval_busy_generation == 0 && measureCalls == 0 && resolutions == 1, "approve_failed_completion_ends_the_approval");
+  // 5. The promise or the work cannot be made: nothing stays busy, nothing stays waiting.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_promise");
+  failPromise = true;
+  Check(ThrownBy(ApprovalApprove) == "ASYNC_UNAVAILABLE" && queue.empty() && !current->approval.occupied() &&
+    current->approval_busy_generation == 0, "approve_promise_failure_rolls_back");
+  for (bool create : {true, false}) {
+    ApprovalReset();
+    Check(OfferIntent(GoodMeasurement()), "approve_offer_queue");
+    (create ? failCreate : failQueue) = true;
+    ApprovalApprove(&input, nullptr);
+    Check(rejections == 1 && resolutions == 0 && queue.empty() && !current->approval.occupied() &&
+      current->approval_busy_generation == 0 && measureCalls == 0, "approve_queue_failure_rejects_and_rolls_back");
+  }
+  // 6. dispatchApproved: nothing held is refused at once; a held ticket is consumed on the worker.
+  ApprovalReset();
+  DispatchApproved(&input, nullptr);
+  Check(queue.empty() && promises == 0 && effects == 0 && measureCalls == 0 && lastOutcome.reason_code == "native_approval_unavailable" &&
+    lastOutcome.result == "rejected" && current->inflight_dispatches.empty(), "dispatch_approved_without_ticket_is_refused_at_once");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup");
+  const unsigned measuredBefore = measureCalls;
+  const std::uint64_t generationBefore = current->ticket_generation.load();
+  DispatchApproved(&input, nullptr);
+  Check(queue.size() == 1 && promises == 2 && effects == 0 && measureCalls == measuredBefore &&
+    current->inflight_dispatches.contains("fresh") && current->approval.ready() &&
+    current->ticket_generation.load() == generationBefore, "dispatch_approved_reserves_without_consuming");
+  Drain();
+  Check(measureCalls == measuredBefore + 1 && effects == 1 && lastOutcome.result == "completed" &&
+    current->inflight_dispatches.empty() && current->dispatch_replay_cache.contains("fresh") &&
+    !current->approval.occupied() && current->ticket_generation.load() == generationBefore + 1,
+    "dispatch_approved_measures_consumes_then_dispatches");
+  DispatchApproved(&input, nullptr);
+  Check(queue.empty() && effects == 1 && lastOutcome.result == "completed", "dispatch_approved_replays_from_the_cache");
+  // 7. A changed measurement, a cancel, and failures on the worker.
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_changed");
+  measurement = GoodMeasurement();
+  measurement.authority_digest = std::string(64, 'd');
+  DispatchApproved(&input, nullptr);
+  Drain();
+  Check(effects == 0 && lastOutcome.reason_code == "native_approval_revalidation_failed" && lastOutcome.result == "rejected" &&
+    current->inflight_dispatches.empty() && current->dispatch_replay_cache.contains("fresh") && !current->approval.occupied(),
+    "dispatch_approved_changed_authority_is_refused");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_cancel");
+  DispatchApproved(&input, nullptr);
+  current->cancel_epoch.store(1);
+  Drain();
+  Check(effects == 0 && lastOutcome.result == "canceled" && !current->approval.occupied() && current->inflight_dispatches.empty(),
+    "dispatch_approved_canceled_before_the_worker");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_throw");
+  measureThrows = true;
+  DispatchApproved(&input, nullptr);
+  Drain();
+  Check(effects == 0 && lastOutcome.reason_code == "native_approval_unavailable" && !current->approval.occupied() &&
+    current->inflight_dispatches.empty(), "dispatch_approved_measure_failure_is_refused_not_unknown");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_effect");
+  failEffect = true;
+  DispatchApproved(&input, nullptr);
+  Drain();
+  Check(lastOutcome.result == "unknown_effect" && lastOutcome.reason_code == "native_dispatch_exception_unknown_effect" &&
+    current->inflight_dispatches.empty(), "dispatch_approved_failure_after_the_ticket_is_unknown_effect");
+  // 8. The promise or the work cannot be made: the reservation is given back, the ticket burned.
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_promise");
+  failPromise = true;
+  Check(ThrownBy(DispatchApproved) == "ASYNC_UNAVAILABLE" && current->inflight_dispatches.empty() &&
+    !current->approval.occupied() && effects == 0, "dispatch_approved_promise_failure_rolls_back");
+  for (bool create : {true, false}) {
+    ApprovalReset();
+    Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_queue");
+    (create ? failCreate : failQueue) = true;
+    DispatchApproved(&input, nullptr);
+    Check(rejections == 1 && current->inflight_dispatches.empty() && !current->approval.occupied() && effects == 0,
+      "dispatch_approved_queue_failure_rejects_and_rolls_back");
+  }
+  // 9. The in-flight slot is taken: refused before the ticket is touched.
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_busy");
+  current->inflight_dispatches.emplace("someone-else", "digest");
+  DispatchApproved(&input, nullptr);
+  Check(queue.empty() && lastOutcome.reason_code == "native_dispatch_busy" && current->approval.ready(), "dispatch_approved_busy_does_not_burn");
+  // 10. No secret and no clock: the worker ends the approval with the same reason as the dispatch path.
+  for (bool token : {true, false}) {
+    ApprovalReset();
+    Check(OfferIntent(GoodMeasurement()), "approve_offer_no_secret");
+    measurement = GoodMeasurement();
+    ApprovalApprove(&input, nullptr);
+    (token ? failTokenGen : failClock) = true;
+    Drain();
+    Check(!lastApprove.ok && lastApprove.reason == "native_ticket_unavailable" && !current->approval.occupied() &&
+      current->approval_busy_generation == 0, "approve_without_a_secret_or_a_clock_ends_the_approval");
+  }
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_clock");
+  DispatchApproved(&input, nullptr);
+  failClock = true;
+  Drain();
+  Check(effects == 0 && lastOutcome.reason_code == "native_ticket_unavailable" && lastOutcome.result == "rejected" &&
+    !current->approval.occupied() && current->inflight_dispatches.empty(), "dispatch_approved_without_a_clock_ends_the_approval");
+  // 11. Another generation neither approves nor is dispatched, and burns nothing.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_other_generation");
+  input.numbers["approvalGeneration"] = 10;
+  ApprovalApprove(&input, nullptr);
+  Check(queue.empty() && current->approval.pending() && !lastApprove.ok && lastApprove.reason == "native_approval_unavailable" &&
+    current->approval_busy_generation == 0, "approve_other_generation_is_refused_without_burning");
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_other_generation");
+  input.numbers["approvalGeneration"] = 10;
+  DispatchApproved(&input, nullptr);
+  Check(queue.empty() && current->approval.ready() && lastOutcome.reason_code == "native_approval_unavailable" &&
+    current->inflight_dispatches.empty() && effects == 0, "dispatch_approved_other_generation_is_refused_without_burning");
+  // 12. A busy mark left by a generation that was discarded while it waited does not hold the next one back.
+  ApprovalReset();
+  Check(OfferIntent(GoodMeasurement()), "approve_offer_before_discard");
+  measurement = GoodMeasurement();
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 1 && current->approval_busy_generation == 9, "approve_busy_for_the_first_generation");
+  current->approval.Discard(9);
+  Check(OfferIntent(GoodMeasurement(), 10), "approve_offer_next_generation");
+  input.numbers["approvalGeneration"] = 10;
+  ApprovalApprove(&input, nullptr);
+  Check(queue.size() == 2 && current->approval_busy_generation == 10 && current->approval.pending(), "approve_next_generation_is_not_held_back");
+  Drain();
+  Check(measureCalls == 2 && lastApprove.ok && current->approval.ready() && current->approval_busy_generation == 0 &&
+    resolutions == 2, "approve_stale_work_burns_nothing_and_the_next_generation_is_approved");
+  // 13. An approved dispatch whose work never ran ends its approval, like the other approval paths.
+  ApprovalReset();
+  Check(ApproveThroughWorker(GoodMeasurement()), "dispatch_approved_setup_failed_completion");
+  DispatchApproved(&input, nullptr);
+  {
+    auto* work = queue.front(); queue.pop_front();
+    work->complete(&input, 1, work->data);  // the completion deletes the work
+  }
+  Check(effects == 0 && !current->approval.occupied() && current->inflight_dispatches.empty() &&
+    lastOutcome.result == "unknown_effect" && measureCalls == 1, "dispatch_approved_failed_completion_ends_the_approval");
 }
 `;
 
