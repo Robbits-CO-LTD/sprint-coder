@@ -336,7 +336,7 @@ export class ProviderComputerUsePlanner implements ComputerUsePlannerPort {
         round: input.round,
         revision: observation.revision,
         bindingDigest: captureProviderBinding(this.deps.compatibilityPermit),
-        actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+        actionDigest: computerUseActionDigest(action),
         actionClass: action.type,
         responseDigest: computerUseCaptureDigest(output),
         responseBytes: Buffer.byteLength(output),

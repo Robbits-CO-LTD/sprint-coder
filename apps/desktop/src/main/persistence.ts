@@ -4621,6 +4621,18 @@ const migrations = [
       END;
     `,
   },
+  {
+    version: 101,
+    checksum: 'computer-use-v101-audit-action-digest-scrub',
+    // #786: action digests are now keyed per process. Rows written before were unkeyed, so a short
+    // text the planner typed (a six-digit code, a PIN) could be recovered from them by guessing.
+    // Nothing compares a stored digest with one computed in a later process, so the old values
+    // are replaced with random ones of the same shape: the row, its kind, state and every other
+    // fact stay; only the guessable digest goes. The column CHECK (64 lowercase hex) still holds.
+    sql: `
+      UPDATE computer_action_audits SET action_digest = lower(hex(randomblob(32)));
+    `,
+  },
 ];
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.

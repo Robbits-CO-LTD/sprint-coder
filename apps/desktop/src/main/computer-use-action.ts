@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHmac, randomBytes } from 'node:crypto';
 import {
   computerUseActionKindSchema,
   type ComputerUseAction,
@@ -22,25 +22,24 @@ export function computerUseActionRoute(action: ComputerUseAction): 'semantic' | 
   return 'visual';
 }
 
+/**
+ * The key every action digest in this process is keyed with (#786). Random per process, held only
+ * in memory, never written, logged or sent anywhere.
+ *
+ * An action digest is read in two kinds of place. Inside the process it binds: a plan grant, an
+ * approval, the native ticket and request-id reuse all compare digests, so it must change with
+ * every character of the text (a byte length alone would let a same-length string pass for the
+ * approved one). Outside the process it is only a record: the SQLite audit row, kept across
+ * restarts, and the runtime capture that becomes final-gate evidence. Nothing compares those with
+ * a digest computed in a later process. An unkeyed hash served both, and handed anyone who could
+ * read the record a six-digit code the planner typed after at most 10^6 guesses. Keyed with a
+ * secret that dies with the process, the digest still binds inside it and no longer answers a
+ * guess afterwards.
+ */
+const ACTION_DIGEST_KEY = randomBytes(32);
+
 export function computerUseActionDigest(action: ComputerUseAction): string {
-  return createHash('sha256')
-    .update(stableStringify(redactActionText(action)))
-    .digest('hex');
-}
-
-function redactActionText(action: ComputerUseAction): unknown {
-  const value = action as unknown as Record<string, unknown>;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, nested]) => {
-      if ((key === 'text' || key === 'value') && typeof nested === 'string')
-        return [key, { byteLength: Buffer.byteLength(nested, 'utf8'), sha256: sha256(nested) }];
-      return [key, nested];
-    }),
-  );
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value).digest('hex');
+  return createHmac('sha256', ACTION_DIGEST_KEY).update(stableStringify(action)).digest('hex');
 }
 
 function stableStringify(value: unknown): string {

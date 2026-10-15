@@ -4137,7 +4137,7 @@ export class ComputerUseController {
           ttlVerified: this.observationIsFresh(record),
           sessionDigest: computerUseCaptureDigest(record.status.sessionId),
           requestDigest: computerUseCaptureDigest(atomicRequestId),
-          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          actionDigest: computerUseActionDigest(action),
           revision: observationRevision,
         }),
       );
@@ -4158,7 +4158,7 @@ export class ComputerUseController {
             sessionDigest: computerUseCaptureDigest(record.status.sessionId),
             requestDigest: computerUseCaptureDigest(atomicRequestId),
             result: 'unknown_effect',
-            actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+            actionDigest: computerUseActionDigest(action),
             revision: observationRevision,
           }),
         );
@@ -4176,7 +4176,7 @@ export class ComputerUseController {
                 inputAttemptCount: result.inputReceipt.inputAttemptCount,
                 cancelEpoch: result.inputReceipt.cancelEpoch,
               }),
-          actionDigest: computerUseCaptureDigest(JSON.stringify(action)),
+          actionDigest: computerUseActionDigest(action),
           revision: observationRevision,
         }),
       );

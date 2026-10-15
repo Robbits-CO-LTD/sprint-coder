@@ -10389,6 +10389,7 @@ if (runsWithElectronAbi)
         { version: 98 },
         { version: 99 },
         { version: 100 },
+        { version: 101 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12074,6 +12075,61 @@ if (runsWithElectronAbi)
       };
       return { fixture, task, base };
     }
+
+    it('replaces every unkeyed action digest written before v101 and keeps the rest of the row (#786)', () => {
+      const { fixture, base } = seed();
+      // What the pre-#786 code wrote for a typed six-digit code: guessable in at most 10^6 tries.
+      const unkeyed = createHash('sha256').update('{"text":"482913","type":"type"}').digest('hex');
+      const typed = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('typed-before-786'),
+        actionKind: 'type',
+        actionDigest: unkeyed,
+      });
+      const clicked = fixture.persistence.recordComputerActionAudit({
+        ...base,
+        nativeRequestId: bindingDigest('clicked-before-786'),
+      });
+      fixture.persistence.close();
+      // A database from before v101: the migration record removed, the old digests in place.
+      const old = new Database(fixture.path);
+      old.exec('DELETE FROM schema_migrations WHERE version = 101;');
+      old.close();
+      const migrated = new SqlitePersistenceClient(fixture.path);
+      try {
+        const rows = migrated.listComputerActionAudits(base.taskId, 10);
+        const typedRow = rows.find((row) => row.id === typed.id)!;
+        const clickedRow = rows.find((row) => row.id === clicked.id)!;
+        for (const [before, after] of [
+          [typed, typedRow],
+          [clicked, clickedRow],
+        ] as const) {
+          expect(after.actionDigest).toMatch(/^[0-9a-f]{64}$/u);
+          expect(after.actionDigest).not.toBe(before.actionDigest);
+          // Only the digest moved. (Reopening also settles a pending row as an application restart,
+          // which is the existing startup rule, not this migration.)
+          const facts = ({
+            actionDigest: _digest,
+            state: _state,
+            reasonCode: _reason,
+            updatedAt: _updated,
+            ...rest
+          }: typeof after) => rest;
+          expect(facts(after)).toEqual(facts(before));
+        }
+        expect(typedRow.actionDigest).not.toBe(clickedRow.actionDigest);
+      } finally {
+        migrated.close();
+      }
+      const verified = new Database(fixture.path);
+      try {
+        expect(
+          verified.prepare('SELECT checksum FROM schema_migrations WHERE version = 101').get(),
+        ).toEqual({ checksum: 'computer-use-v101-audit-action-digest-scrub' });
+      } finally {
+        verified.close();
+      }
+    });
 
     it('adds four nullable columns and keeps legacy rows NULL across an upgrade', () => {
       const { fixture, task, base } = seed();
