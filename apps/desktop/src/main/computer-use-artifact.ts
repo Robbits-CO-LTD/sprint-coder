@@ -79,7 +79,7 @@ const COMBINING = /\p{M}/u;
 // The marks this display draws itself: a value that already contains one must not pass for ours.
 const DISPLAY_SYMBOLS = new Set(['⟦', '⟧', '⏎', '⇥', '⚠']);
 const WORD_CHARACTER = /[\p{L}\p{N}\p{M}\p{Default_Ignorable_Code_Point}\p{Cf}]/u;
-// Scripts whose letters pass for one another (Latin a, Cyrillic а, Greek ο, Armenian օ, ...). Han,
+// Scripts whose letters pass for one another (Latin a, Cyrillic а, Greek ο, Armenian օ, Lisu ꓮ, ...). Han,
 // Hiragana and Katakana are absent on purpose: Japanese text beside Latin letters is ordinary.
 const CONFUSABLE_SCRIPTS: readonly RegExp[] = [
   /\p{Script=Latin}/u,
@@ -88,6 +88,7 @@ const CONFUSABLE_SCRIPTS: readonly RegExp[] = [
   /\p{Script=Armenian}/u,
   /\p{Script=Cherokee}/u,
   /\p{Script=Coptic}/u,
+  /\p{Script=Lisu}/u,
 ];
 const MIXED_SCRIPT_MARK = '⚠';
 

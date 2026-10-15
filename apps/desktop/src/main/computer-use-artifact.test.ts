@@ -237,6 +237,35 @@ describe('what a person is shown, second pass (M1, M2, L1, L2, L5)', () => {
       expect(computerUseArtifactExcerpt(text)).toBe(expected);
     });
 
+    it('R1: a Lisu letter that looks like a Latin capital marks the word', () => {
+      // U+A4EE LISU LETTER A, shaped like a capital A.
+      expect(computerUseArtifactExcerpt(`${cp(0xa4ee)}pple`)).toBe(`⚠${cp(0xa4ee)}pple`);
+    });
+
+    it('R3: a Cherokee letter among Latin ones marks the word', () => {
+      // U+13A0 CHEROKEE LETTER A.
+      expect(computerUseArtifactExcerpt(`${cp(0x13aa)}pple`)).toBe(`⚠${cp(0x13aa)}pple`);
+      expect(computerUseArtifactExcerpt(`${cp(0x13a0)}${cp(0x13aa)}`)).toBe(
+        `${cp(0x13a0)}${cp(0x13aa)}`,
+      );
+    });
+
+    it('R3: a combining mark inside the word does not split it', () => {
+      // Cyrillic а + acute, then Latin: one word with two scripts.
+      const word = `${cyrillicA}${cp(0x301)}pple`.normalize('NFKC');
+      expect(computerUseArtifactExcerpt(`${cyrillicA}${cp(0x301)}pple`)).toBe(`⚠${word}`);
+    });
+
+    it('R2: units and formulas that really mix Latin and Greek are marked too (accepted)', () => {
+      for (const text of ['μm', 'kΩ', '2πr', 'Δx'])
+        expect(computerUseArtifactExcerpt(text)).toBe(`⚠${text.normalize('NFKC')}`);
+    });
+
+    it('R1: the known limits are not detected (design 4.5): one script, or the parts apart', () => {
+      expect(computerUseArtifactExcerpt('аррӏе')).toBe('аррӏе');
+      expect(computerUseArtifactExcerpt(`${cyrillicA}.pple`)).toBe(`${cyrillicA}.pple`);
+    });
+
     it('a zero-width character inside the word does not hide the mix', () => {
       expect(computerUseArtifactExcerpt(`p${cp(0x200b)}${cyrillicA}y`)).toBe('⚠p⟦U+200B⟧аy');
     });
