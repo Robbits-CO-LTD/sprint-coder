@@ -5793,12 +5793,14 @@ sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLan
 // calls and kShadowDeadlineNs), and the portable evaluation of the interlock map. A canceled or
 // out-of-budget capture, a failed read and incomplete facts are NO VERDICT (the answer carries the
 // reason); none of them is a refusal and none is an approval, so the v1 preflight decides.
-// Behaviour-neutral refactor: NOTHING calls this yet. The preflight and the dispatch guard are wired
+// The caller passes the rule set (as MeasureNativeApprovalOnLane does), so a rule set that trusts an
+// approval turns the "approval is closed" refusal into no verdict. Behaviour-neutral: NOTHING calls this yet. The preflight and the dispatch guard are wired
 // in S4-1b-2 (after the real-device check of #777), on the serial lane. It holds neither the state
 // lock nor the serial lane itself (its caller does), calls no N-API, and makes no write, AX action
 // or event: every call it reaches is a read of CaptureShadowTargetFacts.
 [[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateInterlockOnLane(
-    const NativeDispatchRequest& request) noexcept {
+    const NativeDispatchRequest& request,
+    const sprint_coder::computer_use::EffectRuleset& ruleset) noexcept {
   using namespace sprint_coder::computer_use;
   InterlockEvaluation unavailable;
   unavailable.no_verdict = InterlockNoVerdict::kIncomplete;
@@ -5815,7 +5817,7 @@ sprint_coder::computer_use::NativeApprovalMeasurement MeasureNativeApprovalOnLan
     info.maximum_mode = request.session->maximum_mode;
     info.policy_language = request.session->policy_language;
     info.executable_path = request.session->executable_path;
-    return EvaluateInterlockFromCapture(capture, info, reader.canceled);
+    return EvaluateInterlockFromCapture(capture, info, reader.canceled, ruleset);
   } catch (...) {
     return unavailable;
   }

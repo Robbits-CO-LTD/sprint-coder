@@ -5234,6 +5234,22 @@ bool CheckNativeInterlockCapture() {
       return false;
   }
 
+  // A rule set that trusts the file manager approval: the closed-approval refusal is not said.
+  {
+    ShadowAxCapture pdf = finder_script();
+    pdf.chain[0].title = "report.pdf";
+    pdf.url = "file:///Users/me/report.pdf";
+    const InterlockEvaluation closed = EvaluateInterlockFromCapture(pdf, finder(), false);
+    if (!Check(closed.Refuses() && closed.verdict.reason == InterlockReason::kApprovalClosed,
+               "capture-interlock-default-ruleset-approval-closed"))
+      return false;
+    EffectRuleset trusting;
+    trusting.file_manager_open = true;
+    if (!no_verdict(EvaluateInterlockFromCapture(pdf, finder(), false, trusting),
+                    InterlockNoVerdict::kNone, "capture-interlock-trusting-ruleset-is-no-refusal"))
+      return false;
+  }
+
   // Canceled: no verdict, even where the facts would refuse.
   if (!no_verdict(EvaluateInterlockFromCapture(ShadowBase(), terminal(), true),
                   InterlockNoVerdict::kCanceled, "capture-interlock-canceled-is-no-verdict"))

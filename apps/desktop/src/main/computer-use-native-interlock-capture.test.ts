@@ -78,7 +78,9 @@ describe('synchronous interlock evaluation (classifier v2, S4-1b-1)', () => {
     );
     // No refusal can come out of the native yet: the reason codes are the receipt table's, and the
     // adapter does not name them.
-    expect(code(section)).not.toMatch(/native_\w+_blocked|NativePreflightReceipt|decision|reasonCode/u);
+    expect(code(section)).not.toMatch(
+      /native_\w+_blocked|NativePreflightReceipt|decision|reasonCode/u,
+    );
   });
 
   it('reads through the shadow capture, on its budget and cancellation, and changes nothing', () => {
@@ -87,7 +89,7 @@ describe('synchronous interlock evaluation (classifier v2, S4-1b-1)', () => {
     expect(body).toContain('CaptureShadowTargetFacts(reader, &capture)');
     expect(body).toContain('ShadowReader reader(request);');
     expect(body).toContain('capture.budget_exhausted = reader.budget.Exhausted();');
-    expect(body).toContain('EvaluateInterlockFromCapture(capture, info, reader.canceled)');
+    expect(body).toContain('EvaluateInterlockFromCapture(capture, info, reader.canceled, ruleset)');
     // An exception or a missing session is "no verdict", never a refusal.
     expect(body).toContain('unavailable.no_verdict = InterlockNoVerdict::kIncomplete;');
     expect(body).toContain('catch (...) {');
@@ -102,7 +104,9 @@ describe('synchronous interlock evaluation (classifier v2, S4-1b-1)', () => {
     expect(macos.match(/\bCaptureShadowTargetFacts\(/gu)).toHaveLength(4);
     const preflight = /NativePreflightReceipt PerformNativePreflight\([\s\S]*?\n\}\n/u.exec(macos);
     expect(preflight).not.toBeNull();
-    expect(preflight![0]).toContain('ScheduleEffectShadow(request, receipt.decision == "ordinary", v1_validation);');
+    expect(preflight![0]).toContain(
+      'ScheduleEffectShadow(request, receipt.decision == "ordinary", v1_validation);',
+    );
     expect(preflight![0]).not.toMatch(/Interlock/u);
   });
 
