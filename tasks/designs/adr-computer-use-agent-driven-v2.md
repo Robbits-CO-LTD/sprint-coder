@@ -631,6 +631,18 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 
 **INV-3 の順序制約（2026-10-14。出典: #500 計画 contract の INV-3「S4/S5 と操作 interlock を別 PR に切り離さない」。この ADR では D1 の運用規則として置く）**: 適格性の拡大、つまり deny-list で一般アプリを eligible にし、`ListTargets`（Windows では `list_targets`）の結果へ入力できるようにする変更は、実行トリガ interlock（§3.6）と面 deny（§3.7）と**同じ PR か、その後の PR に限る**。S4 / S5 を複数 PR に分けるときも、interlock より先に適格性だけを merge しない。V2 flag が OFF でも例外にしない（flag は後から ON にされ、ビルド時定数と manifest の attest が通れば権限が開くため）。N2b-4（承認後の復帰と再 preflight）、D7（build 時定数と handshake）、classifier v2 のような土台の PR は、新しい候補への入力を公開しないかぎり先行してよい。
 
+**S4-1 の二段構え（2026-10-15。出典: S4-1 の事前調査と親の判断）**: macOS の面 deny（§3.7）と実行トリガ interlock（§3.6）は次の 2 段で入れる。
+
+1. **S4-1（適格性を広げない）は、根拠となる facts が完全なときの正の一致だけを拒否する**。分類器コアが interlock のクラス（面、E1 / E4、承認が閉じている間の E2 / E3）を返し、その根拠の facts（メタデータ、祖先チェーン、面）が揃っているときだけ拒否する。facts が欠けている、分類できなかった、といったときは「判定なし」を返し、v1 の判定に任せる。現行の適格集合（TextEdit、公式 VS Code）の通常操作を、コアの fail-closed（D13）で巻き込まないための措置である。
+2. **S4-3（適格性の拡大）は、新たに適格になる候補について不完全な facts を fail-closed（takeover）にする**。S4-1 の写像は S4-3 の規則ではない。S4-3 の受入条件に、不完全な facts を拒否する規則と、native / Main の attest に「interlock が有効」であることを含める。INV-3 の順序（interlock が先）はこれで保たれる。
+
+写像の細部（S4-1-0。portable な `computer_use_native_interlock.h`、harness で網羅。どこからも呼ばない。配線は S4-1a / S4-1b）:
+- 面（シェル、スクリプト入力、コマンドパレット、DevTools console、チェーン内の面の語）→ blocked / rejected、`native_shell_surface_blocked`。
+- E1 / E4 → takeover / paused、`native_execution_trigger_blocked`。**拡張子で E1 / E4 を拒否するのは、ファイルマネージャーとダウンロード一覧の「開く操作」に限る**（開くことが実行・インストールになる場所）。エディタのファイルツリーで `.sh` を開く操作のように、アプリの中で開くだけのものは拒否しない（VS Code の挙動は HA の観察項目）。インストーラのコントロール（ラベルの語）の活性化は、どの面でも拒否する。
+- E2 / E3 → 承認経路が閉じている間は blocked / rejected、`native_execution_trigger_blocked`。rule set が承認を信頼したら、コアが承認を返し、この写像は判定なしになる（承認が決める）。
+- secure、credential、確認、supervised の承認待ち、sensitive origin、observe-only、分類不能は interlock ではなく、v1 に任せる。
+- 拒否は強める方向だけに使う。コアの lexicon は版 2 の候補（未 attest）を使ってよいが、承認の根拠には使わない。版は上げない。
+
 **S6 の前提（2026-10-14）**: UWP / `ApplicationFrameHost` の identity と束縛（UIA によるコンテンツ HWND の解決、package family name と publisher の検証、native identity digest への束縛、package に限るパス比較の免除、プロセス入れ替わりの検出）は、設計を ADR に追記して敵対的レビューを受けるまで実装しない。レビューが出るまでは、`ApplicationFrameHost` 配下は従来どおり拒否する。Windows 11 の既定 Notepad のような packaged app が `ApplicationFrameHost` 配下か、packaged Win32 かは、プロセスツリーとウィンドウクラスの実測で確かめてから S6 の必要性を判断する。
 
 **S9a / S9b と S8 の順序（2026-10-14）**: S9a（受入 journey の V2 化）→ 両 OS の実機受入 PASS → S8（V1 撤去）→ S9b の順に進める。実機受入は V1 が残った状態の V2 flag ON で行うので、受入が S8 を待つ循環は生じない。S9a の完了時に新しい [human] 受入 Issue を起こす（macOS の署名・notarize 済みパッケージの実機、Windows の受入パッケージ、正式 release 時の Windows 署名者検証を含む）。

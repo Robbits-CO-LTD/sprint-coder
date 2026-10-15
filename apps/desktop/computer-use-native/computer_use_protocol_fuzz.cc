@@ -8,6 +8,7 @@
 #include "computer_use_effect_shadow.h"
 #include "computer_use_windows_shadow.h"
 #include "computer_use_effect_measurement.h"
+#include "computer_use_native_interlock.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -3411,6 +3412,221 @@ bool CheckEffectMeasurement() {
   return true;
 }
 
+// ---- Classifier v2, S4-1-0: the interlock map (pure; nothing calls it yet) ----------------------
+
+bool CheckNativeInterlockMap() {
+  using sprint_coder::computer_use::EffectDecision;
+  using sprint_coder::computer_use::InterlockOutcome;
+  using sprint_coder::computer_use::InterlockReason;
+  using sprint_coder::computer_use::InterlockVerdict;
+  using sprint_coder::computer_use::InterlockForFacts;
+  using sprint_coder::computer_use::MapEffectToInterlock;
+  const auto none = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(!verdict.Refuses() && verdict.outcome == InterlockOutcome::kNone &&
+                     verdict.reason == InterlockReason::kNone && verdict.ReasonCode().empty() &&
+                     verdict.DeniedResult().empty(),
+                 name);
+  };
+  const auto shell_blocked = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
+                     verdict.reason == InterlockReason::kShellSurface &&
+                     verdict.ReasonCode() == "native_shell_surface_blocked" &&
+                     verdict.DeniedResult() == "rejected",
+                 name);
+  };
+  const auto trigger_takeover = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover &&
+                     verdict.reason == InterlockReason::kExecutionTrigger &&
+                     verdict.ReasonCode() == "native_execution_trigger_blocked" &&
+                     verdict.DeniedResult() == "paused",
+                 name);
+  };
+  const auto trigger_blocked = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
+                     verdict.reason == InterlockReason::kApprovalClosed &&
+                     verdict.ReasonCode() == "native_execution_trigger_blocked" &&
+                     verdict.DeniedResult() == "rejected",
+                 name);
+  };
+
+  // An ordinary control is nobody's business here.
+  if (!none(EffBase(), "interlock-ordinary-is-no-verdict")) return false;
+
+  // Surfaces that take commands: refused, with the surface reason (ADR 3.7).
+  for (const SurfaceKind surface : {SurfaceKind::kShellLike, SurfaceKind::kScriptInput,
+                                    SurfaceKind::kCommandPalette, SurfaceKind::kDevToolsConsole}) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axtextfield", "", "Command line"}, {"axwindow", "", "Editor"}};
+    if (!shell_blocked(facts, "interlock-command-surface-is-blocked")) return false;
+    facts.action = ActionKind::kKey;
+    facts.key_is_activation = true;
+    if (!shell_blocked(facts, "interlock-command-surface-enter-is-blocked")) return false;
+  }
+  {
+    // The same surface named by a word in the chain rather than by the surface kind.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axtextarea", "", "Integrated Terminal"}, {"axwindow", "", "Editor"}};
+    if (!shell_blocked(facts, "interlock-surface-term-in-the-chain")) return false;
+  }
+  // Reading is never refused, and a surface judged on incomplete facts is not a verdict.
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kShellLike;
+    facts.action = ActionKind::kObserve;
+    if (!none(facts, "interlock-observe-is-no-verdict")) return false;
+    facts.action = ActionKind::kType;
+    facts.metadata_complete = false;
+    if (!none(facts, "interlock-incomplete-metadata-is-no-verdict")) return false;
+    facts.metadata_complete = true;
+    facts.chain_complete = false;
+    if (!none(facts, "interlock-cut-chain-is-no-verdict")) return false;
+    facts.chain_complete = true;
+    facts.surface = SurfaceKind::kUnknown;
+    if (!none(facts, "interlock-unknown-surface-is-no-verdict")) return false;
+  }
+
+  // E1 / E4 by extension: refused where opening the item runs or installs it (a file manager, a
+  // download list), as a takeover. The same file opened inside an application is not refused here.
+  for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+    for (const char *extension : {"command", "sh", "exe", "msi", "pkg", "dmg", "bat", "app"}) {
+      EffectFacts facts = EffBase();
+      facts.surface = surface;
+      facts.action = ActionKind::kDoubleClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axrow", "", "item"}, {"axwindow", "", "Downloads"}};
+      if (!trigger_takeover(facts, "interlock-executable-open-is-a-takeover")) return false;
+      facts.mode = SessionMode::kSupervised;
+      if (!trigger_takeover(facts, "interlock-executable-open-ignores-the-mode")) return false;
+    }
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kOrdinary;
+    facts.action = ActionKind::kInvoke;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "sh";
+    facts.chain = {{"axrow", "", "install.sh"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+    if (!none(facts, "interlock-script-opened-in-an-editor-is-not-refused")) return false;
+    facts.extension = "pkg";
+    if (!none(facts, "interlock-installer-name-opened-in-an-app-is-not-refused")) return false;
+  }
+  {
+    // An installer button is a trigger on any surface: it is the control that installs.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kClick;
+    facts.chain = {{"axbutton", "", "Install now"}, {"axwindow", "", "Setup"}};
+    if (!trigger_takeover(facts, "interlock-installer-button-is-a-takeover")) return false;
+    facts.action = ActionKind::kType;
+    if (!none(facts, "interlock-typing-near-install-is-no-verdict")) return false;
+  }
+
+  // E2 / E3: opening from a download list or a file manager needs an approval, and the approval
+  // path is closed, so it is refused; once the rule set trusts it, the approval decides, not this.
+  for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = ActionKind::kDoubleClick;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "pdf";
+    facts.chain = {{"axrow", "", "report"}, {"axwindow", "", "Downloads"}};
+    if (!trigger_blocked(facts, "interlock-approval-closed-is-blocked")) return false;
+    EffectRuleset open;
+    open.download_open = true;
+    open.file_manager_open = true;
+    if (!Check(!InterlockForFacts(facts, open).Refuses(), "interlock-approval-open-is-not-this-map")) return false;
+    // Browsing is not opening, and an unknown extension is v1's.
+    facts.action = ActionKind::kSelect;
+    if (!none(facts, "interlock-browsing-is-no-verdict")) return false;
+    facts.action = ActionKind::kDoubleClick;
+    facts.extension_known = false;
+    if (!none(facts, "interlock-unknown-extension-is-no-verdict")) return false;
+  }
+
+  // Everything else the core says is not an interlock: secure and credential fields, a confirmation,
+  // a supervised action waiting for an approval, a sensitive origin, a round it could not classify.
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axsecuretextfield", "", "Password"}, {"axwindow", "", "Login"}};
+    if (!none(facts, "interlock-secure-is-v1s")) return false;
+    facts.chain = {{"axtextfield", "", "Card number"}, {"axwindow", "", "Pay"}};
+    if (!none(facts, "interlock-credential-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.chain = {{"axbutton", "", "Pay now"}, {"axwindow", "", "Shop"}};
+    if (!none(facts, "interlock-confirm-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.mode = SessionMode::kSupervised;
+    if (!none(facts, "interlock-supervised-approval-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.origin = OriginState::kSensitive;
+    if (!none(facts, "interlock-sensitive-origin-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.text_language_supported = false;
+    if (!none(facts, "interlock-unclassifiable-is-no-verdict")) return false;
+    facts = EffBase();
+    facts.mode = SessionMode::kObserveOnly;
+    if (!none(facts, "interlock-observe-only-mode-is-not-this-map")) return false;
+  }
+
+  // The map takes the core's decision and the facts; a decision that does not fit the facts is not
+  // trusted (a surface verdict needs a complete, known surface behind it).
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kClick;
+    EffectDecision claimed;
+    claimed.effect_class = EffectClass::kSurface;
+    claimed.kind = DecisionKind::kBlocked;
+    claimed.reason = DecisionReason::kSurface;
+    facts.surface = SurfaceKind::kShellLike;
+    facts.metadata_complete = false;
+    if (!Check(!MapEffectToInterlock(facts, claimed).Refuses(), "interlock-claim-on-incomplete-facts")) return false;
+    facts.metadata_complete = true;
+    if (!Check(MapEffectToInterlock(facts, claimed).Refuses(), "interlock-claim-on-complete-facts")) return false;
+    // The gate is the core's: a cut chain, an empty chain and an unknown surface are not a ground.
+    EffectFacts cut = facts;
+    cut.chain_complete = false;
+    if (!Check(!MapEffectToInterlock(cut, claimed).Refuses(), "interlock-claim-on-a-cut-chain")) return false;
+    EffectFacts empty = facts;
+    empty.chain.clear();
+    if (!Check(!MapEffectToInterlock(empty, claimed).Refuses(), "interlock-claim-on-an-empty-chain")) return false;
+    EffectFacts unknown = facts;
+    unknown.surface = SurfaceKind::kUnknown;
+    if (!Check(!MapEffectToInterlock(unknown, claimed).Refuses(), "interlock-claim-on-an-unknown-surface")) return false;
+    // The reason has to be the class's own: another reason on the same class is not this map's.
+    EffectDecision odd = claimed;
+    odd.reason = DecisionReason::kSensitiveOrigin;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-surface-class-with-another-reason")) return false;
+    odd.effect_class = EffectClass::kE1ExecutableOpen;
+    odd.reason = DecisionReason::kApprovalNotEnabled;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-trigger-class-with-another-reason")) return false;
+    odd.effect_class = EffectClass::kE3FileManagerOpen;
+    odd.reason = DecisionReason::kExecutionTrigger;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-approval-class-with-another-reason")) return false;
+    // A decision that is not a block is never an interlock, whatever its class.
+    odd.effect_class = EffectClass::kSurface;
+    odd.reason = DecisionReason::kSurface;
+    odd.kind = DecisionKind::kTakeover;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-takeover-decision-is-not-a-block")) return false;
+    // A blocked decision of another class does not become a surface verdict.
+    claimed.effect_class = EffectClass::kSecure;
+    claimed.reason = DecisionReason::kSecure;
+    if (!Check(!MapEffectToInterlock(facts, claimed).Refuses(), "interlock-other-blocked-class")) return false;
+  }
+  std::cout << "Computer Use native interlock map: PASS\n";
+  return true;
+}
+
 // A page scroll is judged on nothing: the page title is not the scrolled control's caption.
 bool CheckEffectPageScroll() {
   for (const char *role : {"axwebarea", "AXWebArea", "Document"}) {
@@ -4606,6 +4822,7 @@ int main() {
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
+  if (!CheckNativeInterlockMap()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;
