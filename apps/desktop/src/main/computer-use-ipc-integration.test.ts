@@ -16,9 +16,11 @@ import {
   computerListTargetsOutputSchema,
   computerUseSessionStatusSchema,
   computerUseApprovalSchema,
+  type ComputerUseAction,
   type ComputerUseSessionStatus,
   type ProviderModel,
 } from '@sprint-coder/contracts';
+import type { ComputerUsePlannerInput } from './computer-use-planner-port';
 import { computerUseProviderModelIsEligible, IpcRouter, toPublicError } from './ipc';
 import {
   COMPUTER_LIST_TARGETS_TOOL,
@@ -1187,6 +1189,8 @@ describe('Computer Use target tools end to end', () => {
       policyEpoch?: number;
       /** V1's "remember" flag on the profile row. Never a grant: the row is unauthenticated. */
       remembered?: boolean;
+      /** The inner planner. The default finishes the first round. */
+      plan?: (input: ComputerUsePlannerInput) => Promise<ComputerUseAction>;
     } = {},
   ) {
     const preset = options.preset ?? 'full';
@@ -1305,7 +1309,7 @@ describe('Computer Use target tools end to end', () => {
       repositionEmergencyStop: () => true,
       publishGrantRequest: (request) => cards.push(request),
       // One round and done, so a real `computer_start` reaches a terminal state without a Provider.
-      planner: { plan: async () => ({ type: 'finish' }) },
+      planner: { plan: options.plan ?? (async () => ({ type: 'finish' })) },
     });
     const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
     Object.assign(router, { permissionBroker, computerUseController: controller });
@@ -1478,6 +1482,74 @@ describe('Computer Use target tools end to end', () => {
       null,
     );
     expect(await outcome).toEqual({ granted: false, reasonCode: 'access_request_denied' });
+  });
+
+  describe('computer_start with a closed question, through the broker (T15-2)', () => {
+    // The real route: the tool boundary parses the strict input schema, the controller hands the
+    // question to the planner, and the broker checks the result against the pinned output schema.
+    async function ask(
+      question: unknown,
+      answer: Record<string, unknown>,
+    ): Promise<Record<string, unknown>> {
+      const fixture = endToEnd({
+        plan: async (input) =>
+          (input.question === undefined
+            ? { type: 'finish' }
+            : { type: 'finish', ...answer }) as ComputerUseAction,
+      });
+      fixture.harness.startTurn(turnContext, 'codex', {
+        computerTargets: true,
+        toolSurface: 'computer-targets-only',
+      });
+      fixture.controller.createAppGrant(computerAppGrantIdentityFrom(fixture.profile.identity)!, {
+        maxMode: 'full_access_app',
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      const targets = (await fixture.harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-list',
+        providerName: 'computer_list_targets',
+        input: {},
+      })) as { targets: readonly { kind: string; targetToken?: string }[] };
+      const targetToken = targets.targets.find(
+        (target) => target.kind === 'selectable',
+      )?.targetToken;
+      return (await fixture.harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-start',
+        providerName: 'computer_start',
+        input: { targetToken, goal: 'Did the build pass?', question },
+      })) as Record<string, unknown>;
+    }
+
+    const eight = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
+    it.each([
+      [{ kind: 'boolean' }, { answerBoolean: true }, { kind: 'boolean', value: true }],
+      [{ kind: 'boolean' }, { answerBoolean: false }, { kind: 'boolean', value: false }],
+      [{ kind: 'choice', choices: eight }, { answerChoice: 7 }, { kind: 'choice', value: 7 }],
+      [{ kind: 'choice', choices: eight }, { answerChoice: 0 }, { kind: 'choice', value: 0 }],
+      [
+        { kind: 'number', maxFractionDigits: 1 },
+        { answerNumber: '-12.5' },
+        { kind: 'number', value: '-12.5' },
+      ],
+      [
+        { kind: 'number', maxFractionDigits: 0 },
+        { answerNumber: 'x' },
+        { kind: 'number', value: null },
+      ],
+      [{ kind: 'boolean' }, { answerChoice: 0 }, { kind: 'boolean', value: null }],
+    ])('asks %o and returns %o as %o', async (question, answer, expected) => {
+      const output = await ask(question, answer);
+      expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+      expect(output).toMatchObject({
+        state: 'stopped',
+        stopReason: 'agent_finish',
+        answer: expected,
+      });
+    });
   });
 
   it('authorizes computer_start and runs a session to its end', async () => {

@@ -5,6 +5,7 @@ import {
   type TaskSummary,
 } from '@sprint-coder/contracts';
 import type { PermissionEvaluation, PermissionRequest, ProviderEgress } from '@sprint-coder/domain';
+import { COMPUTER_USE_PROVIDER_ADAPTER_VERSION } from './computer-use-adapter-version';
 import { digestCanonical } from './context-compiler';
 import type { PreparedContext } from './context-ledger';
 import type { PermissionBroker } from './permission-broker';
@@ -105,12 +106,12 @@ export function authorizeComputerUseProviderEgress(
         screenshotDigest: input.screenshotDigest,
         accessibilityTreeDigest: input.accessibilityTreeDigest,
       }),
-      adapterVersion: 'computer-use-v1',
+      adapterVersion: COMPUTER_USE_PROVIDER_ADAPTER_VERSION,
       connectionId: input.connectionId,
       modelId: input.modelId,
       endpointTrust: trust,
       round: input.round,
-      toolCatalogDigest: digestCanonical(['computer-use-v1']),
+      toolCatalogDigest: digestCanonical([COMPUTER_USE_PROVIDER_ADAPTER_VERSION]),
       attachmentManifestDigest: manifestDigest,
       attachmentByteCount: input.screenshotByteCount,
       ephemeral: true,

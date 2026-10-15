@@ -5505,6 +5505,44 @@ export const computerRequestAccessOutputSchema = z
   });
 export type ComputerRequestAccessOutput = z.infer<typeof computerRequestAccessOutputSchema>;
 
+/**
+ * The closed question an outer agent may ask a `computer_start` session (T15-2, design C8).
+ *
+ * The outer agent names the type of the answer, so what comes back is a boolean, an index into
+ * choices the outer agent wrote itself, or digits — never text from the screen. The choices are the
+ * outer agent's own words and are treated like its goal: untrusted advice to the inner planner.
+ */
+export const COMPUTER_START_MAX_CHOICES = 8;
+export const COMPUTER_START_CHOICE_MAX_CHARACTERS = 64;
+export const COMPUTER_START_MAX_FRACTION_DIGITS = 6;
+export const COMPUTER_START_MAX_INTEGER_DIGITS = 12;
+/** The only shape a numeric answer may have: digits, an optional sign and an optional fraction. */
+export const COMPUTER_START_NUMBER_PATTERN = /^-?\d{1,12}(?:\.\d{1,6})?$/u;
+export const computerStartQuestionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('boolean') }).strict(),
+  z
+    .object({
+      kind: z.literal('choice'),
+      choices: z
+        .array(
+          computerUseModelTextSchemaOf(COMPUTER_START_CHOICE_MAX_CHARACTERS).refine(
+            (value) => value.trim() !== '',
+            'Computer Use question choice is empty',
+          ),
+        )
+        .min(2)
+        .max(COMPUTER_START_MAX_CHOICES),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('number'),
+      maxFractionDigits: z.number().int().min(0).max(COMPUTER_START_MAX_FRACTION_DIGITS),
+    })
+    .strict(),
+]);
+export type ComputerStartQuestion = z.infer<typeof computerStartQuestionSchema>;
+
 /** `computer_start` (ADR v2 §5.2). The goal is model-authored and bounded like a Task goal. */
 export const COMPUTER_START_GOAL_MAX_CHARACTERS = 1_024;
 export const computerStartToolInputSchema = z
@@ -5514,6 +5552,7 @@ export const computerStartToolInputSchema = z
       (value) => value.trim() !== '',
       'Computer Use session goal is empty',
     ),
+    question: computerStartQuestionSchema.optional(),
   })
   .strict();
 export type ComputerStartToolInput = z.infer<typeof computerStartToolInputSchema>;
@@ -5522,6 +5561,52 @@ export const COMPUTER_START_TOOL_INPUT_JSON_SCHEMA = {
   properties: {
     targetToken: { type: 'string', minLength: 1, maxLength: 128 },
     goal: { type: 'string', minLength: 1, maxLength: COMPUTER_START_GOAL_MAX_CHARACTERS },
+    question: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['boolean', 'choice', 'number'] },
+        choices: {
+          type: 'array',
+          items: {
+            type: 'string',
+            minLength: 1,
+            maxLength: COMPUTER_START_CHOICE_MAX_CHARACTERS,
+            // Not blank: the zod schema refuses a choice that trims to nothing.
+            pattern: '\\S',
+          },
+          minItems: 2,
+          maxItems: COMPUTER_START_MAX_CHOICES,
+        },
+        maxFractionDigits: {
+          type: 'integer',
+          minimum: 0,
+          maximum: COMPUTER_START_MAX_FRACTION_DIGITS,
+        },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+      // The same shape per kind as the strict discriminated union in zod: each kind requires its own
+      // field and refuses the other kind's, so a call built from this schema is a call zod accepts.
+      allOf: [
+        {
+          if: { properties: { kind: { const: 'boolean' } } },
+          then: {
+            allOf: [
+              { not: { required: ['choices'] } },
+              { not: { required: ['maxFractionDigits'] } },
+            ],
+          },
+        },
+        {
+          if: { properties: { kind: { const: 'choice' } } },
+          then: { required: ['choices'], not: { required: ['maxFractionDigits'] } },
+        },
+        {
+          if: { properties: { kind: { const: 'number' } } },
+          then: { required: ['maxFractionDigits'], not: { required: ['choices'] } },
+        },
+      ],
+    },
   },
   required: ['targetToken', 'goal'],
   additionalProperties: false,
@@ -6026,6 +6111,34 @@ export function computerUseSessionStateIsSettled(state: ComputerUseSessionState)
  * once written. What is left is what the caller actually needs: which session, how it ended, the
  * mode it really ran in after Main bound it, and how far it got.
  */
+/**
+ * The answer to a closed question, present only when the call asked one (T15-2, design C8).
+ *
+ * `value` is null unless the session ended with `agent_finish`, the planner's answer had exactly the
+ * asked type, and the application's egress agreement still names the destination of the Turn.
+ * A choice is answered by its index alone; the outer agent already holds the words.
+ */
+export const computerStartAnswerSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('boolean'), value: z.boolean().nullable() }).strict(),
+  z
+    .object({
+      kind: z.literal('choice'),
+      value: z
+        .number()
+        .int()
+        .min(0)
+        .max(COMPUTER_START_MAX_CHOICES - 1)
+        .nullable(),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal('number'),
+      value: z.string().regex(COMPUTER_START_NUMBER_PATTERN).nullable(),
+    })
+    .strict(),
+]);
+export type ComputerStartAnswer = z.infer<typeof computerStartAnswerSchema>;
 export const computerStartToolOutputSchema = z
   .object({
     sessionId: computerUseIdSchema,
@@ -6034,6 +6147,7 @@ export const computerStartToolOutputSchema = z
     mode: computerUseModeSchema,
     round: z.number().int().nonnegative(),
     maxRounds: computerUseRoundLimitSchema,
+    answer: computerStartAnswerSchema.optional(),
   })
   .strict();
 export type ComputerStartToolOutput = z.infer<typeof computerStartToolOutputSchema>;
@@ -6048,6 +6162,47 @@ export const COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA = {
     mode: { type: 'string', enum: [...computerUseModeSchema.options] },
     round: { type: 'integer', minimum: 0 },
     maxRounds: { type: 'integer', minimum: 1, maximum: 25 },
+    // Only when the call asked a question. `value` is typed by `kind`: the dialect has no union
+    // types, so each kind narrows it with if/then (null always means "no answer").
+    answer: {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['boolean', 'choice', 'number'] },
+        value: {},
+      },
+      required: ['kind', 'value'],
+      additionalProperties: false,
+      allOf: [
+        {
+          if: { properties: { kind: { const: 'boolean' } } },
+          then: { properties: { value: { enum: [true, false, null] } } },
+        },
+        {
+          if: { properties: { kind: { const: 'choice' } } },
+          then: {
+            properties: {
+              value: {
+                enum: [
+                  ...Array.from({ length: COMPUTER_START_MAX_CHOICES }, (_, index) => index),
+                  null,
+                ],
+              },
+            },
+          },
+        },
+        {
+          if: { properties: { kind: { const: 'number' } } },
+          then: {
+            properties: {
+              value: {
+                if: { not: { type: 'null' } },
+                then: { type: 'string', pattern: COMPUTER_START_NUMBER_PATTERN.source },
+              },
+            },
+          },
+        },
+      ],
+    },
   },
   required: ['sessionId', 'state', 'stopReason', 'mode', 'round', 'maxRounds'],
   additionalProperties: false,
@@ -6206,6 +6361,13 @@ const computerFinishActionSchema = z
   .object({
     type: z.literal('finish'),
     reason: z.string().trim().min(1).max(256).optional(),
+    // The answer to the session's closed question (T15-2). Only the type and a size bound are
+    // checked here, deliberately looser than the provider grammar: an index outside the choices or a
+    // number that is not plain digits is an unanswered question (Main returns null), not a broken
+    // planner reply that fails the whole session.
+    answerBoolean: z.boolean().optional(),
+    answerChoice: z.number().int().safe().optional(),
+    answerNumber: z.string().max(256).optional(),
   })
   .strict();
 

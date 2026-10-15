@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { COMPUTER_USE_CAPTURE_ADAPTER_VERSION } from './computer-use-capture-rounds.mjs';
 import {
   createPendingComputerUseParentClosure,
   validateComputerUseParentClosure,
@@ -35,7 +36,8 @@ const VERIFIER_VALUE_OPTIONS = Object.freeze([
   'windows-installer-sha256',
   'macos-sha256',
 ]);
-export const COMPUTER_USE_PROVIDER_ADAPTER_VERSION = 'computer-use-v1';
+// One value for capture, parent closure and this verifier (see computer-use-capture-rounds.mjs).
+export const COMPUTER_USE_PROVIDER_ADAPTER_VERSION = COMPUTER_USE_CAPTURE_ADAPTER_VERSION;
 export const COMPUTER_USE_EVIDENCE_WORKFLOW = '.github/workflows/computer-use-evidence-harness.yml';
 export const COMPUTER_USE_TRANSCRIPT_SCHEMA_VERSION = 1;
 
@@ -1154,7 +1156,7 @@ function selfTest() {
         ...fixture,
         providerBinding: { ...fixture.providerBinding, adapterVersion: 'PENDING' },
       }),
-    /adapterVersion must be computer-use-v1/u,
+    /adapterVersion must be computer-use-v2/u,
   );
   assert.throws(
     () =>
