@@ -8,6 +8,7 @@
 #include "computer_use_effect_shadow.h"
 #include "computer_use_windows_shadow.h"
 #include "computer_use_effect_measurement.h"
+#include "computer_use_native_interlock.h"
 #include "computer_use_protocol.h"
 #include "computer_use_preflight_classifier.h"
 
@@ -3428,6 +3429,544 @@ bool CheckEffectMeasurement() {
   return true;
 }
 
+// ---- Classifier v2, S4-1-0: the interlock map (pure; nothing calls it yet) ----------------------
+
+bool CheckNativeInterlockMap() {
+  using sprint_coder::computer_use::EffectDecision;
+  using sprint_coder::computer_use::InterlockOutcome;
+  using sprint_coder::computer_use::InterlockReason;
+  using sprint_coder::computer_use::InterlockVerdict;
+  using sprint_coder::computer_use::InterlockForFacts;
+  using sprint_coder::computer_use::MapEffectToInterlock;
+  const auto none = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(!verdict.Refuses() && verdict.outcome == InterlockOutcome::kNone &&
+                     verdict.reason == InterlockReason::kNone && verdict.ReasonCode().empty() &&
+                     verdict.DeniedResult().empty(),
+                 name);
+  };
+  const auto shell_blocked = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
+                     verdict.reason == InterlockReason::kShellSurface &&
+                     verdict.ReasonCode() == "native_shell_surface_blocked" &&
+                     verdict.DeniedResult() == "rejected",
+                 name);
+  };
+  const auto trigger_takeover = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover &&
+                     verdict.reason == InterlockReason::kExecutionTrigger &&
+                     verdict.ReasonCode() == "native_execution_trigger_blocked" &&
+                     verdict.DeniedResult() == "paused",
+                 name);
+  };
+  const auto trigger_blocked = [](const EffectFacts &facts, const char *name) {
+    const InterlockVerdict verdict = InterlockForFacts(facts);
+    return Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kBlocked &&
+                     verdict.reason == InterlockReason::kApprovalClosed &&
+                     verdict.ReasonCode() == "native_execution_trigger_blocked" &&
+                     verdict.DeniedResult() == "rejected",
+                 name);
+  };
+
+  // An ordinary control is nobody's business here.
+  if (!none(EffBase(), "interlock-ordinary-is-no-verdict")) return false;
+
+  // Surfaces that take commands: refused, with the surface reason (ADR 3.7).
+  for (const SurfaceKind surface : {SurfaceKind::kShellLike, SurfaceKind::kScriptInput,
+                                    SurfaceKind::kCommandPalette, SurfaceKind::kDevToolsConsole}) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axtextfield", "", "Command line"}, {"axwindow", "", "Editor"}};
+    if (!shell_blocked(facts, "interlock-command-surface-is-blocked")) return false;
+    facts.action = ActionKind::kKey;
+    facts.key_is_activation = true;
+    if (!shell_blocked(facts, "interlock-command-surface-enter-is-blocked")) return false;
+  }
+  {
+    // The same surface named by a word in the chain rather than by the surface kind.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axtextarea", "", "Integrated Terminal"}, {"axwindow", "", "Editor"}};
+    if (!shell_blocked(facts, "interlock-surface-term-in-the-chain")) return false;
+  }
+  // Reading is never refused, and a surface judged on incomplete facts is not a verdict.
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kShellLike;
+    facts.action = ActionKind::kObserve;
+    if (!none(facts, "interlock-observe-is-no-verdict")) return false;
+    facts.action = ActionKind::kType;
+    facts.metadata_complete = false;
+    if (!none(facts, "interlock-incomplete-metadata-is-no-verdict")) return false;
+    facts.metadata_complete = true;
+    facts.chain_complete = false;
+    if (!none(facts, "interlock-cut-chain-is-no-verdict")) return false;
+    facts.chain_complete = true;
+    facts.surface = SurfaceKind::kUnknown;
+    if (!none(facts, "interlock-unknown-surface-is-no-verdict")) return false;
+  }
+
+  // E1 / E4 by extension: refused where opening the item runs or installs it (a file manager, a
+  // download list), as a takeover. The same file opened inside an application is not refused here.
+  for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+    for (const char *extension : {"command", "sh", "exe", "msi", "pkg", "dmg", "bat", "app"}) {
+      EffectFacts facts = EffBase();
+      facts.surface = surface;
+      facts.action = ActionKind::kDoubleClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axrow", "", "item"}, {"axwindow", "", "Downloads"}};
+      if (!trigger_takeover(facts, "interlock-executable-open-is-a-takeover")) return false;
+      facts.mode = SessionMode::kSupervised;
+      if (!trigger_takeover(facts, "interlock-executable-open-ignores-the-mode")) return false;
+    }
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kOrdinary;
+    facts.action = ActionKind::kInvoke;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "sh";
+    facts.chain = {{"axrow", "", "install.sh"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+    if (!none(facts, "interlock-script-opened-in-an-editor-is-not-refused")) return false;
+    facts.extension = "pkg";
+    if (!none(facts, "interlock-installer-name-opened-in-an-app-is-not-refused")) return false;
+  }
+  {
+    // An installer button is a trigger on any surface: it is the control that installs.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kClick;
+    facts.chain = {{"axbutton", "", "Install now"}, {"axwindow", "", "Setup"}};
+    if (!trigger_takeover(facts, "interlock-installer-button-is-a-takeover")) return false;
+    facts.action = ActionKind::kType;
+    if (!none(facts, "interlock-typing-near-install-is-no-verdict")) return false;
+  }
+  {
+    // The installer control is a trigger on any surface even when an executable extension comes with
+    // it: the extension must not make the refusal go away (the core says E4 either way).
+    for (const char *extension : {"pkg", "sh", "exe", "dmg"}) {
+      EffectFacts facts = EffBase();
+      facts.surface = SurfaceKind::kOrdinary;
+      facts.action = ActionKind::kClick;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-button-with-an-extension-is-a-takeover")) return false;
+    }
+    // Without a known extension it is the same button, with the same answer.
+    EffectFacts unknown = EffBase();
+    unknown.action = ActionKind::kClick;
+    unknown.extension_known = false;
+    unknown.extension = "sh";
+    unknown.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!trigger_takeover(unknown, "interlock-install-button-with-an-unknown-extension")) return false;
+    // An extension that is not plain is no extension at all: the button still decides.
+    EffectFacts odd = unknown;
+    odd.extension_known = true;
+    odd.extension = "s h";
+    if (!trigger_takeover(odd, "interlock-install-button-with-an-odd-extension")) return false;
+    // The shape facts really have: a button that also carries a file (an AXURL / AXFilename makes
+    // it an item) is still a control, and is judged as one.
+    for (const char *extension : {"pkg", "sh", "exe"}) {
+      EffectFacts facts = EffBase();
+      facts.action = ActionKind::kClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = extension;
+      facts.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-button-that-is-also-an-item")) return false;
+    }
+    {
+      // The label inside the button is inside the control.
+      EffectFacts facts = EffBase();
+      facts.action = ActionKind::kClick;
+      facts.target_is_file_item = true;
+      facts.extension_known = true;
+      facts.extension = "pkg";
+      facts.chain = {{"axstatictext", "", "Install"}, {"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(facts, "interlock-install-label-inside-a-button")) return false;
+    }
+    // A row, a cell or a text that is named like an installer is a file in a list, judged by its
+    // extension and, inside an application, not refused: with or without an extension known.
+    for (const char *role : {"axrow", "axcell", "axoutlinerow", "axstatictext", "listitem", "treeitem", "dataitem", "text"}) {
+      for (const bool known : {true, false}) {
+        EffectFacts facts = EffBase();
+        facts.action = ActionKind::kInvoke;
+        facts.target_is_file_item = known;
+        facts.extension_known = known;
+        facts.extension = known ? "sh" : "";
+        facts.chain = {{role, "", "install.sh"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+        if (!none(facts, "interlock-installer-named-item-in-an-app-is-not-refused")) return false;
+      }
+    }
+    {
+      // The same on Windows, from the UIA facts the helper builds: a Button is a control, a ListItem
+      // is a file.
+      const auto windows = [](const char *control_type, const char *name) {
+        ShadowUiaCapture capture = UiaBase();
+        capture.window_class = "SomeAppClass";
+        capture.process_path = "C:\\Apps\\app.exe";
+        capture.chain = {UiaNode(control_type, name), UiaNode("Window", "App")};
+        capture.item_kind = ShadowItemKind::kFile;
+        capture.item_name_read = true;
+        capture.item_name_is_real_path = true;
+        capture.item_name = "C:\\Apps\\setup.pkg";
+        return capture;
+      };
+      const ShadowUiaCapture button = windows("Button", "Install");
+      if (!trigger_takeover(BuildWindowsShadowFacts(button, UiaRequest("click")).facts,
+                            "interlock-windows-install-button-that-is-also-an-item")) return false;
+      ShadowUiaCapture list_item = windows("ListItem", "install.sh");
+      list_item.item_name = "C:\\Apps\\install.sh";
+      if (!none(BuildWindowsShadowFacts(list_item, UiaRequest("invoke")).facts,
+                "interlock-windows-installer-named-list-item")) return false;
+    }
+    // Fail closed: a role that is not known to be a passive item is a control. Unknown and custom
+    // roles, and the controls that were never listed, are refused when the words or the extension say
+    // install, and the allow list is matched whole, not by a word inside the role.
+    for (const char *role : {"axcustomwidget", "AXDisclosureTriangle", "axcombobox", "axrowcustom", "axtextarea",
+                             "axcellrenderer", "axsplitbutton", "axoutline", "AXGroup", "AXMenuBarItem",
+                             "AXIncrementor", "AXButton", "AXLink", "AXMenuItem", "AXCheckBox",
+                             "AXPopUpButton", "AXRadioButton", "AXTabGroup"}) {
+      EffectFacts by_label = EffBase();
+      by_label.action = ActionKind::kClick;
+      by_label.chain = {{role, "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(by_label, "interlock-unknown-role-install-label")) return false;
+      EffectFacts by_extension = by_label;
+      by_extension.extension_known = true;
+      by_extension.extension = "pkg";
+      if (!trigger_takeover(by_extension, "interlock-unknown-role-install-label-with-an-extension")) return false;
+    }
+    {
+      // The Windows control types that are not in the allow list.
+      ShadowUiaCapture split = UiaBase();
+      split.window_class = "SomeAppClass";
+      split.process_path = "C:\\Apps\\app.exe";
+      split.chain = {UiaNode("SplitButton", "Install"), UiaNode("Window", "App")};
+      if (!trigger_takeover(BuildWindowsShadowFacts(split, UiaRequest("click")).facts,
+                            "interlock-windows-split-button-install")) return false;
+      for (const char *control_type : {"Custom", "ComboBox", "Spinner", "Button", "Hyperlink", "MenuItem",
+                                       "CheckBox", "Group", "Pane", "TabItem"}) {
+        ShadowUiaCapture custom = split;
+        custom.chain = {UiaNode(control_type, "Install"), UiaNode("Window", "App")};
+        if (!trigger_takeover(BuildWindowsShadowFacts(custom, UiaRequest("click")).facts,
+                              "interlock-windows-control-type-install")) return false;
+      }
+    }
+    {
+      // A role in the allow list with a subrole that says button is not a passive item.
+      EffectFacts mixed = EffBase();
+      mixed.action = ActionKind::kClick;
+      mixed.chain = {{"axrow", "axbutton", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(mixed, "interlock-item-role-with-a-control-subrole")) return false;
+    }
+    {
+      // A toggle aimed at a file with an executable extension, in an application, by a control that is
+      // not an installer, is not a launch (the extension rule covers the toggle, and the editor
+      // excuse applies to it like to any other opening in an application).
+      EffectFacts toggle_control = EffBase();
+      toggle_control.action = ActionKind::kToggle;
+      toggle_control.target_is_file_item = true;
+      toggle_control.extension_known = true;
+      toggle_control.extension = "sh";
+      toggle_control.chain = {{"axcheckbox", "", "keep"}, {"axwindow", "", "Editor"}};
+      if (!none(toggle_control, "interlock-toggle-control-in-an-app-is-not-a-launch")) return false;
+      // A download row whose extension is not known stays with v1 (a person decides): no verdict.
+      EffectFacts dmg = EffBase();
+      dmg.surface = SurfaceKind::kDownloadPanel;
+      dmg.action = ActionKind::kDoubleClick;
+      dmg.target_is_file_item = true;
+      dmg.extension_known = false;
+      dmg.chain = {{"axrow", "", "Installer.dmg"}, {"axwindow", "", "Downloads"}};
+      if (!none(dmg, "interlock-download-row-with-an-unknown-extension-is-no-verdict")) return false;
+    }
+    {
+      // An unknown ancestor between the label and the nearest known container may be the control that
+      // is pressed (a page makes a group clickable): the passive item must reach a known container
+      // through allow-listed roles only.
+      EffectFacts group = EffBase();
+      group.action = ActionKind::kClick;
+      group.chain = {{"axstatictext", "", "Install"}, {"axgroup", "", ""}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(group, "interlock-label-under-an-unknown-group")) return false;
+      EffectFacts custom_group = EffBase();
+      custom_group.action = ActionKind::kClick;
+      custom_group.chain = {{"axstatictext", "", "Install"}, {"axcustomwidget", "", ""}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(custom_group, "interlock-label-under-a-custom-ancestor")) return false;
+      EffectFacts row_in_group = EffBase();
+      row_in_group.action = ActionKind::kInvoke;
+      row_in_group.chain = {{"axrow", "", "install.sh"}, {"axgroup", "", ""}, {"axoutline", "", "Explorer"},
+                            {"axwindow", "", "Editor"}};
+      if (!trigger_takeover(row_in_group, "interlock-row-under-an-unknown-group")) return false;
+      // A chain that never reaches a known container proves nothing about what it is under.
+      EffectFacts open_ended = EffBase();
+      open_ended.action = ActionKind::kClick;
+      open_ended.chain = {{"axrow", "", "Install"}, {"axrow", "", "Setup"}};
+      if (!trigger_takeover(open_ended, "interlock-chain-without-a-known-container")) return false;
+      // A container is not an item: the target itself being one is a control.
+      EffectFacts container = EffBase();
+      container.action = ActionKind::kClick;
+      container.chain = {{"axoutline", "", "Install"}, {"axwindow", "", "Setup"}};
+      if (!trigger_takeover(container, "interlock-container-as-the-target")) return false;
+      // The passive chain under the usual containers stays no verdict.
+      for (const char *container_role : {"axtable", "axlist", "axoutline", "axbrowser", "axscrollarea"}) {
+        EffectFacts row = EffBase();
+        row.action = ActionKind::kInvoke;
+        row.chain = {{"axstatictext", "", "install.sh"}, {"axrow", "", ""}, {container_role, "", "Explorer"},
+                     {"axwindow", "", "Editor"}};
+        if (!none(row, "interlock-statictext-in-a-row-in-a-container")) return false;
+      }
+      {
+        // The same shapes from UI Automation.
+        ShadowUiaCapture text = UiaBase();
+        text.window_class = "SomeAppClass";
+        text.process_path = "C:\\Apps\\app.exe";
+        text.chain = {UiaNode("Text", "Install"), UiaNode("Custom", ""), UiaNode("Window", "App")};
+        if (!trigger_takeover(BuildWindowsShadowFacts(text, UiaRequest("click")).facts,
+                              "interlock-windows-text-under-a-custom")) return false;
+        ShadowUiaCapture item = UiaBase();
+        item.window_class = "SomeAppClass";
+        item.process_path = "C:\\Apps\\app.exe";
+        item.chain = {UiaNode("Text", "install.sh"), UiaNode("ListItem", ""), UiaNode("List", "Files"),
+                      UiaNode("Window", "App")};
+        if (!none(BuildWindowsShadowFacts(item, UiaRequest("invoke")).facts,
+                  "interlock-windows-text-in-a-list-item")) return false;
+        for (const char *container_type : {"List", "Tree", "DataGrid", "Table", "Pane", "Document"}) {
+          ShadowUiaCapture in_container = item;
+          in_container.chain = {UiaNode("ListItem", "install.sh"), UiaNode(container_type, "Files"),
+                                UiaNode("Window", "App")};
+          if (!none(BuildWindowsShadowFacts(in_container, UiaRequest("invoke")).facts,
+                    "interlock-windows-list-item-in-a-container")) return false;
+        }
+      }
+    }
+    {
+      // A file named like an installer, opened from a file manager or a download list, is an opening
+      // that needs an approval (E2 / E3): refused while the approval path is closed. The core may
+      // call it E4 for the word in the name; the answer does not get weaker for that.
+      for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+        for (const bool item_flag : {true, false}) {
+          for (const ActionKind action : {ActionKind::kDoubleClick, ActionKind::kInvoke, ActionKind::kClick}) {
+            EffectFacts facts = EffBase();
+            facts.surface = surface;
+            facts.action = action;
+            facts.target_is_file_item = item_flag;
+            facts.extension_known = true;
+            facts.extension = "txt";
+            facts.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+            if (!trigger_blocked(facts, "interlock-installer-named-file-opened-from-a-list")) return false;
+            if (!Check(InterlockForFacts(facts).effect_class ==
+                           (surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
+                                                                   : EffectClass::kE3FileManagerOpen),
+                       "interlock-listed-opening-names-its-class")) return false;
+          }
+        }
+        // The refusal says "the approval is closed", so it is only true while it is: once the rule set
+        // trusts the approval for this surface, the approval decides and this map has no verdict.
+        for (const std::string &name : std::vector<std::string>{"install.txt", u8"インストール手順.pdf"_u8}) {
+          EffectFacts named = EffBase();
+          named.surface = surface;
+          named.action = ActionKind::kDoubleClick;
+          named.target_is_file_item = true;
+          named.extension_known = true;
+          named.extension = name.find("pdf") != std::string::npos ? "pdf" : "txt";
+          named.chain = {{"axrow", "", name}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+          if (!trigger_blocked(named, "interlock-closed-approval-refuses-an-installer-named-file")) return false;
+          EffectRuleset trusting;
+          trusting.download_open = true;
+          trusting.file_manager_open = true;
+          if (!Check(!InterlockForFacts(named, trusting).Refuses(), "interlock-open-approval-leaves-an-installer-named-file"))
+            return false;
+          // Only the rule for this surface counts.
+          EffectRuleset other;
+          other.download_open = surface != SurfaceKind::kDownloadPanel;
+          other.file_manager_open = surface != SurfaceKind::kFileBrowser;
+          if (!Check(InterlockForFacts(named, other).Refuses(), "interlock-the-other-surfaces-approval-does-not-count"))
+            return false;
+          EffectRuleset own;
+          own.download_open = surface == SurfaceKind::kDownloadPanel;
+          own.file_manager_open = surface == SurfaceKind::kFileBrowser;
+          if (!Check(!InterlockForFacts(named, own).Refuses(), "interlock-own-surfaces-approval-counts")) return false;
+        }
+        // Browsing it is not opening it.
+        EffectFacts browse = EffBase();
+        browse.surface = surface;
+        browse.action = ActionKind::kSelect;
+        browse.target_is_file_item = true;
+        browse.extension_known = true;
+        browse.extension = "txt";
+        browse.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+        if (!none(browse, "interlock-installer-named-file-selected-in-a-list")) return false;
+        // An unknown extension stays with v1 (a person decides), as for any other name.
+        EffectFacts unknown = browse;
+        unknown.action = ActionKind::kDoubleClick;
+        unknown.extension_known = false;
+        unknown.extension = "";
+        unknown.chain = {{"axrow", "", "Installer.dmg"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+        if (!none(unknown, "interlock-installer-named-file-with-an-unknown-extension-in-a-list")) return false;
+      }
+      // The same name opened inside an application is a file in an editor, not refused.
+      EffectFacts editor = EffBase();
+      editor.surface = SurfaceKind::kOrdinary;
+      editor.action = ActionKind::kDoubleClick;
+      editor.target_is_file_item = true;
+      editor.extension_known = true;
+      editor.extension = "txt";
+      editor.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Explorer"}, {"axwindow", "", "Editor"}};
+      if (!none(editor, "interlock-installer-named-file-opened-in-an-editor")) return false;
+      // From UI Automation: an Explorer ListItem.
+      ShadowUiaCapture explorer = UiaBase();
+      explorer.window_class = "CabinetWClass";
+      explorer.process_path = "C:\\Windows\\explorer.exe";
+      explorer.chain = {UiaNode("ListItem", "install.txt"), UiaNode("List", "Items View"), UiaNode("Window", "Downloads")};
+      explorer.item_kind = ShadowItemKind::kFile;
+      explorer.item_name_read = true;
+      explorer.item_name_is_real_path = true;
+      explorer.item_name = "C:\\Users\\a\\Downloads\\install.txt";
+      explorer.chain[1].class_name = "UIItemsView";
+      if (!trigger_blocked(BuildWindowsShadowFacts(explorer, UiaRequest("invoke")).facts,
+                           "interlock-windows-installer-named-file-in-explorer")) return false;
+    }
+    // The installer rule is the core's: the control must be activated, and its words must be readable.
+    EffectFacts typed = EffBase();
+    typed.action = ActionKind::kKey;
+    typed.key_is_activation = false;
+    typed.extension_known = true;
+    typed.extension = "sh";
+    typed.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!none(typed, "interlock-a-key-that-does-not-activate-is-not-an-installer")) return false;
+    EffectFacts unreadable = EffBase();
+    unreadable.action = ActionKind::kClick;
+    unreadable.text_language_supported = false;
+    unreadable.extension_known = true;
+    unreadable.extension = "sh";
+    unreadable.chain = {{"axbutton", "", "Install"}, {"axwindow", "", "Setup"}};
+    if (!none(unreadable, "interlock-unreadable-words-are-not-an-installer")) return false;
+    // A toggle in an application, aimed at an item with an executable extension, is not a launch.
+    EffectFacts toggle = EffBase();
+    toggle.action = ActionKind::kToggle;
+    toggle.target_is_file_item = true;
+    toggle.extension_known = true;
+    toggle.extension = "sh";
+    toggle.chain = {{"axrow", "", "install.sh"}, {"axwindow", "", "Editor"}};
+    if (!none(toggle, "interlock-toggle-in-an-app-is-not-a-launch")) return false;
+    // The core's extension rule without an extension behind it is not an extension verdict: a claimed
+    // E1 on an ordinary surface with no known extension has no editor excuse.
+    EffectFacts claim = EffBase();
+    claim.action = ActionKind::kClick;
+    claim.extension_known = false;
+    claim.extension = "sh";
+    EffectDecision e1;
+    e1.effect_class = EffectClass::kE1ExecutableOpen;
+    e1.kind = DecisionKind::kBlocked;
+    e1.reason = DecisionReason::kExecutionTrigger;
+    if (!Check(MapEffectToInterlock(claim, e1).Refuses(), "interlock-e1-claim-without-a-known-extension")) return false;
+    claim.extension_known = true;
+    if (!Check(!MapEffectToInterlock(claim, e1).Refuses(), "interlock-e1-claim-by-extension-in-an-app")) return false;
+  }
+
+  // E2 / E3: opening from a download list or a file manager needs an approval, and the approval
+  // path is closed, so it is refused; once the rule set trusts it, the approval decides, not this.
+  for (const SurfaceKind surface : {SurfaceKind::kFileBrowser, SurfaceKind::kDownloadPanel}) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = ActionKind::kDoubleClick;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "pdf";
+    facts.chain = {{"axrow", "", "report"}, {"axwindow", "", "Downloads"}};
+    if (!trigger_blocked(facts, "interlock-approval-closed-is-blocked")) return false;
+    EffectRuleset open;
+    open.download_open = true;
+    open.file_manager_open = true;
+    if (!Check(!InterlockForFacts(facts, open).Refuses(), "interlock-approval-open-is-not-this-map")) return false;
+    // Browsing is not opening, and an unknown extension is v1's.
+    facts.action = ActionKind::kSelect;
+    if (!none(facts, "interlock-browsing-is-no-verdict")) return false;
+    facts.action = ActionKind::kDoubleClick;
+    facts.extension_known = false;
+    if (!none(facts, "interlock-unknown-extension-is-no-verdict")) return false;
+  }
+
+  // Everything else the core says is not an interlock: secure and credential fields, a confirmation,
+  // a supervised action waiting for an approval, a sensitive origin, a round it could not classify.
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {{"axsecuretextfield", "", "Password"}, {"axwindow", "", "Login"}};
+    if (!none(facts, "interlock-secure-is-v1s")) return false;
+    facts.chain = {{"axtextfield", "", "Card number"}, {"axwindow", "", "Pay"}};
+    if (!none(facts, "interlock-credential-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.chain = {{"axbutton", "", "Pay now"}, {"axwindow", "", "Shop"}};
+    if (!none(facts, "interlock-confirm-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.mode = SessionMode::kSupervised;
+    if (!none(facts, "interlock-supervised-approval-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.origin = OriginState::kSensitive;
+    if (!none(facts, "interlock-sensitive-origin-is-not-this-map")) return false;
+    facts = EffBase();
+    facts.text_language_supported = false;
+    if (!none(facts, "interlock-unclassifiable-is-no-verdict")) return false;
+    facts = EffBase();
+    facts.mode = SessionMode::kObserveOnly;
+    if (!none(facts, "interlock-observe-only-mode-is-not-this-map")) return false;
+  }
+
+  // The map takes the core's decision and the facts. It does not re-derive the decision: it checks
+  // the facts gate (complete metadata and chain, a known surface) and that the class comes with its
+  // own reason, and takes a decision that passes both as given.
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kClick;
+    EffectDecision claimed;
+    claimed.effect_class = EffectClass::kSurface;
+    claimed.kind = DecisionKind::kBlocked;
+    claimed.reason = DecisionReason::kSurface;
+    facts.surface = SurfaceKind::kShellLike;
+    facts.metadata_complete = false;
+    if (!Check(!MapEffectToInterlock(facts, claimed).Refuses(), "interlock-claim-on-incomplete-facts")) return false;
+    facts.metadata_complete = true;
+    if (!Check(MapEffectToInterlock(facts, claimed).Refuses(), "interlock-claim-on-complete-facts")) return false;
+    // The gate is the core's: a cut chain, an empty chain and an unknown surface are not a ground.
+    EffectFacts cut = facts;
+    cut.chain_complete = false;
+    if (!Check(!MapEffectToInterlock(cut, claimed).Refuses(), "interlock-claim-on-a-cut-chain")) return false;
+    EffectFacts empty = facts;
+    empty.chain.clear();
+    if (!Check(!MapEffectToInterlock(empty, claimed).Refuses(), "interlock-claim-on-an-empty-chain")) return false;
+    EffectFacts unknown = facts;
+    unknown.surface = SurfaceKind::kUnknown;
+    if (!Check(!MapEffectToInterlock(unknown, claimed).Refuses(), "interlock-claim-on-an-unknown-surface")) return false;
+    // The reason has to be the class's own: another reason on the same class is not this map's.
+    EffectDecision odd = claimed;
+    odd.reason = DecisionReason::kSensitiveOrigin;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-surface-class-with-another-reason")) return false;
+    odd.effect_class = EffectClass::kE1ExecutableOpen;
+    odd.reason = DecisionReason::kApprovalNotEnabled;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-trigger-class-with-another-reason")) return false;
+    odd.effect_class = EffectClass::kE3FileManagerOpen;
+    odd.reason = DecisionReason::kExecutionTrigger;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-approval-class-with-another-reason")) return false;
+    // A decision that is not a block is never an interlock, whatever its class.
+    odd.effect_class = EffectClass::kSurface;
+    odd.reason = DecisionReason::kSurface;
+    odd.kind = DecisionKind::kTakeover;
+    if (!Check(!MapEffectToInterlock(facts, odd).Refuses(), "interlock-takeover-decision-is-not-a-block")) return false;
+    // A blocked decision of another class does not become a surface verdict.
+    claimed.effect_class = EffectClass::kSecure;
+    claimed.reason = DecisionReason::kSecure;
+    if (!Check(!MapEffectToInterlock(facts, claimed).Refuses(), "interlock-other-blocked-class")) return false;
+  }
+  std::cout << "Computer Use native interlock map: PASS\n";
+  return true;
+}
+
 // A page scroll is judged on nothing: the page title is not the scrolled control's caption.
 bool CheckEffectPageScroll() {
   for (const char *role : {"axwebarea", "AXWebArea", "Document"}) {
@@ -4623,6 +5162,7 @@ int main() {
   if (!CheckShadowReadHelpers()) return 1;
   if (!CheckEffectMeasurement()) return 1;
   if (!CheckEffectMeasurementBinding()) return 1;
+  if (!CheckNativeInterlockMap()) return 1;
   if (!CheckEffectPageScroll()) return 1;
   std::cout << "Computer Use native approval ticket policy: PASS\n";
   if (!CheckNativeOrdinaryTicket()) return 1;

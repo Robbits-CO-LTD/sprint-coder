@@ -765,18 +765,6 @@ describe('Computer Use external final gate', () => {
         const block = workflow.slice(start, end + marker.length);
         const directory = mkdtempSync(resolve(tmpdir(), 'sprint-coder-eligibility-ps-'));
         try {
-          const run = (eligibilityJson: string): number | null => {
-            const manifestPath = resolve(directory, 'manifest.json');
-            writeFileSync(manifestPath, `{"version":1,"eligibility":${eligibilityJson}}`);
-            const scriptPath = resolve(directory, 'check.ps1');
-            writeFileSync(
-              scriptPath,
-              `$ErrorActionPreference = 'Stop'\n$nativeManifest = Get-Content -Raw -LiteralPath '${manifestPath}' | ConvertFrom-Json\n${block}\n`,
-            );
-            return spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
-              encoding: 'utf8',
-            }).status;
-          };
           const good = {
             mode: '"v1-allowlist"',
             rulesetVersion: '1',
@@ -788,8 +776,7 @@ describe('Computer Use external final gate', () => {
             `{${Object.entries({ ...good, ...change })
               .map(([key, value]) => `"${key}":${value}`)
               .join(',')}}`;
-          expect(run(json())).toBe(0);
-          for (const change of [
+          const refused: readonly Record<string, string>[] = [
             { rulesetVersion: '"1"' },
             { classifierVersion: 'true' },
             { lexiconVersion: '1.0' },
@@ -800,12 +787,48 @@ describe('Computer Use external final gate', () => {
             { ticketRequired: 'false' },
             { ticketRequired: '"true"' },
             { ticketRequired: '1' },
-          ])
-            expect(run(json(change)), JSON.stringify(change)).not.toBe(0);
+          ];
+          // One pwsh process for every case. Starting pwsh once per case took long enough on a loaded
+          // Linux runner to pass the test timeout (11 starts); a hang is not what was observed. Each
+          // case runs the same block in its own try/catch and reports whether it threw.
+          const cases = [json(), ...refused.map((change) => json(change))];
+          const casePaths = cases.map((eligibilityJson, index) => {
+            const manifestPath = resolve(directory, `manifest-${index}.json`);
+            writeFileSync(manifestPath, `{"version":1,"eligibility":${eligibilityJson}}`);
+            return manifestPath;
+          });
+          const scriptPath = resolve(directory, 'check.ps1');
+          writeFileSync(
+            scriptPath,
+            [
+              "$ErrorActionPreference = 'Stop'",
+              `foreach ($manifestPath in @(${casePaths.map((path) => `'${path}'`).join(',')})) {`,
+              '  $nativeManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json',
+              '  try {',
+              block,
+              "    Write-Output 'ACCEPTED'",
+              '  } catch {',
+              "    Write-Output 'REFUSED'",
+              '  }',
+              '}',
+              '',
+            ].join('\n'),
+          );
+          const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-File', scriptPath], {
+            encoding: 'utf8',
+          });
+          expect(result.status, result.stderr).toBe(0);
+          const outcomes = result.stdout.split(/\r?\n/u).filter((line) => line !== '');
+          expect(outcomes).toHaveLength(cases.length);
+          expect(outcomes[0], 'the v1 eligibility').toBe('ACCEPTED');
+          refused.forEach((change, index) =>
+            expect(outcomes[index + 1], JSON.stringify(change)).toBe('REFUSED'),
+          );
         } finally {
           rmSync(directory, { recursive: true, force: true });
         }
       },
+      60_000,
     );
 
     it('accepts a manifest shaped like the build output and refuses a changed eligibility (macOS check)', () => {

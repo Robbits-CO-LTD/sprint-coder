@@ -631,6 +631,26 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 
 **INV-3 の順序制約（2026-10-14。出典: #500 計画 contract の INV-3「S4/S5 と操作 interlock を別 PR に切り離さない」。この ADR では D1 の運用規則として置く）**: 適格性の拡大、つまり deny-list で一般アプリを eligible にし、`ListTargets`（Windows では `list_targets`）の結果へ入力できるようにする変更は、実行トリガ interlock（§3.6）と面 deny（§3.7）と**同じ PR か、その後の PR に限る**。S4 / S5 を複数 PR に分けるときも、interlock より先に適格性だけを merge しない。V2 flag が OFF でも例外にしない（flag は後から ON にされ、ビルド時定数と manifest の attest が通れば権限が開くため）。N2b-4（承認後の復帰と再 preflight）、D7（build 時定数と handshake）、classifier v2 のような土台の PR は、新しい候補への入力を公開しないかぎり先行してよい。
 
+**S4-1 の二段構え（2026-10-15。出典: S4-1 の事前調査と親の判断）**: macOS の面 deny（§3.7）と実行トリガ interlock（§3.6）は次の 2 段で入れる。
+
+1. **S4-1（適格性を広げない）は、根拠となる facts が完全なときの正の一致だけを拒否する**。分類器コアが interlock のクラス（面、E1 / E4、承認が閉じている間の E2 / E3）を返し、その根拠の facts（メタデータ、祖先チェーン、面）が揃っているときだけ拒否する。facts が欠けている、分類できなかった、といったときは「判定なし」を返し、v1 の判定に任せる。現行の適格集合（TextEdit、公式 VS Code）の通常操作を、コアの fail-closed（D13）で巻き込まないための措置である。
+2. **S4-3（適格性の拡大）は、新たに適格になる候補について不完全な facts を fail-closed（takeover）にする**。S4-1 の写像は S4-3 の規則ではない。S4-3 の受入条件に、不完全な facts を拒否する規則と、native / Main の attest に「interlock が有効」であることを含める。INV-3 の順序（interlock が先）はこれで保たれる。
+
+写像の細部（S4-1-0。portable な `computer_use_native_interlock.h`、harness で網羅。どこからも呼ばない。配線は S4-1a / S4-1b）:
+
+- 面（シェル、スクリプト入力、コマンドパレット、DevTools console、チェーン内の面の語）→ blocked / rejected、`native_shell_surface_blocked`。
+- E1 / E4 → takeover / paused、`native_execution_trigger_blocked`。**拡張子で E1 / E4 を拒否するのは、ファイルマネージャーとダウンロード一覧の「開く操作」に限る**（開くことが実行・インストールになる場所）。エディタのファイルツリーで `.sh` を開く操作のように、アプリの中で開くだけのものは拒否しない（VS Code の挙動は HA の観察項目）。インストーラのコントロール（ラベルの語）の活性化は、どの面でも拒否する。
+- E2 / E3 → 承認経路が閉じている間は blocked / rejected、`native_execution_trigger_blocked`。rule set が承認を信頼したら、コアが承認を返し、この写像は判定なしになる（承認が決める）。
+- secure、credential、確認、supervised の承認待ち、sensitive origin、observe-only、分類不能は interlock ではなく、v1 に任せる。
+- 拒否は強める方向だけに使う。コアの lexicon は版 2 の候補（未 attest）を使ってよいが、承認の根拠には使わない。版は上げない。
+
+申し送り（S4-1-0 のレビュー結果。S4-1a / S4-1b / S4-3 で扱う）:
+
+- **理由コード `native_execution_trigger_blocked` は 2 通りの組で使われる**: E1 / E4 は takeover / paused、E2 / E3（承認が閉じている間）は blocked / rejected。受領書の閉じた表には組として登録される。ADR の `approval_not_enabled`（§9 の N2b 系の記述）との関係は、**S4-1a で決める**（同じコードに畳むか、E2 / E3 に別のコードを与えるか）。
+- **コアの `MayOpen` は、Finder での単純なクリックや矢印キーも「開く操作」に数える**（実機で各入力経路の効果が分かるまでの保守側の扱い、S4 契約 5）。E1 / E3 の対象になる範囲が広いことを前提に、S4-3 の受入で見直す。一方、**Mail の添付のように ordinary な面で `.command` を開く操作は、S4-1 では「判定なし」になる**（リスト面でないため）。これも S4-3 の受入で見直す。
+- **面の語がウィンドウタイトルにあると rejected になる**: チェーンの面の語（`terminal` など）は blocked / rejected で、v1 の `native_high_impact_user_takeover`（paused）が rejected に変わる。**S4-1b の前に、C2 の shadow の内訳（`V2IsStricter`）で、TextEdit と VS Code の通常 journey で起きないことを確かめる**。
+- インストーラの扱い: **許可リストの項目だけを例外にし、未知の role は拒否する側に倒す（fail-closed）**。コントロールか項目かは role で決め、ファイルが付いているかでは決めない（実際の facts では、ボタンでも AXURL や AXFilename を持てば項目になり、`target_is_file_item` が真になるため）。例外は「受動的な項目だと確かに分かる role」だけで、row / cell / outlinerow / listitem / treeitem / dataitem / statictext / text（macOS の `AX` 接頭辞を除き、Windows の ControlType と同じ語。**完全一致**で、`axtextarea` や `axrowcustom` のように語を含むだけの role は項目ではない）。対象から最も近い**既知の容器**（macOS の AXList / AXOutline / AXTable / AXBrowser / AXScrollArea / AXWindow / AXApplication / AXWebArea、UIA の List / Tree / DataGrid / Table / Pane / Window / Document。完全一致）に着くまでのすべてのノードが許可リストの role で、subrole も空か許可リストのものであるときに限る。途中に未知の role（AXGroup、Custom など）があれば、コントロールとして拒否側に倒す（コアの「操作可能な祖先」は AXGroup や Custom を認識せず、その下のラベルだけが項目に見えてしまうため、コアの範囲には頼らない）。対象自身が容器である場合と、既知の容器に着かない祖先の列も、項目ではない（ボタンの中のラベルは、ボタンがリストに無いので項目ではない）。それ以外はすべてコントロールとして扱い、インストーラの語で活性化した場合は、拡張子の有無・ファイルが付いているかにかかわらず、どの面でも拒否する（takeover）。未知の role、カスタムの role、リストに無いコントロール（web のクリックできる AXGroup、AXComboBox、AXIncrementor、AXDisclosureTriangle、AXMenuBarItem、UIA の Custom / ComboBox / Spinner / SplitButton など）は、いずれもこの側に倒れる。許可リストの項目（`install.sh` のような名前の行）は、アプリの中（一覧面でない面）では拒否せず、拡張子の規則で判定する。**ファイルマネージャーとダウンロード一覧では、項目を開く操作は、コアがその名前の語（`install.txt` の install など）で E4 と答えても、E2 / E3（承認経路が閉じている間は blocked）として扱い、拒否の強さが承認の拒否より弱くならない**（拡張子が不明なら、これまでどおり v1 に残る。閲覧・選択は開く操作ではない）。この拒否は「承認が閉じている」ことを理由にするので、rule set がその面の承認（ダウンロード一覧は `download_open`、ファイルマネージャーは `file_manager_open`）を信頼しているときは判定なしにし、承認側に委ねる（写像は rule set を受け取る）。拡張子が不明なダウンロード面の行（`Installer.dmg` など）は、判定なしのまま v1（人の判断）に残る。
+
 **S6 の前提（2026-10-14）**: UWP / `ApplicationFrameHost` の identity と束縛（UIA によるコンテンツ HWND の解決、package family name と publisher の検証、native identity digest への束縛、package に限るパス比較の免除、プロセス入れ替わりの検出）は、設計を ADR に追記して敵対的レビューを受けるまで実装しない。レビューが出るまでは、`ApplicationFrameHost` 配下は従来どおり拒否する。Windows 11 の既定 Notepad のような packaged app が `ApplicationFrameHost` 配下か、packaged Win32 かは、プロセスツリーとウィンドウクラスの実測で確かめてから S6 の必要性を判断する。
 
 **S9a / S9b と S8 の順序（2026-10-14）**: S9a（受入 journey の V2 化）→ 両 OS の実機受入 PASS → S8（V1 撤去）→ S9b の順に進める。実機受入は V1 が残った状態の V2 flag ON で行うので、受入が S8 を待つ循環は生じない。S9a の完了時に新しい [human] 受入 Issue を起こす（macOS の署名・notarize 済みパッケージの実機、Windows の受入パッケージ、正式 release 時の Windows 署名者検証を含む）。
