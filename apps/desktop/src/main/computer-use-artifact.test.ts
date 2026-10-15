@@ -174,6 +174,18 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['a nine-digit number shown as 3 + 3 + 3', '123 456 789'],
     ['a five-digit number with a space', '12 345'],
     ['a code separated by two spaces', '482  913'],
+    [
+      'a table of numbers in tab-separated columns',
+      ['3829\t41027\t5521\t90311\t774', '10293\t4482\t66120\t3317\t59012'].join('\n'),
+    ],
+    [
+      'a column of numbers, one per line',
+      ['48213', '771024', '5521', '903114', '77412', '102938'].join('\n'),
+    ],
+    // Luhn-valid when read as 5-5-6 with spaces, but across lines only 4-digit groups make a card.
+    ['a column of 5- and 6-digit numbers', '41111\n11111\n111111'],
+    // A window keeps one kind of separator: a cell next to a space-separated number is not a card.
+    ['a tab-separated cell next to a spaced number', '4111\t1111 1111 1111'],
     ['a code inside a sentence', 'Order 482913 shipped'],
     ['a 16-digit number that fails Luhn', '4111 1111 1111 1112'],
     ['a 12-digit number that passes Luhn', '477777777772'],

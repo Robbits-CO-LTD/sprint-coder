@@ -104,16 +104,27 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
   // end at group boundaries only, and every group but the last has at least 4 digits (card numbers
   // print as 4-4-4-4, 4-6-5 and the like; only the tail may be short), so runs of short numbers
   // such as phone numbers are not read as cards. Cutting inside an unseparated group would let a
-  // long id that merely contains a Luhn-valid slice be flagged. Bounded work: at most ~2,000 groups
-  // per 4,096 bytes, each window at most 19 digits.
+  // long id that merely contains a Luhn-valid slice be flagged. A window keeps one kind of
+  // separator, and across TABs or line feeds every group but the last is exactly 4 digits: a number
+  // broken across cells or lines still prints 4-4-4-4, while a table of plain numbers (TSV, one
+  // value per line) would otherwise be read as cards almost every time. Bounded work: at most
+  // ~2,000 groups per 4,096 bytes, each window at most 19 digits.
   for (const chain of text.matchAll(/\d(?:[ \t\n-]?\d)*/gu)) {
-    const groups = chain[0].split(/[ \t\n-]/u);
-    for (let first = 0; first < groups.length; first += 1) {
+    // Groups at even indexes, the separator after group i at index 2i + 1.
+    const parts = chain[0].split(/([ \t\n-])/u);
+    const groupCount = (parts.length + 1) / 2;
+    for (let first = 0; first < groupCount; first += 1) {
       let digits = '';
-      for (let last = first; last < groups.length; last += 1) {
-        // Only the last group of a window may be short (4-4-4-4-3, 4-4-4-1).
-        if (last > first && groups[last - 1]!.length < 4) break;
-        digits += groups[last];
+      for (let last = first; last < groupCount; last += 1) {
+        if (last > first) {
+          const separator = parts[2 * last - 1]!;
+          const previous = parts[2 * (last - 1)]!;
+          if (separator !== parts[2 * first + 1]) break;
+          const lineOrCell = separator === '\t' || separator === '\n';
+          // Only the last group of a window may be short (4-4-4-4-3, 4-4-4-1).
+          if (lineOrCell ? previous.length !== 4 : previous.length < 4) break;
+        }
+        digits += parts[2 * last];
         if (digits.length > 19) break;
         if (digits.length >= 13 && passesLuhn(digits)) return true;
       }
