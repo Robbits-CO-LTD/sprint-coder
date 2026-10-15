@@ -3088,7 +3088,9 @@ describe('ComputerUseController', () => {
           reasonCode: 'artifact_paste_refused',
         }),
       ]);
-      expect(store.take([reference.artifactId], owner)).toEqual(['Total 42']);
+      // Refused, not used: the paste took nothing. The session then ended, and what was carried into a
+      // session and not used is discarded with it (T15-8, design 4.4: one session uses it up).
+      expect(store.take([reference.artifactId], owner)).toBeNull();
       await fixture.controller.dispose();
     });
 
@@ -3451,15 +3453,23 @@ describe('ComputerUseController', () => {
       await fixture.controller.dispose();
     });
 
-    it('has no caller of attachArtifacts outside this file before T15-8', () => {
+    it('has one production caller of attachArtifacts: the carry of computer_start (T15-8)', () => {
       const directory = resolve(__dirname);
+      const callers: string[] = [];
       for (const name of readdirSync(directory).filter(
         (file) => /\.tsx?$/u.test(file) && !/\.test\.tsx?$/u.test(file),
       ))
-        if (name !== 'computer-use-controller.ts')
-          expect(readFileSync(resolve(directory, name), 'utf8'), name).not.toContain(
-            'attachArtifacts(',
-          );
+        for (const _call of readFileSync(resolve(directory, name), 'utf8').matchAll(
+          /\battachArtifacts\(/gu,
+        ))
+          callers.push(name);
+      // The definition and the one call, both in the controller; no other module attaches.
+      expect(callers).toEqual(['computer-use-controller.ts', 'computer-use-controller.ts']);
+      const source = readFileSync(resolve(directory, 'computer-use-controller.ts'), 'utf8');
+      const caller = /private attachCarriedArtifacts\([\s\S]*?\n {2}\}\n/u.exec(source)![0];
+      expect(caller).toContain('this.attachArtifacts(');
+      // Called once, right after the session exists, with what `startForAgent` checked.
+      expect(source.match(/this\.attachCarriedArtifacts\(/gu)).toHaveLength(1);
     });
   });
 

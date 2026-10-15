@@ -5586,6 +5586,14 @@ export type ComputerStartQuestion = z.infer<typeof computerStartQuestionSchema>;
 
 /** `computer_start` (ADR v2 §5.2). The goal is model-authored and bounded like a Task goal. */
 export const COMPUTER_START_GOAL_MAX_CHARACTERS = 1_024;
+/**
+ * How many artifacts one `computer_start` may carry into its session (#785 T15-8, design 4.4). It is
+ * also how many the store holds for a Task at once, so a call can carry everything there is.
+ */
+export const COMPUTER_START_MAX_CARRY = 3;
+/** An artifact the outer agent hands to the next session by its opaque id. Nothing else about it. */
+export const computerStartCarryItemSchema = z.object({ artifactId: computerUseIdSchema }).strict();
+export type ComputerStartCarryItem = z.infer<typeof computerStartCarryItemSchema>;
 export const computerStartToolInputSchema = z
   .object({
     targetToken: computerUseIdSchema,
@@ -5594,6 +5602,7 @@ export const computerStartToolInputSchema = z
       'Computer Use session goal is empty',
     ),
     question: computerStartQuestionSchema.optional(),
+    carry: z.array(computerStartCarryItemSchema).max(COMPUTER_START_MAX_CARRY).optional(),
   })
   .strict();
 export type ComputerStartToolInput = z.infer<typeof computerStartToolInputSchema>;
@@ -5647,6 +5656,17 @@ export const COMPUTER_START_TOOL_INPUT_JSON_SCHEMA = {
           then: { required: ['maxFractionDigits'], not: { required: ['choices'] } },
         },
       ],
+    },
+    // Artifacts the session may paste, by the opaque id an earlier `computer_start` returned.
+    carry: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: { artifactId: { type: 'string', minLength: 1, maxLength: 128 } },
+        required: ['artifactId'],
+        additionalProperties: false,
+      },
+      maxItems: COMPUTER_START_MAX_CARRY,
     },
   },
   required: ['targetToken', 'goal'],
@@ -6180,6 +6200,20 @@ export const computerStartAnswerSchema = z.discriminatedUnion('kind', [
     .strict(),
 ]);
 export type ComputerStartAnswer = z.infer<typeof computerStartAnswerSchema>;
+/**
+ * What a session copied, as the outer agent sees it (#785 T15-8, design 4.3): an opaque id, the
+ * kind and a size bucket, and nothing else. No text, no window title, no application name, no
+ * display name; where it came from is a Main-assigned id and no more. The exact length is not
+ * returned either, to give a side channel nothing to carry.
+ */
+export const computerStartArtifactSchema = z
+  .object({
+    artifactId: computerUseIdSchema,
+    kind: z.enum(['text']),
+    sizeClass: z.enum(['le_256', 'le_1k', 'le_4k']),
+  })
+  .strict();
+export type ComputerStartArtifact = z.infer<typeof computerStartArtifactSchema>;
 export const computerStartToolOutputSchema = z
   .object({
     sessionId: computerUseIdSchema,
@@ -6189,6 +6223,9 @@ export const computerStartToolOutputSchema = z
     round: z.number().int().nonnegative(),
     maxRounds: computerUseRoundLimitSchema,
     answer: computerStartAnswerSchema.optional(),
+    // Present only when the session copied something: with nothing copied (and always while the
+    // host cannot read a node) the result is exactly what it was before this field existed.
+    artifacts: z.array(computerStartArtifactSchema).min(1).max(COMPUTER_START_MAX_CARRY).optional(),
   })
   .strict();
 export type ComputerStartToolOutput = z.infer<typeof computerStartToolOutputSchema>;
@@ -6243,6 +6280,22 @@ export const COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA = {
           },
         },
       ],
+    },
+    // Only when the session copied a value; each entry is an opaque id with a kind and a size bucket.
+    artifacts: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          artifactId: { type: 'string', minLength: 1, maxLength: 128 },
+          kind: { type: 'string', enum: ['text'] },
+          sizeClass: { type: 'string', enum: ['le_256', 'le_1k', 'le_4k'] },
+        },
+        required: ['artifactId', 'kind', 'sizeClass'],
+        additionalProperties: false,
+      },
+      minItems: 1,
+      maxItems: COMPUTER_START_MAX_CARRY,
     },
   },
   required: ['sessionId', 'state', 'stopReason', 'mode', 'round', 'maxRounds'],

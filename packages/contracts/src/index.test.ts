@@ -2944,3 +2944,74 @@ describe('Computer Use model-authored tool input bounds', () => {
       ).toBe(false);
   });
 });
+
+describe('computer_start carry and artifacts (#785 T15-8)', () => {
+  const base = { targetToken: 'target-token', goal: 'x' };
+  const status = {
+    sessionId: 'session-1',
+    state: 'stopped',
+    stopReason: 'agent_finish',
+    mode: 'full_access_app',
+    round: 1,
+    maxRounds: 25,
+  };
+
+  it('takes at most three carried artifacts, each only an id (N17)', () => {
+    const parse = (carry: unknown) =>
+      contracts.computerStartToolInputSchema.safeParse({ ...base, carry }).success;
+    expect(contracts.COMPUTER_START_MAX_CARRY).toBe(3);
+    expect(contracts.COMPUTER_START_TOOL_INPUT_JSON_SCHEMA.properties.carry.maxItems).toBe(3);
+    expect(parse([{ artifactId: 'a' }, { artifactId: 'b' }, { artifactId: 'c' }])).toBe(true);
+    expect(parse([])).toBe(true);
+    expect(
+      parse([{ artifactId: 'a' }, { artifactId: 'b' }, { artifactId: 'c' }, { artifactId: 'd' }]),
+    ).toBe(false);
+    // Nothing but the id: no text, no label, no kind.
+    expect(parse([{ artifactId: 'a', text: 'Total 42' }])).toBe(false);
+    expect(parse([{ artifactId: '' }])).toBe(false);
+    expect(parse(['a'])).toBe(false);
+    expect(contracts.computerStartToolInputSchema.safeParse(base).success).toBe(true);
+    // The JSON schema keeps the object strict, and says the same.
+    const items = contracts.COMPUTER_START_TOOL_INPUT_JSON_SCHEMA.properties.carry.items;
+    expect(items.additionalProperties).toBe(false);
+    expect(Object.keys(items.properties)).toEqual(['artifactId']);
+    expect(contracts.COMPUTER_START_TOOL_INPUT_JSON_SCHEMA.additionalProperties).toBe(false);
+  });
+
+  it('returns artifacts as an id, a kind and a size bucket, and nothing else (R8)', () => {
+    const parse = (artifacts: unknown) =>
+      contracts.computerStartToolOutputSchema.safeParse({ ...status, artifacts });
+    const good = { artifactId: 'artifact-1', kind: 'text', sizeClass: 'le_1k' };
+    expect(parse([good]).success).toBe(true);
+    expect(parse([good, good, good]).success).toBe(true);
+    expect(parse([good, good, good, good]).success).toBe(false);
+    // Without the field, the result is exactly what it always was.
+    expect(contracts.computerStartToolOutputSchema.safeParse(status).success).toBe(true);
+    expect(parse([]).success).toBe(false);
+    // No content, no source, no exact length can be added to an entry.
+    for (const extra of [
+      { text: 'Total 42' },
+      { windowTitle: 'Notes' },
+      { appName: 'Notes' },
+      { displayName: 'Total' },
+      { length: 8 },
+      { sourceSessionId: 'session-a' },
+    ])
+      expect(parse([{ ...good, ...extra }]).success, JSON.stringify(extra)).toBe(false);
+    expect(parse([{ ...good, kind: 'image' }]).success).toBe(false);
+    expect(parse([{ ...good, sizeClass: 'le_8k' }]).success).toBe(false);
+    // The result as a whole stays closed.
+    expect(
+      contracts.computerStartToolOutputSchema.safeParse({ ...status, text: 'x' }).success,
+    ).toBe(false);
+    const schema = contracts.COMPUTER_START_TOOL_OUTPUT_JSON_SCHEMA;
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.artifacts.items.additionalProperties).toBe(false);
+    expect(Object.keys(schema.properties.artifacts.items.properties).sort()).toEqual([
+      'artifactId',
+      'kind',
+      'sizeClass',
+    ]);
+    expect(schema.required).not.toContain('artifacts');
+  });
+});

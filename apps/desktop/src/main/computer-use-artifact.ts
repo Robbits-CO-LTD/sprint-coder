@@ -415,6 +415,64 @@ export class ComputerUseArtifactStore {
     );
   }
 
+  /**
+   * The references of these artifacts and who made each, without using any up: for `carry`, which
+   * has to hand the new session references and to check the taker is not the maker. All or nothing,
+   * with the same refusal as `take` for any id that is not the caller's (N9–N11).
+   */
+  describeReference(
+    artifactIds: readonly string[],
+    binding: ComputerUseArtifactBinding,
+  ): readonly (ComputerUseArtifactReference & Readonly<{ sourceSessionId: string }>)[] | null {
+    const found = this.lookup(artifactIds, binding);
+    if (found === null) return null;
+    return found.map((artifact, index) => ({
+      artifactId: artifactIds[index]!,
+      kind: 'text',
+      sizeClass: computerUseArtifactSizeClass(artifact.text),
+      sourceSessionId: artifact.sourceSessionId,
+    }));
+  }
+
+  /**
+   * What one session copied and what is still alive under that exact binding, in the order it was
+   * made. The outer result lists these, so only artifacts a later `carry` could still use appear.
+   */
+  referencesMadeBy(
+    sourceSessionId: string,
+    binding: ComputerUseArtifactBinding,
+  ): readonly ComputerUseArtifactReference[] {
+    this.dropExpired();
+    const found: ComputerUseArtifactReference[] = [];
+    for (const [artifactId, artifact] of this.artifacts)
+      if (
+        artifact.sourceSessionId === sourceSessionId &&
+        artifact.taskId === binding.taskId &&
+        artifact.turnId === binding.turnId &&
+        artifact.policyEpoch === binding.policyEpoch
+      )
+        found.push({
+          artifactId,
+          kind: 'text',
+          sizeClass: computerUseArtifactSizeClass(artifact.text),
+        });
+    return found;
+  }
+
+  /** Forgets these artifacts (those of this exact binding); the session they were carried into ended. */
+  discard(artifactIds: readonly string[], binding: ComputerUseArtifactBinding): void {
+    for (const artifactId of artifactIds) {
+      const artifact = this.artifacts.get(artifactId);
+      if (
+        artifact !== undefined &&
+        artifact.taskId === binding.taskId &&
+        artifact.turnId === binding.turnId &&
+        artifact.policyEpoch === binding.policyEpoch
+      )
+        this.artifacts.delete(artifactId);
+    }
+  }
+
   private lookup(
     artifactIds: readonly string[],
     binding: ComputerUseArtifactBinding,

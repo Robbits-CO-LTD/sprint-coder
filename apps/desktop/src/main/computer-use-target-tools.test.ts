@@ -33,7 +33,7 @@ import {
   type ComputerAppGrantIdentity,
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
-import { COMPUTER_TARGET_TOOLS } from './computer-use-target-tools';
+import { COMPUTER_START_TOOL, COMPUTER_TARGET_TOOLS } from './computer-use-target-tools';
 import { ManagedCodingHarness } from './provider-workspace-tools';
 import { compilePromptGuidance } from './prompt-context';
 
@@ -991,6 +991,48 @@ describe('agent-facing target tool exposure', () => {
         carriesSentence: name !== 'flagOff',
       });
     }
+  });
+
+  it('states the artifact rule once, beside the answer rule, in the fixed sentence (R10, T15-8)', () => {
+    const lines = COMPUTER_TARGET_SYSTEM_PROMPT.split(String.fromCharCode(10));
+    // The answer rule is stated once, and the artifact rule is a separate line, not a repeat of it.
+    expect(lines.filter((line) => line.includes('`answer`'))).toHaveLength(1);
+    const artifactLines = lines.filter((line) => line.includes('`artifacts`'));
+    expect(artifactLines).toHaveLength(1);
+    expect(artifactLines[0]).toContain('内容を持たない');
+    expect(artifactLines[0]).toContain('推測しない');
+    expect(artifactLines[0]).toContain('`carry`');
+    expect(artifactLines[0]).toContain('承認');
+  });
+
+  it('describes carry and artifacts in the tool, with schemas that stay closed', () => {
+    expect(COMPUTER_START_TOOL.description).toContain('carry');
+    expect(COMPUTER_START_TOOL.description).toContain('carries no content');
+    const input = COMPUTER_START_TOOL.inputSchema as {
+      additionalProperties: boolean;
+      required: readonly string[];
+      properties: Record<string, unknown>;
+    };
+    expect(input.additionalProperties).toBe(false);
+    expect(input.required).toEqual(['targetToken', 'goal']);
+    expect(Object.keys(input.properties)).toEqual(['targetToken', 'goal', 'question', 'carry']);
+    const output = COMPUTER_START_TOOL.outputSchema as {
+      additionalProperties: boolean;
+      required: readonly string[];
+      properties: Record<string, unknown>;
+    };
+    expect(output.additionalProperties).toBe(false);
+    expect(output.required).not.toContain('artifacts');
+    expect(Object.keys(output.properties)).toEqual([
+      'sessionId',
+      'state',
+      'stopReason',
+      'mode',
+      'round',
+      'maxRounds',
+      'answer',
+      'artifacts',
+    ]);
   });
 
   it('carries the untrusted-label instruction only when the tools are exposed', () => {

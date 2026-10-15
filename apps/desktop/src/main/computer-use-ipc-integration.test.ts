@@ -1638,6 +1638,59 @@ describe('Computer Use target tools end to end', () => {
     });
   });
 
+  describe('computer_start carry, through the broker, on a host that cannot read or paste (T15-8)', () => {
+    // The real route in production while the capability flags are off: nothing can have been
+    // copied, so a carry names nothing, and the result is the one it always was.
+    async function targetFor(fixture: ReturnType<typeof endToEnd>): Promise<string | undefined> {
+      fixture.harness.startTurn(turnContext, 'codex', {
+        computerTargets: true,
+        toolSurface: 'computer-targets-only',
+      });
+      fixture.controller.createAppGrant(computerAppGrantIdentityFrom(fixture.profile.identity)!, {
+        maxMode: 'full_access_app',
+        providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+      });
+      const targets = (await fixture.harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: 'call-list',
+        providerName: 'computer_list_targets',
+        input: {},
+      })) as { targets: readonly { kind: string; targetToken?: string }[] };
+      return targets.targets.find((target) => target.kind === 'selectable')?.targetToken;
+    }
+    let calls = 0;
+    const start = (fixture: ReturnType<typeof endToEnd>, input: Record<string, unknown>) =>
+      fixture.harness.broker.dispatch({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        callId: `call-start-${(calls += 1)}`,
+        providerName: 'computer_start',
+        input,
+      });
+
+    it('refuses a carry of four at the boundary and a carry of one without telling why, and lists no artifacts', async () => {
+      const fixture = endToEnd();
+      const targetToken = await targetFor(fixture);
+      const item = (artifactId: string) => ({ artifactId });
+      await expect(
+        start(fixture, {
+          targetToken,
+          goal: 'x',
+          carry: ['a', 'b', 'c', 'd'].map(item),
+        }),
+      ).rejects.toThrow();
+      await expect(start(fixture, { targetToken, goal: 'x', carry: [item('a')] })).rejects.toThrow(
+        /carry is not valid/u,
+      );
+      // Neither spent the token: the same call without a carry runs the session.
+      const output = (await start(fixture, { targetToken, goal: 'x' })) as Record<string, unknown>;
+      expect(computerStartToolOutputSchema.parse(output)).toEqual(output);
+      expect(output).toMatchObject({ state: 'stopped', stopReason: 'agent_finish' });
+      expect(output).not.toHaveProperty('artifacts');
+    });
+  });
+
   it('authorizes computer_start and runs a session to its end', async () => {
     const fixture = endToEnd({ preset: 'ask' });
     fixture.harness.startTurn(turnContext, 'codex', {

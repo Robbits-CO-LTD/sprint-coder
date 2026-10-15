@@ -22,6 +22,7 @@ import {
   computerUseSessionStateIsSettled,
   selectableComputerTargetSchema,
   COMPUTER_START_GOAL_MAX_CHARACTERS,
+  COMPUTER_START_MAX_CARRY,
   COMPUTER_TARGET_LIST_LIMIT,
   COMPUTER_USE_GRANT_LIST_LIMIT,
   COMPUTER_USE_REQUESTED_APP_LIST_LIMIT,
@@ -36,6 +37,7 @@ import {
   type ComputerListTargetsOutput,
   type ComputerRequestAccessOutput,
   type ComputerStartAnswer,
+  type ComputerStartCarryItem,
   type ComputerStartQuestion,
   type ComputerStartToolOutput,
   type ComputerUseGrantListResult,
@@ -453,6 +455,12 @@ export type ComputerUseAgentStartBinding = Readonly<{
   grantId: string | null;
   grantIdentityDigest: string;
   providerEgress: Readonly<{ connectionId: string; modelId: string }>;
+  /**
+   * Artifacts the outer agent carried into this session (#785 T15-8), already checked by
+   * `startForAgent` against this Task, Turn and policy epoch. Attached the moment the session
+   * exists and before its first round; each use is checked against the store again.
+   */
+  carry?: readonly ComputerUseArtifactReference[] | undefined;
 }>;
 
 export type ComputerUseAuthorizationRequest = Readonly<{
@@ -2360,6 +2368,7 @@ export class ComputerUseController {
       targetToken: string;
       goal: string;
       question?: ComputerStartQuestion | undefined;
+      carry?: readonly ComputerStartCarryItem[] | undefined;
     }>,
     context: ToolExecutionContext,
     signal?: AbortSignal,
@@ -2373,6 +2382,9 @@ export class ComputerUseController {
     // Before the token is spent: a question that cannot be asked fails the call, not the window.
     const question =
       input.question === undefined ? null : normalizeComputerStartQuestion(input.question);
+    // Likewise for what is carried: a carry that cannot be used fails the call, not the window, and
+    // whatever the cause the answer is the same one (design 4.4, N9–N11, N16, N17).
+    const carried = this.resolveCarry(input.carry, context);
     // Spent before the first await. Two calls racing with the same token must not both reach
     // native: whichever deletes the entry owns it, and the other sees an unknown token.
     const binding = this.targetTokenBinding(input.targetToken);
@@ -2471,7 +2483,10 @@ export class ComputerUseController {
         this.pauseReasons.delete(settled.sessionId);
         await this.stop(settled.sessionId, reason);
       }
-      if (question === null) return computerStartToolOutput(settled);
+      // Read from the store, not from the session: the session record is gone by the time a paused
+      // session is concluded, and the store is what a later `carry` will be checked against.
+      const artifacts = this.copiedArtifactsForOutput(settled, context);
+      if (question === null) return computerStartToolOutput(settled, undefined, artifacts);
       // Taken out whatever happens next, so no candidate outlives the call that asked for it.
       const candidate = this.agentAnswers.get(settled.sessionId) ?? null;
       this.agentAnswers.delete(settled.sessionId);
@@ -2486,6 +2501,7 @@ export class ComputerUseController {
           // the Turn's destination may have moved while the session ran.
           egressAgreed: candidate !== null && this.answerEgressAgreed(profile.id, context),
         }),
+        artifacts,
       );
     };
     // Installed before `start`, so no status published while the session is coming up can be
@@ -2523,6 +2539,7 @@ export class ComputerUseController {
             grantId: state.grantId,
             grantIdentityDigest: identity.grantIdentityDigest,
             providerEgress: egressBinding,
+            ...(carried.length === 0 ? {} : { carry: carried }),
           },
         },
         // Carried into the start path so an abort during start-up reaches native's cleanup, the
@@ -3067,6 +3084,7 @@ export class ComputerUseController {
     };
     this.sessions.set(sessionId, record);
     this.startingSessions.delete(sessionId);
+    this.attachCarriedArtifacts(record, input.agent?.carry);
     // Bound before any round can start. Digest of the limits only; no policy body or identifier.
     captureComputerUseRuntime(this.deps.runtimeCapture, (capture) =>
       capture.record({
@@ -3303,6 +3321,12 @@ export class ComputerUseController {
     this.emit(record.status);
     this.sessions.delete(sessionId);
     this.copiedArtifacts.delete(sessionId);
+    const carriedIn = this.attachedArtifacts.get(sessionId);
+    if (carriedIn !== undefined)
+      this.artifacts.discard(
+        carriedIn.references.map((reference) => reference.artifactId),
+        this.artifactBinding(record),
+      );
     this.attachedArtifacts.delete(sessionId);
     this.statusRevisionBySession.delete(sessionId);
     this.pauseReasons.delete(sessionId);
@@ -3607,6 +3631,78 @@ export class ComputerUseController {
     this.attachedArtifacts.set(sessionId, {
       taskId: record.status.taskId,
       references: references.slice(0, ARTIFACT_PASTE_MAX_ATTACHED),
+    });
+  }
+
+  /**
+   * The artifacts `computer_start { carry }` asks to pass on, or a refusal that says nothing about
+   * why. Checked before the target token is spent. Everything that is not a live artifact of this
+   * Task, Turn and policy epoch — another Task or Turn, a changed epoch, an expired, used, unknown
+   * or guessed id, a repeated id, more than three — is the same error, and so is a host that cannot
+   * paste (then nothing could have been copied for it either). Without a carry, an empty list.
+   */
+  private resolveCarry(
+    carry: readonly ComputerStartCarryItem[] | undefined,
+    context: ToolExecutionContext,
+  ): readonly ComputerUseArtifactReference[] {
+    if (carry === undefined || carry.length === 0) return [];
+    const refuse = (): never => {
+      throw new Error('Computer Use carry is not valid');
+    };
+    if (carry.length > COMPUTER_START_MAX_CARRY) return refuse();
+    if (this.deps.native.artifactPasteSupported?.() !== true) return refuse();
+    const described = this.artifacts.describeReference(
+      carry.map((item) => item.artifactId),
+      {
+        taskId: context.taskId,
+        turnId: context.turnId,
+        policyEpoch: this.currentPolicyEpoch(context.taskId),
+      },
+    );
+    if (described === null) return refuse();
+    return described.map(({ artifactId, kind, sizeClass }) => ({ artifactId, kind, sizeClass }));
+  }
+
+  /**
+   * Gives the new session the carried references, once it exists and before its first round. The
+   * store is asked again (time has passed), and the taker must not be the maker: a session never
+   * pastes what it copied itself (design 4.2). If anything no longer holds, nothing is attached and
+   * a paste is refused like any paste of something the session was not given.
+   */
+  private attachCarriedArtifacts(
+    record: SessionRecord,
+    carry: readonly ComputerUseArtifactReference[] | undefined,
+  ): void {
+    if (carry === undefined || carry.length === 0) return;
+    const described = this.artifacts.describeReference(
+      carry.map((reference) => reference.artifactId),
+      this.artifactBinding(record),
+    );
+    if (
+      described === null ||
+      described.some((reference) => reference.sourceSessionId === record.status.sessionId)
+    )
+      return;
+    this.attachArtifacts(
+      record.status.sessionId,
+      described.map(({ artifactId, kind, sizeClass }) => ({ artifactId, kind, sizeClass })),
+    );
+  }
+
+  /**
+   * What the session that just ended copied and a later call could still carry. Empty unless the
+   * host can read a node (an artifact exists only because a read succeeded, so this is also what
+   * keeps the result as it was where reading is not supported).
+   */
+  private copiedArtifactsForOutput(
+    settled: ComputerUseSessionStatus,
+    context: ToolExecutionContext,
+  ): readonly ComputerUseArtifactReference[] {
+    if (this.deps.native.artifactReadSupported?.() !== true) return [];
+    return this.artifacts.referencesMadeBy(settled.sessionId, {
+      taskId: settled.taskId,
+      turnId: context.turnId,
+      policyEpoch: settled.policyEpoch,
     });
   }
 
@@ -5514,6 +5610,7 @@ export const COMPUTER_USE_DENY_RULESET_VERSION = 1;
 export function computerStartToolOutput(
   status: ComputerUseSessionStatus,
   answer?: ComputerStartAnswer,
+  artifacts?: readonly ComputerUseArtifactReference[],
 ): ComputerStartToolOutput {
   return computerStartToolOutputSchema.parse({
     sessionId: status.sessionId,
@@ -5524,6 +5621,17 @@ export function computerStartToolOutput(
     maxRounds: status.maxRounds,
     // Only for a call that asked a question, so a call that did not gets exactly what it used to.
     ...(answer === undefined ? {} : { answer }),
+    // Named field by field, like the status above: an id, a kind and a size bucket, never more. Only
+    // when something was copied, so a call that copied nothing gets exactly what it used to.
+    ...(artifacts === undefined || artifacts.length === 0
+      ? {}
+      : {
+          artifacts: artifacts.map(({ artifactId, kind, sizeClass }) => ({
+            artifactId,
+            kind,
+            sizeClass,
+          })),
+        }),
   });
 }
 
