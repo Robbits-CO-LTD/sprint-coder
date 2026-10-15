@@ -1231,7 +1231,8 @@ export type ComputerActionKind =
   | 'type'
   | 'key'
   | 'wait'
-  | 'finish';
+  | 'finish'
+  | 'copy';
 export type ComputerActionAuditState =
   'pending' | 'applied' | 'rejected' | 'unknown_effect' | 'canceled';
 /**
@@ -1594,6 +1595,89 @@ const COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL = `
     SELECT audit_rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audit_digest_scrub
     ORDER BY audit_rowid;
   DROP TABLE computer_action_audit_digest_scrub;
+`;
+
+/**
+ * #785 T15-6a: migration v102, the audit table rebuilt with 'copy' in the action_kind list. Every
+ * other definition is the one v80 created plus the four v99 columns, and the guard trigger is v100's.
+ * The columns are listed once, in the table's own order (COMPUTER_USE_AUDIT_TABLE_COLUMNS).
+ */
+const COMPUTER_USE_AUDIT_ACTION_KIND_COPY_SQL = `
+  CREATE TABLE computer_action_audits_v102 (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    turn_id TEXT NOT NULL CHECK (
+      length(turn_id) = 64 AND turn_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    session_id TEXT NOT NULL CHECK (
+      length(session_id) = 64 AND session_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    profile_id TEXT NOT NULL REFERENCES computer_app_profiles(id) ON DELETE RESTRICT,
+    profile_revision INTEGER NOT NULL CHECK (profile_revision >= 1),
+    app_identity_digest TEXT NOT NULL CHECK (
+      length(app_identity_digest) = 64 AND app_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    window_identity_digest TEXT NOT NULL CHECK (
+      length(window_identity_digest) = 64 AND window_identity_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    observation_revision INTEGER NOT NULL CHECK (observation_revision >= 1),
+    observation_digest TEXT NOT NULL CHECK (
+      length(observation_digest) = 64 AND observation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    client_width INTEGER NOT NULL CHECK (client_width > 0 AND client_width <= 2560),
+    client_height INTEGER NOT NULL CHECK (client_height > 0 AND client_height <= 1600),
+    action_digest TEXT NOT NULL CHECK (
+      length(action_digest) = 64 AND action_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    action_kind TEXT NOT NULL CHECK (action_kind IN (
+      'invoke', 'set_text', 'select', 'toggle', 'expand_collapse',
+      'scroll', 'click', 'type', 'key', 'wait', 'finish', 'copy'
+    )),
+    route TEXT NOT NULL CHECK (route IN ('semantic', 'visual', 'none')),
+    state TEXT NOT NULL CHECK (
+      state IN ('pending', 'applied', 'rejected', 'unknown_effect', 'canceled')
+    ),
+    reason_code TEXT CHECK (reason_code IS NULL OR length(reason_code) <= 128),
+    native_request_id TEXT NOT NULL CHECK (
+      length(native_request_id) = 64 AND native_request_id NOT GLOB '*[^0-9a-f]*'
+    ),
+    policy_epoch INTEGER NOT NULL CHECK (policy_epoch >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    approval_id TEXT
+      CHECK (approval_id IS NULL OR (length(approval_id) BETWEEN 1 AND 128)),
+    approval_parent_request_id TEXT
+      CHECK (
+        approval_parent_request_id IS NULL OR
+        (length(approval_parent_request_id) = 64 AND approval_parent_request_id NOT GLOB '*[^0-9a-f]*')
+      ),
+    approval_outcome TEXT
+      CHECK (approval_outcome IS NULL OR approval_outcome IN ('approved', 'denied', 'expired', 'revoked')),
+    approval_effect TEXT
+      CHECK (approval_effect IS NULL OR approval_effect IN (
+        'download_open', 'file_manager_open', 'high_impact_confirmation', 'supervised_action'
+      )),
+    UNIQUE(session_id, native_request_id)
+  );
+  INSERT INTO computer_action_audits_v102(rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS})
+    SELECT rowid, ${COMPUTER_USE_AUDIT_TABLE_COLUMNS} FROM computer_action_audits ORDER BY rowid;
+  DROP TABLE computer_action_audits;
+  ALTER TABLE computer_action_audits_v102 RENAME TO computer_action_audits;
+  CREATE INDEX computer_action_audits_task_created_idx
+    ON computer_action_audits(task_id, created_at, id);
+  CREATE INDEX computer_action_audits_session_idx
+    ON computer_action_audits(session_id, created_at, id);
+  CREATE TRIGGER computer_action_audits_approval_correlation_guard
+  BEFORE UPDATE OF approval_id, approval_parent_request_id, approval_outcome, approval_effect
+  ON computer_action_audits
+  WHEN (OLD.approval_id IS NOT NULL AND OLD.approval_id IS NOT NEW.approval_id)
+    OR OLD.approval_parent_request_id IS NOT NEW.approval_parent_request_id
+    OR (OLD.approval_effect IS NOT NULL AND OLD.approval_effect IS NOT NEW.approval_effect)
+    OR (OLD.approval_outcome IS NOT NULL AND OLD.approval_outcome IS NOT NEW.approval_outcome)
+    OR (NEW.approval_outcome IS NOT NULL AND NEW.approval_id IS NULL)
+  BEGIN
+    SELECT RAISE(ABORT, 'computer action audit approval correlation is write-once');
+  END;
 `;
 
 const migrations = [
@@ -4708,6 +4792,20 @@ const migrations = [
     // audit row earlier (for example the audit rows of a Task deleted before the upgrade), and
     // copies below the file (SSD wear levelling, backups made by other tools, the OS page cache).
     sql: COMPUTER_USE_AUDIT_DIGEST_REBUILD_SQL,
+  },
+  {
+    version: 102,
+    checksum: 'computer-use-v102-audit-action-kind-copy',
+    // #785 T15-6a: the audit table learns the action kind 'copy' (a read of one node's value into an
+    // artifact; nothing writes it yet). SQLite cannot change a CHECK constraint, so the table is
+    // rebuilt: the same columns, constraints, indexes and the approval correlation guard, with
+    // 'copy' added to the action_kind list and nothing else changed. Rows are copied as they are,
+    // rowid included. Nothing refers to this table (it only refers to tasks and profiles), so the
+    // rebuild needs neither foreign keys off nor the digest-scrub machinery: v101 has already
+    // replaced the digests, and no column here ever holds a copied value or a hash of one.
+    // Dropping the old table drops its two indexes and its trigger; all three are created again
+    // below, the trigger exactly as v100 left it.
+    sql: COMPUTER_USE_AUDIT_ACTION_KIND_COPY_SQL,
   },
 ];
 
@@ -24486,6 +24584,7 @@ function validateComputerActionAuditInput(
       'key',
       'wait',
       'finish',
+      'copy',
     ].includes(input.actionKind) ||
     !['semantic', 'visual', 'none'].includes(input.route) ||
     (input.state !== undefined &&

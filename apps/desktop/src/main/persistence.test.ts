@@ -10391,6 +10391,7 @@ if (runsWithElectronAbi)
         { version: 99 },
         { version: 100 },
         { version: 101 },
+        { version: 102 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -12724,6 +12725,206 @@ if (runsWithElectronAbi)
         approvalParentRequestId: first.nativeRequestId,
       });
       fixture.persistence.close();
+    });
+
+    describe('migration v102: the audit action_kind list learns copy (#785 T15-6a)', () => {
+      /** The audit table as it was before v102: the same definition with the old kind list. */
+      function downgradeToV101(path: string): void {
+        const raw = new Database(path);
+        try {
+          const row = raw
+            .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+            .get('computer_action_audits') as { sql: string };
+          const oldSql = row.sql.replace("'wait', 'finish', 'copy'", "'wait', 'finish'");
+          expect(oldSql).not.toBe(row.sql);
+          const columns = (
+            raw.prepare('PRAGMA table_info(computer_action_audits)').all() as { name: string }[]
+          )
+            .map((column) => column.name)
+            .join(', ');
+          const trigger = raw
+            .prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?")
+            .get('computer_action_audits_approval_correlation_guard') as { sql: string };
+          raw.exec('ALTER TABLE computer_action_audits RENAME TO computer_action_audits_new;');
+          raw.exec(oldSql);
+          raw.exec(`
+            INSERT INTO computer_action_audits(rowid, ${columns})
+              SELECT rowid, ${columns} FROM computer_action_audits_new ORDER BY rowid;
+            DROP TABLE computer_action_audits_new;
+            CREATE INDEX computer_action_audits_task_created_idx
+              ON computer_action_audits(task_id, created_at, id);
+            CREATE INDEX computer_action_audits_session_idx
+              ON computer_action_audits(session_id, created_at, id);
+            DELETE FROM schema_migrations WHERE version = 102;
+          `);
+          raw.exec(trigger.sql);
+        } finally {
+          raw.close();
+        }
+      }
+
+      const auditSchema = (path: string) => {
+        const raw = new Database(path, { readonly: true });
+        try {
+          return {
+            table: raw
+              .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+              .get('computer_action_audits'),
+            objects: raw
+              .prepare(
+                "SELECT type, name FROM sqlite_master WHERE tbl_name = 'computer_action_audits' AND name NOT LIKE 'sqlite_autoindex%' ORDER BY type, name",
+              )
+              .all(),
+          };
+        } finally {
+          raw.close();
+        }
+      };
+
+      const dump = (path: string, where = '1 = 1') => {
+        const raw = new Database(path, { readonly: true });
+        try {
+          return raw
+            .prepare(
+              `SELECT rowid AS r, * FROM computer_action_audits WHERE ${where} ORDER BY rowid`,
+            )
+            .all();
+        } finally {
+          raw.close();
+        }
+      };
+
+      it('keeps every row, column and rowid, then accepts copy and still rejects other kinds', () => {
+        const { fixture, base } = seed();
+        const kinds = [
+          'invoke',
+          'set_text',
+          'select',
+          'toggle',
+          'expand_collapse',
+          'scroll',
+          'click',
+          'type',
+          'key',
+          'wait',
+          'finish',
+        ] as const;
+        const written = kinds.map((actionKind, index) =>
+          fixture.persistence.recordComputerActionAudit({
+            ...base,
+            actionKind,
+            state: 'applied',
+            actionDigest: bindingDigest(`digest-${index}`),
+            nativeRequestId: bindingDigest(`before-v102-${index}`),
+            ...(index === 0
+              ? { approvalId: 'approval-1', approvalEffect: 'supervised_action' as const }
+              : {}),
+          }),
+        );
+        fixture.persistence.close();
+        const afterV102 = auditSchema(fixture.path);
+        downgradeToV101(fixture.path);
+        // A gap in the rowids: the rebuild must keep them, not number the rows again.
+        const gap = new Database(fixture.path);
+        gap.prepare('DELETE FROM computer_action_audits WHERE id = ?').run(written[3]!.id);
+        gap.close();
+        const rowsBefore = dump(fixture.path);
+        expect(rowsBefore).toHaveLength(kinds.length - 1);
+
+        const migrated = new SqlitePersistenceClient(fixture.path);
+        try {
+          expect(migrated.listComputerActionAudits(base.taskId, 50)).toHaveLength(kinds.length - 1);
+          const copied = migrated.recordComputerActionAudit({
+            ...base,
+            actionKind: 'copy',
+            route: 'semantic',
+            actionDigest: bindingDigest('copy-digest'),
+            nativeRequestId: bindingDigest('copy-request'),
+          });
+          expect(copied.actionKind).toBe('copy');
+          expect(() =>
+            migrated.recordComputerActionAudit({
+              ...base,
+              actionKind: 'paste' as never,
+              nativeRequestId: bindingDigest('paste-request'),
+            }),
+          ).toThrow('Invalid Computer Use action audit');
+        } finally {
+          migrated.close();
+        }
+
+        // Same values in the same columns with the same rowids.
+        expect(dump(fixture.path, "action_kind != 'copy'")).toEqual(rowsBefore);
+        const raw = new Database(fixture.path);
+        try {
+          // The database itself refuses a kind outside the list, with copy now inside it.
+          const insert = (id: string, kind: string) =>
+            raw
+              .prepare(
+                `INSERT INTO computer_action_audits(id, task_id, turn_id, session_id, profile_id,
+                   profile_revision, app_identity_digest, window_identity_digest,
+                   observation_revision, observation_digest, client_width, client_height,
+                   action_digest, action_kind, route, state, native_request_id, policy_epoch,
+                   created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, 1, ?, ?, 1, ?, 800, 600, ?, ?, 'none', 'pending', ?, 0,
+                   'now', 'now')`,
+              )
+              .run(
+                id,
+                base.taskId,
+                base.turnId,
+                base.sessionId,
+                base.profileId,
+                base.appIdentityDigest,
+                base.windowIdentityDigest,
+                base.observationDigest,
+                bindingDigest(`d-${id}`),
+                kind,
+                bindingDigest(`n-${id}`),
+              );
+          expect(() => insert('raw-copy', 'copy')).not.toThrow();
+          expect(() => insert('raw-paste', 'paste')).toThrow(/CHECK constraint/u);
+          // UNIQUE(session_id, native_request_id) survived the rebuild.
+          expect(() =>
+            raw
+              .prepare('UPDATE computer_action_audits SET native_request_id = ? WHERE id = ?')
+              .run(bindingDigest('n-raw-copy'), written[1]!.id),
+          ).toThrow(/UNIQUE/u);
+          // The two indexes cover the same columns in the same order.
+          const indexColumns = (name: string) =>
+            (raw.prepare(`PRAGMA index_info(${name})`).all() as { name: string }[]).map(
+              (column) => column.name,
+            );
+          expect(indexColumns('computer_action_audits_task_created_idx')).toEqual([
+            'task_id',
+            'created_at',
+            'id',
+          ]);
+          expect(indexColumns('computer_action_audits_session_idx')).toEqual([
+            'session_id',
+            'created_at',
+            'id',
+          ]);
+          // An outcome needs an approval id (a row that never had one).
+          expect(() =>
+            raw
+              .prepare(
+                "UPDATE computer_action_audits SET approval_outcome = 'approved' WHERE id = ?",
+              )
+              .run(written[1]!.id),
+          ).toThrow('write-once');
+          // The approval correlation guard survived: a set approval id cannot be changed.
+          expect(() =>
+            raw
+              .prepare("UPDATE computer_action_audits SET approval_id = 'other' WHERE id = ?")
+              .run(written[0]!.id),
+          ).toThrow('write-once');
+        } finally {
+          raw.close();
+        }
+        // The same objects (table, two indexes, the trigger) and table text as a fresh database.
+        expect(auditSchema(fixture.path)).toEqual(afterV102);
+      });
     });
   });
 
