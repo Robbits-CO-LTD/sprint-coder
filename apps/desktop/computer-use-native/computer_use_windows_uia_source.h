@@ -1,0 +1,390 @@
+#pragma once
+
+// Classifier v2, S5-b-2a: the Windows side of the shadow reader. This is the ONLY place that talks
+// to UI Automation for the shadow: it implements `ShadowUiaSource` (computer_use_windows_shadow_reader.h)
+// with one platform call per method. Nothing here decides what to read or whether it may: the
+// reader admits every call through its gate first, and settles every answer.
+//
+// What it does, and does not do:
+//   * it only READS: element properties (control type, class name, name, automation id, help text,
+//     password flag), the tree (parent, first child, next sibling, compare), the value of a
+//     Document (the page URL), the process that owns a window, and the file-system path of a shell
+//     item. No pattern is invoked, no value is written, focus is not moved, no input is sent;
+//   * an error is kFailed, "no value / unsupported" is kAbsent, a string over its bound is kTooLong,
+//     and none of them is ever turned into an empty string;
+//   * strings are folded to NFKC (NormalizeString) before the core sees them, as the core expects,
+//     and the bound is judged in UTF-8 BYTES on the converted string (the UTF-16 length is only a
+//     cheap cut before converting something huge);
+//   * identifiers used to FIND the target are not normalized.
+// It is not wired into the host yet (S5-b-2b runs the reader off the serial lane, on a thread that
+// has initialized COM). The thread that calls it must have COM initialized.
+
+#include "computer_use_windows_shadow_reader.h"
+
+#include <windows.h>
+
+#include <ole2.h>
+#include <UIAutomation.h>
+
+#include <chrono>
+#include <functional>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#pragma comment(lib, "normaliz.lib")
+
+namespace sprint_coder::computer_use {
+
+namespace windows_uia_source_detail {
+
+// A UTF-16 string as the shadow wants it: NFKC when `normalize`, then UTF-8, then the byte bound.
+// Never truncated and never emptied: lone surrogates and anything NormalizeString refuses are a
+// failed read, a string over the bound is too long, an empty string is absent.
+[[nodiscard]] inline ShadowReadResult ShadowTextFromUtf16(std::wstring_view text, bool normalize,
+                                                          std::size_t maximum_bytes,
+                                                          std::string *output) {
+  if (text.empty()) return ShadowReadResult::kAbsent;
+  if (ShadowUnitsTooLong(text.size(), maximum_bytes)) return ShadowReadResult::kTooLong;
+  std::wstring folded(text);
+  if (normalize) {
+    // NFKC. It can lengthen a string (a ligature becomes several letters), so the cut is checked
+    // again afterwards. The documented loop: ask for an estimate, then retry while the buffer is
+    // too small.
+    const int source_units = static_cast<int>(text.size());
+    int estimate = NormalizeString(NormalizationKC, text.data(), source_units, nullptr, 0);
+    folded.clear();
+    for (int attempt = 0; attempt < 4 && estimate > 0; ++attempt) {
+      std::wstring buffer(static_cast<std::size_t>(estimate), L'\0');
+      const int written = NormalizeString(NormalizationKC, text.data(), source_units,
+                                          buffer.data(), estimate);
+      if (written > 0) {
+        buffer.resize(static_cast<std::size_t>(written));
+        folded = std::move(buffer);
+        break;
+      }
+      if (GetLastError() != ERROR_INSUFFICIENT_BUFFER) return ShadowReadResult::kFailed;
+      estimate = -written;
+    }
+    if (folded.empty()) return ShadowReadResult::kFailed;
+    if (ShadowUnitsTooLong(folded.size(), maximum_bytes)) return ShadowReadResult::kTooLong;
+  }
+  const int units = static_cast<int>(folded.size());
+  const int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, folded.data(), units, nullptr,
+                                        0, nullptr, nullptr);
+  if (bytes <= 0) return ShadowReadResult::kFailed;
+  // The bound is on the converted string; do not build something far beyond it.
+  if (static_cast<std::size_t>(bytes) > maximum_bytes) return ShadowReadResult::kTooLong;
+  std::string utf8(static_cast<std::size_t>(bytes), '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, folded.data(), units, utf8.data(), bytes,
+                          nullptr, nullptr) != bytes)
+    return ShadowReadResult::kFailed;
+  return ShadowCheckText(utf8, maximum_bytes, output);
+}
+
+// The name of a UIA control type id; an id this table does not know is named by its number, which
+// no rule matches (it is not "no role").
+[[nodiscard]] inline std::string ControlTypeName(CONTROLTYPEID id) {
+  static constexpr const char *kNames[] = {
+      "Button",      "Calendar",   "CheckBox", "ComboBox",   "Edit",       "Hyperlink",
+      "Image",       "ListItem",   "List",     "Menu",       "MenuBar",    "MenuItem",
+      "ProgressBar", "RadioButton", "ScrollBar", "Slider",    "Spinner",    "StatusBar",
+      "Tab",         "TabItem",    "Text",     "ToolBar",    "ToolTip",    "Tree",
+      "TreeItem",    "Custom",     "Group",    "Thumb",      "DataGrid",   "DataItem",
+      "Document",    "SplitButton", "Window",  "Pane",       "Header",     "HeaderItem",
+      "Table",       "TitleBar",   "Separator", "SemanticZoom", "AppBar"};
+  if (id >= UIA_ButtonControlTypeId && id <= UIA_AppBarControlTypeId)
+    return kNames[id - UIA_ButtonControlTypeId];
+  return "ControlType" + std::to_string(static_cast<long>(id));
+}
+
+[[nodiscard]] inline std::wstring Widen(const std::string &ascii) {
+  return std::wstring(ascii.begin(), ascii.end());
+}
+
+template <class Interface> class ComRef {
+public:
+  ComRef() = default;
+  explicit ComRef(Interface *pointer) : pointer_(pointer) {}
+  ComRef(const ComRef &) = delete;
+  ComRef &operator=(const ComRef &) = delete;
+  ComRef(ComRef &&other) noexcept : pointer_(other.pointer_) { other.pointer_ = nullptr; }
+  ComRef &operator=(ComRef &&other) noexcept {
+    if (this != &other) {
+      Reset();
+      pointer_ = other.pointer_;
+      other.pointer_ = nullptr;
+    }
+    return *this;
+  }
+  ~ComRef() { Reset(); }
+  [[nodiscard]] Interface *Get() const { return pointer_; }
+  [[nodiscard]] Interface **Receive() {
+    Reset();
+    return &pointer_;
+  }
+  void Reset() {
+    if (pointer_ != nullptr) pointer_->Release();
+    pointer_ = nullptr;
+  }
+
+private:
+  Interface *pointer_ = nullptr;
+};
+
+// A BSTR that is freed whatever the path.
+class BstrHolder {
+public:
+  BstrHolder() = default;
+  BstrHolder(const BstrHolder &) = delete;
+  BstrHolder &operator=(const BstrHolder &) = delete;
+  ~BstrHolder() {
+    if (text_ != nullptr) SysFreeString(text_);
+  }
+  [[nodiscard]] BSTR *Receive() { return &text_; }
+  [[nodiscard]] std::wstring_view View() const {
+    return text_ == nullptr ? std::wstring_view() : std::wstring_view(text_, SysStringLen(text_));
+  }
+
+private:
+  BSTR text_ = nullptr;
+};
+
+} // namespace windows_uia_source_detail
+
+class WindowsUiaShadowSource final : public ShadowUiaSource {
+public:
+  // How a capture is told it is still wanted: false once the action was canceled or its target
+  // stopped being the one v1 validated.
+  using StillValid = std::function<bool()>;
+
+  // The thread must have COM initialized. Null when UI Automation cannot be created at all.
+  [[nodiscard]] static std::unique_ptr<WindowsUiaShadowSource> Create(HWND window, POINT point,
+                                                                    StillValid still_valid) {
+    using windows_uia_source_detail::ComRef;
+    ComRef<IUIAutomation> automation;
+    if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(automation.Receive()))) ||
+        automation.Get() == nullptr)
+      return nullptr;
+    ComRef<IUIAutomationTreeWalker> walker;
+    if (FAILED(automation.Get()->get_RawViewWalker(walker.Receive())) || walker.Get() == nullptr)
+      return nullptr;
+    // A hung target app may hold one call for a long time; where this system lets the client bound
+    // it, bound it (IUIAutomation6, Windows 10 1809 and later). Not relied on: the shadow runs off
+    // the serial lane and its own budget still applies.
+    ComRef<IUIAutomation6> bounded;
+    if (SUCCEEDED(automation.Get()->QueryInterface(IID_PPV_ARGS(bounded.Receive()))) &&
+        bounded.Get() != nullptr) {
+      (void)bounded.Get()->put_ConnectionTimeout(kTimeoutMilliseconds);
+      (void)bounded.Get()->put_TransactionTimeout(kTimeoutMilliseconds);
+    }
+    return std::unique_ptr<WindowsUiaShadowSource>(new WindowsUiaShadowSource(
+        std::move(automation), std::move(walker), window, point, std::move(still_valid)));
+  }
+
+  ~WindowsUiaShadowSource() override {
+    for (IUIAutomationElement *element : elements_) element->Release();
+  }
+  WindowsUiaShadowSource(const WindowsUiaShadowSource &) = delete;
+  WindowsUiaShadowSource &operator=(const WindowsUiaShadowSource &) = delete;
+
+  bool ActionStillValid() override { return still_valid_ == nullptr || still_valid_(); }
+  std::uint64_t NowNs() override {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+  }
+
+  ShadowReadResult Root(Element *output) override {
+    windows_uia_source_detail::ComRef<IUIAutomationElement> element;
+    const HRESULT result = automation_.Get()->ElementFromHandle(window_, element.Receive());
+    return Keep(result, std::move(element), output);
+  }
+  ShadowReadResult AtPoint(Element *output) override {
+    windows_uia_source_detail::ComRef<IUIAutomationElement> element;
+    const HRESULT result = automation_.Get()->ElementFromPoint(point_, element.Receive());
+    return Keep(result, std::move(element), output);
+  }
+  ShadowReadResult Focused(Element *output) override {
+    windows_uia_source_detail::ComRef<IUIAutomationElement> element;
+    const HRESULT result = automation_.Get()->GetFocusedElement(element.Receive());
+    return Keep(result, std::move(element), output);
+  }
+  ShadowReadResult Parent(Element element, Element *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationElement> parent;
+    const HRESULT result = walker_.Get()->GetParentElement(current, parent.Receive());
+    return Keep(result, std::move(parent), output);
+  }
+  ShadowReadResult FirstChild(Element element, Element *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationElement> child;
+    const HRESULT result = walker_.Get()->GetFirstChildElement(current, child.Receive());
+    return Keep(result, std::move(child), output);
+  }
+  ShadowReadResult NextSibling(Element element, Element *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationElement> sibling;
+    const HRESULT result = walker_.Get()->GetNextSiblingElement(current, sibling.Receive());
+    return Keep(result, std::move(sibling), output);
+  }
+  ShadowReadResult Same(Element first, Element second, bool *same) override {
+    IUIAutomationElement *left = At(first);
+    IUIAutomationElement *right = At(second);
+    if (left == nullptr || right == nullptr) return ShadowReadResult::kFailed;
+    BOOL equal = FALSE;
+    if (FAILED(automation_.Get()->CompareElements(left, right, &equal)))
+      return ShadowReadResult::kFailed;
+    *same = equal != FALSE;
+    return ShadowReadResult::kOk;
+  }
+
+  ShadowReadResult Text(Element element, ShadowUiaText what, bool normalize,
+                        std::size_t maximum_bytes, std::string *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    if (what == ShadowUiaText::kControlType) {
+      CONTROLTYPEID id = 0;
+      if (FAILED(current->get_CurrentControlType(&id))) return ShadowReadResult::kFailed;
+      return windows_uia_source_detail::ShadowTextFromUtf16(
+          windows_uia_source_detail::Widen(windows_uia_source_detail::ControlTypeName(id)),
+          false, maximum_bytes, output);
+    }
+    windows_uia_source_detail::BstrHolder text;
+    HRESULT result = E_FAIL;
+    switch (what) {
+    case ShadowUiaText::kClassName: result = current->get_CurrentClassName(text.Receive()); break;
+    case ShadowUiaText::kName: result = current->get_CurrentName(text.Receive()); break;
+    case ShadowUiaText::kAutomationId:
+      result = current->get_CurrentAutomationId(text.Receive());
+      break;
+    case ShadowUiaText::kHelpText: result = current->get_CurrentHelpText(text.Receive()); break;
+    case ShadowUiaText::kControlType: break;
+    }
+    if (FAILED(result)) return ShadowReadResult::kFailed;
+    return windows_uia_source_detail::ShadowTextFromUtf16(text.View(), normalize, maximum_bytes,
+                                                          output);
+  }
+
+  ShadowReadResult IsPassword(Element element, bool *is_password) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    BOOL password = FALSE;
+    if (FAILED(current->get_CurrentIsPassword(&password))) return ShadowReadResult::kFailed;
+    *is_password = password != FALSE;
+    return ShadowReadResult::kOk;
+  }
+
+  // The value of a Document is the address of the page in the browsers that publish it. Reading a
+  // value is a read; nothing is set.
+  ShadowReadResult DocumentUrl(Element document, std::size_t maximum_bytes,
+                               std::string *output) override {
+    IUIAutomationElement *current = At(document);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationValuePattern> pattern;
+    const HRESULT got = current->GetCurrentPatternAs(
+        UIA_ValuePatternId, IID_PPV_ARGS(pattern.Receive()));
+    if (FAILED(got)) return ShadowReadResult::kFailed;
+    if (pattern.Get() == nullptr) return ShadowReadResult::kAbsent;
+    windows_uia_source_detail::BstrHolder value;
+    if (FAILED(pattern.Get()->get_CurrentValue(value.Receive()))) return ShadowReadResult::kFailed;
+    return windows_uia_source_detail::ShadowTextFromUtf16(value.View(), false, maximum_bytes, output);
+  }
+
+  ShadowReadResult WindowProcessPath(Element window, std::size_t maximum_bytes,
+                                     std::string *output) override {
+    IUIAutomationElement *current = At(window);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    return ProcessPathOf(current, maximum_bytes, output);
+  }
+
+  ShadowReadResult CoreWindowProcessPath(Element window, std::size_t maximum_bytes,
+                                         std::string *output) override {
+    IUIAutomationElement *current = At(window);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    VARIANT class_name;
+    VariantInit(&class_name);
+    class_name.vt = VT_BSTR;
+    class_name.bstrVal = SysAllocString(L"Windows.UI.Core.CoreWindow");
+    if (class_name.bstrVal == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationCondition> condition;
+    const HRESULT made = automation_.Get()->CreatePropertyCondition(UIA_ClassNamePropertyId,
+                                                                    class_name, condition.Receive());
+    VariantClear(&class_name);
+    if (FAILED(made) || condition.Get() == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationElement> core;
+    if (FAILED(current->FindFirst(TreeScope_Descendants, condition.Get(), core.Receive())))
+      return ShadowReadResult::kFailed;
+    if (core.Get() == nullptr) return ShadowReadResult::kAbsent;
+    return ProcessPathOf(core.Get(), maximum_bytes, output);
+  }
+
+  // The path of a shell item cannot be read from UI Automation alone (an Explorer item publishes
+  // its display name); S5-b-2c measures what Explorer publishes. Until a source of the REAL path is
+  // established this is absent, which the reader turns into "a file whose extension is unknown".
+  ShadowReadResult ItemPath(Element, std::size_t, std::string *, bool *) override {
+    return ShadowReadResult::kAbsent;
+  }
+
+private:
+  static constexpr int kMaxElements = 1024;
+  static constexpr DWORD kTimeoutMilliseconds = 1500;
+
+  WindowsUiaShadowSource(windows_uia_source_detail::ComRef<IUIAutomation> automation,
+                         windows_uia_source_detail::ComRef<IUIAutomationTreeWalker> walker,
+                         HWND window, POINT point, StillValid still_valid)
+      : automation_(std::move(automation)), walker_(std::move(walker)), window_(window),
+        point_(point), still_valid_(std::move(still_valid)) {}
+
+  [[nodiscard]] IUIAutomationElement *At(Element element) const {
+    return element < elements_.size() ? elements_[element] : nullptr;
+  }
+
+  // A navigation / lookup result: an error is a failed read, S_OK with no element is "none", and an
+  // element is kept (the table is bounded: a capture makes at most the call budget of lookups).
+  ShadowReadResult Keep(HRESULT result,
+                        windows_uia_source_detail::ComRef<IUIAutomationElement> element,
+                        Element *output) {
+    if (FAILED(result)) return ShadowReadResult::kFailed;
+    if (element.Get() == nullptr) return ShadowReadResult::kAbsent;
+    if (elements_.size() >= static_cast<std::size_t>(kMaxElements)) return ShadowReadResult::kFailed;
+    IUIAutomationElement *raw = element.Get();
+    raw->AddRef();
+    elements_.push_back(raw);
+    *output = static_cast<Element>(elements_.size() - 1);
+    return ShadowReadResult::kOk;
+  }
+
+  // The executable of the process that owns an element. Opened with the least right that answers.
+  ShadowReadResult ProcessPathOf(IUIAutomationElement *element, std::size_t maximum_bytes,
+                                 std::string *output) {
+    int process_id = 0;
+    if (FAILED(element->get_CurrentProcessId(&process_id)) || process_id <= 0)
+      return ShadowReadResult::kFailed;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE,
+                                 static_cast<DWORD>(process_id));
+    if (process == nullptr) return ShadowReadResult::kFailed;
+    std::wstring path(32768, L'\0');
+    DWORD size = static_cast<DWORD>(path.size());
+    const BOOL queried = QueryFullProcessImageNameW(process, 0, path.data(), &size);
+    CloseHandle(process);
+    if (!queried || size == 0) return ShadowReadResult::kFailed;
+    path.resize(size);
+    return windows_uia_source_detail::ShadowTextFromUtf16(path, false, maximum_bytes, output);
+  }
+
+  windows_uia_source_detail::ComRef<IUIAutomation> automation_;
+  windows_uia_source_detail::ComRef<IUIAutomationTreeWalker> walker_;
+  HWND window_;
+  POINT point_;
+  StillValid still_valid_;
+  std::vector<IUIAutomationElement *> elements_;
+};
+
+} // namespace sprint_coder::computer_use

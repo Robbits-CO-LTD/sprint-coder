@@ -76,6 +76,7 @@
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_native_eligibility.h"
+#include "computer_use_windows_uia_source.h"
 
 namespace {
 

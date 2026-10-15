@@ -56,7 +56,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
   });
 
   it('is not wired into the Windows host yet, and changes no version', () => {
-    // S5-b-2 reads UI Automation and records the shadow; until then the host does not know it.
+    // S5-b-2a added the reader and the UI Automation source (S5-b-2b wires them); the host reaches the shadow only through that source header.
     expect(windowsHost).not.toContain('computer_use_windows_shadow.h');
     expect(windowsHost).not.toContain('computer_use_effect_shadow.h');
     expect(windowsHost).not.toContain('computer_use_effect_classifier.h');
@@ -70,7 +70,7 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
   it('defines the read helpers in the shared header, and builds the Windows facts on the shared builder', () => {
     // The macOS reader still has its own copy of Settle / Step (same meaning, different corners: an
     // empty string, malformed UTF-8, a stopped state). Converging them, or tying them with a
-    // harness, is S5-b-2's job (see the ADR).
+    // harness, was left alone in S5-b-2a on purpose (see the ADR).
     for (const name of [
       'enum class ShadowReadResult',
       'inline bool ShadowSettle(',

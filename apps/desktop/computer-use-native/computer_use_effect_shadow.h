@@ -631,6 +631,8 @@ public:
     return true;
   }
   [[nodiscard]] bool Canceled() const { return canceled_; }
+  // Refused once (canceled or out of budget): nothing more may be read.
+  [[nodiscard]] bool Stopped() const { return stopped_; }
   [[nodiscard]] bool BudgetExhausted() const { return budget_.Exhausted(); }
   [[nodiscard]] std::uint32_t Calls() const { return budget_.Calls(); }
   // The gap bits this gate accounts for.
