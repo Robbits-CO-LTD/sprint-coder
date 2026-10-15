@@ -333,7 +333,7 @@ function buildHost(attested: boolean, effectiveEligibilityMode: () => ComputerUs
     sent: (sessionId?: string) =>
       (sessionId === undefined
         ? startSessionCalls.at(-1)
-        : startSessionCalls.findLast((call) => call['sessionId'] === sessionId))!,
+        : [...startSessionCalls].reverse().find((call) => call['sessionId'] === sessionId))!,
   };
 }
 
