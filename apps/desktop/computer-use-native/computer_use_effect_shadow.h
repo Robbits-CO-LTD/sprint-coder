@@ -164,7 +164,8 @@ struct ShadowRequestInfo {
 // Tab, Escape / Esc, Backspace, Delete / Del, Home, End and PageUp / PageDown. Shift in front of
 // one of those is still the same key (it extends a selection). Space and a single character are NOT
 // on the list: Space presses the focused button or link ("Open" in a download list), and a letter is a
-// menu access key (after Shift+F10, "o" picks "Open"). Typing text is the "type" action, never a key. The allow list does not depend on which names a host can send; the
+// menu access key (after Shift+F10, "o" picks "Open"). Typing text is the "type" action, never a
+// key. The allow list does not depend on which names a host can send; the
 // host's set is pinned by a test that classifies every name it accepts. The chord is split on '+';
 // the last part is the key and the others are modifiers, each compared WHOLE (no substring: "altgr"
 // and "metadata" are not modifiers, they are unknown names, and unknown names open). Case is ignored,
