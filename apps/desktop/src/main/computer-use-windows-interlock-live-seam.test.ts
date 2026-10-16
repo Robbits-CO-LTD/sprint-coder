@@ -404,7 +404,11 @@ int main(int argc, char **argv) {
       // for those two answers.
       for (int i = 0; i < 5; ++i) {
         after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
-        WaitIdle(2000);
+        // A worker still running after the wait would make the next try a single-flight kBudget, not a
+        // timeout: stop retrying and say so.
+        const bool idle = WaitIdle(2000);
+        Check(idle, "a_retry_worker_ends");
+        if (!idle) break;
         if (after.no_verdict != InterlockNoVerdict::kBudget && after.no_verdict != InterlockNoVerdict::kIncomplete) break;
       }
       Check(after.no_verdict == InterlockNoVerdict::kNone, "an_evaluation_after_the_worker_ended_runs");
