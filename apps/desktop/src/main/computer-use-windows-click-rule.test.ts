@@ -16,6 +16,7 @@ const host = read('computer_use_windows_host.cc');
 const scheduler = read('computer_use_windows_shadow_scheduler.h');
 const shadow = read('computer_use_effect_shadow.h');
 const classifier = read('computer_use_effect_classifier.h');
+const harness = read('computer_use_protocol_fuzz.cc');
 const interlock = read('computer_use_native_interlock.h');
 const squash = (text: string): string => text.replace(/\s+/gu, ' ');
 
@@ -56,16 +57,43 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
     expect(shadow).toContain('bool click_opens = false;');
   });
 
-  it('counts keys that open: Enter, and any chord with a command modifier; not a bare arrow', () => {
+  it('counts every key as opening except an allow list of quiet ones (fail closed)', () => {
     expect(squash(shadow)).toContain(
       'facts.key_is_activation = request.kind == "key" && ShadowKeyOpens(request.key);',
     );
-    expect(shadow).toContain(
-      '"cmd", "command", "ctrl", "control", "alt", "option", "opt", "win", "windows", "meta", "super"',
-    );
+    // An allow list of keys that cannot open; everything else (unknown names, F keys, chords) opens.
+    expect(shadow).toContain('"arrowup"');
+    expect(shadow).toContain('return !ShadowKeyIsOneCharacter(name);');
+    expect(shadow).not.toContain('kCommandModifiers');
     expect(squash(shadow)).toContain(
       'facts.click_tracked = request.kind == "click" && request.click_tracked;',
     );
+  });
+
+  it('classifies every key name a host accepts, on purpose (the list in the harness equals the hosts)', () => {
+    const names = (source: string, from: string): string[] => {
+      const start = source.indexOf(from);
+      const end = source.indexOf('\n}\n', start);
+      if (start < 0 || end < start) throw new Error(`${from} not found`);
+      return [...source.slice(start, end).matchAll(/\{"([A-Za-z]+)",\s*k?VK_/gu)]
+        .map((match) => match[1] as string)
+        .sort();
+    };
+    const windows = names(host, 'WORD VirtualKeyForName(');
+    const macos = names(read('computer_use_macos.mm'), 'CGKeyCode KeyCodeForName(');
+    // macOS spells its codes kVK_..., which the pattern above also takes (k?VK_).
+    const harnessText = harness;
+    const begin = harnessText.indexOf('// BEGIN host key names');
+    const end = harnessText.indexOf('// END host key names');
+    expect(begin).toBeGreaterThan(0);
+    const listed = [
+      ...harnessText.slice(begin, end).matchAll(/\{"([A-Za-z]+)", (?:true|false)\}/gu),
+    ]
+      .map((match) => match[1] as string)
+      .sort();
+    expect(windows.length).toBeGreaterThan(5);
+    expect(listed).toEqual(windows);
+    expect(listed).toEqual(macos);
   });
 
   it('keeps the macOS source out of it: Finder has no single-click-to-open setting, and the wire has no double click', () => {

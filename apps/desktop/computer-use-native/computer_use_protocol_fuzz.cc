@@ -7524,7 +7524,7 @@ bool CheckClickRule() {
     if (!Check(evaluated.Refuses() && evaluated.verdict.outcome == InterlockOutcome::kTakeover,
                "click-rule-untracked-click-through-the-reader-is-a-takeover")) return false;
   }
-  // Keys that open: Enter (with or without modifiers) and any chord that holds a command modifier.
+  // Keys that open: an ALLOW LIST of keys that cannot, everything else counts (fail closed).
   {
     for (const char *key : {"Enter", "enter", "Return", "Shift+Enter", "Ctrl+Enter", "ctrl+Enter", "Alt+Enter",
                             "cmd+o", "Cmd+O", "Command+Down", "cmd+ArrowDown", "Control+O", "Option+Down",
@@ -7534,15 +7534,38 @@ bool CheckClickRule() {
                             " Enter ", "Shift + Enter", "CMD + o", "Ctrl +  Enter",
                             // A chord with a command modifier counts whatever its key (intended: fail closed).
                             "Cmd+C", "Ctrl+A", "Ctrl+Z", "Alt+Tab",
-                            // An empty part inside a chord counts (fail closed); the text backslash-n too.
-                            "ctrl++", "Ctrl+", "+", "a+", "+a", "\\n", "\\r", "\\r\\n"})
+                            // An empty key, an empty part inside a chord, and the text backslash-n count.
+                            "", "ctrl++", "Ctrl+", "a+", "+a", "\\n", "\\r", "\\r\\n",
+                            // Names nobody listed open too: F keys and unknown names, also ones that merely
+                            // contain a modifier's name (they are unknown names, not modifiers).
+                            "F1", "F12", "Insert", "Enterprise", "Entr", "altgr", "metadata", "controller",
+                            "commander", "optional", "winner", "superb", "Shift+altgr", "ctrlx", "xcmd",
+                            "Unidentified", "MediaPlayPause", "ArrowDownX", "Shift+F2"})
       if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
-    for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Tab", "Escape", "Space",
-                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Enterprise", "Entr", "kp_down", "",
-                            // Whole-token comparison: names that merely contain a modifier do not match.
-                            "altgr", "metadata", "controller", "commander", "optional", "winner", "superb",
-                            "Shift+altgr", "ctrlx", "xcmd"})
+    // Only Shift, spelled exactly, may stand before a quiet key.
+    if (!Check(ShadowKeyOpens("shiftx+a"), "key-opens-a-prefix-that-merely-starts-with-shift")) return false;
+    if (!Check(!ShadowKeyOpens("Shift+Shift+a"), "key-does-not-open-shift-shift-a")) return false;
+    for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Up", "Left", "Right",
+                            "KP_Down", "kp_up", "Tab", "Escape", "Esc", "Space", "Backspace", "Delete", "Del",
+                            "Home", "End", "PageUp", "PageDown", "PgUp", "PgDn",
+                            // One printable character: a letter, a digit, a sign, a blank, a plus, a non-ASCII one.
+                            "a", "A", "z", "7", " ", "-", "_", "+", "/", ".", "\u3042", "\u00e9",
+                            // Shift in front of a quiet key is the same key.
+                            "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Shift+a", "shift+Home"})
       if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
+    // BEGIN host key names
+    // Every key name the hosts accept (Windows VirtualKeyForName, macOS KeyCodeForName), with what it
+    // is: the vitest contract reads this list and the two host sources and requires them to match,
+    // so a name added to a host is classified here on purpose.
+    static const std::pair<const char *, bool> kHostKeys[] = {
+        {"Enter", true},     {"Tab", false},       {"Escape", false},     {"Backspace", false},
+        {"Delete", false},   {"ArrowUp", false},   {"ArrowDown", false},  {"ArrowLeft", false},
+        {"ArrowRight", false}, {"Home", false},    {"End", false},
+    };
+    // END host key names
+    for (const auto &entry : kHostKeys)
+      if (!Check(ShadowKeyOpens(entry.first) == entry.second, (std::string("host-key-") + entry.first).c_str()))
+        return false;
     // Through the facts: a chord is an activating key; an arrow is not.
     ShadowRequestInfo request = UiaRequest("key");
     request.key = "Cmd+O";

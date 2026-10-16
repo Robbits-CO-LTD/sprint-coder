@@ -154,20 +154,35 @@ struct ShadowRequestInfo {
   bool click_tracked = false;
 };
 
-// Whether a key opens what has focus. Enter does, with or without modifiers, under any of its
-// spellings (Enter, Return, KP_Enter, NumpadEnter, a bare newline or carriage return); so does any
-// key chord that holds a command modifier (cmd, command, ctrl, control, alt, option, win, windows,
-// meta, super): Cmd+O and Cmd+Down in Finder, Ctrl+Enter and Alt+Enter in Explorer. A chord with a
-// command modifier counts WHATEVER its key is: Cmd+C or Ctrl+A are counted too, which is more than
-// needed and is intended (fail closed: this does not know every shortcut of every app). A bare
-// arrow, Tab, Escape, Space, Home/End or a letter does not, nor does Shift with one of those (it
-// extends a selection). The chord is split on '+'; the last part is the key, the others are
-// modifiers. Each part is compared WHOLE (no substring: "altgr" or "metadata" are not modifiers).
-// Case is ignored, and so are blanks around a part and '_', '-' or blanks inside one. An empty part
-// inside a chord ("ctrl++", a trailing '+') counts (fail closed); an empty key does not. The
-// two-character text backslash-n is taken as Enter like the control character (the host only sends a
-// fixed set of key names and rejects the rest, so this never decides anything real).
+// Whether a key may open what has focus. The classifier's stance is "anything that might open counts
+// as opening", so this is an ALLOW LIST of keys that cannot: everything else opens, an unknown name,
+// an F key, any spelling of Enter (Enter, Return, KP_Enter, NumpadEnter, a newline or carriage
+// return, also written as the two characters backslash and n), and any chord with a command modifier
+// (cmd, command, ctrl, control, alt, option, win, windows, meta, super: Cmd+O and Cmd+Down in Finder,
+// Ctrl+Enter and Alt+Enter in Explorer; Cmd+C or Ctrl+A count too, which is more than needed and
+// intended). The keys that cannot open are the arrows (also Up, Down, Left, Right, KP_Up and so on),
+// Tab, Escape / Esc, Space, Backspace, Delete / Del, Home, End, PageUp / PageDown, and one printable
+// character (a letter, a digit, a sign: typing). Shift in front of one of those is still the same
+// key (it extends a selection). The allow list does not depend on which names a host can send; the
+// host's set is pinned by a test that classifies every name it accepts. The chord is split on '+';
+// the last part is the key and the others are modifiers, each compared WHOLE (no substring: "altgr"
+// and "metadata" are not modifiers, they are unknown names, and unknown names open). Case is ignored,
+// and so are blanks, '_' and '-' inside a part. An empty part inside a chord counts (fail closed) and
+// so does an empty key.
+[[nodiscard]] inline bool ShadowKeyIsOneCharacter(std::string_view part) {
+  if (part.empty()) return false;
+  std::size_t code_points = 0;
+  for (const char raw : part) {
+    const unsigned char byte = static_cast<unsigned char>(raw);
+    if (byte < 0x20 || byte == 0x7F) return false; // a control character is not typing
+    if ((byte & 0xC0) != 0x80) ++code_points;
+  }
+  return code_points == 1;
+}
+
 [[nodiscard]] inline bool ShadowKeyOpens(std::string_view key) {
+  // One printable character as it came ("a", " ", "-", "+", "_"): typing.
+  if (ShadowKeyIsOneCharacter(key)) return false;
   std::vector<std::string> parts;
   std::string current;
   for (const char raw : key) {
@@ -181,20 +196,20 @@ struct ShadowRequestInfo {
     }
   }
   parts.push_back(std::move(current));
-  if (parts.size() > 1)
-    for (const std::string &part : parts)
-      if (part.empty()) return true;
-  static constexpr std::string_view kCommandModifiers[] = {
-      "cmd", "command", "ctrl", "control", "alt", "option", "opt", "win", "windows", "meta", "super"};
   for (const std::string &part : parts)
-    for (const std::string_view modifier : kCommandModifiers)
-      if (part == modifier) return true;
-  static constexpr std::string_view kEnterSpellings[] = {
-      "enter", "return", "kpenter", "numpadenter", "keypadenter", "\n", "\r", "\r\n",
-      "\\n", "\\r", "\\r\\n"};
-  for (const std::string_view enter : kEnterSpellings)
-    if (parts.back() == enter) return true;
-  return false;
+    if (part.empty()) return true; // an empty key, or an empty part of a chord
+  // Everything before the key must be Shift. A command modifier, or a name nobody listed, opens.
+  for (std::size_t index = 0; index + 1 < parts.size(); ++index)
+    if (parts[index] != "shift") return true;
+  const std::string &name = parts.back();
+  static constexpr std::string_view kQuiet[] = {
+      "arrowup",  "arrowdown", "arrowleft", "arrowright", "up",       "down",   "left",
+      "right",    "kpup",      "kpdown",    "kpleft",     "kpright",  "numpadup", "numpaddown",
+      "numpadleft", "numpadright", "tab",   "escape",     "esc",      "space",  "backspace",
+      "delete",   "del",       "home",      "end",        "pageup",   "pagedown", "pgup", "pgdn"};
+  for (const std::string_view quiet : kQuiet)
+    if (name == quiet) return false;
+  return !ShadowKeyIsOneCharacter(name);
 }
 
 // Whether a click made now may complete a double click, from the system's last input time alone.
