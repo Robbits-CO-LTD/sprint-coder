@@ -2885,6 +2885,53 @@ describe('ComputerUseController', () => {
       await fixture.controller.stop(started.sessionId);
     });
 
+    // Main's own check (#785 T15-10 L1), made before native is asked to read anything: a native that
+    // would read anything is not trusted to have judged the node.
+    it.each([
+      ['a secure node', { targetMetadata: { 'node-1': { secure: true } } }, undefined],
+      ['a high-impact node', { targetMetadata: { 'node-1': { highImpact: true } } }, undefined],
+      [
+        'a node native called high-impact',
+        { targetMetadata: { 'node-1': { highImpact: true, highImpactNative: true } } },
+        undefined,
+      ],
+      ['a command surface node', { targetMetadata: { 'node-1': { surface: true } } }, undefined],
+      ['a node of a browser', {}, 'com.google.Chrome'],
+    ] as const)(
+      'refuses %s without asking the native, and says what it says for every refusal',
+      async (_name, overrides, bundleId) => {
+        const { store, owners } = spiedStore();
+        const fixture = createFixture({
+          observationOverrides: { ...withNode, ...overrides },
+          artifactRead: {},
+          artifactStore: store,
+          ...(bundleId === undefined ? {} : { bundleId }),
+        });
+        const started = await start(fixture);
+        await fixture.controller.observe(started.sessionId);
+        await expect(
+          fixture.controller.act(started.sessionId, copy, 'copy-1'),
+        ).resolves.toMatchObject({ result: 'rejected', reasonCode: 'artifact_copy_refused' });
+        expect(fixture.readInputs).toHaveLength(0);
+        expect(owners).toEqual([]);
+        await fixture.controller.stop(started.sessionId);
+      },
+    );
+
+    it('still copies an ordinary node of an ordinary app (the guard refuses nothing else)', async () => {
+      const fixture = createFixture({
+        observationOverrides: { ...withNode, targetMetadata: { 'node-1': {} } },
+        artifactRead: {},
+      });
+      const started = await start(fixture);
+      await fixture.controller.observe(started.sessionId);
+      await expect(
+        fixture.controller.act(started.sessionId, copy, 'copy-1'),
+      ).resolves.toMatchObject({ result: 'completed' });
+      expect(fixture.readInputs).toHaveLength(1);
+      await fixture.controller.stop(started.sessionId);
+    });
+
     it('refuses a node the last observation did not name, without asking the native', async () => {
       const fixture = createFixture({ observationOverrides: withNode, artifactRead: {} });
       const started = await start(fixture);

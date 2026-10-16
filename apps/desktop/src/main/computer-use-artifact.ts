@@ -52,12 +52,23 @@ export type NormalizedComputerUseText = string & {
  * made on the raw string.
  */
 export function normalizeComputerUseArtifactText(raw: string): NormalizedComputerUseText {
-  return raw
-    .normalize('NFKC')
-    .replace(/\r\n|[\r\u2028\u2029]/gu, '\n')
-    .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
-      character === '\n' || character === '\t' ? character : '',
-    ) as NormalizedComputerUseText;
+  // Removing a character can leave two others side by side that NFKC then composes (e + ZWJ +
+  // U+0301, a Hangul jamo pair around a ZWSP), so one pass is not a normal form. Repeat until the
+  // text stops changing: the result is a fixed point, so the excerpt a person is shown (made from
+  // the same function) and the text that is pasted are one string. A pass only removes or
+  // composes, so this ends after a few passes; the bound is a guard.
+  let text = raw;
+  for (let pass = 0; pass < 16; pass += 1) {
+    const next = text
+      .normalize('NFKC')
+      .replace(/\r\n|[\r\u2028\u2029]/gu, '\n')
+      .replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+        character === '\n' || character === '\t' ? character : '',
+      );
+    if (next === text) break;
+    text = next;
+  }
+  return text as NormalizedComputerUseText;
 }
 
 // What a person is shown of a value (design 4.5, R13). Visible escapes for what would otherwise
@@ -221,6 +232,10 @@ const SECRET_PATTERNS: readonly RegExp[] = [
   /(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}/u,
   // PEM private keys of any kind.
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u,
+  // Stripe secret and restricted keys, GitLab personal access tokens, npm access tokens (D2).
+  /(?<![A-Za-z0-9_])[sr]k_(?:live|test)_[A-Za-z0-9]{10,}/u,
+  /(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{16,}/u,
+  /(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{30,}/u,
   // A JWT: a base64url JSON header, a payload and a signature.
   /(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/u,
 ];
@@ -239,7 +254,7 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
   // run together or split by single spaces or hyphens (`482913`, `482 913`, `1234-5678`).
   if (/^\s*\d(?:[ -]?\d){5,7}\s*$/u.test(text)) return true;
   // A card number: 13 to 19 digits passing Luhn, as a run of digit groups with a single space,
-  // TAB, line feed or hyphen between them (a multi-line field may break a number across lines).
+  // TAB, line feed, hyphen or dot between them (a multi-line field may break a number across lines).
   // Every run of whole groups is tried (not only the whole chain), because a number followed by an
   // expiry date or a CVV, or preceded by a short number, is still a card number. Windows begin and
   // end at group boundaries only, and every group but the last has at least 4 digits (card numbers
@@ -250,9 +265,9 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
   // broken across cells or lines still prints 4-4-4-4, while a table of plain numbers (TSV, one
   // value per line) would otherwise be read as cards almost every time. Bounded work: at most
   // ~2,000 groups per 4,096 bytes, each window at most 19 digits.
-  for (const chain of text.matchAll(/\d(?:[ \t\n-]?\d)*/gu)) {
+  for (const chain of text.matchAll(/\d(?:[ \t\n.-]?\d)*/gu)) {
     // Groups at even indexes, the separator after group i at index 2i + 1.
-    const parts = chain[0].split(/([ \t\n-])/u);
+    const parts = chain[0].split(/([ \t\n.-])/u);
     const groupCount = (parts.length + 1) / 2;
     for (let first = 0; first < groupCount; first += 1) {
       let digits = '';

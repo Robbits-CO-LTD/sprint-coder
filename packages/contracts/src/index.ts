@@ -5155,12 +5155,11 @@ const computerUseProviderEgressConsentBindingSchema = z
 export type ComputerUseProviderEgressConsentBinding = z.infer<
   typeof computerUseProviderEgressConsentBindingSchema
 >;
-const computerUseUtf8TextSchema = z
-  .string()
-  .refine(
-    (value) => new TextEncoder().encode(value).byteLength <= 4_096,
-    'Text action exceeds the 4096-byte UTF-8 limit',
-  );
+const computerUseUtf8TextSchema = z.string().refine(
+  // Read when a value is parsed, so the limit's definition further down the file is in place.
+  (value) => new TextEncoder().encode(value).byteLength <= COMPUTER_USE_LIMITS.maxTextActionBytes,
+  'Text action exceeds the 4096-byte UTF-8 limit',
+);
 const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 256 characters');
 
 /**

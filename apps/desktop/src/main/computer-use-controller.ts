@@ -4996,6 +4996,17 @@ export class ComputerUseController {
       return refuse();
     const targetSignature = record.observation?.targetSignatures?.[action.targetId];
     if (targetSignature === undefined || targetSignature.length === 0) return refuse();
+    // Main's own check, before native is asked to read anything (#785 T15-10 L1): a secure, a
+    // high-impact or a surface node, and any node of a browser, are never copied, whatever native
+    // answers. The same refusal as every other, so none of these is told apart.
+    const metadata = record.observation?.targetMetadata?.[action.targetId];
+    if (
+      metadata?.secure === true ||
+      metadata?.surface === true ||
+      splitHighImpact(metadata).any ||
+      isComputerUseBrowserApplication(record.profile)
+    )
+      return refuse();
     let value: ComputerUseNativeNodeValue;
     try {
       value = await native.readNodeValue({
