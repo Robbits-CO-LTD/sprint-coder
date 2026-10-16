@@ -79,7 +79,7 @@ const render = (approval: ComputerUseApproval): string =>
   );
 
 describe('C6 acceptance, Renderer: the card of a paste (N21 (d), N23)', () => {
-  it('N21 (d): the card Main published reaches the screen with source, destination, control, size and excerpt', () => {
+  it('N21 (d): a card of the published shape reaches the screen with source, destination, control, size and excerpt', () => {
     const html = render(card('Total 42'));
     expect(html).toContain('Notes');
     expect(html).toContain('Form · control:field');
@@ -90,7 +90,7 @@ describe('C6 acceptance, Renderer: the card of a paste (N21 (d), N23)', () => {
     expect(html).not.toContain('この計画で許可');
   });
 
-  it('N23: the escapes Main made arrive as the text they are, and no invisible character is drawn', () => {
+  it('N23: the escapes (as Main makes them) arrive as the text they are, and no invisible character is drawn', () => {
     const excerpt = `pay⟦U+1160⟧ to⟦U+2800⟧ bob⟦U+FE0F⟧ ⚠pаy…`;
     const html = render(card(excerpt));
     for (const shown of ['⟦U+1160⟧', '⟦U+2800⟧', '⟦U+FE0F⟧', '⚠pаy…'])
@@ -107,6 +107,7 @@ describe('C6 acceptance, Renderer: the card of a paste (N21 (d), N23)', () => {
   });
 });
 
+// The hook itself is not mounted here (it needs the whole preload API); the rail it feeds is.
 describe('C6 acceptance, Renderer: nothing is kept (N12)', () => {
   it('mounting the rail with a copied value and a paste card writes nothing to local or session storage', async () => {
     const marker = 'MARKER-RENDERER-7f3a';
