@@ -396,17 +396,24 @@ private:
     capture->item_kind = ShadowItemKind::kFile;
     // The shell tab that shows the item is its nearest ShellTabWindowClass ancestor in the walk.
     Element tab = ShadowUiaSource::kNoElement;
-    for (std::size_t at = index; at < capture->chain.size() && at < chain_elements_.size(); ++at)
-      if (windows_shadow_detail::Lowercase(shadow_detail::CompatFold(capture->chain[at].class_name)) ==
-          "shelltabwindowclass") {
+    // Whether the ListItem sits in the shell's ITEM VIEW (a SHELLDLL_DefView or its UIItemsView) between
+    // itself and that tab: a list in the preview pane or a search suggestion is a ListItem too, but its
+    // name is not an item of the folder the view shows, so the shell is not asked about it.
+    bool in_item_view = false;
+    for (std::size_t at = index; at < capture->chain.size() && at < chain_elements_.size(); ++at) {
+      const std::string class_name =
+          windows_shadow_detail::Lowercase(shadow_detail::CompatFold(capture->chain[at].class_name));
+      if (class_name == "shelltabwindowclass") {
         tab = chain_elements_[at];
         break;
       }
+      if (class_name == "shelldll_defview" || class_name == "uiitemsview") in_item_view = true;
+    }
     std::string path;
     bool is_folder = false;
     // The shell is asked only about an item of the bound window: a target the walk could not trace
     // back to it (another window on top, the focus elsewhere) is not looked up.
-    if (capture->chain_reached_root &&
+    if (capture->chain_reached_root && in_item_view &&
         ShadowSettle(ItemPath(chain_elements_[index], tab, kPathBytes, &path, &is_folder),
                      &capture->read_failed)) {
       capture->item_name_read = true;

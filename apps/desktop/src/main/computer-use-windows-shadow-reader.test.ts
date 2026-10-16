@@ -274,6 +274,12 @@ describe('Windows UI Automation source only reads', () => {
       'ShellDisplayNameUsable',
       'MatchShellDisplayName',
       'ShellFolderMayBeListed',
+      'ShellLookupMustStop',
+      'ShellPathHasLink',
+      'ShellEntryNeedsShellName',
+      'ShellDesktopIniLocalizesFileNames',
+      'ShellResolvedNameIsTheCandidate',
+      'ShellLeafName',
       'ShellFolderHasLocalizedFileNames',
       'ShellPathWithoutTrailingSeparator',
       'ShellLookupRunning',
@@ -346,6 +352,7 @@ describe('Windows UI Automation source only reads', () => {
       'GetCurrentProcess',
       'GetCurrentThread',
       'GetPrivateProfileSectionW',
+      'GetVolumePathNameW',
       'SetLastError',
       'ILIsEmpty',
       'NormalizeString',
@@ -394,9 +401,17 @@ describe('Windows UI Automation source only reads', () => {
       'ShellDisplayNameUsable',
       'MatchShellDisplayName',
       'ShellFolderMayBeListed',
+      'ShellLookupMustStop',
+      'ShellPathHasLink',
+      'ShellEntryNeedsShellName',
+      'ShellDesktopIniLocalizesFileNames',
+      'ShellResolvedNameIsTheCandidate',
+      'ShellLeafName',
       'ShellFolderHasLocalizedFileNames',
       'ShellPathWithoutTrailingSeparator',
       'AbsoluteIdList',
+      'ComApartment',
+      'Finish',
       'ShellLookupPending',
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
@@ -509,8 +524,9 @@ describe('Windows UI Automation source only reads', () => {
       'ShellItemPathByName(HWND tab',
       '} // namespace windows_uia_source_detail',
     );
-    // The folder is listed in THIS process, by the display name as a prefix: no walk over the view's
-    // items (IFolderView2::Item / ItemCount) and no per-item shell object are left.
+    const compact = body.replace(/\s+/gu, ' ');
+    // The folder is listed in THIS process: no walk over the view's items (IFolderView2::Item /
+    // ItemCount) and no per-item shell object are left.
     expect(code(body)).not.toMatch(
       /ItemCount|folder_view\.Get\(\)->Item\(|SHCreateItemWithParent|kShellLookupMaxItems/u,
     );
@@ -526,8 +542,7 @@ describe('Windows UI Automation source only reads', () => {
     // The folder's path is asked for once; a folder with no path of the file system is not known.
     expect((code(body).match(/SHGetPathFromIDListEx\(/gu) ?? []).length).toBe(1);
     expect(body).toMatch(/if \(!has_path\) return ShadowReadResult::kAbsent;/u);
-    // No rule about extensions: the SHELL is asked, for every candidate, for the name it shows, and the
-    // matcher compares those. A candidate whose name cannot be read stays unknown (the whole answer is).
+    // No rule about extensions: the SHELL is asked, for every candidate, for the name it shows.
     expect(code(body)).not.toMatch(/SHGetSetSettings|SSF_SHOWEXTENSIONS|extensions_shown/u);
     const names = between(
       body,
@@ -535,11 +550,17 @@ describe('Windows UI Automation source only reads', () => {
       'MatchShellDisplayName(',
     );
     expect(names).toContain('SHCreateItemFromParsingName(');
+    expect(names).toContain('GetDisplayName(SIGDN_FILESYSPATH, &resolved)');
     expect(names).toContain('GetDisplayName(SIGDN_NORMALDISPLAY, &shown)');
-    expect(names).toContain('candidate.shell_name_known = true;');
-    expect(names).toContain('if (!limits.still_valid()) return ShadowReadResult::kStopped;');
     expect(body).toContain(
       'MatchShellDisplayName(display_name, candidates, ShellNameEqualsOrdinal)',
+    );
+    // A name is known ONLY when the path resolved, resolved to the candidate itself (not to the entry
+    // Win32 normalizes a trailing dot or space to), and the shell gave its name: one assignment, in
+    // that branch and nowhere else.
+    expect((code(source).match(/shell_name_known = true/gu) ?? []).length).toBe(1);
+    expect(code(names).replace(/\s+/gu, ' ')).toMatch(
+      /if \(SUCCEEDED\(SHCreateItemFromParsingName\([^{}]*ShellResolvedNameIsTheCandidate\(candidate\.name, ShellLeafName\(resolved\), ShellNameEqualsOrdinal\) && SUCCEEDED\(item\.Get\(\)->GetDisplayName\(SIGDN_NORMALDISPLAY, &shown\)\) && shown != nullptr\) \{ candidate\.shell_name = shown; candidate\.shell_name_known = true; \}/u,
     );
     // Where it may look is decided BEFORE the first listing (and its file system call): the root of the
     // desktop namespace (an empty id list), a slow folder, and then a plain local directory only.
@@ -547,28 +568,87 @@ describe('Windows UI Automation source only reads', () => {
     for (const guard of [
       'ILIsEmpty(folder_id.id)',
       'SFGAO_ISSLOW',
-      'if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;',
+      'ShellFolderMayBeListed(folder_path)',
     ]) {
       expect(body.indexOf(guard), guard).toBeGreaterThanOrEqual(0);
       expect(body.indexOf(guard), guard).toBeLessThan(find);
     }
+    // A slow folder is refused on the shell's own attribute, before any listing.
+    expect(body).toContain('(folder_attributes & SFGAO_ISSLOW) != 0)');
+    expect(body).toContain(
+      'FAILED(folder_item.Get()->GetAttributes(SFGAO_ISSLOW, &folder_attributes))',
+    );
+    // The place check comes before the desktop.ini check, and both before the listing; the caller turns
+    // either answer into "not known".
+    expect(body.indexOf('ShellFolderMayBeListed(folder_path)')).toBeLessThan(
+      body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)'),
+    );
+    expect(body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)')).toBeLessThan(find);
+    expect(compact).toContain(
+      'if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;',
+    );
+    expect(compact).toContain(
+      'if (ShellFolderHasLocalizedFileNames(folder_path)) return ShadowReadResult::kAbsent;',
+    );
+    // NO new I/O after the caller gave up or the deadline passed: asked before the place check, the
+    // desktop.ini, the first listing and each candidate's shell name.
+    for (const step of [
+      'if (!ShellFolderMayBeListed(folder_path))',
+      'if (ShellFolderHasLocalizedFileNames(folder_path))',
+      'find.handle = FindFirstFileExW(',
+      'SHCreateItemFromParsingName(',
+    ]) {
+      const at = compact.indexOf(step);
+      expect(at, step).toBeGreaterThan(0);
+      expect(compact.slice(Math.max(0, at - 170), at), step).toMatch(
+        /if \(ShellLookupMustStop\(limits, &stopped\)\) return stopped;(?: ComRef<IShellItem> item; PWSTR shown = nullptr; PWSTR resolved = nullptr;)? ?(?:if \(SUCCEEDED\()?$/u,
+      );
+    }
+    const stop = between(
+      source,
+      'ShellLookupMustStop(const ShellLookupLimits',
+      'Whether any part of',
+    );
+    expect(stop).toContain('if (!limits.still_valid())');
+    expect(stop).toContain('limits.now_ns() > limits.deadline_ns');
+    // Which entries need the shell's name is the pure rule of the matcher, fed the attributes.
+    expect(compact).toContain('ShellEntryNeedsShellName(found, is_directory,');
+    expect(compact).toContain('(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)');
+    expect(code(body)).not.toMatch(
+      /starts_with_display|renamable_directory|FILE_ATTRIBUTE_HIDDEN/u,
+    );
+    // The place check: the volume of the path (not its first three characters), no link on the way,
+    // the desktop folders asked without verifying, and the drive types, all in one fixed expression.
     const guardFunction = between(
       source,
       'ShellFolderMayBeListed(const std::wstring &path) {',
-      'The path of the item a file browser shows',
+      'ShellFolderHasLocalizedFileNames(const std::wstring &path) {',
     );
+    const guardCompact = guardFunction.replace(/\s+/gu, ' ');
     expect(guardFunction.includes("path[0] == L'" + '\\\\' + "'")).toBe(true);
-    for (const part of [
-      'DRIVE_REMOTE',
-      'DRIVE_CDROM',
-      'DRIVE_UNKNOWN',
-      'DRIVE_NO_ROOT_DIR',
-      'FOLDERID_Desktop',
-      'FOLDERID_PublicDesktop',
-    ])
-      expect(guardFunction, part).toContain(part);
-    // A desktop.ini is normal (a user's home has one): only its [LocalizedFileNames] section counts, and
-    // it is read with the profile API, never opened; what cannot be read is a yes (fail-closed).
+    expect(guardCompact).toContain(
+      'if (drive == DRIVE_REMOTE || drive == DRIVE_CDROM || drive == DRIVE_UNKNOWN || drive == DRIVE_NO_ROOT_DIR) return false;',
+    );
+    expect(guardCompact).toContain('if (same) return false;');
+    expect(guardCompact).toContain('FOLDERID_Desktop, FOLDERID_PublicDesktop');
+    expect(guardCompact).toContain(
+      'SHGetKnownFolderPath(known, KF_FLAG_DONT_VERIFY, nullptr, &folder)',
+    );
+    expect(guardCompact).toContain('GetVolumePathNameW(path.c_str(), root.data()');
+    expect(guardCompact).toContain('GetDriveTypeW(root.c_str())');
+    expect(guardCompact).toContain('return !ShellPathHasLink(root, path);');
+    expect(guardFunction).not.toContain('substr(0, 3)');
+    const link = between(
+      source,
+      'ShellPathHasLink(const std::wstring &root',
+      'ShellFolderMayBeListed(',
+    );
+    expect(link).toContain('IO_REPARSE_TAG_SYMLINK');
+    expect(link).toContain('IO_REPARSE_TAG_MOUNT_POINT');
+    expect(link).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
+    expect(link).toContain('if (find.handle == INVALID_HANDLE_VALUE) return true;');
+    // A desktop.ini is normal (a user's home has one): only its [LocalizedFileNames] section counts, it
+    // is read with the profile API, never opened, and the pure rule turns the answers into a verdict.
     const localized = between(
       source,
       'ShellFolderHasLocalizedFileNames(const std::wstring &path) {',
@@ -576,24 +656,12 @@ describe('Windows UI Automation source only reads', () => {
     );
     expect(localized).toContain('GetPrivateProfileSectionW(L"LocalizedFileNames"');
     expect(localized).toContain('desktop.ini');
+    expect(localized).toContain(
+      'return ShellDesktopIniLocalizesFileNames(found, lookup_error, length, section_error);',
+    );
     expect(code(localized)).not.toMatch(/CreateFile|ReadFile|ifstream|fopen/u);
-    expect(body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)')).toBeGreaterThanOrEqual(0);
-    expect(body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)')).toBeLessThan(find);
-    // Which entries need the shell's name: a file name that starts like the display name, and the
-    // read-only / system directories (a desktop.ini can only rename those); hidden entries are kept.
-    expect(body).toContain('FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM');
-    expect(body).toContain('starts_with_display || renamable_directory');
-    expect(body).toContain(
-      'renamable_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&',
-    );
-    // A slow folder is refused on the shell's own attribute, before any listing.
-    expect(body).toContain('(folder_attributes & SFGAO_ISSLOW) != 0)');
-    expect(body).toContain(
-      'FAILED(folder_item.Get()->GetAttributes(SFGAO_ISSLOW, &folder_attributes))',
-    );
-    expect(code(body)).not.toContain('FILE_ATTRIBUTE_HIDDEN');
-    // The guard decides before any listing of ours.
-    expect(guardFunction).not.toContain('FindFirstFileExW');
+    // The guards decide before any listing of ours.
+    expect(guardFunction).not.toContain('FindFirstFileExW(part');
     // A folder is a directory of the file system.
     expect(body).toContain('FILE_ATTRIBUTE_DIRECTORY');
     // Explorer's calls have no timeout: the lookup runs on its own thread, the caller waits a bounded
@@ -612,7 +680,19 @@ describe('Windows UI Automation source only reads', () => {
     const thread = between(item, 'std::thread([', '}).detach();');
     expect(thread).not.toMatch(/\bthis\b|window_|still_valid_|walker_|automation_/u);
     expect(thread).toContain('CoInitializeEx(nullptr, COINIT_MULTITHREADED)');
-    expect(thread).toContain('running.store(false);');
+    // No exception ends the process: the lookup is wrapped, and the slot and the waiting caller are
+    // released by a guard that runs whatever happened.
+    expect(thread).toMatch(
+      /try \{[\s\S]*ShellItemPathByName\([\s\S]*\} catch \(\.\.\.\) \{\s*\/\/[^\n]*\n\s*result = ShadowReadResult::kFailed;/u,
+    );
+    expect(thread).toContain('struct ComApartment');
+    expect(thread.indexOf('struct ComApartment')).toBeLessThan(
+      thread.indexOf('ShellItemPathByName('),
+    );
+    expect(thread).toMatch(
+      /struct Finish \{[\s\S]*~Finish\(\) \{\s*running\.store\(false\);\s*pending->ready\.notify_one\(\);/u,
+    );
+    expect(thread.indexOf('} catch (...)')).toBeLessThan(thread.indexOf('struct Finish'));
     expect(source).toContain(
       'static std::atomic<bool> *const running = new std::atomic<bool>(false);',
     );
@@ -638,7 +718,7 @@ describe('Windows UI Automation source only reads', () => {
     // Both the walk over the shell windows and the listing of the entries stop on a cancel.
     expect(
       body.match(/if \(!limits\.still_valid\(\)\) return ShadowReadResult::kStopped;/gu)?.length,
-    ).toBe(3);
+    ).toBe(2);
     expect(body).toContain(
       'if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;',
     );
@@ -654,6 +734,24 @@ describe('Windows UI Automation source only reads', () => {
     expect((code(source).match(/ShellItemPathByName\(/gu) ?? []).length).toBe(2);
   });
 
+  it('asks the shell only about a ListItem of the shell item view (S5-c-2 PR-3)', () => {
+    const capture = between(
+      reader,
+      'void CaptureItem(ShadowUiaCapture *capture) {',
+      'ShadowUiaSource &source_;',
+    );
+    const compact = capture.replace(/\s+/gu, ' ');
+    expect(compact).toContain('class_name == "shelldll_defview" || class_name == "uiitemsview"');
+    expect(compact).toContain('capture->chain_reached_root && in_item_view &&');
+    // The scan for the view stops at the tab, like the scan for the tab itself.
+    expect(compact).toMatch(
+      /if \(class_name == "shelltabwindowclass"\) \{ tab = chain_elements_\[at\]; break; \}/u,
+    );
+    expect(harness).toContain('winreader-list-item-outside-the-item-view-is-not-asked');
+    expect(harness).toContain('winreader-list-item-in-a-defview-is-asked');
+    expect(harness).toContain('winreader-list-item-in-the-item-view-is-asked');
+  });
+
   it('matches a display name to the real entry in a portable header the harness runs (S5-c-2 PR-3)', () => {
     const matcher = read('computer_use_windows_shell_name_match.h');
     // Pure: no platform header, no clock, no I/O, no thread.
@@ -663,24 +761,41 @@ describe('Windows UI Automation source only reads', () => {
     expect(code(matcher)).not.toMatch(/FindFirstFile|CompareString|GetLastError|CoCreate/u);
     expect(matcher).toContain('constexpr std::size_t kShellMaxCandidates = 64;');
     // No rule about extensions lives in the matcher: the shell's own name for each candidate is compared.
-    expect(code(matcher)).not.toMatch(/lnk|appref|extension|stem|find\(/u);
+    expect(code(matcher)).not.toMatch(/lnk|appref|extension|\bstem\b/u);
     // Two entries a name can stand for are "not known"; so are more candidates than the cap, and a
     // candidate whose shell name could not be read.
     expect(matcher).toContain('if (found != kNoShellMatch) return kNoShellMatch;');
     expect(matcher).toContain('candidates.size() > kShellMaxCandidates');
     expect(matcher).toContain('if (!candidates[i].shell_name_known) return kNoShellMatch;');
+    // The pure rules: which entries need the shell's name, what a desktop.ini means, and whether a
+    // path resolved to the candidate itself.
+    expect(matcher).toContain('ShellEntryNeedsShellName(');
+    expect(matcher).toContain('ShellDesktopIniLocalizesFileNames(');
+    expect(matcher).toContain('ShellResolvedNameIsTheCandidate(');
+    expect(matcher).toContain("candidate_name.back() == L'.' || candidate_name.back() == L' '");
+    // The intro names both kinds of candidate.
+    expect(matcher).toContain('directories that are read-only or system');
     // The real source compares as the file system does, and the harness runs the table.
     expect(source).toContain('CompareStringOrdinal(');
     expect(harness).toContain('computer_use_windows_shell_name_match.h');
     expect(harness).toContain('CheckWindowsShellNameMatch()');
-    expect(harness).toContain('shellname-lnk-collides-with-same-name');
-    expect(harness).toContain('shellname-pdf-exe-hidden-is-the-second');
-    expect(harness).toContain('shellname-never-shown-extension-is-the-shells-answer');
-    expect(harness).toContain('shellname-x-and-x-website-collide');
-    expect(harness).toContain('shellname-folder-with-a-dot-is-not-a-stem');
-    expect(harness).toContain('shellname-unreadable-after-the-match');
-    expect(harness).toContain('shellname-file-name-is-not-the-display-name');
-    expect(harness).toContain('shellname-over-the-cap-is-unknown');
+    for (const id of [
+      'shellname-lnk-collides-with-same-name',
+      'shellname-pdf-exe-hidden-is-the-second',
+      'shellname-never-shown-extension-is-the-shells-answer',
+      'shellname-x-and-x-website-collide',
+      'shellname-folder-with-a-dot-is-not-a-stem',
+      'shellname-unreadable-after-the-match',
+      'shellname-file-name-is-not-the-display-name',
+      'shellname-over-the-cap-is-unknown',
+      'shellneeds-read-only-or-system-directory-is-a-candidate',
+      'shellneeds-ordinary-directory-is-not-a-candidate',
+      'shellneeds-dot-is-never-a-candidate',
+      'desktopini-unreadable-section-is-a-yes',
+      'desktopini-with-the-section-is-a-yes',
+      'resolved-trailing-dot-resolves-to-another-entry',
+    ])
+      expect(harness, id).toContain(id);
   });
 
   it('is included by the host, and the reader is reached only through the scheduler (S5-b-2b)', () => {

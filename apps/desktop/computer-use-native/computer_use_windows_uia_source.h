@@ -215,16 +215,67 @@ struct AbsoluteIdList {
   return path;
 }
 
+// Whether a lookup must stop now, before it starts one more call that could block on the file
+// system: the action is no longer valid or the caller gave up (kStopped; the caller then also cancels
+// a call that is already blocked, but cannot cancel one that is started after), or the deadline passed
+// (kAbsent). Asked before EVERY new I/O step of the lookup.
+[[nodiscard]] inline bool ShellLookupMustStop(const ShellLookupLimits &limits, ShadowReadResult *result) {
+  if (!limits.still_valid()) {
+    *result = ShadowReadResult::kStopped;
+    return true;
+  }
+  if (limits.now_ns() > limits.deadline_ns) {
+    *result = ShadowReadResult::kAbsent;
+    return true;
+  }
+  return false;
+}
+
+// Whether any part of `path` (below its volume root) is a symbolic link or a volume mount point:
+// those can lead to a network or optical location that the drive letter does not show. Cloud file
+// tags and other reparse points are not links in this sense. A part that cannot be looked at counts
+// as a link (fail-closed).
+[[nodiscard]] inline bool ShellPathHasLink(const std::wstring &root, const std::wstring &path) {
+  const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
+  std::size_t at = root.size();
+  for (;;) {
+    const std::size_t next = trimmed.find(L'\\', at);
+    const std::wstring part = trimmed.substr(0, next == std::wstring::npos ? trimmed.size() : next);
+    if (part.size() > root.size()) {
+      WIN32_FIND_DATAW data{};
+      FindHandle find;
+      find.handle = FindFirstFileExW(part.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
+                                     nullptr, 0);
+      if (find.handle == INVALID_HANDLE_VALUE) return true;
+      if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+          (data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT))
+        return true;
+    }
+    if (next == std::wstring::npos) return false;
+    at = next + 1;
+  }
+}
+
 // Whether the folder at `path` is one whose entries may be listed here: a plain directory on a local
 // disk, whose view shows exactly its own entries under the names the shell gives them. Decided
-// BEFORE any file system access that could block, and fail-closed (a doubt is "no"):
-//  - a network location (a UNC path, a remote, optical or unknown drive) can block for long;
+// BEFORE any listing, and fail-closed (a doubt is "no"):
+//  - a network location (a UNC path, a remote, optical or unknown drive) can block for long. The
+//    drive is that of the VOLUME the path is on (GetVolumePathNameW), not of its first three
+//    characters, and a symbolic link or mount point on the way (which may lead to such a location) is
+//    refused;
 //  - the desktop folders (the user's and the public one) are shown MERGED in the desktop view, so an
-//    entry of the other folder looks like one of this folder;
+//    entry of the other folder looks like one of this folder. Their paths are asked WITHOUT
+//    verifying them (KF_FLAG_DONT_VERIFY): a redirected desktop would otherwise be probed over the
+//    network.
 [[nodiscard]] inline bool ShellFolderMayBeListed(const std::wstring &path) {
   if (path.size() < 3 || path[0] == L'\\') return false;
   if (path[1] != L':' || path[2] != L'\\') return false;
-  const std::wstring root = path.substr(0, 3);
+  std::wstring root(MAX_PATH * 2, L'\0');
+  if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return false;
+  root.resize(wcslen(root.c_str()));
+  if (root.size() < 3 || root[0] == L'\\' || root.size() > path.size() ||
+      !ShellNameEqualsOrdinal(std::wstring_view(path).substr(0, root.size()), root))
+    return false;
   const UINT drive = GetDriveTypeW(root.c_str());
   if (drive == DRIVE_REMOTE || drive == DRIVE_CDROM || drive == DRIVE_UNKNOWN ||
       drive == DRIVE_NO_ROOT_DIR)
@@ -232,7 +283,7 @@ struct AbsoluteIdList {
   const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
   for (const KNOWNFOLDERID &known : {FOLDERID_Desktop, FOLDERID_PublicDesktop}) {
     PWSTR folder = nullptr;
-    if (FAILED(SHGetKnownFolderPath(known, 0, nullptr, &folder)) || folder == nullptr) {
+    if (FAILED(SHGetKnownFolderPath(known, KF_FLAG_DONT_VERIFY, nullptr, &folder)) || folder == nullptr) {
       if (folder != nullptr) CoTaskMemFree(folder);
       return false;
     }
@@ -240,27 +291,28 @@ struct AbsoluteIdList {
     CoTaskMemFree(folder);
     if (same) return false;
   }
-  return true;
+  return !ShellPathHasLink(root, path);
 }
 
 // Whether the files of the folder can be shown under names that have nothing to do with their file
-// names: a desktop.ini with a [LocalizedFileNames] section does that. Then an entry that is not a
-// candidate by its file name could still carry the display name, so the folder is not looked into.
-// Only that section is read (a desktop.ini is normal, in a user's home for one; it is not by itself a
-// reason), and what cannot be read is taken to be a yes (fail-closed).
+// names (a desktop.ini with a non-empty [LocalizedFileNames] section: see
+// ShellDesktopIniLocalizesFileNames for the rule, which treats what cannot be read as a yes). Then an
+// entry that is not a candidate by its file name could still carry the display name. Only that
+// section is read; the file is never opened otherwise.
 [[nodiscard]] inline bool ShellFolderHasLocalizedFileNames(const std::wstring &path) {
   const std::wstring settings = ShellPathWithoutTrailingSeparator(path) + L"\\desktop.ini";
-  const DWORD attributes = GetFileAttributesW(settings.c_str());
-  if (attributes == INVALID_FILE_ATTRIBUTES) {
-    const DWORD error = GetLastError();
-    return !(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+  const bool found = GetFileAttributesW(settings.c_str()) != INVALID_FILE_ATTRIBUTES;
+  const DWORD lookup_error = found ? 0 : GetLastError();
+  DWORD length = 0;
+  DWORD section_error = 0;
+  if (found) {
+    std::wstring section(32767, L'\0');
+    SetLastError(0);
+    length = GetPrivateProfileSectionW(L"LocalizedFileNames", section.data(),
+                                       static_cast<DWORD>(section.size()), settings.c_str());
+    section_error = GetLastError();
   }
-  std::wstring section(32767, L'\0');
-  SetLastError(0);
-  const DWORD length = GetPrivateProfileSectionW(L"LocalizedFileNames", section.data(),
-                                                 static_cast<DWORD>(section.size()), settings.c_str());
-  if (length != 0) return true;
-  return GetLastError() != 0 && GetLastError() != ERROR_FILE_NOT_FOUND;
+  return ShellDesktopIniLocalizesFileNames(found, lookup_error, length, section_error);
 }
 
 // The path of the item a file browser shows under `display_name`. The folder the view shows is asked
@@ -357,7 +409,10 @@ struct AbsoluteIdList {
   if (!has_path) return ShadowReadResult::kAbsent;
   folder_path.resize(wcslen(folder_path.c_str()));
   if (folder_path.empty() || !ShellDisplayNameUsable(display_name)) return ShadowReadResult::kAbsent;
-  // Only a plain local directory without a desktop.ini: decided before the first listing.
+  // Only a plain local directory: decided before the first listing, and never after the caller gave
+  // up or the deadline passed (a call started after the cancel could not be canceled).
+  ShadowReadResult stopped = ShadowReadResult::kAbsent;
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;
   std::wstring directory = ShellPathWithoutTrailingSeparator(folder_path);
   directory.push_back(L'\\');
@@ -367,11 +422,13 @@ struct AbsoluteIdList {
   // A path past MAX_PATH would need the extended prefix: it is not looked up.
   if (directory.size() >= MAX_PATH - 14) return ShadowReadResult::kAbsent;
   // A desktop.ini that renames files: an entry outside the candidates could carry the display name.
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   if (ShellFolderHasLocalizedFileNames(folder_path)) return ShadowReadResult::kAbsent;
 
   std::vector<ShellNameCandidate> candidates;
   FindHandle find;
   WIN32_FIND_DATAW entry{};
+  if (ShellLookupMustStop(limits, &stopped)) return stopped;
   find.handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch,
                                  nullptr, FIND_FIRST_EX_LARGE_FETCH);
   if (find.handle == INVALID_HANDLE_VALUE) {
@@ -383,21 +440,20 @@ struct AbsoluteIdList {
     if (!limits.still_valid()) return ShadowReadResult::kStopped;
     if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
     const std::wstring_view found(entry.cFileName);
-    // An entry needs its shell name only when it can carry the display name: its file name starts
-    // with it, or it is a read-only / system directory (a desktop.ini can rename those). Hidden
-    // entries are not left out (a doubt keeps an entry, which can only make the answer "not known").
-    const bool starts_with_display =
-        found.size() >= display_name.size() &&
-        ShellNameEqualsOrdinal(found.substr(0, display_name.size()), display_name);
-    const bool renamable_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-                                     (entry.dwFileAttributes &
-                                      (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0;
-    if (found != L"." && found != L".." && (starts_with_display || renamable_directory)) {
+    const bool is_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    // An entry needs its shell name only when it can carry the display name (the pure rule in the
+    // matcher header: a file name that starts with it, or a read-only / system directory, which a
+    // desktop.ini can rename). Hidden entries are not left out (a doubt keeps an entry, which can only
+    // make the answer "not known").
+    if (ShellEntryNeedsShellName(found, is_directory,
+                                 (entry.dwFileAttributes &
+                                  (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0,
+                                 display_name, ShellNameEqualsOrdinal)) {
       // One past the cap is enough to know there are too many.
       if (candidates.size() >= kShellMaxCandidates) return ShadowReadResult::kAbsent;
       ShellNameCandidate candidate;
       candidate.name = std::wstring(found);
-      candidate.is_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      candidate.is_directory = is_directory;
       candidates.push_back(std::move(candidate));
     }
     if (!FindNextFileW(find.handle, &entry)) {
@@ -405,21 +461,26 @@ struct AbsoluteIdList {
       return ShadowReadResult::kFailed;
     }
   }
-  // The name the shell shows for each candidate. One that cannot be read is left unknown, which makes
-  // the whole answer "not known" (it might be the one, or a second one).
+  // The name the shell shows for each candidate. One that cannot be read, or whose path resolved to
+  // another entry (Win32 drops a trailing dot or space), is left unknown, which makes the whole
+  // answer "not known" (it might be the one, or a second one).
   for (ShellNameCandidate &candidate : candidates) {
-    if (!limits.still_valid()) return ShadowReadResult::kStopped;
-    if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     ComRef<IShellItem> item;
     PWSTR shown = nullptr;
+    PWSTR resolved = nullptr;
     if (SUCCEEDED(SHCreateItemFromParsingName((directory + candidate.name).c_str(), nullptr,
                                               IID_PPV_ARGS(item.Receive()))) &&
         item.Get() != nullptr &&
+        SUCCEEDED(item.Get()->GetDisplayName(SIGDN_FILESYSPATH, &resolved)) &&
+        resolved != nullptr &&
+        ShellResolvedNameIsTheCandidate(candidate.name, ShellLeafName(resolved), ShellNameEqualsOrdinal) &&
         SUCCEEDED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) && shown != nullptr) {
       candidate.shell_name = shown;
       candidate.shell_name_known = true;
     }
     if (shown != nullptr) CoTaskMemFree(shown);
+    if (resolved != nullptr) CoTaskMemFree(resolved);
   }
   const std::size_t index = MatchShellDisplayName(display_name, candidates, ShellNameEqualsOrdinal);
   if (index == kNoShellMatch) return ShadowReadResult::kAbsent;
@@ -684,39 +745,57 @@ public:
     const std::wstring display_name(name.View());
     try {
       std::thread([pending, tab, top, display_name, valid, &running]() {
-        const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-        const auto now = [] {
-          return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                                std::chrono::steady_clock::now().time_since_epoch())
-                                                .count());
-        };
-        windows_uia_source_detail::ShellLookupLimits limits;
-        // The caller giving up ends the lookup at its next step, like the action being canceled.
-        limits.still_valid = [valid, pending] {
-          return !pending->abandoned.load(std::memory_order_acquire) && (valid == nullptr || valid());
-        };
-        {
-          HANDLE self = nullptr;
-          if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0,
-                              FALSE, DUPLICATE_SAME_ACCESS)) {
-            std::lock_guard<std::mutex> lock(pending->mutex);
-            pending->thread = self;
-          }
-        }
-        limits.now_ns = now;
-        limits.deadline_ns = now() + windows_uia_source_detail::kShellLookupBudgetNs;
+        ShadowReadResult result = ShadowReadResult::kFailed;
         windows_uia_source_detail::ShellItemAnswer answer;
-        const ShadowReadResult result = windows_uia_source_detail::ShellItemPathByName(
-            tab, top, display_name, limits, &answer);
-        if (SUCCEEDED(initialized)) CoUninitialize();
-        {
-          std::lock_guard<std::mutex> lock(pending->mutex);
-          pending->result = result;
-          pending->answer = std::move(answer);
-          pending->done = true;
+        try {
+          // Released after the lookup, also when something throws.
+          struct ComApartment {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~ComApartment() {
+              if (SUCCEEDED(initialized)) CoUninitialize();
+            }
+          } apartment;
+          const auto now = [] {
+            return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                  std::chrono::steady_clock::now().time_since_epoch())
+                                                  .count());
+          };
+          windows_uia_source_detail::ShellLookupLimits limits;
+          // The caller giving up ends the lookup at its next step, like the action being canceled.
+          limits.still_valid = [valid, pending] {
+            return !pending->abandoned.load(std::memory_order_acquire) &&
+                   (valid == nullptr || valid());
+          };
+          {
+            HANDLE self = nullptr;
+            if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0,
+                                FALSE, DUPLICATE_SAME_ACCESS)) {
+              std::lock_guard<std::mutex> lock(pending->mutex);
+              pending->thread = self;
+            }
+          }
+          limits.now_ns = now;
+          limits.deadline_ns = now() + windows_uia_source_detail::kShellLookupBudgetNs;
+          result = windows_uia_source_detail::ShellItemPathByName(tab, top, display_name, limits,
+                                                                  &answer);
+        } catch (...) {
+          // An exception out of a thread would end the process: the lookup just failed.
+          result = ShadowReadResult::kFailed;
+          answer = windows_uia_source_detail::ShellItemAnswer{};
         }
-        running.store(false);
-        pending->ready.notify_one();
+        // The slot is released and the waiting caller told, whatever happened above.
+        struct Finish {
+          std::atomic<bool> &running;
+          std::shared_ptr<windows_uia_source_detail::ShellLookupPending> pending;
+          ~Finish() {
+            running.store(false);
+            pending->ready.notify_one();
+          }
+        } finish{running, pending};
+        std::lock_guard<std::mutex> lock(pending->mutex);
+        pending->result = result;
+        pending->answer = std::move(answer);
+        pending->done = true;
       }).detach();
     } catch (...) {
       running.store(false);

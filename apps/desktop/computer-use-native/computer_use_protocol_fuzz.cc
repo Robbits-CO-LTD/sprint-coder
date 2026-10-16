@@ -3089,7 +3089,8 @@ struct FakeExplorer {
   FakeForm form;
   int item = 0;
   int tab = -1;
-  explicit FakeExplorer(const std::string &name, bool with_tab = false) {
+  explicit FakeExplorer(const std::string &name, bool with_tab = false,
+                        const std::string &list_class = "UIItemsView") {
     form.Node(form.window).class_name = "CabinetWClass";
     form.source.process_path = "C:\\Windows\\explorer.exe";
     int parent = form.window;
@@ -3097,7 +3098,7 @@ struct FakeExplorer {
       tab = form.source.Add(form.window, "Pane", "Tab", "ShellTabWindowClass");
       parent = tab;
     }
-    const int list = form.source.Add(parent, "List", "Items", "UIItemsView");
+    const int list = form.source.Add(parent, "List", "Items", list_class);
     item = form.source.Add(list, "ListItem", name, "UIItem");
     form.source.point = item;
   }
@@ -3451,6 +3452,27 @@ bool CheckWindowsShadowReader() {
     const ShadowUiaCapture plain = ordinary_reader.Capture("click", "");
     if (!Check(plain.item_kind == ShadowItemKind::kNone && ordinary.source.item_calls == 0,
                "winreader-no-item-outside-a-file-browser")) return false;
+
+    // A ListItem outside the shell's item view (a preview pane list, a search suggestion) is not an
+    // item of the folder: the shell is not asked about it, and its name stays a display name.
+    FakeExplorer preview("invoice.pdf", true, "PreviewPaneList");
+    preview.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader preview_reader(preview.form.source);
+    const ShadowUiaCapture in_preview = preview_reader.Capture("click", "");
+    if (!Check(in_preview.item_kind == ShadowItemKind::kFile && !in_preview.item_name_is_real_path &&
+                   preview.form.source.item_calls == 0,
+               "winreader-list-item-outside-the-item-view-is-not-asked")) return false;
+    // The item view is a SHELLDLL_DefView too, with or without the UIItemsView below it.
+    FakeExplorer defview("invoice.pdf", true, "SHELLDLL_DefView");
+    defview.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader defview_reader(defview.form.source);
+    if (!Check(defview_reader.Capture("click", "").item_name_is_real_path && defview.form.source.item_calls == 1,
+               "winreader-list-item-in-a-defview-is-asked")) return false;
+    // With a tab and the ordinary item view the path is read (the case used throughout).
+    FakeExplorer tabbed("invoice.pdf", true);
+    tabbed.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader tabbed_reader(tabbed.form.source);
+    if (!Check(tabbed_reader.Capture("click", "").item_name_is_real_path, "winreader-list-item-in-the-item-view-is-asked")) return false;
 
     // A path longer than the core accepts is a gap, and still only a display name.
     FakeExplorer lost("a.txt");
@@ -6849,6 +6871,55 @@ bool CheckWindowsShellNameMatch() {
     if (!Check(MatchShellDisplayName(L"Run", List{shown(L"run", L"run")}, exact_case) == kNoShellMatch, "shellname-uses-the-given-comparison")) return false;
     if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, exact_case) == 0, "shellname-given-comparison-matches")) return false;
     if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, nullptr) == kNoShellMatch, "shellname-null-comparison-is-unknown")) return false;
+  }
+  // Which entries need the shell's name (the pure rule): a file name that starts like the display
+  // name (case-blind), and any read-only / system DIRECTORY; nothing else, never "." or "..".
+  {
+    const auto needs = [](const wchar_t *name, bool directory, bool read_only_or_system, const wchar_t *display) {
+      return ShellEntryNeedsShellName(name, directory, read_only_or_system, display);
+    };
+    if (!Check(needs(L"report", false, false, L"report"), "shellneeds-exact")) return false;
+    if (!Check(needs(L"report.pdf", false, false, L"report"), "shellneeds-prefix")) return false;
+    if (!Check(needs(L"REPORT.pdf", false, false, L"report"), "shellneeds-case-differs")) return false;
+    if (!Check(!needs(L"other.txt", false, false, L"report"), "shellneeds-unrelated-file-is-not-a-candidate")) return false;
+    if (!Check(!needs(L"other", true, false, L"report"), "shellneeds-ordinary-directory-is-not-a-candidate")) return false;
+    if (!Check(needs(L"other", true, true, L"report"), "shellneeds-read-only-or-system-directory-is-a-candidate")) return false;
+    if (!Check(!needs(L"other.txt", false, true, L"report"), "shellneeds-read-only-file-is-not-a-candidate")) return false;
+    if (!Check(!needs(L"re", false, false, L"report"), "shellneeds-shorter-name-is-not-a-prefix")) return false;
+    if (!Check(!needs(L".", true, true, L"."), "shellneeds-dot-is-never-a-candidate")) return false;
+    if (!Check(!needs(L"..", true, true, L"report"), "shellneeds-dotdot-is-never-a-candidate")) return false;
+    if (!Check(!ShellEntryNeedsShellName(L"report", false, false, L"report", nullptr), "shellneeds-null-comparison-is-no")) return false;
+  }
+  // A desktop.ini that localizes file names: the section's length and the errors decide.
+  {
+    constexpr unsigned long kAccessDenied = 5;
+    if (!Check(!ShellDesktopIniLocalizesFileNames(false, kShellErrorFileNotFound, 0, 0), "desktopini-none-file-not-found")) return false;
+    if (!Check(!ShellDesktopIniLocalizesFileNames(false, kShellErrorPathNotFound, 0, 0), "desktopini-none-path-not-found")) return false;
+    if (!Check(ShellDesktopIniLocalizesFileNames(false, kAccessDenied, 0, 0), "desktopini-unknown-lookup-error-is-a-yes")) return false;
+    if (!Check(!ShellDesktopIniLocalizesFileNames(true, 0, 0, 0), "desktopini-without-the-section-is-normal")) return false;
+    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 17, 0), "desktopini-with-the-section-is-a-yes")) return false;
+    if (!Check(!ShellDesktopIniLocalizesFileNames(true, 0, 0, kShellErrorFileNotFound), "desktopini-section-file-not-found-is-no")) return false;
+    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 0, kAccessDenied), "desktopini-unreadable-section-is-a-yes")) return false;
+    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 3, kAccessDenied), "desktopini-length-wins-over-an-error")) return false;
+  }
+  // The leaf of a file system path identifies a resolved item (a known folder's parsing name is a GUID).
+  {
+    if (!Check(ShellLeafName(L"C:\\Users\\a\\Documents") == L"Documents", "leaf-of-a-path")) return false;
+    if (!Check(ShellLeafName(L"C:\\Users\\a\\Documents\\") == L"Documents", "leaf-ignores-a-trailing-separator")) return false;
+    if (!Check(ShellLeafName(L"name") == L"name", "leaf-of-a-bare-name")) return false;
+    if (!Check(ShellLeafName(L"C:\\") == L"C:", "leaf-of-a-root-is-the-drive-part")) return false;
+  }
+  // A path that resolved to a shell item is that candidate only if the name comes back as it went in;
+  // a name that ends in a dot or a space is normalized to ANOTHER entry and is never taken.
+  {
+    if (!Check(ShellResolvedNameIsTheCandidate(L"a.txt", L"a.txt"), "resolved-same-name")) return false;
+    if (!Check(ShellResolvedNameIsTheCandidate(L"a.txt", L"A.TXT"), "resolved-case-differs")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a.", L"a"), "resolved-trailing-dot-resolves-to-another-entry")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a.", L"a."), "resolved-trailing-dot-is-never-taken")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a ", L"a"), "resolved-trailing-space-resolves-to-another-entry")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a", L"b"), "resolved-another-name")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"", L""), "resolved-empty-is-never-taken")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a", L"a", nullptr), "resolved-null-comparison-is-no")) return false;
   }
   std::cout << "Computer Use native Windows shell name match: PASS\n";
   return true;
