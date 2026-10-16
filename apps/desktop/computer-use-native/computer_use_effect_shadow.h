@@ -161,28 +161,16 @@ struct ShadowRequestInfo {
 // (cmd, command, ctrl, control, alt, option, win, windows, meta, super: Cmd+O and Cmd+Down in Finder,
 // Ctrl+Enter and Alt+Enter in Explorer; Cmd+C or Ctrl+A count too, which is more than needed and
 // intended). The keys that cannot open are the arrows (also Up, Down, Left, Right, KP_Up and so on),
-// Tab, Escape / Esc, Space, Backspace, Delete / Del, Home, End, PageUp / PageDown, and one printable
-// character (a letter, a digit, a sign: typing). Shift in front of one of those is still the same
-// key (it extends a selection). The allow list does not depend on which names a host can send; the
+// Tab, Escape / Esc, Backspace, Delete / Del, Home, End and PageUp / PageDown. Shift in front of
+// one of those is still the same key (it extends a selection). Space and a single character are NOT
+// on the list: Space presses the focused button or link ("Open" in a download list), and a letter is a
+// menu access key (after Shift+F10, "o" picks "Open"). Typing text is the "type" action, never a key. The allow list does not depend on which names a host can send; the
 // host's set is pinned by a test that classifies every name it accepts. The chord is split on '+';
 // the last part is the key and the others are modifiers, each compared WHOLE (no substring: "altgr"
 // and "metadata" are not modifiers, they are unknown names, and unknown names open). Case is ignored,
 // and so are blanks, '_' and '-' inside a part. An empty part inside a chord counts (fail closed) and
 // so does an empty key.
-[[nodiscard]] inline bool ShadowKeyIsOneCharacter(std::string_view part) {
-  if (part.empty()) return false;
-  std::size_t code_points = 0;
-  for (const char raw : part) {
-    const unsigned char byte = static_cast<unsigned char>(raw);
-    if (byte < 0x20 || byte == 0x7F) return false; // a control character is not typing
-    if ((byte & 0xC0) != 0x80) ++code_points;
-  }
-  return code_points == 1;
-}
-
 [[nodiscard]] inline bool ShadowKeyOpens(std::string_view key) {
-  // One printable character as it came ("a", " ", "-", "+", "_"): typing.
-  if (ShadowKeyIsOneCharacter(key)) return false;
   std::vector<std::string> parts;
   std::string current;
   for (const char raw : key) {
@@ -205,11 +193,11 @@ struct ShadowRequestInfo {
   static constexpr std::string_view kQuiet[] = {
       "arrowup",  "arrowdown", "arrowleft", "arrowright", "up",       "down",   "left",
       "right",    "kpup",      "kpdown",    "kpleft",     "kpright",  "numpadup", "numpaddown",
-      "numpadleft", "numpadright", "tab",   "escape",     "esc",      "space",  "backspace",
+      "numpadleft", "numpadright", "tab",   "escape",     "esc",      "backspace",
       "delete",   "del",       "home",      "end",        "pageup",   "pagedown", "pgup", "pgdn"};
   for (const std::string_view quiet : kQuiet)
     if (name == quiet) return false;
-  return !ShadowKeyIsOneCharacter(name);
+  return true;
 }
 
 // Whether a click made now may complete a double click, from the system's last input time alone.

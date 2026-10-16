@@ -7542,18 +7542,19 @@ bool CheckClickRule() {
                             // contain a modifier's name (they are unknown names, not modifiers).
                             "F1", "F12", "Insert", "Enterprise", "Entr", "altgr", "metadata", "controller",
                             "commander", "optional", "winner", "superb", "Shift+altgr", "ctrlx", "xcmd",
-                            "Unidentified", "MediaPlayPause", "ArrowDownX", "Shift+F2"})
+                            "Unidentified", "MediaPlayPause", "ArrowDownX", "Shift+F2",
+                            // Space presses the focused button or link; a character is a menu access key.
+                            "Space", " ", "a", "A", "z", "7", "-", "_", "+", "/", ".", "o", "O", "\u3042", "\u00e9",
+                            "Shift+a", "Shift+Space", "Shift+o", "Shift+Shift+a"})
       if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
     // Only Shift, spelled exactly, may stand before a quiet key.
     if (!Check(ShadowKeyOpens("shiftx+a"), "key-opens-a-prefix-that-merely-starts-with-shift")) return false;
-    if (!Check(!ShadowKeyOpens("Shift+Shift+a"), "key-does-not-open-shift-shift-a")) return false;
+    if (!Check(!ShadowKeyOpens("Shift+Shift+Tab"), "key-does-not-open-shift-shift-tab")) return false;
     for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Up", "Left", "Right",
-                            "KP_Down", "kp_up", "Tab", "Escape", "Esc", "Space", "Backspace", "Delete", "Del",
+                            "KP_Down", "kp_up", "Tab", "Escape", "Esc", "Backspace", "Delete", "Del",
                             "Home", "End", "PageUp", "PageDown", "PgUp", "PgDn",
-                            // One printable character: a letter, a digit, a sign, a blank, a plus, a non-ASCII one.
-                            "a", "A", "z", "7", " ", "-", "_", "+", "/", ".", "\u3042", "\u00e9",
                             // Shift in front of a quiet key is the same key.
-                            "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Shift+a", "shift+Home"})
+                            "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "shift+Home"})
       if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
     // The core's own default is fail closed: facts built without a key decision treat a key as one
     // that may open (never as plain typing); every production path sets it from ShadowKeyOpens.

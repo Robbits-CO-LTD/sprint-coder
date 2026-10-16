@@ -63,8 +63,10 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
     );
     // An allow list of keys that cannot open; everything else (unknown names, F keys, chords) opens.
     expect(shadow).toContain('"arrowup"');
-    expect(shadow).toContain('return !ShadowKeyIsOneCharacter(name);');
+    expect(squash(shadow)).toContain('if (name == quiet) return false; return true; }');
     expect(shadow).not.toContain('kCommandModifiers');
+    expect(shadow).not.toContain('ShadowKeyIsOneCharacter');
+    expect(shadow).not.toContain('"space"');
     expect(squash(shadow)).toContain(
       'facts.click_tracked = request.kind == "click" && request.click_tracked;',
     );
@@ -92,6 +94,12 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
       .map((match) => match[1] as string)
       .sort();
     expect(windows.length).toBeGreaterThan(5);
+    // No host key is Space or a single character: those are not on the quiet list (the harness
+    // classifies them as opening), so the real behaviour of the hosts does not depend on them.
+    for (const name of listed) {
+      expect(name.toLowerCase()).not.toBe('space');
+      expect(name.length).toBeGreaterThan(1);
+    }
     expect(listed).toEqual(windows);
     expect(listed).toEqual(macos);
   });

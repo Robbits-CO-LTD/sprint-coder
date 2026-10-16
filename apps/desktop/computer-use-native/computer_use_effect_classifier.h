@@ -43,7 +43,7 @@
 //     than Shift, an F key, an unknown name - and a click the host does not follow) is treated as
 //     opening it until a real device shows otherwise (ADR v2 S4 contract 5, decision 2-A). A single
 //     click the host follows on a passive item (it selects), an allowlisted key (an arrow, Tab,
-//     Escape, Space, ... with at most Shift), a semantic select, a rename or a scroll is browsing
+//     Escape, Backspace, ... with at most Shift), a semantic select, a rename or a scroll is browsing
 //     (#500 S5-c-2 PR-2, #777).
 
 #include "computer_use_native_approval_ticket.h"
@@ -119,9 +119,11 @@ struct EffectFacts {
   SessionMode mode = SessionMode::kObserveOnly;
   OriginState origin = OriginState::kNotApplicable;
   // The key may open the focused item. ShadowKeyOpens decides it from an allow list of keys that
-  // cannot (arrows, Tab, Escape, Space, Backspace, Delete, Home, End, PageUp / PageDown, one printable
-  // character, also with Shift only); everything else opens: Enter in any spelling, a chord with a
-  // modifier other than Shift, an F key, an unknown name, an empty key. Only used when the action is
+  // cannot (arrows, Tab, Escape, Backspace, Delete, Home, End, PageUp / PageDown, also with Shift
+  // only); everything else opens: Enter in any spelling, a chord with a modifier other than Shift, an
+  // F key, an unknown name, an empty key. Space and a single character key are NOT on the list: Space
+  // presses the focused button or link, and a letter is a menu access key ("o" picks "Open" in an
+  // open context menu). Typing text is the "type" action, not a key. Only used when the action is
   // a key. The default is TRUE (fail closed): facts built without a key decision treat a key as one
   // that may open, never as plain typing.
   bool key_is_activation = true;
