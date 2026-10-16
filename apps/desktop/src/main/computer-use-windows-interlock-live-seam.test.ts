@@ -177,6 +177,8 @@ std::atomic<bool> g_hold_after{false};
 std::atomic<bool> g_eval_done{false};
 std::atomic<bool> g_release{false};
 std::atomic<int> g_worker_no_verdict{-1};
+// Set when the lane has returned, so the mover does not wait for a worker that never evaluated.
+std::atomic<bool> lane_returned{false};
 sprint_coder::computer_use::InterlockEvaluation StallingEvaluate(
     sprint_coder::computer_use::ShadowUiaSource &source, std::string_view kind, std::string_view target_id,
     const sprint_coder::computer_use::ShadowRequestInfo &info, const sprint_coder::computer_use::EffectRuleset &rules) {
@@ -419,18 +421,20 @@ int main(int argc, char **argv) {
     // A loaded machine may cut the worker's read short (kBudget): the case needs a worker that finished.
     for (int attempt = 0; attempt < 8; ++attempt) {
     g_eval_done.store(false);
+    lane_returned.store(false);
     g_release.store(false);
     g_worker_no_verdict.store(-1);
     std::thread mover([&session]() {
-      for (int i = 0; i < 500 && !g_eval_done.load(); ++i) Sleep(10);
+      for (int i = 0; i < 500 && !g_eval_done.load() && !lane_returned.load(); ++i) Sleep(10);
       cancellation_epoch.store(session.cancel_epoch + 1);
       g_release.store(true);
     });
     answer = EvaluateWindowsInterlockOnLane(session, kClick, "click", ruleset);
+    lane_returned.store(true);
     mover.join();
     cancellation_epoch.store(session.cancel_epoch);
     WaitIdle(2000);
-    if (g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone)) break;
+    if (g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone) && answer.no_verdict != InterlockNoVerdict::kBudget) break;
     }
     Check(g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone), "the_worker_itself_did_not_see_a_cancel");
     Check(answer.no_verdict == InterlockNoVerdict::kCanceled && !answer.Refuses(), "a_cancel_after_the_worker_finished_is_kCanceled");
