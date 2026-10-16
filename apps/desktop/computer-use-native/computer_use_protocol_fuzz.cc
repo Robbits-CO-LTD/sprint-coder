@@ -2233,7 +2233,8 @@ bool CheckWindowsShadowCore() {
     const ShadowRecord native_record = WindowsShadowClassify(native, UiaRequest("type"), true);
     if (!Check(native_facts.facts.origin == OriginState::kUnknown &&
                    (native_facts.gaps & kShadowGapOrigin) != 0 &&
-                   (native_facts.gaps & kShadowGapNativeDocument) != 0 &&
+                   (native_facts.gaps & kShadowGapNativeDocument) == 0 &&
+                   (native_record.gaps & kShadowGapNativeDocument) != 0 &&
                    native_record.kind == DecisionKind::kTakeover && !native_record.V2IsStricter() &&
                    native_record.NativeDocumentGap(),
                "winshadow-native-document-is-a-separate-gap")) return false;
@@ -2243,9 +2244,30 @@ bool CheckWindowsShadowCore() {
     const ShadowFacts web_facts = BuildWindowsShadowFacts(web, UiaRequest("type"));
     const ShadowRecord web_record = WindowsShadowClassify(web, UiaRequest("type"), true);
     if (!Check(web_facts.facts.origin == OriginState::kUnknown &&
-                   (web_facts.gaps & kShadowGapNativeDocument) == 0 && web_record.V2IsStricter() &&
+                   (web_record.gaps & kShadowGapNativeDocument) == 0 && web_record.V2IsStricter() &&
                    !web_record.NativeDocumentGap(),
                "winshadow-web-document-stays-stricter")) return false;
+    // Another cause of the non-ordinary verdict (a secure-looking title) keeps it stricter.
+    ShadowUiaCapture secret = UiaBase();
+    secret.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "passwords.txt - Notepad")};
+    const ShadowRecord secret_record = WindowsShadowClassify(secret, UiaRequest("type"), true);
+    if (!Check(secret_record.kind != DecisionKind::kOrdinary && secret_record.V2IsStricter() &&
+                   !secret_record.NativeDocumentGap(),
+               "winshadow-native-document-other-cause-stays-stricter")) return false;
+    // A window class that could not be read is a read gap, not a native window.
+    ShadowUiaCapture blind = UiaBase();
+    blind.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Browser")};
+    blind.window_class_read = false;
+    const ShadowRecord blind_record = WindowsShadowClassify(blind, UiaRequest("type"), true);
+    if (!Check(!blind_record.NativeDocumentGap() && (blind_record.gaps & kShadowGapNativeDocument) == 0,
+               "winshadow-native-document-unread-class")) return false;
+    // A download page overrides the origin: no bit.
+    ShadowUiaCapture dl = UiaBase();
+    dl.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Notepad")};
+    dl.document_url_read = true;
+    dl.document_url = "chrome://downloads/";
+    if (!Check((WindowsShadowClassify(dl, UiaRequest("type"), true).gaps & kShadowGapNativeDocument) == 0,
+               "winshadow-native-document-download-override")) return false;
   }
   // The page: a Document in the chain is a page; its URL decides the origin and the download list.
   {

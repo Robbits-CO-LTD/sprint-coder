@@ -54,7 +54,12 @@ constexpr std::uint32_t kShadowGapBusy = 1u << 13;
 // e.g. Notepad's text area. Aggregation only (S5-c-2 PR-4): the facts and the verdict are unchanged,
 // but the record is counted by ShadowRecord::NativeDocumentGap(), not V2IsStricter().
 constexpr std::uint32_t kShadowGapNativeDocument = 1u << 15;
-static_assert((kShadowGapNativeDocument & ((1u << 15) - 1u)) == 0,
+static_assert((kShadowGapNativeDocument &
+               (kShadowGapTargetMissing | kShadowGapOversize | kShadowGapChainTruncated |
+                kShadowGapNeighborsIncomplete | kShadowGapExtensionUnknown | kShadowGapLanguage |
+                kShadowGapOrigin | kShadowGapUnsupportedAction | kShadowGapRoleMissing |
+                kShadowGapV1Invalid | kShadowGapCanceled | kShadowGapBudget | kShadowGapReadFailed |
+                kShadowGapBusy | (1u << 14))) == 0,
               "the native-document gap bit must not overlap another gap bit");
 
 // The shadow shares the serial lane with the preflight, so a capture is bounded: AX calls, and

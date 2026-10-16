@@ -363,11 +363,6 @@ namespace windows_shadow_detail {
   // exactly like a Document's (a URL that was not read is an unknown origin, not "not applicable").
   if (target_in_page && capture.target_found)
     ApplyShadowOrigin(true, capture.document_url_read, capture.document_url, &facts, &result.gaps);
-  // S5-c-2 PR-4 (aggregation only): a Document in a window that is not a web window (Notepad's text
-  // area) made the origin unknown. Mark it so the shadow counts it apart from "v2 is stricter".
-  if (target_in_page && capture.target_found && !IsWebWindowClass(capture) &&
-      facts.origin == OriginState::kUnknown)
-    result.gaps |= kShadowGapNativeDocument;
 
   // The surface. A page that is a browser's download list wins over the window around it.
   if (capture.target_found) {
@@ -403,6 +398,20 @@ WindowsShadowClassify(const ShadowUiaCapture &capture, const ShadowRequestInfo &
   record.reason = decision.reason;
   record.gaps = built.gaps;
   record.v1_ordinary = v1_ordinary;
+  // S5-c-2 PR-4 (aggregation only): a Document in a window that is not a web window (Notepad's text
+  // area) leaves the origin unknown. Mark the record only when that origin is the sole cause of the
+  // non-ordinary verdict: the same facts with a neutral origin must classify as ordinary. Facts and
+  // verdict are not touched.
+  using windows_shadow_detail::IsWebWindowClass;
+  using windows_shadow_detail::NodeInPage;
+  if (capture.target_found && NodeInPage(capture, 0) && !IsWebWindowClass(capture) &&
+      built.facts.origin == OriginState::kUnknown && (built.gaps & kShadowGapReadFailed) == 0 &&
+      decision.kind != DecisionKind::kOrdinary) {
+    EffectFacts neutral = built.facts;
+    neutral.origin = OriginState::kNotApplicable;
+    if (ClassifyEffect(neutral, ruleset).kind == DecisionKind::kOrdinary)
+      record.gaps |= kShadowGapNativeDocument;
+  }
   return record;
 }
 
