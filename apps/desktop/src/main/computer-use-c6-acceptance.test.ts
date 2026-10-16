@@ -805,7 +805,7 @@ function stringsIn(value: unknown, out: string[] = []): string[] {
 }
 
 const WINDOW = 8;
-const PROMPT_WINDOW = 24;
+const PROMPT_WINDOW = 16;
 
 /**
  * Walks `body` and its forms through everything an outsider could read: the tool results (the target
@@ -1227,6 +1227,23 @@ describe('C6 acceptance: whose artifact it is (N9, N10, N11)', () => {
     expect(run.setTexts()).toEqual(['Total 42']);
   });
 
+  it('R1: an artifact that expires while its card is open is not pasted once the card is allowed, and nothing says the value', async () => {
+    const run = c6Acceptance();
+    const { id } = await copyInA(run, 'Total 42');
+    const running = startPasteInB(run, id!);
+    await run.untilCard();
+    run.advance(600_001);
+    await run.answer('allow_once');
+    const outcome = await running;
+    expect(outcome.error).toBeNull();
+    expect(run.setTexts()).toEqual([]);
+    expect(run.dispatched).toEqual([]);
+    expect(run.audits().find((row) => row['actionKind'] === 'set_text')?.['reasonCode']).toBe(
+      'artifact_paste_refused',
+    );
+    expectNoBodyAnywhere(run, 'Total 42');
+  });
+
   it('L10 / N10: an artifact that expires between the carry and the paste is not pasted, no card is raised, and B ends like any other B', async () => {
     const run = c6Acceptance();
     const { id } = await copyInA(run, 'Total 42');
@@ -1400,7 +1417,7 @@ describe('C6 acceptance: what native may read (N6, N7, N20)', () => {
       expect(started.output).not.toHaveProperty('artifacts');
       expect(run.readInputs).toEqual([]);
       expect(run.audits().map((row) => row['reasonCode'])).toEqual(['artifact_copy_refused']);
-      expectNoBodyAnywhere(run, value, { prompts: false });
+      expectNoBodyAnywhere(run, value);
     });
   });
 
@@ -1676,7 +1693,7 @@ describe('C6 acceptance: a value that looks like a command (N14)', () => {
     expect(run.audits().find((row) => row['actionKind'] === 'type')?.['reasonCode']).toBe(
       'artifact_paste_refused',
     );
-    expectNoBodyAnywhere(run, script, { prompts: false });
+    expectNoBodyAnywhere(run, script);
     const second = await copyInA(run, script);
     const set = await pasteInB(run, second.id!);
     expect(set.card.actionType).toBe('set_text');
@@ -2413,7 +2430,7 @@ describe('C6 acceptance: ways round the card, pinned as they are today (L2-L11)'
       expect(outcome.output!['state']).toBe('paused');
       // Main's own boundary: the press is rejected, or handed to a person before it is recorded.
       const press = run.audits().filter((row) => row['actionKind'] === 'invoke');
-      expect(press.every((row) => row['reasonCode'] === 'hard_boundary')).toBe(true);
+      expect(press.map((row) => row['reasonCode'])).toEqual(['hard_boundary']);
     },
   );
 
