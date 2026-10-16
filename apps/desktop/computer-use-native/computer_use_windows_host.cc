@@ -4844,12 +4844,17 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // (single-flight), so at most one such thread is ever stuck. The worker gets everything by value
 // and never touches `sessions`; the lane's own apartment is not changed.
 //
-// Worst case of one wait, from the bounds below: the gate's deadline (150 ms) + one call that
-// started just before it (UI Automation 250 ms, or a shell lookup's wait of 150 ms: the larger) +
-// creating the source and starting the thread (50 ms) = 450 ms, within the 500 ms the lane may wait.
+// Worst case of one wait. The gate bounds the START of a step, not its length. For a step that makes
+// ONE UI Automation call: the gate's deadline (150 ms) + that call (250 ms) + creating the source and
+// starting the thread (50 ms) = 450 ms, within the 500 ms the lane may wait (the static_assert below
+// states only this case). Some steps make several calls inside ONE gate step: ItemPath (two UI
+// Automation calls, then a shell lookup's wait of 150 ms: up to 650 ms) and CoreWindowProcessPath
+// (two calls: 500 ms). Started just before the deadline they can run past 500 ms (about 850 ms by
+// this arithmetic); for them the lane's wait_for cut-off (kBudget, worker abandoned) is the real
+// bound of the hold, not the estimate.
 constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};
 static_assert(150 + sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs + 50 <= 500,
-              "the lane may be held at most 500 ms by one evaluation");
+              "holds for a step of ONE UI Automation call only; longer steps are bounded by the wait_for cut-off");
 static_assert(sprint_coder::computer_use::kShadowDeadlineNs == 150'000'000,
               "the lane's worst-case estimate assumes the gate's 150 ms deadline");
 
@@ -4891,12 +4896,8 @@ std::atomic<bool> &InterlockWorkerRunning() {
       unavailable.no_verdict = InterlockNoVerdict::kCanceled;
       return unavailable;
     }
-    // Single-flight: a worker still stuck from an earlier evaluation means no second one.
-    std::atomic<bool> &running = InterlockWorkerRunning();
-    if (running.exchange(true)) {
-      unavailable.no_verdict = InterlockNoVerdict::kBudget;
-      return unavailable;
-    }
+    // Everything that can throw is prepared BEFORE the single-flight slot is taken, so a failure
+    // here cannot leave the slot taken for ever.
     auto pending = std::make_shared<InterlockPending>();
     // Everything the worker needs, by value.
     const HWND window = session.active_window;
@@ -4908,13 +4909,25 @@ std::atomic<bool> &InterlockWorkerRunning() {
     (void)ReadJsonString(metadata, "key", &key);
     (void)ReadJsonString(metadata, "targetId", &target_id);
     const EffectRuleset ruleset_copy = ruleset;
+    // Single-flight: a worker still stuck from an earlier evaluation means no second one.
+    std::atomic<bool> &running = InterlockWorkerRunning();
+    if (running.exchange(true)) {
+      unavailable.no_verdict = InterlockNoVerdict::kBudget;
+      return unavailable;
+    }
     try {
       std::thread([pending, window, point, maximum_mode, policy_language, kind_copy, key,
                    target_id, ruleset_copy, expected_epoch, &running]() {
         InterlockEvaluation answer;
         answer.no_verdict = InterlockNoVerdict::kIncomplete;
         try {
-          const HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+          // Declared before the source: released after it, also when something throws.
+          struct ComApartment {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~ComApartment() {
+              if (SUCCEEDED(initialized)) CoUninitialize();
+            }
+          } apartment;
           {
             const auto still_valid = [pending, expected_epoch]() {
               return !pending->abandoned.load(std::memory_order_acquire) &&
@@ -4933,7 +4946,6 @@ std::atomic<bool> &InterlockWorkerRunning() {
                                                         ruleset_copy);
             }
           }
-          if (SUCCEEDED(initialized)) CoUninitialize();
         } catch (...) {
           answer = InterlockEvaluation{};
           answer.no_verdict = InterlockNoVerdict::kIncomplete;

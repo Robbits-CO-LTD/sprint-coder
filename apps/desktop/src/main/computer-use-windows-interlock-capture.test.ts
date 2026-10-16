@@ -126,7 +126,11 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     // The worker's apartment is inside the entry; the lane's own thread stays an STA.
     expect(body).toContain('CoInitializeEx(nullptr, COINIT_MULTITHREADED)');
     expect(body).toContain('.detach()');
-    expect(code(host).match(/COINIT_APARTMENTTHREADED/gu)).toHaveLength(2);
+    // The lane's thread body (ServeMain) initializes its own apartment as an STA, and the entry does not.
+    const serveStart = code(host).indexOf('int ServeMain(');
+    expect(serveStart).toBeGreaterThan(0);
+    const laneThread = code(host).slice(serveStart);
+    expect(laneThread).toContain('CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)');
     expect(outside).toContain('COINIT_APARTMENTTHREADED');
     expect(body).not.toContain('COINIT_APARTMENTTHREADED');
     expect(body).toContain('constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};');
@@ -135,7 +139,22 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(body).toMatch(
       /static_assert\(150 \+ sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs \+ 50 <=\s*500,/u,
     );
-    expect(entry).toContain('450 ms');
+    // The estimate is stated for the one-call case only; longer steps are bounded by the wait_for cut-off.
+    expect(entry).toContain('ONE UI Automation call');
+    expect(entry).toContain('ItemPath');
+    expect(entry).toContain("the lane's wait_for cut-off");
+    // The worker's apartment is released by a guard declared before the source, also on a throw.
+    expect(body.indexOf('struct ComApartment')).toBeGreaterThan(0);
+    expect(body.indexOf('struct ComApartment')).toBeLessThan(
+      body.indexOf('WindowsUiaShadowSource::Create('),
+    );
+    // Everything that can throw is prepared before the single-flight slot is taken.
+    expect(body.indexOf('std::make_shared<InterlockPending>()')).toBeLessThan(
+      body.indexOf('running.exchange(true)'),
+    );
+    expect(body.indexOf('ReadJsonString(metadata, "targetId", &target_id)')).toBeLessThan(
+      body.indexOf('running.exchange(true)'),
+    );
     // A wait that ran out is a budget answer, and the worker is told it is abandoned.
     expect(body).toMatch(
       /pending->abandoned\.store\(true, std::memory_order_release\);\s*unavailable\.no_verdict = InterlockNoVerdict::kBudget;/u,

@@ -13,7 +13,9 @@ import { describe, expect, it } from 'vitest';
 // console class is refused as a shell surface, that a window that does not answer holds the lane at
 // most 500 ms (+ a margin) and a second evaluation right after is refused at once (single-flight),
 // that a cancel before the start creates no UI Automation object, and that an ordinary window is not
-// refused. Windows only: elsewhere, or where no MSVC can be found, it is skipped (but never in CI,
+// refused. It also checks that the lane asks the cancellation epoch again after the wait (a cancel that
+// comes after the worker has finished is still a kCanceled), and tabulates WindowsActionPoint against
+// the old formula. Windows only: elsewhere, or where no MSVC can be found, it is skipped (but never in CI,
 // where a runner that cannot compile must not turn this into a silent pass). The build output goes
 // to a temporary directory and has no .pdb.
 
@@ -168,12 +170,26 @@ bool ReadJsonDouble(std::string_view json, std::string_view key, double *output)
 // (~265 ms measured) before the lane's 500 ms ever matters, so the lane's own cut-off and the
 // single-flight need a worker that really is stuck.
 std::atomic<int> g_stall_ms{0};
+// "Stop after the evaluation" mode: the worker runs the real evaluation, reports what it found and that
+// it is done, then waits to be released (so the test can move the epoch exactly between the worker's
+// finish and the lane's second look). Ordered by flags, not by sleeps.
+std::atomic<bool> g_hold_after{false};
+std::atomic<bool> g_eval_done{false};
+std::atomic<bool> g_release{false};
+std::atomic<int> g_worker_no_verdict{-1};
 sprint_coder::computer_use::InterlockEvaluation StallingEvaluate(
     sprint_coder::computer_use::ShadowUiaSource &source, std::string_view kind, std::string_view target_id,
     const sprint_coder::computer_use::ShadowRequestInfo &info, const sprint_coder::computer_use::EffectRuleset &rules) {
   const int stall = g_stall_ms.load();
   if (stall > 0) Sleep(stall);
-  return sprint_coder::computer_use::EvaluateWindowsInterlockOnSource(source, kind, target_id, info, rules);
+  sprint_coder::computer_use::InterlockEvaluation answer =
+      sprint_coder::computer_use::EvaluateWindowsInterlockOnSource(source, kind, target_id, info, rules);
+  if (g_hold_after.load()) {
+    g_worker_no_verdict.store(static_cast<int>(answer.no_verdict));
+    g_eval_done.store(true);
+    for (int i = 0; i < 300 && !g_release.load(); ++i) Sleep(10);
+  }
+  return answer;
 }
 #define EvaluateWindowsInterlockOnSource StallingEvaluate
 
@@ -253,7 +269,8 @@ bool WaitIdle(int limit_ms) {
   return !InterlockWorkerRunning().load();
 }
 
-int main() {
+int main(int argc, char **argv) {
+  const bool ci = argc > 1 && std::string(argv[1]) == "ci";
   Win ordinary, console, hang;
   MakeWindow(ordinary, L"Sc500InterlockOrdinary", L"sc500-ordinary", 40);
   MakeWindow(console, L"ConsoleWindowClass", L"sc500-console", 440);
@@ -266,15 +283,41 @@ int main() {
   // Warm UI Automation up in this process (its first use loads providers), so a cold start is not
   // mistaken for a hung window. Whether it can read our windows at all is asked of the ordinary one.
   InterlockEvaluation warm;
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 8; ++i) {
     warm = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
     if (warm.no_verdict != InterlockNoVerdict::kBudget) break;
     WaitIdle(2000);
   }
-  const bool readable = warm.no_verdict == InterlockNoVerdict::kNone || warm.no_verdict == InterlockNoVerdict::kIncomplete
-                        ? warm.no_verdict == InterlockNoVerdict::kNone
-                        : false;
+  const bool readable = warm.no_verdict == InterlockNoVerdict::kNone;
   std::cout << "warm no_verdict=" << static_cast<int>(warm.no_verdict) << " readable=" << readable << "\n";
+  // On a CI runner UI Automation must read our windows: a runner that cannot would otherwise skip the
+  // main cases below and pass. Locally the cases that need it are skipped (argument "ci" absent).
+  if (ci) Check(readable, "uia_reads_our_windows");
+
+  // WindowsActionPoint against the old formula, left + lround(x * max(0, width - 1)), per axis.
+  {
+    const double values[] = {0.0, 1.0, 0.5, 0.25, -0.1, 1.1};
+    const LONG widths[] = {0, 1, 2, 362, 801};
+    for (double x : values)
+      for (double y : values)
+        for (LONG w : widths)
+          for (LONG h : widths) {
+            const RECT bounds{100, -40, 100 + w, -40 + h};
+            const std::string meta = "{\"type\":\"click\",\"x\":" + std::to_string(x) + ",\"y\":" + std::to_string(y) + "}";
+            POINT point{-7, -7};
+            const bool in_range = x >= 0 && x <= 1 && y >= 0 && y <= 1;
+            const bool got = WindowsActionPoint(bounds, meta, &point);
+            bool ok = got == in_range;
+            if (in_range) {
+              const LONG ex = bounds.left + static_cast<LONG>(std::lround(x * std::max<LONG>(0, w - 1)));
+              const LONG ey = bounds.top + static_cast<LONG>(std::lround(y * std::max<LONG>(0, h - 1)));
+              ok = ok && point.x == ex && point.y == ey;
+            }
+            Check(ok, "windows_action_point_matches_the_old_formula");
+          }
+    POINT missing{0, 0};
+    Check(!WindowsActionPoint(RECT{0, 0, 10, 10}, "{\"type\":\"click\"}", &missing), "windows_action_point_needs_x_and_y");
+  }
 
   // 5. An ordinary window is not refused (whatever else the answer is).
   {
@@ -286,7 +329,7 @@ int main() {
   // 1. A window of the console class is blocked as a shell surface.
   {
     InterlockEvaluation answer;
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 8; ++i) {
       answer = EvaluateWindowsInterlockOnLane(SessionFor(console.handle), kClick, "click", ruleset);
       WaitIdle(2000);
       if (answer.Refuses()) break;
@@ -349,24 +392,50 @@ int main() {
     // The stuck worker ends, and the next evaluation runs.
     g_stall_ms.store(0);
     Check(WaitIdle(15000), "the_stuck_worker_ends");
-    const InterlockEvaluation after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
-    Check(after.no_verdict == InterlockNoVerdict::kNone && !after.Refuses(), "an_evaluation_after_the_worker_ended_runs");
+    InterlockEvaluation after;
+    // A loaded machine may cut a read short (kBudget): a few tries, never a turned-away one.
+    for (int i = 0; i < 5; ++i) {
+      after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
+      WaitIdle(2000);
+      if (after.no_verdict == InterlockNoVerdict::kNone) break;
+    }
+    // Readable: the evaluation runs and finds nothing to refuse. Not readable: at least it is not
+    // turned away by the single-flight (kBudget).
+    Check(!after.Refuses(), "an_evaluation_after_the_worker_ended_does_not_refuse");
+    if (readable)
+      Check(after.no_verdict == InterlockNoVerdict::kNone, "an_evaluation_after_the_worker_ended_runs");
+    else
+      Check(after.no_verdict != InterlockNoVerdict::kBudget, "an_evaluation_after_the_worker_ended_is_not_turned_away");
     WaitIdle(2000);
   }
 
-  // The action is canceled while the worker reads: kCanceled, whatever it found.
-  {
-    g_stall_ms.store(200);
+  // The action is canceled AFTER the worker has finished and before the lane looks again: the worker's
+  // own answer is not a cancel (kNone, it saw nothing wrong), yet the lane returns kCanceled. Ordered by
+  // flags: the worker reports it is done and waits; main moves the epoch; then the worker is released.
+  if (readable) {
+    g_hold_after.store(true);
     const WindowsSession session = SessionFor(ordinary.handle);
+    InterlockEvaluation answer;
+    // A loaded machine may cut the worker's read short (kBudget): the case needs a worker that finished.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+    g_eval_done.store(false);
+    g_release.store(false);
+    g_worker_no_verdict.store(-1);
     std::thread mover([&session]() {
-      Sleep(80);
+      for (int i = 0; i < 500 && !g_eval_done.load(); ++i) Sleep(10);
       cancellation_epoch.store(session.cancel_epoch + 1);
+      g_release.store(true);
     });
-    const InterlockEvaluation answer = EvaluateWindowsInterlockOnLane(session, kClick, "click", ruleset);
+    answer = EvaluateWindowsInterlockOnLane(session, kClick, "click", ruleset);
     mover.join();
-    Check(answer.no_verdict == InterlockNoVerdict::kCanceled && !answer.Refuses(), "canceled_while_the_worker_reads_is_kCanceled");
     cancellation_epoch.store(session.cancel_epoch);
-    g_stall_ms.store(0);
+    WaitIdle(2000);
+    if (g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone)) break;
+    }
+    Check(g_worker_no_verdict.load() == static_cast<int>(InterlockNoVerdict::kNone), "the_worker_itself_did_not_see_a_cancel");
+    Check(answer.no_verdict == InterlockNoVerdict::kCanceled && !answer.Refuses(), "a_cancel_after_the_worker_finished_is_kCanceled");
+    cancellation_epoch.store(session.cancel_epoch);
+    g_hold_after.store(false);
     WaitIdle(2000);
   }
 
@@ -415,7 +484,10 @@ describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(context.binary, [], { encoding: 'utf8', timeout: 90_000 });
+        const run = spawnSync(context.binary, process.env['CI'] ? ['ci'] : [], {
+          encoding: 'utf8',
+          timeout: 90_000,
+        });
         console.log(run.stdout);
         expect(run.status, `${run.stdout}\n${run.stderr}`).toBe(0);
         expect(run.stdout).toContain('OK');
