@@ -660,6 +660,24 @@ describe('ComputerUseArtifactStore (§4.2)', () => {
     expect(artifacts.take([created.artifactId], binding)).toEqual(['A\nB']);
   });
 
+  it('N11: default ids are version-4 UUIDs, never repeat, and are not a counting sequence even with a frozen clock', () => {
+    const artifacts = new ComputerUseArtifactStore({ now: () => 0 });
+    const ids: string[] = [];
+    for (let index = 0; index < 1_000; index += 1) {
+      const created = artifacts.create(
+        { taskId: `task-${index}`, turnId: 't', policyEpoch: 0, sourceSessionId: 's' },
+        'x',
+      );
+      ids.push(created!.artifactId);
+    }
+    for (const id of ids)
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    expect(new Set(ids).size).toBe(ids.length);
+    const numbers = ids.map((id) => BigInt(`0x${id.replaceAll('-', '')}`));
+    const steps = new Set(numbers.slice(1).map((value, index) => value - numbers[index]!));
+    expect(steps.size).toBeGreaterThan(900);
+  });
+
   it('N11: ids it hands out are unguessable random values by default', () => {
     const artifacts = new ComputerUseArtifactStore({ now: () => 0 });
     const owner = { ...binding, sourceSessionId: 'session-a' };

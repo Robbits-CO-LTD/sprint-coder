@@ -746,7 +746,8 @@ function sessionView(
   };
 }
 
-function approvalView(
+/** Exported for the C6 acceptance test (T15-10): the card a person sees is built here. */
+export function approvalView(
   approval: NonNullable<ComputerUseSessionStatus['pendingApproval']>,
 ): ComputerUseApprovalView {
   const activationIntents: Partial<Record<ComputerUseApprovalDecision, string>> = {};
