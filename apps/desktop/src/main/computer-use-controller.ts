@@ -5000,9 +5000,11 @@ export class ComputerUseController {
     // high-impact or a surface node, and any node of a browser, are never copied, whatever native
     // answers. The same refusal as every other, so none of these is told apart.
     const metadata = record.observation?.targetMetadata?.[action.targetId];
+    // No facts about the node is not "nothing to worry about": like the plan grant, fail closed.
     if (
-      metadata?.secure === true ||
-      metadata?.surface === true ||
+      metadata === undefined ||
+      metadata.secure === true ||
+      metadata.surface === true ||
       splitHighImpact(metadata).any ||
       isComputerUseBrowserApplication(record.profile)
     )

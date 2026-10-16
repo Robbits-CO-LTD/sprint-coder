@@ -3025,7 +3025,9 @@ describe('computer_start carry and artifacts (#785 T15-8)', () => {
       const action = (text: string) =>
         type === 'type' ? { type, text } : { type, targetId: 'field', text };
       expect(contracts.computerUseActionSchema.safeParse(action(exact)).success).toBe(true);
-      expect(contracts.computerUseActionSchema.safeParse(action(exact + 'x')).success).toBe(false);
+      const refused = contracts.computerUseActionSchema.safeParse(action(exact + 'x'));
+      expect(refused.success).toBe(false);
+      expect(JSON.stringify(refused.error?.issues)).toContain(`${limit}-byte`);
     }
   });
 });

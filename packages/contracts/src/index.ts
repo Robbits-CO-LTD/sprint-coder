@@ -5158,7 +5158,10 @@ export type ComputerUseProviderEgressConsentBinding = z.infer<
 const computerUseUtf8TextSchema = z.string().refine(
   // Read when a value is parsed, so the limit's definition further down the file is in place.
   (value) => new TextEncoder().encode(value).byteLength <= COMPUTER_USE_LIMITS.maxTextActionBytes,
-  'Text action exceeds the 4096-byte UTF-8 limit',
+  {
+    error: () =>
+      `Text action exceeds the ${COMPUTER_USE_LIMITS.maxTextActionBytes}-byte UTF-8 limit`,
+  },
 );
 const computerUsePreviewSchema = z.string().max(256, 'Approval preview exceeds 256 characters');
 

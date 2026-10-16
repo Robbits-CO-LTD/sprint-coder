@@ -2495,7 +2495,10 @@ describe('ComputerUseController', () => {
 
   describe('copy (#785 T15-6b)', () => {
     const copy: ComputerUseAction = { type: 'copy', targetId: 'node-1' };
-    const withNode = { targetSignatures: { 'node-1': 'a'.repeat(64) } };
+    const withNode = {
+      targetSignatures: { 'node-1': 'a'.repeat(64) },
+      targetMetadata: { 'node-1': {} },
+    };
 
     /** A store that remembers whom each artifact was created for, so a test can take it back. */
     function spiedStore() {
@@ -2892,9 +2895,10 @@ describe('ComputerUseController', () => {
       ['a high-impact node', { targetMetadata: { 'node-1': { highImpact: true } } }, undefined],
       [
         'a node native called high-impact',
-        { targetMetadata: { 'node-1': { highImpact: true, highImpactNative: true } } },
+        { targetMetadata: { 'node-1': { highImpactNative: true } } },
         undefined,
       ],
+      ['a node native gave no facts about (fail closed)', { targetMetadata: {} }, undefined],
       ['a command surface node', { targetMetadata: { 'node-1': { surface: true } } }, undefined],
       ['a node of a browser', {}, 'com.google.Chrome'],
     ] as const)(

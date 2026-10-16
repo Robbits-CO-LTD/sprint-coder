@@ -314,7 +314,11 @@ function createFixture(
       const withNode =
         options.artifactRead === undefined
           ? observed
-          : { ...observed, targetSignatures: { 'node-1': 'a'.repeat(64) } };
+          : {
+              ...observed,
+              targetSignatures: { 'node-1': 'a'.repeat(64) },
+              targetMetadata: { 'node-1': {} },
+            };
       return options.focusedSecure === true
         ? { ...withNode, focusedElementSecure: true }
         : withNode;

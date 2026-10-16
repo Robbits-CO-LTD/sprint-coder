@@ -282,6 +282,9 @@ export function looksLikeComputerUseSecret(text: NormalizedComputerUseText): boo
         }
         digits += parts[2 * last];
         if (digits.length > 19) break;
+        // A window joined by dots alone needs three groups (4-4-4-4, 4-6-5): two make a decimal
+        // number or a timestamp (`1760600004.123456`), which is no card.
+        if (last > first && parts[2 * first + 1] === '.' && last - first < 2) continue;
         if (digits.length >= 13 && passesLuhn(digits)) return true;
       }
     }
