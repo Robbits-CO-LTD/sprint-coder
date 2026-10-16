@@ -2,7 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
   computerAppProfileSchema,
@@ -17,6 +17,7 @@ import {
   computerUseSessionStatusSchema,
   computerUseApprovalSchema,
   type ComputerUseAction,
+  type ComputerUseApproval,
   type ComputerUseSessionStatus,
   type ProviderModel,
 } from '@sprint-coder/contracts';
@@ -32,6 +33,7 @@ import {
   COMPUTER_TARGET_SYSTEM_PROMPT,
   computerTargetSystemPromptFor,
 } from './computer-use-target-model';
+import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { ComputerUseController } from './computer-use-controller';
 import {
   computerAppGrantIdentityFrom,
@@ -1870,5 +1872,422 @@ describe('Computer Use target tool exposure decision', () => {
   it('withholds the tools from a Team Turn and with the flag off', () => {
     expect(decide({ teamTurn: true, toolCalling: true })).toBe(false);
     expect(decide({ teamTurn: false, toolCalling: true }, { flag: false })).toBe(false);
+  });
+});
+
+/**
+ * #785 T15-10 J21(e): the card of a paste, answered through the trusted Renderer intent path.
+ *
+ * The real controller, the real `ComputerUseArtifactStore` and the router's own publishing code
+ * (`publishComputerUseApproval` / `publishComputerUseStatus`, so the status channel is what a
+ * Renderer would be sent); only the native host, the planner and the click's activation are
+ * stand-ins. A value is copied in session A, carried into session B and pasted there: the click
+ * that answers B's card has to carry an intent that names this card and this decision.
+ */
+describe('a paste card answered through the trusted intent path (T15-10 J21(e))', () => {
+  const body = 'Total 42 qzx-7f3a-Mk';
+  const visible = 'qzx-7f3a-Mk';
+  const turnContext = {
+    taskId: 'task-1',
+    turnId: 'turn-1',
+    workspaceId: null,
+    policyEpoch: 0,
+  } as const;
+  const taskBinding = { taskId: 'task-1', turnId: 'turn-1', policyEpoch: 0 } as const;
+
+  beforeEach(() => {
+    vi.useFakeTimers({ now: new Date('2026-09-21T00:00:00.000Z') });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  async function settle<T>(pending: Promise<T>, steps = 200): Promise<T> {
+    const sentinel = Symbol('pending');
+    const race = pending.then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    for (let step = 0; step < steps; step += 1) {
+      const outcome = await Promise.race([race, Promise.resolve(sentinel)]);
+      if (outcome !== sentinel) {
+        if ('error' in outcome) throw outcome.error;
+        return outcome.value;
+      }
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    throw new Error('the session never settled');
+  }
+
+  function trusted() {
+    const fixture = captureComputerUseHandlers();
+    const router = fixture.router as unknown as Record<string, (...args: unknown[]) => unknown> &
+      Record<string, unknown>;
+    const sent: { channel: string; payload: unknown }[] = [];
+    Object.assign(router, {
+      window: {
+        id: 42,
+        webContents: {
+          once: vi.fn(),
+          isDestroyed: () => false,
+          send: (channel: string, payload: unknown) => sent.push({ channel, payload }),
+        },
+        isDestroyed: () => false,
+        isVisible: () => true,
+        showInactive: vi.fn(),
+        flashFrame: vi.fn(),
+      },
+      computerUseStatusBySession: new Map(),
+      computerUseApprovalSessionById: new Map(),
+      computerUsePendingApprovalBySession: new Map<string, { id: string }>(),
+      computerUseSessionByTask: new Map(),
+      computerUsePendingGrantRequestIds: new Set(),
+      computerUseAttentionFlashing: false,
+    });
+    const logged: unknown[][] = [];
+    for (const level of ['debug', 'info', 'warn', 'error'] as const)
+      vi.spyOn(secureLogger, level).mockImplementation((...args: unknown[]) => {
+        logged.push(args);
+      });
+
+    const profile = {
+      id: 'profile-1',
+      platform: 'darwin' as const,
+      kind: 'macos-bundle' as const,
+      label: 'Notes',
+      canonicalPath: '/Applications/Notes.app/Contents/MacOS/Notes',
+      appUrl: null,
+      identity: endToEndIdentity,
+      identityDigest: endToEndIdentity.identityDigest,
+      version: null,
+      executableDigest: 'b'.repeat(64),
+      mode: 'full_access_app' as const,
+      connectionId: 'connection-1',
+      modelId: 'model-1',
+      providerEgressConsent: true,
+      remember: true,
+      revision: 3,
+      createdAt: '2026-09-19T00:00:00.000Z',
+      updatedAt: '2026-09-19T00:00:00.000Z',
+    };
+    const audits = new Map<string, Record<string, unknown>>();
+    const dispatched: ComputerUseAction[] = [];
+    const plans: Record<string, unknown>[] = [];
+    let observationRevision = 0;
+    const store = new ComputerUseArtifactStore({ now: () => performance.now() });
+    const grantStore = createComputerAppGrantFixtureStore();
+    const controller = new ComputerUseController({
+      persistence: {
+        listComputerAppProfiles: () => [profile],
+        getComputerAppProfile: () => profile,
+        getActiveTurnId: () => 'turn-1',
+        getPermissionPolicy: () => ({ policyEpoch: 0 }),
+        listComputerActionAudits: () => [...audits.values()],
+        recordComputerActionAudit: (input: Record<string, unknown>) => {
+          const record = { ...input, id: `audit-${audits.size + 1}`, state: 'pending' };
+          audits.set(record.id, record);
+          return record;
+        },
+        completeComputerActionAudit: ({ auditId, state }: { auditId: string; state: string }) => {
+          const next = { ...audits.get(auditId), state };
+          audits.set(auditId, next);
+          return next;
+        },
+        ...grantStore.api,
+      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['persistence'],
+      native: {
+        availability: () => available,
+        pickApplication: async () => null,
+        listWindows: async () => [
+          {
+            platform: 'darwin',
+            windowId: 'native-window-1',
+            appIdentityDigest: profile.identityDigest,
+            windowIdentityDigest: 'd'.repeat(64),
+            title: 'Meeting notes',
+            bounds: { x: 0, y: 0, width: 800, height: 600 },
+            screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+            focused: true,
+            eligible: true,
+            ownerKind: 'application',
+            modal: false,
+            revision: 1,
+            policyLanguage: 'en',
+            maximumMode: 'full_access_app',
+          },
+        ],
+        startSession: async (input: { sessionId: string; windowId: string }) => ({
+          sessionId: input.sessionId,
+          platform: 'darwin',
+          appIdentityDigest: profile.identityDigest,
+          windowIdentityDigest: 'd'.repeat(64),
+          windowId: input.windowId,
+          profileRevision: profile.revision,
+          cancelEpoch: 0,
+          policyLanguage: 'en',
+          maximumMode: 'full_access_app',
+          screenBounds: { x: 0, y: 0, width: 800, height: 600 },
+        }),
+        observe: async (session: { sessionId: string }) => {
+          observationRevision += 1;
+          return {
+            ...endToEndObservation(session.sessionId, observationRevision, profile.identityDigest),
+            targetSignatures: { 'node-1': 'a'.repeat(64) },
+            targetMetadata: { 'node-1': {} },
+          };
+        },
+        artifactReadSupported: () => true,
+        readNodeValue: async () => ({ ok: true as const, text: body }),
+        artifactPasteSupported: () => true,
+        dispatch: async (input: { action: ComputerUseAction }) => {
+          dispatched.push(input.action);
+          return { result: 'completed', reasonCode: null };
+        },
+        cancel: async () => undefined,
+        close: async () => undefined,
+      } as unknown as ConstructorParameters<typeof ComputerUseController>[0]['native'],
+      featureEnabled: () => true,
+      agentDrivenEnabled: () => true,
+      artifactStore: store,
+      providerEgressBindingFor: () => ({ connectionId: 'connection-1', modelId: 'model-1' }),
+      currentPolicyEpoch: () => 0,
+      repositionEmergencyStop: () => true,
+      publishGrantRequest: () => undefined,
+      publishApproval: (approval) => router['publishComputerUseApproval']!(approval),
+      publishStatus: (status) => router['publishComputerUseStatus']!(status),
+      planner: {
+        plan: async () => (plans.shift() as ComputerUseAction | undefined) ?? { type: 'finish' },
+      },
+    });
+    Object.assign(router, { computerUseController: controller });
+    controller.createAppGrant(computerAppGrantIdentityFrom(endToEndIdentity)!, {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+    const handler = fixture.handlers.get(IPC_CHANNELS.computerUseApprovalResolve)!;
+
+    const targetToken = async (): Promise<string> => {
+      const row = (await controller.listTargets({}, turnContext)).targets.find(
+        (target) => (target as { kind?: string }).kind === 'selectable',
+      ) as { targetToken: string } | undefined;
+      if (row === undefined) throw new Error('no selectable target');
+      return row.targetToken;
+    };
+
+    /** A copies the value; B is started with it carried, and stops at the paste's card. */
+    async function reachCard() {
+      plans.push({ type: 'copy', targetId: 'node-1' });
+      const outA = await settle(
+        controller.startForAgent({ targetToken: await targetToken(), goal: 'copy' }, turnContext),
+      );
+      const artifactId = (outA as { artifacts: { artifactId: string }[] }).artifacts[0]!.artifactId;
+      plans.push({ type: 'set_text', targetId: 'node-1', artifactRef: artifactId });
+      const running = controller.startForAgent(
+        { targetToken: await targetToken(), goal: 'paste', carry: [{ artifactId }] },
+        turnContext,
+      );
+      const pending = router['computerUsePendingApprovalBySession'] as unknown as Map<
+        string,
+        ComputerUseApproval
+      >;
+      for (let step = 0; step < 100 && pending.size === 0; step += 1)
+        await vi.advanceTimersByTimeAsync(10);
+      const card = [...pending.values()][0];
+      if (card === undefined) throw new Error('no card was raised');
+      return { outA, artifactId, running, card };
+    }
+
+    /** What the Renderer's click carries: the decision it was given and the card it is on. */
+    const clickInput = (card: ComputerUseApproval, decision: string) =>
+      ({
+        approvalId: card.id,
+        expectedRevision: card.revision,
+        decision,
+        challenge: card.challenge,
+      }) as const;
+    const click = (
+      input: ReturnType<typeof clickInput>,
+      intent: { decision?: string; approvalId?: string; challenge?: string } | null,
+    ) => {
+      fixture.activation.consume.mockReturnValueOnce(
+        intent === null
+          ? null
+          : {
+              token: 'approval-activation',
+              intent: approvalActivationIntent({ ...input, ...intent } as never),
+            },
+      );
+      return handler(input, {}, {});
+    };
+
+    return {
+      controller,
+      store,
+      dispatched,
+      sent,
+      logged,
+      reachCard,
+      clickInput,
+      click,
+      handler,
+      settle,
+    };
+  }
+
+  const stillPending = (t: ReturnType<typeof trusted>, card: ComputerUseApproval): boolean =>
+    t.controller.getStatus(card.sessionId)?.pendingApproval?.id === card.id;
+
+  it('raises a card that can only be allowed once or denied, with the excerpt in it', async () => {
+    const t = trusted();
+    const { card } = await t.reachCard();
+    expect(card.allowedDecisions).toEqual(['allow_once', 'deny']);
+    expect(card.transfer?.excerpt).toBe(body);
+    expect(card.transfer?.sourceLabel).toBe('Notes');
+    expect(t.dispatched).toEqual([]);
+  });
+
+  it.each([
+    ['another decision', { decision: 'deny' }],
+    ['another card', { approvalId: 'approval-other' }],
+    ['another challenge', { challenge: 'b'.repeat(64) }],
+    ['no trusted activation at all', null],
+  ] as const)(
+    'refuses a click whose intent names %s, and nothing is typed',
+    async (_name, intent) => {
+      const t = trusted();
+      const { card } = await t.reachCard();
+      await expect(t.click(t.clickInput(card, 'allow_once'), intent)).rejects.toBeTruthy();
+      expect(t.dispatched).toEqual([]);
+      expect(stillPending(t, card)).toBe(true);
+    },
+  );
+
+  it('refuses allow_plan on a paste card even with an intent that names it', async () => {
+    const t = trusted();
+    const { card } = await t.reachCard();
+    await expect(t.click(t.clickInput(card, 'allow_plan'), {})).rejects.toBeTruthy();
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, card)).toBe(true);
+  });
+
+  it('refuses a card id that this Renderer was never sent (another session)', async () => {
+    const t = trusted();
+    const { card } = await t.reachCard();
+    const foreign = {
+      ...t.clickInput(card, 'allow_once'),
+      approvalId: 'approval-of-another-session',
+    };
+    await expect(t.click(foreign, {})).rejects.toThrow(/not found/iu);
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, card)).toBe(true);
+  });
+
+  it('keeps the artifact when the card is denied, and discards it when the session ends', async () => {
+    const t = trusted();
+    const { card, artifactId, running } = await t.reachCard();
+    await t.click(t.clickInput(card, 'deny'), {});
+    expect(t.dispatched).toEqual([]);
+    // Denying uses nothing up: what was carried in is still there while the session lives.
+    expect(t.store.describeReference([artifactId], taskBinding)).not.toBeNull();
+    await t.controller.stop(card.sessionId);
+    await t.settle(running);
+    expect(t.store.describeReference([artifactId], taskBinding)).toBeNull();
+    expect(t.dispatched).toEqual([]);
+  });
+
+  it('types once for allow_once, and a second click on the same card does nothing', async () => {
+    const t = trusted();
+    const { card, artifactId, running } = await t.reachCard();
+    const input = t.clickInput(card, 'allow_once');
+    await t.click(input, {});
+    await t.settle(running);
+    expect(t.dispatched).toEqual([{ type: 'set_text', targetId: 'node-1', text: body }]);
+    // The value is used up by the paste, and the same click again is refused.
+    expect(t.store.describeReference([artifactId], taskBinding)).toBeNull();
+    await expect(t.click(input, {})).rejects.toBeTruthy();
+    expect(t.dispatched).toHaveLength(1);
+  });
+
+  it('puts the excerpt on the status channel only, never on another channel or in a log', async () => {
+    const t = trusted();
+    const { card, outA, running } = await t.reachCard();
+    await t.click(t.clickInput(card, 'allow_once'), {});
+    const outB = await t.settle(running);
+    // The excerpt did travel the way it is meant to: in a status the Renderer was sent.
+    const statusSends = t.sent.filter(
+      (entry) => entry.channel === IPC_CHANNELS.computerUseStatusEvent,
+    );
+    expect(JSON.stringify(statusSends)).toContain(visible);
+    expect(t.sent.length).toBeGreaterThan(0);
+    // And nowhere else: not on another channel, not in a log line, not in either tool result.
+    const elsewhere = t.sent.filter(
+      (entry) => entry.channel !== IPC_CHANNELS.computerUseStatusEvent,
+    );
+    expect(JSON.stringify(elsewhere)).not.toContain(visible);
+    expect(JSON.stringify(t.logged)).not.toContain(visible);
+    expect(JSON.stringify([outA, outB])).not.toContain(visible);
+    expect(computerStartToolOutputSchema.parse(outB)).toEqual(outB);
+  });
+});
+
+/**
+ * #785 T15-10 J18, the provider API route: the fixed sentence (a copied value is a content-less
+ * reference, do not guess it, pass it with `carry`, a paste needs a person each time) rides along
+ * only when the tools it speaks of are in the catalog that route sends. `ipc.ts` assembles that
+ * route's messages and tools by itself, so the wiring is pinned at the source as well as the
+ * helper it calls.
+ */
+describe('the artifact sentence on the provider API route (T15-10 J18)', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/main/ipc.ts'), 'utf8').replace(
+    /\s+/gu,
+    ' ',
+  );
+  const turn = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+
+  it('derives the guidance from the catalog it sends, and adds it only when there is some', () => {
+    const start = source.indexOf('const computerTargetGuidance = computerTargetSystemPromptFor(');
+    expect(start).toBeGreaterThan(0);
+    const block = source.slice(start, start + 420);
+    expect(block).toContain('workspaceToolSnapshot?.entries ?? []');
+    expect(block).toContain('if (computerTargetGuidance !== null)');
+    expect(block).toContain(
+      "messages.unshift({ role: 'system', content: computerTargetGuidance })",
+    );
+    // One site, and no second way to put the sentence in: the helper is the only source of it.
+    expect(source.match(/computerTargetSystemPromptFor\(/gu)).toHaveLength(1);
+    expect(source).not.toContain('COMPUTER_TARGET_SYSTEM_PROMPT');
+  });
+
+  it('gives the sentence, with the artifact rule once, exactly when the tools are in the catalog', () => {
+    const { harness } = (() => {
+      const fixtureHarness = new ManagedCodingHarness({
+        workspaceFor: () => null,
+        rootIdentityFor: () => undefined,
+        policyEpochFor: () => 0,
+        authorizer: async () => ({ decision: 'allow' }) as never,
+        computerTargets: {
+          listTargets: async () => ({ targets: [] }) as never,
+          requestAccess: async () => ({}) as never,
+          start: async () => ({}) as never,
+          stop: async () => undefined,
+        },
+      });
+      return { harness: fixtureHarness };
+    })();
+    const visible = harness.startTurn(turn, 'openai', {
+      computerTargets: true,
+      toolSurface: 'computer-targets-only',
+    });
+    const hidden = harness.startTurn({ ...turn, turnId: 'turn-2' }, 'openai', {
+      computerTargets: false,
+    });
+    const sentence = computerTargetSystemPromptFor(visible.entries);
+    expect(sentence).toBe(COMPUTER_TARGET_SYSTEM_PROMPT);
+    expect(sentence?.split('`artifacts`').length).toBe(2);
+    expect(sentence).toContain('`carry`');
+    // No computer tool in the catalog, no catalog at all, or an empty one: no sentence.
+    expect(computerTargetSystemPromptFor(hidden.entries)).toBeNull();
+    expect(computerTargetSystemPromptFor([])).toBeNull();
   });
 });
