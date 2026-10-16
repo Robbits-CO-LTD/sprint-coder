@@ -82,7 +82,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     // Our own injections are noted at the one place that sends input.
     const send = squash(host.slice(host.indexOf('UINT SendInputForBoundTarget(')));
     expect(send.slice(0, send.indexOf('WORD VirtualKeyForName'))).toContain(
-      'if (sent > 0) RecordWindowsOwnInput();',
+      'if (sent > 0) RecordWindowsOwnInput(before_read, before_tick);',
     );
   });
 
@@ -243,12 +243,17 @@ void Check(bool ok, const char *name) {
 
 // True while nobody else has touched the mouse or keyboard since our last injection (a person at
 // the machine during the run only makes the helper answer "opens", which is the safe side).
+void NoteOwn() {
+  DWORD tick = 0;
+  ReadSystemLastInput(&tick);
+  RecordWindowsOwnInput(true, tick);
+}
 bool Quiet() {
   DWORD last = 0;
   if (!ReadSystemLastInput(&last)) return false;
   WindowsClickState &state = ClickState();
   return !sprint_coder::computer_use::ExternalInputWithinDoubleClick(
-      state.has_input, state.input_tick, last, static_cast<std::uint32_t>(GetTickCount64()),
+      state.has_input, state.input_before_tick, state.input_after_tick, last, static_cast<std::uint32_t>(GetTickCount64()),
       GetDoubleClickTime());
 }
 void CheckNotOpening(POINT point, bool single, const char *name) {
@@ -263,7 +268,7 @@ int main() {
   std::cout << "single_click_opens=" << single << " interval=" << interval << "\n";
   // A baseline: our own injection note, as the host takes after each SendInput.
   Sleep(interval + 150);
-  RecordWindowsOwnInput();
+  NoteOwn();
   CheckNotOpening(POINT{50, 50}, single, "no_previous_click");
   RecordWindowsClick(50, 50);
   // The same point at once: a double click (and always opens when the setting is on).
@@ -272,15 +277,31 @@ int main() {
   CheckNotOpening(POINT{500, 500}, single, "far_away_is_not_a_double_click");
   // After the interval: not one.
   Sleep(interval + 150);
-  RecordWindowsOwnInput();
+  NoteOwn();
   CheckNotOpening(POINT{50, 50}, single, "after_the_interval_is_not_a_double_click");
   // A new click starts a new pair.
   RecordWindowsClick(50, 50);
   Check(WindowsClickOpens(POINT{50, 50}), "a_new_record_pairs_again");
+  // The helper's own injection, noted the way the host does it (before and after SendInput, with no
+  // wait in between), is not input from elsewhere. Skipped when a person is at the machine.
+  {
+    DWORD before = 0;
+    const bool before_read = ReadSystemLastInput(&before);
+    INPUT own{};
+    own.type = INPUT_KEYBOARD;
+    own.ki.wVk = VK_F24;
+    own.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &own, sizeof(INPUT));
+    RecordWindowsOwnInput(before_read, before);
+    if (Quiet())
+      Check(!WindowsClickOpens(POINT{900, 900}) || single, "own_injection_is_not_external_input");
+    else
+      std::cout << "skip own_injection (somebody else is using the machine)\n";
+  }
   // Input that did not come through the helper (a key-up of an unassigned key sent directly)
   // makes the next click possibly paired, wherever it lands.
   Sleep(interval + 150);
-  RecordWindowsOwnInput();
+  NoteOwn();
   DWORD before_tick = 0;
   ReadSystemLastInput(&before_tick);
   INPUT key{};

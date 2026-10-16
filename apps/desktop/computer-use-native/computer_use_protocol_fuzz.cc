@@ -7322,6 +7322,26 @@ bool CheckClickRule() {
     if (!Check(doubled.Refuses() && doubled.verdict.outcome == InterlockOutcome::kTakeover &&
                    doubled.verdict.reason == InterlockReason::kExecutionTrigger,
                "click-rule-cell-click-that-opens-is-a-takeover")) return false;
+    // The cell can also be a Text of class UIProperty (a column that shows plain text).
+    EffectFacts text_cell = EffBase();
+    text_cell.surface = SurfaceKind::kFileBrowser;
+    text_cell.action = ActionKind::kClick;
+    text_cell.target_is_file_item = true;
+    text_cell.extension_known = true;
+    text_cell.extension = "bat";
+    text_cell.chain = {{"text", "UIProperty", "Size"}, {"listitem", "", "run.bat"}, {"list", "", "Items"},
+                       {"window", "", "Docs"}};
+    if (!Check(ItemInSpan(text_cell) && !MayOpen(text_cell) && !InterlockForFacts(text_cell).Refuses(),
+               "click-rule-text-cell-one-click-is-no-refusal")) return false;
+    {
+      FakeExplorer item("run.bat");
+      item.GiveRealPath("C:\\Users\\me\\run.bat");
+      item.form.source.point = item.form.source.Add(item.item, "Text", "Size", "UIProperty");
+      const auto one_text = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", UiaRequest("click"),
+                                                             EffectRuleset{});
+      if (!Check(!one_text.Refuses() && one_text.no_verdict == InterlockNoVerdict::kNone,
+                 "click-rule-text-cell-through-the-reader-is-no-verdict")) return false;
+    }
     // Only the exact shape: the same Edit with another class (a rename box is "Edit") still counts.
     const auto rename = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "Edit");
     if (!Check(rename.Refuses(), "click-rule-edit-of-another-class-still-counts")) return false;
@@ -7473,20 +7493,29 @@ bool CheckClickRule() {
   // Input from somewhere else (a person at the mouse) within the double-click time since our own
   // last injection makes the click one that may open. Equal ticks = nobody else touched anything.
   {
-    const auto external = [](bool has_own, std::uint32_t own, std::uint32_t last, std::uint32_t now) {
-      return ExternalInputWithinDoubleClick(has_own, own, last, now, 500);
+    // (has_own, own_before, own_after, last_input, now); interval 500, slack 50.
+    const auto external = [](bool has_own, std::uint32_t before, std::uint32_t after, std::uint32_t last,
+                             std::uint32_t now) {
+      return ExternalInputWithinDoubleClick(has_own, before, after, last, now, 500);
     };
-    if (!Check(!external(true, 1000, 1000, 1100), "external-input-same-tick-as-ours-is-none")) return false;
-    if (!Check(external(true, 1000, 1050, 1100), "external-input-newer-than-ours-within-the-interval")) return false;
-    if (!Check(external(true, 1000, 1050, 1550), "external-input-exactly-at-the-interval")) return false;
-    if (!Check(!external(true, 1000, 1050, 1551), "external-input-one-past-the-interval")) return false;
-    if (!Check(!external(true, 1000, 900, 1100), "external-input-older-than-ours-is-none")) return false;
-    if (!Check(!external(true, 1000, 1050, 1000), "external-input-in-the-future-is-none")) return false;
-    if (!Check(external(false, 0, 900, 1100), "external-input-with-no-injection-of-ours-counts")) return false;
-    if (!Check(!external(false, 0, 100, 1100), "external-input-with-no-injection-and-old-is-none")) return false;
+    if (!Check(!external(true, 1000, 1000, 1000, 1100), "external-input-same-tick-as-ours-is-none")) return false;
+    // Our own window: from the tick read before SendInput to the tick read after it, plus the slack.
+    if (!Check(!external(true, 1000, 1010, 1000, 1100), "external-input-at-the-before-tick-is-ours")) return false;
+    if (!Check(!external(true, 1000, 1010, 1005, 1100), "external-input-inside-the-window-is-ours")) return false;
+    if (!Check(!external(true, 1000, 1010, 1060, 1100), "external-input-at-the-after-tick-plus-slack-is-ours")) return false;
+    if (!Check(external(true, 1000, 1010, 1061, 1100), "external-input-one-past-the-slack-is-external")) return false;
+    if (!Check(!external(true, 1000, 1010, 999, 1100), "external-input-one-before-the-before-tick-is-none")) return false;
+    if (!Check(external(true, 1000, 1000, 1100, 1200), "external-input-newer-than-ours-within-the-interval")) return false;
+    if (!Check(external(true, 1000, 1000, 1100, 1600), "external-input-exactly-at-the-interval")) return false;
+    if (!Check(!external(true, 1000, 1000, 1100, 1601), "external-input-one-past-the-interval")) return false;
+    if (!Check(!external(true, 1000, 1000, 900, 1100), "external-input-older-than-ours-is-none")) return false;
+    if (!Check(!external(true, 1000, 1000, 1100, 1000), "external-input-in-the-future-is-none")) return false;
+    if (!Check(external(false, 0, 0, 900, 1100), "external-input-with-no-injection-of-ours-counts")) return false;
+    if (!Check(!external(false, 0, 0, 100, 1100), "external-input-with-no-injection-and-old-is-none")) return false;
     // Ticks wrap at 2^32.
-    if (!Check(external(true, 0xFFFFFFF0u, 0x00000010u, 0x00000020u), "external-input-across-the-wrap")) return false;
-    if (!Check(!external(true, 0x00000010u, 0xFFFFFFF0u, 0x00000020u), "external-input-older-across-the-wrap")) return false;
+    if (!Check(external(true, 0xFFFFFFF0u, 0xFFFFFFF0u, 0x00000040u, 0x00000050u), "external-input-across-the-wrap")) return false;
+    if (!Check(!external(true, 0xFFFFFFF0u, 0x00000000u, 0x00000020u, 0x00000050u), "external-input-in-our-window-across-the-wrap")) return false;
+    if (!Check(!external(true, 0x00000010u, 0x00000010u, 0xFFFFFFF0u, 0x00000020u), "external-input-older-across-the-wrap")) return false;
   }
 
   std::cout << "Computer Use native click rule: PASS\n";

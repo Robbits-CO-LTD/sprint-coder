@@ -173,14 +173,22 @@ struct ShadowRequestInfo {
 // a double click that this helper cannot see, so the caller treats the click as opening (fail
 // closed). With no injection of our own yet, any input in the window counts. Ticks wrap at 2^32:
 // differences are taken modulo 2^32 and a difference of 2^31 or more means "older" / "in the future".
-[[nodiscard]] inline bool ExternalInputWithinDoubleClick(bool has_own, std::uint32_t own_input_tick,
-                                                         std::uint32_t last_input_tick,
-                                                         std::uint32_t now_tick,
-                                                         std::uint32_t interval_ms) {
+//
+// The system may update its last input time a moment AFTER SendInput returns, so our own injection
+// is a window, not a point: `own_before_tick` is the last input time read just before SendInput and
+// `own_after_tick` the one read just after. A last input time from `own_before_tick` up to
+// `own_after_tick + slack_ms` is ours; only a later one is somebody else's.
+inline constexpr std::uint32_t kOwnInputSlackMs = 50;
+
+[[nodiscard]] inline bool ExternalInputWithinDoubleClick(
+    bool has_own, std::uint32_t own_before_tick, std::uint32_t own_after_tick,
+    std::uint32_t last_input_tick, std::uint32_t now_tick, std::uint32_t interval_ms,
+    std::uint32_t slack_ms = kOwnInputSlackMs) {
   constexpr std::uint32_t kHalf = 0x80000000u;
   if (has_own) {
-    const std::uint32_t newer_by = last_input_tick - own_input_tick;
-    if (newer_by == 0 || newer_by >= kHalf) return false;
+    if (last_input_tick - own_before_tick >= kHalf) return false; // older than our injection
+    const std::uint32_t past_ours = last_input_tick - (own_after_tick + slack_ms);
+    if (past_ours == 0 || past_ours >= kHalf) return false; // inside our window
   }
   const std::uint32_t age = now_tick - last_input_tick;
   return age < kHalf && age <= interval_ms;

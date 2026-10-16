@@ -661,13 +661,14 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 [[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
   for (std::size_t index = 0; index < facts.chain.size(); ++index) {
     const NodeFacts &node = facts.chain[index];
-    // The one narrow exception: a click on a cell of the Windows details view lands on an Edit of
-    // class UIProperty directly under the row's ListItem. It is the row's own cell (a date, a size),
+    // The one narrow exception: a click on a cell of the Windows details view lands on an Edit (or a Text)
+    // of class UIProperty directly under the row's ListItem. It is the row's own cell (a date, a size),
     // and one click on it selects the row. Only that exact shape counts: the target node itself, the
     // class UIProperty (the host passes it as the subrole), and a ListItem right above. The edit box
     // of a rename has class "Edit", so it stays a control (a click there never opens, but it is not
     // a thing to wave through either).
-    if (index == 0 && NormalizeForMatch(node.role) == "edit" &&
+    if (index == 0 &&
+        (NormalizeForMatch(node.role) == "edit" || NormalizeForMatch(node.role) == "text") &&
         NormalizeForMatch(node.subrole) == "uiproperty" && facts.chain.size() > 1 &&
         NormalizeForMatch(facts.chain[1].role) == "listitem")
       continue;

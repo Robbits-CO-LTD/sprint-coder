@@ -4014,15 +4014,19 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
          current.right == expected.right && current.bottom == expected.bottom;
 }
 
-void RecordWindowsOwnInput() noexcept;
+bool ReadSystemLastInput(DWORD *tick) noexcept;
+void RecordWindowsOwnInput(bool before_read, DWORD before_tick) noexcept;
 
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
   if (!RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+  // The system may move its last input time a moment after SendInput returns: note it before too.
+  DWORD before_tick = 0;
+  const bool before_read = ReadSystemLastInput(&before_tick);
   const UINT sent = SendInput(count, events, sizeof(INPUT));
-  if (sent > 0) RecordWindowsOwnInput();
+  if (sent > 0) RecordWindowsOwnInput(before_read, before_tick);
   return sent;
 }
 
@@ -4340,7 +4344,8 @@ struct WindowsClickState {
   LONG click_x = 0;
   LONG click_y = 0;
   bool has_input = false;
-  DWORD input_tick = 0; // GetLastInputInfo, read right after our own last injection
+  DWORD input_before_tick = 0; // GetLastInputInfo, read just before our own last injection
+  DWORD input_after_tick = 0;  // ... and just after it
 };
 
 WindowsClickState &ClickState() {
@@ -4357,13 +4362,14 @@ bool ReadSystemLastInput(DWORD *tick) noexcept {
 }
 
 // Called after every injection that was accepted: the system's last input time is now ours.
-void RecordWindowsOwnInput() noexcept {
+void RecordWindowsOwnInput(bool before_read, DWORD before_tick) noexcept {
   DWORD tick = 0;
   const bool read = ReadSystemLastInput(&tick);
   WindowsClickState &state = ClickState();
   std::lock_guard<std::mutex> guard(state.lock);
-  state.has_input = read;
-  state.input_tick = tick;
+  state.has_input = read && before_read;
+  state.input_before_tick = before_tick;
+  state.input_after_tick = tick;
 }
 
 // Remembers the click that was just sent (screen coordinates).
@@ -4393,7 +4399,7 @@ bool WindowsClickOpens(POINT point) noexcept {
   WindowsClickState &state = ClickState();
   std::lock_guard<std::mutex> guard(state.lock);
   if (sprint_coder::computer_use::ExternalInputWithinDoubleClick(
-          state.has_input, state.input_tick, last_input, static_cast<std::uint32_t>(now), interval))
+          state.has_input, state.input_before_tick, state.input_after_tick, last_input, static_cast<std::uint32_t>(now), interval))
     return true;
   return sprint_coder::computer_use::ClickCompletesDoubleClick(
       state.has_click, state.click_tick_ms, state.click_x, state.click_y, now, point.x, point.y,
