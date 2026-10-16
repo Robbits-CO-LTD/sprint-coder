@@ -165,29 +165,30 @@ struct ShadowRequestInfo {
   return (dx < 0 ? -dx : dx) <= slop_x && (dy < 0 ? -dy : dy) <= slop_y;
 }
 
-// Whether input came from somewhere else since this helper last sent some: the system's last input
-// time (`last_input_tick`, GetLastInputInfo, 32-bit ticks) is newer than the one read right after
-// this helper's own last injection (`own_input_tick`; an injection moves the system's last input
-// time too, so the two are equal while nobody else touched the mouse or keyboard), and it is at
-// most `interval_ms` before `now_tick`. A person's click in that window may pair with ours into
-// a double click that this helper cannot see, so the caller treats the click as opening (fail
-// closed). With no injection of our own yet, any input in the window counts. Ticks wrap at 2^32:
-// differences are taken modulo 2^32 and a difference of 2^31 or more means "older" / "in the future".
-//
-// The system may update its last input time a moment AFTER SendInput returns, so our own injection
-// is a window, not a point: `own_before_tick` is the last input time read just before SendInput and
-// `own_after_tick` the one read just after. A last input time from `own_before_tick` up to
-// `own_after_tick + slack_ms` is ours; only a later one is somebody else's.
+// Whether input came from somewhere else since this helper last sent some. The system's last input
+// time (`last_input_tick`, GetLastInputInfo) and every other tick here are 32-bit GetTickCount
+// values (the same clock). Our own injection is a WINDOW of the clock: `send_before_tick` is the
+// time just before SendInput and `send_after_tick` the time just after it. The system stamps the
+// injection with the time it happened, so a last input time from `send_before_tick` up to
+// `send_after_tick + slack_ms` is OUR input (the slack covers a system that updates its last input
+// time a moment after SendInput returns). A last input time before the window is older than our
+// injection (it does not pair with it). One after the window is somebody else's, and when it is
+// also at most `interval_ms` before `now_tick`, a person's click may pair with ours into a double
+// click this helper cannot see: the caller treats the click as opening (fail closed). With no
+// injection of our own yet, any input in the interval counts. Ticks wrap at 2^32: differences are
+// taken modulo 2^32 and a difference of 2^31 or more means "before" / "in the future". The window
+// is anchored on the clock, never on the previous input, so an old previous input does not matter.
 inline constexpr std::uint32_t kOwnInputSlackMs = 50;
 
 [[nodiscard]] inline bool ExternalInputWithinDoubleClick(
-    bool has_own, std::uint32_t own_before_tick, std::uint32_t own_after_tick,
+    bool has_own, std::uint32_t send_before_tick, std::uint32_t send_after_tick,
     std::uint32_t last_input_tick, std::uint32_t now_tick, std::uint32_t interval_ms,
     std::uint32_t slack_ms = kOwnInputSlackMs) {
   constexpr std::uint32_t kHalf = 0x80000000u;
   if (has_own) {
-    if (last_input_tick - own_before_tick >= kHalf) return false; // older than our injection
-    const std::uint32_t past_ours = last_input_tick - (own_after_tick + slack_ms);
+    const std::uint32_t before_by = send_before_tick - last_input_tick;
+    if (before_by != 0 && before_by < kHalf) return false; // older than our injection
+    const std::uint32_t past_ours = last_input_tick - (send_after_tick + slack_ms);
     if (past_ours == 0 || past_ours >= kHalf) return false; // inside our window
   }
   const std::uint32_t age = now_tick - last_input_tick;

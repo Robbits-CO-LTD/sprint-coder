@@ -82,7 +82,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     // Our own injections are noted at the one place that sends input.
     const send = squash(host.slice(host.indexOf('UINT SendInputForBoundTarget(')));
     expect(send.slice(0, send.indexOf('WORD VirtualKeyForName'))).toContain(
-      'if (sent > 0) RecordWindowsOwnInput(before_read, before_tick);',
+      'if (sent > 0) RecordWindowsOwnInput(send_before_tick);',
     );
   });
 
@@ -243,17 +243,13 @@ void Check(bool ok, const char *name) {
 
 // True while nobody else has touched the mouse or keyboard since our last injection (a person at
 // the machine during the run only makes the helper answer "opens", which is the safe side).
-void NoteOwn() {
-  DWORD tick = 0;
-  ReadSystemLastInput(&tick);
-  RecordWindowsOwnInput(true, tick);
-}
+void NoteOwn() { RecordWindowsOwnInput(GetTickCount()); }
 bool Quiet() {
   DWORD last = 0;
   if (!ReadSystemLastInput(&last)) return false;
   WindowsClickState &state = ClickState();
   return !sprint_coder::computer_use::ExternalInputWithinDoubleClick(
-      state.has_input, state.input_before_tick, state.input_after_tick, last, static_cast<std::uint32_t>(GetTickCount64()),
+      state.has_input, state.send_before_tick, state.send_after_tick, last, static_cast<std::uint32_t>(GetTickCount64()),
       GetDoubleClickTime());
 }
 void CheckNotOpening(POINT point, bool single, const char *name) {
@@ -282,26 +278,44 @@ int main() {
   // A new click starts a new pair.
   RecordWindowsClick(50, 50);
   Check(WindowsClickOpens(POINT{50, 50}), "a_new_record_pairs_again");
-  // The helper's own injection, noted the way the host does it (before and after SendInput, with no
-  // wait in between), is not input from elsewhere. Skipped when a person is at the machine.
+  // The helper's own injections, noted the way the host does it (the clock just before SendInput,
+  // the clock just after, no wait in between), are not input from elsewhere, whether the system
+  // stamps them at once or a moment later. Skipped when a person is at the machine.
   {
-    DWORD before = 0;
-    const bool before_read = ReadSystemLastInput(&before);
-    INPUT own{};
-    own.type = INPUT_KEYBOARD;
-    own.ki.wVk = VK_F24;
-    own.ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(1, &own, sizeof(INPUT));
-    RecordWindowsOwnInput(before_read, before);
-    if (Quiet())
-      Check(!WindowsClickOpens(POINT{900, 900}) || single, "own_injection_is_not_external_input");
-    else
-      std::cout << "skip own_injection (somebody else is using the machine)\n";
+    const auto injected = [&](const INPUT &input, const char *name) {
+      const DWORD send_before = GetTickCount();
+      SendInput(1, const_cast<INPUT *>(&input), sizeof(INPUT));
+      RecordWindowsOwnInput(send_before);
+      if (Quiet())
+        Check(!WindowsClickOpens(POINT{900, 900}) || single, name);
+      else
+        std::cout << "skip " << name << " (somebody else is using the machine)\n";
+    };
+    INPUT key{};
+    key.type = INPUT_KEYBOARD;
+    key.ki.wVk = VK_F24;
+    key.ki.dwFlags = KEYEVENTF_KEYUP;
+    injected(key, "own_key_injection_is_not_external_input");
+    // A mouse injection: an absolute move onto the cursor's own position; the cursor is put back.
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+      Sleep(interval + 150);
+      const int width = GetSystemMetrics(SM_CXSCREEN);
+      const int height = GetSystemMetrics(SM_CYSCREEN);
+      INPUT mouse{};
+      mouse.type = INPUT_MOUSE;
+      mouse.mi.dx = static_cast<LONG>(cursor.x * 65535LL / (width > 1 ? width - 1 : 1));
+      mouse.mi.dy = static_cast<LONG>(cursor.y * 65535LL / (height > 1 ? height - 1 : 1));
+      mouse.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
+      injected(mouse, "own_mouse_injection_is_not_external_input");
+      SetCursorPos(cursor.x, cursor.y);
+    }
   }
   // Input that did not come through the helper (a key-up of an unassigned key sent directly)
   // makes the next click possibly paired, wherever it lands.
   Sleep(interval + 150);
   NoteOwn();
+  Sleep(120); // past the slack: input after this is not ours
   DWORD before_tick = 0;
   ReadSystemLastInput(&before_tick);
   INPUT key{};
