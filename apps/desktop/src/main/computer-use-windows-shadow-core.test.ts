@@ -154,6 +154,25 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
     expect(windowsShadow).toContain('static_assert((kShadowGapOsPromptSurface');
   });
 
+  it('counts a native Document apart from the stricter-than-v1 findings (S5-c-2 PR-4)', () => {
+    // The bit is the next free one after the Windows OS-prompt bit (14) and overlaps no other bit.
+    expect(sharedShadow).toContain('constexpr std::uint32_t kShadowGapNativeDocument = 1u << 15;');
+    expect(windowsShadow).toContain(
+      'constexpr std::uint32_t kShadowGapOsPromptSurface = 1u << 14;',
+    );
+    const bits = [...(sharedShadow + windowsShadow).matchAll(/kShadowGap\w+ = 1u << (\d+);/gu)].map(
+      (match) => Number(match[1]),
+    );
+    expect(bits).toContain(15);
+    expect(new Set(bits).size).toBe(bits.length);
+    expect(sharedShadow).toContain('static_assert((kShadowGapNativeDocument');
+    // The count excludes the bit; the facts and the verdict are not touched by it.
+    const squashed = sharedShadow.replace(/\s+/gu, ' ');
+    expect(squashed).toContain('(gaps & kShadowGapNativeDocument) == 0');
+    expect(squashed).toContain('bool NativeDocumentGap() const');
+    expect(windowsShadow).toContain('kShadowGapNativeDocument');
+  });
+
   it('knows the Windows 11 Explorer (XAML address bar, DUI list) and trusts nothing a page wrote', () => {
     for (const name of [
       'autosuggestbox',

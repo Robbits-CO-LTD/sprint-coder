@@ -49,6 +49,18 @@ constexpr std::uint32_t kShadowGapBudget = 1u << 11;
 constexpr std::uint32_t kShadowGapReadFailed = 1u << 12;
 // Another capture was still running (a hung target app), so this one was not taken.
 constexpr std::uint32_t kShadowGapBusy = 1u << 13;
+// (bit 14 is kShadowGapOsPromptSurface, in computer_use_windows_shadow.h.)
+// The origin is unknown only because a Document (UIA) sits in a window that is not a web window,
+// e.g. Notepad's text area. Aggregation only (S5-c-2 PR-4): the facts and the verdict are unchanged,
+// but the record is counted by ShadowRecord::NativeDocumentGap(), not V2IsStricter().
+constexpr std::uint32_t kShadowGapNativeDocument = 1u << 15;
+static_assert((kShadowGapNativeDocument &
+               (kShadowGapTargetMissing | kShadowGapOversize | kShadowGapChainTruncated |
+                kShadowGapNeighborsIncomplete | kShadowGapExtensionUnknown | kShadowGapLanguage |
+                kShadowGapOrigin | kShadowGapUnsupportedAction | kShadowGapRoleMissing |
+                kShadowGapV1Invalid | kShadowGapCanceled | kShadowGapBudget | kShadowGapReadFailed |
+                kShadowGapBusy | (1u << 14))) == 0,
+              "the native-document gap bit must not overlap another gap bit");
 
 // The shadow shares the serial lane with the preflight, so a capture is bounded: AX calls, and
 // time on a monotonic clock. The numbers are a share of the lane's budgets (the Cancel ack waits
@@ -496,8 +508,15 @@ struct ShadowRecord {
   [[nodiscard]] bool Skipped() const {
     return (gaps & (kShadowGapV1Invalid | kShadowGapCanceled | kShadowGapBusy)) != 0;
   }
+  // A record whose only novelty is a native Document (kShadowGapNativeDocument) is counted by
+  // NativeDocumentGap() instead of here.
   [[nodiscard]] bool V2IsStricter() const {
-    return !Skipped() && v1_ordinary && kind != DecisionKind::kOrdinary;
+    return !Skipped() && v1_ordinary && kind != DecisionKind::kOrdinary &&
+           (gaps & kShadowGapNativeDocument) == 0;
+  }
+  [[nodiscard]] bool NativeDocumentGap() const {
+    return !Skipped() && v1_ordinary && kind != DecisionKind::kOrdinary &&
+           (gaps & kShadowGapNativeDocument) != 0;
   }
   [[nodiscard]] bool V2IsLooser() const {
     return !Skipped() && !v1_ordinary && kind == DecisionKind::kOrdinary;
