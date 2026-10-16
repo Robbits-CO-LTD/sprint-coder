@@ -4890,6 +4890,11 @@ bool CheckNativeInterlockMap() {
             facts.extension_known = true;
             facts.extension = "txt";
             facts.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+            // A single click on a passive item of a file manager only selects it (#777): no verdict.
+            if (surface == SurfaceKind::kFileBrowser && action == ActionKind::kClick) {
+              if (!none(facts, "interlock-installer-named-item-clicked-in-a-file-manager")) return false;
+              continue;
+            }
             if (!trigger_blocked(facts, "interlock-installer-named-file-opened-from-a-list")) return false;
             if (!Check(InterlockForFacts(facts).effect_class ==
                            (surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
@@ -5404,6 +5409,7 @@ bool CheckEffectClassifierCore() {
                                     ActionKind::kKey}) {
       EffectFacts facts = EffItem(SurfaceKind::kDownloadPanel, action, "pdf");
       facts.target_is_file_item = item;
+      facts.key_is_activation = action == ActionKind::kKey;
       facts.chain[0].label = item ? "report" : "open";
       const auto enabled = ClassifyEffect(facts, EffAllEnabled());
       if (!Check(EffIs(enabled, DecisionKind::kApproval, DecisionReason::kNone,
@@ -5444,9 +5450,10 @@ bool CheckEffectClassifierCore() {
       if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-e3-unknown-extension")) return false;
       facts.extension_known = true;
       facts.key_is_activation = false;
+      // Only an activating key (Enter) opens; an arrow, Tab or Escape moves or dismisses (click rule).
       if (action == ActionKind::kKey &&
-          !Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kE3FileManagerOpen,
-                 "effect-e3-any-key")) return false;
+          !Check(ClassifyEffect(facts, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+                 "effect-e3-only-an-activating-key-opens")) return false;
     }
     for (const ActionKind browsing : {ActionKind::kSelect, ActionKind::kSetText, ActionKind::kScroll,
                                       ActionKind::kExpandCollapse}) {
@@ -6516,8 +6523,10 @@ bool CheckWindowsInterlockCapture() {
                  code);
   };
   const auto evaluate = [](FakeUia &source, std::string_view kind, std::string_view target_id = "",
-                           const EffectRuleset &ruleset = EffectRuleset{}) {
-    return EvaluateWindowsInterlockOnSource(source, kind, target_id, UiaRequest(kind), ruleset);
+                           const EffectRuleset &ruleset = EffectRuleset{}, bool click_opens = false) {
+    ShadowRequestInfo request = UiaRequest(kind);
+    request.click_opens = click_opens;
+    return EvaluateWindowsInterlockOnSource(source, kind, target_id, request, ruleset);
   };
 
   // An ordinary window: asked, and nothing to refuse.
@@ -6543,7 +6552,7 @@ bool CheckWindowsInterlockCapture() {
   {
     FakeExplorer script("run.bat");
     script.GiveRealPath("C:\\Users\\me\\run.bat");
-    const InterlockEvaluation evaluation = evaluate(script.form.source, "click");
+    const InterlockEvaluation evaluation = evaluate(script.form.source, "invoke", "run.bat");
     if (!Check(evaluation.Refuses() && evaluation.verdict.outcome == InterlockOutcome::kTakeover &&
                    evaluation.verdict.reason == InterlockReason::kExecutionTrigger,
                "winlane-file-manager-script-is-a-takeover")) return false;
@@ -6553,12 +6562,12 @@ bool CheckWindowsInterlockCapture() {
     FakeExplorer script("run.bat");
     script.GiveRealPath("C:\\Users\\me\\run.bat");
     WindowsShadowReader reader(script.form.source);
-    const ShadowUiaCapture capture = reader.Capture("click", "");
-    const ShadowFacts built = BuildWindowsShadowFacts(capture, UiaRequest("click"));
+    const ShadowUiaCapture capture = reader.Capture("invoke", "run.bat");
+    const ShadowFacts built = BuildWindowsShadowFacts(capture, UiaRequest("invoke"));
     const InterlockVerdict direct = InterlockForFacts(built.facts);
     FakeExplorer again("run.bat");
     again.GiveRealPath("C:\\Users\\me\\run.bat");
-    const InterlockEvaluation evaluation = evaluate(again.form.source, "click");
+    const InterlockEvaluation evaluation = evaluate(again.form.source, "invoke", "run.bat");
     if (!Check(evaluation.verdict.outcome == direct.outcome && evaluation.verdict.reason == direct.reason,
                "winlane-equals-the-map")) return false;
   }
@@ -6567,14 +6576,14 @@ bool CheckWindowsInterlockCapture() {
   {
     FakeExplorer closed("invoice.pdf");
     closed.GiveRealPath("C:\\Users\\me\\invoice.pdf");
-    const InterlockEvaluation refused = evaluate(closed.form.source, "click");
+    const InterlockEvaluation refused = evaluate(closed.form.source, "invoke", "invoice.pdf");
     if (!Check(refused.Refuses() && refused.verdict.reason == InterlockReason::kApprovalClosed,
                "winlane-default-ruleset-approval-closed")) return false;
     FakeExplorer trusted("invoice.pdf");
     trusted.GiveRealPath("C:\\Users\\me\\invoice.pdf");
     EffectRuleset ruleset;
     ruleset.file_manager_open = true;
-    if (!no_verdict(evaluate(trusted.form.source, "click", "", ruleset), InterlockNoVerdict::kNone,
+    if (!no_verdict(evaluate(trusted.form.source, "invoke", "invoice.pdf", ruleset), InterlockNoVerdict::kNone,
                     "winlane-trusting-ruleset-is-no-refusal")) return false;
   }
   // The real path of a file item could not be read (lookup abandoned or refused, shell slot busy):
@@ -6595,7 +6604,7 @@ bool CheckWindowsInterlockCapture() {
     // With the real path the same item is refused as the map says.
     FakeExplorer known_script("run.bat");
     known_script.GiveRealPath("C:\\Users\\me\\run.bat");
-    if (!Check(evaluate(known_script.form.source, "click").Refuses(), "winlane-known-path-script-refuses"))
+    if (!Check(evaluate(known_script.form.source, "invoke", "run.bat").Refuses(), "winlane-known-path-script-refuses"))
       return false;
   }
   // Canceled and out of budget together: canceled wins, as on macOS.
@@ -7163,6 +7172,179 @@ bool CheckNativePreflightV2() {
   return true;
 }
 
+// ---- #500 S5-c-2 PR-2: the click rule (one click on a passive item of a file manager selects it) ---
+
+bool CheckClickRule() {
+  using namespace sprint_coder::computer_use;
+  using sprint_coder::computer_use::effect_detail::ItemInSpan;
+  using sprint_coder::computer_use::effect_detail::MayOpen;
+  const auto refusal = [](const InterlockEvaluation &evaluation) {
+    return evaluation.Refuses() ? evaluation.verdict.ReasonCode() : std::string();
+  };
+  const auto explorer = [&](const char *name, const char *path, std::string_view kind,
+                            const char *key = "", bool click_opens = false) {
+    FakeExplorer item(name);
+    item.GiveRealPath(path);
+    item.form.source.focused = item.item;
+    ShadowRequestInfo request = UiaRequest(kind);
+    request.key = key;
+    request.click_opens = click_opens;
+    return EvaluateWindowsInterlockOnSource(item.form.source, kind, kind == "invoke" ? name : "", request,
+                                            EffectRuleset{});
+  };
+
+  // Windows file manager: a passive ListItem named like a script.
+  if (!Check(refusal(explorer("run.bat", "C:\\Users\\me\\run.bat", "click")).empty(),
+             "click-rule-script-item-one-click-is-no-refusal")) return false;
+  {
+    const auto invoked = explorer("run.bat", "C:\\Users\\me\\run.bat", "invoke");
+    if (!Check(invoked.Refuses() && invoked.verdict.outcome == InterlockOutcome::kTakeover &&
+                   invoked.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-invoke-is-a-takeover")) return false;
+    const auto entered = explorer("run.bat", "C:\\Users\\me\\run.bat", "key", "Enter");
+    if (!Check(entered.Refuses() && entered.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-enter-is-a-takeover")) return false;
+    const auto doubled = explorer("run.bat", "C:\\Users\\me\\run.bat", "click", "", true);
+    if (!Check(doubled.Refuses() && doubled.verdict.outcome == InterlockOutcome::kTakeover &&
+                   doubled.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-double-click-is-a-takeover")) return false;
+  }
+  // A document: one click selects; an invoke is the closed approval; a click that opens is too.
+  if (!Check(refusal(explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "click")).empty(),
+             "click-rule-document-one-click-is-no-refusal")) return false;
+  {
+    const auto invoked = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "invoke");
+    if (!Check(invoked.Refuses() && invoked.verdict.outcome == InterlockOutcome::kBlocked &&
+                   invoked.verdict.reason == InterlockReason::kApprovalClosed,
+               "click-rule-document-invoke-is-approval-closed")) return false;
+    const auto opened = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "click", "", true);
+    if (!Check(opened.Refuses() && opened.verdict.reason == InterlockReason::kApprovalClosed,
+               "click-rule-document-click-that-opens-is-approval-closed")) return false;
+    // The flag belongs to a click: it changes nothing for another kind.
+    const auto scrolled = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "scroll", "", true);
+    if (!Check(refusal(scrolled).empty(), "click-rule-flag-does-not-touch-a-scroll")) return false;
+  }
+  // click_opens makes the facts carry a double click, and only for a click.
+  {
+    ShadowRequestInfo request = UiaRequest("click");
+    request.click_opens = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.action == ActionKind::kDoubleClick,
+               "click-rule-flag-makes-a-double-click")) return false;
+    request.click_opens = false;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.action == ActionKind::kClick,
+               "click-rule-no-flag-stays-a-click")) return false;
+    ShadowRequestInfo other = UiaRequest("invoke");
+    other.click_opens = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), other).facts.action == ActionKind::kInvoke,
+               "click-rule-flag-leaves-an-invoke")) return false;
+  }
+
+  // The rule on facts: file manager vs download list vs a control vs an unlisted role.
+  const auto facts_for = [](SurfaceKind surface, ActionKind action,
+                            std::vector<NodeFacts> chain, const char *extension, bool file_item) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = action;
+    facts.target_is_file_item = file_item;
+    facts.extension_known = true;
+    facts.extension = extension;
+    facts.chain = std::move(chain);
+    return facts;
+  };
+  const std::vector<NodeFacts> row = {{"listitem", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}};
+  // A Button "Open" in a file manager: still the closed approval (E3).
+  {
+    const EffectFacts button = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick,
+                                         {{"button", "", "Open"}, {"window", "", "Docs"}}, "txt", false);
+    const InterlockVerdict verdict = InterlockForFacts(button);
+    if (!Check(MayOpen(button) && verdict.Refuses() && verdict.reason == InterlockReason::kApprovalClosed &&
+                   verdict.effect_class == EffectClass::kE3FileManagerOpen,
+               "click-rule-open-button-in-a-file-manager-is-still-e3")) return false;
+  }
+  // A download list's item: one click still opens in some browsers; still E2.
+  {
+    const EffectFacts item = facts_for(SurfaceKind::kDownloadPanel, ActionKind::kClick, row, "pdf", true);
+    const InterlockVerdict verdict = InterlockForFacts(item);
+    if (!Check(MayOpen(item) && verdict.Refuses() && verdict.reason == InterlockReason::kApprovalClosed &&
+                   verdict.effect_class == EffectClass::kE2DownloadOpen,
+               "click-rule-download-item-click-is-still-e2")) return false;
+  }
+  // A role nobody listed (Custom) in a file manager counts as opening: fail closed.
+  {
+    const EffectFacts custom = facts_for(
+        SurfaceKind::kFileBrowser, ActionKind::kClick,
+        {{"custom", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}}, "bat", true);
+    const InterlockVerdict verdict = InterlockForFacts(custom);
+    if (!Check(MayOpen(custom) && !ItemInSpan(custom) && verdict.Refuses() &&
+                   verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-custom-role-click-counts-as-opening")) return false;
+  }
+  // An arrow key (or Tab, Escape) is not an opening; Enter is.
+  {
+    EffectFacts arrow = facts_for(SurfaceKind::kFileBrowser, ActionKind::kKey, row, "bat", true);
+    arrow.key_is_activation = false;
+    if (!Check(!MayOpen(arrow) && !InterlockForFacts(arrow).Refuses(), "click-rule-arrow-key-is-not-opening"))
+      return false;
+    arrow.key_is_activation = true;
+    if (!Check(MayOpen(arrow) && InterlockForFacts(arrow).Refuses(), "click-rule-enter-key-is-opening"))
+      return false;
+    EffectFacts down = facts_for(SurfaceKind::kDownloadPanel, ActionKind::kKey, row, "pdf", true);
+    down.key_is_activation = false;
+    if (!Check(!MayOpen(down), "click-rule-arrow-key-in-a-download-list-is-not-opening")) return false;
+  }
+  // Finder: an AXRow under an AXOutline, one click: nothing to refuse; the same row double clicked is.
+  {
+    const std::vector<NodeFacts> finder = {{"axrow", "", "run.command"}, {"axoutline", "", "Files"},
+                                           {"axwindow", "", "Documents"}};
+    EffectFacts click = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, finder, "command", true);
+    if (!Check(!MayOpen(click) && !InterlockForFacts(click).Refuses(), "click-rule-finder-row-one-click-is-no-refusal"))
+      return false;
+    click.action = ActionKind::kDoubleClick;
+    if (!Check(MayOpen(click) && InterlockForFacts(click).Refuses(), "click-rule-finder-row-double-click-refuses"))
+      return false;
+  }
+  // An AXButton that carries a file (AXURL): a button, decided by its role, still opens.
+  {
+    const EffectFacts button = facts_for(
+        SurfaceKind::kFileBrowser, ActionKind::kClick,
+        {{"axbutton", "", "run.command"}, {"axwindow", "", "Documents"}}, "command", true);
+    if (!Check(MayOpen(button) && InterlockForFacts(button).Refuses(), "click-rule-button-with-a-url-click-is-opening"))
+      return false;
+  }
+  // The same click on any other surface is unchanged: it still counts.
+  {
+    const EffectFacts app = facts_for(SurfaceKind::kOrdinary, ActionKind::kClick, row, "bat", true);
+    if (!Check(MayOpen(app), "click-rule-click-outside-a-file-manager-still-counts")) return false;
+  }
+
+  // ClickCompletesDoubleClick: interval and distance are inclusive; no previous click or a clock
+  // that went backwards is not one.
+  {
+    const auto completes = [](std::uint64_t last, std::int32_t lx, std::int32_t ly, std::uint64_t now,
+                              std::int32_t x, std::int32_t y) {
+      return ClickCompletesDoubleClick(true, last, lx, ly, now, x, y, 500, 2, 2);
+    };
+    if (!Check(completes(1000, 10, 10, 1500, 10, 10), "dblclick-exact-interval")) return false;
+    if (!Check(!completes(1000, 10, 10, 1501, 10, 10), "dblclick-interval-plus-one")) return false;
+    if (!Check(completes(1000, 10, 10, 1000, 10, 10), "dblclick-same-tick")) return false;
+    if (!Check(completes(1000, 10, 10, 1200, 12, 8), "dblclick-exact-slop")) return false;
+    if (!Check(!completes(1000, 10, 10, 1200, 13, 10), "dblclick-slop-x-plus-one")) return false;
+    if (!Check(!completes(1000, 10, 10, 1200, 10, 13), "dblclick-slop-y-plus-one")) return false;
+    if (!Check(!completes(1000, 10, 10, 1200, 7, 10), "dblclick-slop-x-minus-plus-one")) return false;
+    if (!Check(!completes(1000, 10, 10, 999, 10, 10), "dblclick-clock-went-backwards")) return false;
+    if (!Check(!ClickCompletesDoubleClick(false, 0, 0, 0, 100, 10, 10, 500, 2, 2), "dblclick-no-previous-click"))
+      return false;
+    if (!Check(ClickCompletesDoubleClick(true, 1000, 0, 0, 1000, 0, 0, 0, 2, 2) &&
+                   !ClickCompletesDoubleClick(true, 1000, 0, 0, 1001, 0, 0, 0, 2, 2),
+               "dblclick-zero-interval-only-same-tick")) return false;
+    if (!Check(!ClickCompletesDoubleClick(true, 0, -2147483647 - 1, 0, 100, 2147483647, 0, 500, 2, 2),
+               "dblclick-extreme-coordinates")) return false;
+  }
+
+  std::cout << "Computer Use native click rule: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -7186,6 +7368,7 @@ int main() {
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
+  if (!CheckClickRule()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;

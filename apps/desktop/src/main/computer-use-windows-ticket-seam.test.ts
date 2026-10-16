@@ -650,6 +650,16 @@ function cutShadowWiring(text: string): string {
   return withoutShadow.slice(0, entryFrom) + withoutShadow.slice(entryTo + entryEnd.length);
 }
 
+// The click rule (#500 S5-c-2 PR-2) reads the shell's settings and the clock; it has its own
+// contract in computer-use-windows-click-rule.test.ts and is not part of the ticket.
+function cutClickRule(text: string): string {
+  const from = text.indexOf('// BEGIN click rule');
+  const endMarker = '// END click rule';
+  const to = text.indexOf(endMarker, from);
+  if (from < 0 || to < 0) throw new Error('Click rule markers changed');
+  return text.slice(0, from) + text.slice(to + endMarker.length);
+}
+
 function assembled(): string {
   const cutClock = (text: string): string => {
     const from = text.indexOf('std::uint64_t MonotonicNowNs() {');
@@ -666,7 +676,9 @@ function assembled(): string {
     between('std::string ErrorPayload(', 'bool Respond('),
     between('std::string ResponseCacheKey(', 'bool RevalidateWindowsTarget('),
     between('bool RespondAndCache(', 'WindowsSession *FindWindowsSession('),
-    cutClock(between('bool ValidateWindowsDispatchBinding(', 'bool DispatchWindowsAction(')),
+    cutClickRule(
+      cutClock(between('bool ValidateWindowsDispatchBinding(', 'bool DispatchWindowsAction(')),
+    ),
     shadowStub,
     cutShadowWiring(between('std::string WindowsPreflightReceipt(', 'bool ObserveWindowsWindow(')),
     '}  // namespace\n',

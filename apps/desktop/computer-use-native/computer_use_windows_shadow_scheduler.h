@@ -41,6 +41,8 @@ struct WindowsShadowJob {
   std::string policy_language;
   // The V1 preflight issued its ordinary ticket for this request.
   bool v1_ordinary = false;
+  // The click opens what it lands on (a double click, or a file manager that opens on one click).
+  bool click_opens = false;
 };
 
 // How the host gives the capture its world. Both run on the shadow's thread.
@@ -123,6 +125,7 @@ private:
       info.key = job.key;
       info.maximum_mode = job.maximum_mode;
       info.policy_language = job.policy_language;
+      info.click_opens = job.click_opens;
       EmitFromShadow(WindowsShadowClassify(capture, info, job.v1_ordinary));
     } catch (...) {
       // A shadow failure is invisible to the caller.

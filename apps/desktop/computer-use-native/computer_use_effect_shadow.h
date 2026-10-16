@@ -133,7 +133,25 @@ struct ShadowRequestInfo {
   std::string_view maximum_mode;
   std::string_view policy_language;
   std::string_view executable_path;
+  // A click that opens what it lands on: it completes a double click, or the file manager opens an
+  // item on one click. Facts then carry it as a double click. Ignored for any other kind.
+  bool click_opens = false;
 };
+
+// Whether a click completes a double click: the previous click was at most `interval_ms` before and
+// at most `slop_x` / `slop_y` pixels away on each axis (the same test the OS applies). No previous
+// click (`last_tick_ms` == 0 and no `has_last`), or a clock that went backwards, is not one.
+[[nodiscard]] inline bool ClickCompletesDoubleClick(bool has_last, std::uint64_t last_tick_ms,
+                                                    std::int32_t last_x, std::int32_t last_y,
+                                                    std::uint64_t now_tick_ms, std::int32_t x,
+                                                    std::int32_t y, std::uint32_t interval_ms,
+                                                    std::int32_t slop_x, std::int32_t slop_y) {
+  if (!has_last || now_tick_ms < last_tick_ms) return false;
+  if (now_tick_ms - last_tick_ms > interval_ms) return false;
+  const std::int64_t dx = static_cast<std::int64_t>(x) - last_x;
+  const std::int64_t dy = static_cast<std::int64_t>(y) - last_y;
+  return (dx < 0 ? -dx : dx) <= slop_x && (dy < 0 ? -dy : dy) <= slop_y;
+}
 
 struct ShadowFacts {
   EffectFacts facts;
@@ -396,6 +414,7 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
 
   ActionKind action = ActionKind::kClick;
   if (!ShadowActionForKind(request.kind, &action)) result.gaps |= kShadowGapUnsupportedAction;
+  if (request.kind == "click" && request.click_opens) action = ActionKind::kDoubleClick;
   facts.action = action;
   facts.key_is_activation = request.kind == "key" && request.key == "Enter";
   facts.mode = request.maximum_mode == "full_access_app" ? SessionMode::kFullAccess

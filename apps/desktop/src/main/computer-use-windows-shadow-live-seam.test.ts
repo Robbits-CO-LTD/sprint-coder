@@ -148,6 +148,9 @@ bool ReadJsonDouble(std::string_view json, std::string_view key, double *output)
   return true;
 }
 
+// The click rule (the host, #500 S5-c-2 PR-2) is its own contract; here a click never opens.
+bool WindowsClickOpens(const WindowsSession &, POINT) noexcept { return false; }
+
 //@@BLOCK@@
 
 } // namespace

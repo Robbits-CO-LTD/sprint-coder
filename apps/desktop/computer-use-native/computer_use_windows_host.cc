@@ -14,6 +14,7 @@
 #include <bcrypt.h>
 #include <dwmapi.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <softpub.h>
 #include <tlhelp32.h>
@@ -139,7 +140,17 @@ std::unordered_map<std::string, CachedResponse> response_cache;
 std::deque<std::string> response_cache_order;
 std::size_t response_cache_bytes = 0;
 
+// The previous click this helper sent to the target, for the double-click rule (#500 S5-c-2, the
+// click rule): a click that completes a double click opens what it lands on. Shared by copies.
+struct WindowsLastClick {
+  bool has = false;
+  std::uint64_t tick_ms = 0;
+  LONG x = 0;
+  LONG y = 0;
+};
+
 struct WindowsSession {
+  std::shared_ptr<WindowsLastClick> last_click = std::make_shared<WindowsLastClick>();
   // Counts API attempts, never inferred successful effects. Shared by session refocus copies.
   std::shared_ptr<std::atomic<std::uint64_t>> input_api_attempts =
       std::make_shared<std::atomic<std::uint64_t>>(0);
@@ -4310,6 +4321,46 @@ bool ConsumeWindowsDispatchTicket(const std::string &session_key,
   return consumed && session.cancel_epoch == cancel_epoch;
 }
 
+// BEGIN click rule (#500 S5-c-2 PR-2)
+// A single click on a passive item of a file manager only selects it (#777), unless it completes a
+// double click or the file manager opens an item on one click (its "single click to open" setting).
+// The portable rule is MayOpen; these two facts are what only the host knows.
+
+// Whether the user's file manager opens an item on ONE click. Read from the shell state each time.
+// The state starts zeroed, so a read that fills nothing says "single click" (= it opens: fail
+// closed). fDoubleClickInWebView is TRUE (-1) when a double click is required (the default).
+bool WindowsSingleClickOpens() noexcept {
+  SHELLSTATE state{};
+  SHGetSetSettings(&state, SSF_DOUBLECLICKINWEBVIEW, FALSE);
+  return state.fDoubleClickInWebView == 0;
+}
+
+// Remembers the click that was just sent (screen coordinates).
+void RecordWindowsClick(const WindowsSession &session, LONG x, LONG y) noexcept {
+  WindowsLastClick &last = *session.last_click;
+  last.has = true;
+  last.tick_ms = GetTickCount64();
+  last.x = x;
+  last.y = y;
+}
+
+// Whether a click at `point` opens what it lands on: the file manager opens on one click, or this
+// click completes a double click with the previous one. A system that cannot say how wide a double
+// click is, is treated as "opens".
+bool WindowsClickOpens(const WindowsSession &session, POINT point) noexcept {
+  if (WindowsSingleClickOpens())
+    return true;
+  const int slop_x = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
+  const int slop_y = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
+  if (slop_x <= 0 || slop_y <= 0)
+    return true;
+  const WindowsLastClick &last = *session.last_click;
+  return sprint_coder::computer_use::ClickCompletesDoubleClick(
+      last.has, last.tick_ms, last.x, last.y, GetTickCount64(), point.x, point.y,
+      GetDoubleClickTime(), slop_x, slop_y);
+}
+// END click rule
+
 bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
                            std::string *reason, bool *accepted) {
@@ -4384,8 +4435,10 @@ bool DispatchWindowsAction(const WindowsSession &session,
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
     const UINT sent =
         SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
-    if (sent > 0)
+    if (sent > 0) {
       *accepted = true;
+      RecordWindowsClick(session, screen_x, screen_y);
+    }
     dispatched =
         sent == 2 && RevalidateWindowsTarget(session, bounds, expected_epoch);
   } else if (kind == "scroll") {
@@ -4789,6 +4842,7 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
       point.y = bounds.top + static_cast<LONG>(std::lround(
                                  y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
     }
+    job.click_opens = kind == "click" && point_known && WindowsClickOpens(session, point);
     const HWND window = session.active_window;
     const std::uint64_t expected_epoch = session.cancel_epoch;
     // Valid while the cancellation epoch is the one the preflight was bound to (a cancel and the
@@ -4878,6 +4932,7 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     info.key = key;
     info.maximum_mode = session.maximum_mode;
     info.policy_language = session.policy_language;
+    info.click_opens = kind == "click" && WindowsClickOpens(session, point);
     return EvaluateWindowsInterlockOnSource(*source, kind, target_id, info, ruleset);
   } catch (...) {
     return unavailable;
