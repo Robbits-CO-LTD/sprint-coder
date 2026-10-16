@@ -394,20 +394,26 @@ int main(int argc, char **argv) {
     // The stuck worker ends, and the next evaluation runs.
     g_stall_ms.store(0);
     Check(WaitIdle(15000), "the_stuck_worker_ends");
+    // The single-flight slot is free once the stuck worker has ended. This is checked directly, before
+    // the first evaluation and outside any retry, so a slot that is never released cannot hide behind a
+    // retry (it would make every later evaluation a kBudget).
+    Check(!InterlockWorkerRunning().load(), "the_single_flight_slot_is_free_after_the_worker_ended");
     InterlockEvaluation after;
-    // A loaded machine may cut a read short (kBudget): a few tries, never a turned-away one.
-    for (int i = 0; i < 5; ++i) {
-      after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
-      WaitIdle(2000);
-      if (after.no_verdict == InterlockNoVerdict::kNone) break;
-    }
-    // Readable: the evaluation runs and finds nothing to refuse. Not readable: at least it is not
-    // turned away by the single-flight (kBudget).
-    Check(!after.Refuses(), "an_evaluation_after_the_worker_ended_does_not_refuse");
-    if (readable)
+    if (readable) {
+      // A loaded machine may cut a read short (a timeout: kBudget / kIncomplete): a few tries, and only
+      // for those two answers.
+      for (int i = 0; i < 5; ++i) {
+        after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
+        WaitIdle(2000);
+        if (after.no_verdict != InterlockNoVerdict::kBudget && after.no_verdict != InterlockNoVerdict::kIncomplete) break;
+      }
       Check(after.no_verdict == InterlockNoVerdict::kNone, "an_evaluation_after_the_worker_ended_runs");
-    else
-      Check(after.no_verdict != InterlockNoVerdict::kBudget, "an_evaluation_after_the_worker_ended_is_not_turned_away");
+    } else {
+      // UI Automation cannot read our windows here, so no_verdict says nothing (a timeout and the
+      // single-flight both look like kBudget): the slot check above is what is asked.
+      after = EvaluateWindowsInterlockOnLane(SessionFor(ordinary.handle), kClick, "click", ruleset);
+    }
+    Check(!after.Refuses(), "an_evaluation_after_the_worker_ended_does_not_refuse");
     WaitIdle(2000);
   }
 
