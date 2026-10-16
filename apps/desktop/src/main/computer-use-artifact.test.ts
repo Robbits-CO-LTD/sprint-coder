@@ -584,4 +584,30 @@ describe('ComputerUseArtifactStore (§4.2)', () => {
     expect(first).toMatch(/^[0-9a-f-]{36}$/u);
     expect(first).not.toBe(second);
   });
+
+  it('discard forgets only artifacts of its own binding (T15-8)', () => {
+    const { artifacts } = store();
+    const owner = { ...binding, sourceSessionId: 'session-a' };
+    const id = artifacts.create(owner, 'a')!.artifactId;
+    for (const other of [
+      { ...binding, taskId: 'task-2' },
+      { ...binding, turnId: 'turn-2' },
+      { ...binding, policyEpoch: 4 },
+    ]) {
+      artifacts.discard([id], other);
+      expect(artifacts.describeReference([id], binding)).not.toBeNull();
+    }
+    artifacts.discard([id], binding);
+    expect(artifacts.describeReference([id], binding)).toBeNull();
+  });
+
+  it('referencesMadeBy lists only what that session made, under that binding (T15-8)', () => {
+    const { artifacts } = store();
+    const mine = artifacts.create({ ...binding, sourceSessionId: 'session-a' }, 'a')!.artifactId;
+    artifacts.create({ ...binding, sourceSessionId: 'session-b' }, 'b');
+    artifacts.create({ ...binding, taskId: 'task-2', sourceSessionId: 'session-a' }, 'c');
+    expect(artifacts.referencesMadeBy('session-a', binding).map((r) => r.artifactId)).toEqual([
+      mine,
+    ]);
+  });
 });

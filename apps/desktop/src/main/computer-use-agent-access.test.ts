@@ -257,7 +257,9 @@ function createFixture(
     /** Runs every time an action audit row is recorded. */
     onAuditRecord?: () => void;
     /** A fake native that can read one node, and the store a copy goes to (#785 T15-6b). */
-    artifactRead?: { store: ComputerUseArtifactStore };
+    artifactRead?: { store: ComputerUseArtifactStore; readSupported?: boolean };
+    /** A fake native that can also paste an artifact (#785 T15-7, T15-8). */
+    artifactPaste?: boolean;
   } = {},
 ) {
   const profiles = [...(options.profiles ?? [profileRecord('profile-notes', macIdentity())])];
@@ -274,6 +276,7 @@ function createFixture(
   let plannedRounds = 0;
   const statuses: ComputerUseSessionStatus[] = [];
   const approvals: ComputerUseApproval[] = [];
+  const dispatchedActions: ComputerUseAction[] = [];
   const native: ComputerUseNativeHost = {
     availability: () => availability,
     pickApplication: async () => null,
@@ -319,10 +322,14 @@ function createFixture(
     ...(options.artifactRead === undefined
       ? {}
       : {
-          artifactReadSupported: () => true,
+          artifactReadSupported: () => options.artifactRead?.readSupported !== false,
           readNodeValue: async () => ({ ok: true as const, text: 'Total 42' }),
         }),
-    dispatch: async () => ({ result: 'completed', reasonCode: null }),
+    ...(options.artifactPaste === true ? { artifactPasteSupported: () => true } : {}),
+    dispatch: async (input) => {
+      dispatchedActions.push(input.action);
+      return { result: 'completed', reasonCode: null };
+    },
     cancel: async () => undefined,
     close: async () => {
       closedSessions += 1;
@@ -441,6 +448,7 @@ function createFixture(
     startRoutes,
     audits: () => [...audits.values()],
     approvals,
+    dispatchedActions: () => dispatchedActions,
     /** Why the last session ended, as the status stream published it. */
     finalStopReason: () =>
       statuses.filter((status) => status.state === 'stopped').at(-1)?.stopReason,
@@ -2446,5 +2454,392 @@ describe('computer_start', () => {
     await expect(
       fixture.controller.startForAgent({ targetToken: 'anything', goal: 'x' }, context),
     ).rejects.toThrow(/unavailable/u);
+  });
+});
+
+// ---- #785 T15-8: what `computer_start` returns about copied values, and what it carries on ---------
+
+describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
+  type Fixture = ReturnType<typeof createFixture>;
+  const turnOwner = {
+    taskId: 'task-1',
+    turnId: 'turn-1',
+    policyEpoch: 0,
+    sourceSessionId: 'session-elsewhere',
+  } as const;
+  const taskBinding = { taskId: 'task-1', turnId: 'turn-1', policyEpoch: 0 } as const;
+  const carryRefused = 'Computer Use carry is not valid';
+
+  const grant = (fixture: Fixture): void => {
+    fixture.controller.createAppGrant(grantIdentityOf(fixture.profiles[0]!), {
+      maxMode: 'full_access_app',
+      providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
+    });
+  };
+  const target = async (fixture: Fixture) => await listOne(fixture);
+  const pendingCard = (fixture: Fixture): ComputerUseApproval | undefined =>
+    fixture.approvals.filter((approval) => approval.state === 'pending').at(-1);
+  const answerCard = async (fixture: Fixture, decision: 'allow_once' | 'deny'): Promise<void> => {
+    const card = pendingCard(fixture)!;
+    await fixture.controller.resolveApproval({
+      approvalId: card.id,
+      expectedRevision: card.revision,
+      decision,
+      challenge: card.challenge,
+    });
+  };
+  const untilCard = async (fixture: Fixture): Promise<void> => {
+    for (let step = 0; step < 100 && pendingCard(fixture) === undefined; step += 1)
+      await vi.advanceTimersByTimeAsync(10);
+    expect(pendingCard(fixture)).toBeDefined();
+  };
+  /**
+   * The text of a copied value reaches a screen only as the escaped excerpt in `status.copied` and
+   * in the live approval card's `transfer` (T15-9). The outer agent's result, the audit and every other field of
+   * the status never hold it, and the result never names `copied`, `transfer` or `sourceLabel`.
+   */
+  const expectNoBodyOutside = (fixture: Fixture, out: Record<string, unknown>): void => {
+    const outer = JSON.stringify([out, fixture.audits()]);
+    for (const secret of ['Total 42', 'Notes', 'com.example.notes'])
+      expect(outer).not.toContain(secret);
+    for (const key of ['copied', 'transfer', 'sourceLabel', 'excerpt'])
+      expect(Object.keys(out), key).not.toContain(key);
+    // The two places made for it: `copied` and the live card's `transfer`. Nothing else.
+    const rest = JSON.stringify(
+      fixture.statuses.map(({ copied: _copied, pendingApproval, ...others }) => ({
+        ...others,
+        pendingApproval:
+          pendingApproval === undefined || pendingApproval === null
+            ? pendingApproval
+            : (({ transfer: _transfer, ...card }) => card)(pendingApproval),
+      })),
+    );
+    for (const secret of ['Total 42', 'com.example.notes']) expect(rest).not.toContain(secret);
+  };
+  const typedText = (fixture: Fixture): string =>
+    fixture
+      .dispatchedActions()
+      .map((action) => (action.type === 'type' ? action.text : ''))
+      .join('');
+  /** A fixture whose inner planner answers from a queue (then finishes). */
+  function withPlans(options: Parameters<typeof createFixture>[0] = {}): {
+    fixture: Fixture;
+    plans: ComputerUseAction[];
+  } {
+    const plans: ComputerUseAction[] = [];
+    const fixture = createFixture({
+      ...options,
+      plan: async () => plans.shift() ?? { type: 'finish' },
+    });
+    return { fixture, plans };
+  }
+  const newStore = (now: () => number = () => performance.now()) =>
+    new ComputerUseArtifactStore({ now });
+  const startA = async (fixture: Fixture, goal = 'copy the total') =>
+    await settle(
+      fixture.controller.startForAgent(
+        { targetToken: (await target(fixture)).targetToken, goal },
+        context,
+      ),
+    );
+
+  it('copy in A, carry into B, paste in B with a card each time: the whole trip (N15 N21)', async () => {
+    const store = newStore();
+    const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    plans.push({ type: 'copy', targetId: 'node-1' });
+    const outA = await startA(fixture);
+    // Only a reference leaves: an opaque id, a kind, a size bucket. No text, no title, no app name.
+    expect(outA.artifacts).toEqual([
+      { artifactId: expect.any(String), kind: 'text', sizeClass: 'le_256' },
+    ]);
+    expect(Object.keys(outA.artifacts![0]!).sort()).toEqual(['artifactId', 'kind', 'sizeClass']);
+    expect(computerStartToolOutputSchema.parse(outA)).toEqual(outA);
+    expectNoBodyOutside(fixture, outA);
+    const artifactId = outA.artifacts![0]!.artifactId;
+
+    // B: the artifact is carried in, and pasting it raises a card every time.
+    plans.push({ type: 'type', artifactRef: artifactId } as never);
+    const running = fixture.controller.startForAgent(
+      {
+        targetToken: (await target(fixture)).targetToken,
+        goal: 'type the total',
+        carry: [{ artifactId }],
+      },
+      context,
+    );
+    await untilCard(fixture);
+    // Nothing typed before the person answers, and only allow_once or deny can be chosen.
+    expect(fixture.dispatchedActions()).toEqual([]);
+    expect(pendingCard(fixture)!.allowedDecisions).toEqual(['allow_once', 'deny']);
+    await answerCard(fixture, 'allow_once');
+    const outB = await settle(running);
+    expect(typedText(fixture)).toBe('Total 42');
+    expect(outB.stopReason).toBe('agent_finish');
+    // B copied nothing, so its result has no `artifacts` at all.
+    expect(outB).not.toHaveProperty('artifacts');
+    // Used up by the paste: nothing of it is left to carry again.
+    expect(store.describeReference([artifactId], taskBinding)).toBeNull();
+    expectNoBodyOutside(fixture, outB);
+  });
+
+  it('pastes nothing when the card is denied, and discards the artifact when B ends (one session uses it up)', async () => {
+    const store = newStore();
+    const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    plans.push({ type: 'copy', targetId: 'node-1' });
+    const outA = await startA(fixture);
+    const artifactId = outA.artifacts![0]!.artifactId;
+    expect(store.describeReference([artifactId], taskBinding)).not.toBeNull();
+    plans.push({ type: 'type', artifactRef: artifactId } as never);
+    const running = fixture.controller.startForAgent(
+      { targetToken: (await target(fixture)).targetToken, goal: 'x', carry: [{ artifactId }] },
+      context,
+    );
+    await untilCard(fixture);
+    await answerCard(fixture, 'deny');
+    await settle(running);
+    expect(fixture.dispatchedActions()).toEqual([]);
+    // Denied and B ended: what was carried into B and not used is gone.
+    expect(store.describeReference([artifactId], taskBinding)).toBeNull();
+  });
+
+  it("carries only this Task, Turn and epoch's own live artifact, and always says the same thing (N9 N10 N11 N17)", async () => {
+    let clock = 0;
+    const store = newStore(() => clock);
+    const make = (owner: Parameters<ComputerUseArtifactStore['create']>[0]): string =>
+      store.create(owner, 'Total 42')!.artifactId;
+    const cases: Array<[string, () => readonly string[]]> = [
+      ['another Task', () => [make({ ...turnOwner, taskId: 'task-2' })]],
+      ['another Turn', () => [make({ ...turnOwner, turnId: 'turn-2' })]],
+      ['another policy epoch', () => [make({ ...turnOwner, policyEpoch: 5 })]],
+      ['a guessed id', () => ['00000000-0000-4000-8000-000000000000']],
+      [
+        'an id repeated',
+        () => {
+          const id = make(turnOwner);
+          return [id, id];
+        },
+      ],
+      ['one good id and one that is not', () => [make(turnOwner), 'nope']],
+      [
+        'an expired artifact',
+        () => {
+          const id = make(turnOwner);
+          clock += 11 * 60_000;
+          return [id];
+        },
+      ],
+      [
+        'an artifact already used',
+        () => {
+          const id = make(turnOwner);
+          store.take([id], taskBinding);
+          return [id];
+        },
+      ],
+      ['four ids', () => [make(turnOwner), make(turnOwner), make(turnOwner), 'nope']],
+    ];
+    const messages = new Set<string>();
+    for (const [name, build] of cases) {
+      const { fixture } = withPlans({ artifactRead: { store }, artifactPaste: true });
+      grant(fixture);
+      const row = await target(fixture);
+      const ids = build();
+      const error = await fixture.controller
+        .startForAgent(
+          {
+            targetToken: row.targetToken,
+            goal: 'x',
+            carry: ids.map((artifactId) => ({ artifactId })),
+          },
+          context,
+        )
+        .then(
+          () => null,
+          (thrown: unknown) => thrown,
+        );
+      expect(error, name).toBeInstanceOf(Error);
+      messages.add((error as Error).message);
+      // Refused before the token is spent and before native is asked for anything.
+      expect(fixture.startedSessions(), name).toBe(0);
+      const out = await settle(
+        fixture.controller.startForAgent({ targetToken: row.targetToken, goal: 'x' }, context),
+      );
+      expect(out.state, name).toBe('stopped');
+    }
+    expect([...messages]).toEqual([carryRefused]);
+  });
+
+  it('refuses a carry on a host that cannot paste, and leaves the artifact alone (production flags)', async () => {
+    const store = newStore();
+    const id = store.create(turnOwner, 'Total 42')!.artifactId;
+    const { fixture } = withPlans({ artifactRead: { store } });
+    grant(fixture);
+    await expect(
+      fixture.controller.startForAgent(
+        {
+          targetToken: (await target(fixture)).targetToken,
+          goal: 'x',
+          carry: [{ artifactId: id }],
+        },
+        context,
+      ),
+    ).rejects.toThrow(carryRefused);
+    expect(fixture.startedSessions()).toBe(0);
+    expect(store.describeReference([id], taskBinding)).not.toBeNull();
+  });
+
+  it('with no artifact support at all the result is exactly what it was, and a carry is refused (production flags)', async () => {
+    const fixture = createFixture();
+    grant(fixture);
+    const row = await target(fixture);
+    await expect(
+      fixture.controller.startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: 'anything' }] },
+        context,
+      ),
+    ).rejects.toThrow(carryRefused);
+    const out = await settle(
+      fixture.controller.startForAgent({ targetToken: row.targetToken, goal: 'x' }, context),
+    );
+    expect(Object.keys(out).sort()).toEqual([
+      'maxRounds',
+      'mode',
+      'round',
+      'sessionId',
+      'state',
+      'stopReason',
+    ]);
+  });
+
+  it('lists nothing where the host cannot read a node, whatever the store holds of the session', async () => {
+    for (const readSupported of [true, false]) {
+      const store = newStore();
+      const fixture = createFixture({
+        artifactRead: { store, readSupported },
+        plan: async () => {
+          store.create(
+            { ...turnOwner, sourceSessionId: fixture.statuses.at(-1)!.sessionId },
+            'Total 42',
+          );
+          return { type: 'finish' };
+        },
+      });
+      grant(fixture);
+      const out = await startA(fixture);
+      // The store holds the session's value either way; only a host that reads can have made it,
+      // so only then is it listed.
+      if (readSupported) expect(out.artifacts).toHaveLength(1);
+      else expect(out).not.toHaveProperty('artifacts');
+    }
+  });
+
+  it('does not carry an artifact of another Turn: the Turn is the caller own, not a constant', async () => {
+    const store = newStore();
+    const secondTurn = { ...context, turnId: 'turn-2' } as const;
+    const { fixture } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    const id = store.create(turnOwner, 'Total 42')!.artifactId;
+    const row = await listOne(fixture, secondTurn);
+    await expect(
+      fixture.controller.startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: id }] },
+        secondTurn,
+      ),
+    ).rejects.toThrow(carryRefused);
+    expect(fixture.startedSessions()).toBe(0);
+  });
+
+  it('lists a session that did not end well by its references alone, and keeps text out of everything else (N19)', async () => {
+    const store = newStore();
+    const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    // A copy, then an action the planner may not take: the session ends badly.
+    plans.push({ type: 'copy', targetId: 'node-1' }, { type: 'copy', targetId: 'missing' });
+    const out = await startA(fixture);
+    // Not vacuous: the copy that did happen is listed.
+    expect(out.artifacts).toHaveLength(1);
+    for (const artifact of out.artifacts ?? [])
+      expect(Object.keys(artifact).sort()).toEqual(['artifactId', 'kind', 'sizeClass']);
+    expectNoBodyOutside(fixture, out);
+  });
+
+  it('lists only what this session made, not another session of the same Turn (T15-8)', async () => {
+    const store = newStore();
+    const fixture = createFixture({
+      artifactRead: { store },
+      plan: async () => {
+        const mine = fixture.statuses.at(-1)!.sessionId;
+        store.create({ ...turnOwner, sourceSessionId: mine }, 'Mine 1');
+        store.create({ ...turnOwner, sourceSessionId: 'session-other' }, 'Not mine');
+        return { type: 'finish' };
+      },
+    });
+    grant(fixture);
+    const out = await startA(fixture);
+    expect(out.artifacts).toHaveLength(1);
+    const other = store.referencesMadeBy('session-other', taskBinding);
+    expect(other).toHaveLength(1);
+    expect(out.artifacts![0]!.artifactId).not.toBe(other[0]!.artifactId);
+  });
+
+  it('checks the carry against the current policy epoch, not epoch 0 (T15-8)', async () => {
+    const store = newStore();
+    const { fixture } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    const row = await target(fixture);
+    fixture.setPolicyEpoch(3);
+    const old = store.create(turnOwner, 'old epoch')!.artifactId;
+    await expect(
+      fixture.controller.startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: old }] },
+        context,
+      ),
+    ).rejects.toThrow(carryRefused);
+    // (Creating under epoch 3 drops the epoch-0 one, so this comes after the refusal above.)
+    const current = store.create({ ...turnOwner, policyEpoch: 3 }, 'epoch 3')!.artifactId;
+    // The artifact of the current epoch passes the carry check (the stale token is refused later,
+    // and with a different message).
+    const error = await fixture.controller
+      .startForAgent(
+        { targetToken: row.targetToken, goal: 'x', carry: [{ artifactId: current }] },
+        context,
+      )
+      .then(
+        () => null,
+        (thrown: unknown) => thrown as Error,
+      );
+    expect(error?.message).not.toBe(carryRefused);
+  });
+
+  it('leaves nothing attached when the session fails to start (T15-8)', async () => {
+    const store = newStore();
+    const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
+    grant(fixture);
+    plans.push({ type: 'copy', targetId: 'node-1' });
+    const outA = await startA(fixture);
+    const artifactId = outA.artifacts![0]!.artifactId;
+    const internals = fixture.controller as unknown as {
+      broker: { startTurn: (...args: unknown[]) => unknown };
+      attachedArtifacts: Map<string, unknown>;
+    };
+    const spy = vi.spyOn(internals.broker, 'startTurn').mockImplementation(() => {
+      throw new Error('start failed');
+    });
+    await expect(
+      fixture.controller.startForAgent(
+        {
+          targetToken: (await target(fixture)).targetToken,
+          goal: 'x',
+          carry: [{ artifactId }],
+        },
+        context,
+      ),
+    ).rejects.toThrow('start failed');
+    spy.mockRestore();
+    expect(internals.attachedArtifacts.size).toBe(0);
+    // And the carried artifact was not used up by the failed start.
+    expect(store.describeReference([artifactId], taskBinding)).not.toBeNull();
   });
 });
