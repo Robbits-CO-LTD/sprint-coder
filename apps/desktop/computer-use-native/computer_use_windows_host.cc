@@ -4891,7 +4891,9 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // Automation calls, then a shell lookup's wait of 150 ms: up to 650 ms) and CoreWindowProcessPath
 // (two calls: 500 ms). Started just before the deadline they can run past 500 ms (about 850 ms by
 // this arithmetic); for them the lane's wait_for cut-off (kBudget, worker abandoned) is the real
-// bound of the hold, not the estimate.
+// bound of the hold, not the estimate. Before the wait the lane also reads the click facts
+// (WindowsClickOpens: a settings read and GetLastInputInfo, microseconds, never a wait); that read
+// sits outside this bound.
 constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};
 static_assert(150 + sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs + 50 <= 500,
               "holds for a step of ONE UI Automation call only; longer steps are bounded by the wait_for cut-off");
@@ -4939,7 +4941,7 @@ std::atomic<bool> &InterlockWorkerRunning() {
     // The click facts the host alone knows, taken HERE on the lane (a cheap system call, never a
     // wait) and handed to the worker by value: the worker touches no session and no system state.
     // The time of the last input is read at this request, not when a worker finally runs.
-    const bool click_tracked = kind == "click";
+    const bool click_tracked = kind == "click" && point_known;
     const bool click_opens = click_tracked && WindowsClickOpens();
     // Everything that can throw is prepared BEFORE the single-flight slot is taken, so a failure
     // here cannot leave the slot taken for ever.

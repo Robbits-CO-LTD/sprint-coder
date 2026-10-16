@@ -109,7 +109,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     // The synchronous entry takes both on the lane, before the worker exists, and hands them to the
     // worker by value; the worker reads no system state of its own for them.
     expect(squashed).toContain(
-      'const bool click_tracked = kind == "click"; const bool click_opens = click_tracked && WindowsClickOpens();',
+      'const bool click_tracked = kind == "click" && point_known; const bool click_opens = click_tracked && WindowsClickOpens();',
     );
     expect(squashed).toContain(
       'info.click_tracked = click_tracked; info.click_opens = click_opens;',
