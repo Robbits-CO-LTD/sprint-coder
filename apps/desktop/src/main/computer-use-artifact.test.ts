@@ -426,6 +426,7 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ],
     ['a card number', '4111 1111 1111 1111'],
     ['a card number with hyphens', 'card 5555-5555-5555-4444 exp'],
+    ['a card number in two groups of uneven size', '4111111111 111111'],
     ['a GitHub OAuth token', 'gho_0123456789abcdefghijABCDEFGHIJ'],
     ['a GitHub server token', 'ghs_0123456789abcdefghijABCDEFGHIJ'],
     ['a GitHub refresh token', 'ghr_0123456789abcdefghijABCDEFGHIJ'],
@@ -658,6 +659,24 @@ describe('ComputerUseArtifactStore (§4.2)', () => {
     expect(artifacts.create(owner, '482913')).toBeNull();
     const created = artifacts.create(owner, 'Ａ\r\nB')!;
     expect(artifacts.take([created.artifactId], binding)).toEqual(['A\nB']);
+  });
+
+  it('N11: default ids are version-4 UUIDs, never repeat, and are not a counting sequence even with a frozen clock', () => {
+    const artifacts = new ComputerUseArtifactStore({ now: () => 0 });
+    const ids: string[] = [];
+    for (let index = 0; index < 1_000; index += 1) {
+      const created = artifacts.create(
+        { taskId: `task-${index}`, turnId: 't', policyEpoch: 0, sourceSessionId: 's' },
+        'x',
+      );
+      ids.push(created!.artifactId);
+    }
+    for (const id of ids)
+      expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
+    expect(new Set(ids).size).toBe(ids.length);
+    const numbers = ids.map((id) => BigInt(`0x${id.replaceAll('-', '')}`));
+    const steps = new Set(numbers.slice(1).map((value, index) => value - numbers[index]!));
+    expect(steps.size).toBeGreaterThan(900);
   });
 
   it('N11: ids it hands out are unguessable random values by default', () => {

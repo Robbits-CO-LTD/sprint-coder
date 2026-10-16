@@ -2508,14 +2508,23 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
       expect(outer).not.toContain(secret);
     for (const key of ['copied', 'transfer', 'sourceLabel', 'excerpt'])
       expect(Object.keys(out), key).not.toContain(key);
-    // The two places made for it: `copied` and the live card's `transfer`. Nothing else.
+    // The two places made for it: `copied[].excerpt` and the live card's `transfer.excerpt`. The rest
+    // of `transfer` (labels, size) and everything else must be clean too.
     const rest = JSON.stringify(
-      fixture.statuses.map(({ copied: _copied, pendingApproval, ...others }) => ({
+      fixture.statuses.map(({ copied, pendingApproval, ...others }) => ({
         ...others,
+        copied: copied.map(({ excerpt: _excerpt, ...value }) => value),
         pendingApproval:
           pendingApproval === undefined || pendingApproval === null
             ? pendingApproval
-            : (({ transfer: _transfer, ...card }) => card)(pendingApproval),
+            : {
+                ...pendingApproval,
+                ...(pendingApproval.transfer === undefined
+                  ? {}
+                  : (({ excerpt: _excerpt, ...transfer }) => ({ transfer }))(
+                      pendingApproval.transfer,
+                    )),
+              },
       })),
     );
     for (const secret of ['Total 42', 'com.example.notes']) expect(rest).not.toContain(secret);
@@ -2547,7 +2556,7 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
       ),
     );
 
-  it('copy in A, carry into B, paste in B with a card each time: the whole trip (N15 N21)', async () => {
+  it('copy in A, carry into B, paste in B with a card each time: the whole trip (N21)', async () => {
     const store = newStore();
     const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
     grant(fixture);
@@ -2760,8 +2769,10 @@ describe('computer_start: artifacts out, carry in (#785 T15-8)', () => {
     const { fixture, plans } = withPlans({ artifactRead: { store }, artifactPaste: true });
     grant(fixture);
     // A copy, then an action the planner may not take: the session ends badly.
-    plans.push({ type: 'copy', targetId: 'node-1' }, { type: 'copy', targetId: 'missing' });
+    plans.push({ type: 'copy', targetId: 'node-1' }, { type: 'click', x: 5, y: 5, button: 'left' });
     const out = await startA(fixture);
+    // The ending first: this was not the planner's clean finish, or the test would prove nothing.
+    expect(out.stopReason).not.toBe('agent_finish');
     // Not vacuous: the copy that did happen is listed.
     expect(out.artifacts).toHaveLength(1);
     for (const artifact of out.artifacts ?? [])
