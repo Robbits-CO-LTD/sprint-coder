@@ -20,6 +20,7 @@
 // has initialized COM). The thread that calls it must have COM initialized.
 
 #include "computer_use_windows_shadow_reader.h"
+#include "computer_use_windows_shell_name_match.h"
 
 #include <windows.h>
 
@@ -34,6 +35,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cwchar>
 #include <functional>
 #include <mutex>
 #include <memory>
@@ -167,23 +169,45 @@ struct ShellItemAnswer {
   bool is_folder = false;
 };
 
-// How long, and for how many items, the shell lookup may go on. It is ONE gated call of the reader,
-// so it keeps its own limits: the action still being valid, a deadline, and a cap on the items it
-// goes through. A folder bigger than the cap, or a lookup past the deadline, is "not known".
+// How long the shell lookup may go on. It is ONE gated call of the reader, so it keeps its own
+// limits: the action still being valid, a deadline, and (in the matcher) a cap on the candidate
+// entries it collects. A lookup past the deadline, or with more candidates than the cap, is "not
+// known". The size of the folder does not matter: only entries whose names start with the display
+// name are listed.
 struct ShellLookupLimits {
   std::function<bool()> still_valid;
   std::function<std::uint64_t()> now_ns;
   std::uint64_t deadline_ns = 0;
 };
-constexpr int kShellLookupMaxItems = 512;
 constexpr int kShellLookupMaxWindows = 64;
 constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;
 
-// The path of the item a file browser shows under `display_name`, found in the shell view of the
-// tab (or of the window) by its display name. Read-only: windows and views are asked for, never
-// navigated, selected or invoked. kAbsent when there is no such view, the name is not unique in the
-// view (a hidden extension can make two items look alike), the item has no file-system path
-// (a search, This PC, a library), the folder is too big to look through, or the deadline passed.
+// Whether the file system compares two names as equal, the way Explorer does (ordinal, case-blind).
+[[nodiscard]] inline bool ShellNameEqualsOrdinal(std::wstring_view left, std::wstring_view right) {
+  if (left.size() != right.size()) return false;
+  if (left.empty()) return true;
+  return CompareStringOrdinal(left.data(), static_cast<int>(left.size()), right.data(),
+                              static_cast<int>(right.size()), TRUE) == CSTR_EQUAL;
+}
+
+struct FindHandle {
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  FindHandle() = default;
+  FindHandle(const FindHandle &) = delete;
+  FindHandle &operator=(const FindHandle &) = delete;
+  ~FindHandle() {
+    if (handle != INVALID_HANDLE_VALUE) FindClose(handle);
+  }
+};
+
+// The path of the item a file browser shows under `display_name`. The folder the view shows is asked
+// for its file-system path ONCE; the entries of that folder whose names START WITH the display name
+// are then listed in THIS process (FindFirstFileExW: a cost that follows the number of candidates, not
+// the size of the folder), and MatchShellDisplayName decides which entry the display name stands for
+// (a hidden extension, a shortcut, an 8.3 name). Read-only: windows and views are asked for, never
+// navigated, selected or invoked, and nothing is opened. kAbsent when there is no such view, the
+// folder has no file-system path (a search, This PC, a library), no entry or more than one entry fits
+// the name, there are more candidates than the cap, or the deadline passed.
 [[nodiscard]] inline ShadowReadResult ShellItemPathByName(HWND tab, HWND top,
                                                           std::wstring_view display_name,
                                                           const ShellLookupLimits &limits,
@@ -244,46 +268,62 @@ constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;
       folder_view.Get() == nullptr ||
       FAILED(folder_view.Get()->GetFolder(IID_PPV_ARGS(folder.Receive()))) || folder.Get() == nullptr)
     return ShadowReadResult::kAbsent;
-  int items = 0;
-  if (FAILED(folder_view.Get()->ItemCount(SVGIO_ALLVIEW, &items))) return ShadowReadResult::kFailed;
-  if (items <= 0 || items > kShellLookupMaxItems) return ShadowReadResult::kAbsent;
+  // The folder's path, once. A folder that is no directory of the file system has none.
+  PIDLIST_ABSOLUTE folder_id = nullptr;
+  if (FAILED(SHGetIDListFromObject(folder.Get(), &folder_id)) || folder_id == nullptr)
+    return ShadowReadResult::kAbsent;
+  std::wstring folder_path(32768, L'\0');
+  const BOOL has_path = SHGetPathFromIDListEx(folder_id, folder_path.data(),
+                                              static_cast<DWORD>(folder_path.size()), GPFIDL_DEFAULT);
+  ILFree(folder_id);
+  if (!has_path) return ShadowReadResult::kAbsent;
+  folder_path.resize(wcslen(folder_path.c_str()));
+  if (folder_path.empty() || !ShellDisplayNameUsable(display_name)) return ShadowReadResult::kAbsent;
+  std::wstring pattern = folder_path;
+  if (pattern.back() != L'\\') pattern.push_back(L'\\');
+  pattern.append(display_name);
+  pattern.push_back(L'*');
+  // A path past MAX_PATH would need the extended prefix: it is not looked up.
+  if (pattern.size() >= MAX_PATH) return ShadowReadResult::kAbsent;
 
-  ComRef<IShellItem> matched;
-  for (int index = 0; index < items; ++index) {
+  // Whether Explorer shows known extensions decides which entries a display name can stand for.
+  SHELLSTATE state{};
+  SHGetSetSettings(&state, SSF_SHOWEXTENSIONS, FALSE);
+  const bool extensions_shown = state.fShowExtensions != 0;
+
+  std::vector<ShellNameCandidate> candidates;
+  FindHandle find;
+  WIN32_FIND_DATAW entry{};
+  find.handle = FindFirstFileExW(pattern.c_str(), FindExInfoBasic, &entry, FindExSearchNameMatch,
+                                 nullptr, FIND_FIRST_EX_LARGE_FETCH);
+  if (find.handle == INVALID_HANDLE_VALUE) {
+    const DWORD error = GetLastError();
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ? ShadowReadResult::kAbsent
+                                                                         : ShadowReadResult::kFailed;
+  }
+  for (;;) {
     if (!limits.still_valid()) return ShadowReadResult::kStopped;
     if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
-    PITEMID_CHILD child = nullptr;
-    // An item that cannot be read leaves the uniqueness of the name unknown: the whole lookup is
-    // not obtained (a readable file beside an unreadable .lnk of the same display name would
-    // otherwise be taken for the target).
-    if (FAILED(folder_view.Get()->Item(index, &child)) || child == nullptr)
+    const std::wstring_view found(entry.cFileName);
+    if (found != L"." && found != L"..") {
+      // One past the cap is enough to know there are too many.
+      if (candidates.size() >= kShellMaxCandidates) return ShadowReadResult::kAbsent;
+      candidates.push_back(
+          {std::wstring(found), (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0});
+    }
+    if (!FindNextFileW(find.handle, &entry)) {
+      if (GetLastError() == ERROR_NO_MORE_FILES) break;
       return ShadowReadResult::kFailed;
-    ComRef<IShellItem> item;
-    const HRESULT made =
-        SHCreateItemWithParent(nullptr, folder.Get(), child, IID_PPV_ARGS(item.Receive()));
-    ILFree(child);
-    if (FAILED(made) || item.Get() == nullptr) return ShadowReadResult::kFailed;
-    PWSTR shown = nullptr;
-    if (FAILED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) || shown == nullptr)
-      return ShadowReadResult::kFailed;
-    const bool same = std::wstring_view(shown) == display_name;
-    CoTaskMemFree(shown);
-    if (!same) continue;
-    // Two items with the same display name (a hidden extension): which one was meant is not known.
-    if (matched.Get() != nullptr) return ShadowReadResult::kAbsent;
-    matched = std::move(item);
+    }
   }
-  if (matched.Get() == nullptr) return ShadowReadResult::kAbsent;
-  PWSTR file_path = nullptr;
-  if (FAILED(matched.Get()->GetDisplayName(SIGDN_FILESYSPATH, &file_path)) || file_path == nullptr)
-    return ShadowReadResult::kAbsent;
-  answer->path = file_path;
-  CoTaskMemFree(file_path);
-  SFGAOF attributes = 0;
-  if (FAILED(matched.Get()->GetAttributes(SFGAO_FOLDER | SFGAO_STREAM, &attributes)))
-    return ShadowReadResult::kFailed;
-  // An archive is both a folder and a stream: it is a file with an extension.
-  answer->is_folder = (attributes & SFGAO_FOLDER) != 0 && (attributes & SFGAO_STREAM) == 0;
+  const std::size_t index =
+      MatchShellDisplayName(display_name, candidates, extensions_shown, ShellNameEqualsOrdinal);
+  if (index == kNoShellMatch) return ShadowReadResult::kAbsent;
+  answer->path = folder_path;
+  if (answer->path.back() != L'\\') answer->path.push_back(L'\\');
+  answer->path.append(candidates[index].name);
+  // A directory of the file system is a folder; an archive is a file.
+  answer->is_folder = candidates[index].is_directory;
   return ShadowReadResult::kOk;
 }
 

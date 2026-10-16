@@ -14,6 +14,7 @@
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_windows_shell_name_match.h"
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
 #include "computer_use_native_refusal_table.h"
@@ -6751,6 +6752,82 @@ bool CheckWindowsInterlockCapture() {
   return true;
 }
 
+// ---- Classifier v2, S5-c-2 PR-3: the display name of a file browser item -> the real entry ---------
+
+bool CheckWindowsShellNameMatch() {
+  using namespace sprint_coder::computer_use;
+  const auto entries = [](std::initializer_list<const wchar_t *> names) {
+    std::vector<ShellNameCandidate> list;
+    for (const wchar_t *name : names) list.push_back({name, false});
+    return list;
+  };
+  const auto match = [](std::wstring_view display, const std::vector<ShellNameCandidate> &list, bool shown) {
+    return MatchShellDisplayName(display, list, shown);
+  };
+  // An exact name is the entry (extensions shown or hidden).
+  if (!Check(match(L"run.bat", entries({L"run.bat"}), true) == 0, "shellname-exact-shown")) return false;
+  if (!Check(match(L"run.bat", entries({L"run.bat"}), false) == 0, "shellname-exact-hidden")) return false;
+  // Extensions hidden: the display name is the stem of exactly one entry.
+  if (!Check(match(L"report", entries({L"report.pdf"}), false) == 0, "shellname-hidden-stem-matches")) return false;
+  if (!Check(match(L"report", entries({L"report.pdf", L"report.docx"}), false) == kNoShellMatch,
+             "shellname-hidden-stem-two-extensions-is-unknown")) return false;
+  // Extensions shown: a stem is NOT the display name of an ordinary file ...
+  if (!Check(match(L"report", entries({L"report.pdf"}), true) == kNoShellMatch, "shellname-shown-stem-is-not-a-file")) return false;
+  // ... except for the extensions Explorer always hides.
+  for (const wchar_t *hidden : {L"x.lnk", L"x.url", L"x.pif", L"x.scf", L"x.shb", L"x.appref-ms", L"x.library-ms", L"x.LNK"})
+    if (!Check(match(L"x", entries({hidden}), true) == 0, "shellname-always-hidden-extension")) return false;
+  // A shortcut beside a file of the same shown name collides.
+  if (!Check(match(L"x", entries({L"x", L"x.lnk"}), true) == kNoShellMatch, "shellname-lnk-collides-with-same-name")) return false;
+  if (!Check(match(L"x", entries({L"x.lnk", L"x.url"}), true) == kNoShellMatch, "shellname-two-hidden-extensions-collide")) return false;
+  // x.pdf and x.pdf.exe: extensions hidden, "x.pdf" stands for both (the exact name and the stem of the
+  // second); shown, the exact name is the only entry.
+  if (!Check(match(L"x.pdf", entries({L"x.pdf", L"x.pdf.exe"}), false) == kNoShellMatch, "shellname-pdf-and-pdf-exe-hidden-is-unknown")) return false;
+  if (!Check(match(L"x.pdf", entries({L"x.pdf", L"x.pdf.exe"}), true) == 0, "shellname-pdf-and-pdf-exe-shown-is-the-exact-one")) return false;
+  // x.pdf alone, extensions hidden: "x.pdf" is also the stem of x.pdf.exe only, never of x.pdf itself.
+  if (!Check(match(L"x.pdf", entries({L"x.pdf.exe"}), false) == 0, "shellname-double-extension-stem")) return false;
+  // Only ONE extension is hidden: "a" is not the stem of "a.b.c".
+  if (!Check(match(L"a", entries({L"a.b.c"}), false) == kNoShellMatch, "shellname-two-extensions-are-not-one")) return false;
+  // A folder and a file of the same name cannot coexist, but a folder named like a stem can.
+  {
+    std::vector<ShellNameCandidate> list{{L"data", true}, {L"data.txt", false}};
+    if (!Check(match(L"data", list, false) == kNoShellMatch, "shellname-folder-and-file-stem-collide")) return false;
+    if (!Check(match(L"data", list, true) == 0 && list[0].is_directory, "shellname-folder-shown-is-the-folder")) return false;
+  }
+  // Case is not significant.
+  if (!Check(match(L"README", entries({L"readme.MD"}), false) == 0, "shellname-case-insensitive-stem")) return false;
+  if (!Check(match(L"Run.BAT", entries({L"run.bat"}), true) == 0, "shellname-case-insensitive-exact")) return false;
+  // 8.3 names: the caller lists by pattern, which an alternate name can satisfy; only the LONG name is
+  // a candidate, so an entry whose long name does not fit the display name is no match.
+  if (!Check(match(L"PROGRA~1", entries({L"Program Files"}), true) == kNoShellMatch, "shellname-8dot3-alternate-is-dropped")) return false;
+  if (!Check(match(L"PROGRA~1", entries({L"PROGRA~1"}), true) == 0, "shellname-a-real-8dot3-looking-name-is-itself")) return false;
+  // Nothing, a prefix that is no stem, and a longer name that only starts alike.
+  if (!Check(match(L"a", entries({}), false) == kNoShellMatch, "shellname-no-candidate")) return false;
+  if (!Check(match(L"a", entries({L"ab.txt"}), false) == kNoShellMatch, "shellname-prefix-is-not-a-stem")) return false;
+  if (!Check(match(L"a", entries({L"a."}), false) == kNoShellMatch, "shellname-empty-extension-is-not-one")) return false;
+  // A display name that cannot be a file name matches nothing.
+  for (const wchar_t *bad : {L"", L"a*", L"a?b", L"a\\b", L"a/b", L"a:b", L"a|b"})
+    if (!Check(match(bad, entries({L"a*", L"a?b", L"a\\b", L"a/b", L"a:b", L"a|b", L"a"}), false) == kNoShellMatch,
+               "shellname-unusable-display-name")) return false;
+  // More candidates than the cap are not known; exactly the cap is fine.
+  {
+    std::vector<ShellNameCandidate> list;
+    for (std::size_t i = 0; i < kShellMaxCandidates; ++i) list.push_back({L"n" + std::to_wstring(i) + L".txt", false});
+    list.push_back({L"target.txt", false});
+    if (!Check(list.size() == kShellMaxCandidates + 1 && match(L"target", list, false) == kNoShellMatch, "shellname-over-the-cap-is-unknown")) return false;
+    list.erase(list.begin());
+    if (!Check(list.size() == kShellMaxCandidates && match(L"target", list, false) == kShellMaxCandidates - 1, "shellname-exactly-the-cap-is-fine")) return false;
+  }
+  // The comparison is the caller's: a stricter one is used for the exact name and the stem.
+  {
+    const auto exact_case = [](std::wstring_view a, std::wstring_view b) { return a == b; };
+    if (!Check(MatchShellDisplayName(L"Run", entries({L"run.bat"}), false, exact_case) == kNoShellMatch, "shellname-uses-the-given-comparison")) return false;
+    if (!Check(MatchShellDisplayName(L"run", entries({L"run.bat"}), false, exact_case) == 0, "shellname-given-comparison-matches")) return false;
+    if (!Check(MatchShellDisplayName(L"run", entries({L"run.bat"}), false, nullptr) == kNoShellMatch, "shellname-null-comparison-is-unknown")) return false;
+  }
+  std::cout << "Computer Use native Windows shell name match: PASS\n";
+  return true;
+}
+
 // ---- Classifier v2, C4-2c-1: the split high-impact vocabulary and the approved-effect judgement ----
 // The v1 vocabulary as it was before the split, frozen here byte for byte (the lists, and the two
 // matching rules). The table in computer_use_native_approved_risk.h must say exactly the same when
@@ -7266,6 +7343,7 @@ int main() {
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
+  if (!CheckWindowsShellNameMatch()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;

@@ -232,7 +232,7 @@ describe('Windows UI Automation source only reads', () => {
     const win32 = new Set(
       [
         ...source.matchAll(
-          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|GetAncestor|SH\w+|Shell\w+)\(/gu,
+          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|GetAncestor|FindFirstFileExW|FindNextFileW|FindClose|CompareStringOrdinal|SH\w+|Shell\w+)\(/gu,
         ),
       ].map((match) => match[1]!),
     );
@@ -253,8 +253,19 @@ describe('Windows UI Automation source only reads', () => {
       'ILFree',
       'CoTaskMemFree',
       'GetAncestor',
+      // the folder's path and a listing of its entries in this process (read-only)
+      'SHGetIDListFromObject',
+      'SHGetPathFromIDListEx',
+      'SHGetSetSettings',
+      'FindFirstFileExW',
+      'FindNextFileW',
+      'FindClose',
+      'CompareStringOrdinal',
       // the shell lookup of the item path (functions of this file, not Win32 calls)
       'ShellItemPathByName',
+      'ShellNameEqualsOrdinal',
+      'ShellDisplayNameUsable',
+      'MatchShellDisplayName',
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
     ]);
@@ -309,6 +320,13 @@ describe('Windows UI Automation source only reads', () => {
       'GetLastError',
       'IID_PPV_ARGS',
       'ILFree',
+      'CompareStringOrdinal',
+      'FindClose',
+      'FindFirstFileExW',
+      'FindNextFileW',
+      'SHGetIDListFromObject',
+      'SHGetPathFromIDListEx',
+      'SHGetSetSettings',
       'NormalizeString',
       'OpenProcess',
       'QueryFullProcessImageNameW',
@@ -332,6 +350,7 @@ describe('Windows UI Automation source only reads', () => {
       'CoreWindowProcessPath',
       'Create',
       'DocumentUrl',
+      'FindHandle',
       'FirstChild',
       'Focused',
       'Get',
@@ -350,6 +369,9 @@ describe('Windows UI Automation source only reads', () => {
       'ShadowTextFromUtf16',
       'ShadowUnitsTooLong',
       'ShellItemPathByName',
+      'ShellNameEqualsOrdinal',
+      'ShellDisplayNameUsable',
+      'MatchShellDisplayName',
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
       'Text',
@@ -461,16 +483,29 @@ describe('Windows UI Automation source only reads', () => {
       'ShellItemPathByName(HWND tab',
       '} // namespace windows_uia_source_detail',
     );
-    // A failed read of any item (the item, the shell item, its display name) is a failed lookup: it
-    // leaves the uniqueness of the name unknown. None of them is skipped.
-    const items = between(
-      body,
-      'for (int index = 0; index < items; ++index) {',
-      'if (matched.Get() == nullptr)',
+    // The folder is listed in THIS process, by the display name as a prefix: no walk over the view's
+    // items (IFolderView2::Item / ItemCount) and no per-item shell object are left.
+    expect(code(body)).not.toMatch(
+      /ItemCount|folder_view\.Get\(\)->Item\(|SHCreateItemWithParent|kShellLookupMaxItems/u,
     );
-    // (the one `continue` left is for a readable item whose name differs)
-    expect(code(items).replace('if (!same) continue;', '')).not.toMatch(/\bcontinue;/u);
-    expect(items.match(/return ShadowReadResult::kFailed;/gu)?.length).toBeGreaterThanOrEqual(3);
+    const listing = between(body, 'FindFirstFileExW(', 'MatchShellDisplayName(');
+    expect(listing).toContain('FindExInfoBasic');
+    expect(listing).toContain('FindExSearchNameMatch');
+    expect(listing).toContain('FIND_FIRST_EX_LARGE_FETCH');
+    // A failed read of the listing is a failed lookup (the uniqueness is unknown), never a skipped entry.
+    expect(listing).toContain('return ShadowReadResult::kFailed;');
+    expect(body).toContain('pattern.append(display_name);');
+    expect(body).toContain("pattern.push_back(L'*');");
+    // The folder's path is asked for once; a folder with no path of the file system is not known.
+    expect((code(body).match(/SHGetPathFromIDListEx\(/gu) ?? []).length).toBe(1);
+    expect(body).toMatch(/if \(!has_path\) return ShadowReadResult::kAbsent;/u);
+    // The setting that hides extensions is read from the shell, and the matcher gets it.
+    expect(body).toContain('SHGetSetSettings(&state, SSF_SHOWEXTENSIONS, FALSE);');
+    expect(body).toContain(
+      'MatchShellDisplayName(display_name, candidates, extensions_shown, ShellNameEqualsOrdinal)',
+    );
+    // A folder is a directory of the file system.
+    expect(body).toContain('FILE_ATTRIBUTE_DIRECTORY');
     // Explorer's calls have no timeout: the lookup runs on its own thread, the caller waits a bounded
     // time, an unanswered lookup is abandoned, and no second one starts while one is stuck.
     const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
@@ -501,26 +536,57 @@ describe('Windows UI Automation source only reads', () => {
     expect(code(body)).not.toMatch(
       /navigate|SelectItem|SelectAndPositionItems|InvokeCommand|InvokeVerb|DoVerb|Execute|Refresh|Rename|Delete|SetCurrent|SetViewModeAndIconSize|ShellExecute|SetFocus/iu,
     );
-    // Its own limits, because it is one gated call: the action, a deadline, and a cap on the items.
-    expect(source).toContain('constexpr int kShellLookupMaxItems = 512;');
+    // Its own limits, because it is one gated call: the action, a deadline, and a cap on the candidates.
+    expect(source).not.toContain('kShellLookupMaxItems');
+    expect(source).toContain('#include "computer_use_windows_shell_name_match.h"');
+    expect(source).toContain('kShellMaxCandidates');
     expect(source).toContain("constexpr std::uint64_t kShellLookupBudgetNs = 60'000'000;");
-    // Both the walk over the shell windows and the walk over the items stop on a cancel.
+    // Both the walk over the shell windows and the listing of the entries stop on a cancel.
     expect(
       body.match(/if \(!limits\.still_valid\(\)\) return ShadowReadResult::kStopped;/gu)?.length,
     ).toBe(2);
     expect(body).toContain(
       'if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;',
     );
-    expect(body).toContain('items > kShellLookupMaxItems) return ShadowReadResult::kAbsent;');
-    // Two items with the same display name are not known; so is an item without a file-system path.
-    expect(body).toContain('if (matched.Get() != nullptr) return ShadowReadResult::kAbsent;');
-    expect(body).toContain('SIGDN_FILESYSPATH');
-    expect(body).toContain('SFGAO_STREAM');
+    // More candidates than the cap are not known; so are two entries a name can stand for (the matcher).
+    expect(body).toContain(
+      'if (candidates.size() >= kShellMaxCandidates) return ShadowReadResult::kAbsent;',
+    );
+    expect(body).toContain('if (index == kNoShellMatch) return ShadowReadResult::kAbsent;');
     // The path is a string like any other: UTF-8, bound in bytes, never emptied.
     const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
     expect(item).toContain('ShadowTextFromUtf16(answer.path, false, maximum_bytes, path)');
     expect(item).toContain('ShellItemPathByName(');
     expect((code(source).match(/ShellItemPathByName\(/gu) ?? []).length).toBe(2);
+  });
+
+  it('matches a display name to the real entry in a portable header the harness runs (S5-c-2 PR-3)', () => {
+    const matcher = read('computer_use_windows_shell_name_match.h');
+    // Pure: no platform header, no clock, no I/O, no thread.
+    expect(code(matcher)).not.toMatch(
+      /#include\s*<(windows|shlobj|shobjidl|ole2|chrono|thread|mutex|atomic|fstream|filesystem|iostream)/u,
+    );
+    expect(code(matcher)).not.toMatch(/FindFirstFile|CompareString|GetLastError|CoCreate/u);
+    expect(matcher).toContain('constexpr std::size_t kShellMaxCandidates = 64;');
+    // The extensions Explorer hides whatever the setting says.
+    for (const extension of ['lnk', 'url', 'pif', 'scf', 'shb', 'appref-ms', 'library-ms'])
+      expect(matcher).toContain(`L"${extension}"`);
+    // Two entries a name can stand for are "not known"; so are more candidates than the cap.
+    expect(matcher).toContain('if (found != kNoShellMatch) return kNoShellMatch;');
+    expect(matcher).toContain('candidates.size() > kShellMaxCandidates');
+    // Only ONE extension is hidden; with extensions shown only the always-hidden ones are.
+    expect(matcher).toContain("extension.find(L'.') == std::wstring_view::npos");
+    expect(matcher).toContain(
+      'stands_for = !extensions_shown || ShellExtensionAlwaysHidden(extension, equals);',
+    );
+    // The real source compares as the file system does, and the harness runs the table.
+    expect(source).toContain('CompareStringOrdinal(');
+    expect(harness).toContain('computer_use_windows_shell_name_match.h');
+    expect(harness).toContain('CheckWindowsShellNameMatch()');
+    expect(harness).toContain('shellname-lnk-collides-with-same-name');
+    expect(harness).toContain('shellname-pdf-and-pdf-exe-hidden-is-unknown');
+    expect(harness).toContain('shellname-8dot3-alternate-is-dropped');
+    expect(harness).toContain('shellname-over-the-cap-is-unknown');
   });
 
   it('is included by the host, and the reader is reached only through the scheduler (S5-b-2b)', () => {
