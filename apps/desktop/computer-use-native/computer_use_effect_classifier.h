@@ -38,10 +38,11 @@
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
 //   * An approval whose effect the rule set has not enabled is a refusal, not an approval.
-//   * Anything that might open a file from a file browser or a download list (a visual click, a
-//     key, an invoke, a double click) is treated as opening it until a real device shows otherwise
-//     (ADR v2 S4 contract 5, decision 2-A). Only a semantic select, a rename or a scroll is
-//     browsing.
+//   * Anything that might open a file from a file browser or a download list (an invoke, a double
+//     click, Enter or a key chord with a modifier, and a click the host does not follow) is treated
+//     as opening it until a real device shows otherwise (ADR v2 S4 contract 5, decision 2-A). A
+//     single click the host follows on a passive item (it selects), a plain arrow / Tab / Escape /
+//     Space, a semantic select, a rename or a scroll is browsing (#500 S5-c-2 PR-2, #777).
 
 #include "computer_use_native_approval_ticket.h"
 
@@ -115,7 +116,8 @@ struct EffectFacts {
   ActionKind action = ActionKind::kObserve;
   SessionMode mode = SessionMode::kObserveOnly;
   OriginState origin = OriginState::kNotApplicable;
-  // The key activates the focused control (Enter, Return, Space or a control's own shortcut).
+  // The key may open the focused item: Enter / Return in any spelling, or any chord with a modifier
+  // (ShadowKeyOpens). A plain arrow, Tab, Escape or Space does not.
   bool key_is_activation = false;
   // The host follows clicks: it knows whether this click completes a double click or opens on one
   // click, and says so by the action (kDoubleClick). Only then is a single click on a passive item of
