@@ -179,7 +179,7 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(text.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(2);
     expect(wiring.match(/WindowsUiaShadowSource::Create/gu)?.length).toBe(1);
     expect(wiring).toMatch(
-      /environment\.open_source = \[window, point, still_valid, point_known, needs_point\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*if \(needs_point && !point_known\)\s*return nullptr;\s*return WindowsUiaShadowSource::Create\(window, point, still_valid\);/u,
+      /environment\.open_source = \[window, point, still_valid, point_known, needs_point\]\(\)\s*->\s*std::unique_ptr<ShadowUiaSource> \{\s*if \(needs_point && !point_known\)\s*return nullptr;\s*return WindowsUiaShadowSource::Create\(\s*window, point, still_valid,\s*WindowsUiaShadowSource::kShadowUiaTimeoutMs,\s*windows_uia_source_detail::ShellLookupRunning\(\)\);/u,
     );
     // The process ring is named in exactly one place: the wiring.
     expect(text.match(/ProcessShadowLog\(\)/gu)?.length).toBe(1);
@@ -283,9 +283,24 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(schedule).not.toMatch(
       /->\w+\(|SendInput|SetFocus|SetForegroundWindow|PostMessage|SendMessage/u,
     );
-    // The click point is computed as the dispatch computes it.
-    expect(schedule).toContain('bounds.right - bounds.left - 1');
-    expect(schedule).toContain('bounds.bottom - bounds.top - 1');
+    // The click point is the one mapping the dispatch uses (S5-c-2 PR-1), not a copy of it.
+    expect(schedule).toContain('WindowsActionPoint(session.observation_bounds, metadata, &point)');
+    expect(schedule).not.toContain('std::lround');
+  });
+
+  it('maps a click or scroll point in one place, used by the dispatch, the shadow and the synchronous entry', () => {
+    const text = code(host);
+    // The formula appears once (left + lround(x * max(0, w - 1))), inside the one function.
+    expect(text.match(/bounds\.right - bounds\.left - 1/gu)).toHaveLength(1);
+    expect(text.match(/bounds\.bottom - bounds\.top - 1/gu)).toHaveLength(1);
+    const point = between(host, '// BEGIN windows action point', '// END windows action point');
+    expect(code(point)).toContain('bounds.right - bounds.left - 1');
+    expect(code(point)).toContain('x < 0 || x > 1 || y < 0 || y > 1');
+    // Three callers: the click and the scroll of the dispatch, the shadow, the synchronous entry.
+    expect(text.match(/WindowsActionPoint\(/gu)).toHaveLength(5); // the definition and four calls
+    const dispatch = between(host, 'bool DispatchWindowsAction(', 'std::string ProbeJson(');
+    expect(code(dispatch).match(/WindowsActionPoint\(bounds, metadata, &/gu)).toHaveLength(2);
+    expect(code(wiring)).toContain('WindowsActionPoint(session.observation_bounds');
   });
 
   it('changes no version and no receipt: the V1 answer is unchanged', () => {

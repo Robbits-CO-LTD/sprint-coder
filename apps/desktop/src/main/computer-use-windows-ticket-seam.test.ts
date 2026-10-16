@@ -650,6 +650,16 @@ function cutShadowWiring(text: string): string {
   return withoutShadow.slice(0, entryFrom) + withoutShadow.slice(entryTo + entryEnd.length);
 }
 
+// The point mapping (S5-c-2 PR-1) serves the dispatch, the shadow and the entry, none of which this
+// seam compiles; the other live seams compile it.
+function cutActionPoint(text: string): string {
+  const from = text.indexOf('// BEGIN windows action point');
+  const endMarker = '// END windows action point';
+  const to = text.indexOf(endMarker, from);
+  if (from < 0 || to < 0) throw new Error('Action point markers changed');
+  return text.slice(0, from) + text.slice(to + endMarker.length);
+}
+
 function assembled(): string {
   const cutClock = (text: string): string => {
     const from = text.indexOf('std::uint64_t MonotonicNowNs() {');
@@ -666,7 +676,9 @@ function assembled(): string {
     between('std::string ErrorPayload(', 'bool Respond('),
     between('std::string ResponseCacheKey(', 'bool RevalidateWindowsTarget('),
     between('bool RespondAndCache(', 'WindowsSession *FindWindowsSession('),
-    cutClock(between('bool ValidateWindowsDispatchBinding(', 'bool DispatchWindowsAction(')),
+    cutActionPoint(
+      cutClock(between('bool ValidateWindowsDispatchBinding(', 'bool DispatchWindowsAction(')),
+    ),
     shadowStub,
     cutShadowWiring(between('std::string WindowsPreflightReceipt(', 'bool ObserveWindowsWindow(')),
     '}  // namespace\n',

@@ -4310,6 +4310,26 @@ bool ConsumeWindowsDispatchTicket(const std::string &session_key,
   return consumed && session.cancel_epoch == cancel_epoch;
 }
 
+// BEGIN windows action point
+// The screen point a click or scroll lands on: the metadata's x / y (each in 0..1) mapped onto the
+// bounds. THE one copy of the mapping: the dispatch, the effect shadow and the synchronous interlock
+// entry all call it, so they cannot disagree about where an action lands. False (and no point) when
+// x or y is missing or out of range.
+bool WindowsActionPoint(const RECT &bounds, const std::string &metadata,
+                        POINT *point) {
+  double x = 0;
+  double y = 0;
+  if (!ReadJsonDouble(metadata, "x", &x) || !ReadJsonDouble(metadata, "y", &y) ||
+      x < 0 || x > 1 || y < 0 || y > 1)
+    return false;
+  point->x = bounds.left + static_cast<LONG>(std::lround(
+                               x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
+  point->y = bounds.top + static_cast<LONG>(std::lround(
+                              y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
+  return true;
+}
+// END windows action point
+
 bool DispatchWindowsAction(const WindowsSession &session,
                            const std::string &metadata, std::string *result,
                            std::string *reason, bool *accepted) {
@@ -4329,14 +4349,13 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "stale_target";
       return false;
     }
-    const int screen_x =
-        bounds.left +
-        static_cast<int>(
-            std::lround(x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
-    const int screen_y =
-        bounds.top +
-        static_cast<int>(
-            std::lround(y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
+    POINT click_point{0, 0};
+    if (!WindowsActionPoint(bounds, metadata, &click_point)) {
+      *reason = "stale_target";
+      return false;
+    }
+    const int screen_x = click_point.x;
+    const int screen_y = click_point.y;
     std::string visual_signature;
     if (RejectWindowsRisk(ClassifyWindowsPoint({screen_x, screen_y},
                                                session.pid, &visual_signature),
@@ -4401,14 +4420,11 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "invalid_action";
       return false;
     }
-    const POINT point = {
-        bounds.left +
-            static_cast<LONG>(std::lround(
-                x * std::max<LONG>(0, bounds.right - bounds.left - 1))),
-        bounds.top +
-            static_cast<LONG>(std::lround(
-                y * std::max<LONG>(0, bounds.bottom - bounds.top - 1))),
-    };
+    POINT point{0, 0};
+    if (!WindowsActionPoint(bounds, metadata, &point)) {
+      *reason = "invalid_action";
+      return false;
+    }
     std::string visual_signature;
     if (RejectWindowsRisk(
             ClassifyWindowsPoint(point, session.pid, &visual_signature),
@@ -4777,18 +4793,8 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     (void)ReadJsonString(metadata, "targetId", &job.target_id);
     // The point a click or scroll lands on, computed as the dispatch computes it.
     POINT point{0, 0};
-    double x = 0;
-    double y = 0;
-    bool point_known = false;
-    if (ReadJsonDouble(metadata, "x", &x) && ReadJsonDouble(metadata, "y", &y) &&
-        x >= 0 && x <= 1 && y >= 0 && y <= 1) {
-      point_known = true;
-      const RECT bounds = session.observation_bounds;
-      point.x = bounds.left + static_cast<LONG>(std::lround(
-                                  x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
-      point.y = bounds.top + static_cast<LONG>(std::lround(
-                                 y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
-    }
+    const bool point_known =
+        WindowsActionPoint(session.observation_bounds, metadata, &point);
     const HWND window = session.active_window;
     const std::uint64_t expected_epoch = session.cancel_epoch;
     // Valid while the cancellation epoch is the one the preflight was bound to (a cancel and the
@@ -4805,7 +4811,10 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
         -> std::unique_ptr<ShadowUiaSource> {
       if (needs_point && !point_known)
         return nullptr;
-      return WindowsUiaShadowSource::Create(window, point, still_valid);
+      return WindowsUiaShadowSource::Create(
+          window, point, still_valid,
+          WindowsUiaShadowSource::kShadowUiaTimeoutMs,
+          windows_uia_source_detail::ShellLookupRunning());
     };
     WindowsEffectShadow().Schedule(std::move(job), v1_valid,
                                    std::move(environment));
@@ -4823,15 +4832,47 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // incomplete facts are NO VERDICT (the answer carries the reason): never a refusal and never an
 // approval, so the V1 preflight decides.
 //
-// Behaviour-neutral: NOTHING calls this yet. The preflight and the dispatch guard are wired in
-// S5-c-2, on the serial lane, after a Windows real-machine check and a decision on how long the
-// lane may be held (the gate bounds the number and the start of calls, not the length of one: a UI
-// Automation call has its own 1500 ms timeout, and Create is outside the gate). The caller must have
-// COM initialized on its thread (the shadow's thread does it in LaunchWindowsShadowThread), and must
-// call this only AFTER the V1 re-validation of the bound target succeeded (ValidateWindowsDispatchBinding):
-// the point below is the third copy of the click / scroll mapping (dispatch, shadow, here), and it is
-// only right for a binding that is still valid. It holds no lock, calls no input API,
-// writes nothing, and never throws; the shadow wiring above is not touched.
+// Behaviour-neutral: NOTHING calls this yet (the preflight and the dispatch guard are wired later in
+// S5-c-2). The caller must call it only AFTER the V1 re-validation of the bound target succeeded
+// (ValidateWindowsDispatchBinding): the point is only right for a binding that is still valid.
+//
+// THE SERIAL LANE IS HELD AT MOST kInterlockLaneHoldLimit. The lane's thread is an STA (the picker
+// and the WinRT capture need it), and a UI Automation call to an app that does not answer is
+// bounded only by its timeout. So the evaluation runs on a worker thread of its own, one per
+// evaluation, in the multithreaded apartment, and the lane waits for it a bounded time: a worker
+// that has not answered by then is abandoned (kBudget), and until it ends no second one is started
+// (single-flight), so at most one such thread is ever stuck. The worker gets everything by value
+// and never touches `sessions`; the lane's own apartment is not changed.
+//
+// Worst case of one wait. The gate bounds the START of a step, not its length. For a step that makes
+// ONE UI Automation call: the gate's deadline (150 ms) + that call (250 ms) + creating the source and
+// starting the thread (50 ms) = 450 ms, within the 500 ms the lane may wait (the static_assert below
+// states only this case). Some steps make several calls inside ONE gate step: ItemPath (two UI
+// Automation calls, then a shell lookup's wait of 150 ms: up to 650 ms) and CoreWindowProcessPath
+// (two calls: 500 ms). Started just before the deadline they can run past 500 ms (about 850 ms by
+// this arithmetic); for them the lane's wait_for cut-off (kBudget, worker abandoned) is the real
+// bound of the hold, not the estimate.
+constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};
+static_assert(150 + sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs + 50 <= 500,
+              "holds for a step of ONE UI Automation call only; longer steps are bounded by the wait_for cut-off");
+static_assert(sprint_coder::computer_use::kShadowDeadlineNs == 150'000'000,
+              "the lane's worst-case estimate assumes the gate's 150 ms deadline");
+
+struct InterlockPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool done = false;
+  // Set by the lane when it stops waiting: the worker's captures then stop at the next call.
+  std::atomic<bool> abandoned{false};
+  sprint_coder::computer_use::InterlockEvaluation result;
+};
+
+// Never destroyed: an abandoned worker may end after the process has started to exit.
+std::atomic<bool> &InterlockWorkerRunning() {
+  static std::atomic<bool> *const running = new std::atomic<bool>(false);
+  return *running;
+}
+
 [[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     const WindowsSession &session, const std::string &metadata, const std::string &kind,
     const sprint_coder::computer_use::EffectRuleset &ruleset) noexcept {
@@ -4839,46 +4880,105 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
   InterlockEvaluation unavailable;
   unavailable.no_verdict = InterlockNoVerdict::kIncomplete;
   try {
-    std::string key;
-    std::string target_id;
-    (void)ReadJsonString(metadata, "key", &key);
-    (void)ReadJsonString(metadata, "targetId", &target_id);
     POINT point{0, 0};
-    double x = 0;
-    double y = 0;
-    bool point_known = false;
-    if (ReadJsonDouble(metadata, "x", &x) && ReadJsonDouble(metadata, "y", &y) &&
-        x >= 0 && x <= 1 && y >= 0 && y <= 1) {
-      point_known = true;
-      const RECT bounds = session.observation_bounds;
-      point.x = bounds.left + static_cast<LONG>(std::lround(
-                                  x * std::max<LONG>(0, bounds.right - bounds.left - 1)));
-      point.y = bounds.top + static_cast<LONG>(std::lround(
-                                 y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
-    }
+    const bool point_known =
+        WindowsActionPoint(session.observation_bounds, metadata, &point);
     // A click or scroll whose point is not a point of the window is not looked up at the screen's
     // origin.
     if ((kind == "click" || kind == "scroll") && !point_known)
       return unavailable;
     const std::uint64_t expected_epoch = session.cancel_epoch;
-    const auto still_valid = [expected_epoch]() {
+    const auto epoch_unchanged = [expected_epoch]() {
       return cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
     };
-    // Canceled before anything is created or read: no verdict, and no UI Automation object.
-    if (!still_valid()) {
+    // Canceled before anything is created or read: no verdict, no worker and no UI Automation object.
+    if (!epoch_unchanged()) {
       unavailable.no_verdict = InterlockNoVerdict::kCanceled;
       return unavailable;
     }
-    std::unique_ptr<ShadowUiaSource> source =
-        WindowsUiaShadowSource::Create(session.active_window, point, still_valid);
-    if (source == nullptr)
+    // Everything that can throw is prepared BEFORE the single-flight slot is taken, so a failure
+    // here cannot leave the slot taken for ever.
+    auto pending = std::make_shared<InterlockPending>();
+    // Everything the worker needs, by value.
+    const HWND window = session.active_window;
+    const std::string maximum_mode = session.maximum_mode;
+    const std::string policy_language = session.policy_language;
+    const std::string kind_copy = kind;
+    std::string key;
+    std::string target_id;
+    (void)ReadJsonString(metadata, "key", &key);
+    (void)ReadJsonString(metadata, "targetId", &target_id);
+    const EffectRuleset ruleset_copy = ruleset;
+    // Single-flight: a worker still stuck from an earlier evaluation means no second one.
+    std::atomic<bool> &running = InterlockWorkerRunning();
+    if (running.exchange(true)) {
+      unavailable.no_verdict = InterlockNoVerdict::kBudget;
       return unavailable;
-    ShadowRequestInfo info;
-    info.kind = kind;
-    info.key = key;
-    info.maximum_mode = session.maximum_mode;
-    info.policy_language = session.policy_language;
-    return EvaluateWindowsInterlockOnSource(*source, kind, target_id, info, ruleset);
+    }
+    try {
+      std::thread([pending, window, point, maximum_mode, policy_language, kind_copy, key,
+                   target_id, ruleset_copy, expected_epoch, &running]() {
+        InterlockEvaluation answer;
+        answer.no_verdict = InterlockNoVerdict::kIncomplete;
+        try {
+          // Declared before the source: released after it, also when something throws.
+          struct ComApartment {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~ComApartment() {
+              if (SUCCEEDED(initialized)) CoUninitialize();
+            }
+          } apartment;
+          {
+            const auto still_valid = [pending, expected_epoch]() {
+              return !pending->abandoned.load(std::memory_order_acquire) &&
+                     cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
+            };
+            std::unique_ptr<ShadowUiaSource> source = WindowsUiaShadowSource::Create(
+                window, point, still_valid, WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
+                windows_uia_source_detail::InterlockShellLookupRunning());
+            if (source != nullptr) {
+              ShadowRequestInfo info;
+              info.kind = kind_copy;
+              info.key = key;
+              info.maximum_mode = maximum_mode;
+              info.policy_language = policy_language;
+              answer = EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info,
+                                                        ruleset_copy);
+            }
+          }
+        } catch (...) {
+          answer = InterlockEvaluation{};
+          answer.no_verdict = InterlockNoVerdict::kIncomplete;
+        }
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          pending->result = answer;
+          pending->done = true;
+        }
+        running.store(false);
+        pending->ready.notify_one();
+      }).detach();
+    } catch (...) {
+      running.store(false);
+      return unavailable;
+    }
+    InterlockEvaluation answer;
+    {
+      std::unique_lock<std::mutex> lock(pending->mutex);
+      if (!pending->ready.wait_for(lock, kInterlockLaneHoldLimit,
+                                   [&pending] { return pending->done; })) {
+        pending->abandoned.store(true, std::memory_order_release);
+        unavailable.no_verdict = InterlockNoVerdict::kBudget;
+        return unavailable;
+      }
+      answer = pending->result;
+    }
+    // The action was canceled while the worker read: no verdict, whatever it found.
+    if (!epoch_unchanged()) {
+      unavailable.no_verdict = InterlockNoVerdict::kCanceled;
+      return unavailable;
+    }
+    return answer;
   } catch (...) {
     return unavailable;
   }
