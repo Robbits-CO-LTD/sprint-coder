@@ -157,7 +157,9 @@ describe('Windows shadow core (classifier v2, S5-b-1)', () => {
   it('counts a native Document apart from the stricter-than-v1 findings (S5-c-2 PR-4)', () => {
     // The bit is the next free one after the Windows OS-prompt bit (14) and overlaps no other bit.
     expect(sharedShadow).toContain('constexpr std::uint32_t kShadowGapNativeDocument = 1u << 15;');
-    expect(windowsShadow).toContain('constexpr std::uint32_t kShadowGapOsPromptSurface = 1u << 14;');
+    expect(windowsShadow).toContain(
+      'constexpr std::uint32_t kShadowGapOsPromptSurface = 1u << 14;',
+    );
     const bits = [...(sharedShadow + windowsShadow).matchAll(/kShadowGap\w+ = 1u << (\d+);/gu)].map(
       (match) => Number(match[1]),
     );
