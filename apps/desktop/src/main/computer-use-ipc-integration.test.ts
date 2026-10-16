@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { inspect } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
@@ -56,12 +57,12 @@ import {
   startActivationIntent,
 } from '../computer-use-activation-intent';
 
-const electronMock = vi.hoisted(() => ({ ipcMainOn: vi.fn() }));
+const electronMock = vi.hoisted(() => ({ ipcMainOn: vi.fn(), ipcMainHandle: vi.fn() }));
 vi.mock('electron', () => ({
   app: {},
   clipboard: {},
   dialog: {},
-  ipcMain: { on: electronMock.ipcMainOn },
+  ipcMain: { on: electronMock.ipcMainOn, handle: electronMock.ipcMainHandle },
   MessageChannelMain: class {},
 }));
 
@@ -179,6 +180,8 @@ function quickStartIntent(input = quickStartInput()): string {
 function captureComputerUseHandlers(): {
   router: IpcRouter & Record<string, unknown>;
   handlers: Map<string, CapturedHandler>;
+  /** The input and output schemas each channel was registered with (for the real outer wrapper). */
+  schemas: Map<string, { input: unknown; output: unknown }>;
   activation: {
     consume: ReturnType<typeof vi.fn>;
     generation: ReturnType<typeof vi.fn>;
@@ -191,12 +194,14 @@ function captureComputerUseHandlers(): {
 } {
   const router = Object.create(IpcRouter.prototype) as IpcRouter & Record<string, unknown>;
   const handlers = new Map<string, CapturedHandler>();
+  const schemas = new Map<string, { input: unknown; output: unknown }>();
   const capture = (...args: unknown[]): void => {
     const channel = args[0];
     const handler = args[3];
     if (typeof channel !== 'string' || typeof handler !== 'function')
       throw new Error('Unexpected IPC handler registration');
     handlers.set(channel, handler as CapturedHandler);
+    schemas.set(channel, { input: args[1], output: args[2] });
   };
   const activation = {
     consume: vi.fn(() => null),
@@ -316,6 +321,7 @@ function captureComputerUseHandlers(): {
   return {
     router,
     handlers,
+    schemas,
     activation,
     controller,
     native,
@@ -1929,6 +1935,7 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
       window: {
         id: 42,
         webContents: {
+          id: 42,
           once: vi.fn(),
           isDestroyed: () => false,
           send: (channel: string, payload: unknown) => sent.push({ channel, payload }),
@@ -1944,6 +1951,7 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
       computerUseSessionByTask: new Map(),
       computerUsePendingGrantRequestIds: new Set(),
       computerUseAttentionFlashing: false,
+      trustedRendererOrigin: 'app://bundle',
     });
     const logged: unknown[][] = [];
     for (const level of ['debug', 'info', 'warn', 'error'] as const)
@@ -2066,9 +2074,30 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
       providerEgress: { connectionId: 'connection-1', modelId: 'model-1' },
     });
     const handler = fixture.handlers.get(IPC_CHANNELS.computerUseApprovalResolve)!;
+    // The real outer wrapper of `IpcRouter.handle` (sender check, envelope parse, output schema)
+    // around the real registered handler body and the schemas it was registered with.
+    const registration = fixture.schemas.get(IPC_CHANNELS.computerUseApprovalResolve)!;
+    electronMock.ipcMainHandle.mockClear();
+    (IpcRouter.prototype as unknown as { handle: (...args: unknown[]) => void }).handle.call(
+      router,
+      IPC_CHANNELS.computerUseApprovalResolve,
+      registration.input,
+      registration.output,
+      handler,
+    );
+    const outer = electronMock.ipcMainHandle.mock.calls.at(-1)![1] as (
+      event: unknown,
+      raw: unknown,
+    ) => Promise<{ ok: boolean; value?: unknown; error?: { code: string } }>;
+    const senderEvent = (id: number, url: string) => {
+      const frame: { url: string; top?: unknown } = { url };
+      frame.top = frame;
+      return { sender: { id }, senderFrame: frame };
+    };
+    const rendererEvent = senderEvent(42, 'app://bundle/index.html');
 
-    const targetToken = async (): Promise<string> => {
-      const row = (await controller.listTargets({}, turnContext)).targets.find(
+    const targetToken = async (context: typeof turnContext = turnContext): Promise<string> => {
+      const row = (await controller.listTargets({}, context)).targets.find(
         (target) => (target as { kind?: string }).kind === 'selectable',
       ) as { targetToken: string } | undefined;
       if (row === undefined) throw new Error('no selectable target');
@@ -2076,24 +2105,31 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     };
 
     /** A copies the value; B is started with it carried, and stops at the paste's card. */
-    async function reachCard() {
+    async function reachCard(
+      exclude: readonly string[] = [],
+      context: typeof turnContext = turnContext,
+    ) {
       plans.push({ type: 'copy', targetId: 'node-1' });
       const outA = await settle(
-        controller.startForAgent({ targetToken: await targetToken(), goal: 'copy' }, turnContext),
+        controller.startForAgent(
+          { targetToken: await targetToken(context), goal: 'copy' },
+          context,
+        ),
       );
       const artifactId = (outA as { artifacts: { artifactId: string }[] }).artifacts[0]!.artifactId;
       plans.push({ type: 'set_text', targetId: 'node-1', artifactRef: artifactId });
       const running = controller.startForAgent(
-        { targetToken: await targetToken(), goal: 'paste', carry: [{ artifactId }] },
+        { targetToken: await targetToken(context), goal: 'paste', carry: [{ artifactId }] },
         turnContext,
       );
       const pending = router['computerUsePendingApprovalBySession'] as unknown as Map<
         string,
         ComputerUseApproval
       >;
-      for (let step = 0; step < 100 && pending.size === 0; step += 1)
+      const fresh = () => [...pending.values()].find((entry) => !exclude.includes(entry.id));
+      for (let step = 0; step < 100 && fresh() === undefined; step += 1)
         await vi.advanceTimersByTimeAsync(10);
-      const card = [...pending.values()][0];
+      const card = fresh();
       if (card === undefined) throw new Error('no card was raised');
       return { outA, artifactId, running, card };
     }
@@ -2109,6 +2145,7 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     const click = (
       input: ReturnType<typeof clickInput>,
       intent: { decision?: string; approvalId?: string; challenge?: string } | null,
+      event: unknown = rendererEvent,
     ) => {
       fixture.activation.consume.mockReturnValueOnce(
         intent === null
@@ -2118,7 +2155,7 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
               intent: approvalActivationIntent({ ...input, ...intent } as never),
             },
       );
-      return handler(input, {}, {});
+      return outer(event, { requestId: 'request-1', operationId: 'operation-1', payload: input });
     };
 
     return {
@@ -2130,6 +2167,8 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
       reachCard,
       clickInput,
       click,
+      senderEvent,
+      activation: fixture.activation,
       handler,
       settle,
     };
@@ -2147,6 +2186,12 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     expect(t.dispatched).toEqual([]);
   });
 
+  const codeOf = (result: { ok: boolean; error?: { code: string } }): string | undefined =>
+    result.ok ? undefined : result.error?.code;
+  /** Everything a log call was given, Errors included (their message and stack), as one string. */
+  const loggedText = (t: ReturnType<typeof trusted>): string =>
+    inspect(t.logged, { depth: null, maxStringLength: null, maxArrayLength: null });
+
   it.each([
     ['another decision', { decision: 'deny' }],
     ['another card', { approvalId: 'approval-other' }],
@@ -2157,28 +2202,99 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     async (_name, intent) => {
       const t = trusted();
       const { card } = await t.reachCard();
-      await expect(t.click(t.clickInput(card, 'allow_once'), intent)).rejects.toBeTruthy();
+      const result = await t.click(t.clickInput(card, 'allow_once'), intent);
+      expect(codeOf(result)).toBe('FORBIDDEN');
       expect(t.dispatched).toEqual([]);
       expect(stillPending(t, card)).toBe(true);
     },
   );
 
-  it('refuses allow_plan on a paste card even with an intent that names it', async () => {
+  it('refuses a click from a sender that is not the trusted Renderer, whatever the intent', async () => {
     const t = trusted();
     const { card } = await t.reachCard();
-    await expect(t.click(t.clickInput(card, 'allow_plan'), {})).rejects.toBeTruthy();
+    const input = t.clickInput(card, 'allow_once');
+    const foreignOrigin = t.senderEvent(42, 'https://example.invalid/index.html');
+    const otherWebContents = t.senderEvent(7, 'app://bundle/index.html');
+    for (const event of [foreignOrigin, otherWebContents]) {
+      const result = await t.click(input, {}, event);
+      expect(codeOf(result)).toBe('FORBIDDEN');
+    }
+    // It never got as far as the activation, the controller or the native host.
+    expect(t.activation.consume).not.toHaveBeenCalled();
     expect(t.dispatched).toEqual([]);
     expect(stillPending(t, card)).toBe(true);
   });
 
-  it('refuses a card id that this Renderer was never sent (another session)', async () => {
+  it('refuses allow_plan on a paste card even with an intent that names it', async () => {
     const t = trusted();
     const { card } = await t.reachCard();
-    const foreign = {
+    expect(card.eligibleForPlan).toBe(false);
+    const result = await t.click(t.clickInput(card, 'allow_plan'), {});
+    expect(result.ok).toBe(false);
+    expect(loggedText(t)).toContain('decision is not allowed');
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, card)).toBe(true);
+  });
+
+  it('refuses an old challenge of a card that is still pending, and the right one still works', async () => {
+    const t = trusted();
+    const { card, running } = await t.reachCard();
+    // The intent names the (old) challenge the click carries, so only the controller can refuse it.
+    const old = { ...t.clickInput(card, 'allow_once'), challenge: 'c'.repeat(64) };
+    const result = await t.click(old, {});
+    expect(result.ok).toBe(false);
+    expect(loggedText(t)).toContain('approval is stale');
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, card)).toBe(true);
+    expect((await t.click(t.clickInput(card, 'allow_once'), {})).ok).toBe(true);
+    await t.settle(running);
+    expect(t.dispatched).toHaveLength(1);
+  });
+
+  it('refuses a revision that is not the card current one while the session goes on', async () => {
+    const t = trusted();
+    const { card, running } = await t.reachCard();
+    const old = { ...t.clickInput(card, 'allow_once'), expectedRevision: card.revision + 1 };
+    const result = await t.click(old, {});
+    expect(result.ok).toBe(false);
+    expect(loggedText(t)).toContain('approval is stale');
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, card)).toBe(true);
+    expect((await t.click(t.clickInput(card, 'allow_once'), {})).ok).toBe(true);
+    await t.settle(running);
+    expect(t.dispatched).toHaveLength(1);
+  });
+
+  it('refuses the card of an earlier session while a later session has its own card', async () => {
+    const t = trusted();
+    // Only one Computer Use session lives at a time, so session 1 is ended before session 2 starts.
+    const first = await t.reachCard();
+    await t.controller.stop(first.card.sessionId);
+    await t.settle(first.running);
+    const second = await t.reachCard([first.card.id]);
+    expect(second.card.sessionId).not.toBe(first.card.sessionId);
+    expect(second.card.id).not.toBe(first.card.id);
+    // Session 1's own, once valid, click is for a card this Renderer is no longer waiting on.
+    const result = await t.click(t.clickInput(first.card, 'allow_once'), {});
+    expect(result.ok).toBe(false);
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, second.card)).toBe(true);
+    // And session 2's decision aimed at session 1's id does not reach session 2's card either.
+    const crossed = { ...t.clickInput(second.card, 'allow_once'), approvalId: first.card.id };
+    expect((await t.click(crossed, {})).ok).toBe(false);
+    expect(t.dispatched).toEqual([]);
+    expect(stillPending(t, second.card)).toBe(true);
+  });
+
+  it('refuses a card id that was never raised (unknown card id) as not found', async () => {
+    const t = trusted();
+    const { card } = await t.reachCard();
+    const unknown = {
       ...t.clickInput(card, 'allow_once'),
-      approvalId: 'approval-of-another-session',
+      approvalId: 'approval-never-raised',
     };
-    await expect(t.click(foreign, {})).rejects.toThrow(/not found/iu);
+    const result = await t.click(unknown, {});
+    expect(codeOf(result)).toBe('NOT_FOUND');
     expect(t.dispatched).toEqual([]);
     expect(stillPending(t, card)).toBe(true);
   });
@@ -2186,7 +2302,7 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
   it('keeps the artifact when the card is denied, and discards it when the session ends', async () => {
     const t = trusted();
     const { card, artifactId, running } = await t.reachCard();
-    await t.click(t.clickInput(card, 'deny'), {});
+    expect((await t.click(t.clickInput(card, 'deny'), {})).ok).toBe(true);
     expect(t.dispatched).toEqual([]);
     // Denying uses nothing up: what was carried in is still there while the session lives.
     expect(t.store.describeReference([artifactId], taskBinding)).not.toBeNull();
@@ -2200,19 +2316,24 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     const t = trusted();
     const { card, artifactId, running } = await t.reachCard();
     const input = t.clickInput(card, 'allow_once');
-    await t.click(input, {});
+    expect((await t.click(input, {})).ok).toBe(true);
+    // The session is still going: the answered card is not a pending one any more.
+    const again = await t.click(input, {});
+    expect(again.ok).toBe(false);
+    expect(loggedText(t)).toContain('approval not found');
+    expect(stillPending(t, card)).toBe(false);
     await t.settle(running);
     expect(t.dispatched).toEqual([{ type: 'set_text', targetId: 'node-1', text: body }]);
-    // The value is used up by the paste, and the same click again is refused.
+    // The value is used up by the paste, and the same click after the session ended is refused too.
     expect(t.store.describeReference([artifactId], taskBinding)).toBeNull();
-    await expect(t.click(input, {})).rejects.toBeTruthy();
+    expect((await t.click(input, {})).ok).toBe(false);
     expect(t.dispatched).toHaveLength(1);
   });
 
   it('puts the excerpt on the status channel only, never on another channel or in a log', async () => {
     const t = trusted();
     const { card, outA, running } = await t.reachCard();
-    await t.click(t.clickInput(card, 'allow_once'), {});
+    expect((await t.click(t.clickInput(card, 'allow_once'), {})).ok).toBe(true);
     const outB = await t.settle(running);
     // The excerpt did travel the way it is meant to: in a status the Renderer was sent.
     const statusSends = t.sent.filter(
@@ -2220,13 +2341,31 @@ describe('a paste card answered through the trusted intent path (T15-10 J21(e))'
     );
     expect(JSON.stringify(statusSends)).toContain(visible);
     expect(t.sent.length).toBeGreaterThan(0);
-    // And nowhere else: not on another channel, not in a log line, not in either tool result.
+    // And nowhere else. A log argument may be an Error (JSON.stringify gives `{}` for one), so it is
+    // read as `util.inspect` does, message and stack included; and a leak need not be the whole
+    // text, so every 8-character window of the body, and its distinctive parts, are looked for.
+    const fragments = [
+      body,
+      visible,
+      'qzx',
+      '7f3a',
+      ...Array.from({ length: body.length - 7 }, (_unused, at) => body.slice(at, at + 8)),
+    ];
     const elsewhere = t.sent.filter(
       (entry) => entry.channel !== IPC_CHANNELS.computerUseStatusEvent,
     );
-    expect(JSON.stringify(elsewhere)).not.toContain(visible);
-    expect(JSON.stringify(t.logged)).not.toContain(visible);
-    expect(JSON.stringify([outA, outB])).not.toContain(visible);
+    const searched = {
+      'another channel': inspect(elsewhere, { depth: null, maxStringLength: null }),
+      'a log line': loggedText(t),
+      'a tool result': inspect([outA, outB], { depth: null, maxStringLength: null }),
+    };
+    for (const [where, text] of Object.entries(searched))
+      for (const fragment of fragments)
+        expect({ where, fragment, found: text.includes(fragment) }).toEqual({
+          where,
+          fragment,
+          found: false,
+        });
     expect(computerStartToolOutputSchema.parse(outB)).toEqual(outB);
   });
 });
