@@ -2268,6 +2268,39 @@ bool CheckWindowsShadowCore() {
     dl.document_url = "chrome://downloads/";
     if (!Check((WindowsShadowClassify(dl, UiaRequest("type"), true).gaps & kShadowGapNativeDocument) == 0,
                "winshadow-native-document-download-override")) return false;
+    // A native Document with an unknown origin AND another reason to refuse stays stricter: no bit.
+    // (Canceled: a canceled capture is a skipped record and never reaches this path. Budget: an
+    // exhausted capture has incomplete metadata, which refuses on its own.)
+    bool other_causes_ok = true;
+    const auto other_cause = [&](const char *name, const ShadowUiaCapture &capture,
+                                 std::string_view language) {
+      ShadowRequestInfo request = UiaRequest("type");
+      request.policy_language = language;
+      const ShadowFacts facts = BuildWindowsShadowFacts(capture, request);
+      const ShadowRecord record = WindowsShadowClassify(capture, request, true);
+      const bool ok = facts.facts.origin == OriginState::kUnknown &&
+                      record.kind != DecisionKind::kOrdinary &&
+                      (record.gaps & kShadowGapNativeDocument) == 0 && record.V2IsStricter() &&
+                      !record.NativeDocumentGap();
+      // Every case is reported (no early return), so one run names all that fail.
+      if (!Check(ok, name)) other_causes_ok = false;
+    };
+    ShadowUiaCapture shell = UiaBase();
+    shell.chain = {UiaNode("Document", "Console"), UiaNode("Window", "Command Prompt")};
+    shell.window_class = "ConsoleWindowClass";
+    other_cause("winshadow-native-document-shell-surface", shell, "en");
+    ShadowUiaCapture prompt = UiaBase();
+    prompt.chain = {UiaNode("Document", "Prompt"), UiaNode("Window", "User Account Control")};
+    prompt.window_class = "NativeHWNDHost";
+    prompt.process_path = "C:\\Windows\\System32\\consent.exe";
+    other_cause("winshadow-native-document-os-prompt-surface", prompt, "en");
+    ShadowUiaCapture budget_cut = UiaBase();
+    budget_cut.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Notepad")};
+    budget_cut.budget_exhausted = true;
+    other_cause("winshadow-native-document-budget", budget_cut, "en");
+    other_cause("winshadow-native-document-unsupported-language", native, "fr");
+    if (!Check(other_causes_ok, "winshadow-native-document-other-causes-stay-stricter"))
+      return false;
   }
   // The page: a Document in the chain is a page; its URL decides the origin and the download list.
   {
