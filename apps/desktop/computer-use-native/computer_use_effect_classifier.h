@@ -117,6 +117,11 @@ struct EffectFacts {
   OriginState origin = OriginState::kNotApplicable;
   // The key activates the focused control (Enter, Return, Space or a control's own shortcut).
   bool key_is_activation = false;
+  // The host follows clicks: it knows whether this click completes a double click or opens on one
+  // click, and says so by the action (kDoubleClick). Only then is a single click on a passive item of
+  // a file manager known to select and nothing more. Without it (macOS, which does not record the
+  // previous click yet, or a click with no point) every click may open, as before (fail closed).
+  bool click_tracked = false;
   // The target (or the item the action would open) is a document or program item rather than a
   // folder that opens by browsing into it. macOS packages (.app and the like) count as items.
   bool target_is_file_item = false;
@@ -692,7 +697,7 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
   return facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke ||
          (facts.action == ActionKind::kKey && facts.key_is_activation) ||
          (facts.action == ActionKind::kClick &&
-          !(facts.surface == SurfaceKind::kFileBrowser && ItemInSpan(facts)));
+          !(facts.click_tracked && facts.surface == SurfaceKind::kFileBrowser && ItemInSpan(facts)));
 }
 
 // An action that activates a control: a click, an invoke, a toggle, a menu pick or an activating

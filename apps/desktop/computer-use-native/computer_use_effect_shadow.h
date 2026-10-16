@@ -148,51 +148,53 @@ struct ShadowRequestInfo {
   // A click that opens what it lands on: it completes a double click, or the file manager opens an
   // item on one click. Facts then carry it as a double click. Ignored for any other kind.
   bool click_opens = false;
+  // The host tracks clicks (it set click_opens from the previous click and the file manager's
+  // setting). Only a tracked click may be taken as a plain selection; see EffectFacts::click_tracked.
+  bool click_tracked = false;
 };
 
-// Whether a click completes a double click: the previous click was at most `interval_ms` before and
-// at most `slop_x` / `slop_y` pixels away on each axis (the same test the OS applies). No previous
-// click (`last_tick_ms` == 0 and no `has_last`), or a clock that went backwards, is not one.
-[[nodiscard]] inline bool ClickCompletesDoubleClick(bool has_last, std::uint64_t last_tick_ms,
-                                                    std::int32_t last_x, std::int32_t last_y,
-                                                    std::uint64_t now_tick_ms, std::int32_t x,
-                                                    std::int32_t y, std::uint32_t interval_ms,
-                                                    std::int32_t slop_x, std::int32_t slop_y) {
-  if (!has_last || now_tick_ms < last_tick_ms) return false;
-  if (now_tick_ms - last_tick_ms > interval_ms) return false;
-  const std::int64_t dx = static_cast<std::int64_t>(x) - last_x;
-  const std::int64_t dy = static_cast<std::int64_t>(y) - last_y;
-  return (dx < 0 ? -dx : dx) <= slop_x && (dy < 0 ? -dy : dy) <= slop_y;
+// Whether a key opens what has focus. Enter (or Return) does, with or without modifiers; so does any
+// key chord that holds a command modifier (cmd, command, ctrl, control, alt, option, win, windows,
+// meta, super): Cmd+O and Cmd+Down in Finder, Ctrl+Enter and Alt+Enter in Explorer, or any other
+// shortcut. Fail closed. A bare arrow, Tab, Escape, Space, Home/End or a letter does not; neither
+// does Shift with one of those (it extends a selection). The chord is split on '+'; the last part
+// is the key, the others are modifiers. Case is ignored.
+[[nodiscard]] inline bool ShadowKeyOpens(std::string_view key) {
+  std::vector<std::string> parts;
+  std::string current;
+  for (const char raw : key) {
+    if (raw == '+') {
+      parts.push_back(std::move(current));
+      current.clear();
+    } else {
+      current.push_back(raw >= 'A' && raw <= 'Z' ? static_cast<char>(raw - 'A' + 'a') : raw);
+    }
+  }
+  parts.push_back(std::move(current));
+  static constexpr std::string_view kCommandModifiers[] = {
+      "cmd", "command", "ctrl", "control", "alt", "option", "opt", "win", "windows", "meta", "super"};
+  for (const std::string &part : parts)
+    for (const std::string_view modifier : kCommandModifiers)
+      if (part == modifier) return true;
+  return parts.back() == "enter" || parts.back() == "return";
 }
 
-// Whether input came from somewhere else since this helper last sent some. The system's last input
-// time (`last_input_tick`, GetLastInputInfo) and every other tick here are 32-bit GetTickCount
-// values (the same clock). Our own injection is a WINDOW of the clock: `send_before_tick` is the
-// time just before SendInput and `send_after_tick` the time just after it. The system stamps the
-// injection with the time it happened, so a last input time from `send_before_tick` up to
-// `send_after_tick + slack_ms` is OUR input (the slack covers a system that updates its last input
-// time a moment after SendInput returns). A last input time before the window is older than our
-// injection (it does not pair with it). One after the window is somebody else's, and when it is
-// also at most `interval_ms` before `now_tick`, a person's click may pair with ours into a double
-// click this helper cannot see: the caller treats the click as opening (fail closed). With no
-// injection of our own yet, any input in the interval counts. Ticks wrap at 2^32: differences are
-// taken modulo 2^32 and a difference of 2^31 or more means "before" / "in the future". The window
-// is anchored on the clock, never on the previous input, so an old previous input does not matter.
-inline constexpr std::uint32_t kOwnInputSlackMs = 50;
-
-[[nodiscard]] inline bool ExternalInputWithinDoubleClick(
-    bool has_own, std::uint32_t send_before_tick, std::uint32_t send_after_tick,
-    std::uint32_t last_input_tick, std::uint32_t now_tick, std::uint32_t interval_ms,
-    std::uint32_t slack_ms = kOwnInputSlackMs) {
-  constexpr std::uint32_t kHalf = 0x80000000u;
-  if (has_own) {
-    const std::uint32_t before_by = send_before_tick - last_input_tick;
-    if (before_by != 0 && before_by < kHalf) return false; // older than our injection
-    const std::uint32_t past_ours = last_input_tick - (send_after_tick + slack_ms);
-    if (past_ours == 0 || past_ours >= kHalf) return false; // inside our window
-  }
+// Whether a click made now may complete a double click, from the system's last input time alone.
+// `last_input_tick` (GetLastInputInfo) and `now_tick` are 32-bit GetTickCount values. A double click
+// needs the previous button press to be within `interval_ms` of this one, and that press (a person's
+// or this helper's own) is an input, so it is at or before the last input time. If the last input is
+// older than the interval, no double click can form, whatever was sent before and wherever this click
+// lands. This asks no one who sent the input: it is structurally on the safe side. It costs a click
+// within the interval of ANY input (also our own previous key, scroll or click) counting as opening;
+// an agent acts once per model round trip, which is seconds. A last input time that cannot be read, or
+// that lies in the future (a difference of 2^31 or more modulo 2^32), is "may complete". `now_tick` is
+// taken at preflight, before the click is sent, which is the safe side as well.
+[[nodiscard]] inline bool RecentInputMayCompleteDoubleClick(bool read_ok, std::uint32_t last_input_tick,
+                                                            std::uint32_t now_tick,
+                                                            std::uint32_t interval_ms) {
+  if (!read_ok) return true;
   const std::uint32_t age = now_tick - last_input_tick;
-  return age < kHalf && age <= interval_ms;
+  return age >= 0x80000000u || age <= interval_ms;
 }
 
 struct ShadowFacts {
@@ -458,7 +460,8 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
   if (!ShadowActionForKind(request.kind, &action)) result.gaps |= kShadowGapUnsupportedAction;
   if (request.kind == "click" && request.click_opens) action = ActionKind::kDoubleClick;
   facts.action = action;
-  facts.key_is_activation = request.kind == "key" && request.key == "Enter";
+  facts.click_tracked = request.kind == "click" && request.click_tracked;
+  facts.key_is_activation = request.kind == "key" && ShadowKeyOpens(request.key);
   facts.mode = request.maximum_mode == "full_access_app" ? SessionMode::kFullAccess
                : request.maximum_mode == "supervised"    ? SessionMode::kSupervised
                                                          : SessionMode::kObserveOnly;

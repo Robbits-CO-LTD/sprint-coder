@@ -45,7 +45,7 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
   it('counts a double click, an invoke, an activating key and a click that is not a known passive file-manager item', () => {
     const body = squash(classifier.slice(classifier.indexOf('inline bool MayOpen(')));
     expect(body).toContain(
-      'return facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke || (facts.action == ActionKind::kKey && facts.key_is_activation) || (facts.action == ActionKind::kClick && !(facts.surface == SurfaceKind::kFileBrowser && ItemInSpan(facts)));',
+      'return facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke || (facts.action == ActionKind::kKey && facts.key_is_activation) || (facts.action == ActionKind::kClick && !(facts.click_tracked && facts.surface == SurfaceKind::kFileBrowser && ItemInSpan(facts)));',
     );
   });
 
@@ -56,69 +56,64 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
     expect(shadow).toContain('bool click_opens = false;');
   });
 
+  it('counts keys that open: Enter, and any chord with a command modifier; not a bare arrow', () => {
+    expect(squash(shadow)).toContain(
+      'facts.key_is_activation = request.kind == "key" && ShadowKeyOpens(request.key);',
+    );
+    expect(shadow).toContain(
+      '"cmd", "command", "ctrl", "control", "alt", "option", "opt", "win", "windows", "meta", "super"',
+    );
+    expect(squash(shadow)).toContain(
+      'facts.click_tracked = request.kind == "click" && request.click_tracked;',
+    );
+  });
+
   it('keeps the macOS source out of it: Finder has no single-click-to-open setting, and the wire has no double click', () => {
     expect(read('computer_use_macos.mm')).not.toContain('click_opens');
   });
 });
 
 describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
-  it('remembers the click that was sent, only when input was accepted', () => {
-    const squashed = squash(host);
-    expect(squashed).toContain(
-      'if (sent > 0) { *accepted = true; RecordWindowsClick(screen_x, screen_y); }',
-    );
-    expect(host.match(/RecordWindowsClick\(/gu)).toHaveLength(2); // the definition and that one call
-  });
-
-  it('keeps the previous click and our last injection once per process, behind a mutex, never destroyed', () => {
+  it('keeps no record of clicks: the rule is the last input time of the system alone', () => {
     const block = squash(clickRuleBlock());
-    expect(block).toContain('struct WindowsClickState { std::mutex lock;');
-    expect(block).toContain('static WindowsClickState *state = new WindowsClickState();');
-    // No per-session copy of it (a new session starts on the same machine).
-    expect(host).not.toContain('WindowsLastClick');
-    expect(host).not.toContain('last_click');
-    // Every read and write of it holds the lock.
-    expect(block.match(/std::lock_guard<std::mutex> guard\(state\.lock\);/gu)).toHaveLength(3);
-    // Our own injections are noted at the one place that sends input.
-    const send = squash(host.slice(host.indexOf('UINT SendInputForBoundTarget(')));
-    expect(send.slice(0, send.indexOf('WORD VirtualKeyForName'))).toContain(
-      'if (sent > 0) RecordWindowsOwnInput(send_before_tick);',
-    );
-  });
-
-  it('treats input from somewhere else since our last injection as possibly pairing, failing toward "opens"', () => {
-    const block = squash(clickRuleBlock());
+    expect(host).not.toContain('RecordWindowsClick');
+    expect(host).not.toContain('RecordWindowsOwnInput');
+    expect(host).not.toContain('WindowsClickState');
+    expect(host).not.toContain('GetTickCount()');
+    // Sending input is untouched: no new Win32 call there.
+    const send = host.slice(host.indexOf('UINT SendInputForBoundTarget('));
+    const sendBody = send.slice(0, send.indexOf('WORD VirtualKeyForName'));
+    for (const call of ['GetLastInputInfo', 'GetTickCount', 'Record', 'ClickState'])
+      expect(sendBody).not.toContain(call);
+    expect(sendBody).toContain('return SendInput(count, events, sizeof(INPUT));');
     expect(block).toContain('GetLastInputInfo(&info)');
-    expect(block).toContain('if (!ReadSystemLastInput(&last_input)) return true;');
-    expect(block).toContain('sprint_coder::computer_use::ExternalInputWithinDoubleClick(');
+    expect(block).toContain(
+      'sprint_coder::computer_use::RecentInputMayCompleteDoubleClick( read, read ? info.dwTime : 0, static_cast<std::uint32_t>(GetTickCount64()), GetDoubleClickTime());',
+    );
+    expect(block).toContain('return WindowsSingleClickOpens() || WindowsRecentInputMayPair();');
   });
 
-  it('reads the double-click time and distance from the system, and the setting from the shell, failing toward "opens"', () => {
+  it('reads the setting from the shell, failing toward "opens"', () => {
     const block = squash(clickRuleBlock());
     expect(block).toContain('SHELLSTATE state{};');
     expect(block).toContain('SHGetSetSettings(&state, SSF_DOUBLECLICKINWEBVIEW, FALSE);');
     expect(block).toContain('return state.fDoubleClickInWebView == 0;');
-    expect(block).toContain('GetSystemMetrics(SM_CXDOUBLECLK) / 2');
-    expect(block).toContain('GetSystemMetrics(SM_CYDOUBLECLK) / 2');
-    expect(block).toContain('GetDoubleClickTime()');
-    expect(block).toContain('GetTickCount64()');
-    expect(block).toContain('if (slop_x <= 0 || slop_y <= 0) return true;');
-    expect(block).toContain('if (WindowsSingleClickOpens()) return true;');
-    expect(block).toContain('sprint_coder::computer_use::ClickCompletesDoubleClick(');
   });
 
   it('hands click_opens to the shadow and to the synchronous entry, for a click with a point, and nowhere else', () => {
     const squashed = squash(host);
     expect(host.match(/WindowsClickOpens\(/gu)).toHaveLength(3); // the definition and two uses
     expect(squashed).toContain(
-      'job.click_opens = kind == "click" && point_known && WindowsClickOpens(point);',
+      'job.click_tracked = kind == "click" && point_known; job.click_opens = job.click_tracked && WindowsClickOpens();',
     );
-    expect(squashed).toContain('info.click_opens = kind == "click" && WindowsClickOpens(point);');
+    expect(squashed).toContain(
+      'info.click_tracked = kind == "click"; info.click_opens = info.click_tracked && WindowsClickOpens();',
+    );
     // The synchronous entry leaves before it uses the point when a click has none.
     const guard = 'if ((kind == "click" || kind == "scroll") && !point_known) return unavailable;';
     const entry = squashed.slice(squashed.indexOf('EvaluateWindowsInterlockOnLane('));
     expect(entry).toContain(guard);
-    expect(entry.indexOf(guard)).toBeLessThan(entry.indexOf('WindowsClickOpens(point)'));
+    expect(entry.indexOf(guard)).toBeLessThan(entry.indexOf('WindowsClickOpens()'));
     // Only the dispatch records a click, and the dispatch never asks: preflight (where click_opens
     // is computed) runs before the dispatch of the same click (the ticket comes from it), so a click
     // is compared with the PREVIOUS one, never with itself.
@@ -128,6 +123,11 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     );
     expect(squash(scheduler)).toContain('info.click_opens = job.click_opens;');
     expect(scheduler).toContain('bool click_opens = false;');
+    expect(squash(scheduler)).toContain('info.click_tracked = job.click_tracked;');
+    // macOS follows no clicks yet: it sets neither flag, so a click there counts as before.
+    const mac = read('computer_use_macos.mm');
+    expect(mac).not.toContain('click_tracked');
+    expect(mac).not.toContain('click_opens');
     // Not the dispatch: the click that is being sent is not yet a "previous" click.
     const dispatch = host.slice(host.indexOf('bool DispatchWindowsAction('));
     expect(dispatch.slice(0, dispatch.indexOf('BackendProbe ProbeBackend('))).not.toContain(
@@ -222,8 +222,6 @@ const program = String.raw`
 
 #include <cstdint>
 #include <iostream>
-#include <memory>
-#include <mutex>
 
 #include "computer_use_effect_shadow.h"
 
@@ -241,95 +239,37 @@ void Check(bool ok, const char *name) {
   }
 }
 
-// True while nobody else has touched the mouse or keyboard since our last injection (a person at
-// the machine during the run only makes the helper answer "opens", which is the safe side).
-void NoteOwn() { RecordWindowsOwnInput(GetTickCount()); }
-bool Quiet() {
-  DWORD last = 0;
-  if (!ReadSystemLastInput(&last)) return false;
-  WindowsClickState &state = ClickState();
-  return !sprint_coder::computer_use::ExternalInputWithinDoubleClick(
-      state.has_input, state.send_before_tick, state.send_after_tick, last, static_cast<std::uint32_t>(GetTickCount64()),
-      GetDoubleClickTime());
-}
-void CheckNotOpening(POINT point, bool single, const char *name) {
-  const bool before = Quiet();
-  const bool result = WindowsClickOpens(point);
-  if (before && Quiet()) Check(result == single, name);
-}
-
+// The system's last input time must be fresh or stale on purpose: a person at the machine only makes
+// the answer "may pair", so a check that expects "stale" is skipped then.
 int main() {
-  const bool single = WindowsSingleClickOpens();
   const DWORD interval = GetDoubleClickTime();
-  std::cout << "single_click_opens=" << single << " interval=" << interval << "\n";
-  // A baseline: our own injection note, as the host takes after each SendInput.
-  Sleep(interval + 150);
-  NoteOwn();
-  CheckNotOpening(POINT{50, 50}, single, "no_previous_click");
-  RecordWindowsClick(50, 50);
-  // The same point at once: a double click (and always opens when the setting is on).
-  Check(WindowsClickOpens(POINT{50, 50}), "same_point_at_once_completes_a_double_click");
-  // Far away: not one.
-  CheckNotOpening(POINT{500, 500}, single, "far_away_is_not_a_double_click");
-  // After the interval: not one.
-  Sleep(interval + 150);
-  NoteOwn();
-  CheckNotOpening(POINT{50, 50}, single, "after_the_interval_is_not_a_double_click");
-  // A new click starts a new pair.
-  RecordWindowsClick(50, 50);
-  Check(WindowsClickOpens(POINT{50, 50}), "a_new_record_pairs_again");
-  // The helper's own injections, noted the way the host does it (the clock just before SendInput,
-  // the clock just after, no wait in between), are not input from elsewhere, whether the system
-  // stamps them at once or a moment later. Skipped when a person is at the machine.
-  {
-    const auto injected = [&](const INPUT &input, const char *name) {
-      const DWORD send_before = GetTickCount();
-      SendInput(1, const_cast<INPUT *>(&input), sizeof(INPUT));
-      RecordWindowsOwnInput(send_before);
-      if (Quiet())
-        Check(!WindowsClickOpens(POINT{900, 900}) || single, name);
-      else
-        std::cout << "skip " << name << " (somebody else is using the machine)\n";
-    };
-    INPUT key{};
-    key.type = INPUT_KEYBOARD;
-    key.ki.wVk = VK_F24;
-    key.ki.dwFlags = KEYEVENTF_KEYUP;
-    injected(key, "own_key_injection_is_not_external_input");
-    // A mouse injection: an absolute move onto the cursor's own position; the cursor is put back.
-    POINT cursor{};
-    if (GetCursorPos(&cursor)) {
-      Sleep(interval + 150);
-      const int width = GetSystemMetrics(SM_CXSCREEN);
-      const int height = GetSystemMetrics(SM_CYSCREEN);
-      INPUT mouse{};
-      mouse.type = INPUT_MOUSE;
-      mouse.mi.dx = static_cast<LONG>(cursor.x * 65535LL / (width > 1 ? width - 1 : 1));
-      mouse.mi.dy = static_cast<LONG>(cursor.y * 65535LL / (height > 1 ? height - 1 : 1));
-      mouse.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE;
-      injected(mouse, "own_mouse_injection_is_not_external_input");
-      SetCursorPos(cursor.x, cursor.y);
-    }
-  }
-  // Input that did not come through the helper (a key-up of an unassigned key sent directly)
-  // makes the next click possibly paired, wherever it lands.
-  Sleep(interval + 150);
-  NoteOwn();
-  Sleep(120); // past the slack: input after this is not ours
-  DWORD before_tick = 0;
-  ReadSystemLastInput(&before_tick);
+  std::cout << "interval=" << interval << "\n";
+  // Input a moment ago: a click now may pair with it.
   INPUT key{};
   key.type = INPUT_KEYBOARD;
   key.ki.wVk = VK_F24;
   key.ki.dwFlags = KEYEVENTF_KEYUP;
   SendInput(1, &key, sizeof(INPUT));
   Sleep(30);
-  DWORD after_tick = 0;
-  ReadSystemLastInput(&after_tick);
-  if (after_tick != before_tick)
-    Check(WindowsClickOpens(POINT{900, 900}), "input_from_elsewhere_is_possibly_a_pair");
+  DWORD stamp = 0;
+  LASTINPUTINFO info{};
+  info.cbSize = sizeof(info);
+  const bool moved = GetLastInputInfo(&info) != FALSE;
+  stamp = info.dwTime;
+  if (moved && static_cast<DWORD>(GetTickCount()) - stamp <= interval)
+    Check(WindowsRecentInputMayPair(), "input_a_moment_ago_may_pair");
   else
-    std::cout << "skip input_from_elsewhere (the system did not move its last input time)\n";
+    std::cout << "skip input_a_moment_ago (the system did not stamp the input)\n";
+  // Past the interval with no input from anyone: it cannot pair.
+  Sleep(interval + 250);
+  LASTINPUTINFO later{};
+  later.cbSize = sizeof(later);
+  if (GetLastInputInfo(&later) && static_cast<DWORD>(GetTickCount()) - later.dwTime > interval)
+    Check(!WindowsRecentInputMayPair(), "no_input_for_longer_than_the_interval_cannot_pair");
+  else
+    std::cout << "skip stale_check (somebody else is using the machine)\n";
+  // The click opens when either part says so.
+  Check(WindowsClickOpens() == (WindowsSingleClickOpens() || WindowsRecentInputMayPair()), "click_opens_is_the_or");
   std::cout << (failures == 0 ? "OK\n" : "FAILED\n");
   return failures == 0 ? 0 : 1;
 }

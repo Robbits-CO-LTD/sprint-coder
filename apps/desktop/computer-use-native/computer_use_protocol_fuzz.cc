@@ -4972,6 +4972,7 @@ bool CheckNativeInterlockMap() {
             facts.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
             // A single click on a passive item of a file manager only selects it (#777): no verdict.
             if (surface == SurfaceKind::kFileBrowser && action == ActionKind::kClick) {
+              facts.click_tracked = true;
               if (!none(facts, "interlock-installer-named-item-clicked-in-a-file-manager")) return false;
               continue;
             }
@@ -7269,6 +7270,7 @@ bool CheckClickRule() {
     ShadowRequestInfo request = UiaRequest(kind);
     request.key = key;
     request.click_opens = click_opens;
+    request.click_tracked = true;
     return EvaluateWindowsInterlockOnSource(item.form.source, kind, kind == "invoke" ? name : "", request,
                                             EffectRuleset{});
   };
@@ -7313,6 +7315,7 @@ bool CheckClickRule() {
       item.form.source.point = item.form.source.Add(item.item, "Edit", "Date modified", cell_class);
       ShadowRequestInfo request = UiaRequest("click");
       request.click_opens = click_opens;
+      request.click_tracked = true;
       return EvaluateWindowsInterlockOnSource(item.form.source, "click", "", request, EffectRuleset{});
     };
     const auto one = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "UIProperty");
@@ -7327,6 +7330,7 @@ bool CheckClickRule() {
     text_cell.surface = SurfaceKind::kFileBrowser;
     text_cell.action = ActionKind::kClick;
     text_cell.target_is_file_item = true;
+    text_cell.click_tracked = true;
     text_cell.extension_known = true;
     text_cell.extension = "bat";
     text_cell.chain = {{"text", "UIProperty", "Size"}, {"listitem", "", "run.bat"}, {"list", "", "Items"},
@@ -7337,7 +7341,9 @@ bool CheckClickRule() {
       FakeExplorer item("run.bat");
       item.GiveRealPath("C:\\Users\\me\\run.bat");
       item.form.source.point = item.form.source.Add(item.item, "Text", "Size", "UIProperty");
-      const auto one_text = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", UiaRequest("click"),
+      ShadowRequestInfo text_request = UiaRequest("click");
+      text_request.click_tracked = true;
+      const auto one_text = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", text_request,
                                                              EffectRuleset{});
       if (!Check(!one_text.Refuses() && one_text.no_verdict == InterlockNoVerdict::kNone,
                  "click-rule-text-cell-through-the-reader-is-no-verdict")) return false;
@@ -7353,6 +7359,7 @@ bool CheckClickRule() {
     cell_facts.surface = SurfaceKind::kFileBrowser;
     cell_facts.action = ActionKind::kClick;
     cell_facts.target_is_file_item = true;
+    cell_facts.click_tracked = true;
     cell_facts.extension_known = true;
     cell_facts.extension = "bat";
     cell_facts.chain = cell;
@@ -7395,6 +7402,7 @@ bool CheckClickRule() {
     facts.surface = surface;
     facts.action = action;
     facts.target_is_file_item = file_item;
+    facts.click_tracked = true;
     facts.extension_known = true;
     facts.extension = extension;
     facts.chain = std::move(chain);
@@ -7466,63 +7474,90 @@ bool CheckClickRule() {
     if (!Check(MayOpen(app), "click-rule-click-outside-a-file-manager-still-counts")) return false;
   }
 
-  // ClickCompletesDoubleClick: interval and distance are inclusive; no previous click or a clock
-  // that went backwards is not one.
+  // A host that does not follow clicks (macOS: no record of the previous click; or a click with no
+  // point) leaves click_tracked false: every click may open, a passive item's too (fail closed).
   {
-    const auto completes = [](std::uint64_t last, std::int32_t lx, std::int32_t ly, std::uint64_t now,
-                              std::int32_t x, std::int32_t y) {
-      return ClickCompletesDoubleClick(true, last, lx, ly, now, x, y, 500, 2, 2);
-    };
-    if (!Check(completes(1000, 10, 10, 1500, 10, 10), "dblclick-exact-interval")) return false;
-    if (!Check(!completes(1000, 10, 10, 1501, 10, 10), "dblclick-interval-plus-one")) return false;
-    if (!Check(completes(1000, 10, 10, 1000, 10, 10), "dblclick-same-tick")) return false;
-    if (!Check(completes(1000, 10, 10, 1200, 12, 8), "dblclick-exact-slop")) return false;
-    if (!Check(!completes(1000, 10, 10, 1200, 13, 10), "dblclick-slop-x-plus-one")) return false;
-    if (!Check(!completes(1000, 10, 10, 1200, 10, 13), "dblclick-slop-y-plus-one")) return false;
-    if (!Check(!completes(1000, 10, 10, 1200, 7, 10), "dblclick-slop-x-minus-plus-one")) return false;
-    if (!Check(!completes(1000, 10, 10, 999, 10, 10), "dblclick-clock-went-backwards")) return false;
-    if (!Check(!ClickCompletesDoubleClick(false, 0, 0, 0, 100, 10, 10, 500, 2, 2), "dblclick-no-previous-click"))
+    const std::vector<NodeFacts> finder = {{"axrow", "", "run.command"}, {"axoutline", "", "Files"},
+                                           {"axwindow", "", "Documents"}};
+    EffectFacts untracked = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, finder, "command", true);
+    untracked.click_tracked = false;
+    const InterlockVerdict verdict = InterlockForFacts(untracked);
+    if (!Check(MayOpen(untracked) && verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-untracked-finder-row-click-counts")) return false;
+    untracked.click_tracked = true;
+    if (!Check(!MayOpen(untracked) && !InterlockForFacts(untracked).Refuses(),
+               "click-rule-tracked-finder-row-click-is-no-refusal")) return false;
+    // The request flag reaches the facts for a click only, and a plain request is untracked.
+    ShadowRequestInfo request = UiaRequest("click");
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), request).facts.click_tracked, "click-rule-request-is-untracked-by-default"))
       return false;
-    if (!Check(ClickCompletesDoubleClick(true, 1000, 0, 0, 1000, 0, 0, 0, 2, 2) &&
-                   !ClickCompletesDoubleClick(true, 1000, 0, 0, 1001, 0, 0, 0, 2, 2),
-               "dblclick-zero-interval-only-same-tick")) return false;
-    if (!Check(!ClickCompletesDoubleClick(true, 0, -2147483647 - 1, 0, 100, 2147483647, 0, 500, 2, 2),
-               "dblclick-extreme-coordinates")) return false;
+    request.click_tracked = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.click_tracked, "click-rule-request-tracked-reaches-the-facts"))
+      return false;
+    ShadowRequestInfo other = UiaRequest("invoke");
+    other.click_tracked = true;
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), other).facts.click_tracked, "click-rule-tracked-is-for-a-click-only"))
+      return false;
+    // Through the reader: an untracked click on a script item is a takeover.
+    FakeExplorer item("run.bat");
+    item.GiveRealPath("C:\\Users\\me\\run.bat");
+    item.form.source.focused = item.item;
+    const auto evaluated = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", UiaRequest("click"), EffectRuleset{});
+    if (!Check(evaluated.Refuses() && evaluated.verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-untracked-click-through-the-reader-is-a-takeover")) return false;
+  }
+  // Keys that open: Enter (with or without modifiers) and any chord that holds a command modifier.
+  {
+    for (const char *key : {"Enter", "enter", "Return", "Shift+Enter", "Ctrl+Enter", "ctrl+Enter", "Alt+Enter",
+                            "cmd+o", "Cmd+O", "Command+Down", "cmd+ArrowDown", "Control+O", "Option+Down",
+                            "Meta+O", "Super+E", "Win+E", "Windows+E", "ctrl+shift+n", "Alt+F4"})
+      if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
+    for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Tab", "Escape", "Space",
+                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", ""})
+      if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
+    // Through the facts: a chord is an activating key; an arrow is not.
+    ShadowRequestInfo request = UiaRequest("key");
+    request.key = "Cmd+O";
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.key_is_activation, "key-chord-is-activation-in-the-facts"))
+      return false;
+    request.key = "ArrowDown";
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), request).facts.key_is_activation, "arrow-is-not-activation-in-the-facts"))
+      return false;
+    EffectFacts finder_key = facts_for(SurfaceKind::kFileBrowser, ActionKind::kKey,
+                                       {{"axrow", "", "run.command"}, {"axoutline", "", "Files"}, {"axwindow", "", "Documents"}},
+                                       "command", true);
+    finder_key.key_is_activation = ShadowKeyOpens("Cmd+Down");
+    if (!Check(MayOpen(finder_key) && InterlockForFacts(finder_key).Refuses(), "key-cmd-down-on-a-finder-row-is-opening"))
+      return false;
   }
 
-  // Input from somewhere else (a person at the mouse) within the double-click time since our own
-  // last injection makes the click one that may open. Equal ticks = nobody else touched anything.
+  // RecentInputMayCompleteDoubleClick: a click may pair only with an input within the double-click
+  // time of now; the last input time is the latest of all inputs, whoever sent them. Interval 500.
   {
-    // (has_own, send_before, send_after, last_input, now); interval 500, slack 50. Our window is
-    // [send_before, send_after + slack] on the clock; the previous input does not matter.
-    const auto external = [](bool has_own, std::uint32_t before, std::uint32_t after, std::uint32_t last,
-                             std::uint32_t now) {
-      return ExternalInputWithinDoubleClick(has_own, before, after, last, now, 500);
+    const auto may = [](bool read_ok, std::uint32_t last, std::uint32_t now) {
+      return RecentInputMayCompleteDoubleClick(read_ok, last, now, 500);
     };
-    if (!Check(!external(true, 1000, 1000, 1000, 1100), "external-input-at-the-before-tick-is-ours")) return false;
-    if (!Check(!external(true, 1000, 1010, 1005, 1100), "external-input-inside-the-window-is-ours")) return false;
-    if (!Check(!external(true, 1000, 1010, 1010, 1100), "external-input-at-the-after-tick-is-ours")) return false;
-    if (!Check(!external(true, 1000, 1010, 1060, 1100), "external-input-at-the-after-tick-plus-slack-is-ours")) return false;
-    if (!Check(external(true, 1000, 1010, 1061, 1100), "external-input-one-past-the-slack-is-external")) return false;
-    if (!Check(!external(true, 1000, 1010, 999, 1100), "external-input-one-before-the-window-is-none")) return false;
-    // The race the slack is for: the injection is stamped a moment after SendInput returned, and the
-    // previous input was seconds ago. Anchored on the clock, the stamp is in the window.
-    if (!Check(!external(true, 5000, 5003, 5040, 5100), "external-input-stamp-after-return-with-an-old-previous-input")) return false;
-    // The system had not stamped it yet: the last input time is still the old previous one.
-    if (!Check(!external(true, 5000, 5003, 100, 5100), "external-input-not-yet-stamped-is-none")) return false;
-    if (!Check(external(true, 5000, 5003, 5200, 5300), "external-input-newer-than-the-window-within-the-interval")) return false;
-    if (!Check(external(true, 5000, 5003, 5200, 5700), "external-input-exactly-at-the-interval")) return false;
-    if (!Check(!external(true, 5000, 5003, 5200, 5701), "external-input-one-past-the-interval")) return false;
-    if (!Check(!external(true, 5000, 5003, 5200, 5100), "external-input-in-the-future-is-none")) return false;
-    if (!Check(external(false, 0, 0, 900, 1100), "external-input-with-no-injection-of-ours-counts")) return false;
-    if (!Check(!external(false, 0, 0, 100, 1100), "external-input-with-no-injection-and-old-is-none")) return false;
+    if (!Check(may(true, 1000, 1000), "recent-input-same-tick")) return false;
+    if (!Check(may(true, 1000, 1500), "recent-input-exactly-at-the-interval")) return false;
+    if (!Check(!may(true, 1000, 1501), "recent-input-one-past-the-interval")) return false;
+    if (!Check(!may(true, 1000, 60000), "recent-input-long-ago-cannot-pair")) return false;
+    if (!Check(may(true, 1500, 1000), "recent-input-in-the-future-may-pair")) return false;
+    if (!Check(may(false, 0, 60000), "recent-input-unreadable-may-pair")) return false;
     // Ticks wrap at 2^32.
-    if (!Check(!external(true, 0xFFFFFFF0u, 0xFFFFFFF8u, 0x00000010u, 0x00000050u), "external-input-in-our-window-across-the-wrap")) return false;
-    if (!Check(external(true, 0xFFFFFFF0u, 0xFFFFFFF8u, 0x00000040u, 0x00000050u), "external-input-after-the-window-across-the-wrap")) return false;
-    if (!Check(!external(true, 0x00000010u, 0x00000012u, 0xFFFFFFF0u, 0x00000020u), "external-input-older-across-the-wrap")) return false;
-    // A last input about 24.8 days older is not mistaken for a recent one.
-    if (!Check(!external(true, 0x00001000u, 0x00001002u, 0x80001000u, 0x00001100u), "external-input-two-pow-31-older-is-none")) return false;
+    if (!Check(may(true, 0xFFFFFFF0u, 0x00000010u), "recent-input-across-the-wrap")) return false;
+    if (!Check(!may(true, 0xFFFFFFF0u, 0x00000300u), "recent-input-across-the-wrap-too-old")) return false;
+    // A last input 2^31 or more behind now reads as the future (fail closed), not as ancient.
+    if (!Check(may(true, 0x00001000u, 0x80001000u), "recent-input-two-pow-31-apart-is-fail-closed")) return false;
+    // The scenarios that a "who sent it" rule gets wrong. A person clicks at t=1000, this helper
+    // sends a key at t=1100 (it overwrites the system's last input), then clicks at t=1300: the OS
+    // sees two presses 300 ms apart.
+    if (!Check(may(true, 1100, 1300), "recent-input-person-click-then-our-key-then-our-click")) return false;
+    // A person's click lands 40 ms after our injection, inside any slack; then our click at t=1200.
+    if (!Check(may(true, 1040, 1200), "recent-input-person-click-in-the-slack")) return false;
+    // Our own previous click and the next one a model round trip later: not a pair.
+    if (!Check(!may(true, 1000, 4000), "recent-input-our-own-click-seconds-ago-cannot-pair")) return false;
   }
+
 
   std::cout << "Computer Use native click rule: PASS\n";
   return true;

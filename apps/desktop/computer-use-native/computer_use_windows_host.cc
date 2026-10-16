@@ -4014,18 +4014,12 @@ bool RevalidateWindowsTarget(const WindowsSession &session,
          current.right == expected.right && current.bottom == expected.bottom;
 }
 
-void RecordWindowsOwnInput(DWORD send_before_tick) noexcept;
-
 UINT SendInputForBoundTarget(const WindowsSession &session,
                              const RECT &expected, std::uint64_t expected_epoch,
                              UINT count, LPINPUT events) {
   if (!RevalidateWindowsTarget(session, expected, expected_epoch)) return 0;
   session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-  // Our injection is a window of the clock (see ExternalInputWithinDoubleClick): note its start.
-  const DWORD send_before_tick = GetTickCount();
-  const UINT sent = SendInput(count, events, sizeof(INPUT));
-  if (sent > 0) RecordWindowsOwnInput(send_before_tick);
-  return sent;
+  return SendInput(count, events, sizeof(INPUT));
 }
 
 WORD VirtualKeyForName(std::string_view key) {
@@ -4331,76 +4325,26 @@ bool WindowsSingleClickOpens() noexcept {
   return state.fDoubleClickInWebView == 0;
 }
 
-// The last click and the last injection of this helper, for the whole process (not per session: a
-// new session starts on the same machine, and the OS pairs clicks across them). One state that is
-// never destroyed, behind a mutex: the request thread writes it (dispatch) and reads it (preflight,
-// the shadow's scheduling), and the synchronous entry may read it from its own thread.
-struct WindowsClickState {
-  std::mutex lock;
-  bool has_click = false;
-  std::uint64_t click_tick_ms = 0;
-  LONG click_x = 0;
-  LONG click_y = 0;
-  bool has_input = false;
-  DWORD send_before_tick = 0; // GetTickCount just before our own last injection
-  DWORD send_after_tick = 0;  // ... and just after it
-};
-
-WindowsClickState &ClickState() {
-  static WindowsClickState *state = new WindowsClickState();
-  return *state;
-}
-
-bool ReadSystemLastInput(DWORD *tick) noexcept {
+// Whether a click made now may complete a double click. The OS pairs two presses within the
+// double-click time, whoever sent them, and the earlier press is an input, so it is at or before the
+// system's LAST input time: if that is older than the double-click time, no pair can form. That is all
+// this asks (see RecentInputMayCompleteDoubleClick); it keeps no record of its own clicks and tells
+// nobody's input from anybody's. The price: a click within the double-click time (500 ms by default)
+// of any input, this helper's own included, counts as opening; the agent acts one step per model
+// round trip, which is seconds. Anything this cannot read is "opens".
+bool WindowsRecentInputMayPair() noexcept {
   LASTINPUTINFO info{};
   info.cbSize = sizeof(info);
-  if (!GetLastInputInfo(&info)) return false;
-  *tick = info.dwTime;
-  return true;
+  const bool read = GetLastInputInfo(&info) != FALSE;
+  return sprint_coder::computer_use::RecentInputMayCompleteDoubleClick(
+      read, read ? info.dwTime : 0, static_cast<std::uint32_t>(GetTickCount64()),
+      GetDoubleClickTime());
 }
 
-// Called after every injection that was accepted: the system's last input time is now ours.
-void RecordWindowsOwnInput(DWORD send_before_tick) noexcept {
-  const DWORD send_after_tick = GetTickCount();
-  WindowsClickState &state = ClickState();
-  std::lock_guard<std::mutex> guard(state.lock);
-  state.has_input = true;
-  state.send_before_tick = send_before_tick;
-  state.send_after_tick = send_after_tick;
-}
-
-// Remembers the click that was just sent (screen coordinates).
-void RecordWindowsClick(LONG x, LONG y) noexcept {
-  WindowsClickState &state = ClickState();
-  std::lock_guard<std::mutex> guard(state.lock);
-  state.has_click = true;
-  state.click_tick_ms = GetTickCount64();
-  state.click_x = x;
-  state.click_y = y;
-}
-
-// Whether a click at `point` opens what it lands on: the file manager opens on one click, or someone
-// else (a person at the mouse) sent input within the double-click time since our last injection, or
-// this click completes a double click with our previous one. Anything this cannot tell is "opens".
-// GetLastInputInfo also counts a person's mouse movement and keys: a click while someone touches the
-// machine is read as possibly paired, on purpose (fail closed).
-bool WindowsClickOpens(POINT point) noexcept {
-  if (WindowsSingleClickOpens()) return true;
-  const int slop_x = GetSystemMetrics(SM_CXDOUBLECLK) / 2;
-  const int slop_y = GetSystemMetrics(SM_CYDOUBLECLK) / 2;
-  if (slop_x <= 0 || slop_y <= 0) return true;
-  DWORD last_input = 0;
-  if (!ReadSystemLastInput(&last_input)) return true;
-  const DWORD interval = GetDoubleClickTime();
-  const std::uint64_t now = GetTickCount64();
-  WindowsClickState &state = ClickState();
-  std::lock_guard<std::mutex> guard(state.lock);
-  if (sprint_coder::computer_use::ExternalInputWithinDoubleClick(
-          state.has_input, state.send_before_tick, state.send_after_tick, last_input, static_cast<std::uint32_t>(now), interval))
-    return true;
-  return sprint_coder::computer_use::ClickCompletesDoubleClick(
-      state.has_click, state.click_tick_ms, state.click_x, state.click_y, now, point.x, point.y,
-      interval, slop_x, slop_y);
+// Whether a click opens what it lands on: the file manager opens on one click, or it may complete a
+// double click.
+bool WindowsClickOpens() noexcept {
+  return WindowsSingleClickOpens() || WindowsRecentInputMayPair();
 }
 // END click rule
 
@@ -4478,10 +4422,8 @@ bool DispatchWindowsAction(const WindowsSession &session,
     events[1].mi.dwFlags = MOUSEEVENTF_LEFTUP;
     const UINT sent =
         SendInputForBoundTarget(session, bounds, expected_epoch, 2, events);
-    if (sent > 0) {
+    if (sent > 0)
       *accepted = true;
-      RecordWindowsClick(screen_x, screen_y);
-    }
     dispatched =
         sent == 2 && RevalidateWindowsTarget(session, bounds, expected_epoch);
   } else if (kind == "scroll") {
@@ -4885,7 +4827,8 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
       point.y = bounds.top + static_cast<LONG>(std::lround(
                                  y * std::max<LONG>(0, bounds.bottom - bounds.top - 1)));
     }
-    job.click_opens = kind == "click" && point_known && WindowsClickOpens(point);
+    job.click_tracked = kind == "click" && point_known;
+    job.click_opens = job.click_tracked && WindowsClickOpens();
     const HWND window = session.active_window;
     const std::uint64_t expected_epoch = session.cancel_epoch;
     // Valid while the cancellation epoch is the one the preflight was bound to (a cancel and the
@@ -4975,7 +4918,8 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     info.key = key;
     info.maximum_mode = session.maximum_mode;
     info.policy_language = session.policy_language;
-    info.click_opens = kind == "click" && WindowsClickOpens(point);
+    info.click_tracked = kind == "click";
+    info.click_opens = info.click_tracked && WindowsClickOpens();
     return EvaluateWindowsInterlockOnSource(*source, kind, target_id, info, ruleset);
   } catch (...) {
     return unavailable;

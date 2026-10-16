@@ -43,6 +43,7 @@ struct WindowsShadowJob {
   bool v1_ordinary = false;
   // The click opens what it lands on (a double click, or a file manager that opens on one click).
   bool click_opens = false;
+  bool click_tracked = false;
 };
 
 // How the host gives the capture its world. Both run on the shadow's thread.
@@ -126,6 +127,7 @@ private:
       info.maximum_mode = job.maximum_mode;
       info.policy_language = job.policy_language;
       info.click_opens = job.click_opens;
+      info.click_tracked = job.click_tracked;
       EmitFromShadow(WindowsShadowClassify(capture, info, job.v1_ordinary));
     } catch (...) {
       // A shadow failure is invisible to the caller.
