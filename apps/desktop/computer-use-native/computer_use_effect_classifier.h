@@ -691,8 +691,10 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 // Windows 11 file manager only selects it (#777). A click on anything else still counts: an item of
 // a download list (some browsers open it on one click), a button, a menu item, a role nobody
 // listed. A click that completes a double click, or that a file manager opens on one click (its
-// "single click to open" setting), is a kDoubleClick by the time it gets here. Other keys (arrows,
-// Tab, Escape) move or dismiss; they do not open.
+// "single click to open" setting), is a kDoubleClick by the time it gets here. Of the keys, only an
+// activating one opens: Enter, or a chord with a command modifier (Cmd+O, Ctrl+Enter; see
+// ShadowKeyOpens, which counts more than needed on purpose). A bare arrow, Tab or Escape moves or
+// dismisses; it does not open.
 [[nodiscard]] inline bool MayOpen(const EffectFacts &facts) {
   return facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke ||
          (facts.action == ActionKind::kKey && facts.key_is_activation) ||

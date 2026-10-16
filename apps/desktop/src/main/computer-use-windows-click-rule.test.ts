@@ -5,8 +5,8 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // The click rule on Windows (#500 S5-c-2 PR-2). The portable rule (MayOpen, ItemInSpan,
-// ClickCompletesDoubleClick) is exercised by the harness (computer_use_protocol_fuzz.cc). Tied here:
-// what only the host knows (the previous click, the double-click time and distance, the file
+// RecentInputMayCompleteDoubleClick) is exercised by the harness (computer_use_protocol_fuzz.cc). Tied here:
+// what only the host knows (the system's last input time, the double-click time, the file
 // manager's "single click to open" setting) reaches the facts as `click_opens`, and a live run of the
 // host's own helpers against the real clock and the real shell setting.
 

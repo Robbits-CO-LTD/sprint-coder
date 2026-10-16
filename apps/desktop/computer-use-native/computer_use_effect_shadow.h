@@ -153,12 +153,15 @@ struct ShadowRequestInfo {
   bool click_tracked = false;
 };
 
-// Whether a key opens what has focus. Enter (or Return) does, with or without modifiers; so does any
+// Whether a key opens what has focus. Enter does, with or without modifiers, under any of its
+// spellings (Enter, Return, KP_Enter, NumpadEnter, a bare newline or carriage return); so does any
 // key chord that holds a command modifier (cmd, command, ctrl, control, alt, option, win, windows,
-// meta, super): Cmd+O and Cmd+Down in Finder, Ctrl+Enter and Alt+Enter in Explorer, or any other
-// shortcut. Fail closed. A bare arrow, Tab, Escape, Space, Home/End or a letter does not; neither
-// does Shift with one of those (it extends a selection). The chord is split on '+'; the last part
-// is the key, the others are modifiers. Case is ignored.
+// meta, super): Cmd+O and Cmd+Down in Finder, Ctrl+Enter and Alt+Enter in Explorer. A chord with a
+// command modifier counts WHATEVER its key is: Cmd+C or Ctrl+A are counted too, which is more than
+// needed and is intended (fail closed: this does not know every shortcut of every app). A bare
+// arrow, Tab, Escape, Space, Home/End or a letter does not, nor does Shift with one of those (it
+// extends a selection). The chord is split on '+'; the last part is the key, the others are
+// modifiers. Case is ignored, and so are blanks around a part and '_', '-' or blanks inside one.
 [[nodiscard]] inline bool ShadowKeyOpens(std::string_view key) {
   std::vector<std::string> parts;
   std::string current;
@@ -166,6 +169,8 @@ struct ShadowRequestInfo {
     if (raw == '+') {
       parts.push_back(std::move(current));
       current.clear();
+    } else if (raw == ' ' || raw == '\t' || raw == '_' || raw == '-') {
+      continue;
     } else {
       current.push_back(raw >= 'A' && raw <= 'Z' ? static_cast<char>(raw - 'A' + 'a') : raw);
     }
@@ -176,7 +181,11 @@ struct ShadowRequestInfo {
   for (const std::string &part : parts)
     for (const std::string_view modifier : kCommandModifiers)
       if (part == modifier) return true;
-  return parts.back() == "enter" || parts.back() == "return";
+  static constexpr std::string_view kEnterSpellings[] = {
+      "enter", "return", "kpenter", "numpadenter", "keypadenter", "\n", "\r", "\r\n"};
+  for (const std::string_view enter : kEnterSpellings)
+    if (parts.back() == enter) return true;
+  return false;
 }
 
 // Whether a click made now may complete a double click, from the system's last input time alone.
@@ -187,14 +196,17 @@ struct ShadowRequestInfo {
 // lands. This asks no one who sent the input: it is structurally on the safe side. It costs a click
 // within the interval of ANY input (also our own previous key, scroll or click) counting as opening;
 // an agent acts once per model round trip, which is seconds. A last input time that cannot be read, or
-// that lies in the future (a difference of 2^31 or more modulo 2^32), is "may complete". `now_tick` is
+// that lies in the future (a difference of 2^31 or more modulo 2^32), is "may complete". GetTickCount
+// ticks every 10 to 16 ms, so the interval gets one tick of room (kTickSlackMs), on the safe side. `now_tick` is
 // taken at preflight, before the click is sent, which is the safe side as well.
+inline constexpr std::uint32_t kTickSlackMs = 16;
+
 [[nodiscard]] inline bool RecentInputMayCompleteDoubleClick(bool read_ok, std::uint32_t last_input_tick,
                                                             std::uint32_t now_tick,
                                                             std::uint32_t interval_ms) {
   if (!read_ok) return true;
   const std::uint32_t age = now_tick - last_input_tick;
-  return age >= 0x80000000u || age <= interval_ms;
+  return age >= 0x80000000u || age <= interval_ms + kTickSlackMs;
 }
 
 struct ShadowFacts {

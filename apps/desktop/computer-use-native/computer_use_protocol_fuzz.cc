@@ -7494,6 +7494,12 @@ bool CheckClickRule() {
     request.click_tracked = true;
     if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.click_tracked, "click-rule-request-tracked-reaches-the-facts"))
       return false;
+    // Tracked and opening (a pair with an input within the double-click time, or a file manager that
+    // opens on one click): the facts carry a double click and the click is still tracked.
+    request.click_opens = true;
+    const ShadowFacts paired = BuildWindowsShadowFacts(UiaBase(), request);
+    if (!Check(paired.facts.action == ActionKind::kDoubleClick && paired.facts.click_tracked,
+               "click-rule-tracked-and-opening-is-a-double-click-in-the-facts")) return false;
     ShadowRequestInfo other = UiaRequest("invoke");
     other.click_tracked = true;
     if (!Check(!BuildWindowsShadowFacts(UiaBase(), other).facts.click_tracked, "click-rule-tracked-is-for-a-click-only"))
@@ -7510,10 +7516,15 @@ bool CheckClickRule() {
   {
     for (const char *key : {"Enter", "enter", "Return", "Shift+Enter", "Ctrl+Enter", "ctrl+Enter", "Alt+Enter",
                             "cmd+o", "Cmd+O", "Command+Down", "cmd+ArrowDown", "Control+O", "Option+Down",
-                            "Meta+O", "Super+E", "Win+E", "Windows+E", "ctrl+shift+n", "Alt+F4"})
+                            "Meta+O", "Super+E", "Win+E", "Windows+E", "ctrl+shift+n", "Alt+F4",
+                            // Other spellings of Enter, and blanks and case around the parts.
+                            "KP_Enter", "kp-enter", "NumpadEnter", "Numpad Enter", "KeypadEnter", "\n", "\r", "\r\n",
+                            " Enter ", "Shift + Enter", "CMD + o", "Ctrl +  Enter",
+                            // A chord with a command modifier counts whatever its key (intended: fail closed).
+                            "Cmd+C", "Ctrl+A", "Ctrl+Z", "Alt+Tab"})
       if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
     for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Tab", "Escape", "Space",
-                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", ""})
+                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Enterprise", "Entr", "kp_down", ""})
       if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
     // Through the facts: a chord is an activating key; an arrow is not.
     ShadowRequestInfo request = UiaRequest("key");
@@ -7539,7 +7550,9 @@ bool CheckClickRule() {
     };
     if (!Check(may(true, 1000, 1000), "recent-input-same-tick")) return false;
     if (!Check(may(true, 1000, 1500), "recent-input-exactly-at-the-interval")) return false;
-    if (!Check(!may(true, 1000, 1501), "recent-input-one-past-the-interval")) return false;
+    // One tick of room (16 ms) for the coarse clock, on the safe side.
+    if (!Check(may(true, 1000, 1516), "recent-input-at-the-interval-plus-a-tick")) return false;
+    if (!Check(!may(true, 1000, 1517), "recent-input-one-past-the-interval-and-a-tick")) return false;
     if (!Check(!may(true, 1000, 60000), "recent-input-long-ago-cannot-pair")) return false;
     if (!Check(may(true, 1500, 1000), "recent-input-in-the-future-may-pair")) return false;
     if (!Check(may(false, 0, 60000), "recent-input-unreadable-may-pair")) return false;
