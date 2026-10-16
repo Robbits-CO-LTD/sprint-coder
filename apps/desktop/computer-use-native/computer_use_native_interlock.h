@@ -88,6 +88,11 @@ struct InterlockVerdict {
 
 namespace interlock_detail {
 
+// The role walk lives in the core (it decides what counts as opening); the map uses the same one.
+using effect_detail::ItemInSpan;
+using effect_detail::RoleIsKnownContainer;
+using effect_detail::RoleIsPassiveItem;
+
 [[nodiscard]] inline InterlockVerdict Refusal(InterlockOutcome outcome, InterlockReason reason,
                                               EffectClass effect_class) {
   InterlockVerdict verdict;
@@ -116,57 +121,6 @@ namespace interlock_detail {
   const std::string extension = NormalizeExtension(facts.extension);
   return (MayOpen(facts) || facts.action == ActionKind::kToggle) && facts.extension_known &&
          IsPlainExtension(extension) && InSet(extension, kExecutableExtensions);
-}
-
-// Whether a role names a passive item of a list or a text (a row, a cell, an outline row, a list
-// item, a tree item, a data item, static text). An ALLOW LIST, matched whole after lowercasing and
-// dropping the macOS "ax" prefix, so the Windows control types (ListItem, DataItem, TreeItem, Text)
-// and the macOS roles (AXRow, AXOutlineRow, AXStaticText, ...) name the same things.
-[[nodiscard]] inline bool RoleIsPassiveItem(std::string_view role) {
-  using namespace effect_detail;
-  std::string name = NormalizeForMatch(role);
-  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
-  static constexpr std::string_view kItems[] = {"row",      "cell",     "outlinerow", "listitem",
-                                                "treeitem", "dataitem", "statictext", "text"};
-  for (const std::string_view item : kItems)
-    if (name == item) return true;
-  return false;
-}
-
-// A known container: something items live in, which is never pressed itself (a list, an outline, a
-// table, a browser, a scroll area, a window, the application, a web area; UI Automation's List, Tree,
-// DataGrid, Table, Pane, Window and Document). Matched whole, like the items.
-[[nodiscard]] inline bool RoleIsKnownContainer(std::string_view role) {
-  using namespace effect_detail;
-  std::string name = NormalizeForMatch(role);
-  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
-  static constexpr std::string_view kContainers[] = {
-      "list", "outline", "table",  "browser", "scrollarea", "window", "application",
-      "webarea", "tree", "datagrid", "pane", "document"};
-  for (const std::string_view container : kContainers)
-    if (name == container) return true;
-  return false;
-}
-
-// Whether what the action lands on is KNOWN to be a passive item: walking up from the target, every
-// node has an allow-listed role (and no subrole other than an allow-listed one) until the nearest
-// KNOWN container is reached. Anything else is treated as a control: a role nobody listed anywhere on
-// the way up (an AXGroup a page made clickable, a Custom, a combo box, a disclosure triangle, a menu
-// bar item, a split button), a chain that never reaches a known container, and a target that is
-// itself a container. This fails closed on purpose. It does not stop at the core's nearest
-// actionable ancestor: the core does not recognize a group or a custom control as actionable, so a
-// label under one would look like an item on its own. The decision is by ROLE, never by whether a
-// file is attached: a button can carry an AXURL or a file name and is still a button, and a file's
-// row is still a row.
-[[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
-  for (std::size_t index = 0; index < facts.chain.size(); ++index) {
-    const NodeFacts &node = facts.chain[index];
-    if (RoleIsKnownContainer(node.role)) return index > 0;
-    if (!RoleIsPassiveItem(node.role)) return false;
-    if (!effect_detail::NormalizeForMatch(node.subrole).empty() && !RoleIsPassiveItem(node.subrole))
-      return false;
-  }
-  return false;
 }
 
 // An installer control activated: the core's label rule (E4), independent of any extension that

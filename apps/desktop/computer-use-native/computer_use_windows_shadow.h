@@ -290,7 +290,7 @@ namespace windows_shadow_detail {
       "systreeview32", "systabcontrol32", "toolbarwindow32", "richedit20w", "richedit50w",
       "passwordbox", "textbox", "richeditbox", "toggleswitch", "checkbox", "radiobutton",
       "hyperlinkbutton", "togglebutton", "splitbutton", "appbarbutton", "slider", "listview",
-      "gridview", "menuflyoutitem", "textblock"};
+      "gridview", "menuflyoutitem", "textblock", "uiproperty"};
   return OneOf(name, kKnown, std::size(kKnown));
 }
 

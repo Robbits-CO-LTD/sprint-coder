@@ -1320,6 +1320,8 @@ EffectFacts EffBase() {
   facts.action = ActionKind::kClick;
   facts.mode = SessionMode::kFullAccess;
   facts.origin = OriginState::kNotApplicable;
+  // The core defaults a key to "may open" (fail closed); most cases here mean plain typing.
+  facts.key_is_activation = false;
   facts.chain.push_back(NodeFacts{"axbutton", "", "ok"});
   return facts;
 }
@@ -4970,6 +4972,12 @@ bool CheckNativeInterlockMap() {
             facts.extension_known = true;
             facts.extension = "txt";
             facts.chain = {{"axrow", "", "install.txt"}, {"axoutline", "", "Files"}, {"axwindow", "", "Downloads"}};
+            // A single click on a passive item of a file manager only selects it (#777): no verdict.
+            if (surface == SurfaceKind::kFileBrowser && action == ActionKind::kClick) {
+              facts.click_tracked = true;
+              if (!none(facts, "interlock-installer-named-item-clicked-in-a-file-manager")) return false;
+              continue;
+            }
             if (!trigger_blocked(facts, "interlock-installer-named-file-opened-from-a-list")) return false;
             if (!Check(InterlockForFacts(facts).effect_class ==
                            (surface == SurfaceKind::kDownloadPanel ? EffectClass::kE2DownloadOpen
@@ -5484,6 +5492,7 @@ bool CheckEffectClassifierCore() {
                                     ActionKind::kKey}) {
       EffectFacts facts = EffItem(SurfaceKind::kDownloadPanel, action, "pdf");
       facts.target_is_file_item = item;
+      facts.key_is_activation = action == ActionKind::kKey;
       facts.chain[0].label = item ? "report" : "open";
       const auto enabled = ClassifyEffect(facts, EffAllEnabled());
       if (!Check(EffIs(enabled, DecisionKind::kApproval, DecisionReason::kNone,
@@ -5524,9 +5533,10 @@ bool CheckEffectClassifierCore() {
       if (!Check(EffTakeover(facts, EffAllEnabled()), "effect-e3-unknown-extension")) return false;
       facts.extension_known = true;
       facts.key_is_activation = false;
+      // Only an activating key (Enter) opens; an arrow, Tab or Escape moves or dismisses (click rule).
       if (action == ActionKind::kKey &&
-          !Check(ClassifyEffect(facts, EffAllEnabled()).effect_class == EffectClass::kE3FileManagerOpen,
-                 "effect-e3-any-key")) return false;
+          !Check(ClassifyEffect(facts, EffAllEnabled()).kind == DecisionKind::kOrdinary,
+                 "effect-e3-only-an-activating-key-opens")) return false;
     }
     for (const ActionKind browsing : {ActionKind::kSelect, ActionKind::kSetText, ActionKind::kScroll,
                                       ActionKind::kExpandCollapse}) {
@@ -6596,8 +6606,10 @@ bool CheckWindowsInterlockCapture() {
                  code);
   };
   const auto evaluate = [](FakeUia &source, std::string_view kind, std::string_view target_id = "",
-                           const EffectRuleset &ruleset = EffectRuleset{}) {
-    return EvaluateWindowsInterlockOnSource(source, kind, target_id, UiaRequest(kind), ruleset);
+                           const EffectRuleset &ruleset = EffectRuleset{}, bool click_opens = false) {
+    ShadowRequestInfo request = UiaRequest(kind);
+    request.click_opens = click_opens;
+    return EvaluateWindowsInterlockOnSource(source, kind, target_id, request, ruleset);
   };
 
   // An ordinary window: asked, and nothing to refuse.
@@ -6623,7 +6635,7 @@ bool CheckWindowsInterlockCapture() {
   {
     FakeExplorer script("run.bat");
     script.GiveRealPath("C:\\Users\\me\\run.bat");
-    const InterlockEvaluation evaluation = evaluate(script.form.source, "click");
+    const InterlockEvaluation evaluation = evaluate(script.form.source, "invoke", "run.bat");
     if (!Check(evaluation.Refuses() && evaluation.verdict.outcome == InterlockOutcome::kTakeover &&
                    evaluation.verdict.reason == InterlockReason::kExecutionTrigger,
                "winlane-file-manager-script-is-a-takeover")) return false;
@@ -6633,12 +6645,12 @@ bool CheckWindowsInterlockCapture() {
     FakeExplorer script("run.bat");
     script.GiveRealPath("C:\\Users\\me\\run.bat");
     WindowsShadowReader reader(script.form.source);
-    const ShadowUiaCapture capture = reader.Capture("click", "");
-    const ShadowFacts built = BuildWindowsShadowFacts(capture, UiaRequest("click"));
+    const ShadowUiaCapture capture = reader.Capture("invoke", "run.bat");
+    const ShadowFacts built = BuildWindowsShadowFacts(capture, UiaRequest("invoke"));
     const InterlockVerdict direct = InterlockForFacts(built.facts);
     FakeExplorer again("run.bat");
     again.GiveRealPath("C:\\Users\\me\\run.bat");
-    const InterlockEvaluation evaluation = evaluate(again.form.source, "click");
+    const InterlockEvaluation evaluation = evaluate(again.form.source, "invoke", "run.bat");
     if (!Check(evaluation.verdict.outcome == direct.outcome && evaluation.verdict.reason == direct.reason,
                "winlane-equals-the-map")) return false;
   }
@@ -6647,14 +6659,14 @@ bool CheckWindowsInterlockCapture() {
   {
     FakeExplorer closed("invoice.pdf");
     closed.GiveRealPath("C:\\Users\\me\\invoice.pdf");
-    const InterlockEvaluation refused = evaluate(closed.form.source, "click");
+    const InterlockEvaluation refused = evaluate(closed.form.source, "invoke", "invoice.pdf");
     if (!Check(refused.Refuses() && refused.verdict.reason == InterlockReason::kApprovalClosed,
                "winlane-default-ruleset-approval-closed")) return false;
     FakeExplorer trusted("invoice.pdf");
     trusted.GiveRealPath("C:\\Users\\me\\invoice.pdf");
     EffectRuleset ruleset;
     ruleset.file_manager_open = true;
-    if (!no_verdict(evaluate(trusted.form.source, "click", "", ruleset), InterlockNoVerdict::kNone,
+    if (!no_verdict(evaluate(trusted.form.source, "invoke", "invoice.pdf", ruleset), InterlockNoVerdict::kNone,
                     "winlane-trusting-ruleset-is-no-refusal")) return false;
   }
   // The real path of a file item could not be read (lookup abandoned or refused, shell slot busy):
@@ -6675,7 +6687,7 @@ bool CheckWindowsInterlockCapture() {
     // With the real path the same item is refused as the map says.
     FakeExplorer known_script("run.bat");
     known_script.GiveRealPath("C:\\Users\\me\\run.bat");
-    if (!Check(evaluate(known_script.form.source, "click").Refuses(), "winlane-known-path-script-refuses"))
+    if (!Check(evaluate(known_script.form.source, "invoke", "run.bat").Refuses(), "winlane-known-path-script-refuses"))
       return false;
   }
   // Canceled and out of budget together: canceled wins, as on macOS.
@@ -7243,6 +7255,378 @@ bool CheckNativePreflightV2() {
   return true;
 }
 
+// ---- #500 S5-c-2 PR-2: the click rule (one click on a passive item of a file manager selects it) ---
+
+bool CheckClickRule() {
+  using namespace sprint_coder::computer_use;
+  using sprint_coder::computer_use::effect_detail::ItemInSpan;
+  using sprint_coder::computer_use::effect_detail::MayOpen;
+  const auto refusal = [](const InterlockEvaluation &evaluation) {
+    return evaluation.Refuses() ? evaluation.verdict.ReasonCode() : std::string();
+  };
+  const auto explorer = [&](const char *name, const char *path, std::string_view kind,
+                            const char *key = "", bool click_opens = false) {
+    FakeExplorer item(name);
+    item.GiveRealPath(path);
+    item.form.source.focused = item.item;
+    ShadowRequestInfo request = UiaRequest(kind);
+    request.key = key;
+    request.click_opens = click_opens;
+    request.click_tracked = true;
+    return EvaluateWindowsInterlockOnSource(item.form.source, kind, kind == "invoke" ? name : "", request,
+                                            EffectRuleset{});
+  };
+
+  // Windows file manager: a passive ListItem named like a script.
+  if (!Check(refusal(explorer("run.bat", "C:\\Users\\me\\run.bat", "click")).empty(),
+             "click-rule-script-item-one-click-is-no-refusal")) return false;
+  {
+    const auto invoked = explorer("run.bat", "C:\\Users\\me\\run.bat", "invoke");
+    if (!Check(invoked.Refuses() && invoked.verdict.outcome == InterlockOutcome::kTakeover &&
+                   invoked.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-invoke-is-a-takeover")) return false;
+    const auto entered = explorer("run.bat", "C:\\Users\\me\\run.bat", "key", "Enter");
+    if (!Check(entered.Refuses() && entered.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-enter-is-a-takeover")) return false;
+    const auto doubled = explorer("run.bat", "C:\\Users\\me\\run.bat", "click", "", true);
+    if (!Check(doubled.Refuses() && doubled.verdict.outcome == InterlockOutcome::kTakeover &&
+                   doubled.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-script-item-double-click-is-a-takeover")) return false;
+  }
+  // A document: one click selects; an invoke is the closed approval; a click that opens is too.
+  if (!Check(refusal(explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "click")).empty(),
+             "click-rule-document-one-click-is-no-refusal")) return false;
+  {
+    const auto invoked = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "invoke");
+    if (!Check(invoked.Refuses() && invoked.verdict.outcome == InterlockOutcome::kBlocked &&
+                   invoked.verdict.reason == InterlockReason::kApprovalClosed,
+               "click-rule-document-invoke-is-approval-closed")) return false;
+    const auto opened = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "click", "", true);
+    if (!Check(opened.Refuses() && opened.verdict.reason == InterlockReason::kApprovalClosed,
+               "click-rule-document-click-that-opens-is-approval-closed")) return false;
+    // The flag belongs to a click: it changes nothing for another kind.
+    const auto scrolled = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "scroll", "", true);
+    if (!Check(refusal(scrolled).empty(), "click-rule-flag-does-not-touch-a-scroll")) return false;
+  }
+  // A click on a cell of the details view lands on an Edit of class UIProperty under the ListItem: the
+  // row is what is clicked, so one click selects it (no verdict at all), a click that opens does not.
+  {
+    const auto in_cell = [&](const char *name, const char *path, bool click_opens, const char *cell_class) {
+      FakeExplorer item(name);
+      item.GiveRealPath(path);
+      item.form.source.point = item.form.source.Add(item.item, "Edit", "Date modified", cell_class);
+      ShadowRequestInfo request = UiaRequest("click");
+      request.click_opens = click_opens;
+      request.click_tracked = true;
+      return EvaluateWindowsInterlockOnSource(item.form.source, "click", "", request, EffectRuleset{});
+    };
+    const auto one = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "UIProperty");
+    if (!Check(!one.Refuses() && one.no_verdict == InterlockNoVerdict::kNone,
+               "click-rule-cell-one-click-is-no-verdict")) return false;
+    const auto doubled = in_cell("run.bat", "C:\\Users\\me\\run.bat", true, "UIProperty");
+    if (!Check(doubled.Refuses() && doubled.verdict.outcome == InterlockOutcome::kTakeover &&
+                   doubled.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-cell-click-that-opens-is-a-takeover")) return false;
+    // The cell can also be a Text of class UIProperty (a column that shows plain text).
+    EffectFacts text_cell = EffBase();
+    text_cell.surface = SurfaceKind::kFileBrowser;
+    text_cell.action = ActionKind::kClick;
+    text_cell.target_is_file_item = true;
+    text_cell.click_tracked = true;
+    text_cell.extension_known = true;
+    text_cell.extension = "bat";
+    text_cell.chain = {{"text", "UIProperty", "Size"}, {"listitem", "", "run.bat"}, {"list", "", "Items"},
+                       {"window", "", "Docs"}};
+    if (!Check(ItemInSpan(text_cell) && !MayOpen(text_cell) && !InterlockForFacts(text_cell).Refuses(),
+               "click-rule-text-cell-one-click-is-no-refusal")) return false;
+    {
+      FakeExplorer item("run.bat");
+      item.GiveRealPath("C:\\Users\\me\\run.bat");
+      item.form.source.point = item.form.source.Add(item.item, "Text", "Size", "UIProperty");
+      ShadowRequestInfo text_request = UiaRequest("click");
+      text_request.click_tracked = true;
+      const auto one_text = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", text_request,
+                                                             EffectRuleset{});
+      if (!Check(!one_text.Refuses() && one_text.no_verdict == InterlockNoVerdict::kNone,
+                 "click-rule-text-cell-through-the-reader-is-no-verdict")) return false;
+    }
+    // Only the exact shape: the same Edit with another class (a rename box is "Edit") still counts.
+    const auto rename = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "Edit");
+    if (!Check(rename.Refuses(), "click-rule-edit-of-another-class-still-counts")) return false;
+    // The facts: the cell is passive only with the ListItem right above it and a file manager around.
+    const std::vector<NodeFacts> cell = {{"edit", "UIProperty", "Date modified"},
+                                         {"listitem", "", "run.bat"}, {"list", "", "Items"},
+                                         {"window", "", "Docs"}};
+    EffectFacts cell_facts = EffBase();
+    cell_facts.surface = SurfaceKind::kFileBrowser;
+    cell_facts.action = ActionKind::kClick;
+    cell_facts.target_is_file_item = true;
+    cell_facts.click_tracked = true;
+    cell_facts.extension_known = true;
+    cell_facts.extension = "bat";
+    cell_facts.chain = cell;
+    if (!Check(ItemInSpan(cell_facts) && !MayOpen(cell_facts), "click-rule-cell-is-a-passive-item")) return false;
+    std::vector<NodeFacts> bare = cell;
+    bare[0].subrole = "";
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts) && MayOpen(cell_facts), "click-rule-edit-without-the-class-counts")) return false;
+    bare = cell;
+    bare.erase(bare.begin() + 1);
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-cell-without-a-listitem-above-counts")) return false;
+    bare = cell;
+    bare[1].role = "group";
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-cell-under-a-group-counts")) return false;
+    // The cell shape is for the target node only: an Edit higher up the chain is not it.
+    cell_facts.chain = {{"listitem", "", "run.bat"}, cell[0], cell[1], cell[2]};
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-the-cell-exception-is-for-the-target-only")) return false;
+  }
+  // click_opens makes the facts carry a double click, and only for a click.
+  {
+    ShadowRequestInfo request = UiaRequest("click");
+    request.click_opens = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.action == ActionKind::kDoubleClick,
+               "click-rule-flag-makes-a-double-click")) return false;
+    request.click_opens = false;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.action == ActionKind::kClick,
+               "click-rule-no-flag-stays-a-click")) return false;
+    ShadowRequestInfo other = UiaRequest("invoke");
+    other.click_opens = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), other).facts.action == ActionKind::kInvoke,
+               "click-rule-flag-leaves-an-invoke")) return false;
+  }
+
+  // The rule on facts: file manager vs download list vs a control vs an unlisted role.
+  const auto facts_for = [](SurfaceKind surface, ActionKind action,
+                            std::vector<NodeFacts> chain, const char *extension, bool file_item) {
+    EffectFacts facts = EffBase();
+    facts.surface = surface;
+    facts.action = action;
+    facts.target_is_file_item = file_item;
+    facts.click_tracked = true;
+    facts.extension_known = true;
+    facts.extension = extension;
+    facts.chain = std::move(chain);
+    return facts;
+  };
+  const std::vector<NodeFacts> row = {{"listitem", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}};
+  // A Button "Open" in a file manager: still the closed approval (E3).
+  {
+    const EffectFacts button = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick,
+                                         {{"button", "", "Open"}, {"window", "", "Docs"}}, "txt", false);
+    const InterlockVerdict verdict = InterlockForFacts(button);
+    if (!Check(MayOpen(button) && verdict.Refuses() && verdict.reason == InterlockReason::kApprovalClosed &&
+                   verdict.effect_class == EffectClass::kE3FileManagerOpen,
+               "click-rule-open-button-in-a-file-manager-is-still-e3")) return false;
+  }
+  // A download list's item: one click still opens in some browsers; still E2.
+  {
+    const EffectFacts item = facts_for(SurfaceKind::kDownloadPanel, ActionKind::kClick, row, "pdf", true);
+    const InterlockVerdict verdict = InterlockForFacts(item);
+    if (!Check(MayOpen(item) && verdict.Refuses() && verdict.reason == InterlockReason::kApprovalClosed &&
+                   verdict.effect_class == EffectClass::kE2DownloadOpen,
+               "click-rule-download-item-click-is-still-e2")) return false;
+  }
+  // A role nobody listed (Custom) in a file manager counts as opening: fail closed.
+  {
+    const EffectFacts custom = facts_for(
+        SurfaceKind::kFileBrowser, ActionKind::kClick,
+        {{"custom", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}}, "bat", true);
+    const InterlockVerdict verdict = InterlockForFacts(custom);
+    if (!Check(MayOpen(custom) && !ItemInSpan(custom) && verdict.Refuses() &&
+                   verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-custom-role-click-counts-as-opening")) return false;
+  }
+  // Tracked does not make everything passive: a Group, the List itself and a Custom stay controls.
+  {
+    for (const std::vector<NodeFacts> &chain : {
+             std::vector<NodeFacts>{{"group", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"list", "", "Items"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"pane", "", "Docs"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"custom", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}}}) {
+      const EffectFacts container = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, chain, "bat", true);
+      if (!Check(container.click_tracked && !ItemInSpan(container) && MayOpen(container),
+                 "click-rule-tracked-click-on-a-container-or-control-counts")) return false;
+    }
+  }
+  // An arrow key (or Tab, Escape) is not an opening; Enter is.
+  {
+    EffectFacts arrow = facts_for(SurfaceKind::kFileBrowser, ActionKind::kKey, row, "bat", true);
+    arrow.key_is_activation = false;
+    if (!Check(!MayOpen(arrow) && !InterlockForFacts(arrow).Refuses(), "click-rule-arrow-key-is-not-opening"))
+      return false;
+    arrow.key_is_activation = true;
+    if (!Check(MayOpen(arrow) && InterlockForFacts(arrow).Refuses(), "click-rule-enter-key-is-opening"))
+      return false;
+    EffectFacts down = facts_for(SurfaceKind::kDownloadPanel, ActionKind::kKey, row, "pdf", true);
+    down.key_is_activation = false;
+    if (!Check(!MayOpen(down), "click-rule-arrow-key-in-a-download-list-is-not-opening")) return false;
+  }
+  // Finder: an AXRow under an AXOutline, one click: nothing to refuse; the same row double clicked is.
+  {
+    const std::vector<NodeFacts> finder = {{"axrow", "", "run.command"}, {"axoutline", "", "Files"},
+                                           {"axwindow", "", "Documents"}};
+    EffectFacts click = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, finder, "command", true);
+    if (!Check(!MayOpen(click) && !InterlockForFacts(click).Refuses(), "click-rule-finder-row-one-click-is-no-refusal"))
+      return false;
+    click.action = ActionKind::kDoubleClick;
+    if (!Check(MayOpen(click) && InterlockForFacts(click).Refuses(), "click-rule-finder-row-double-click-refuses"))
+      return false;
+  }
+  // An AXButton that carries a file (AXURL): a button, decided by its role, still opens.
+  {
+    const EffectFacts button = facts_for(
+        SurfaceKind::kFileBrowser, ActionKind::kClick,
+        {{"axbutton", "", "run.command"}, {"axwindow", "", "Documents"}}, "command", true);
+    if (!Check(MayOpen(button) && InterlockForFacts(button).Refuses(), "click-rule-button-with-a-url-click-is-opening"))
+      return false;
+  }
+  // The same click on any other surface is unchanged: it still counts.
+  {
+    const EffectFacts app = facts_for(SurfaceKind::kOrdinary, ActionKind::kClick, row, "bat", true);
+    if (!Check(MayOpen(app), "click-rule-click-outside-a-file-manager-still-counts")) return false;
+  }
+
+  // A host that does not follow clicks (macOS: no record of the previous click; or a click with no
+  // point) leaves click_tracked false: every click may open, a passive item's too (fail closed).
+  {
+    const std::vector<NodeFacts> finder = {{"axrow", "", "run.command"}, {"axoutline", "", "Files"},
+                                           {"axwindow", "", "Documents"}};
+    EffectFacts untracked = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, finder, "command", true);
+    untracked.click_tracked = false;
+    const InterlockVerdict verdict = InterlockForFacts(untracked);
+    if (!Check(MayOpen(untracked) && verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-untracked-finder-row-click-counts")) return false;
+    untracked.click_tracked = true;
+    if (!Check(!MayOpen(untracked) && !InterlockForFacts(untracked).Refuses(),
+               "click-rule-tracked-finder-row-click-is-no-refusal")) return false;
+    // The request flag reaches the facts for a click only, and a plain request is untracked.
+    ShadowRequestInfo request = UiaRequest("click");
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), request).facts.click_tracked, "click-rule-request-is-untracked-by-default"))
+      return false;
+    request.click_tracked = true;
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.click_tracked, "click-rule-request-tracked-reaches-the-facts"))
+      return false;
+    // Tracked and opening (a pair with an input within the double-click time, or a file manager that
+    // opens on one click): the facts carry a double click and the click is still tracked.
+    request.click_opens = true;
+    const ShadowFacts paired = BuildWindowsShadowFacts(UiaBase(), request);
+    if (!Check(paired.facts.action == ActionKind::kDoubleClick && paired.facts.click_tracked,
+               "click-rule-tracked-and-opening-is-a-double-click-in-the-facts")) return false;
+    ShadowRequestInfo other = UiaRequest("invoke");
+    other.click_tracked = true;
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), other).facts.click_tracked, "click-rule-tracked-is-for-a-click-only"))
+      return false;
+    // Through the reader: an untracked click on a script item is a takeover.
+    FakeExplorer item("run.bat");
+    item.GiveRealPath("C:\\Users\\me\\run.bat");
+    item.form.source.focused = item.item;
+    const auto evaluated = EvaluateWindowsInterlockOnSource(item.form.source, "click", "", UiaRequest("click"), EffectRuleset{});
+    if (!Check(evaluated.Refuses() && evaluated.verdict.outcome == InterlockOutcome::kTakeover,
+               "click-rule-untracked-click-through-the-reader-is-a-takeover")) return false;
+  }
+  // Keys that open: an ALLOW LIST of keys that cannot, everything else counts (fail closed).
+  {
+    for (const char *key : {"Enter", "enter", "Return", "Shift+Enter", "Ctrl+Enter", "ctrl+Enter", "Alt+Enter",
+                            "cmd+o", "Cmd+O", "Command+Down", "cmd+ArrowDown", "Control+O", "Option+Down",
+                            "Meta+O", "Super+E", "Win+E", "Windows+E", "ctrl+shift+n", "Alt+F4",
+                            // Other spellings of Enter, and blanks and case around the parts.
+                            "KP_Enter", "kp-enter", "NumpadEnter", "Numpad Enter", "KeypadEnter", "\n", "\r", "\r\n",
+                            " Enter ", "Shift + Enter", "CMD + o", "Ctrl +  Enter",
+                            // A chord with a command modifier counts whatever its key (intended: fail closed).
+                            "Cmd+C", "Ctrl+A", "Ctrl+Z", "Alt+Tab",
+                            // An empty key, an empty part inside a chord, and the text backslash-n count.
+                            "", "ctrl++", "Ctrl+", "a+", "+a", "\\n", "\\r", "\\r\\n",
+                            // Names nobody listed open too: F keys and unknown names, also ones that merely
+                            // contain a modifier's name (they are unknown names, not modifiers).
+                            "F1", "F12", "Insert", "Enterprise", "Entr", "altgr", "metadata", "controller",
+                            "commander", "optional", "winner", "superb", "Shift+altgr", "ctrlx", "xcmd",
+                            "Unidentified", "MediaPlayPause", "ArrowDownX", "Shift+F2",
+                            // Space presses the focused button or link; a character is a menu access key.
+                            "Space", " ", "a", "A", "z", "7", "-", "_", "+", "/", ".", "o", "O", "\u3042", "\u00e9",
+                            "Shift+a", "Shift+Space", "Shift+o", "Shift+Shift+a"})
+      if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
+    // Only Shift, spelled exactly, may stand before a quiet key.
+    if (!Check(ShadowKeyOpens("shiftx+a"), "key-opens-a-prefix-that-merely-starts-with-shift")) return false;
+    if (!Check(!ShadowKeyOpens("Shift+Shift+Tab"), "key-does-not-open-shift-shift-tab")) return false;
+    for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Up", "Left", "Right",
+                            "KP_Down", "kp_up", "Tab", "Escape", "Esc", "Backspace", "Delete", "Del",
+                            "Home", "End", "PageUp", "PageDown", "PgUp", "PgDn",
+                            // Shift in front of a quiet key is the same key.
+                            "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "shift+Home"})
+      if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
+    // The core's own default is fail closed: facts built without a key decision treat a key as one
+    // that may open (never as plain typing); every production path sets it from ShadowKeyOpens.
+    {
+      EffectFacts bare;
+      bare.action = ActionKind::kKey;
+      if (!Check(bare.key_is_activation && MayOpen(bare), "key-default-is-fail-closed")) return false;
+      bare.key_is_activation = false;
+      if (!Check(!MayOpen(bare), "key-explicit-typing-does-not-open")) return false;
+    }
+    // BEGIN host key names
+    // Every key name the hosts accept (Windows VirtualKeyForName, macOS KeyCodeForName), with what it
+    // is: the vitest contract reads this list and the two host sources and requires them to match,
+    // so a name added to a host is classified here on purpose.
+    static const std::pair<const char *, bool> kHostKeys[] = {
+        {"Enter", true},     {"Tab", false},       {"Escape", false},     {"Backspace", false},
+        {"Delete", false},   {"ArrowUp", false},   {"ArrowDown", false},  {"ArrowLeft", false},
+        {"ArrowRight", false}, {"Home", false},    {"End", false},
+    };
+    // END host key names
+    for (const auto &entry : kHostKeys)
+      if (!Check(ShadowKeyOpens(entry.first) == entry.second, (std::string("host-key-") + entry.first).c_str()))
+        return false;
+    // Through the facts: a chord is an activating key; an arrow is not.
+    ShadowRequestInfo request = UiaRequest("key");
+    request.key = "Cmd+O";
+    if (!Check(BuildWindowsShadowFacts(UiaBase(), request).facts.key_is_activation, "key-chord-is-activation-in-the-facts"))
+      return false;
+    request.key = "ArrowDown";
+    if (!Check(!BuildWindowsShadowFacts(UiaBase(), request).facts.key_is_activation, "arrow-is-not-activation-in-the-facts"))
+      return false;
+    EffectFacts finder_key = facts_for(SurfaceKind::kFileBrowser, ActionKind::kKey,
+                                       {{"axrow", "", "run.command"}, {"axoutline", "", "Files"}, {"axwindow", "", "Documents"}},
+                                       "command", true);
+    finder_key.key_is_activation = ShadowKeyOpens("Cmd+Down");
+    if (!Check(MayOpen(finder_key) && InterlockForFacts(finder_key).Refuses(), "key-cmd-down-on-a-finder-row-is-opening"))
+      return false;
+  }
+
+  // RecentInputMayCompleteDoubleClick: a click may pair only with an input within the double-click
+  // time of now; the last input time is the latest of all inputs, whoever sent them. Interval 500.
+  {
+    const auto may = [](bool read_ok, std::uint32_t last, std::uint32_t now) {
+      return RecentInputMayCompleteDoubleClick(read_ok, last, now, 500);
+    };
+    if (!Check(may(true, 1000, 1000), "recent-input-same-tick")) return false;
+    if (!Check(may(true, 1000, 1500), "recent-input-exactly-at-the-interval")) return false;
+    // One tick of room (16 ms) for the coarse clock, on the safe side.
+    if (!Check(may(true, 1000, 1516), "recent-input-at-the-interval-plus-a-tick")) return false;
+    if (!Check(!may(true, 1000, 1517), "recent-input-one-past-the-interval-and-a-tick")) return false;
+    if (!Check(!may(true, 1000, 60000), "recent-input-long-ago-cannot-pair")) return false;
+    if (!Check(may(true, 1500, 1000), "recent-input-in-the-future-may-pair")) return false;
+    if (!Check(may(false, 0, 60000), "recent-input-unreadable-may-pair")) return false;
+    // Ticks wrap at 2^32.
+    if (!Check(may(true, 0xFFFFFFF0u, 0x00000010u), "recent-input-across-the-wrap")) return false;
+    if (!Check(!may(true, 0xFFFFFFF0u, 0x00000300u), "recent-input-across-the-wrap-too-old")) return false;
+    // A last input 2^31 or more behind now reads as the future (fail closed), not as ancient.
+    if (!Check(may(true, 0x00001000u, 0x80001000u), "recent-input-two-pow-31-apart-is-fail-closed")) return false;
+    // The scenarios that a "who sent it" rule gets wrong. A person clicks at t=1000, this helper
+    // sends a key at t=1100 (it overwrites the system's last input), then clicks at t=1300: the OS
+    // sees two presses 300 ms apart.
+    if (!Check(may(true, 1100, 1300), "recent-input-person-click-then-our-key-then-our-click")) return false;
+    // A person's click lands 40 ms after our injection, inside any slack; then our click at t=1200.
+    if (!Check(may(true, 1040, 1200), "recent-input-person-click-in-the-slack")) return false;
+    // Our own previous click and the next one a model round trip later: not a pair.
+    if (!Check(!may(true, 1000, 4000), "recent-input-our-own-click-seconds-ago-cannot-pair")) return false;
+  }
+
+  std::cout << "Computer Use native click rule: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -7266,6 +7650,7 @@ int main() {
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
+  if (!CheckClickRule()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;

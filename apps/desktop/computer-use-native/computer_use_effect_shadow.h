@@ -145,7 +145,82 @@ struct ShadowRequestInfo {
   std::string_view maximum_mode;
   std::string_view policy_language;
   std::string_view executable_path;
+  // A click that opens what it lands on: it completes a double click, or the file manager opens an
+  // item on one click. Facts then carry it as a double click. Ignored for any other kind.
+  bool click_opens = false;
+  // The host follows clicks (it sets click_opens from the system's last input time and the file
+  // manager's setting). Only a tracked click may be taken as a plain selection; see
+  // EffectFacts::click_tracked.
+  bool click_tracked = false;
 };
+
+// Whether a key may open what has focus. The classifier's stance is "anything that might open counts
+// as opening", so this is an ALLOW LIST of keys that cannot: everything else opens, an unknown name,
+// an F key, any spelling of Enter (Enter, Return, KP_Enter, NumpadEnter, a newline or carriage
+// return, also written as the two characters backslash and n), and any chord with a command modifier
+// (cmd, command, ctrl, control, alt, option, win, windows, meta, super: Cmd+O and Cmd+Down in Finder,
+// Ctrl+Enter and Alt+Enter in Explorer; Cmd+C or Ctrl+A count too, which is more than needed and
+// intended). The keys that cannot open are the arrows (also Up, Down, Left, Right, KP_Up and so on),
+// Tab, Escape / Esc, Backspace, Delete / Del, Home, End and PageUp / PageDown. Shift in front of
+// one of those is still the same key (it extends a selection). Space and a single character are NOT
+// on the list: Space presses the focused button or link ("Open" in a download list), and a letter is a
+// menu access key (after Shift+F10, "o" picks "Open"). Typing text is the "type" action, never a
+// key. The allow list does not depend on which names a host can send; the
+// host's set is pinned by a test that classifies every name it accepts. The chord is split on '+';
+// the last part is the key and the others are modifiers, each compared WHOLE (no substring: "altgr"
+// and "metadata" are not modifiers, they are unknown names, and unknown names open). Case is ignored,
+// and so are blanks, '_' and '-' inside a part. An empty part inside a chord counts (fail closed) and
+// so does an empty key.
+[[nodiscard]] inline bool ShadowKeyOpens(std::string_view key) {
+  std::vector<std::string> parts;
+  std::string current;
+  for (const char raw : key) {
+    if (raw == '+') {
+      parts.push_back(std::move(current));
+      current.clear();
+    } else if (raw == ' ' || raw == '\t' || raw == '_' || raw == '-') {
+      continue;
+    } else {
+      current.push_back(raw >= 'A' && raw <= 'Z' ? static_cast<char>(raw - 'A' + 'a') : raw);
+    }
+  }
+  parts.push_back(std::move(current));
+  for (const std::string &part : parts)
+    if (part.empty()) return true; // an empty key, or an empty part of a chord
+  // Everything before the key must be Shift. A command modifier, or a name nobody listed, opens.
+  for (std::size_t index = 0; index + 1 < parts.size(); ++index)
+    if (parts[index] != "shift") return true;
+  const std::string &name = parts.back();
+  static constexpr std::string_view kQuiet[] = {
+      "arrowup",  "arrowdown", "arrowleft", "arrowright", "up",       "down",   "left",
+      "right",    "kpup",      "kpdown",    "kpleft",     "kpright",  "numpadup", "numpaddown",
+      "numpadleft", "numpadright", "tab",   "escape",     "esc",      "backspace",
+      "delete",   "del",       "home",      "end",        "pageup",   "pagedown", "pgup", "pgdn"};
+  for (const std::string_view quiet : kQuiet)
+    if (name == quiet) return false;
+  return true;
+}
+
+// Whether a click made now may complete a double click, from the system's last input time alone.
+// `last_input_tick` (GetLastInputInfo) and `now_tick` are 32-bit GetTickCount values. A double click
+// needs the previous button press to be within `interval_ms` of this one, and that press (a person's
+// or this helper's own) is an input, so it is at or before the last input time. If the last input is
+// older than the interval, no double click can form, whatever was sent before and wherever this click
+// lands. This asks no one who sent the input: it is structurally on the safe side. It costs a click
+// within the interval of ANY input (also our own previous key, scroll or click) counting as opening;
+// an agent acts once per model round trip, which is seconds. A last input time that cannot be read, or
+// that lies in the future (a difference of 2^31 or more modulo 2^32), is "may complete". GetTickCount
+// ticks every 10 to 16 ms, so the interval gets one tick of room (kTickSlackMs), on the safe side.
+// `now_tick` is taken at preflight, before the click is sent, which is the safe side as well.
+inline constexpr std::uint32_t kTickSlackMs = 16;
+
+[[nodiscard]] inline bool RecentInputMayCompleteDoubleClick(bool read_ok, std::uint32_t last_input_tick,
+                                                            std::uint32_t now_tick,
+                                                            std::uint32_t interval_ms) {
+  if (!read_ok) return true;
+  const std::uint32_t age = now_tick - last_input_tick;
+  return age >= 0x80000000u || age <= interval_ms + kTickSlackMs;
+}
 
 struct ShadowFacts {
   EffectFacts facts;
@@ -408,8 +483,10 @@ inline void ApplyShadowOrigin(bool is_page, bool url_read, std::string_view page
 
   ActionKind action = ActionKind::kClick;
   if (!ShadowActionForKind(request.kind, &action)) result.gaps |= kShadowGapUnsupportedAction;
+  if (request.kind == "click" && request.click_opens) action = ActionKind::kDoubleClick;
   facts.action = action;
-  facts.key_is_activation = request.kind == "key" && request.key == "Enter";
+  facts.click_tracked = request.kind == "click" && request.click_tracked;
+  facts.key_is_activation = request.kind == "key" && ShadowKeyOpens(request.key);
   facts.mode = request.maximum_mode == "full_access_app" ? SessionMode::kFullAccess
                : request.maximum_mode == "supervised"    ? SessionMode::kSupervised
                                                          : SessionMode::kObserveOnly;

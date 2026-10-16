@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const read = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
 const header = read('computer_use_native_interlock.h');
+const classifier = read('computer_use_effect_classifier.h');
 const harness = read('computer_use_protocol_fuzz.cc');
 
 describe('interlock map (classifier v2, S4-1-0)', () => {
@@ -79,7 +80,7 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     // A control is told from an item by its role, never by whether a file is attached to it, and
     // only an allow list of passive items, matched whole, is an exception (fail closed).
     expect(squashed).toContain('if (!RefusedByExtension(facts) && ItemInSpan(facts)) {');
-    expect(squashed).toContain('if (name == item) return true;');
+    expect(classifier).toContain('if (name == item) return true;');
     expect(header).not.toContain('ControlInSpan');
     // A passive item opened from a file manager or a download list stays an E2 / E3 refusal.
     expect(squashed).toContain(
@@ -92,13 +93,18 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     expect(squashed).toContain(
       'MapEffectToInterlock(facts, ClassifyEffect(facts, ruleset), ruleset)',
     );
-    // The walk goes up to the nearest KNOWN container, through allow-listed roles only.
-    expect(squashed).toContain('if (RoleIsKnownContainer(node.role)) return index > 0;');
-    expect(squashed).toContain('if (!RoleIsPassiveItem(node.role)) return false;');
-    expect(squashed).toContain('if (name == container) return true;');
+    // The walk goes up to the nearest KNOWN container, through allow-listed roles only. It lives in
+    // the core now (the click rule needs it: MayOpen), and the map refers to it.
+    const core = classifier.replace(/\s+/gu, ' ');
+    expect(core).toContain('if (RoleIsKnownContainer(node.role)) return index > 0;');
+    expect(core).toContain('if (!RoleIsPassiveItem(node.role)) return false;');
+    expect(core).toContain('if (name == container) return true;');
+    expect(core).toContain('if (name == item) return true;');
+    expect(squashed).toContain('using effect_detail::ItemInSpan;');
     expect(header).not.toContain('ActionableSpan');
     expect(header).not.toMatch(/name\.find\(item\)/u);
-    expect(squashed).toContain(
+    expect(classifier).not.toMatch(/name\.find\(item\)/u);
+    expect(core).toContain(
       'static constexpr std::string_view kItems[] = {"row", "cell", "outlinerow", "listitem", "treeitem", "dataitem", "statictext", "text"};',
     );
     expect(header).not.toContain('target_is_file_item');
