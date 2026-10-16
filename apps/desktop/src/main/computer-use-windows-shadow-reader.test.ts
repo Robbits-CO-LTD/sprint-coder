@@ -256,6 +256,7 @@ describe('Windows UI Automation source only reads', () => {
       // the shell lookup of the item path (functions of this file, not Win32 calls)
       'ShellItemPathByName',
       'ShellLookupRunning',
+      'InterlockShellLookupRunning',
     ]);
     for (const name of win32) expect(allowedWin32.has(name), name).toBe(true);
     // The process is opened with the least right that answers.
@@ -350,6 +351,7 @@ describe('Windows UI Automation source only reads', () => {
       'ShadowUnitsTooLong',
       'ShellItemPathByName',
       'ShellLookupRunning',
+      'InterlockShellLookupRunning',
       'Text',
       'View',
       'Widen',
@@ -382,17 +384,35 @@ describe('Windows UI Automation source only reads', () => {
     expect(create).toContain('CLSID_CUIAutomation8');
     expect(code(create)).not.toMatch(/CLSID_CUIAutomation\b(?!8)/u);
     expect(create).toContain('ComRef<IUIAutomation2> bounded;');
-    expect(create).toContain('put_ConnectionTimeout(kTimeoutMilliseconds)');
-    expect(create).toContain('put_TransactionTimeout(kTimeoutMilliseconds)');
+    expect(create).toContain('put_ConnectionTimeout(timeout_ms)');
+    expect(create).toContain('put_TransactionTimeout(timeout_ms)');
     expect(code(source)).not.toContain('IUIAutomation6');
     // Failing to set either is "no source" (the capture is skipped), never a call without a bound.
     expect(create).toMatch(
-      /FAILED\(bounded\.Get\(\)->put_ConnectionTimeout\(kTimeoutMilliseconds\)\) \|\|\s*FAILED\(bounded\.Get\(\)->put_TransactionTimeout\(kTimeoutMilliseconds\)\)\)\s*return nullptr;/u,
+      /FAILED\(bounded\.Get\(\)->put_ConnectionTimeout\(timeout_ms\)\) \|\|\s*FAILED\(bounded\.Get\(\)->put_TransactionTimeout\(timeout_ms\)\)\)\s*return nullptr;/u,
     );
     expect(create.indexOf('put_TransactionTimeout')).toBeLessThan(
       create.indexOf('get_RawViewWalker'),
     );
-    expect(source).toMatch(/kTimeoutMilliseconds = 1500;/u);
+    // The bound is the caller's (S5-c-2 PR-1): the shadow is asynchronous and waits up to 1500 ms, the
+    // synchronous entry holds the serial lane and waits up to 250 ms. No bound is left in the class.
+    expect(source).toMatch(/kShadowUiaTimeoutMs = 1500;/u);
+    expect(source).toMatch(/kInterlockUiaTimeoutMs = 250;/u);
+    expect(code(source)).not.toContain('kTimeoutMilliseconds');
+    expect(create).toMatch(/DWORD timeout_ms,\s*std::atomic<bool> &lookup_slot\)/u);
+  });
+
+  it('uses the lookup slot it is given, one slot for the shadow and one for the synchronous entry', () => {
+    const item = between(source, 'ShadowReadResult ItemPath(', 'private:');
+    expect(item).toContain('std::atomic<bool> &running = lookup_slot_;');
+    expect(code(item)).not.toContain('ShellLookupRunning');
+    // Two slots, each a static that is never destroyed: at most one stuck lookup per slot.
+    expect(source).toMatch(
+      /std::atomic<bool> &ShellLookupRunning\(\) \{\s*static std::atomic<bool> \*const running = new std::atomic<bool>\(false\);/u,
+    );
+    expect(source).toMatch(
+      /std::atomic<bool> &InterlockShellLookupRunning\(\) \{\s*static std::atomic<bool> \*const running = new std::atomic<bool>\(false\);/u,
+    );
   });
 
   it('asks the shell only about a tab of the bound window', () => {

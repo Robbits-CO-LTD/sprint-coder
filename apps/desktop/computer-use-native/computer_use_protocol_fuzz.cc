@@ -7436,6 +7436,18 @@ bool CheckClickRule() {
                    verdict.outcome == InterlockOutcome::kTakeover,
                "click-rule-custom-role-click-counts-as-opening")) return false;
   }
+  // Tracked does not make everything passive: a Group, the List itself and a Custom stay controls.
+  {
+    for (const std::vector<NodeFacts> &chain : {
+             std::vector<NodeFacts>{{"group", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"list", "", "Items"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"pane", "", "Docs"}, {"window", "", "Docs"}},
+             std::vector<NodeFacts>{{"custom", "", "run.bat"}, {"list", "", "Items"}, {"window", "", "Docs"}}}) {
+      const EffectFacts container = facts_for(SurfaceKind::kFileBrowser, ActionKind::kClick, chain, "bat", true);
+      if (!Check(container.click_tracked && !ItemInSpan(container) && MayOpen(container),
+                 "click-rule-tracked-click-on-a-container-or-control-counts")) return false;
+    }
+  }
   // An arrow key (or Tab, Escape) is not an opening; Enter is.
   {
     EffectFacts arrow = facts_for(SurfaceKind::kFileBrowser, ActionKind::kKey, row, "bat", true);
@@ -7521,10 +7533,15 @@ bool CheckClickRule() {
                             "KP_Enter", "kp-enter", "NumpadEnter", "Numpad Enter", "KeypadEnter", "\n", "\r", "\r\n",
                             " Enter ", "Shift + Enter", "CMD + o", "Ctrl +  Enter",
                             // A chord with a command modifier counts whatever its key (intended: fail closed).
-                            "Cmd+C", "Ctrl+A", "Ctrl+Z", "Alt+Tab"})
+                            "Cmd+C", "Ctrl+A", "Ctrl+Z", "Alt+Tab",
+                            // An empty part inside a chord counts (fail closed); the text backslash-n too.
+                            "ctrl++", "Ctrl+", "+", "a+", "+a", "\\n", "\\r", "\\r\\n"})
       if (!Check(ShadowKeyOpens(key), (std::string("key-opens-") + key).c_str())) return false;
     for (const char *key : {"ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Down", "Tab", "Escape", "Space",
-                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Enterprise", "Entr", "kp_down", ""})
+                            " ", "a", "Home", "End", "Backspace", "Delete", "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Enterprise", "Entr", "kp_down", "",
+                            // Whole-token comparison: names that merely contain a modifier do not match.
+                            "altgr", "metadata", "controller", "commander", "optional", "winner", "superb",
+                            "Shift+altgr", "ctrlx", "xcmd"})
       if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
     // Through the facts: a chord is an activating key; an arrow is not.
     ShadowRequestInfo request = UiaRequest("key");
@@ -7570,7 +7587,6 @@ bool CheckClickRule() {
     // Our own previous click and the next one a model round trip later: not a pair.
     if (!Check(!may(true, 1000, 4000), "recent-input-our-own-click-seconds-ago-cannot-pair")) return false;
   }
-
 
   std::cout << "Computer Use native click rule: PASS\n";
   return true;

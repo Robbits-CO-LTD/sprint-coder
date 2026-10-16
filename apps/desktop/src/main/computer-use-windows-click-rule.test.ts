@@ -106,21 +106,27 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     expect(squashed).toContain(
       'job.click_tracked = kind == "click" && point_known; job.click_opens = job.click_tracked && WindowsClickOpens();',
     );
+    // The synchronous entry takes both on the lane, before the worker exists, and hands them to the
+    // worker by value; the worker reads no system state of its own for them.
     expect(squashed).toContain(
-      'info.click_tracked = kind == "click"; info.click_opens = info.click_tracked && WindowsClickOpens();',
+      'const bool click_tracked = kind == "click"; const bool click_opens = click_tracked && WindowsClickOpens();',
     );
+    expect(squashed).toContain(
+      'info.click_tracked = click_tracked; info.click_opens = click_opens;',
+    );
+    const lane = squashed.indexOf('const bool click_opens = click_tracked && WindowsClickOpens();');
+    expect(lane).toBeLessThan(squashed.indexOf('std::thread([pending'));
+    expect(lane).toBeLessThan(squashed.indexOf('running.exchange(true)'));
+    const worker = squashed.slice(
+      squashed.indexOf('std::thread([pending'),
+      squashed.indexOf('}).detach();'),
+    );
+    expect(worker).not.toContain('WindowsClickOpens(');
     // The synchronous entry leaves before it uses the point when a click has none.
     const guard = 'if ((kind == "click" || kind == "scroll") && !point_known) return unavailable;';
     const entry = squashed.slice(squashed.indexOf('EvaluateWindowsInterlockOnLane('));
     expect(entry).toContain(guard);
     expect(entry.indexOf(guard)).toBeLessThan(entry.indexOf('WindowsClickOpens()'));
-    // Only the dispatch records a click, and the dispatch never asks: preflight (where click_opens
-    // is computed) runs before the dispatch of the same click (the ticket comes from it), so a click
-    // is compared with the PREVIOUS one, never with itself.
-    const preflight = host.slice(host.indexOf('bool HandleWindowsPreflight('));
-    expect(preflight.slice(0, preflight.indexOf('\nbool ', 10))).not.toContain(
-      'RecordWindowsClick(',
-    );
     expect(squash(scheduler)).toContain('info.click_opens = job.click_opens;');
     expect(scheduler).toContain('bool click_opens = false;');
     expect(squash(scheduler)).toContain('info.click_tracked = job.click_tracked;');
@@ -287,7 +293,7 @@ const build = (() => {
 describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
   'click rule, the host helpers live (#500 S5-c-2 PR-2)',
   () => {
-    it('pairs two clicks by time and distance with the real clock and the real shell setting', () => {
+    it('decides by the last input time alone with the real clock and the real shell setting', () => {
       const context = build!;
       try {
         expect(context.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();

@@ -301,7 +301,14 @@ struct ShellLookupPending {
 constexpr std::chrono::milliseconds kShellLookupWait{150};
 
 // Never destroyed: an abandoned lookup may finish after the process has started to exit.
+// One slot per caller: the shadow's own, and the synchronous interlock entry's. A lookup that never
+// comes back holds only its own slot, so the two callers cannot starve each other and at most two
+// threads can ever be stuck (one per slot).
 [[nodiscard]] inline std::atomic<bool> &ShellLookupRunning() {
+  static std::atomic<bool> *const running = new std::atomic<bool>(false);
+  return *running;
+}
+[[nodiscard]] inline std::atomic<bool> &InterlockShellLookupRunning() {
   static std::atomic<bool> *const running = new std::atomic<bool>(false);
   return *running;
 }
@@ -314,9 +321,19 @@ public:
   // stopped being the one v1 validated.
   using StillValid = std::function<bool()>;
 
+  // The bound of one UI Automation call (connection and transaction). The shadow is asynchronous and
+  // may wait longer; the synchronous interlock entry holds the serial lane, so its bound is short
+  // (see the lane's worst-case estimate in the host).
+  static constexpr DWORD kShadowUiaTimeoutMs = 1500;
+  static constexpr DWORD kInterlockUiaTimeoutMs = 250;
+
   // The thread must have COM initialized. Null when UI Automation cannot be created at all.
+  // `timeout_ms` bounds each UI Automation call; `lookup_slot` is the single-flight slot of the
+  // shell lookup this source may start (the shadow's and the synchronous entry's are different).
   [[nodiscard]] static std::unique_ptr<WindowsUiaShadowSource> Create(HWND window, POINT point,
-                                                                    StillValid still_valid) {
+                                                                    StillValid still_valid,
+                                                                    DWORD timeout_ms,
+                                                                    std::atomic<bool> &lookup_slot) {
     using windows_uia_source_detail::ComRef;
     // CUIAutomation8 (Windows 8 and later) is the only coclass that implements IUIAutomation2, whose
     // ConnectionTimeout / TransactionTimeout bound a call to an app that does not answer. The
@@ -331,14 +348,15 @@ public:
     ComRef<IUIAutomation2> bounded;
     if (FAILED(automation.Get()->QueryInterface(IID_PPV_ARGS(bounded.Receive()))) ||
         bounded.Get() == nullptr ||
-        FAILED(bounded.Get()->put_ConnectionTimeout(kTimeoutMilliseconds)) ||
-        FAILED(bounded.Get()->put_TransactionTimeout(kTimeoutMilliseconds)))
+        FAILED(bounded.Get()->put_ConnectionTimeout(timeout_ms)) ||
+        FAILED(bounded.Get()->put_TransactionTimeout(timeout_ms)))
       return nullptr;
     ComRef<IUIAutomationTreeWalker> walker;
     if (FAILED(automation.Get()->get_RawViewWalker(walker.Receive())) || walker.Get() == nullptr)
       return nullptr;
     return std::unique_ptr<WindowsUiaShadowSource>(new WindowsUiaShadowSource(
-        std::move(automation), std::move(walker), window, point, std::move(still_valid)));
+        std::move(automation), std::move(walker), window, point, std::move(still_valid),
+        lookup_slot));
   }
 
   ~WindowsUiaShadowSource() override {
@@ -505,7 +523,7 @@ public:
     // Only a tab of the bound window: an item of any other Explorer window is not read.
     if (tab != nullptr && GetAncestor(tab, GA_ROOT) != window_) return ShadowReadResult::kAbsent;
     // The lookup runs on its own thread (see ShellLookupPending); nothing of this object is used there.
-    std::atomic<bool> &running = windows_uia_source_detail::ShellLookupRunning();
+    std::atomic<bool> &running = lookup_slot_;
     if (running.exchange(true)) return ShadowReadResult::kAbsent;
     auto pending = std::make_shared<windows_uia_source_detail::ShellLookupPending>();
     const HWND top = window_;
@@ -557,13 +575,13 @@ public:
 
 private:
   static constexpr int kMaxElements = 1024;
-  static constexpr DWORD kTimeoutMilliseconds = 1500;
 
   WindowsUiaShadowSource(windows_uia_source_detail::ComRef<IUIAutomation> automation,
                          windows_uia_source_detail::ComRef<IUIAutomationTreeWalker> walker,
-                         HWND window, POINT point, StillValid still_valid)
+                         HWND window, POINT point, StillValid still_valid,
+                         std::atomic<bool> &lookup_slot)
       : automation_(std::move(automation)), walker_(std::move(walker)), window_(window),
-        point_(point), still_valid_(std::move(still_valid)) {}
+        point_(point), still_valid_(std::move(still_valid)), lookup_slot_(lookup_slot) {}
 
   [[nodiscard]] IUIAutomationElement *At(Element element) const {
     return element < elements_.size() ? elements_[element] : nullptr;
@@ -607,6 +625,7 @@ private:
   HWND window_;
   POINT point_;
   StillValid still_valid_;
+  std::atomic<bool> &lookup_slot_;
   std::vector<IUIAutomationElement *> elements_;
 };
 
