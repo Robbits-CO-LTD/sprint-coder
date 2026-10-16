@@ -18,7 +18,10 @@ import {
   type SelectableComputerTarget,
 } from '@sprint-coder/contracts';
 import { computerUseActionDigest } from './computer-use-action';
-import { ComputerUseArtifactStore } from './computer-use-artifact';
+import {
+  ComputerUseArtifactStore,
+  normalizeComputerUseArtifactText,
+} from './computer-use-artifact';
 import {
   ComputerUseController,
   type ComputerUseNativeHost,
@@ -51,17 +54,36 @@ const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
 
 /** Long, distinctive and ASCII, so no schema text or generated id can contain a piece of it. */
 const BODY = 'Total 42 qzx-7f3a-Mk';
+/**
+ * Full-width letters and digits, kana with a half-width form, a combining mark, an astral
+ * character: NFKC changes its shape, so the value on the screen, the value in the store and the
+ * value that is typed are three different strings.
+ */
+const UNICODE_BODY = 'Ｔｏｔａｌ ４２ ｶﾀｶﾅ カタカナ é 😀 qzx-7f3a-Mk';
+/** The part of either body that stays ASCII and visible in an excerpt. */
+const VISIBLE = 'qzx-7f3a-Mk';
+/** How many tests the child run must execute and pass (the launcher itself is not one of them). */
+const EXPECTED_CHILD_TESTS = 3;
 
 const directories: string[] = [];
 /** Opened databases, closed after every test (an open file cannot be removed on Windows). */
 const openDatabases: SqlitePersistenceClient[] = [];
+/** Controllers, disposed after every test even when it failed half way. */
+const openControllers: ComputerUseController[] = [];
 
 beforeEach(() => {
   // Not in the launcher run, which waits for a child process on real timers.
   if (runsWithElectronAbi) vi.useFakeTimers({ now: new Date('2026-09-21T00:00:00.000Z') });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  for (const controller of openControllers.splice(0)) {
+    try {
+      await controller.dispose();
+    } catch {
+      // Already disposed by the test.
+    }
+  }
   vi.useRealTimers();
   for (const persistence of openDatabases.splice(0)) {
     try {
@@ -207,7 +229,7 @@ type Journey = Readonly<{
   dispose: () => Promise<void>;
 }>;
 
-function createJourney(): Journey {
+function createJourney(body: string = BODY): Journey {
   const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-c6-'));
   directories.push(directory);
   const databasePath = join(directory, 'sprint-coder.sqlite3');
@@ -263,7 +285,7 @@ function createJourney(): Journey {
       return observation(session.sessionId, revision, session.appIdentityDigest);
     },
     artifactReadSupported: () => true,
-    readNodeValue: async () => ({ ok: true as const, text: BODY }),
+    readNodeValue: async () => ({ ok: true as const, text: body }),
     artifactPasteSupported: () => true,
     dispatch: async (input) => {
       const action = input.action as ComputerUseAction;
@@ -312,6 +334,8 @@ function createJourney(): Journey {
         (plans.shift() as ComputerUseAction | undefined) ?? { type: 'finish' },
     },
   });
+
+  openControllers.push(controller);
 
   const targetToken = async (): Promise<string> => {
     const row = (await controller.listTargets({}, context)).targets.find(
@@ -391,6 +415,22 @@ function filesOf(directory: string): { name: string; bytes: Buffer }[] {
   }));
 }
 
+/** Non-ASCII characters as JSON writes them when asked to escape: a backslash, u, four hex digits. */
+function jsonEscaped(text: string, upper: boolean): string {
+  return Array.from(text, (character) => {
+    let out = '';
+    for (let index = 0; index < character.length; index += 1) {
+      const unit = character.charCodeAt(index);
+      if (unit < 0x80) out += character[index];
+      else {
+        const hex = unit.toString(16).padStart(4, '0');
+        out += '\\u' + (upper ? hex.toUpperCase() : hex);
+      }
+    }
+    return out;
+  }).join('');
+}
+
 /** The body, and every form of it that a careless writer might leave behind. */
 function needlesFor(body: string): { label: string; value: Buffer }[] {
   const needles: { label: string; value: Buffer }[] = [];
@@ -398,65 +438,93 @@ function needlesFor(body: string): { label: string; value: Buffer }[] {
     needles.push({ label: `${label} (utf8)`, value: Buffer.from(text, 'utf8') });
     needles.push({ label: `${label} (utf16le)`, value: Buffer.from(text, 'utf16le') });
   };
-  add('body', body);
-  add('body NFKC', body.normalize('NFKC'));
-  add('body base64', Buffer.from(body, 'utf8').toString('base64'));
-  add('body hex', Buffer.from(body, 'utf8').toString('hex'));
-  const sha = createHash('sha256').update(body, 'utf8');
-  const digest = sha.digest();
-  add('sha256 hex', digest.toString('hex'));
-  add('sha256 HEX', digest.toString('hex').toUpperCase());
-  add('sha256 base64', digest.toString('base64'));
-  needles.push({ label: 'sha256 raw', value: digest });
-  // Every piece of eight characters or more, so a cut-off copy is found too.
-  for (let start = 0; start < body.length; start += 1)
-    for (let end = start + 8; end <= body.length; end += 1)
-      add(`part ${start}-${end}`, body.slice(start, end));
+  // The value as the screen gave it, and as the store and the paste hold it.
+  const variants = [
+    ['body', body],
+    ['body NFKC', body.normalize('NFKC')],
+    ['body normalized', normalizeComputerUseArtifactText(body)],
+  ] as const;
+  const seen = new Set<string>();
+  for (const [name, text] of variants) {
+    if (seen.has(text)) continue;
+    seen.add(text);
+    add(name, text);
+    add(`${name} lower`, text.toLowerCase());
+    add(`${name} upper`, text.toUpperCase());
+    add(`${name} json-escaped`, jsonEscaped(text, false));
+    add(`${name} JSON-ESCAPED`, jsonEscaped(text, true));
+    add(`${name} base64`, Buffer.from(text, 'utf8').toString('base64'));
+    add(`${name} hex`, Buffer.from(text, 'utf8').toString('hex'));
+    const digest = createHash('sha256').update(text, 'utf8').digest();
+    add(`${name} sha256 hex`, digest.toString('hex'));
+    add(`${name} sha256 HEX`, digest.toString('hex').toUpperCase());
+    add(`${name} sha256 base64`, digest.toString('base64'));
+    needles.push({ label: `${name} sha256 raw`, value: digest });
+    // Every piece of eight characters or more (by code point), so a cut-off copy is found too.
+    const points = Array.from(text);
+    for (let from = 0; from < points.length; from += 1)
+      for (let to = from + 8; to <= points.length; to += 1) {
+        const piece = points.slice(from, to).join('');
+        add(`${name} part ${from}-${to}`, piece);
+        add(`${name} part ${from}-${to} lower`, piece.toLowerCase());
+        add(`${name} part ${from}-${to} json-escaped`, jsonEscaped(piece, false));
+      }
+  }
   return needles;
 }
 
 function findIn(files: { name: string; bytes: Buffer }[], body: string): string[] {
   const found: string[] = [];
+  const needles = needlesFor(body);
   for (const file of files)
-    for (const needle of needlesFor(body))
+    for (const needle of needles)
       if (file.bytes.includes(needle.value)) found.push(`${file.name}: ${needle.label}`);
   return found;
 }
 
 describe.skipIf(!runsWithElectronAbi)('a copied value is not persisted (N12, T15-10 PR-C)', () => {
-  it('writes none of the value, its forms or its excerpt to the database files, open or closed, and keeps the digests', async () => {
-    const journey = createJourney();
-    const [outA, outB] = await journey.run();
-    // The journey did what it claims: the value was copied, carried and pasted after a card.
-    expect(outA).toHaveProperty('artifacts');
-    expect(outB).not.toHaveProperty('artifacts');
-    expect(journey.pastedTexts).toEqual([BODY]);
-    // The excerpt did reach the screen's channel (status.copied and the card), which is the point
-    // of looking for it in the files and not finding it.
-    expect(JSON.stringify(journey.statuses)).toContain('Total 42');
-    expect(
-      journey.approvals.some((approval) => JSON.stringify(approval).includes('Total 42')),
-    ).toBe(true);
+  it.each([
+    ['an ASCII value', BODY],
+    ['a value that NFKC changes', UNICODE_BODY],
+  ])(
+    'writes none of %s, its forms or its excerpt to the database files, open or closed, and keeps the digests',
+    async (_name, body) => {
+      const journey = createJourney(body);
+      const pasted = normalizeComputerUseArtifactText(body);
+      const [outA, outB] = await journey.run();
+      // The journey did what it claims: the value was copied, carried and pasted after a card.
+      expect(outA).toHaveProperty('artifacts');
+      expect(outB).not.toHaveProperty('artifacts');
+      expect(journey.pastedTexts).toEqual([pasted]);
+      // The excerpt did reach the screen's channel (status.copied and the card), which is the point
+      // of looking for it in the files and not finding it.
+      expect(JSON.stringify(journey.statuses)).toContain(VISIBLE);
+      expect(journey.approvals.some((approval) => JSON.stringify(approval).includes(VISIBLE))).toBe(
+        true,
+      );
 
-    // The audit has the rows, with keyed digests.
-    const audits = journey.persistence.listComputerActionAudits(journey.taskId);
-    const copy = audits.find((audit) => audit.actionKind === 'copy');
-    const paste = audits.find((audit) => audit.actionKind === 'set_text');
-    expect(copy?.actionDigest).toBe(computerUseActionDigest({ type: 'copy', targetId: 'node-1' }));
-    expect(paste?.actionDigest).toBe(
-      computerUseActionDigest({ type: 'set_text', targetId: 'node-1', text: BODY }),
-    );
-    expect(paste?.actionDigest).not.toBe(createHash('sha256').update(BODY).digest('hex'));
-    expect(JSON.stringify(audits)).not.toContain('Total 42');
+      // The audit has the rows, with keyed digests.
+      const audits = journey.persistence.listComputerActionAudits(journey.taskId);
+      const copy = audits.find((audit) => audit.actionKind === 'copy');
+      const paste = audits.find((audit) => audit.actionKind === 'set_text');
+      expect(copy?.actionDigest).toBe(
+        computerUseActionDigest({ type: 'copy', targetId: 'node-1' }),
+      );
+      expect(paste?.actionDigest).toBe(
+        computerUseActionDigest({ type: 'set_text', targetId: 'node-1', text: pasted }),
+      );
+      expect(paste?.actionDigest).not.toBe(createHash('sha256').update(pasted).digest('hex'));
+      expect(JSON.stringify(audits)).not.toContain(VISIBLE);
 
-    // With the client still open, the write-ahead log holds what has not been checkpointed.
-    expect(readdirSync(journey.directory).some((name) => name.endsWith('-wal'))).toBe(true);
-    expect(findIn(filesOf(journey.directory), BODY)).toEqual([]);
+      // With the client still open, the write-ahead log holds what has not been checkpointed.
+      expect(readdirSync(journey.directory).some((name) => name.endsWith('-wal'))).toBe(true);
+      expect(findIn(filesOf(journey.directory), body)).toEqual([]);
 
-    await journey.dispose();
-    journey.persistence.close();
-    expect(findIn(filesOf(journey.directory), BODY)).toEqual([]);
-  });
+      await journey.dispose();
+      journey.persistence.close();
+      expect(findIn(filesOf(journey.directory), body)).toEqual([]);
+    },
+  );
 
   it('would find the value if something wrote it (the scan reads the log and the database)', async () => {
     const journey = createJourney();
@@ -482,18 +550,35 @@ describe.skipIf(!runsWithElectronAbi)('a copied value is not persisted (N12, T15
 // of every run and a failure in the child fails this test.
 if (!runsWithElectronAbi)
   it('runs the persistence scan with the bundled Electron ABI', async () => {
-    await promisify(execFile)(
-      electronTestExecutablePath(),
-      [
-        join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
-        'run',
-        'src/main/computer-use-c6-persistence.test.ts',
-      ],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
-        timeout: 120_000,
-        maxBuffer: 2 * 1024 * 1024,
-      },
-    );
+    const reportDirectory = mkdtempSync(join(tmpdir(), 'sprint-coder-c6-report-'));
+    const reportFile = join(reportDirectory, 'report.json');
+    try {
+      await promisify(execFile)(
+        electronTestExecutablePath(),
+        [
+          join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+          'run',
+          'src/main/computer-use-c6-persistence.test.ts',
+          '--reporter=default',
+          '--reporter=json',
+          `--outputFile.json=${reportFile}`,
+        ],
+        {
+          cwd: process.cwd(),
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+          timeout: 120_000,
+          maxBuffer: 2 * 1024 * 1024,
+        },
+      );
+      // A child that skipped everything would also exit cleanly: count what really ran and passed.
+      const report = JSON.parse(readFileSync(reportFile, 'utf8')) as Record<string, number>;
+      expect({
+        passed: report['numPassedTests'],
+        failed: report['numFailedTests'],
+        skipped: report['numPendingTests'],
+        todo: report['numTodoTests'],
+      }).toEqual({ passed: EXPECTED_CHILD_TESTS, failed: 0, skipped: 0, todo: 0 });
+    } finally {
+      rmSync(reportDirectory, { recursive: true, force: true });
+    }
   }, 125_000);
