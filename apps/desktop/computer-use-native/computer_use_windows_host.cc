@@ -14,6 +14,7 @@
 #include <bcrypt.h>
 #include <dwmapi.h>
 #include <sddl.h>
+#include <shlobj.h>
 #include <shobjidl.h>
 #include <softpub.h>
 #include <tlhelp32.h>
@@ -4310,6 +4311,43 @@ bool ConsumeWindowsDispatchTicket(const std::string &session_key,
   return consumed && session.cancel_epoch == cancel_epoch;
 }
 
+// BEGIN click rule (#500 S5-c-2 PR-2)
+// A single click on a passive item of a file manager only selects it (#777), unless it completes a
+// double click or the file manager opens an item on one click (its "single click to open" setting).
+// The portable rule is MayOpen; these are the facts only the host knows.
+
+// Whether the user's file manager opens an item on ONE click. Read from the shell state each time.
+// The state starts zeroed, so a read that fills nothing says "single click" (= it opens: fail
+// closed). fDoubleClickInWebView is TRUE (-1) when a double click is required (the default).
+bool WindowsSingleClickOpens() noexcept {
+  SHELLSTATE state{};
+  SHGetSetSettings(&state, SSF_DOUBLECLICKINWEBVIEW, FALSE);
+  return state.fDoubleClickInWebView == 0;
+}
+
+// Whether a click made now may complete a double click. The OS pairs two presses within the
+// double-click time, whoever sent them, and the earlier press is an input, so it is at or before the
+// system's LAST input time: if that is older than the double-click time, no pair can form. That is all
+// this asks (see RecentInputMayCompleteDoubleClick); it keeps no record of its own clicks and tells
+// nobody's input from anybody's. The price: a click within the double-click time (500 ms by default)
+// of any input, this helper's own included, counts as opening; the agent acts one step per model
+// round trip, which is seconds. Anything this cannot read is "opens".
+bool WindowsRecentInputMayPair() noexcept {
+  LASTINPUTINFO info{};
+  info.cbSize = sizeof(info);
+  const bool read = GetLastInputInfo(&info) != FALSE;
+  return sprint_coder::computer_use::RecentInputMayCompleteDoubleClick(
+      read, read ? info.dwTime : 0, static_cast<std::uint32_t>(GetTickCount64()),
+      GetDoubleClickTime());
+}
+
+// Whether a click opens what it lands on: the file manager opens on one click, or it may complete a
+// double click.
+bool WindowsClickOpens() noexcept {
+  return WindowsSingleClickOpens() || WindowsRecentInputMayPair();
+}
+// END click rule
+
 // BEGIN windows action point
 // The screen point a click or scroll lands on: the metadata's x / y (each in 0..1) mapped onto the
 // bounds. THE one copy of the mapping: the dispatch, the effect shadow and the synchronous interlock
@@ -4795,6 +4833,8 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
     POINT point{0, 0};
     const bool point_known =
         WindowsActionPoint(session.observation_bounds, metadata, &point);
+    job.click_tracked = kind == "click" && point_known;
+    job.click_opens = job.click_tracked && WindowsClickOpens();
     const HWND window = session.active_window;
     const std::uint64_t expected_epoch = session.cancel_epoch;
     // Valid while the cancellation epoch is the one the preflight was bound to (a cancel and the
@@ -4851,7 +4891,9 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // Automation calls, then a shell lookup's wait of 150 ms: up to 650 ms) and CoreWindowProcessPath
 // (two calls: 500 ms). Started just before the deadline they can run past 500 ms (about 850 ms by
 // this arithmetic); for them the lane's wait_for cut-off (kBudget, worker abandoned) is the real
-// bound of the hold, not the estimate.
+// bound of the hold, not the estimate. Before the wait the lane also reads the click facts
+// (WindowsClickOpens: a settings read and GetLastInputInfo, microseconds, never a wait); that read
+// sits outside this bound.
 constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};
 static_assert(150 + sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs + 50 <= 500,
               "holds for a step of ONE UI Automation call only; longer steps are bounded by the wait_for cut-off");
@@ -4896,6 +4938,11 @@ std::atomic<bool> &InterlockWorkerRunning() {
       unavailable.no_verdict = InterlockNoVerdict::kCanceled;
       return unavailable;
     }
+    // The click facts the host alone knows, taken HERE on the lane (a cheap system call, never a
+    // wait) and handed to the worker by value: the worker touches no session and no system state.
+    // The time of the last input is read at this request, not when a worker finally runs.
+    const bool click_tracked = kind == "click" && point_known;
+    const bool click_opens = click_tracked && WindowsClickOpens();
     // Everything that can throw is prepared BEFORE the single-flight slot is taken, so a failure
     // here cannot leave the slot taken for ever.
     auto pending = std::make_shared<InterlockPending>();
@@ -4917,7 +4964,7 @@ std::atomic<bool> &InterlockWorkerRunning() {
     }
     try {
       std::thread([pending, window, point, maximum_mode, policy_language, kind_copy, key,
-                   target_id, ruleset_copy, expected_epoch, &running]() {
+                   target_id, ruleset_copy, expected_epoch, click_tracked, click_opens, &running]() {
         InterlockEvaluation answer;
         answer.no_verdict = InterlockNoVerdict::kIncomplete;
         try {
@@ -4942,6 +4989,8 @@ std::atomic<bool> &InterlockWorkerRunning() {
               info.key = key;
               info.maximum_mode = maximum_mode;
               info.policy_language = policy_language;
+              info.click_tracked = click_tracked;
+              info.click_opens = click_opens;
               answer = EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info,
                                                         ruleset_copy);
             }

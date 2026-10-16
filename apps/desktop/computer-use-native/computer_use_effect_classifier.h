@@ -38,10 +38,13 @@
 //     command surface, executable / installer triggers. An approval is only ever produced for a
 //     complete fact set, never together with a refusal, and always carries a valid effect.
 //   * An approval whose effect the rule set has not enabled is a refusal, not an approval.
-//   * Anything that might open a file from a file browser or a download list (a visual click, a
-//     key, an invoke, a double click) is treated as opening it until a real device shows otherwise
-//     (ADR v2 S4 contract 5, decision 2-A). Only a semantic select, a rename or a scroll is
-//     browsing.
+//   * Anything that might open a file from a file browser or a download list (an invoke, a double
+//     click, a key outside the allowlist of browsing keys - Enter, a chord with a modifier other
+//     than Shift, an F key, an unknown name - and a click the host does not follow) is treated as
+//     opening it until a real device shows otherwise (ADR v2 S4 contract 5, decision 2-A). A single
+//     click the host follows on a passive item (it selects), an allowlisted key (an arrow, Tab,
+//     Escape, Backspace, ... with at most Shift), a semantic select, a rename or a scroll is browsing
+//     (#500 S5-c-2 PR-2, #777).
 
 #include "computer_use_native_approval_ticket.h"
 
@@ -115,8 +118,20 @@ struct EffectFacts {
   ActionKind action = ActionKind::kObserve;
   SessionMode mode = SessionMode::kObserveOnly;
   OriginState origin = OriginState::kNotApplicable;
-  // The key activates the focused control (Enter, Return, Space or a control's own shortcut).
-  bool key_is_activation = false;
+  // The key may open the focused item. ShadowKeyOpens decides it from an allow list of keys that
+  // cannot (arrows, Tab, Escape, Backspace, Delete, Home, End, PageUp / PageDown, also with Shift
+  // only); everything else opens: Enter in any spelling, a chord with a modifier other than Shift, an
+  // F key, an unknown name, an empty key. Space and a single character key are NOT on the list: Space
+  // presses the focused button or link, and a letter is a menu access key ("o" picks "Open" in an
+  // open context menu). Typing text is the "type" action, not a key. Only used when the action is
+  // a key. The default is TRUE (fail closed): facts built without a key decision treat a key as one
+  // that may open, never as plain typing.
+  bool key_is_activation = true;
+  // The host follows clicks: it knows whether this click completes a double click or opens on one
+  // click, and says so by the action (kDoubleClick). Only then is a single click on a passive item of
+  // a file manager known to select and nothing more. Without it (macOS, which does not record the
+  // previous click yet, or a click with no point) every click may open, as before (fail closed).
+  bool click_tracked = false;
   // The target (or the item the action would open) is a document or program item rather than a
   // folder that opens by browsing into it. macOS packages (.app and the like) count as items.
   bool target_is_file_item = false;
@@ -620,11 +635,81 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
          (facts.action == ActionKind::kKey && !facts.key_is_activation);
 }
 
-// An action that might open a file when aimed at one: until a real device shows what a visual
-// click or a key does in a file browser or a download list, they all count (ADR v2 S4-5).
+// Whether a role names a passive item of a list or a text (a row, a cell, an outline row, a list
+// item, a tree item, a data item, static text). An ALLOW LIST, matched whole after lowercasing and
+// dropping the macOS "ax" prefix, so the Windows control types (ListItem, DataItem, TreeItem, Text)
+// and the macOS roles (AXRow, AXOutlineRow, AXStaticText, ...) name the same things.
+[[nodiscard]] inline bool RoleIsPassiveItem(std::string_view role) {
+  std::string name = NormalizeForMatch(role);
+  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
+  static constexpr std::string_view kItems[] = {"row",      "cell",     "outlinerow", "listitem",
+                                                "treeitem", "dataitem", "statictext", "text"};
+  for (const std::string_view item : kItems)
+    if (name == item) return true;
+  return false;
+}
+
+// A known container: something items live in, which is never pressed itself (a list, an outline, a
+// table, a browser, a scroll area, a window, the application, a web area; UI Automation's List, Tree,
+// DataGrid, Table, Pane, Window and Document). Matched whole, like the items.
+[[nodiscard]] inline bool RoleIsKnownContainer(std::string_view role) {
+  std::string name = NormalizeForMatch(role);
+  if (name.rfind("ax", 0) == 0) name.erase(0, 2);
+  static constexpr std::string_view kContainers[] = {
+      "list", "outline", "table",  "browser", "scrollarea", "window", "application",
+      "webarea", "tree", "datagrid", "pane", "document"};
+  for (const std::string_view container : kContainers)
+    if (name == container) return true;
+  return false;
+}
+
+// Whether what the action lands on is KNOWN to be a passive item: walking up from the target, every
+// node has an allow-listed role (and no subrole other than an allow-listed one) until the nearest
+// KNOWN container is reached. Anything else is treated as a control: a role nobody listed anywhere on
+// the way up (an AXGroup a page made clickable, a Custom, a combo box, a disclosure triangle, a menu
+// bar item, a split button), a chain that never reaches a known container, and a target that is
+// itself a container. This fails closed on purpose. It does not stop at the core's nearest
+// actionable ancestor: the core does not recognize a group or a custom control as actionable, so a
+// label under one would look like an item on its own. The decision is by ROLE, never by whether a
+// file is attached: a button can carry an AXURL or a file name and is still a button, and a file's
+// row is still a row.
+[[nodiscard]] inline bool ItemInSpan(const EffectFacts &facts) {
+  for (std::size_t index = 0; index < facts.chain.size(); ++index) {
+    const NodeFacts &node = facts.chain[index];
+    // The one narrow exception: a click on a cell of the Windows details view lands on an Edit (or a Text)
+    // of class UIProperty directly under the row's ListItem. It is the row's own cell (a date, a size),
+    // and one click on it selects the row. Only that exact shape counts: the target node itself, the
+    // class UIProperty (the host passes it as the subrole), and a ListItem right above. The edit box
+    // of a rename has class "Edit", so it stays a control (a click there never opens, but it is not
+    // a thing to wave through either).
+    if (index == 0 &&
+        (NormalizeForMatch(node.role) == "edit" || NormalizeForMatch(node.role) == "text") &&
+        NormalizeForMatch(node.subrole) == "uiproperty" && facts.chain.size() > 1 &&
+        NormalizeForMatch(facts.chain[1].role) == "listitem")
+      continue;
+    if (RoleIsKnownContainer(node.role)) return index > 0;
+    if (!RoleIsPassiveItem(node.role)) return false;
+    if (!NormalizeForMatch(node.subrole).empty() && !RoleIsPassiveItem(node.subrole))
+      return false;
+  }
+  return false;
+}
+
+// An action that might open a file when aimed at one. A double click, an invoke and an activating
+// key (Enter) always do. A single click does too, EXCEPT one that lands on an item a file manager
+// is known to show as a passive item (a row, a list item, a tree item: see ItemInSpan): a real
+// Windows 11 file manager only selects it (#777). A click on anything else still counts: an item of
+// a download list (some browsers open it on one click), a button, a menu item, a role nobody
+// listed. A click that completes a double click, or that a file manager opens on one click (its
+// "single click to open" setting), is a kDoubleClick by the time it gets here. Of the keys, only an
+// activating one opens: Enter, or a chord with a command modifier (Cmd+O, Ctrl+Enter; see
+// ShadowKeyOpens, which counts more than needed on purpose). A bare arrow, Tab or Escape moves or
+// dismisses; it does not open.
 [[nodiscard]] inline bool MayOpen(const EffectFacts &facts) {
-  return facts.action == ActionKind::kClick || facts.action == ActionKind::kDoubleClick ||
-         facts.action == ActionKind::kInvoke || facts.action == ActionKind::kKey;
+  return facts.action == ActionKind::kDoubleClick || facts.action == ActionKind::kInvoke ||
+         (facts.action == ActionKind::kKey && facts.key_is_activation) ||
+         (facts.action == ActionKind::kClick &&
+          !(facts.click_tracked && facts.surface == SurfaceKind::kFileBrowser && ItemInSpan(facts)));
 }
 
 // An action that activates a control: a click, an invoke, a toggle, a menu pick or an activating
