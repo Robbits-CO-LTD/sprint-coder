@@ -116,9 +116,13 @@ struct EffectFacts {
   ActionKind action = ActionKind::kObserve;
   SessionMode mode = SessionMode::kObserveOnly;
   OriginState origin = OriginState::kNotApplicable;
-  // The key may open the focused item: Enter / Return in any spelling, or any chord with a modifier
-  // (ShadowKeyOpens). A plain arrow, Tab, Escape or Space does not.
-  bool key_is_activation = false;
+  // The key may open the focused item. ShadowKeyOpens decides it from an allow list of keys that
+  // cannot (arrows, Tab, Escape, Space, Backspace, Delete, Home, End, PageUp / PageDown, one printable
+  // character, also with Shift only); everything else opens: Enter in any spelling, a chord with a
+  // modifier other than Shift, an F key, an unknown name, an empty key. Only used when the action is
+  // a key. The default is TRUE (fail closed): facts built without a key decision treat a key as one
+  // that may open, never as plain typing.
+  bool key_is_activation = true;
   // The host follows clicks: it knows whether this click completes a double click or opens on one
   // click, and says so by the action (kDoubleClick). Only then is a single click on a passive item of
   // a file manager known to select and nothing more. Without it (macOS, which does not record the

@@ -1320,6 +1320,8 @@ EffectFacts EffBase() {
   facts.action = ActionKind::kClick;
   facts.mode = SessionMode::kFullAccess;
   facts.origin = OriginState::kNotApplicable;
+  // The core defaults a key to "may open" (fail closed); most cases here mean plain typing.
+  facts.key_is_activation = false;
   facts.chain.push_back(NodeFacts{"axbutton", "", "ok"});
   return facts;
 }
@@ -7553,6 +7555,15 @@ bool CheckClickRule() {
                             // Shift in front of a quiet key is the same key.
                             "Shift+ArrowDown", "Shift+Tab", "Shift + Tab", "Shift+a", "shift+Home"})
       if (!Check(!ShadowKeyOpens(key), (std::string("key-does-not-open-") + key).c_str())) return false;
+    // The core's own default is fail closed: facts built without a key decision treat a key as one
+    // that may open (never as plain typing); every production path sets it from ShadowKeyOpens.
+    {
+      EffectFacts bare;
+      bare.action = ActionKind::kKey;
+      if (!Check(bare.key_is_activation && MayOpen(bare), "key-default-is-fail-closed")) return false;
+      bare.key_is_activation = false;
+      if (!Check(!MayOpen(bare), "key-explicit-typing-does-not-open")) return false;
+    }
     // BEGIN host key names
     // Every key name the hosts accept (Windows VirtualKeyForName, macOS KeyCodeForName), with what it
     // is: the vitest contract reads this list and the two host sources and requires them to match,
