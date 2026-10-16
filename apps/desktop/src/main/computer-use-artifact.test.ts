@@ -426,6 +426,7 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ],
     ['a card number', '4111 1111 1111 1111'],
     ['a card number with hyphens', 'card 5555-5555-5555-4444 exp'],
+    ['a card number in two groups of uneven size', '4111111111 111111'],
     ['a GitHub OAuth token', 'gho_0123456789abcdefghijABCDEFGHIJ'],
     ['a GitHub server token', 'ghs_0123456789abcdefghijABCDEFGHIJ'],
     ['a GitHub refresh token', 'ghr_0123456789abcdefghijABCDEFGHIJ'],

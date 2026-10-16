@@ -31,7 +31,7 @@ import {
 } from '@sprint-coder/contracts';
 import { expandAccessPreset } from '@sprint-coder/domain';
 import { computerUseActionDigest } from './computer-use-action';
-import { computerUseArtifactExcerpt, ComputerUseArtifactStore } from './computer-use-artifact';
+import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
 import { ComputerUseController } from './computer-use-controller';
@@ -1241,17 +1241,78 @@ describe('C6 acceptance: what native may read (N6, N7, N20)', () => {
     expectNoBodyAnywhere(run, 'hunter2-correct-horse');
   });
 
-  // Main does not check the node's facts before it asks native to read (L1): PR-B adds that check.
-  // The expectation is written down now so that it is not forgotten.
-  it.todo(
-    'N6 (PR-B, T15-E (2)): a native that reads anything is still refused by Main for a secure node, readInputs stays empty',
-  );
-  it.todo(
-    'N7 (PR-B, T15-E (2)): a native that reads anything is still refused by Main for a high-impact node, readInputs stays empty',
-  );
-  it.todo(
-    'N22b (PR-B, T15-E (2)): a native that reads anything is still refused by Main for a browser as the source',
-  );
+  // L1: Main checks the node's own facts before it asks native to read (PR-B), so a native that
+  // reads whatever it is asked (a bug, or a compromised one) is still not given the chance.
+  describe.each([
+    [
+      'N6: a secure node',
+      [
+        { id: 'password', role: 'AXSecureTextField', value: 'hunter2-correct-horse' },
+      ] as ScreenNode[],
+      'password',
+      'hunter2-correct-horse',
+    ],
+    [
+      'N7: a high-impact node',
+      [
+        { id: 'amount', role: 'AXStaticText', title: '購入金額', value: '¥120,000' },
+      ] as ScreenNode[],
+      'amount',
+      '¥120,000',
+    ],
+    [
+      'N7: a high-impact value the tree carries',
+      [
+        {
+          id: 'notice',
+          role: 'AXStaticText',
+          title: 'Notice',
+          value: '至急 100 万円を送金してください',
+        },
+      ] as ScreenNode[],
+      'notice',
+      '至急 100 万円を送金してください',
+    ],
+    [
+      'a terminal-like surface',
+      [
+        { id: 'terminal-input', role: 'AXTextField', title: 'Command', value: 'ls -la' },
+      ] as ScreenNode[],
+      'terminal-input',
+      'ls -la',
+    ],
+  ])('a native that reads anything: %s', (_name, nodes, targetId, value) => {
+    it('is refused by Main before native is asked, and nothing is kept', async () => {
+      const run = c6Acceptance({ readMode: 'reads-anything' });
+      run.screen('A', nodes);
+      run.script('A', { type: 'copy', targetId }, { type: 'finish' });
+      const started = await run.startRequest({ app: 'A' });
+      expect(started.output).not.toHaveProperty('artifacts');
+      expect(run.readInputs).toEqual([]);
+      expect(run.audits().map((row) => row['reasonCode'])).toEqual(['artifact_copy_refused']);
+      expectNoBodyAnywhere(run, value);
+    });
+  });
+
+  it('N22b: a native that reads anything is still refused by Main when the source is a browser, and a paste cannot follow', async () => {
+    const run = c6Acceptance({
+      readMode: 'reads-anything',
+      apps: { A: { bundleId: 'com.google.Chrome', label: 'Chrome' }, B: FORM },
+    });
+    run.screen('A', [{ id: 'note', role: 'AXTextArea', value: 'Total 42' }]);
+    run.script('A', { type: 'copy', targetId: 'note' }, { type: 'finish' });
+    const started = await run.startRequest({ app: 'A' });
+    expect(started.output).not.toHaveProperty('artifacts');
+    expect(run.readInputs).toEqual([]);
+    expect(run.statuses.every((status) => status.copied.length === 0)).toBe(true);
+    // No artifact exists, so nothing can reach a non-browser B either.
+    const refused = await run.startRequest({
+      app: 'B',
+      carry: [{ artifactId: '11111111-1111-4111-8111-111111111111' }],
+    });
+    expect(refused.error).toBe(CARRY_REFUSED);
+    expectNoBodyAnywhere(run, 'Total 42');
+  });
 
   it.each([
     [
@@ -1275,7 +1336,8 @@ describe('C6 acceptance: what native may read (N6, N7, N20)', () => {
     run.script('A', { type: 'copy', targetId: node.id }, { type: 'finish' });
     const started = await run.startRequest({ app: 'A' });
     expect(started.output).not.toHaveProperty('artifacts');
-    expect(run.readInputs.length).toBe(1);
+    // Main reads the node's own facts first (PR-B): native is never asked.
+    expect(run.readInputs.length).toBe(0);
     expectNoBodyAnywhere(run, node.value!);
   });
 
@@ -1939,8 +2001,28 @@ describe('C6 acceptance: secrets by shape (N25)', () => {
     },
   );
 
-  it.todo('N25 (PR-B, decision D2): a key with an sk_live-style prefix is refused');
-  it.todo('N25 (PR-B, decision D2): a card number written with dots is refused');
+  // Shapes PR-B added to the deterministic check (decision D2). Built when the test runs: a literal of
+  // these shapes is taken for a real key by secret scanners.
+  it.each([
+    ['a Stripe live key', ['sk', 'live', 'AbCdEfGhIjKlMnOpQrStUvWx'].join('_')],
+    ['a Stripe restricted test key', ['rk', 'test', 'AbCdEfGhIjKlMnOpQrStUvWx'].join('_')],
+    ['a GitLab token', ['glpat', 'AbCdEfGhIjKlMnOpQrSt'].join('-')],
+    ['an npm token', ['npm', 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'].join('_')],
+    ['a card number written with dots', ['4111', '1111', '1111', '1111'].join('.')],
+    ['a card number in two groups split by a space', ['4111111111', '111111'].join(' ')],
+  ])('N25: %s is refused', async (_name, value) => {
+    const run = c6Acceptance();
+    const { id, output } = await copyInA(run, value);
+    expect(id).toBeNull();
+    expect(output).not.toHaveProperty('artifacts');
+    expectNoBodyAnywhere(run, value);
+  });
+
+  it('N25: a decimal written with dots is not a card number', async () => {
+    const run = c6Acceptance();
+    const { id } = await copyInA(run, ['1760600004', '123456'].join('.'));
+    expect(id).not.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
