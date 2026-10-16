@@ -153,6 +153,27 @@ struct ShadowRequestInfo {
   return (dx < 0 ? -dx : dx) <= slop_x && (dy < 0 ? -dy : dy) <= slop_y;
 }
 
+// Whether input came from somewhere else since this helper last sent some: the system's last input
+// time (`last_input_tick`, GetLastInputInfo, 32-bit ticks) is newer than the one read right after
+// this helper's own last injection (`own_input_tick`; an injection moves the system's last input
+// time too, so the two are equal while nobody else touched the mouse or keyboard), and it is at
+// most `interval_ms` before `now_tick`. A person's click in that window may pair with ours into
+// a double click that this helper cannot see, so the caller treats the click as opening (fail
+// closed). With no injection of our own yet, any input in the window counts. Ticks wrap at 2^32:
+// differences are taken modulo 2^32 and a difference of 2^31 or more means "older" / "in the future".
+[[nodiscard]] inline bool ExternalInputWithinDoubleClick(bool has_own, std::uint32_t own_input_tick,
+                                                         std::uint32_t last_input_tick,
+                                                         std::uint32_t now_tick,
+                                                         std::uint32_t interval_ms) {
+  constexpr std::uint32_t kHalf = 0x80000000u;
+  if (has_own) {
+    const std::uint32_t newer_by = last_input_tick - own_input_tick;
+    if (newer_by == 0 || newer_by >= kHalf) return false;
+  }
+  const std::uint32_t age = now_tick - last_input_tick;
+  return age < kHalf && age <= interval_ms;
+}
+
 struct ShadowFacts {
   EffectFacts facts;
   std::uint32_t gaps = 0;

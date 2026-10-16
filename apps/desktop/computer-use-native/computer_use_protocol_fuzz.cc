@@ -7224,6 +7224,55 @@ bool CheckClickRule() {
     const auto scrolled = explorer("invoice.pdf", "C:\\Users\\me\\invoice.pdf", "scroll", "", true);
     if (!Check(refusal(scrolled).empty(), "click-rule-flag-does-not-touch-a-scroll")) return false;
   }
+  // A click on a cell of the details view lands on an Edit of class UIProperty under the ListItem: the
+  // row is what is clicked, so one click selects it (no verdict at all), a click that opens does not.
+  {
+    const auto in_cell = [&](const char *name, const char *path, bool click_opens, const char *cell_class) {
+      FakeExplorer item(name);
+      item.GiveRealPath(path);
+      item.form.source.point = item.form.source.Add(item.item, "Edit", "Date modified", cell_class);
+      ShadowRequestInfo request = UiaRequest("click");
+      request.click_opens = click_opens;
+      return EvaluateWindowsInterlockOnSource(item.form.source, "click", "", request, EffectRuleset{});
+    };
+    const auto one = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "UIProperty");
+    if (!Check(!one.Refuses() && one.no_verdict == InterlockNoVerdict::kNone,
+               "click-rule-cell-one-click-is-no-verdict")) return false;
+    const auto doubled = in_cell("run.bat", "C:\\Users\\me\\run.bat", true, "UIProperty");
+    if (!Check(doubled.Refuses() && doubled.verdict.outcome == InterlockOutcome::kTakeover &&
+                   doubled.verdict.reason == InterlockReason::kExecutionTrigger,
+               "click-rule-cell-click-that-opens-is-a-takeover")) return false;
+    // Only the exact shape: the same Edit with another class (a rename box is "Edit") still counts.
+    const auto rename = in_cell("run.bat", "C:\\Users\\me\\run.bat", false, "Edit");
+    if (!Check(rename.Refuses(), "click-rule-edit-of-another-class-still-counts")) return false;
+    // The facts: the cell is passive only with the ListItem right above it and a file manager around.
+    const std::vector<NodeFacts> cell = {{"edit", "UIProperty", "Date modified"},
+                                         {"listitem", "", "run.bat"}, {"list", "", "Items"},
+                                         {"window", "", "Docs"}};
+    EffectFacts cell_facts = EffBase();
+    cell_facts.surface = SurfaceKind::kFileBrowser;
+    cell_facts.action = ActionKind::kClick;
+    cell_facts.target_is_file_item = true;
+    cell_facts.extension_known = true;
+    cell_facts.extension = "bat";
+    cell_facts.chain = cell;
+    if (!Check(ItemInSpan(cell_facts) && !MayOpen(cell_facts), "click-rule-cell-is-a-passive-item")) return false;
+    std::vector<NodeFacts> bare = cell;
+    bare[0].subrole = "";
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts) && MayOpen(cell_facts), "click-rule-edit-without-the-class-counts")) return false;
+    bare = cell;
+    bare.erase(bare.begin() + 1);
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-cell-without-a-listitem-above-counts")) return false;
+    bare = cell;
+    bare[1].role = "group";
+    cell_facts.chain = bare;
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-cell-under-a-group-counts")) return false;
+    // The cell shape is for the target node only: an Edit higher up the chain is not it.
+    cell_facts.chain = {{"listitem", "", "run.bat"}, cell[0], cell[1], cell[2]};
+    if (!Check(!ItemInSpan(cell_facts), "click-rule-the-cell-exception-is-for-the-target-only")) return false;
+  }
   // click_opens makes the facts carry a double click, and only for a click.
   {
     ShadowRequestInfo request = UiaRequest("click");
@@ -7339,6 +7388,25 @@ bool CheckClickRule() {
                "dblclick-zero-interval-only-same-tick")) return false;
     if (!Check(!ClickCompletesDoubleClick(true, 0, -2147483647 - 1, 0, 100, 2147483647, 0, 500, 2, 2),
                "dblclick-extreme-coordinates")) return false;
+  }
+
+  // Input from somewhere else (a person at the mouse) within the double-click time since our own
+  // last injection makes the click one that may open. Equal ticks = nobody else touched anything.
+  {
+    const auto external = [](bool has_own, std::uint32_t own, std::uint32_t last, std::uint32_t now) {
+      return ExternalInputWithinDoubleClick(has_own, own, last, now, 500);
+    };
+    if (!Check(!external(true, 1000, 1000, 1100), "external-input-same-tick-as-ours-is-none")) return false;
+    if (!Check(external(true, 1000, 1050, 1100), "external-input-newer-than-ours-within-the-interval")) return false;
+    if (!Check(external(true, 1000, 1050, 1550), "external-input-exactly-at-the-interval")) return false;
+    if (!Check(!external(true, 1000, 1050, 1551), "external-input-one-past-the-interval")) return false;
+    if (!Check(!external(true, 1000, 900, 1100), "external-input-older-than-ours-is-none")) return false;
+    if (!Check(!external(true, 1000, 1050, 1000), "external-input-in-the-future-is-none")) return false;
+    if (!Check(external(false, 0, 900, 1100), "external-input-with-no-injection-of-ours-counts")) return false;
+    if (!Check(!external(false, 0, 100, 1100), "external-input-with-no-injection-and-old-is-none")) return false;
+    // Ticks wrap at 2^32.
+    if (!Check(external(true, 0xFFFFFFF0u, 0x00000010u, 0x00000020u), "external-input-across-the-wrap")) return false;
+    if (!Check(!external(true, 0x00000010u, 0xFFFFFFF0u, 0x00000020u), "external-input-older-across-the-wrap")) return false;
   }
 
   std::cout << "Computer Use native click rule: PASS\n";
