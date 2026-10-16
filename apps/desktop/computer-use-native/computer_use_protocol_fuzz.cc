@@ -2029,6 +2029,7 @@ using sprint_coder::computer_use::ShadowItemKind;
 using sprint_coder::computer_use::BuildWindowsShadowFacts;
 using sprint_coder::computer_use::WindowsShadowClassify;
 using sprint_coder::computer_use::kShadowGapOsPromptSurface;
+using sprint_coder::computer_use::kShadowGapNativeDocument;
 using sprint_coder::computer_use::ShadowCheckText;
 using sprint_coder::computer_use::ShadowReadResult;
 using sprint_coder::computer_use::ShadowSettle;
@@ -2221,6 +2222,85 @@ bool CheckWindowsShadowCore() {
     const ShadowRecord shell = WindowsShadowClassify(console, UiaRequest("type"), true);
     if (!Check(shell.kind == DecisionKind::kBlocked && shell.effect_class == EffectClass::kSurface,
                "winshadow-console-input-is-blocked")) return false;
+  }
+  // S5-c-2 PR-4: a Document in a window that is not a web window (Notepad's text area) leaves an
+  // unknown origin that is not a stricter-than-v1 finding; it is counted apart. Facts and verdict
+  // stay what they were. A web window's Document without a URL is still stricter.
+  {
+    ShadowUiaCapture native = UiaBase();
+    native.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Untitled - Notepad")};
+    const ShadowFacts native_facts = BuildWindowsShadowFacts(native, UiaRequest("type"));
+    const ShadowRecord native_record = WindowsShadowClassify(native, UiaRequest("type"), true);
+    if (!Check(native_facts.facts.origin == OriginState::kUnknown &&
+                   (native_facts.gaps & kShadowGapOrigin) != 0 &&
+                   (native_facts.gaps & kShadowGapNativeDocument) == 0 &&
+                   (native_record.gaps & kShadowGapNativeDocument) != 0 &&
+                   native_record.kind == DecisionKind::kTakeover && !native_record.V2IsStricter() &&
+                   native_record.NativeDocumentGap(),
+               "winshadow-native-document-is-a-separate-gap")) return false;
+    ShadowUiaCapture web = UiaBase();
+    web.window_class = "Chrome_WidgetWin_1";
+    web.chain = {UiaNode("Edit", "Search"), UiaNode("Document", "Shop"), UiaNode("Window", "Browser")};
+    const ShadowFacts web_facts = BuildWindowsShadowFacts(web, UiaRequest("type"));
+    const ShadowRecord web_record = WindowsShadowClassify(web, UiaRequest("type"), true);
+    if (!Check(web_facts.facts.origin == OriginState::kUnknown &&
+                   (web_record.gaps & kShadowGapNativeDocument) == 0 && web_record.V2IsStricter() &&
+                   !web_record.NativeDocumentGap(),
+               "winshadow-web-document-stays-stricter")) return false;
+    // Another cause of the non-ordinary verdict (a secure-looking title) keeps it stricter.
+    ShadowUiaCapture secret = UiaBase();
+    secret.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "passwords.txt - Notepad")};
+    const ShadowRecord secret_record = WindowsShadowClassify(secret, UiaRequest("type"), true);
+    if (!Check(secret_record.kind != DecisionKind::kOrdinary && secret_record.V2IsStricter() &&
+                   !secret_record.NativeDocumentGap(),
+               "winshadow-native-document-other-cause-stays-stricter")) return false;
+    // A window class that could not be read is a read gap, not a native window.
+    ShadowUiaCapture blind = UiaBase();
+    blind.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Browser")};
+    blind.window_class_read = false;
+    const ShadowRecord blind_record = WindowsShadowClassify(blind, UiaRequest("type"), true);
+    if (!Check(!blind_record.NativeDocumentGap() && (blind_record.gaps & kShadowGapNativeDocument) == 0,
+               "winshadow-native-document-unread-class")) return false;
+    // A download page overrides the origin: no bit.
+    ShadowUiaCapture dl = UiaBase();
+    dl.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Notepad")};
+    dl.document_url_read = true;
+    dl.document_url = "chrome://downloads/";
+    if (!Check((WindowsShadowClassify(dl, UiaRequest("type"), true).gaps & kShadowGapNativeDocument) == 0,
+               "winshadow-native-document-download-override")) return false;
+    // A native Document with an unknown origin AND another reason to refuse stays stricter: no bit.
+    // (Canceled: a canceled capture is a skipped record and never reaches this path. Budget: an
+    // exhausted capture has incomplete metadata, which refuses on its own.)
+    bool other_causes_ok = true;
+    const auto other_cause = [&](const char *name, const ShadowUiaCapture &capture,
+                                 std::string_view language) {
+      ShadowRequestInfo request = UiaRequest("type");
+      request.policy_language = language;
+      const ShadowFacts facts = BuildWindowsShadowFacts(capture, request);
+      const ShadowRecord record = WindowsShadowClassify(capture, request, true);
+      const bool ok = facts.facts.origin == OriginState::kUnknown &&
+                      record.kind != DecisionKind::kOrdinary &&
+                      (record.gaps & kShadowGapNativeDocument) == 0 && record.V2IsStricter() &&
+                      !record.NativeDocumentGap();
+      // Every case is reported (no early return), so one run names all that fail.
+      if (!Check(ok, name)) other_causes_ok = false;
+    };
+    ShadowUiaCapture shell = UiaBase();
+    shell.chain = {UiaNode("Document", "Console"), UiaNode("Window", "Command Prompt")};
+    shell.window_class = "ConsoleWindowClass";
+    other_cause("winshadow-native-document-shell-surface", shell, "en");
+    ShadowUiaCapture prompt = UiaBase();
+    prompt.chain = {UiaNode("Document", "Prompt"), UiaNode("Window", "User Account Control")};
+    prompt.window_class = "NativeHWNDHost";
+    prompt.process_path = "C:\\Windows\\System32\\consent.exe";
+    other_cause("winshadow-native-document-os-prompt-surface", prompt, "en");
+    ShadowUiaCapture budget_cut = UiaBase();
+    budget_cut.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Notepad")};
+    budget_cut.budget_exhausted = true;
+    other_cause("winshadow-native-document-budget", budget_cut, "en");
+    other_cause("winshadow-native-document-unsupported-language", native, "fr");
+    if (!Check(other_causes_ok, "winshadow-native-document-other-causes-stay-stricter"))
+      return false;
   }
   // The page: a Document in the chain is a page; its URL decides the origin and the download list.
   {
