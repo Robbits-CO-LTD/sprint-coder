@@ -2029,6 +2029,7 @@ using sprint_coder::computer_use::ShadowItemKind;
 using sprint_coder::computer_use::BuildWindowsShadowFacts;
 using sprint_coder::computer_use::WindowsShadowClassify;
 using sprint_coder::computer_use::kShadowGapOsPromptSurface;
+using sprint_coder::computer_use::kShadowGapNativeDocument;
 using sprint_coder::computer_use::ShadowCheckText;
 using sprint_coder::computer_use::ShadowReadResult;
 using sprint_coder::computer_use::ShadowSettle;
@@ -2221,6 +2222,30 @@ bool CheckWindowsShadowCore() {
     const ShadowRecord shell = WindowsShadowClassify(console, UiaRequest("type"), true);
     if (!Check(shell.kind == DecisionKind::kBlocked && shell.effect_class == EffectClass::kSurface,
                "winshadow-console-input-is-blocked")) return false;
+  }
+  // S5-c-2 PR-4: a Document in a window that is not a web window (Notepad's text area) leaves an
+  // unknown origin that is not a stricter-than-v1 finding; it is counted apart. Facts and verdict
+  // stay what they were. A web window's Document without a URL is still stricter.
+  {
+    ShadowUiaCapture native = UiaBase();
+    native.chain = {UiaNode("Document", "Text editor"), UiaNode("Window", "Untitled - Notepad")};
+    const ShadowFacts native_facts = BuildWindowsShadowFacts(native, UiaRequest("type"));
+    const ShadowRecord native_record = WindowsShadowClassify(native, UiaRequest("type"), true);
+    if (!Check(native_facts.facts.origin == OriginState::kUnknown &&
+                   (native_facts.gaps & kShadowGapOrigin) != 0 &&
+                   (native_facts.gaps & kShadowGapNativeDocument) != 0 &&
+                   native_record.kind == DecisionKind::kTakeover && !native_record.V2IsStricter() &&
+                   native_record.NativeDocumentGap(),
+               "winshadow-native-document-is-a-separate-gap")) return false;
+    ShadowUiaCapture web = UiaBase();
+    web.window_class = "Chrome_WidgetWin_1";
+    web.chain = {UiaNode("Edit", "Search"), UiaNode("Document", "Shop"), UiaNode("Window", "Browser")};
+    const ShadowFacts web_facts = BuildWindowsShadowFacts(web, UiaRequest("type"));
+    const ShadowRecord web_record = WindowsShadowClassify(web, UiaRequest("type"), true);
+    if (!Check(web_facts.facts.origin == OriginState::kUnknown &&
+                   (web_facts.gaps & kShadowGapNativeDocument) == 0 && web_record.V2IsStricter() &&
+                   !web_record.NativeDocumentGap(),
+               "winshadow-web-document-stays-stricter")) return false;
   }
   // The page: a Document in the chain is a page; its URL decides the origin and the download list.
   {
