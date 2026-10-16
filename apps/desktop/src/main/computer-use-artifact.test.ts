@@ -330,6 +330,72 @@ describe('what a person is shown, second pass (M1, M2, L1, L2, L5)', () => {
   });
 });
 
+describe('normalizeComputerUseArtifactText is a fixed point (T15-10 J3)', () => {
+  const normalize = (text: string): string => normalizeComputerUseArtifactText(text);
+
+  it.each([
+    ['e, ZWJ, combining acute', 'e‍́'],
+    ['hangul jamo around a ZWSP', 'ᄀ​ᅡ'],
+    ['e, ZWSP, combining acute', 'e​́'],
+    ['a base, two format characters, a mark', 'a⁠‍̈'],
+    ['a compatibility letter, a format character, a mark', 'ｅ­́'],
+    ['CR around a format character', 'a\r​\nb'],
+  ])('is stable for %s, and what is shown and what is pasted are one string', (_n, raw) => {
+    const once = normalize(raw);
+    expect(normalize(once)).toBe(once);
+    expect(once).toBe(once.normalize('NFKC'));
+    expect(prepareComputerUseArtifactText(raw)).toMatchObject({ text: once });
+  });
+
+  it('composes what removal leaves side by side', () => {
+    expect(normalize('e‍́')).toBe('é');
+    expect(normalize('ᄀ​ᅡ')).toBe('가');
+  });
+
+  it('is stable for any text drawn from a pool of troublesome characters', () => {
+    const pool = [
+      'e',
+      'a',
+      'x',
+      '1',
+      ' ',
+      '\n',
+      '\r',
+      '\t',
+      '​',
+      '‍',
+      '⁠',
+      '­',
+      '́',
+      '̈',
+      '̣',
+      'ᄀ',
+      'ᅡ',
+      'ᆨ',
+      'ｅ',
+      'ﬁ',
+      ' ',
+      '\u0000',
+      '﻿',
+      '゙',
+      '゛',
+      '̊',
+    ];
+    let seed = 12345;
+    const next = (): number => {
+      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+      return seed;
+    };
+    for (let round = 0; round < 3000; round += 1) {
+      let raw = '';
+      for (let index = 0, length = 1 + (next() % 10); index < length; index += 1)
+        raw += pool[next() % pool.length];
+      const once = normalize(raw);
+      expect(normalize(once), JSON.stringify(raw)).toBe(once);
+    }
+  });
+});
+
 describe('computerUseArtifactSizeClass', () => {
   it.each([
     [1, 'le_256'],
@@ -382,6 +448,14 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['a card number split across lines', '4111\n1111\n1111\n1111'],
     ['a six-digit code', '482913'],
     ['an eight-digit code with spaces around', '  12345678 '],
+    // Built at run time so that a secret scanner does not read the fixtures as real keys.
+    ['a Stripe live secret key', ['sk', 'live', 'AbCdEfGhIjKlMnOpQrSt0123'].join('_')],
+    ['a Stripe test secret key', `key=${['sk', 'test', 'AbCdEfGhIjKlMnOpQrSt0123'].join('_')}`],
+    ['a Stripe restricted key', ['rk', 'live', 'AbCdEfGhIjKlMnOpQrSt0123'].join('_')],
+    ['a GitLab personal access token', ['glpat', 'AbCdEfGhIjKlMnOpQrSt'].join('-')],
+    ['an npm access token', ['npm', 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'].join('_')],
+    ['a card number with dots', '4111.1111.1111.1111'],
+    ['a card number with dots, 4-6-5', '3782.822463.10005'],
     ['a six-digit code shown as 3 + 3', '482 913'],
     ['a six-digit code with a hyphen', '482-913'],
     ['an eight-digit code shown as 4 + 4', '1234 5678'],
@@ -421,6 +495,16 @@ describe('looksLikeComputerUseSecret (N25, §7.1 decision 6)', () => {
     ['sk- glued to a word', 'task-aaaaaaaaaaaaaaaaaaaaaa'],
     ['sk- after an underscore', 'my_sk-aaaaaaaaaaaaaaaaaaaaaa'],
     ['a dotted version', '1.2.3'],
+    ['a dotted four-part version', '10.15.7.1234'],
+    ['an IPv4 address', '192.168.100.200'],
+    ['a dotted number that fails Luhn', '4111.1111.1111.1112'],
+    ['a price with decimals', '1234567.89'],
+    ['a timestamp with microseconds', '1760600004.123456'],
+    ['a long decimal', '12345.00000009'],
+    ['a snapshot version', '2.1.0-20261016.100004-1'],
+    ['a short Stripe-like word', 'sk_live_ is the prefix'],
+    ['npm_ glued to a word', 'run npm_config_cache'],
+    ['accepted gap (§7.1 #6): a code inside a sentence', 'Your code is 482913'],
     ['a word that starts like a key', 'skeleton key'],
   ])('lets %s through', (_name, text) => {
     expect(looksSecret(text)).toBe(false);

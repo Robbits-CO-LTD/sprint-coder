@@ -3014,4 +3014,20 @@ describe('computer_start carry and artifacts (#785 T15-8)', () => {
     ]);
     expect(schema.required).not.toContain('artifacts');
   });
+
+  it('holds the text of a type or set_text to the artifact limit, byte for byte (T15-10 J8)', () => {
+    const limit = contracts.COMPUTER_USE_LIMITS.maxTextActionBytes;
+    expect(contracts.COMPUTER_USE_ARTIFACT_LIMITS.maxBytes).toBe(limit);
+    // 3-byte characters, so the boundary falls inside a character if it is off by one.
+    const exact = 'あ'.repeat(Math.floor(limit / 3)) + 'x'.repeat(limit % 3);
+    expect(new TextEncoder().encode(exact).byteLength).toBe(limit);
+    for (const type of ['type', 'set_text'] as const) {
+      const action = (text: string) =>
+        type === 'type' ? { type, text } : { type, targetId: 'field', text };
+      expect(contracts.computerUseActionSchema.safeParse(action(exact)).success).toBe(true);
+      const refused = contracts.computerUseActionSchema.safeParse(action(exact + 'x'));
+      expect(refused.success).toBe(false);
+      expect(JSON.stringify(refused.error?.issues)).toContain(`${limit}-byte`);
+    }
+  });
 });
