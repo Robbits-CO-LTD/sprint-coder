@@ -6756,73 +6756,99 @@ bool CheckWindowsInterlockCapture() {
 
 bool CheckWindowsShellNameMatch() {
   using namespace sprint_coder::computer_use;
-  const auto entries = [](std::initializer_list<const wchar_t *> names) {
-    std::vector<ShellNameCandidate> list;
-    for (const wchar_t *name : names) list.push_back({name, false});
-    return list;
+  // A candidate: the file system's long name and the name the SHELL shows for it.
+  const auto shown = [](const wchar_t *name, const wchar_t *shell, bool directory = false) {
+    ShellNameCandidate candidate;
+    candidate.name = name;
+    candidate.is_directory = directory;
+    candidate.shell_name = shell;
+    candidate.shell_name_known = true;
+    return candidate;
   };
-  const auto match = [](std::wstring_view display, const std::vector<ShellNameCandidate> &list, bool shown) {
-    return MatchShellDisplayName(display, list, shown);
+  const auto unreadable = [](const wchar_t *name) {
+    ShellNameCandidate candidate;
+    candidate.name = name;
+    return candidate;
   };
-  // An exact name is the entry (extensions shown or hidden).
-  if (!Check(match(L"run.bat", entries({L"run.bat"}), true) == 0, "shellname-exact-shown")) return false;
-  if (!Check(match(L"run.bat", entries({L"run.bat"}), false) == 0, "shellname-exact-hidden")) return false;
-  // Extensions hidden: the display name is the stem of exactly one entry.
-  if (!Check(match(L"report", entries({L"report.pdf"}), false) == 0, "shellname-hidden-stem-matches")) return false;
-  if (!Check(match(L"report", entries({L"report.pdf", L"report.docx"}), false) == kNoShellMatch,
-             "shellname-hidden-stem-two-extensions-is-unknown")) return false;
-  // Extensions shown: a stem is NOT the display name of an ordinary file ...
-  if (!Check(match(L"report", entries({L"report.pdf"}), true) == kNoShellMatch, "shellname-shown-stem-is-not-a-file")) return false;
-  // ... except for the extensions Explorer always hides.
-  for (const wchar_t *hidden : {L"x.lnk", L"x.url", L"x.pif", L"x.scf", L"x.shb", L"x.appref-ms", L"x.library-ms", L"x.LNK"})
-    if (!Check(match(L"x", entries({hidden}), true) == 0, "shellname-always-hidden-extension")) return false;
-  // A shortcut beside a file of the same shown name collides.
-  if (!Check(match(L"x", entries({L"x", L"x.lnk"}), true) == kNoShellMatch, "shellname-lnk-collides-with-same-name")) return false;
-  if (!Check(match(L"x", entries({L"x.lnk", L"x.url"}), true) == kNoShellMatch, "shellname-two-hidden-extensions-collide")) return false;
-  // x.pdf and x.pdf.exe: extensions hidden, "x.pdf" stands for both (the exact name and the stem of the
-  // second); shown, the exact name is the only entry.
-  if (!Check(match(L"x.pdf", entries({L"x.pdf", L"x.pdf.exe"}), false) == kNoShellMatch, "shellname-pdf-and-pdf-exe-hidden-is-unknown")) return false;
-  if (!Check(match(L"x.pdf", entries({L"x.pdf", L"x.pdf.exe"}), true) == 0, "shellname-pdf-and-pdf-exe-shown-is-the-exact-one")) return false;
-  // x.pdf alone, extensions hidden: "x.pdf" is also the stem of x.pdf.exe only, never of x.pdf itself.
-  if (!Check(match(L"x.pdf", entries({L"x.pdf.exe"}), false) == 0, "shellname-double-extension-stem")) return false;
-  // Only ONE extension is hidden: "a" is not the stem of "a.b.c".
-  if (!Check(match(L"a", entries({L"a.b.c"}), false) == kNoShellMatch, "shellname-two-extensions-are-not-one")) return false;
-  // A folder and a file of the same name cannot coexist, but a folder named like a stem can.
+  using List = std::vector<ShellNameCandidate>;
+  const auto match = [](std::wstring_view display, const List &list) {
+    return MatchShellDisplayName(display, list);
+  };
+  // The one candidate whose shell name is the display name is the entry.
+  if (!Check(match(L"report", List{shown(L"report.pdf", L"report")}) == 0, "shellname-one-shell-name-matches")) return false;
+  if (!Check(match(L"run.bat", List{shown(L"run.bat", L"run.bat"), shown(L"run.bat.old", L"run.bat.old")}) == 0,
+             "shellname-extension-shown-exact")) return false;
+  // Which part of the name the shell hides is the shell's business, not a rule here: an extension
+  // that is never shown, a shortcut, a hidden extension of any kind.
+  if (!Check(match(L"x", List{shown(L"x.website", L"x")}) == 0, "shellname-never-shown-extension-is-the-shells-answer")) return false;
+  if (!Check(match(L"x", List{shown(L"x", L"x"), shown(L"x.website", L"x")}) == kNoShellMatch,
+             "shellname-x-and-x-website-collide")) return false;
+  if (!Check(match(L"x", List{shown(L"x", L"x"), shown(L"x.lnk", L"x")}) == kNoShellMatch,
+             "shellname-lnk-collides-with-same-name")) return false;
+  // x.pdf and x.pdf.exe, extensions hidden: the shell shows "x" and "x.pdf"; shown: "x.pdf", "x.pdf.exe".
+  if (!Check(match(L"x.pdf", List{shown(L"x.pdf", L"x"), shown(L"x.pdf.exe", L"x.pdf")}) == 1,
+             "shellname-pdf-exe-hidden-is-the-second")) return false;
+  if (!Check(match(L"x.pdf", List{shown(L"x.pdf", L"x.pdf"), shown(L"x.pdf.exe", L"x.pdf.exe")}) == 0,
+             "shellname-pdf-exe-shown-is-the-first")) return false;
+  // A folder whose name has a dot keeps it: the shell shows "data.xxx", and "data" is not that folder.
+  if (!Check(match(L"data", List{shown(L"data.xxx", L"data.xxx", true)}) == kNoShellMatch,
+             "shellname-folder-with-a-dot-is-not-a-stem")) return false;
+  if (!Check(match(L"data.xxx", List{shown(L"data.xxx", L"data.xxx", true)}) == 0, "shellname-folder-with-a-dot-is-itself")) return false;
   {
-    std::vector<ShellNameCandidate> list{{L"data", true}, {L"data.txt", false}};
-    if (!Check(match(L"data", list, false) == kNoShellMatch, "shellname-folder-and-file-stem-collide")) return false;
-    if (!Check(match(L"data", list, true) == 0 && list[0].is_directory, "shellname-folder-shown-is-the-folder")) return false;
+    const List list{shown(L"data", L"data", true), shown(L"data.txt", L"data")};
+    if (!Check(match(L"data", list) == kNoShellMatch, "shellname-folder-and-file-stem-collide")) return false;
   }
+  // A localized folder: "Documents" is shown as the Japanese word. It is found by its SHELL name
+  // (no file name starts like it), and a file whose name starts the same is a second entry.
+  {
+    const wchar_t *word = L"\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8";
+    const std::wstring file = std::wstring(word) + L".txt";
+    if (!Check(match(word, List{shown(L"Documents", word, true)}) == 0, "shellname-localized-folder-is-found-by-its-shell-name")) return false;
+    if (!Check(match(word, List{shown(L"Documents", word, true), shown(file.c_str(), word)}) == kNoShellMatch,
+               "shellname-localized-folder-and-same-stem-file-collide")) return false;
+  }
+  // Two folders data and data.xxx: both keep their names, "data" is the first.
+  if (!Check(match(L"data", List{shown(L"data", L"data", true), shown(L"data.xxx", L"data.xxx", true)}) == 0,
+             "shellname-two-folders-data-and-data-xxx")) return false;
+  // LICENSE and LICENSE.md with .md not a registered extension: the shell shows both extensions.
+  if (!Check(match(L"LICENSE", List{shown(L"LICENSE", L"LICENSE"), shown(L"LICENSE.md", L"LICENSE.md")}) == 0,
+             "shellname-unregistered-extension-is-not-hidden")) return false;
+  if (!Check(match(L"LICENSE.md", List{shown(L"LICENSE", L"LICENSE"), shown(L"LICENSE.md", L"LICENSE.md")}) == 1,
+             "shellname-unregistered-extension-is-the-second")) return false;
+  // The names have nothing to do with each other (a localized name): only the shell name counts.
+  if (!Check(match(L"Documents", List{shown(L"Dokumente", L"Documents")}) == 0, "shellname-localized-name-is-the-shell-name")) return false;
+  if (!Check(match(L"Dokumente", List{shown(L"Dokumente", L"Documents")}) == kNoShellMatch,
+             "shellname-file-name-is-not-the-display-name")) return false;
+  // No candidate fits, and none at all.
+  if (!Check(match(L"a", List{shown(L"ab.txt", L"ab")}) == kNoShellMatch, "shellname-prefix-is-not-a-match")) return false;
+  if (!Check(match(L"a", List{}) == kNoShellMatch, "shellname-no-candidate")) return false;
+  // One candidate whose shell name cannot be read makes the whole answer unknown, wherever it is.
+  if (!Check(match(L"a", List{shown(L"a", L"a"), unreadable(L"a2")}) == kNoShellMatch, "shellname-unreadable-after-the-match")) return false;
+  if (!Check(match(L"a", List{unreadable(L"a2"), shown(L"a", L"a")}) == kNoShellMatch, "shellname-unreadable-before-the-match")) return false;
+  if (!Check(match(L"a", List{unreadable(L"a")}) == kNoShellMatch, "shellname-only-candidate-unreadable")) return false;
   // Case is not significant.
-  if (!Check(match(L"README", entries({L"readme.MD"}), false) == 0, "shellname-case-insensitive-stem")) return false;
-  if (!Check(match(L"Run.BAT", entries({L"run.bat"}), true) == 0, "shellname-case-insensitive-exact")) return false;
-  // 8.3 names: the caller lists by pattern, which an alternate name can satisfy; only the LONG name is
-  // a candidate, so an entry whose long name does not fit the display name is no match.
-  if (!Check(match(L"PROGRA~1", entries({L"Program Files"}), true) == kNoShellMatch, "shellname-8dot3-alternate-is-dropped")) return false;
-  if (!Check(match(L"PROGRA~1", entries({L"PROGRA~1"}), true) == 0, "shellname-a-real-8dot3-looking-name-is-itself")) return false;
-  // Nothing, a prefix that is no stem, and a longer name that only starts alike.
-  if (!Check(match(L"a", entries({}), false) == kNoShellMatch, "shellname-no-candidate")) return false;
-  if (!Check(match(L"a", entries({L"ab.txt"}), false) == kNoShellMatch, "shellname-prefix-is-not-a-stem")) return false;
-  if (!Check(match(L"a", entries({L"a."}), false) == kNoShellMatch, "shellname-empty-extension-is-not-one")) return false;
+  if (!Check(match(L"README", List{shown(L"readme.MD", L"readme")}) == 0, "shellname-case-insensitive")) return false;
   // A display name that cannot be a file name matches nothing.
   for (const wchar_t *bad : {L"", L"a*", L"a?b", L"a\\b", L"a/b", L"a:b", L"a|b"})
-    if (!Check(match(bad, entries({L"a*", L"a?b", L"a\\b", L"a/b", L"a:b", L"a|b", L"a"}), false) == kNoShellMatch,
-               "shellname-unusable-display-name")) return false;
+    if (!Check(match(bad, List{shown(L"a", bad), shown(L"b", L"b")}) == kNoShellMatch, "shellname-unusable-display-name")) return false;
   // More candidates than the cap are not known; exactly the cap is fine.
   {
-    std::vector<ShellNameCandidate> list;
-    for (std::size_t i = 0; i < kShellMaxCandidates; ++i) list.push_back({L"n" + std::to_wstring(i) + L".txt", false});
-    list.push_back({L"target.txt", false});
-    if (!Check(list.size() == kShellMaxCandidates + 1 && match(L"target", list, false) == kNoShellMatch, "shellname-over-the-cap-is-unknown")) return false;
+    List list;
+    for (std::size_t i = 0; i < kShellMaxCandidates; ++i) {
+      const std::wstring name = L"n" + std::to_wstring(i);
+      list.push_back(shown(name.c_str(), name.c_str()));
+    }
+    list.push_back(shown(L"target", L"target"));
+    if (!Check(list.size() == kShellMaxCandidates + 1 && match(L"target", list) == kNoShellMatch, "shellname-over-the-cap-is-unknown")) return false;
     list.erase(list.begin());
-    if (!Check(list.size() == kShellMaxCandidates && match(L"target", list, false) == kShellMaxCandidates - 1, "shellname-exactly-the-cap-is-fine")) return false;
+    if (!Check(list.size() == kShellMaxCandidates && match(L"target", list) == kShellMaxCandidates - 1, "shellname-exactly-the-cap-is-fine")) return false;
   }
-  // The comparison is the caller's: a stricter one is used for the exact name and the stem.
+  // The comparison is the caller's.
   {
-    const auto exact_case = [](std::wstring_view a, std::wstring_view b) { return a == b; };
-    if (!Check(MatchShellDisplayName(L"Run", entries({L"run.bat"}), false, exact_case) == kNoShellMatch, "shellname-uses-the-given-comparison")) return false;
-    if (!Check(MatchShellDisplayName(L"run", entries({L"run.bat"}), false, exact_case) == 0, "shellname-given-comparison-matches")) return false;
-    if (!Check(MatchShellDisplayName(L"run", entries({L"run.bat"}), false, nullptr) == kNoShellMatch, "shellname-null-comparison-is-unknown")) return false;
+    const auto exact_case = [](std::wstring_view left, std::wstring_view right) { return left == right; };
+    if (!Check(MatchShellDisplayName(L"Run", List{shown(L"run", L"run")}, exact_case) == kNoShellMatch, "shellname-uses-the-given-comparison")) return false;
+    if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, exact_case) == 0, "shellname-given-comparison-matches")) return false;
+    if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, nullptr) == kNoShellMatch, "shellname-null-comparison-is-unknown")) return false;
   }
   std::cout << "Computer Use native Windows shell name match: PASS\n";
   return true;

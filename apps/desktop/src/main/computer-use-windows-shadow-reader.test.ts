@@ -232,7 +232,7 @@ describe('Windows UI Automation source only reads', () => {
     const win32 = new Set(
       [
         ...source.matchAll(
-          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|GetAncestor|FindFirstFileExW|FindNextFileW|FindClose|CompareStringOrdinal|SH\w+|Shell\w+)\(/gu,
+          /(?<![\w.>:])(CoCreateInstance|NormalizeString|WideCharToMultiByte|MultiByteToWideChar|GetLastError|Sys\w+|Variant\w+|OpenProcess|QueryFullProcessImageNameW|CloseHandle|GetWindowThreadProcessId|FindWindow\w*|EnumWindows|GetForegroundWindow|SHCreateItemWithParent|ILFree|CoTaskMemFree|GetAncestor|FindFirstFileExW|FindNextFileW|FindClose|CompareStringOrdinal|GetDriveTypeW|GetFileAttributesW|CancelSynchronousIo|DuplicateHandle|SH\w+|Shell\w+)\(/gu,
         ),
       ].map((match) => match[1]!),
     );
@@ -256,16 +256,26 @@ describe('Windows UI Automation source only reads', () => {
       // the folder's path and a listing of its entries in this process (read-only)
       'SHGetIDListFromObject',
       'SHGetPathFromIDListEx',
-      'SHGetSetSettings',
+      'SHGetKnownFolderPath',
+      'SHCreateItemFromIDList',
+      'SHCreateItemFromParsingName',
       'FindFirstFileExW',
       'FindNextFileW',
       'FindClose',
       'CompareStringOrdinal',
+      'GetDriveTypeW',
+      'GetFileAttributesW',
+      'CancelSynchronousIo',
+      'DuplicateHandle',
       // the shell lookup of the item path (functions of this file, not Win32 calls)
       'ShellItemPathByName',
+      'ShellLookupPending',
       'ShellNameEqualsOrdinal',
       'ShellDisplayNameUsable',
       'MatchShellDisplayName',
+      'ShellFolderMayBeListed',
+      'ShellFolderHasLocalizedFileNames',
+      'ShellPathWithoutTrailingSeparator',
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
     ]);
@@ -326,7 +336,18 @@ describe('Windows UI Automation source only reads', () => {
       'FindNextFileW',
       'SHGetIDListFromObject',
       'SHGetPathFromIDListEx',
-      'SHGetSetSettings',
+      'SHGetKnownFolderPath',
+      'SHCreateItemFromIDList',
+      'SHCreateItemFromParsingName',
+      'GetDriveTypeW',
+      'GetFileAttributesW',
+      'CancelSynchronousIo',
+      'DuplicateHandle',
+      'GetCurrentProcess',
+      'GetCurrentThread',
+      'GetPrivateProfileSectionW',
+      'SetLastError',
+      'ILIsEmpty',
       'NormalizeString',
       'OpenProcess',
       'QueryFullProcessImageNameW',
@@ -372,6 +393,11 @@ describe('Windows UI Automation source only reads', () => {
       'ShellNameEqualsOrdinal',
       'ShellDisplayNameUsable',
       'MatchShellDisplayName',
+      'ShellFolderMayBeListed',
+      'ShellFolderHasLocalizedFileNames',
+      'ShellPathWithoutTrailingSeparator',
+      'AbsoluteIdList',
+      'ShellLookupPending',
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
       'Text',
@@ -494,16 +520,80 @@ describe('Windows UI Automation source only reads', () => {
     expect(listing).toContain('FIND_FIRST_EX_LARGE_FETCH');
     // A failed read of the listing is a failed lookup (the uniqueness is unknown), never a skipped entry.
     expect(listing).toContain('return ShadowReadResult::kFailed;');
-    expect(body).toContain('pattern.append(display_name);');
+    // The whole folder is listed once (the display name does not narrow the listing).
+    expect(code(body)).not.toContain('pattern.append(display_name)');
     expect(body).toContain("pattern.push_back(L'*');");
     // The folder's path is asked for once; a folder with no path of the file system is not known.
     expect((code(body).match(/SHGetPathFromIDListEx\(/gu) ?? []).length).toBe(1);
     expect(body).toMatch(/if \(!has_path\) return ShadowReadResult::kAbsent;/u);
-    // The setting that hides extensions is read from the shell, and the matcher gets it.
-    expect(body).toContain('SHGetSetSettings(&state, SSF_SHOWEXTENSIONS, FALSE);');
-    expect(body).toContain(
-      'MatchShellDisplayName(display_name, candidates, extensions_shown, ShellNameEqualsOrdinal)',
+    // No rule about extensions: the SHELL is asked, for every candidate, for the name it shows, and the
+    // matcher compares those. A candidate whose name cannot be read stays unknown (the whole answer is).
+    expect(code(body)).not.toMatch(/SHGetSetSettings|SSF_SHOWEXTENSIONS|extensions_shown/u);
+    const names = between(
+      body,
+      'for (ShellNameCandidate &candidate : candidates) {',
+      'MatchShellDisplayName(',
     );
+    expect(names).toContain('SHCreateItemFromParsingName(');
+    expect(names).toContain('GetDisplayName(SIGDN_NORMALDISPLAY, &shown)');
+    expect(names).toContain('candidate.shell_name_known = true;');
+    expect(names).toContain('if (!limits.still_valid()) return ShadowReadResult::kStopped;');
+    expect(body).toContain(
+      'MatchShellDisplayName(display_name, candidates, ShellNameEqualsOrdinal)',
+    );
+    // Where it may look is decided BEFORE the first listing (and its file system call): the root of the
+    // desktop namespace (an empty id list), a slow folder, and then a plain local directory only.
+    const find = body.indexOf('FindFirstFileExW(');
+    for (const guard of [
+      'ILIsEmpty(folder_id.id)',
+      'SFGAO_ISSLOW',
+      'if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;',
+    ]) {
+      expect(body.indexOf(guard), guard).toBeGreaterThanOrEqual(0);
+      expect(body.indexOf(guard), guard).toBeLessThan(find);
+    }
+    const guardFunction = between(
+      source,
+      'ShellFolderMayBeListed(const std::wstring &path) {',
+      'The path of the item a file browser shows',
+    );
+    expect(guardFunction.includes("path[0] == L'" + '\\\\' + "'")).toBe(true);
+    for (const part of [
+      'DRIVE_REMOTE',
+      'DRIVE_CDROM',
+      'DRIVE_UNKNOWN',
+      'DRIVE_NO_ROOT_DIR',
+      'FOLDERID_Desktop',
+      'FOLDERID_PublicDesktop',
+    ])
+      expect(guardFunction, part).toContain(part);
+    // A desktop.ini is normal (a user's home has one): only its [LocalizedFileNames] section counts, and
+    // it is read with the profile API, never opened; what cannot be read is a yes (fail-closed).
+    const localized = between(
+      source,
+      'ShellFolderHasLocalizedFileNames(const std::wstring &path) {',
+      'The path of the item a file browser shows',
+    );
+    expect(localized).toContain('GetPrivateProfileSectionW(L"LocalizedFileNames"');
+    expect(localized).toContain('desktop.ini');
+    expect(code(localized)).not.toMatch(/CreateFile|ReadFile|ifstream|fopen/u);
+    expect(body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)')).toBeGreaterThanOrEqual(0);
+    expect(body.indexOf('ShellFolderHasLocalizedFileNames(folder_path)')).toBeLessThan(find);
+    // Which entries need the shell's name: a file name that starts like the display name, and the
+    // read-only / system directories (a desktop.ini can only rename those); hidden entries are kept.
+    expect(body).toContain('FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM');
+    expect(body).toContain('starts_with_display || renamable_directory');
+    expect(body).toContain(
+      'renamable_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&',
+    );
+    // A slow folder is refused on the shell's own attribute, before any listing.
+    expect(body).toContain('(folder_attributes & SFGAO_ISSLOW) != 0)');
+    expect(body).toContain(
+      'FAILED(folder_item.Get()->GetAttributes(SFGAO_ISSLOW, &folder_attributes))',
+    );
+    expect(code(body)).not.toContain('FILE_ATTRIBUTE_HIDDEN');
+    // The guard decides before any listing of ours.
+    expect(guardFunction).not.toContain('FindFirstFileExW');
     // A folder is a directory of the file system.
     expect(body).toContain('FILE_ATTRIBUTE_DIRECTORY');
     // Explorer's calls have no timeout: the lookup runs on its own thread, the caller waits a bounded
@@ -512,7 +602,11 @@ describe('Windows UI Automation source only reads', () => {
     expect(item).toContain('running.exchange(true)) return ShadowReadResult::kAbsent;');
     expect(item).toContain('}).detach();');
     expect(item).toContain('wait_for(lock, windows_uia_source_detail::kShellLookupWait');
-    expect(item).toMatch(/\)\)\s*return ShadowReadResult::kAbsent;/u);
+    // A caller that gives up cancels the file system call the lookup's thread may be blocked in.
+    expect(item).toContain('pending->abandoned.store(true, std::memory_order_release);');
+    expect(item).toContain('CancelSynchronousIo(pending->thread)');
+    expect(item).toContain('DuplicateHandle(GetCurrentProcess(), GetCurrentThread()');
+    expect(item).toMatch(/return !pending->abandoned\.load\(std::memory_order_acquire\)/u);
     expect(item.indexOf('running.exchange(true)')).toBeLessThan(item.indexOf('std::thread('));
     // Nothing of this object is used on that thread (it may outlive the object).
     const thread = between(item, 'std::thread([', '}).detach();');
@@ -533,7 +627,7 @@ describe('Windows UI Automation source only reads', () => {
       '} // namespace windows_uia_source_detail',
     );
     // Windows and views are asked for; nothing is navigated, selected, invoked, renamed or changed.
-    expect(code(body)).not.toMatch(
+    expect(code(body).replaceAll('= delete', '')).not.toMatch(
       /navigate|SelectItem|SelectAndPositionItems|InvokeCommand|InvokeVerb|DoVerb|Execute|Refresh|Rename|Delete|SetCurrent|SetViewModeAndIconSize|ShellExecute|SetFocus/iu,
     );
     // Its own limits, because it is one gated call: the action, a deadline, and a cap on the candidates.
@@ -544,7 +638,7 @@ describe('Windows UI Automation source only reads', () => {
     // Both the walk over the shell windows and the listing of the entries stop on a cancel.
     expect(
       body.match(/if \(!limits\.still_valid\(\)\) return ShadowReadResult::kStopped;/gu)?.length,
-    ).toBe(2);
+    ).toBe(3);
     expect(body).toContain(
       'if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;',
     );
@@ -568,24 +662,24 @@ describe('Windows UI Automation source only reads', () => {
     );
     expect(code(matcher)).not.toMatch(/FindFirstFile|CompareString|GetLastError|CoCreate/u);
     expect(matcher).toContain('constexpr std::size_t kShellMaxCandidates = 64;');
-    // The extensions Explorer hides whatever the setting says.
-    for (const extension of ['lnk', 'url', 'pif', 'scf', 'shb', 'appref-ms', 'library-ms'])
-      expect(matcher).toContain(`L"${extension}"`);
-    // Two entries a name can stand for are "not known"; so are more candidates than the cap.
+    // No rule about extensions lives in the matcher: the shell's own name for each candidate is compared.
+    expect(code(matcher)).not.toMatch(/lnk|appref|extension|stem|find\(/u);
+    // Two entries a name can stand for are "not known"; so are more candidates than the cap, and a
+    // candidate whose shell name could not be read.
     expect(matcher).toContain('if (found != kNoShellMatch) return kNoShellMatch;');
     expect(matcher).toContain('candidates.size() > kShellMaxCandidates');
-    // Only ONE extension is hidden; with extensions shown only the always-hidden ones are.
-    expect(matcher).toContain("extension.find(L'.') == std::wstring_view::npos");
-    expect(matcher).toContain(
-      'stands_for = !extensions_shown || ShellExtensionAlwaysHidden(extension, equals);',
-    );
+    expect(matcher).toContain('if (!candidates[i].shell_name_known) return kNoShellMatch;');
     // The real source compares as the file system does, and the harness runs the table.
     expect(source).toContain('CompareStringOrdinal(');
     expect(harness).toContain('computer_use_windows_shell_name_match.h');
     expect(harness).toContain('CheckWindowsShellNameMatch()');
     expect(harness).toContain('shellname-lnk-collides-with-same-name');
-    expect(harness).toContain('shellname-pdf-and-pdf-exe-hidden-is-unknown');
-    expect(harness).toContain('shellname-8dot3-alternate-is-dropped');
+    expect(harness).toContain('shellname-pdf-exe-hidden-is-the-second');
+    expect(harness).toContain('shellname-never-shown-extension-is-the-shells-answer');
+    expect(harness).toContain('shellname-x-and-x-website-collide');
+    expect(harness).toContain('shellname-folder-with-a-dot-is-not-a-stem');
+    expect(harness).toContain('shellname-unreadable-after-the-match');
+    expect(harness).toContain('shellname-file-name-is-not-the-display-name');
     expect(harness).toContain('shellname-over-the-cap-is-unknown');
   });
 

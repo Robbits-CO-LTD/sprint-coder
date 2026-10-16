@@ -200,14 +200,82 @@ struct FindHandle {
   }
 };
 
+struct AbsoluteIdList {
+  PIDLIST_ABSOLUTE id = nullptr;
+  AbsoluteIdList() = default;
+  AbsoluteIdList(const AbsoluteIdList &) = delete;
+  AbsoluteIdList &operator=(const AbsoluteIdList &) = delete;
+  ~AbsoluteIdList() {
+    if (id != nullptr) ILFree(id);
+  }
+};
+
+[[nodiscard]] inline std::wstring ShellPathWithoutTrailingSeparator(std::wstring path) {
+  while (path.size() > 3 && path.back() == L'\\') path.pop_back();
+  return path;
+}
+
+// Whether the folder at `path` is one whose entries may be listed here: a plain directory on a local
+// disk, whose view shows exactly its own entries under the names the shell gives them. Decided
+// BEFORE any file system access that could block, and fail-closed (a doubt is "no"):
+//  - a network location (a UNC path, a remote, optical or unknown drive) can block for long;
+//  - the desktop folders (the user's and the public one) are shown MERGED in the desktop view, so an
+//    entry of the other folder looks like one of this folder;
+[[nodiscard]] inline bool ShellFolderMayBeListed(const std::wstring &path) {
+  if (path.size() < 3 || path[0] == L'\\') return false;
+  if (path[1] != L':' || path[2] != L'\\') return false;
+  const std::wstring root = path.substr(0, 3);
+  const UINT drive = GetDriveTypeW(root.c_str());
+  if (drive == DRIVE_REMOTE || drive == DRIVE_CDROM || drive == DRIVE_UNKNOWN ||
+      drive == DRIVE_NO_ROOT_DIR)
+    return false;
+  const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
+  for (const KNOWNFOLDERID &known : {FOLDERID_Desktop, FOLDERID_PublicDesktop}) {
+    PWSTR folder = nullptr;
+    if (FAILED(SHGetKnownFolderPath(known, 0, nullptr, &folder)) || folder == nullptr) {
+      if (folder != nullptr) CoTaskMemFree(folder);
+      return false;
+    }
+    const bool same = ShellNameEqualsOrdinal(ShellPathWithoutTrailingSeparator(folder), trimmed);
+    CoTaskMemFree(folder);
+    if (same) return false;
+  }
+  return true;
+}
+
+// Whether the files of the folder can be shown under names that have nothing to do with their file
+// names: a desktop.ini with a [LocalizedFileNames] section does that. Then an entry that is not a
+// candidate by its file name could still carry the display name, so the folder is not looked into.
+// Only that section is read (a desktop.ini is normal, in a user's home for one; it is not by itself a
+// reason), and what cannot be read is taken to be a yes (fail-closed).
+[[nodiscard]] inline bool ShellFolderHasLocalizedFileNames(const std::wstring &path) {
+  const std::wstring settings = ShellPathWithoutTrailingSeparator(path) + L"\\desktop.ini";
+  const DWORD attributes = GetFileAttributesW(settings.c_str());
+  if (attributes == INVALID_FILE_ATTRIBUTES) {
+    const DWORD error = GetLastError();
+    return !(error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND);
+  }
+  std::wstring section(32767, L'\0');
+  SetLastError(0);
+  const DWORD length = GetPrivateProfileSectionW(L"LocalizedFileNames", section.data(),
+                                                 static_cast<DWORD>(section.size()), settings.c_str());
+  if (length != 0) return true;
+  return GetLastError() != 0 && GetLastError() != ERROR_FILE_NOT_FOUND;
+}
+
 // The path of the item a file browser shows under `display_name`. The folder the view shows is asked
-// for its file-system path ONCE; the entries of that folder whose names START WITH the display name
-// are then listed in THIS process (FindFirstFileExW: a cost that follows the number of candidates, not
-// the size of the folder), and MatchShellDisplayName decides which entry the display name stands for
-// (a hidden extension, a shortcut, an 8.3 name). Read-only: windows and views are asked for, never
-// navigated, selected or invoked, and nothing is opened. kAbsent when there is no such view, the
-// folder has no file-system path (a search, This PC, a library), no entry or more than one entry fits
-// the name, there are more candidates than the cap, or the deadline passed.
+// for its file-system path ONCE, and only a plain local directory is looked into (see
+// ShellFolderMayBeListed; the root of the desktop namespace has an empty id list and is not; a folder
+// whose desktop.ini localizes file names is not either). The folder is listed ONCE in THIS process
+// (FindFirstFileExW: file system metadata only), and the SHELL is asked for the name it shows (the
+// very name Explorer shows: a hidden extension of any kind, a folder with a dot in its name) only for
+// the entries that can carry the display name: those whose file name STARTS WITH it, and the
+// directories that are read-only or system (the only ones a desktop.ini can give another name, as
+// "Documents" shown as the localized word). MatchShellDisplayName takes the one whose shell name is
+// the display name, if there is exactly one and every such entry could be read. Read-only: windows
+// and views are asked for, never navigated, selected or invoked, and nothing is opened. kAbsent when
+// there is no such view, the folder is not a plain local directory, no or more than one entry fits, a
+// name cannot be read, more than the cap of entries need their shell name, or the deadline passed.
 [[nodiscard]] inline ShadowReadResult ShellItemPathByName(HWND tab, HWND top,
                                                           std::wstring_view display_name,
                                                           const ShellLookupLimits &limits,
@@ -268,28 +336,38 @@ struct FindHandle {
       folder_view.Get() == nullptr ||
       FAILED(folder_view.Get()->GetFolder(IID_PPV_ARGS(folder.Receive()))) || folder.Get() == nullptr)
     return ShadowReadResult::kAbsent;
-  // The folder's path, once. A folder that is no directory of the file system has none.
-  PIDLIST_ABSOLUTE folder_id = nullptr;
-  if (FAILED(SHGetIDListFromObject(folder.Get(), &folder_id)) || folder_id == nullptr)
+  // The folder's id list. The root of the desktop namespace has an EMPTY one (its path would be the
+  // user's desktop, while the view also merges the public desktop): not looked into.
+  AbsoluteIdList folder_id;
+  if (FAILED(SHGetIDListFromObject(folder.Get(), &folder_id.id)) || folder_id.id == nullptr ||
+      ILIsEmpty(folder_id.id))
     return ShadowReadResult::kAbsent;
+  // A slow location is not touched (its folder says so before any I/O of ours).
+  ComRef<IShellItem> folder_item;
+  SFGAOF folder_attributes = 0;
+  if (FAILED(SHCreateItemFromIDList(folder_id.id, IID_PPV_ARGS(folder_item.Receive()))) ||
+      folder_item.Get() == nullptr ||
+      FAILED(folder_item.Get()->GetAttributes(SFGAO_ISSLOW, &folder_attributes)) ||
+      (folder_attributes & SFGAO_ISSLOW) != 0)
+    return ShadowReadResult::kAbsent;
+  // The folder's path, once. A folder that is no directory of the file system has none.
   std::wstring folder_path(32768, L'\0');
-  const BOOL has_path = SHGetPathFromIDListEx(folder_id, folder_path.data(),
+  const BOOL has_path = SHGetPathFromIDListEx(folder_id.id, folder_path.data(),
                                               static_cast<DWORD>(folder_path.size()), GPFIDL_DEFAULT);
-  ILFree(folder_id);
   if (!has_path) return ShadowReadResult::kAbsent;
   folder_path.resize(wcslen(folder_path.c_str()));
   if (folder_path.empty() || !ShellDisplayNameUsable(display_name)) return ShadowReadResult::kAbsent;
-  std::wstring pattern = folder_path;
-  if (pattern.back() != L'\\') pattern.push_back(L'\\');
-  pattern.append(display_name);
+  // Only a plain local directory without a desktop.ini: decided before the first listing.
+  if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;
+  std::wstring directory = ShellPathWithoutTrailingSeparator(folder_path);
+  directory.push_back(L'\\');
+  // The folder itself: every entry (a name that is only the display name's prefix does not decide).
+  std::wstring pattern = directory;
   pattern.push_back(L'*');
   // A path past MAX_PATH would need the extended prefix: it is not looked up.
-  if (pattern.size() >= MAX_PATH) return ShadowReadResult::kAbsent;
-
-  // Whether Explorer shows known extensions decides which entries a display name can stand for.
-  SHELLSTATE state{};
-  SHGetSetSettings(&state, SSF_SHOWEXTENSIONS, FALSE);
-  const bool extensions_shown = state.fShowExtensions != 0;
+  if (directory.size() >= MAX_PATH - 14) return ShadowReadResult::kAbsent;
+  // A desktop.ini that renames files: an entry outside the candidates could carry the display name.
+  if (ShellFolderHasLocalizedFileNames(folder_path)) return ShadowReadResult::kAbsent;
 
   std::vector<ShellNameCandidate> candidates;
   FindHandle find;
@@ -305,23 +383,47 @@ struct FindHandle {
     if (!limits.still_valid()) return ShadowReadResult::kStopped;
     if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
     const std::wstring_view found(entry.cFileName);
-    if (found != L"." && found != L"..") {
+    // An entry needs its shell name only when it can carry the display name: its file name starts
+    // with it, or it is a read-only / system directory (a desktop.ini can rename those). Hidden
+    // entries are not left out (a doubt keeps an entry, which can only make the answer "not known").
+    const bool starts_with_display =
+        found.size() >= display_name.size() &&
+        ShellNameEqualsOrdinal(found.substr(0, display_name.size()), display_name);
+    const bool renamable_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                                     (entry.dwFileAttributes &
+                                      (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0;
+    if (found != L"." && found != L".." && (starts_with_display || renamable_directory)) {
       // One past the cap is enough to know there are too many.
       if (candidates.size() >= kShellMaxCandidates) return ShadowReadResult::kAbsent;
-      candidates.push_back(
-          {std::wstring(found), (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0});
+      ShellNameCandidate candidate;
+      candidate.name = std::wstring(found);
+      candidate.is_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+      candidates.push_back(std::move(candidate));
     }
     if (!FindNextFileW(find.handle, &entry)) {
       if (GetLastError() == ERROR_NO_MORE_FILES) break;
       return ShadowReadResult::kFailed;
     }
   }
-  const std::size_t index =
-      MatchShellDisplayName(display_name, candidates, extensions_shown, ShellNameEqualsOrdinal);
+  // The name the shell shows for each candidate. One that cannot be read is left unknown, which makes
+  // the whole answer "not known" (it might be the one, or a second one).
+  for (ShellNameCandidate &candidate : candidates) {
+    if (!limits.still_valid()) return ShadowReadResult::kStopped;
+    if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
+    ComRef<IShellItem> item;
+    PWSTR shown = nullptr;
+    if (SUCCEEDED(SHCreateItemFromParsingName((directory + candidate.name).c_str(), nullptr,
+                                              IID_PPV_ARGS(item.Receive()))) &&
+        item.Get() != nullptr &&
+        SUCCEEDED(item.Get()->GetDisplayName(SIGDN_NORMALDISPLAY, &shown)) && shown != nullptr) {
+      candidate.shell_name = shown;
+      candidate.shell_name_known = true;
+    }
+    if (shown != nullptr) CoTaskMemFree(shown);
+  }
+  const std::size_t index = MatchShellDisplayName(display_name, candidates, ShellNameEqualsOrdinal);
   if (index == kNoShellMatch) return ShadowReadResult::kAbsent;
-  answer->path = folder_path;
-  if (answer->path.back() != L'\\') answer->path.push_back(L'\\');
-  answer->path.append(candidates[index].name);
+  answer->path = directory + candidates[index].name;
   // A directory of the file system is a folder; an archive is a file.
   answer->is_folder = candidates[index].is_directory;
   return ShadowReadResult::kOk;
@@ -335,6 +437,17 @@ struct ShellLookupPending {
   std::mutex mutex;
   std::condition_variable ready;
   bool done = false;
+  // Set by the caller when it stops waiting: the lookup stops at its next step.
+  std::atomic<bool> abandoned{false};
+  // A handle of the lookup's thread (under `mutex`), so a caller that gives up can cancel the file
+  // system call the thread is blocked in.
+  HANDLE thread = nullptr;
+  ShellLookupPending() = default;
+  ShellLookupPending(const ShellLookupPending &) = delete;
+  ShellLookupPending &operator=(const ShellLookupPending &) = delete;
+  ~ShellLookupPending() {
+    if (thread != nullptr) CloseHandle(thread);
+  }
   ShadowReadResult result = ShadowReadResult::kAbsent;
   ShellItemAnswer answer;
 };
@@ -578,7 +691,18 @@ public:
                                                 .count());
         };
         windows_uia_source_detail::ShellLookupLimits limits;
-        limits.still_valid = [valid] { return valid == nullptr || valid(); };
+        // The caller giving up ends the lookup at its next step, like the action being canceled.
+        limits.still_valid = [valid, pending] {
+          return !pending->abandoned.load(std::memory_order_acquire) && (valid == nullptr || valid());
+        };
+        {
+          HANDLE self = nullptr;
+          if (DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self, 0,
+                              FALSE, DUPLICATE_SAME_ACCESS)) {
+            std::lock_guard<std::mutex> lock(pending->mutex);
+            pending->thread = self;
+          }
+        }
         limits.now_ns = now;
         limits.deadline_ns = now() + windows_uia_source_detail::kShellLookupBudgetNs;
         windows_uia_source_detail::ShellItemAnswer answer;
@@ -602,8 +726,14 @@ public:
     {
       std::unique_lock<std::mutex> lock(pending->mutex);
       if (!pending->ready.wait_for(lock, windows_uia_source_detail::kShellLookupWait,
-                                   [&pending] { return pending->done; }))
+                                   [&pending] { return pending->done; })) {
+        // Given up: the lookup stops at its next step, and a file system call it is blocked in (a
+        // disk that does not answer) is canceled, so the single-flight slot is not held for good. A
+        // call that cannot be canceled (a driver that never returns) is a known limit.
+        pending->abandoned.store(true, std::memory_order_release);
+        if (pending->thread != nullptr) CancelSynchronousIo(pending->thread);
         return ShadowReadResult::kAbsent;
+      }
       if (pending->result != ShadowReadResult::kOk) return pending->result;
       answer = std::move(pending->answer);
     }

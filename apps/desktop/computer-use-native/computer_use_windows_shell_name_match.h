@@ -4,22 +4,22 @@
 // pure: no platform header, no clock, no I/O, no thread.
 //
 // UI Automation publishes only what Explorer SHOWS: "report" for "report.pdf" when known extensions
-// are hidden. The real name is found by listing the folder's entries whose names START WITH the
-// display name (the caller does that, in its own process, bounded) and asking this function which
-// entry the display name stands for. The answer is an entry only when it is the ONLY one the display
-// name can stand for; otherwise it is "not known" (kNoShellMatch), never a guess:
+// are hidden. The real file is found in two steps:
 //
-//  - the entry is named exactly like the display name; or
-//  - the entry is the display name + "." + ONE extension (no further dot), where the extension is
-//    hidden by Explorer: with extensions hidden (extensions_shown == false) any extension may be
-//    hidden, and with extensions shown only the ones Explorer hides for good (.lnk, .url, .pif, .scf,
-//    .shb, .appref-ms, .library-ms) may be.
+//  1. the caller lists the folder's entries whose names START WITH the display name (bounded, at most
+//     kShellMaxCandidates), only to narrow the field; and
+//  2. for EVERY candidate the caller asks the SHELL for the name it shows (the same name Explorer
+//     shows, whatever hides an extension: the user's setting, an extension that is never shown,
+//     a folder with a dot in its name), and this function decides which candidate the display name
+//     stands for. No rule about extensions lives here: the shell's own answer is compared.
 //
-// Names are compared as Explorer's file system does, case-insensitively and ordinally, by the
-// function the caller passes (the host passes one built on CompareStringOrdinal); the default folds
-// ASCII only. A candidate is the entry's LONG name: an entry that only its 8.3 alternate name matched
-// is dropped by this comparison, because the long name is what is compared. More candidates than
-// kShellMaxCandidates (the caller stops collecting one past it) is "not known".
+// The answer is an entry only when it is the ONLY candidate whose shell name equals the display name.
+// It is "not known" (kNoShellMatch), never a guess, when no candidate does, when two or more do, when
+// there are more candidates than the cap, or when the shell name of ANY candidate could not be read
+// (a candidate that could not be read might be the one, or a second one).
+//
+// Names are compared as the file system does, case-insensitively and ordinally, by the function the
+// caller passes (the host passes one built on CompareStringOrdinal); the default folds ASCII only.
 
 #include <cstddef>
 #include <string>
@@ -31,6 +31,8 @@ namespace sprint_coder::computer_use {
 struct ShellNameCandidate {
   std::wstring name; // the entry's long name, as the file system has it
   bool is_directory = false;
+  std::wstring shell_name; // the name the shell shows for it (valid when shell_name_known)
+  bool shell_name_known = false;
 };
 
 constexpr std::size_t kShellMaxCandidates = 64;
@@ -50,18 +52,8 @@ using ShellNameEquals = bool (*)(std::wstring_view, std::wstring_view);
   return true;
 }
 
-// The extensions Explorer never shows, whatever the setting.
-[[nodiscard]] inline bool ShellExtensionAlwaysHidden(std::wstring_view extension,
-                                                     ShellNameEquals equals) {
-  for (const std::wstring_view hidden : {std::wstring_view(L"lnk"), std::wstring_view(L"url"),
-                                         std::wstring_view(L"pif"), std::wstring_view(L"scf"),
-                                         std::wstring_view(L"shb"), std::wstring_view(L"appref-ms"),
-                                         std::wstring_view(L"library-ms")})
-    if (equals(extension, hidden)) return true;
-  return false;
-}
-
-// A display name that cannot be a file name (it holds a wildcard or a separator) matches nothing.
+// A display name that cannot be a file name (it holds a wildcard or a separator) matches nothing, and
+// is never used to build a search pattern.
 [[nodiscard]] inline bool ShellDisplayNameUsable(std::wstring_view display) {
   if (display.empty()) return false;
   for (const wchar_t c : display)
@@ -74,23 +66,15 @@ using ShellNameEquals = bool (*)(std::wstring_view, std::wstring_view);
 // The index of the one candidate the display name stands for, or kNoShellMatch.
 [[nodiscard]] inline std::size_t MatchShellDisplayName(
     std::wstring_view display, const std::vector<ShellNameCandidate> &candidates,
-    bool extensions_shown, ShellNameEquals equals = ShellNameEqualsAsciiFold) {
+    ShellNameEquals equals = ShellNameEqualsAsciiFold) {
   if (!ShellDisplayNameUsable(display) || candidates.empty() ||
       candidates.size() > kShellMaxCandidates || equals == nullptr)
     return kNoShellMatch;
   std::size_t found = kNoShellMatch;
   for (std::size_t i = 0; i < candidates.size(); ++i) {
-    const std::wstring_view name = candidates[i].name;
-    bool stands_for = false;
-    if (equals(name, display)) {
-      stands_for = true;
-    } else if (name.size() > display.size() + 1 && name[display.size()] == L'.' &&
-               equals(name.substr(0, display.size()), display)) {
-      const std::wstring_view extension = name.substr(display.size() + 1);
-      if (extension.find(L'.') == std::wstring_view::npos)
-        stands_for = !extensions_shown || ShellExtensionAlwaysHidden(extension, equals);
-    }
-    if (!stands_for) continue;
+    // A candidate whose shell name is not known could be the one, or a second one.
+    if (!candidates[i].shell_name_known) return kNoShellMatch;
+    if (!equals(candidates[i].shell_name, display)) continue;
     if (found != kNoShellMatch) return kNoShellMatch; // two entries: which one was meant is not known
     found = i;
   }
