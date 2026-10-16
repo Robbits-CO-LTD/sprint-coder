@@ -1,8 +1,10 @@
 import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import {
@@ -29,6 +31,7 @@ import {
 } from './computer-use-grant-identity';
 import { createComputerAppGrantFixtureStore } from './computer-use-grant-fixture';
 import type { ComputerUsePlannerInput } from './computer-use-planner-port';
+import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient, type ComputerAppProfileRecord } from './persistence';
 
 /**
@@ -54,7 +57,8 @@ const directories: string[] = [];
 const openDatabases: SqlitePersistenceClient[] = [];
 
 beforeEach(() => {
-  vi.useFakeTimers({ now: new Date('2026-09-21T00:00:00.000Z') });
+  // Not in the launcher run, which waits for a child process on real timers.
+  if (runsWithElectronAbi) vi.useFakeTimers({ now: new Date('2026-09-21T00:00:00.000Z') });
 });
 
 afterEach(() => {
@@ -472,3 +476,24 @@ describe.skipIf(!runsWithElectronAbi)('a copied value is not persisted (N12, T15
     ).toBe(true);
   });
 });
+
+// The suite needs better-sqlite3 built for Electron. Where the variable is not set (the ordinary
+// vitest run, CI), one test starts this file again under Electron's ABI, so the real run is part
+// of every run and a failure in the child fails this test.
+if (!runsWithElectronAbi)
+  it('runs the persistence scan with the bundled Electron ABI', async () => {
+    await promisify(execFile)(
+      electronTestExecutablePath(),
+      [
+        join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
+        'run',
+        'src/main/computer-use-c6-persistence.test.ts',
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', SPRINT_CODER_ELECTRON_DB_TEST: '1' },
+        timeout: 120_000,
+        maxBuffer: 2 * 1024 * 1024,
+      },
+    );
+  }, 125_000);
