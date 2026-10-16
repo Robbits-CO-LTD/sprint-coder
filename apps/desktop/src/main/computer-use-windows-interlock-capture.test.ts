@@ -93,8 +93,8 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
   it('takes the rule set from its caller, answers an exception or a missing source as no verdict, and changes nothing', () => {
     const body = code(entry);
     expect(body).toContain('const sprint_coder::computer_use::EffectRuleset &ruleset');
-    expect(body).toContain(
-      'EvaluateWindowsInterlockOnSource(*source, kind, target_id, info, ruleset)',
+    expect(body.replace(/\s+/gu, ' ')).toContain(
+      'EvaluateWindowsInterlockOnSource(*source, kind_copy, target_id, info, ruleset_copy)',
     );
     expect(body).toContain('unavailable.no_verdict = InterlockNoVerdict::kIncomplete;');
     expect(body).toContain('catch (...) {');
@@ -102,26 +102,85 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(entry).toMatch(
       /kind == "click" \|\| kind == "scroll"\) && !point_known\)\s*return unavailable/u,
     );
-    // The same source and cancellation epoch as the shadow.
-    expect(body).toContain(
-      'WindowsUiaShadowSource::Create(session.active_window, point, still_valid)',
-    );
+    // The same cancellation epoch as the shadow, and the one point mapping of the host.
     expect(body).toContain('cancellation_epoch.load(std::memory_order_acquire) == expected_epoch');
-    // No lock, no input API, no write: the caller holds the lane.
+    expect(body).toContain('WindowsActionPoint(session.observation_bounds, metadata, &point)');
+    // No input API and no write: the caller holds the lane.
     expect(body).not.toMatch(
-      /lock_guard|unique_lock|scoped_lock|mutex|SendInput|mouse_event|keybd_event|SetForegroundWindow|SetFocus|PostMessage|SendMessage|WriteFile|std::thread/u,
+      /SendInput|mouse_event|keybd_event|SetForegroundWindow|SetFocus|PostMessage|SendMessage|WriteFile/u,
     );
   });
 
-  it('does not schedule the shadow, and looks at the cancellation before it creates anything', () => {
+  it('creates the source with the synchronous bounds: 250 ms and its own lookup slot (S5-c-2 PR-1)', () => {
+    const body = code(entry);
+    expect(body).toMatch(
+      /WindowsUiaShadowSource::Create\(\s*window, point, still_valid, WindowsUiaShadowSource::kInterlockUiaTimeoutMs,\s*windows_uia_source_detail::InterlockShellLookupRunning\(\)\)/u,
+    );
+    // Not the shadow's bound and not the shadow's slot.
+    expect(body).not.toContain('kShadowUiaTimeoutMs');
+    expect(body).not.toMatch(/[^\w]ShellLookupRunning/u);
+  });
+
+  it('runs on a worker thread of its own in the multithreaded apartment, and the lane waits at most 500 ms (S5-c-2 PR-1)', () => {
+    const body = code(entry);
+    // The worker's apartment is inside the entry; the lane's own thread stays an STA.
+    expect(body).toContain('CoInitializeEx(nullptr, COINIT_MULTITHREADED)');
+    expect(body).toContain('.detach()');
+    expect(code(host).match(/COINIT_APARTMENTTHREADED/gu)).toHaveLength(2);
+    expect(outside).toContain('COINIT_APARTMENTTHREADED');
+    expect(body).not.toContain('COINIT_APARTMENTTHREADED');
+    expect(body).toContain('constexpr std::chrono::milliseconds kInterlockLaneHoldLimit{500};');
+    expect(body).toContain('pending->ready.wait_for(lock, kInterlockLaneHoldLimit');
+    // The worst case of one wait is stated and checked at compile time.
+    expect(body).toMatch(
+      /static_assert\(150 \+ sprint_coder::computer_use::WindowsUiaShadowSource::kInterlockUiaTimeoutMs \+ 50 <=\s*500,/u,
+    );
+    expect(entry).toContain('450 ms');
+    // A wait that ran out is a budget answer, and the worker is told it is abandoned.
+    expect(body).toMatch(
+      /pending->abandoned\.store\(true, std::memory_order_release\);\s*unavailable\.no_verdict = InterlockNoVerdict::kBudget;/u,
+    );
+    // An epoch that moved while the worker read is a cancel, whatever it found: asked again AFTER
+    // the wait, before the worker's answer is returned.
+    const wait = body.indexOf('pending->ready.wait_for(');
+    const after = body.indexOf('if (!epoch_unchanged()) {', wait);
+    expect(after).toBeGreaterThan(wait);
+    expect(body.slice(after, after + 120)).toContain('InterlockNoVerdict::kCanceled');
+    expect(body.indexOf('return answer;')).toBeGreaterThan(after);
+  });
+
+  it('starts one worker at a time and gives it values only, never the sessions (S5-c-2 PR-1)', () => {
+    const body = code(entry);
+    expect(body).toContain(
+      'static std::atomic<bool> *const running = new std::atomic<bool>(false);',
+    );
+    // The single-flight flag is taken before anything is copied, and a taken one is a budget answer.
+    expect(body).toMatch(
+      /if \(running\.exchange\(true\)\) \{\s*unavailable\.no_verdict = InterlockNoVerdict::kBudget;\s*return unavailable;/u,
+    );
+    // A failed thread start gives the slot back.
+    expect(body).toMatch(
+      /\} catch \(\.\.\.\) \{\s*running\.store\(false\);\s*return unavailable;/u,
+    );
+    // The worker's capture list is values (and the shared pending block), never `session`/`sessions`.
+    const lambda = /std::thread\(\[([^\]]*)\]/u.exec(body)?.[1] ?? '';
+    expect(lambda.length).toBeGreaterThan(20);
+    expect(lambda).not.toContain('session');
+    expect(lambda).toContain('&running');
+    expect(lambda).not.toMatch(/[=]/u);
+    expect(body).not.toMatch(/\bsessions\b|ticket_states|response_cache/u);
+    // Canceled before the start: no worker and no UI Automation object are made.
+    const canceled = body.indexOf('if (!epoch_unchanged()) {');
+    expect(canceled).toBeGreaterThan(0);
+    expect(body.indexOf('running.exchange(true)')).toBeGreaterThan(canceled);
+    expect(body.indexOf('WindowsUiaShadowSource::Create(')).toBeGreaterThan(canceled);
+  });
+
+  it('does not schedule the shadow', () => {
     const body = code(entry);
     expect(body).not.toMatch(
       /\.Schedule\(|WindowsEffectShadow|ScheduleWindowsEffectShadow|ProcessShadowLog/u,
     );
-    const canceled = body.indexOf('if (!still_valid()) {');
-    const create = body.indexOf('WindowsUiaShadowSource::Create(');
-    expect(canceled).toBeGreaterThan(0);
-    expect(create).toBeGreaterThan(canceled);
   });
 
   it('leaves the shadow wiring as it was: the scheduler, the ring and the observer only', () => {

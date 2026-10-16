@@ -23,6 +23,14 @@ function wiringBlock(): string {
   return hostSource.slice(begin, end);
 }
 
+// The one point mapping the wiring calls (S5-c-2 PR-1): compiled as it is, next to the wiring.
+function pointBlock(): string {
+  const begin = hostSource.indexOf('// BEGIN windows action point');
+  const end = hostSource.indexOf('// END windows action point');
+  if (begin < 0 || end <= begin) throw new Error('Action point markers changed');
+  return hostSource.slice(begin, end);
+}
+
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 const libraries = [
   'ole32.lib',
@@ -333,7 +341,7 @@ describe.skipIf(!onWindows || (build?.compiler === null && !process.env['CI']))(
       const context = build!;
       try {
         expect(context.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
-        writeFileSync(context.source, program.replace('//@@BLOCK@@', wiringBlock()));
+        writeFileSync(context.source, program.replace('//@@BLOCK@@', pointBlock() + wiringBlock()));
         const compiler = context.compiler!;
         const built = spawnSync(compiler.file, compiler.args, {
           encoding: 'utf8',
