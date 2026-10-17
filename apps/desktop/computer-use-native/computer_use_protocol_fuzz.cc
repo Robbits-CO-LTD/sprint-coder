@@ -14,6 +14,7 @@
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_windows_shell_name_match.h"
 #include "computer_use_native_approved_risk.h"
 #include "computer_use_native_approval_offer.h"
 #include "computer_use_native_refusal_table.h"
@@ -3090,7 +3091,8 @@ struct FakeExplorer {
   FakeForm form;
   int item = 0;
   int tab = -1;
-  explicit FakeExplorer(const std::string &name, bool with_tab = false) {
+  explicit FakeExplorer(const std::string &name, bool with_tab = false,
+                        const std::string &list_class = "UIItemsView") {
     form.Node(form.window).class_name = "CabinetWClass";
     form.source.process_path = "C:\\Windows\\explorer.exe";
     int parent = form.window;
@@ -3098,7 +3100,7 @@ struct FakeExplorer {
       tab = form.source.Add(form.window, "Pane", "Tab", "ShellTabWindowClass");
       parent = tab;
     }
-    const int list = form.source.Add(parent, "List", "Items", "UIItemsView");
+    const int list = form.source.Add(parent, "List", "Items", list_class);
     item = form.source.Add(list, "ListItem", name, "UIItem");
     form.source.point = item;
   }
@@ -3452,6 +3454,27 @@ bool CheckWindowsShadowReader() {
     const ShadowUiaCapture plain = ordinary_reader.Capture("click", "");
     if (!Check(plain.item_kind == ShadowItemKind::kNone && ordinary.source.item_calls == 0,
                "winreader-no-item-outside-a-file-browser")) return false;
+
+    // A ListItem outside the shell's item view (a preview pane list, a search suggestion) is not an
+    // item of the folder: the shell is not asked about it, and its name stays a display name.
+    FakeExplorer preview("invoice.pdf", true, "PreviewPaneList");
+    preview.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader preview_reader(preview.form.source);
+    const ShadowUiaCapture in_preview = preview_reader.Capture("click", "");
+    if (!Check(in_preview.item_kind == ShadowItemKind::kFile && !in_preview.item_name_is_real_path &&
+                   preview.form.source.item_calls == 0,
+               "winreader-list-item-outside-the-item-view-is-not-asked")) return false;
+    // The item view is a SHELLDLL_DefView too, with or without the UIItemsView below it.
+    FakeExplorer defview("invoice.pdf", true, "SHELLDLL_DefView");
+    defview.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader defview_reader(defview.form.source);
+    if (!Check(defview_reader.Capture("click", "").item_name_is_real_path && defview.form.source.item_calls == 1,
+               "winreader-list-item-in-a-defview-is-asked")) return false;
+    // With a tab and the ordinary item view the path is read (the case used throughout).
+    FakeExplorer tabbed("invoice.pdf", true);
+    tabbed.GiveRealPath("C:\\Users\\a\\invoice.pdf.exe");
+    WindowsShadowReader tabbed_reader(tabbed.form.source);
+    if (!Check(tabbed_reader.Capture("click", "").item_name_is_real_path, "winreader-list-item-in-the-item-view-is-asked")) return false;
 
     // A path longer than the core accepts is a gap, and still only a display name.
     FakeExplorer lost("a.txt");
@@ -6763,6 +6786,384 @@ bool CheckWindowsInterlockCapture() {
   return true;
 }
 
+// ---- Classifier v2, S5-c-2 PR-3: the display name of a file browser item -> the real entry ---------
+
+bool CheckWindowsShellNameMatch() {
+  using namespace sprint_coder::computer_use;
+  // A candidate: the file system's long name and the name the SHELL shows for it.
+  const auto shown = [](const wchar_t *name, const wchar_t *shell, bool directory = false) {
+    ShellNameCandidate candidate;
+    candidate.name = name;
+    candidate.is_directory = directory;
+    candidate.shell_name = shell;
+    candidate.shell_name_known = true;
+    return candidate;
+  };
+  const auto unreadable = [](const wchar_t *name) {
+    ShellNameCandidate candidate;
+    candidate.name = name;
+    return candidate;
+  };
+  using List = std::vector<ShellNameCandidate>;
+  const auto match = [](std::wstring_view display, const List &list) {
+    return MatchShellDisplayName(display, list);
+  };
+  // The one candidate whose shell name is the display name is the entry.
+  if (!Check(match(L"report", List{shown(L"report.pdf", L"report")}) == 0, "shellname-one-shell-name-matches")) return false;
+  if (!Check(match(L"run.bat", List{shown(L"run.bat", L"run.bat"), shown(L"run.bat.old", L"run.bat.old")}) == 0,
+             "shellname-extension-shown-exact")) return false;
+  // Which part of the name the shell hides is the shell's business, not a rule here: an extension
+  // that is never shown, a shortcut, a hidden extension of any kind.
+  if (!Check(match(L"x", List{shown(L"x.website", L"x")}) == 0, "shellname-never-shown-extension-is-the-shells-answer")) return false;
+  if (!Check(match(L"x", List{shown(L"x", L"x"), shown(L"x.website", L"x")}) == kNoShellMatch,
+             "shellname-x-and-x-website-collide")) return false;
+  if (!Check(match(L"x", List{shown(L"x", L"x"), shown(L"x.lnk", L"x")}) == kNoShellMatch,
+             "shellname-lnk-collides-with-same-name")) return false;
+  // x.pdf and x.pdf.exe, extensions hidden: the shell shows "x" and "x.pdf"; shown: "x.pdf", "x.pdf.exe".
+  if (!Check(match(L"x.pdf", List{shown(L"x.pdf", L"x"), shown(L"x.pdf.exe", L"x.pdf")}) == 1,
+             "shellname-pdf-exe-hidden-is-the-second")) return false;
+  if (!Check(match(L"x.pdf", List{shown(L"x.pdf", L"x.pdf"), shown(L"x.pdf.exe", L"x.pdf.exe")}) == 0,
+             "shellname-pdf-exe-shown-is-the-first")) return false;
+  // A folder whose name has a dot keeps it: the shell shows "data.xxx", and "data" is not that folder.
+  if (!Check(match(L"data", List{shown(L"data.xxx", L"data.xxx", true)}) == kNoShellMatch,
+             "shellname-folder-with-a-dot-is-not-a-stem")) return false;
+  if (!Check(match(L"data.xxx", List{shown(L"data.xxx", L"data.xxx", true)}) == 0, "shellname-folder-with-a-dot-is-itself")) return false;
+  {
+    const List list{shown(L"data", L"data", true), shown(L"data.txt", L"data")};
+    if (!Check(match(L"data", list) == kNoShellMatch, "shellname-folder-and-file-stem-collide")) return false;
+  }
+  // A localized folder: "Documents" is shown as the Japanese word. It is found by its SHELL name
+  // (no file name starts like it), and a file whose name starts the same is a second entry.
+  {
+    const wchar_t *word = L"\u30c9\u30ad\u30e5\u30e1\u30f3\u30c8";
+    const std::wstring file = std::wstring(word) + L".txt";
+    if (!Check(match(word, List{shown(L"Documents", word, true)}) == 0, "shellname-localized-folder-is-found-by-its-shell-name")) return false;
+    if (!Check(match(word, List{shown(L"Documents", word, true), shown(file.c_str(), word)}) == kNoShellMatch,
+               "shellname-localized-folder-and-same-stem-file-collide")) return false;
+  }
+  // Two folders data and data.xxx: both keep their names, "data" is the first.
+  if (!Check(match(L"data", List{shown(L"data", L"data", true), shown(L"data.xxx", L"data.xxx", true)}) == 0,
+             "shellname-two-folders-data-and-data-xxx")) return false;
+  // LICENSE and LICENSE.md with .md not a registered extension: the shell shows both extensions.
+  if (!Check(match(L"LICENSE", List{shown(L"LICENSE", L"LICENSE"), shown(L"LICENSE.md", L"LICENSE.md")}) == 0,
+             "shellname-unregistered-extension-is-not-hidden")) return false;
+  if (!Check(match(L"LICENSE.md", List{shown(L"LICENSE", L"LICENSE"), shown(L"LICENSE.md", L"LICENSE.md")}) == 1,
+             "shellname-unregistered-extension-is-the-second")) return false;
+  // The names have nothing to do with each other (a localized name): only the shell name counts.
+  if (!Check(match(L"Documents", List{shown(L"Dokumente", L"Documents")}) == 0, "shellname-localized-name-is-the-shell-name")) return false;
+  if (!Check(match(L"Dokumente", List{shown(L"Dokumente", L"Documents")}) == kNoShellMatch,
+             "shellname-file-name-is-not-the-display-name")) return false;
+  // No candidate fits, and none at all.
+  if (!Check(match(L"a", List{shown(L"ab.txt", L"ab")}) == kNoShellMatch, "shellname-prefix-is-not-a-match")) return false;
+  if (!Check(match(L"a", List{}) == kNoShellMatch, "shellname-no-candidate")) return false;
+  // One candidate whose shell name cannot be read makes the whole answer unknown, wherever it is.
+  if (!Check(match(L"a", List{shown(L"a", L"a"), unreadable(L"a2")}) == kNoShellMatch, "shellname-unreadable-after-the-match")) return false;
+  if (!Check(match(L"a", List{unreadable(L"a2"), shown(L"a", L"a")}) == kNoShellMatch, "shellname-unreadable-before-the-match")) return false;
+  if (!Check(match(L"a", List{unreadable(L"a")}) == kNoShellMatch, "shellname-only-candidate-unreadable")) return false;
+  // Case is not significant.
+  if (!Check(match(L"README", List{shown(L"readme.MD", L"readme")}) == 0, "shellname-case-insensitive")) return false;
+  // A display name that cannot be a file name matches nothing.
+  for (const wchar_t *bad : {L"", L"a*", L"a?b", L"a\\b", L"a/b", L"a:b", L"a|b"})
+    if (!Check(match(bad, List{shown(L"a", bad), shown(L"b", L"b")}) == kNoShellMatch, "shellname-unusable-display-name")) return false;
+  // More candidates than the cap are not known; exactly the cap is fine.
+  {
+    List list;
+    for (std::size_t i = 0; i < kShellMaxCandidates; ++i) {
+      const std::wstring name = L"n" + std::to_wstring(i);
+      list.push_back(shown(name.c_str(), name.c_str()));
+    }
+    list.push_back(shown(L"target", L"target"));
+    if (!Check(list.size() == kShellMaxCandidates + 1 && match(L"target", list) == kNoShellMatch, "shellname-over-the-cap-is-unknown")) return false;
+    list.erase(list.begin());
+    if (!Check(list.size() == kShellMaxCandidates && match(L"target", list) == kShellMaxCandidates - 1, "shellname-exactly-the-cap-is-fine")) return false;
+  }
+  // The comparison is the caller's.
+  {
+    const auto exact_case = [](std::wstring_view left, std::wstring_view right) { return left == right; };
+    if (!Check(MatchShellDisplayName(L"Run", List{shown(L"run", L"run")}, exact_case) == kNoShellMatch, "shellname-uses-the-given-comparison")) return false;
+    if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, exact_case) == 0, "shellname-given-comparison-matches")) return false;
+    if (!Check(MatchShellDisplayName(L"run", List{shown(L"run", L"run")}, nullptr) == kNoShellMatch, "shellname-null-comparison-is-unknown")) return false;
+  }
+  // Which entries need the shell's name (the pure rule): a file name that starts like the display
+  // name (case-blind), and any read-only / system DIRECTORY; nothing else, never "." or "..".
+  {
+    const auto needs = [](const wchar_t *name, bool directory, bool read_only_or_system, const wchar_t *display) {
+      return ShellEntryNeedsShellName(name, directory, read_only_or_system, display);
+    };
+    if (!Check(needs(L"report", false, false, L"report"), "shellneeds-exact")) return false;
+    if (!Check(needs(L"report.pdf", false, false, L"report"), "shellneeds-prefix")) return false;
+    if (!Check(needs(L"REPORT.pdf", false, false, L"report"), "shellneeds-case-differs")) return false;
+    if (!Check(!needs(L"other.txt", false, false, L"report"), "shellneeds-unrelated-file-is-not-a-candidate")) return false;
+    if (!Check(!needs(L"other", true, false, L"report"), "shellneeds-ordinary-directory-is-not-a-candidate")) return false;
+    if (!Check(needs(L"other", true, true, L"report"), "shellneeds-read-only-or-system-directory-is-a-candidate")) return false;
+    if (!Check(!needs(L"other.txt", false, true, L"report"), "shellneeds-read-only-file-is-not-a-candidate")) return false;
+    if (!Check(!needs(L"re", false, false, L"report"), "shellneeds-shorter-name-is-not-a-prefix")) return false;
+    if (!Check(!needs(L".", true, true, L"."), "shellneeds-dot-is-never-a-candidate")) return false;
+    if (!Check(!needs(L"..", true, true, L"report"), "shellneeds-dotdot-is-never-a-candidate")) return false;
+    if (!Check(!ShellEntryNeedsShellName(L"report", false, false, L"report", nullptr), "shellneeds-null-comparison-is-no")) return false;
+  }
+  // A desktop.ini that localizes file names. The shell honours it only in a read-only / system folder, so
+  // other folders are not read; a desktop.ini that is a link (of any kind) is a yes without being read;
+  // what cannot be known is a yes.
+  {
+    constexpr unsigned long kAccessDenied = 5;
+    constexpr unsigned long kDirectory = 0x10;
+    const auto ini = [](bool folder_known, unsigned long folder_attributes, bool opened, unsigned long open_error,
+                        bool reparse, bool content_says_localized) {
+      return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, opened, open_error, reparse,
+                                               content_says_localized);
+    };
+    const unsigned long read_only = kDirectory | kShellAttributeReadOnly;
+    const unsigned long system_dir = kDirectory | kShellAttributeSystem;
+    if (!Check(!ini(true, kDirectory, true, 0, false, true), "desktopini-plain-folder-is-not-read")) return false;
+    if (!Check(!ini(true, kDirectory, true, 0, true, true), "desktopini-plain-folder-link-is-not-read-either")) return false;
+    if (!Check(ini(false, 0, true, 0, false, false), "desktopini-unknown-folder-attributes-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, false, kShellErrorFileNotFound, false, true), "desktopini-none-file-not-found")) return false;
+    if (!Check(!ini(true, system_dir, false, kShellErrorPathNotFound, false, true), "desktopini-none-path-not-found")) return false;
+    if (!Check(ini(true, read_only, false, kAccessDenied, false, false), "desktopini-unknown-open-error-is-a-yes")) return false;
+    if (!Check(ini(true, read_only, true, 0, true, false), "desktopini-link-is-a-yes-without-reading")) return false;
+    if (!Check(ini(true, system_dir, true, 0, true, false), "desktopini-link-in-a-system-folder-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, true, 0, false, false), "desktopini-without-the-section-is-normal")) return false;
+    if (!Check(ini(true, read_only, true, 0, false, true), "desktopini-with-the-section-is-a-yes")) return false;
+    if (!Check(ini(true, system_dir, true, 0, false, true), "desktopini-with-the-section-in-a-system-folder-is-a-yes")) return false;
+  }
+  // The text of a desktop.ini: a non-empty [LocalizedFileNames] section is a yes; anything not known is too.
+  {
+    const auto ansi = [](const char *text) {
+      std::vector<unsigned char> bytes;
+      for (const char *c = text; *c != 0; ++c) bytes.push_back(static_cast<unsigned char>(*c));
+      return bytes;
+    };
+    const auto utf16 = [](const wchar_t *text, bool big_endian = false) {
+      std::vector<unsigned char> bytes;
+      if (big_endian) { bytes.push_back(0xFE); bytes.push_back(0xFF); } else { bytes.push_back(0xFF); bytes.push_back(0xFE); }
+      for (const wchar_t *c = text; *c != 0; ++c) {
+        const unsigned char lo = static_cast<unsigned char>(*c & 0xFF);
+        const unsigned char hi = static_cast<unsigned char>((*c >> 8) & 0xFF);
+        if (big_endian) { bytes.push_back(hi); bytes.push_back(lo); } else { bytes.push_back(lo); bytes.push_back(hi); }
+      }
+      return bytes;
+    };
+    const auto says = [](const std::vector<unsigned char> &bytes) {
+      return ShellDesktopIniTextHasLocalizedFileNames(bytes.data(), bytes.size());
+    };
+    if (!Check(says(utf16(L"[LocalizedFileNames]\r\nalpha.txt=Beta\r\n")), "initext-utf16le-with-a-entry")) return false;
+    if (!Check(says(utf16(L"[LocalizedFileNames]\r\nalpha.txt=Beta\r\n", true)), "initext-utf16be-with-an-entry")) return false;
+    if (!Check(says(ansi("[LocalizedFileNames]\r\nalpha.txt=Beta\r\n")), "initext-ansi-with-an-entry")) return false;
+    if (!Check(says(ansi("\xEF\xBB\xBF[LocalizedFileNames]\nalpha.txt=Beta")), "initext-utf8-with-its-mark-and-no-final-newline")) return false;
+    if (!Check(says(ansi("[localizedfilenames]\nalpha.txt=Beta\n")), "initext-section-name-is-case-blind")) return false;
+    if (!Check(says(ansi("[ LOCALIZEDFILENAMES ]\nalpha.txt=Beta\n")), "initext-spaces-around-the-name-still-count")) return false;
+    if (!Check(says(ansi("[.ShellClassInfo]\nInfoTip=x\n[LocalizedFileNames]\n\n; note\n  \nalpha.txt=Beta\n")), "initext-entry-after-blank-and-comment-lines")) return false;
+    if (!Check(says(ansi("[LocalizedFileNames]\nalpha.txt=Beta\n[Other]\nx=y\n")), "initext-entry-before-another-section")) return false;
+    if (!Check(says(ansi("[Other]\n[LocalizedFileNames]\nx=1\n[LocalizedFileNames]\n")), "initext-the-same-section-twice-one-with-an-entry")) return false;
+    if (!Check(!says(ansi("")), "initext-empty-file-is-no")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\n")), "initext-empty-section")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\r\n\r\n   \r\n")), "initext-blank-lines-only-section")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\n; just a comment\n;another\n[Other]\nx=y\n")), "initext-comments-only-section")) return false;
+    if (!Check(!says(utf16(L"[LocalizedFileNames]\r\n; c\r\n[.ShellClassInfo]\r\nInfoTip=x\r\n")), "initext-utf16-empty-section-then-another")) return false;
+    if (!Check(!says(ansi("[.ShellClassInfo]\nLocalizedResourceName=@x,-1\n")), "initext-another-section-only")) return false;
+    if (!Check(!says(ansi("alpha.txt=Beta\n")), "initext-lines-before-any-section-do-not-count")) return false;
+    if (!Check(!says(ansi("[Other]\nLocalizedFileNames=x\n")), "initext-the-name-as-a-key-is-not-the-section")) return false;
+    // Not known is a yes.
+    if (!Check(says(ansi("[LocalizedFileNames\nalpha.txt=Beta\n")), "initext-header-that-never-closes")) return false;
+    if (!Check(says(std::vector<unsigned char>{0xFF, 0xFE, 0x5B}), "initext-utf16-with-an-odd-number-of-bytes")) return false;
+    if (!Check(says(std::vector<unsigned char>{'[', 0, 'L', 0, ']', 0}), "initext-nul-in-single-byte-text-is-a-utf16-file-without-its-mark")) return false;
+    {
+      const std::vector<unsigned char> large(kShellDesktopIniMaxBytes + 1, static_cast<unsigned char>(';'));
+      if (!Check(says(large), "initext-larger-than-the-cap-is-a-yes")) return false;
+      const std::vector<unsigned char> at_cap(kShellDesktopIniMaxBytes, static_cast<unsigned char>(';'));
+      if (!Check(!says(at_cap), "initext-exactly-the-cap-is-judged")) return false;
+    }
+    if (!Check(ShellDesktopIniTextHasLocalizedFileNames(nullptr, 3), "initext-null-bytes-with-a-size-is-a-yes")) return false;
+    if (!Check(!ShellDesktopIniTextHasLocalizedFileNames(nullptr, 0), "initext-null-and-empty-is-no")) return false;
+  }
+  // A link is a reparse point that NAMES another object (bit 29 of the tag): a symbolic link, a mount
+  // point, any other such tag. A cloud file's tag does not have the bit and is not a link.
+  {
+    if (!Check(ShellReparseIsLink(true, kShellReparseTagSymlink), "link-symlink")) return false;
+    if (!Check(ShellReparseIsLink(true, kShellReparseTagMountPoint), "link-mount-point-or-junction")) return false;
+    if (!Check(ShellReparseIsLink(true, 0xA000001D), "link-another-name-surrogate-tag")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0x9000001A), "link-cloud-tag-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0x80000015), "link-a-tag-without-the-surrogate-bit-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0), "link-other-reparse-point-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(false, kShellReparseTagSymlink), "link-tag-of-a-non-reparse-entry-is-garbage")) return false;
+    if (!Check(ShellReparseIsMountPoint(true, kShellReparseTagMountPoint) && !ShellReparseIsMountPoint(true, kShellReparseTagSymlink) &&
+                   !ShellReparseIsMountPoint(false, kShellReparseTagMountPoint),
+               "link-only-a-mount-point-is-a-mount-point")) return false;
+  }
+  // A candidate that is a link is never matched, even with a shell name that fits.
+  {
+    ShellNameCandidate linked;
+    linked.name = L"jn";
+    linked.shell_name = L"jn";
+    linked.shell_name_known = true;
+    linked.is_link = true;
+    if (!Check(MatchShellDisplayName(L"jn", std::vector<ShellNameCandidate>{linked}) == kNoShellMatch, "link-candidate-is-never-matched")) return false;
+    ShellNameCandidate plain;
+    plain.name = L"a.txt";
+    plain.shell_name = L"a.txt";
+    plain.shell_name_known = true;
+    if (!Check(MatchShellDisplayName(L"a.txt", std::vector<ShellNameCandidate>{plain, linked}) == kNoShellMatch,
+               "link-candidate-among-the-others-makes-the-answer-unknown")) return false;
+    linked.is_link = false;
+    if (!Check(MatchShellDisplayName(L"jn", std::vector<ShellNameCandidate>{linked}) == 0, "link-candidate-let-through-is-an-ordinary-one")) return false;
+  }
+  // The target of a mount point, from the bytes FSCTL_GET_REPARSE_POINT returns.
+  {
+    const auto buffer = [](const std::wstring &substitute, unsigned long tag = kShellReparseTagMountPoint) {
+      std::vector<unsigned char> bytes(16, 0);
+      for (int i = 0; i < 4; ++i) bytes[static_cast<std::size_t>(i)] = static_cast<unsigned char>((tag >> (8 * i)) & 0xFF);
+      const std::size_t length = substitute.size() * 2;
+      bytes[8] = 0; bytes[9] = 0;                                                  // substitute offset
+      bytes[10] = static_cast<unsigned char>(length & 0xFF); bytes[11] = static_cast<unsigned char>(length >> 8);
+      for (const wchar_t c : substitute) { bytes.push_back(static_cast<unsigned char>(c & 0xFF)); bytes.push_back(static_cast<unsigned char>((c >> 8) & 0xFF)); }
+      return bytes;
+    };
+    std::wstring name;
+    const auto made = buffer(L"\\??\\C:\\Users\\a");
+    if (!Check(ShellMountPointSubstituteName(made.data(), made.size(), &name) && name == L"\\??\\C:\\Users\\a", "mount-substitute-name-is-read")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(name) == L'C', "mount-drive-letter-path")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\d:") == L'd', "mount-bare-drive")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\") == 0, "mount-volume-guid-is-not-a-drive-letter")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\UNC\\server\\share") == 0, "mount-unc-is-not-a-drive-letter")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\C:x") == 0, "mount-a-colon-without-a-separator")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"C:\\x") == 0, "mount-without-the-nt-prefix")) return false;
+    const auto symlink_tag = buffer(L"\\??\\C:\\x", kShellReparseTagSymlink);
+    if (!Check(!ShellMountPointSubstituteName(symlink_tag.data(), symlink_tag.size(), &name), "mount-a-symlink-buffer-is-not-read")) return false;
+    auto cut = made;
+    cut.resize(cut.size() - 4);
+    if (!Check(!ShellMountPointSubstituteName(cut.data(), cut.size(), &name), "mount-a-cut-buffer-is-not-read")) return false;
+    if (!Check(!ShellMountPointSubstituteName(made.data(), 8, &name), "mount-a-short-buffer-is-not-read")) return false;
+    auto odd = made;
+    odd[10] = 5;
+    if (!Check(!ShellMountPointSubstituteName(odd.data(), odd.size(), &name), "mount-an-odd-length-is-not-read")) return false;
+  }
+  // The target of a mount point as an ordinary path, whose parts are then looked at one by one.
+  {
+    if (!Check(ShellMountTargetPath(L"\\??\\C:\\redirect\\subdir") == L"C:\\redirect\\subdir", "mounttarget-path-of-a-drive-letter-target")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\D:") == L"D:\\", "mounttarget-bare-drive-gets-its-root")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\").empty(), "mounttarget-volume-guid-has-no-path")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\UNC\\server\\share").empty(), "mounttarget-unc-has-no-path")) return false;
+    if (!Check(ShellMountTargetPath(L"C:\\x").empty(), "mounttarget-without-the-nt-prefix-has-no-path")) return false;
+  }
+  // A directory ready to have a name appended: a drive root must stay "C:\\" (not "C:\\\\").
+  {
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\") == L"C:\\", "dirsep-drive-root-stays-a-root")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"e:\\") == L"e:\\", "dirsep-another-drive-root")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows") == L"C:\\Windows\\", "dirsep-a-separator-is-added")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows\\") == L"C:\\Windows\\", "dirsep-one-is-kept")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows\\\\\\") == L"C:\\Windows\\", "dirsep-several-become-one")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\\\") == L"C:\\", "dirsep-doubled-root-becomes-one")) return false;
+    if (!Check((ShellDirectoryWithSeparator(L"C:\\") + L"Windows") == L"C:\\Windows", "dirsep-appending-to-a-root-makes-a-valid-path")) return false;
+  }
+  // The allow-list for a value in a candidate folder's desktop.ini. Only plain text, and an absolute path
+  // under a known system variable (with an optional '@' and ",-N" / ",N"), are safe; a drive-letter path
+  // is not.
+  {
+    const auto safe = [&](const wchar_t *value) { return ShellIniValueIsSafe(value); };
+    // Safe.
+    if (!Check(safe(L"Documents"), "inival-plain-text")) return false;
+    if (!Check(safe(L""), "inival-empty")) return false;
+    if (!Check(safe(L"A tip for this folder"), "inival-plain-text-with-spaces")) return false;
+    if (!Check(safe(L"'abc"), "inival-a-lone-quote-in-plain-text")) return false;
+    if (!Check(safe(L"@%SystemRoot%\\system32\\shell32.dll,-21770"), "inival-system-root-resource")) return false;
+    if (!Check(safe(L"%SystemRoot%\\system32\\imageres.dll,-112"), "inival-system-root-icon-without-the-at")) return false;
+    if (!Check(safe(L"%windir%\\system32\\x.dll,3"), "inival-windir-with-a-positive-index")) return false;
+    if (!Check(safe(L"@%ProgramFiles%\\App\\a.dll,-1"), "inival-program-files")) return false;
+    if (!Check(safe(L"@%ProgramFiles(x86)%\\App\\a.dll,-1"), "inival-program-files-x86")) return false;
+    if (!Check(safe(L"%CommonProgramFiles%\\a.dll"), "inival-common-program-files")) return false;
+    if (!Check(safe(L"%SYSTEMROOT%\\system32\\x.dll"), "inival-variable-name-is-case-blind")) return false;
+    if (!Check(!safe(L"@C:\\Windows\\system32\\shell32.dll,-1"), "inival-local-drive-path-is-not-safe-a-part-can-be-a-link")) return false;
+    if (!Check(!safe(L"D:\\res\\x.dll"), "inival-another-local-drive-is-not-safe-either")) return false;
+    if (!Check(safe(L"'@%SystemRoot%\\system32\\shell32.dll,-21770'"), "inival-single-quotes-are-removed")) return false;
+    if (!Check(safe(L"\"@%SystemRoot%\\system32\\shell32.dll,-21770\""), "inival-double-quotes-are-removed")) return false;
+    if (!Check(safe(L"  %windir%\\x.dll  "), "inival-blanks-are-removed")) return false;
+    // Not safe.
+    if (!Check(!safe(L"'@\\\\server\\share\\x.dll,-1'"), "inival-single-quoted-unc")) return false;
+    if (!Check(!safe(L"\"@\\\\server\\share\\x.dll,-1\""), "inival-double-quoted-unc")) return false;
+    if (!Check(!safe(L"\"'@\\\\server\\share\\x.dll,-1'\""), "inival-one-level-of-quotes-only")) return false;
+    if (!Check(!safe(L"//server/share/icon.ico"), "inival-slash-unc")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\system32/x.dll"), "inival-slash-later-in-the-path")) return false;
+    if (!Check(!safe(L"@C:\\a/b.dll"), "inival-slash-in-a-drive-path")) return false;
+    if (!Check(!safe(L"/x"), "inival-leading-slash")) return false;
+    if (!Check(!safe(L"@/x.dll"), "inival-at-and-slash")) return false;
+    if (!Check(!safe(L"%SystemRoot%/system32/x.dll"), "inival-forward-slashes-after-a-variable")) return false;
+    if (!Check(!safe(L"\\\\server\\share\\icon.ico"), "inival-backslash-unc")) return false;
+    if (!Check(!safe(L"@\\\\server\\share\\x.dll,-1"), "inival-resource-unc")) return false;
+    if (!Check(!safe(L"\\\\?\\C:\\x.dll"), "inival-extended-length-prefix")) return false;
+    if (!Check(!safe(L"\\\\.\\pipe\\x"), "inival-device-prefix")) return false;
+    if (!Check(!safe(L"@C:\\Windows\\..\\x.dll"), "inival-dot-dot")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\..\\x.dll"), "inival-dot-dot-after-a-variable")) return false;
+    if (!Check(!safe(L"@%Unknown%\\x.dll,-1"), "inival-unknown-variable")) return false;
+    if (!Check(!safe(L"@%USERPROFILE%\\x.dll,-1"), "inival-a-variable-that-is-not-on-the-list")) return false;
+    if (!Check(!safe(L"@%SystemRoot%x.dll"), "inival-variable-without-a-separator")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\a%b.dll"), "inival-another-percent")) return false;
+    if (!Check(!safe(L"@shell32.dll,-21770"), "inival-relative-resource")) return false;
+    if (!Check(!safe(L"sub\\path.dll"), "inival-relative-path")) return false;
+    if (!Check(!safe(L"http://example.invalid/x"), "inival-url")) return false;
+    if (!Check(!safe(L"@Z:\\x.dll,-1"), "inival-non-local-drive")) return false;
+    if (!Check(!safe(L"@C:\\\\x.dll"), "inival-doubled-backslash")) return false;
+    if (!Check(!safe(L"@C:x.dll"), "inival-drive-without-a-separator")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,abc"), "inival-bad-resource-suffix")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,-"), "inival-empty-resource-index")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,1,2"), "inival-two-commas")) return false;
+    if (!Check(!safe(L"Hello, world"), "inival-a-comma-in-plain-text")) return false;
+    if (!Check(!safe(L"a:b"), "inival-a-colon-in-plain-text")) return false;
+    if (!Check(!safe(L"user@host"), "inival-an-at-in-plain-text")) return false;
+    if (!Check(!safe(L"@"), "inival-a-bare-at")) return false;
+    const auto ansi = [](const char *text) {
+      std::vector<unsigned char> bytes;
+      for (const char *c = text; *c != 0; ++c) bytes.push_back(static_cast<unsigned char>(*c));
+      return bytes;
+    };
+    const auto text_risky = [&](const std::vector<unsigned char> &bytes) {
+      return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size());
+    };
+    if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-21770\r\nIconResource=%SystemRoot%\\system32\\imageres.dll,-112\r\n")),
+               "inirisk-a-typical-known-folder-ini-is-safe")) return false;
+    if (!Check(!text_risky(ansi("")), "inirisk-empty-is-safe")) return false;
+    if (!Check(!text_risky(ansi("[Other]\r\nIconFile=\\\\server\\share\\x.ico\r\n")), "inirisk-another-section-is-not-looked-at")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName='@\\\\server\\share\\x.dll,-1'\r\n")), "inirisk-single-quoted-unc-resource-name")) return false;
+    if (!Check(text_risky(ansi("[.shellclassinfo]\r\nlocalizedresourcename=@\\\\server\\share\\x.dll,-1\r\n")), "inirisk-names-are-case-blind")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconResource=//server/share/x.dll,0\r\n")), "inirisk-slash-unc-icon-resource")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconFile=Z:\\x.ico\r\n")), "inirisk-network-icon-file")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=@\\\\server\\share\\x.dll,-3\r\n")), "inirisk-unc-info-tip")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLogo=sub\\logo.png\r\n")), "inirisk-relative-logo")) return false;
+    if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=A tip with words\r\n")), "inirisk-a-plain-info-tip-is-safe")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID2={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid2")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nUICLSID={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-uiclsid")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo\r\nx=y\r\n")), "inirisk-text-that-cannot-be-judged")) return false;
+    if (!Check(text_risky(std::vector<unsigned char>(kShellDesktopIniMaxBytes + 1, ';')), "inirisk-larger-than-the-cap")) return false;
+    {
+      std::vector<unsigned char> wide{0xFF, 0xFE};
+      for (const wchar_t c : std::wstring(L"[.ShellClassInfo]\r\nCLSID=x\r\n")) { wide.push_back(static_cast<unsigned char>(c)); wide.push_back(0); }
+      if (!Check(text_risky(wide), "inirisk-utf16-clsid")) return false;
+    }
+  }
+  // The leaf of a file system path identifies a resolved item (a known folder's parsing name is a GUID).
+  {
+    if (!Check(ShellLeafName(L"C:\\Users\\a\\Documents") == L"Documents", "leaf-of-a-path")) return false;
+    if (!Check(ShellLeafName(L"C:\\Users\\a\\Documents\\") == L"Documents", "leaf-ignores-a-trailing-separator")) return false;
+    if (!Check(ShellLeafName(L"name") == L"name", "leaf-of-a-bare-name")) return false;
+    if (!Check(ShellLeafName(L"C:\\") == L"C:", "leaf-of-a-root-is-the-drive-part")) return false;
+  }
+  // A path that resolved to a shell item is that candidate only if the name comes back as it went in;
+  // a name that ends in a dot or a space is normalized to ANOTHER entry and is never taken.
+  {
+    if (!Check(ShellResolvedNameIsTheCandidate(L"a.txt", L"a.txt"), "resolved-same-name")) return false;
+    if (!Check(ShellResolvedNameIsTheCandidate(L"a.txt", L"A.TXT"), "resolved-case-differs")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a.", L"a"), "resolved-trailing-dot-resolves-to-another-entry")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a.", L"a."), "resolved-trailing-dot-is-never-taken")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a ", L"a"), "resolved-trailing-space-resolves-to-another-entry")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a", L"b"), "resolved-another-name")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"", L""), "resolved-empty-is-never-taken")) return false;
+    if (!Check(!ShellResolvedNameIsTheCandidate(L"a", L"a", nullptr), "resolved-null-comparison-is-no")) return false;
+  }
+  std::cout << "Computer Use native Windows shell name match: PASS\n";
+  return true;
+}
+
 // ---- Classifier v2, C4-2c-1: the split high-impact vocabulary and the approved-effect judgement ----
 // The v1 vocabulary as it was before the split, frozen here byte for byte (the lists, and the two
 // matching rules). The table in computer_use_native_approved_risk.h must say exactly the same when
@@ -7650,6 +8051,7 @@ int main() {
   if (!CheckArtifactReadJudgement()) return 1;
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
+  if (!CheckWindowsShellNameMatch()) return 1;
   if (!CheckClickRule()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
