@@ -5760,8 +5760,11 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
           // The V1 resolution (search, signature, risk) and the signature the read checks run on
           // this worker inside ONE bounded V1 path (#820), with the epoch of the request: the first
           // timed-out call ends them all and a Cancel stops them before the next call. Outside a path
-          // the V1 calls are refused, so without it no node could be read.
-          const WindowsV1UiaPath uia_path(std::chrono::milliseconds::zero(), expected_epoch);
+          // the V1 calls are refused, so without it no node could be read. The path's budget is the
+          // lane's wait: once the lane has given up (abandoned), the walk ends at its next call
+          // instead of holding the single-flight slot, which the interlock entry shares, for as long
+          // as a large tree takes.
+          const WindowsV1UiaPath uia_path(kInterlockLaneHoldLimit, expected_epoch);
           IUIAutomationElement *target = nullptr;
           std::string why;
           if (FindWindowsSemanticTarget(copy, target_id, &target, &why)) {
