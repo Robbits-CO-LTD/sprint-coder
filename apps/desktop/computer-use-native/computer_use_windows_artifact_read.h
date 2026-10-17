@@ -133,6 +133,15 @@ struct WindowsArtifactReadFacts {
   return result;
 }
 
+// Overwrites a string that held a value before it is dropped (best effort: the compiler is not allowed
+// to remove a write through a volatile pointer). The buffers inside the platform (a BSTR, the UTF-16
+// text) are outside this and are only released.
+inline void ScrubArtifactText(std::string *text) {
+  volatile char *bytes = text->data();
+  for (std::size_t index = 0; index < text->size(); ++index) bytes[index] = '\0';
+  text->clear();
+}
+
 struct WindowsArtifactReadResult {
   bool ok = false;
   // The value; set only when `ok`. UTF-8, 1 to kArtifactReadMaxBytes bytes.
@@ -141,16 +150,31 @@ struct WindowsArtifactReadResult {
   ArtifactReadVerdict verdict;
   // The read did not get as far as a judgement or a value: canceled, out of budget, or a failed read.
   bool incomplete = false;
+  // The node the read found is not the one the observation recorded (its control signature differs,
+  // or it has none): the app rebuilt the control, or two controls carry the same id.
+  bool signature_mismatch = false;
 };
 
-// The read. `target_id` is the id the semantic actions use. The source must not have been used before.
+// The read. `target_id` is the id the semantic actions use, and `expected_signature` is the control
+// signature the observation recorded for it. The node this read finds (and reads the value of) must
+// carry exactly that signature, whatever a search for the id found before: an element rebuilt with
+// the same id has another runtime id and is refused. The source must not have been used before.
 [[nodiscard]] inline WindowsArtifactReadResult ReadWindowsArtifactValue(
-    ShadowUiaSource &source, std::string_view target_id, const ShadowRequestInfo &request) {
+    ShadowUiaSource &source, std::string_view target_id, const ShadowRequestInfo &request,
+    std::string_view expected_signature) {
   WindowsArtifactReadResult result;
   WindowsShadowReader reader(source);
   const ShadowUiaCapture capture = reader.Capture("copy", target_id);
   if (reader.Canceled() || !source.ActionStillValid() || capture.budget_exhausted) {
     result.incomplete = true;
+    return result;
+  }
+  // The element found now is the one that was observed. Without a signature to compare, nothing is read.
+  std::string found_signature;
+  if (expected_signature.empty() || capture.target_found == false ||
+      reader.ReadTargetSignature(&found_signature) != ShadowReadResult::kOk ||
+      found_signature != expected_signature) {
+    result.signature_mismatch = true;
     return result;
   }
   const WindowsArtifactReadFacts built = BuildWindowsArtifactReadFacts(capture, request);
@@ -160,10 +184,12 @@ struct WindowsArtifactReadResult {
   const ShadowReadResult read = reader.ReadTargetValue(kArtifactReadMaxBytes, &text);
   // A cancel or a deadline during the value read: no value, whatever it returned.
   if (reader.Canceled() || !source.ActionStillValid()) {
+    ScrubArtifactText(&text);
     result.incomplete = true;
     return result;
   }
   if (read != ShadowReadResult::kOk) {
+    ScrubArtifactText(&text);
     result.incomplete = read != ShadowReadResult::kAbsent;
     return result;
   }

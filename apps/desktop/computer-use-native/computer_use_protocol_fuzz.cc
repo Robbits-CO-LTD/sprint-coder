@@ -2890,6 +2890,10 @@ struct FakeUiaNode {
   bool has_value = false;
   std::string value;
   ShadowReadResult value_result = ShadowReadResult::kOk;
+  // The control signature of the node (what the observation recorded for its id).
+  bool has_signature = true;
+  std::string signature;
+  ShadowReadResult signature_result = ShadowReadResult::kOk;
   ShadowReadResult name_result = ShadowReadResult::kOk;
   ShadowReadResult id_result = ShadowReadResult::kOk;
   // The class read that fails (1 = the first one), counted per node; 0 = none.
@@ -3040,6 +3044,14 @@ public:
     ++core_calls;
     if (core_result != ShadowReadResult::kOk) return core_result;
     return ShadowCheckText(core_path, maximum_bytes, output);
+  }
+  ShadowReadResult ControlSignature(Element element, std::string *signature) override {
+    Tick();
+    const FakeUiaNode &node = nodes[element];
+    if (node.signature_result != ShadowReadResult::kOk) return node.signature_result;
+    if (!node.has_signature) return ShadowReadResult::kAbsent;
+    *signature = node.signature;
+    return ShadowReadResult::kOk;
   }
   ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) override {
     Tick();
@@ -8321,15 +8333,35 @@ bool CheckWindowsArtifactRead() {
     return info;
   };
   // The read of the Edit of an ordinary form. `tweak` changes the form before it is read.
-  const auto read = [&](const std::function<void(FakeForm &)> &tweak, const char *target = "name") {
+  // `expected` is the signature the observation recorded for the id; the Edit carries "sig-edit".
+  const auto read = [&](const std::function<void(FakeForm &)> &tweak, const char *target = "name",
+                        const std::string &expected = "sig-edit") {
     FakeForm form;
     form.Node(form.edit).has_value = true;
     form.Node(form.edit).value = "Fixture text: safe to replace";
+    form.Node(form.edit).signature = "sig-edit";
     if (tweak) tweak(form);
-    const WindowsArtifactReadResult result = ReadWindowsArtifactValue(form.source, target, request());
+    const WindowsArtifactReadResult result = ReadWindowsArtifactValue(form.source, target, request(), expected);
     return std::make_pair(result, form.source.value_calls);
   };
 
+  // The node that is READ is the observed one: the same id on a rebuilt control (another runtime id,
+  // so another signature), an unreadable or missing signature, and no signature to compare with.
+  {
+    const auto [rebuilt, rebuilt_calls] = read([](FakeForm &form) { form.Node(form.edit).signature = "sig-rebuilt"; });
+    if (!Check(!rebuilt.ok && rebuilt.signature_mismatch && rebuilt_calls == 0,
+               "artifact-read-same-id-another-runtime-id-is-refused-unread")) return false;
+    const auto [failed, failed_calls] = read([](FakeForm &form) { form.Node(form.edit).signature_result = ShadowReadResult::kFailed; });
+    if (!Check(!failed.ok && failed.signature_mismatch && failed_calls == 0, "artifact-read-unreadable-signature-is-refused")) return false;
+    const auto [none, none_calls] = read([](FakeForm &form) { form.Node(form.edit).has_signature = false; });
+    if (!Check(!none.ok && none.signature_mismatch && none_calls == 0, "artifact-read-no-signature-is-refused")) return false;
+    const auto [unexpected, unexpected_calls] = read(nullptr, "name", "");
+    if (!Check(!unexpected.ok && unexpected.signature_mismatch && unexpected_calls == 0,
+               "artifact-read-nothing-to-compare-with-is-refused")) return false;
+    // The value is read from the node the signature was checked on: the checked node is the Edit.
+    const auto [other, other_calls] = read(nullptr, "name", "sig-of-another-control");
+    if (!Check(!other.ok && other.signature_mismatch && other_calls == 0, "artifact-read-other-expected-signature-is-refused")) return false;
+  }
   // An Edit with a value is read, and the value is exactly the node's.
   {
     const auto [result, value_calls] = read(nullptr);

@@ -5407,6 +5407,9 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
 // goes out with Respond, not RespondAndCache) and the copy of it is scrubbed after it is sent.
 // Reads only: no input API, no pattern is invoked, nothing is set.
 struct ArtifactReadPending {
+  // Whatever value is still here when the last owner lets go (the lane gave up, or never took it)
+  // is overwritten first.
+  ~ArtifactReadPending() { ScrubString(&text); }
   std::mutex mutex;
   std::condition_variable ready;
   bool done = false;
@@ -5461,15 +5464,21 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
             const bool risky = RejectWindowsRisk(ClassifyWindowsUiaElement(target), &why);
             target->Release();
             if (same_control && !risky) {
-              std::unique_ptr<ShadowUiaSource> source = WindowsUiaShadowSource::Create(
+              std::unique_ptr<WindowsUiaShadowSource> source = WindowsUiaShadowSource::Create(
                   copy.active_window, POINT{0, 0}, still_valid,
                   WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
                   windows_uia_source_detail::InterlockShellLookupRunning());
               if (source != nullptr) {
+                // The element the read finds is checked against the observed signature (runtime id
+                // included), the same function the observation and the semantic actions use.
+                const std::uint32_t pid = copy.pid;
+                source->SetSignatureProvider([pid](IUIAutomationElement *element, std::string *out) {
+                  return ComputeWindowsControlSignature(element, pid, nullptr, out);
+                });
                 ShadowRequestInfo info;
                 info.policy_language = copy.policy_language;
                 info.maximum_mode = "full_access_app";
-                WindowsArtifactReadResult result = ReadWindowsArtifactValue(*source, target_id, info);
+                WindowsArtifactReadResult result = ReadWindowsArtifactValue(*source, target_id, info, signature);
                 ok = result.ok;
                 value = std::move(result.text);
               }
@@ -5481,6 +5490,13 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
         }
         {
           std::lock_guard<std::mutex> lock(pending->mutex);
+          // The lane sets `abandoned` while it holds this lock, so this look is not a race: a value
+          // that arrives after the lane gave up is overwritten here and never stored.
+          if (pending->abandoned.load(std::memory_order_acquire)) {
+            ScrubString(&value);
+            value.clear();
+            ok = false;
+          }
           pending->ok = ok;
           pending->text = std::move(value);
           pending->done = true;

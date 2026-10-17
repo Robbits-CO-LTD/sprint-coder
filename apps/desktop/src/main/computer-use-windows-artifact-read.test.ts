@@ -144,6 +144,31 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     expect(body).toContain('!RevalidateWindowsTarget(session, bounds, expected_epoch)');
   });
 
+  it('overwrites a value wherever helper memory can still hold it after the lane gave up', () => {
+    const body = squash(block);
+    // The pending slot scrubs what it still holds when it is released.
+    expect(body).toContain('~ArtifactReadPending() { ScrubString(&text); }');
+    // A value that reaches the slot after the lane abandoned it is overwritten, never stored (the lane
+    // sets the flag under the slot's lock, the worker looks under the same lock).
+    const worker = body.slice(
+      body.indexOf('std::lock_guard<std::mutex> lock(pending->mutex); // The lane'),
+    );
+    expect(squash(code(block))).toContain(
+      'if (pending->abandoned.load(std::memory_order_acquire)) { ScrubString(&value); value.clear(); ok = false; }',
+    );
+    expect(worker.length).toBeGreaterThan(0);
+    const lane = squash(code(block));
+    expect(
+      lane.indexOf('pending->abandoned.store(true, std::memory_order_release);'),
+    ).toBeGreaterThan(lane.indexOf('pending->ready.wait_for(lock, kInterlockLaneHoldLimit'));
+    // The portable read scrubs its own temporary on the failure paths.
+    const portable = squash(code(header));
+    expect(portable).toContain(
+      'if (reader.Canceled() || !source.ActionStillValid()) { ScrubArtifactText(&text);',
+    );
+    expect(portable).toContain('if (read != ShadowReadResult::kOk) { ScrubArtifactText(&text);');
+  });
+
   it('resolves the node as a semantic action does, and reads it through the 250 ms source', () => {
     const body = squash(code(block));
     const binding = body.indexOf('ValidateWindowsDispatchBinding(');
@@ -153,7 +178,7 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     );
     const risk = body.indexOf('RejectWindowsRisk(ClassifyWindowsUiaElement(target), &why)');
     const create = body.indexOf('WindowsUiaShadowSource::Create(');
-    const portable = body.indexOf('ReadWindowsArtifactValue(*source, target_id, info)');
+    const portable = body.indexOf('ReadWindowsArtifactValue(*source, target_id, info, signature)');
     for (const at of [binding, find, signature, risk, create, portable])
       expect(at).toBeGreaterThan(0);
     expect(find).toBeGreaterThan(binding);
@@ -179,8 +204,8 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
       "readNodeValue: (input) => { const value = record(input); return client.call( 'probe', 'read_node_value', value, stringField(value, 'sessionId'), `readNodeValue:${stringField(value, 'requestId')}`, ); },",
     );
     // Production never reports the capability: only a fake does, until T15-E enables it.
-    expect(main('computer-use-native-host.ts')).not.toMatch(/artifactReadSupporteds*[:(=]/u);
-    expect(main('computer-use-native-windows.ts')).not.toMatch(/artifactReadSupporteds*[:(=]/u);
+    expect(main('computer-use-native-host.ts')).not.toMatch(/artifactReadSupported\s*[:(=]/u);
+    expect(main('computer-use-native-windows.ts')).not.toMatch(/artifactReadSupported\s*[:(=]/u);
     // The planner and the controller still ask the capability, not the method.
     expect(main('computer-use-controller.ts')).toContain(
       'native.artifactReadSupported?.() !== true',

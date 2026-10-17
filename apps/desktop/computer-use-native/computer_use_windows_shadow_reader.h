@@ -89,6 +89,15 @@ public:
     (void)output;
     return ShadowReadResult::kAbsent;
   }
+  // The control signature of one element: the string the observation recorded for its target id
+  // (control type, automation id, runtime id, bounds...), so the element a read is about can be
+  // told from another one that carries the same id (an app that rebuilt its control). kAbsent when
+  // the source cannot compute one.
+  virtual ShadowReadResult ControlSignature(Element element, std::string *signature) {
+    (void)element;
+    (void)signature;
+    return ShadowReadResult::kAbsent;
+  }
 };
 
 namespace windows_shadow_reader_detail {
@@ -163,6 +172,12 @@ public:
   // other read: a canceled or out-of-budget capture reads nothing. kFailed when there was no target.
   // After the read the capture is over: a cancel or a deadline passed during it is reported by
   // Canceled() / Gate(), and the caller must not use a value then.
+  // The control signature of the node the last Capture located (same gate). kFailed without a target.
+  [[nodiscard]] ShadowReadResult ReadTargetSignature(std::string *signature) {
+    if (!has_target_) return ShadowReadResult::kFailed;
+    return ControlSignature(target_element_, signature);
+  }
+
   [[nodiscard]] ShadowReadResult ReadTargetValue(std::size_t maximum_bytes, std::string *output) {
     if (!has_target_) return ShadowReadResult::kFailed;
     const ShadowReadResult result = Value(target_element_, maximum_bytes, output);
@@ -225,6 +240,9 @@ private:
   }
   ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) {
     return Gated([&] { return source_.Value(element, maximum_bytes, output); });
+  }
+  ShadowReadResult ControlSignature(Element element, std::string *signature) {
+    return Gated([&] { return source_.ControlSignature(element, signature); });
   }
   // The capture is over: a cancel, or a deadline passed during the last call, makes it incomplete.
   void Finish() { (void)gate_.Finish(source_.NowNs(), source_.ActionStillValid()); }

@@ -93,15 +93,21 @@ Read ReadOf(HWND window, const std::string &target) {
   const auto started = std::chrono::steady_clock::now();
   Read read;
   const auto valid = []() { return true; };
-  std::unique_ptr<ShadowUiaSource> source =
+  std::unique_ptr<WindowsUiaShadowSource> source =
       WindowsUiaShadowSource::Create(window, POINT{0, 0}, valid, WindowsUiaShadowSource::kInterlockUiaTimeoutMs, g_lookup_slot);
   if (source == nullptr) {
     read.result.incomplete = true;
   } else {
+    // The host's signature (runtime id included) is its own function; here a fixed one stands in, so
+    // this seam shows the real source, reader and judgement. The host's check is in the harness.
+    source->SetSignatureProvider([](IUIAutomationElement *, std::string *out) {
+      *out = "live-signature";
+      return true;
+    });
     ShadowRequestInfo info;
     info.policy_language = "en";
     info.maximum_mode = "full_access_app";
-    read.result = ReadWindowsArtifactValue(*source, target, info);
+    read.result = ReadWindowsArtifactValue(*source, target, info, "live-signature");
   }
   read.micros = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
   return read;

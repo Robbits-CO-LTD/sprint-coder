@@ -767,6 +767,9 @@ public:
   static constexpr DWORD kShadowUiaTimeoutMs = 1500;
   static constexpr DWORD kInterlockUiaTimeoutMs = 250;
 
+  // How the signature of an element is computed (the host's, the one the observation recorded).
+  using SignatureProvider = std::function<bool(IUIAutomationElement *, std::string *)>;
+
   // The thread must have COM initialized. Null when UI Automation cannot be created at all.
   // `timeout_ms` bounds each UI Automation call; `lookup_slot` is the single-flight slot of the
   // shell lookup this source may start (the shadow's and the synchronous entry's are different).
@@ -940,6 +943,21 @@ public:
     windows_uia_source_detail::BstrHolder value;
     if (FAILED(value_pattern.Get()->get_CurrentValue(value.Receive()))) return ShadowReadResult::kFailed;
     return windows_uia_source_detail::ShadowTextFromUtf16(value.View(), false, maximum_bytes, output);
+  }
+
+  // The host gives the source the way it computes a control signature (the same function the
+  // observation and the semantic actions use), so a read can check the exact element it is about.
+  void SetSignatureProvider(SignatureProvider provider) { signature_provider_ = std::move(provider); }
+
+  ShadowReadResult ControlSignature(Element element, std::string *signature) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    if (!signature_provider_) return ShadowReadResult::kAbsent;
+    std::string computed;
+    if (!signature_provider_(current, &computed)) return ShadowReadResult::kFailed;
+    if (computed.empty()) return ShadowReadResult::kAbsent;
+    *signature = std::move(computed);
+    return ShadowReadResult::kOk;
   }
 
   ShadowReadResult WindowProcessPath(Element window, std::size_t maximum_bytes,
@@ -1132,6 +1150,7 @@ private:
   StillValid still_valid_;
   std::atomic<bool> &lookup_slot_;
   std::vector<IUIAutomationElement *> elements_;
+  SignatureProvider signature_provider_;
 };
 
 } // namespace sprint_coder::computer_use

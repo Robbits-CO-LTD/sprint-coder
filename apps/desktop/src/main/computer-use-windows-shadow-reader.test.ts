@@ -456,6 +456,8 @@ describe('Windows UI Automation source only reads', () => {
       'InterlockShellLookupRunning',
       'Text',
       'Value',
+      'ControlSignature',
+      'SetSignatureProvider',
       'View',
       'Widen',
       'WindowProcessPath',
