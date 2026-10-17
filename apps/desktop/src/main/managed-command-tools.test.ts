@@ -133,6 +133,70 @@ function createCommandBoundary(workspace: string) {
   return { boundary, commandRows, backgroundTransitions, backgroundCompletions, publish };
 }
 
+describe('managed command root selection (issue #840)', () => {
+  it('runs in the secondary root when cwd is an absolute path inside it and rootId is omitted', async () => {
+    const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-command-root-a-'));
+    const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-command-root-b-'));
+    roots.push(primary, secondary);
+    const registry = new ToolRegistry();
+    registry.register(MANAGED_EXEC_COMMAND_TOOL);
+    const { boundary } = createCommandBoundary(primary);
+    const single = boundary.persistence.readTurnWorkspaceSet('turn')!;
+    boundary.persistence.readTurnWorkspaceSet = () => ({
+      ...single,
+      roots: [
+        single.roots[0]!,
+        {
+          rootId: 'root-b',
+          path: secondary,
+          label: 'b',
+          role: 'secondary',
+          status: 'available',
+        },
+      ],
+    });
+    const runner = new CommandRunner();
+    const sessions = new ManagedCommandSessions(runner);
+    const prepare = vi
+      .spyOn(commandRunnerModule, 'prepareExecutionSpec')
+      .mockRejectedValueOnce(new Error('stop after root selection'));
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({ decision: 'allow', reason: 'test' }),
+    );
+    registerCommandRunnerTool(broker, runner, boundary, MANAGED_EXEC_COMMAND_TOOL, sessions);
+    const owner = {
+      taskId: 'task-command-root',
+      turnId: 'turn-command-root',
+      workspaceId: 'workspace-command-root',
+      policyEpoch: 1,
+    };
+    broker.startTurn(owner, 'grok');
+    try {
+      await expect(
+        broker.dispatch({
+          ...owner,
+          callId: 'exec-secondary',
+          providerName: 'exec_command',
+          input: {
+            executable: process.execPath,
+            argv: ['-e', ''],
+            cwd: secondary,
+            purpose: 'secondary root cwd',
+          },
+        }),
+      ).rejects.toThrow('stop after root selection');
+      expect(prepare).toHaveBeenCalledWith(
+        expect.objectContaining({ rootId: 'root-b', workspacePath: secondary, cwd: secondary }),
+      );
+    } finally {
+      prepare.mockRestore();
+      await sessions.dispose();
+    }
+  });
+});
+
 describe('managed command startup persistence', () => {
   it.each([
     { state: 'prepared', beforeSpawn: false, background: false, terminationUnconfirmed: true },

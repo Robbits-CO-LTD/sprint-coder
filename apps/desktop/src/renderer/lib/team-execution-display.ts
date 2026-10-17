@@ -80,6 +80,9 @@ export function writeScopeLabel(accessMode: TeamExecutionSummary['accessMode']):
  *    requireWorkspaceWrite が作業場所の変更なしを確かめて 'succeeded' を 'failed' へ差し替えた
  *    場合（issue #584）。Worker は完了条件を満たしたと報告しても、Mainの検証で上書きされる。
  *  - 'rate_limited': team-coordinator.ts 3701行。ProviderRateLimitedError による失敗。
+ *  - 'egress_denied': team-coordinator.ts の同じ失敗経路。Main の送信可否検査（秘密情報スキャンを
+ *    含む）が Worker への送信を拒否した WorkerEgressDeniedError（issue #841）。検出した理由コードは
+ *    Team 診断ログ（team.attempt.egress_denied）に残る。
  *  - 'steered': team-coordinator.ts 4015行。修正指示（team_steer_execution）による中断。
  *  - 'app_restart': persistence.ts 12389/12471行。アプリ再起動からの復元時に未確定のまま終了扱い
  *    にした実行の起点。
@@ -98,6 +101,7 @@ export const TERMINAL_REASON_LABELS: Readonly<Record<string, string>> = {
   worker_reported_failure: 'Workerが失敗を報告',
   workspace_write_unverified: '書き込みを確認できず失敗',
   rate_limited: 'レート制限で停止',
+  egress_denied: '送信前の検査で送信を止めた',
   steered: '修正指示により中断',
   app_restart: 'アプリ再起動で中断',
 };

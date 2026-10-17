@@ -1535,7 +1535,7 @@ export class IpcRouter {
             : kind === 'claude'
               ? authorizeClaudeProviderEgress
               : authorizeCodexProviderEgress;
-        return authorize({
+        const decision = authorize({
           broker: this.permissionBroker,
           task: this.persistence.getTask(taskId),
           turnId,
@@ -1546,7 +1546,13 @@ export class IpcRouter {
           knownWorkspaceRoots,
           context,
           now: new Date().toISOString(),
-        }).allowed;
+        });
+        // Reason codes only, so a denied step can say why it stopped (issue #841).
+        return {
+          allowed: decision.allowed,
+          reason: decision.evaluation.reason,
+          disclosureReasons: decision.disclosureReasons ?? [],
+        };
       },
       contextFor: (worker, executionId) =>
         executionId === undefined
@@ -8768,7 +8774,10 @@ export class IpcRouter {
               },
             )
           : undefined;
-      const workspaceGuidance = providerWorkspaceGuidance();
+      const workspaceGuidance = providerWorkspaceGuidance(
+        process.platform,
+        started.workspaceSet.roots,
+      );
       if (!teamTurn)
         messages.unshift({
           role: 'system',

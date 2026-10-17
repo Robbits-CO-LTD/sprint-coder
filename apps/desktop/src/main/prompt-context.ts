@@ -36,6 +36,7 @@ export type PromptEnvironment = Readonly<{
   currentDate: string;
   workingDirectory: string | null;
   workspaceRoots: readonly Readonly<{
+    rootId: string;
     label: string;
     path: string;
     role: 'primary' | 'secondary';
@@ -97,7 +98,7 @@ export function compilePromptGuidance(input: {
     }))
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
   const workspaceRoots = input.workspace.roots
-    .map(({ label, path, role }) => ({ label, path, role }))
+    .map(({ rootId, label, path, role }) => ({ rootId, label, path, role }))
     .sort((left, right) => left.path.localeCompare(right.path));
   const mode =
     input.writeScope === 'read-only' || requestedAgent.mode === 'read-only'
@@ -281,6 +282,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     lines.push('- 親にない能力やツールを子が持つものとして扱わない。');
   }
   lines.push('', '実行環境:', JSON.stringify(context.environment));
+  if (context.environment.workspaceRoots.length > 1)
+    lines.push(
+      '- 複数のWorkspaceフォルダがある。primary以外のフォルダを読む・書く・コマンドを実行するときは、ツールの rootId に workspaceRoots のそのフォルダの rootId を渡す（path はそのフォルダからの相対パス）。rootId を省いた相対パスは primary のフォルダとして扱う。どれか1つのフォルダの中を指す絶対パスは、rootId を省いてもそのフォルダとして扱う。',
+    );
   if (context.workspaceRules.length > 0) {
     lines.push(
       '',

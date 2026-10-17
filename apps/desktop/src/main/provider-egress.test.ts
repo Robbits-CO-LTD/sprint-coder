@@ -68,29 +68,70 @@ if (runsWithElectronAbi)
       fixture.persistence.close();
     });
     it.each([
-      { localOnly: true, suffix: '' },
-      { localOnly: false, suffix: '\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH' },
-      { localOnly: false, suffix: '\npassword="not-for-a-provider"' },
-    ])('keeps protected egress denied with a known root (%#)', ({ localOnly, suffix }) => {
-      const fixture = createFixture(localOnly);
-      const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
-      let dispatches = 0;
-      const decision = dispatchAfterCodexProviderEgress(
-        {
+      { localOnly: true, suffix: '', scanCodes: [] as string[] },
+      {
+        localOnly: false,
+        suffix: '\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH',
+        scanCodes: ['high-entropy-value'],
+      },
+      {
+        localOnly: false,
+        suffix: '\npassword="not-for-a-provider"',
+        scanCodes: ['credential-field'],
+      },
+    ])(
+      'keeps protected egress denied with a known root (%#)',
+      ({ localOnly, suffix, scanCodes }) => {
+        const fixture = createFixture(localOnly);
+        const root = '/private/tmp/sprint-coder-patrol-20260905/workspace';
+        let dispatches = 0;
+        const decision = dispatchAfterCodexProviderEgress(
+          {
+            broker: new PermissionBroker(fixture.persistence),
+            task: fixture.task,
+            turnId: 'protected-workspace-root',
+            prompt: `${root}${suffix}`,
+            knownWorkspaceRoots: [root],
+            context,
+            now: '2026-09-05T00:00:00.000Z',
+          },
+          () => {
+            dispatches += 1;
+          },
+        );
+        expect(decision.allowed).toBe(false);
+        // A secret-scan denial is explained by its codes, never by the bytes it withheld (issue
+        // #841); a local-only denial has nothing from the scan to explain.
+        if (scanCodes.length === 0) expect(decision.disclosureReasons).toEqual([]);
+        else expect(decision.disclosureReasons).toEqual(expect.arrayContaining(scanCodes));
+        expect(JSON.stringify(decision)).not.toContain('8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH');
+        expect(JSON.stringify(decision)).not.toContain('not-for-a-provider');
+        expect(dispatches).toBe(0);
+        fixture.persistence.close();
+      },
+    );
+    it('allows a long root label set apart from its isolation root (issue #841)', () => {
+      const fixture = createFixture(false);
+      const root =
+        '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-14838862-f09e-4174-84e4-68cbb3cac903-1';
+      const label = 'realai-ws-codex-graph-Hnb2yq';
+      const decide = (prompt: string, turnId: string) =>
+        authorizeCodexProviderEgress({
           broker: new PermissionBroker(fixture.persistence),
           task: fixture.task,
-          turnId: 'protected-workspace-root',
-          prompt: `${root}${suffix}`,
+          turnId,
+          prompt,
           knownWorkspaceRoots: [root],
           context,
-          now: '2026-09-05T00:00:00.000Z',
-        },
-        () => {
-          dispatches += 1;
-        },
-      );
-      expect(decision.allowed).toBe(false);
-      expect(dispatches).toBe(0);
+          now: '2026-10-18T00:00:00.000Z',
+        });
+      // The Worker prompt's old `label=root` spelling fused the label into the root's token.
+      const fused = decide(`隔離root: ${label}=${root}`, 'fused-label');
+      expect(fused.allowed).toBe(false);
+      expect(fused.evaluation.reason).toBe('parent_ceiling');
+      expect(fused.disclosureReasons).toEqual(['high-entropy-value']);
+      const apart = decide(`隔離root: ${label} = ${root}`, 'separate-label');
+      expect(apart).toMatchObject({ allowed: true, disclosureReasons: [] });
       fixture.persistence.close();
     });
     it.each(['codex', 'claude', 'grok'] as const)(

@@ -205,7 +205,7 @@ describe('activity supplements', () => {
       );
       expect(display.details).toContain(`終了理由 ${TERMINAL_REASON_LABELS[reason]}`);
     }
-    expect(Object.keys(TERMINAL_REASON_LABELS)).toHaveLength(11);
+    expect(Object.keys(TERMINAL_REASON_LABELS)).toHaveLength(12);
   });
 
   it('falls back to the raw code for an unknown terminal reason, e.g. a Graph Mission free-text reason (issue #583)', () => {

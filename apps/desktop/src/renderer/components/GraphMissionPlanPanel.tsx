@@ -140,9 +140,13 @@ export function GraphMissionPlanPanel({
                     // scheduler admits it; that reason no longer explains where it stands.
                     const stoppedReason = execution.graph?.stepResumePending
                       ? null
-                      : stoppedExecutionReason(
-                          team?.executions.find((item) => item.id === execution.executionId),
-                        );
+                      : stoppedExecutionReason({
+                          // The step's own state is what the line above shows (issue #841).
+                          state: execution.state,
+                          terminalReason:
+                            team?.executions.find((item) => item.id === execution.executionId)
+                              ?.terminalReason ?? null,
+                        });
                     return (
                       <>
                         <p data-testid="graph-step-state">

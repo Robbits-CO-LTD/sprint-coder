@@ -45,7 +45,9 @@ import { WorkerWorktreeManager } from './worker-worktree';
 import {
   TeamCoordinator,
   DeterministicTeamWorkerRuntime,
+  WorkerEgressDeniedError,
   WorkerRuntimeExitUnconfirmedError,
+  type TeamDiagnosticEvent,
   type TeamWorkerRuntime,
 } from './team-coordinator';
 import { authorizationTurnIsActive, workerManagedCatalogOwner } from './ipc';
@@ -2227,6 +2229,55 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         }
       },
     );
+
+    it('parks a step the egress gate denied with its reason and the scan codes in diagnostics (issue #841)', async () => {
+      const f = fixture();
+      const scheduler = new TeamExecutionScheduler(2);
+      const runtime = new DeterministicTeamWorkerRuntime();
+      vi.spyOn(runtime, 'execute').mockRejectedValue(
+        new WorkerEgressDeniedError('codex', 'parent_ceiling', ['high-entropy-value']),
+      );
+      const diagnostics: TeamDiagnosticEvent[] = [];
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        (event) => diagnostics.push(event),
+      );
+      try {
+        const mission = await coordinator.startGraphMission(f.task.id, async () => f.input);
+        const first = mission.steps[0]!.executionId;
+        await vi.waitFor(() =>
+          expect(f.persistence.getTeamExecution(first).state).toBe('waiting_resume'),
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        const reason =
+          'codex Team Worker egress was denied: 送信前の秘密情報検査が送信を止めました（検出: high-entropy-value）';
+        expect(f.persistence.listTeamAttempts(first).at(-1)?.terminalReason).toBe(reason);
+        // The step's summary carries the same reason to the Graph panel.
+        const detail = coordinator.get(f.task.id)!;
+        expect(detail.executions.find(({ id }) => id === first)?.terminalReason).toBe(reason);
+        expect(diagnostics).toContainEqual(
+          expect.objectContaining({
+            event: 'team.attempt.egress_denied',
+            missionId: mission.id,
+            status: 'denied',
+            result: 'secret_scan:high-entropy-value',
+          }),
+        );
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
 
     it('runs every graph step through the real Worker catalog preflight without a chat Turn', async () => {
       const f = fixture(undefined, false, ['a', 'b', 'c']);

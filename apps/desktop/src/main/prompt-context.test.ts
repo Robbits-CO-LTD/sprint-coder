@@ -252,6 +252,46 @@ describe('prompt context compiler', () => {
     expect(fragments[0]?.content).toContain('基本方針:');
     expect(fragments[1]?.authority).toBe('none');
   });
+
+  // Issue #840: without each folder's rootId the agent had no way to address a secondary folder.
+  it('tells the agent the rootId of every workspace folder and how to address a secondary one', () => {
+    const compiled = compilePromptGuidance({
+      workspace: {
+        primaryRootId: 'root-a',
+        digest: 'ws',
+        roots: [
+          { rootId: 'root-a', path: '/work/a', label: 'a', role: 'primary' },
+          { rootId: 'root-b', path: '/work/b', label: 'b', role: 'secondary' },
+        ],
+      },
+      toolCatalog: catalog([]),
+      vcs: [],
+      workspaceRules: [],
+      platform: 'win32',
+      shell: null,
+    });
+    expect(compiled.context.environment.workspaceRoots).toEqual([
+      { rootId: 'root-a', label: 'a', path: '/work/a', role: 'primary' },
+      { rootId: 'root-b', label: 'b', path: '/work/b', role: 'secondary' },
+    ]);
+    expect(compiled.content).toContain('"rootId":"root-b"');
+    expect(compiled.content).toContain('複数のWorkspaceフォルダ');
+  });
+
+  it('keeps the multi-folder sentence out of a single-folder Turn', () => {
+    const compiled = compilePromptGuidance({
+      workspace,
+      toolCatalog: catalog([]),
+      vcs: [],
+      workspaceRules: [],
+      platform: 'linux',
+      shell: null,
+    });
+    expect(compiled.context.environment.workspaceRoots).toEqual([
+      { rootId: 'root', label: 'repo', path: '/work/repo', role: 'primary' },
+    ]);
+    expect(compiled.content).not.toContain('複数のWorkspaceフォルダ');
+  });
 });
 
 function catalog(entries: ToolCatalogSnapshot['entries']): ToolCatalogSnapshot {

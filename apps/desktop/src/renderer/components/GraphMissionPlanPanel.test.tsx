@@ -34,19 +34,22 @@ const plan: GraphMissionPlan = {
   ],
 };
 
-function seed(graph: {
-  stepResumeAvailable: boolean;
-  integrationResumeAvailable: boolean;
-  stepResumePending?: boolean;
-  workspaceReviewRequired?: boolean;
-  waitReason?: 'dependencies' | 'resources' | 'write-conflicts' | 'owner-active';
-}) {
+function seed(
+  graph: {
+    stepResumeAvailable: boolean;
+    integrationResumeAvailable: boolean;
+    stepResumePending?: boolean;
+    workspaceReviewRequired?: boolean;
+    waitReason?: 'dependencies' | 'resources' | 'write-conflicts' | 'owner-active';
+  },
+  terminalReason: string | null = null,
+) {
   useAppStore.setState({
     teamByTask: {
       'task-1': {
         team: { state: 'active' },
         workers: [{ id: 'worker-a', role: 'reviewer', state: 'waiting', writeCapable: false }],
-        executions: [],
+        executions: [{ id: 'execution-a', terminalReason }],
         missions: [
           {
             id: 'mission-1',
@@ -383,5 +386,43 @@ it('hides the old stop reason once the step has been resumed', async () => {
     );
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+// issue #841: an egress denial reads as its reason, not as a bare wait; a resumed step drops it.
+it('says why a parked step stopped instead of a bare wait (issue #841)', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('sprintCoder', { graphs: {} });
+  const reason = 'codex Team Worker egress was denied: 送信前の秘密情報検査が送信を止めました';
+  seed({ stepResumeAvailable: true, integrationResumeAvailable: false }, reason);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    const state = () =>
+      container.querySelector('[data-testid="graph-step-state"]')?.textContent ?? '';
+    expect(state()).toBe(`再開待ち · 理由: ${reason}`);
+    await act(async () => root.unmount());
+    seed({ stepResumeAvailable: true, integrationResumeAvailable: false }, 'egress_denied');
+    const coded = createRoot(container);
+    await act(async () =>
+      coded.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(state()).toBe('再開待ち · 理由: 送信前の検査で送信を止めた');
+    await act(async () => coded.unmount());
+    seed(
+      { stepResumeAvailable: false, integrationResumeAvailable: false, stepResumePending: true },
+      reason,
+    );
+    const resumed = createRoot(container);
+    await act(async () =>
+      resumed.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(state()).toBe('再開済み · 依存の完了待ち');
+    await act(async () => resumed.unmount());
+  } finally {
+    container.remove();
   }
 });

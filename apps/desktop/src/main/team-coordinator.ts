@@ -236,6 +236,35 @@ export class WorkerRuntimeFailureError extends Error {
   }
 }
 
+/**
+ * Main's egress gate refused to send a Worker's prompt to its Provider (issue #841). It carries the
+ * gate's reason codes only — the policy reason and the secret scan's reason codes — and never the
+ * withheld bytes, so a parked step can say why it stopped without disclosing what it held back.
+ */
+export class WorkerEgressDeniedError extends Error {
+  constructor(
+    readonly runtimeKind: 'claude' | 'codex' | 'grok',
+    readonly policyReason: string | null,
+    readonly disclosureReasons: readonly string[],
+  ) {
+    super(
+      `${runtimeKind} Team Worker egress was denied: ${
+        disclosureReasons.length > 0
+          ? `送信前の秘密情報検査が送信を止めました（検出: ${disclosureReasons.join(', ')}）`
+          : `送信の許可が得られませんでした（${policyReason ?? 'unknown'}）`
+      }`,
+    );
+    this.name = 'WorkerEgressDeniedError';
+  }
+
+  /** What a diagnostic records: `secret_scan:<code>` for each scan reason, else the policy's. */
+  get diagnosticCodes(): string {
+    return this.disclosureReasons.length > 0
+      ? this.disclosureReasons.map((code) => `secret_scan:${code}`).join(',')
+      : `policy:${this.policyReason ?? 'unknown'}`;
+  }
+}
+
 class TeamIntegrationResumeRequiredError extends Error {
   constructor(message: string) {
     super(message);
@@ -1696,6 +1725,11 @@ export class TeamCoordinator {
       const reason = (error instanceof Error ? error.message : 'Graph execution failed').slice(
         0,
         2000,
+      );
+      this.recordWorkerEgressDenial(
+        { taskId: graph.taskId, teamId: execution.teamId, missionId: graph.missionId },
+        worker.id,
+        error,
       );
       const runtimeFailure = workerRuntimeFailureOf(error);
       if (
@@ -4024,6 +4058,15 @@ export class TeamCoordinator {
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
       this.releaseReservations(reservations);
+      this.recordWorkerEgressDenial(
+        {
+          taskId: input.taskId,
+          teamId: input.teamId,
+          ...(mission === null ? {} : { missionId: mission.id }),
+        },
+        worker.id,
+        error,
+      );
       const runtimeFailure = workerRuntimeFailureOf(error);
       if (
         attemptId !== null &&
@@ -4135,7 +4178,9 @@ export class TeamCoordinator {
           ? error.code
           : error instanceof ProviderRateLimitedError
             ? 'rate_limited'
-            : 'runtime_failure';
+            : error instanceof WorkerEgressDeniedError
+              ? 'egress_denied'
+              : 'runtime_failure';
       if (attemptId !== null) {
         const attempt = this.persistence.getTeamAttempt(attemptId);
         if (!['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state))
@@ -4318,6 +4363,25 @@ export class TeamCoordinator {
     return true;
   }
 
+  /**
+   * Leaves the egress gate's reason codes in the Team diagnostics (issue #841): the step's own
+   * reason says the scan stopped it, and this says which checks did. Codes only, never the bytes.
+   */
+  private recordWorkerEgressDenial(
+    scope: { taskId: string; teamId: string; missionId?: string },
+    workerId: string,
+    error: unknown,
+  ): void {
+    if (!(error instanceof WorkerEgressDeniedError)) return;
+    this.diagnostic?.({
+      event: 'team.attempt.egress_denied',
+      ...scope,
+      workerId,
+      status: 'denied',
+      result: error.diagnosticCodes,
+    });
+  }
+
   private recordWorkerRuntimeFailure(
     scope: { taskId: string; teamId: string },
     attemptId: string,
@@ -4378,6 +4442,8 @@ export class TeamCoordinator {
       // A CLI that may still be running must not get a second one beside it (issue #548); an
       // execution refused for that reason would only be refused again.
       error instanceof WorkerRuntimeExitUnconfirmedError ||
+      // The gate judges the same payload the same way, so a retry would only be denied again.
+      error instanceof WorkerEgressDeniedError ||
       this.persistence.listTeamAttempts(input.executionId).length >= 2
     )
       return false;
