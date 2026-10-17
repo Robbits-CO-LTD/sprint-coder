@@ -181,6 +181,8 @@ function createFixture(
     /** The Task permission policy, in full (instead of the approval-required stand-in). */
     authorize?: ComputerUseControllerDeps['authorize'];
     startSessionGate?: Promise<void>;
+    /** Main's Computer Use (beta) gate; open unless a test closes it. */
+    featureEnabled?: () => boolean;
     revalidateWindowsGate?: Promise<void>;
     failFocusRestore?: boolean;
     focusRestoreGate?: Promise<void>;
@@ -579,7 +581,7 @@ function createFixture(
     ...(options.runtimeCapture === undefined ? {} : { runtimeCapture: options.runtimeCapture }),
     ...(options.planner === undefined ? {} : { planner: options.planner }),
     ...(options.plannerFactory === undefined ? {} : { plannerFactory: options.plannerFactory }),
-    featureEnabled: () => true,
+    featureEnabled: options.featureEnabled ?? (() => true),
     agentDrivenEnabled: () => true,
     ...(options.artifactStore === undefined ? {} : { artifactStore: options.artifactStore }),
     ...(options.effectiveEligibilityMode === undefined
@@ -3603,6 +3605,65 @@ describe('ComputerUseController', () => {
     expect(fixture.controller.getStatus(started.sessionId)?.state).not.toBe('stopped');
     await fixture.controller.stop(started.sessionId);
     await fixture.controller.dispose();
+  });
+
+  describe('the Computer Use (beta) setting as the feature gate', () => {
+    it('reports feature_disabled while the setting is off and opens when it is on', async () => {
+      let setting = false;
+      const fixture = createFixture({ featureEnabled: () => setting });
+      expect(fixture.controller.availability()).toMatchObject({
+        state: 'feature_disabled',
+        featureEnabled: false,
+        available: false,
+        observe: false,
+        control: false,
+      });
+      // Off is enforced, not just displayed: a start is refused before any native session.
+      await expect(start(fixture)).rejects.toThrow();
+      expect(fixture.startSessionEnteredCount()).toBe(0);
+
+      setting = true;
+      expect(fixture.controller.availability()).toMatchObject({
+        featureEnabled: true,
+        available: true,
+      });
+      expect(fixture.controller.availability().state).not.toBe('feature_disabled');
+      await fixture.controller.dispose();
+    });
+
+    it('ends a running session as a policy change when the setting is turned off', async () => {
+      let setting = true;
+      const fixture = createFixture({ featureEnabled: () => setting });
+      const started = await start(fixture);
+      setting = false;
+      await fixture.controller.featureDisabled();
+      expect(fixture.controller.getStatus(started.sessionId)).toBeNull();
+      expect(fixture.statuses.at(-1)).toMatchObject({
+        sessionId: started.sessionId,
+        state: 'stopped',
+        stopReason: 'policy_changed',
+      });
+      expect(fixture.controller.availability().state).toBe('feature_disabled');
+      await expect(start(fixture)).rejects.toThrow();
+      await fixture.controller.dispose();
+    });
+
+    it('cancels a start that is still in flight when the setting is turned off', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let setting = true;
+      const fixture = createFixture({ startSessionGate: gate, featureEnabled: () => setting });
+      const starting = start(fixture);
+      await vi.waitFor(() => expect(fixture.startSessionEnteredCount()).toBe(1));
+      setting = false;
+      await fixture.controller.featureDisabled();
+      release();
+      await expect(starting).rejects.toThrow('policy_changed');
+      expect(fixture.statuses.filter((status) => status.state !== 'stopped')).toEqual([]);
+      await fixture.controller.dispose();
+    });
   });
 
   it('stops every ephemeral session when the trusted Renderer is reloaded', async () => {

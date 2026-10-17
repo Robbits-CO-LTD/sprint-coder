@@ -13,6 +13,17 @@ direct unit/integration/native contract proof specified by AC-29; it does not re
 every fault as real-application E2E. Add platform E2E only where a failure directly requires it.
 Compatibility must match measured support and the UI/documentation claims.
 
+Feature gate (beta setting): the user-facing switch is the persisted setting
+`computer-use.enabled` (設定 → 詳細 → 「Computer Use を使用する」, labelled 「ベータ版」), which
+defaults to off. Main's gate is open when that setting is on **or**
+`SPRINT_CODER_COMPUTER_USE_DESKTOP_V1` is exactly `1`; the env stays a forced-on override for CI
+and acceptance runs, and the setting cannot turn it off. The signed native part is still loaded
+once, at startup, and only when one of the two asked for it, so turning the setting on at runtime
+shows 「再起動後に有効になります」 and takes effect after a restart. Turning it off closes the gate
+at once and stops any running or starting session (`policy_changed`). Every package, signature,
+handshake and permission gate below is unchanged. Until the journeys pass, "remains disabled"
+above means: the setting ships off by default and is presented as beta, not as generally available.
+
 `FAIL / EXTERNAL_GATE_NOT_RUN` in the pending template means that canonical evidence has not
 been supplied; it does not claim an attempted run failed or that the corresponding automated
 Safety test failed. Core and Safety never accept `SKIP`. Compatibility may be `FAIL` or `SKIP`

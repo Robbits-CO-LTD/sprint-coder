@@ -9,6 +9,7 @@ import {
   computerAppProfileSchema,
   computerAppGrantRequestSchema,
   computerUseAvailabilitySchema,
+  computerUseSettingsSchema,
   computerAppGrantResolveInputSchema,
   computerStartToolOutputSchema,
   computerUseGrantRevokeInputSchema,
@@ -36,6 +37,7 @@ import {
 } from './computer-use-target-model';
 import { ComputerUseArtifactStore } from './computer-use-artifact';
 import { ComputerUseController } from './computer-use-controller';
+import { createComputerUseFeatureGate } from './computer-use-feature-gate';
 import {
   computerAppGrantIdentityFrom,
   computerAppNativeIdentityDigest,
@@ -589,6 +591,50 @@ describe('Computer Use Main IPC integration', () => {
     } catch (error) {
       expect(toPublicError(error)).toMatchObject({ code: 'RUNTIME_UNAVAILABLE' });
     }
+  });
+
+  it('saves the Computer Use (beta) setting and ends live Computer Use when it is turned off', async () => {
+    const fixture = captureComputerUseHandlers();
+    let saved = false;
+    const featureDisabled = vi.fn(async () => undefined);
+    Object.assign(fixture.persistence, {
+      getComputerUseEnabled: vi.fn(() => saved),
+      setComputerUseEnabled: vi.fn((enabled: boolean) => {
+        saved = enabled;
+      }),
+    });
+    Object.assign(fixture.controller, { featureDisabled });
+    Object.assign(fixture.router, {
+      computerUseFeature: createComputerUseFeatureGate({
+        setting: () => saved,
+        environment: {},
+        loadedAtStartup: true,
+        buildSupported: () => false,
+      }),
+    });
+    const get = fixture.handlers.get(IPC_CHANNELS.settingsGetComputerUse)!;
+    const set = fixture.handlers.get(IPC_CHANNELS.settingsSetComputerUse)!;
+    expect(fixture.schemas.get(IPC_CHANNELS.settingsGetComputerUse)?.output).toBe(
+      computerUseSettingsSchema,
+    );
+    expect(await get({}, {}, {})).toMatchObject({ enabled: false, effective: false });
+
+    await expect(set({ enabled: true }, {}, {})).resolves.toEqual({
+      enabled: true,
+      forcedByEnvironment: false,
+      effective: true,
+      restartRequired: false,
+      buildSupported: false,
+    });
+    expect(fixture.persistence.setComputerUseEnabled).toHaveBeenLastCalledWith(true);
+    expect(featureDisabled).not.toHaveBeenCalled();
+
+    await expect(set({ enabled: false }, {}, {})).resolves.toMatchObject({
+      enabled: false,
+      effective: false,
+    });
+    expect(fixture.persistence.setComputerUseEnabled).toHaveBeenLastCalledWith(false);
+    expect(featureDisabled).toHaveBeenCalledTimes(1);
   });
 
   it('consumes application activation and persists only the Main-resolved identity', async () => {

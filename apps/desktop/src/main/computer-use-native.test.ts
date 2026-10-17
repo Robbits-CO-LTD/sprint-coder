@@ -1643,6 +1643,41 @@ describe('Computer Use native manifest and runtime gate', () => {
       requireAddon: () => addon,
     });
     expect(flagOff.probe.reason).toBe('FEATURE_FLAG_DISABLED');
+
+    // The saved beta setting opens the first gate without the env override, and every later check
+    // still runs: the same package loads, and a wrong signer is still refused.
+    const userEnabled = loadComputerUseNative({
+      environment: {},
+      userEnabled: true,
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'darwin',
+      architecture: 'arm64',
+      requireAddon: () => addon,
+      verifySignature: () => 'a'.repeat(64),
+    });
+    expect(userEnabled.probe).toMatchObject({ available: true, backend: 'fixture' });
+    const userEnabledSignerMismatch = loadComputerUseNative({
+      environment: {},
+      userEnabled: true,
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'darwin',
+      architecture: 'arm64',
+      requireAddon: () => addon,
+      verifySignature: () => 'b'.repeat(64),
+    });
+    expect(userEnabledSignerMismatch.probe.reason).toBe('ARTIFACT_SIGNATURE_MISMATCH');
+    const userDisabled = loadComputerUseNative({
+      environment: {},
+      userEnabled: false,
+      dirname: fixture.packagedDirname,
+      resourcesPath: fixture.resources,
+      platform: 'darwin',
+      architecture: 'arm64',
+      requireAddon: () => addon,
+    });
+    expect(userDisabled.probe.reason).toBe('FEATURE_FLAG_DISABLED');
   });
 
   it.each([null, 'buildMode', 'ruleset', 'classifier', 'lexicon'])(

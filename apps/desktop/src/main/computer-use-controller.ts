@@ -3742,6 +3742,22 @@ export class ComputerUseController {
         void this.stop(session.status.sessionId, 'policy_changed');
   }
 
+  /**
+   * The user turned Computer Use (beta) off. `availability()` already reads the closed gate, so no
+   * new session can start; this ends what was already running or starting, as a policy change.
+   */
+  async featureDisabled(): Promise<void> {
+    this.withdrawAppGrantCardFor(() => true);
+    this.startingController?.abort(new Error('Computer Use was turned off'));
+    for (const starting of this.startingSessions.values()) {
+      starting.reason = 'policy_changed';
+      starting.controller.abort(new Error('Computer Use was turned off'));
+    }
+    await Promise.all(
+      [...this.sessions.keys()].map((sessionId) => this.stop(sessionId, 'policy_changed')),
+    );
+  }
+
   async rendererInvalidated(): Promise<void> {
     // The window that was showing the card is gone, so the click it was waiting for can never come.
     this.withdrawAppGrantCardFor(() => true);

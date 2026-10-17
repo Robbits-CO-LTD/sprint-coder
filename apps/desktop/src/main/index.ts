@@ -31,6 +31,10 @@ import {
 } from './native-safe-fs';
 import { computerUseCompiledAcceptanceMode } from './computer-use-acceptance-mode';
 import { loadComputerUseNative } from './computer-use-native';
+import {
+  computerUseRequestedAtStartup,
+  createComputerUseFeatureGate,
+} from './computer-use-feature-gate';
 import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
 import {
   createComputerUseNativeHost,
@@ -172,10 +176,23 @@ if (squirrelStartup || !hasLock) {
         app.getPath('userData'),
       );
       nativeSafeFs = loadNativeSafeFs({ lockDirectoryPath: nativeSafeFsLockDirectory });
+      const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
+      persistence = new SqlitePersistenceClient(
+        databasePath,
+        (binding) => nativeSafeFs!.assertSession(binding),
+        (workspaceKey, minimumFence) =>
+          nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
+      );
+      // Computer Use (beta) is the user's saved setting, with the env as a forced-on override. It is
+      // read here, before the native part loads, because that part is loaded once per process: a
+      // setting turned on later reports that a restart applies it.
+      const computerUseLoadedAtStartup = computerUseRequestedAtStartup(
+        persistence.getComputerUseEnabled(),
+      );
       // The Computer Use host is always injected through the signed/packaged loader. In source
       // builds this produces a visible unavailable capability; no PATH or renderer fallback is
       // permitted to make desktop input reachable.
-      const computerUseBinding = loadComputerUseNative();
+      const computerUseBinding = loadComputerUseNative({ userEnabled: computerUseLoadedAtStartup });
       // Typed explicitly so the callback inside the conditional spread is checked against the host
       // options (its `bounds` parameter is contextually typed from them).
       const computerUseNativeHostOptions: ComputerUseNativeHostOptions = {
@@ -220,13 +237,6 @@ if (squirrelStartup || !hasLock) {
           },
           { event: 'system.computer-use.acceptance-build', status: 'completed' },
         );
-      const databasePath = join(app.getPath('userData'), 'sprint-coder.sqlite3');
-      persistence = new SqlitePersistenceClient(
-        databasePath,
-        (binding) => nativeSafeFs!.assertSession(binding),
-        (workspaceKey, minimumFence) =>
-          nativeSafeFs!.invalidateWorkspace(workspaceKey, minimumFence),
-      );
       const startupQuarantines = persistence.initializeMutationRecovery(
         randomUUID(),
         new Date().toISOString(),
@@ -282,6 +292,19 @@ if (squirrelStartup || !hasLock) {
               computerUseNativeHost.availability().manifestDigest ?? '0'.repeat(64),
             packaged: app.isPackaged,
             packageReady: computerUseNativeHost.availability().packageReady,
+          },
+        }),
+        createComputerUseFeatureGate({
+          setting: () => persistence!.getComputerUseEnabled(),
+          loadedAtStartup: computerUseLoadedAtStartup,
+          buildSupported: () => {
+            // A source build or an unsupported OS is known without loading anything; a packaged
+            // build on Windows/macOS is only verified by the loader, which runs with the feature on.
+            if (!app.isPackaged || (process.platform !== 'darwin' && process.platform !== 'win32'))
+              return false;
+            if (!computerUseLoadedAtStartup) return null;
+            const native = computerUseNativeHost.availability();
+            return native.packageReady && native.handshakeReady;
           },
         }),
       );

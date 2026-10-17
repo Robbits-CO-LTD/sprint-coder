@@ -35,6 +35,8 @@ function stubBridge(): void {
         getRuntime: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
+        getComputerUse: () => Promise.resolve(),
+        setComputerUse: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
         setTeamModelSelectionGuidance: () => Promise.resolve(),
         getSprintCoderPrePrompt: () => Promise.resolve({ prompt: '' }),
@@ -91,6 +93,13 @@ describe('which body the flag selects', () => {
     expect(html).toContain('Sprint Coderの事前プロンプト');
     expect(html).toMatch(/data-testid="settings-page-models"[^>]*>/);
     expect(html).toMatch(/data-testid="settings-page-team"[^>]*hidden=""/);
+    // Computer Use (beta) is its own group on the 詳細 page, never a new 一般 section.
+    const advanced = html.slice(html.indexOf('data-testid="settings-page-advanced"'));
+    expect(advanced).toContain('data-testid="settings-computer-use"');
+    expect(advanced).toContain('data-testid="settings-computer-use-beta"');
+    expect(advanced).toContain('ベータ版');
+    expect(advanced).toContain('Computer Use を使用する');
+    expect(html).not.toContain('data-testid="settings-nav-general"');
   });
 
   it('keeps the shipped one-column body as the fallback when the flag is off', () => {

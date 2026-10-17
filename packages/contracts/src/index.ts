@@ -3913,6 +3913,31 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
+/**
+ * The user-facing switch for desktop Computer Use (beta). `enabled` is the persisted choice and
+ * defaults to off; the rest are Main's facts about what that choice does in this process.
+ */
+export const computerUseSettingsSchema = z
+  .object({
+    /** The persisted user choice. Off until the user turns it on. */
+    enabled: z.boolean(),
+    /** `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1=1` forces the feature on (CI and acceptance runs). */
+    forcedByEnvironment: z.boolean(),
+    /** Whether Main's feature gate is open right now. */
+    effective: z.boolean(),
+    /** On, but the native part was not loaded when this process started: a restart applies it. */
+    restartRequired: z.boolean(),
+    /**
+     * Whether this build can run Computer Use: true once the signed native part was verified, false
+     * for a source/unsigned build or an unsupported OS, null while it has not been checked (it is
+     * only checked at startup, with the feature on).
+     */
+    buildSupported: z.boolean().nullable(),
+  })
+  .strict();
+export type ComputerUseSettings = z.infer<typeof computerUseSettingsSchema>;
+export const computerUseSettingsSetInputSchema = z.object({ enabled: z.boolean() }).strict();
+export type ComputerUseSettingsSetInput = z.infer<typeof computerUseSettingsSetInputSchema>;
 export const teamModelSelectionGuidanceSchema = z
   .object({
     guidance: z.string().max(4000),
@@ -7208,6 +7233,9 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    /** Computer Use (beta) on/off. Resolves with Main's view after the change. */
+    getComputerUse(): Promise<ComputerUseSettings>;
+    setComputerUse(input: ComputerUseSettingsSetInput): Promise<ComputerUseSettings>;
     getTeamModelSelectionGuidance(): Promise<TeamModelSelectionGuidance>;
     setTeamModelSelectionGuidance(input: TeamModelSelectionGuidance): Promise<void>;
     getSprintCoderPrePrompt(): Promise<SprintCoderPrePrompt>;
@@ -7456,6 +7484,8 @@ export const IPC_CHANNELS = {
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetComputerUse: 'sprint-coder:settings:get-computer-use',
+  settingsSetComputerUse: 'sprint-coder:settings:set-computer-use',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',
   settingsSetTeamModelSelectionGuidance: 'sprint-coder:settings:set-team-model-selection-guidance',
   settingsGetSprintCoderPrePrompt: 'sprint-coder:settings:get-sprint-coder-pre-prompt',

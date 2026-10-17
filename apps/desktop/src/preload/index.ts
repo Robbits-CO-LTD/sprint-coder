@@ -200,6 +200,8 @@ import {
   teamPolicySchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  computerUseSettingsSchema,
+  computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
   teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
@@ -1112,6 +1114,20 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.settingsSetTeamModelResearch,
         teamModelResearchSettingsSetInputSchema,
         z.undefined(),
+        input,
+      ),
+    getComputerUse: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetComputerUse,
+        emptyPayloadSchema,
+        computerUseSettingsSchema,
+        {},
+      ),
+    setComputerUse: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetComputerUse,
+        computerUseSettingsSetInputSchema,
+        computerUseSettingsSchema,
         input,
       ),
     getTeamModelSelectionGuidance: () =>

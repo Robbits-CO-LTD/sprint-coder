@@ -645,6 +645,33 @@ describe('public contracts', () => {
     expect(() => teamModelResearchSettingsSchema.parse({ researchBeforeHiring: 'true' })).toThrow();
   });
 
+  it('validates the Computer Use (beta) setting strictly and publishes its channels', () => {
+    const settings = {
+      enabled: true,
+      forcedByEnvironment: false,
+      effective: false,
+      restartRequired: true,
+      buildSupported: null,
+    };
+    expect(contracts.computerUseSettingsSchema.parse(settings)).toEqual(settings);
+    expect(() =>
+      contracts.computerUseSettingsSchema.parse({ ...settings, enabled: 'true' }),
+    ).toThrow();
+    expect(() => contracts.computerUseSettingsSchema.parse({ ...settings, extra: 1 })).toThrow();
+    expect(contracts.computerUseSettingsSetInputSchema.parse({ enabled: false })).toEqual({
+      enabled: false,
+    });
+    expect(() =>
+      contracts.computerUseSettingsSetInputSchema.parse({ enabled: true, effective: true }),
+    ).toThrow();
+    expect(contracts.IPC_CHANNELS.settingsGetComputerUse).toBe(
+      'sprint-coder:settings:get-computer-use',
+    );
+    expect(contracts.IPC_CHANNELS.settingsSetComputerUse).toBe(
+      'sprint-coder:settings:set-computer-use',
+    );
+  });
+
   it('requires at least one unique model when Team models are restricted', () => {
     const identity = {
       connectionId: 'builtin:codex-cli',
