@@ -35,19 +35,26 @@ export function assessProviderDisclosure(
   return assessDisclosure(content, relativePath, []);
 }
 
-/** Roots must come from Main's sealed Turn workspace, never from Provider/Renderer text. */
+/**
+ * Roots and root labels must come from Main's sealed Turn workspace, never from Provider/Renderer
+ * text. A root label is the name Main itself declares for a root to the Provider, so its exact value
+ * is known structure, not an opaque secret (issue #849).
+ */
 export function assessProviderEgressDisclosure(
   content: string,
   knownWorkspaceRoots: readonly string[] = [],
+  knownWorkspaceLabels: readonly string[] = [],
 ): ProviderDisclosureAssessment {
-  return assessDisclosure(content, undefined, knownWorkspaceRoots);
+  return assessDisclosure(content, undefined, knownWorkspaceRoots, knownWorkspaceLabels);
 }
 
 function assessDisclosure(
   content: string,
   relativePath: string | undefined,
   knownWorkspaceRoots: readonly string[],
+  knownWorkspaceLabels: readonly string[] = [],
 ): ProviderDisclosureAssessment {
+  const labels = declaredLabels(knownWorkspaceLabels);
   const reasons = new Set<string>();
   const baselineRedacted = redactSecrets(content);
   if (relativePath !== undefined && CREDENTIAL_FILENAME.test(basename(relativePath)))
@@ -65,7 +72,13 @@ function assessDisclosure(
   const contentRootSpans = knownRootSpans(content, knownWorkspaceRoots);
   const contentDocumentSpans = ordinaryDocumentSpans(content, relativePath);
   const highEntropy = [...content.matchAll(ENTROPY_CANDIDATE)].some((match) =>
-    isSensitiveEntropyCandidate(match[0], match.index, contentRootSpans, contentDocumentSpans),
+    isSensitiveEntropyCandidate(
+      match[0],
+      match.index,
+      contentRootSpans,
+      contentDocumentSpans,
+      labels,
+    ),
   );
   if (highEntropy) reasons.add('high-entropy-value');
 
@@ -89,7 +102,13 @@ function assessDisclosure(
     const redactedRootSpans = knownRootSpans(redactedContent, knownWorkspaceRoots);
     const redactedDocumentSpans = ordinaryDocumentSpans(redactedContent, relativePath);
     redactedContent = redactedContent.replace(ENTROPY_CANDIDATE, (candidate, offset: number) =>
-      isSensitiveEntropyCandidate(candidate, offset, redactedRootSpans, redactedDocumentSpans)
+      isSensitiveEntropyCandidate(
+        candidate,
+        offset,
+        redactedRootSpans,
+        redactedDocumentSpans,
+        labels,
+      )
         ? '[REDACTED_HIGH_ENTROPY]'
         : candidate,
     );
@@ -246,13 +265,30 @@ function knownRootSpans(
   return spans;
 }
 
+/**
+ * The root labels a caller declared, kept only when they are usable values. A malformed entry
+ * exempts nothing, so the scan stays as strict as if no label had been declared.
+ */
+function declaredLabels(knownWorkspaceLabels: readonly string[]): ReadonlySet<string> {
+  return new Set(
+    knownWorkspaceLabels.filter(
+      (label): label is string => typeof label === 'string' && label.trim() !== '',
+    ),
+  );
+}
+
 function isSensitiveEntropyCandidate(
   candidate: string,
   offset: number,
   rootSpans: readonly TextSpan[],
   documentSpans: readonly TextSpan[],
+  labels: ReadonlySet<string> = new Set(),
 ): boolean {
   if (!isHighEntropyCandidate(candidate)) return false;
+  // A declared root label is exempt only as the whole token: the candidate's boundaries already
+  // stop at quotes, spaces and other separators, so anything fused to the label (`<label>=<x>`,
+  // `<label>/<x>`, `<x>+<label>`) is a different, longer candidate and is scanned in full.
+  if (labels.has(candidate)) return false;
   if (documentSpans.some((span) => span.start <= offset && span.end >= offset + candidate.length))
     return false;
   // Only the bytes of a Main-issued root are exempt. What the candidate adds below the root, and

@@ -12,7 +12,7 @@ import {
   ProviderAwareTeamWorkerRuntime,
   type ProviderTeamWorkerRuntimeDeps,
 } from './provider-team-worker-runtime';
-import type { WorkerActivityEvent } from './team-coordinator';
+import { WorkerEgressDeniedError, type WorkerActivityEvent } from './team-coordinator';
 import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError } from './tool-broker';
 import { WorkspacePatchRejection } from './workspace-patch-tool';
@@ -67,6 +67,90 @@ describe('ProviderAwareTeamWorkerRuntime', () => {
     });
     expect(result.completion).toMatchObject({ status: 'succeeded', summary: 'Done' });
     expect(released).toBe(true);
+  });
+  it('names the egress gate reason codes, never the withheld bytes, when it denies (issue #849)', async () => {
+    const execute = vi.fn();
+    const runtime: ProviderRuntime = {
+      verify: vi.fn(),
+      listModels: vi.fn(),
+      cancel: vi.fn(),
+      execute,
+    };
+    const secret = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+    const authorizeEgress = vi.fn(() => ({
+      allowed: false,
+      reason: 'parent_ceiling',
+      disclosureReasons: ['high-entropy-value'],
+    }));
+    const adapter = controlledProviderAdapter(runtime, { authorizeEgress });
+
+    const failure = await adapter
+      .execute({
+        worker: providerWorker(),
+        envelope,
+        content: `${secret} を使って調査する`,
+        workspaceSet: {
+          primaryRootId: 'root',
+          roots: [
+            {
+              rootId: 'root',
+              path: '/workspace',
+              label: 'ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa',
+              role: 'primary',
+            },
+          ],
+          digest: 'a'.repeat(64),
+        },
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(WorkerEgressDeniedError);
+    const denied = failure as WorkerEgressDeniedError;
+    expect(denied).toMatchObject({
+      runtimeKind: 'provider',
+      policyReason: 'parent_ceiling',
+      disclosureReasons: ['high-entropy-value'],
+      diagnosticCodes: 'secret_scan:high-entropy-value',
+    });
+    expect(denied.message).toBe(
+      'Provider Worker egress was denied: 送信前の秘密情報検査が送信を止めました（検出: high-entropy-value）',
+    );
+    expect(denied.message).not.toContain(secret);
+    // The declared root label is handed to the gate as known structure, as the CLI Worker does.
+    expect(authorizeEgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        knownWorkspaceRoots: ['/workspace'],
+        knownWorkspaceLabels: ['ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa'],
+      }),
+    );
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['false', false, '送信の許可が得られませんでした（unknown）'],
+    ['a malformed verdict', { allowed: 'yes' }, '送信の許可が得られませんでした（unknown）'],
+    [
+      'a policy-only denial',
+      { allowed: false, reason: 'local_only', disclosureReasons: [] },
+      '送信の許可が得られませんでした（local_only）',
+    ],
+  ])('treats %s from the egress gate as a denial with its reason', async (_case, verdict, text) => {
+    const execute = vi.fn();
+    const adapter = controlledProviderAdapter(
+      { verify: vi.fn(), listModels: vi.fn(), cancel: vi.fn(), execute },
+      { authorizeEgress: () => verdict as unknown as boolean },
+    );
+    const failure = await adapter
+      .execute({ worker: providerWorker(), envelope, content: '調査' })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    expect(failure).toBeInstanceOf(WorkerEgressDeniedError);
+    expect((failure as Error).message).toBe(`Provider Worker egress was denied: ${text}`);
+    expect(execute).not.toHaveBeenCalled();
   });
   it.each(['text', 'tool', 'usage'])(
     'rejects a Gemini %s round truncated before finishReason without running tools',

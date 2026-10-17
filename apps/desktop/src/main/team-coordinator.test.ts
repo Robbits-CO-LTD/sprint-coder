@@ -1548,59 +1548,71 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('fails an egress-denied execution once, by its reason, with the scan codes in diagnostics (issue #841)', async () => {
-      const persistence = createPersistence();
-      const task = persistence.createTask('Egress denied Team');
-      const runtime = new TestWorkerRuntime();
-      const execute = vi
-        .spyOn(runtime, 'execute')
-        .mockRejectedValue(new WorkerEgressDeniedError('codex', 'parent_ceiling', []));
-      const diagnostics: TeamDiagnosticEvent[] = [];
-      const coordinator = new TeamCoordinator(
-        persistence,
-        runtime,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        (event) => diagnostics.push(event),
-      );
-      const worker = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'denied worker',
-        objective: 'read only',
-        contextInheritancePolicy: 'none',
-        writeCapable: false,
-      });
-      const submission = await coordinator.assignTask({
-        taskId: task.id,
-        targetAgentId: worker.id,
-        content: 'read and report',
-        doneCriteria: ['return a result'],
-      });
+    it.each([
+      // A CLI Worker denied by policy (issue #841).
+      ['codex' as const, [] as string[], 'policy:parent_ceiling'],
+      // An official-API Worker denied by the secret scan (issue #849).
+      ['provider' as const, ['high-entropy-value'], 'secret_scan:high-entropy-value'],
+    ])(
+      'fails a %s egress-denied execution once, by its reason, with the scan codes in diagnostics',
+      async (kind, disclosureReasons, codes) => {
+        const persistence = createPersistence();
+        const task = persistence.createTask('Egress denied Team');
+        const runtime = new TestWorkerRuntime();
+        const execute = vi
+          .spyOn(runtime, 'execute')
+          .mockRejectedValue(
+            new WorkerEgressDeniedError(kind, 'parent_ceiling', disclosureReasons),
+          );
+        const diagnostics: TeamDiagnosticEvent[] = [];
+        const coordinator = new TeamCoordinator(
+          persistence,
+          runtime,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          (event) => diagnostics.push(event),
+        );
+        const worker = await coordinator.hireWorker({
+          taskId: task.id,
+          role: 'denied worker',
+          objective: 'read only',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        });
+        const submission = await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'read and report',
+          doneCriteria: ['return a result'],
+        });
 
-      await waitFor(() => persistence.getTeamExecution(submission.executionId).state === 'failed');
+        await waitFor(
+          () => persistence.getTeamExecution(submission.executionId).state === 'failed',
+        );
 
-      // The gate judges the same payload the same way, so the read-only retry is not spent on it.
-      expect(execute).toHaveBeenCalledTimes(1);
-      expect(
-        persistence.listTeamAttempts(submission.executionId).map((a) => a.terminalReason),
-      ).toEqual(['egress_denied']);
-      expect(diagnostics).toContainEqual(
-        expect.objectContaining({
-          event: 'team.attempt.egress_denied',
-          workerId: worker.id,
-          status: 'denied',
-          result: 'policy:parent_ceiling',
-        }),
-      );
-      persistence.close();
-    });
+        // The gate judges the same payload the same way, so the read-only retry is not spent on it.
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(
+          persistence.listTeamAttempts(submission.executionId).map((a) => a.terminalReason),
+        ).toEqual(['egress_denied']);
+        expect(diagnostics).toContainEqual(
+          expect.objectContaining({
+            event: 'team.attempt.egress_denied',
+            workerId: worker.id,
+            status: 'denied',
+            result: codes,
+          }),
+        );
+        persistence.close();
+      },
+    );
 
     it('never redelivers a timed-out Worker before its previous runtime stop is confirmed', async () => {
       const persistence = createPersistence();

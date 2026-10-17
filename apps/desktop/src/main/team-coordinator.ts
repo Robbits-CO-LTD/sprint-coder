@@ -243,12 +243,13 @@ export class WorkerRuntimeFailureError extends Error {
  */
 export class WorkerEgressDeniedError extends Error {
   constructor(
-    readonly runtimeKind: 'claude' | 'codex' | 'grok',
+    /** `provider` is an official-API Worker, whose gate gives the same verdict (issue #849). */
+    readonly runtimeKind: 'claude' | 'codex' | 'grok' | 'provider',
     readonly policyReason: string | null,
     readonly disclosureReasons: readonly string[],
   ) {
     super(
-      `${runtimeKind} Team Worker egress was denied: ${
+      `${runtimeKind === 'provider' ? 'Provider' : `${runtimeKind} Team`} Worker egress was denied: ${
         disclosureReasons.length > 0
           ? `送信前の秘密情報検査が送信を止めました（検出: ${disclosureReasons.join(', ')}）`
           : `送信の許可が得られませんでした（${policyReason ?? 'unknown'}）`

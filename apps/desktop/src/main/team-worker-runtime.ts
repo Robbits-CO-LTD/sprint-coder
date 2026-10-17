@@ -113,6 +113,8 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     context: PreparedContext,
     /** Canonical Main-issued roots this dispatch may name: the isolation worktree included. */
     knownWorkspaceRoots: readonly string[],
+    /** The labels Main declared for those roots, named in the prompt and guidance (issue #849). */
+    knownWorkspaceLabels: readonly string[],
   ) => boolean | TeamWorkerEgressVerdict;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
@@ -571,6 +573,9 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         // The primary root already carries `workspacePath` in canonical form; declaring the raw
         // spelling too would only add a second, non-canonical entry on Windows.
         canonicalWorkspaceRoots(normalizedWorkspace.roots.map(({ path }) => path)),
+        // Their labels too: the guidance JSON carries each one as its own `"label"` value, and a
+        // long label with a random suffix would otherwise read as an opaque secret (issue #849).
+        workspaceRootLabels(normalizedWorkspace.roots),
       );
       // Only an explicit `true` allows: any other verdict, a malformed one included, is a denial.
       const verdict: TeamWorkerEgressVerdict =
@@ -982,6 +987,23 @@ function uniqueRuntimeChoices(choices: readonly RealRuntimeChoice[]): RealRuntim
     seen.add(kind);
     return true;
   });
+}
+
+/**
+ * Deduplicated labels of the roots Main declared to the Provider, for the egress secret scan to read
+ * as known structure (issue #849). Only labels of Main's own Workspace set belong here — never
+ * Provider-supplied text; the scan exempts each exact value as a whole token and nothing else.
+ */
+export function workspaceRootLabels(
+  roots: readonly Readonly<{ label?: string | null }>[] | undefined,
+): readonly string[] {
+  return [
+    ...new Set(
+      (roots ?? [])
+        .map(({ label }) => label)
+        .filter((label): label is string => typeof label === 'string' && label.trim() !== ''),
+    ),
+  ];
 }
 
 /**

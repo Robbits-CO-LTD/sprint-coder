@@ -1443,6 +1443,8 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       // The declared root is the canonical spelling Main derives from the legacy path, which on
       // Windows resolves onto the current drive rather than staying `/workspace`.
       runtimeWorkspaceSetFromLegacyPath('/workspace').roots.map(({ path }) => path),
+      // And that root's label, as the guidance names it (issue #849).
+      runtimeWorkspaceSetFromLegacyPath('/workspace').roots.map(({ label }) => label),
     );
     expect(runtimeHostMock.starts[0]?.args[6]).toMatchObject({
       projectItems: [{ id: 'project:one:instruction' }, { id: 'project:one:reference:one' }],
@@ -1547,6 +1549,60 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
         assessProviderEgressDisclosure(
           `${payload}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`,
           knownWorkspaceRoots,
+        ).reasons,
+      ).toEqual(['high-entropy-value']);
+      subject.dispose();
+    },
+  );
+
+  it.each(['realai-ws-codex-graph-Hnb2yq', 'ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa'])(
+    'declares the root label %s to the egress scan as known structure (issue #849)',
+    async (label) => {
+      runtimeHostMock.starts.length = 0;
+      const isolationRoot =
+        '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-14838862-f09e-4174-84e4-68cbb3cac903-1';
+      const authorizeEgress = vi.fn((..._args: unknown[]) => true);
+      const subject = runtime({
+        authorizeEgress,
+        selectRuntimes: () => [{ kind: 'codex', model: 'gpt-5.6-luna' }],
+      });
+
+      await subject.execute({
+        worker: { ...worker(false), writeCapable: true },
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        executionId: 'execution-graph-step-1',
+        accessMode: 'workspace-write',
+        workspacePath: isolationRoot,
+        workspaceSet: {
+          primaryRootId: 'root-1',
+          digest: 'f'.repeat(64),
+          roots: [{ rootId: 'root-1', path: isolationRoot, label, role: 'primary' as const }],
+        },
+        content: '実装する',
+      });
+
+      const [, , , payload, , knownWorkspaceRoots, knownWorkspaceLabels] = authorizeEgress.mock
+        .calls[0] as [
+        string,
+        string,
+        string,
+        string,
+        unknown,
+        readonly string[],
+        readonly string[],
+      ];
+      // The guidance JSON names the label as its own `"label"` value.
+      expect(payload).toContain(label);
+      expect(knownWorkspaceLabels).toEqual([label]);
+      expect(
+        assessProviderEgressDisclosure(payload, knownWorkspaceRoots, knownWorkspaceLabels),
+      ).toMatchObject({ classification: 'safe', reasons: [] });
+      // A real secret beside the label is still caught: only the exact label is exempt.
+      expect(
+        assessProviderEgressDisclosure(
+          `${payload}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`,
+          knownWorkspaceRoots,
+          knownWorkspaceLabels,
         ).reasons,
       ).toEqual(['high-entropy-value']);
       subject.dispose();

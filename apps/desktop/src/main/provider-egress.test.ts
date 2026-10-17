@@ -397,6 +397,47 @@ if (runsWithElectronAbi)
       expect(auditFor([`${root}/`, root.replaceAll('/', '\\')]).digest).toBe(exempted.digest);
     });
 
+    it('lets the declared root label through the gate, and binds it into the audit (issue #849)', () => {
+      const root = '/private/tmp/sprint-coder-known-roots/workspace';
+      const label = 'ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa';
+      const prompt = JSON.stringify({ roots: [{ label, path: root }] });
+      const gate = (
+        content: string,
+        knownWorkspaceLabels: readonly string[] | undefined,
+        turnId: string,
+      ) => {
+        const fixture = createFixture(false);
+        const decision = authorizeCodexProviderEgress({
+          broker: new PermissionBroker(fixture.persistence),
+          task: fixture.task,
+          turnId,
+          prompt: content,
+          context,
+          now: '2026-07-23T00:00:00.000Z',
+          knownWorkspaceRoots: [root],
+          ...(knownWorkspaceLabels === undefined ? {} : { knownWorkspaceLabels }),
+        });
+        const audit = readAudit(fixture.path) as { resource_digest: string }[];
+        fixture.persistence.close();
+        return { decision, digest: audit[0]!.resource_digest };
+      };
+
+      expect(gate(prompt, undefined, 'turn-label-undeclared').decision).toMatchObject({
+        allowed: false,
+        disclosureReasons: ['high-entropy-value'],
+      });
+      const declared = gate(prompt, [label], 'turn-label-declared');
+      expect(declared.decision).toMatchObject({ allowed: true, disclosureReasons: [] });
+      // An audit must tell a scan told to ignore the label from one told to ignore only the root.
+      expect(gate('clean prompt', [label], 'turn-clean-label').digest).not.toBe(
+        gate('clean prompt', undefined, 'turn-clean-root').digest,
+      );
+      // A real secret beside the declared label is still withheld.
+      expect(
+        gate(`${prompt}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`, [label], 'turn-label-secret').decision,
+      ).toMatchObject({ allowed: false, disclosureReasons: ['high-entropy-value'] });
+    });
+
     it('rejects partial or unsafe attachment egress facts before evaluation', () => {
       const fixture = createFixture(false);
       expect(() =>
