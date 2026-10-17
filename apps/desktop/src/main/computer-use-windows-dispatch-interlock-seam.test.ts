@@ -95,11 +95,30 @@ using sprint_coder::computer_use::InterlockOutcome;
 using sprint_coder::computer_use::InterlockReason;
 
 struct RECT { long left = 0; long top = 0; long right = 0; long bottom = 0; };
-struct WindowsSession { std::uint64_t cancel_epoch = 0; };
+struct WindowsSession {
+  std::uint64_t cancel_epoch = 0;
+  std::uint32_t pid = 4242;
+  bool has_focused_element_signature = true;
+  std::string focused_element_signature = "observed-focus";
+};
+struct WindowsClickBasis { bool tracked = false; bool opens = false; bool input_read = false; unsigned long input_tick = 0; };
 
 std::vector<std::string> g_calls;
+std::string g_kind = "click";
 bool g_binding_ok = true;
 InterlockEvaluation g_answer;
+// What the focus is after the interlocks ran, and whether it can be read.
+std::string g_focus_after_interlock = "observed-focus";
+bool g_focus_readable = true;
+bool g_focus_changes_during_interlock = false;
+std::string g_focus_now = "observed-focus";
+
+bool WindowsFocusedElementSignature(std::uint32_t, const RECT &, std::string *signature) {
+  g_calls.push_back("focus");
+  if (!g_focus_readable) return false;
+  *signature = g_focus_now;
+  return true;
+}
 
 bool ValidateWindowsDispatchBinding(const WindowsSession &, const std::string &, std::string *kind,
                                     RECT *, std::string *reason) {
@@ -108,13 +127,15 @@ bool ValidateWindowsDispatchBinding(const WindowsSession &, const std::string &,
     *reason = "stale_target";
     return false;
   }
-  *kind = "click";
+  *kind = g_kind;
   return true;
 }
 
 InterlockEvaluation WindowsInterlockRefusal(const WindowsSession &, const std::string &,
-                                            const std::string &kind) noexcept {
+                                            const std::string &kind, WindowsClickBasis * = nullptr) noexcept {
   g_calls.push_back("interlock:" + kind);
+  // The evaluation takes time: the focus can move to another control while it runs.
+  if (g_focus_changes_during_interlock) g_focus_now = g_focus_after_interlock;
   return g_answer;
 }
 
@@ -137,6 +158,7 @@ void Check(bool ok, const char *name) {
 struct Outcome { bool ran_on; bool accepted; std::string reason; std::vector<std::string> calls; };
 Outcome Run() {
   g_calls.clear();
+  g_focus_now = "observed-focus";
   WindowsSession session;
   std::string result;
   std::string reason;
@@ -171,6 +193,45 @@ int main() {
     Check(outcome.ran_on && outcome.reason.empty(), "no_verdict_goes_on_to_v1");
     Check(outcome.calls == std::vector<std::string>({"validate", "interlock:click", "v1-guards"}), "no_verdict_order");
   }
+  // The focus recheck, for a key or a text, after the interlocks and before any input: the signature
+  // is the observed one (go on), another one (stop, no input), or unreadable (stop).
+  g_binding_ok = true;
+  g_answer = InterlockEvaluation{};
+  for (const char *kind : {"key", "type"}) {
+    g_kind = kind;
+    g_focus_readable = true;
+    g_focus_changes_during_interlock = false;
+    {
+      const Outcome outcome = Run();
+      Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", std::string("interlock:") + kind, "focus", "v1-guards"}),
+            "focus_unchanged_goes_on");
+    }
+    g_focus_changes_during_interlock = true;
+    g_focus_after_interlock = "another-control";
+    {
+      const Outcome outcome = Run();
+      Check(!outcome.ran_on && !outcome.accepted && outcome.reason == "focused_target_changed" &&
+                outcome.calls == std::vector<std::string>({"validate", std::string("interlock:") + kind, "focus"}),
+            "focus_moved_during_the_interlocks_sends_nothing");
+    }
+    g_focus_changes_during_interlock = false;
+    g_focus_readable = false;
+    {
+      const Outcome outcome = Run();
+      Check(!outcome.ran_on && outcome.reason == "focused_target_changed", "unreadable_focus_sends_nothing");
+    }
+    g_focus_readable = true;
+  }
+  // Other kinds do not look at the focus again (their V1 checks are their own).
+  g_kind = "click";
+  g_focus_changes_during_interlock = true;
+  {
+    const Outcome outcome = Run();
+    Check(outcome.ran_on && outcome.calls == std::vector<std::string>({"validate", "interlock:click", "v1-guards"}),
+          "click_does_not_recheck_the_focus");
+  }
+  g_focus_changes_during_interlock = false;
+  g_kind = "click";
   // A failed binding is V1's own refusal and the interlocks are never asked.
   g_binding_ok = false;
   g_answer = InterlockEvaluation{};

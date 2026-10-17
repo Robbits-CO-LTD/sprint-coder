@@ -167,7 +167,7 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
       'constexpr sprint_coder::computer_use::EffectRuleset kWindowsInterlockRuleset{ /*download_open=*/false, /*file_manager_open=*/false};',
     );
     expect(body).toContain(
-      'EvaluateWindowsInterlockOnLane(session, metadata, kind, kWindowsInterlockRuleset)',
+      'EvaluateWindowsInterlockOnLane(session, metadata, kind, kWindowsInterlockRuleset, basis)',
     );
     // Counts and enum names only: no label, no title, no text.
     const counter = entry.slice(
@@ -178,10 +178,85 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(counter).not.toMatch(/label|title|name\s*=\s*node|metadata|text/iu);
   });
 
-  it('leaves INV-3 alone: the eligibility, the versions and the supported targets are what they were (#500 S5-c-2 PR-5)', () => {
-    expect(host).toContain('IsSupportedWindowsV1Target');
-    expect(host).toContain('MaximumModeForWindowsExecutable');
-    expect(host).toContain('kNativePreflightClassifierVersion');
+  it('leaves INV-3 alone: the function bodies that decide eligibility, the win32 refusal of v2 and the versions are pinned (#500 S5-c-2 PR-5)', () => {
+    const squashed = (text: string): string => text.replace(/\s+/gu, ' ').trim();
+    const functionBody = (signature: string): string => {
+      const from = host.indexOf(signature);
+      expect(from, signature).toBeGreaterThanOrEqual(0);
+      const open = host.indexOf('{', from);
+      let depth = 0;
+      for (let index = open; index < host.length; index += 1) {
+        if (host[index] === '{') depth += 1;
+        else if (host[index] === '}') {
+          depth -= 1;
+          if (depth === 0) return squashed(host.slice(from, index + 1));
+        }
+      }
+      throw new Error(`unterminated: ${signature}`);
+    };
+    // What a target must be to get full access, and the one place it is decided.
+    expect(functionBody('std::string MaximumModeForWindowsExecutable(')).toBe(
+      'std::string MaximumModeForWindowsExecutable( const WindowsExecutableIdentity &identity) { if (!IsPolicyLanguageSupported(identity.policy_language)) return "observe_only"; if (IsTrustedSystemNotepad(identity)) return "full_access_app"; const std::string helper_signer = CurrentHelperSignerDigest(); if (IsAcceptanceFixtureExecutable(identity.path) && !helper_signer.empty() && identity.signer_digest == helper_signer) return "full_access_app"; return "observe_only"; }',
+    );
+    expect(functionBody('bool IsSupportedWindowsV1Target(')).toBe(
+      'bool IsSupportedWindowsV1Target( const WindowsExecutableIdentity &identity) { return MaximumModeForWindowsExecutable(identity) == "full_access_app"; }',
+    );
+    // The executables a session can never target (a remote desktop, a shell, an installer, Settings, ...).
+    const blocked = functionBody('bool IsDisallowedTargetExecutable(const std::wstring &path) {');
+    expect(
+      [...blocked.matchAll(/L"([^"]+)"/gu)]
+        .map((match) => match[1])
+        .filter((name) => name!.endsWith('.exe')),
+    ).toEqual([
+      'mstsc.exe',
+      'msrdc.exe',
+      'SystemSettings.exe',
+      'control.exe',
+      'msiexec.exe',
+      'setup.exe',
+      'install.exe',
+      'installer.exe',
+      'powershell.exe',
+      'pwsh.exe',
+      'cmd.exe',
+      'wt.exe',
+      'WindowsTerminal.exe',
+      'wsl.exe',
+      'bash.exe',
+      'cscript.exe',
+      'wscript.exe',
+      'regedit.exe',
+      'mmc.exe',
+      'explorer.exe',
+      'taskmgr.exe',
+      'msrdcw.exe',
+      'RdClient.Windows.exe',
+      'QuickAssist.exe',
+      'TeamViewer.exe',
+      'AnyDesk.exe',
+      'RustDesk.exe',
+      'parsec.exe',
+    ]);
+    expect(blocked).toContain(
+      'if (_wcsicmp(leaf.c_str(), candidate.data()) == 0) return true; return false; }',
+    );
+    // The build refuses eligibility v2 for win32 (no deny-list there yet): a Windows helper cannot be
+    // built with the interlocks' approval path, or with a wider eligibility.
+    const build = squashed(
+      readFileSync(join(__dirname, '../../../../build-computer-use-eligibility.mjs'), 'utf8'),
+    );
+    expect(build).toContain(
+      "if (mode === MODES.v2 && target === 'win32') throw new Error( 'Computer Use native --eligibility=v2 is unsupported on Windows until S5 (no deny-list there yet)', );",
+    );
+    // The classifier version the preflight receipt attests, and the versions of the eligibility.
+    expect(read('computer_use_preflight_classifier.h')).toContain(
+      'constexpr std::uint32_t kNativePreflightClassifierVersion = 1;',
+    );
+    expect(
+      squashed(host).match(
+        /std::to_string\( ?sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
+      ),
+    ).toHaveLength(1);
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: Record<string, number>;
     };
@@ -190,8 +265,6 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
       classifierVersion: 1,
       lexiconVersion: 1,
     });
-    // The target eligibility functions are not touched by this change: they appear as before.
-    expect(host.match(/\bIsSupportedWindowsV1Target\(/gu)?.length).toBeGreaterThan(0);
   });
 
   it('takes the rule set from its caller, answers an exception or a missing source as no verdict, and changes nothing', () => {

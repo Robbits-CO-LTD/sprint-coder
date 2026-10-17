@@ -81,3 +81,33 @@ describe('interlock surface words against V1 words (#500 S5-c-2 PR-5)', () => {
     );
   });
 });
+
+// E4, the installer rule (kInstallerTerms), is the same kind of difference: it makes a click on a
+// control named like an installer a takeover (paused) on EVERY surface, and V1's risk text has fewer
+// of those words. The owner accepted this direction (starting an installer fails closed, the same
+// as the words above). Frozen: a word added to kInstallerTerms without a decision turns this red.
+const v1Risk = quotedTerms(host, 'static constexpr std::array<std::string_view, 36> terms', '');
+const installer = quotedTerms(
+  classifier,
+  'inline constexpr std::u8string_view kInstallerTerms[]',
+  'u8',
+);
+const ACCEPTED_NEW_INSTALLER_WORDS = ['install', 'インストーラ'];
+
+describe('interlock installer words against V1 words (#500 S5-c-2 PR-5 review)', () => {
+  it('reads both tables', () => {
+    expect(v1Risk.length).toBe(36);
+    expect(installer.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('adds exactly "install" (on a word boundary) and "インストーラ" to what V1 refuses', () => {
+    const added = installer.filter((word) => !v1Risk.includes(word));
+    expect([...added].sort()).toEqual([...ACCEPTED_NEW_INSTALLER_WORDS].sort());
+  });
+
+  it('shares the rest: V1 has installer, install application and インストール', () => {
+    expect(installer.filter((word) => v1Risk.includes(word)).sort()).toEqual(
+      ['install application', 'installer', 'インストール'].sort(),
+    );
+  });
+});

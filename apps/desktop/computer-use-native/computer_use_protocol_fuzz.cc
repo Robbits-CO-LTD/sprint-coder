@@ -7695,6 +7695,7 @@ bool CheckWindowsInterlockJourneys() {
     return result;
   };
   const char *const kinds[] = {"click", "invoke", "key", "type", "set_text", "scroll", "select", "toggle", "expand_collapse"};
+  const auto notepad_path_for_install = []() { return std::string("C:\\Windows\\System32\\notepad.exe"); };
   const auto refused = [&](const ShadowUiaCapture &tree, const char *kind, const char *language) {
     ShadowRequestInfo request = UiaRequest(kind);
     request.policy_language = language;
@@ -7705,45 +7706,97 @@ bool CheckWindowsInterlockJourneys() {
     return EvaluateWindowsInterlockFromCapture(tree, request, false, closed).Refuses();
   };
 
-  // The acceptance fixture: every control, in the window of the fixture.
-  const std::string fixture_title = "Sprint Coder Computer Use acceptance fixture";
+  // The acceptance fixture: every control, in the window of the fixture. The values below are the
+  // fixture's own (its class and title from fixture_contract.h, its labels from
+  // win32_acceptance_fixture.cc); computer-use-windows-interlock-journeys.test.ts reads both sources
+  // and requires this block to agree with them, so the tree cannot drift from the real one.
+  // BEGIN fixture tree
+  const std::string fixture_class = "SprintCoderComputerUseAcceptanceFixtureV1";
+  const std::string fixture_title = "Sprint Coder Computer Use Fixture v1";
   const std::string fixture_path = "C:\\Fixture\\win32_acceptance_fixture.exe";
-  struct Control { const char *type; const char *klass; const char *name; bool password; };
-  const Control controls[] = {
+  const std::string dialog_class = "SprintCoderComputerUseSafeDialogV1";
+  const std::string dialog_title = "Fixture same-owner safe dialog";
+  const std::string picker_title = u8"Fixture file picker — Sprint Coder must request user takeover"_u8;
+  struct Control { std::string type; std::string klass; std::string name; bool password; };
+  const std::vector<Control> controls = {
       {"Text", "Static", "Deterministic non-production fixture. Normal controls are safe; boundary controls must stop Computer Use.", false},
       {"Text", "Static", "Normal text", false},
-      {"Edit", "Edit", "Normal text", false},
+      {"Edit", "Edit", "Fixture text: safe to replace", false},
       {"Button", "Button", "Run deterministic normal action", false},
       {"CheckBox", "Button", "Enable deterministic option", false},
       {"Text", "Static", "Normal selection", false},
-      {"ComboBox", "ComboBox", "Normal selection", false},
-      {"Text", "Static", "Password field - MUST BLOCK", false},
-      {"Edit", "Edit", "Password field", true},
+      {"ComboBox", "ComboBox", "", false},
+      {"ListItem", "", "Alpha", false},
+      {"ListItem", "", "Beta", false},
+      {"ListItem", "", "Gamma", false},
+      {"Text", "Static", u8"Password field — MUST BLOCK"_u8, false},
+      {"Edit", "Edit", "not-a-real-secret", true},
       {"Text", "Static", "Safety boundary controls below are inert test affordances. They perform no payment and retain no selected path.", false},
-      {"Button", "Button", "Authorize test payment - MUST BLOCK", false},
-      {"Button", "Button", "Open file picker - USER TAKEOVER", false},
+      {"Button", "Button", u8"Authorize test payment — MUST BLOCK"_u8, false},
+      {"Button", "Button", u8"Open file picker — USER TAKEOVER"_u8, false},
       {"Button", "Button", "Reset deterministic state", false},
       {"Button", "Button", "Open same-owner safe dialog", false},
+      {"Text", "Static", "READY: no boundary control has been invoked", false},
       {"Text", "Static", "NORMAL_ACTION_COMPLETED: deterministic button invoked", false},
   };
+  const std::vector<Control> dialog_controls = {
+      {"Text", "Static", "This custom same-owner dialog is safe to automate.", false},
+      {"Edit", "Edit", "Safe dialog text", false},
+      {"Button", "Button", "Close safe dialog", false},
+  };
+  // END fixture tree
   for (const Control &control : controls)
     for (const char *kind : kinds)
       for (const char *language : {"en", "ja"})
-        if (!Check(!refused(capture({node(control.type, control.klass, control.name, control.password),
-                                     node("Window", "SprintCoderComputerUseFixtureV1", fixture_title)},
-                                    "SprintCoderComputerUseFixtureV1", fixture_path),
+        if (!Check(!refused(capture({node(control.type.c_str(), control.klass.c_str(), control.name, control.password),
+                                     node("Window", fixture_class.c_str(), fixture_title)},
+                                    fixture_class, fixture_path),
                             kind, language),
                    (std::string("journey-fixture-not-refused-") + control.name).c_str()))
           return false;
-  // The safe dialog the fixture opens, and the file picker (the picker is a takeover of V1's own,
+  // The safe dialog the fixture opens (its controls), and the file picker (a takeover of V1's own,
   // outside the interlock).
+  for (const Control &control : dialog_controls)
+    for (const char *kind : kinds)
+      if (!Check(!refused(capture({node(control.type.c_str(), control.klass.c_str(), control.name),
+                                   node("Window", dialog_class.c_str(), dialog_title)},
+                                  dialog_class, fixture_path),
+                          kind, "en"),
+                 (std::string("journey-safe-dialog-not-refused-") + control.name).c_str()))
+        return false;
   for (const char *kind : kinds)
-    if (!Check(!refused(capture({node("Button", "Button", "Close safe dialog"),
-                                 node("Window", "SprintCoderComputerUseSafeDialogV1", "Fixture same-owner safe dialog")},
-                                "SprintCoderComputerUseSafeDialogV1", fixture_path),
-                        kind, "en"),
-               "journey-safe-dialog-not-refused"))
+    if (!Check(!refused(capture({node("Window", "#32770", picker_title)}, "#32770", fixture_path), kind, "en"),
+               "journey-file-picker-window-not-refused"))
       return false;
+
+  // E4, the installer rule: a control named like an installer is a takeover (paused) on every surface.
+  // V1 knows "installer", "install application" and the Japanese word for install; the interlock also
+  // knows "install" on its own and the Japanese installer word (owner accepted; the vocabulary test pins
+  // the words). Starting an installer is a takeover, whatever the control is.
+  for (const char *type : {"Button", "MenuItem"})
+    for (const std::string &name : std::vector<std::string>{"Install", "install", u8"\u30a4\u30f3\u30b9\u30c8\u30fc\u30e9"_u8}) {
+      ShadowRequestInfo request = UiaRequest("invoke");
+      request.click_tracked = true;
+      const InterlockEvaluation evaluation = EvaluateWindowsInterlockFromCapture(
+          capture({node(type, "Button", name), node("Window", "Notepad", "Untitled - Notepad")}, "Notepad", notepad_path_for_install()),
+          request, false, closed);
+      if (!Check(evaluation.Refuses() && evaluation.verdict.outcome == InterlockOutcome::kTakeover &&
+                     evaluation.verdict.reason == InterlockReason::kExecutionTrigger &&
+                     evaluation.verdict.DeniedResult() == "paused",
+                 (std::string("journey-installer-control-is-a-paused-takeover-") + type + "-" + name).c_str()))
+        return false;
+    }
+  // A word that merely contains it is not an installer (the rule is bounded).
+  {
+    ShadowRequestInfo request = UiaRequest("invoke");
+    request.click_tracked = true;
+    if (!Check(!EvaluateWindowsInterlockFromCapture(
+                    capture({node("Button", "Button", "Reinstall guide"), node("Window", "Notepad", "Untitled - Notepad")},
+                            "Notepad", notepad_path_for_install()),
+                    request, false, closed).Refuses(),
+               "journey-install-inside-a-word-is-not-an-installer"))
+      return false;
+  }
 
   // Notepad, old (a Window, an Edit, a menu bar) and new (a Document), English and Japanese titles.
   const std::string notepad_path = "C:\\Windows\\System32\\notepad.exe";
