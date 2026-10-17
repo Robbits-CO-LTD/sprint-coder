@@ -278,13 +278,14 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       gated,
     );
     expect([...semantic.matchAll(new RegExp(effect, 'gu'))]).toHaveLength(gated);
+    // Outside those assignments only reads (get_*/Get*) and housekeeping are called through a pointer,
+    // whatever the variable or the method is called: any other call there would be an unguarded input.
+    const otherCalls = [
+      ...semantic.replace(/action_result = [^;]*;/gu, '').matchAll(/\b\w+->(?!get_|Get)(\w+)\(/gu),
+    ].map((match) => match[1]);
     expect(
-      semantic
-        .replace(/action_result = [^;]*;/gu, '')
-        .match(
-          /->(?:Invoke|SetValue|Select|Toggle|Expand|Collapse|AddToSelection|RemoveFromSelection)\(/u,
-        ),
-    ).toBeNull();
+      otherCalls.filter((name) => !['Release', 'AddRef', 'fetch_add', 'empty'].includes(name!)),
+    ).toEqual([]);
     expect(semantic).toContain(
       '*reason = !*accepted ? "semantic_action_failed" : WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed"',
     );
@@ -969,6 +970,7 @@ int RunDriver(bool ci) {
     SeamCheck(refused == E_ABORT && !called && !WindowsV1UiaOk(refused), "a_call_outside_any_path_is_refused_without_being_made");
     SeamCheck(!WindowsV1UiaMayCall() && std::string(WindowsV1UiaEndedReason()) == "semantic_action_failed", "an_action_outside_any_path_is_not_sent");
     SeamCheck(!WindowsV1UiaIsTimeout(E_ABORT), "a_refused_call_is_not_a_timeout");
+    SeamCheck(!WindowsV1UiaIsTimeout(E_FAIL), "the_initial_result_of_an_action_not_sent_is_not_a_timeout");
   }
   {  // a timeout inside an inner path ends the outer one: the later reads of the frame make no call
     const WindowsV1UiaPath frame;
@@ -1004,7 +1006,9 @@ int RunDriver(bool ci) {
     const POINT inside_ordinary{(ordinary_rect.left + ordinary_rect.right) / 2, (ordinary_rect.top + ordinary_rect.bottom) / 2};
     std::string signature;
     std::string reason;
-    SeamCheck(RejectWindowsRisk(ClassifyWindowsPoint(inside_ordinary, static_cast<std::uint32_t>(pid), &signature), &reason), "a_refused_classification_is_rejected");
+    const WindowsUiaRisk refused = ClassifyWindowsPoint(inside_ordinary, static_cast<std::uint32_t>(pid), &signature);
+    SeamCheck(!refused.metadata_complete, "a_refused_classification_is_incomplete");
+    SeamCheck(RejectWindowsRisk(refused, &reason) && reason == "target_unclassified", "a_refused_classification_is_rejected_as_unclassified");
   }
   {  // the semantic dispatch of a target that does not answer: a transient rejection before any input
     WindowsSession session;
