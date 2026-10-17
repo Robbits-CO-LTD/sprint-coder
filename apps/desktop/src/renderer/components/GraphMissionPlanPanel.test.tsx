@@ -334,11 +334,11 @@ it('shows the recorded reason beside a step that waits for a resume', async () =
       root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
     );
     const state = container.querySelector('[data-testid="graph-step-state"]')?.textContent ?? '';
-    expect(state.startsWith('再開待ち · 理由: Graph step interrupted: worktree … is locked')).toBe(
-      true,
-    );
+    // The path is hidden to the end of the line (a path may contain spaces), so the words after it go
+    // too; nothing of the path is shown.
+    expect(state).toBe('再開待ち · 理由: Graph step interrupted: worktree …');
     expect(state).not.toContain('Users');
-    expect(state.endsWith('…')).toBe(true);
+    expect(state).not.toContain('repo');
     expect(Array.from(state.slice(state.indexOf('理由: ') + 4)).length).toBeLessThanOrEqual(60);
 
     await act(async () => root.unmount());

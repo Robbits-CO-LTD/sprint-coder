@@ -114,6 +114,7 @@ describe('Timeline history (issue #842)', () => {
           workers: [
             { id: 'w1', role: 'implementer', state: 'waiting' },
             { id: 'w2', role: 'reviewer', state: 'waiting' },
+            { id: 'w3', role: 'writer', state: 'done' },
           ],
           executions: [
             {
@@ -122,6 +123,15 @@ describe('Timeline history (issue #842)', () => {
               state: 'waiting_resume',
               terminalReason: 'worker_reported_failure',
               updatedAt: '2026-10-18T00:00:01.000Z',
+            },
+            // A failed execution is terminal history: a Worker that has done other work since keeps
+            // the label of its own state, not an old 「失敗」.
+            {
+              id: 'e3',
+              assigneeAgentId: 'w3',
+              state: 'failed',
+              terminalReason: 'worker_reported_failure',
+              updatedAt: '2026-10-18T00:00:00.500Z',
             },
           ],
           activities: [],
@@ -134,5 +144,7 @@ describe('Timeline history (issue #842)', () => {
     expect(html).toContain('再開待ち: Workerが失敗を報告');
     // A Worker that is merely idle keeps its existing wording.
     expect(html).toContain('<span>reviewer</span><span>待機中</span>');
+    expect(html).toContain('<span>writer</span><span>完了</span>');
+    expect(html).not.toContain('<span>writer</span><span>失敗');
   });
 });

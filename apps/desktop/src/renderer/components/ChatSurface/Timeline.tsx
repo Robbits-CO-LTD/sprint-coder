@@ -582,14 +582,16 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
 
 /**
  * A Worker whose step failed and now waits for a resume reads as idle ("待機中") from its own state,
- * so the breakdown says it stopped and why (issue #842), from its latest persisted execution.
+ * so the breakdown says it stopped and why (issue #842), from its latest persisted execution. Only a
+ * step still waiting for a resume does: a failed execution is terminal history, and a Worker that has
+ * done other work since (or sits idle) keeps the label of its own state.
  */
 function workerBreakdownStatus(
   worker: { id: string; state: string },
   executions: readonly TeamExecutionSummary[] | undefined,
 ): string {
   const execution = latestExecutionForWorker(executions, worker.id);
-  if (execution === null || !['waiting_resume', 'failed'].includes(execution.state))
+  if (execution === null || execution.state !== 'waiting_resume')
     return workerStateLabel(worker.state);
   const reason = stoppedExecutionReason(execution);
   const label = executionStateLabel(execution.state);
