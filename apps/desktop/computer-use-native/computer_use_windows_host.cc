@@ -2456,9 +2456,10 @@ std::uint32_t WindowsBuildNumber() {
 //     side), inside the 1 s of the Cancel acknowledgment (COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS).
 //     The margin is SMALL: 1000 - 800 = about 200 ms for everything else the lane does between the
 //     epoch moving and the acknowledgment (the pipe, the frame, the answer). Measured on CI: a
-//     transaction-bound call is cut after 310-320 ms, a first contact after 505-514 ms, so a real
-//     worst case is nearer 830 ms than the 800 ms counted (800 ms is the nominal value, not a measured
-//     upper bound), and the margin there is about 170 ms; under load it can be less (not verified).
+//     transaction-bound call is cut after 310-320 ms, a first contact after 505-514 ms. The sum of
+//     these two measurements, taken one at a time, is about 830 ms (the chain itself was not measured;
+//     800 ms is the nominal value, not a measured upper bound), which leaves about 170 ms for the pipe,
+//     the frame and the acknowledgment together; under load it can be less (not verified).
 //  2. The FIRST timed-out call (UIA_E_TIMEOUT or an equivalent failure) ends its path for good: no
 //     UI Automation call after it, fail closed, the "unreadable" of the caller. A target that answers
 //     the first contact and then stops therefore costs one timeout, not one per remaining call.

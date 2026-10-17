@@ -247,6 +247,35 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     expect(c).toContain('if (windows_v1_uia_lane != nullptr) return;');
     expect(c).toContain('~WindowsV1UiaPath() { if (owner_) windows_v1_uia_lane = nullptr; }');
+    // An inner path stays a non-owner: owner_ starts false and is set in one place only (the end of
+    // the constructor, after the early return of an inner path).
+    expect(c.split('bool owner_ = false;')).toHaveLength(2);
+    expect(c.split('owner_ = true;')).toHaveLength(2);
+    // Every input of a semantic action is sent only while the path is alive: when it is not, nothing
+    // is sent, the attempt is not counted and the action is not accepted (so it cannot become
+    // input_timeout_unconfirmed, which needs an accepted action).
+    const semanticStart = c.indexOf('bool DispatchWindowsSemanticAction(');
+    expect(semanticStart).toBeGreaterThanOrEqual(0);
+    const semanticRest = c.slice(semanticStart);
+    const semantic = semanticRest.slice(0, semanticRest.indexOf(' return true; }'));
+    const gate =
+      'if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); } else { *accepted = true; session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);';
+    expect(semantic.split(gate)).toHaveLength(6);
+    expect(semantic.split('input_api_attempts->fetch_add(')).toHaveLength(6);
+    expect(semantic).toContain(
+      '*reason = !*accepted ? "semantic_action_failed" : WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed"',
+    );
+    // The interlock: a Cancel is looked at before anything is created, a worker still stuck means an
+    // immediate kBudget (no wait for it), and only then the one bounded wait.
+    const interlock = c.slice(c.indexOf('InterlockEvaluation EvaluateWindowsInterlockOnLane('));
+    const order = [
+      'if (!epoch_unchanged())',
+      'std::make_shared<InterlockPending>()',
+      'if (running.exchange(true)) { unavailable.no_verdict = InterlockNoVerdict::kBudget; return unavailable; }',
+      'pending->ready.wait_for(lock, kInterlockLaneHoldLimit,',
+    ].map((text) => interlock.indexOf(text));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(c).toContain(
       'template <class Call> HRESULT WindowsV1UiaCall(Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call); }',
     );
@@ -916,6 +945,7 @@ int RunDriver(bool ci) {
     const HRESULT refused = WindowsV1UiaCall([&] { called = true; return S_OK; });
     SeamCheck(refused == E_ABORT && !called && !WindowsV1UiaOk(refused), "a_call_outside_any_path_is_refused_without_being_made");
     SeamCheck(!WindowsV1UiaMayCall() && std::string(WindowsV1UiaEndedReason()) == "semantic_action_failed", "an_action_outside_any_path_is_not_sent");
+    SeamCheck(!WindowsV1UiaIsTimeout(E_ABORT), "a_refused_call_is_not_a_timeout");
   }
   {  // a timeout inside an inner path ends the outer one: the later reads of the frame make no call
     const WindowsV1UiaPath frame;
@@ -945,6 +975,13 @@ int RunDriver(bool ci) {
     SeamCheck(!read && ms < 50, "a_cancel_ends_the_path_before_the_next_call");
     SeamCheck(frame.Stop() == WindowsV1UiaStop::kCanceled, "the_frame_is_canceled");
     SeamCheck(std::string(WindowsV1ObserveReason(frame.Stop(), "x")) == "observation_stale", "the_canceled_observes_reason");
+    // A classification whose calls are refused (E_ABORT, not a timeout) falls to the rejecting side.
+    RECT ordinary_rect{};
+    GetWindowRect(ordinary, &ordinary_rect);
+    const POINT inside_ordinary{(ordinary_rect.left + ordinary_rect.right) / 2, (ordinary_rect.top + ordinary_rect.bottom) / 2};
+    std::string signature;
+    std::string reason;
+    SeamCheck(RejectWindowsRisk(ClassifyWindowsPoint(inside_ordinary, static_cast<std::uint32_t>(pid), &signature), &reason), "a_refused_classification_is_rejected");
   }
   {  // the semantic dispatch of a target that does not answer: a transient rejection before any input
     WindowsSession session;
