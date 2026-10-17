@@ -251,6 +251,9 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // the constructor, after the early return of an inner path).
     expect(c.split('bool owner_ = false;')).toHaveLength(2);
     expect(c.split('owner_ = true;')).toHaveLength(2);
+    expect(c.indexOf('owner_ = true;')).toBeGreaterThan(
+      c.indexOf('if (windows_v1_uia_lane != nullptr) return;'),
+    );
     // Every input of a semantic action is sent only while the path is alive: when it is not, nothing
     // is sent, the attempt is not counted and the action is not accepted (so it cannot become
     // input_timeout_unconfirmed, which needs an accepted action).
@@ -260,8 +263,12 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     const semantic = semanticRest.slice(0, semanticRest.indexOf(' return true; }'));
     const gate =
       'if (!WindowsV1UiaMayCall()) { *reason = WindowsV1UiaEndedReason(); } else { *accepted = true; session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);';
-    expect(semantic.split(gate)).toHaveLength(6);
-    expect(semantic.split('input_api_attempts->fetch_add(')).toHaveLength(6);
+    // Counted against each other: an input added outside the gate makes the two counts differ.
+    const gated = semantic.split(gate).length - 1;
+    expect(gated).toBeGreaterThanOrEqual(5);
+    expect(semantic.split('input_api_attempts->fetch_add(').length - 1).toBe(gated);
+    expect(semantic.split('*accepted = true;').length - 1).toBe(gated);
+    expect(semantic).not.toContain('*accepted = false;');
     expect(semantic).toContain(
       '*reason = !*accepted ? "semantic_action_failed" : WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed"',
     );
