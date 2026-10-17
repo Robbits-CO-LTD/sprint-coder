@@ -78,6 +78,17 @@ public:
   // `tab` is the shell tab that shows the item (an element of the walk) or kNoElement.
   virtual ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes,
                                     std::string *path, bool *is_folder) = 0;
+  // The VALUE of one element, for `copy` (#785 T15-4w): its text through TextPattern when it has one
+  // (bounded by `maximum_bytes`, so a whole document is never pulled in), else through ValuePattern.
+  // kAbsent when the element has neither or its value is empty (a node with only a Name has no value),
+  // kTooLong when the value is over the bound. Never truncated: a value cut short is not the value.
+  // Not pure: only the artifact read asks for it, so a source that cannot read a value says "absent".
+  virtual ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) {
+    (void)element;
+    (void)maximum_bytes;
+    (void)output;
+    return ShadowReadResult::kAbsent;
+  }
 };
 
 namespace windows_shadow_reader_detail {
@@ -88,8 +99,9 @@ constexpr std::size_t kUrlBytes = 2048;
 constexpr std::size_t kPathBytes = 1024;
 
 [[nodiscard]] inline bool IsSemanticKind(std::string_view kind) {
+  // "copy" (#785 T15-4w) finds its node exactly as the semantic actions do: by the target id.
   return kind == "invoke" || kind == "set_text" || kind == "select" || kind == "toggle" ||
-         kind == "expand_collapse";
+         kind == "expand_collapse" || kind == "copy";
 }
 
 } // namespace windows_shadow_reader_detail
@@ -132,6 +144,8 @@ public:
     // A lookup that failed or was cut off is a read gap, not "the target was not there".
     if (locate_failed) capture.read_failed = true;
 
+    has_target_ = located;
+    target_element_ = located ? target : 0;
     if (located) {
       capture.target_found = true;
       // The window first: the page URL is read only in a web window (see CaptureChain).
@@ -143,6 +157,17 @@ public:
     Finish();
     capture.budget_exhausted = gate_.BudgetExhausted();
     return capture;
+  }
+
+  // The value of the node the last Capture found (#785 T15-4w), through the same gate as every
+  // other read: a canceled or out-of-budget capture reads nothing. kFailed when there was no target.
+  // After the read the capture is over: a cancel or a deadline passed during it is reported by
+  // Canceled() / Gate(), and the caller must not use a value then.
+  [[nodiscard]] ShadowReadResult ReadTargetValue(std::size_t maximum_bytes, std::string *output) {
+    if (!has_target_) return ShadowReadResult::kFailed;
+    const ShadowReadResult result = Value(target_element_, maximum_bytes, output);
+    Finish();
+    return result;
   }
 
 private:
@@ -197,6 +222,9 @@ private:
   ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes, std::string *path,
                             bool *is_folder) {
     return Gated([&] { return source_.ItemPath(element, tab, maximum_bytes, path, is_folder); });
+  }
+  ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) {
+    return Gated([&] { return source_.Value(element, maximum_bytes, output); });
   }
   // The capture is over: a cancel, or a deadline passed during the last call, makes it incomplete.
   void Finish() { (void)gate_.Finish(source_.NowNs(), source_.ActionStillValid()); }
@@ -430,6 +458,9 @@ private:
 
   ShadowUiaSource &source_;
   ShadowGate gate_;
+  // The node the last Capture located, for ReadTargetValue.
+  bool has_target_ = false;
+  Element target_element_ = 0;
   std::vector<Element> chain_elements_;
 };
 

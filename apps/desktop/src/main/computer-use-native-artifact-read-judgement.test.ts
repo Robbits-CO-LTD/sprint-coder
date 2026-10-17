@@ -33,10 +33,17 @@ describe('artifact read judgement (#785 T15-4p)', () => {
     );
   });
 
-  it('is not called by any native source yet, and moves no version', () => {
+  it('is called by the Windows read only (T15-4w; macOS is T15-4m), and moves no version', () => {
     const sources = readdirSync(nativeDirectory).filter((file) => /\.(h|cc|mm)$/u.test(file));
+    // The Windows read (portable) is the one caller; the host reaches it through that header.
+    expect(read('computer_use_windows_artifact_read.h')).toContain('JudgeArtifactRead(');
     for (const file of sources) {
-      if (file === name || file === 'computer_use_protocol_fuzz.cc') continue;
+      if (
+        file === name ||
+        file === 'computer_use_protocol_fuzz.cc' ||
+        file === 'computer_use_windows_artifact_read.h'
+      )
+        continue;
       expect(read(file), file).not.toContain(name);
       expect(read(file), file).not.toContain('JudgeArtifactRead');
     }

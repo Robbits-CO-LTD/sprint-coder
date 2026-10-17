@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { COMPUTER_USE_ARTIFACT_LIMITS } from '@sprint-coder/contracts';
 import { describe, expect, it, vi } from 'vitest';
 import type { ComputerUseNativeBinding } from './computer-use-native';
 import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
@@ -328,7 +329,11 @@ describe('Computer Use native Main adapter', () => {
     ]);
   });
 
-  const win32TicketScenario = async (withPreflight: boolean, classifierRoute?: 'v1' | 'v2') => {
+  const win32TicketScenario = async (
+    withPreflight: boolean,
+    classifierRoute?: 'v1' | 'v2',
+    extraSurface: Record<string, unknown> = {},
+  ) => {
     const startSession = vi.fn((_input: unknown) => ({
       sessionId: 'session-w',
       windowId: '100',
@@ -398,6 +403,7 @@ describe('Computer Use native Main adapter', () => {
       dispatch,
       cancel: () => undefined,
       close: () => undefined,
+      ...extraSurface,
     };
     const host = createComputerUseNativeHost(binding(surface, {}, 'win32'), 'win32', {
       windowsPhysicalBoundsToDip: (bounds) => bounds,
@@ -451,8 +457,74 @@ describe('Computer Use native Main adapter', () => {
         signal: new AbortController().signal,
       }),
     ).resolves.toMatchObject({ result: 'completed' });
-    return { preflight, dispatch, winTicket, startSession };
+    return { preflight, dispatch, winTicket, startSession, host, session };
   };
+
+  // #785 T15-4w: the Windows read of one node's value. It travels as the native's own method and is
+  // answered in one shape; it is not a capability (`artifactReadSupported` stays undefined).
+  it('reads one node value through the win32 addon, in one shape, and is not a capability (T15-4w)', async () => {
+    const answers: unknown[] = [];
+    const readNodeValue = vi.fn((_input: unknown): unknown => answers.shift());
+    const { host, session } = await win32TicketScenario(true, undefined, { readNodeValue });
+    expect(host.artifactReadSupported).toBeUndefined();
+    expect(host.readNodeValue).toBeTypeOf('function');
+    const read = () =>
+      host.readNodeValue!({
+        session,
+        requestId: 'copy-1',
+        targetId: '1001',
+        targetSignature: 'signature',
+        observationRevision: 1,
+        cancelEpoch: 0,
+        signal: new AbortController().signal,
+      });
+    answers.push({ ok: true, text: 'Fixture text' });
+    await expect(read()).resolves.toEqual({ ok: true, text: 'Fixture text' });
+    // What the native is asked: a copy of one target under the observation it was shown.
+    expect(readNodeValue.mock.calls[0]![0]).toMatchObject({
+      type: 'copy',
+      requestId: 'copy-1',
+      sessionId: 'session-w',
+      targetId: '1001',
+      targetSignature: 'signature',
+      observationRevision: 1,
+      cancelEpoch: 0,
+    });
+    // Every other answer is the same refusal: not ok, an extra key, an empty or a non-string text, a
+    // text over the contracts' byte bound, a throw, or not even an object.
+    const over = 'a'.repeat(COMPUTER_USE_ARTIFACT_LIMITS.maxBytes + 1);
+    const exact = 'a'.repeat(COMPUTER_USE_ARTIFACT_LIMITS.maxBytes);
+    for (const bad of [
+      { ok: false },
+      { ok: true },
+      { ok: true, text: '' },
+      { ok: true, text: 7 },
+      { ok: true, text: over },
+      { ok: true, text: 'x', title: 'a title' },
+      { ok: 'true', text: 'x' },
+      null,
+      'text',
+      [],
+    ]) {
+      answers.push(bad);
+      await expect(read()).resolves.toEqual({ ok: false });
+    }
+    answers.push({ ok: true, text: exact });
+    await expect(read()).resolves.toEqual({ ok: true, text: exact });
+    readNodeValue.mockImplementationOnce(() => {
+      throw new Error('helper gone');
+    });
+    await expect(read()).resolves.toEqual({ ok: false });
+    // A multi-byte text is judged in bytes, not characters.
+    answers.push({
+      ok: true,
+      text: 'あ'.repeat(Math.floor(COMPUTER_USE_ARTIFACT_LIMITS.maxBytes / 3) + 1),
+    });
+    await expect(read()).resolves.toEqual({ ok: false });
+    // Without the native method there is no read at all.
+    const without = await win32TicketScenario(true);
+    expect(without.host.readNodeValue).toBeUndefined();
+  });
 
   // C4-0: the Windows helper does not know the key until S5, so the route is bound in Main and
   // never sent there, whichever route was asked for.

@@ -912,6 +912,36 @@ public:
     return windows_uia_source_detail::ShadowTextFromUtf16(value.View(), false, maximum_bytes, output);
   }
 
+  // The value of one element for `copy` (#785 T15-4w). TextPattern first: it can be asked for at most
+  // `maximum_bytes + 1` characters, so a document of any size costs one bounded read (a Windows
+  // Notepad Document has both patterns, and its ValuePattern would hand over the WHOLE text). Then
+  // ValuePattern, for the controls that have only that (a Win32 Edit). An element with neither, or
+  // with an empty value, has no value. A value over the bound is too long, never cut. Reads only.
+  ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) override {
+    IUIAutomationElement *current = At(element);
+    if (current == nullptr) return ShadowReadResult::kFailed;
+    windows_uia_source_detail::ComRef<IUIAutomationTextPattern> text_pattern;
+    if (FAILED(current->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(text_pattern.Receive()))))
+      return ShadowReadResult::kFailed;
+    if (text_pattern.Get() != nullptr) {
+      windows_uia_source_detail::ComRef<IUIAutomationTextRange> range;
+      if (FAILED(text_pattern.Get()->get_DocumentRange(range.Receive())) || range.Get() == nullptr)
+        return ShadowReadResult::kFailed;
+      windows_uia_source_detail::BstrHolder text;
+      // One character more than the bound: a longer text is seen as longer, not cut to fit.
+      if (FAILED(range.Get()->GetText(static_cast<int>(maximum_bytes + 1), text.Receive())))
+        return ShadowReadResult::kFailed;
+      return windows_uia_source_detail::ShadowTextFromUtf16(text.View(), false, maximum_bytes, output);
+    }
+    windows_uia_source_detail::ComRef<IUIAutomationValuePattern> value_pattern;
+    if (FAILED(current->GetCurrentPatternAs(UIA_ValuePatternId, IID_PPV_ARGS(value_pattern.Receive()))))
+      return ShadowReadResult::kFailed;
+    if (value_pattern.Get() == nullptr) return ShadowReadResult::kAbsent;
+    windows_uia_source_detail::BstrHolder value;
+    if (FAILED(value_pattern.Get()->get_CurrentValue(value.Receive()))) return ShadowReadResult::kFailed;
+    return windows_uia_source_detail::ShadowTextFromUtf16(value.View(), false, maximum_bytes, output);
+  }
+
   ShadowReadResult WindowProcessPath(Element window, std::size_t maximum_bytes,
                                      std::string *output) override {
     IUIAutomationElement *current = At(window);

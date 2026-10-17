@@ -122,6 +122,18 @@ export function createWindowsComputerUseNativeAddon(
         `preflight:${stringField(value, 'requestId')}`,
       );
     },
+    // #785 T15-4w: the read of one node's value for `copy`. A probe operation of its own, under its own
+    // request key, so its answer (which carries the value) is never confused with a dispatch's.
+    readNodeValue: (input) => {
+      const value = record(input);
+      return client.call(
+        'probe',
+        'read_node_value',
+        value,
+        stringField(value, 'sessionId'),
+        `readNodeValue:${stringField(value, 'requestId')}`,
+      );
+    },
     dispatch: (input) => {
       const value = record(input);
       return client.call(
@@ -765,6 +777,8 @@ export function operationTimeoutMilliseconds(operation: string): number {
   if (operation === 'pick_application') return 5 * 60_000;
   if (operation === 'list_windows' || operation === 'observe') return 30_000;
   if (operation === 'start_session') return 15_000;
+  // The helper answers a read within the lane's 500 ms hold; a longer wait is a helper that is stuck.
+  if (operation === 'read_node_value') return 5_000;
   if (operation === 'close_session') return COMPUTER_USE_NATIVE_CLOSE_TRANSPORT_TIMEOUT_MS;
   return 10_000;
 }
