@@ -2439,11 +2439,40 @@ std::uint32_t WindowsBuildNumber() {
   return version.dwBuildNumber;
 }
 
+// The bound of ONE UI Automation call on the V1 lane (observe, the point / focus classification, the
+// control bindings, the semantic target search, the focused-element signature that the re-validation
+// uses). Without it a target that does not answer holds the serial lane for good, and every later
+// frame (observe, preflight, dispatch, Cancel) waits behind it (#820). 500 ms because:
+//  - a live app answers a call in milliseconds, and a cold one (providers loading on the first call)
+//    in well under that: this is twice the 250 ms of the synchronous interlock (which has a 500 ms
+//    budget of its own) so a slow-but-alive app is not turned into "unreadable";
+//  - a hung one is cut off after this one call (measured on a window that does not answer: the
+//    timeout is kept to within about 15 ms), and the V1 paths stop at the first failed read, so two
+//    calls fit in the 1 s the Cancel acknowledgment is given (COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS)
+//    and many fit in the 10 s of a preflight.
+// A failed (timed out) read is exactly the "unreadable" of each caller (stale target, rejected action,
+// or an observation that is not produced): the meaning of V1's answers is not changed.
+constexpr DWORD kWindowsV1UiaTimeoutMs = 500;
+
+// The ONE place the V1 lane creates UI Automation. The bounded one when the system has it
+// (CreateBoundedAutomation); if IUIAutomation2 cannot be had it falls back to the plain one, as before
+// this bound existed (no timeout), and counts it, so that the missing bound is visible and not silent.
+std::atomic<long> windows_v1_uia_unbounded_creations{0};
+HRESULT CreateWindowsV1Automation(IUIAutomation **automation) {
+  *automation = nullptr;
+  if (sprint_coder::computer_use::windows_uia_source_detail::CreateBoundedAutomation(
+          kWindowsV1UiaTimeoutMs, automation))
+    return S_OK;
+  if (windows_v1_uia_unbounded_creations.fetch_add(1) == 0)
+    OutputDebugStringA("computer-use: V1 UI Automation without a call timeout (IUIAutomation2 unavailable)\n");
+  return CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_PPV_ARGS(automation));
+}
+
 bool HasUiAutomation() {
   IUIAutomation *automation = nullptr;
   const HRESULT result =
-      CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                       IID_PPV_ARGS(&automation));
+      CreateWindowsV1Automation(&automation);
   if (FAILED(result) || automation == nullptr)
     return false;
   automation->Release();
@@ -3104,9 +3133,7 @@ bool IsProcessElevated(std::uint32_t pid) {
 bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
                         std::size_t *nodes) {
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return false;
   IUIAutomationElement *root = nullptr;
@@ -3298,9 +3325,7 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
     return merged;
   IUIAutomation *automation = nullptr;
   IUIAutomationTreeWalker *walker = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr || FAILED(automation->get_RawViewWalker(&walker)) ||
       walker == nullptr) {
     if (walker != nullptr)
@@ -3342,9 +3367,7 @@ WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
   if (control_signature != nullptr)
     control_signature->clear();
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return {};
   IUIAutomationElement *element = nullptr;
@@ -3371,9 +3394,7 @@ WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
 
 WindowsUiaRisk ClassifyWindowsFocusedElement(std::uint32_t expected_pid) {
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return {};
   IUIAutomationElement *element = nullptr;
@@ -3571,8 +3592,7 @@ bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
   if (bindings == nullptr)
     return false;
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return false;
   IUIAutomationElement *root = nullptr;
@@ -3599,9 +3619,7 @@ bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
   if (signature == nullptr)
     return false;
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr)
     return false;
   IUIAutomationElement *element = nullptr;
@@ -3711,9 +3729,7 @@ bool FindWindowsSemanticTarget(const WindowsSession &session,
     return false;
   }
   IUIAutomation *automation = nullptr;
-  if (FAILED(CoCreateInstance(CLSID_CUIAutomation, nullptr,
-                              CLSCTX_INPROC_SERVER,
-                              IID_PPV_ARGS(&automation))) ||
+  if (FAILED(CreateWindowsV1Automation(&automation)) ||
       automation == nullptr) {
     *reason = "accessibility_unavailable";
     return false;

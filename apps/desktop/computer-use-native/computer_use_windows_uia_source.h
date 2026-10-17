@@ -164,6 +164,33 @@ private:
 };
 
 
+// UI Automation created WITH its call timeouts, or not at all. CUIAutomation8 (Windows 8 and later) is
+// the only coclass that implements IUIAutomation2, whose ConnectionTimeout / TransactionTimeout bound a
+// call to an app that does not answer. The original CUIAutomation does not, and a call to a hung app
+// then never returns (measured: about 1.5 s for the first call alone, and without an upper bound after
+// it), which holds the thread that made it. False (and *automation null) when the coclass, the
+// interface or either timeout is not available. The ONE place the shadow source and the V1 lane
+// (CreateWindowsV1Automation in the host) get their bounded UI Automation from.
+[[nodiscard]] inline bool CreateBoundedAutomation(DWORD timeout_ms, IUIAutomation **automation) {
+  *automation = nullptr;
+  IUIAutomation *created = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&created))) ||
+      created == nullptr)
+    return false;
+  IUIAutomation2 *bounded = nullptr;
+  const bool set = SUCCEEDED(created->QueryInterface(IID_PPV_ARGS(&bounded))) && bounded != nullptr &&
+                   SUCCEEDED(bounded->put_ConnectionTimeout(timeout_ms)) &&
+                   SUCCEEDED(bounded->put_TransactionTimeout(timeout_ms));
+  if (bounded != nullptr) bounded->Release();
+  if (!set) {
+    created->Release();
+    return false;
+  }
+  *automation = created;
+  return true;
+}
+
 // What the shell knows about an item: the path in the file system, and whether it opens by browsing.
 struct ShellItemAnswer {
   std::wstring path;
@@ -775,21 +802,12 @@ public:
                                                                     DWORD timeout_ms,
                                                                     std::atomic<bool> &lookup_slot) {
     using windows_uia_source_detail::ComRef;
-    // CUIAutomation8 (Windows 8 and later) is the only coclass that implements IUIAutomation2, whose
-    // ConnectionTimeout / TransactionTimeout bound a call to an app that does not answer. The
-    // original CUIAutomation does not, and a call to a hung app then never returns (measured), which
-    // would hold the shadow's thread and its one slot for the life of the helper. So the timeouts are
-    // a precondition: without them there is no source, and the capture is recorded as skipped.
+    // The timeouts are a precondition (see windows_uia_source_detail::CreateBoundedAutomation): a call
+    // to a hung app would otherwise hold the shadow's thread and its one slot for the life of the
+    // helper. Without them there is no source, and the capture is recorded as skipped.
     ComRef<IUIAutomation> automation;
-    if (FAILED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER,
-                                IID_PPV_ARGS(automation.Receive()))) ||
+    if (!windows_uia_source_detail::CreateBoundedAutomation(timeout_ms, automation.Receive()) ||
         automation.Get() == nullptr)
-      return nullptr;
-    ComRef<IUIAutomation2> bounded;
-    if (FAILED(automation.Get()->QueryInterface(IID_PPV_ARGS(bounded.Receive()))) ||
-        bounded.Get() == nullptr ||
-        FAILED(bounded.Get()->put_ConnectionTimeout(timeout_ms)) ||
-        FAILED(bounded.Get()->put_TransactionTimeout(timeout_ms)))
       return nullptr;
     ComRef<IUIAutomationTreeWalker> walker;
     if (FAILED(automation.Get()->get_RawViewWalker(walker.Receive())) || walker.Get() == nullptr)

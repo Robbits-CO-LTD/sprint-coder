@@ -277,6 +277,8 @@ describe('Windows UI Automation source only reads', () => {
       'ShellDriveIsLocalDisk',
       'ShellReparseIsLink',
       'ShellMountTargetPath',
+      'CreateBoundedAutomation',
+      'CreateWindowsV1Automation',
       'ShellDirectoryWithSeparator',
       'ShellIniValueIsSafe',
       'ShellDriveLetterIsLocal',
@@ -423,6 +425,8 @@ describe('Windows UI Automation source only reads', () => {
       'ShellDriveIsLocalDisk',
       'ShellReparseIsLink',
       'ShellMountTargetPath',
+      'CreateBoundedAutomation',
+      'CreateWindowsV1Automation',
       'ShellDirectoryWithSeparator',
       'ShellIniValueIsSafe',
       'ShellDriveLetterIsLocal',
@@ -477,19 +481,28 @@ describe('Windows UI Automation source only reads', () => {
       'static std::unique_ptr<WindowsUiaShadowSource> Create(',
       'WindowsUiaShadowSource(const',
     );
-    // CUIAutomation8 is the only coclass with IUIAutomation2 (ConnectionTimeout / TransactionTimeout);
-    // with the original CUIAutomation a call to a hung app never returns (measured).
-    expect(create).toContain('CLSID_CUIAutomation8');
-    expect(code(create)).not.toMatch(/CLSID_CUIAutomation\b(?!8)/u);
-    expect(create).toContain('ComRef<IUIAutomation2> bounded;');
-    expect(create).toContain('put_ConnectionTimeout(timeout_ms)');
-    expect(create).toContain('put_TransactionTimeout(timeout_ms)');
-    expect(code(source)).not.toContain('IUIAutomation6');
-    // Failing to set either is "no source" (the capture is skipped), never a call without a bound.
-    expect(create).toMatch(
-      /FAILED\(bounded\.Get\(\)->put_ConnectionTimeout\(timeout_ms\)\) \|\|\s*FAILED\(bounded\.Get\(\)->put_TransactionTimeout\(timeout_ms\)\)\)\s*return nullptr;/u,
+    // The coclass with IUIAutomation2 (CUIAutomation8; with the original CUIAutomation a call to a hung
+    // app never returns, measured) is created by the one shared helper, which sets both timeouts and
+    // hands out nothing when it cannot (#820: the V1 lane uses the same helper).
+    const helper = between(
+      source,
+      'inline bool CreateBoundedAutomation(',
+      'What the shell knows about an item',
     );
-    expect(create.indexOf('put_TransactionTimeout')).toBeLessThan(
+    expect(helper).toContain('CLSID_CUIAutomation8');
+    expect(code(source)).not.toMatch(/CLSID_CUIAutomation\b(?!8)/u);
+    expect(helper).toContain('IUIAutomation2 *bounded = nullptr;');
+    expect(helper).toContain('put_ConnectionTimeout(timeout_ms)');
+    expect(helper).toContain('put_TransactionTimeout(timeout_ms)');
+    expect(code(source)).not.toContain('IUIAutomation6');
+    expect(helper.replace(/\s+/gu, ' ')).toContain(
+      'if (!set) { created->Release(); return false; }',
+    );
+    // Failing to get a bounded one is "no source" (the capture is skipped), never a call without a bound.
+    expect(create.replace(/\s+/gu, ' ')).toContain(
+      'if (!windows_uia_source_detail::CreateBoundedAutomation(timeout_ms, automation.Receive()) || automation.Get() == nullptr) return nullptr;',
+    );
+    expect(create.indexOf('CreateBoundedAutomation')).toBeLessThan(
       create.indexOf('get_RawViewWalker'),
     );
     // The bound is the caller's (S5-c-2 PR-1): the shadow is asynchronous and waits up to 1500 ms, the
