@@ -182,8 +182,10 @@ struct WindowsArtifactReadResult {
   if (!result.verdict.MayRead()) return result;
   std::string text;
   const ShadowReadResult read = reader.ReadTargetValue(kArtifactReadMaxBytes, &text);
-  // A cancel or a deadline during the value read: no value, whatever it returned.
-  if (reader.Canceled() || !source.ActionStillValid()) {
+  // A cancel or a deadline during the value read: no value, whatever it returned. A call that ends
+  // past the deadline marks the budget spent without canceling, so the budget is asked too.
+  if (reader.Canceled() || !source.ActionStillValid() || reader.Gate().BudgetExhausted() ||
+      reader.Gate().Stopped()) {
     ScrubArtifactText(&text);
     result.incomplete = true;
     return result;

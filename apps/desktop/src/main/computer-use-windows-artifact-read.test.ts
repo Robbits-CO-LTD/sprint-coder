@@ -172,8 +172,9 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     ).toBeGreaterThan(lane.indexOf('pending->ready.wait_for(lock, kInterlockLaneHoldLimit'));
     // The portable read scrubs its own temporary on the failure paths.
     const portable = squash(code(header));
+    // A value read that ends past the deadline is not used either (the gate stops without canceling).
     expect(portable).toContain(
-      'if (reader.Canceled() || !source.ActionStillValid()) { ScrubArtifactText(&text);',
+      'if (reader.Canceled() || !source.ActionStillValid() || reader.Gate().BudgetExhausted() || reader.Gate().Stopped()) { ScrubArtifactText(&text);',
     );
     expect(portable).toContain('if (read != ShadowReadResult::kOk) { ScrubArtifactText(&text);');
   });

@@ -2932,6 +2932,8 @@ public:
   Element last_tab = kNoElement;
   // Time that passes inside the shell lookup (a slow Explorer).
   std::uint64_t item_delay_ns = 0;
+  // Time that passes inside a value read (a slow provider).
+  std::uint64_t value_delay_ns = 0;
 
   int Add(int parent, const std::string &control, const std::string &name = "",
           const std::string &class_name = "") {
@@ -3056,6 +3058,7 @@ public:
   ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) override {
     Tick();
     ++value_calls;
+    now += value_delay_ns;
     const FakeUiaNode &node = nodes[element];
     if (node.value_result != ShadowReadResult::kOk) return node.value_result;
     if (!node.has_value) return ShadowReadResult::kAbsent;
@@ -8390,6 +8393,13 @@ bool CheckWindowsArtifactRead() {
     // The value is read from the node the signature was checked on: the checked node is the Edit.
     const auto [other, other_calls] = read(nullptr, "name", "sig-of-another-control");
     if (!Check(!other.ok && other.signature_mismatch && other_calls == 0, "artifact-read-other-expected-signature-is-refused")) return false;
+  }
+  // A value read that returns after the shadow deadline: no value, whatever it returned (the deadline
+  // ends the read like a cancel; a late value is never used).
+  {
+    const auto [late, late_calls] = read([](FakeForm &form) { form.source.value_delay_ns = kShadowDeadlineNs * 2; });
+    if (!Check(!late.ok && late.incomplete && late.text.empty() && late_calls == 1,
+               "artifact-read-value-past-the-deadline-is-not-used")) return false;
   }
   // An Edit with a value is read, and the value is exactly the node's.
   {
