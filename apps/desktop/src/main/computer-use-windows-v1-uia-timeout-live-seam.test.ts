@@ -16,7 +16,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // a connected element, 310-320 ms). The bound is therefore one ConnectionTimeout and a 200 ms margin.
 // The 800 ms (Connection + Transaction in ONE call) that the ADR counts against the 1 s Cancel
 // acknowledgment is a safe upper estimate that has not been observed; if a call ever did run both waits,
-// it would exceed this bound and the seam would fail, which is the alarm wanted.
+// it would exceed this bound and the seam would fail, which is the alarm wanted. No case here sets out to
+// cause that chain, so the 800 ms itself is not verified (a known limit, as the ADR says).
 //
 // The live seam compiles the real host (computer_use_windows_host.cc, with its entry point renamed) into a
 // test program. The program starts ITSELF as a second process that owns the windows (so every UI
