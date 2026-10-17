@@ -3288,6 +3288,22 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('lists Turns a restart closed as interrupted in the snapshot (issue #842)', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('interrupted history');
+      const finished = persistence.startTurn(task.id, 'finished before the restart');
+      for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+        persistence.changeStage(task.id, finished.turnId, stage);
+      persistence.completeTurn(task.id, finished.turnId, 'completed');
+      const running = persistence.startTurn(task.id, 'still running at the restart');
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      reopened.interruptActiveTurns();
+      expect(reopened.snapshot(task.id).interruptedTurnIds).toEqual([running.turnId]);
+      reopened.close();
+    });
+
     it('canonicalizes Windows FileChange separators without changing a POSIX backslash', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

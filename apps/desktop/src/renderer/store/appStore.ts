@@ -214,6 +214,8 @@ type AppState = {
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
   commandsByTask: Record<string, CommandCardState[]>;
   turnDiffByTask: Record<string, TurnDiff | undefined>;
+  /** Turns a restart closed as interrupted, from the task snapshot (issue #842). */
+  interruptedTurnIdsByTask: Record<string, readonly string[]>;
   /** Images generated per task, oldest first (issue #11). Metadata only — bytes are fetched by the
    * card that displays them, so switching tasks never drags base64 through the store. */
   imagesByTask: Record<string, GeneratedImage[]>;
@@ -850,6 +852,19 @@ export function handleTurnEvent(
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
           },
           stageAnnouncement: finalStateLabel(ev.state),
+          ...(ev.state === 'interrupted'
+            ? {
+                interruptedTurnIdsByTask: {
+                  ...state.interruptedTurnIdsByTask,
+                  [taskId]: [
+                    ...(state.interruptedTurnIdsByTask[taskId] ?? []).filter(
+                      (turnId) => turnId !== ev.turnId,
+                    ),
+                    ev.turnId,
+                  ],
+                },
+              }
+            : {}),
           // Smallest-surface exposure of "which model actually ran" (FR clarity ask): the model
           // chip's tooltip reads this after a Claude turn completes with a resolved model id.
           ...(ev.resolvedModel !== undefined
@@ -1074,6 +1089,7 @@ export const useAppStore = create<AppState>((set, get) => {
     autoDecisionsByTask: {},
     commandsByTask: {},
     turnDiffByTask: {},
+    interruptedTurnIdsByTask: {},
     imagesByTask: {},
     fileChangesByTask: {},
     liveEditTaskId: null,
@@ -1719,6 +1735,10 @@ export const useAppStore = create<AppState>((set, get) => {
           turnDiffByTask: {
             ...state.turnDiffByTask,
             [taskId]: snapshot.latestTurnDiff ?? undefined,
+          },
+          interruptedTurnIdsByTask: {
+            ...state.interruptedTurnIdsByTask,
+            [taskId]: snapshot.interruptedTurnIds ?? [],
           },
         }));
       }
