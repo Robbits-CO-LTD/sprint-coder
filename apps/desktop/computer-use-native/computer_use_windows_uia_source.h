@@ -231,24 +231,37 @@ struct AbsoluteIdList {
   return false;
 }
 
+// Whether a drive type is one whose files are read from a local disk: not a network drive, an
+// optical drive, an unknown one or a root that does not exist.
+[[nodiscard]] inline bool ShellDriveIsLocalDisk(UINT drive) {
+  if (drive == DRIVE_REMOTE || drive == DRIVE_CDROM || drive == DRIVE_UNKNOWN ||
+      drive == DRIVE_NO_ROOT_DIR)
+    return false;
+  return true;
+}
+
 // Whether any part of `path` (below its volume root) is a symbolic link or a volume mount point:
 // those can lead to a network or optical location that the drive letter does not show. Cloud file
 // tags and other reparse points are not links in this sense. A part that cannot be looked at counts
-// as a link (fail-closed).
-[[nodiscard]] inline bool ShellPathHasLink(const std::wstring &root, const std::wstring &path) {
+// as a link (fail-closed), and so does a stop (see ShellLookupMustStop; *result then says why).
+[[nodiscard]] inline bool ShellPathHasLink(const std::wstring &root, const std::wstring &path,
+                                           const ShellLookupLimits &limits, ShadowReadResult *result) {
   const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
   std::size_t at = root.size();
   for (;;) {
     const std::size_t next = trimmed.find(L'\\', at);
     const std::wstring part = trimmed.substr(0, next == std::wstring::npos ? trimmed.size() : next);
     if (part.size() > root.size()) {
+      // Each part is one more file system call: not after the caller gave up or the deadline passed (a
+      // stop counts as "a link": fail-closed, and the caller returns the stop result).
+      if (ShellLookupMustStop(limits, result)) return true;
       WIN32_FIND_DATAW data{};
       FindHandle find;
       find.handle = FindFirstFileExW(part.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
                                      nullptr, 0);
       if (find.handle == INVALID_HANDLE_VALUE) return true;
-      if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
-          (data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT))
+      if (ShellReparseIsLink((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0,
+                             data.dwReserved0))
         return true;
     }
     if (next == std::wstring::npos) return false;
@@ -259,30 +272,45 @@ struct AbsoluteIdList {
 // Whether the folder at `path` is one whose entries may be listed here: a plain directory on a local
 // disk, whose view shows exactly its own entries under the names the shell gives them. Decided
 // BEFORE any listing, and fail-closed (a doubt is "no"):
-//  - a network location (a UNC path, a remote, optical or unknown drive) can block for long. The
-//    drive is that of the VOLUME the path is on (GetVolumePathNameW), not of its first three
-//    characters, and a symbolic link or mount point on the way (which may lead to such a location) is
-//    refused;
+//  - a network location (a UNC path, a remote, optical or unknown drive) can block for long. It is
+//    excluded in TWO steps: first by the type of the drive letter (GetDriveTypeW on the first three
+//    characters: no I/O, so a drive mapped to an SMB share that does not answer is never touched),
+//    and only then GetVolumePathNameW finds the VOLUME the path is on (a mount point inside a local
+//    drive can lead elsewhere), whose type is checked again. A symbolic link or mount point on the
+//    way is refused. The root of a mounted volume itself (C:\\mnt\\vol, listed as the folder) is not
+//    listed either: its volume root is longer than its path, which is "no" (fail-closed);
 //  - the desktop folders (the user's and the public one) are shown MERGED in the desktop view, so an
 //    entry of the other folder looks like one of this folder. Their paths are asked WITHOUT
 //    verifying them (KF_FLAG_DONT_VERIFY): a redirected desktop would otherwise be probed over the
 //    network.
-[[nodiscard]] inline bool ShellFolderMayBeListed(const std::wstring &path) {
+//
+// Every file system call here is preceded by ShellLookupMustStop: on a stop the answer is "no" and
+// *result is kStopped or kAbsent (the caller returns it); on any other "no" *result is untouched.
+//
+// A known limit: the folder could be swapped for a link between this check and the listing (TOCTOU).
+// It is accepted, because only a local operation of the same user on this machine can do it, and a
+// swap does not make the answer wrong by itself: every candidate must still resolve (by its file
+// system path) to the very entry that was listed, and the action is re-evaluated just before it is
+// sent (the dispatch guard of the later step), so a folder that changed in between is seen again.
+[[nodiscard]] inline bool ShellFolderMayBeListed(const std::wstring &path, const ShellLookupLimits &limits,
+                                                 ShadowReadResult *result) {
   if (path.size() < 3 || path[0] == L'\\') return false;
   if (path[1] != L':' || path[2] != L'\\') return false;
+  // Step 1: the drive letter's type, with no I/O (a share that does not answer is not touched).
+  if (!ShellDriveIsLocalDisk(GetDriveTypeW(path.substr(0, 3).c_str()))) return false;
+  // Step 2: the volume the path is really on, and its type. From here on every call may block.
   std::wstring root(MAX_PATH * 2, L'\0');
+  if (ShellLookupMustStop(limits, result)) return false;
   if (!GetVolumePathNameW(path.c_str(), root.data(), static_cast<DWORD>(root.size()))) return false;
   root.resize(wcslen(root.c_str()));
   if (root.size() < 3 || root[0] == L'\\' || root.size() > path.size() ||
       !ShellNameEqualsOrdinal(std::wstring_view(path).substr(0, root.size()), root))
     return false;
-  const UINT drive = GetDriveTypeW(root.c_str());
-  if (drive == DRIVE_REMOTE || drive == DRIVE_CDROM || drive == DRIVE_UNKNOWN ||
-      drive == DRIVE_NO_ROOT_DIR)
-    return false;
+  if (!ShellDriveIsLocalDisk(GetDriveTypeW(root.c_str()))) return false;
   const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
   for (const KNOWNFOLDERID &known : {FOLDERID_Desktop, FOLDERID_PublicDesktop}) {
     PWSTR folder = nullptr;
+    if (ShellLookupMustStop(limits, result)) return false;
     if (FAILED(SHGetKnownFolderPath(known, KF_FLAG_DONT_VERIFY, nullptr, &folder)) || folder == nullptr) {
       if (folder != nullptr) CoTaskMemFree(folder);
       return false;
@@ -291,7 +319,7 @@ struct AbsoluteIdList {
     CoTaskMemFree(folder);
     if (same) return false;
   }
-  return !ShellPathHasLink(root, path);
+  return !ShellPathHasLink(root, path, limits, result);
 }
 
 // Whether the files of the folder can be shown under names that have nothing to do with their file
@@ -299,20 +327,43 @@ struct AbsoluteIdList {
 // ShellDesktopIniLocalizesFileNames for the rule, which treats what cannot be read as a yes). Then an
 // entry that is not a candidate by its file name could still carry the display name. Only that
 // section is read; the file is never opened otherwise.
-[[nodiscard]] inline bool ShellFolderHasLocalizedFileNames(const std::wstring &path) {
-  const std::wstring settings = ShellPathWithoutTrailingSeparator(path) + L"\\desktop.ini";
-  const bool found = GetFileAttributesW(settings.c_str()) != INVALID_FILE_ATTRIBUTES;
-  const DWORD lookup_error = found ? 0 : GetLastError();
+[[nodiscard]] inline bool ShellFolderHasLocalizedFileNames(const std::wstring &path,
+                                                           const ShellLookupLimits &limits,
+                                                           ShadowReadResult *result) {
+  const std::wstring folder = ShellPathWithoutTrailingSeparator(path);
+  const std::wstring settings = folder + L"\\desktop.ini";
+  // A stop counts as "yes" (fail-closed); *result then says why. Asked before EVERY call below.
+  // The shell reads a desktop.ini only in a folder that is read-only or system: other folders are
+  // not read at all. And a desktop.ini that is a link (of any kind) is never read, because the profile
+  // API would follow it, possibly to a network location (and authenticate there).
+  if (ShellLookupMustStop(limits, result)) return true;
+  const DWORD folder_attributes = GetFileAttributesW(folder.c_str());
+  const bool folder_known = folder_attributes != INVALID_FILE_ATTRIBUTES;
+  bool found = false;
+  DWORD lookup_error = 0;
+  bool is_reparse_point = false;
   DWORD length = 0;
   DWORD section_error = 0;
-  if (found) {
-    std::wstring section(32767, L'\0');
-    SetLastError(0);
-    length = GetPrivateProfileSectionW(L"LocalizedFileNames", section.data(),
-                                       static_cast<DWORD>(section.size()), settings.c_str());
-    section_error = GetLastError();
+  if (folder_known && (folder_attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0) {
+    if (ShellLookupMustStop(limits, result)) return true;
+    WIN32_FIND_DATAW data{};
+    FindHandle find;
+    find.handle = FindFirstFileExW(settings.c_str(), FindExInfoBasic, &data, FindExSearchNameMatch,
+                                   nullptr, 0);
+    found = find.handle != INVALID_HANDLE_VALUE;
+    lookup_error = found ? 0 : GetLastError();
+    is_reparse_point = found && (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+    if (found && !is_reparse_point) {
+      if (ShellLookupMustStop(limits, result)) return true;
+      std::wstring section(32767, L'\0');
+      SetLastError(0);
+      length = GetPrivateProfileSectionW(L"LocalizedFileNames", section.data(),
+                                         static_cast<DWORD>(section.size()), settings.c_str());
+      section_error = GetLastError();
+    }
   }
-  return ShellDesktopIniLocalizesFileNames(found, lookup_error, length, section_error);
+  return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, found, lookup_error,
+                                           is_reparse_point, length, section_error);
 }
 
 // The path of the item a file browser shows under `display_name`. The folder the view shows is asked
@@ -413,7 +464,8 @@ struct AbsoluteIdList {
   // up or the deadline passed (a call started after the cancel could not be canceled).
   ShadowReadResult stopped = ShadowReadResult::kAbsent;
   if (ShellLookupMustStop(limits, &stopped)) return stopped;
-  if (!ShellFolderMayBeListed(folder_path)) return ShadowReadResult::kAbsent;
+  stopped = ShadowReadResult::kAbsent;
+  if (!ShellFolderMayBeListed(folder_path, limits, &stopped)) return stopped;
   std::wstring directory = ShellPathWithoutTrailingSeparator(folder_path);
   directory.push_back(L'\\');
   // The folder itself: every entry (a name that is only the display name's prefix does not decide).
@@ -423,7 +475,8 @@ struct AbsoluteIdList {
   if (directory.size() >= MAX_PATH - 14) return ShadowReadResult::kAbsent;
   // A desktop.ini that renames files: an entry outside the candidates could carry the display name.
   if (ShellLookupMustStop(limits, &stopped)) return stopped;
-  if (ShellFolderHasLocalizedFileNames(folder_path)) return ShadowReadResult::kAbsent;
+  stopped = ShadowReadResult::kAbsent;
+  if (ShellFolderHasLocalizedFileNames(folder_path, limits, &stopped)) return stopped;
 
   std::vector<ShellNameCandidate> candidates;
   FindHandle find;
@@ -437,8 +490,7 @@ struct AbsoluteIdList {
                                                                          : ShadowReadResult::kFailed;
   }
   for (;;) {
-    if (!limits.still_valid()) return ShadowReadResult::kStopped;
-    if (limits.now_ns() > limits.deadline_ns) return ShadowReadResult::kAbsent;
+    if (ShellLookupMustStop(limits, &stopped)) return stopped;
     const std::wstring_view found(entry.cFileName);
     const bool is_directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
     // An entry needs its shell name only when it can carry the display name (the pure rule in the
@@ -454,6 +506,9 @@ struct AbsoluteIdList {
       ShellNameCandidate candidate;
       candidate.name = std::wstring(found);
       candidate.is_directory = is_directory;
+      // A link is never followed to get a name (its target can be on the network): it stays unknown.
+      candidate.is_link = ShellReparseIsLink((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0,
+                                             entry.dwReserved0);
       candidates.push_back(std::move(candidate));
     }
     if (!FindNextFileW(find.handle, &entry)) {
@@ -466,6 +521,7 @@ struct AbsoluteIdList {
   // answer "not known" (it might be the one, or a second one).
   for (ShellNameCandidate &candidate : candidates) {
     if (ShellLookupMustStop(limits, &stopped)) return stopped;
+    if (candidate.is_link) continue;
     ComRef<IShellItem> item;
     PWSTR shown = nullptr;
     PWSTR resolved = nullptr;

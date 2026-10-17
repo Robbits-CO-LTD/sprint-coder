@@ -9,7 +9,11 @@
 //  1. the caller lists the folder ONCE and keeps, only to narrow the field, the entries that can carry
 //     the display name (ShellEntryNeedsShellName): those whose file name STARTS WITH it, and the
 //     directories that are read-only or system (a desktop.ini can give only those another name, as a
-//     localized "Documents"). At most kShellMaxCandidates are kept, both kinds counted together; and
+//     localized "Documents"). Both kinds count together toward kShellMaxCandidates. The CALLER
+//     must not cut the list at the cap and match what is left: the moment it finds one more entry
+//     than the cap it gives up and the whole lookup is "not known" (kAbsent). MatchShellDisplayName
+//     repeats that rule for its own input: a list longer than the cap (the caller's one-past-the-cap
+//     case, were it ever passed in) is "not known" too, never matched; and
 //  2. for EVERY candidate the caller asks the SHELL for the name it shows (the same name Explorer
 //     shows, whatever hides an extension: the user's setting, an extension that is never shown,
 //     a folder with a dot in its name), and this function decides which candidate the display name
@@ -35,6 +39,7 @@ struct ShellNameCandidate {
   bool is_directory = false;
   std::wstring shell_name; // the name the shell shows for it (valid when shell_name_known)
   bool shell_name_known = false;
+  bool is_link = false; // a symbolic link / mount point: its shell name is never asked for (unknown)
 };
 
 constexpr std::size_t kShellMaxCandidates = 64;
@@ -67,22 +72,42 @@ using ShellNameEquals = bool (*)(std::wstring_view, std::wstring_view);
   return is_directory && readonly_or_system;
 }
 
-// The Win32 error numbers the folder checks below read (kept here so the rule stays pure).
+// The Win32 values the folder checks below read (kept here so the rules stay pure).
 constexpr unsigned long kShellErrorFileNotFound = 2;
 constexpr unsigned long kShellErrorPathNotFound = 3;
+constexpr unsigned long kShellAttributeReadOnly = 0x1;
+constexpr unsigned long kShellAttributeSystem = 0x4;
+constexpr unsigned long kShellReparseTagMountPoint = 0xA0000003;
+constexpr unsigned long kShellReparseTagSymlink = 0xA000000C;
+
+// Whether a directory entry is a symbolic link or a mount point (a junction): reading the shell's name
+// for it would touch what it points to, which can be a network or optical location. Any other reparse
+// point (a cloud file's tag, for one) is not a link in this sense. The tag is only meaningful when
+// the entry IS a reparse point (the listing leaves it undefined otherwise).
+[[nodiscard]] inline bool ShellReparseIsLink(bool is_reparse_point, unsigned long tag) {
+  return is_reparse_point && (tag == kShellReparseTagSymlink || tag == kShellReparseTagMountPoint);
+}
 
 // Whether a folder's desktop.ini means that its files can be shown under names with no relation to
-// their file names (a non-empty [LocalizedFileNames] section). A desktop.ini is normal (a user's home
-// has one), so its existence is not a yes; but what cannot be known is: a desktop.ini that cannot be
-// looked up for another reason than "not there", and a section that cannot be read. Inputs: whether
-// the file was found (and the error of that lookup if not), and the length the profile API returned
-// for the section (and its error).
-[[nodiscard]] inline bool ShellDesktopIniLocalizesFileNames(bool file_found,
+// their file names (a non-empty [LocalizedFileNames] section). The shell honours that section only
+// for a folder that is read-only or system (checked on this machine: the same desktop.ini changes no
+// name in a plain folder), so a folder without those attributes is not read at all. A desktop.ini
+// is normal (a user's home has one): its existence is not a yes. What cannot be known is a yes
+// (fail-closed): the folder's attributes, a lookup that failed for another reason than "not there",
+// a section that cannot be read, and a desktop.ini that is itself a reparse point of ANY kind (the
+// profile API follows it, to a place that can be on the network, and is never asked).
+[[nodiscard]] inline bool ShellDesktopIniLocalizesFileNames(bool folder_attributes_known,
+                                                            unsigned long folder_attributes,
+                                                            bool file_found,
                                                             unsigned long lookup_error,
+                                                            bool file_is_reparse_point,
                                                             std::size_t section_length,
                                                             unsigned long section_error) {
+  if (!folder_attributes_known) return true;
+  if ((folder_attributes & (kShellAttributeReadOnly | kShellAttributeSystem)) == 0) return false;
   if (!file_found)
     return !(lookup_error == kShellErrorFileNotFound || lookup_error == kShellErrorPathNotFound);
+  if (file_is_reparse_point) return true;
   if (section_length != 0) return true;
   return section_error != 0 && section_error != kShellErrorFileNotFound;
 }

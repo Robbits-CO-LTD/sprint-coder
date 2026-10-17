@@ -6902,17 +6902,41 @@ bool CheckWindowsShellNameMatch() {
     if (!Check(!needs(L"..", true, true, L"report"), "shellneeds-dotdot-is-never-a-candidate")) return false;
     if (!Check(!ShellEntryNeedsShellName(L"report", false, false, L"report", nullptr), "shellneeds-null-comparison-is-no")) return false;
   }
-  // A desktop.ini that localizes file names: the section's length and the errors decide.
+  // A desktop.ini that localizes file names. The shell honours it only in a read-only / system folder, so
+  // other folders are not read; a desktop.ini that is a link (of any kind) is a yes without being read;
+  // what cannot be known is a yes.
   {
     constexpr unsigned long kAccessDenied = 5;
-    if (!Check(!ShellDesktopIniLocalizesFileNames(false, kShellErrorFileNotFound, 0, 0), "desktopini-none-file-not-found")) return false;
-    if (!Check(!ShellDesktopIniLocalizesFileNames(false, kShellErrorPathNotFound, 0, 0), "desktopini-none-path-not-found")) return false;
-    if (!Check(ShellDesktopIniLocalizesFileNames(false, kAccessDenied, 0, 0), "desktopini-unknown-lookup-error-is-a-yes")) return false;
-    if (!Check(!ShellDesktopIniLocalizesFileNames(true, 0, 0, 0), "desktopini-without-the-section-is-normal")) return false;
-    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 17, 0), "desktopini-with-the-section-is-a-yes")) return false;
-    if (!Check(!ShellDesktopIniLocalizesFileNames(true, 0, 0, kShellErrorFileNotFound), "desktopini-section-file-not-found-is-no")) return false;
-    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 0, kAccessDenied), "desktopini-unreadable-section-is-a-yes")) return false;
-    if (!Check(ShellDesktopIniLocalizesFileNames(true, 0, 3, kAccessDenied), "desktopini-length-wins-over-an-error")) return false;
+    constexpr unsigned long kDirectory = 0x10;
+    const auto ini = [](bool folder_known, unsigned long folder_attributes, bool found, unsigned long lookup_error,
+                        bool reparse, std::size_t length, unsigned long section_error) {
+      return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, found, lookup_error, reparse, length,
+                                               section_error);
+    };
+    const unsigned long read_only = kDirectory | kShellAttributeReadOnly;
+    const unsigned long system_dir = kDirectory | kShellAttributeSystem;
+    if (!Check(!ini(true, kDirectory, true, 0, false, 17, 0), "desktopini-plain-folder-is-not-read")) return false;
+    if (!Check(!ini(true, kDirectory, true, 0, true, 17, 0), "desktopini-plain-folder-link-is-not-read-either")) return false;
+    if (!Check(ini(false, 0, true, 0, false, 0, 0), "desktopini-unknown-folder-attributes-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, false, kShellErrorFileNotFound, false, 0, 0), "desktopini-none-file-not-found")) return false;
+    if (!Check(!ini(true, system_dir, false, kShellErrorPathNotFound, false, 0, 0), "desktopini-none-path-not-found")) return false;
+    if (!Check(ini(true, read_only, false, kAccessDenied, false, 0, 0), "desktopini-unknown-lookup-error-is-a-yes")) return false;
+    if (!Check(ini(true, read_only, true, 0, true, 0, 0), "desktopini-link-is-a-yes-without-reading")) return false;
+    if (!Check(ini(true, system_dir, true, 0, true, 0, 0), "desktopini-link-in-a-system-folder-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, true, 0, false, 0, 0), "desktopini-without-the-section-is-normal")) return false;
+    if (!Check(ini(true, read_only, true, 0, false, 17, 0), "desktopini-with-the-section-is-a-yes")) return false;
+    if (!Check(ini(true, system_dir, true, 0, false, 17, 0), "desktopini-with-the-section-in-a-system-folder-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, true, 0, false, 0, kShellErrorFileNotFound), "desktopini-section-file-not-found-is-no")) return false;
+    if (!Check(ini(true, read_only, true, 0, false, 0, kAccessDenied), "desktopini-unreadable-section-is-a-yes")) return false;
+    if (!Check(ini(true, read_only, true, 0, false, 3, kAccessDenied), "desktopini-length-wins-over-an-error")) return false;
+  }
+  // A candidate that is a symbolic link or a mount point is never followed for its shell name.
+  {
+    if (!Check(ShellReparseIsLink(true, kShellReparseTagSymlink), "link-symlink")) return false;
+    if (!Check(ShellReparseIsLink(true, kShellReparseTagMountPoint), "link-mount-point-or-junction")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0x9000001A), "link-cloud-tag-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0), "link-other-reparse-point-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(false, kShellReparseTagSymlink), "link-tag-of-a-non-reparse-entry-is-garbage")) return false;
   }
   // The leaf of a file system path identifies a resolved item (a known folder's parsing name is a GUID).
   {
