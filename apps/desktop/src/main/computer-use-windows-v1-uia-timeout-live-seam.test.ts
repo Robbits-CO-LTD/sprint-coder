@@ -269,6 +269,22 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(semantic.split('input_api_attempts->fetch_add(').length - 1).toBe(gated);
     expect(semantic.split('*accepted = true;').length - 1).toBe(gated);
     expect(semantic).not.toContain('*accepted = false;');
+    // ...and each gate's else block holds the pattern call itself, which is assigned to action_result
+    // (its own HRESULT decides input_timeout_unconfirmed). No pattern call stands anywhere else.
+    const escapedGate = gate.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+    const effect =
+      'action_result = [^;]*?pattern->(?:Invoke|SetValue|Select|Toggle|Expand|Collapse)\\(';
+    expect([...semantic.matchAll(new RegExp(`${escapedGate}[^}]*?${effect}`, 'gu'))]).toHaveLength(
+      gated,
+    );
+    expect([...semantic.matchAll(new RegExp(effect, 'gu'))]).toHaveLength(gated);
+    expect(
+      semantic
+        .replace(/action_result = [^;]*;/gu, '')
+        .match(
+          /->(?:Invoke|SetValue|Select|Toggle|Expand|Collapse|AddToSelection|RemoveFromSelection)\(/u,
+        ),
+    ).toBeNull();
     expect(semantic).toContain(
       '*reason = !*accepted ? "semantic_action_failed" : WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed"',
     );
