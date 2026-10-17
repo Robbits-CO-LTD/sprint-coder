@@ -4,6 +4,7 @@ import type { ComputerUseNativeBinding } from './computer-use-native';
 import { projectComputerUseAccessibilityTree } from './computer-use-accessibility-tree';
 import {
   COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE,
+  NATIVE_PREFLIGHT_REFUSALS,
   classifyComputerUseNativeDispatchFailure,
   createComputerUseNativeHost,
   parseNativeApprovalApproveReceipt,
@@ -76,6 +77,62 @@ describe('Computer Use native Main adapter', () => {
         Object.assign(new Error('accepted'), { code: 'STALE_TARGET', accepted: true }),
       ),
     ).toBeNull();
+  });
+
+  it('maps the three v2 interlock dispatch codes to the result of their preflight row (#500 S5-c-2 PR-5)', () => {
+    const refusal = (code: string, accepted: boolean | undefined = false) =>
+      classifyComputerUseNativeDispatchFailure(
+        Object.assign(new Error('refused'), {
+          code,
+          ...(accepted === undefined ? {} : { accepted }),
+        }),
+      );
+    // The result is the one of the same row of the receipt table: a block is rejected, an execution
+    // trigger is paused for a person.
+    expect(refusal('SHELL_SURFACE_BLOCKED')).toEqual({
+      result: 'rejected',
+      reasonCode: 'native_shell_surface_blocked',
+    });
+    expect(refusal('EXECUTION_TRIGGER_BLOCKED')).toEqual({
+      result: 'paused',
+      reasonCode: 'native_execution_trigger_blocked',
+    });
+    expect(refusal('APPROVAL_NOT_ENABLED')).toEqual({
+      result: 'rejected',
+      reasonCode: 'native_approval_not_enabled',
+    });
+    // The native spells the code in lower case: the same.
+    expect(refusal('execution_trigger_blocked')).toMatchObject({ result: 'paused' });
+    // Every mapped code has a row in the table, with the same result (a table change cannot leave the
+    // mapping behind).
+    for (const code of [
+      'SHELL_SURFACE_BLOCKED',
+      'EXECUTION_TRIGGER_BLOCKED',
+      'APPROVAL_NOT_ENABLED',
+    ]) {
+      const mapped = refusal(code)!;
+      expect(
+        NATIVE_PREFLIGHT_REFUSALS.some(
+          (entry) => entry.reasonCode === mapped.reasonCode && entry.deniedResult === mapped.result,
+        ),
+        code,
+      ).toBe(true);
+    }
+    // The V1 codes keep their plain rejection (the mapping of V1 is unchanged).
+    for (const code of [
+      'HIGH_IMPACT_BLOCKED',
+      'SECURE_FIELD_BLOCKED',
+      'STALE_TARGET',
+      'TARGET_UNCLASSIFIED',
+    ])
+      expect(refusal(code)).toEqual({
+        result: 'rejected',
+        reasonCode: `native_${code.toLowerCase()}`,
+      });
+    // An interlock code that is not marked as refused before input is not taken as a pre-dispatch
+    // refusal unless the native says accepted:false.
+    expect(refusal('EXECUTION_TRIGGER_BLOCKED', true)).toBeNull();
+    expect(refusal('EXECUTION_TRIGGER_BLOCKED', undefined)).toMatchObject({ result: 'paused' });
   });
 
   it('does not read node values: a production host offers no copy until T15-4m / T15-4w and C5', () => {

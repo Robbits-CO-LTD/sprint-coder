@@ -167,6 +167,16 @@ bool ReadJsonDouble(std::string_view json, std::string_view key, double *output)
 
 // The click rule (the host, #500 S5-c-2 PR-2) is its own contract; here a click never opens.
 bool WindowsClickOpens() noexcept { return false; }
+struct WindowsClickBasis {
+  bool tracked = false;
+  bool opens = false;
+  bool input_read = false;
+  DWORD input_tick = 0;
+};
+bool WindowsReadLastInputTick(DWORD *tick) noexcept {
+  *tick = 1;
+  return true;
+}
 
 // Stands in for the capture's evaluation to stall the worker by a chosen time (the real call is still
 // made): a real window that does not answer is cut off by UI Automation's own timeout and the gate

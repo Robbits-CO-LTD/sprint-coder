@@ -60,6 +60,21 @@ struct InterlockVerdict {
     }
     return {};
   }
+  // The error code a dispatch gives when it refuses (the preflight code without its "native_"
+  // prefix: Main adds the prefix back). One reason, one code; empty when there is no verdict.
+  [[nodiscard]] std::string_view DispatchCode() const {
+    switch (reason) {
+    case InterlockReason::kShellSurface:
+      return "shell_surface_blocked";
+    case InterlockReason::kExecutionTrigger:
+      return "execution_trigger_blocked";
+    case InterlockReason::kApprovalClosed:
+      return "approval_not_enabled";
+    case InterlockReason::kNone:
+      break;
+    }
+    return {};
+  }
   // The receipt's decision for this refusal (the first column of the receipt table).
   [[nodiscard]] std::string_view DecisionName() const {
     switch (outcome) {

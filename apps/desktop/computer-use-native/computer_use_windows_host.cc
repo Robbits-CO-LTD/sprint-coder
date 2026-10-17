@@ -80,6 +80,7 @@
 #include "computer_use_windows_uia_source.h"
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_native_refusal_table.h"
 
 namespace {
 
@@ -4362,6 +4363,44 @@ bool WindowsRecentInputMayPair() noexcept {
 bool WindowsClickOpens() noexcept {
   return WindowsSingleClickOpens() || WindowsRecentInputMayPair();
 }
+
+// What the interlock evaluation knew about the click when it ran (#500 S5-c-2 PR-5, review): whether
+// the click is followed at all, whether it was already taken as opening, and the system's last input
+// time at that moment. The evaluation can take up to the lane's hold limit; this lets the dispatch
+// tell, just before it sends the click, that input came in after the evaluation.
+struct WindowsClickBasis {
+  bool tracked = false;
+  bool opens = false;
+  bool input_read = false;
+  DWORD input_tick = 0;
+};
+
+bool WindowsReadLastInputTick(DWORD *tick) noexcept {
+  LASTINPUTINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetLastInputInfo(&info)) return false;
+  *tick = info.dwTime;
+  return true;
+}
+
+// Whether input has come in since the evaluation, for a click the evaluation judged as NOT opening
+// (a click already taken as opening has nothing to lose). The dispatch then stops the click before
+// it is sent (fail closed): the verdict was made for a moment that is no longer the present one, and
+// a person's click that now pairs with ours would open the item. A last input time that cannot be
+// read counts as moved. The cost: a person moving the mouse during the evaluation stops the click
+// (the agent tries again).
+bool WindowsInputMovedSinceEvaluation(const WindowsClickBasis &basis) noexcept {
+  if (!basis.tracked || basis.opens) return false;
+  DWORD now_tick = 0;
+  if (!basis.input_read || !WindowsReadLastInputTick(&now_tick)) return true;
+  return now_tick != basis.input_tick;
+}
+
+// The v2 interlocks' answer for an action whose V1 binding is valid (defined with the synchronous
+// entry): a refusal, or no verdict. A click fills `basis` with what the evaluation knew.
+sprint_coder::computer_use::InterlockEvaluation
+WindowsInterlockRefusal(const WindowsSession &session, const std::string &metadata,
+                        const std::string &kind, WindowsClickBasis *basis = nullptr) noexcept;
 // END click rule
 
 // BEGIN windows action point
@@ -4393,6 +4432,31 @@ bool DispatchWindowsAction(const WindowsSession &session,
   RECT bounds{};
   if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, reason))
     return false;
+  // The v2 interlocks again, right before any input (#500 S5-c-2 PR-5): the screen can have changed
+  // since the preflight (the ticket lives seconds), and the click facts (the last input time) are read
+  // again by the evaluation. A refusal is made before the first input API attempt, SetCursorPos or
+  // SendInput. No verdict leaves the V1 guards below as they are.
+  WindowsClickBasis click_basis;
+  {
+    const sprint_coder::computer_use::InterlockEvaluation evaluation =
+        WindowsInterlockRefusal(session, metadata, kind, &click_basis);
+    if (evaluation.Refuses()) {
+      *reason = std::string(evaluation.verdict.DispatchCode());
+      return false;
+    }
+  }
+  // The evaluation took time (up to the lane's hold limit) after the binding check, and the focus
+  // moved to another control of the same window in that time would send the key or the text to an
+  // element the observation never saw. The same check as the binding's, again, before any input.
+  if (kind == "key" || kind == "type") {
+    std::string current_focused_signature;
+    if (!session.has_focused_element_signature ||
+        !WindowsFocusedElementSignature(session.pid, bounds, &current_focused_signature) ||
+        current_focused_signature != session.focused_element_signature) {
+      *reason = "focused_target_changed";
+      return false;
+    }
+  }
   bool dispatched = false;
   if (kind == "click") {
     double x = 0;
@@ -4448,6 +4512,14 @@ bool DispatchWindowsAction(const WindowsSession &session,
     }
     if (!RevalidateWindowsTarget(session, bounds, expected_epoch)) {
       *reason = "stale_target";
+      return false;
+    }
+    // Input came in after the interlock evaluation judged this click as not opening: it is not sent.
+    // The reuse of "focused_target_changed" is on purpose (Main maps every code of this kind to the
+    // same plain rejection): for a click it means "input from elsewhere came in after the
+    // evaluation", not that the focus moved.
+    if (WindowsInputMovedSinceEvaluation(click_basis)) {
+      *reason = "focused_target_changed";
       return false;
     }
     INPUT events[2]{};
@@ -4742,13 +4814,19 @@ std::string WindowsPreflightReceipt(const WindowsSession &session,
                                     std::uint64_t observation_revision,
                                     std::string_view decision,
                                     std::string_view denied_reason,
-                                    const std::string &ticket) {
+                                    const std::string &ticket,
+                                    std::string_view refusal_result = "rejected") {
   const bool denied = decision == "denied";
   const bool ordinary = decision == "ordinary";
+  // A v2 refusal (blocked / takeover) carries its reason and the result of its own table row.
+  const bool refused = decision == "blocked" || decision == "takeover";
+  const bool with_reason = denied || refused;
   return "{\"decision\":\"" + std::string(decision) +
          "\",\"reasonCode\":" +
-         (denied ? "\"" + std::string(denied_reason) + "\"" : std::string("null")) +
-         ",\"deniedResult\":" + (denied ? "\"rejected\"" : "null") +
+         (with_reason ? "\"" + std::string(denied_reason) + "\"" : std::string("null")) +
+         ",\"deniedResult\":" +
+         (denied ? "\"rejected\""
+                 : (refused ? "\"" + std::string(refusal_result) + "\"" : std::string("null"))) +
          ",\"ticket\":" + (ordinary ? "\"" + ticket + "\"" : "null") +
          ",\"classifierVersion\":" +
          std::to_string(sprint_coder::computer_use::kNativePreflightClassifierVersion) +
@@ -4888,9 +4966,10 @@ void ScheduleWindowsEffectShadow(const WindowsSession &session,
 // incomplete facts are NO VERDICT (the answer carries the reason): never a refusal and never an
 // approval, so the V1 preflight decides.
 //
-// Behaviour-neutral: NOTHING calls this yet (the preflight and the dispatch guard are wired later in
-// S5-c-2). The caller must call it only AFTER the V1 re-validation of the bound target succeeded
-// (ValidateWindowsDispatchBinding): the point is only right for a binding that is still valid.
+// Called from exactly two places, through WindowsInterlockRefusal below: the preflight, before it
+// issues a ticket, and the dispatch, before any input (#500 S5-c-2 PR-5). The caller must call it
+// only AFTER the V1 re-validation of the bound target succeeded (ValidateWindowsDispatchBinding): the
+// point is only right for a binding that is still valid.
 //
 // THE SERIAL LANE IS HELD AT MOST kInterlockLaneHoldLimit. The lane's thread is an STA (the picker
 // and the WinRT capture need it), and a UI Automation call to an app that does not answer is
@@ -4931,9 +5010,10 @@ std::atomic<bool> &InterlockWorkerRunning() {
   return *running;
 }
 
-[[maybe_unused]] sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
+sprint_coder::computer_use::InterlockEvaluation EvaluateWindowsInterlockOnLane(
     const WindowsSession &session, const std::string &metadata, const std::string &kind,
-    const sprint_coder::computer_use::EffectRuleset &ruleset) noexcept {
+    const sprint_coder::computer_use::EffectRuleset &ruleset,
+    WindowsClickBasis *basis = nullptr) noexcept {
   using namespace sprint_coder::computer_use;
   InterlockEvaluation unavailable;
   unavailable.no_verdict = InterlockNoVerdict::kIncomplete;
@@ -4958,7 +5038,16 @@ std::atomic<bool> &InterlockWorkerRunning() {
     // wait) and handed to the worker by value: the worker touches no session and no system state.
     // The time of the last input is read at this request, not when a worker finally runs.
     const bool click_tracked = kind == "click" && point_known;
+    // The last input time first, then the click facts (which read it again): the time of the basis is
+    // never later than the one the verdict used.
+    if (basis != nullptr && click_tracked) {
+      basis->input_read = WindowsReadLastInputTick(&basis->input_tick);
+    }
     const bool click_opens = click_tracked && WindowsClickOpens();
+    if (basis != nullptr) {
+      basis->tracked = click_tracked;
+      basis->opens = click_opens;
+    }
     // Everything that can throw is prepared BEFORE the single-flight slot is taken, so a failure
     // here cannot leave the slot taken for ever.
     auto pending = std::make_shared<InterlockPending>();
@@ -5048,6 +5137,39 @@ std::atomic<bool> &InterlockWorkerRunning() {
     return unavailable;
   }
 }
+// Windows has no approval path (the route v2 build is refused for win32 by
+// build-computer-use-eligibility.mjs), so a file opened from a file manager or a download list is a
+// closed approval.
+constexpr sprint_coder::computer_use::EffectRuleset kWindowsInterlockRuleset{
+    /*download_open=*/false, /*file_manager_open=*/false};
+
+// How often the interlocks had NO verdict, by reason, and how often the lane's time ran out. Only
+// enum names and counts are written, never a label or a title.
+void CountWindowsInterlockNoVerdict(sprint_coder::computer_use::InterlockNoVerdict reason) noexcept {
+  using sprint_coder::computer_use::InterlockNoVerdict;
+  static std::atomic<std::uint64_t> counts[4];
+  const std::size_t index = static_cast<std::size_t>(reason);
+  if (index >= 4) return;
+  const std::uint64_t count = counts[index].fetch_add(1, std::memory_order_relaxed) + 1;
+  const char *name = reason == InterlockNoVerdict::kCanceled
+                         ? "canceled"
+                         : (reason == InterlockNoVerdict::kBudget ? "budget" : "incomplete");
+  char line[96];
+  const int written = std::snprintf(line, sizeof(line), "computer-use interlock: no verdict %s count=%llu\n",
+                                    name, static_cast<unsigned long long>(count));
+  if (written > 0) OutputDebugStringA(line);
+}
+
+sprint_coder::computer_use::InterlockEvaluation
+WindowsInterlockRefusal(const WindowsSession &session, const std::string &metadata,
+                        const std::string &kind, WindowsClickBasis *basis) noexcept {
+  const sprint_coder::computer_use::InterlockEvaluation evaluation =
+      EvaluateWindowsInterlockOnLane(session, metadata, kind, kWindowsInterlockRuleset, basis);
+  if (!evaluation.Refuses() &&
+      evaluation.no_verdict != sprint_coder::computer_use::InterlockNoVerdict::kNone)
+    CountWindowsInterlockNoVerdict(evaluation.no_verdict);
+  return evaluation;
+}
 // END sync interlock entry
 
 bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
@@ -5097,6 +5219,28 @@ bool HandleWindowsPreflight(HANDLE pipe, const Frame &request,
     if (!kind.empty())
       ScheduleWindowsEffectShadow(session, metadata, kind, false, false);
     return denied_sent;
+  }
+  // The v2 interlocks (#500 S5-c-2 PR-5): AFTER the V1 binding is valid and BEFORE a ticket is
+  // issued. A refusal issues no ticket (the slot was invalidated above). No verdict (budget,
+  // incomplete facts, canceled) leaves the V1 answer: an ordinary ticket as before.
+  {
+    const sprint_coder::computer_use::InterlockEvaluation evaluation =
+        WindowsInterlockRefusal(session, metadata, kind);
+    if (evaluation.Refuses()) {
+      const std::string decision(evaluation.verdict.DecisionName());
+      const std::string code(evaluation.verdict.ReasonCode());
+      const std::string result(evaluation.verdict.DeniedResult());
+      const bool sent = Respond(
+          pipe, request, MessageType::kPreflightResult,
+          sprint_coder::computer_use::NativePreflightRefusalAllowed(decision, code, result)
+              ? WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
+                                        decision, code, "", result)
+              : WindowsPreflightReceipt(session, request_id, cancel_epoch, observation_revision,
+                                        "denied", "native_preflight_invalid", ""));
+      // The V1 answer is "no ticket": the shadow records that V1 did not issue its ordinary one.
+      ScheduleWindowsEffectShadow(session, metadata, kind, true, false);
+      return sent;
+    }
   }
   std::string token;
   const bool issued =

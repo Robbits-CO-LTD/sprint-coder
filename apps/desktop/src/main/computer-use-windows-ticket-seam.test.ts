@@ -126,6 +126,8 @@ const preamble = String.raw`
 #include <string_view>
 #include <unordered_map>
 #include <vector>
+#include "computer_use_native_interlock_capture.h"
+#include "computer_use_native_refusal_table.h"
 #include "computer_use_native_ticket.h"
 #include "computer_use_preflight_classifier.h"
 #include "computer_use_protocol.h"
@@ -292,6 +294,8 @@ void Reset() {
   response_cache_bytes = 0;
   g_sent.clear();
   g_shadow.clear();
+  g_interlock_kinds.clear();
+  g_interlock_answer = InterlockEvaluation{};
   g_validate_ok = true;
   g_revalidate_ok = true;
   g_focus_ok = true;
@@ -617,6 +621,87 @@ int main() {
           "changed_payload_is_a_conflict");
   }
 
+  // 13. The v2 interlocks (#500 S5-c-2 PR-5): asked after the V1 binding is valid and before a ticket
+  // is issued; a refusal issues no ticket and the shadow still sees the request as not ordinary.
+  struct Scripted { InterlockOutcome outcome; InterlockReason reason; const char *decision; const char *code; const char *result; };
+  const Scripted scripted[] = {
+      {InterlockOutcome::kBlocked, InterlockReason::kShellSurface, "blocked", "native_shell_surface_blocked", "rejected"},
+      {InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger, "takeover", "native_execution_trigger_blocked", "paused"},
+      {InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed, "blocked", "native_approval_not_enabled", "rejected"},
+  };
+  for (const Scripted &row : scripted) {
+    Reset();
+    g_interlock_answer.verdict.outcome = row.outcome;
+    g_interlock_answer.verdict.reason = row.reason;
+    ticket = Preflight(Meta());
+    const std::string &receipt = g_sent.back().payload;
+    Check(ticket.empty() && HasDecision(row.decision) &&
+              receipt.find(std::string("\"reasonCode\":\"") + row.code + "\"") != std::string::npos &&
+              receipt.find(std::string("\"deniedResult\":\"") + row.result + "\"") != std::string::npos &&
+              receipt.find("\"ticket\":null") != std::string::npos,
+          "interlock_refusal_receipt");
+    Check(!ticket_states.at(kSessionKey).slot.occupied(), "interlock_refusal_issues_no_ticket");
+    Check(g_interlock_kinds.size() == 1 && g_interlock_kinds[0] == "click", "interlock_asked_once_with_the_kind");
+    Check(g_shadow.size() == 1 && g_shadow[0].v1_valid && !g_shadow[0].v1_ordinary,
+          "interlock_refusal_shadow_sees_not_ordinary");
+    // There is no ticket to use: a dispatch with a made-up one is refused.
+    Check(!Consume(Meta("", std::string(64, 'a'))), "interlock_refusal_leaves_no_ticket_to_consume");
+    // Every refusal this sends is a row of the closed table.
+    Check(sprint_coder::computer_use::NativePreflightRefusalAllowed(row.decision, row.code, row.result),
+          "interlock_refusal_is_a_table_row");
+  }
+  // No verdict (budget, incomplete, canceled): the V1 answer, an ordinary ticket as before.
+  for (const InterlockNoVerdict none : {InterlockNoVerdict::kBudget, InterlockNoVerdict::kIncomplete, InterlockNoVerdict::kCanceled}) {
+    Reset();
+    g_interlock_answer.no_verdict = none;
+    ticket = Preflight(Meta());
+    Check(ticket.size() == 64 && HasDecision("ordinary"), "no_verdict_keeps_the_ordinary_ticket");
+    Check(g_interlock_kinds.size() == 1, "no_verdict_was_asked");
+    Check(g_shadow.size() == 1 && g_shadow[0].v1_ordinary, "no_verdict_shadow_sees_ordinary");
+  }
+  // A verdict that is not a row of the table is never sent as a refusal: denied, fail closed.
+  Reset();
+  g_interlock_answer.verdict.outcome = InterlockOutcome::kTakeover;
+  g_interlock_answer.verdict.reason = InterlockReason::kShellSurface;
+  ticket = Preflight(Meta());
+  Check(ticket.empty() && HasDecision("denied") &&
+            g_sent.back().payload.find("native_preflight_invalid") != std::string::npos &&
+            !ticket_states.at(kSessionKey).slot.occupied(),
+        "interlock_pair_outside_the_table_is_denied");
+  // A refusal does not outlive the next preflight: a later no-verdict preflight issues again.
+  Reset();
+  g_interlock_answer.verdict.outcome = InterlockOutcome::kBlocked;
+  g_interlock_answer.verdict.reason = InterlockReason::kShellSurface;
+  Check(Preflight(Meta()).empty(), "refused_first");
+  g_interlock_answer = InterlockEvaluation{};
+  ticket = Preflight(Meta());
+  Check(ticket.size() == 64 && Consume(Meta("", ticket)), "ordinary_after_a_refusal");
+  // The interlocks are not asked when V1 does not get as far: a failed binding, a replay, a missing
+  // session, an invalid action.
+  Reset();
+  g_validate_ok = false;
+  Check(Preflight(Meta()).empty() && HasDecision("denied") && g_interlock_kinds.empty(), "failed_binding_asks_nothing");
+  Reset();
+  {
+    Frame finished = PipeFrame(MessageType::kDispatch, 0);
+    sprint_coder::computer_use::FrameId derived;
+    Check(DispatchFrameIdFor("request-1", &derived), "interlock_replay_id");
+    finished.header.request_id = derived;
+    response_cache.emplace(ResponseCacheKey(finished), CachedResponse{MessageType::kDispatchResult, "digest", "{}", {}});
+    Preflight(Meta());
+    Check(HasDecision("replay") && g_interlock_kinds.empty(), "replay_asks_nothing");
+  }
+  Reset();
+  {
+    Frame unknown = PipeFrame(MessageType::kPreflight, 9);
+    unknown.header.session_id = IdOf(77);
+    g_sent.clear();
+    HandleWindowsPreflight(nullptr, unknown, Meta());
+    Check(g_interlock_kinds.empty(), "missing_session_asks_nothing");
+  }
+  Reset();
+  Check(Preflight("{\"requestId\":\"request-1\"}").empty() && g_interlock_kinds.empty(), "invalid_action_asks_nothing");
+
   if (g_failures != 0) return 1;
   std::cout << "OK\n";
   return 0;
@@ -631,6 +716,20 @@ std::vector<ShadowCall> g_shadow;
 void ScheduleWindowsEffectShadow(const WindowsSession &, const std::string &, const std::string &kind,
                                  bool v1_valid, bool v1_ordinary) noexcept {
   g_shadow.push_back({kind, v1_valid, v1_ordinary});
+}
+
+// The v2 interlocks (#500 S5-c-2 PR-5) have their own seams; here they answer from a script, and
+// every call is recorded, so the preflight's use of the answer is what is checked.
+using sprint_coder::computer_use::InterlockEvaluation;
+using sprint_coder::computer_use::InterlockNoVerdict;
+using sprint_coder::computer_use::InterlockOutcome;
+using sprint_coder::computer_use::InterlockReason;
+std::vector<std::string> g_interlock_kinds;
+InterlockEvaluation g_interlock_answer;
+InterlockEvaluation WindowsInterlockRefusal(const WindowsSession &, const std::string &,
+                                            const std::string &kind) noexcept {
+  g_interlock_kinds.push_back(kind);
+  return g_interlock_answer;
 }
 `;
 
