@@ -235,3 +235,123 @@ it('offers nothing while the step is not parked for a manual decision', async ()
     await act(async () => root.unmount());
   }
 });
+
+// issue #842: a finished plan no longer offers to start, and write scopes name the Workspace
+// folder rather than the root's UUID.
+it('drops the start hint once the plan has run and names roots by their Workspace label', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  const rootId = 'd3a61295-0000-4000-8000-000000000001';
+  const getEffective = vi.fn(async () => ({
+    source: 'project',
+    projectId: 'project-1',
+    primaryRootId: rootId,
+    roots: [{ rootId, path: '/work/client-app', label: 'client-app', role: 'primary' }],
+    digest: 'd'.repeat(64),
+  }));
+  vi.stubGlobal('sprintCoder', { graphs: {}, workspace: { getEffective } });
+  seed({ stepResumeAvailable: false, integrationResumeAvailable: false });
+  const team = useAppStore.getState().teamByTask['task-1']!;
+  useAppStore.setState({
+    teamByTask: {
+      'task-1': {
+        ...team,
+        missions: team.missions.map((mission) => ({
+          ...mission,
+          state: 'completed',
+          steps: mission.steps.map((step) => ({ ...step, state: 'completed' })),
+        })),
+      } as TeamDetail,
+    },
+  });
+  const writePlan: GraphMissionPlan = {
+    ...plan,
+    steps: [
+      {
+        ...plan.steps[0]!,
+        access: 'workspace-write',
+        writeClaims: [{ rootId, path: 'src/client.ts', semanticKeys: [] }],
+        resourceClaims: [{ scope: 'workspace', key: 'dev.server', rootId: 'legacy-primary' }],
+      },
+    ],
+  };
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={writePlan} sourceStamp={null} />),
+    );
+    const text = container.textContent ?? '';
+    expect(container.querySelector('[data-testid="graph-mission-state"]')?.textContent).toBe(
+      'すべての工程が完了しました。',
+    );
+    expect(text).not.toContain('この計画で開始できます');
+    expect(getEffective).toHaveBeenCalledWith('task-1');
+    expect(text).toContain('client-app: src/client.ts');
+    expect(text).toContain('Workspace: client-app');
+    expect(text).not.toContain(rootId);
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+it('keeps the start hint on a plan that has not started yet', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('sprintCoder', { graphs: {} });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.textContent).toContain('この計画で開始できます');
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+// issue #842: a step parked after a failure says why, short and without local paths.
+it('shows the recorded reason beside a step that waits for a resume', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('sprintCoder', { graphs: {} });
+  seed({ stepResumeAvailable: false, integrationResumeAvailable: false });
+  const team = useAppStore.getState().teamByTask['task-1']!;
+  const withReason = (terminalReason: string) =>
+    useAppStore.setState({
+      teamByTask: {
+        'task-1': {
+          ...team,
+          executions: [{ id: 'execution-a', state: 'waiting_resume', terminalReason }],
+        } as unknown as TeamDetail,
+      },
+    });
+  withReason(
+    'Graph step interrupted: worktree C:\\Users\\someone\\repo\\.git is locked while the integration was still waiting',
+  );
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    const state = container.querySelector('[data-testid="graph-step-state"]')?.textContent ?? '';
+    expect(state.startsWith('再開待ち · 理由: Graph step interrupted: worktree … is locked')).toBe(
+      true,
+    );
+    expect(state).not.toContain('Users');
+    expect(state.endsWith('…')).toBe(true);
+    expect(Array.from(state.slice(state.indexOf('理由: ') + 4)).length).toBeLessThanOrEqual(60);
+
+    await act(async () => root.unmount());
+    withReason('runtime_failure');
+    const next = createRoot(container);
+    await act(async () =>
+      next.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.querySelector('[data-testid="graph-step-state"]')?.textContent).toBe(
+      '再開待ち · 理由: 実行時エラー',
+    );
+    await act(async () => next.unmount());
+  } finally {
+    container.remove();
+  }
+});
