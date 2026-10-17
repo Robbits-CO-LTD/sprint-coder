@@ -8,8 +8,15 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // them, a target that does not answer holds the serial lane for good: every later frame waits behind
 // it. The V1 lane creates its UI Automation in ONE place (CreateWindowsV1Automation), which sets the
 // ConnectionTimeout / TransactionTimeout of IUIAutomation2, and every path of calls has its own bound
-// (WindowsV1UiaPath: the first timed-out call ends the path, a short path has a budget, the observe has
-// a budget and the cancellation epoch).
+// (WindowsV1UiaPath: the first timed-out call, or a moved cancellation epoch, ends the path; only the
+// observe as a whole has a time budget, no short path has one).
+//
+// What the live seam measures: every case below stops at ONE call, cut off either by the
+// ConnectionTimeout (a first contact, measured 505-514 ms in CI) or by the TransactionTimeout (a call on
+// a connected element, 310-320 ms). The bound is therefore one ConnectionTimeout and a 200 ms margin.
+// The 800 ms (Connection + Transaction in ONE call) that the ADR counts against the 1 s Cancel
+// acknowledgment is a safe upper estimate that has not been observed; if a call ever did run both waits,
+// it would exceed this bound and the seam would fail, which is the alarm wanted.
 //
 // The live seam compiles the real host (computer_use_windows_host.cc, with its entry point renamed) into a
 // test program. The program starts ITSELF as a second process that owns the windows (so every UI
@@ -262,17 +269,26 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // answer, or go on after a Cancel.
     const uiaNames =
       'get_Current\\w+|get_Cached\\w+|GetCurrentPattern\\w*|GetCachedPattern\\w*|GetCurrentPropertyValue\\w*|GetCachedPropertyValue\\w*|BuildUpdatedCache|GetRuntimeId|ElementFrom\\w+|FindFirst\\w*|FindAll\\w*|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetPreviousSiblingElement|GetLastChildElement|GetParentElement';
-    const anyCalls = [...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))];
-    const wrapped = [
-      ...c.matchAll(
-        new RegExp(
-          `WindowsV1Uia(?:Read|Call|Contact)\\(\\[&\\] \\{ return \\w+->(?:${uiaNames})\\(`,
-          'gu',
+    const bareUiaCalls = (text: string): number =>
+      [...text.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))].length -
+      [
+        ...text.matchAll(
+          new RegExp(
+            `WindowsV1Uia(?:Read|Call|Contact)\\(\\[&\\] \\{ return \\w+->(?:${uiaNames})\\(`,
+            'gu',
+          ),
         ),
+      ].length;
+    // The check itself catches a bare call (a wrapped one and a bare one of the same method).
+    expect(
+      bareUiaCalls(
+        'WindowsV1UiaRead([&] { return element->get_CurrentName(&n); }); element->get_CurrentName(&n);',
       ),
-    ];
-    expect(anyCalls.length).toBeGreaterThanOrEqual(35);
-    expect(wrapped).toHaveLength(anyCalls.length);
+    ).toBe(1);
+    expect([...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))].length).toBeGreaterThanOrEqual(
+      35,
+    );
+    expect(bareUiaCalls(c)).toBe(0);
     // The calls that DO something (Invoke, SetValue, Select, Toggle, Expand, Collapse) are made only
     // while the path is alive: after a timeout or a Cancel nothing is sent (a rejection before any input).
     expect([...c.matchAll(/->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu)]).toHaveLength(
@@ -768,7 +784,9 @@ int RunDriver(bool ci) {
   std::cout << "child pid=" << pid << std::endl;
 
   const long long kOneTimeout = static_cast<long long>(kWindowsV1UiaConnectionTimeoutMs);
-  const long long kBound = kOneTimeout + 200;  // one timeout and a small margin
+  // One timeout (the longer, the connection) and a small margin. Every case stops at one call; the
+  // counted 800 ms worst case (both waits in one call) is not expected here and would fail this bound.
+  const long long kBound = kOneTimeout + 200;
   const long long kHeldUp = 250;               // a call that came back sooner was never held up
 
   // The very first call of this new process, to a window of another process, reads it: a cold start
