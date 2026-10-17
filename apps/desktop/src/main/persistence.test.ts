@@ -2881,6 +2881,20 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('defaults Computer Use (beta) off and persists an explicit choice across restart', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getComputerUseEnabled()).toBe(false);
+      persistence.setComputerUseEnabled(true);
+      persistence.close();
+
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getComputerUseEnabled()).toBe(true);
+      reopened.setComputerUseEnabled(false);
+      expect(reopened.getComputerUseEnabled()).toBe(false);
+
+      reopened.close();
+    });
+
     it('persists trimmed Team model-selection guidance across restart', () => {
       const { persistence, path } = createPersistence();
       expect(persistence.getTeamModelSelectionGuidance()).toBe('');

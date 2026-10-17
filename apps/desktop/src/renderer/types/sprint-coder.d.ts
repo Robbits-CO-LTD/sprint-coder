@@ -1096,6 +1096,10 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getComputerUse(): Promise<import('@sprint-coder/contracts').ComputerUseSettings>;
+    setComputerUse(input: {
+      enabled: boolean;
+    }): Promise<import('@sprint-coder/contracts').ComputerUseSettings>;
     getTeamModelSelectionGuidance(): Promise<
       import('@sprint-coder/contracts').TeamModelSelectionGuidance
     >;

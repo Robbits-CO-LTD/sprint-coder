@@ -19,8 +19,9 @@ export function projectMultiFolderUxEnabled(env: FeatureFlagEnvironment = proces
 }
 
 /**
- * Desktop Computer Use is a privileged preview, not a rollout switch.  Only an exact opt-in may
- * make Main probe the separately signed native boundary; every other value stays fail-closed.
+ * Desktop Computer Use is a privileged preview (beta). Its user-facing switch is the saved setting
+ * (see `computer-use-feature-gate.ts`); this exact opt-in is the forced-on override CI and
+ * acceptance runs use. Every other value leaves the decision to the setting, which defaults to off.
  */
 export function computerUseDesktopV1Enabled(env: FeatureFlagEnvironment = process.env): boolean {
   return env['SPRINT_CODER_COMPUTER_USE_DESKTOP_V1'] === '1';

@@ -169,7 +169,11 @@ authority is derived from the running helper's own signer; Windows journeys use 
 
 The capability remains unavailable when any gate is false:
 
-- `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1` is not exactly `1`.
+- The user's Computer Use (beta) setting (`computer-use.enabled`, default off) is off and
+  `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1` is not exactly `1` (the env is a forced-on override for CI
+  and acceptance runs). Main reads both before it loads the native part, once per process: a setting
+  turned on later applies after a restart (the Settings UI says 「再起動後に有効になります」), and one
+  turned off closes the gate at once and stops any running or starting session as `policy_changed`.
 - Runtime is source/dev, Linux, unsigned Windows, ad-hoc macOS, or has a missing/duplicate artifact.
 - Manifest target/protocol/API/ABI/digest/signer differs from the packaged bytes and outer identity.
 - The complete picker/session/observe/dispatch/cancel/close surface did not handshake.
@@ -179,8 +183,8 @@ The capability remains unavailable when any gate is false:
 - A Windows candidate is a UWP, `ApplicationFrameHost.exe`, or another package/proxy window that
   would require identity unwrapping.
 
-These checks do not turn Core or Safety `SKIP` results into success. The feature flag remains closed
-until signed Windows x64 and notarized macOS acceptance, real supported-app scenarios, privacy
+These checks do not turn Core or Safety `SKIP` results into success. The feature stays off by
+default and labelled beta until signed Windows x64 and notarized macOS acceptance, real supported-app scenarios, privacy
 inspection, and the selected real Provider three-round gate pass.
 
 ## Consequences and verification boundary

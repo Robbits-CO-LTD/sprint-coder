@@ -5969,6 +5969,8 @@ export interface PersistenceClient {
   acknowledgeFullAccessRisk(): void;
   getTeamModelResearchBeforeHiring(): boolean;
   setTeamModelResearchBeforeHiring(enabled: boolean): void;
+  getComputerUseEnabled(): boolean;
+  setComputerUseEnabled(enabled: boolean): void;
   getTeamModelSelectionGuidance(): string;
   setTeamModelSelectionGuidance(guidance: string): void;
   getSprintCoderPrePrompt(): string;
@@ -15542,6 +15544,23 @@ export class SqlitePersistenceClient implements PersistenceClient {
     this.db
       .prepare(
         `INSERT INTO settings(key, value, updated_at) VALUES ('team.model-research-before-hiring', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(enabled ? '1' : '0', new Date().toISOString());
+  }
+
+  /** Computer Use (beta) is off unless the user turned it on: only an exact '1' opens it. */
+  getComputerUseEnabled(): boolean {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'computer-use.enabled'")
+      .get() as { value: string } | undefined;
+    return row?.value === '1';
+  }
+
+  setComputerUseEnabled(enabled: boolean): void {
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('computer-use.enabled', ?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(enabled ? '1' : '0', new Date().toISOString());

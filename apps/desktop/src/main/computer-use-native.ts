@@ -60,6 +60,12 @@ const MAC_TEAM_IDENTIFIER_PATTERN = /^[A-Z0-9]{10}$/u;
 export type ComputerUseNativeLoadOptions = Readonly<{
   /** Override the runtime environment in tests. Production callers must leave this undefined. */
   environment?: Readonly<Record<string, string | undefined>>;
+  /**
+   * The user's saved Computer Use (beta) setting, read by Main before this call. Either it or the
+   * exact `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1=1` override opens the first gate; every other
+   * package, signature and handshake check still applies.
+   */
+  userEnabled?: boolean;
   /** Override only for deterministic tests; the production loader derives this from __dirname. */
   dirname?: string;
   resourcesPath?: string;
@@ -279,7 +285,7 @@ export function loadComputerUseNative(
     platform,
     packaged,
   );
-  if (environment[COMPUTER_USE_NATIVE_FEATURE_FLAG] !== '1')
+  if (environment[COMPUTER_USE_NATIVE_FEATURE_FLAG] !== '1' && options.userEnabled !== true)
     return deniedBinding('FEATURE_FLAG_DISABLED', null, artifactPath);
   if (!packaged) return deniedBinding('PACKAGED_RUNTIME_REQUIRED', null, artifactPath);
   if (platform !== 'darwin' && platform !== 'win32')

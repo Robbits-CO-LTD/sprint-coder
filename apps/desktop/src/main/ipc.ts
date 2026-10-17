@@ -201,6 +201,8 @@ import {
   sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  computerUseSettingsSchema,
+  computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
   teamModelSelectionGuidanceSetInputSchema,
   teamModelRestrictionSetInputSchema,
@@ -802,10 +804,13 @@ import {
 import {
   multiProviderModelPickerV2Enabled,
   computerUseAgentDrivenV2Enabled,
-  computerUseDesktopV1Enabled,
   projectMultiFolderUxEnabled,
   settingsWorkspaceV2Enabled,
 } from './feature-flags';
+import {
+  createComputerUseFeatureGate,
+  type ComputerUseFeatureGate,
+} from './computer-use-feature-gate';
 import {
   ProviderSecretStorage,
   ProviderSecretStorageUnavailableError,
@@ -1099,6 +1104,7 @@ export class IpcRouter {
   private readonly computerUseController: ComputerUseController;
   private readonly computerUseRuntimeCapture: ComputerUseRuntimeCapture;
   private readonly computerUseNative: ComputerUseNativeHost;
+  private readonly computerUseFeature: ComputerUseFeatureGate;
   private readonly computerUsePermissionSettings: ComputerUsePermissionSettingsOpener;
   private readonly computerUseActivationGate: ComputerUseUserActivationGate;
   private readonly computerUseEmergencyStop: ComputerUseEmergencyStop;
@@ -1291,6 +1297,7 @@ export class IpcRouter {
     computerUseActivationGate?: ComputerUseUserActivationGate,
     private readonly graphs: GraphRenderService | null = null,
     private readonly computerUseCaptureOutput?: ComputerUseCaptureOutput,
+    computerUseFeature?: ComputerUseFeatureGate,
   ) {
     this.computerUseRuntimeCapture = createComputerUseRuntimeCapture(computerUseCaptureOutput);
     this.graphSourceMonitor = new GraphSourceMonitor({
@@ -1965,6 +1972,17 @@ export class IpcRouter {
       computerUseActivationGate ??
       new ComputerUseUserActivationGate(this.window.webContents, this.window.id);
     this.computerUseNative = computerUseNative;
+    // The saved beta setting is the user's switch; startup passes whether it loaded the native part
+    // for it. A router built without one (tests, embedded) gates on the setting and env alone.
+    this.computerUseFeature =
+      computerUseFeature ??
+      createComputerUseFeatureGate({
+        setting: () => this.persistence.getComputerUseEnabled(),
+        buildSupported: () => {
+          const native = computerUseNative.availability();
+          return native.packageReady && native.handshakeReady;
+        },
+      });
     // The URL table lives in this module's constants; Renderer supplies only a permission name.
     this.computerUsePermissionSettings = createComputerUsePermissionSettingsOpener({
       openExternal: async (url) => await shell.openExternal(url),
@@ -1980,7 +1998,7 @@ export class IpcRouter {
       runtimeCapture: this.computerUseRuntimeCapture,
       persistence: this.persistence,
       native: computerUseNative,
-      featureEnabled: () => computerUseDesktopV1Enabled(),
+      featureEnabled: () => this.computerUseFeature.enabled(),
       agentDrivenEnabled: () => computerUseAgentDrivenV2Enabled(),
       // The effective eligibility mode (C5-1): v2-denylist only for a build compiled as v2 with the V2
       // flag on and no force-v1 variable. It decides which route a session asks the native for; the
@@ -2862,6 +2880,26 @@ export class IpcRouter {
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelResearch, () =>
           this.persistence.setTeamModelResearchBeforeHiring(input.researchBeforeHiring),
         ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetComputerUse,
+      emptyPayloadSchema,
+      computerUseSettingsSchema,
+      () => this.computerUseFeature.settings(),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetComputerUse,
+      computerUseSettingsSetInputSchema,
+      computerUseSettingsSchema,
+      async (input, event, envelope) => {
+        this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetComputerUse, () =>
+          this.persistence.setComputerUseEnabled(input.enabled),
+        );
+        // Off takes effect now: the gate already reads the saved value, and whatever was running or
+        // starting under it ends here, before the Renderer hears that the change was saved.
+        if (!this.computerUseFeature.enabled()) await this.computerUseController.featureDisabled();
+        return this.computerUseFeature.settings();
+      },
     );
     this.handle(
       IPC_CHANNELS.settingsGetTeamModelSelectionGuidance,
