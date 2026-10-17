@@ -392,6 +392,7 @@ import {
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import {
+  promptWriteAccess,
   relativizeWorkspacePath,
   resolveWriteScope,
   workerWriteScopeFor,
@@ -6721,10 +6722,8 @@ export class IpcRouter {
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
     // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
-    const writeScope = resolveWriteScope(
-      this.persistence.getPermissionPolicy(taskId).preset,
-      workspacePath,
-    );
+    const accessPreset = this.persistence.getPermissionPolicy(taskId).preset;
+    const writeScope = resolveWriteScope(accessPreset, workspacePath);
     const dispatchEgress =
       kind === 'grok'
         ? dispatchAfterGrokProviderEgress
@@ -6832,7 +6831,9 @@ export class IpcRouter {
         compilePromptGuidance({
           workspace: runtimeWorkspaceSet,
           toolCatalog: toolCatalogSnapshot,
-          writeScope,
+          // What the agent may do through the managed tools, which under Ask is more than the
+          // CLI's own read-only scope: each write and command waits on its card (issue #826).
+          ...promptWriteAccess(accessPreset, workspacePath),
           skills: runtimeSkills,
           teamMcpEnabled: teamMcp !== undefined,
         }),

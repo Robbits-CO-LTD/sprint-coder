@@ -20,11 +20,12 @@ export type TeamAssignmentWriteScope = 'read-only' | 'workspace-write';
  *     adapters independently refuse a write scope with a null workspace as well; a write would have
  *     to get past both.
  *
- * `ask` maps to `read-only` rather than to a prompt because neither CLI can be asked mid-turn:
- * `codex exec` is one-shot stdin with no answerable approval channel, and `claude -p` has no
- * permission-prompt hook on supported CLI versions (the flag is absent from help). Pretending to ask
- * and then silently allowing would be the worst of the three options, so `ask` means "propose, do
- * not write", and what was refused is reported after the fact from Claude's `permission_denials`.
+ * Under `ask` the CLI itself stays `read-only`. The adapters disable the CLI's own file and shell
+ * tools, so the agent creates and edits files and runs commands only through Main's managed tools,
+ * and under `ask` each of those calls waits on the person's approval card. The CLI is never handed
+ * write authority of its own that no card could stand in front of. This value is not what the
+ * agent is told it may do: that is promptWriteAccess (issue #826). Telling the agent `read-only`
+ * here made it refuse work its catalog and the approval cards would have allowed.
  *
  * Team Worker はこの関数ではなく resolveWorkerWriteScope を使う（issue #525）。
  */
@@ -76,6 +77,24 @@ export function workerWriteScopeFor(
  */
 export function workerWritesNeedApproval(preset: AccessPreset): boolean {
   return preset === 'ask';
+}
+
+/**
+ * What the primary agent is told it may change this Turn (issue #826).
+ *
+ * The agent writes and runs commands through the same managed tools as a Team Worker, so it is told
+ * the same thing: under `ask` it can create and edit files and run commands, each call once the
+ * person approves it on its card. Without a Workspace it stays read-only, as in resolveWriteScope.
+ * This changes only the prompt; every call is still decided by the permission policy.
+ */
+export function promptWriteAccess(
+  preset: AccessPreset,
+  workspacePath: string | null,
+): Readonly<{ writeScope: RuntimeWriteScope; writeApproval?: 'per-call' }> {
+  const writeScope = resolveWorkerWriteScope(preset, workspacePath);
+  return writeScope !== 'read-only' && workerWritesNeedApproval(preset)
+    ? { writeScope, writeApproval: 'per-call' }
+    : { writeScope };
 }
 
 /**
