@@ -7057,7 +7057,8 @@ bool CheckWindowsShellNameMatch() {
     if (!Check((ShellDirectoryWithSeparator(L"C:\\") + L"Windows") == L"C:\\Windows", "dirsep-appending-to-a-root-makes-a-valid-path")) return false;
   }
   // The allow-list for a value in a candidate folder's desktop.ini. Only plain text, and an absolute path
-  // under a known system variable or on a local drive (with an optional '@' and ",-N" / ",N"), are safe.
+  // under a known system variable (with an optional '@' and ",-N" / ",N"), are safe; a drive-letter path
+  // is not.
   {
     const auto safe = [&](const wchar_t *value) { return ShellIniValueIsSafe(value); };
     // Safe.

@@ -257,8 +257,9 @@ struct IniEntry {
 using ShellDriveIsLocal = bool (*)(wchar_t);
 
 // Whether a value from a desktop.ini is SAFE for the shell to be given: an ALLOW-list. The shell reads
-// these values with GetPrivateProfileStringW, which removes one pair of surrounding quotes (' or ", the
-// same at both ends), so that is removed here first, and the blanks. What is left is safe only if it is
+// these values itself (on a device a single-quoted value was shown with its quotes kept). Here one
+// pair of surrounding quotes (' or ", the same at both ends) and the blanks are removed first anyway,
+// which can only make the verdict stricter. What is left is safe only if it is
 //  (a) plain text: none of the characters  \ / : % @ ,  (a title, a tip); or
 //  (b) a path under a system variable, optionally with a leading '@' (a resource reference) and
 //      optionally a resource suffix ",-N" or ",N": it starts with %SystemRoot%, %windir%,
@@ -288,7 +289,7 @@ using ShellDriveIsLocal = bool (*)(wchar_t);
       value.find(L"..") != std::wstring_view::npos || value.find(L',') != std::wstring_view::npos ||
       value.find(L'@') != std::wstring_view::npos)
     return false;
-  // The start: a known system variable followed by '\', or a local drive letter followed by ":\".
+  // The start: a known system variable followed by '\'. A drive-letter path is not allowed (see above).
   for (const std::wstring_view variable :
        {std::wstring_view(L"%SystemRoot%"), std::wstring_view(L"%windir%"), std::wstring_view(L"%ProgramFiles%"),
         std::wstring_view(L"%ProgramFiles(x86)%"), std::wstring_view(L"%CommonProgramFiles%")}) {
