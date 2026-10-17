@@ -564,7 +564,9 @@ test.describe('real AI workspace E2E', () => {
         const restored = await firstWindow(app);
         collectRendererErrors(restored, errors);
         await restored.waitForTimeout(5_000);
-        const teamButton = restored.getByRole('button', { name: /Team/ }).first();
+        // ヘッダーの「Teamを開く」を名前で指す。/Team/ だと、AI が付けた Task 名（例:「Team mode …」）
+        // のサイドバー行に先に当たり、Team を開かずに終わる。
+        const teamButton = restored.getByRole('button', { name: 'Teamを開く' });
         if (
           (await restored.getByTestId('team-list').count()) === 0 &&
           (await teamButton.count()) > 0
