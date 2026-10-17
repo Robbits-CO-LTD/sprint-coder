@@ -52,7 +52,7 @@ const PRESET_LABEL: Record<AccessPreset, string> = {
 };
 
 const PRESET_DESC: Record<AccessPreset, string> = {
-  ask: '権限が必要な操作は毎回確認します',
+  ask: 'Workspace内のファイルの読み取りも含め、権限が必要な操作は毎回確認します',
   auto: 'Workspace内のファイル作成・編集は自動許可し、コマンドは実行前に確認します。その他は自動レビューで安全なものだけ自動許可し、残りは確認します',
   full: '広い操作を許可しますが、管理denyと秘密保護は維持します',
 };

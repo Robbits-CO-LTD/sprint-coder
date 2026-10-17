@@ -108,6 +108,8 @@ describe('prompt context compiler', () => {
     expect(ask.content).toContain('primary agent / write-capable');
     expect(ask.content).not.toContain('read-only');
     expect(ask.content).toContain('1回ごとに利用者の承認が必要');
+    // issue #842: Workspace reads wait on a card under Ask too, so the agent is not told otherwise.
+    expect(ask.content).toContain('Workspaceの読み取りも含め1回ごとに利用者の承認が必要');
 
     // A read-only agent is never told it may write, and other Turns keep their digest.
     const readOnly = compilePromptGuidance({

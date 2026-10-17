@@ -274,7 +274,7 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
   ];
   if (context.agent.writeApproval === 'per-call')
     lines.push(
-      '- ファイルの作成・編集とコマンドの実行はツールで行える。ただし1回ごとに利用者の承認が必要で、ツールを呼ぶと承認カードが出て許可を待つ。拒否されたら同じ操作を繰り返さない。',
+      '- ファイルの作成・編集とコマンドの実行はツールで行える。ただしWorkspaceの読み取りも含め1回ごとに利用者の承認が必要で、ツールを呼ぶと承認カードが出て許可を待つ。拒否されたら同じ操作を繰り返さない。',
     );
   if (context.agent.role === 'subagent') {
     lines.push('- 親から委任された範囲だけを扱い、結果と根拠を親へ返す。');

@@ -24,6 +24,14 @@ describe('managed access labels', () => {
     );
   });
 
+  it('describes Ask as confirming Workspace reads too (issue #842)', () => {
+    // allowRules is empty under Ask, so read_file / list_workspace also wait on an approval card.
+    const description = accessDescription('ask', null);
+    expect(description).toContain('Workspace内のファイルの読み取り・一覧も含め');
+    expect(description).toContain('1回ごとに実行前に確認します');
+    expect(description).not.toContain('読み取りは共通Harnessで実行し');
+  });
+
   it('reports fail-closed command removal with the probe reason', () => {
     const capability = {
       available: false,
