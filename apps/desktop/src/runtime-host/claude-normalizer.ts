@@ -50,6 +50,11 @@ export class ClaudeJsonlNormalizer {
   // concrete model id the CLI actually resolved for this turn's `auto`/alias selection. Surfaced
   // on the terminal `completed` event so Main can show it in the UI (see the ADR amendment).
   private resolvedModel: string | undefined;
+  // Claude streams each assistant text block (one before a tool call, the next after its result)
+  // as its own content block. Deltas within a block are token continuations, while a new block is
+  // a new paragraph — mirror CodexAgentMessageBoundary so the blocks are not glued together.
+  private emittedText = false;
+  private textBlockBoundaryPending = false;
   constructor(private readonly expected: ClaudeExpectedCapabilities = MANAGED_CAPABILITIES) {}
 
   hasPendingManagedTools(): boolean {
@@ -92,8 +97,11 @@ export class ClaudeJsonlNormalizer {
   private pushStreamEvent(value: Record<string, unknown>): RuntimeCanonicalEvent[] {
     const event = isRecord(value['event']) ? value['event'] : null;
     if (event === null) return [];
-    if (event['type'] === 'content_block_start' || event['type'] === 'content_block_stop')
+    if (event['type'] === 'content_block_start') {
+      this.textBlockBoundaryPending = this.emittedText;
       return [];
+    }
+    if (event['type'] === 'content_block_stop') return [];
     if (event['type'] !== 'content_block_delta') return [];
     const delta = isRecord(event['delta']) ? event['delta'] : null;
     if (delta === null) return [];
@@ -118,11 +126,18 @@ export class ClaudeJsonlNormalizer {
 
     const text = readString(delta, 'text');
     if (text === null || text.length === 0) return [];
+    const separated = this.textBlockBoundaryPending
+      ? `
+
+${text}`
+      : text;
+    this.emittedText = true;
+    this.textBlockBoundaryPending = false;
     // Claude also emits text before invoking tools. Approval requests must remain valid until
     // the result event confirms that no more tools will run.
     return [
       ...this.advanceTo('executing'),
-      { type: 'delta', messageId: this.messageId, delta: text },
+      { type: 'delta', messageId: this.messageId, delta: separated },
     ];
   }
 

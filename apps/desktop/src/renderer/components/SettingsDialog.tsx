@@ -15,7 +15,9 @@ import { ProviderSettingsSection } from './ProviderSettingsSection';
 import { LocalAiSettingsSection } from './LocalAiSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
+import { announceComputerUseSettingChanged } from '../lib/computer-use-setting-event';
 import type {
+  ComputerUseSettings,
   ProviderModel,
   TeamModelRestriction,
   TeamPolicy,
@@ -100,7 +102,7 @@ export const SETTINGS_SECTIONS: readonly {
   {
     id: 'advanced',
     label: '詳細',
-    description: '事前プロンプト・CLI検出・診断',
+    description: '事前プロンプト・CLI検出・Computer Use・診断',
     eyebrow: 'Advanced',
   },
 ];
@@ -353,6 +355,7 @@ export function WorkspaceBody({
                   which is exactly where a user who cannot select a Runtime will not look. */}
               <CliDetectionGroup />
               <UpdateHealthGroup />
+              <ComputerUseSetting active={open} />
               <DiagnosticsGroup />
               <SoundEffectsGroup />
               <LicenseGroup />
@@ -1874,6 +1877,172 @@ function researchApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
     settings === undefined ||
     typeof settings.getTeamModelResearch !== 'function' ||
     typeof settings.setTeamModelResearch !== 'function'
+  )
+    return null;
+  return settings;
+}
+
+/** The Computer Use (beta) switch. Off by default; Main decides what turning it on can do here. */
+export function ComputerUseSetting({ active }: { active: boolean }) {
+  const [api] = useState(computerUseSettingsApi);
+  const [canonical, setCanonical] = useState<ComputerUseSettings | null>(null);
+  const [shown, setShown] = useState<boolean | null>(null);
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  // The same race guards as the Team research switch: a slow read can never undo a newer save.
+  const generation = useRef(0);
+  const inFlight = useRef(false);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    inFlight.current = true;
+    void (async () => {
+      await Promise.resolve();
+      if (request !== generation.current) return;
+      setCanonical(null);
+      setShown(null);
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getComputerUse();
+        if (request !== generation.current) return;
+        inFlight.current = false;
+        setCanonical(result);
+        setShown(result.enabled || result.forcedByEnvironment);
+        setPhase('idle');
+      } catch {
+        if (request !== generation.current) return;
+        inFlight.current = false;
+        setError('Computer Useの設定を読み込めませんでした。設定を開き直してください。');
+        setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request !== generation.current) return;
+      generation.current += 1;
+      inFlight.current = false;
+    };
+  }, [active, api]);
+
+  async function save(next: boolean): Promise<void> {
+    if (api === null || inFlight.current) return;
+    const request = ++generation.current;
+    inFlight.current = true;
+    const previous = canonical;
+    setShown(next);
+    setPhase('saving');
+    setError(null);
+    try {
+      const result = await api.setComputerUse({ enabled: next });
+      // Saved, whichever response wins the race: the entry point must read availability again.
+      announceComputerUseSettingChanged();
+      if (request !== generation.current) return;
+      setCanonical(result);
+      setShown(result.enabled || result.forcedByEnvironment);
+      setStatus(
+        !result.enabled
+          ? 'Computer Useを無効にしました。'
+          : result.restartRequired
+            ? 'Computer Useを有効にしました。再起動後に有効になります。'
+            : 'Computer Useを有効にしました。',
+      );
+    } catch {
+      if (request !== generation.current) return;
+      setShown(previous === null ? null : previous.enabled || previous.forcedByEnvironment);
+      setError('設定を保存できませんでした。直前の値に戻しました。');
+    } finally {
+      if (request === generation.current) {
+        inFlight.current = false;
+        setPhase('idle');
+      }
+    }
+  }
+
+  const unavailable = api === null;
+  const forced = canonical?.forcedByEnvironment === true;
+  const disabled = unavailable || forced || phase !== 'idle' || shown === null;
+  const buildUnsupported = canonical?.buildSupported === false;
+
+  return (
+    <fieldset className="settings-group" aria-busy={phase === 'loading'}>
+      <legend>
+        Computer Use{' '}
+        <span className="settings-beta-badge" data-testid="settings-computer-use-beta">
+          ベータ版
+        </span>
+      </legend>
+      <label
+        className={`settings-skill-row${disabled ? ' disabled' : ''}`}
+        data-testid="settings-computer-use"
+      >
+        <input
+          type="checkbox"
+          checked={shown ?? false}
+          disabled={disabled}
+          aria-describedby="settings-computer-use-hint"
+          onChange={(e) => void save(e.target.checked)}
+        />
+        <span>
+          <strong>
+            Computer Use を使用する<span className="sr-only">（ベータ版）</span>
+          </strong>
+          <small data-testid="settings-computer-use-state">
+            {unavailable
+              ? 'この環境では変更できません'
+              : phase === 'loading'
+                ? '現在の設定を読み込み中'
+                : phase === 'saving'
+                  ? '保存中'
+                  : canonical === null || shown === null
+                    ? '未取得'
+                    : forced
+                      ? 'ON · 環境変数で有効になっています'
+                      : !shown
+                        ? buildUnsupported
+                          ? 'OFF · このビルドでは使用できません'
+                          : 'OFF'
+                        : canonical.restartRequired
+                          ? 'ON · 再起動後に有効になります'
+                          : buildUnsupported
+                            ? 'ON · このビルドでは使用できません'
+                            : 'ON'}
+          </small>
+        </span>
+      </label>
+      <p className="settings-hint" id="settings-computer-use-hint">
+        ベータ版の機能です。ONにすると、AIがデスクトップ上のアプリを画面を見ながら操作できるようになります。
+        既定はOFFです。署名済みのアプリを、対応するOS（Windows /
+        macOS）で使っているときだけ動作します。
+        ONにした直後は、アプリの再起動が必要な場合があります（上の状態欄でお知らせします）。OFFにすると、実行中のComputer
+        Useもすぐに止まります。
+      </p>
+      {buildUnsupported && (
+        <p className="settings-hint" data-testid="settings-computer-use-build">
+          このビルドではComputer
+          Useを使用できません（開発版・未署名のビルド、または対応していないOSです）。
+          設定は保存され、対応するビルドで使えるようになります。
+        </p>
+      )}
+      {error !== null && (
+        <p className="settings-skill-error" role="alert" data-testid="settings-computer-use-error">
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </fieldset>
+  );
+}
+
+function computerUseSettingsApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getComputerUse !== 'function' ||
+    typeof settings.setComputerUse !== 'function'
   )
     return null;
   return settings;

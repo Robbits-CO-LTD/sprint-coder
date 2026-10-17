@@ -8423,6 +8423,19 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, transparent);
 }
+/* A preview feature's label. Text, not a colour alone, so it reads the same without colour. */
+.settings-beta-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: var(--r-xs);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: 11.5px;
+  font-weight: 600;
+  vertical-align: middle;
+  white-space: nowrap;
+}
 .settings-connection-expand {
   display: inline-flex;
   align-items: center;

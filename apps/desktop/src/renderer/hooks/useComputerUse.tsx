@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { COMPUTER_USE_SETTING_CHANGED_EVENT } from '../lib/computer-use-setting-event';
 import type {
   ComputerAppGrantView,
   ComputerAppProfile,
@@ -93,16 +94,25 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
         active = false;
       };
     }
-    void api
-      .availability()
-      .then((availability) => {
-        if (active) setAvailability(availability);
-      })
-      .catch(() => {
-        if (active) setAvailability(null);
-      });
+    // Each read supersedes the one before, so a slow answer from before a settings change cannot
+    // bring back an entry point the user just turned off.
+    let latest = 0;
+    const refresh = (): void => {
+      const request = ++latest;
+      void api
+        .availability()
+        .then((availability) => {
+          if (active && request === latest) setAvailability(availability);
+        })
+        .catch(() => {
+          if (active && request === latest) setAvailability(null);
+        });
+    };
+    refresh();
+    window.addEventListener(COMPUTER_USE_SETTING_CHANGED_EVENT, refresh);
     return () => {
       active = false;
+      window.removeEventListener(COMPUTER_USE_SETTING_CHANGED_EVENT, refresh);
     };
   }, []);
 
@@ -518,7 +528,8 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
     surface: (
       <>
         <ComputerUseAcceptanceBuildNotice acceptanceMode={availability?.acceptanceMode ?? null} />
-        {dialogOpen && taskId !== null && availability !== null ? (
+        {/* `enabled` too: a dialog opened before the beta setting was turned off closes with it. */}
+        {dialogOpen && enabled && taskId !== null && availability !== null ? (
           computerUseCapabilitiesReady(availability) ? (
             <ComputerUseOnboarding
               key={taskId}

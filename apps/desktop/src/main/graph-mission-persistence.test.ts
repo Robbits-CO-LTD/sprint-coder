@@ -3670,6 +3670,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         const sealed = await coordinator['finalizeIsolation']({
           isolation,
           agentId: run.execution.assigneeAgentId,
+          teamTaskId: f.persistence.getTeamExecutionDispatch(run.execution.id).teamTaskId,
           missionId: mission.id,
           stepOrdinal: 1,
         });

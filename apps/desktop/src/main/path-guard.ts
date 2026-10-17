@@ -1,8 +1,15 @@
-import { constants, lstatSync, realpathSync, type BigIntStats } from 'node:fs';
+import {
+  constants,
+  lstatSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  type BigIntStats,
+} from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
 import { canonicalizeExistingPath, pathsEquivalent } from '../path-comparison';
 
@@ -315,6 +322,36 @@ export function workspacePermissionResourceFromGuard(
   });
 }
 
+/**
+ * The protected classification a Workspace root itself carries, or null for an ordinary folder.
+ * The home folder and a drive root stay null here: they have their own confirmation.
+ */
+export function protectedWorkspaceRootClassification(
+  canonicalRootPath: string,
+  workspaceAuthority?: 'sealed-team-isolation',
+): Exclude<PathClassification, 'workspace' | 'unclassified'> | null {
+  const classification = classifyWorkspacePath(
+    canonicalRootPath,
+    canonicalRootPath,
+    workspaceAuthority,
+  );
+  return classification === 'workspace' || classification === 'unclassified'
+    ? null
+    : classification;
+}
+
+/** A user-facing name for the kind of protected place a Workspace root sits in. */
+export function protectedWorkspaceRootLabel(
+  classification: Exclude<PathClassification, 'workspace' | 'unclassified'>,
+): string {
+  if (classification === 'os-protected') return 'OS のシステムフォルダ';
+  if (classification === 'credential') return '認証情報を置くフォルダ';
+  if (classification === 'app-private') return 'アプリの内部データの場所（AppData など）';
+  return '鍵などを置く保護された場所';
+}
+
+const CREDENTIAL_DIRECTORY_NAMES = ['.ssh', '.aws', '.gnupg', '.kube', 'gcloud', 'keychains'];
+
 function classifyWorkspacePath(
   workspacePath: string,
   resolvedPath: string,
@@ -323,13 +360,21 @@ function classifyWorkspacePath(
   const parts = relative(workspacePath, resolvedPath)
     .split(/[\\/]+/)
     .map((part) => part.toLowerCase());
+  // Only the AppData / app-state names below are deliberately judged on every ancestor. Any other
+  // folder name above the Workspace (a parent called `windows` or `gcloud`) says nothing about the
+  // files inside it: OS areas are compared with the real system roots and credential folders with
+  // the real ones in the home folder, while names are judged from the Workspace root down.
   const absoluteParts = resolvedPath
     .split(/[\\/]+/)
     .filter(Boolean)
     .map((part) => part.toLowerCase());
-  const classificationParts =
-    workspaceAuthority === 'sealed-team-isolation' ? parts : absoluteParts;
+  const appStateParts = workspaceAuthority === 'sealed-team-isolation' ? parts : absoluteParts;
+  const credentialParts =
+    workspaceAuthority === 'sealed-team-isolation'
+      ? parts
+      : [basename(workspacePath).toLowerCase(), ...parts];
   const name = parts.at(-1) ?? '';
+  const home = canonicalizeExistingPath(homedir());
   if (
     workspaceAuthority === undefined &&
     (isAtOrBelow('/System', resolvedPath) || isAtOrBelow('/Library', resolvedPath))
@@ -347,35 +392,47 @@ function classifyWorkspacePath(
       isAtOrBelow('/private/var/root', resolvedPath))
   )
     return 'os-protected';
+  if (workspaceAuthority === undefined && isAtOrBelowAnyRoot(windowsSystemRoots(), resolvedPath))
+    return 'os-protected';
   if (
-    classificationParts.includes('windows') ||
-    classificationParts.includes('system32') ||
-    classificationParts.includes('programdata') ||
-    classificationParts.includes('program files') ||
-    classificationParts.includes('program files (x86)')
+    parts.includes('windows') ||
+    parts.includes('system32') ||
+    parts.includes('programdata') ||
+    parts.includes('program files') ||
+    parts.includes('program files (x86)')
   )
     return 'os-protected';
   if (
-    classificationParts.includes('.ssh') ||
-    classificationParts.includes('.aws') ||
-    classificationParts.includes('.gnupg') ||
-    classificationParts.includes('.kube') ||
-    classificationParts.includes('gcloud') ||
-    classificationParts.includes('keychains')
+    workspaceAuthority === undefined &&
+    isAtOrBelowAnyRoot(
+      [
+        ['.ssh'],
+        ['.aws'],
+        ['.gnupg'],
+        ['.kube'],
+        ['.config', 'gcloud'],
+        ['Library', 'Keychains'],
+      ].map((segments) => join(home, ...segments)),
+      resolvedPath,
+    )
   )
     return 'credential';
-  if (classificationParts.includes('appdata')) return 'app-private';
+  if (CREDENTIAL_DIRECTORY_NAMES.some((directory) => credentialParts.includes(directory)))
+    return 'credential';
+  if (appStateParts.includes('appdata')) return 'app-private';
   if (
-    classificationParts.includes('.git') ||
-    classificationParts.includes('.codex') ||
-    classificationParts.includes('.sprint-coder') ||
-    classificationParts.includes('.sprint-coder-team')
+    appStateParts.includes('.git') ||
+    appStateParts.includes('.codex') ||
+    appStateParts.includes('.sprint-coder') ||
+    appStateParts.includes('.sprint-coder-team')
   )
     return 'app-private';
   if (
-    classificationParts.includes('library') &&
-    classificationParts.includes('application support')
+    workspaceAuthority === undefined &&
+    isAtOrBelowAnyRoot([join(home, 'Library', 'Application Support')], resolvedPath)
   )
+    return 'app-private';
+  if (credentialParts.includes('library') && credentialParts.includes('application support'))
     return 'app-private';
   if (
     parts.some(
@@ -416,6 +473,142 @@ function isAtOrBelow(root: string, candidate: string): boolean {
   return (
     relation === '' ||
     (!relation.startsWith(`..${sep}`) && relation !== '..' && !isAbsolute(relation))
+  );
+}
+
+/** The Windows install and its program folders, from the environment plus the usual defaults. */
+function windowsSystemRoots(): string[] {
+  if (process.platform !== 'win32') return [];
+  const drive = process.env['SystemDrive'] ?? 'C:';
+  return [
+    process.env['SystemRoot'],
+    process.env['WINDIR'],
+    process.env['ProgramData'],
+    process.env['ProgramFiles'],
+    process.env['ProgramFiles(x86)'],
+    process.env['ProgramW6432'],
+    `${drive}\\Windows`,
+    `${drive}\\ProgramData`,
+    `${drive}\\Program Files`,
+    `${drive}\\Program Files (x86)`,
+  ].filter((root): root is string => root !== undefined && root !== '' && isAbsolute(root));
+}
+
+/**
+ * Whether a resolved path is at or below one of the protected roots. Each root is compared both as
+ * written and resolved, because the root itself may be a symlink or junction to another place
+ * (`~/.aws -> /mnt/profile/.aws`) while the guarded path is always the resolved one. When a root
+ * exists but cannot be resolved, the comparison falls back as `locateProtectedRoot` describes and
+ * never quietly treats the path as outside the root.
+ */
+function isAtOrBelowAnyRoot(roots: readonly string[], resolvedPath: string): boolean {
+  return roots.some((root) => {
+    const location = locateProtectedRoot(root);
+    return (
+      location.paths.some((path) => isAtOrBelow(path, resolvedPath)) ||
+      (location.identity !== null && hasAncestorWithIdentity(resolvedPath, location.identity)) ||
+      (location.names !== null && hasAncestorNamed(resolvedPath, location.names))
+    );
+  });
+}
+
+let protectedRootRealpath = (path: string): string => realpathSync.native(path);
+
+/** Replaces the canonicalizer used to find where a protected root really is; null restores it. */
+export function setProtectedRootRealpathForTesting(
+  realpath: ((path: string) => string) | null,
+): void {
+  protectedRootRealpath = realpath ?? ((path) => realpathSync.native(path));
+}
+
+const MAX_PROTECTED_ROOT_LINK_HOPS = 40;
+
+type ProtectedRootLocation = {
+  /** Where the root is known to be: as written, each link target on the way, and its real path. */
+  paths: string[];
+  /** The directory the root leads to, when it can be reached but not named. */
+  identity: { dev: bigint; ino: bigint } | null;
+  /** Set only when the root exists and where it leads is unknown: the names it goes by. */
+  names: string[] | null;
+};
+
+/**
+ * Where a protected root really is, failing closed (#835). The usual answer is its real path. When
+ * that cannot be read (a permission error, a link loop, a link to an unreadable place) yet
+ * something is there:
+ * - a link is followed by its target text, each target compared as well and resolved in turn;
+ * - otherwise the directory it leads to is identified by device and inode, and a path is below the
+ *   root when one of its ancestors is that very directory;
+ * - and when not even that can be read, a path is treated as below the root when one of its
+ *   ancestors has the root's name (or a name a link on the way gave it), compared without case.
+ *   This is the only guess, and it can only mark a Workspace protected, never the other way.
+ * A root (or link target) that does not exist is only compared as written: nothing is below it.
+ */
+function locateProtectedRoot(root: string): ProtectedRootLocation {
+  let current = resolve(root);
+  const paths = [current];
+  const names = [basename(current)];
+  // More links in a row than this is a loop: nothing is below one, but it still fails closed.
+  for (let hop = 0; hop <= MAX_PROTECTED_ROOT_LINK_HOPS; hop += 1) {
+    try {
+      return { paths: [...paths, protectedRootRealpath(current)], identity: null, names: null };
+    } catch {
+      // Look at what is there instead.
+    }
+    let target: string | null = null;
+    try {
+      if (lstatSync(current).isSymbolicLink()) target = readlinkSync(current);
+    } catch (error) {
+      if (isAbsent(error)) return { paths, identity: null, names: null };
+    }
+    if (target === null) break;
+    current = resolve(dirname(current), target);
+    paths.push(current);
+    names.push(basename(current));
+  }
+  return withIdentityOrNames(current, paths, names);
+}
+
+function withIdentityOrNames(
+  current: string,
+  paths: string[],
+  names: string[],
+): ProtectedRootLocation {
+  try {
+    const stats = statSync(current, { bigint: true });
+    return { paths, identity: { dev: stats.dev, ino: stats.ino }, names: null };
+  } catch {
+    return { paths, identity: null, names };
+  }
+}
+
+function hasAncestorWithIdentity(
+  resolvedPath: string,
+  identity: { dev: bigint; ino: bigint },
+): boolean {
+  for (let candidate = resolvedPath; ; candidate = dirname(candidate)) {
+    try {
+      const stats = statSync(candidate, { bigint: true, throwIfNoEntry: false });
+      if (stats !== undefined && stats.dev === identity.dev && stats.ino === identity.ino)
+        return true;
+    } catch {
+      // An ancestor this process cannot stat is not the directory it could stat.
+    }
+    if (dirname(candidate) === candidate) return false;
+  }
+}
+
+function hasAncestorNamed(resolvedPath: string, names: readonly string[]): boolean {
+  const wanted = new Set(names.map((name) => name.toLowerCase()).filter(Boolean));
+  return resolvedPath.split(/[\\/]+/).some((part) => wanted.has(part.toLowerCase()));
+}
+
+function isAbsent(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
   );
 }
 

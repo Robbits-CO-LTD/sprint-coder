@@ -116,6 +116,7 @@ import {
   teamPolicySchema,
   teamPolicyUpdateInputSchema,
   teamModelResearchSettingsSetInputSchema,
+  computerUseSettingsSetInputSchema,
   teamModelRestrictionSetInputSchema,
   teamSendMessageInputSchema,
   teamSubscriptionInputSchema,
@@ -168,6 +169,7 @@ import {
   shouldRetryEmptyOllamaToolRound,
   shouldFailRequiredTeamTurn,
   requiresHomeDirectoryConfirmation,
+  protectedProjectFolderWarning,
   runBestEffortCancellation,
   sandboxProfileForToolAuthorization,
   shouldStartNextQueuedAfterCancel,
@@ -781,6 +783,23 @@ describe('Project home-directory confirmation', () => {
   it('does not warn for a child or path-component sibling of home', () => {
     expect(requiresHomeDirectoryConfirmation(join(home, 'project'), home)).toBe(false);
     expect(requiresHomeDirectoryConfirmation(`${home}-other`, home)).toBe(false);
+  });
+});
+
+describe('Project protected-folder warning (issue #830)', () => {
+  it('says in Japanese that the AI cannot work in a folder under AppData', () => {
+    const appDataFolder = join(dirname(process.cwd()), 'AppData', 'Local', 'Temp', 'my-app');
+    const warning = protectedProjectFolderWarning([appDataFolder]);
+    expect(warning?.message).toContain('保護された場所');
+    expect(warning?.detail).toContain(appDataFolder);
+    expect(warning?.detail).toContain('AppData');
+    expect(warning?.detail).toContain(
+      'AIはこの場所のファイルの読み書きやコマンドの実行ができません',
+    );
+  });
+
+  it('does not warn for an ordinary project folder', () => {
+    expect(protectedProjectFolderWarning([join(dirname(process.cwd()), 'my-app')])).toBeNull();
   });
 });
 
@@ -7661,6 +7680,8 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.workspaceSelect]: taskIdPayloadSchema,
   [IPC_CHANNELS.settingsGetTeamModelResearch]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelResearch]: teamModelResearchSettingsSetInputSchema,
+  [IPC_CHANNELS.settingsGetComputerUse]: emptyPayloadSchema,
+  [IPC_CHANNELS.settingsSetComputerUse]: computerUseSettingsSetInputSchema,
   [IPC_CHANNELS.settingsGetTeamModelSelectionGuidance]: emptyPayloadSchema,
   [IPC_CHANNELS.settingsSetTeamModelSelectionGuidance]: teamModelSelectionGuidanceSetInputSchema,
   [IPC_CHANNELS.settingsGetSprintCoderPrePrompt]: emptyPayloadSchema,

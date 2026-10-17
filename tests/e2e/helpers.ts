@@ -633,8 +633,10 @@ export async function launchApp(
   };
 
   if (mode === 'packaged') {
-    return recordMainProcessOutput(
-      await electron.launch({ executablePath: findPackagedExecutable(), env }),
+    return acceptProtectedProjectFolderWarning(
+      recordMainProcessOutput(
+        await electron.launch({ executablePath: findPackagedExecutable(), env }),
+      ),
     );
   }
 
@@ -642,13 +644,46 @@ export async function launchApp(
   // bundle at apps/desktop/.vite/build/*.js was produced by `npm start` (see
   // ensureDevServerReady) and has MAIN_WINDOW_VITE_DEV_SERVER_URL baked in, so the renderer loads
   // from the already-running Vite dev server rather than the app://bundle production protocol.
-  return recordMainProcessOutput(
-    await electron.launch({
-      executablePath: resolveDevElectronBinary(),
-      args: [DESKTOP_ROOT],
-      env,
-    }),
+  return acceptProtectedProjectFolderWarning(
+    recordMainProcessOutput(
+      await electron.launch({
+        executablePath: resolveDevElectronBinary(),
+        args: [DESKTOP_ROOT],
+        env,
+      }),
+    ),
   );
+}
+
+/** Title of Main's warning for a Project folder in a protected place (issue #830). */
+export const PROTECTED_PROJECT_FOLDER_DIALOG_TITLE = '保護された場所のフォルダ';
+
+/**
+ * Specs keep their Project folders under tmpdir(), which on Windows is inside AppData, so adding
+ * one raises Main's native protected-folder warning (issue #830) — a modal no spec can click.
+ * Answer only that warning with "追加する", the same way specs stub the native folder picker, and
+ * leave every other message box to Electron. This lives in the test process; the app has no bypass.
+ */
+async function acceptProtectedProjectFolderWarning(
+  app: ElectronApplication,
+): Promise<ElectronApplication> {
+  await app.evaluate(({ dialog }, title) => {
+    const original = dialog.showMessageBox.bind(dialog) as (...args: unknown[]) => unknown;
+    Object.defineProperty(dialog, 'showMessageBox', {
+      configurable: true,
+      // showMessageBox(window, options) or showMessageBox(options).
+      value: (...args: unknown[]) => {
+        const options = args.find(
+          (arg): arg is { title?: unknown; message: unknown } =>
+            typeof arg === 'object' && arg !== null && 'message' in arg,
+        );
+        if (options?.title === title)
+          return Promise.resolve({ response: 0, checkboxChecked: false });
+        return original(...args);
+      },
+    });
+  }, PROTECTED_PROJECT_FOLDER_DIALOG_TITLE);
+  return app;
 }
 
 const MAIN_OUTPUT_TAIL_CHARS = 64 * 1024;

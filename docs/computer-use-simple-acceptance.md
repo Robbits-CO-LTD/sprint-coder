@@ -77,7 +77,8 @@ release workflow independently refuses to publish such a build.
 
 **Both**
 
-- Start the app with `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1=1`. Without it the Computer Use entry
+- Start the app with `SPRINT_CODER_COMPUTER_USE_DESKTOP_V1=1`, or turn on 設定 → 詳細 →
+  「Computer Use を使用する」（ベータ版） and restart the app. Without either the Computer Use entry
   point stays hidden.
 - Use the Connection and Model already configured in the Task. No particular Provider is required,
   and Provider behaviour is out of scope for this acceptance.
