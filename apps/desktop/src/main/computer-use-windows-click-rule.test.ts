@@ -381,8 +381,17 @@ int main() {
   }
   // The dispatch's own cursor move (SetCursorPos, between the evaluation and the send) does not count as
   // input: the system's last input time stays, so the check does not stop every click. Checked here
-  // with the real call, the way the dispatch runs it: basis, move, wait, check, move back.
+  // with the real call, the way the dispatch runs it, AGAINST A CONTROL: the same wait without any
+  // move. If the control stays and the move changes the time, the move is counted as input and this
+  // fails (nobody else is blamed); if both change, somebody else is using the machine and it is skipped.
   {
+    DWORD control_before = 0;
+    const bool control_read = WindowsReadLastInputTick(&control_before);
+    Sleep(120);
+    DWORD control_after = 0;
+    WindowsReadLastInputTick(&control_after);
+    const bool quiet = control_read && control_after == control_before;
+
     WindowsClickBasis basis;
     basis.tracked = true;
     basis.opens = false;
@@ -397,10 +406,13 @@ int main() {
     Sleep(60);
     DWORD after_back = 0;
     WindowsReadLastInputTick(&after_back);
-    if (basis.input_read && after_move == basis.input_tick && after_back == basis.input_tick)
-      Check(moved && !WindowsInputMovedSinceEvaluation(basis), "own_cursor_move_does_not_stop_the_click");
-    else
-      std::cout << "skip own_cursor_move (somebody else is using the machine, or the system counts the move)\n";
+    const bool unchanged = basis.input_read && after_move == basis.input_tick && after_back == basis.input_tick;
+    if (quiet) {
+      // Nobody else moved the time during the control; the move must not either.
+      Check(moved && unchanged && !WindowsInputMovedSinceEvaluation(basis), "own_cursor_move_does_not_stop_the_click");
+    } else {
+      std::cout << "skip own_cursor_move (the control moved by itself: somebody else is using the machine)\n";
+    }
   }
   // The click opens when either part says so.
   Check(WindowsClickOpens() == (WindowsSingleClickOpens() || WindowsRecentInputMayPair()), "click_opens_is_the_or");

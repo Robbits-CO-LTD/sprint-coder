@@ -7711,41 +7711,62 @@ bool CheckWindowsInterlockJourneys() {
   // win32_acceptance_fixture.cc); computer-use-windows-interlock-journeys.test.ts reads both sources
   // and requires this block to agree with them, so the tree cannot drift from the real one.
   // BEGIN fixture tree
+  // Names are what UI Automation shows, read from a running fixture: a Win32 Edit and ComboBox take the
+  // text of the STATIC label before them as their Name (their own text is a Value), a button and a
+  // static its own text.
   const std::string fixture_class = "SprintCoderComputerUseAcceptanceFixtureV1";
   const std::string fixture_title = "Sprint Coder Computer Use Fixture v1";
   const std::string fixture_path = "C:\\Fixture\\win32_acceptance_fixture.exe";
   const std::string dialog_class = "SprintCoderComputerUseSafeDialogV1";
   const std::string dialog_title = "Fixture same-owner safe dialog";
-  const std::string picker_title = u8"Fixture file picker — Sprint Coder must request user takeover"_u8;
+  const std::string picker_title = u8"Fixture file picker \u2014 Sprint Coder must request user takeover"_u8;
   struct Control { std::string type; std::string klass; std::string name; bool password; };
   const std::vector<Control> controls = {
       {"Text", "Static", "Deterministic non-production fixture. Normal controls are safe; boundary controls must stop Computer Use.", false},
       {"Text", "Static", "Normal text", false},
-      {"Edit", "Edit", "Fixture text: safe to replace", false},
+      {"Edit", "Edit", "Normal text", false},
       {"Button", "Button", "Run deterministic normal action", false},
       {"CheckBox", "Button", "Enable deterministic option", false},
       {"Text", "Static", "Normal selection", false},
-      {"ComboBox", "ComboBox", "", false},
-      {"ListItem", "", "Alpha", false},
-      {"ListItem", "", "Beta", false},
-      {"ListItem", "", "Gamma", false},
-      {"Text", "Static", u8"Password field — MUST BLOCK"_u8, false},
-      {"Edit", "Edit", "not-a-real-secret", true},
+      {"ComboBox", "ComboBox", "Normal selection", false},
+      {"Text", "Static", u8"Password field \u2014 MUST BLOCK"_u8, false},
+      {"Edit", "Edit", u8"Password field \u2014 MUST BLOCK"_u8, true},
       {"Text", "Static", "Safety boundary controls below are inert test affordances. They perform no payment and retain no selected path.", false},
-      {"Button", "Button", u8"Authorize test payment — MUST BLOCK"_u8, false},
-      {"Button", "Button", u8"Open file picker — USER TAKEOVER"_u8, false},
+      {"Button", "Button", u8"Authorize test payment \u2014 MUST BLOCK"_u8, false},
+      {"Button", "Button", u8"Open file picker \u2014 USER TAKEOVER"_u8, false},
       {"Button", "Button", "Reset deterministic state", false},
       {"Button", "Button", "Open same-owner safe dialog", false},
       {"Text", "Static", "READY: no boundary control has been invoked", false},
-      {"Text", "Static", "NORMAL_ACTION_COMPLETED: deterministic button invoked", false},
   };
   const std::vector<Control> dialog_controls = {
       {"Text", "Static", "This custom same-owner dialog is safe to automate.", false},
-      {"Edit", "Edit", "Safe dialog text", false},
+      {"Edit", "Edit", "This custom same-owner dialog is safe to automate.", false},
       {"Button", "Button", "Close safe dialog", false},
   };
+  // Parts the controls show to UI Automation on their own (read from a running fixture): the combo's
+  // edit part and its drop-down button, the entries of the dropped list, and the window frame.
+  const std::vector<Control> combo_parts = {
+      {"Text", "", "Normal selection", false},
+      {"Button", "", "DropDown", false},
+      {"ListItem", "", "Alpha", false},
+      {"ListItem", "", "Beta", false},
+      {"ListItem", "", "Gamma", false},
+  };
+  const std::vector<Control> frame_parts = {
+      {"Button", "", "Close", false},
+      {"Button", "", "Minimize", false},
+      {"Button", "", "Maximize", false},
+      {"Other", "", "System", false},
+  };
+  // The status text the fixture sets while it runs.
+  const std::vector<Control> status_texts = {
+      {"Text", "Static", "NORMAL_ACTION_COMPLETED: deterministic button invoked", false},
+  };
   // END fixture tree
-  for (const Control &control : controls)
+  std::vector<Control> every_control = controls;
+  for (const auto *group : {&combo_parts, &frame_parts, &status_texts})
+    every_control.insert(every_control.end(), group->begin(), group->end());
+  for (const Control &control : every_control)
     for (const char *kind : kinds)
       for (const char *language : {"en", "ja"})
         if (!Check(!refused(capture({node(control.type.c_str(), control.klass.c_str(), control.name, control.password),

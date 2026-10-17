@@ -4498,8 +4498,10 @@ bool DispatchWindowsAction(const WindowsSession &session,
       *reason = "stale_target";
       return false;
     }
-    // Input came in after the interlock evaluation judged this click as not opening: it is not sent
-    // (the existing code of a target that is no longer the one that was judged).
+    // Input came in after the interlock evaluation judged this click as not opening: it is not sent.
+    // The reuse of "focused_target_changed" is on purpose (Main maps every code of this kind to the
+    // same plain rejection): for a click it means "input from elsewhere came in after the
+    // evaluation", not that the focus moved.
     if (WindowsInputMovedSinceEvaluation(click_basis)) {
       *reason = "focused_target_changed";
       return false;
