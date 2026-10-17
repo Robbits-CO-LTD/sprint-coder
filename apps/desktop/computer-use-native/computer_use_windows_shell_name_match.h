@@ -131,6 +131,26 @@ constexpr unsigned long kShellReparseNameSurrogate = 0x20000000;
   return letter;
 }
 
+// A directory path ready to have a name appended: trailing separators are dropped (except the one of a
+// drive root) and exactly one is put at the end. "C:\" stays "C:\" (it must not become "C:\\", which no
+// shell call accepts: every candidate of a drive root would be unknown), "C:\Windows" and
+// "C:\Windows\" both become "C:\Windows\".
+[[nodiscard]] inline std::wstring ShellDirectoryWithSeparator(std::wstring path) {
+  while (path.size() > 3 && path.back() == L'\\') path.pop_back();
+  if (path.empty() || path.back() != L'\\') path.push_back(L'\\');
+  return path;
+}
+
+// The target of a mount point as an ordinary path ("C:\redirect\subdir"), from a substitute name of the form
+// "\??\C:\redirect\subdir" (or "\??\C:"); empty for any other form. The parts of this path are looked at
+// one by one, from the root of the drive, before the mount point is let through.
+[[nodiscard]] inline std::wstring ShellMountTargetPath(std::wstring_view substitute) {
+  if (ShellLocalDriveLetterOfSubstituteName(substitute) == 0) return std::wstring();
+  std::wstring path(substitute.substr(4));
+  if (path.size() == 2) path.push_back(L'\\');
+  return path;
+}
+
 // The most of a desktop.ini that is read (a real one is a few hundred bytes); a bigger file is a yes.
 constexpr std::size_t kShellDesktopIniMaxBytes = 64 * 1024;
 
@@ -234,65 +254,65 @@ struct IniEntry {
   return false;
 }
 
-using ShellExpandEnvironment = std::wstring (*)(std::wstring_view);
 using ShellDriveIsLocal = bool (*)(wchar_t);
 
-// Whether a value from a desktop.ini names a place the shell might LOAD or READ and that is not on a
-// local disk: a resource reference ("@path,-id"), or anything that looks like a path. A value that
-// is plain text (a title, a tip) names nothing. The path is expanded by the caller's function, then:
-// a name still holding '%' (an unknown variable), a UNC or device path, a URL, a path rooted on the
-// current drive, and a drive letter that is not a local disk are all RISKY. A relative path is not
-// (it is searched in the system directories or the folder). The "path,-id" or "path,index" resource
-// suffix is not part of the path.
-[[nodiscard]] inline bool ShellIniValueIsRisky(std::wstring_view value, ShellExpandEnvironment expand,
-                                               ShellDriveIsLocal is_local) {
+// Whether a value from a desktop.ini is SAFE for the shell to be given: an ALLOW-list. The shell reads
+// these values with GetPrivateProfileStringW, which removes one pair of surrounding quotes (' or ", the
+// same at both ends), so that is removed here first, and the blanks. What is left is safe only if it is
+//  (a) plain text: none of the characters  \ / : % @ ,  (a title, a tip); or
+//  (b) a path under a system variable, optionally with a leading '@' (a resource reference) and
+//      optionally a resource suffix ",-N" or ",N": it starts with %SystemRoot%, %windir%,
+//      %ProgramFiles%, %ProgramFiles(x86)% or %CommonProgramFiles% (followed by '\'); and the rest has no
+//      '/', no doubled '\' (so no UNC and no "\\?\" or "\\.\" form), no "..", and no other '%'.
+// Everything else is NOT safe: a path that starts with a drive letter (even a local one: a part of it
+// can be a symbolic link to the network), a relative path, a UNC or device path, a URL, an unknown
+// variable, a malformed suffix. A KNOWN LIMIT: the folder a system variable expands to could itself
+// hold a link; that is not looked at.
+[[nodiscard]] inline bool ShellIniValueIsSafe(std::wstring_view value) {
+  using shell_desktop_ini_detail::SameName;
   using shell_desktop_ini_detail::Trim;
   value = Trim(value);
-  if (value.empty()) return false;
-  if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') value = Trim(value.substr(1, value.size() - 2));
-  const bool at_reference = !value.empty() && value.front() == L'@';
-  if (at_reference) value = Trim(value.substr(1));
-  if (value.empty()) return at_reference; // a bare "@" refers to nothing we can read: not known
-  const bool letter_path = value.size() >= 2 && value[1] == L':' &&
-                           ((value[0] >= L'A' && value[0] <= L'Z') || (value[0] >= L'a' && value[0] <= L'z'));
-  const bool looks_like_path = at_reference || value.front() == L'%' || value.front() == L'\\' || letter_path ||
-                               value.find(L"://") != std::wstring_view::npos;
-  if (!looks_like_path) return false;
-  if (value.find(L"://") != std::wstring_view::npos) return true;
-  const std::size_t comma = value.find_last_of(L',');
+  if (value.size() >= 2 && (value.front() == L'"' || value.front() == L'\'') && value.back() == value.front())
+    value = Trim(value.substr(1, value.size() - 2));
+  if (value.find_first_of(L"\\/:%@,") == std::wstring_view::npos) return true; // (a) plain text
+  if (!value.empty() && value.front() == L'@') value.remove_prefix(1);
+  // The resource suffix: ",-N" or ",N". A comma that is not that is not safe.
+  const std::size_t comma = value.find(L',');
   if (comma != std::wstring_view::npos) {
-    std::wstring_view tail = Trim(value.substr(comma + 1));
+    std::wstring_view tail = value.substr(comma + 1);
     if (!tail.empty() && tail.front() == L'-') tail.remove_prefix(1);
-    bool digits = !tail.empty();
-    for (const wchar_t c : tail)
-      if (c < L'0' || c > L'9') digits = false;
-    if (digits) value = Trim(value.substr(0, comma));
+    if (tail.empty() || tail.find_first_not_of(L"0123456789") != std::wstring_view::npos) return false;
+    value = value.substr(0, comma);
   }
-  if (expand == nullptr || is_local == nullptr) return true;
-  std::wstring path = expand(value);
-  if (path.find(L'%') != std::wstring::npos) return true;
-  std::wstring_view view = Trim(path);
-  if (view.size() >= 2 && view.front() == L'"' && view.back() == L'"') view = Trim(view.substr(1, view.size() - 2));
-  if (view.empty()) return false;
-  if (view.front() == L'\\' || view.front() == L'/') return true; // UNC, device, or rooted on the current drive
-  if (view.size() >= 2 && view[1] == L':') {
-    const wchar_t letter = view[0];
-    const bool alpha = (letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z');
-    return !alpha || !is_local(letter);
+  if (value.find(L'/') != std::wstring_view::npos || value.find(L"\\\\") != std::wstring_view::npos ||
+      value.find(L"..") != std::wstring_view::npos || value.find(L',') != std::wstring_view::npos ||
+      value.find(L'@') != std::wstring_view::npos)
+    return false;
+  // The start: a known system variable followed by '\', or a local drive letter followed by ":\".
+  for (const std::wstring_view variable :
+       {std::wstring_view(L"%SystemRoot%"), std::wstring_view(L"%windir%"), std::wstring_view(L"%ProgramFiles%"),
+        std::wstring_view(L"%ProgramFiles(x86)%"), std::wstring_view(L"%CommonProgramFiles%")}) {
+    if (value.size() > variable.size() && SameName(value.substr(0, variable.size()), variable)) {
+      if (value[variable.size()] != L'\\') return false;
+      return value.substr(variable.size()).find(L'%') == std::wstring_view::npos;
+    }
   }
-  return false;
+  return false; // a drive letter, an unknown variable, a relative path: not safe
+}
+
+[[nodiscard]] inline bool ShellIniValueIsRisky(std::wstring_view value) {
+  return !ShellIniValueIsSafe(value);
 }
 
 // Whether a candidate FOLDER's desktop.ini could make the shell's name for it reach somewhere that is not
 // a local disk. The shell reads that file to name a read-only / system folder: the keys
-// LocalizedResourceName, IconResource, IconFile and InfoTip of [.ShellClassInfo] can refer to a module
-// or a file ("@\\server\share\x.dll,-1" loads a library from the network), and CLSID / CLSID2 /
-// UICLSID can bind a namespace extension: any of those keys that is risky, or present at all for a
-// CLSID, is a YES. Text that cannot be judged is a YES.
+// LocalizedResourceName, IconResource, IconFile, InfoTip (and the logo / icon-area keys) of
+// [.ShellClassInfo] can refer to a module or a file ("@\\server\share\x.dll,-1" loads a library from the
+// network), and CLSID / CLSID2 / UICLSID can bind a namespace extension: a value that is not SAFE
+// (ShellIniValueIsSafe: an allow-list), and any CLSID key at all, is a YES. Text that cannot be judged
+// is a YES.
 [[nodiscard]] inline bool ShellDesktopIniTextIsRiskyForShellName(const unsigned char *bytes,
-                                                                 std::size_t size,
-                                                                 ShellExpandEnvironment expand,
-                                                                 ShellDriveIsLocal is_local) {
+                                                                 std::size_t size) {
   using shell_desktop_ini_detail::SameName;
   std::vector<shell_desktop_ini_detail::IniEntry> entries;
   if (!shell_desktop_ini_detail::ParseIni(bytes, size, &entries)) return true;
@@ -300,10 +320,12 @@ using ShellDriveIsLocal = bool (*)(wchar_t);
     if (!SameName(entry.section, L".ShellClassInfo")) continue;
     if (SameName(entry.key, L"CLSID") || SameName(entry.key, L"CLSID2") || SameName(entry.key, L"UICLSID"))
       return true;
-    if (SameName(entry.key, L"LocalizedResourceName") || SameName(entry.key, L"IconResource") ||
-        SameName(entry.key, L"IconFile") || SameName(entry.key, L"InfoTip")) {
-      if (ShellIniValueIsRisky(entry.value, expand, is_local)) return true;
-    }
+    for (const std::wstring_view key :
+         {std::wstring_view(L"LocalizedResourceName"), std::wstring_view(L"IconResource"),
+          std::wstring_view(L"IconFile"), std::wstring_view(L"InfoTip"), std::wstring_view(L"Logo"),
+          std::wstring_view(L"WideLogo"), std::wstring_view(L"IconArea_Image"),
+          std::wstring_view(L"PersonalizedName")})
+      if (SameName(entry.key, key) && ShellIniValueIsRisky(entry.value)) return true;
   }
   return false;
 }

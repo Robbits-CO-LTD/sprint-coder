@@ -7038,53 +7038,96 @@ bool CheckWindowsShellNameMatch() {
     odd[10] = 5;
     if (!Check(!ShellMountPointSubstituteName(odd.data(), odd.size(), &name), "mount-an-odd-length-is-not-read")) return false;
   }
-  // What a read-only / system folder's desktop.ini can make the shell reach.
+  // The target of a mount point as an ordinary path, whose parts are then looked at one by one.
   {
-    const auto expand = [](std::wstring_view text) {
-      std::wstring out(text);
-      const auto replace = [&out](const std::wstring &from, const std::wstring &to) {
-        for (std::size_t at = out.find(from); at != std::wstring::npos; at = out.find(from, at + to.size())) out.replace(at, from.size(), to);
-      };
-      replace(L"%SystemRoot%", L"C:\\Windows");
-      replace(L"%UncVar%", L"\\\\server\\share");
-      return out;
-    };
-    const auto local = [](wchar_t letter) { return letter == L'C' || letter == L'c' || letter == L'D' || letter == L'd'; };
-    const auto risky = [&](const wchar_t *value) { return ShellIniValueIsRisky(value, expand, local); };
-    if (!Check(!risky(L"@%SystemRoot%\\system32\\shell32.dll,-21770"), "inival-system-resource-is-safe")) return false;
-    if (!Check(!risky(L"%SystemRoot%\\system32\\imageres.dll,-112"), "inival-icon-resource-is-safe")) return false;
-    if (!Check(!risky(L"@shell32.dll,-21770"), "inival-relative-resource-is-safe")) return false;
-    if (!Check(!risky(L"@D:\\res\\x.dll,-1"), "inival-another-local-drive-is-safe")) return false;
-    if (!Check(!risky(L"Documents"), "inival-plain-text-is-safe")) return false;
-    if (!Check(!risky(L""), "inival-empty-is-safe")) return false;
-    if (!Check(!risky(L"Look at this"), "inival-plain-text-with-spaces-is-safe")) return false;
-    if (!Check(risky(L"@\\\\server\\share\\x.dll,-1"), "inival-unc-resource-is-risky")) return false;
-    if (!Check(risky(L"@%UncVar%\\x.dll,-1"), "inival-unc-after-expansion-is-risky")) return false;
-    if (!Check(risky(L"@%Unknown%\\x.dll,-1"), "inival-unknown-variable-is-risky")) return false;
-    if (!Check(risky(L"@Z:\\x.dll,-1"), "inival-network-drive-is-risky")) return false;
-    if (!Check(risky(L"\\\\server\\share\\icon.ico"), "inival-unc-path-is-risky")) return false;
-    if (!Check(risky(L"\"\\\\server\\share\\icon.ico\""), "inival-quoted-unc-path-is-risky")) return false;
-    if (!Check(risky(L"\\Windows\\x.dll"), "inival-path-rooted-on-the-current-drive-is-risky")) return false;
-    if (!Check(risky(L"http://example.invalid/x"), "inival-url-is-risky")) return false;
-    if (!Check(risky(L"@"), "inival-a-bare-reference-is-risky")) return false;
-    if (!Check(ShellIniValueIsRisky(L"@C:\\x.dll,-1", nullptr, nullptr), "inival-without-the-callbacks-a-path-is-risky")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\C:\\redirect\\subdir") == L"C:\\redirect\\subdir", "mounttarget-path-of-a-drive-letter-target")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\D:") == L"D:\\", "mounttarget-bare-drive-gets-its-root")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\").empty(), "mounttarget-volume-guid-has-no-path")) return false;
+    if (!Check(ShellMountTargetPath(L"\\??\\UNC\\server\\share").empty(), "mounttarget-unc-has-no-path")) return false;
+    if (!Check(ShellMountTargetPath(L"C:\\x").empty(), "mounttarget-without-the-nt-prefix-has-no-path")) return false;
+  }
+  // A directory ready to have a name appended: a drive root must stay "C:\\" (not "C:\\\\").
+  {
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\") == L"C:\\", "dirsep-drive-root-stays-a-root")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"e:\\") == L"e:\\", "dirsep-another-drive-root")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows") == L"C:\\Windows\\", "dirsep-a-separator-is-added")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows\\") == L"C:\\Windows\\", "dirsep-one-is-kept")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\Windows\\\\\\") == L"C:\\Windows\\", "dirsep-several-become-one")) return false;
+    if (!Check(ShellDirectoryWithSeparator(L"C:\\\\") == L"C:\\", "dirsep-doubled-root-becomes-one")) return false;
+    if (!Check((ShellDirectoryWithSeparator(L"C:\\") + L"Windows") == L"C:\\Windows", "dirsep-appending-to-a-root-makes-a-valid-path")) return false;
+  }
+  // The allow-list for a value in a candidate folder's desktop.ini. Only plain text, and an absolute path
+  // under a known system variable or on a local drive (with an optional '@' and ",-N" / ",N"), are safe.
+  {
+    const auto safe = [&](const wchar_t *value) { return ShellIniValueIsSafe(value); };
+    // Safe.
+    if (!Check(safe(L"Documents"), "inival-plain-text")) return false;
+    if (!Check(safe(L""), "inival-empty")) return false;
+    if (!Check(safe(L"A tip for this folder"), "inival-plain-text-with-spaces")) return false;
+    if (!Check(safe(L"'abc"), "inival-a-lone-quote-in-plain-text")) return false;
+    if (!Check(safe(L"@%SystemRoot%\\system32\\shell32.dll,-21770"), "inival-system-root-resource")) return false;
+    if (!Check(safe(L"%SystemRoot%\\system32\\imageres.dll,-112"), "inival-system-root-icon-without-the-at")) return false;
+    if (!Check(safe(L"%windir%\\system32\\x.dll,3"), "inival-windir-with-a-positive-index")) return false;
+    if (!Check(safe(L"@%ProgramFiles%\\App\\a.dll,-1"), "inival-program-files")) return false;
+    if (!Check(safe(L"@%ProgramFiles(x86)%\\App\\a.dll,-1"), "inival-program-files-x86")) return false;
+    if (!Check(safe(L"%CommonProgramFiles%\\a.dll"), "inival-common-program-files")) return false;
+    if (!Check(safe(L"%SYSTEMROOT%\\system32\\x.dll"), "inival-variable-name-is-case-blind")) return false;
+    if (!Check(!safe(L"@C:\\Windows\\system32\\shell32.dll,-1"), "inival-local-drive-path-is-not-safe-a-part-can-be-a-link")) return false;
+    if (!Check(!safe(L"D:\\res\\x.dll"), "inival-another-local-drive-is-not-safe-either")) return false;
+    if (!Check(safe(L"'@%SystemRoot%\\system32\\shell32.dll,-21770'"), "inival-single-quotes-are-removed")) return false;
+    if (!Check(safe(L"\"@%SystemRoot%\\system32\\shell32.dll,-21770\""), "inival-double-quotes-are-removed")) return false;
+    if (!Check(safe(L"  %windir%\\x.dll  "), "inival-blanks-are-removed")) return false;
+    // Not safe.
+    if (!Check(!safe(L"'@\\\\server\\share\\x.dll,-1'"), "inival-single-quoted-unc")) return false;
+    if (!Check(!safe(L"\"@\\\\server\\share\\x.dll,-1\""), "inival-double-quoted-unc")) return false;
+    if (!Check(!safe(L"\"'@\\\\server\\share\\x.dll,-1'\""), "inival-one-level-of-quotes-only")) return false;
+    if (!Check(!safe(L"//server/share/icon.ico"), "inival-slash-unc")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\system32/x.dll"), "inival-slash-later-in-the-path")) return false;
+    if (!Check(!safe(L"@C:\\a/b.dll"), "inival-slash-in-a-drive-path")) return false;
+    if (!Check(!safe(L"/x"), "inival-leading-slash")) return false;
+    if (!Check(!safe(L"@/x.dll"), "inival-at-and-slash")) return false;
+    if (!Check(!safe(L"%SystemRoot%/system32/x.dll"), "inival-forward-slashes-after-a-variable")) return false;
+    if (!Check(!safe(L"\\\\server\\share\\icon.ico"), "inival-backslash-unc")) return false;
+    if (!Check(!safe(L"@\\\\server\\share\\x.dll,-1"), "inival-resource-unc")) return false;
+    if (!Check(!safe(L"\\\\?\\C:\\x.dll"), "inival-extended-length-prefix")) return false;
+    if (!Check(!safe(L"\\\\.\\pipe\\x"), "inival-device-prefix")) return false;
+    if (!Check(!safe(L"@C:\\Windows\\..\\x.dll"), "inival-dot-dot")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\..\\x.dll"), "inival-dot-dot-after-a-variable")) return false;
+    if (!Check(!safe(L"@%Unknown%\\x.dll,-1"), "inival-unknown-variable")) return false;
+    if (!Check(!safe(L"@%USERPROFILE%\\x.dll,-1"), "inival-a-variable-that-is-not-on-the-list")) return false;
+    if (!Check(!safe(L"@%SystemRoot%x.dll"), "inival-variable-without-a-separator")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\a%b.dll"), "inival-another-percent")) return false;
+    if (!Check(!safe(L"@shell32.dll,-21770"), "inival-relative-resource")) return false;
+    if (!Check(!safe(L"sub\\path.dll"), "inival-relative-path")) return false;
+    if (!Check(!safe(L"http://example.invalid/x"), "inival-url")) return false;
+    if (!Check(!safe(L"@Z:\\x.dll,-1"), "inival-non-local-drive")) return false;
+    if (!Check(!safe(L"@C:\\\\x.dll"), "inival-doubled-backslash")) return false;
+    if (!Check(!safe(L"@C:x.dll"), "inival-drive-without-a-separator")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,abc"), "inival-bad-resource-suffix")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,-"), "inival-empty-resource-index")) return false;
+    if (!Check(!safe(L"@%SystemRoot%\\x.dll,1,2"), "inival-two-commas")) return false;
+    if (!Check(!safe(L"Hello, world"), "inival-a-comma-in-plain-text")) return false;
+    if (!Check(!safe(L"a:b"), "inival-a-colon-in-plain-text")) return false;
+    if (!Check(!safe(L"user@host"), "inival-an-at-in-plain-text")) return false;
+    if (!Check(!safe(L"@"), "inival-a-bare-at")) return false;
     const auto ansi = [](const char *text) {
       std::vector<unsigned char> bytes;
       for (const char *c = text; *c != 0; ++c) bytes.push_back(static_cast<unsigned char>(*c));
       return bytes;
     };
     const auto text_risky = [&](const std::vector<unsigned char> &bytes) {
-      return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size(), expand, local);
+      return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size());
     };
     if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-21770\r\nIconResource=%SystemRoot%\\system32\\imageres.dll,-112\r\n")),
                "inirisk-a-typical-known-folder-ini-is-safe")) return false;
     if (!Check(!text_risky(ansi("")), "inirisk-empty-is-safe")) return false;
     if (!Check(!text_risky(ansi("[Other]\r\nIconFile=\\\\server\\share\\x.ico\r\n")), "inirisk-another-section-is-not-looked-at")) return false;
-    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName=@\\\\server\\share\\x.dll,-1\r\n")), "inirisk-unc-resource-name")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName='@\\\\server\\share\\x.dll,-1'\r\n")), "inirisk-single-quoted-unc-resource-name")) return false;
     if (!Check(text_risky(ansi("[.shellclassinfo]\r\nlocalizedresourcename=@\\\\server\\share\\x.dll,-1\r\n")), "inirisk-names-are-case-blind")) return false;
-    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconResource=\\\\server\\share\\x.dll,0\r\n")), "inirisk-unc-icon-resource")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconResource=//server/share/x.dll,0\r\n")), "inirisk-slash-unc-icon-resource")) return false;
     if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconFile=Z:\\x.ico\r\n")), "inirisk-network-icon-file")) return false;
     if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=@\\\\server\\share\\x.dll,-3\r\n")), "inirisk-unc-info-tip")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLogo=sub\\logo.png\r\n")), "inirisk-relative-logo")) return false;
     if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=A tip with words\r\n")), "inirisk-a-plain-info-tip-is-safe")) return false;
     if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid")) return false;
     if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID2={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid2")) return false;

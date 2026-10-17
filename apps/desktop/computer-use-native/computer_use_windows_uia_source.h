@@ -251,21 +251,16 @@ struct AbsoluteIdList {
   return true;
 }
 
-[[nodiscard]] inline std::wstring ShellExpandEnvironmentStrings(std::wstring_view text) {
-  const std::wstring source(text);
-  std::wstring out(MAX_PATH * 4, L'\0');
-  const DWORD needed = ExpandEnvironmentStringsW(source.c_str(), out.data(), static_cast<DWORD>(out.size()));
-  if (needed == 0 || needed > out.size()) return source + L"%"; // could not expand: stays risky
-  out.resize(needed - 1);
-  return out;
-}
-
 [[nodiscard]] inline bool ShellDriveLetterIsLocal(wchar_t letter) {
   const wchar_t root[4] = {letter, L':', L'\\', L'\0'};
   return ShellDriveIsLocalDisk(GetDriveTypeW(root)); // no I/O
 }
 
 enum class ShellMountTarget { kLocalDisk, kNotLocal, kStopped };
+
+[[nodiscard]] inline bool ShellPathHasLink(const std::wstring &root, const std::wstring &path,
+                                           const ShellLookupLimits &limits, ShadowReadResult *result,
+                                           bool allow_local_mount_points = true);
 
 // Where a mount point (a junction) at `path` leads: read with FSCTL_GET_REPARSE_POINT on the
 // mount point itself (opened as the link, never followed). It is a local disk only when the target is a
@@ -291,8 +286,17 @@ enum class ShellMountTarget { kLocalDisk, kNotLocal, kStopped };
   if (!ShellMountPointSubstituteName(buffer.data(), returned, &substitute))
     return ShellMountTarget::kNotLocal;
   const wchar_t letter = ShellLocalDriveLetterOfSubstituteName(substitute);
-  return letter != 0 && ShellDriveLetterIsLocal(letter) ? ShellMountTarget::kLocalDisk
-                                                        : ShellMountTarget::kNotLocal;
+  if (letter == 0 || !ShellDriveLetterIsLocal(letter)) return ShellMountTarget::kNotLocal;
+  // A local drive letter is not enough: a part of the target's own path can be a symbolic link to the
+  // network ("C:\redirect\subdir" with C:\redirect a link to a share). So every part of the target is
+  // looked at, from the drive's root, and the target is accepted only if NONE of them names another object.
+  // No recursion: a junction (or any link) inside the target is refused (depth one).
+  const std::wstring target = ShellMountTargetPath(substitute);
+  const std::wstring root = std::wstring(1, letter) + L":\\";
+  if (target.empty()) return ShellMountTarget::kNotLocal;
+  if (ShellPathHasLink(root, target, limits, result, false))
+    return *result == ShadowReadResult::kStopped ? ShellMountTarget::kStopped : ShellMountTarget::kNotLocal;
+  return ShellMountTarget::kLocalDisk;
 }
 
 enum class ShellIniStatus { kStopped, kNotThere, kOpenFailed, kLink, kUnreadable, kText };
@@ -350,15 +354,14 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
                                                                   ShadowReadResult *result) {
   DWORD open_error = 0;
   std::vector<unsigned char> bytes;
-  switch (ShellReadDesktopIni(ShellPathWithoutTrailingSeparator(directory) + L"\\desktop.ini", limits,
+  switch (ShellReadDesktopIni(ShellDirectoryWithSeparator(directory) + L"desktop.ini", limits,
                               result, &open_error, &bytes)) {
   case ShellIniStatus::kStopped:
     return ShellCandidateIni::kStopped;
   case ShellIniStatus::kNotThere:
     return ShellCandidateIni::kSafe;
   case ShellIniStatus::kText:
-    return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size(), ShellExpandEnvironmentStrings,
-                                                  ShellDriveLetterIsLocal)
+    return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size())
                ? ShellCandidateIni::kUnknown
                : ShellCandidateIni::kSafe;
   default:
@@ -372,7 +375,8 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
 // as a link (fail-closed), and so does a stop (see ShellLookupMustStop; *result then says why). Only a
 // mount point that leads to a local disk is let through (ShellMountPointTarget).
 [[nodiscard]] inline bool ShellPathHasLink(const std::wstring &root, const std::wstring &path,
-                                           const ShellLookupLimits &limits, ShadowReadResult *result) {
+                                           const ShellLookupLimits &limits, ShadowReadResult *result,
+                                           bool allow_local_mount_points) {
   const std::wstring trimmed = ShellPathWithoutTrailingSeparator(path);
   std::size_t at = root.size();
   for (;;) {
@@ -392,7 +396,7 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
         // A symbolic link is refused. A mount point (a junction) whose target is a local drive-letter
         // path is allowed: it cannot lead to the network, and the folders of a user's profile are often
         // reached through one. Any other target, and a stop, is refused.
-        if (!ShellReparseIsMountPoint(is_reparse, data.dwReserved0)) return true;
+        if (!allow_local_mount_points || !ShellReparseIsMountPoint(is_reparse, data.dwReserved0)) return true;
         if (ShellMountPointTarget(part, limits, result) != ShellMountTarget::kLocalDisk) return true;
       }
     }
@@ -475,7 +479,7 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
                                                            const ShellLookupLimits &limits,
                                                            ShadowReadResult *result) {
   const std::wstring folder = ShellPathWithoutTrailingSeparator(path);
-  const std::wstring settings = folder + L"\\desktop.ini";
+  const std::wstring settings = ShellDirectoryWithSeparator(path) + L"desktop.ini";
   if (ShellLookupMustStop(limits, result)) return true;
   const DWORD folder_attributes = GetFileAttributesW(folder.c_str());
   const bool folder_known = folder_attributes != INVALID_FILE_ATTRIBUTES;
@@ -613,8 +617,7 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
   if (ShellLookupMustStop(limits, &stopped)) return stopped;
   stopped = ShadowReadResult::kAbsent;
   if (!ShellFolderMayBeListed(folder_path, limits, &stopped)) return stopped;
-  std::wstring directory = ShellPathWithoutTrailingSeparator(folder_path);
-  directory.push_back(L'\\');
+  const std::wstring directory = ShellDirectoryWithSeparator(folder_path);
   // The folder itself: every entry (a name that is only the display name's prefix does not decide).
   std::wstring pattern = directory;
   pattern.push_back(L'*');
@@ -680,7 +683,6 @@ enum class ShellCandidateIni { kSafe, kUnknown, kStopped };
   // answer "not known" (it might be the one, or a second one).
   for (ShellNameCandidate &candidate : candidates) {
     if (ShellLookupMustStop(limits, &stopped)) return stopped;
-    if (candidate.is_link) continue;
     // To name a read-only / system directory the shell reads ITS desktop.ini (and may follow a link there,
     // load a module a resource reference names, bind a CLSID): read it here first, as a handle, and
     // judge it; a risky or unreadable one leaves the name unknown, and the shell is never asked.
