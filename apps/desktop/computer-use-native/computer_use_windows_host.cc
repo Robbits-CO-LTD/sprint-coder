@@ -2545,11 +2545,13 @@ private:
 };
 
 // Whether the path may make one more UI Automation call. False for good once a call timed out, the
-// action was canceled or (the observe) the budget is spent. Outside any path: always true.
+// action was canceled or (the observe) the budget is spent. Outside any path: false (fail closed). Every
+// V1 call is reached from inside a path; a call that is not would watch neither a Cancel nor the first
+// timeout, so it is refused instead of made unwatched.
 bool WindowsV1UiaMayCall() {
   WindowsV1UiaLane *lane = windows_v1_uia_lane;
   if (lane == nullptr)
-    return true;
+    return false;
   if (lane->stop == WindowsV1UiaStop::kNone) {
     if (cancellation_epoch.load(std::memory_order_acquire) != lane->epoch)
       lane->stop = WindowsV1UiaStop::kCanceled;

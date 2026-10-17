@@ -240,6 +240,13 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'if (cancellation_epoch.load(std::memory_order_acquire) != lane->epoch) lane->stop = WindowsV1UiaStop::kCanceled; else if (lane->has_deadline',
     );
+    // Outside any path a call is refused (fail closed), not made unwatched; only the owner (the
+    // outermost path) clears the lane, so an inner path that ends leaves the outer one's state.
+    expect(c).toContain(
+      'WindowsV1UiaLane *lane = windows_v1_uia_lane; if (lane == nullptr) return false;',
+    );
+    expect(c).toContain('if (windows_v1_uia_lane != nullptr) return;');
+    expect(c).toContain('~WindowsV1UiaPath() { if (owner_) windows_v1_uia_lane = nullptr; }');
     expect(c).toContain(
       'template <class Call> HRESULT WindowsV1UiaCall(Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call); }',
     );
@@ -940,6 +947,7 @@ int RunDriver(bool ci) {
     bool accepted = false;
     std::string reason;
     bool ok = true;
+    const WindowsV1UiaPath frame;  // as the dispatch frame of HandlePipeRequest gives it
     const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] {
       ok = DispatchWindowsSemanticAction(session, RECT{}, cancellation_epoch.load(), "invoke", "{\"targetId\":\"x\"}", &accepted, &reason);
     });
