@@ -302,10 +302,10 @@ export function stoppedExecutionReason(
   const text = reason
     // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
-    // A path can contain spaces (`C:\Users\Jane Doe\…`), so it is hidden up to the closing quote or
-    // bracket, or the end of the line, not only up to the first space: the words after it may be lost,
-    // never a part of the path.
-    .replace(/(?<![\w.])(?:[A-Za-z]:[\\/]|\\\\|\/)[^'"`）)\n]*/gu, '…')
+    // A path can contain spaces, brackets and quotes (`C:\Users\Jane Doe\…`, `C:\Program Files (x86)\…`,
+    // `C:\Users\O'Brien\…`), so no character can tell where it ends: everything from its start to the
+    // end of the line is hidden. The words after it are lost, never a part of the path.
+    .replace(/(?<![\w.])(?:[A-Za-z]:[\\/]|\\\\|\/)[^\n]*/gu, '…')
     .replace(/\s+/gu, ' ')
     .trim();
   if (text === '') return null;
