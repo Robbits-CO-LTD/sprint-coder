@@ -9,7 +9,11 @@ import {
   type PermissionRequest,
   type Capability,
 } from '@sprint-coder/domain';
-import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
+import {
+  PermissionBroker,
+  protectedWorkspaceRootDenialReason,
+  protectedWorkspaceRootMessage,
+} from './permission-broker';
 import type { PermissionPolicyRecord } from './persistence';
 import {
   createPathGuard,
@@ -490,6 +494,17 @@ describe('Main PermissionBroker', () => {
     );
     expect(protectedWorkspaceRootDenialReason(pathGuard)).toBeUndefined();
     expect(protectedWorkspaceRootDenialReason(undefined)).toBeUndefined();
+  });
+
+  // Issue #838: a Workspace protected only by the name of a protected folder that could not be
+  // located is told so, instead of being told it is in that folder.
+  it('says when the protected folder itself could not be located', () => {
+    expect(protectedWorkspaceRootMessage('credential', true)).toBe(
+      'このWorkspaceは保護された場所（認証情報を置くフォルダ）にある可能性があるため（保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています）、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
+    );
+    expect(protectedWorkspaceRootMessage('credential')).toContain(
+      '保護された場所（認証情報を置くフォルダ）にあるため、',
+    );
   });
 
   it('authorizes a command guard against its sealed Turn roots', async () => {

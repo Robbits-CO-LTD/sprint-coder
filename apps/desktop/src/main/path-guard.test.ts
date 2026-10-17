@@ -21,6 +21,7 @@ import {
   createPathGuard,
   openGuardedExistingFile,
   protectedWorkspaceRootClassification,
+  protectedWorkspaceRootLocationUnknown,
   revalidatePathGuard,
   setProtectedRootRealpathForTesting,
   workspacePermissionResourceFromGuard,
@@ -583,6 +584,8 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
       await withHome(home, async () => {
         expect(await classify(project)).toBe('credential');
         expect(protectedWorkspaceRootClassification(project)).toBe('credential');
+        // Located by its link target as a whole path: not a guess by name.
+        expect(protectedWorkspaceRootLocationUnknown(project)).toBe(false);
         expect(await classify(unrelated)).toBe('workspace');
       });
     });
@@ -621,7 +624,45 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
       await mkdir(lookalike, { recursive: true });
       await withHome(home, async () => {
         expect(await classify(lookalike)).toBe('credential');
+        expect(protectedWorkspaceRootLocationUnknown(lookalike)).toBe(true);
         expect(await classify(unrelated)).toBe('workspace');
+        expect(protectedWorkspaceRootLocationUnknown(unrelated)).toBe(false);
+      });
+    });
+
+    // Issue #838: the name of a place a link on the way leads to (`config`) is not the name of a
+    // protected folder, so an unrelated Workspace with a folder of that name stays ordinary.
+    it('does not protect an unrelated folder named like a link target when nothing can be read', async () => {
+      const { root } = await fixture();
+      const home = join(root, 'home');
+      const sync = join(root, 'sync');
+      const config = join(sync, 'config');
+      const configLoop = join(sync, 'config-loop');
+      await mkdir(home, { recursive: true });
+      await mkdir(config, { recursive: true });
+      // `~/.aws -> sync/config`, and `config` itself a link loop through `config-loop`.
+      await symlink(config, configLoop, linkType);
+      await rmdir(config);
+      await symlink(configLoop, config, linkType);
+      await symlink(config, join(home, '.aws'), linkType);
+      const project = join(root, 'projects', 'app');
+      await mkdir(join(project, 'config'), { recursive: true });
+      await writeFile(join(project, 'config', 'settings.json'), '{}');
+      const namedLikeTarget = join(root, 'elsewhere', 'config', 'project');
+      await mkdir(namedLikeTarget, { recursive: true });
+      const lookalike = join(root, 'elsewhere', '.aws', 'project');
+      await mkdir(lookalike, { recursive: true });
+      await withHome(home, async () => {
+        expect(await classify(namedLikeTarget)).toBe('workspace');
+        expect(protectedWorkspaceRootClassification(namedLikeTarget)).toBeNull();
+        const guard = await createPathGuard({
+          workspacePath: project,
+          targetPath: join('config', 'settings.json'),
+          operation: 'write',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe('workspace');
+        // The protected folder's own name is still the fail-closed guess.
+        expect(await classify(lookalike)).toBe('credential');
       });
     });
   });

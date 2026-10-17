@@ -340,6 +340,26 @@ export function protectedWorkspaceRootClassification(
     : classification;
 }
 
+/**
+ * Whether a Workspace root counts as protected only because a protected folder could not be
+ * located and a folder of its name was taken for it (#835, #838), so the reason can say so.
+ */
+export function protectedWorkspaceRootLocationUnknown(
+  canonicalRootPath: string,
+  workspaceAuthority?: 'sealed-team-isolation',
+): boolean {
+  const located = classifyWorkspacePath(
+    canonicalRootPath,
+    canonicalRootPath,
+    workspaceAuthority,
+    false,
+  );
+  return (
+    protectedWorkspaceRootClassification(canonicalRootPath, workspaceAuthority) !== null &&
+    (located === 'workspace' || located === 'unclassified')
+  );
+}
+
 /** A user-facing name for the kind of protected place a Workspace root sits in. */
 export function protectedWorkspaceRootLabel(
   classification: Exclude<PathClassification, 'workspace' | 'unclassified'>,
@@ -356,6 +376,7 @@ function classifyWorkspacePath(
   workspacePath: string,
   resolvedPath: string,
   workspaceAuthority?: 'sealed-team-isolation',
+  guessUnlocatedRoots = true,
 ): PathClassification {
   const parts = relative(workspacePath, resolvedPath)
     .split(/[\\/]+/)
@@ -392,7 +413,10 @@ function classifyWorkspacePath(
       isAtOrBelow('/private/var/root', resolvedPath))
   )
     return 'os-protected';
-  if (workspaceAuthority === undefined && isAtOrBelowAnyRoot(windowsSystemRoots(), resolvedPath))
+  if (
+    workspaceAuthority === undefined &&
+    isAtOrBelowAnyRoot(windowsSystemRoots(), resolvedPath, guessUnlocatedRoots)
+  )
     return 'os-protected';
   if (
     parts.includes('windows') ||
@@ -414,6 +438,7 @@ function classifyWorkspacePath(
         ['Library', 'Keychains'],
       ].map((segments) => join(home, ...segments)),
       resolvedPath,
+      guessUnlocatedRoots,
     )
   )
     return 'credential';
@@ -429,7 +454,11 @@ function classifyWorkspacePath(
     return 'app-private';
   if (
     workspaceAuthority === undefined &&
-    isAtOrBelowAnyRoot([join(home, 'Library', 'Application Support')], resolvedPath)
+    isAtOrBelowAnyRoot(
+      [join(home, 'Library', 'Application Support')],
+      resolvedPath,
+      guessUnlocatedRoots,
+    )
   )
     return 'app-private';
   if (credentialParts.includes('library') && credentialParts.includes('application support'))
@@ -499,15 +528,22 @@ function windowsSystemRoots(): string[] {
  * written and resolved, because the root itself may be a symlink or junction to another place
  * (`~/.aws -> /mnt/profile/.aws`) while the guarded path is always the resolved one. When a root
  * exists but cannot be resolved, the comparison falls back as `locateProtectedRoot` describes and
- * never quietly treats the path as outside the root.
+ * never quietly treats the path as outside the root; `guessUnlocatedRoots` false leaves out its
+ * last guess by name.
  */
-function isAtOrBelowAnyRoot(roots: readonly string[], resolvedPath: string): boolean {
+function isAtOrBelowAnyRoot(
+  roots: readonly string[],
+  resolvedPath: string,
+  guessUnlocatedRoots: boolean,
+): boolean {
   return roots.some((root) => {
     const location = locateProtectedRoot(root);
     return (
       location.paths.some((path) => isAtOrBelow(path, resolvedPath)) ||
       (location.identity !== null && hasAncestorWithIdentity(resolvedPath, location.identity)) ||
-      (location.names !== null && hasAncestorNamed(resolvedPath, location.names))
+      (guessUnlocatedRoots &&
+        location.name !== null &&
+        hasAncestorNamed(resolvedPath, location.name))
     );
   });
 }
@@ -528,8 +564,8 @@ type ProtectedRootLocation = {
   paths: string[];
   /** The directory the root leads to, when it can be reached but not named. */
   identity: { dev: bigint; ino: bigint } | null;
-  /** Set only when the root exists and where it leads is unknown: the names it goes by. */
-  names: string[] | null;
+  /** Set only when the root exists and where it leads is unknown: the root's own name. */
+  name: string | null;
 };
 
 /**
@@ -540,18 +576,21 @@ type ProtectedRootLocation = {
  * - otherwise the directory it leads to is identified by device and inode, and a path is below the
  *   root when one of its ancestors is that very directory;
  * - and when not even that can be read, a path is treated as below the root when one of its
- *   ancestors has the root's name (or a name a link on the way gave it), compared without case.
- *   This is the only guess, and it can only mark a Workspace protected, never the other way.
+ *   ancestors has the root's own name (`.aws`), compared without case. The name of a place a link
+ *   on the way leads to (`D:\Sync\config`) is not used (#838): it is an ordinary folder name, and
+ *   every Workspace with a folder of that name would be protected. Those places are still compared
+ *   as whole paths above. This is the only guess, and it can only mark a Workspace protected, never
+ *   the other way.
  * A root (or link target) that does not exist is only compared as written: nothing is below it.
  */
 function locateProtectedRoot(root: string): ProtectedRootLocation {
   let current = resolve(root);
   const paths = [current];
-  const names = [basename(current)];
+  const name = basename(current);
   // More links in a row than this is a loop: nothing is below one, but it still fails closed.
   for (let hop = 0; hop <= MAX_PROTECTED_ROOT_LINK_HOPS; hop += 1) {
     try {
-      return { paths: [...paths, protectedRootRealpath(current)], identity: null, names: null };
+      return { paths: [...paths, protectedRootRealpath(current)], identity: null, name: null };
     } catch {
       // Look at what is there instead.
     }
@@ -559,26 +598,17 @@ function locateProtectedRoot(root: string): ProtectedRootLocation {
     try {
       if (lstatSync(current).isSymbolicLink()) target = readlinkSync(current);
     } catch (error) {
-      if (isAbsent(error)) return { paths, identity: null, names: null };
+      if (isAbsent(error)) return { paths, identity: null, name: null };
     }
     if (target === null) break;
     current = resolve(dirname(current), target);
     paths.push(current);
-    names.push(basename(current));
   }
-  return withIdentityOrNames(current, paths, names);
-}
-
-function withIdentityOrNames(
-  current: string,
-  paths: string[],
-  names: string[],
-): ProtectedRootLocation {
   try {
     const stats = statSync(current, { bigint: true });
-    return { paths, identity: { dev: stats.dev, ino: stats.ino }, names: null };
+    return { paths, identity: { dev: stats.dev, ino: stats.ino }, name: null };
   } catch {
-    return { paths, identity: null, names };
+    return { paths, identity: null, name };
   }
 }
 
@@ -598,9 +628,11 @@ function hasAncestorWithIdentity(
   }
 }
 
-function hasAncestorNamed(resolvedPath: string, names: readonly string[]): boolean {
-  const wanted = new Set(names.map((name) => name.toLowerCase()).filter(Boolean));
-  return resolvedPath.split(/[\\/]+/).some((part) => wanted.has(part.toLowerCase()));
+function hasAncestorNamed(resolvedPath: string, name: string): boolean {
+  const wanted = name.toLowerCase();
+  return (
+    wanted !== '' && resolvedPath.split(/[\\/]+/).some((part) => part.toLowerCase() === wanted)
+  );
 }
 
 function isAbsent(error: unknown): boolean {
