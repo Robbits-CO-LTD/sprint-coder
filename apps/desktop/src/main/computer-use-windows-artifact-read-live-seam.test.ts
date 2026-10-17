@@ -295,95 +295,99 @@ int main(int argc, char **argv) {
 
 const build = findBuild();
 const ci = process.env['CI'] !== undefined;
+const onWindows = process.platform === 'win32';
 
-describe.skipIf(build === null && !ci)('Windows read of one node value, live (#785 T15-4w)', () => {
-  it('reads an Edit and the fixture Edit, and refuses a password, a button, a browser class and a console', () => {
-    expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
-    const scratch = mkdtempSync(join(tmpdir(), 'computer-use-artifact-read-'));
-    try {
-      const run = (args: string[]) => {
-        const command = build!.wrap(args);
-        return spawnSync(command.file, command.args, {
-          encoding: 'utf8',
-          windowsVerbatimArguments: command.verbatim,
-          timeout: 240_000,
-          env: { ...process.env, VSLANG: '1033' },
-        });
-      };
-      const fixtureExecutable = join(scratch, 'fixture.exe');
-      const fixtureBuild = run([
-        '/nologo',
-        '/std:c++20',
-        '/EHsc',
-        '/O2',
-        '/MT',
-        '/W4',
-        '/GS',
-        '/permissive-',
-        '/utf-8',
-        '/DUNICODE',
-        '/D_UNICODE',
-        '/DWIN32_LEAN_AND_MEAN',
-        '/D_WIN32_WINNT=0x0A00',
-        `/I${fixtureDirectory}`,
-        join(fixtureDirectory, 'win32_acceptance_fixture.cc'),
-        `/Fo:${join(scratch, 'fixture.obj')}`,
-        `/Fe:${fixtureExecutable}`,
-        '/link',
-        '/SUBSYSTEM:WINDOWS,10.00',
-        '/MANIFEST:EMBED',
-        `/MANIFESTINPUT:${join(fixtureDirectory, 'win32_acceptance_fixture.manifest')}`,
-        'user32.lib',
-        'gdi32.lib',
-        'comctl32.lib',
-        'comdlg32.lib',
-        'shell32.lib',
-      ]);
-      expect(fixtureBuild.status, `fixture\n${fixtureBuild.stdout}\n${fixtureBuild.stderr}`).toBe(
-        0,
-      );
+describe.skipIf(!onWindows || (build === null && !ci))(
+  'Windows read of one node value, live (#785 T15-4w)',
+  () => {
+    it('reads an Edit and the fixture Edit, and refuses a password, a button, a browser class and a console', () => {
+      expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+      const scratch = mkdtempSync(join(tmpdir(), 'computer-use-artifact-read-'));
+      try {
+        const run = (args: string[]) => {
+          const command = build!.wrap(args);
+          return spawnSync(command.file, command.args, {
+            encoding: 'utf8',
+            windowsVerbatimArguments: command.verbatim,
+            timeout: 240_000,
+            env: { ...process.env, VSLANG: '1033' },
+          });
+        };
+        const fixtureExecutable = join(scratch, 'fixture.exe');
+        const fixtureBuild = run([
+          '/nologo',
+          '/std:c++20',
+          '/EHsc',
+          '/O2',
+          '/MT',
+          '/W4',
+          '/GS',
+          '/permissive-',
+          '/utf-8',
+          '/DUNICODE',
+          '/D_UNICODE',
+          '/DWIN32_LEAN_AND_MEAN',
+          '/D_WIN32_WINNT=0x0A00',
+          `/I${fixtureDirectory}`,
+          join(fixtureDirectory, 'win32_acceptance_fixture.cc'),
+          `/Fo:${join(scratch, 'fixture.obj')}`,
+          `/Fe:${fixtureExecutable}`,
+          '/link',
+          '/SUBSYSTEM:WINDOWS,10.00',
+          '/MANIFEST:EMBED',
+          `/MANIFESTINPUT:${join(fixtureDirectory, 'win32_acceptance_fixture.manifest')}`,
+          'user32.lib',
+          'gdi32.lib',
+          'comctl32.lib',
+          'comdlg32.lib',
+          'shell32.lib',
+        ]);
+        expect(fixtureBuild.status, `fixture\n${fixtureBuild.stdout}\n${fixtureBuild.stderr}`).toBe(
+          0,
+        );
 
-      const source = join(scratch, 'seam.cc');
-      const binary = join(scratch, 'seam.exe');
-      writeFileSync(source, program);
-      const built = run([
-        '/nologo',
-        '/std:c++20',
-        '/EHsc',
-        '/W4',
-        '/permissive-',
-        '/utf-8',
-        '/DUNICODE',
-        '/D_UNICODE',
-        '/DNOMINMAX',
-        '/D_WIN32_WINNT=0x0A00',
-        `/I${nativeDirectory}`,
-        source,
-        `/Fe:${binary}`,
-        `/Fo:${binary}.obj`,
-        '/link',
-        '/DEBUG:NONE',
-        'ole32.lib',
-        'oleaut32.lib',
-        'uiautomationcore.lib',
-        'user32.lib',
-        'uuid.lib',
-        'shell32.lib',
-      ]);
-      expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
-      const executed = spawnSync(
-        binary,
-        ci ? ['ci', fixtureExecutable] : ['local', fixtureExecutable],
-        {
-          encoding: 'utf8',
-          timeout: 120_000,
-        },
-      );
-      console.log(executed.stdout);
-      expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
-      expect(executed.stdout).toContain('OK');
-    } finally {
-      rmSync(scratch, { recursive: true, force: true });
-    }
-  }, 400_000);
-});
+        const source = join(scratch, 'seam.cc');
+        const binary = join(scratch, 'seam.exe');
+        writeFileSync(source, program);
+        const built = run([
+          '/nologo',
+          '/std:c++20',
+          '/EHsc',
+          '/W4',
+          '/permissive-',
+          '/utf-8',
+          '/DUNICODE',
+          '/D_UNICODE',
+          '/DNOMINMAX',
+          '/D_WIN32_WINNT=0x0A00',
+          `/I${nativeDirectory}`,
+          source,
+          `/Fe:${binary}`,
+          `/Fo:${binary}.obj`,
+          '/link',
+          '/DEBUG:NONE',
+          'ole32.lib',
+          'oleaut32.lib',
+          'uiautomationcore.lib',
+          'user32.lib',
+          'uuid.lib',
+          'shell32.lib',
+        ]);
+        expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
+        const executed = spawnSync(
+          binary,
+          ci ? ['ci', fixtureExecutable] : ['local', fixtureExecutable],
+          {
+            encoding: 'utf8',
+            timeout: 120_000,
+          },
+        );
+        console.log(executed.stdout);
+        expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
+        expect(executed.stdout).toContain('OK');
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    }, 400_000);
+  },
+);
