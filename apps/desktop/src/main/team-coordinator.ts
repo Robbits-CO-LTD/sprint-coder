@@ -57,6 +57,7 @@ import {
   type TeamEnvelope,
 } from '@sprint-coder/domain';
 import { killProcessTree } from './process-tree';
+import { redactSecrets } from './secret-redactor';
 import { safeGitSpawnSync } from './safe-git';
 import {
   TEAM_GLOBAL_EXECUTION_LIMIT,
@@ -1210,6 +1211,7 @@ export class TeamCoordinator {
                 await this.finalizeIsolation({
                   isolation,
                   agentId: completion.agentId,
+                  teamTaskId: completion.teamTaskId,
                   missionId: mission.id,
                   stepOrdinal: step.ordinal,
                 })
@@ -1628,6 +1630,7 @@ export class TeamCoordinator {
         const finalized = await this.finalizeIsolation({
           isolation,
           agentId: worker.id,
+          teamTaskId: dispatch.teamTaskId,
           missionId: graph.missionId,
           stepOrdinal: this.persistence
             .getTeamMission(graph.missionId)
@@ -2592,7 +2595,8 @@ export class TeamCoordinator {
               await this.finalizeIsolation({
                 isolation,
                 agentId: completion.agentId,
-                missionId: '',
+                teamTaskId: completion.teamTaskId,
+                missionId: null,
                 stepOrdinal: 1,
               })
             ).isolation;
@@ -3780,7 +3784,12 @@ export class TeamCoordinator {
           worktreeId: input.executionId,
           repoPath: missionWorktree.repoPath,
           baseHead: missionWorktree.baseHead,
-          commitMessage: `Sprint Coder Mission ${mission?.id ?? ''} step ${missionStep?.ordinal ?? ''}`,
+          commitMessage: this.workerCommitMessage({
+            agentId: worker.id,
+            teamTaskId: input.teamTaskId,
+            missionId: mission?.id ?? null,
+            stepOrdinal: missionStep?.ordinal ?? 1,
+          }),
         });
         changedFiles = [...finalized.changedFiles];
         missionWorktree = this.persistence.updateTeamMissionWorktree({
@@ -3835,7 +3844,8 @@ export class TeamCoordinator {
           const finalized = await this.finalizeIsolation({
             isolation: executionIsolation,
             agentId: worker.id,
-            missionId: mission?.id ?? '',
+            teamTaskId: input.teamTaskId,
+            missionId: mission?.id ?? null,
             stepOrdinal: missionStep?.ordinal ?? 1,
           });
           executionIsolation = finalized.isolation;
@@ -5774,10 +5784,41 @@ export class TeamCoordinator {
     return this.worktreeManager.requireCleanRepositorySet(workspace.roots.map(({ path }) => path));
   }
 
+  /**
+   * The commit a Worker's changes are integrated as. A Mission keeps its `Mission <id> step <n>`
+   * subject; a Team execution outside a Mission names the Worker's role and assigned task instead,
+   * so neither commit is an empty, identical line (issue #829). The task text is user-written, so it
+   * is secret-redacted, flattened to one line, and bounded before it reaches the repository history.
+   */
+  private workerCommitMessage(input: {
+    agentId: string;
+    teamTaskId: string;
+    missionId: string | null;
+    stepOrdinal: number;
+    repositoryOrdinal?: number;
+  }): string {
+    const teamTask = this.persistence.getTeamTask(input.teamTaskId);
+    const role = this.persistence
+      .getTeamSnapshot(teamTask.teamId)
+      .agents.find(({ id }) => id === input.agentId)?.role;
+    const assignment = [
+      commitMessageLine(role ?? '', 40) || 'Worker',
+      commitMessageLine(teamTask.description, 72),
+    ]
+      .filter((part) => part !== '')
+      .join(': ');
+    const repository =
+      input.repositoryOrdinal === undefined ? '' : ` repository ${input.repositoryOrdinal}`;
+    return input.missionId === null
+      ? `Sprint Coder Team ${assignment}${repository}`
+      : `Sprint Coder Mission ${input.missionId} step ${input.stepOrdinal}${repository}\n\n${assignment}`;
+  }
+
   private async finalizeIsolation(input: {
     isolation: TeamExecutionIsolationRecord;
     agentId: string;
-    missionId: string;
+    teamTaskId: string;
+    missionId: string | null;
     stepOrdinal: number;
   }): Promise<{ isolation: TeamExecutionIsolationRecord; changedFiles: readonly string[] }> {
     if (this.worktreeManager === undefined)
@@ -5797,7 +5838,10 @@ export class TeamCoordinator {
           worktreeId: isolationWorktreeId(isolation.executionId, repository.ordinal),
           repoPath: repository.repoPath,
           baseHead: repository.baseHead,
-          commitMessage: `Sprint Coder Mission ${input.missionId} step ${input.stepOrdinal} repository ${repository.ordinal}`,
+          commitMessage: this.workerCommitMessage({
+            ...input,
+            repositoryOrdinal: repository.ordinal,
+          }),
         });
         isolation = this.updateExecutionIsolation({
           executionId: isolation.executionId,
@@ -5888,7 +5932,7 @@ export class TeamCoordinator {
 
   private reportIsolationVerification(
     executionId: string,
-    input: Readonly<{ agentId: string; missionId: string }>,
+    input: Readonly<{ agentId: string; missionId: string | null }>,
     event: 'team.isolation.sagas_unverified' | 'team.isolation.verification_failed',
     result: string,
   ): void {
@@ -5898,7 +5942,7 @@ export class TeamCoordinator {
         event,
         taskId: this.persistence.getTeam(execution.teamId).taskId,
         teamId: execution.teamId,
-        missionId: input.missionId,
+        missionId: input.missionId ?? '',
         workerId: input.agentId,
         status: 'unverified',
         result,
@@ -7061,6 +7105,12 @@ function workerResultMessageContent(completion: WorkerCompletion): string {
   if (content.length <= TEAM_MESSAGE_CONTENT_LIMIT || completion.criteria === undefined)
     return content;
   return JSON.stringify({ ...completion, criteria: undefined });
+}
+
+/** One secret-redacted line of at most `maxLength` characters for a Worker commit message. */
+function commitMessageLine(text: string, maxLength: number): string {
+  const line = redactSecrets(text).replace(/\s+/gu, ' ').trim();
+  return line.length <= maxLength ? line : `${line.slice(0, maxLength - 1).trimEnd()}…`;
 }
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {

@@ -2876,6 +2876,11 @@ if (runsWithElectronAbi)
         15_000,
       );
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      // Outside a Mission the commit names the Worker and its task, not `Mission  step 1` (issue #829).
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%B'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe('Sprint Coder Team writer: write the output repository 1\n\n');
       expect(persistence.getTeamExecutionIsolation(submission.executionId)).toMatchObject({
         phase: 'completed',
         repositories: [{ state: 'cleaned' }],
@@ -3235,7 +3240,7 @@ if (runsWithElectronAbi)
       const submission = await coordinator.assignTask({
         taskId: task.id,
         targetAgentId: writer.id,
-        content: 'write the output once',
+        content: `write the output once\nusing password=hunter2-correct-horse ${'and more detail '.repeat(10)}`,
         doneCriteria: ['worker-output.txt is integrated'],
         accessMode: 'workspace-write',
       });
@@ -3257,6 +3262,13 @@ if (runsWithElectronAbi)
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
       expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
+      // The resumed integration commit also names the task: one redacted, bounded line (issue #829).
+      expect(
+        spawnSync('git', ['-C', workspace, 'log', '-1', '--pretty=%B'], { encoding: 'utf8' })
+          .stdout,
+      ).toBe(
+        'Sprint Coder Team writer: write the output once using password=[REDACTED] and more detail and mor… repository 1\n\n',
+      );
       persistence.close();
     });
 
