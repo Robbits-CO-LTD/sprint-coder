@@ -18,6 +18,7 @@ import {
   canonicalizeResourcePath,
   createPathGuard,
   openGuardedExistingFile,
+  protectedWorkspaceRootClassification,
   revalidatePathGuard,
   workspacePermissionResourceFromGuard,
   workspaceMutationBinding,
@@ -361,6 +362,200 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
     });
     expect(workspacePermissionResourceFromGuard(guard).classification).toBe('credential');
   });
+
+  // Issue #828: a parent folder's name said nothing about the files inside the Workspace, yet
+  // `…/windows/my-app`, `…/gcloud/my-app` and `…/Library/Application Support/my-app` were protected.
+  it.each([
+    ['windows'],
+    ['Program Files'],
+    ['gcloud'],
+    ['.ssh'],
+    [join('Library', 'Application Support')],
+  ])('keeps an ordinary project below an ancestor named %s as Workspace scope', async (segment) => {
+    const { root } = await fixture();
+    const workspace = join(root, segment, 'my-app');
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'a.ts'), 'x');
+    const guard = await createPathGuard({
+      workspacePath: workspace,
+      targetPath: 'src/a.ts',
+      operation: 'write',
+    });
+    expect(workspacePermissionResourceFromGuard(guard).classification).toBe('workspace');
+    expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBeNull();
+  });
+
+  it('still protects a Workspace inside the real home credential and app-support folders', async () => {
+    const { root } = await fixture();
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = root;
+    try {
+      const cases = [
+        [join(root, '.config', 'gcloud', 'configurations'), 'credential'],
+        [join(root, '.ssh', 'keys'), 'credential'],
+        [join(root, 'Library', 'Application Support', 'SomeApp'), 'app-private'],
+      ] as const;
+      for (const [workspace, expected] of cases) {
+        await mkdir(workspace, { recursive: true });
+        await writeFile(join(workspace, 'plain.txt'), 'x');
+        const guard = await createPathGuard({
+          workspacePath: workspace,
+          targetPath: 'plain.txt',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe(expected);
+        expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe(expected);
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
+  // A protected root that is itself a link (`~/.aws -> /mnt/profile/aws-store`) has to be compared
+  // in its resolved form too, since the guarded path is always the resolved one.
+  it('protects a Project inside a home credential folder that is a link to another place', async () => {
+    const { root } = await fixture();
+    const home = join(root, 'home');
+    const store = join(root, 'profile', 'aws-store');
+    await mkdir(home, { recursive: true });
+    await mkdir(join(store, 'sso', 'cache'), { recursive: true });
+    await writeFile(join(store, 'sso', 'cache', '0123abcd.json'), '{}');
+    await symlink(store, join(home, '.aws'), process.platform === 'win32' ? 'junction' : 'dir');
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = home;
+    try {
+      const guard = await createPathGuard({
+        workspacePath: join(home, '.aws', 'sso', 'cache'),
+        targetPath: '0123abcd.json',
+        operation: 'read',
+      });
+      expect(workspacePermissionResourceFromGuard(guard).classification).toBe('credential');
+      expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe('credential');
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
+  it('protects a Project inside a home app-support folder that is a link to another place', async () => {
+    const { root } = await fixture();
+    const home = join(root, 'home');
+    const store = join(root, 'profile', 'app-support-store');
+    await mkdir(join(home, 'Library'), { recursive: true });
+    await mkdir(join(store, 'SomeApp'), { recursive: true });
+    await writeFile(join(store, 'SomeApp', 'state.json'), '{}');
+    await symlink(
+      store,
+      join(home, 'Library', 'Application Support'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = home;
+    try {
+      const guard = await createPathGuard({
+        workspacePath: join(home, 'Library', 'Application Support', 'SomeApp'),
+        targetPath: 'state.json',
+        operation: 'read',
+      });
+      expect(workspacePermissionResourceFromGuard(guard).classification).toBe('app-private');
+      expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe('app-private');
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
+  it('protects a Project that is a link into a home credential or app-support folder', async () => {
+    const { root } = await fixture();
+    const home = join(root, 'home');
+    const cases = [
+      [join(home, '.aws', 'sso'), 'credential'],
+      [join(home, 'Library', 'Application Support', 'SomeApp'), 'app-private'],
+    ] as const;
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = home;
+    try {
+      for (const [index, [target, expected]] of cases.entries()) {
+        await mkdir(target, { recursive: true });
+        await writeFile(join(target, 'plain.txt'), 'x');
+        const link = join(root, `project-link-${index}`);
+        await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+        const guard = await createPathGuard({
+          workspacePath: link,
+          targetPath: 'plain.txt',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe(expected);
+        expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe(expected);
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'protects a Project below a Windows program folder that is a junction',
+    async () => {
+      const { root } = await fixture();
+      const realData = join(root, 'machine-store');
+      const programData = join(root, 'machine-data');
+      await mkdir(join(realData, 'Vendor', 'app'), { recursive: true });
+      await symlink(realData, programData, 'junction');
+      const previous = process.env['ProgramData'];
+      process.env['ProgramData'] = programData;
+      try {
+        const guard = await createPathGuard({
+          workspacePath: join(programData, 'Vendor', 'app'),
+          targetPath: '.',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe('os-protected');
+      } finally {
+        if (previous === undefined) delete process.env['ProgramData'];
+        else process.env['ProgramData'] = previous;
+      }
+    },
+  );
+
+  it.runIf(process.platform === 'win32')(
+    'compares Windows program folders with the real roots from the environment',
+    async () => {
+      const { root } = await fixture();
+      const programData = join(root, 'machine-data');
+      const workspace = join(programData, 'Vendor', 'app');
+      await mkdir(workspace, { recursive: true });
+      const previous = process.env['ProgramData'];
+      process.env['ProgramData'] = programData;
+      try {
+        const guard = await createPathGuard({
+          workspacePath: workspace,
+          targetPath: '.',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe('os-protected');
+      } finally {
+        if (previous === undefined) delete process.env['ProgramData'];
+        else process.env['ProgramData'] = previous;
+      }
+    },
+  );
+
+  // Issue #830: a folder under AppData (such as %TEMP%) is refused for every operation, so adding
+  // it as a Project folder has to be flagged up front.
+  it.runIf(process.platform === 'win32')(
+    'reports an AppData folder such as the temp directory as a protected Workspace root',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-appdata-root-'));
+      temporaryRoots.push(workspace);
+      expect(protectedWorkspaceRootClassification(await realpath(workspace))).toBe('app-private');
+    },
+  );
 
   it('classifies an ordinary canonical Workspace write as Workspace policy scope', async () => {
     const { workspace } = await fixture();

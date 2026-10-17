@@ -15,6 +15,8 @@ import type { PermissionPolicyRecord, PersistenceClient } from './persistence';
 import {
   pathGuardIdentityDigest,
   isIssuedPathGuard,
+  protectedWorkspaceRootClassification,
+  protectedWorkspaceRootLabel,
   workspacePermissionResourceFromGuard,
   type PathGuard,
 } from './path-guard';
@@ -355,9 +357,21 @@ export class PermissionBroker {
       (input.request.operation === 'write' && guard.operation !== 'write')
     )
       throw new Error('Permission path facts are not derived from the supplied guard');
-    if (resource.classification !== 'workspace' && input.request.risk !== 'high')
+    if (resource.classification !== 'workspace' && input.request.risk !== 'high') {
+      const protectedRoot = protectedWorkspaceRootClassification(
+        guard.workspacePath,
+        input.workspaceAuthority,
+      );
+      if (protectedRoot !== null) throw new Error(protectedWorkspaceRootMessage(protectedRoot));
       throw new Error('Unclassified or protected paths must be treated as high risk');
+    }
   }
+}
+
+export function protectedWorkspaceRootMessage(
+  classification: NonNullable<ReturnType<typeof protectedWorkspaceRootClassification>>,
+): string {
+  return `このWorkspaceは保護された場所（${protectedWorkspaceRootLabel(classification)}）にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
 }
 
 function operationForCapability(capability: Capability): PermissionOperation {
