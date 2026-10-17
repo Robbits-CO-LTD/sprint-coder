@@ -421,7 +421,7 @@ describe('Main PermissionBroker', () => {
         },
       }),
     ).toThrow(
-      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。',
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。',
     );
   });
 
@@ -490,7 +490,7 @@ describe('Main PermissionBroker', () => {
       }),
     ).toMatchObject({ decision: 'deny', reason: 'immutable_protected_resource' });
     expect(protectedWorkspaceRootDenialReason(guard)).toBe(
-      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
     );
     expect(protectedWorkspaceRootDenialReason(pathGuard)).toBeUndefined();
     expect(protectedWorkspaceRootDenialReason(undefined)).toBeUndefined();
@@ -500,7 +500,7 @@ describe('Main PermissionBroker', () => {
   // located is told so, instead of being told it is in that folder.
   it('says when the protected folder itself could not be located', () => {
     expect(protectedWorkspaceRootMessage('credential', true)).toBe(
-      'このWorkspaceは保護された場所（認証情報を置くフォルダ）にある可能性があるため（保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています）、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
+      'このWorkspaceは保護された場所（認証情報を置くフォルダ）にある可能性があるため（保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています）、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
     );
     expect(protectedWorkspaceRootMessage('credential')).toContain(
       '保護された場所（認証情報を置くフォルダ）にあるため、',

@@ -2217,6 +2217,12 @@ export const turnSnapshotSchema = z
       .max(4_096)
       .default([]),
     latestTurnDiff: turnDiffSchema.nullable().default(null),
+    /**
+     * Turns that Main closed as `interrupted` when it restarted while they were still running
+     * (issue #842). The Renderer marks them in the history, so a partial reply does not read as a
+     * finished one once the dismissible restart notice is gone.
+     */
+    interruptedTurnIds: z.array(idSchema).max(4_096).default([]),
   })
   .strict();
 export type TurnSnapshot = z.infer<typeof turnSnapshotSchema>;

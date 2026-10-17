@@ -3675,6 +3675,20 @@ button {
     flex-wrap: wrap;
   }
 }
+.turn-interrupted-marker {
+  display: flex;
+  align-self: flex-start;
+  gap: 8px;
+  margin: -6px 0 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--warning);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.turn-interrupted-marker strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
 .turn-context-button {
   align-self: flex-start;
   margin: -14px 0 0;

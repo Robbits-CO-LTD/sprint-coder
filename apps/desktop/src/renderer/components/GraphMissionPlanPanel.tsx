@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   graphResumeActivationIntent,
   graphResumeStepActivationIntent,
@@ -13,7 +13,7 @@ import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
 import { useGraphDisclosure } from '../lib/graph-view-preference';
 import { GraphMissionUpdatePanel } from './GraphMissionUpdatePanel';
-import { terminalReasonLabel } from '../lib/team-execution-display';
+import { stoppedExecutionReason } from '../lib/team-execution-display';
 
 const executionLabels: Record<TeamMissionStepSummary['state'], string> = {
   assigned: '開始待ち',
@@ -56,6 +56,7 @@ export function GraphMissionPlanPanel({
         !['completed', 'failed', 'canceled'].includes(mission.state),
     );
   const updating = Boolean(mission?.graph && mission.graph.semanticRevision !== view.revision);
+  const rootLabel = useWorkspaceRootLabels(taskId);
   const workers = plan.steps.map((step) => {
     const worker = team?.workers.find((worker) => worker.id === step.workerId);
     return [
@@ -109,7 +110,11 @@ export function GraphMissionPlanPanel({
               : '合意した計画の実行状況'}
           </p>
         )}
-        <p className="settings-hint">担当・変更範囲・前提工程を確認し、この計画で開始できます。</p>
+        {!mission ? (
+          <p className="settings-hint">
+            担当・変更範囲・前提工程を確認し、この計画で開始できます。
+          </p>
+        ) : null}
         <strong>{plan.objective}</strong>
         <ul>
           {plan.doneCriteria.map((criterion, index) => (
@@ -131,6 +136,17 @@ export function GraphMissionPlanPanel({
               {mission?.steps.find((item) => item.graph?.key === step.key)
                 ? (() => {
                     const execution = mission.steps.find((item) => item.graph?.key === step.key)!;
+                    // A resumed step keeps waiting_resume, and its old failure, until the
+                    // scheduler admits it; that reason no longer explains where it stands.
+                    const stoppedReason = execution.graph?.stepResumePending
+                      ? null
+                      : stoppedExecutionReason({
+                          // The step's own state is what the line above shows (issue #841).
+                          state: execution.state,
+                          terminalReason:
+                            team?.executions.find((item) => item.id === execution.executionId)
+                              ?.terminalReason ?? null,
+                        });
                     return (
                       <>
                         <p data-testid="graph-step-state">
@@ -142,24 +158,8 @@ export function GraphMissionPlanPanel({
                           {execution.graph?.resourceState === 'quarantined'
                             ? ' · 資源を保持して停止確認待ち'
                             : ''}
+                          {stoppedReason !== null ? ` · 理由: ${stoppedReason}` : ''}
                         </p>
-                        {(() => {
-                          // Why the step parked or failed, so it never reads as a bare wait
-                          // (issue #841). A step already resumed is past that reason.
-                          if (
-                            !['waiting_resume', 'failed'].includes(execution.state) ||
-                            execution.graph?.stepResumePending
-                          )
-                            return null;
-                          const reason = team?.executions.find(
-                            ({ id }) => id === execution.executionId,
-                          )?.terminalReason;
-                          return reason ? (
-                            <p data-testid="graph-step-reason">
-                              停止理由: {terminalReasonLabel(reason)}
-                            </p>
-                          ) : null;
-                        })()}
                         {!updating &&
                         (execution.graph?.integrationResumeAvailable ||
                           execution.graph?.stepResumeAvailable) ? (
@@ -196,7 +196,7 @@ export function GraphMissionPlanPanel({
                   <ul>
                     {step.writeClaims.map((claim, index) => (
                       <li key={index}>
-                        {claim.rootId}: {claim.path ?? 'Workspace全体'}
+                        {rootLabel(claim.rootId)}: {claim.path ?? 'Workspace全体'}
                         {claim.semanticKeys.length
                           ? ` · 競合キー: ${claim.semanticKeys.join('・')}`
                           : ''}
@@ -212,7 +212,9 @@ export function GraphMissionPlanPanel({
                     {step.resourceClaims.map((claim, index) => (
                       <li key={index}>
                         {claim.key}（
-                        {claim.scope === 'machine' ? 'この端末全体' : `Workspace: ${claim.rootId}`}
+                        {claim.scope === 'machine'
+                          ? 'この端末全体'
+                          : `Workspace: ${rootLabel(claim.rootId)}`}
                         ）
                       </li>
                     ))}
@@ -227,6 +229,44 @@ export function GraphMissionPlanPanel({
       </div>
     </details>
   );
+}
+
+/**
+ * The plan names Workspace roots by their id, which reads as a bare UUID (issue #842). This resolves
+ * each id to the label of the Task's effective Workspace root (its folder name); `legacy-primary`
+ * stands for the primary root, as Main's review reads it. An id that cannot be resolved (not loaded
+ * yet, or no longer a root) is shown as a generic Workspace rather than as the UUID.
+ */
+function useWorkspaceRootLabels(taskId: string): (rootId: string | null) => string {
+  const [workspace, setWorkspace] = useState<{
+    taskId: string;
+    primaryRootId: string | null;
+    labels: ReadonlyMap<string, string>;
+  } | null>(null);
+  useEffect(() => {
+    const api = window.sprintCoder?.workspace;
+    if (typeof api?.getEffective !== 'function') return;
+    let current = true;
+    api
+      .getEffective(taskId)
+      .then((set) => {
+        if (!current) return;
+        setWorkspace({
+          taskId,
+          primaryRootId: set.primaryRootId,
+          labels: new Map(set.roots.map((root) => [root.rootId, root.label])),
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [taskId]);
+  return (rootId) => {
+    if (rootId === null || workspace === null || workspace.taskId !== taskId) return 'Workspace';
+    const id = rootId === 'legacy-primary' ? workspace.primaryRootId : rootId;
+    return (id === null ? undefined : workspace.labels.get(id)) ?? 'Workspace（未確認）';
+  };
 }
 
 /**

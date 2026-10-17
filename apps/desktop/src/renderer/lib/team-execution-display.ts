@@ -285,3 +285,36 @@ export function describeExecution(execution: TeamExecutionSummary): TeamExecutio
     ariaSummary: parts.join('、'),
   };
 }
+
+const STOPPED_REASON_MAX_CHARS = 60;
+
+/**
+ * 失敗して止まった、または再開待ちの実行に添える短い理由（issue #842）。Team内訳やGraphの工程で
+ * 「待機中」「再開待ち」だけが出て、なぜ止まったのかが分からなかった。Main が記録した最新 attempt の
+ * terminalReason を使い、既知のコードは日本語ラベルに、自由記述（Graph Mission の中断理由など）は
+ * 1行に畳んで絶対パスを伏せ、短く切って返す。止まっていない実行と、理由の記録が無い実行は null。
+ */
+export function stoppedExecutionReason(
+  execution: Pick<TeamExecutionSummary, 'state' | 'terminalReason'> | null | undefined,
+): string | null {
+  if (execution == null) return null;
+  if (execution.state !== 'waiting_resume' && execution.state !== 'failed') return null;
+  const reason = execution.terminalReason;
+  if (reason == null || reason.trim() === '') return null;
+  const known = TERMINAL_REASON_LABELS[reason];
+  if (known !== undefined) return known;
+  const text = reason
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/gu, ' ')
+    // A path can contain spaces, brackets and quotes (`C:\Users\Jane Doe\…`, `C:\Program Files (x86)\…`,
+    // `C:\Users\O'Brien\…`), so no character can tell where it ends: everything from its start to the
+    // end of the line is hidden. The words after it are lost, never a part of the path.
+    .replace(/(?<![\w.])(?:[A-Za-z]:[\\/]|\\\\|\/)[^\n]*/gu, '…')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  if (text === '') return null;
+  const chars = Array.from(text);
+  return chars.length > STOPPED_REASON_MAX_CHARS
+    ? `${chars.slice(0, STOPPED_REASON_MAX_CHARS - 1).join('')}…`
+    : text;
+}

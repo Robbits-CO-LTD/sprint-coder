@@ -402,7 +402,7 @@ export function protectedWorkspaceRootMessage(
   const where = locationUnknown
     ? `${place}にある可能性があるため（保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています）`
     : `${place}にあるため`;
-  return `このWorkspaceは${where}、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
+  return `このWorkspaceは${where}、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
 }
 
 function operationForCapability(capability: Capability): PermissionOperation {

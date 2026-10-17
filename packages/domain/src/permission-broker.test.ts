@@ -691,6 +691,20 @@ describe('access preset expansion', () => {
     );
   });
 
+  // issue #842: 「確認する」の説明は、Workspace内の読み取りも実行前に確認すると書く（「Task中許可」を
+  // 選んだ操作はそのTaskでは確認なしで続く）。説明が前提にしている挙動（許可が無ければ読み取りも
+  // 承認カードになる）をここで固定する。
+  it('asks before a Workspace read under Ask, as its description says (issue #842)', () => {
+    const ask = expandAccessPreset('ask');
+    expect(ask.allowRules.some((rule) => rule.capability === 'workspace.read')).toBe(false);
+    const result = evaluatePermissionPolicy({
+      request: { ...workspaceWriteRequest, capability: 'workspace.read', operation: 'read' },
+      policy: { ...basePolicy(), ...ask },
+      now: NOW,
+    });
+    expect(result).toMatchObject({ decision: 'approval_required' });
+  });
+
   it('routes an operation not proven safe by Auto to approval', () => {
     // A Workspace file edit is auto-allowed since issue #526, so a command stands in for "not
     // proven safe" here.

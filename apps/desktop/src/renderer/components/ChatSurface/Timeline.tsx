@@ -4,12 +4,18 @@ import type {
   AutoPermissionDecision,
   ChatMessage,
   TeamActivitySummary,
+  TeamDetail,
   TurnDiff,
   TurnDiffEntry,
 } from '../../types/sprint-coder';
 import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
+import {
+  executionStateLabel,
+  latestExecutionForWorker,
+  stoppedExecutionReason,
+} from '../../lib/team-execution-display';
 import { TeamActivityCard, TeamActivityGroup } from '../TeamActivityCard';
 import { ArrowDown, ArrowUp } from '../icons';
 import { MessageBubble } from '../MessageBubble';
@@ -45,6 +51,7 @@ const NO_IMAGES: ReturnType<typeof useAppStore.getState>['imagesByTask'][string]
 const NO_FILE_CHANGES: ReturnType<typeof useAppStore.getState>['fileChangesByTask'][string] = [];
 const NO_ACTIVITIES: TeamActivitySummary[] = [];
 const NO_SKILL_DRAFTS: ReturnType<typeof useAppStore.getState>['skillDraftsByTask'][string] = [];
+const NO_INTERRUPTED_TURNS: readonly string[] = [];
 
 export function Timeline({
   taskId,
@@ -62,6 +69,8 @@ export function Timeline({
   const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
+  const interruptedTurnIds =
+    useAppStore((s) => s.interruptedTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
   const images = useAppStore((s) => s.imagesByTask[taskId]) ?? NO_IMAGES;
   const fileChanges = useAppStore((s) => s.fileChangesByTask[taskId]) ?? NO_FILE_CHANGES;
   const graphVersions = useAppStore((s) => s.graphVersionsByTask[taskId]);
@@ -137,6 +146,25 @@ export function Timeline({
     }
     return content;
   }, [messages]);
+
+  // One marker per interrupted Turn (issue #842): under its last reply, or under its last request
+  // when nothing was written yet. A steered Turn holds several requests with the same Turn id.
+  const interruptedMarkerByMessage = useMemo(() => {
+    const markers = new Map<string, 'reply' | 'request'>();
+    if (interruptedTurnIds.length === 0) return markers;
+    const interrupted = new Set(interruptedTurnIds);
+    const lastReply = new Map<string, string>();
+    const lastRequest = new Map<string, string>();
+    for (const message of messages) {
+      if (message.turnId === null || !interrupted.has(message.turnId)) continue;
+      if (message.author === 'assistant') lastReply.set(message.turnId, message.id);
+      else if (message.author === 'user') lastRequest.set(message.turnId, message.id);
+    }
+    for (const [turnId, messageId] of lastRequest)
+      if (!lastReply.has(turnId)) markers.set(messageId, 'request');
+    for (const messageId of lastReply.values()) markers.set(messageId, 'reply');
+    return markers;
+  }, [interruptedTurnIds, messages]);
 
   const runtimeSummaryByTurn = useMemo(() => {
     const recordsByTurn = new Map<string, { changes: (typeof fileChanges)[number]['changes'] }[]>();
@@ -331,7 +359,7 @@ export function Timeline({
               message.id === latestAssistantMessageId
                 ? (teamDetail?.workers ?? []).map((worker) => ({
                     role: worker.role,
-                    status: workerStateLabel(worker.state),
+                    status: workerBreakdownStatus(worker, teamDetail),
                   }))
                 : [];
             // A request that produced nothing must not read as success (issue #11). Detected from the
@@ -367,6 +395,14 @@ export function Timeline({
               message.author === 'user' && message.turnId !== null
                 ? (assistantWorkContentByTurn.get(message.turnId) ?? null)
                 : null;
+            // A Turn a restart cut short stays marked in the history (issue #842): the restart notice
+            // can be dismissed, and a partial reply would otherwise read as a finished answer. The
+            // marker sits under the reply, or under the request when nothing was written yet. The
+            // current Turn is left to its Run Card, which already shows its final state.
+            const interruptedMarker =
+              turn?.turnId !== message.turnId
+                ? (interruptedMarkerByMessage.get(message.id) ?? null)
+                : null;
             return (
               <div key={message.id} style={{ display: 'contents' }}>
                 <MessageBubble
@@ -374,6 +410,18 @@ export function Timeline({
                   content={message.content}
                   attachments={message.attachments}
                 />
+                {interruptedMarker !== null && (
+                  <p
+                    className="turn-interrupted-marker"
+                    role="note"
+                    data-testid="turn-interrupted-marker"
+                  >
+                    <strong>中断</strong>
+                    {interruptedMarker === 'reply'
+                      ? 'アプリの再起動で、このTurnは途中で止まりました。この回答は完了していません。'
+                      : 'アプリの再起動で、このTurnは回答の前に止まりました。'}
+                  </p>
+                )}
                 {message.author === 'assistant' && message.turnId !== null && (
                   <button
                     type="button"
@@ -541,6 +589,32 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
     persisted.path === runtime.path &&
     persisted.destination === runtime.destination
   );
+}
+
+/**
+ * A Worker whose step failed and now waits for a resume reads as idle ("待機中") from its own state,
+ * so the breakdown says it stopped and why (issue #842), from its latest persisted execution. Only a
+ * step still waiting for a resume does: a failed execution is terminal history, and a Worker that has
+ * done other work since (or sits idle) keeps the label of its own state.
+ */
+function workerBreakdownStatus(
+  worker: { id: string; state: string },
+  team: Pick<TeamDetail, 'executions' | 'missions'> | null | undefined,
+): string {
+  const execution = latestExecutionForWorker(team?.executions, worker.id);
+  if (execution === null || execution.state !== 'waiting_resume')
+    return workerStateLabel(worker.state);
+  // A graph step resumed by hand stays waiting_resume, with its old failure, until the scheduler
+  // admits it; the old reason would read as the step still being stopped.
+  const resumePending = (team?.missions ?? []).some((mission) =>
+    mission.steps.some(
+      (step) => step.executionId === execution.id && step.graph?.stepResumePending === true,
+    ),
+  );
+  if (resumePending) return '再開済み';
+  const reason = stoppedExecutionReason(execution);
+  const label = executionStateLabel(execution.state);
+  return reason === null ? label : `${label}: ${reason}`;
 }
 
 function workerStateLabel(state: string): string {

@@ -510,6 +510,8 @@ export type TurnSnapshot = {
     name: string;
   }[];
   latestTurnDiff: TurnDiff | null;
+  /** Turns closed as interrupted by a restart (issue #842); absent from older backends. */
+  interruptedTurnIds?: string[];
 };
 
 /** err.code values the IPC layer may attach to a rejected SprintCoderApi promise. */

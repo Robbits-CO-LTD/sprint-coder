@@ -993,7 +993,10 @@ test('resumes one interrupted graph step by hand after a relaunch', async ({}, t
     expect(parked.mission).not.toBe('completed');
     await restarted.getByTestId('inline-graph-open').last().click();
     await expect(restarted.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
-    await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText('再開待ち');
+    // The step states why it stopped beside 「再開待ち」 (issue #842).
+    await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText(
+      /^再開待ち · 理由: .+/u,
+    );
     const resumeStep = restarted.getByRole('button', { name: 'この工程を再開', exact: true });
     await expect(resumeStep).toHaveCount(1);
     // The already-rendered view owns the instance/render revision; re-reading the document through

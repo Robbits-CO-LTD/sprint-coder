@@ -20334,6 +20334,12 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ORDER BY created_at DESC, id DESC LIMIT 1`,
       )
       .get(taskId) as { id: string } | undefined;
+    const interruptedTurns = this.db
+      .prepare(
+        `SELECT id FROM turns WHERE task_id = ? AND state = 'interrupted'
+         ORDER BY created_at DESC, rowid DESC LIMIT 4096`,
+      )
+      .all(taskId) as Array<{ id: string }>;
     const activatedSkills = this.db
       .prepare(
         `SELECT c.turn_id, c.source, c.skill_id, c.digest, c.name
@@ -20368,6 +20374,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
               turnId: latestCompletedTurn.id,
               entries: this.getDisplayTurnDiff(taskId, latestCompletedTurn.id),
             },
+      interruptedTurnIds: interruptedTurns.map(({ id }) => id),
     });
   }
 
