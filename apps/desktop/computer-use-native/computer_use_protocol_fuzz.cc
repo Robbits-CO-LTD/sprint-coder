@@ -6788,6 +6788,35 @@ bool CheckWindowsInterlockCapture() {
 
 // ---- Classifier v2, S5-c-2 PR-3: the display name of a file browser item -> the real entry ---------
 
+// ---- The Windows V1 host: what a read that could not be made leaves behind is never "no risk" -----
+
+bool CheckWindowsV1DefaultRisk() {
+  using namespace sprint_coder::computer_use;
+  // The host's WindowsUiaRisk is all false until something is read. A path that ended (a timeout, a
+  // Cancel) returns that default, and the host asks ClassifyNativePreflightFacts with
+  // {metadata_complete, classified, secure, high_impact}.
+  const NativePreflightDecision nothing = ClassifyNativePreflightFacts({false, false, false, false});
+  if (!Check(!NativePreflightAllowsDispatch(nothing) && nothing.kind == NativePreflightKind::kTakeover &&
+                 nothing.reason == NativePreflightReason::kUnclassified,
+             "v1-default-risk-is-unclassified")) return false;
+  // Whatever else is set, facts that are not complete and classified are never an ordinary dispatch.
+  for (int bits = 0; bits < 8; ++bits) {
+    const bool secure = (bits & 1) != 0;
+    const bool high_impact = (bits & 2) != 0;
+    const bool classified = (bits & 4) != 0;
+    const NativePreflightDecision incomplete = ClassifyNativePreflightFacts({false, classified, secure, high_impact});
+    if (!Check(!NativePreflightAllowsDispatch(incomplete) && incomplete.reason == NativePreflightReason::kUnclassified,
+               "v1-incomplete-metadata-is-always-unclassified")) return false;
+    const NativePreflightDecision unclassified = ClassifyNativePreflightFacts({true, false, secure, high_impact});
+    if (!Check(!NativePreflightAllowsDispatch(unclassified) && unclassified.reason == NativePreflightReason::kUnclassified,
+               "v1-unclassified-is-never-ordinary")) return false;
+  }
+  if (!Check(NativePreflightAllowsDispatch(ClassifyNativePreflightFacts({true, true, false, false})),
+             "v1-complete-classified-and-quiet-is-ordinary")) return false;
+  std::cout << "Computer Use native Windows V1 default risk: PASS\n";
+  return true;
+}
+
 bool CheckWindowsShellNameMatch() {
   using namespace sprint_coder::computer_use;
   // A candidate: the file system's long name and the name the SHELL shows for it.
@@ -8321,6 +8350,7 @@ int main() {
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckWindowsShellNameMatch()) return 1;
+  if (!CheckWindowsV1DefaultRisk()) return 1;
   if (!CheckClickRule()) return 1;
   if (!CheckInterlockDispatchCodes()) return 1;
   if (!CheckWindowsInterlockJourneys()) return 1;
