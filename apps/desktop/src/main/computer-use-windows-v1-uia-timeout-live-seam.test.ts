@@ -136,7 +136,6 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
   it('keeps the worst cases inside what the lane is given, from the constants themselves', () => {
     const connection = hostNumber('kWindowsV1UiaConnectionTimeoutMs');
     const transaction = hostNumber('kWindowsV1UiaTransactionTimeoutMs');
-    const shortBudget = hostNumber('kWindowsV1UiaShortPathBudget');
     const observeBudget = hostNumber('kWindowsV1UiaObserveBudget');
     const cancelAck = Number(
       /COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS = ([0-9_]+)/u
@@ -150,15 +149,27 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     expect(cancelAck).toBe(1000);
     expect(observeTimeout).toBe(30_000);
-    // A short path: the budget, plus the one call that starts just before it is spent (at most the
-    // longer of the two timeouts), is inside the Cancel acknowledgment.
-    expect(shortBudget + Math.max(connection, transaction)).toBeLessThan(cancelAck);
-    // The first contact is allowed to be slower than a call on a connected element, and one timed-out
-    // call alone is inside the acknowledgment too.
+    // One call: the first contact waits for the connection and then for the transaction, so its worst
+    // case is counted as the SUM of the two (the safe side), and a Cancel waits for at most that one
+    // call (the epoch is asked before every call): it is inside the acknowledgment.
+    expect(connection + transaction).toBeLessThan(cancelAck);
+    // The first contact is allowed to be slower than a call on a connected element.
     expect(connection).toBeGreaterThanOrEqual(transaction);
-    expect(connection).toBeLessThan(cancelAck);
+    // There is NO time budget on a path: a deep tree of a live app must not become "unclassified".
+    expect(code(host)).not.toContain('kWindowsV1UiaShortPathBudget');
+    expect(code(host)).not.toMatch(/ShortPath/u);
     // The observe has a budget of its own, inside what Main gives an observe (which also captures).
     expect(observeBudget).toBeLessThan(observeTimeout);
+    // It is wide (an ordinary app's tree of several thousand nodes is read four times) and there only to
+    // answer with the native's own reason before Main's 30 s: not the cause of a Cancel's delay.
+    expect(observeBudget).toBe(25_000);
+    // A call that "succeeded" after nearly its whole timeout has timed out all the same.
+    const slowRead = hostNumber('kWindowsV1UiaSlowRead');
+    const slowContact = hostNumber('kWindowsV1UiaSlowContact');
+    expect(slowRead).toBeLessThan(transaction);
+    expect(slowContact).toBeLessThan(connection);
+    expect(slowRead).toBeGreaterThan(transaction - 100);
+    expect(slowContact).toBeGreaterThan(connection - 100);
   });
 
   it('ends a path at its first timed-out call, and stops climbing at an element that cannot be read', () => {
@@ -169,7 +180,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain('lane->stop = WindowsV1UiaStop::kBudget;');
     expect(c).toContain('lane->stop = WindowsV1UiaStop::kCanceled;');
     expect(c).toContain(
-      'return result == kUiaTimeout || result == kWin32Timeout || result == kRpcTimeout;',
+      'return result == kWindowsV1UiaTimeoutResult || result == kWin32Timeout || result == kRpcTimeout;',
     );
     // Every walk checks it at each node, and every chain of reads goes through the checked result.
     for (const walk of [
@@ -197,7 +208,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       climb.indexOf('walker->GetParentElement(current, &parent)'),
     );
     expect(climb).toContain(
-      'WindowsV1UiaMayCall() ? walker->GetParentElement(current, &parent) : E_ABORT',
+      'WindowsV1UiaCall([&] { return walker->GetParentElement(current, &parent); })',
     );
     // The point classification reads the signature only for facts that are complete.
     expect(c).toContain(
@@ -207,13 +218,67 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'focused_risk.classified && focused_risk.metadata_complete && WindowsFocusedElementSignature(',
     );
-    // The scopes: each short path has its own, the observe has the long budget and the epoch.
-    expect([
-      ...c.matchAll(/const WindowsV1UiaPath path\(kWindowsV1UiaShortPathBudget\);/gu),
-    ]).toHaveLength(4);
+    // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
+    // began), and only the observe has a budget, with the session's epoch.
+    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(7);
     expect(c).toContain(
-      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, true, session.cancel_epoch);',
+      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch);',
     );
+    expect(c).toContain(
+      'WindowsV1UiaPath() : WindowsV1UiaPath(std::chrono::milliseconds::zero(), cancellation_epoch.load(std::memory_order_acquire)) {}',
+    );
+    // A Cancel ends the path before a spent budget is looked at, and the check is the first thing
+    // every call goes through.
+    expect(c).toContain(
+      'if (cancellation_epoch.load(std::memory_order_acquire) != lane->epoch) lane->stop = WindowsV1UiaStop::kCanceled; else if (lane->has_deadline',
+    );
+    expect(c).toContain(
+      'template <class Call> HRESULT WindowsV1UiaCall(Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call); }',
+    );
+    // EVERY call that reaches the target goes through WindowsV1UiaCall: the first contact, the walks
+    // (first child, next sibling) and the climb to the parent. The reads of properties are asked at the
+    // entry of each function that makes them (checked above).
+    const calls = [
+      ...c.matchAll(
+        /->(ElementFromPoint|ElementFromHandle|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetParentElement)\(/gu,
+      ),
+    ];
+    const guarded = [
+      ...c.matchAll(
+        /WindowsV1Uia(?:Call|Contact)\(\[&\] \{ return \w+->(ElementFromPoint|ElementFromHandle|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetParentElement)\(/gu,
+      ),
+    ];
+    expect(calls.length).toBeGreaterThanOrEqual(12);
+    expect(guarded).toHaveLength(calls.length);
+    // The first contacts use the contact wrapper (the longer slow threshold), the moves the call one.
+    for (const name of ['ElementFromPoint', 'ElementFromHandle', 'GetFocusedElement'])
+      expect(c, name).not.toMatch(
+        new RegExp(`WindowsV1UiaCall\\(\\[&\\] \\{ return \\w+->${name}\\(`, 'u'),
+      );
+    // EVERY read of a property of an element in the V1 lane is timed (WindowsV1UiaRead): none is read by a
+    // plain SUCCEEDED / FAILED / WindowsV1UiaOk, which would take a read that came back "successfully"
+    // after the whole timeout for a good one.
+    const reads = [...c.matchAll(/ element->(get_Current\w+|GetRuntimeId)\(/gu)];
+    const timedReads = [
+      ...c.matchAll(/WindowsV1UiaRead\(\[&\] \{ return element->(get_Current\w+|GetRuntimeId)\(/gu),
+    ];
+    expect(reads.length).toBeGreaterThanOrEqual(14);
+    expect(timedReads).toHaveLength(reads.length);
+    // The time of a call is measured, and a slow "success" is a timeout.
+    expect(c).toContain(
+      'if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow) result = kWindowsV1UiaTimeoutResult;',
+    );
+    // The frames of a preflight and of a dispatch each run under one outer path, so the later steps of
+    // a frame share the state of the first timed-out call and of a Cancel.
+    expect(c).toContain('const WindowsV1UiaPath preflight_uia_path; if (!HandleWindowsPreflight(');
+    expect(c).toContain(
+      'const WindowsV1UiaPath dispatch_uia_path; const bool succeeded = DispatchWindowsAction(',
+    );
+    // The observe counts nodes, logs only a count when its budget is spent, and gives the reasons of
+    // WindowsV1ObserveReason.
+    expect(c).toContain('WindowsV1UiaCountNode();');
+    expect(c).toContain('budget spent after');
+    expect(c).toContain('return WindowsV1ObserveReason(uia_path.Stop(), otherwise);');
   });
 
   it('names why a read did not complete, and keeps a timed-out action apart from an unconfirmed one', () => {
@@ -228,9 +293,13 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'path.Stop() == WindowsV1UiaStop::kTimeout ? "accessibility_timeout" : "target_required"',
     );
-    // A pattern call that timed out may have been applied: unconfirmed, told apart.
+    // A pattern call that timed out may have been applied: unconfirmed, told apart, and the common tail
+    // of a dispatch keeps that reason instead of writing input_not_confirmed over it.
     expect(c).toContain(
       'WindowsV1UiaIsTimeout(action_result) ? "input_timeout_unconfirmed" : "input_not_confirmed"',
+    );
+    expect(c).toContain(
+      'if (*accepted) { if (*reason != "input_timeout_unconfirmed") *reason = "input_not_confirmed"; } else if (cancellation_epoch',
     );
     // A failed read is the "unreadable" of each caller (fail closed).
     expect(c).toContain(
@@ -448,10 +517,50 @@ LRESULT CALLBACK ProviderProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   return DefWindowProcW(window, message, w, l);
 }
 
+// A window of a deep tree that answers, slowly: every request of UI Automation to it takes 15 ms.
+LRESULT CALLBACK DeepProc(HWND window, UINT message, WPARAM w, LPARAM l) {
+  if (message == WM_GETOBJECT || message == WM_GETTEXT || message == WM_GETTEXTLENGTH) Sleep(15);
+  if (message == WM_DESTROY && GetParent(window) == nullptr) {
+    PostQuitMessage(0);
+    return 0;
+  }
+  return DefWindowProcW(window, message, w, l);
+}
+
 struct Win {
   HWND handle = nullptr;
   std::thread thread;
+  HWND deepest = nullptr;
 };
+
+// A top-level window with a chain of nested child windows (five in all with the top one: with the
+// desktop that is six elements up to the root, inside what the V1 climb reads).
+void MakeDeepWindow(Win &win, int x, int y) {
+  std::atomic<bool> ready{false};
+  win.thread = std::thread([&win, &ready, x, y]() {
+    WNDCLASSW cls{};
+    cls.lpfnWndProc = DeepProc;
+    cls.hInstance = GetModuleHandleW(nullptr);
+    cls.lpszClassName = L"Sc820Deep";
+    RegisterClassW(&cls);
+    win.handle = CreateWindowExW(WS_EX_TOPMOST, L"Sc820Deep", L"sc820-deep", WS_OVERLAPPEDWINDOW | WS_VISIBLE, x, y, 300, 200,
+                                 nullptr, nullptr, cls.hInstance, nullptr);
+    HWND parent = win.handle;
+    for (int level = 0; level < 4; ++level) {
+      parent = CreateWindowExW(0, L"Sc820Deep", L"", WS_CHILD | WS_VISIBLE, 10, 10, 200 - level * 20, 100 - level * 10, parent,
+                               nullptr, cls.hInstance, nullptr);
+    }
+    win.deepest = parent;
+    ShowWindow(win.handle, SW_SHOW);
+    ready.store(true);
+    MSG message;
+    while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+      TranslateMessage(&message);
+      DispatchMessageW(&message);
+    }
+  });
+  for (int i = 0; i < 500 && !ready.load(); ++i) Sleep(10);
+}
 
 void MakeWindow(Win &win, WNDPROC proc, const wchar_t *class_name, const wchar_t *title, int x, int y, bool children) {
   std::atomic<bool> ready{false};
@@ -480,13 +589,14 @@ void MakeWindow(Win &win, WNDPROC proc, const wchar_t *class_name, const wchar_t
 
 int RunWindowProcess() {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  Win hang, ordinary, provider;
+  Win hang, ordinary, provider, deep;
+  MakeDeepWindow(deep, 340, 240);
   MakeWindow(hang, HangProc, L"Sc820Hang", L"sc820-hang", 20, 20, true);
   MakeWindow(ordinary, DefWindowProcW, L"Sc820Ordinary", L"sc820-ordinary", 20, 240, true);
   MakeWindow(provider, ProviderProc, L"Sc820Provider", L"sc820-provider", 340, 20, false);
   std::cout << "READY " << GetCurrentProcessId() << " " << reinterpret_cast<std::uintptr_t>(hang.handle) << " "
-            << reinterpret_cast<std::uintptr_t>(ordinary.handle) << " " << reinterpret_cast<std::uintptr_t>(provider.handle)
-            << std::endl;
+            << reinterpret_cast<std::uintptr_t>(ordinary.handle) << " " << reinterpret_cast<std::uintptr_t>(provider.handle) << " "
+            << reinterpret_cast<std::uintptr_t>(deep.deepest) << std::endl;
   for (;;) Sleep(1000);  // the test ends this process
 }
 
@@ -538,17 +648,37 @@ int RunDriver(bool ci) {
   HANDLE read_end = nullptr, write_end = nullptr;
   CreatePipe(&read_end, &write_end, &inherit, 0);
   SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);
-  STARTUPINFOW startup{sizeof(startup)};
-  startup.dwFlags = STARTF_USESTDHANDLES;
-  startup.hStdOutput = write_end;
-  startup.hStdError = write_end;
-  startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  // The window process lives in a job that is closed with this process: if this process is killed (the
+  // test's timeout), the job closes and the windows go with it. And it inherits the pipe's write end and
+  // nothing else, so it cannot hold on to the handles of the process that started this one.
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+  SIZE_T attribute_bytes = 0;
+  InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+  std::vector<char> attribute_storage(attribute_bytes);
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+  InitializeProcThreadAttributeList(attributes, 1, 0, &attribute_bytes);
+  HANDLE inherited[1] = {write_end};
+  UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, sizeof(inherited), nullptr, nullptr);
+  STARTUPINFOEXW startup{};
+  startup.StartupInfo.cb = sizeof(startup);
+  startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+  startup.StartupInfo.hStdOutput = write_end;
+  startup.StartupInfo.hStdError = write_end;
+  startup.StartupInfo.hStdInput = nullptr;
+  startup.lpAttributeList = attributes;
   PROCESS_INFORMATION child{};
   std::wstring command = std::wstring(L"\"") + self + L"\" window-process";
-  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &startup, &child)) {
+  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, TRUE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, nullptr,
+                      nullptr, &startup.StartupInfo, &child)) {
     std::cout << "FAIL could_not_start_the_window_process" << std::endl;
     return 2;
   }
+  SeamCheck(AssignProcessToJobObject(job, child.hProcess) != 0, "the_window_process_is_in_the_job");
+  ResumeThread(child.hThread);
+  DeleteProcThreadAttributeList(attributes);
   CloseHandle(write_end);
   std::string line;
   for (char c; line.find('\n') == std::string::npos;) {
@@ -557,8 +687,8 @@ int RunDriver(bool ci) {
     line.push_back(c);
   }
   unsigned long pid = 0;
-  unsigned long long hang_value = 0, ordinary_value = 0, provider_value = 0;
-  if (sscanf_s(line.c_str(), "READY %lu %llu %llu %llu", &pid, &hang_value, &ordinary_value, &provider_value) != 4) {
+  unsigned long long hang_value = 0, ordinary_value = 0, provider_value = 0, deepest_value = 0;
+  if (sscanf_s(line.c_str(), "READY %lu %llu %llu %llu %llu", &pid, &hang_value, &ordinary_value, &provider_value, &deepest_value) != 5) {
     std::cout << "FAIL the_window_process_did_not_report " << line << std::endl;
     TerminateProcess(child.hProcess, 1);
     return 2;
@@ -566,6 +696,7 @@ int RunDriver(bool ci) {
   const HWND hang = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(hang_value));
   const HWND ordinary = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(ordinary_value));
   const HWND provider = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(provider_value));
+  const HWND deepest = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(deepest_value));
   Sleep(600);
   std::cout << "child pid=" << pid << std::endl;
 
@@ -676,8 +807,79 @@ int RunDriver(bool ci) {
     }
   }
   const bool focus_case = focus_classification && focus_signature;
-  std::cout << "focus_case=" << focus_case << std::endl;
-  if (ci) SeamCheck(focus_case, "the_focus_paths_ran");
+  std::cout << "focus_case=" << focus_case
+            << (focus_case ? "" : " focus_skipped_reason=the_hung_window_could_not_be_made_the_foreground_one_with_the_focus") << std::endl;
+
+  // ---- the boundaries of a path: the state is shared by the paths inside it, a Cancel ends it before the
+  // next call, and the reason an observe gives follows from why it ended
+  {
+    SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kTimeout, "x")) == "accessibility_timeout", "reason_of_a_timeout");
+    SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kBudget, "x")) == "observation_timeout", "reason_of_a_spent_budget");
+    SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kCanceled, "x")) == "observation_stale", "reason_of_a_cancel");
+    SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kNone, "x")) == "x", "reason_otherwise_is_the_steps_own");
+  }
+  {  // a timeout inside an inner path ends the outer one: the later reads of the frame make no call
+    const WindowsV1UiaPath frame;
+    WindowsUiaRisk risk;
+    std::string signature;
+    const POINT on_button = client_point(hang, 60, 35);
+    WhileStuck(hang, WM_APP + 1, 0, [&] { risk = ClassifyWindowsPoint(on_button, static_cast<std::uint32_t>(pid), &signature); });
+    SeamCheck(frame.Stop() == WindowsV1UiaStop::kTimeout, "the_frame_sees_the_timeout_of_its_inner_path");
+    std::string tree;
+    std::size_t nodes = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const bool read = ReadUiaObservation(static_cast<std::uint32_t>(pid), ordinary, &tree, &nodes);
+    const long long ms = Millis(start);
+    std::cout << "after_timeout_in_frame ms=" << ms << " read=" << read << std::endl;
+    SeamCheck(!read && ms < 50, "a_frame_makes_no_call_after_its_first_timeout");
+    SeamCheck(std::string(WindowsV1ObserveReason(frame.Stop(), "x")) == "accessibility_timeout", "the_frames_reason_is_accessibility_timeout");
+  }
+  {  // a Cancel ends the path before the next call, even of an app that answers
+    const WindowsV1UiaPath frame;
+    cancellation_epoch.fetch_add(1);
+    std::string tree;
+    std::size_t nodes = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const bool read = ReadUiaObservation(static_cast<std::uint32_t>(pid), ordinary, &tree, &nodes);
+    const long long ms = Millis(start);
+    std::cout << "after_cancel_in_frame ms=" << ms << " read=" << read << std::endl;
+    SeamCheck(!read && ms < 50, "a_cancel_ends_the_path_before_the_next_call");
+    SeamCheck(frame.Stop() == WindowsV1UiaStop::kCanceled, "the_frame_is_canceled");
+    SeamCheck(std::string(WindowsV1ObserveReason(frame.Stop(), "x")) == "observation_stale", "the_canceled_observes_reason");
+  }
+  {  // the semantic dispatch of a target that does not answer: a transient rejection before any input
+    WindowsSession session;
+    session.active_window = hang;
+    session.pid = static_cast<std::uint32_t>(pid);
+    bool accepted = true;
+    std::string reason;
+    bool ok = true;
+    const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] {
+      ok = DispatchWindowsSemanticAction(session, RECT{}, cancellation_epoch.load(), "invoke", "{\"targetId\":\"x\"}", &accepted, &reason);
+    });
+    std::cout << "semantic_dispatch ms=" << ms << " ok=" << ok << " accepted=" << accepted << " reason=" << reason << std::endl;
+    SeamCheck(!ok && !accepted && reason == "accessibility_timeout", "a_semantic_dispatch_to_a_target_that_does_not_answer_is_a_transient_rejection");
+    SeamCheck(ms <= kBound, "the_semantic_dispatch_returns_within_one_timeout_and_a_margin");
+  }
+
+  // ---- a deep tree of a LIVE app that answers every request, slowly: reading it up the parents makes
+  // dozens of calls and takes longer than any budget a short path might have had, and it must still be
+  // classified (not rejected as unclassified): the bounds only cut off what does not answer.
+  {
+    RECT deepest_rect{};
+    GetWindowRect(deepest, &deepest_rect);
+    const POINT inside{(deepest_rect.left + deepest_rect.right) / 2, (deepest_rect.top + deepest_rect.bottom) / 2};
+    SeamCheck(over(inside, GetAncestor(deepest, GA_ROOT)), "the_point_is_over_the_deep_window");
+    std::string signature;
+    const auto start = std::chrono::steady_clock::now();
+    const WindowsUiaRisk risk = ClassifyWindowsPoint(inside, static_cast<std::uint32_t>(pid), &signature);
+    const long long ms = Millis(start);
+    std::string reason;
+    const bool rejected = RejectWindowsRisk(risk, &reason);
+    std::cout << "deep_tree ms=" << ms << " rejected=" << rejected << " reason=" << reason << " complete=" << risk.metadata_complete << std::endl;
+    SeamCheck(!rejected, "a_deep_tree_that_answers_is_not_rejected");
+    SeamCheck(risk.metadata_complete && risk.classified, "a_deep_tree_that_answers_is_classified");
+  }
 
   // ---- a native provider that answers a few requests and then stops: the call that is held up is not
   // the first one, so the calls after it are the ones that must not be made
@@ -726,6 +928,7 @@ int RunDriver(bool ci) {
   TerminateProcess(child.hProcess, 0);
   CloseHandle(child.hProcess);
   CloseHandle(child.hThread);
+  CloseHandle(job);
   std::cout << (failures == 0 ? "OK" : "FAILED") << std::endl;
   return failures == 0 ? 0 : 1;
 }
@@ -760,9 +963,23 @@ beforeAll(() => {
   context = { scratch, source, binary, compiler: findBuild(source, binary, provenance) };
 });
 
-afterAll(() => {
-  if (context !== null) rmSync(context.scratch, { recursive: true, force: true });
+// The directory is removed with retries (a program that has only just ended may still hold its files for
+// a moment) and a warning, not a silent leak, if it cannot be.
+afterAll(async () => {
+  if (context === null) return;
+  const scratch = context.scratch;
   context = null;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      rmSync(scratch, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  console.warn(`The scratch directory ${scratch} could not be removed: ${String(lastError)}`);
 });
 
 describe('V1 lane UI Automation against windows that do not answer, live, across processes (#820)', () => {
@@ -792,8 +1009,16 @@ describe('V1 lane UI Automation against windows that do not answer, live, across
     const ran = new Set(
       [...result.stdout.matchAll(/^ran (\w+)(?:@[\w-]+)? /gmu)].map((match) => match[1]),
     );
-    const required = process.env['CI'] ? sixPaths : sixPaths.slice(0, 4);
+    // The six paths all ran, unless the hung window could not be made the foreground one (a machine
+    // where the foreground cannot be taken): then the two focus paths are skipped and the reason is on
+    // record, and the four that do not depend on the focus still ran.
+    const focusSkipped = /^focus_case=0 focus_skipped_reason=\w+/mu.test(result.stdout);
+    const required = focusSkipped ? sixPaths.slice(0, 4) : sixPaths;
     for (const path of required) expect(ran.has(path), `${path} ran`).toBe(true);
+    if (focusSkipped)
+      console.warn(
+        'The focus paths were skipped: ' + /focus_skipped_reason=\w+/u.exec(result.stdout)![0],
+      );
     expect(result.stdout).toMatch(/first_call_ok=1/u);
   }, 480_000);
 });
