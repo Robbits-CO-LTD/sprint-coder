@@ -136,9 +136,13 @@ export function GraphMissionPlanPanel({
               {mission?.steps.find((item) => item.graph?.key === step.key)
                 ? (() => {
                     const execution = mission.steps.find((item) => item.graph?.key === step.key)!;
-                    const stoppedReason = stoppedExecutionReason(
-                      team?.executions.find((item) => item.id === execution.executionId),
-                    );
+                    // A resumed step keeps waiting_resume, and its old failure, until the
+                    // scheduler admits it; that reason no longer explains where it stands.
+                    const stoppedReason = execution.graph?.stepResumePending
+                      ? null
+                      : stoppedExecutionReason(
+                          team?.executions.find((item) => item.id === execution.executionId),
+                        );
                     return (
                       <>
                         <p data-testid="graph-step-state">

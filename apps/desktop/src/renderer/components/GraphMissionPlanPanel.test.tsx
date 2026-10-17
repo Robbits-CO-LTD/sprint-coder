@@ -355,3 +355,33 @@ it('shows the recorded reason beside a step that waits for a resume', async () =
     container.remove();
   }
 });
+
+// A resumed step keeps waiting_resume and its old failure until the scheduler admits it.
+it('hides the old stop reason once the step has been resumed', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('sprintCoder', { graphs: {} });
+  seed({ stepResumeAvailable: false, integrationResumeAvailable: false, stepResumePending: true });
+  const team = useAppStore.getState().teamByTask['task-1']!;
+  useAppStore.setState({
+    teamByTask: {
+      'task-1': {
+        ...team,
+        executions: [
+          { id: 'execution-a', state: 'waiting_resume', terminalReason: 'runtime_failure' },
+        ],
+      } as unknown as TeamDetail,
+    },
+  });
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.querySelector('[data-testid="graph-step-state"]')?.textContent).toBe(
+      '再開済み · 依存の完了待ち',
+    );
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
