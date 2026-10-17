@@ -5589,12 +5589,12 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   }
   const WindowsUiaRisk focused_risk =
       ClassifyWindowsFocusedElement(session.pid);
-  // The focused element's signature is read only when its facts are complete: an unclassified focus
-  // is rejected by every action that needs it, and reading its signature would be one more call to an
-  // element that did not answer.
+  // The focused element's signature is read whatever its classification says, as before #820: a live
+  // focus that is only unclassified (deeper than the climb, say) keeps its signature, so its key / type
+  // is refused later as target_unclassified, not as a focus that moved. After a timeout or a Cancel in
+  // this observe the read is refused by the path without a call (no second wait on the element).
   std::string focused_element_signature;
   const bool has_focused_element_signature =
-      focused_risk.classified && focused_risk.metadata_complete &&
       WindowsFocusedElementSignature(session.pid, bounds, &focused_element_signature);
   RECT screen_bounds{};
   if (!ScreenBoundsPhysicalForWindow(dialogs.active_window, &screen_bounds)) {

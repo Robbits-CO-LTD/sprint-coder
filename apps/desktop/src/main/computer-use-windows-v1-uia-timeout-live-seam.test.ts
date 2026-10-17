@@ -222,8 +222,13 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'if (control_signature != nullptr && risk.metadata_complete) ComputeWindowsControlSignature(element, expected_pid, nullptr, control_signature);',
     );
-    // The observe reads the focused element's signature only for a classified focus.
+    // The observe reads the focused element's signature whatever the classification says (a live but
+    // unclassified focus keeps it, so its action is refused as target_unclassified); after a timeout the
+    // shared path refuses the read without a call.
     expect(c).toContain(
+      'const bool has_focused_element_signature = WindowsFocusedElementSignature(session.pid, bounds, &focused_element_signature);',
+    );
+    expect(c).not.toContain(
       'focused_risk.classified && focused_risk.metadata_complete && WindowsFocusedElementSignature(',
     );
     // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
