@@ -142,6 +142,15 @@ describe('Windows read of one node value (#785 T15-4w): the host', () => {
     expect(body).toContain('const WindowsSession copy = session;');
     expect(body).toContain('cancellation_epoch.load(std::memory_order_acquire) != expected_epoch');
     expect(body).toContain('!RevalidateWindowsTarget(session, bounds, expected_epoch)');
+    // The V1 calls of the worker (the search, the signature, the risk, the signature the read checks)
+    // run inside one bounded V1 path with the request's epoch (#820): outside a path they are refused.
+    const path =
+      'const WindowsV1UiaPath uia_path(std::chrono::milliseconds::zero(), expected_epoch);';
+    expect(body).toContain(path);
+    expect(body.indexOf(path)).toBeLessThan(
+      body.indexOf('FindWindowsSemanticTarget(copy, target_id'),
+    );
+    expect(body.indexOf(path)).toBeGreaterThan(body.indexOf('std::thread([pending, copy'));
   });
 
   it('overwrites a value wherever helper memory can still hold it after the lane gave up', () => {

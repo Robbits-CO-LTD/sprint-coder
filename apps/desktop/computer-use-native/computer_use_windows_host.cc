@@ -5757,6 +5757,11 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
             return !pending->abandoned.load(std::memory_order_acquire) &&
                    cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
           };
+          // The V1 resolution (search, signature, risk) and the signature the read checks run on
+          // this worker inside ONE bounded V1 path (#820), with the epoch of the request: the first
+          // timed-out call ends them all and a Cancel stops them before the next call. Outside a path
+          // the V1 calls are refused, so without it no node could be read.
+          const WindowsV1UiaPath uia_path(std::chrono::milliseconds::zero(), expected_epoch);
           IUIAutomationElement *target = nullptr;
           std::string why;
           if (FindWindowsSemanticTarget(copy, target_id, &target, &why)) {
