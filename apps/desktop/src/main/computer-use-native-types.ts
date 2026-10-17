@@ -45,6 +45,12 @@ export type ComputerUseNativeAddon = Readonly<{
   /** The input entry after `approvalApprove`; asks for `approvalGeneration` and never a ticket. */
   dispatchApproved?(input: unknown): unknown;
   dispatch?(input: unknown): unknown;
+  /**
+   * Windows helper only (#785 T15-4w; macOS is T15-4m). Reads the value of the one node a `copy`
+   * names and answers `{ ok: true, text }` or `{ ok: false }`. No input capability. The host adapter
+   * exposes it, but the capability `artifactReadSupported` stays false until T15-E.
+   */
+  readNodeValue?(input: unknown): unknown;
   cancel?(input: unknown): unknown;
   close?(input: unknown): unknown;
 }>;

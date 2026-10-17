@@ -81,6 +81,7 @@
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_windows_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
+#include "computer_use_windows_artifact_read.h"
 
 namespace {
 
@@ -5698,6 +5699,154 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   return true;
 }
 
+// BEGIN artifact read (#785 T15-4w)
+// The value of ONE node, for `copy`. Like the interlock entry it runs on a worker of its own in the
+// multithreaded apartment while the lane waits at most kInterlockLaneHoldLimit, with the same
+// single-flight slot (at most one stuck worker in the process); the worker gets everything by value.
+// The node is resolved as the semantic actions resolve it (the V1 search by target id, the signature
+// the observation recorded, the V1 risk of the element); the facts and the value then come from the
+// shadow's source and reader (portable: ReadWindowsArtifactValue), which also judges the role, the
+// secure / high-impact / surface facts and the browser window (the judgement lives in that header).
+// Any way of not reading is the same "not read". The value is never cached by the helper (the answer
+// goes out with Respond, not RespondAndCache) and the copy of it is scrubbed after it is sent.
+// Reads only: no input API, no pattern is invoked, nothing is set.
+struct ArtifactReadPending {
+  // Whatever value is still here when the last owner lets go (the lane gave up, or never took it)
+  // is overwritten first.
+  ~ArtifactReadPending() { ScrubString(&text); }
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool done = false;
+  std::atomic<bool> abandoned{false};
+  bool ok = false;
+  std::string text;
+};
+
+bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string &metadata,
+                                std::string *text) noexcept {
+  using namespace sprint_coder::computer_use;
+  try {
+    std::string kind;
+    RECT bounds{};
+    std::string reason;
+    if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, &reason) || kind != "copy")
+      return false;
+    std::string target_id;
+    if (!ReadJsonString(metadata, "targetId", &target_id) || target_id.empty() || target_id.size() > 128)
+      return false;
+    const auto observed = session.semantic_control_signatures.find(target_id);
+    if (observed == session.semantic_control_signatures.end()) return false;
+    const std::uint64_t expected_epoch = session.cancel_epoch;
+    auto pending = std::make_shared<ArtifactReadPending>();
+    const WindowsSession copy = session;
+    const std::string signature = observed->second;
+    std::atomic<bool> &running = InterlockWorkerRunning();
+    if (running.exchange(true)) return false;
+    try {
+      std::thread([pending, copy, target_id, signature, expected_epoch, &running]() {
+        bool ok = false;
+        std::string value;
+        try {
+          struct ComApartment {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~ComApartment() {
+              if (SUCCEEDED(initialized)) CoUninitialize();
+            }
+          } apartment;
+          const auto still_valid = [pending, expected_epoch]() {
+            return !pending->abandoned.load(std::memory_order_acquire) &&
+                   cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
+          };
+          // The V1 resolution (search, signature, risk) and the signature the read checks run on
+          // this worker inside ONE bounded V1 path (#820), with the epoch of the request: the first
+          // timed-out call ends them all and a Cancel stops them before the next call. Outside a path
+          // the V1 calls are refused, so without it no node could be read. The path's budget is the
+          // lane's wait: once the lane has given up (abandoned), the walk ends at its next call
+          // instead of holding the single-flight slot, which the interlock entry shares, for as long
+          // as a large tree takes.
+          const WindowsV1UiaPath uia_path(kInterlockLaneHoldLimit, expected_epoch);
+          IUIAutomationElement *target = nullptr;
+          std::string why;
+          if (FindWindowsSemanticTarget(copy, target_id, &target, &why)) {
+            std::string current;
+            const bool same_control =
+                ComputeWindowsControlSignature(target, copy.pid, nullptr, &current) && current == signature;
+            // The V1 risk of the element, as for every semantic action: a secure or high-impact
+            // element is never read, whatever else says.
+            const bool risky = RejectWindowsRisk(ClassifyWindowsUiaElement(target), &why);
+            target->Release();
+            if (same_control && !risky) {
+              std::unique_ptr<WindowsUiaShadowSource> source = WindowsUiaShadowSource::Create(
+                  copy.active_window, POINT{0, 0}, still_valid,
+                  WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
+                  windows_uia_source_detail::InterlockShellLookupRunning());
+              if (source != nullptr) {
+                // The element the read finds is checked against the observed signature (runtime id
+                // included), the same function the observation and the semantic actions use.
+                const std::uint32_t pid = copy.pid;
+                source->SetSignatureProvider([pid](IUIAutomationElement *element, std::string *out) {
+                  return ComputeWindowsControlSignature(element, pid, nullptr, out);
+                });
+                ShadowRequestInfo info;
+                info.policy_language = copy.policy_language;
+                info.maximum_mode = "full_access_app";
+                WindowsArtifactReadResult result = ReadWindowsArtifactValue(*source, target_id, info, signature);
+                ok = result.ok;
+                value = std::move(result.text);
+              }
+            }
+          }
+        } catch (...) {
+          ok = false;
+          value.clear();
+        }
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          // The lane sets `abandoned` while it holds this lock, so this look is not a race: a value
+          // that arrives after the lane gave up is overwritten here and never stored.
+          if (pending->abandoned.load(std::memory_order_acquire)) {
+            ScrubString(&value);
+            value.clear();
+            ok = false;
+          }
+          pending->ok = ok;
+          pending->text = std::move(value);
+          pending->done = true;
+        }
+        running.store(false);
+        pending->ready.notify_one();
+      }).detach();
+    } catch (...) {
+      running.store(false);
+      return false;
+    }
+    {
+      std::unique_lock<std::mutex> lock(pending->mutex);
+      if (!pending->ready.wait_for(lock, kInterlockLaneHoldLimit, [&pending] { return pending->done; })) {
+        pending->abandoned.store(true, std::memory_order_release);
+        return false;
+      }
+      if (!pending->ok) return false;
+      *text = pending->text;
+      ScrubString(&pending->text);
+    }
+    // The action was canceled or the window changed while the worker read: no value.
+    if (cancellation_epoch.load(std::memory_order_acquire) != expected_epoch ||
+        !RevalidateWindowsTarget(session, bounds, expected_epoch) || text->empty() ||
+        text->size() > kArtifactReadMaxBytes) {
+      ScrubString(text);
+      text->clear();
+      return false;
+    }
+    return true;
+  } catch (...) {
+    ScrubString(text);
+    text->clear();
+    return false;
+  }
+}
+// END artifact read
+
 bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const Frame &request, bool *handshaken) {
   const auto type = static_cast<MessageType>(request.header.message_type);
@@ -5737,6 +5886,18 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     std::string operation;
     if (!ReadJsonString(metadata, "operation", &operation))
       operation = "probe";
+    if (operation == "read_node_value") {
+      // The value of one node for copy (#785 T15-4w): its own answer, never cached.
+      WindowsSession *session = FindWindowsSession(request);
+      std::string text;
+      const bool read = session != nullptr && ReadWindowsNodeValueOnLane(*session, metadata, &text);
+      std::string payload = read ? "{\"ok\":true,\"text\":\"" + JsonEscape(text) + "\"}" : "{\"ok\":false}";
+      const bool sent = Respond(pipe, request, MessageType::kProbeResult, payload);
+      ScrubString(&text);
+      ScrubString(&payload);
+      if (!sent) return false;
+      break;
+    }
     std::string response;
     std::string reason;
     bool succeeded = false;

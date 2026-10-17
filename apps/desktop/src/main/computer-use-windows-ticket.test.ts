@@ -65,7 +65,8 @@ describe('Windows helper ordinary ticket (S5-a)', () => {
   it('shares one binding check between the preflight and the dispatch', () => {
     const dispatch = between(host, 'bool DispatchWindowsAction(', 'BackendProbe ProbeBackend(');
     expect(dispatch).toContain('ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds');
-    expect(host.match(/ValidateWindowsDispatchBinding\(/gu)).toHaveLength(3);
+    // the definition, the preflight, the dispatch, and the read of one node's value (#785 T15-4w)
+    expect(host.match(/ValidateWindowsDispatchBinding\(/gu)).toHaveLength(4);
   });
 
   it('requires the ticket for every dispatch, after the replay answer and before any input', () => {

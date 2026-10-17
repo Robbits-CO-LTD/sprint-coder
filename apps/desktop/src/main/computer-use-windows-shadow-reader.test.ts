@@ -213,6 +213,9 @@ describe('Windows UI Automation source only reads', () => {
       'GetAttributes',
       'GetCurrentPatternAs',
       'get_CurrentValue',
+      // the value of one node for `copy` (#785 T15-4w): a bounded text of the document range
+      'get_DocumentRange',
+      'GetText',
       'CreatePropertyCondition',
       'FindFirst',
       'get_RawViewWalker',
@@ -223,8 +226,9 @@ describe('Windows UI Automation source only reads', () => {
       'AddRef',
     ]);
     for (const name of methods) expect(allowedMethods.has(name), name).toBe(true);
-    // The value of a pattern is read in exactly one place, and nothing is set, invoked or moved.
-    expect(source.match(/get_CurrentValue/gu)?.length).toBe(1);
+    // The value of a pattern is read in exactly two places (the page address of a Document, and the
+    // value of one node for `copy`), and nothing is set, invoked or moved.
+    expect(source.match(/get_CurrentValue/gu)?.length).toBe(2);
     expect(code(source)).not.toMatch(
       /SetValue|Invoke\(|->Select|Toggle|->Expand|->Collapse|SetFocus|ScrollIntoView|->Move|Resize|->Close|SendInput|SendMessage|PostMessage|keybd_event|mouse_event|SetCursorPos|SetForegroundWindow|SetWindowPos|ShellExecute|CreateProcess|WriteProcessMemory|OpenClipboard|RegisterHotKey/u,
     );
@@ -455,6 +459,9 @@ describe('Windows UI Automation source only reads', () => {
       'ShellLookupRunning',
       'InterlockShellLookupRunning',
       'Text',
+      'Value',
+      'ControlSignature',
+      'SetSignatureProvider',
       'View',
       'Widen',
       'WindowProcessPath',

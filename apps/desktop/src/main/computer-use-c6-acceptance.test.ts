@@ -2537,7 +2537,11 @@ describe('C6 acceptance: ways round the card, pinned as they are today (L2-L11)'
     expect(seen.map((list) => list.length)).toEqual([1, 1, 1, 0]);
   });
 
-  it('L11: current behaviour (decision D9, T15-E (5)): a Task that has been closed can still start a session and copy', async () => {
+  // D9 / T15-E (5) is resolved at the router: `canStartSession` refuses an ARCHIVED Task (see
+  // computer-use-session-gate.test.ts). Here the Task has only been closed to the controller (the
+  // artifacts dropped), and the harness's own gate does not model the archive, so a fresh session may
+  // begin and copy: what "closed" alone means.
+  it('L11: current behaviour (decision D9): a Task that has only been closed to the controller can start a fresh session and copy', async () => {
     const run = c6Acceptance();
     run.controller.taskClosed('task-1');
     const { id, output } = await copyInA(run, 'Total 42');
