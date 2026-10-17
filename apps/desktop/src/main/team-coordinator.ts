@@ -7107,10 +7107,18 @@ function workerResultMessageContent(completion: WorkerCompletion): string {
   return JSON.stringify({ ...completion, criteria: undefined });
 }
 
-/** One secret-redacted line of at most `maxLength` characters for a Worker commit message. */
-function commitMessageLine(text: string, maxLength: number): string {
-  const line = redactSecrets(text).replace(/\s+/gu, ' ').trim();
-  return line.length <= maxLength ? line : `${line.slice(0, maxLength - 1).trimEnd()}…`;
+/**
+ * One secret-redacted line of at most `maxLength` characters (code points, so an emoji is never cut
+ * in half) for a Worker commit message.
+ */
+export function commitMessageLine(text: string, maxLength: number): string {
+  const characters = Array.from(redactSecrets(text).replace(/\s+/gu, ' ').trim());
+  return characters.length <= maxLength
+    ? characters.join('')
+    : `${characters
+        .slice(0, maxLength - 1)
+        .join('')
+        .trimEnd()}…`;
 }
 
 function isolationWorktreeId(executionId: string, repositoryOrdinal: number): string {
