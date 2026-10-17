@@ -11,6 +11,7 @@
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_effect_measurement.h"
 #include "computer_use_artifact_read_judgement.h"
+#include "computer_use_windows_artifact_read.h"
 #include "computer_use_native_interlock.h"
 #include "computer_use_native_interlock_capture.h"
 #include "computer_use_windows_interlock_capture.h"
@@ -2885,6 +2886,14 @@ struct FakeUiaNode {
   bool has_item = false;
   std::string item_path;
   bool item_is_folder = false;
+  // The value of the node (#785 T15-4w).
+  bool has_value = false;
+  std::string value;
+  ShadowReadResult value_result = ShadowReadResult::kOk;
+  // The control signature of the node (what the observation recorded for its id).
+  bool has_signature = true;
+  std::string signature;
+  ShadowReadResult signature_result = ShadowReadResult::kOk;
   ShadowReadResult name_result = ShadowReadResult::kOk;
   ShadowReadResult id_result = ShadowReadResult::kOk;
   // The class read that fails (1 = the first one), counted per node; 0 = none.
@@ -2919,9 +2928,12 @@ public:
   long core_calls = 0;
   long item_calls = 0;
   long url_calls = 0;
+  long value_calls = 0;
   Element last_tab = kNoElement;
   // Time that passes inside the shell lookup (a slow Explorer).
   std::uint64_t item_delay_ns = 0;
+  // Time that passes inside a value read (a slow provider).
+  std::uint64_t value_delay_ns = 0;
 
   int Add(int parent, const std::string &control, const std::string &name = "",
           const std::string &class_name = "") {
@@ -3034,6 +3046,23 @@ public:
     ++core_calls;
     if (core_result != ShadowReadResult::kOk) return core_result;
     return ShadowCheckText(core_path, maximum_bytes, output);
+  }
+  ShadowReadResult ControlSignature(Element element, std::string *signature) override {
+    Tick();
+    const FakeUiaNode &node = nodes[element];
+    if (node.signature_result != ShadowReadResult::kOk) return node.signature_result;
+    if (!node.has_signature) return ShadowReadResult::kAbsent;
+    *signature = node.signature;
+    return ShadowReadResult::kOk;
+  }
+  ShadowReadResult Value(Element element, std::size_t maximum_bytes, std::string *output) override {
+    Tick();
+    ++value_calls;
+    now += value_delay_ns;
+    const FakeUiaNode &node = nodes[element];
+    if (node.value_result != ShadowReadResult::kOk) return node.value_result;
+    if (!node.has_value) return ShadowReadResult::kAbsent;
+    return ShadowCheckText(node.value, maximum_bytes, output);
   }
   ShadowReadResult ItemPath(Element element, Element tab, std::size_t maximum_bytes, std::string *path,
                             bool *is_folder) override {
@@ -8326,6 +8355,208 @@ bool CheckWindowsInterlockJourneys() {
   return true;
 }
 
+// ---- #785 T15-4w: the Windows read of one node's value --------------------------------------------
+
+bool CheckWindowsArtifactRead() {
+  using namespace sprint_coder::computer_use;
+  const auto request = []() {
+    ShadowRequestInfo info = UiaRequest("copy");
+    info.policy_language = "en";
+    return info;
+  };
+  // The read of the Edit of an ordinary form. `tweak` changes the form before it is read.
+  // `expected` is the signature the observation recorded for the id; the Edit carries "sig-edit".
+  const auto read = [&](const std::function<void(FakeForm &)> &tweak, const char *target = "name",
+                        const std::string &expected = "sig-edit") {
+    FakeForm form;
+    form.Node(form.edit).has_value = true;
+    form.Node(form.edit).value = "Fixture text: safe to replace";
+    form.Node(form.edit).signature = "sig-edit";
+    if (tweak) tweak(form);
+    const WindowsArtifactReadResult result = ReadWindowsArtifactValue(form.source, target, request(), expected);
+    return std::make_pair(result, form.source.value_calls);
+  };
+
+  // The node that is READ is the observed one: the same id on a rebuilt control (another runtime id,
+  // so another signature), an unreadable or missing signature, and no signature to compare with.
+  {
+    const auto [rebuilt, rebuilt_calls] = read([](FakeForm &form) { form.Node(form.edit).signature = "sig-rebuilt"; });
+    if (!Check(!rebuilt.ok && rebuilt.signature_mismatch && rebuilt_calls == 0,
+               "artifact-read-same-id-another-runtime-id-is-refused-unread")) return false;
+    const auto [failed, failed_calls] = read([](FakeForm &form) { form.Node(form.edit).signature_result = ShadowReadResult::kFailed; });
+    if (!Check(!failed.ok && failed.signature_mismatch && failed_calls == 0, "artifact-read-unreadable-signature-is-refused")) return false;
+    const auto [none, none_calls] = read([](FakeForm &form) { form.Node(form.edit).has_signature = false; });
+    if (!Check(!none.ok && none.signature_mismatch && none_calls == 0, "artifact-read-no-signature-is-refused")) return false;
+    const auto [unexpected, unexpected_calls] = read(nullptr, "name", "");
+    if (!Check(!unexpected.ok && unexpected.signature_mismatch && unexpected_calls == 0,
+               "artifact-read-nothing-to-compare-with-is-refused")) return false;
+    // The value is read from the node the signature was checked on: the checked node is the Edit.
+    const auto [other, other_calls] = read(nullptr, "name", "sig-of-another-control");
+    if (!Check(!other.ok && other.signature_mismatch && other_calls == 0, "artifact-read-other-expected-signature-is-refused")) return false;
+  }
+  // A value read that returns after the shadow deadline: no value, whatever it returned (the deadline
+  // ends the read like a cancel; a late value is never used).
+  {
+    const auto [late, late_calls] = read([](FakeForm &form) { form.source.value_delay_ns = kShadowDeadlineNs * 2; });
+    if (!Check(!late.ok && late.incomplete && late.text.empty() && late_calls == 1,
+               "artifact-read-value-past-the-deadline-is-not-used")) return false;
+  }
+  // An Edit with a value is read, and the value is exactly the node's.
+  {
+    const auto [result, value_calls] = read(nullptr);
+    if (!Check(result.ok && result.text == "Fixture text: safe to replace" && value_calls == 1 &&
+                   result.verdict.MayRead(),
+               "artifact-read-edit-value")) return false;
+  }
+  // The same read of a node with no value: refused, nothing but a Name (R3).
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) { form.Node(form.edit).has_value = false; });
+    if (!Check(!result.ok && result.verdict.MayRead() && !result.incomplete && value_calls == 1,
+               "artifact-read-node-without-a-value-is-refused")) return false;
+  }
+  // A value over the bound is refused, never cut.
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) {
+      form.Node(form.edit).value = std::string(kArtifactReadMaxBytes + 1, 'a');
+    });
+    if (!Check(!result.ok && result.text.empty(), "artifact-read-over-the-bound-is-refused")) return false;
+    const auto [exact, exact_calls] = read([](FakeForm &form) {
+      form.Node(form.edit).value = std::string(kArtifactReadMaxBytes, 'a');
+    });
+    if (!Check(exact.ok && exact.text.size() == kArtifactReadMaxBytes && exact_calls == 1,
+               "artifact-read-exactly-the-bound-is-read")) return false;
+  }
+  // A password field: refused before the value is touched, and the password flag is the reason.
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) { form.Node(form.edit).password = true; });
+    if (!Check(!result.ok && result.verdict.Has(ArtifactReadRefusal::kSecure) && value_calls == 0,
+               "artifact-read-password-edit-is-refused-unread")) return false;
+  }
+  // A password flag that could not be read is an incomplete node, not a pass.
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) {
+      form.Node(form.edit).password_result = ShadowReadResult::kFailed;
+    });
+    if (!Check(!result.ok && result.verdict.Has(ArtifactReadRefusal::kFactsMissing) && value_calls == 0,
+               "artifact-read-unreadable-password-flag-is-refused")) return false;
+  }
+  // The class name (the subrole) could not be read: metadata is not complete, so refused, unread.
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) { form.Node(form.edit).class_fails_on_read = 1; });
+    if (!Check(!result.ok && result.verdict.Has(ArtifactReadRefusal::kFactsMissing) && value_calls == 0,
+               "artifact-read-unreadable-class-is-refused")) return false;
+  }
+  // A role that may not be read: a button, a list item, a group; the ROLE is the control type name.
+  for (const char *type : {"Button", "ListItem", "Group", "Pane", "MenuItem", "CheckBox"}) {
+    const auto [result, value_calls] = read([&](FakeForm &form) { form.Node(form.edit).control_type = type; });
+    if (!Check(!result.ok && result.verdict.Has(ArtifactReadRefusal::kRoleNotAllowed) && value_calls == 0,
+               (std::string("artifact-read-role-is-refused-") + type).c_str())) return false;
+  }
+  // The legacy V1 role names are not control types: they are refused too.
+  for (const char *type : {"UIATextField", "AXTextField", "textfield"}) {
+    const auto [result, value_calls] = read([&](FakeForm &form) { form.Node(form.edit).control_type = type; });
+    if (!Check(!result.ok && value_calls == 0, (std::string("artifact-read-legacy-role-is-refused-") + type).c_str()))
+      return false;
+  }
+  // Text is a readable role; without a value (a plain Win32 static) it is refused, with one it is read.
+  {
+    const auto [plain, plain_calls] = read([](FakeForm &form) {
+      form.Node(form.edit).control_type = "Text";
+      form.Node(form.edit).has_value = false;
+    });
+    if (!Check(!plain.ok && plain.verdict.MayRead() && plain_calls == 1, "artifact-read-static-text-without-a-value")) return false;
+    const auto [shown, shown_calls] = read([](FakeForm &form) { form.Node(form.edit).control_type = "Text"; });
+    if (!Check(shown.ok && shown_calls == 1, "artifact-read-text-with-a-value")) return false;
+  }
+  // A Document in a window with no web content: the judgement allows the role, and the shadow's origin
+  // of a native Document keeps it a refusal (the known gap, on purpose): no value is read.
+  {
+    const auto [result, value_calls] = read([](FakeForm &form) { form.Node(form.edit).control_type = "Document"; });
+    if (!Check(!result.ok && value_calls == 0, "artifact-read-native-document-is-the-known-gap")) return false;
+  }
+  // A browser window: by the window class, the process name, and a page address on a Document.
+  {
+    const auto [chrome, chrome_calls] = read([](FakeForm &form) { form.Node(form.window).class_name = "Chrome_WidgetWin_1"; });
+    if (!Check(!chrome.ok && chrome.verdict.Has(ArtifactReadRefusal::kBrowserWindow) && chrome_calls == 0,
+               "artifact-read-chrome-widget-window-is-refused")) return false;
+    const auto [gecko, gecko_calls] = read([](FakeForm &form) { form.Node(form.window).class_name = "MozillaWindowClass"; });
+    if (!Check(!gecko.ok && gecko.verdict.Has(ArtifactReadRefusal::kBrowserWindow) && gecko_calls == 0,
+               "artifact-read-mozilla-window-is-refused")) return false;
+    for (const char *path : {"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\x\\MSEDGE.EXE", "firefox.exe"}) {
+      const auto [named, named_calls] = read([&](FakeForm &form) { form.source.process_path = path; });
+      if (!Check(!named.ok && named.verdict.Has(ArtifactReadRefusal::kBrowserWindow) && named_calls == 0,
+                 (std::string("artifact-read-browser-executable-is-refused-") + path).c_str())) return false;
+    }
+    // An executable that merely CONTAINS a browser's name is not one.
+    const auto [other, other_calls] = read([](FakeForm &form) { form.source.process_path = "C:\\x\\notchrome.exe.txt"; });
+    if (!Check(other.ok && other_calls == 1, "artifact-read-a-name-that-contains-a-browser-is-not-one")) return false;
+    // The process of the window could not be read: the identity was not checked, so refused.
+    const auto [unknown, unknown_calls] = read([](FakeForm &form) { form.source.process_result = ShadowReadResult::kFailed; });
+    if (!Check(!unknown.ok && unknown_calls == 0, "artifact-read-unreadable-process-is-refused")) return false;
+  }
+  // A command surface (a console window) and a surface word in the chain: not read.
+  {
+    const auto [console, console_calls] = read([](FakeForm &form) { form.Node(form.window).class_name = "ConsoleWindowClass"; });
+    if (!Check(!console.ok && console.verdict.Has(ArtifactReadRefusal::kSurfaceNotOrdinary) && console_calls == 0,
+               "artifact-read-console-window-is-refused")) return false;
+    const auto [word, word_calls] = read([](FakeForm &form) { form.Node(form.window).name = "Terminal"; });
+    if (!Check(!word.ok && word_calls == 0, "artifact-read-surface-word-in-the-chain-is-refused")) return false;
+  }
+  // High impact: the node's own label has the confirmation vocabulary (the native's lexicon).
+  {
+    const auto [pay, pay_calls] = read([](FakeForm &form) { form.Node(form.edit).name = "Pay now"; });
+    if (!Check(!pay.ok && pay.verdict.Has(ArtifactReadRefusal::kHighImpact) && pay_calls == 0,
+               "artifact-read-high-impact-label-is-refused")) return false;
+  }
+  // A card or a PIN field by the caption next to it: credential, not read.
+  {
+    const auto [pin, pin_calls] = read([](FakeForm &form) { form.Node(form.caption).name = "Enter your PIN"; });
+    if (!Check(!pin.ok && pin.verdict.Has(ArtifactReadRefusal::kSecure) && pin_calls == 0,
+               "artifact-read-pin-caption-is-refused")) return false;
+  }
+  // The node is not there, or two nodes carry the id: nothing is read.
+  {
+    const auto [absent, absent_calls] = read(nullptr, "no-such-id");
+    if (!Check(!absent.ok && absent_calls == 0, "artifact-read-unknown-target-is-refused")) return false;
+    const auto [twice, twice_calls] = read([](FakeForm &form) {
+      const int duplicate = form.source.Add(form.pane, "Edit", "Other", "Edit");
+      form.Node(duplicate).automation_id = "name";
+      form.Node(duplicate).has_value = true;
+      form.Node(duplicate).value = "other";
+    });
+    if (!Check(!twice.ok && twice_calls == 0, "artifact-read-ambiguous-target-is-refused")) return false;
+  }
+  // A cancel before the read ends it with no value, and one during the value read drops the value.
+  {
+    const auto [early, early_calls] = read([](FakeForm &form) { form.source.cancel_after = 3; });
+    if (!Check(!early.ok && early.incomplete && early_calls == 0, "artifact-read-canceled-early-reads-nothing")) return false;
+    FakeForm probe;
+    probe.Node(probe.edit).has_value = true;
+    probe.Node(probe.edit).value = "x";
+    const ShadowUiaCapture warm = WindowsShadowReader(probe.source).Capture("copy", "name");
+    (void)warm;
+    const long capture_calls = probe.source.calls;
+    const auto [late, late_calls] = read([&](FakeForm &form) { form.source.cancel_after = capture_calls + 1; });
+    if (!Check(!late.ok && late.text.empty() && late.incomplete, "artifact-read-canceled-during-the-value-drops-it")) return false;
+    (void)late_calls;
+  }
+  // A budget spent during the capture ends it.
+  {
+    const auto [slow, slow_calls] = read([](FakeForm &form) { form.source.step_ns = 40'000'000; });
+    if (!Check(!slow.ok && slow.incomplete && slow_calls == 0, "artifact-read-budget-spent-reads-nothing")) return false;
+  }
+  // A failed value read is a refusal as well.
+  {
+    const auto [failed, failed_calls] = read([](FakeForm &form) { form.Node(form.edit).value_result = ShadowReadResult::kFailed; });
+    if (!Check(!failed.ok && failed.incomplete && failed_calls == 1, "artifact-read-failed-value-read-is-refused")) return false;
+  }
+  // The bound of a value is the contracts' (a source test holds the number), and the judgement itself
+  // is the one T15-4p: the same facts give the same verdict as the pure function.
+  if (!Check(kArtifactReadMaxBytes == 4096, "artifact-read-bound-is-4096")) return false;
+  std::cout << "Computer Use native Windows artifact read: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -8354,6 +8585,7 @@ int main() {
   if (!CheckClickRule()) return 1;
   if (!CheckInterlockDispatchCodes()) return 1;
   if (!CheckWindowsInterlockJourneys()) return 1;
+  if (!CheckWindowsArtifactRead()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;
