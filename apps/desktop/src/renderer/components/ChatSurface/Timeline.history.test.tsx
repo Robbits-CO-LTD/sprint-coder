@@ -72,6 +72,89 @@ describe('Timeline history (issue #842)', () => {
     );
   });
 
+  it('marks a steered Turn once, under its last request or its last reply', async () => {
+    // steerTurn adds a further user message with the same Turn id.
+    useAppStore.setState({
+      messagesByTask: {
+        'task-1': [
+          message({ id: 'u1', turnId: 'turn-1', content: '最初の依頼' }),
+          message({ id: 'u1b', turnId: 'turn-1', content: '途中での修正指示' }),
+          message({ id: 'u2', turnId: 'turn-2', content: '次の依頼' }),
+          message({ id: 'u2b', turnId: 'turn-2', content: '次の修正指示' }),
+          message({ id: 'a2', turnId: 'turn-2', author: 'assistant', content: '途中の回答' }),
+        ],
+      },
+      interruptedTurnIdsByTask: { 'task-1': ['turn-1', 'turn-2'] },
+    });
+    const html = await render();
+    expect(html.match(/data-testid="turn-interrupted-marker"/gu) ?? []).toHaveLength(2);
+    expect(html.match(/回答の前に止まりました。/gu) ?? []).toHaveLength(1);
+    expect(html.indexOf('回答の前に止まりました。')).toBeGreaterThan(
+      html.indexOf('途中での修正指示'),
+    );
+    expect(html.indexOf('回答の前に止まりました。')).toBeLessThan(html.indexOf('次の依頼'));
+    expect(html.match(/この回答は完了していません。/gu) ?? []).toHaveLength(1);
+    expect(html.indexOf('この回答は完了していません。')).toBeGreaterThan(
+      html.indexOf('途中の回答'),
+    );
+  });
+
+  it('drops the old stop reason once the step was resumed and waits to be admitted', async () => {
+    useAppStore.setState({
+      messagesByTask: {
+        'task-1': [
+          message({ id: 'u1' }),
+          message({ id: 'a1', author: 'assistant', content: '回答' }),
+        ],
+      },
+      turnDiffByTask: {
+        'task-1': {
+          turnId: 'turn-1',
+          entries: [
+            {
+              ordinal: 1,
+              kind: 'update',
+              path: 'src/client.ts',
+              destination: null,
+              preHash: null,
+              postHash: null,
+              provenance: 'agent_edit',
+              status: 'applied',
+              actualHash: null,
+            },
+          ],
+        },
+      },
+      teamByTask: {
+        'task-1': {
+          workers: [{ id: 'w1', role: 'implementer', state: 'waiting' }],
+          executions: [
+            {
+              id: 'e1',
+              assigneeAgentId: 'w1',
+              state: 'waiting_resume',
+              terminalReason: 'worker_reported_failure',
+              updatedAt: '2026-10-18T00:00:01.000Z',
+            },
+          ],
+          activities: [],
+          missions: [
+            {
+              id: 'm1',
+              state: 'running',
+              steps: [
+                { executionId: 'e1', state: 'waiting_resume', graph: { stepResumePending: true } },
+              ],
+            },
+          ],
+        } as unknown as TeamDetail,
+      },
+    });
+    const html = await render();
+    expect(html).toContain('<span>implementer</span><span>再開済み</span>');
+    expect(html).not.toContain('Workerが失敗を報告');
+  });
+
   it('renders no marker when nothing was interrupted', async () => {
     useAppStore.setState({
       messagesByTask: {

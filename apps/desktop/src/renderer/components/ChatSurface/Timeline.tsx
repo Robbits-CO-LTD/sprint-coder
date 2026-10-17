@@ -4,7 +4,7 @@ import type {
   AutoPermissionDecision,
   ChatMessage,
   TeamActivitySummary,
-  TeamExecutionSummary,
+  TeamDetail,
   TurnDiff,
   TurnDiffEntry,
 } from '../../types/sprint-coder';
@@ -147,7 +147,24 @@ export function Timeline({
     return content;
   }, [messages]);
 
-  const interruptedTurns = useMemo(() => new Set(interruptedTurnIds), [interruptedTurnIds]);
+  // One marker per interrupted Turn (issue #842): under its last reply, or under its last request
+  // when nothing was written yet. A steered Turn holds several requests with the same Turn id.
+  const interruptedMarkerByMessage = useMemo(() => {
+    const markers = new Map<string, 'reply' | 'request'>();
+    if (interruptedTurnIds.length === 0) return markers;
+    const interrupted = new Set(interruptedTurnIds);
+    const lastReply = new Map<string, string>();
+    const lastRequest = new Map<string, string>();
+    for (const message of messages) {
+      if (message.turnId === null || !interrupted.has(message.turnId)) continue;
+      if (message.author === 'assistant') lastReply.set(message.turnId, message.id);
+      else if (message.author === 'user') lastRequest.set(message.turnId, message.id);
+    }
+    for (const [turnId, messageId] of lastRequest)
+      if (!lastReply.has(turnId)) markers.set(messageId, 'request');
+    for (const messageId of lastReply.values()) markers.set(messageId, 'reply');
+    return markers;
+  }, [interruptedTurnIds, messages]);
 
   const runtimeSummaryByTurn = useMemo(() => {
     const recordsByTurn = new Map<string, { changes: (typeof fileChanges)[number]['changes'] }[]>();
@@ -342,7 +359,7 @@ export function Timeline({
               message.id === latestAssistantMessageId
                 ? (teamDetail?.workers ?? []).map((worker) => ({
                     role: worker.role,
-                    status: workerBreakdownStatus(worker, teamDetail?.executions),
+                    status: workerBreakdownStatus(worker, teamDetail),
                   }))
                 : [];
             // A request that produced nothing must not read as success (issue #11). Detected from the
@@ -383,14 +400,8 @@ export function Timeline({
             // marker sits under the reply, or under the request when nothing was written yet. The
             // current Turn is left to its Run Card, which already shows its final state.
             const interruptedMarker =
-              message.turnId !== null &&
-              interruptedTurns.has(message.turnId) &&
               turn?.turnId !== message.turnId
-                ? message.author === 'assistant'
-                  ? 'reply'
-                  : message.author === 'user' && !assistantCreatedAtByTurn.has(message.turnId)
-                    ? 'request'
-                    : null
+                ? (interruptedMarkerByMessage.get(message.id) ?? null)
                 : null;
             return (
               <div key={message.id} style={{ display: 'contents' }}>
@@ -588,11 +599,19 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
  */
 function workerBreakdownStatus(
   worker: { id: string; state: string },
-  executions: readonly TeamExecutionSummary[] | undefined,
+  team: Pick<TeamDetail, 'executions' | 'missions'> | null | undefined,
 ): string {
-  const execution = latestExecutionForWorker(executions, worker.id);
+  const execution = latestExecutionForWorker(team?.executions, worker.id);
   if (execution === null || execution.state !== 'waiting_resume')
     return workerStateLabel(worker.state);
+  // A graph step resumed by hand stays waiting_resume, with its old failure, until the scheduler
+  // admits it; the old reason would read as the step still being stopped.
+  const resumePending = (team?.missions ?? []).some((mission) =>
+    mission.steps.some(
+      (step) => step.executionId === execution.id && step.graph?.stepResumePending === true,
+    ),
+  );
+  if (resumePending) return '再開済み';
   const reason = stoppedExecutionReason(execution);
   const label = executionStateLabel(execution.state);
   return reason === null ? label : `${label}: ${reason}`;
