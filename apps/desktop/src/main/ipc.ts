@@ -60,6 +60,7 @@ import {
 } from 'node:path';
 import {
   protectedWorkspaceRootClassification,
+  protectedWorkspaceRootLocationUnknown,
   protectedWorkspaceRootLabel,
   workspaceMutationBinding,
   workspacePermissionResourceFromGuard,
@@ -10850,7 +10851,13 @@ export function protectedProjectFolderWarning(
     const classification = protectedWorkspaceRootClassification(path);
     return classification === null
       ? []
-      : [`・${path}（${protectedWorkspaceRootLabel(classification)}）`];
+      : [
+          `・${path}（${protectedWorkspaceRootLabel(classification)}${
+            protectedWorkspaceRootLocationUnknown(path)
+              ? '。保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています'
+              : ''
+          }）`,
+        ];
   });
   if (protectedFolders.length === 0) return null;
   return {

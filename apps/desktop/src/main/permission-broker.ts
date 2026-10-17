@@ -17,6 +17,7 @@ import {
   isIssuedPathGuard,
   protectedWorkspaceRootClassification,
   protectedWorkspaceRootLabel,
+  protectedWorkspaceRootLocationUnknown,
   workspacePermissionResourceFromGuard,
   type PathGuard,
 } from './path-guard';
@@ -381,13 +382,27 @@ export function protectedWorkspaceRootDenialReason(
     guard.workspacePath,
     workspaceAuthority,
   );
-  return protectedRoot === null ? undefined : protectedWorkspaceRootMessage(protectedRoot);
+  return protectedRoot === null
+    ? undefined
+    : protectedWorkspaceRootMessage(
+        protectedRoot,
+        protectedWorkspaceRootLocationUnknown(guard.workspacePath, workspaceAuthority),
+      );
 }
 
+/**
+ * `locationUnknown`: the protected folder itself could not be located, so the Workspace is
+ * protected only because a folder above it has that folder's name (#838), and the reason says so.
+ */
 export function protectedWorkspaceRootMessage(
   classification: NonNullable<ReturnType<typeof protectedWorkspaceRootClassification>>,
+  locationUnknown = false,
 ): string {
-  return `このWorkspaceは保護された場所（${protectedWorkspaceRootLabel(classification)}）にあるため、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
+  const place = `保護された場所（${protectedWorkspaceRootLabel(classification)}）`;
+  const where = locationUnknown
+    ? `${place}にある可能性があるため（保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています）`
+    : `${place}にあるため`;
+  return `このWorkspaceは${where}、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
 }
 
 function operationForCapability(capability: Capability): PermissionOperation {
