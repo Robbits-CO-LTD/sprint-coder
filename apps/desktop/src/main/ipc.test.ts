@@ -7391,6 +7391,142 @@ describe('toolPermissionFacts over every path an Edit Saga call touches (issue #
   }
 });
 
+// Issue #836: a high-risk request in a Workspace whose root sits in a protected place is refused by
+// the policy (immutable_protected_resource), not by the trusted-facts check that #830 explained, so
+// the model and the person were only told `permission_denied`. This runs the Main Turn path: the
+// managed harness, ApprovalCoordinator, IpcRouter.evaluateToolPermission and a real PermissionBroker.
+describe('a high-risk call in a Workspace under a protected location (issue #836)', () => {
+  const protectedReason =
+    'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。';
+
+  async function dispatchCreateFile(
+    root: string,
+    preset: AccessPreset,
+    path = 'fresh.txt',
+  ): Promise<unknown> {
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: root, label: 'my-app', role: 'primary', status: 'available' },
+      ],
+      digest: 'e'.repeat(64),
+    };
+    const audits: { reason: string }[] = [];
+    const permissionBroker = new PermissionBroker({
+      getPermissionPolicy: () => ({
+        preset,
+        policyEpoch: 1,
+        expandedPolicy: expandAccessPreset(preset),
+        revokedCapabilities: [],
+      }),
+      listPermissionGrants: () => [],
+      readTurnWorkspaceSetForTask: () => workspace,
+      commitPermissionEvaluation: (_taskId: string, _request: unknown, evaluation: never) => {
+        audits.push(evaluation);
+        return undefined;
+      },
+    } as never);
+    const router = Object.create(IpcRouter.prototype) as {
+      evaluateToolPermission(
+        request: ToolAuthorizationRequest,
+        capability: string,
+      ): Promise<ToolAuthorizationDecision>;
+    };
+    Object.assign(router, {
+      managedWorkerCall: new Map(),
+      autoReviewer: AutoReviewer.createProduction(),
+      publish: () => undefined,
+      permissionBroker,
+    });
+    const coordinator = new ApprovalCoordinator({
+      persistence: {} as never,
+      now: () => '2026-10-18T00:00:00.000Z',
+      expiresAt: () => '2026-10-18T01:00:00.000Z',
+      getCurrentPolicyEpoch: () => 1,
+      isTurnActive: () => true,
+      evaluatePermission: ({ capability, request }) =>
+        router.evaluateToolPermission(request, capability),
+      publish: () => undefined,
+    });
+    const tools = new ManagedCodingHarness({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 1,
+      authorizer: (request, control) => coordinator.authorizeTool(request, control),
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async () => {
+          throw new Error('authorization must stop this call');
+        },
+        policyEpochFor: () => 1,
+      },
+    });
+    const context = {
+      taskId: 'task-836',
+      turnId: 'turn-836',
+      workspaceId: workspace.digest,
+      policyEpoch: 1,
+    } as const;
+    tools.startTurn(context, 'codex');
+    const error = await tools.broker
+      .dispatch({
+        ...context,
+        callId: 'call-836',
+        providerName: 'create_file',
+        input: { path, content: 'x\n' },
+      })
+      .then(
+        () => undefined,
+        (rejection: unknown) => rejection,
+      );
+    // The audit keeps the policy's own code; only what the call is told changes.
+    expect(audits.map(({ reason }) => reason)).toEqual(['immutable_protected_resource']);
+    return error;
+  }
+
+  it.each(['auto', 'ask', 'full'] as const)(
+    'stays denied under %s and tells the model why, in the words #830 uses',
+    async (preset) => {
+      const base = process.platform === 'win32' ? process.cwd() : tmpdir();
+      const testRoot = await mkdtemp(join(base, '.sprint-coder-issue-836-'));
+      try {
+        const root = join(testRoot, 'AppData', 'Local', 'Temp', 'my-app');
+        await mkdir(root, { recursive: true });
+        const error = await dispatchCreateFile(await realpath(root), preset);
+        expect(error).toBeInstanceOf(ToolAuthorizationDeniedError);
+        expect((error as ToolAuthorizationDeniedError).authorization).toMatchObject({
+          decision: 'deny',
+          reason: protectedReason,
+        });
+        expect(JSON.parse(providerWorkspaceToolFailure(error))).toEqual({
+          ok: false,
+          error: { code: 'PERMISSION_DENIED', message: protectedReason },
+        });
+      } finally {
+        await rm(testRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('keeps the policy code for a protected file inside an ordinary Workspace', async () => {
+    const base = process.platform === 'win32' ? process.cwd() : tmpdir();
+    const root = await mkdtemp(join(base, '.sprint-coder-issue-836-plain-'));
+    try {
+      const error = await dispatchCreateFile(await realpath(root), 'auto', '.env');
+      expect((error as ToolAuthorizationDeniedError).authorization).toMatchObject({
+        decision: 'deny',
+        reason: 'immutable_protected_resource',
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // Adversarial IPC hardening (Phase 7, IMPLEMENTATION_PLAN §10.4, NFR-SEC-03). Two independent
 // properties are proven here without needing a live BrowserWindow/WebContents:
 //

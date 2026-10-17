@@ -357,15 +357,31 @@ export class PermissionBroker {
       (input.request.operation === 'write' && guard.operation !== 'write')
     )
       throw new Error('Permission path facts are not derived from the supplied guard');
-    if (resource.classification !== 'workspace' && input.request.risk !== 'high') {
-      const protectedRoot = protectedWorkspaceRootClassification(
-        guard.workspacePath,
-        input.workspaceAuthority,
+    if (resource.classification !== 'workspace' && input.request.risk !== 'high')
+      throw new Error(
+        protectedWorkspaceRootDenialReason(guard, input.workspaceAuthority) ??
+          'Unclassified or protected paths must be treated as high risk',
       );
-      if (protectedRoot !== null) throw new Error(protectedWorkspaceRootMessage(protectedRoot));
-      throw new Error('Unclassified or protected paths must be treated as high risk');
-    }
   }
+}
+
+/**
+ * What a refused request is told when its Workspace root itself sits in a protected place (Issues
+ * #830, #836). Every path under such a root classifies as protected, so the same reason applies
+ * whether the trusted-facts check above refuses a low-risk request or the immutable protected-path
+ * deny refuses a high-risk one. `undefined` for an ordinary root: a protected file inside it keeps
+ * the policy's own reason.
+ */
+export function protectedWorkspaceRootDenialReason(
+  guard: PathGuard | undefined,
+  workspaceAuthority?: 'sealed-team-isolation',
+): string | undefined {
+  if (guard === undefined) return undefined;
+  const protectedRoot = protectedWorkspaceRootClassification(
+    guard.workspacePath,
+    workspaceAuthority,
+  );
+  return protectedRoot === null ? undefined : protectedWorkspaceRootMessage(protectedRoot);
 }
 
 export function protectedWorkspaceRootMessage(
