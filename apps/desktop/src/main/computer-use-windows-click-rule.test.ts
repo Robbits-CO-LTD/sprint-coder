@@ -379,6 +379,29 @@ int main() {
       std::cout << "skip nothing_moved_since (somebody else is using the machine)\n";
     }
   }
+  // The dispatch's own cursor move (SetCursorPos, between the evaluation and the send) does not count as
+  // input: the system's last input time stays, so the check does not stop every click. Checked here
+  // with the real call, the way the dispatch runs it: basis, move, wait, check, move back.
+  {
+    WindowsClickBasis basis;
+    basis.tracked = true;
+    basis.opens = false;
+    basis.input_read = WindowsReadLastInputTick(&basis.input_tick);
+    POINT original{};
+    GetCursorPos(&original);
+    const BOOL moved = SetCursorPos(original.x + 4, original.y + 3);
+    Sleep(60);
+    DWORD after_move = 0;
+    WindowsReadLastInputTick(&after_move);
+    SetCursorPos(original.x, original.y);
+    Sleep(60);
+    DWORD after_back = 0;
+    WindowsReadLastInputTick(&after_back);
+    if (basis.input_read && after_move == basis.input_tick && after_back == basis.input_tick)
+      Check(moved && !WindowsInputMovedSinceEvaluation(basis), "own_cursor_move_does_not_stop_the_click");
+    else
+      std::cout << "skip own_cursor_move (somebody else is using the machine, or the system counts the move)\n";
+  }
   // The click opens when either part says so.
   Check(WindowsClickOpens() == (WindowsSingleClickOpens() || WindowsRecentInputMayPair()), "click_opens_is_the_or");
   std::cout << (failures == 0 ? "OK\n" : "FAILED\n");
