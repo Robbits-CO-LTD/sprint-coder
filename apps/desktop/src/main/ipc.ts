@@ -357,6 +357,7 @@ import {
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
+import { computerUseSessionMayStart } from './computer-use-session-gate';
 import {
   createComputerUseRuntimeCapture,
   type ComputerUseRuntimeCapture,
@@ -1993,8 +1994,14 @@ export class IpcRouter {
       // that its own Turn is still the active one — the same requirement, expressed against the
       // Turn that owns the session rather than against "none".
       canStartSession: (taskId, ownerTurnId) =>
-        this.persistence.getActiveTurnId(taskId) === ownerTurnId &&
-        !this.teamCoordinator.hasBusyWorkers(taskId),
+        computerUseSessionMayStart(
+          {
+            persistence: this.persistence,
+            hasBusyWorkers: (id) => this.teamCoordinator.hasBusyWorkers(id),
+          },
+          taskId,
+          ownerTurnId,
+        ),
       plannerFactory: async ({
         taskId,
         turnId,
