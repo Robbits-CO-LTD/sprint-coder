@@ -208,8 +208,10 @@ export class ApprovalCoordinator {
       throwIfAborted(signal);
       evaluations.push({ capability, decision: normalizeAuthorization(evaluated) });
     }
-    if (evaluations.some(({ decision }) => decision.decision === 'deny'))
-      return { decision: 'deny', reason: 'permission_denied' };
+    // The first refusal's reason reaches the model as its tool error, so a refusal that explains
+    // itself (a Workspace in a protected place, Issue #836) is not reduced to a bare denial.
+    const denied = evaluations.find(({ decision }) => decision.decision === 'deny');
+    if (denied !== undefined) return { decision: 'deny', reason: denied.decision.reason };
     const revalidators: (() => boolean)[] = [];
     let approvalDecision: ToolAuthorizationDecision['approvalDecision'];
     let userInputSelection: number | undefined;
