@@ -492,15 +492,15 @@ describe('Windows UI Automation source only reads', () => {
     expect(helper).toContain('CLSID_CUIAutomation8');
     expect(code(source)).not.toMatch(/CLSID_CUIAutomation\b(?!8)/u);
     expect(helper).toContain('IUIAutomation2 *bounded = nullptr;');
-    expect(helper).toContain('put_ConnectionTimeout(timeout_ms)');
-    expect(helper).toContain('put_TransactionTimeout(timeout_ms)');
+    expect(helper).toContain('put_ConnectionTimeout(connection_timeout_ms)');
+    expect(helper).toContain('put_TransactionTimeout(transaction_timeout_ms)');
     expect(code(source)).not.toContain('IUIAutomation6');
     expect(helper.replace(/\s+/gu, ' ')).toContain(
       'if (!set) { created->Release(); return false; }',
     );
     // Failing to get a bounded one is "no source" (the capture is skipped), never a call without a bound.
     expect(create.replace(/\s+/gu, ' ')).toContain(
-      'if (!windows_uia_source_detail::CreateBoundedAutomation(timeout_ms, automation.Receive()) || automation.Get() == nullptr) return nullptr;',
+      'if (!windows_uia_source_detail::CreateBoundedAutomation(timeout_ms, timeout_ms, automation.Receive()) || automation.Get() == nullptr) return nullptr;',
     );
     expect(create.indexOf('CreateBoundedAutomation')).toBeLessThan(
       create.indexOf('get_RawViewWalker'),

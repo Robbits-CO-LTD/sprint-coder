@@ -77,6 +77,28 @@ describe('Computer Use native Main adapter', () => {
         Object.assign(new Error('accepted'), { code: 'STALE_TARGET', accepted: true }),
       ),
     ).toBeNull();
+    // #820: a V1 target that did not answer. Before any input (accepted false) it is a typed rejection
+    // that a new observation can answer; once the action was sent (accepted true) a pattern call that
+    // timed out is unconfirmed and stays an exception for the controller to book as an unknown effect,
+    // exactly like input_not_confirmed (the agent decides whether to repeat it).
+    expect(
+      classifyComputerUseNativeDispatchFailure(
+        Object.assign(new Error('timeout'), { code: 'ACCESSIBILITY_TIMEOUT', accepted: false }),
+      ),
+    ).toEqual({ result: 'rejected', reasonCode: 'native_accessibility_timeout' });
+    expect(
+      classifyComputerUseNativeDispatchFailure(
+        Object.assign(new Error('unconfirmed'), {
+          code: 'INPUT_TIMEOUT_UNCONFIRMED',
+          accepted: true,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyComputerUseNativeDispatchFailure(
+        Object.assign(new Error('unconfirmed'), { code: 'INPUT_TIMEOUT_UNCONFIRMED' }),
+      ),
+    ).toBeNull();
   });
 
   it('maps the three v2 interlock dispatch codes to the result of their preflight row (#500 S5-c-2 PR-5)', () => {
