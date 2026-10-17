@@ -15,6 +15,11 @@ const MAX_WORKSPACE_RULE_TOTAL_BYTES = 32 * 1024;
 export type PromptAgent = Readonly<{
   role: 'primary' | 'subagent';
   mode: 'read-only' | 'write-capable';
+  /**
+   * Set when every write and command waits on the person's approval card (issue #826). Only a
+   * write-capable agent carries it, and it is absent otherwise so other Turns keep their digest.
+   */
+  writeApproval?: 'per-call';
   parentToolNames?: readonly string[];
 }>;
 
@@ -63,6 +68,7 @@ export function compilePromptGuidance(input: {
   workspace: RuntimeWorkspaceSet;
   toolCatalog: ToolCatalogSnapshot;
   writeScope?: RuntimeWriteScope;
+  writeApproval?: 'per-call';
   agent?: PromptAgent;
   now?: Date;
   platform?: NodeJS.Platform;
@@ -93,14 +99,17 @@ export function compilePromptGuidance(input: {
   const workspaceRoots = input.workspace.roots
     .map(({ label, path, role }) => ({ label, path, role }))
     .sort((left, right) => left.path.localeCompare(right.path));
+  const mode =
+    input.writeScope === 'read-only' || requestedAgent.mode === 'read-only'
+      ? 'read-only'
+      : 'write-capable';
+  const writeApproval = input.writeApproval ?? requestedAgent.writeApproval;
   const context: CanonicalPromptContext = {
     version: PROMPT_CONTEXT_VERSION,
     agent: {
       role: requestedAgent.role,
-      mode:
-        input.writeScope === 'read-only' || requestedAgent.mode === 'read-only'
-          ? 'read-only'
-          : 'write-capable',
+      mode,
+      ...(mode === 'write-capable' && writeApproval !== undefined ? { writeApproval } : {}),
       ...(requestedAgent.parentToolNames === undefined
         ? {}
         : { parentToolNames: [...requestedAgent.parentToolNames].sort() }),
@@ -263,6 +272,10 @@ function renderPromptGuidance(context: CanonicalPromptContext): string {
     '',
     `実行主体: ${context.agent.role === 'primary' ? 'primary agent' : 'subagent'} / ${context.agent.mode}`,
   ];
+  if (context.agent.writeApproval === 'per-call')
+    lines.push(
+      '- ファイルの作成・編集とコマンドの実行はツールで行える。ただし1回ごとに利用者の承認が必要で、ツールを呼ぶと承認カードが出て許可を待つ。拒否されたら同じ操作を繰り返さない。',
+    );
   if (context.agent.role === 'subagent') {
     lines.push('- 親から委任された範囲だけを扱い、結果と根拠を親へ返す。');
     lines.push('- 親にない能力やツールを子が持つものとして扱わない。');

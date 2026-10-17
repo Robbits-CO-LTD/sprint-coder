@@ -5,7 +5,13 @@ import {
   type AutoReviewerInput,
   type AutoReviewerModel,
 } from './auto-reviewer';
-import type { PermissionRequest } from '@sprint-coder/domain';
+import {
+  REVIEWER_HUMAN_APPROVABLE_DENY_REASONS,
+  type PermissionRequest,
+  type ToolKind,
+  type ToolRisk,
+  type ToolSideEffect,
+} from '@sprint-coder/domain';
 
 const requestBase: Omit<PermissionRequest, 'reviewerInputDigest'> = {
   taskId: 'task-1',
@@ -173,4 +179,38 @@ describe('AutoReviewer', () => {
       }),
     ).resolves.toMatchObject({ decision: 'deny', reason: 'review_request_conflict' });
   });
+
+  // Issue #825: what the production reviewer refuses on the request's own facts is a question for
+  // the person, so each such reason must be one the policy engine hands to an approval card.
+  it.each([
+    ['a high-risk command', { sandboxProfile: 'full', risk: 'high' }, 'shell', 'process', 'high'],
+    ['an unsandboxed command', { sandboxProfile: 'full' }, 'shell', 'process', 'medium'],
+    ['a networked tool', {}, 'network', 'network', 'medium'],
+    ['a non-read operation', { operation: 'fetch' }, 'network', 'read', 'low'],
+    ['provider egress', { providerEgress: 'trusted-remote' }, 'fileRead', 'read', 'low'],
+  ] as const)(
+    'refuses %s only for a reason a person may still allow',
+    async (label, facts, kind, sideEffect, risk) => {
+      const reviewed: Omit<PermissionRequest, 'reviewerInputDigest'> = { ...requestBase, ...facts };
+      const tool: { kind: ToolKind; sideEffect: ToolSideEffect; risk: ToolRisk } = {
+        kind,
+        sideEffect,
+        risk,
+      };
+      const decision = await AutoReviewer.createProduction().review({
+        reviewRequestId: `review-825-${label}`,
+        ...reviewBinding,
+        request: {
+          ...reviewed,
+          reviewerInputDigest: autoReviewerInputDigest({ request: reviewed, tool, policyEpoch: 3 }),
+        },
+        tool,
+        policyEpoch: 3,
+      });
+      expect(decision.decision).toBe('deny');
+      expect(REVIEWER_HUMAN_APPROVABLE_DENY_REASONS).toContain(
+        decision.decision === 'deny' ? decision.reason : undefined,
+      );
+    },
+  );
 });

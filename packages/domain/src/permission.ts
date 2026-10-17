@@ -34,6 +34,28 @@ export function requiresPerCallHumanApproval(capability: Capability): boolean {
   return (PER_CALL_HUMAN_APPROVAL_CAPABILITIES as readonly Capability[]).includes(capability);
 }
 
+/**
+ * Auto reviewer deny reasons that mean only "not safe to allow without a person" (Issue #825).
+ *
+ * The reviewer runs after every deny stage (managed, immutable and project denies, ceilings,
+ * sandbox feasibility) has passed, so a request it sees is one Ask would put on a card. A deny for
+ * one of these reasons hands the request to the person instead of refusing it, which keeps Auto
+ * from being stricter than Ask. Every other deny reason stays final: a reviewer decision that is
+ * not bound to the evaluated facts (`input_digest_mismatch`, `review_request_conflict`) or carries
+ * an unknown reason never reaches a card, and neither does a reviewer that timed out or failed.
+ */
+export const REVIEWER_HUMAN_APPROVABLE_DENY_REASONS = [
+  'high_risk',
+  'sandbox_full',
+  'side_effect',
+  'unsupported_operation',
+  'provider_egress',
+] as const;
+
+function reviewerDenyNeedsHuman(reason: string): boolean {
+  return (REVIEWER_HUMAN_APPROVABLE_DENY_REASONS as readonly string[]).includes(reason);
+}
+
 /** Resource target prefixes for the per-call capabilities. Main owns the value after the colon. */
 export const PROJECT_MEMORY_RESOURCE_PREFIX = 'project-memory:';
 export const SKILL_DRAFT_RESOURCE_PREFIX = 'skill-draft:';
@@ -771,7 +793,14 @@ export function evaluatePermissionPolicy(input: {
     );
   if (policy.reviewerDecision?.decision === 'deny')
     return withReviewerAudit(
-      evaluation('deny', policy.reviewerDecision.reason, policy.policyEpoch, trace),
+      reviewerDenyNeedsHuman(policy.reviewerDecision.reason)
+        ? evaluation(
+            'approval_required',
+            `reviewer_escalated_${policy.reviewerDecision.reason}`,
+            policy.policyEpoch,
+            trace,
+          )
+        : evaluation('deny', policy.reviewerDecision.reason, policy.policyEpoch, trace),
       policy.reviewerDecision,
     );
   if (policy.reviewerDecision !== undefined)

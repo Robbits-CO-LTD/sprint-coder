@@ -85,6 +85,44 @@ describe('prompt context compiler', () => {
     expect(withCeiling.content).not.toContain('write_file');
   });
 
+  it('tells an agent whose writes wait on approval cards that it can still write (issue #826)', () => {
+    const input = {
+      workspace,
+      toolCatalog: catalog([
+        tool('create_file', 'workspace.write', 'workspace', 'write'),
+        tool('exec_command', 'command.exec', 'command', 'write'),
+      ]),
+      workspaceRules: [],
+      vcs: [],
+    };
+    const ask = compilePromptGuidance({
+      ...input,
+      writeScope: 'workspace-write',
+      writeApproval: 'per-call',
+    });
+    expect(ask.context.agent).toEqual({
+      role: 'primary',
+      mode: 'write-capable',
+      writeApproval: 'per-call',
+    });
+    expect(ask.content).toContain('primary agent / write-capable');
+    expect(ask.content).not.toContain('read-only');
+    expect(ask.content).toContain('1回ごとに利用者の承認が必要');
+
+    // A read-only agent is never told it may write, and other Turns keep their digest.
+    const readOnly = compilePromptGuidance({
+      ...input,
+      writeScope: 'read-only',
+      writeApproval: 'per-call',
+    });
+    expect(readOnly.context.agent).toEqual({ role: 'primary', mode: 'read-only' });
+    expect(readOnly.content).not.toContain('承認が必要');
+    const auto = compilePromptGuidance({ ...input, writeScope: 'workspace-write' });
+    expect(auto.context.agent).toEqual({ role: 'primary', mode: 'write-capable' });
+    expect(auto.content).not.toContain('承認が必要');
+    expect(auto.digest).not.toBe(ask.digest);
+  });
+
   it.each(['codex', 'claude', 'ollama'])(
     'advertises callable names for %s after applying the parent ceiling',
     (providerId) => {
