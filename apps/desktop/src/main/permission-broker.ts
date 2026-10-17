@@ -387,7 +387,7 @@ export function protectedWorkspaceRootDenialReason(
 export function protectedWorkspaceRootMessage(
   classification: NonNullable<ReturnType<typeof protectedWorkspaceRootClassification>>,
 ): string {
-  return `このWorkspaceは保護された場所（${protectedWorkspaceRootLabel(classification)}）にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
+  return `このWorkspaceは保護された場所（${protectedWorkspaceRootLabel(classification)}）にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。`;
 }
 
 function operationForCapability(capability: Capability): PermissionOperation {

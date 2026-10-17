@@ -417,7 +417,7 @@ describe('Main PermissionBroker', () => {
         },
       }),
     ).toThrow(
-      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。',
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。',
     );
   });
 
@@ -486,7 +486,7 @@ describe('Main PermissionBroker', () => {
       }),
     ).toMatchObject({ decision: 'deny', reason: 'immutable_protected_resource' });
     expect(protectedWorkspaceRootDenialReason(guard)).toBe(
-      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
     );
     expect(protectedWorkspaceRootDenialReason(pathGuard)).toBeUndefined();
     expect(protectedWorkspaceRootDenialReason(undefined)).toBeUndefined();
