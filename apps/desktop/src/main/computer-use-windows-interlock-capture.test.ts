@@ -76,18 +76,195 @@ describe('Windows synchronous interlock entry (classifier v2, S5-c-1)', () => {
     expect(squashed).toContain('reader.Canceled() || !source.ActionStillValid()');
   });
 
-  it('is defined once in the host and referenced nowhere else (S5-c-2 wires it)', () => {
+  it('is defined once in the host and asked from exactly two places: the preflight and the dispatch (S5-c-2 PR-5)', () => {
     expect(entry.length).toBeGreaterThan(200);
     expect(host).toContain('#include "computer_use_windows_interlock_capture.h"');
-    expect(host.match(/\bEvaluateWindowsInterlockOnLane\(/gu)).toHaveLength(1);
-    // THIS EXPECTATION IS REMOVED IN S5-c-2, which is the producer.
-    expect(outside).not.toMatch(
-      /EvaluateWindowsInterlockOnLane|EvaluateWindowsInterlockOnSource|EvaluateWindowsInterlockFromCapture|InterlockEvaluation|InterlockNoVerdict|InterlockVerdict/u,
+    // The lane's entry is defined once and used by the one wrapper; the wrapper by the two callers.
+    expect(host.match(/\bEvaluateWindowsInterlockOnLane\(/gu)).toHaveLength(2);
+    const calls = [...code(outside).matchAll(/\bWindowsInterlockRefusal\(/gu)];
+    // the forward declaration and the two calls (the definition is inside the entry)
+    expect(calls).toHaveLength(3);
+    const preflightAt = outside.indexOf('bool HandleWindowsPreflight(');
+    const dispatchAt = outside.indexOf('bool DispatchWindowsAction(');
+    expect(preflightAt).toBeGreaterThan(0);
+    expect(dispatchAt).toBeGreaterThan(0);
+    const preflightText = code(
+      outside.slice(preflightAt, outside.indexOf('\nbool ObserveWindowsWindow(')),
     );
-    // No refusal can come out of the host yet: the adapter does not name the codes or the receipt.
-    expect(code(entry)).not.toMatch(
-      /native_\w+_blocked|native_approval_not_enabled|Receipt|decision|reasonCode/u,
+    const dispatchText = code(
+      outside.slice(dispatchAt, outside.indexOf('BackendProbe ProbeBackend(')),
     );
+    expect(preflightText.match(/\bWindowsInterlockRefusal\(/gu)).toHaveLength(1);
+    expect(dispatchText.match(/\bWindowsInterlockRefusal\(/gu)).toHaveLength(1);
+    // No other message path asks: observe, start_session, list_targets, cancel, close.
+    const rest = outside
+      .replace(outside.slice(preflightAt, outside.indexOf('\nbool ObserveWindowsWindow(')), '')
+      .replace(outside.slice(dispatchAt, outside.indexOf('BackendProbe ProbeBackend(')), '');
+    expect(code(rest).match(/\bWindowsInterlockRefusal\(/gu)).toHaveLength(1); // the declaration
+    expect(code(rest)).not.toMatch(
+      /EvaluateWindowsInterlockOnSource|EvaluateWindowsInterlockFromCapture/u,
+    );
+  });
+
+  it('asks in the preflight after the V1 binding and before a ticket is issued; in the dispatch after the binding and before any input', () => {
+    const preflightAt = outside.indexOf('bool HandleWindowsPreflight(');
+    const preflight = code(
+      outside.slice(preflightAt, outside.indexOf('\nbool ObserveWindowsWindow(')),
+    );
+    const validate = preflight.indexOf('ValidateWindowsDispatchBinding(');
+    const ask = preflight.indexOf('WindowsInterlockRefusal(');
+    const issue = preflight.indexOf('state.slot.Issue(');
+    expect(validate).toBeGreaterThan(0);
+    expect(ask).toBeGreaterThan(validate);
+    expect(issue).toBeGreaterThan(ask);
+    // The refusal receipt goes through the closed table before it is sent; a pair outside it is denied.
+    const rawPreflight = outside.slice(
+      preflightAt,
+      outside.indexOf('\nbool ObserveWindowsWindow('),
+    );
+    const refusal = rawPreflight
+      .slice(
+        rawPreflight.indexOf('WindowsInterlockRefusal('),
+        rawPreflight.indexOf('state.slot.Issue('),
+      )
+      .replace(/\s+/gu, ' ');
+    expect(refusal).toContain('NativePreflightRefusalAllowed(decision, code, result)');
+    expect(refusal).toContain('"denied", "native_preflight_invalid"');
+    expect(refusal).toContain('evaluation.verdict.DecisionName()');
+    expect(refusal).toContain('evaluation.verdict.ReasonCode()');
+    expect(refusal).toContain('evaluation.verdict.DeniedResult()');
+    // The refusal issues no ticket and returns before the issuing code.
+    expect(refusal).toContain('return sent;');
+
+    const dispatchAt = outside.indexOf('bool DispatchWindowsAction(');
+    const dispatch = code(outside.slice(dispatchAt, outside.indexOf('BackendProbe ProbeBackend(')));
+    const dValidate = dispatch.indexOf('ValidateWindowsDispatchBinding(');
+    const dAsk = dispatch.indexOf('WindowsInterlockRefusal(');
+    expect(dValidate).toBeGreaterThan(0);
+    expect(dAsk).toBeGreaterThan(dValidate);
+    // Before the first input attempt, the cursor, any input API and the semantic action.
+    for (const input of [
+      'input_api_attempts',
+      'SetCursorPos',
+      'SendInput',
+      'SendInputForBoundTarget',
+      'DispatchWindowsSemanticAction',
+    ]) {
+      const at = dispatch.indexOf(input);
+      expect(at, input).toBeGreaterThan(dAsk);
+    }
+    // A refusal sets the dispatch code of the verdict and refuses without input.
+    const block = dispatch
+      .slice(dAsk, dispatch.indexOf('bool dispatched = false;'))
+      .replace(/\s+/gu, ' ');
+    expect(block).toContain('*reason = std::string(evaluation.verdict.DispatchCode());');
+    expect(block).toContain('return false;');
+  });
+
+  it('uses the Windows rule set with no approval path, and counts the cases that have no verdict', () => {
+    const body = entry.replace(/\s+/gu, ' ');
+    expect(body).toContain(
+      'constexpr sprint_coder::computer_use::EffectRuleset kWindowsInterlockRuleset{ /*download_open=*/false, /*file_manager_open=*/false};',
+    );
+    expect(body).toContain(
+      'EvaluateWindowsInterlockOnLane(session, metadata, kind, kWindowsInterlockRuleset, basis)',
+    );
+    // Counts and enum names only: no label, no title, no text.
+    const counter = entry.slice(
+      entry.indexOf('void CountWindowsInterlockNoVerdict('),
+      entry.indexOf('WindowsInterlockRefusal(const'),
+    );
+    expect(counter).toContain('OutputDebugStringA(line)');
+    expect(counter).not.toMatch(/label|title|name\s*=\s*node|metadata|text/iu);
+  });
+
+  it('leaves INV-3 alone: the function bodies that decide eligibility, the win32 refusal of v2 and the versions are pinned (#500 S5-c-2 PR-5)', () => {
+    const squashed = (text: string): string => text.replace(/\s+/gu, ' ').trim();
+    const functionBody = (signature: string): string => {
+      const from = host.indexOf(signature);
+      expect(from, signature).toBeGreaterThanOrEqual(0);
+      const open = host.indexOf('{', from);
+      let depth = 0;
+      for (let index = open; index < host.length; index += 1) {
+        if (host[index] === '{') depth += 1;
+        else if (host[index] === '}') {
+          depth -= 1;
+          if (depth === 0) return squashed(host.slice(from, index + 1));
+        }
+      }
+      throw new Error(`unterminated: ${signature}`);
+    };
+    // What a target must be to get full access, and the one place it is decided.
+    expect(functionBody('std::string MaximumModeForWindowsExecutable(')).toBe(
+      'std::string MaximumModeForWindowsExecutable( const WindowsExecutableIdentity &identity) { if (!IsPolicyLanguageSupported(identity.policy_language)) return "observe_only"; if (IsTrustedSystemNotepad(identity)) return "full_access_app"; const std::string helper_signer = CurrentHelperSignerDigest(); if (IsAcceptanceFixtureExecutable(identity.path) && !helper_signer.empty() && identity.signer_digest == helper_signer) return "full_access_app"; return "observe_only"; }',
+    );
+    expect(functionBody('bool IsSupportedWindowsV1Target(')).toBe(
+      'bool IsSupportedWindowsV1Target( const WindowsExecutableIdentity &identity) { return MaximumModeForWindowsExecutable(identity) == "full_access_app"; }',
+    );
+    // The executables a session can never target (a remote desktop, a shell, an installer, Settings, ...).
+    const blocked = functionBody('bool IsDisallowedTargetExecutable(const std::wstring &path) {');
+    expect(
+      [...blocked.matchAll(/L"([^"]+)"/gu)]
+        .map((match) => match[1])
+        .filter((name) => name!.endsWith('.exe')),
+    ).toEqual([
+      'mstsc.exe',
+      'msrdc.exe',
+      'SystemSettings.exe',
+      'control.exe',
+      'msiexec.exe',
+      'setup.exe',
+      'install.exe',
+      'installer.exe',
+      'powershell.exe',
+      'pwsh.exe',
+      'cmd.exe',
+      'wt.exe',
+      'WindowsTerminal.exe',
+      'wsl.exe',
+      'bash.exe',
+      'cscript.exe',
+      'wscript.exe',
+      'regedit.exe',
+      'mmc.exe',
+      'explorer.exe',
+      'taskmgr.exe',
+      'msrdcw.exe',
+      'RdClient.Windows.exe',
+      'QuickAssist.exe',
+      'TeamViewer.exe',
+      'AnyDesk.exe',
+      'RustDesk.exe',
+      'parsec.exe',
+    ]);
+    expect(blocked).toContain(
+      'if (_wcsicmp(leaf.c_str(), candidate.data()) == 0) return true; return false; }',
+    );
+    // The build refuses eligibility v2 for win32 (no deny-list there yet): a Windows helper cannot be
+    // built with the interlocks' approval path, or with a wider eligibility.
+    const build = squashed(
+      readFileSync(join(__dirname, '../../../../build-computer-use-eligibility.mjs'), 'utf8'),
+    );
+    expect(build).toContain(
+      "if (mode === MODES.v2 && target === 'win32') throw new Error( 'Computer Use native --eligibility=v2 is unsupported on Windows until S5 (no deny-list there yet)', );",
+    );
+    // The classifier version the preflight receipt attests, and the versions of the eligibility.
+    expect(read('computer_use_preflight_classifier.h')).toContain(
+      'constexpr std::uint32_t kNativePreflightClassifierVersion = 1;',
+    );
+    expect(
+      squashed(host).match(
+        /std::to_string\( ?sprint_coder::computer_use::kNativePreflightClassifierVersion\)/gu,
+      ),
+    ).toHaveLength(1);
+    const eligibility = JSON.parse(read('eligibility.json')) as {
+      versions: Record<string, number>;
+    };
+    expect(eligibility.versions).toEqual({
+      rulesetVersion: 1,
+      classifierVersion: 1,
+      lexiconVersion: 1,
+    });
   });
 
   it('takes the rule set from its caller, answers an exception or a missing source as no verdict, and changes nothing', () => {

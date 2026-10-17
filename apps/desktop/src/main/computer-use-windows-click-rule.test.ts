@@ -104,6 +104,38 @@ describe('click rule (#500 S5-c-2 PR-2): portable', () => {
     expect(listed).toEqual(macos);
   });
 
+  it('stops a click that input overtook after the evaluation, just before it is sent (#500 S5-c-2 PR-5 review)', () => {
+    const dispatch = host.slice(
+      host.indexOf('bool DispatchWindowsAction('),
+      host.indexOf('BackendProbe ProbeBackend('),
+    );
+    const click = dispatch.slice(0, dispatch.indexOf('} else if (kind == "scroll")'));
+    const squashed = squash(click);
+    const guard = click.indexOf('WindowsInputMovedSinceEvaluation(click_basis)');
+    const send = click.indexOf('SendInputForBoundTarget(');
+    // Right after the last re-validation of the target, before the input is built and sent.
+    expect(click.slice(Math.max(0, guard - 700), guard)).toContain(
+      'RevalidateWindowsTarget(session, bounds, expected_epoch)',
+    );
+    expect(guard).toBeGreaterThan(0);
+    expect(send).toBeGreaterThan(guard);
+    expect(squashed).toContain(
+      'if (WindowsInputMovedSinceEvaluation(click_basis)) { *reason = "focused_target_changed"; return false; }',
+    );
+    // The basis is the one the dispatch's own evaluation filled.
+    expect(squash(dispatch)).toContain(
+      'WindowsInterlockRefusal(session, metadata, kind, &click_basis)',
+    );
+    // The decision, in the click rule block: only a tracked click that was judged as not opening can be
+    // overtaken, and an unreadable time counts as overtaken.
+    const block = squash(clickRuleBlock());
+    expect(block).toContain('if (!basis.tracked || basis.opens) return false;');
+    expect(block).toContain(
+      'if (!basis.input_read || !WindowsReadLastInputTick(&now_tick)) return true;',
+    );
+    expect(block).toContain('return now_tick != basis.input_tick;');
+  });
+
   it('keeps the macOS source out of it: Finder has no single-click-to-open setting, and the wire has no double click', () => {
     expect(read('computer_use_macos.mm')).not.toContain('click_opens');
   });
@@ -144,9 +176,13 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     );
     // The synchronous entry takes both on the lane, before the worker exists, and hands them to the
     // worker by value; the worker reads no system state of its own for them.
+    expect(squashed).toContain('const bool click_tracked = kind == "click" && point_known;');
+    expect(squashed).toContain('const bool click_opens = click_tracked && WindowsClickOpens();');
+    // The basis (the last input time before the click facts, and what they said) is filled on the lane.
     expect(squashed).toContain(
-      'const bool click_tracked = kind == "click" && point_known; const bool click_opens = click_tracked && WindowsClickOpens();',
+      'if (basis != nullptr && click_tracked) { basis->input_read = WindowsReadLastInputTick(&basis->input_tick); }',
     );
+    expect(squashed).toContain('basis->tracked = click_tracked; basis->opens = click_opens;');
     expect(squashed).toContain(
       'info.click_tracked = click_tracked; info.click_opens = click_opens;',
     );
@@ -177,7 +213,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     );
   });
 
-  it('adds no version and wires nothing new into preflight or dispatch', () => {
+  it('adds no version', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: Record<string, number>;
     };
@@ -186,7 +222,6 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
       classifierVersion: 1,
       lexiconVersion: 1,
     });
-    expect(host).not.toContain('EvaluateWindowsInterlockOnLane(session, metadata, kind');
   });
 });
 
@@ -266,8 +301,11 @@ const program = String.raw`
 #include <iostream>
 
 #include "computer_use_effect_shadow.h"
+#include "computer_use_native_interlock_capture.h"
 
 namespace {
+
+struct WindowsSession {};
 
 //@@BLOCK@@
 
@@ -310,6 +348,77 @@ int main() {
     Check(!WindowsRecentInputMayPair(), "no_input_for_longer_than_the_interval_cannot_pair");
   else
     std::cout << "skip stale_check (somebody else is using the machine)\n";
+  // A click the evaluation judged as not opening is stopped when input came in after it.
+  {
+    WindowsClickBasis basis;
+    Check(!WindowsInputMovedSinceEvaluation(basis), "untracked_click_is_never_stopped");
+    basis.tracked = true;
+    basis.opens = true;
+    Check(!WindowsInputMovedSinceEvaluation(basis), "click_taken_as_opening_is_not_stopped");
+    basis.opens = false;
+    Check(WindowsInputMovedSinceEvaluation(basis), "unread_input_time_stops_the_click");
+    basis.input_read = WindowsReadLastInputTick(&basis.input_tick);
+    // Nothing came in since the basis was taken (a person at the machine only makes this skip).
+    if (basis.input_read && !WindowsInputMovedSinceEvaluation(basis)) {
+      // Input that does not come from the helper (a key-up of an unassigned key) overtakes it.
+      DWORD stamp_before = basis.input_tick;
+      INPUT key{};
+      key.type = INPUT_KEYBOARD;
+      key.ki.wVk = VK_F24;
+      key.ki.dwFlags = KEYEVENTF_KEYUP;
+      Sleep(20);
+      SendInput(1, &key, sizeof(INPUT));
+      Sleep(30);
+      DWORD stamp_after = 0;
+      WindowsReadLastInputTick(&stamp_after);
+      if (stamp_after != stamp_before)
+        Check(WindowsInputMovedSinceEvaluation(basis), "input_after_the_evaluation_stops_the_click");
+      else
+        std::cout << "skip input_after_the_evaluation (the system did not move its last input time)\n";
+    } else {
+      std::cout << "skip nothing_moved_since (somebody else is using the machine)\n";
+    }
+  }
+  // The dispatch's own cursor move (SetCursorPos, between the evaluation and the send) does not count as
+  // input: the system's last input time stays, so the check does not stop every click. Checked here
+  // with the real call, the way the dispatch runs it, AGAINST A CONTROL: the same wait without any
+  // move, read BEFORE and AFTER the moving stretch. If both controls stay and the move changes the time,
+  // the move is counted as input and this fails (nobody else is blamed); if either control moved by
+  // itself, somebody else is using the machine and it is skipped.
+  {
+    DWORD control_before = 0;
+    const bool control_read = WindowsReadLastInputTick(&control_before);
+    Sleep(120);
+    DWORD control_after = 0;
+    WindowsReadLastInputTick(&control_after);
+    const bool quiet = control_read && control_after == control_before;
+
+    WindowsClickBasis basis;
+    basis.tracked = true;
+    basis.opens = false;
+    basis.input_read = WindowsReadLastInputTick(&basis.input_tick);
+    POINT original{};
+    GetCursorPos(&original);
+    const BOOL moved = SetCursorPos(original.x + 4, original.y + 3);
+    Sleep(60);
+    DWORD after_move = 0;
+    WindowsReadLastInputTick(&after_move);
+    SetCursorPos(original.x, original.y);
+    Sleep(60);
+    DWORD after_back = 0;
+    WindowsReadLastInputTick(&after_back);
+    const bool unchanged = basis.input_read && after_move == basis.input_tick && after_back == basis.input_tick;
+    Sleep(120);
+    DWORD control_end = 0;
+    WindowsReadLastInputTick(&control_end);
+    const bool quiet_after = control_end == after_back;
+    if (quiet && quiet_after) {
+      // Nobody else moved the time during the control; the move must not either.
+      Check(moved && unchanged && !WindowsInputMovedSinceEvaluation(basis), "own_cursor_move_does_not_stop_the_click");
+    } else {
+      std::cout << "skip own_cursor_move (a control moved by itself: somebody else is using the machine)\n";
+    }
+  }
   // The click opens when either part says so.
   Check(WindowsClickOpens() == (WindowsSingleClickOpens() || WindowsRecentInputMayPair()), "click_opens_is_the_or");
   std::cout << (failures == 0 ? "OK\n" : "FAILED\n");
