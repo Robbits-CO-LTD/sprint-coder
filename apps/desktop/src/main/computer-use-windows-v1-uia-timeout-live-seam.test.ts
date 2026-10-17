@@ -261,7 +261,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // WindowsV1UiaCall / WindowsV1UiaContact. None is made bare, so none can take a cut-off "success" for an
     // answer, or go on after a Cancel.
     const uiaNames =
-      'get_Current\\w+|GetCurrentPatternAs|GetRuntimeId|ElementFrom\\w+|FindFirst\\w*|FindAll\\w*|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetPreviousSiblingElement|GetLastChildElement|GetParentElement';
+      'get_Current\\w+|get_Cached\\w+|GetCurrentPattern\\w*|GetCachedPattern\\w*|GetCurrentPropertyValue\\w*|GetCachedPropertyValue\\w*|BuildUpdatedCache|GetRuntimeId|ElementFrom\\w+|FindFirst\\w*|FindAll\\w*|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetPreviousSiblingElement|GetLastChildElement|GetParentElement';
     const anyCalls = [...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))];
     const wrapped = [
       ...c.matchAll(
