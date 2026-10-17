@@ -1,4 +1,11 @@
-import { constants, lstatSync, realpathSync, type BigIntStats } from 'node:fs';
+import {
+  constants,
+  lstatSync,
+  readlinkSync,
+  realpathSync,
+  statSync,
+  type BigIntStats,
+} from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -490,13 +497,118 @@ function windowsSystemRoots(): string[] {
 /**
  * Whether a resolved path is at or below one of the protected roots. Each root is compared both as
  * written and resolved, because the root itself may be a symlink or junction to another place
- * (`~/.aws -> /mnt/profile/.aws`) while the guarded path is always the resolved one.
+ * (`~/.aws -> /mnt/profile/.aws`) while the guarded path is always the resolved one. When a root
+ * exists but cannot be resolved, the comparison falls back as `locateProtectedRoot` describes and
+ * never quietly treats the path as outside the root.
  */
 function isAtOrBelowAnyRoot(roots: readonly string[], resolvedPath: string): boolean {
-  return roots.some(
-    (root) =>
-      isAtOrBelow(resolve(root), resolvedPath) ||
-      isAtOrBelow(canonicalizeExistingPath(root), resolvedPath),
+  return roots.some((root) => {
+    const location = locateProtectedRoot(root);
+    return (
+      location.paths.some((path) => isAtOrBelow(path, resolvedPath)) ||
+      (location.identity !== null && hasAncestorWithIdentity(resolvedPath, location.identity)) ||
+      (location.names !== null && hasAncestorNamed(resolvedPath, location.names))
+    );
+  });
+}
+
+let protectedRootRealpath = (path: string): string => realpathSync.native(path);
+
+/** Replaces the canonicalizer used to find where a protected root really is; null restores it. */
+export function setProtectedRootRealpathForTesting(
+  realpath: ((path: string) => string) | null,
+): void {
+  protectedRootRealpath = realpath ?? ((path) => realpathSync.native(path));
+}
+
+const MAX_PROTECTED_ROOT_LINK_HOPS = 40;
+
+type ProtectedRootLocation = {
+  /** Where the root is known to be: as written, each link target on the way, and its real path. */
+  paths: string[];
+  /** The directory the root leads to, when it can be reached but not named. */
+  identity: { dev: bigint; ino: bigint } | null;
+  /** Set only when the root exists and where it leads is unknown: the names it goes by. */
+  names: string[] | null;
+};
+
+/**
+ * Where a protected root really is, failing closed (#835). The usual answer is its real path. When
+ * that cannot be read (a permission error, a link loop, a link to an unreadable place) yet
+ * something is there:
+ * - a link is followed by its target text, each target compared as well and resolved in turn;
+ * - otherwise the directory it leads to is identified by device and inode, and a path is below the
+ *   root when one of its ancestors is that very directory;
+ * - and when not even that can be read, a path is treated as below the root when one of its
+ *   ancestors has the root's name (or a name a link on the way gave it), compared without case.
+ *   This is the only guess, and it can only mark a Workspace protected, never the other way.
+ * A root (or link target) that does not exist is only compared as written: nothing is below it.
+ */
+function locateProtectedRoot(root: string): ProtectedRootLocation {
+  let current = resolve(root);
+  const paths = [current];
+  const names = [basename(current)];
+  // More links in a row than this is a loop: nothing is below one, but it still fails closed.
+  for (let hop = 0; hop <= MAX_PROTECTED_ROOT_LINK_HOPS; hop += 1) {
+    try {
+      return { paths: [...paths, protectedRootRealpath(current)], identity: null, names: null };
+    } catch {
+      // Look at what is there instead.
+    }
+    let target: string | null = null;
+    try {
+      if (lstatSync(current).isSymbolicLink()) target = readlinkSync(current);
+    } catch (error) {
+      if (isAbsent(error)) return { paths, identity: null, names: null };
+    }
+    if (target === null) break;
+    current = resolve(dirname(current), target);
+    paths.push(current);
+    names.push(basename(current));
+  }
+  return withIdentityOrNames(current, paths, names);
+}
+
+function withIdentityOrNames(
+  current: string,
+  paths: string[],
+  names: string[],
+): ProtectedRootLocation {
+  try {
+    const stats = statSync(current, { bigint: true });
+    return { paths, identity: { dev: stats.dev, ino: stats.ino }, names: null };
+  } catch {
+    return { paths, identity: null, names };
+  }
+}
+
+function hasAncestorWithIdentity(
+  resolvedPath: string,
+  identity: { dev: bigint; ino: bigint },
+): boolean {
+  for (let candidate = resolvedPath; ; candidate = dirname(candidate)) {
+    try {
+      const stats = statSync(candidate, { bigint: true, throwIfNoEntry: false });
+      if (stats !== undefined && stats.dev === identity.dev && stats.ino === identity.ino)
+        return true;
+    } catch {
+      // An ancestor this process cannot stat is not the directory it could stat.
+    }
+    if (dirname(candidate) === candidate) return false;
+  }
+}
+
+function hasAncestorNamed(resolvedPath: string, names: readonly string[]): boolean {
+  const wanted = new Set(names.map((name) => name.toLowerCase()).filter(Boolean));
+  return resolvedPath.split(/[\\/]+/).some((part) => wanted.has(part.toLowerCase()));
+}
+
+function isAbsent(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error.code === 'ENOENT' || error.code === 'ENOTDIR')
   );
 }
 
