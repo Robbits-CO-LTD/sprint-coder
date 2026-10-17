@@ -2457,7 +2457,8 @@ std::uint32_t WindowsBuildNumber() {
 //     The margin is SMALL: 1000 - 800 = about 200 ms for everything else the lane does between the
 //     epoch moving and the acknowledgment (the pipe, the frame, the answer). Measured on CI: a
 //     transaction-bound call is cut after 310-320 ms, a first contact after 505-514 ms, so a real
-//     worst case is nearer 830 ms than the 800 ms counted, and the margin there is under 200 ms.
+//     worst case is nearer 830 ms than the 800 ms counted (800 ms is the nominal value, not a measured
+//     upper bound), and the margin there is about 170 ms; under load it can be less (not verified).
 //  2. The FIRST timed-out call (UIA_E_TIMEOUT or an equivalent failure) ends its path for good: no
 //     UI Automation call after it, fail closed, the "unreadable" of the caller. A target that answers
 //     the first contact and then stops therefore costs one timeout, not one per remaining call.

@@ -911,6 +911,12 @@ int RunDriver(bool ci) {
     SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kCanceled, "x")) == "observation_stale", "reason_of_a_cancel");
     SeamCheck(std::string(WindowsV1ObserveReason(WindowsV1UiaStop::kNone, "x")) == "x", "reason_otherwise_is_the_steps_own");
   }
+  {  // outside any path a call is refused (fail closed): no call is made, and an action is not sent
+    bool called = false;
+    const HRESULT refused = WindowsV1UiaCall([&] { called = true; return S_OK; });
+    SeamCheck(refused == E_ABORT && !called && !WindowsV1UiaOk(refused), "a_call_outside_any_path_is_refused_without_being_made");
+    SeamCheck(!WindowsV1UiaMayCall() && std::string(WindowsV1UiaEndedReason()) == "semantic_action_failed", "an_action_outside_any_path_is_not_sent");
+  }
   {  // a timeout inside an inner path ends the outer one: the later reads of the frame make no call
     const WindowsV1UiaPath frame;
     WindowsUiaRisk risk;
