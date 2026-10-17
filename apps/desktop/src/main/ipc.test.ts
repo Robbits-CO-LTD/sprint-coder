@@ -794,7 +794,7 @@ describe('Project protected-folder warning (issue #830)', () => {
     expect(warning?.detail).toContain(appDataFolder);
     expect(warning?.detail).toContain('AppData');
     expect(warning?.detail).toContain(
-      'AIはこの場所のファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）',
+      'AIはこの場所のファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）',
     );
   });
 
@@ -7397,7 +7397,7 @@ describe('toolPermissionFacts over every path an Edit Saga call touches (issue #
 // managed harness, ApprovalCoordinator, IpcRouter.evaluateToolPermission and a real PermissionBroker.
 describe('a high-risk call in a Workspace under a protected location (issue #836)', () => {
   const protectedReason =
-    'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。';
+    'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行はほかの場所と同じ扱いで、承認の要否は権限の設定に従います）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。';
 
   async function dispatchCreateFile(
     root: string,
