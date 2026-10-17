@@ -6908,35 +6908,194 @@ bool CheckWindowsShellNameMatch() {
   {
     constexpr unsigned long kAccessDenied = 5;
     constexpr unsigned long kDirectory = 0x10;
-    const auto ini = [](bool folder_known, unsigned long folder_attributes, bool found, unsigned long lookup_error,
-                        bool reparse, std::size_t length, unsigned long section_error) {
-      return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, found, lookup_error, reparse, length,
-                                               section_error);
+    const auto ini = [](bool folder_known, unsigned long folder_attributes, bool opened, unsigned long open_error,
+                        bool reparse, bool content_says_localized) {
+      return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, opened, open_error, reparse,
+                                               content_says_localized);
     };
     const unsigned long read_only = kDirectory | kShellAttributeReadOnly;
     const unsigned long system_dir = kDirectory | kShellAttributeSystem;
-    if (!Check(!ini(true, kDirectory, true, 0, false, 17, 0), "desktopini-plain-folder-is-not-read")) return false;
-    if (!Check(!ini(true, kDirectory, true, 0, true, 17, 0), "desktopini-plain-folder-link-is-not-read-either")) return false;
-    if (!Check(ini(false, 0, true, 0, false, 0, 0), "desktopini-unknown-folder-attributes-is-a-yes")) return false;
-    if (!Check(!ini(true, read_only, false, kShellErrorFileNotFound, false, 0, 0), "desktopini-none-file-not-found")) return false;
-    if (!Check(!ini(true, system_dir, false, kShellErrorPathNotFound, false, 0, 0), "desktopini-none-path-not-found")) return false;
-    if (!Check(ini(true, read_only, false, kAccessDenied, false, 0, 0), "desktopini-unknown-lookup-error-is-a-yes")) return false;
-    if (!Check(ini(true, read_only, true, 0, true, 0, 0), "desktopini-link-is-a-yes-without-reading")) return false;
-    if (!Check(ini(true, system_dir, true, 0, true, 0, 0), "desktopini-link-in-a-system-folder-is-a-yes")) return false;
-    if (!Check(!ini(true, read_only, true, 0, false, 0, 0), "desktopini-without-the-section-is-normal")) return false;
-    if (!Check(ini(true, read_only, true, 0, false, 17, 0), "desktopini-with-the-section-is-a-yes")) return false;
-    if (!Check(ini(true, system_dir, true, 0, false, 17, 0), "desktopini-with-the-section-in-a-system-folder-is-a-yes")) return false;
-    if (!Check(!ini(true, read_only, true, 0, false, 0, kShellErrorFileNotFound), "desktopini-section-file-not-found-is-no")) return false;
-    if (!Check(ini(true, read_only, true, 0, false, 0, kAccessDenied), "desktopini-unreadable-section-is-a-yes")) return false;
-    if (!Check(ini(true, read_only, true, 0, false, 3, kAccessDenied), "desktopini-length-wins-over-an-error")) return false;
+    if (!Check(!ini(true, kDirectory, true, 0, false, true), "desktopini-plain-folder-is-not-read")) return false;
+    if (!Check(!ini(true, kDirectory, true, 0, true, true), "desktopini-plain-folder-link-is-not-read-either")) return false;
+    if (!Check(ini(false, 0, true, 0, false, false), "desktopini-unknown-folder-attributes-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, false, kShellErrorFileNotFound, false, true), "desktopini-none-file-not-found")) return false;
+    if (!Check(!ini(true, system_dir, false, kShellErrorPathNotFound, false, true), "desktopini-none-path-not-found")) return false;
+    if (!Check(ini(true, read_only, false, kAccessDenied, false, false), "desktopini-unknown-open-error-is-a-yes")) return false;
+    if (!Check(ini(true, read_only, true, 0, true, false), "desktopini-link-is-a-yes-without-reading")) return false;
+    if (!Check(ini(true, system_dir, true, 0, true, false), "desktopini-link-in-a-system-folder-is-a-yes")) return false;
+    if (!Check(!ini(true, read_only, true, 0, false, false), "desktopini-without-the-section-is-normal")) return false;
+    if (!Check(ini(true, read_only, true, 0, false, true), "desktopini-with-the-section-is-a-yes")) return false;
+    if (!Check(ini(true, system_dir, true, 0, false, true), "desktopini-with-the-section-in-a-system-folder-is-a-yes")) return false;
   }
-  // A candidate that is a symbolic link or a mount point is never followed for its shell name.
+  // The text of a desktop.ini: a non-empty [LocalizedFileNames] section is a yes; anything not known is too.
+  {
+    const auto ansi = [](const char *text) {
+      std::vector<unsigned char> bytes;
+      for (const char *c = text; *c != 0; ++c) bytes.push_back(static_cast<unsigned char>(*c));
+      return bytes;
+    };
+    const auto utf16 = [](const wchar_t *text, bool big_endian = false) {
+      std::vector<unsigned char> bytes;
+      if (big_endian) { bytes.push_back(0xFE); bytes.push_back(0xFF); } else { bytes.push_back(0xFF); bytes.push_back(0xFE); }
+      for (const wchar_t *c = text; *c != 0; ++c) {
+        const unsigned char lo = static_cast<unsigned char>(*c & 0xFF);
+        const unsigned char hi = static_cast<unsigned char>((*c >> 8) & 0xFF);
+        if (big_endian) { bytes.push_back(hi); bytes.push_back(lo); } else { bytes.push_back(lo); bytes.push_back(hi); }
+      }
+      return bytes;
+    };
+    const auto says = [](const std::vector<unsigned char> &bytes) {
+      return ShellDesktopIniTextHasLocalizedFileNames(bytes.data(), bytes.size());
+    };
+    if (!Check(says(utf16(L"[LocalizedFileNames]\r\nalpha.txt=Beta\r\n")), "initext-utf16le-with-a-entry")) return false;
+    if (!Check(says(utf16(L"[LocalizedFileNames]\r\nalpha.txt=Beta\r\n", true)), "initext-utf16be-with-an-entry")) return false;
+    if (!Check(says(ansi("[LocalizedFileNames]\r\nalpha.txt=Beta\r\n")), "initext-ansi-with-an-entry")) return false;
+    if (!Check(says(ansi("\xEF\xBB\xBF[LocalizedFileNames]\nalpha.txt=Beta")), "initext-utf8-with-its-mark-and-no-final-newline")) return false;
+    if (!Check(says(ansi("[localizedfilenames]\nalpha.txt=Beta\n")), "initext-section-name-is-case-blind")) return false;
+    if (!Check(says(ansi("[ LOCALIZEDFILENAMES ]\nalpha.txt=Beta\n")), "initext-spaces-around-the-name-still-count")) return false;
+    if (!Check(says(ansi("[.ShellClassInfo]\nInfoTip=x\n[LocalizedFileNames]\n\n; note\n  \nalpha.txt=Beta\n")), "initext-entry-after-blank-and-comment-lines")) return false;
+    if (!Check(says(ansi("[LocalizedFileNames]\nalpha.txt=Beta\n[Other]\nx=y\n")), "initext-entry-before-another-section")) return false;
+    if (!Check(says(ansi("[Other]\n[LocalizedFileNames]\nx=1\n[LocalizedFileNames]\n")), "initext-the-same-section-twice-one-with-an-entry")) return false;
+    if (!Check(!says(ansi("")), "initext-empty-file-is-no")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\n")), "initext-empty-section")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\r\n\r\n   \r\n")), "initext-blank-lines-only-section")) return false;
+    if (!Check(!says(ansi("[LocalizedFileNames]\n; just a comment\n;another\n[Other]\nx=y\n")), "initext-comments-only-section")) return false;
+    if (!Check(!says(utf16(L"[LocalizedFileNames]\r\n; c\r\n[.ShellClassInfo]\r\nInfoTip=x\r\n")), "initext-utf16-empty-section-then-another")) return false;
+    if (!Check(!says(ansi("[.ShellClassInfo]\nLocalizedResourceName=@x,-1\n")), "initext-another-section-only")) return false;
+    if (!Check(!says(ansi("alpha.txt=Beta\n")), "initext-lines-before-any-section-do-not-count")) return false;
+    if (!Check(!says(ansi("[Other]\nLocalizedFileNames=x\n")), "initext-the-name-as-a-key-is-not-the-section")) return false;
+    // Not known is a yes.
+    if (!Check(says(ansi("[LocalizedFileNames\nalpha.txt=Beta\n")), "initext-header-that-never-closes")) return false;
+    if (!Check(says(std::vector<unsigned char>{0xFF, 0xFE, 0x5B}), "initext-utf16-with-an-odd-number-of-bytes")) return false;
+    if (!Check(says(std::vector<unsigned char>{'[', 0, 'L', 0, ']', 0}), "initext-nul-in-single-byte-text-is-a-utf16-file-without-its-mark")) return false;
+    {
+      const std::vector<unsigned char> large(kShellDesktopIniMaxBytes + 1, static_cast<unsigned char>(';'));
+      if (!Check(says(large), "initext-larger-than-the-cap-is-a-yes")) return false;
+      const std::vector<unsigned char> at_cap(kShellDesktopIniMaxBytes, static_cast<unsigned char>(';'));
+      if (!Check(!says(at_cap), "initext-exactly-the-cap-is-judged")) return false;
+    }
+    if (!Check(ShellDesktopIniTextHasLocalizedFileNames(nullptr, 3), "initext-null-bytes-with-a-size-is-a-yes")) return false;
+    if (!Check(!ShellDesktopIniTextHasLocalizedFileNames(nullptr, 0), "initext-null-and-empty-is-no")) return false;
+  }
+  // A link is a reparse point that NAMES another object (bit 29 of the tag): a symbolic link, a mount
+  // point, any other such tag. A cloud file's tag does not have the bit and is not a link.
   {
     if (!Check(ShellReparseIsLink(true, kShellReparseTagSymlink), "link-symlink")) return false;
     if (!Check(ShellReparseIsLink(true, kShellReparseTagMountPoint), "link-mount-point-or-junction")) return false;
+    if (!Check(ShellReparseIsLink(true, 0xA000001D), "link-another-name-surrogate-tag")) return false;
     if (!Check(!ShellReparseIsLink(true, 0x9000001A), "link-cloud-tag-is-not-a-link")) return false;
+    if (!Check(!ShellReparseIsLink(true, 0x80000015), "link-a-tag-without-the-surrogate-bit-is-not-a-link")) return false;
     if (!Check(!ShellReparseIsLink(true, 0), "link-other-reparse-point-is-not-a-link")) return false;
     if (!Check(!ShellReparseIsLink(false, kShellReparseTagSymlink), "link-tag-of-a-non-reparse-entry-is-garbage")) return false;
+    if (!Check(ShellReparseIsMountPoint(true, kShellReparseTagMountPoint) && !ShellReparseIsMountPoint(true, kShellReparseTagSymlink) &&
+                   !ShellReparseIsMountPoint(false, kShellReparseTagMountPoint),
+               "link-only-a-mount-point-is-a-mount-point")) return false;
+  }
+  // A candidate that is a link is never matched, even with a shell name that fits.
+  {
+    ShellNameCandidate linked;
+    linked.name = L"jn";
+    linked.shell_name = L"jn";
+    linked.shell_name_known = true;
+    linked.is_link = true;
+    if (!Check(MatchShellDisplayName(L"jn", std::vector<ShellNameCandidate>{linked}) == kNoShellMatch, "link-candidate-is-never-matched")) return false;
+    ShellNameCandidate plain;
+    plain.name = L"a.txt";
+    plain.shell_name = L"a.txt";
+    plain.shell_name_known = true;
+    if (!Check(MatchShellDisplayName(L"a.txt", std::vector<ShellNameCandidate>{plain, linked}) == kNoShellMatch,
+               "link-candidate-among-the-others-makes-the-answer-unknown")) return false;
+    linked.is_link = false;
+    if (!Check(MatchShellDisplayName(L"jn", std::vector<ShellNameCandidate>{linked}) == 0, "link-candidate-let-through-is-an-ordinary-one")) return false;
+  }
+  // The target of a mount point, from the bytes FSCTL_GET_REPARSE_POINT returns.
+  {
+    const auto buffer = [](const std::wstring &substitute, unsigned long tag = kShellReparseTagMountPoint) {
+      std::vector<unsigned char> bytes(16, 0);
+      for (int i = 0; i < 4; ++i) bytes[static_cast<std::size_t>(i)] = static_cast<unsigned char>((tag >> (8 * i)) & 0xFF);
+      const std::size_t length = substitute.size() * 2;
+      bytes[8] = 0; bytes[9] = 0;                                                  // substitute offset
+      bytes[10] = static_cast<unsigned char>(length & 0xFF); bytes[11] = static_cast<unsigned char>(length >> 8);
+      for (const wchar_t c : substitute) { bytes.push_back(static_cast<unsigned char>(c & 0xFF)); bytes.push_back(static_cast<unsigned char>((c >> 8) & 0xFF)); }
+      return bytes;
+    };
+    std::wstring name;
+    const auto made = buffer(L"\\??\\C:\\Users\\a");
+    if (!Check(ShellMountPointSubstituteName(made.data(), made.size(), &name) && name == L"\\??\\C:\\Users\\a", "mount-substitute-name-is-read")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(name) == L'C', "mount-drive-letter-path")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\d:") == L'd', "mount-bare-drive")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\Volume{12345678-1234-1234-1234-123456789abc}\\") == 0, "mount-volume-guid-is-not-a-drive-letter")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\UNC\\server\\share") == 0, "mount-unc-is-not-a-drive-letter")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"\\??\\C:x") == 0, "mount-a-colon-without-a-separator")) return false;
+    if (!Check(ShellLocalDriveLetterOfSubstituteName(L"C:\\x") == 0, "mount-without-the-nt-prefix")) return false;
+    const auto symlink_tag = buffer(L"\\??\\C:\\x", kShellReparseTagSymlink);
+    if (!Check(!ShellMountPointSubstituteName(symlink_tag.data(), symlink_tag.size(), &name), "mount-a-symlink-buffer-is-not-read")) return false;
+    auto cut = made;
+    cut.resize(cut.size() - 4);
+    if (!Check(!ShellMountPointSubstituteName(cut.data(), cut.size(), &name), "mount-a-cut-buffer-is-not-read")) return false;
+    if (!Check(!ShellMountPointSubstituteName(made.data(), 8, &name), "mount-a-short-buffer-is-not-read")) return false;
+    auto odd = made;
+    odd[10] = 5;
+    if (!Check(!ShellMountPointSubstituteName(odd.data(), odd.size(), &name), "mount-an-odd-length-is-not-read")) return false;
+  }
+  // What a read-only / system folder's desktop.ini can make the shell reach.
+  {
+    const auto expand = [](std::wstring_view text) {
+      std::wstring out(text);
+      const auto replace = [&out](const std::wstring &from, const std::wstring &to) {
+        for (std::size_t at = out.find(from); at != std::wstring::npos; at = out.find(from, at + to.size())) out.replace(at, from.size(), to);
+      };
+      replace(L"%SystemRoot%", L"C:\\Windows");
+      replace(L"%UncVar%", L"\\\\server\\share");
+      return out;
+    };
+    const auto local = [](wchar_t letter) { return letter == L'C' || letter == L'c' || letter == L'D' || letter == L'd'; };
+    const auto risky = [&](const wchar_t *value) { return ShellIniValueIsRisky(value, expand, local); };
+    if (!Check(!risky(L"@%SystemRoot%\\system32\\shell32.dll,-21770"), "inival-system-resource-is-safe")) return false;
+    if (!Check(!risky(L"%SystemRoot%\\system32\\imageres.dll,-112"), "inival-icon-resource-is-safe")) return false;
+    if (!Check(!risky(L"@shell32.dll,-21770"), "inival-relative-resource-is-safe")) return false;
+    if (!Check(!risky(L"@D:\\res\\x.dll,-1"), "inival-another-local-drive-is-safe")) return false;
+    if (!Check(!risky(L"Documents"), "inival-plain-text-is-safe")) return false;
+    if (!Check(!risky(L""), "inival-empty-is-safe")) return false;
+    if (!Check(!risky(L"Look at this"), "inival-plain-text-with-spaces-is-safe")) return false;
+    if (!Check(risky(L"@\\\\server\\share\\x.dll,-1"), "inival-unc-resource-is-risky")) return false;
+    if (!Check(risky(L"@%UncVar%\\x.dll,-1"), "inival-unc-after-expansion-is-risky")) return false;
+    if (!Check(risky(L"@%Unknown%\\x.dll,-1"), "inival-unknown-variable-is-risky")) return false;
+    if (!Check(risky(L"@Z:\\x.dll,-1"), "inival-network-drive-is-risky")) return false;
+    if (!Check(risky(L"\\\\server\\share\\icon.ico"), "inival-unc-path-is-risky")) return false;
+    if (!Check(risky(L"\"\\\\server\\share\\icon.ico\""), "inival-quoted-unc-path-is-risky")) return false;
+    if (!Check(risky(L"\\Windows\\x.dll"), "inival-path-rooted-on-the-current-drive-is-risky")) return false;
+    if (!Check(risky(L"http://example.invalid/x"), "inival-url-is-risky")) return false;
+    if (!Check(risky(L"@"), "inival-a-bare-reference-is-risky")) return false;
+    if (!Check(ShellIniValueIsRisky(L"@C:\\x.dll,-1", nullptr, nullptr), "inival-without-the-callbacks-a-path-is-risky")) return false;
+    const auto ansi = [](const char *text) {
+      std::vector<unsigned char> bytes;
+      for (const char *c = text; *c != 0; ++c) bytes.push_back(static_cast<unsigned char>(*c));
+      return bytes;
+    };
+    const auto text_risky = [&](const std::vector<unsigned char> &bytes) {
+      return ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size(), expand, local);
+    };
+    if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-21770\r\nIconResource=%SystemRoot%\\system32\\imageres.dll,-112\r\n")),
+               "inirisk-a-typical-known-folder-ini-is-safe")) return false;
+    if (!Check(!text_risky(ansi("")), "inirisk-empty-is-safe")) return false;
+    if (!Check(!text_risky(ansi("[Other]\r\nIconFile=\\\\server\\share\\x.ico\r\n")), "inirisk-another-section-is-not-looked-at")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nLocalizedResourceName=@\\\\server\\share\\x.dll,-1\r\n")), "inirisk-unc-resource-name")) return false;
+    if (!Check(text_risky(ansi("[.shellclassinfo]\r\nlocalizedresourcename=@\\\\server\\share\\x.dll,-1\r\n")), "inirisk-names-are-case-blind")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconResource=\\\\server\\share\\x.dll,0\r\n")), "inirisk-unc-icon-resource")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nIconFile=Z:\\x.ico\r\n")), "inirisk-network-icon-file")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=@\\\\server\\share\\x.dll,-3\r\n")), "inirisk-unc-info-tip")) return false;
+    if (!Check(!text_risky(ansi("[.ShellClassInfo]\r\nInfoTip=A tip with words\r\n")), "inirisk-a-plain-info-tip-is-safe")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nCLSID2={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-clsid2")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo]\r\nUICLSID={11111111-2222-3333-4444-555555555555}\r\n")), "inirisk-uiclsid")) return false;
+    if (!Check(text_risky(ansi("[.ShellClassInfo\r\nx=y\r\n")), "inirisk-text-that-cannot-be-judged")) return false;
+    if (!Check(text_risky(std::vector<unsigned char>(kShellDesktopIniMaxBytes + 1, ';')), "inirisk-larger-than-the-cap")) return false;
+    {
+      std::vector<unsigned char> wide{0xFF, 0xFE};
+      for (const wchar_t c : std::wstring(L"[.ShellClassInfo]\r\nCLSID=x\r\n")) { wide.push_back(static_cast<unsigned char>(c)); wide.push_back(0); }
+      if (!Check(text_risky(wide), "inirisk-utf16-clsid")) return false;
+    }
   }
   // The leaf of a file system path identifies a resolved item (a known folder's parsing name is a GUID).
   {

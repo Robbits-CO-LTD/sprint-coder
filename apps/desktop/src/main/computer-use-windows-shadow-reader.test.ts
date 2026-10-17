@@ -226,7 +226,7 @@ describe('Windows UI Automation source only reads', () => {
     // The value of a pattern is read in exactly one place, and nothing is set, invoked or moved.
     expect(source.match(/get_CurrentValue/gu)?.length).toBe(1);
     expect(code(source)).not.toMatch(
-      /SetValue|Invoke\(|->Select|Toggle|Expand|Collapse|SetFocus|ScrollIntoView|->Move|Resize|->Close|SendInput|SendMessage|PostMessage|keybd_event|mouse_event|SetCursorPos|SetForegroundWindow|SetWindowPos|ShellExecute|CreateProcess|WriteProcessMemory|OpenClipboard|RegisterHotKey/u,
+      /SetValue|Invoke\(|->Select|Toggle|->Expand|->Collapse|SetFocus|ScrollIntoView|->Move|Resize|->Close|SendInput|SendMessage|PostMessage|keybd_event|mouse_event|SetCursorPos|SetForegroundWindow|SetWindowPos|ShellExecute|CreateProcess|WriteProcessMemory|OpenClipboard|RegisterHotKey/u,
     );
     // The only Win32 calls: strings, the process that owns a window, and COM creation.
     const win32 = new Set(
@@ -276,6 +276,18 @@ describe('Windows UI Automation source only reads', () => {
       'ShellFolderMayBeListed',
       'ShellDriveIsLocalDisk',
       'ShellReparseIsLink',
+      'ShellExpandEnvironmentStrings',
+      'ShellDriveLetterIsLocal',
+      'ShellMountPointTarget',
+      'ShellReadDesktopIni',
+      'ShellCandidateDirectoryIni',
+      'ShellReparseIsMountPoint',
+      'ShellMountPointSubstituteName',
+      'ShellLocalDriveLetterOfSubstituteName',
+      'ShellIniValueIsRisky',
+      'ShellDesktopIniTextIsRiskyForShellName',
+      'ShellDesktopIniTextHasLocalizedFileNames',
+      'FileHandle',
       'ShellLookupMustStop',
       'ShellPathHasLink',
       'ShellEntryNeedsShellName',
@@ -353,8 +365,12 @@ describe('Windows UI Automation source only reads', () => {
       'DuplicateHandle',
       'GetCurrentProcess',
       'GetCurrentThread',
-      'GetPrivateProfileSectionW',
       'GetVolumePathNameW',
+      'CreateFileW',
+      'GetFileInformationByHandle',
+      'ReadFile',
+      'DeviceIoControl',
+      'ExpandEnvironmentStringsW',
       'SetLastError',
       'ILIsEmpty',
       'NormalizeString',
@@ -405,6 +421,18 @@ describe('Windows UI Automation source only reads', () => {
       'ShellFolderMayBeListed',
       'ShellDriveIsLocalDisk',
       'ShellReparseIsLink',
+      'ShellExpandEnvironmentStrings',
+      'ShellDriveLetterIsLocal',
+      'ShellMountPointTarget',
+      'ShellReadDesktopIni',
+      'ShellCandidateDirectoryIni',
+      'ShellReparseIsMountPoint',
+      'ShellMountPointSubstituteName',
+      'ShellLocalDriveLetterOfSubstituteName',
+      'ShellIniValueIsRisky',
+      'ShellDesktopIniTextIsRiskyForShellName',
+      'ShellDesktopIniTextHasLocalizedFileNames',
+      'FileHandle',
       'ShellLookupMustStop',
       'ShellPathHasLink',
       'ShellEntryNeedsShellName',
@@ -582,6 +610,18 @@ describe('Windows UI Automation source only reads', () => {
     expect(body).toContain(
       'FAILED(folder_item.Get()->GetAttributes(SFGAO_ISSLOW, &folder_attributes))',
     );
+    // Every shell call on the FOLDER (id list, slow attribute, path) is preceded by the stop check.
+    for (const call of [
+      'SHGetIDListFromObject(',
+      'SHCreateItemFromIDList(',
+      'SHGetPathFromIDListEx(',
+    ]) {
+      const at = compact.indexOf(call);
+      expect(at, call).toBeGreaterThan(0);
+      expect(compact.slice(Math.max(0, at - 320), at), call).toContain(
+        'ShellLookupMustStop(limits, &stopped)',
+      );
+    }
     // The place check comes before the desktop.ini check, and both before the listing; the caller turns
     // either answer into "not known".
     expect(body.indexOf('ShellFolderMayBeListed(folder_path')).toBeLessThan(
@@ -618,9 +658,7 @@ describe('Windows UI Automation source only reads', () => {
     // Which entries need the shell's name is the pure rule of the matcher, fed the attributes.
     expect(compact).toContain('ShellEntryNeedsShellName(found, is_directory,');
     expect(compact).toContain('(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)');
-    expect(code(body)).not.toMatch(
-      /starts_with_display|renamable_directory|FILE_ATTRIBUTE_HIDDEN/u,
-    );
+    expect(code(body)).not.toMatch(/starts_with_display|FILE_ATTRIBUTE_HIDDEN/u);
     // The place check: the volume of the path (not its first three characters), no link on the way,
     // the desktop folders asked without verifying, and the drive types, all in one fixed expression.
     const guardFunction = between(
@@ -637,7 +675,7 @@ describe('Windows UI Automation source only reads', () => {
     );
     expect(guardCompact).toContain('GetVolumePathNameW(path.c_str(), root.data()');
     expect(guardCompact).toContain('GetDriveTypeW(root.c_str())');
-    expect(guardCompact).toContain('return !ShellPathHasLink(root, path, limits, result);');
+    expect(guardCompact).toContain('ShellPathHasLink(path.substr(0, 3), path, limits, result)');
     // Two steps: the drive letter's type first (no I/O: GetDriveTypeW on the first three characters),
     // and only then the volume of the path, whose type is checked again. A stop check sits between.
     const letter = guardCompact.indexOf('GetDriveTypeW(path.substr(0, 3).c_str())');
@@ -662,9 +700,7 @@ describe('Windows UI Automation source only reads', () => {
       'ShellPathHasLink(const std::wstring &root',
       'ShellFolderMayBeListed(',
     );
-    expect(link).toContain(
-      'ShellReparseIsLink((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0,',
-    );
+    expect(link).toContain('ShellReparseIsLink(is_reparse, data.dwReserved0)');
     expect(link).toContain('FILE_ATTRIBUTE_REPARSE_POINT');
     expect(link).toContain('if (find.handle == INVALID_HANDLE_VALUE) return true;');
     // A desktop.ini is normal (a user's home has one): only its [LocalizedFileNames] section counts, it
@@ -674,12 +710,13 @@ describe('Windows UI Automation source only reads', () => {
       'ShellFolderHasLocalizedFileNames(const std::wstring &path,',
       'The path of the item a file browser shows',
     );
-    expect(localized).toContain('GetPrivateProfileSectionW(L"LocalizedFileNames"');
     expect(localized).toContain('desktop.ini');
     expect(localized.replace(/\s+/gu, ' ')).toContain(
-      'return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, found, lookup_error, is_reparse_point, length, section_error);',
+      'return ShellDesktopIniLocalizesFileNames(folder_known, folder_attributes, opened, open_error, is_reparse_point, content_says_localized);',
     );
-    expect(code(localized)).not.toMatch(/CreateFile|ReadFile|ifstream|fopen/u);
+    // The profile API reopens the file by path (and follows a link): it is not used at all.
+    expect(code(source)).not.toMatch(/GetPrivateProfile|WritePrivateProfile/u);
+    expect(code(localized)).not.toMatch(/ifstream|fopen|_wfopen/u);
     // The guards decide before any listing of ours.
     expect(guardFunction).not.toContain('FindFirstFileExW(part');
     // A folder is a directory of the file system.
@@ -771,55 +808,179 @@ describe('Windows UI Automation source only reads', () => {
       mayBe.indexOf('GetVolumePathNameW('),
     );
     const known = mayBe.indexOf('SHGetKnownFolderPath(');
-    expect(mayBe.lastIndexOf('ShellLookupMustStop(limits, result)', known)).toBeGreaterThan(
-      mayBe.indexOf('GetDriveTypeW('),
+    expect(mayBe.slice(Math.max(0, known - 200), known)).toContain(
+      'ShellLookupMustStop(limits, result)',
     );
+    // The order of the three steps: the drive letter's type, then every part of the path from that drive's
+    // root, then the volume (a link in the middle must be refused before the volume is asked about).
+    const mayBeCompact = mayBe.replace(/\s+/gu, ' ');
+    const letterStep = mayBeCompact.indexOf('GetDriveTypeW(path.substr(0, 3).c_str())');
+    const linkStep = mayBeCompact.indexOf(
+      'ShellPathHasLink(path.substr(0, 3), path, limits, result)',
+    );
+    const volumeStep = mayBeCompact.indexOf('GetVolumePathNameW(');
+    expect(letterStep).toBeGreaterThan(0);
+    expect(linkStep).toBeGreaterThan(letterStep);
+    expect(volumeStep).toBeGreaterThan(linkStep);
+    expect(mayBeCompact.indexOf('GetDriveTypeW(root.c_str())')).toBeGreaterThan(volumeStep);
+    expect(mayBeCompact).toContain(
+      'if (ShellPathHasLink(path.substr(0, 3), path, limits, result)) return false;',
+    );
+    expect(mayBeCompact).not.toContain('ShellPathHasLink(root,');
     const ini = between(
       source,
       'ShellFolderHasLocalizedFileNames(const std::wstring &path,',
       'The path of the item a file browser shows',
     );
-    expect(ini.indexOf('ShellLookupMustStop(limits, result)')).toBeLessThan(
-      ini.indexOf('GetFileAttributesW('),
-    );
-    expect(ini.lastIndexOf('ShellLookupMustStop(limits, result)')).toBeGreaterThan(
-      ini.indexOf('GetFileAttributesW('),
-    );
-    expect(ini.lastIndexOf('ShellLookupMustStop(limits, result)')).toBeLessThan(
-      ini.indexOf('GetPrivateProfileSectionW('),
-    );
-    // A known limit, stated where it applies.
-    expect(source).toContain('(TOCTOU)');
-    // A desktop.ini is read only in a read-only / system folder (what the shell honours) and never when
-    // it is itself a link of any kind: the profile API would follow it, possibly to the network.
     const iniCompact = ini.replace(/\s+/gu, ' ');
+    // The folder's attributes: asked after a stop check, and the desktop.ini is read only in a read-only /
+    // system folder (what the shell honours).
+    expect(
+      ini
+        .slice(0, ini.indexOf('GetFileAttributesW('))
+        .lastIndexOf('ShellLookupMustStop(limits, result)'),
+    ).toBeGreaterThan(0);
     expect(iniCompact).toContain(
       '(folder_attributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0',
     );
-    expect(iniCompact).toContain('FindFirstFileExW(settings.c_str(), FindExInfoBasic');
+    expect(ini.indexOf('FILE_ATTRIBUTE_READONLY')).toBeLessThan(
+      ini.indexOf('ShellReadDesktopIni('),
+    );
+    // A known limit, stated where it applies.
+    expect(source).toContain('(TOCTOU)');
+    // The shared reader: ONE open of the file, as the file itself (a link is opened, not followed), then
+    // the reparse check, the size cap and the read all on that same handle: no second open by path.
+    const reader = between(
+      source,
+      'ShellReadDesktopIni(const std::wstring &settings',
+      'enum class ShellCandidateIni',
+    );
+    const readerCompact = reader.replace(/\s+/gu, ' ');
+    expect((code(reader).match(/CreateFileW\(/gu) ?? []).length).toBe(1);
+    expect((code(reader).match(/settings\.c_str\(\)/gu) ?? []).length).toBe(1);
+    expect(readerCompact).toContain(
+      'CreateFileW(settings.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);',
+    );
+    expect(readerCompact).toContain('GetFileInformationByHandle(file.handle, &info)');
+    expect(readerCompact).toContain(
+      'if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) return ShellIniStatus::kLink;',
+    );
+    expect(readerCompact).toContain(
+      'if (size > kShellDesktopIniMaxBytes) return ShellIniStatus::kUnreadable;',
+    );
+    expect(readerCompact).toContain('ReadFile(file.handle, content.data()');
+    expect(reader.indexOf('CreateFileW(')).toBeLessThan(
+      reader.indexOf('GetFileInformationByHandle('),
+    );
+    expect(reader.indexOf('GetFileInformationByHandle(')).toBeLessThan(reader.indexOf('ReadFile('));
+    expect(reader.indexOf('FILE_ATTRIBUTE_REPARSE_POINT')).toBeLessThan(
+      reader.indexOf('ReadFile('),
+    );
+    // The stop check comes before EACH of the three calls (open, handle information, read).
+    for (const call of ['CreateFileW(', 'GetFileInformationByHandle(', 'ReadFile(']) {
+      const at = reader.indexOf(call);
+      expect(at, call).toBeGreaterThan(0);
+      expect(reader.slice(Math.max(0, at - 320), at), call).toContain(
+        'ShellLookupMustStop(limits, result)',
+      );
+    }
+    // The folder's own desktop.ini goes through the reader; its text is judged by the pure rule.
     expect(iniCompact).toContain(
-      'is_reparse_point = found && (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;',
+      'ShellReadDesktopIni(settings, limits, result, &open_error, &bytes)',
     );
-    expect(iniCompact).toContain('if (found && !is_reparse_point) {');
-    expect(ini.indexOf('FindFirstFileExW(')).toBeLessThan(
-      ini.indexOf('GetPrivateProfileSectionW('),
+    expect(iniCompact).toContain(
+      'ShellDesktopIniTextHasLocalizedFileNames(bytes.data(), bytes.size())',
     );
-    expect(ini.indexOf('FILE_ATTRIBUTE_READONLY')).toBeLessThan(ini.indexOf('FindFirstFileExW('));
-    expect(
-      ini.lastIndexOf('ShellLookupMustStop(limits, result)', ini.indexOf('FindFirstFileExW(')),
-    ).toBeGreaterThan(ini.indexOf('GetFileAttributesW('));
-    // A candidate that is a link gets no shell name: no call that could reach its target.
-    const linkSkip = between(
+    // A read-only / system CANDIDATE directory: the shell would read ITS desktop.ini to name it (and may
+    // follow a link, load a module a resource reference names, bind a CLSID), so it is read first by the
+    // same reader and judged by the pure rule; no file is safe, a link / unreadable / risky one is unknown.
+    const candidateIni = between(
+      source,
+      'ShellCandidateDirectoryIni(const std::wstring &directory',
+      'Whether any part of',
+    );
+    const candidateCompact = candidateIni.replace(/\s+/gu, ' ');
+    expect(candidateCompact).toContain(
+      'ShellReadDesktopIni(ShellPathWithoutTrailingSeparator(directory) + L"\\\\desktop.ini"',
+    );
+    expect(candidateCompact).toContain(
+      'case ShellIniStatus::kNotThere: return ShellCandidateIni::kSafe;',
+    );
+    expect(candidateCompact).toContain(
+      'ShellDesktopIniTextIsRiskyForShellName(bytes.data(), bytes.size(), ShellExpandEnvironmentStrings, ShellDriveLetterIsLocal)',
+    );
+    expect(candidateCompact).toContain('default: return ShellCandidateIni::kUnknown;');
+    const namesLoop = between(
       body,
       'for (ShellNameCandidate &candidate : candidates) {',
       'MatchShellDisplayName(',
     );
-    expect(linkSkip.indexOf('if (candidate.is_link) continue;')).toBeGreaterThan(0);
-    expect(linkSkip.indexOf('if (candidate.is_link) continue;')).toBeLessThan(
-      linkSkip.indexOf('SHCreateItemFromParsingName('),
+    const namesCompact = namesLoop.replace(/\s+/gu, ' ');
+    expect(namesCompact).toContain('if (candidate.renamable_directory) {');
+    expect(namesCompact).toContain(
+      'ShellCandidateDirectoryIni(directory + candidate.name, limits, &stopped)',
+    );
+    expect(namesCompact).toContain('if (ini == ShellCandidateIni::kUnknown) continue;');
+    expect(namesLoop.indexOf('ShellCandidateDirectoryIni(')).toBeLessThan(
+      namesLoop.indexOf('SHCreateItemFromParsingName('),
     );
     expect(body.replace(/\s+/gu, ' ')).toContain(
-      'candidate.is_link = ShellReparseIsLink((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0, entry.dwReserved0);',
+      'candidate.renamable_directory = is_directory && (entry.dwFileAttributes & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_SYSTEM)) != 0;',
+    );
+    // A candidate that is a link: the moment one is found the whole answer is "not known" and nothing
+    // else is read; only a mount point whose target is a local drive-letter path is let through.
+    expect(namesLoop.indexOf('if (candidate.is_link) continue;')).toBeGreaterThan(0);
+    expect(namesLoop.indexOf('if (candidate.is_link) continue;')).toBeLessThan(
+      namesLoop.indexOf('SHCreateItemFromParsingName('),
+    );
+    const listingCompact = body.replace(/\s+/gu, ' ');
+    expect(listingCompact).toContain(
+      'candidate.is_link = ShellReparseIsLink(is_reparse, entry.dwReserved0);',
+    );
+    expect(listingCompact).toContain(
+      'if (!ShellReparseIsMountPoint(is_reparse, entry.dwReserved0)) return ShadowReadResult::kAbsent;',
+    );
+    expect(listingCompact).toContain(
+      'ShellMountPointTarget(directory + candidate.name, limits, &stopped)',
+    );
+    expect(listingCompact).toContain('if (target == ShellMountTarget::kStopped) return stopped;');
+    expect(listingCompact).toContain(
+      'if (target != ShellMountTarget::kLocalDisk) return ShadowReadResult::kAbsent;',
+    );
+    // A mount point is read with FSCTL_GET_REPARSE_POINT on the link itself, stop check before each call,
+    // and accepted only for a drive-letter target on a local disk.
+    const mount = between(
+      source,
+      'ShellMountPointTarget(const std::wstring &path',
+      'enum class ShellIniStatus',
+    );
+    const mountCompact = mount.replace(/\s+/gu, ' ');
+    expect(mountCompact).toContain('FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS');
+    expect(mountCompact).toContain('DeviceIoControl(link.handle, FSCTL_GET_REPARSE_POINT');
+    expect(mountCompact).toContain(
+      'ShellMountPointSubstituteName(buffer.data(), returned, &substitute)',
+    );
+    expect(mountCompact).toContain('ShellLocalDriveLetterOfSubstituteName(substitute)');
+    expect(mountCompact).toContain('ShellDriveLetterIsLocal(letter)');
+    for (const call of ['CreateFileW(', 'DeviceIoControl(']) {
+      const at = mount.indexOf(call);
+      expect(at, call).toBeGreaterThan(0);
+      expect(mount.slice(Math.max(0, at - 200), at), call).toContain(
+        'ShellLookupMustStop(limits, result)',
+      );
+    }
+    // The same relaxation on the way: a mount point with a local target is let through; a symbolic link
+    // and any other target is refused.
+    const hasLinkCompact = between(
+      source,
+      'ShellPathHasLink(const std::wstring &root',
+      'ShellFolderMayBeListed(',
+    ).replace(/\s+/gu, ' ');
+    expect(hasLinkCompact).toContain(
+      'if (!ShellReparseIsMountPoint(is_reparse, data.dwReserved0)) return true;',
+    );
+    expect(hasLinkCompact).toContain(
+      'if (ShellMountPointTarget(part, limits, result) != ShellMountTarget::kLocalDisk) return true;',
     );
     // More candidates than the cap are not known; so are two entries a name can stand for (the matcher).
     expect(body).toContain(
@@ -890,8 +1051,13 @@ describe('Windows UI Automation source only reads', () => {
       'shellneeds-read-only-or-system-directory-is-a-candidate',
       'shellneeds-ordinary-directory-is-not-a-candidate',
       'shellneeds-dot-is-never-a-candidate',
-      'desktopini-unreadable-section-is-a-yes',
+      'desktopini-link-is-a-yes-without-reading',
       'desktopini-with-the-section-is-a-yes',
+      'initext-utf16le-with-a-entry',
+      'initext-ansi-with-an-entry',
+      'initext-comments-only-section',
+      'initext-empty-section',
+      'initext-header-that-never-closes',
       'resolved-trailing-dot-resolves-to-another-entry',
     ])
       expect(harness, id).toContain(id);

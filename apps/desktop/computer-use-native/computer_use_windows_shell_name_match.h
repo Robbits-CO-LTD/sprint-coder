@@ -11,7 +11,9 @@
 //     directories that are read-only or system (a desktop.ini can give only those another name, as a
 //     localized "Documents"). Both kinds count together toward kShellMaxCandidates. The CALLER
 //     must not cut the list at the cap and match what is left: the moment it finds one more entry
-//     than the cap it gives up and the whole lookup is "not known" (kAbsent). MatchShellDisplayName
+//     than the cap it gives up and the whole lookup is "not known" (ShadowReadResult::kAbsent in
+//     the caller's terms; this header defines no such result, and kNoShellMatch below is its
+//     counterpart for a match that is not made). MatchShellDisplayName
 //     repeats that rule for its own input: a list longer than the cap (the caller's one-past-the-cap
 //     case, were it ever passed in) is "not known" too, never matched; and
 //  2. for EVERY candidate the caller asks the SHELL for the name it shows (the same name Explorer
@@ -37,9 +39,12 @@ namespace sprint_coder::computer_use {
 struct ShellNameCandidate {
   std::wstring name; // the entry's long name, as the file system has it
   bool is_directory = false;
+  bool renamable_directory = false; // a read-only / system directory: its desktop.ini can name it
   std::wstring shell_name; // the name the shell shows for it (valid when shell_name_known)
   bool shell_name_known = false;
-  bool is_link = false; // a symbolic link / mount point: its shell name is never asked for (unknown)
+  // A link (a name surrogate: symbolic link or mount point) whose target is not known to be a local disk:
+  // its shell name is never asked for. A match is never made while one is among the candidates.
+  bool is_link = false;
 };
 
 constexpr std::size_t kShellMaxCandidates = 64;
@@ -61,7 +66,7 @@ using ShellNameEquals = bool (*)(std::wstring_view, std::wstring_view);
 
 // Whether a directory entry can carry the display name and so needs the name the shell shows for it
 // (the pure rule of step 1). "." and ".." never do. An entry whose file name starts with the display
-// name does (compared with `equals`: case-blind), and so does a directory that is read-only or system
+// name does (compared with equals: case-blind), and so does a directory that is read-only or system
 // whatever its name, because a desktop.ini inside it can show it under another name.
 [[nodiscard]] inline bool ShellEntryNeedsShellName(std::wstring_view name, bool is_directory,
                                                    bool readonly_or_system,
@@ -79,13 +84,228 @@ constexpr unsigned long kShellAttributeReadOnly = 0x1;
 constexpr unsigned long kShellAttributeSystem = 0x4;
 constexpr unsigned long kShellReparseTagMountPoint = 0xA0000003;
 constexpr unsigned long kShellReparseTagSymlink = 0xA000000C;
+// Bit 29 of a reparse tag says the entry NAMES ANOTHER FILE SYSTEM OBJECT (IsReparseTagNameSurrogate):
+// a symbolic link, a mount point, and any other tag of that kind. A cloud file's tag does not have it.
+constexpr unsigned long kShellReparseNameSurrogate = 0x20000000;
 
-// Whether a directory entry is a symbolic link or a mount point (a junction): reading the shell's name
-// for it would touch what it points to, which can be a network or optical location. Any other reparse
-// point (a cloud file's tag, for one) is not a link in this sense. The tag is only meaningful when
-// the entry IS a reparse point (the listing leaves it undefined otherwise).
+// Whether a directory entry is a link: a reparse point that names another object. Reading the shell's
+// name for it would touch what it points to, which can be a network or optical location. Any other
+// reparse point (a cloud file's tag, for one) is not a link in this sense. The tag is only meaningful
+// when the entry IS a reparse point (the listing leaves it undefined otherwise).
 [[nodiscard]] inline bool ShellReparseIsLink(bool is_reparse_point, unsigned long tag) {
-  return is_reparse_point && (tag == kShellReparseTagSymlink || tag == kShellReparseTagMountPoint);
+  return is_reparse_point && (tag & kShellReparseNameSurrogate) != 0;
+}
+
+[[nodiscard]] inline bool ShellReparseIsMountPoint(bool is_reparse_point, unsigned long tag) {
+  return is_reparse_point && tag == kShellReparseTagMountPoint;
+}
+
+// The substitute name (the target) in the bytes FSCTL_GET_REPARSE_POINT returned for a mount point
+// (a junction): tag, data length, reserved, then the offsets and lengths of the substitute and the print
+// name, then the path buffer. False for anything that is not a well-formed mount point buffer.
+[[nodiscard]] inline bool ShellMountPointSubstituteName(const unsigned char *bytes, std::size_t size,
+                                                        std::wstring *name) {
+  if (bytes == nullptr || name == nullptr || size < 16) return false;
+  const auto word = [&](std::size_t at) { return static_cast<unsigned>(bytes[at]) | (static_cast<unsigned>(bytes[at + 1]) << 8); };
+  const unsigned long tag = static_cast<unsigned long>(word(0)) | (static_cast<unsigned long>(word(2)) << 16);
+  if (tag != kShellReparseTagMountPoint) return false;
+  const std::size_t offset = word(8);
+  const std::size_t length = word(10);
+  const std::size_t begin = 16 + offset;
+  if ((length & 1u) != 0 || begin > size || length > size - begin) return false;
+  name->clear();
+  for (std::size_t at = begin; at < begin + length; at += 2)
+    name->push_back(static_cast<wchar_t>(word(at)));
+  return true;
+}
+
+// The drive letter of a mount point target of the form "\??\X:" or "\??\X:\...", else 0. A target such as
+// "\??\Volume{guid}\" names a volume and not a drive letter: it is not a local drive for our purpose.
+[[nodiscard]] inline wchar_t ShellLocalDriveLetterOfSubstituteName(std::wstring_view substitute) {
+  constexpr std::wstring_view kPrefix = L"\\??\\";
+  if (substitute.size() < kPrefix.size() + 2 || substitute.substr(0, kPrefix.size()) != kPrefix) return 0;
+  const wchar_t letter = substitute[kPrefix.size()];
+  const bool alpha = (letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z');
+  if (!alpha || substitute[kPrefix.size() + 1] != L':') return 0;
+  if (substitute.size() > kPrefix.size() + 2 && substitute[kPrefix.size() + 2] != L'\\') return 0;
+  return letter;
+}
+
+// The most of a desktop.ini that is read (a real one is a few hundred bytes); a bigger file is a yes.
+constexpr std::size_t kShellDesktopIniMaxBytes = 64 * 1024;
+
+namespace shell_desktop_ini_detail {
+
+[[nodiscard]] inline bool IsBlank(wchar_t c) { return c == L' ' || c == L'\t'; }
+
+[[nodiscard]] inline std::wstring_view Trim(std::wstring_view text) {
+  while (!text.empty() && IsBlank(text.front())) text.remove_prefix(1);
+  while (!text.empty() && IsBlank(text.back())) text.remove_suffix(1);
+  return text;
+}
+
+struct IniEntry {
+  std::wstring section; // the section the line is in (empty before any header)
+  std::wstring key;     // the text before '=' (the whole line when there is none)
+  std::wstring value;   // the text after '='
+};
+
+// The lines of a desktop.ini that are not blank, not a comment and not a header, each with its section.
+// The bytes are UTF-16 LE or BE with a byte order mark, or else single-byte text (ANSI / UTF-8 with or
+// without its mark; only ASCII matters to the rules, and a character above 127 is just a character).
+// False when the text cannot be judged (fail-closed for every caller): longer than
+// kShellDesktopIniMaxBytes, UTF-16 with an odd number of bytes, a NUL in single-byte text (a UTF-16
+// file without its mark), and a line that opens a header but does not close it.
+[[nodiscard]] inline bool ParseIni(const unsigned char *bytes, std::size_t size, std::vector<IniEntry> *entries) {
+  if (size > kShellDesktopIniMaxBytes) return false;
+  if (size != 0 && bytes == nullptr) return false;
+  std::wstring text;
+  text.reserve(size);
+  std::size_t at = 0;
+  bool wide = false;
+  bool big_endian = false;
+  if (size >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE) {
+    wide = true;
+    at = 2;
+  } else if (size >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF) {
+    wide = true;
+    big_endian = true;
+    at = 2;
+  } else if (size >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF) {
+    at = 3;
+  }
+  if (wide) {
+    if (((size - at) & 1u) != 0) return false;
+    for (; at + 1 < size; at += 2) {
+      const unsigned lo = big_endian ? bytes[at + 1] : bytes[at];
+      const unsigned hi = big_endian ? bytes[at] : bytes[at + 1];
+      text.push_back(static_cast<wchar_t>((hi << 8) | lo));
+    }
+  } else {
+    for (; at < size; ++at) {
+      if (bytes[at] == 0) return false;
+      text.push_back(static_cast<wchar_t>(bytes[at]));
+    }
+  }
+  std::wstring section;
+  std::size_t line_begin = 0;
+  while (line_begin <= text.size()) {
+    std::size_t line_end = text.find_first_of(L"\r\n", line_begin);
+    if (line_end == std::wstring::npos) line_end = text.size();
+    const std::wstring_view line = Trim(std::wstring_view(text).substr(line_begin, line_end - line_begin));
+    line_begin = line_end + 1;
+    if (line.empty() || line.front() == L';') continue;
+    if (line.front() == L'[') {
+      const std::size_t close = line.find(L']');
+      if (close == std::wstring_view::npos) return false; // a header that never closes: not known
+      section = std::wstring(Trim(line.substr(1, close - 1)));
+      continue;
+    }
+    IniEntry entry;
+    entry.section = section;
+    const std::size_t equals = line.find(L'=');
+    if (equals == std::wstring_view::npos) {
+      entry.key = std::wstring(line);
+    } else {
+      entry.key = std::wstring(Trim(line.substr(0, equals)));
+      entry.value = std::wstring(Trim(line.substr(equals + 1)));
+    }
+    entries->push_back(std::move(entry));
+  }
+  return true;
+}
+
+[[nodiscard]] inline bool SameName(std::wstring_view left, std::wstring_view right) {
+  return ShellNameEqualsAsciiFold(left, right);
+}
+
+} // namespace shell_desktop_ini_detail
+
+// Whether the TEXT of a desktop.ini has a [LocalizedFileNames] section that is not empty (a section is
+// empty when no line between its header and the next header is anything but blank or a comment, a line
+// that starts with ';'). The section name is compared without regard to case. Text that cannot be
+// judged (see ParseIni) is a YES.
+[[nodiscard]] inline bool ShellDesktopIniTextHasLocalizedFileNames(const unsigned char *bytes,
+                                                                   std::size_t size) {
+  std::vector<shell_desktop_ini_detail::IniEntry> entries;
+  if (!shell_desktop_ini_detail::ParseIni(bytes, size, &entries)) return true;
+  for (const auto &entry : entries)
+    if (shell_desktop_ini_detail::SameName(entry.section, L"LocalizedFileNames")) return true;
+  return false;
+}
+
+using ShellExpandEnvironment = std::wstring (*)(std::wstring_view);
+using ShellDriveIsLocal = bool (*)(wchar_t);
+
+// Whether a value from a desktop.ini names a place the shell might LOAD or READ and that is not on a
+// local disk: a resource reference ("@path,-id"), or anything that looks like a path. A value that
+// is plain text (a title, a tip) names nothing. The path is expanded by the caller's function, then:
+// a name still holding '%' (an unknown variable), a UNC or device path, a URL, a path rooted on the
+// current drive, and a drive letter that is not a local disk are all RISKY. A relative path is not
+// (it is searched in the system directories or the folder). The "path,-id" or "path,index" resource
+// suffix is not part of the path.
+[[nodiscard]] inline bool ShellIniValueIsRisky(std::wstring_view value, ShellExpandEnvironment expand,
+                                               ShellDriveIsLocal is_local) {
+  using shell_desktop_ini_detail::Trim;
+  value = Trim(value);
+  if (value.empty()) return false;
+  if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"') value = Trim(value.substr(1, value.size() - 2));
+  const bool at_reference = !value.empty() && value.front() == L'@';
+  if (at_reference) value = Trim(value.substr(1));
+  if (value.empty()) return at_reference; // a bare "@" refers to nothing we can read: not known
+  const bool letter_path = value.size() >= 2 && value[1] == L':' &&
+                           ((value[0] >= L'A' && value[0] <= L'Z') || (value[0] >= L'a' && value[0] <= L'z'));
+  const bool looks_like_path = at_reference || value.front() == L'%' || value.front() == L'\\' || letter_path ||
+                               value.find(L"://") != std::wstring_view::npos;
+  if (!looks_like_path) return false;
+  if (value.find(L"://") != std::wstring_view::npos) return true;
+  const std::size_t comma = value.find_last_of(L',');
+  if (comma != std::wstring_view::npos) {
+    std::wstring_view tail = Trim(value.substr(comma + 1));
+    if (!tail.empty() && tail.front() == L'-') tail.remove_prefix(1);
+    bool digits = !tail.empty();
+    for (const wchar_t c : tail)
+      if (c < L'0' || c > L'9') digits = false;
+    if (digits) value = Trim(value.substr(0, comma));
+  }
+  if (expand == nullptr || is_local == nullptr) return true;
+  std::wstring path = expand(value);
+  if (path.find(L'%') != std::wstring::npos) return true;
+  std::wstring_view view = Trim(path);
+  if (view.size() >= 2 && view.front() == L'"' && view.back() == L'"') view = Trim(view.substr(1, view.size() - 2));
+  if (view.empty()) return false;
+  if (view.front() == L'\\' || view.front() == L'/') return true; // UNC, device, or rooted on the current drive
+  if (view.size() >= 2 && view[1] == L':') {
+    const wchar_t letter = view[0];
+    const bool alpha = (letter >= L'A' && letter <= L'Z') || (letter >= L'a' && letter <= L'z');
+    return !alpha || !is_local(letter);
+  }
+  return false;
+}
+
+// Whether a candidate FOLDER's desktop.ini could make the shell's name for it reach somewhere that is not
+// a local disk. The shell reads that file to name a read-only / system folder: the keys
+// LocalizedResourceName, IconResource, IconFile and InfoTip of [.ShellClassInfo] can refer to a module
+// or a file ("@\\server\share\x.dll,-1" loads a library from the network), and CLSID / CLSID2 /
+// UICLSID can bind a namespace extension: any of those keys that is risky, or present at all for a
+// CLSID, is a YES. Text that cannot be judged is a YES.
+[[nodiscard]] inline bool ShellDesktopIniTextIsRiskyForShellName(const unsigned char *bytes,
+                                                                 std::size_t size,
+                                                                 ShellExpandEnvironment expand,
+                                                                 ShellDriveIsLocal is_local) {
+  using shell_desktop_ini_detail::SameName;
+  std::vector<shell_desktop_ini_detail::IniEntry> entries;
+  if (!shell_desktop_ini_detail::ParseIni(bytes, size, &entries)) return true;
+  for (const auto &entry : entries) {
+    if (!SameName(entry.section, L".ShellClassInfo")) continue;
+    if (SameName(entry.key, L"CLSID") || SameName(entry.key, L"CLSID2") || SameName(entry.key, L"UICLSID"))
+      return true;
+    if (SameName(entry.key, L"LocalizedResourceName") || SameName(entry.key, L"IconResource") ||
+        SameName(entry.key, L"IconFile") || SameName(entry.key, L"InfoTip")) {
+      if (ShellIniValueIsRisky(entry.value, expand, is_local)) return true;
+    }
+  }
+  return false;
 }
 
 // Whether a folder's desktop.ini means that its files can be shown under names with no relation to
@@ -94,22 +314,22 @@ constexpr unsigned long kShellReparseTagSymlink = 0xA000000C;
 // name in a plain folder), so a folder without those attributes is not read at all. A desktop.ini
 // is normal (a user's home has one): its existence is not a yes. What cannot be known is a yes
 // (fail-closed): the folder's attributes, a lookup that failed for another reason than "not there",
-// a section that cannot be read, and a desktop.ini that is itself a reparse point of ANY kind (the
-// profile API follows it, to a place that can be on the network, and is never asked).
+// a desktop.ini that is itself a reparse point of ANY kind (it is opened as the link itself, never
+// followed, to a place that can be on the network), and content that cannot be read or judged
+// (content_says_localized is the verdict of ShellDesktopIniTextHasLocalizedFileNames, or true when
+// the bytes could not be had).
 [[nodiscard]] inline bool ShellDesktopIniLocalizesFileNames(bool folder_attributes_known,
                                                             unsigned long folder_attributes,
-                                                            bool file_found,
-                                                            unsigned long lookup_error,
+                                                            bool file_opened,
+                                                            unsigned long open_error,
                                                             bool file_is_reparse_point,
-                                                            std::size_t section_length,
-                                                            unsigned long section_error) {
+                                                            bool content_says_localized) {
   if (!folder_attributes_known) return true;
   if ((folder_attributes & (kShellAttributeReadOnly | kShellAttributeSystem)) == 0) return false;
-  if (!file_found)
-    return !(lookup_error == kShellErrorFileNotFound || lookup_error == kShellErrorPathNotFound);
+  if (!file_opened)
+    return !(open_error == kShellErrorFileNotFound || open_error == kShellErrorPathNotFound);
   if (file_is_reparse_point) return true;
-  if (section_length != 0) return true;
-  return section_error != 0 && section_error != kShellErrorFileNotFound;
+  return content_says_localized;
 }
 
 // The last part of a file system path (what follows the last separator; a trailing separator is
@@ -153,6 +373,7 @@ constexpr unsigned long kShellReparseTagSymlink = 0xA000000C;
   std::size_t found = kNoShellMatch;
   for (std::size_t i = 0; i < candidates.size(); ++i) {
     // A candidate whose shell name is not known could be the one, or a second one.
+    if (candidates[i].is_link) return kNoShellMatch;
     if (!candidates[i].shell_name_known) return kNoShellMatch;
     if (!equals(candidates[i].shell_name, display)) continue;
     if (found != kNoShellMatch) return kNoShellMatch; // two entries: which one was meant is not known
