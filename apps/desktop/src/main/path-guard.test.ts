@@ -7,12 +7,14 @@ import {
   realpath,
   rename,
   rm,
+  rmdir,
   stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { basename, join, parse } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, join, parse, resolve, sep } from 'node:path';
 import {
   PathGuardError,
   canonicalizeResourcePath,
@@ -20,9 +22,11 @@ import {
   openGuardedExistingFile,
   protectedWorkspaceRootClassification,
   revalidatePathGuard,
+  setProtectedRootRealpathForTesting,
   workspacePermissionResourceFromGuard,
   workspaceMutationBinding,
 } from './path-guard';
+import { pathComparisonKey } from '../path-comparison';
 
 const temporaryRoots: string[] = [];
 
@@ -497,6 +501,129 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
       if (previousHome === undefined) delete process.env[homeVariable];
       else process.env[homeVariable] = previousHome;
     }
+  });
+
+  // Issue #835: when a protected root exists but its real location cannot be read, comparing it
+  // only as written left a Project given by its real path classified as an ordinary Workspace.
+  describe('protected roots whose real location cannot be read', () => {
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+
+    async function withHome<T>(home: string, run: () => Promise<T>): Promise<T> {
+      const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+      const previousHome = process.env[homeVariable];
+      process.env[homeVariable] = home;
+      try {
+        return await run();
+      } finally {
+        if (previousHome === undefined) delete process.env[homeVariable];
+        else process.env[homeVariable] = previousHome;
+      }
+    }
+
+    async function classify(workspacePath: string): Promise<string> {
+      const guard = await createPathGuard({ workspacePath, targetPath: '.', operation: 'read' });
+      return workspacePermissionResourceFromGuard(guard).classification;
+    }
+
+    function realpathFailingBelow(roots: readonly string[]): (path: string) => string {
+      const keys = roots.map((root) => pathComparisonKey(resolve(root)));
+      return (path) => {
+        const key = pathComparisonKey(resolve(path));
+        if (keys.some((root) => key === root || key.startsWith(`${root}${sep}`)))
+          throw Object.assign(new Error(`EACCES: permission denied, realpath '${path}'`), {
+            code: 'EACCES',
+          });
+        return realpathSync.native(path);
+      };
+    }
+
+    afterEach(() => setProtectedRootRealpathForTesting(null));
+
+    it.runIf(process.platform === 'win32').each([['directly'], ['through another junction']])(
+      'protects a Project given by its real path when the credential folder link target (named %s) is unreadable',
+      async (shape) => {
+        const { root, workspace: unrelated } = await fixture();
+        const home = join(root, 'home');
+        const store = join(root, 'profile', 'aws-store');
+        await mkdir(home, { recursive: true });
+        await mkdir(join(store, 'sso', 'cache'), { recursive: true });
+        let linkTarget = store;
+        if (shape !== 'directly') {
+          await symlink(join(root, 'profile'), join(root, 'profile-alias'), 'junction');
+          linkTarget = join(root, 'profile-alias', 'aws-store');
+        }
+        await symlink(linkTarget, join(home, '.aws'), 'junction');
+        const project = await realpath(join(store, 'sso', 'cache'));
+        const user = process.env['USERNAME'];
+        if (user === undefined) throw new Error('USERNAME is not set');
+        // Deny the store folder itself (not inherited): the link no longer resolves, while the
+        // folders inside it still do, since Windows lets a process pass through a folder it cannot open.
+        execFileSync('icacls', [store, '/deny', `${user}:(F)`], { stdio: 'ignore' });
+        try {
+          await withHome(home, async () => {
+            expect(await classify(project)).toBe('credential');
+            expect(protectedWorkspaceRootClassification(project)).toBe('credential');
+            expect(await classify(unrelated)).toBe('workspace');
+          });
+        } finally {
+          execFileSync('icacls', [store, '/remove:d', user], { stdio: 'ignore' });
+        }
+      },
+    );
+
+    it('protects a Project given by its real path when the link target cannot be canonicalized', async () => {
+      const { root, workspace: unrelated } = await fixture();
+      const home = join(root, 'home');
+      const store = join(root, 'profile', 'aws-store');
+      await mkdir(home, { recursive: true });
+      await mkdir(join(store, 'sso', 'cache'), { recursive: true });
+      await symlink(store, join(home, '.aws'), linkType);
+      const project = await realpath(join(store, 'sso', 'cache'));
+      setProtectedRootRealpathForTesting(realpathFailingBelow([join(home, '.aws'), store]));
+      await withHome(home, async () => {
+        expect(await classify(project)).toBe('credential');
+        expect(protectedWorkspaceRootClassification(project)).toBe('credential');
+        expect(await classify(unrelated)).toBe('workspace');
+      });
+    });
+
+    it('protects a Project given by its real path when only the identity of the root is known', async () => {
+      const { root, workspace: unrelated } = await fixture();
+      const home = join(root, 'home');
+      const profile = join(root, 'profile');
+      const profileAlias = join(root, 'profile-alias');
+      await mkdir(home, { recursive: true });
+      await mkdir(join(profile, 'aws-store', 'sso', 'cache'), { recursive: true });
+      await symlink(profile, profileAlias, linkType);
+      await symlink(join(profileAlias, 'aws-store'), join(home, '.aws'), linkType);
+      const project = await realpath(join(profile, 'aws-store', 'sso', 'cache'));
+      // Neither the root, the place its link names, nor that place's parent can be canonicalized,
+      // and the link names the place through another link, so no path comparison can match.
+      setProtectedRootRealpathForTesting(realpathFailingBelow([home, profileAlias]));
+      await withHome(home, async () => {
+        expect(await classify(project)).toBe('credential');
+        expect(protectedWorkspaceRootClassification(project)).toBe('credential');
+        expect(await classify(unrelated)).toBe('workspace');
+      });
+    });
+
+    it('protects a folder of the same name when a protected root is a link loop', async () => {
+      const { root, workspace: unrelated } = await fixture();
+      const home = join(root, 'home');
+      const credentialRoot = join(home, '.aws');
+      const loopBack = join(home, '.aws-loop');
+      await mkdir(credentialRoot, { recursive: true });
+      // `.aws-loop -> .aws`, then `.aws` itself replaced by a link back to `.aws-loop`.
+      await symlink(credentialRoot, loopBack, linkType);
+      await rmdir(credentialRoot);
+      await symlink(loopBack, credentialRoot, linkType);
+      const lookalike = join(root, 'elsewhere', '.aws', 'project');
+      await mkdir(lookalike, { recursive: true });
+      await withHome(home, async () => {
+        expect(await classify(lookalike)).toBe('credential');
+        expect(await classify(unrelated)).toBe('workspace');
+      });
+    });
   });
 
   it.runIf(process.platform === 'win32')(
