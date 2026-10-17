@@ -2197,6 +2197,15 @@ describe('RuntimeHostTeamWorkerRuntime write approval notice (issue #525)', () =
     ).toBe(unspecified);
   });
 
+  it('says writes wait for approval before they land, and that 「Task中許可」 lets the same operation go on without a card (issue #848)', () => {
+    // A Worker write is decided on the parent Turn's card, which offers 「Task中許可」 for it; the
+    // Task grant then covers the same operation without a card, so the Worker is not told "every time".
+    expect(WORKER_WRITE_APPROVAL_NOTICE).toBe(
+      'ファイルの書き込みは、反映の前に利用者の承認を待ちます（利用者が「Task中許可」を選ぶと、このTaskでは同じ操作は確認なしで反映されます）。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。',
+    );
+    expect(WORKER_WRITE_APPROVAL_NOTICE).not.toContain('1回ごと');
+  });
+
   it('adds no approval notice to an execution that cannot write', async () => {
     // A read-only investigation by a Worker that is not write-capable.
     const investigation = await startPrompt(

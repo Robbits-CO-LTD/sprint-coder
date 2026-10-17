@@ -221,8 +221,13 @@ import {
   createToolDefinition,
   createToolId,
   evaluatePermissionPolicy,
+  createSessionGrant,
   expandAccessPreset,
   type AccessPreset,
+  type Capability,
+  type PermissionOperation,
+  type ResourceSet,
+  type SessionGrant,
 } from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
 import { AutoReviewer } from './auto-reviewer';
@@ -3730,6 +3735,240 @@ describe('Main image attachment dispatch boundary', () => {
 
       await expect(pending).resolves.toEqual({});
       expect(execute).toHaveBeenCalledOnce();
+    });
+
+    it('lets 「Task中許可」 on a Worker write card cover the same operation again in this Task, and nothing else (issue #848)', async () => {
+      // tmpdir() sits under AppData on Windows, which would classify every file as app-private.
+      const base = process.platform === 'win32' ? process.cwd() : tmpdir();
+      const root = await realpath(await mkdtemp(join(base, '.sprint-coder-issue-848-')));
+      try {
+        type Card = {
+          id: string;
+          taskId: string;
+          turnId: string;
+          callId: string;
+          subjectId: string;
+          capability: Capability;
+          resource: ResourceSet;
+          operation: PermissionOperation;
+          providerEgress: 'none';
+          sandboxProfile: 'read-only' | 'workspace-write' | 'full';
+          specDigest: string;
+          policyEpoch: number;
+          challenge: string;
+          revision: number;
+          state: string;
+          decision: 'allow_once' | 'allow_task' | 'deny' | null;
+        };
+        const cards: Card[] = [];
+        const grants: SessionGrant[] = [];
+        const evaluations: string[] = [];
+        const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
+        const coordinator = new ApprovalCoordinator({
+          persistence: {
+            requestApproval: (input) => {
+              const card = { ...(input as unknown as Card), revision: 0, state: 'pending' };
+              cards.push(card);
+              return { approval: card };
+            },
+            getApproval: (_taskId, approvalId) => cards.find(({ id }) => id === approvalId),
+            resolveApproval: (input) => {
+              const index = cards.findIndex(({ id }) => id === input.approvalId);
+              const card = cards[index]!;
+              const resolved = {
+                ...card,
+                state: 'resolved',
+                decision: input.decision,
+                revision: 1,
+              };
+              cards[index] = resolved;
+              // The grant SqlitePersistenceClient.resolveApproval saves for `allow_task`: bound to
+              // the card's tool, resource, operation and exact content, for this Task only.
+              if (input.decision === 'allow_task')
+                grants.push(
+                  createSessionGrant({
+                    id: `grant-${card.id}`,
+                    subjectId: card.subjectId,
+                    capability: card.capability,
+                    resourceSet: card.resource,
+                    operations: [card.operation],
+                    scope: 'task',
+                    expiresAt: '2099-01-01T00:00:00.000Z',
+                    policyEpoch: card.policyEpoch,
+                    providerEgress: [card.providerEgress],
+                    sandboxProfiles: [card.sandboxProfile],
+                    executionSpecDigest: card.specDigest,
+                  }),
+                );
+              return { approval: resolved };
+            },
+            cancelPendingApprovalForCall: () => null,
+          },
+          now: () => new Date().toISOString(),
+          expiresAt: () => '2099-01-01T00:00:00.000Z',
+          getCurrentPolicyEpoch: () => 9,
+          isTurnActive: () => true,
+          evaluatePermission: ({ capability, request }) =>
+            (
+              router as unknown as {
+                evaluateToolPermission(
+                  request: ToolAuthorizationRequest,
+                  capability: Capability,
+                ): Promise<ToolAuthorizationDecision>;
+              }
+            ).evaluateToolPermission(request, capability),
+          revalidateTaskGrant: ({ capability, request }) =>
+            (
+              router as unknown as {
+                revalidateApprovedTaskGrant(
+                  request: ToolAuthorizationRequest,
+                  capability: Capability,
+                ): boolean;
+              }
+            ).revalidateApprovedTaskGrant(request, capability),
+          publish: () => undefined,
+        });
+        // The harness is wired the way IpcRouter wires it: a Worker call resolves its own sealed
+        // Workspace through managedWorkerCall. Reaching `apply` means the write was authorized.
+        const managedWorkerCall = new Map<
+          string,
+          {
+            workspace: EffectiveWorkspaceSet;
+            mutationBindings: ReadonlyMap<
+              string,
+              { workspaceKey: string; rootIdentityDigest: string }
+            >;
+          }
+        >();
+        const workerCall = (turnId: string, callId: string | undefined) =>
+          callId === undefined
+            ? undefined
+            : managedWorkerCall.get(JSON.stringify([turnId, callId]));
+        const applied = vi.fn(async () => {
+          throw new Error('edit applied (test stub)');
+        });
+        const harness = new ManagedCodingHarness({
+          workspaceFor: (_taskId, turnId, callId) => workerCall(turnId, callId)?.workspace ?? null,
+          rootIdentityFor: (turnId, rootId, callId) =>
+            workerCall(turnId, callId)?.mutationBindings.get(rootId)?.rootIdentityDigest,
+          mutationBindingFor: (turnId, rootId, callId) =>
+            workerCall(turnId, callId)?.mutationBindings.get(rootId),
+          policyEpochFor: () => 9,
+          authorizer: (request, control) => coordinator.authorizeTool(request, control),
+          workspaceEdit: {
+            turnWorkspaceSetFor: () => null,
+            turnRootMutationBindingsFor: () => new Map(),
+            revisions: new FileRevisionRegistry(),
+            apply: applied,
+            policyEpochFor: () => 9,
+          },
+        });
+        const broker = harness.broker;
+        broker.startTurn(
+          { taskId: 'task-1', turnId: 'turn-parent', workspaceId: 'workspace-1', policyEpoch: 9 },
+          'claude',
+        );
+        Object.assign(router, {
+          managedWorkerTurn: new Map(),
+          managedWorkerCall,
+          managedCodingHarness: harness,
+          cliTeamWorkerRuntime: {
+            recordManagedToolDenied: vi.fn(),
+            recordManagedToolResult: vi.fn(),
+          },
+          persistence: {
+            getActiveTurnId: () => 'turn-parent',
+            getTeamMissionForExecution: () => null,
+            readTurnWorkspaceSetForTask: () => null,
+            getPermissionPolicy: () => ({ policyEpoch: 9 }),
+            listPermissionGrants: () => [...grants],
+          },
+          autoReviewer: AutoReviewer.createProduction(),
+          publish: () => undefined,
+          permissionBroker: new PermissionBroker({
+            getPermissionPolicy: () => ({
+              preset: 'ask',
+              policyEpoch: 9,
+              expandedPolicy: expandAccessPreset('ask'),
+              revokedCapabilities: [],
+            }),
+            listPermissionGrants: () => [...grants],
+            commitPermissionEvaluation: (_taskId: string, _request: unknown, evaluation: never) => {
+              evaluations.push((evaluation as { reason: string }).reason);
+              return undefined;
+            },
+            recordPermissionAudit: () => undefined,
+          } as never),
+        });
+        const catalog = await prepareWorkerManagedCatalog.call(
+          router,
+          'claude',
+          'task-1',
+          'runtime-worker',
+          {
+            primaryRootId: 'root-worker',
+            digest: 'x'.repeat(64),
+            roots: [
+              { rootId: 'root-worker', path: root, label: 'Worker', role: 'primary' },
+            ] as never[],
+          },
+          false,
+          'workspace-write',
+        );
+        const write = (callId: string, path: string) =>
+          createHandlers.call(router).teamMcp(
+            { path, content: 'hello' },
+            {
+              taskId: 'task-1',
+              turnId: 'runtime-worker',
+              callId,
+              toolName: 'create_file',
+              catalogDigest: catalog.digest,
+            },
+          );
+        const decide = (card: Card, decision: 'allow_task' | 'deny') =>
+          coordinator.resolve({
+            taskId: card.taskId,
+            turnId: card.turnId,
+            approvalId: card.id,
+            decision,
+            expectedRevision: card.revision,
+            challenge: card.challenge,
+            operationId: `operation-${card.id}`,
+          });
+        const deniedOnItsOwnCard = async (callId: string, path: string, cardCount: number) => {
+          const pending = write(callId, path);
+          await vi.waitFor(() => expect(cards).toHaveLength(cardCount));
+          decide(cards[cardCount - 1]!, 'deny');
+          await expect(pending).rejects.toBeInstanceOf(ToolAuthorizationDeniedError);
+        };
+
+        // The Worker's first write is asked about on the parent Turn's card, and that card takes
+        // 「Task中許可」 (it is not one of the per-call capabilities that refuse it).
+        const first = write('call-1', 'a.txt');
+        await vi.waitFor(() => expect(cards).toHaveLength(1));
+        expect(cards[0]).toMatchObject({ turnId: 'turn-parent', capability: 'workspace.write' });
+        expect(applied).not.toHaveBeenCalled();
+        decide(cards[0]!, 'allow_task');
+        await expect(first).rejects.toThrow('edit applied (test stub)');
+        expect(applied).toHaveBeenCalledTimes(1);
+        expect(grants).toHaveLength(1);
+
+        // The same operation again in this Task goes through without a card, on the Task grant.
+        await expect(write('call-2', 'a.txt')).rejects.toThrow('edit applied (test stub)');
+        expect(cards).toHaveLength(1);
+        expect(applied).toHaveBeenCalledTimes(2);
+        expect(evaluations).toEqual(['approval_policy_ask', 'remembered_grant']);
+
+        // Another file is not covered: it waits on its own card, and a denial writes nothing.
+        await deniedOnItsOwnCard('call-3', 'b.txt', 2);
+        // Nor is the same file once it has changed: the grant is bound to the file as it was.
+        await writeFile(join(root, 'a.txt'), 'changed since the grant\n');
+        await deniedOnItsOwnCard('call-4', 'a.txt', 3);
+        expect(applied).toHaveBeenCalledTimes(2);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
     });
 
     it('does not write when the card is allowed after the Worker Turn was released', async () => {

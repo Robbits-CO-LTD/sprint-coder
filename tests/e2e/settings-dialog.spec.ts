@@ -121,7 +121,7 @@ test.describe('settings dialog', () => {
     await expect(accessDefault).toBeVisible();
     await expect(accessDefault.locator('option')).toHaveText([
       '前回選択した設定',
-      '毎回確認',
+      '実行前に確認',
       '安全時は自動',
       'フルアクセス',
     ]);

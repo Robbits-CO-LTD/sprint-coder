@@ -1462,8 +1462,9 @@ export class IpcRouter {
       this.skillSettings.pinnedAutoCandidates(runtime),
     );
     const genericManagedRuntimeTools = this.createGenericManagedRuntimeToolHandlers();
-    // 「確認する」では Worker の書き込みも1回ずつ、親の Turn（Leader の Turn、Graph Mission では
-    // そのセッション Turn）の承認カードで確認する（issue #525）。
+    // 「確認する」では Worker の書き込みも反映の前に、親の Turn（Leader の Turn、Graph Mission では
+    // そのセッション Turn）の承認カードで確認する（issue #525）。「Task中許可」を選んだ同じ操作は、
+    // この Task では確認なしで続く（issue #848）。
     const workerWriteApprovalRequiredFor = (taskId: string): boolean =>
       workerWritesNeedApproval(this.persistence.getPermissionPolicy(taskId).preset);
     this.cliTeamWorkerRuntime = new RuntimeHostTeamWorkerRuntime({

@@ -60,7 +60,7 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
   }): boolean;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   /**
-   * Task の安全設定が書き込みのたびに利用者の承認を求めるとき true（issue #525）。未指定は false で、
+   * Task の安全設定が書き込みの前に利用者の承認を求めるとき true（issue #525）。未指定は false で、
    * そのとき指示文は変わらない。
    */
   writeApprovalRequiredFor?: (taskId: string) => boolean;
@@ -666,7 +666,7 @@ function workerPrompt(
     writeRequested: boolean;
     /** What the actually-handed-over managed tools cannot do, e.g. the Windows add-only limit. */
     writeLimitNotice: string;
-    /** The Task asks the user before each write (issue #525). */
+    /** The Task asks the user before a write lands (issue #525). */
     writeApprovalRequired: boolean;
   }>,
 ): string {

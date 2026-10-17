@@ -557,7 +557,7 @@ function AccessDefaultGroup() {
           }}
         >
           <option value="last">前回選択した設定</option>
-          <option value="ask">毎回確認</option>
+          <option value="ask">実行前に確認</option>
           <option value="auto">安全時は自動</option>
           <option value="full">フルアクセス</option>
         </select>
