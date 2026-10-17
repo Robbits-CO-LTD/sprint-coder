@@ -440,6 +440,35 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
     }
   });
 
+  it('protects a Project inside a home app-support folder that is a link to another place', async () => {
+    const { root } = await fixture();
+    const home = join(root, 'home');
+    const store = join(root, 'profile', 'app-support-store');
+    await mkdir(join(home, 'Library'), { recursive: true });
+    await mkdir(join(store, 'SomeApp'), { recursive: true });
+    await writeFile(join(store, 'SomeApp', 'state.json'), '{}');
+    await symlink(
+      store,
+      join(home, 'Library', 'Application Support'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = home;
+    try {
+      const guard = await createPathGuard({
+        workspacePath: join(home, 'Library', 'Application Support', 'SomeApp'),
+        targetPath: 'state.json',
+        operation: 'read',
+      });
+      expect(workspacePermissionResourceFromGuard(guard).classification).toBe('app-private');
+      expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe('app-private');
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
   it('protects a Project that is a link into a home credential or app-support folder', async () => {
     const { root } = await fixture();
     const home = join(root, 'home');
