@@ -14,6 +14,12 @@ import { assessProviderEgressDisclosure } from './provider-disclosure-classifier
 export type ProviderEgressDecision = Readonly<{
   allowed: boolean;
   evaluation: PermissionEvaluation;
+  /**
+   * The secret scan's reason codes (for example `high-entropy-value`), empty when the scan was
+   * clean. Codes only: never the scanned bytes, so a denial can be explained without disclosing
+   * what it withheld (issue #841).
+   */
+  disclosureReasons?: readonly string[];
 }>;
 
 /**
@@ -53,6 +59,7 @@ export function authorizeComputerUseProviderEgress(
         policyEpoch: input.broker.getPolicy(input.task.id).policyEpoch,
         evaluationTrace: [],
       },
+      disclosureReasons: Object.freeze([]),
     });
   }
   if (
@@ -271,10 +278,10 @@ function authorizeProviderEgress(
     ...input.context.fragments.map((fragment) => fragment.content),
     ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
+  const disclosure = assessProviderEgressDisclosure(content, input.knownWorkspaceRoots);
   const secretScan =
-    assessProviderEgressDisclosure(content, input.knownWorkspaceRoots).classification === 'safe'
-      ? ('clean' as const)
-      : ('blocked' as const);
+    disclosure.classification === 'safe' ? ('clean' as const) : ('blocked' as const);
+  const disclosureReasons = secretScan === 'clean' ? Object.freeze([]) : disclosure.reasons;
   const textByteCount = Buffer.byteLength(content, 'utf8');
   const attachmentManifestDigest = input.attachmentManifestDigest ?? null;
   const attachmentByteCount = input.attachmentByteCount ?? 0;
@@ -415,7 +422,7 @@ function authorizeProviderEgress(
     (evaluation.decision !== 'allow' && evaluation.decision !== 'allow_once') ||
     evaluation.permit === undefined
   )
-    return Object.freeze({ allowed: false, evaluation });
+    return Object.freeze({ allowed: false, evaluation, disclosureReasons });
   const revalidationInput = {
     ...evaluationInput,
     permit: evaluation.permit,
@@ -435,5 +442,6 @@ function authorizeProviderEgress(
   return Object.freeze({
     allowed: revalidated.valid,
     evaluation: finalEvaluation,
+    disclosureReasons,
   });
 }

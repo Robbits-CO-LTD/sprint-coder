@@ -140,6 +140,7 @@ import {
   type TeamWorkerRuntimeDeps,
 } from './team-worker-runtime';
 import {
+  WorkerEgressDeniedError,
   WorkerRuntimeExitUnconfirmedError,
   WorkerRuntimeFailureError,
   runtimeStopConfirmed,
@@ -1300,7 +1301,7 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
       '/isolated/primary',
     );
     expect(runtimeHostMock.starts[0]?.args[2]).toContain(
-      '隔離root: primary=/isolated/primary, secondary=/isolated/secondary',
+      '隔離root: primary = /isolated/primary, secondary = /isolated/secondary',
     );
   });
 
@@ -1484,6 +1485,132 @@ describe('RuntimeHostTeamWorkerRuntime Manager MCP', () => {
     // The Worker cannot work without naming that directory, so the scan must read it as clean.
     expect(assessProviderEgressDisclosure(prompt).classification).toBe('sensitive');
     expect(assessProviderEgressDisclosure(prompt, knownWorkspaceRoots).classification).toBe('safe');
+  });
+
+  it.each([
+    [
+      'POSIX',
+      '/Users/dev/Library/Application Support/Sprint Coder/team-worker-worktrees/worktree-14838862-f09e-4174-84e4-68cbb3cac903-1',
+    ],
+    [
+      'Windows',
+      String.raw`C:\Users\dev\AppData\Roaming\Sprint Coder\team-worker-worktrees\worktree-14838862-f09e-4174-84e4-68cbb3cac903-1`,
+    ],
+  ])(
+    'keeps a root label apart from its %s isolation root in the egress scan (issue #841)',
+    async (_platform, isolationRoot) => {
+      runtimeHostMock.starts.length = 0;
+      const authorizeEgress = vi.fn((..._args: unknown[]) => true);
+      const subject = runtime({
+        authorizeEgress,
+        selectRuntimes: () => [{ kind: 'codex', model: 'gpt-5.6-luna' }],
+      });
+
+      await subject.execute({
+        worker: { ...worker(false), writeCapable: true },
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        executionId: 'execution-graph-step-1',
+        accessMode: 'workspace-write',
+        workspacePath: isolationRoot,
+        workspaceSet: {
+          primaryRootId: 'root-1',
+          digest: 'f'.repeat(64),
+          roots: [
+            {
+              rootId: 'root-1',
+              path: isolationRoot,
+              // The label of the real-AI E2E Graph Mission whose Codex Worker was denied: on its
+              // own it stays under the entropy threshold, fused to the root by `=` it did not.
+              label: 'realai-ws-codex-graph-Hnb2yq',
+              role: 'primary' as const,
+            },
+          ],
+        },
+        content: '実装する',
+      });
+
+      const [, , , payload, , knownWorkspaceRoots] = authorizeEgress.mock.calls[0] as [
+        string,
+        string,
+        string,
+        string,
+        unknown,
+        readonly string[],
+      ];
+      expect(payload).toContain('realai-ws-codex-graph-Hnb2yq');
+      expect(assessProviderEgressDisclosure(payload, knownWorkspaceRoots)).toMatchObject({
+        classification: 'safe',
+        reasons: [],
+      });
+      // A real secret beside the label is still caught: the root alone is what is exempt.
+      expect(
+        assessProviderEgressDisclosure(
+          `${payload}\n8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH`,
+          knownWorkspaceRoots,
+        ).reasons,
+      ).toEqual(['high-entropy-value']);
+      subject.dispose();
+    },
+  );
+
+  it('names the egress gate reason codes, never the withheld bytes, when it denies (issue #841)', async () => {
+    runtimeHostMock.starts.length = 0;
+    const releaseManagedTurn = vi.fn();
+    const subject = runtime({
+      releaseManagedTurn,
+      selectRuntimes: () => [{ kind: 'codex', model: 'gpt-5.6-luna' }],
+      authorizeEgress: () => ({
+        allowed: false,
+        reason: 'parent_ceiling',
+        disclosureReasons: ['high-entropy-value'],
+      }),
+    });
+
+    const failure = await subject
+      .execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        executionId: 'execution-denied-1',
+        content: '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH を使って実装する',
+      })
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+
+    expect(failure).toBeInstanceOf(WorkerEgressDeniedError);
+    const denied = failure as WorkerEgressDeniedError;
+    expect(denied).toMatchObject({
+      runtimeKind: 'codex',
+      policyReason: 'parent_ceiling',
+      disclosureReasons: ['high-entropy-value'],
+      diagnosticCodes: 'secret_scan:high-entropy-value',
+    });
+    expect(denied.message).toBe(
+      'codex Team Worker egress was denied: 送信前の秘密情報検査が送信を止めました（検出: high-entropy-value）',
+    );
+    expect(denied.message).not.toContain('8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH');
+    expect(runtimeHostMock.starts).toHaveLength(0);
+    expect(releaseManagedTurn).toHaveBeenCalledTimes(1);
+    subject.dispose();
+  });
+
+  it('treats any verdict other than an explicit allow as a policy denial', async () => {
+    runtimeHostMock.starts.length = 0;
+    const subject = runtime({
+      authorizeEgress: () => ({ allowed: 'yes' }) as unknown as { allowed: boolean },
+    });
+    await expect(
+      subject.execute({
+        worker: worker(false),
+        envelope: { ...envelope, targetAgentId: 'worker-1' },
+        content: '実装する',
+      }),
+    ).rejects.toThrow(
+      'claude Team Worker egress was denied: 送信の許可が得られませんでした（unknown）',
+    );
+    expect(runtimeHostMock.starts).toHaveLength(0);
+    subject.dispose();
   });
 
   it('fails explicitly before dispatch rather than silently subsetting oversized Project items', async () => {

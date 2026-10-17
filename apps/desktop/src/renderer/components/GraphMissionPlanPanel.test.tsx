@@ -34,19 +34,22 @@ const plan: GraphMissionPlan = {
   ],
 };
 
-function seed(graph: {
-  stepResumeAvailable: boolean;
-  integrationResumeAvailable: boolean;
-  stepResumePending?: boolean;
-  workspaceReviewRequired?: boolean;
-  waitReason?: 'dependencies' | 'resources' | 'write-conflicts' | 'owner-active';
-}) {
+function seed(
+  graph: {
+    stepResumeAvailable: boolean;
+    integrationResumeAvailable: boolean;
+    stepResumePending?: boolean;
+    workspaceReviewRequired?: boolean;
+    waitReason?: 'dependencies' | 'resources' | 'write-conflicts' | 'owner-active';
+  },
+  terminalReason: string | null = null,
+) {
   useAppStore.setState({
     teamByTask: {
       'task-1': {
         team: { state: 'active' },
         workers: [{ id: 'worker-a', role: 'reviewer', state: 'waiting', writeCapable: false }],
-        executions: [],
+        executions: [{ id: 'execution-a', terminalReason }],
         missions: [
           {
             id: 'mission-1',
@@ -233,5 +236,46 @@ it('offers nothing while the step is not parked for a manual decision', async ()
     );
   } finally {
     await act(async () => root.unmount());
+  }
+});
+
+it('says why a parked step stopped instead of a bare wait (issue #841)', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
+  vi.stubGlobal('sprintCoder', { graphs: {} });
+  const reason =
+    'codex Team Worker egress was denied: 送信前の秘密情報検査が送信を止めました（検出: high-entropy-value）';
+  seed({ stepResumeAvailable: true, integrationResumeAvailable: false }, reason);
+  const container = document.createElement('div');
+  const root = createRoot(container);
+  try {
+    await act(async () =>
+      root.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.querySelector('[data-testid="graph-step-reason"]')?.textContent).toBe(
+      `停止理由: ${reason}`,
+    );
+    // A known code reads in Japanese; a step already resumed is past its old reason.
+    await act(async () => root.unmount());
+    seed({ stepResumeAvailable: true, integrationResumeAvailable: false }, 'egress_denied');
+    const coded = createRoot(container);
+    await act(async () =>
+      coded.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.querySelector('[data-testid="graph-step-reason"]')?.textContent).toBe(
+      '停止理由: 送信前の検査で送信を止めた',
+    );
+    await act(async () => coded.unmount());
+    seed(
+      { stepResumeAvailable: false, integrationResumeAvailable: false, stepResumePending: true },
+      reason,
+    );
+    const resumed = createRoot(container);
+    await act(async () =>
+      resumed.render(<GraphMissionPlanPanel view={view} plan={plan} sourceStamp={null} />),
+    );
+    expect(container.querySelector('[data-testid="graph-step-reason"]')).toBeNull();
+    await act(async () => resumed.unmount());
+  } finally {
+    container.remove();
   }
 });
