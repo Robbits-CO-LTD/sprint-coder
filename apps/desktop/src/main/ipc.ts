@@ -388,7 +388,7 @@ import {
 } from './computer-use-permission-settings';
 import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
-import { PermissionBroker } from './permission-broker';
+import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
 import {
   ApprovalCoordinator,
   approvalFactsForTool,
@@ -6463,7 +6463,12 @@ export class IpcRouter {
         reason:
           evaluation.decision === 'allow_once'
             ? 'permission_allow_once_missing_permit'
-            : evaluation.reason,
+            : // A high-risk request in a protected Workspace root is refused by the policy, not by
+              // the broker's trusted-facts check, so it is told the same reason here (Issue #836).
+              // The audit committed above keeps the policy's own code.
+              ((evaluation.reason === 'immutable_protected_resource'
+                ? protectedWorkspaceRootDenialReason(pathGuard, workspaceAuthority)
+                : undefined) ?? evaluation.reason),
       },
       providerProcessAuthority,
       preset,
@@ -10853,7 +10858,7 @@ export function protectedProjectFolderWarning(
     detail: [
       ...protectedFolders,
       '',
-      'AIはこの場所のファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから追加することをおすすめします。',
+      'AIはこの場所のファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから追加することをおすすめします。',
     ].join('\n'),
   };
 }

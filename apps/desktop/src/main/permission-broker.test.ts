@@ -9,7 +9,7 @@ import {
   type PermissionRequest,
   type Capability,
 } from '@sprint-coder/domain';
-import { PermissionBroker } from './permission-broker';
+import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
 import type { PermissionPolicyRecord } from './persistence';
 import {
   createPathGuard,
@@ -417,8 +417,79 @@ describe('Main PermissionBroker', () => {
         },
       }),
     ).toThrow(
-      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。',
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。',
     );
+  });
+
+  // Issue #836: a high-risk request passes the trusted-facts check and is refused by the policy;
+  // the decision stays a deny, and the protected-root reason is what the call is told.
+  it('keeps a high-risk write in a protected Workspace denied and names the protected root', async () => {
+    const appDataWorkspace = join(testRoot, 'AppData', 'Local', 'Temp', 'high-risk-app');
+    await mkdir(appDataWorkspace, { recursive: true });
+    const guard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: appDataWorkspace,
+      targetPath: 'fresh.txt',
+      operation: 'write',
+    });
+    const writeCeiling: CapabilityCeiling = {
+      entries: [
+        {
+          capability: 'workspace.write',
+          resourceSet: { kind: 'all' },
+          operations: ['write'],
+          expiresAt: '2026-07-22T13:00:00.000Z',
+          providerEgress: ['none'],
+          sandboxProfiles: ['workspace-write'],
+        },
+      ],
+      maxWorkerDepth: 0,
+      maxConcurrentWorkers: 0,
+    };
+    const { broker } = fixture();
+    expect(
+      broker.preview({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        request: {
+          ...request,
+          capability: 'workspace.write',
+          operation: 'write',
+          sandboxProfile: 'workspace-write',
+          resource: workspacePermissionResourceFromGuard(guard),
+          risk: 'high',
+        },
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: writeCeiling,
+          modeCeiling: writeCeiling,
+          sandbox: { feasible: true, profile: 'workspace-write' },
+        },
+        pathGuard: guard,
+        workspace: {
+          source: 'project',
+          projectId: 'project-1',
+          primaryRootId: 'root-a',
+          roots: [
+            {
+              rootId: 'root-a',
+              path: guard.workspacePath,
+              label: 'high-risk-app',
+              role: 'primary',
+              status: 'available',
+            },
+          ],
+          digest: 'f'.repeat(64),
+        },
+      }),
+    ).toMatchObject({ decision: 'deny', reason: 'immutable_protected_resource' });
+    expect(protectedWorkspaceRootDenialReason(guard)).toBe(
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きができません（コマンドの実行は、ほかの場所と同じく利用者の承認が必要です）。ドキュメントなど通常のフォルダへ移動してから、Projectのフォルダに設定し直してください。',
+    );
+    expect(protectedWorkspaceRootDenialReason(pathGuard)).toBeUndefined();
+    expect(protectedWorkspaceRootDenialReason(undefined)).toBeUndefined();
   });
 
   it('authorizes a command guard against its sealed Turn roots', async () => {
