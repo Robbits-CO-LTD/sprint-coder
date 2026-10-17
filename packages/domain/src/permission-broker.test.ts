@@ -691,8 +691,9 @@ describe('access preset expansion', () => {
     );
   });
 
-  // issue #842: 「確認する」の説明は、Workspace内の読み取りも1回ごとに確認すると書く。説明が
-  // 前提にしている挙動（読み取りも承認カードになる）をここで固定する。
+  // issue #842: 「確認する」の説明は、Workspace内の読み取りも実行前に確認すると書く（「Task中許可」を
+  // 選んだ操作はそのTaskでは確認なしで続く）。説明が前提にしている挙動（許可が無ければ読み取りも
+  // 承認カードになる）をここで固定する。
   it('asks before a Workspace read under Ask, as its description says (issue #842)', () => {
     const ask = expandAccessPreset('ask');
     expect(ask.allowRules.some((rule) => rule.capability === 'workspace.read')).toBe(false);
