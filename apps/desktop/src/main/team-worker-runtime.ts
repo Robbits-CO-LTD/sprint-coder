@@ -12,6 +12,7 @@ import { verifyToolCatalogSnapshot, type ToolCatalogSnapshot } from '@sprint-cod
 import { RuntimeHostClient } from './runtime-host';
 import {
   DeterministicTeamWorkerRuntime,
+  WorkerEgressDeniedError,
   WorkerRuntimeExitUnconfirmedError,
   WorkerRuntimeFailureError,
   type TeamRuntimeConversationItem,
@@ -43,6 +44,15 @@ import { workerWriteLimitNotice, workspaceWriteLimitsFromTools } from './workspa
 // Production must never present simulated Worker output as a real Team report.
 
 export type RealRuntimeChoice = Readonly<{ kind: 'claude' | 'codex' | 'grok'; model: string }>;
+
+/** The egress gate's verdict, explained by reason codes only — never by the bytes it withheld. */
+export type TeamWorkerEgressVerdict = Readonly<{
+  allowed: boolean;
+  /** The permission evaluation's reason, e.g. `parent_ceiling`. */
+  reason?: string;
+  /** The secret scan's reason codes, e.g. `high-entropy-value`; empty when the scan was clean. */
+  disclosureReasons?: readonly string[];
+}>;
 
 const UNKNOWN_RUNTIME_RETRY_DELAY_MS = 60_000;
 // Pause before asking the Runtime Host again whether an unconfirmed Turn has exited. The Host keeps
@@ -91,7 +101,10 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     /** The execution's `onApprovalWait`, bound to this Turn's managed tool calls (issue #573). */
     onApprovalWait?: ApprovalWaitObserver,
   ) => unknown | Promise<unknown>;
-  /** Provider egress gate; returns false when policy denies the dispatch. */
+  /**
+   * Provider egress gate; false (or `allowed: false`) when policy denies the dispatch. The verdict
+   * form also names why, as reason codes only, so the failure can say so (issue #841).
+   */
   authorizeEgress: (
     kind: 'claude' | 'codex' | 'grok',
     taskId: string,
@@ -100,7 +113,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
     context: PreparedContext,
     /** Canonical Main-issued roots this dispatch may name: the isolation worktree included. */
     knownWorkspaceRoots: readonly string[],
-  ) => boolean;
+  ) => boolean | TeamWorkerEgressVerdict;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
   /**
@@ -547,21 +560,27 @@ export class RuntimeHostTeamWorkerRuntime implements TeamWorkerRuntime {
         })),
         ...(teamMcp === undefined ? {} : { teamGuidance: teamMcp.guidance }),
       });
-      if (
-        !this.deps.authorizeEgress(
+      const egress = this.deps.authorizeEgress(
+        choice.kind,
+        taskId,
+        turnId,
+        serializedPayload.text,
+        context,
+        // The prompt and the guidance both name the roots Main prepared for this Worker. Declare
+        // them so the egress secret scan reads them as workspace structure, not as opaque values.
+        // The primary root already carries `workspacePath` in canonical form; declaring the raw
+        // spelling too would only add a second, non-canonical entry on Windows.
+        canonicalWorkspaceRoots(normalizedWorkspace.roots.map(({ path }) => path)),
+      );
+      // Only an explicit `true` allows: any other verdict, a malformed one included, is a denial.
+      const verdict: TeamWorkerEgressVerdict =
+        typeof egress === 'boolean' ? { allowed: egress } : egress;
+      if (verdict.allowed !== true)
+        throw new WorkerEgressDeniedError(
           choice.kind,
-          taskId,
-          turnId,
-          serializedPayload.text,
-          context,
-          // The prompt and the guidance both name the roots Main prepared for this Worker. Declare
-          // them so the egress secret scan reads them as workspace structure, not as opaque values.
-          // The primary root already carries `workspacePath` in canonical form; declaring the raw
-          // spelling too would only add a second, non-canonical entry on Windows.
-          canonicalWorkspaceRoots(normalizedWorkspace.roots.map(({ path }) => path)),
-        )
-      )
-        throw new Error(`${choice.kind} Team Worker egress was denied`);
+          verdict.reason ?? null,
+          verdict.disclosureReasons ?? [],
+        );
       input.signal?.addEventListener('abort', abort, { once: true });
       input.signal?.throwIfAborted();
       const finalText = await new Promise<string>((resolve, reject) => {
@@ -1108,7 +1127,10 @@ function buildWorkerPrompt(
       : `隔離worktree: ${input.workspacePath ?? '利用不可'}${writable ? '（このディレクトリ内だけを変更してください）' : '（読み取り専用）'}`,
     input.workspaceSet === undefined
       ? ''
-      : `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label}=${path}`).join(', ')}`,
+      : // The spaces keep each label its own token. `label=path` fused the two into one value the
+        // egress secret scan reads past the root's edge, so a long label with a random suffix
+        // (`realai-ws-codex-graph-Hnb2yq=`) tripped its entropy test and denied the step (#841).
+        `隔離root: ${input.workspaceSet.roots.map(({ label, path }) => `${label} = ${path}`).join(', ')}`,
     '以下のLeaderからの依頼に対応し、結果を日本語で簡潔に報告してください。',
     formatPriorTeamConversation(input.priorConversation),
     '',

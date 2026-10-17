@@ -13,6 +13,7 @@ import { useAppStore } from '../store/appStore';
 import { GraphMissionReviewNotice } from './GraphMissionReviewNotice';
 import { useGraphDisclosure } from '../lib/graph-view-preference';
 import { GraphMissionUpdatePanel } from './GraphMissionUpdatePanel';
+import { terminalReasonLabel } from '../lib/team-execution-display';
 
 const executionLabels: Record<TeamMissionStepSummary['state'], string> = {
   assigned: '開始待ち',
@@ -142,6 +143,23 @@ export function GraphMissionPlanPanel({
                             ? ' · 資源を保持して停止確認待ち'
                             : ''}
                         </p>
+                        {(() => {
+                          // Why the step parked or failed, so it never reads as a bare wait
+                          // (issue #841). A step already resumed is past that reason.
+                          if (
+                            !['waiting_resume', 'failed'].includes(execution.state) ||
+                            execution.graph?.stepResumePending
+                          )
+                            return null;
+                          const reason = team?.executions.find(
+                            ({ id }) => id === execution.executionId,
+                          )?.terminalReason;
+                          return reason ? (
+                            <p data-testid="graph-step-reason">
+                              停止理由: {terminalReasonLabel(reason)}
+                            </p>
+                          ) : null;
+                        })()}
                         {!updating &&
                         (execution.graph?.integrationResumeAvailable ||
                           execution.graph?.stepResumeAvailable) ? (
