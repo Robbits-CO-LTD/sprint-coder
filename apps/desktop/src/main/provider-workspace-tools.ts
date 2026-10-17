@@ -98,13 +98,35 @@ export const PROVIDER_NO_TOOL_GUIDANCE = `This model has no verified tool-callin
 turn. You cannot read, create, or change workspace files or run commands. Do not claim that you did;
 explain the limitation and provide instructions only if that is useful.`;
 
-export function providerWorkspaceGuidance(platform: NodeJS.Platform = process.platform): string {
-  if (platform !== 'win32') return PROVIDER_WORKSPACE_GUIDANCE;
-  return `${PROVIDER_WORKSPACE_GUIDANCE}\nThe host OS is Windows. For exec_command, use an absolute Windows executable and direct argv. Never
+export function providerWorkspaceGuidance(
+  platform: NodeJS.Platform = process.platform,
+  roots: readonly Readonly<{
+    rootId: string;
+    label: string;
+    path: string;
+    role: 'primary' | 'secondary';
+  }>[] = [],
+): string {
+  const base =
+    platform !== 'win32'
+      ? PROVIDER_WORKSPACE_GUIDANCE
+      : `${PROVIDER_WORKSPACE_GUIDANCE}\nThe host OS is Windows. For exec_command, use an absolute Windows executable and direct argv. Never
 guess /bin/bash or another Unix-only path. If cmd.exe is explicitly needed, use Windows switches
 such as /d, /s, and /c; never pass Unix flags such as -e. Prefer structured workspace file tools
 when they are available. cmd.exe echo writes CRLF, so when exact UTF-8 LF bytes are required, use an
 absolute node.exe with -e and node:fs instead. Verify every requested change with the provided test.`;
+  // A single folder needs no addressing, so its guidance and digest stay as they were. With more
+  // than one, the model must be told each folder's rootId or it can never reach a secondary folder
+  // (issue #840).
+  if (roots.length < 2) return base;
+  return [
+    base,
+    "This turn has several workspace folders. To read, change, or run a command in a folder other than the primary one, pass that folder's rootId to the workspace tool, with a path relative to that folder. A relative path without rootId resolves against the primary folder; an absolute path inside exactly one folder resolves to that folder even without rootId. Folders:",
+    ...roots.map(
+      ({ rootId, label, path, role }) =>
+        `- rootId=${rootId} (${role}) label=${JSON.stringify(label)} path=${JSON.stringify(path)}`,
+    ),
+  ].join('\n');
 }
 
 export const LIST_WORKSPACE_TOOL = createToolDefinition({
@@ -870,7 +892,7 @@ export class ManagedCodingHarness {
     const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
-    const root = resolveWorkspaceToolRoot(workspace, request.rootId);
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId, [request.path]);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
@@ -998,7 +1020,7 @@ export class ManagedCodingHarness {
     const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
-    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null, [request.path]);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
@@ -1155,7 +1177,7 @@ export class ManagedCodingHarness {
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
     const requestedRootId = typeof record['rootId'] === 'string' ? record['rootId'] : null;
-    const root = resolveWorkspaceToolRoot(workspace, requestedRootId);
+    const root = resolveWorkspaceToolRoot(workspace, requestedRootId, [record['path']]);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
@@ -1211,7 +1233,10 @@ export class ManagedCodingHarness {
     const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
-    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null);
+    const paths = request.operations.flatMap((operation) =>
+      operation.kind === 'rename' ? [operation.path, operation.destination] : [operation.path],
+    );
+    const root = resolveWorkspaceToolRoot(workspace, request.rootId ?? null, paths);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
       workspace.source === 'project'
@@ -1219,9 +1244,6 @@ export class ManagedCodingHarness {
         : undefined;
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
-    const paths = request.operations.flatMap((operation) =>
-      operation.kind === 'rename' ? [operation.path, operation.destination] : [operation.path],
-    );
     const guards = await Promise.all(
       paths.map((targetPath) =>
         createPathGuard({

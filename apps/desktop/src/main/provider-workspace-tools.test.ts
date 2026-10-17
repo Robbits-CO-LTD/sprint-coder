@@ -773,6 +773,106 @@ describe('Provider workspace read tools', () => {
     },
   );
 
+  // Issue #840: an absolute path into the secondary folder used to fall back to the primary root
+  // and fail its containment check, so the agent could never write there.
+  it('resolves an absolute path inside the secondary root to that root and refuses one outside all roots', async () => {
+    const primary = await mkdtemp(join(tmpdir(), 'sprint-coder-multi-root-a-'));
+    const secondary = await mkdtemp(join(tmpdir(), 'sprint-coder-multi-root-b-'));
+    const outside = await mkdtemp(join(tmpdir(), 'sprint-coder-multi-root-out-'));
+    roots.push(primary, secondary, outside);
+    await writeFile(join(secondary, 'existing.txt'), 'from b\n');
+    const workspace: EffectiveWorkspaceSet = {
+      source: 'task',
+      projectId: null,
+      primaryRootId: 'root-a',
+      roots: [
+        { rootId: 'root-a', path: primary, label: 'a', role: 'primary', status: 'available' },
+        { rootId: 'root-b', path: secondary, label: 'b', role: 'secondary', status: 'available' },
+      ],
+      digest: 'c'.repeat(64),
+    };
+    const created: { rootId: string; path: string; resolvedPath: string }[] = [];
+    const authorized: unknown[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => workspace,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => 3,
+      authorizer: (request) => {
+        authorized.push(workspaceToolAuthorizationGuard(request.input));
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      workspaceEdit: {
+        turnWorkspaceSetFor: () => workspace,
+        turnRootMutationBindingsFor: () => new Map(),
+        revisions: new FileRevisionRegistry(),
+        apply: async () => {
+          throw new Error('not used');
+        },
+        createDirectory: async ({ rootId, path, guard }) => {
+          created.push({ rootId, path, resolvedPath: guard.resolvedPath });
+          return { rootId, path, sagaId: 'mkdir-saga', state: 'committed', kind: 'mkdir' };
+        },
+        policyEpochFor: () => 3,
+      },
+    });
+    const context = {
+      taskId: 'task-840',
+      turnId: 'turn-840',
+      workspaceId: workspace.digest,
+      policyEpoch: 3,
+    } as const;
+    tools.startTurn(context, 'ollama');
+    try {
+      await expect(
+        tools.broker.dispatch({
+          ...context,
+          callId: 'call-mkdir-b',
+          providerName: 'create_directory',
+          input: { path: join(secondary, 'made-in-b') },
+        }),
+      ).resolves.toMatchObject({ rootId: 'root-b', state: 'committed' });
+      expect(created).toEqual([
+        expect.objectContaining({ rootId: 'root-b', path: join(secondary, 'made-in-b') }),
+      ]);
+      expect(authorized.at(-1)).toMatchObject({ rootId: 'root-b' });
+      await expect(
+        tools.broker.dispatch({
+          ...context,
+          callId: 'call-read-b',
+          providerName: 'read_file',
+          input: { path: join(secondary, 'existing.txt') },
+        }),
+      ).resolves.toMatchObject({ rootId: 'root-b', content: 'from b\n' });
+      const authorizedBeforeRefusal = authorized.length;
+      await expect(
+        tools.broker.dispatch({
+          ...context,
+          callId: 'call-mkdir-outside',
+          providerName: 'create_directory',
+          input: { path: join(outside, 'escaped') },
+        }),
+      ).rejects.toThrow(/escapes the canonical workspace/);
+      expect(authorized).toHaveLength(authorizedBeforeRefusal);
+      expect(created).toHaveLength(1);
+    } finally {
+      await tools.dispose();
+    }
+  });
+
+  it('tells Provider API models how to address each folder of a multi-folder Turn', () => {
+    const folders = [
+      { rootId: 'root-a', path: '/work/a', label: 'a', role: 'primary' as const },
+      { rootId: 'root-b', path: '/work/b', label: 'b', role: 'secondary' as const },
+    ];
+    const guidance = providerWorkspaceGuidance('linux', folders);
+    expect(guidance.startsWith(PROVIDER_WORKSPACE_GUIDANCE)).toBe(true);
+    expect(guidance).toContain('rootId=root-b');
+    expect(guidance).toContain('/work/b');
+    expect(providerWorkspaceGuidance('linux', folders.slice(0, 1))).toBe(
+      PROVIDER_WORKSPACE_GUIDANCE,
+    );
+  });
+
   it('states the high-impact and honesty constraints in the Provider system guidance', () => {
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/Never delete or\s+overwrite data/);
     expect(PROVIDER_WORKSPACE_GUIDANCE).toMatch(/send data over a network/);

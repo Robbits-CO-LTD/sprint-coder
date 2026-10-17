@@ -8768,7 +8768,10 @@ export class IpcRouter {
               },
             )
           : undefined;
-      const workspaceGuidance = providerWorkspaceGuidance();
+      const workspaceGuidance = providerWorkspaceGuidance(
+        process.platform,
+        started.workspaceSet.roots,
+      );
       if (!teamTurn)
         messages.unshift({
           role: 'system',
