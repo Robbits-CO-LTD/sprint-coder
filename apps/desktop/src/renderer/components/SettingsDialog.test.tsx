@@ -162,6 +162,15 @@ describe('which body the flag selects', () => {
     }
   });
 
+  it('names the Ask default for what it does, without claiming every call is asked (issue #848)', () => {
+    // 「Task中許可」 lets the same operation go on without a card, so "every time" over-claims.
+    stubBridge();
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('<option value="ask">実行前に確認</option>');
+      expect(html).not.toContain('毎回確認');
+    }
+  });
+
   it('does not add a second heading called Skills', () => {
     // The Skill section's own heading is contributed by SkillSettingsSection. A page heading by the
     // same name would give the sheet two, which is ambiguous to a rotor and to a by-name locator.

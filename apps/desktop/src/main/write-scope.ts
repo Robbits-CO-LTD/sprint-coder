@@ -45,7 +45,8 @@ export function resolveWriteScope(
  * して書き込み範囲を無視するので、Worker がファイルを変える手段は、Main がこの範囲から作るカタログ
  * の管理ツールだけになる。その呼び出しは1回ごとに ToolBroker が Task の安全設定で判定し、`ask`
  * では親の Turn（Leader の Turn、Graph Mission ではそのセッション Turn）の承認カードで利用者の
- * 許可を待つ。だから `ask` でも Worker に書き込みツールを渡したまま、書き込みの前に毎回確認できる。
+ * 許可を待つ。だから `ask` でも Worker に書き込みツールを渡したまま、書き込みの前に確認できる
+ * （利用者が「Task中許可」を選んだ同じ操作は、この Task では確認なしで続く。issue #848）。
  * Managed Local の Worker もすでに同じ扱いである。Workspace が無いときは、resolveWriteScope と
  * 同じ理由でどの設定でも読み取り専用にする。
  */
@@ -72,7 +73,7 @@ export function workerWriteScopeFor(
 }
 
 /**
- * Worker の書き込みが1回ごとに利用者の承認を待つ安全設定か（issue #525）。true のとき Worker の
+ * Worker の書き込みが反映の前に利用者の承認を待つ安全設定か（issue #525）。true のとき Worker の
  * 指示文にそのことを書く。
  */
 export function workerWritesNeedApproval(preset: AccessPreset): boolean {
@@ -136,7 +137,8 @@ function isAbsoluteLike(path: string): boolean {
 function writeApprovalNote(preset: AccessPreset | undefined): string {
   switch (preset) {
     case 'ask':
-      return '書き込みは1回ごとに利用者の承認カードで確認されます。';
+      // issue #848: 承認カードで「Task中許可」を選ぶと、この Task では同じ操作が確認なしで続く。
+      return '書き込みは実行前に利用者の承認カードで確認されます（「Task中許可」を選ぶと、このTaskでは同じ操作を確認なしで続けます）。';
     case 'auto':
       // issue #526: Workspace内のファイルの作成・編集は自動で許可される。issue #825: コマンドと、自動
       // レビューが安全と判定しなかった操作は、拒否ではなく利用者の承認カードで確認される。

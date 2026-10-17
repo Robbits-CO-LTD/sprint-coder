@@ -110,7 +110,7 @@ describe('writeScopeNote (issue #551)', () => {
 
   it('describes workspace-write with the worktree/integration explanation plus the confirmation for each known preset', () => {
     expect(writeScopeNote('workspace-write', 'ask')).toBe(
-      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは1回ごとに利用者の承認カードで確認されます。',
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは実行前に利用者の承認カードで確認されます（「Task中許可」を選ぶと、このTaskでは同じ操作を確認なしで続けます）。',
     );
     // issue #526: 「安全時は自動」ではファイルの作成・編集は自動許可。issue #825: コマンドと、自動
     // レビューが安全と判定しなかった操作は承認カードで確認される。

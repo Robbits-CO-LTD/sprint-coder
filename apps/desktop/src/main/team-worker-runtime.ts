@@ -117,7 +117,7 @@ export type TeamWorkerRuntimeDeps = Readonly<{
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   writeScopeFor?: (worker: AgentRecord, workspacePath: string | null) => RuntimeWriteScope;
   /**
-   * Task の安全設定が書き込みのたびに利用者の承認を求めるとき true（issue #525）。未指定は false で、
+   * Task の安全設定が書き込みの前に利用者の承認を求めるとき true（issue #525）。未指定は false で、
    * そのとき指示文は変わらない。
    */
   writeApprovalRequiredFor?: (taskId: string) => boolean;
@@ -157,11 +157,12 @@ export const WORKER_CANNOT_WRITE_NOTICE =
 
 /**
  * 安全設定「確認する」の Task で、書き込み可能な実行の Worker に伝える（issue #525）。書き込みは
- * 1回ごとに親の Turn（Leader の Turn、Graph Mission ではそのセッション Turn）の承認カードで利用者の
- * 許可を待つ。
+ * 反映の前に親の Turn（Leader の Turn、Graph Mission ではそのセッション Turn）の承認カードで利用者の
+ * 許可を待つ。そのカードでも「Task中許可」を選べ、選ぶとこの Task では同じ操作（同じツールで、
+ * 変わっていない同じファイルへの書き込み）は確認なしで反映される（issue #848）。
  */
 export const WORKER_WRITE_APPROVAL_NOTICE =
-  'ファイルの書き込みは、1回ごとに利用者の承認を待ってから反映されます。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
+  'ファイルの書き込みは、反映の前に利用者の承認を待ちます（利用者が「Task中許可」を選ぶと、このTaskでは同じ操作は確認なしで反映されます）。拒否された書き込みは同じ内容で繰り返さず、必要な変更内容を報告してください。';
 
 /**
  * How much text the Turn has produced, and how much of it came before its last tool call. The
@@ -1103,7 +1104,7 @@ export function applyWorkerContextInheritance(
  * The CLI Worker's instruction text. `writeLimitNotice` — computed from this choice's own tool
  * catalog once it is known — is placed right after the "Workspace書き込み" line, and only when the
  * Worker is actually write-capable; a Worker with no write access at all keeps its existing
- * WORKER_CANNOT_WRITE_NOTICE instead. When the Task asks before each write, a write-capable Worker
+ * WORKER_CANNOT_WRITE_NOTICE instead. When the Task asks before a write lands, a write-capable Worker
  * is also told so, right after that notice (issue #525).
  */
 function buildWorkerPrompt(
