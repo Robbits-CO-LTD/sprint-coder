@@ -177,7 +177,7 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     );
   });
 
-  it('adds no version and wires nothing new into preflight or dispatch', () => {
+  it('adds no version', () => {
     const eligibility = JSON.parse(read('eligibility.json')) as {
       versions: Record<string, number>;
     };
@@ -186,7 +186,6 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
       classifierVersion: 1,
       lexiconVersion: 1,
     });
-    expect(host).not.toContain('EvaluateWindowsInterlockOnLane(session, metadata, kind');
   });
 });
 

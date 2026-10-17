@@ -188,10 +188,10 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
 
   it('calls ScheduleWindowsEffectShadow from HandleWindowsPreflight only: once without V1, once after the receipt is out', () => {
     const calls = [...code(host).matchAll(/ScheduleWindowsEffectShadow\(/gu)];
-    // the definition and the two calls
-    expect(calls.length).toBe(3);
+    // the definition and the three calls (no V1 binding, an interlock refusal, the V1 answer)
+    expect(calls.length).toBe(4);
     const inPreflight = [...code(preflight).matchAll(/ScheduleWindowsEffectShadow\(/gu)];
-    expect(inPreflight.length).toBe(2);
+    expect(inPreflight.length).toBe(3);
     const text = code(preflight);
     const validate = text.indexOf('ValidateWindowsDispatchBinding(');
     const deniedSent = text.indexOf('const bool denied_sent =');
@@ -307,7 +307,8 @@ describe('Windows host calls the shadow only after V1, and only to watch', () =>
     expect(host).toContain('kNativePreflightClassifierVersion');
     // The receipt constructor and its two calls still build the V1 answer from V1 inputs only.
     const text = code(preflight);
-    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(3);
+    // replay, a failed binding, the two spellings of an interlock refusal, the V1 answer
+    expect((text.match(/WindowsPreflightReceipt\(/gu) ?? []).length).toBe(5);
     expect(text).toContain('issued ? "ordinary" : "denied"');
     expect(text).not.toMatch(/ProcessShadowLog|Snapshot\(|Total\(\)/u);
   });

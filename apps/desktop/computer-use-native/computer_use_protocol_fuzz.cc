@@ -7627,6 +7627,170 @@ bool CheckClickRule() {
   return true;
 }
 
+// ---- #500 S5-c-2 PR-5: the dispatch's refusal codes ---------------------------------------------
+
+bool CheckInterlockDispatchCodes() {
+  using namespace sprint_coder::computer_use;
+  // One reason, one dispatch code: the preflight code without its "native_" prefix (Main adds it back
+  // and takes the result from the same row of the receipt table). No verdict, no code.
+  struct Row { InterlockOutcome outcome; InterlockReason reason; const char *dispatch; const char *preflight; };
+  const Row rows[] = {
+      {InterlockOutcome::kBlocked, InterlockReason::kShellSurface, "shell_surface_blocked", "native_shell_surface_blocked"},
+      {InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger, "execution_trigger_blocked", "native_execution_trigger_blocked"},
+      {InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed, "approval_not_enabled", "native_approval_not_enabled"},
+  };
+  for (const Row &row : rows) {
+    InterlockVerdict verdict;
+    verdict.outcome = row.outcome;
+    verdict.reason = row.reason;
+    if (!Check(verdict.DispatchCode() == row.dispatch, "dispatch-code-of-the-reason")) return false;
+    if (!Check(std::string("native_") + std::string(verdict.DispatchCode()) == verdict.ReasonCode() &&
+                   verdict.ReasonCode() == row.preflight,
+               "dispatch-code-is-the-preflight-code-without-the-prefix")) return false;
+    // The pair the preflight sends is a row of the closed table (the dispatch has the same reason).
+    if (!Check(NativePreflightRefusalAllowed(verdict.DecisionName(), verdict.ReasonCode(), verdict.DeniedResult()),
+               "interlock-pair-is-a-table-row")) return false;
+  }
+  // One to one: the three codes are pairwise different, and a verdict with nothing has none.
+  if (!Check(std::string_view("shell_surface_blocked") != "execution_trigger_blocked" &&
+                 std::string_view("execution_trigger_blocked") != "approval_not_enabled" &&
+                 std::string_view("shell_surface_blocked") != "approval_not_enabled",
+             "dispatch-codes-differ")) return false;
+  if (!Check(InterlockVerdict{}.DispatchCode().empty(), "no-verdict-has-no-dispatch-code")) return false;
+  if (!Check(InterlockVerdict{}.ReasonCode().empty() && InterlockVerdict{}.DecisionName().empty(),
+             "no-verdict-has-no-receipt-fields")) return false;
+  std::cout << "Computer Use native interlock dispatch codes: PASS\n";
+  return true;
+}
+
+// ---- #500 S5-c-2 PR-5: what V1's users can reach is not newly refused --------------------------------
+//
+// V1 reaches the acceptance fixture and Notepad only. Their UI Automation trees (every control of the
+// fixture; the old and the new Notepad) are fed to the interlock with every action kind and a title in
+// English and Japanese. A refusal is allowed only where V1's own word list refuses too, or for one of
+// the words the owner accepted (the vocabulary test pins the list).
+
+bool CheckWindowsInterlockJourneys() {
+  using namespace sprint_coder::computer_use;
+  const EffectRuleset closed;  // the Windows rule set: no approval path (download_open / file_manager_open false)
+  const auto node = [](const char *type, const char *klass, const std::string &name, bool password = false) {
+    ShadowUiaNode item;
+    item.control_type = type;
+    item.class_name = klass;
+    item.name = name;
+    item.is_password = password;
+    return item;
+  };
+  const auto capture = [&](std::vector<ShadowUiaNode> chain, const std::string &window_class,
+                           const std::string &process_path) {
+    ShadowUiaCapture result;
+    result.target_found = true;
+    result.chain = std::move(chain);
+    result.chain_reached_root = true;
+    result.neighbors_complete = true;
+    result.window_class_read = true;
+    result.window_class = window_class;
+    result.process_path_read = true;
+    result.process_path = process_path;
+    return result;
+  };
+  const char *const kinds[] = {"click", "invoke", "key", "type", "set_text", "scroll", "select", "toggle", "expand_collapse"};
+  const auto refused = [&](const ShadowUiaCapture &tree, const char *kind, const char *language) {
+    ShadowRequestInfo request = UiaRequest(kind);
+    request.policy_language = language;
+    request.key = "Enter";
+    request.click_tracked = true;
+    // The worst case for a click: it may open (a double click).
+    request.click_opens = std::string_view(kind) == "click";
+    return EvaluateWindowsInterlockFromCapture(tree, request, false, closed).Refuses();
+  };
+
+  // The acceptance fixture: every control, in the window of the fixture.
+  const std::string fixture_title = "Sprint Coder Computer Use acceptance fixture";
+  const std::string fixture_path = "C:\\Fixture\\win32_acceptance_fixture.exe";
+  struct Control { const char *type; const char *klass; const char *name; bool password; };
+  const Control controls[] = {
+      {"Text", "Static", "Deterministic non-production fixture. Normal controls are safe; boundary controls must stop Computer Use.", false},
+      {"Text", "Static", "Normal text", false},
+      {"Edit", "Edit", "Normal text", false},
+      {"Button", "Button", "Run deterministic normal action", false},
+      {"CheckBox", "Button", "Enable deterministic option", false},
+      {"Text", "Static", "Normal selection", false},
+      {"ComboBox", "ComboBox", "Normal selection", false},
+      {"Text", "Static", "Password field - MUST BLOCK", false},
+      {"Edit", "Edit", "Password field", true},
+      {"Text", "Static", "Safety boundary controls below are inert test affordances. They perform no payment and retain no selected path.", false},
+      {"Button", "Button", "Authorize test payment - MUST BLOCK", false},
+      {"Button", "Button", "Open file picker - USER TAKEOVER", false},
+      {"Button", "Button", "Reset deterministic state", false},
+      {"Button", "Button", "Open same-owner safe dialog", false},
+      {"Text", "Static", "NORMAL_ACTION_COMPLETED: deterministic button invoked", false},
+  };
+  for (const Control &control : controls)
+    for (const char *kind : kinds)
+      for (const char *language : {"en", "ja"})
+        if (!Check(!refused(capture({node(control.type, control.klass, control.name, control.password),
+                                     node("Window", "SprintCoderComputerUseFixtureV1", fixture_title)},
+                                    "SprintCoderComputerUseFixtureV1", fixture_path),
+                            kind, language),
+                   (std::string("journey-fixture-not-refused-") + control.name).c_str()))
+          return false;
+  // The safe dialog the fixture opens, and the file picker (the picker is a takeover of V1's own,
+  // outside the interlock).
+  for (const char *kind : kinds)
+    if (!Check(!refused(capture({node("Button", "Button", "Close safe dialog"),
+                                 node("Window", "SprintCoderComputerUseSafeDialogV1", "Fixture same-owner safe dialog")},
+                                "SprintCoderComputerUseSafeDialogV1", fixture_path),
+                        kind, "en"),
+               "journey-safe-dialog-not-refused"))
+      return false;
+
+  // Notepad, old (a Window, an Edit, a menu bar) and new (a Document), English and Japanese titles.
+  const std::string notepad_path = "C:\\Windows\\System32\\notepad.exe";
+  struct Tree { const char *name; std::vector<ShadowUiaNode> chain; };
+  const std::vector<Tree> notepads = {
+      {"old-edit", {node("Edit", "Edit", "Text Editor"), node("Window", "Notepad", "Untitled - Notepad")}},
+      {"old-edit-ja", {node("Edit", "Edit", u8"テキスト エディター"_u8), node("Window", "Notepad", u8"無題 - メモ帳"_u8)}},
+      {"old-menu", {node("MenuItem", "", "File"), node("MenuBar", "", "Application"), node("Window", "Notepad", "Untitled - Notepad")}},
+      {"old-menu-ja", {node("MenuItem", "", u8"ファイル(F)"_u8), node("MenuBar", "", u8"アプリケーション"_u8), node("Window", "Notepad", u8"無題 - メモ帳"_u8)}},
+      {"old-find", {node("Button", "Button", "Find Next"), node("Window", "#32770", "Find")}},
+      {"old-replace", {node("Button", "Button", "Replace All"), node("Window", "#32770", "Replace")}},
+      {"old-font", {node("Button", "Button", "OK"), node("Window", "#32770", "Font")}},
+      {"new-document", {node("Document", "RichEditD2DPT", "Text editor"), node("Window", "Notepad", "Untitled - Notepad")}},
+      {"new-document-ja", {node("Document", "RichEditD2DPT", u8"テキスト エディター"_u8), node("Window", "Notepad", u8"無題 - メモ帳"_u8)}},
+      {"new-saved-file", {node("Document", "RichEditD2DPT", "Text editor"), node("Window", "Notepad", "notes.txt - Notepad")}},
+      {"new-saved-file-ja", {node("Document", "RichEditD2DPT", u8"テキスト エディター"_u8), node("Window", "Notepad", u8"メモ.txt - メモ帳"_u8)}},
+  };
+  for (const Tree &tree : notepads)
+    for (const char *kind : kinds)
+      for (const char *language : {"en", "ja"})
+        if (!Check(!refused(capture(tree.chain, tree.chain.back().class_name, notepad_path), kind, language),
+                   (std::string("journey-notepad-not-refused-") + tree.name).c_str()))
+          return false;
+
+  // Where the refusal is allowed. A title with a word V1 refuses too: refused (no change for V1).
+  const auto titled = [&](const std::string &title) {
+    return capture({node("Edit", "Edit", "Text Editor"), node("Window", "Notepad", title)}, "Notepad", notepad_path);
+  };
+  for (const char *title : {"terminal notes.txt - Notepad", "console log - Notepad", "shell.txt - Notepad", "powershell tips - Notepad"})
+    if (!Check(refused(titled(title), "click", "en") && refused(titled(title), "type", "en"),
+               (std::string("journey-v1-word-in-the-title-is-refused-") + title).c_str()))
+      return false;
+  // The words the owner accepted (not refused by V1 today): refused now, and only these.
+  for (const std::string &title : std::vector<std::string>{"xterm settings - Notepad", "run script.txt - Notepad", u8"ターミナル手順.txt - メモ帳"_u8,
+                            u8"コンソール - メモ帳"_u8, u8"コマンドプロンプト入門 - メモ帳"_u8, u8"スクリプトを実行 - メモ帳"_u8})
+    if (!Check(refused(titled(title), "click", "ja"), (std::string("journey-accepted-new-word-is-refused-") + title).c_str()))
+      return false;
+  // The same words in full width are folded to ASCII before they are matched (NFKC): refused as in
+  // ASCII. This is the spelling difference the owner accepted (V1 matches the characters as they are).
+  for (const std::string &title : std::vector<std::string>{u8"ｘｔｅｒｍ settings - Notepad"_u8, u8"ｔｅｒｍｉｎａｌ notes - Notepad"_u8})
+    if (!Check(refused(titled(title), "click", "en"), (std::string("journey-full-width-word-is-refused-") + title).c_str()))
+      return false;
+
+  std::cout << "Computer Use native Windows interlock journeys: PASS\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -7651,6 +7815,8 @@ int main() {
   if (!CheckNativeInterlockCapture()) return 1;
   if (!CheckWindowsInterlockCapture()) return 1;
   if (!CheckClickRule()) return 1;
+  if (!CheckInterlockDispatchCodes()) return 1;
+  if (!CheckWindowsInterlockJourneys()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
   if (!CheckNativeApprovalOffer()) return 1;
   if (!CheckNativePreflightV2()) return 1;

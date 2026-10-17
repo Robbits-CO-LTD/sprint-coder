@@ -1458,6 +1458,18 @@ function parseNativeBounds(value: unknown): ComputerUseNativeBounds {
   };
 }
 
+/**
+ * The v2 interlock refusals a dispatch can still make on its own (#500 S5-c-2 PR-5): the native
+ * evaluates the interlocks again right before any input. Each is the dispatch code of a preflight
+ * refusal, so it takes the result of the same row of NATIVE_PREFLIGHT_REFUSALS: a block is rejected
+ * and an execution trigger is paused for a person. Shared with macOS (dispatchApproved).
+ */
+const NATIVE_DISPATCH_INTERLOCK_CODES: ReadonlySet<string> = new Set([
+  'SHELL_SURFACE_BLOCKED',
+  'EXECUTION_TRIGGER_BLOCKED',
+  'APPROVAL_NOT_ENABLED',
+]);
+
 export function classifyComputerUseNativeDispatchFailure(
   error: unknown,
 ): ComputerUseNativeActionResult | null {
@@ -1495,9 +1507,16 @@ export function classifyComputerUseNativeDispatchFailure(
     'INVALID_KEY',
     'INVALID_TEXT',
     'INVALID_TARGET',
+    ...NATIVE_DISPATCH_INTERLOCK_CODES,
   ]);
   if (candidate.accepted !== false && !preDispatchCodes.has(code)) return null;
   if (!/^[A-Z][A-Z0-9_]{0,63}$/u.test(code)) return null;
+  if (NATIVE_DISPATCH_INTERLOCK_CODES.has(code)) {
+    const reasonCode = `native_${code.toLowerCase()}`;
+    const row = NATIVE_PREFLIGHT_REFUSALS.find((entry) => entry.reasonCode === reasonCode);
+    // The table owns the result; a code with no row stays a plain rejection.
+    return Object.freeze({ result: row?.deniedResult ?? 'rejected', reasonCode });
+  }
   return Object.freeze({
     result: 'rejected',
     reasonCode: `native_${code.toLowerCase()}`.slice(0, 64),
