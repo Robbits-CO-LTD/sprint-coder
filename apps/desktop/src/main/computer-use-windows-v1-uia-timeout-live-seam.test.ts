@@ -255,15 +255,66 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       expect(c, name).not.toMatch(
         new RegExp(`WindowsV1UiaCall\\(\\[&\\] \\{ return \\w+->${name}\\(`, 'u'),
       );
-    // EVERY read of a property of an element in the V1 lane is timed (WindowsV1UiaRead): none is read by a
-    // plain SUCCEEDED / FAILED / WindowsV1UiaOk, which would take a read that came back "successfully"
-    // after the whole timeout for a good one.
-    const reads = [...c.matchAll(/ element->(get_Current\w+|GetRuntimeId)\(/gu)];
-    const timedReads = [
-      ...c.matchAll(/WindowsV1UiaRead\(\[&\] \{ return element->(get_Current\w+|GetRuntimeId)\(/gu),
+    // EVERY call of a UI Automation interface in the host, whatever the variable is called (element,
+    // target, pattern, walker, automation, ...), goes through a wrapper of the V1 lane: the reads of
+    // properties and patterns through WindowsV1UiaRead, the moves and the first contacts through
+    // WindowsV1UiaCall / WindowsV1UiaContact. None is made bare, so none can take a cut-off "success" for an
+    // answer, or go on after a Cancel.
+    const uiaNames =
+      'get_Current\\w+|GetCurrentPatternAs|GetRuntimeId|ElementFrom\\w+|FindFirst\\w*|FindAll\\w*|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetPreviousSiblingElement|GetLastChildElement|GetParentElement';
+    const anyCalls = [...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))];
+    const wrapped = [
+      ...c.matchAll(
+        new RegExp(
+          `WindowsV1Uia(?:Read|Call|Contact)\\(\\[&\\] \\{ return \\w+->(?:${uiaNames})\\(`,
+          'gu',
+        ),
+      ),
     ];
-    expect(reads.length).toBeGreaterThanOrEqual(14);
-    expect(timedReads).toHaveLength(reads.length);
+    expect(anyCalls.length).toBeGreaterThanOrEqual(35);
+    expect(wrapped).toHaveLength(anyCalls.length);
+    // The calls that DO something (Invoke, SetValue, Select, Toggle, Expand, Collapse) are made only
+    // while the path is alive: after a timeout or a Cancel nothing is sent (a rejection before any input).
+    expect([...c.matchAll(/->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu)]).toHaveLength(
+      6,
+    );
+    const semanticBody = c.slice(
+      c.indexOf('bool DispatchWindowsSemanticAction('),
+      c.indexOf('std::string ResponseCacheKey('),
+    );
+    expect([...semanticBody.matchAll(/\*accepted = true;/gu)]).toHaveLength(5);
+    expect([
+      ...c.matchAll(
+        /if \(!WindowsV1UiaMayCall\(\)\) \{ \*reason = WindowsV1UiaEndedReason\(\); \} else \{ \*accepted = true; session\.input_api_attempts->fetch_add\(1, std::memory_order_acq_rel\); action_result = [^;]*->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu,
+      ),
+    ]).toHaveLength(5);
+    // What a read that could not be made leaves behind is NOT "no risk": the risk is all false, which
+    // ClassifyNativePreflightFacts (checked in the harness) puts first of all as unclassified, and
+    // RejectWindowsRisk rejects as target_unclassified.
+    expect(c).toContain(
+      'struct WindowsUiaRisk { bool classified = false; bool secure = false; bool high_impact = false; bool metadata_complete = false; };',
+    );
+    expect(c).toContain('if (element == nullptr || !WindowsV1UiaMayCall()) return risk;');
+    // The semantic action reads its patterns through ONE timed helper that releases what a read that did
+    // not complete produced, and the name of a select is not compared when it was not read.
+    expect(c).toContain(
+      'bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **pattern)',
+    );
+    expect([
+      ...c.matchAll(/ReadWindowsV1Pattern\(target, UIA_\w+PatternId, &pattern\)/gu),
+    ]).toHaveLength(5);
+    expect(c).not.toMatch(/target->GetCurrentPatternAs\(UIA_/u);
+    expect(c).toContain(
+      'const bool name_read = WindowsV1UiaRead([&] { return target->get_CurrentName(&name); });',
+    );
+    expect(c).toContain('if (!name_read) {');
+    // A child that a cut-off first-child call produced is released (no output pointer is leaked).
+    expect(c).toMatch(
+      /if \(!WindowsV1UiaOk\(first_result\)\) \{\s*if \(child != nullptr\)\s*child->Release\(\);\s*return false;/u,
+    );
+    expect(readFileSync(join(nativeDirectory, 'computer_use_protocol_fuzz.cc'), 'utf8')).toContain(
+      'v1-default-risk-is-unclassified',
+    );
     // The time of a call is measured, and a slow "success" is a timeout.
     expect(c).toContain(
       'if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow) result = kWindowsV1UiaTimeoutResult;',
@@ -279,6 +330,21 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain('WindowsV1UiaCountNode();');
     expect(c).toContain('budget spent after');
     expect(c).toContain('return WindowsV1ObserveReason(uia_path.Stop(), otherwise);');
+  });
+
+  it('does not hand the job, or anything else of the test, to the window process', () => {
+    // The job is made without security attributes (so it is not inheritable) and marked not
+    // inheritable all the same; the only handle the child inherits is the write end of its pipe, by an
+    // explicit list, and the read end is not inheritable.
+    expect(program).toContain('CreateJobObjectW(nullptr, nullptr)');
+    expect(program).toContain('SetHandleInformation(job, HANDLE_FLAG_INHERIT, 0);');
+    expect(program).toContain('SetHandleInformation(read_end, HANDLE_FLAG_INHERIT, 0);');
+    expect(program).toContain('HANDLE inherited[1] = {write_end};');
+    expect(program).toContain('PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited');
+    expect(program).not.toMatch(/inherited\[[^\]]*\] = \{[^}]*job/u);
+    expect(program).not.toMatch(/&inherit[^;]*Job|CreateJobObjectW\(&/u);
+    expect(program).toContain('EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED');
+    expect(program).toContain('JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE');
   });
 
   it('names why a read did not complete, and keeps a timed-out action apart from an unconfirmed one', () => {
@@ -652,6 +718,7 @@ int RunDriver(bool ci) {
   // test's timeout), the job closes and the windows go with it. And it inherits the pipe's write end and
   // nothing else, so it cannot hold on to the handles of the process that started this one.
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  SetHandleInformation(job, HANDLE_FLAG_INHERIT, 0);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
@@ -851,7 +918,7 @@ int RunDriver(bool ci) {
     WindowsSession session;
     session.active_window = hang;
     session.pid = static_cast<std::uint32_t>(pid);
-    bool accepted = true;
+    bool accepted = false;
     std::string reason;
     bool ok = true;
     const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] {

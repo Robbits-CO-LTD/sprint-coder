@@ -2454,6 +2454,10 @@ std::uint32_t WindowsBuildNumber() {
 //     transaction is bounded by BOTH: the worst case of one call is counted as 500 + 300 = 800 ms
 //     (whether the two waits can really follow each other is not established; the sum is the safe
 //     side), inside the 1 s of the Cancel acknowledgment (COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS).
+//     The margin is SMALL: 1000 - 800 = about 200 ms for everything else the lane does between the
+//     epoch moving and the acknowledgment (the pipe, the frame, the answer). Measured on CI: a
+//     transaction-bound call is cut after 310-320 ms, a first contact after 505-514 ms, so a real
+//     worst case is nearer 830 ms than the 800 ms counted, and the margin there is under 200 ms.
 //  2. The FIRST timed-out call (UIA_E_TIMEOUT or an equivalent failure) ends its path for good: no
 //     UI Automation call after it, fail closed, the "unreadable" of the caller. A target that answers
 //     the first contact and then stops therefore costs one timeout, not one per remaining call.
@@ -2604,6 +2608,18 @@ template <class Call> HRESULT WindowsV1UiaContact(Call &&call) {
 // One read of a property: true only for a call that answered in time.
 template <class Call> bool WindowsV1UiaRead(Call &&call) {
   return WindowsV1UiaOk(WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call));
+}
+
+// Why the path ended, now (kNone outside a path).
+WindowsV1UiaStop WindowsV1UiaCurrentStop() {
+  return windows_v1_uia_lane != nullptr ? windows_v1_uia_lane->stop : WindowsV1UiaStop::kNone;
+}
+
+// The reason of an action that was NOT sent because the path had ended (a timeout, a Cancel): nothing
+// was done, so it is a rejection before any input.
+const char *WindowsV1UiaEndedReason() {
+  return WindowsV1UiaCurrentStop() == WindowsV1UiaStop::kTimeout ? "accessibility_timeout"
+                                                                  : "semantic_action_failed";
 }
 
 // One node of a walk was visited.
@@ -3749,8 +3765,11 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
   IUIAutomationElement *child = nullptr;
   const HRESULT first_result =
       WindowsV1UiaCall([&] { return walker->GetFirstChildElement(element, &child); });
-  if (!WindowsV1UiaOk(first_result))
+  if (!WindowsV1UiaOk(first_result)) {
+    if (child != nullptr)
+      child->Release();
     return false;
+  }
   while (child != nullptr) {
     if (!CollectWindowsControlBindings(child, walker, expected_pid, depth + 1, nodes,
                                        bindings, duplicate_targets)) {
@@ -3976,6 +3995,22 @@ bool Utf16FromUtf8(std::string_view value, std::wstring *output) {
   return true;
 }
 
+// A pattern of the target, read through the timed read. A read that did not complete (it timed out, or
+// "succeeded" too slowly to be believed) hands nothing back: a pattern it did produce is released here,
+// so the caller never holds, or acts on, the answer of a target that stopped answering.
+template <class Pattern>
+bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **pattern) {
+  *pattern = nullptr;
+  const bool read = WindowsV1UiaRead([&] { return target->GetCurrentPatternAs(id, IID_PPV_ARGS(pattern)); });
+  if (!read || *pattern == nullptr) {
+    if (*pattern != nullptr)
+      (*pattern)->Release();
+    *pattern = nullptr;
+    return false;
+  }
+  return true;
+}
+
 bool DispatchWindowsSemanticAction(const WindowsSession &session,
                                    const RECT &expected,
                                    std::uint64_t expected_epoch,
@@ -4013,12 +4048,16 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
   HRESULT action_result = E_FAIL;
   if (kind == "invoke") {
     IUIAutomationInvokePattern *pattern = nullptr;
-    if (SUCCEEDED(target->GetCurrentPatternAs(UIA_InvokePatternId,
-                                              IID_PPV_ARGS(&pattern))) &&
-        pattern != nullptr) {
-      *accepted = true;
-      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-      action_result = pattern->Invoke();
+    if (ReadWindowsV1Pattern(target, UIA_InvokePatternId, &pattern)) {
+      // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
+      // (a rejection before any input), never a call that cannot be confirmed.
+      if (!WindowsV1UiaMayCall()) {
+        *reason = WindowsV1UiaEndedReason();
+      } else {
+        *accepted = true;
+        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+        action_result = pattern->Invoke();
+      }
       pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";
@@ -4030,17 +4069,21 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
     if (!ReadJsonString(metadata, "text", &text) ||
         !Utf16FromUtf8(text, &wide_text)) {
       *reason = "invalid_text";
-    } else if (SUCCEEDED(target->GetCurrentPatternAs(UIA_ValuePatternId,
-                                                     IID_PPV_ARGS(&pattern))) &&
-               pattern != nullptr) {
+    } else if (ReadWindowsV1Pattern(target, UIA_ValuePatternId, &pattern)) {
       BSTR value = SysAllocStringLen(wide_text.data(),
                                     static_cast<UINT>(wide_text.size()));
       if (value == nullptr && !wide_text.empty()) {
         *reason = "semantic_action_failed";
       } else {
-        *accepted = true;
-        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-        action_result = pattern->SetValue(value);
+        // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
+        // (a rejection before any input), never a call that cannot be confirmed.
+        if (!WindowsV1UiaMayCall()) {
+          *reason = WindowsV1UiaEndedReason();
+        } else {
+          *accepted = true;
+          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+          action_result = pattern->SetValue(value);
+        }
       }
       if (value != nullptr)
         SysFreeString(value);
@@ -4052,22 +4095,29 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
     std::string selected_value;
     IUIAutomationSelectionItemPattern *pattern = nullptr;
     BSTR name = nullptr;
-    target->get_CurrentName(&name);
+    const bool name_read = WindowsV1UiaRead([&] { return target->get_CurrentName(&name); });
     const std::string target_name =
-        name == nullptr
+        name == nullptr || !name_read
             ? std::string{}
             : Utf8FromWide(std::wstring_view(name, SysStringLen(name)));
     if (name != nullptr)
       SysFreeString(name);
-    if (!ReadJsonString(metadata, "value", &selected_value) ||
+    if (!name_read) {
+      // The target did not answer: nothing is compared with a name that was not read, and nothing is sent.
+      *reason = WindowsV1UiaEndedReason();
+    } else if (!ReadJsonString(metadata, "value", &selected_value) ||
         (selected_value != target_id && selected_value != target_name)) {
       *reason = "semantic_value_mismatch";
-    } else if (SUCCEEDED(target->GetCurrentPatternAs(UIA_SelectionItemPatternId,
-                                                     IID_PPV_ARGS(&pattern))) &&
-               pattern != nullptr) {
-      *accepted = true;
-      session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-      action_result = pattern->Select();
+    } else if (ReadWindowsV1Pattern(target, UIA_SelectionItemPatternId, &pattern)) {
+      // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
+      // (a rejection before any input), never a call that cannot be confirmed.
+      if (!WindowsV1UiaMayCall()) {
+        *reason = WindowsV1UiaEndedReason();
+      } else {
+        *accepted = true;
+        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+        action_result = pattern->Select();
+      }
       pattern->Release();
     } else {
       *reason = "semantic_pattern_unavailable";
@@ -4079,21 +4129,26 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         metadata.find("\"value\":false") != std::string::npos;
     IUIAutomationTogglePattern *pattern = nullptr;
     if ((!wants_true && !wants_false) ||
-        FAILED(target->GetCurrentPatternAs(UIA_TogglePatternId,
-                                           IID_PPV_ARGS(&pattern))) ||
+        !ReadWindowsV1Pattern(target, UIA_TogglePatternId, &pattern) ||
         pattern == nullptr) {
       *reason = "semantic_pattern_unavailable";
     } else {
       ToggleState current = ToggleState_Indeterminate;
-      if (FAILED(pattern->get_CurrentToggleState(&current)) ||
+      if (!WindowsV1UiaRead([&] { return pattern->get_CurrentToggleState(&current); }) ||
           current == ToggleState_Indeterminate) {
         *reason = "semantic_state_unavailable";
       } else if ((current == ToggleState_On) == wants_true) {
         action_result = S_OK;
       } else {
-        *accepted = true;
-        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-        action_result = pattern->Toggle();
+        // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
+        // (a rejection before any input), never a call that cannot be confirmed.
+        if (!WindowsV1UiaMayCall()) {
+          *reason = WindowsV1UiaEndedReason();
+        } else {
+          *accepted = true;
+          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+          action_result = pattern->Toggle();
+        }
       }
       pattern->Release();
     }
@@ -4104,26 +4159,34 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
         metadata.find("\"expanded\":false") != std::string::npos;
     IUIAutomationExpandCollapsePattern *pattern = nullptr;
     if ((!wants_expand && !wants_collapse) ||
-        FAILED(target->GetCurrentPatternAs(UIA_ExpandCollapsePatternId,
-                                           IID_PPV_ARGS(&pattern))) ||
+        !ReadWindowsV1Pattern(target, UIA_ExpandCollapsePatternId, &pattern) ||
         pattern == nullptr) {
       *reason = "semantic_pattern_unavailable";
     } else {
       ExpandCollapseState current = ExpandCollapseState_LeafNode;
-      if (FAILED(pattern->get_CurrentExpandCollapseState(&current)) ||
+      if (!WindowsV1UiaRead([&] { return pattern->get_CurrentExpandCollapseState(&current); }) ||
           current == ExpandCollapseState_LeafNode) {
         *reason = "semantic_state_unavailable";
       } else if ((current == ExpandCollapseState_Expanded) == wants_expand) {
         action_result = S_OK;
       } else {
-        *accepted = true;
-        session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
-        action_result = wants_expand ? pattern->Expand() : pattern->Collapse();
+        // The action is SENT only while the path is alive: after a timeout or a Cancel nothing is done
+        // (a rejection before any input), never a call that cannot be confirmed.
+        if (!WindowsV1UiaMayCall()) {
+          *reason = WindowsV1UiaEndedReason();
+        } else {
+          *accepted = true;
+          session.input_api_attempts->fetch_add(1, std::memory_order_acq_rel);
+          action_result = wants_expand ? pattern->Expand() : pattern->Collapse();
+        }
       }
       pattern->Release();
     }
   }
   target->Release();
+  if (FAILED(action_result) && !*accepted &&
+      WindowsV1UiaCurrentStop() == WindowsV1UiaStop::kTimeout)
+    *reason = "accessibility_timeout";
   if (FAILED(action_result)) {
     if (reason->empty())
       // A pattern call (Invoke, SetValue, Select, Toggle, Expand) that timed out may still have been
