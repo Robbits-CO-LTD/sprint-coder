@@ -449,7 +449,7 @@ export function registerCommandRunnerTool(
       const workspace = command.persistence.readTurnWorkspaceSet(context.turnId);
       if (workspace === null)
         throw new Error('CommandRunner requires a sealed Turn Workspace snapshot');
-      const root = resolveWorkspaceToolRoot(workspace, request.rootId);
+      const root = resolveWorkspaceToolRoot(workspace, request.rootId, [request.cwd]);
       if (root === null) throw new Error('CommandRunner requires a valid Workspace rootId');
       const expectedRootIdentityDigest =
         workspace.source === 'project'

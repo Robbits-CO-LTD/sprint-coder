@@ -1,6 +1,62 @@
 import { describe, expect, it } from 'vitest';
 import type { EffectiveWorkspaceSet } from '@sprint-coder/contracts';
+import { join, resolve } from 'node:path';
 import { displayWorkspaceRootLabel, resolveWorkspaceToolRoot } from './workspace-root-resolution';
+
+describe('resolveWorkspaceToolRoot with absolute target paths (issue #840)', () => {
+  const a = resolve('/tmp/root-0');
+  const b = resolve('/tmp/root-1');
+  const selected = workspace(['root-a', 'root-b'], 'root-a');
+
+  it('selects the one root that lexically contains every absolute target', () => {
+    expect(resolveWorkspaceToolRoot(selected, undefined, [join(b, 'new.txt')])?.rootId).toBe(
+      'root-b',
+    );
+    expect(resolveWorkspaceToolRoot(selected, null, [b])?.rootId).toBe('root-b');
+    expect(
+      resolveWorkspaceToolRoot(selected, 'legacy-primary', [join(b, 'x'), join(b, 'y')])?.rootId,
+    ).toBe('root-b');
+    expect(resolveWorkspaceToolRoot(selected, undefined, [join(a, 'new.txt')])?.rootId).toBe(
+      'root-a',
+    );
+  });
+
+  it('keeps an explicit rootId authoritative over the target path', () => {
+    expect(resolveWorkspaceToolRoot(selected, 'root-a', [join(b, 'new.txt')])?.rootId).toBe(
+      'root-a',
+    );
+    expect(resolveWorkspaceToolRoot(selected, 'unknown', [join(b, 'new.txt')])).toBe(null);
+  });
+
+  it('falls back to the primary root when no single root contains the targets', () => {
+    // The primary root's PathGuard then refuses the target, so nothing outside the roots opens up.
+    expect(
+      resolveWorkspaceToolRoot(selected, undefined, [resolve('/elsewhere/new.txt')])?.rootId,
+    ).toBe('root-a');
+    expect(
+      resolveWorkspaceToolRoot(selected, undefined, [join(a, 'x'), join(b, 'y')])?.rootId,
+    ).toBe('root-a');
+    expect(resolveWorkspaceToolRoot(selected, undefined, ['relative/new.txt'])?.rootId).toBe(
+      'root-a',
+    );
+    expect(
+      resolveWorkspaceToolRoot(selected, undefined, [join(b, 'x'), 'relative.txt'])?.rootId,
+    ).toBe('root-a');
+    expect(resolveWorkspaceToolRoot(selected, undefined, [`${b}-sibling/x`])?.rootId).toBe(
+      'root-a',
+    );
+  });
+
+  it('does not guess between nested roots', () => {
+    const nested: EffectiveWorkspaceSet = {
+      ...selected,
+      roots: [selected.roots[0]!, { ...selected.roots[1]!, path: join(a, 'nested') }],
+    };
+    expect(resolveWorkspaceToolRoot(nested, undefined, [join(a, 'nested', 'x')])?.rootId).toBe(
+      'root-a',
+    );
+  });
+});
 
 function workspace(
   rootIds: readonly string[],
