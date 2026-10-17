@@ -13,11 +13,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 //
 // What the live seam measures: every case below stops at ONE call, cut off either by the
 // ConnectionTimeout (a first contact, measured 505-514 ms in CI) or by the TransactionTimeout (a call on
-// a connected element, 310-320 ms). The bound is therefore one ConnectionTimeout and a 200 ms margin.
-// The 800 ms (Connection + Transaction in ONE call) that the ADR counts against the 1 s Cancel
-// acknowledgment is a safe upper estimate that has not been observed; if a call ever did run both waits,
-// it would exceed this bound and the seam would fail, which is the alarm wanted. No case here sets out to
-// cause that chain, so the 800 ms itself is not verified (a known limit, as the ADR says).
+// a connected element, 310-320 ms), or by both in ONE call: the 800 ms (Connection + Transaction) that the
+// ADR counts against the 1 s Cancel acknowledgment does happen (CI of PR #822, 2026-10-17: a
+// ClassifyWindowsFocusedElement case took 844 ms, about 156 ms short of the 1 s). The bound is therefore
+// that counted worst case of one call and a 150 ms margin (950 ms), strictly under the 1 s; a case that
+// made a second slow call would exceed it.
 //
 // The live seam compiles the real host (computer_use_windows_host.cc, with its entry point renamed) into a
 // test program. The program starts ITSELF as a second process that owns the windows (so every UI
@@ -25,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // answering altogether, an ordinary one, and one whose native UI Automation provider answers a few
 // property requests and then stops. The V1 paths are called against them (the point and focus
 // classification, the observation, the control bindings, the semantic target search, the focused-element
-// signature that the re-validation uses). Each must come back within one timeout plus a small margin and
+// signature that the re-validation uses). Each must come back within one call (its worst case) and a margin and
 // fail closed. Windows only: elsewhere, or where no MSVC can be found, it is skipped (but never in CI,
 // where a runner that cannot compile must not turn this into a silent pass). The build output goes to a
 // temporary directory that is removed after the run.
@@ -161,6 +161,17 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // case is counted as the SUM of the two (the safe side), and a Cancel waits for at most that one
     // call (the epoch is asked before every call): it is inside the acknowledgment.
     expect(connection + transaction).toBeLessThan(cancelAck);
+    // The live seam's bound on each case is that worst case of one call and a margin, from the same
+    // constants, and it stays strictly inside the acknowledgment (the chain was observed on CI at 844 ms).
+    const seamMargin = Number(
+      /constexpr long long kBound = kOneCall \+ (\d+);/u.exec(program)![1]!,
+    );
+    expect(program).toContain(
+      'static_cast<long long>(kWindowsV1UiaConnectionTimeoutMs) + static_cast<long long>(kWindowsV1UiaTransactionTimeoutMs);',
+    );
+    expect(seamMargin).toBeGreaterThan(0);
+    expect(connection + transaction + seamMargin).toBeLessThan(cancelAck);
+    expect(program).toContain('static_assert(kBound < 1000,');
     // The first contact is allowed to be slower than a call on a connected element.
     expect(connection).toBeGreaterThanOrEqual(transaction);
     // There is NO time budget on a path: a deep tree of a live app must not become "unclassified".
@@ -216,7 +227,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
       climb.indexOf('walker->GetParentElement(current, &parent)'),
     );
     expect(climb).toContain(
-      'WindowsV1UiaCall([&] { return walker->GetParentElement(current, &parent); })',
+      'WindowsV1UiaCall(parent, [&] { return walker->GetParentElement(current, &parent); })',
     );
     // The point classification reads the signature only for facts that are complete.
     expect(c).toContain(
@@ -306,7 +317,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(order.every((at) => at >= 0)).toBe(true);
     expect([...order].sort((a, b) => a - b)).toEqual(order);
     expect(c).toContain(
-      'template <class Call> HRESULT WindowsV1UiaCall(Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call); }',
+      'template <class Value, class Call> HRESULT WindowsV1UiaCall(const Value &output, Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, true, output, call); }',
     );
     // EVERY call that reaches the target goes through WindowsV1UiaCall: the first contact, the walks
     // (first child, next sibling) and the climb to the parent. The reads of properties are asked at the
@@ -318,7 +329,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     ];
     const guarded = [
       ...c.matchAll(
-        /WindowsV1Uia(?:Call|Contact)\(\[&\] \{ return \w+->(ElementFromPoint|ElementFromHandle|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetParentElement)\(/gu,
+        /WindowsV1Uia(?:Call|Contact)\(\w+, \[&\] \{ return \w+->(ElementFromPoint|ElementFromHandle|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetParentElement)\(/gu,
       ),
     ];
     expect(calls.length).toBeGreaterThanOrEqual(12);
@@ -326,7 +337,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // The first contacts use the contact wrapper (the longer slow threshold), the moves the call one.
     for (const name of ['ElementFromPoint', 'ElementFromHandle', 'GetFocusedElement'])
       expect(c, name).not.toMatch(
-        new RegExp(`WindowsV1UiaCall\\(\\[&\\] \\{ return \\w+->${name}\\(`, 'u'),
+        new RegExp(`WindowsV1UiaCall\\(\\w+, \\[&\\] \\{ return \\w+->${name}\\(`, 'u'),
       );
     // EVERY call of a UI Automation interface in the host, whatever the variable is called (element,
     // target, pattern, walker, automation, ...), goes through a wrapper of the V1 lane: the reads of
@@ -335,26 +346,41 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     // answer, or go on after a Cancel.
     const uiaNames =
       'get_Current\\w+|get_Cached\\w+|GetCurrentPattern\\w*|GetCachedPattern\\w*|GetCurrentPropertyValue\\w*|GetCachedPropertyValue\\w*|BuildUpdatedCache|GetRuntimeId|ElementFrom\\w+|FindFirst\\w*|FindAll\\w*|GetFocusedElement|GetFirstChildElement|GetNextSiblingElement|GetPreviousSiblingElement|GetLastChildElement|GetParentElement';
+    // Each wrapper is handed the call's own out-value first (#823): it decides whether a slow success
+    // is a cut-off one (empty) or an answer.
+    const wrappedUiaCall = new RegExp(
+      `WindowsV1Uia(?:Read|Call|Contact)\\((\\*?\\w+), \\[&\\] \\{ return \\w+->(?:${uiaNames})\\(([^;]*)\\); \\}\\)`,
+      'gu',
+    );
     const bareUiaCalls = (text: string): number =>
       [...text.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))].length -
-      [
-        ...text.matchAll(
-          new RegExp(
-            `WindowsV1Uia(?:Read|Call|Contact)\\(\\[&\\] \\{ return \\w+->(?:${uiaNames})\\(`,
-            'gu',
-          ),
-        ),
-      ].length;
-    // The check itself catches a bare call (a wrapped one and a bare one of the same method).
+      [...text.matchAll(wrappedUiaCall)].length;
+    // The output a wrapper is handed is the one the call writes: "&x" in its arguments, or
+    // IID_PPV_ARGS(x) for "*x" (a pattern). Calls that hand it something else are counted.
+    const misnamedOutputs = (text: string): number =>
+      [...text.matchAll(wrappedUiaCall)].filter(([, output, args]) =>
+        output!.startsWith('*')
+          ? !args!.includes(`IID_PPV_ARGS(${output!.slice(1)})`)
+          : !new RegExp(`&${output}\\b`, 'u').test(args!),
+      ).length;
+    // The checks themselves catch a bare call (a wrapped one and a bare one of the same method), a
+    // wrapper without its output (the form before #823), and a wrapper handed another variable.
     expect(
       bareUiaCalls(
-        'WindowsV1UiaRead([&] { return element->get_CurrentName(&n); }); element->get_CurrentName(&n);',
+        'WindowsV1UiaRead(n, [&] { return element->get_CurrentName(&n); }); element->get_CurrentName(&n);',
       ),
     ).toBe(1);
-    expect([...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))].length).toBeGreaterThanOrEqual(
-      35,
-    );
+    expect(bareUiaCalls('WindowsV1UiaRead([&] { return element->get_CurrentName(&n); });')).toBe(1);
+    expect(
+      misnamedOutputs(
+        'WindowsV1UiaRead(m, [&] { return element->get_CurrentName(&n); }); WindowsV1UiaRead(*q, [&] { return t->GetCurrentPatternAs(id, IID_PPV_ARGS(p)); });',
+      ),
+    ).toBe(2);
+    const allUiaCalls = [...c.matchAll(new RegExp(`->(?:${uiaNames})\\(`, 'gu'))].length;
+    expect(allUiaCalls).toBeGreaterThanOrEqual(38);
+    expect([...c.matchAll(wrappedUiaCall)]).toHaveLength(allUiaCalls);
     expect(bareUiaCalls(c)).toBe(0);
+    expect(misnamedOutputs(c)).toBe(0);
     // The calls that DO something (Invoke, SetValue, Select, Toggle, Expand, Collapse) are made only
     // while the path is alive: after a timeout or a Cancel nothing is sent (a rejection before any input).
     expect([...c.matchAll(/->(Invoke|SetValue|Select|Toggle|Expand|Collapse)\(/gu)]).toHaveLength(
@@ -387,7 +413,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     ]).toHaveLength(5);
     expect(c).not.toMatch(/target->GetCurrentPatternAs\(UIA_/u);
     expect(c).toContain(
-      'const bool name_read = WindowsV1UiaRead([&] { return target->get_CurrentName(&name); });',
+      'const bool name_read = WindowsV1UiaRead(name, [&] { return target->get_CurrentName(&name); });',
     );
     expect(c).toContain('if (!name_read) {');
     // A child that a cut-off first-child call produced is released (no output pointer is leaked).
@@ -397,10 +423,38 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(readFileSync(join(nativeDirectory, 'computer_use_protocol_fuzz.cc'), 'utf8')).toContain(
       'v1-default-risk-is-unclassified',
     );
-    // The time of a call is measured, and a slow "success" is a timeout.
+    // The time of a call is measured, and a slow "success" is a timeout only when its output is empty
+    // (the shape of a cut-off call); a slow success with a value is a success (#823). A first contact is
+    // the exception: its element is built from the HWND even when the app was cut off, so a slow contact
+    // stays a timeout whatever it hands back (as in #820).
     expect(c).toContain(
-      'if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow) result = kWindowsV1UiaTimeoutResult;',
+      'if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow && (!output_proves_answer || WindowsV1UiaEmpty(output))) result = kWindowsV1UiaTimeoutResult;',
     );
+    expect(c).not.toContain('std::chrono::steady_clock::now() - start >= slow)');
+    expect(c).toContain(
+      'template <class Value, class Call> HRESULT WindowsV1UiaContact(const Value &output, Call &&call) { return WindowsV1UiaTimed(kWindowsV1UiaSlowContact, false, output, call); }',
+    );
+    expect(c).toContain(
+      'template <class Value, class Call> bool WindowsV1UiaRead(const Value &output, Call &&call) { return WindowsV1UiaOk(WindowsV1UiaTimed(kWindowsV1UiaSlowRead, true, output, call)); }',
+    );
+    // The three wrappers are the only callers of the timed call.
+    expect([...c.matchAll(/WindowsV1UiaTimed\(kWindowsV1UiaSlow/gu)]).toHaveLength(3);
+    // What "empty" is, per type: a null or zero-length BSTR (an empty name stays fail closed), a null
+    // pointer (element, pattern, walker, SAFEARRAY), an all-zero RECT, and the zero of a value type.
+    expect(c).toContain(
+      'inline bool WindowsV1UiaEmpty(BSTR value) { return SysStringLen(value) == 0; }',
+    );
+    expect(c).toContain(
+      'template <class Pointee> bool WindowsV1UiaEmpty(Pointee *value) { return value == nullptr; }',
+    );
+    expect(c).toContain(
+      'inline bool WindowsV1UiaEmpty(const RECT &value) { return value.left == 0 && value.top == 0 && value.right == 0 && value.bottom == 0; }',
+    );
+    expect(c).toContain(
+      'template <class Value> requires(std::is_arithmetic_v<Value> || std::is_enum_v<Value>) bool WindowsV1UiaEmpty(Value value) { return value == Value{}; }',
+    );
+    // The overloads are the only ones (no other type gets its own idea of "empty").
+    expect([...c.matchAll(/bool WindowsV1UiaEmpty\(/gu)]).toHaveLength(4);
     // The frames of a preflight and of a dispatch each run under one outer path, so the later steps of
     // a frame share the state of the first timed-out call and of a Cancel.
     expect(c).toContain('const WindowsV1UiaPath preflight_uia_path; if (!HandleWindowsPreflight(');
@@ -849,10 +903,13 @@ int RunDriver(bool ci) {
   Sleep(600);
   std::cout << "child pid=" << pid << std::endl;
 
-  const long long kOneTimeout = static_cast<long long>(kWindowsV1UiaConnectionTimeoutMs);
-  // One timeout (the longer, the connection) and a small margin. Every case stops at one call; the
-  // counted 800 ms worst case (both waits in one call) is not expected here and would fail this bound.
-  const long long kBound = kOneTimeout + 200;
+  // The counted worst case of ONE call (the connection wait and then the transaction wait, observed on CI
+  // at 844 ms) and a margin, strictly inside the 1 s Cancel acknowledgment of Main. Every case stops at
+  // one call; a second call would exceed it.
+  constexpr long long kOneCall =
+      static_cast<long long>(kWindowsV1UiaConnectionTimeoutMs) + static_cast<long long>(kWindowsV1UiaTransactionTimeoutMs);
+  constexpr long long kBound = kOneCall + 150;
+  static_assert(kBound < 1000, "one call and its margin stay inside the 1 s Cancel acknowledgment");
   const long long kHeldUp = 250;               // a call that came back sooner was never held up
 
   // The very first call of this new process, to a window of another process, reads it: a cold start
@@ -971,11 +1028,73 @@ int RunDriver(bool ci) {
   }
   {  // outside any path a call is refused (fail closed): no call is made, and an action is not sent
     bool called = false;
-    const HRESULT refused = WindowsV1UiaCall([&] { called = true; return S_OK; });
+    const HRESULT refused = WindowsV1UiaCall(called, [&] { called = true; return S_OK; });
     SeamCheck(refused == E_ABORT && !called && !WindowsV1UiaOk(refused), "a_call_outside_any_path_is_refused_without_being_made");
     SeamCheck(!WindowsV1UiaMayCall() && std::string(WindowsV1UiaEndedReason()) == "semantic_action_failed", "an_action_outside_any_path_is_not_sent");
     SeamCheck(!WindowsV1UiaIsTimeout(E_ABORT), "a_refused_call_is_not_a_timeout");
     SeamCheck(!WindowsV1UiaIsTimeout(E_FAIL), "the_initial_result_of_an_action_not_sent_is_not_a_timeout");
+  }
+  {  // a slow success is a timeout only when its output is empty (#823): calls that take just over the
+     // slow threshold and say S_OK, with a value and without one (no window: the timing is the seam's own)
+    const auto slow_by = [](std::chrono::milliseconds slow) {
+      const auto until = std::chrono::steady_clock::now() + slow + std::chrono::milliseconds(10);
+      while (std::chrono::steady_clock::now() < until) Sleep(5);
+    };
+    {
+      const WindowsV1UiaPath path;
+      BSTR fast_empty = nullptr;
+      const bool fast = WindowsV1UiaRead(fast_empty, [&] { fast_empty = SysAllocString(L""); return S_OK; });
+      SysFreeString(fast_empty);
+      SeamCheck(fast && path.Stop() == WindowsV1UiaStop::kNone, "a_fast_empty_read_is_an_answer");
+      BSTR name = nullptr;
+      const bool named = WindowsV1UiaRead(name, [&] { slow_by(kWindowsV1UiaSlowRead); name = SysAllocString(L"answer"); return S_OK; });
+      SysFreeString(name);
+      SeamCheck(named && path.Stop() == WindowsV1UiaStop::kNone && WindowsV1UiaMayCall(), "a_slow_read_with_a_value_is_a_success_and_the_path_lives");
+      CONTROLTYPEID control_type = 0;
+      const bool typed = WindowsV1UiaRead(control_type, [&] { slow_by(kWindowsV1UiaSlowRead); control_type = UIA_ButtonControlTypeId; return S_OK; });
+      SeamCheck(typed && path.Stop() == WindowsV1UiaStop::kNone, "a_slow_value_type_read_with_a_value_is_a_success");
+      int found_target = 0;
+      int *found = nullptr;
+      const HRESULT moved = WindowsV1UiaCall(found, [&] { slow_by(kWindowsV1UiaSlowRead); found = &found_target; return S_OK; });
+      SeamCheck(moved == S_OK && WindowsV1UiaOk(moved) && path.Stop() == WindowsV1UiaStop::kNone, "a_slow_move_with_an_element_is_a_success");
+      BSTR empty = nullptr;
+      const bool emptied = WindowsV1UiaRead(empty, [&] { slow_by(kWindowsV1UiaSlowRead); empty = SysAllocString(L""); return S_OK; });
+      SysFreeString(empty);
+      SeamCheck(!emptied && path.Stop() == WindowsV1UiaStop::kTimeout, "a_slow_read_with_an_empty_value_is_a_timeout_and_ends_the_path");
+      bool called_after = false;
+      const HRESULT after = WindowsV1UiaCall(called_after, [&] { called_after = true; return S_OK; });
+      SeamCheck(after == E_ABORT && !called_after, "no_call_is_made_after_the_slow_empty_read");
+    }
+    {  // ...and a slow call that hands back no element is a timeout too
+      const WindowsV1UiaPath path;
+      int *element = nullptr;
+      const HRESULT result = WindowsV1UiaCall(element, [&] { slow_by(kWindowsV1UiaSlowRead); element = nullptr; return S_OK; });
+      SeamCheck(WindowsV1UiaIsTimeout(result) && !WindowsV1UiaOk(result) && path.Stop() == WindowsV1UiaStop::kTimeout, "a_slow_call_without_an_element_is_a_timeout");
+    }
+    {  // ...and a slow first contact is a timeout even WITH an element (UI Automation builds it from the
+       // HWND when the app's provider was cut off), while a fast one is an answer
+      const WindowsV1UiaPath path;
+      int element_target = 0;
+      int *fast_element = nullptr;
+      const HRESULT fast = WindowsV1UiaContact(fast_element, [&] { fast_element = &element_target; return S_OK; });
+      SeamCheck(WindowsV1UiaOk(fast) && path.Stop() == WindowsV1UiaStop::kNone, "a_fast_contact_is_an_answer");
+      int *element = nullptr;
+      const HRESULT result = WindowsV1UiaContact(element, [&] { slow_by(kWindowsV1UiaSlowContact); element = &element_target; return S_OK; });
+      SeamCheck(WindowsV1UiaIsTimeout(result) && !WindowsV1UiaOk(result) && path.Stop() == WindowsV1UiaStop::kTimeout, "a_slow_contact_with_an_element_is_still_a_timeout");
+    }
+    {  // ...and a slow FALSE: a value type has no "nothing" of its own, so its zero stays fail closed
+       // (a cut-off IsPassword must never read as "not a password")
+      const WindowsV1UiaPath path;
+      BOOL password = FALSE;
+      const bool read = WindowsV1UiaRead(password, [&] { slow_by(kWindowsV1UiaSlowRead); password = FALSE; return S_OK; });
+      SeamCheck(!read && path.Stop() == WindowsV1UiaStop::kTimeout, "a_slow_false_is_a_timeout");
+    }
+    {  // ...while a slow TRUE is an answer
+      const WindowsV1UiaPath path;
+      BOOL password = FALSE;
+      const bool read = WindowsV1UiaRead(password, [&] { slow_by(kWindowsV1UiaSlowRead); password = TRUE; return S_OK; });
+      SeamCheck(read && password == TRUE && path.Stop() == WindowsV1UiaStop::kNone, "a_slow_true_is_an_answer");
+    }
   }
   {  // a timeout inside an inner path ends the outer one: the later reads of the frame make no call
     const WindowsV1UiaPath frame;
