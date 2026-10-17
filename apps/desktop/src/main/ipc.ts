@@ -59,6 +59,8 @@ import {
   sep,
 } from 'node:path';
 import {
+  protectedWorkspaceRootClassification,
+  protectedWorkspaceRootLabel,
   workspaceMutationBinding,
   workspacePermissionResourceFromGuard,
   type PathGuard,
@@ -3994,7 +3996,7 @@ export class IpcRouter {
             role: ordinal === 0 ? ('primary' as const) : ('secondary' as const),
           })),
         );
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           bindings.map(({ canonicalPath }) => canonicalPath),
         );
@@ -4025,7 +4027,7 @@ export class IpcRouter {
       projectSummarySchema,
       async (input, event, envelope) => {
         const folders = await canonicalProjectFolderBindings(input.folders);
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           folders.map(({ canonicalPath }) => canonicalPath),
         );
@@ -4229,7 +4231,7 @@ export class IpcRouter {
           input.folders === undefined
             ? undefined
             : await canonicalProjectFolderBindings(input.folders);
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           folders?.map(({ canonicalPath }) => canonicalPath) ?? [],
         );
@@ -10769,6 +10771,49 @@ async function canonicalProjectFolderBindings(
       };
     }),
   );
+}
+
+async function confirmProjectFolderAccess(
+  window: BrowserWindow,
+  canonicalPaths: readonly string[],
+): Promise<void> {
+  await confirmHomeDirectoryAccess(window, canonicalPaths);
+  const warning = protectedProjectFolderWarning(canonicalPaths);
+  if (warning === null) return;
+  const confirmation = await dialog.showMessageBox(window, {
+    type: 'warning',
+    buttons: ['追加する', 'キャンセル'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '保護された場所のフォルダ',
+    ...warning,
+  });
+  if (confirmation.response !== 0)
+    throw new InvalidProjectError('Protected folder access was canceled');
+}
+
+/**
+ * Every operation in a Workspace whose root sits in a protected place (AppData, an OS folder, a
+ * credential folder) is refused, so such a Project folder is called out before it is added.
+ */
+export function protectedProjectFolderWarning(
+  canonicalPaths: readonly string[],
+): { message: string; detail: string } | null {
+  const protectedFolders = canonicalPaths.flatMap((path) => {
+    const classification = protectedWorkspaceRootClassification(path);
+    return classification === null
+      ? []
+      : [`・${path}（${protectedWorkspaceRootLabel(classification)}）`];
+  });
+  if (protectedFolders.length === 0) return null;
+  return {
+    message: 'このフォルダは保護された場所にあります。Projectに追加しますか？',
+    detail: [
+      ...protectedFolders,
+      '',
+      'AIはこの場所のファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから追加することをおすすめします。',
+    ].join('\n'),
+  };
 }
 
 async function confirmHomeDirectoryAccess(

@@ -18,6 +18,7 @@ import {
   canonicalizeResourcePath,
   createPathGuard,
   openGuardedExistingFile,
+  protectedWorkspaceRootClassification,
   revalidatePathGuard,
   workspacePermissionResourceFromGuard,
   workspaceMutationBinding,
@@ -361,6 +362,90 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
     });
     expect(workspacePermissionResourceFromGuard(guard).classification).toBe('credential');
   });
+
+  // Issue #828: a parent folder's name said nothing about the files inside the Workspace, yet
+  // `…/windows/my-app`, `…/gcloud/my-app` and `…/Library/Application Support/my-app` were protected.
+  it.each([
+    ['windows'],
+    ['Program Files'],
+    ['gcloud'],
+    ['.ssh'],
+    [join('Library', 'Application Support')],
+  ])('keeps an ordinary project below an ancestor named %s as Workspace scope', async (segment) => {
+    const { root } = await fixture();
+    const workspace = join(root, segment, 'my-app');
+    await mkdir(join(workspace, 'src'), { recursive: true });
+    await writeFile(join(workspace, 'src', 'a.ts'), 'x');
+    const guard = await createPathGuard({
+      workspacePath: workspace,
+      targetPath: 'src/a.ts',
+      operation: 'write',
+    });
+    expect(workspacePermissionResourceFromGuard(guard).classification).toBe('workspace');
+    expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBeNull();
+  });
+
+  it('still protects a Workspace inside the real home credential and app-support folders', async () => {
+    const { root } = await fixture();
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    process.env[homeVariable] = root;
+    try {
+      const cases = [
+        [join(root, '.config', 'gcloud', 'configurations'), 'credential'],
+        [join(root, '.ssh', 'keys'), 'credential'],
+        [join(root, 'Library', 'Application Support', 'SomeApp'), 'app-private'],
+      ] as const;
+      for (const [workspace, expected] of cases) {
+        await mkdir(workspace, { recursive: true });
+        await writeFile(join(workspace, 'plain.txt'), 'x');
+        const guard = await createPathGuard({
+          workspacePath: workspace,
+          targetPath: 'plain.txt',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe(expected);
+        expect(protectedWorkspaceRootClassification(guard.workspacePath)).toBe(expected);
+      }
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+    }
+  });
+
+  it.runIf(process.platform === 'win32')(
+    'compares Windows program folders with the real roots from the environment',
+    async () => {
+      const { root } = await fixture();
+      const programData = join(root, 'machine-data');
+      const workspace = join(programData, 'Vendor', 'app');
+      await mkdir(workspace, { recursive: true });
+      const previous = process.env['ProgramData'];
+      process.env['ProgramData'] = programData;
+      try {
+        const guard = await createPathGuard({
+          workspacePath: workspace,
+          targetPath: '.',
+          operation: 'read',
+        });
+        expect(workspacePermissionResourceFromGuard(guard).classification).toBe('os-protected');
+      } finally {
+        if (previous === undefined) delete process.env['ProgramData'];
+        else process.env['ProgramData'] = previous;
+      }
+    },
+  );
+
+  // Issue #830: a folder under AppData (such as %TEMP%) is refused for every operation, so adding
+  // it as a Project folder has to be flagged up front.
+  it.runIf(process.platform === 'win32')(
+    'reports an AppData folder such as the temp directory as a protected Workspace root',
+    async () => {
+      const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-appdata-root-'));
+      temporaryRoots.push(workspace);
+      expect(protectedWorkspaceRootClassification(await realpath(workspace))).toBe('app-private');
+    },
+  );
 
   it('classifies an ordinary canonical Workspace write as Workspace policy scope', async () => {
     const { workspace } = await fixture();

@@ -2,7 +2,7 @@ import { constants, lstatSync, realpathSync, type BigIntStats } from 'node:fs';
 import { lstat, open, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import type { PathClassification, PermissionResource } from '@sprint-coder/domain';
 import { canonicalizeExistingPath, pathsEquivalent } from '../path-comparison';
 
@@ -315,6 +315,36 @@ export function workspacePermissionResourceFromGuard(
   });
 }
 
+/**
+ * The protected classification a Workspace root itself carries, or null for an ordinary folder.
+ * The home folder and a drive root stay null here: they have their own confirmation.
+ */
+export function protectedWorkspaceRootClassification(
+  canonicalRootPath: string,
+  workspaceAuthority?: 'sealed-team-isolation',
+): Exclude<PathClassification, 'workspace' | 'unclassified'> | null {
+  const classification = classifyWorkspacePath(
+    canonicalRootPath,
+    canonicalRootPath,
+    workspaceAuthority,
+  );
+  return classification === 'workspace' || classification === 'unclassified'
+    ? null
+    : classification;
+}
+
+/** A user-facing name for the kind of protected place a Workspace root sits in. */
+export function protectedWorkspaceRootLabel(
+  classification: Exclude<PathClassification, 'workspace' | 'unclassified'>,
+): string {
+  if (classification === 'os-protected') return 'OS のシステムフォルダ';
+  if (classification === 'credential') return '認証情報を置くフォルダ';
+  if (classification === 'app-private') return 'アプリの内部データの場所（AppData など）';
+  return '鍵などを置く保護された場所';
+}
+
+const CREDENTIAL_DIRECTORY_NAMES = ['.ssh', '.aws', '.gnupg', '.kube', 'gcloud', 'keychains'];
+
 function classifyWorkspacePath(
   workspacePath: string,
   resolvedPath: string,
@@ -323,13 +353,21 @@ function classifyWorkspacePath(
   const parts = relative(workspacePath, resolvedPath)
     .split(/[\\/]+/)
     .map((part) => part.toLowerCase());
+  // Only the AppData / app-state names below are deliberately judged on every ancestor. Any other
+  // folder name above the Workspace (a parent called `windows` or `gcloud`) says nothing about the
+  // files inside it: OS areas are compared with the real system roots and credential folders with
+  // the real ones in the home folder, while names are judged from the Workspace root down.
   const absoluteParts = resolvedPath
     .split(/[\\/]+/)
     .filter(Boolean)
     .map((part) => part.toLowerCase());
-  const classificationParts =
-    workspaceAuthority === 'sealed-team-isolation' ? parts : absoluteParts;
+  const appStateParts = workspaceAuthority === 'sealed-team-isolation' ? parts : absoluteParts;
+  const credentialParts =
+    workspaceAuthority === 'sealed-team-isolation'
+      ? parts
+      : [basename(workspacePath).toLowerCase(), ...parts];
   const name = parts.at(-1) ?? '';
+  const home = canonicalizeExistingPath(homedir());
   if (
     workspaceAuthority === undefined &&
     (isAtOrBelow('/System', resolvedPath) || isAtOrBelow('/Library', resolvedPath))
@@ -348,34 +386,46 @@ function classifyWorkspacePath(
   )
     return 'os-protected';
   if (
-    classificationParts.includes('windows') ||
-    classificationParts.includes('system32') ||
-    classificationParts.includes('programdata') ||
-    classificationParts.includes('program files') ||
-    classificationParts.includes('program files (x86)')
+    workspaceAuthority === undefined &&
+    windowsSystemRoots().some((root) => isAtOrBelow(root, resolvedPath))
   )
     return 'os-protected';
   if (
-    classificationParts.includes('.ssh') ||
-    classificationParts.includes('.aws') ||
-    classificationParts.includes('.gnupg') ||
-    classificationParts.includes('.kube') ||
-    classificationParts.includes('gcloud') ||
-    classificationParts.includes('keychains')
+    parts.includes('windows') ||
+    parts.includes('system32') ||
+    parts.includes('programdata') ||
+    parts.includes('program files') ||
+    parts.includes('program files (x86)')
+  )
+    return 'os-protected';
+  if (
+    workspaceAuthority === undefined &&
+    [
+      join(home, '.ssh'),
+      join(home, '.aws'),
+      join(home, '.gnupg'),
+      join(home, '.kube'),
+      join(home, '.config', 'gcloud'),
+      join(home, 'Library', 'Keychains'),
+    ].some((root) => isAtOrBelow(root, resolvedPath))
   )
     return 'credential';
-  if (classificationParts.includes('appdata')) return 'app-private';
+  if (CREDENTIAL_DIRECTORY_NAMES.some((directory) => credentialParts.includes(directory)))
+    return 'credential';
+  if (appStateParts.includes('appdata')) return 'app-private';
   if (
-    classificationParts.includes('.git') ||
-    classificationParts.includes('.codex') ||
-    classificationParts.includes('.sprint-coder') ||
-    classificationParts.includes('.sprint-coder-team')
+    appStateParts.includes('.git') ||
+    appStateParts.includes('.codex') ||
+    appStateParts.includes('.sprint-coder') ||
+    appStateParts.includes('.sprint-coder-team')
   )
     return 'app-private';
   if (
-    classificationParts.includes('library') &&
-    classificationParts.includes('application support')
+    workspaceAuthority === undefined &&
+    isAtOrBelow(join(home, 'Library', 'Application Support'), resolvedPath)
   )
+    return 'app-private';
+  if (credentialParts.includes('library') && credentialParts.includes('application support'))
     return 'app-private';
   if (
     parts.some(
@@ -417,6 +467,26 @@ function isAtOrBelow(root: string, candidate: string): boolean {
     relation === '' ||
     (!relation.startsWith(`..${sep}`) && relation !== '..' && !isAbsolute(relation))
   );
+}
+
+/** The Windows install and its program folders, from the environment plus the usual defaults. */
+function windowsSystemRoots(): string[] {
+  if (process.platform !== 'win32') return [];
+  const drive = process.env['SystemDrive'] ?? 'C:';
+  return [
+    process.env['SystemRoot'],
+    process.env['WINDIR'],
+    process.env['ProgramData'],
+    process.env['ProgramFiles'],
+    process.env['ProgramFiles(x86)'],
+    process.env['ProgramW6432'],
+    `${drive}\\Windows`,
+    `${drive}\\ProgramData`,
+    `${drive}\\Program Files`,
+    `${drive}\\Program Files (x86)`,
+  ]
+    .filter((root): root is string => root !== undefined && root !== '' && isAbsolute(root))
+    .map((root) => canonicalizeExistingPath(root));
 }
 
 // Conservative, portable bounds (POSIX NAME_MAX=255, a total well below any platform's
