@@ -75,9 +75,7 @@ test.describe('command runner flow', () => {
     await expect(card).toBeVisible();
     await expect(card).toBeFocused();
     await expect(card).toContainText('run_command');
-    await expect(card).toContainText(
-      process.platform === 'win32' ? 'cmd.exe' : '/usr/bin/printf',
-    );
+    await expect(card).toContainText(process.platform === 'win32' ? 'cmd.exe' : '/usr/bin/printf');
     const toDeny = await tabToApprovalButton(page, 'approval-deny');
     // The three decisions are the last stops and keep their order, whether or not the disclosure
     // button precedes them.
@@ -190,13 +188,29 @@ test.describe('command runner flow', () => {
     const restoredTextarea = restoredPage.getByTestId('composer-textarea');
     await restoredTextarea.fill('コマンドテストをしてください');
     await restoredTextarea.press('Enter');
-    await expect(restoredPage.getByTestId('auto-decision-audit')).toContainText('拒否');
-    await expect(restoredPage.getByTestId('auto-decision-audit')).toContainText('high_risk');
-    await expect(restoredPage.getByTestId('approval-card')).toHaveCount(0);
+    // Issue #825: Auto is never stricter than Ask. The reviewer will not allow a high-risk command
+    // on its own, so the person is asked on the same card instead of the command being refused,
+    // and no Auto row claims a decision Auto did not make.
+    const autoCard = restoredPage.getByTestId('approval-card');
+    await expect(autoCard).toBeVisible();
+    await expect(autoCard).toContainText('run_command');
+    await expect(restoredPage.getByTestId('auto-decision-audit')).toHaveCount(0);
+    await restoredPage.getByTestId('approval-allow-once').click();
+    await expect(
+      restoredPage.locator('[data-testid="command-card"].command-card--exited'),
+    ).toHaveCount(2);
+    await expect(restoredPage.getByTestId('run-card').last()).toHaveAttribute(
+      'data-run-status',
+      'completed',
+      { timeout: 20_000 },
+    );
 
     await closeApp(app);
     app = await launchApp(userDataDir);
     const auditRestoredPage: Page = await firstWindow(app);
-    await expect(auditRestoredPage.getByTestId('auto-decision-audit')).toContainText('high_risk');
+    await expect(
+      auditRestoredPage.locator('[data-testid="command-card"].command-card--exited'),
+    ).toHaveCount(2);
+    await expect(auditRestoredPage.getByTestId('auto-decision-audit')).toHaveCount(0);
   });
 });

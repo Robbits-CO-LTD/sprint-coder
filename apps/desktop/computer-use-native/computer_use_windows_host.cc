@@ -69,6 +69,7 @@
 #include <chrono>
 #include <cstdio>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -81,6 +82,7 @@
 #include "computer_use_windows_shadow_scheduler.h"
 #include "computer_use_windows_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
+#include "computer_use_windows_artifact_read.h"
 
 namespace {
 
@@ -2451,15 +2453,14 @@ std::uint32_t WindowsBuildNumber() {
 //     governs a first contact). 500 ms leaves a cold app time to load its providers on the first call (a
 //     call that still times out is reported as accessibility_timeout, a failure that a new observe does
 //     not repeat once the providers are loaded). A call that waits for the connection and then for the
-//     transaction is bounded by BOTH: the worst case of one call is counted as 500 + 300 = 800 ms
-//     (whether the two waits can really follow each other is not established; the sum is the safe
-//     side), inside the 1 s of the Cancel acknowledgment (COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS).
-//     The margin is SMALL: 1000 - 800 = about 200 ms for everything else the lane does between the
-//     epoch moving and the acknowledgment (the pipe, the frame, the answer). Measured on CI: a
-//     transaction-bound call is cut after 310-320 ms, a first contact after 505-514 ms. The sum of
-//     these two measurements, taken one at a time, is about 830 ms (the chain itself was not measured;
-//     800 ms is the nominal value, not a measured upper bound), which leaves about 170 ms for the pipe,
-//     the frame and the acknowledgment together; under load it can be less (not verified).
+//     transaction is bounded by BOTH: the worst case of one call is counted as 500 + 300 = 800 ms,
+//     inside the 1 s of the Cancel acknowledgment (COMPUTER_USE_NATIVE_CANCEL_ACK_TIMEOUT_MS). The two
+//     waits DO follow each other: on the CI of PR #822 (2026-10-17) a ClassifyWindowsFocusedElement case
+//     of the live seam came back after 844 ms. The margin is SMALL: what is left of the 1 s for
+//     everything else the lane does between the epoch moving and the acknowledgment (the pipe, the frame,
+//     the answer) was about 156 ms there. Measured on CI one at a time: a transaction-bound call is cut
+//     after 310-320 ms, a first contact after 505-514 ms. Under more load the margin can be less (not
+//     verified). The live seam's bound on one case is this counted worst case and 150 ms (950 ms).
 //  2. The FIRST timed-out call (UIA_E_TIMEOUT or an equivalent failure) ends its path for good: no
 //     UI Automation call after it, fail closed, the "unreadable" of the caller. A target that answers
 //     the first contact and then stops therefore costs one timeout, not one per remaining call.
@@ -2478,7 +2479,14 @@ std::uint32_t WindowsBuildNumber() {
 //  systems return a default value for a property when the provider times out (measured on a CI runner:
 //  five property reads of a native provider that does not answer took 1.5 s and all succeeded, with
 //  empty values). So the time of each call is measured, and a call that took within 30 ms of its
-//  timeout is a timed-out call (WindowsV1UiaTimed), whatever the HRESULT says.
+//  timeout AND left its output empty (the shape only a cut-off call produces: no element, no string,
+//  zero; WindowsV1UiaEmpty) is a timed-out call (WindowsV1UiaTimed), whatever the HRESULT says. A slow
+//  call that did hand back a value has answered: a live app under load can be slow and right, and
+//  cutting it off would turn it into "unclassified" (#823). Where an empty output is also a real answer
+//  (an empty name, no child, FALSE), a slow one is still taken for a timeout: fail closed. A first
+//  contact is the exception: a slow one is a timeout whatever it hands back, because UI Automation
+//  builds the element of a window from its HWND even when the app's provider was cut off
+//  (WindowsV1UiaContact).
 // A failed (timed out, canceled, over the observe budget) read is exactly the "unreadable" of each
 // caller (stale target, rejected action, or an observation that is not produced): the meaning of V1's
 // answers is not changed.
@@ -2582,36 +2590,72 @@ bool WindowsV1UiaOk(HRESULT result) {
   return false;
 }
 
-// A call that took this long and still "succeeded" has been cut off by its timeout (30 ms under it):
-// 270 ms against the 300 ms transaction timeout, 470 ms against the 500 ms connection timeout.
+// A call that took this long and "succeeded" with an empty output has been cut off by its timeout
+// (30 ms under it): 270 ms against the 300 ms transaction timeout, 470 ms against the 500 ms connection
+// timeout.
 constexpr std::chrono::milliseconds kWindowsV1UiaSlowRead{270};
 constexpr std::chrono::milliseconds kWindowsV1UiaSlowContact{470};
 static_assert(kWindowsV1UiaSlowRead.count() < kWindowsV1UiaTransactionTimeoutMs, "a read is slow before it times out");
 static_assert(kWindowsV1UiaSlowContact.count() < kWindowsV1UiaConnectionTimeoutMs, "a contact is slow before it times out");
 
+// Whether the output of a call has the shape a cut-off call leaves behind (#823): nothing. Measured on
+// CI, a timed-out read comes back S_OK with an empty value; a slow call that handed back something real
+// has answered. One rule for every type, its zero value: no element / pattern / walker / SAFEARRAY (a
+// null pointer), no string (a null or zero-length BSTR), and for the value types, which have no "nothing"
+// of their own, the zero a cut-off call leaves (0, FALSE, the first enumerator, an all-zero RECT). A
+// process id or a control type of 0 is no answer at all. Where the zero is a real answer too (an element
+// with no name, a leaf with no child, the last sibling, a control that is not a password one,
+// ToggleState_Off, ExpandCollapseState_Collapsed), a SLOW zero is still taken for a timeout: fail closed,
+// as before #823 (IsPassword in particular must never read a cut-off FALSE as "not a password"). A fast
+// zero is an answer, whatever it is. A cut-off call that writes nothing leaves the caller's starting
+// value: every output starts empty (nullptr, 0, FALSE, an all-zero RECT), except the two pattern states,
+// which start at ToggleState_Indeterminate / ExpandCollapseState_LeafNode; a slow one of those is taken
+// for an answer here, but the caller rejects exactly those values (semantic_state_unavailable), so both
+// shapes of a cut-off state read are refused.
+inline bool WindowsV1UiaEmpty(BSTR value) { return SysStringLen(value) == 0; }
+template <class Pointee> bool WindowsV1UiaEmpty(Pointee *value) { return value == nullptr; }
+inline bool WindowsV1UiaEmpty(const RECT &value) {
+  return value.left == 0 && value.top == 0 && value.right == 0 && value.bottom == 0;
+}
+template <class Value>
+  requires(std::is_arithmetic_v<Value> || std::is_enum_v<Value>)
+bool WindowsV1UiaEmpty(Value value) {
+  return value == Value{};
+}
+
 // One UI Automation call of a path: the cancel / timeout / budget check first (E_ABORT, no call made,
-// when the path has ended), then the call, timed. A call that came back only after nearly its whole
-// timeout is a timed-out call (UIA_E_TIMEOUT), even if it says S_OK.
-template <class Call> HRESULT WindowsV1UiaTimed(std::chrono::milliseconds slow, Call &&call) {
+// when the path has ended), then the call, timed. `output` is the call's own out-value (read after the
+// call). A call that came back only after nearly its whole timeout with an empty output (or, where the
+// output proves nothing, with any output) is a timed-out call (UIA_E_TIMEOUT), even if it says S_OK; a
+// slow call with a real output is a success.
+template <class Value, class Call>
+HRESULT WindowsV1UiaTimed(std::chrono::milliseconds slow, bool output_proves_answer, const Value &output, Call &&call) {
   if (!WindowsV1UiaMayCall())
     return E_ABORT;
   const auto start = std::chrono::steady_clock::now();
   HRESULT result = call();
-  if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow)
+  if (SUCCEEDED(result) && std::chrono::steady_clock::now() - start >= slow &&
+      (!output_proves_answer || WindowsV1UiaEmpty(output)))
     result = kWindowsV1UiaTimeoutResult;
   return result;
 }
-// A call on a connected element (walker moves, the parent).
-template <class Call> HRESULT WindowsV1UiaCall(Call &&call) {
-  return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call);
+// A call on a connected element (walker moves, the parent): a slow one is an answer when it hands back
+// an element.
+template <class Value, class Call> HRESULT WindowsV1UiaCall(const Value &output, Call &&call) {
+  return WindowsV1UiaTimed(kWindowsV1UiaSlowRead, true, output, call);
 }
-// The first contact with a target (ElementFromHandle / ElementFromPoint / GetFocusedElement).
-template <class Call> HRESULT WindowsV1UiaContact(Call &&call) {
-  return WindowsV1UiaTimed(kWindowsV1UiaSlowContact, call);
+// The first contact with a target (ElementFromHandle / ElementFromPoint / GetFocusedElement). A slow
+// contact is a timeout WHATEVER it hands back (as in #820, kept by #823): UI Automation builds the
+// element of a window from its HWND (the host proxy) even when the app's own provider was cut off
+// (measured locally: ElementFromHandle on a provider that stopped answering, 1026 ms, S_OK, an element),
+// so an element is no proof that the app answered. The output is still named, as every wrapped call names
+// its own, but it does not decide.
+template <class Value, class Call> HRESULT WindowsV1UiaContact(const Value &output, Call &&call) {
+  return WindowsV1UiaTimed(kWindowsV1UiaSlowContact, false, output, call);
 }
-// One read of a property: true only for a call that answered in time.
-template <class Call> bool WindowsV1UiaRead(Call &&call) {
-  return WindowsV1UiaOk(WindowsV1UiaTimed(kWindowsV1UiaSlowRead, call));
+// One read of a property: true only for a call that answered (in time, or slowly with a value).
+template <class Value, class Call> bool WindowsV1UiaRead(const Value &output, Call &&call) {
+  return WindowsV1UiaOk(WindowsV1UiaTimed(kWindowsV1UiaSlowRead, true, output, call));
 }
 
 // Why the path ended, now (kNone outside a path).
@@ -3205,11 +3249,11 @@ bool AppendUiaTree(IUIAutomationElement *element,
   CONTROLTYPEID control_type = 0;
   BOOL password = FALSE;
   const bool attributes_read =
-      WindowsV1UiaRead([&] { return element->get_CurrentName(&name); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentAutomationId(&automation_id); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentHelpText(&help); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentControlType(&control_type); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentIsPassword(&password); });
+      WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); }) &&
+      WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
+      WindowsV1UiaRead(help, [&] { return element->get_CurrentHelpText(&help); }) &&
+      WindowsV1UiaRead(control_type, [&] { return element->get_CurrentControlType(&control_type); }) &&
+      WindowsV1UiaRead(password, [&] { return element->get_CurrentIsPassword(&password); });
   if (!attributes_read) {
     if (name != nullptr)
       SysFreeString(name);
@@ -3263,7 +3307,7 @@ bool AppendUiaTree(IUIAutomationElement *element,
     *json += ",\"help\":\"" + JsonEscape(help_utf8) + "\"";
   *json += ",\"children\":[";
   IUIAutomationElement *child = nullptr;
-  HRESULT result = WindowsV1UiaCall([&] { return walker->GetFirstChildElement(element, &child); });
+  HRESULT result = WindowsV1UiaCall(child, [&] { return walker->GetFirstChildElement(element, &child); });
   bool first = true;
   bool complete = WindowsV1UiaOk(result);
   while (complete && child != nullptr) {
@@ -3273,7 +3317,7 @@ bool AppendUiaTree(IUIAutomationElement *element,
     if (!AppendUiaTree(child, walker, depth + 1, nodes, json))
       complete = false;
     IUIAutomationElement *next = nullptr;
-    if (complete && !WindowsV1UiaOk(WindowsV1UiaCall([&] { return walker->GetNextSiblingElement(child, &next); })))
+    if (complete && !WindowsV1UiaOk(WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); })))
       complete = false;
     child->Release();
     child = next;
@@ -3322,7 +3366,7 @@ bool ReadUiaObservation(std::uint32_t pid, HWND window, std::string *tree,
   IUIAutomationElement *root = nullptr;
   IUIAutomationTreeWalker *walker = nullptr;
   const HRESULT root_result =
-      WindowsV1UiaContact([&] { return automation->ElementFromHandle(window, &root); });
+      WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });
   const HRESULT walker_result = automation->get_RawViewWalker(&walker);
   std::string value;
   std::size_t count = 0;
@@ -3447,11 +3491,11 @@ WindowsUiaRisk ClassifyWindowsUiaElementSelf(IUIAutomationElement *element) {
   CONTROLTYPEID control_type = 0;
   BOOL password = FALSE;
   const bool attributes_read =
-      WindowsV1UiaRead([&] { return element->get_CurrentName(&name); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentAutomationId(&automation_id); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentHelpText(&help); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentControlType(&control_type); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentIsPassword(&password); });
+      WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); }) &&
+      WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
+      WindowsV1UiaRead(help, [&] { return element->get_CurrentHelpText(&help); }) &&
+      WindowsV1UiaRead(control_type, [&] { return element->get_CurrentControlType(&control_type); }) &&
+      WindowsV1UiaRead(password, [&] { return element->get_CurrentIsPassword(&password); });
   if (!attributes_read) {
     if (name != nullptr)
       SysFreeString(name);
@@ -3536,7 +3580,7 @@ WindowsUiaRisk ClassifyWindowsUiaElement(IUIAutomationElement *element) {
       break;
     IUIAutomationElement *parent = nullptr;
     const HRESULT parent_result =
-        WindowsV1UiaCall([&] { return walker->GetParentElement(current, &parent); });
+        WindowsV1UiaCall(parent, [&] { return walker->GetParentElement(current, &parent); });
     if (!WindowsV1UiaOk(parent_result)) {
       metadata_complete = false;
       if (parent != nullptr)
@@ -3568,7 +3612,7 @@ WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
   IUIAutomationElement *element = nullptr;
   const POINT query = point;
   const HRESULT found =
-      WindowsV1UiaContact([&] { return automation->ElementFromPoint(query, &element); });
+      WindowsV1UiaContact(element, [&] { return automation->ElementFromPoint(query, &element); });
   automation->Release();
   if (!WindowsV1UiaOk(found) || element == nullptr) {
     if (element != nullptr)
@@ -3576,7 +3620,7 @@ WindowsUiaRisk ClassifyWindowsPoint(POINT point, std::uint32_t expected_pid,
     return {};
   }
   int owner_pid = 0;
-  if (!WindowsV1UiaRead([&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
+  if (!WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
       static_cast<std::uint32_t>(owner_pid) != expected_pid) {
     element->Release();
     return {};
@@ -3599,7 +3643,7 @@ WindowsUiaRisk ClassifyWindowsFocusedElement(std::uint32_t expected_pid) {
     return {};
   IUIAutomationElement *element = nullptr;
   const HRESULT found =
-      WindowsV1UiaContact([&] { return automation->GetFocusedElement(&element); });
+      WindowsV1UiaContact(element, [&] { return automation->GetFocusedElement(&element); });
   automation->Release();
   if (!WindowsV1UiaOk(found) || element == nullptr) {
     if (element != nullptr)
@@ -3607,7 +3651,7 @@ WindowsUiaRisk ClassifyWindowsFocusedElement(std::uint32_t expected_pid) {
     return {};
   }
   int owner_pid = 0;
-  if (!WindowsV1UiaRead([&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
+  if (!WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) || owner_pid <= 0 ||
       static_cast<std::uint32_t>(owner_pid) != expected_pid) {
     element->Release();
     return {};
@@ -3629,18 +3673,18 @@ bool ComputeWindowsControlSignature(IUIAutomationElement *element,
   BSTR automation_id = nullptr;
   SAFEARRAY *runtime_id = nullptr;
   const bool facts =
-      WindowsV1UiaRead([&] { return element->get_CurrentProcessId(&owner_pid); }) && owner_pid > 0 &&
+      WindowsV1UiaRead(owner_pid, [&] { return element->get_CurrentProcessId(&owner_pid); }) && owner_pid > 0 &&
       static_cast<std::uint32_t>(owner_pid) == expected_pid &&
-      WindowsV1UiaRead([&] { return element->get_CurrentControlType(&control_type); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentBoundingRectangle(&bounds); }) &&
+      WindowsV1UiaRead(control_type, [&] { return element->get_CurrentControlType(&control_type); }) &&
+      WindowsV1UiaRead(bounds, [&] { return element->get_CurrentBoundingRectangle(&bounds); }) &&
       bounds.right > bounds.left && bounds.bottom > bounds.top &&
       (containing_bounds == nullptr ||
        (bounds.left >= containing_bounds->left &&
         bounds.top >= containing_bounds->top &&
         bounds.right <= containing_bounds->right &&
         bounds.bottom <= containing_bounds->bottom)) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentAutomationId(&automation_id); }) &&
-      WindowsV1UiaRead([&] { return element->GetRuntimeId(&runtime_id); }) && runtime_id != nullptr &&
+      WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
+      WindowsV1UiaRead(runtime_id, [&] { return element->GetRuntimeId(&runtime_id); }) && runtime_id != nullptr &&
       SafeArrayGetDim(runtime_id) == 1;
   if (!facts) {
     if (automation_id != nullptr)
@@ -3699,8 +3743,8 @@ bool ReadWindowsElementTargetId(IUIAutomationElement *element,
   BSTR automation_id = nullptr;
   BSTR name = nullptr;
   const bool read =
-      WindowsV1UiaRead([&] { return element->get_CurrentAutomationId(&automation_id); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentName(&name); });
+      WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
+      WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); });
   if (!read) {
     if (automation_id != nullptr)
       SysFreeString(automation_id);
@@ -3768,7 +3812,7 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
 
   IUIAutomationElement *child = nullptr;
   const HRESULT first_result =
-      WindowsV1UiaCall([&] { return walker->GetFirstChildElement(element, &child); });
+      WindowsV1UiaCall(child, [&] { return walker->GetFirstChildElement(element, &child); });
   if (!WindowsV1UiaOk(first_result)) {
     if (child != nullptr)
       child->Release();
@@ -3782,7 +3826,7 @@ bool CollectWindowsControlBindings(IUIAutomationElement *element,
     }
     IUIAutomationElement *next = nullptr;
     const HRESULT next_result =
-        WindowsV1UiaCall([&] { return walker->GetNextSiblingElement(child, &next); });
+        WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); });
     child->Release();
     if (!WindowsV1UiaOk(next_result)) {
       if (next != nullptr)
@@ -3806,7 +3850,7 @@ bool CaptureWindowsControlBindings(std::uint32_t pid, HWND window,
   IUIAutomationElement *root = nullptr;
   IUIAutomationTreeWalker *walker = nullptr;
   const bool initialized =
-      WindowsV1UiaOk(WindowsV1UiaContact([&] { return automation->ElementFromHandle(window, &root); })) &&
+      WindowsV1UiaOk(WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); })) &&
       root != nullptr &&
       SUCCEEDED(automation->get_RawViewWalker(&walker)) && walker != nullptr;
   std::size_t nodes = 0;
@@ -3834,7 +3878,7 @@ bool WindowsFocusedElementSignature(std::uint32_t expected_pid,
     return false;
   IUIAutomationElement *element = nullptr;
   const HRESULT found =
-      WindowsV1UiaContact([&] { return automation->GetFocusedElement(&element); });
+      WindowsV1UiaContact(element, [&] { return automation->GetFocusedElement(&element); });
   automation->Release();
   if (!WindowsV1UiaOk(found) || element == nullptr) {
     if (element != nullptr)
@@ -3879,8 +3923,8 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
   BSTR automation_id = nullptr;
   BSTR name = nullptr;
   const bool attributes_read =
-      WindowsV1UiaRead([&] { return element->get_CurrentAutomationId(&automation_id); }) &&
-      WindowsV1UiaRead([&] { return element->get_CurrentName(&name); });
+      WindowsV1UiaRead(automation_id, [&] { return element->get_CurrentAutomationId(&automation_id); }) &&
+      WindowsV1UiaRead(name, [&] { return element->get_CurrentName(&name); });
   if (!attributes_read) {
     if (automation_id != nullptr)
       SysFreeString(automation_id);
@@ -3911,7 +3955,7 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
     }
   }
   IUIAutomationElement *child = nullptr;
-  if (!WindowsV1UiaOk(WindowsV1UiaCall([&] { return walker->GetFirstChildElement(element, &child); }))) {
+  if (!WindowsV1UiaOk(WindowsV1UiaCall(child, [&] { return walker->GetFirstChildElement(element, &child); }))) {
     if (child != nullptr)
       child->Release();
     return false;
@@ -3923,7 +3967,7 @@ bool FindUiaTargetRecursive(IUIAutomationElement *element,
       return false;
     }
     IUIAutomationElement *next = nullptr;
-    if (!WindowsV1UiaOk(WindowsV1UiaCall([&] { return walker->GetNextSiblingElement(child, &next); }))) {
+    if (!WindowsV1UiaOk(WindowsV1UiaCall(next, [&] { return walker->GetNextSiblingElement(child, &next); }))) {
       if (next != nullptr)
         next->Release();
       child->Release();
@@ -3955,7 +3999,7 @@ bool FindWindowsSemanticTarget(const WindowsSession &session,
   IUIAutomationTreeWalker *walker = nullptr;
   const WindowsV1UiaPath path;
   const bool initialized =
-      WindowsV1UiaOk(WindowsV1UiaContact([&] { return automation->ElementFromHandle(session.active_window, &root); })) &&
+      WindowsV1UiaOk(WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(session.active_window, &root); })) &&
       root != nullptr && SUCCEEDED(automation->get_RawViewWalker(&walker)) &&
       walker != nullptr;
   std::size_t visited = 0;
@@ -4005,7 +4049,7 @@ bool Utf16FromUtf8(std::string_view value, std::wstring *output) {
 template <class Pattern>
 bool ReadWindowsV1Pattern(IUIAutomationElement *target, PATTERNID id, Pattern **pattern) {
   *pattern = nullptr;
-  const bool read = WindowsV1UiaRead([&] { return target->GetCurrentPatternAs(id, IID_PPV_ARGS(pattern)); });
+  const bool read = WindowsV1UiaRead(*pattern, [&] { return target->GetCurrentPatternAs(id, IID_PPV_ARGS(pattern)); });
   if (!read || *pattern == nullptr) {
     if (*pattern != nullptr)
       (*pattern)->Release();
@@ -4099,7 +4143,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
     std::string selected_value;
     IUIAutomationSelectionItemPattern *pattern = nullptr;
     BSTR name = nullptr;
-    const bool name_read = WindowsV1UiaRead([&] { return target->get_CurrentName(&name); });
+    const bool name_read = WindowsV1UiaRead(name, [&] { return target->get_CurrentName(&name); });
     const std::string target_name =
         name == nullptr || !name_read
             ? std::string{}
@@ -4138,7 +4182,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
       *reason = "semantic_pattern_unavailable";
     } else {
       ToggleState current = ToggleState_Indeterminate;
-      if (!WindowsV1UiaRead([&] { return pattern->get_CurrentToggleState(&current); }) ||
+      if (!WindowsV1UiaRead(current, [&] { return pattern->get_CurrentToggleState(&current); }) ||
           current == ToggleState_Indeterminate) {
         *reason = "semantic_state_unavailable";
       } else if ((current == ToggleState_On) == wants_true) {
@@ -4168,7 +4212,7 @@ bool DispatchWindowsSemanticAction(const WindowsSession &session,
       *reason = "semantic_pattern_unavailable";
     } else {
       ExpandCollapseState current = ExpandCollapseState_LeafNode;
-      if (!WindowsV1UiaRead([&] { return pattern->get_CurrentExpandCollapseState(&current); }) ||
+      if (!WindowsV1UiaRead(current, [&] { return pattern->get_CurrentExpandCollapseState(&current); }) ||
           current == ExpandCollapseState_LeafNode) {
         *reason = "semantic_state_unavailable";
       } else if ((current == ExpandCollapseState_Expanded) == wants_expand) {
@@ -5698,6 +5742,154 @@ bool ObserveWindowsWindow(WindowsSession &session, std::string *response,
   return true;
 }
 
+// BEGIN artifact read (#785 T15-4w)
+// The value of ONE node, for `copy`. Like the interlock entry it runs on a worker of its own in the
+// multithreaded apartment while the lane waits at most kInterlockLaneHoldLimit, with the same
+// single-flight slot (at most one stuck worker in the process); the worker gets everything by value.
+// The node is resolved as the semantic actions resolve it (the V1 search by target id, the signature
+// the observation recorded, the V1 risk of the element); the facts and the value then come from the
+// shadow's source and reader (portable: ReadWindowsArtifactValue), which also judges the role, the
+// secure / high-impact / surface facts and the browser window (the judgement lives in that header).
+// Any way of not reading is the same "not read". The value is never cached by the helper (the answer
+// goes out with Respond, not RespondAndCache) and the copy of it is scrubbed after it is sent.
+// Reads only: no input API, no pattern is invoked, nothing is set.
+struct ArtifactReadPending {
+  // Whatever value is still here when the last owner lets go (the lane gave up, or never took it)
+  // is overwritten first.
+  ~ArtifactReadPending() { ScrubString(&text); }
+  std::mutex mutex;
+  std::condition_variable ready;
+  bool done = false;
+  std::atomic<bool> abandoned{false};
+  bool ok = false;
+  std::string text;
+};
+
+bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string &metadata,
+                                std::string *text) noexcept {
+  using namespace sprint_coder::computer_use;
+  try {
+    std::string kind;
+    RECT bounds{};
+    std::string reason;
+    if (!ValidateWindowsDispatchBinding(session, metadata, &kind, &bounds, &reason) || kind != "copy")
+      return false;
+    std::string target_id;
+    if (!ReadJsonString(metadata, "targetId", &target_id) || target_id.empty() || target_id.size() > 128)
+      return false;
+    const auto observed = session.semantic_control_signatures.find(target_id);
+    if (observed == session.semantic_control_signatures.end()) return false;
+    const std::uint64_t expected_epoch = session.cancel_epoch;
+    auto pending = std::make_shared<ArtifactReadPending>();
+    const WindowsSession copy = session;
+    const std::string signature = observed->second;
+    std::atomic<bool> &running = InterlockWorkerRunning();
+    if (running.exchange(true)) return false;
+    try {
+      std::thread([pending, copy, target_id, signature, expected_epoch, &running]() {
+        bool ok = false;
+        std::string value;
+        try {
+          struct ComApartment {
+            HRESULT initialized = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~ComApartment() {
+              if (SUCCEEDED(initialized)) CoUninitialize();
+            }
+          } apartment;
+          const auto still_valid = [pending, expected_epoch]() {
+            return !pending->abandoned.load(std::memory_order_acquire) &&
+                   cancellation_epoch.load(std::memory_order_acquire) == expected_epoch;
+          };
+          // The V1 resolution (search, signature, risk) and the signature the read checks run on
+          // this worker inside ONE bounded V1 path (#820), with the epoch of the request: the first
+          // timed-out call ends them all and a Cancel stops them before the next call. Outside a path
+          // the V1 calls are refused, so without it no node could be read. The path's budget is the
+          // lane's wait: once the lane has given up (abandoned), the walk ends at its next call
+          // instead of holding the single-flight slot, which the interlock entry shares, for as long
+          // as a large tree takes.
+          const WindowsV1UiaPath uia_path(kInterlockLaneHoldLimit, expected_epoch);
+          IUIAutomationElement *target = nullptr;
+          std::string why;
+          if (FindWindowsSemanticTarget(copy, target_id, &target, &why)) {
+            std::string current;
+            const bool same_control =
+                ComputeWindowsControlSignature(target, copy.pid, nullptr, &current) && current == signature;
+            // The V1 risk of the element, as for every semantic action: a secure or high-impact
+            // element is never read, whatever else says.
+            const bool risky = RejectWindowsRisk(ClassifyWindowsUiaElement(target), &why);
+            target->Release();
+            if (same_control && !risky) {
+              std::unique_ptr<WindowsUiaShadowSource> source = WindowsUiaShadowSource::Create(
+                  copy.active_window, POINT{0, 0}, still_valid,
+                  WindowsUiaShadowSource::kInterlockUiaTimeoutMs,
+                  windows_uia_source_detail::InterlockShellLookupRunning());
+              if (source != nullptr) {
+                // The element the read finds is checked against the observed signature (runtime id
+                // included), the same function the observation and the semantic actions use.
+                const std::uint32_t pid = copy.pid;
+                source->SetSignatureProvider([pid](IUIAutomationElement *element, std::string *out) {
+                  return ComputeWindowsControlSignature(element, pid, nullptr, out);
+                });
+                ShadowRequestInfo info;
+                info.policy_language = copy.policy_language;
+                info.maximum_mode = "full_access_app";
+                WindowsArtifactReadResult result = ReadWindowsArtifactValue(*source, target_id, info, signature);
+                ok = result.ok;
+                value = std::move(result.text);
+              }
+            }
+          }
+        } catch (...) {
+          ok = false;
+          value.clear();
+        }
+        {
+          std::lock_guard<std::mutex> lock(pending->mutex);
+          // The lane sets `abandoned` while it holds this lock, so this look is not a race: a value
+          // that arrives after the lane gave up is overwritten here and never stored.
+          if (pending->abandoned.load(std::memory_order_acquire)) {
+            ScrubString(&value);
+            value.clear();
+            ok = false;
+          }
+          pending->ok = ok;
+          pending->text = std::move(value);
+          pending->done = true;
+        }
+        running.store(false);
+        pending->ready.notify_one();
+      }).detach();
+    } catch (...) {
+      running.store(false);
+      return false;
+    }
+    {
+      std::unique_lock<std::mutex> lock(pending->mutex);
+      if (!pending->ready.wait_for(lock, kInterlockLaneHoldLimit, [&pending] { return pending->done; })) {
+        pending->abandoned.store(true, std::memory_order_release);
+        return false;
+      }
+      if (!pending->ok) return false;
+      *text = pending->text;
+      ScrubString(&pending->text);
+    }
+    // The action was canceled or the window changed while the worker read: no value.
+    if (cancellation_epoch.load(std::memory_order_acquire) != expected_epoch ||
+        !RevalidateWindowsTarget(session, bounds, expected_epoch) || text->empty() ||
+        text->size() > kArtifactReadMaxBytes) {
+      ScrubString(text);
+      text->clear();
+      return false;
+    }
+    return true;
+  } catch (...) {
+    ScrubString(text);
+    text->clear();
+    return false;
+  }
+}
+// END artifact read
+
 bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
                        const Frame &request, bool *handshaken) {
   const auto type = static_cast<MessageType>(request.header.message_type);
@@ -5737,6 +5929,18 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
     std::string operation;
     if (!ReadJsonString(metadata, "operation", &operation))
       operation = "probe";
+    if (operation == "read_node_value") {
+      // The value of one node for copy (#785 T15-4w): its own answer, never cached.
+      WindowsSession *session = FindWindowsSession(request);
+      std::string text;
+      const bool read = session != nullptr && ReadWindowsNodeValueOnLane(*session, metadata, &text);
+      std::string payload = read ? "{\"ok\":true,\"text\":\"" + JsonEscape(text) + "\"}" : "{\"ok\":false}";
+      const bool sent = Respond(pipe, request, MessageType::kProbeResult, payload);
+      ScrubString(&text);
+      ScrubString(&payload);
+      if (!sent) return false;
+      break;
+    }
     std::string response;
     std::string reason;
     bool succeeded = false;

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  COMPUTER_USE_ARTIFACT_LIMITS,
   bindComputerUseMaximumMode,
   computerAppIdentitySchema,
   computerUseActionResultSchema,
@@ -25,6 +26,7 @@ import type {
   ComputerUseNativeApprovalApproveResult,
   ComputerUseNativeApprovalOffer,
   ComputerUseNativeHost,
+  ComputerUseNativeNodeValue,
   ComputerUseNativeSession,
   ComputerUseNativeWindow,
 } from './computer-use-controller';
@@ -99,6 +101,7 @@ type NativeMethod =
   | 'approvalDiscard'
   | 'dispatchApproved'
   | 'dispatch'
+  | 'readNodeValue'
   | 'cancel'
   | 'close';
 
@@ -240,6 +243,7 @@ export function createComputerUseNativeHost(
         method === 'preflight' ||
         method === 'approvalApprove' ||
         method === 'dispatchApproved' ||
+        method === 'readNodeValue' ||
         method === 'dispatch')
     )
       throw new ComputerUseNativeUnavailableError(unavailableReason());
@@ -640,6 +644,39 @@ export function createComputerUseNativeHost(
     },
 
     nativeApprovalPathEnabled: (sessionId: string): boolean => approvalPathEnabled(sessionId),
+
+    // #785 T15-4w: the read of one node's value (Windows helper). Present only when the native has it.
+    // It is NOT a capability: `artifactReadSupported` is not defined here, so `copy` stays closed in
+    // production until T15-E enables it. Every way of not reading is the same `{ ok: false }`.
+    ...(hasMethod(addon, 'readNodeValue')
+      ? {
+          readNodeValue: async (input: {
+            session: ComputerUseNativeSession;
+            requestId: string;
+            targetId: string;
+            targetSignature: string;
+            observationRevision: number;
+            cancelEpoch: number;
+          }): Promise<ComputerUseNativeNodeValue> => {
+            const internal = sessions.get(input.session.sessionId);
+            if (internal === undefined) return Object.freeze({ ok: false });
+            try {
+              const value = await invoke('readNodeValue', {
+                ...internal.raw,
+                type: 'copy',
+                requestId: input.requestId,
+                targetId: input.targetId,
+                targetSignature: input.targetSignature,
+                observationRevision: input.observationRevision,
+                cancelEpoch: input.cancelEpoch,
+              });
+              return parseNativeNodeValue(value);
+            } catch {
+              return Object.freeze({ ok: false });
+            }
+          },
+        }
+      : {}),
 
     approvalApprove: async (input): Promise<ComputerUseNativeApprovalApproveResult> => {
       const internal = sessions.get(input.session.sessionId);
@@ -1271,6 +1308,23 @@ function nativePreflightInvalidResult(error: unknown): ComputerUseNativeActionRe
   )
     return null;
   return Object.freeze({ result: 'rejected', reasonCode: 'native_preflight_invalid' });
+}
+
+/**
+ * The answer of the native read of one node. Exactly `{ ok: true, text }` with a non-empty text of at
+ * most the artifact byte bound (the contracts'), or `{ ok: false }`. Anything else, an extra key, a
+ * text over the bound or a non-string, is the same refusal, so the planner learns nothing from it.
+ */
+export function parseNativeNodeValue(value: unknown): ComputerUseNativeNodeValue {
+  const refused = Object.freeze({ ok: false as const });
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return refused;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (record['ok'] !== true || keys.length !== 2 || !keys.includes('text')) return refused;
+  const text = record['text'];
+  if (typeof text !== 'string' || text.length === 0) return refused;
+  if (Buffer.byteLength(text, 'utf8') > COMPUTER_USE_ARTIFACT_LIMITS.maxBytes) return refused;
+  return Object.freeze({ ok: true as const, text });
 }
 
 function hasMethod(

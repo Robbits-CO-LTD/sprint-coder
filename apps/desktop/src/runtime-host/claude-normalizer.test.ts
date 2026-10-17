@@ -444,3 +444,58 @@ describe('managed MCP tool calls', () => {
     ).toEqual([]);
   });
 });
+
+// issue #827: text blocks split by a tool call were glued together (`…connection.SC_TEAM_DONE`).
+describe('ClaudeJsonlNormalizer text block boundary (issue #827)', () => {
+  function streamEvent(event: Record<string, unknown>): string {
+    return JSON.stringify({ type: 'stream_event', event });
+  }
+  const textBlockStart = streamEvent({
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'text', text: '' },
+  });
+  const textDelta = (text: string) =>
+    streamEvent({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } });
+  function joinedText(lines: readonly string[]): string {
+    const normalizer = new ClaudeJsonlNormalizer();
+    return lines
+      .flatMap((line) => normalizer.push(line))
+      .map((event) => (event.type === 'delta' ? event.delta : ''))
+      .join('');
+  }
+
+  it('separates text blocks that a tool call splits with a paragraph break', () => {
+    expect(
+      joinedText([
+        textBlockStart,
+        textDelta("Now I'll create it."),
+        streamEvent({ type: 'content_block_stop', index: 0 }),
+        streamEvent({ type: 'message_stop' }),
+        streamEvent({ type: 'message_start', message: {} }),
+        textBlockStart,
+        textDelta('team-a.txt を作成しました。'),
+      ]),
+    ).toBe("Now I'll create it.\n\nteam-a.txt を作成しました。");
+  });
+
+  it('keeps streaming deltas of one block contiguous and adds no leading separator', () => {
+    expect(
+      joinedText([
+        streamEvent({
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'thinking', thinking: '' },
+        }),
+        streamEvent({
+          type: 'content_block_delta',
+          index: 0,
+          delta: { type: 'thinking_delta', thinking: '考え中' },
+        }),
+        textBlockStart,
+        textDelta('Canonical '),
+        textDelta('answer.'),
+      ]),
+    ).toBe('Canonical answer.');
+  });
+});

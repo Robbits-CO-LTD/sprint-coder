@@ -374,6 +374,53 @@ describe('Main PermissionBroker', () => {
     ).toMatchObject({ decision: 'allow' });
   });
 
+  // Issue #830: the refusal only said "Unclassified or protected paths must be treated as high risk".
+  it('explains a refusal in a Workspace that sits in a protected location', async () => {
+    const appDataWorkspace = join(testRoot, 'AppData', 'Local', 'Temp', 'my-app');
+    await mkdir(join(appDataWorkspace, 'src'), { recursive: true });
+    await writeFile(join(appDataWorkspace, 'src', 'app.ts'), 'safe');
+    const guard = await createPathGuard({
+      rootId: 'root-a',
+      workspacePath: appDataWorkspace,
+      targetPath: 'src/app.ts',
+      operation: 'read',
+    });
+    const { broker } = fixture();
+    expect(() =>
+      broker.evaluate({
+        taskId: 'task-1',
+        turnId: 'turn-1',
+        request: { ...request, resource: workspacePermissionResourceFromGuard(guard), risk: 'low' },
+        now: NOW,
+        basePolicy: {
+          managedDeny: [],
+          projectDeny: [],
+          parentCeiling: ceiling,
+          modeCeiling: ceiling,
+          sandbox: { feasible: true, profile: 'read-only' },
+        },
+        pathGuard: guard,
+        workspace: {
+          source: 'project',
+          projectId: 'project-1',
+          primaryRootId: 'root-a',
+          roots: [
+            {
+              rootId: 'root-a',
+              path: guard.workspacePath,
+              label: 'my-app',
+              role: 'primary',
+              status: 'available',
+            },
+          ],
+          digest: 'f'.repeat(64),
+        },
+      }),
+    ).toThrow(
+      'このWorkspaceは保護された場所（アプリの内部データの場所（AppData など））にあるため、AIはここでファイルの読み書きやコマンドの実行ができません。',
+    );
+  });
+
   it('authorizes a command guard against its sealed Turn roots', async () => {
     const sealedGuard = await createPathGuard({
       rootId: 'root-a',

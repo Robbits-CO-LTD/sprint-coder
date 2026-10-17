@@ -59,6 +59,8 @@ import {
   sep,
 } from 'node:path';
 import {
+  protectedWorkspaceRootClassification,
+  protectedWorkspaceRootLabel,
   workspaceMutationBinding,
   workspacePermissionResourceFromGuard,
   type PathGuard,
@@ -359,6 +361,7 @@ import {
 } from './persistence';
 import { MockRuntimeAdapter } from './runtime';
 import { ComputerUseController, type ComputerUseNativeHost } from './computer-use-controller';
+import { computerUseSessionMayStart } from './computer-use-session-gate';
 import {
   createComputerUseRuntimeCapture,
   type ComputerUseRuntimeCapture,
@@ -393,6 +396,7 @@ import {
 } from './approval-coordinator';
 export { sandboxProfileForToolAuthorization } from './approval-coordinator';
 import {
+  promptWriteAccess,
   relativizeWorkspacePath,
   resolveWriteScope,
   workerWriteScopeFor,
@@ -2011,8 +2015,14 @@ export class IpcRouter {
       // that its own Turn is still the active one — the same requirement, expressed against the
       // Turn that owns the session rather than against "none".
       canStartSession: (taskId, ownerTurnId) =>
-        this.persistence.getActiveTurnId(taskId) === ownerTurnId &&
-        !this.teamCoordinator.hasBusyWorkers(taskId),
+        computerUseSessionMayStart(
+          {
+            persistence: this.persistence,
+            hasBusyWorkers: (id) => this.teamCoordinator.hasBusyWorkers(id),
+          },
+          taskId,
+          ownerTurnId,
+        ),
       plannerFactory: async ({
         taskId,
         turnId,
@@ -4025,7 +4035,7 @@ export class IpcRouter {
             role: ordinal === 0 ? ('primary' as const) : ('secondary' as const),
           })),
         );
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           bindings.map(({ canonicalPath }) => canonicalPath),
         );
@@ -4056,7 +4066,7 @@ export class IpcRouter {
       projectSummarySchema,
       async (input, event, envelope) => {
         const folders = await canonicalProjectFolderBindings(input.folders);
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           folders.map(({ canonicalPath }) => canonicalPath),
         );
@@ -4260,7 +4270,7 @@ export class IpcRouter {
           input.folders === undefined
             ? undefined
             : await canonicalProjectFolderBindings(input.folders);
-        await confirmHomeDirectoryAccess(
+        await confirmProjectFolderAccess(
           this.window,
           folders?.map(({ canonicalPath }) => canonicalPath) ?? [],
         );
@@ -6355,7 +6365,10 @@ export class IpcRouter {
         ...(pathGuard === undefined ? {} : { pathGuard }),
       },
       evaluation,
-      autoPreset
+      // A reviewer deny the person may still overrule goes to an approval card (Issue #825). Auto
+      // decided nothing then, so no Auto row is recorded; the reviewer's verdict stays in the
+      // permission audit, and the card records what the person decided.
+      autoPreset && evaluation.decision !== 'approval_required'
         ? autoPermissionDecisionSchema.parse({
             id: randomUUID(),
             taskId: request.context.taskId,
@@ -6749,10 +6762,8 @@ export class IpcRouter {
     // What this Turn may write (issue #37). Both inputs matter: the Access preset is the user's
     // choice, and the Workspace is what makes a write meaningful at all — without one the Runtime's
     // cwd is a throwaway temp directory, so an edit would land somewhere the user can never see.
-    const writeScope = resolveWriteScope(
-      this.persistence.getPermissionPolicy(taskId).preset,
-      workspacePath,
-    );
+    const accessPreset = this.persistence.getPermissionPolicy(taskId).preset;
+    const writeScope = resolveWriteScope(accessPreset, workspacePath);
     const dispatchEgress =
       kind === 'grok'
         ? dispatchAfterGrokProviderEgress
@@ -6860,7 +6871,9 @@ export class IpcRouter {
         compilePromptGuidance({
           workspace: runtimeWorkspaceSet,
           toolCatalog: toolCatalogSnapshot,
-          writeScope,
+          // What the agent may do through the managed tools, which under Ask is more than the
+          // CLI's own read-only scope: each write and command waits on its card (issue #826).
+          ...promptWriteAccess(accessPreset, workspacePath),
           skills: runtimeSkills,
           teamMcpEnabled: teamMcp !== undefined,
         }),
@@ -10800,6 +10813,49 @@ async function canonicalProjectFolderBindings(
       };
     }),
   );
+}
+
+async function confirmProjectFolderAccess(
+  window: BrowserWindow,
+  canonicalPaths: readonly string[],
+): Promise<void> {
+  await confirmHomeDirectoryAccess(window, canonicalPaths);
+  const warning = protectedProjectFolderWarning(canonicalPaths);
+  if (warning === null) return;
+  const confirmation = await dialog.showMessageBox(window, {
+    type: 'warning',
+    buttons: ['追加する', 'キャンセル'],
+    defaultId: 1,
+    cancelId: 1,
+    title: '保護された場所のフォルダ',
+    ...warning,
+  });
+  if (confirmation.response !== 0)
+    throw new InvalidProjectError('Protected folder access was canceled');
+}
+
+/**
+ * Every operation in a Workspace whose root sits in a protected place (AppData, an OS folder, a
+ * credential folder) is refused, so such a Project folder is called out before it is added.
+ */
+export function protectedProjectFolderWarning(
+  canonicalPaths: readonly string[],
+): { message: string; detail: string } | null {
+  const protectedFolders = canonicalPaths.flatMap((path) => {
+    const classification = protectedWorkspaceRootClassification(path);
+    return classification === null
+      ? []
+      : [`・${path}（${protectedWorkspaceRootLabel(classification)}）`];
+  });
+  if (protectedFolders.length === 0) return null;
+  return {
+    message: 'このフォルダは保護された場所にあります。Projectに追加しますか？',
+    detail: [
+      ...protectedFolders,
+      '',
+      'AIはこの場所のファイルの読み書きやコマンドの実行ができません。ドキュメントなど通常のフォルダへ移動してから追加することをおすすめします。',
+    ].join('\n'),
+  };
 }
 
 async function confirmHomeDirectoryAccess(

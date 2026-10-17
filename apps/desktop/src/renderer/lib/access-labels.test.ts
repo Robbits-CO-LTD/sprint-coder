@@ -17,7 +17,11 @@ describe('managed access labels', () => {
   it('describes Auto as auto-allowing Workspace file edits and reviewing the rest (issue #526)', () => {
     const description = accessDescription('auto', null);
     expect(description).toContain('Workspace内のファイルの作成・編集は自動で許可します');
-    expect(description).toContain('コマンドなどそれ以外の操作は自動レビューで判定します');
+    // issue #825: what the reviewer does not allow is asked about, not refused.
+    expect(description).toContain('コマンドは実行前に確認します');
+    expect(description).toContain(
+      '自動レビューが安全と判定したものだけ自動で許可し、残りは確認します',
+    );
   });
 
   it('reports fail-closed command removal with the probe reason', () => {
