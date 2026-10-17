@@ -148,6 +148,59 @@ describe('Worker isolation worktree egress classification', () => {
   });
 });
 
+describe('declared Workspace root label egress classification (issue #849)', () => {
+  const root = '/private/tmp/sprint-coder-labels/workspace';
+  // Long and random-looking enough to clear the 24-character, 4.25-bit entropy test on its own.
+  const randomLabel = 'ws-Q7xK2mZp9LcV4tRb8NfJ3hYd6Wa';
+  const realLabel = 'realai-ws-codex-graph-Hnb2yq';
+  const opaque = '8Jv2mQp7Zx4Lk9Wd6Tn3Rs5Yc1Ua0BfH';
+  const guidance = (label: string) =>
+    JSON.stringify({ workspace: { roots: [{ label, path: root, role: 'primary' }] } });
+
+  it('reads a declared root label in the guidance JSON and the prompt as known structure', () => {
+    for (const label of [randomLabel, realLabel]) {
+      const content = `${guidance(label)}\n隔離root: ${label} = ${root}`;
+      expect(assessProviderEgressDisclosure(content, [root], [label])).toMatchObject({
+        classification: 'safe',
+        reasons: [],
+        redactedContent: content,
+      });
+    }
+    // Without the declaration the random label is what the scan stops on.
+    expect(assessProviderEgressDisclosure(guidance(randomLabel), [root]).reasons).toEqual([
+      'high-entropy-value',
+    ]);
+  });
+
+  it.each([
+    ['a secret beside the label', `${guidance(randomLabel)}\n${opaque}`],
+    ['a secret fused to the label', `${guidance(`${randomLabel}${opaque}`)}`],
+    ['a secret joined to the label by =', `${randomLabel}=${opaque}`],
+    ['a secret under the label as a path', `${randomLabel}/${opaque}`],
+    ['the label with a secret prefix', `${opaque}+${randomLabel}`],
+  ])('still blocks %s', (_case, content) => {
+    const assessment = assessProviderEgressDisclosure(content, [root], [randomLabel]);
+    expect(assessment.classification).toBe('sensitive');
+    expect(assessment.reasons).toContain('high-entropy-value');
+    expect(assessment.redactedContent).not.toContain(opaque);
+  });
+
+  it('exempts only the exact declared value, and never a malformed declaration', () => {
+    expect(
+      assessProviderEgressDisclosure(randomLabel.slice(0, -1), [], [randomLabel]).classification,
+    ).toBe('sensitive');
+    for (const labels of [[undefined as unknown as string], [''], [null as unknown as string]])
+      expect(assessProviderEgressDisclosure(randomLabel, [], labels).classification).toBe(
+        'sensitive',
+      );
+    // A declared label never hides a recognized credential shape.
+    const token = 'sk-proj-abcdefghijklmnopqrstuvwxyz1234';
+    expect(assessProviderEgressDisclosure(token, [], [token]).reasons).toContain(
+      'ai-provider-token',
+    );
+  });
+});
+
 describe('provider disclosure classifier', () => {
   it.each([
     'See https://github.com/Robbits-CO-LTD/sprint-coder/actions/workflows/ci.yml',

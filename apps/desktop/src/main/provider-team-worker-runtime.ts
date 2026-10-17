@@ -12,12 +12,13 @@ import { ProviderRateLimitedError } from './provider-rate-limit-retry';
 import { acquireProviderModelLease, type ProviderRegistry } from './provider-runtime';
 import type { ProviderModelLease } from './ollama-model-lifecycle';
 import type { ProviderVerificationService } from './provider-verification';
-import type {
-  TeamExecutionAccess,
-  TeamRuntimeConversationItem,
-  TeamWorkerRuntime,
-  WorkerActivityEvent,
-  WorkerRuntimeResult,
+import {
+  WorkerEgressDeniedError,
+  type TeamExecutionAccess,
+  type TeamRuntimeConversationItem,
+  type TeamWorkerRuntime,
+  type WorkerActivityEvent,
+  type WorkerRuntimeResult,
 } from './team-coordinator';
 import type { AgentRecord } from './persistence';
 import type { PreparedContext } from './context-ledger';
@@ -34,6 +35,8 @@ import {
   WORKSPACE_WRITE_TOOL_NAMES,
   workerWriteCheckedCompletion,
   workerWriteFailure,
+  workspaceRootLabels,
+  type TeamWorkerEgressVerdict,
   type WorkerWriteObservation,
 } from './team-worker-runtime';
 import { ToolAuthorizationDeniedError, type ApprovalWaitObserver } from './tool-broker';
@@ -57,7 +60,9 @@ export type ProviderTeamWorkerRuntimeDeps = Readonly<{
     prompt: string;
     context: PreparedContext;
     knownWorkspaceRoots: readonly string[];
-  }): boolean;
+    /** The labels Main declared for those roots (issue #849). */
+    knownWorkspaceLabels: readonly string[];
+  }): boolean | TeamWorkerEgressVerdict;
   contextFor?: (worker: AgentRecord, executionId?: string) => PreparedContext;
   /**
    * Task の安全設定が書き込みの前に利用者の承認を求めるとき true（issue #525）。未指定は false で、
@@ -327,22 +332,31 @@ export class ProviderAwareTeamWorkerRuntime implements TeamWorkerRuntime {
       while (providerCallCount < MAX_PROVIDER_MANAGER_ROUNDS) {
         controller.signal.throwIfAborted();
         providerCallCount += 1;
-        if (
-          !this.deps.authorizeEgress({
-            worker: input.worker,
-            executionId,
-            connection,
-            prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
-            context: inheritedContext,
-            // Same declaration the CLI Worker makes: the Workspace roots plus the isolation
-            // worktree Main generated, so naming that directory is not read as an opaque secret.
-            knownWorkspaceRoots: canonicalWorkspaceRoots([
-              ...(input.workspaceSet?.roots.map((root) => root.path) ?? []),
-              input.workspacePath,
-            ]),
-          })
-        )
-          throw new Error('Provider Worker egress was denied');
+        const egress = this.deps.authorizeEgress({
+          worker: input.worker,
+          executionId,
+          connection,
+          prompt: JSON.stringify(providerMessagesForEgressPolicy(messages)),
+          context: inheritedContext,
+          // Same declaration the CLI Worker makes: the Workspace roots plus the isolation
+          // worktree Main generated, so naming that directory is not read as an opaque secret.
+          knownWorkspaceRoots: canonicalWorkspaceRoots([
+            ...(input.workspaceSet?.roots.map((root) => root.path) ?? []),
+            input.workspacePath,
+          ]),
+          knownWorkspaceLabels: workspaceRootLabels(input.workspaceSet?.roots),
+        });
+        // As on the CLI Worker path (issue #841): only an explicit `true` allows, and a denial
+        // names the gate's reason codes — never the withheld bytes — so the step can say why it
+        // stopped and the coordinator does not retry the same payload into the same denial.
+        const verdict: TeamWorkerEgressVerdict =
+          typeof egress === 'boolean' ? { allowed: egress } : egress;
+        if (verdict.allowed !== true)
+          throw new WorkerEgressDeniedError(
+            'provider',
+            verdict.reason ?? null,
+            verdict.disclosureReasons ?? [],
+          );
         if (modelLease === undefined)
           modelLease = await acquireProviderModelLease(
             runtime,

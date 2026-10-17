@@ -726,6 +726,7 @@ import {
   TeamRuntimeAvailabilityTracker,
   buildInheritedWorkerContext,
   chooseWorkerRuntime,
+  workspaceRootLabels,
 } from './team-worker-runtime';
 import {
   isTeamScenarioInput,
@@ -1529,7 +1530,15 @@ export class IpcRouter {
           executionId,
           onApprovalWait,
         ),
-      authorizeEgress: (kind, taskId, turnId, prompt, context, knownWorkspaceRoots) => {
+      authorizeEgress: (
+        kind,
+        taskId,
+        turnId,
+        prompt,
+        context,
+        knownWorkspaceRoots,
+        knownWorkspaceLabels,
+      ) => {
         const authorize =
           kind === 'grok'
             ? authorizeGrokProviderEgress
@@ -1545,6 +1554,8 @@ export class IpcRouter {
           // already canonicalized by the runtime. The Task's other roots were never given to this
           // dispatch, so exempting them would widen the secret scan's blind spot for nothing.
           knownWorkspaceRoots,
+          // The labels of those same roots, as the prompt and guidance name them (issue #849).
+          knownWorkspaceLabels,
           context,
           now: new Date().toISOString(),
         });
@@ -1590,20 +1601,29 @@ export class IpcRouter {
         prompt,
         context,
         knownWorkspaceRoots,
-      }) =>
-        authorizeOfficialApiProviderEgress(
+        knownWorkspaceLabels,
+      }) => {
+        const decision = authorizeOfficialApiProviderEgress(
           {
             broker: this.permissionBroker,
             task: this.persistence.getTask(worker.taskId),
             turnId: executionId,
             prompt,
             knownWorkspaceRoots,
+            knownWorkspaceLabels,
             context,
             now: new Date().toISOString(),
           },
           connection.providerId,
           this.providerEgressTrustForConnection(connection),
-        ).allowed,
+        );
+        // Reason codes only, as the CLI Worker's gate reports them (issues #841, #849).
+        return {
+          allowed: decision.allowed,
+          reason: decision.evaluation.reason,
+          disclosureReasons: decision.disclosureReasons ?? [],
+        };
+      },
       contextFor: (worker, executionId) =>
         executionId === undefined
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
@@ -6944,6 +6964,7 @@ export class IpcRouter {
           turnId: started.turnId,
           prompt: gatePayload.toString('utf8'),
           knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
+          knownWorkspaceLabels: workspaceRootLabels(started.workspaceSet.roots),
           context,
           now: new Date().toISOString(),
           payloadDigest: serializedPayload.digest,
@@ -8868,6 +8889,7 @@ export class IpcRouter {
             turnId: started.turnId,
             prompt: initialPolicyPayload,
             knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
+            knownWorkspaceLabels: workspaceRootLabels(started.workspaceSet.roots),
             context,
             now: new Date().toISOString(),
             payloadDigest: initialPayloadDigest,
@@ -8949,6 +8971,7 @@ export class IpcRouter {
               broker: this.permissionBroker,
               task: this.persistence.getTask(taskId),
               knownWorkspaceRoots: started.workspaceSet.roots.map((root) => root.path),
+              knownWorkspaceLabels: workspaceRootLabels(started.workspaceSet.roots),
               turnId: started.turnId,
               prompt: JSON.stringify({
                 messages: providerMessagesForEgressPolicy(dispatchRound.messages),

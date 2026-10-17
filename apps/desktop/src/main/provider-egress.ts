@@ -161,6 +161,11 @@ export type ProviderEgressInput = {
   prompt: string;
   /** Exact canonical roots from Main's sealed Turn workspace. No prefix or glob matching. */
   knownWorkspaceRoots?: readonly string[];
+  /**
+   * The labels Main declared for those same roots (issue #849). The secret scan exempts each exact
+   * value as a whole token, never a prefix or anything fused to it.
+   */
+  knownWorkspaceLabels?: readonly string[];
   context: PreparedContext;
   now: string;
   payloadDigest?: string;
@@ -253,9 +258,14 @@ export function authorizeOfficialApiProviderEgress(
 /**
  * Identify the roots the secret scan was permitted to exempt, so the audit record carries what the
  * `clean` verdict was conditioned on. Normalized and sorted: the same declaration spelled with
- * either separator, in any order, is the same fact. Null means nothing was exempted at all.
+ * either separator, in any order, is the same fact. Null means nothing was exempted at all. Declared
+ * root labels are exemptions too (issue #849), so they join the digest whenever there are any; a
+ * declaration of roots alone keeps the digest it always had.
  */
-function knownRootsDigest(knownWorkspaceRoots: readonly string[] | undefined): string | null {
+function knownRootsDigest(
+  knownWorkspaceRoots: readonly string[] | undefined,
+  knownWorkspaceLabels: readonly string[] | undefined,
+): string | null {
   const normalized = [
     ...new Set(
       (knownWorkspaceRoots ?? [])
@@ -263,6 +273,14 @@ function knownRootsDigest(knownWorkspaceRoots: readonly string[] | undefined): s
         .map((root) => root.replaceAll('\\', '/').replace(/\/+$/u, '')),
     ),
   ].sort();
+  const labels = [
+    ...new Set(
+      (knownWorkspaceLabels ?? []).filter(
+        (label): label is string => typeof label === 'string' && label.trim() !== '',
+      ),
+    ),
+  ].sort();
+  if (labels.length > 0) return digestCanonical({ roots: normalized, labels });
   return normalized.length === 0 ? null : digestCanonical(normalized);
 }
 
@@ -278,7 +296,11 @@ function authorizeProviderEgress(
     ...input.context.fragments.map((fragment) => fragment.content),
     ...input.context.projectItems.map((item) => item.content),
   ].join('\n');
-  const disclosure = assessProviderEgressDisclosure(content, input.knownWorkspaceRoots);
+  const disclosure = assessProviderEgressDisclosure(
+    content,
+    input.knownWorkspaceRoots,
+    input.knownWorkspaceLabels,
+  );
   const secretScan =
     disclosure.classification === 'safe' ? ('clean' as const) : ('blocked' as const);
   const disclosureReasons = secretScan === 'clean' ? Object.freeze([]) : disclosure.reasons;
@@ -318,7 +340,7 @@ function authorizeProviderEgress(
     dataResidency: providerTrust === 'trusted-local' ? 'local-device' : 'unspecified',
     provenanceTrust,
     secretScan,
-    knownRootsDigest: knownRootsDigest(input.knownWorkspaceRoots),
+    knownRootsDigest: knownRootsDigest(input.knownWorkspaceRoots, input.knownWorkspaceLabels),
     localOnlyTask:
       input.task.localOnly || input.context.projectItems.some((item) => item.localOnly),
     attachmentManifestDigest,
