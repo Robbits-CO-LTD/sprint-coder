@@ -1,7 +1,7 @@
 import { RetryableActionRegistry } from './retryable-action';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, rmdir, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
@@ -800,6 +800,44 @@ describe('Project protected-folder warning (issue #830)', () => {
 
   it('does not warn for an ordinary project folder', () => {
     expect(protectedProjectFolderWarning([join(dirname(process.cwd()), 'my-app')])).toBeNull();
+  });
+
+  // Issue #838: a folder protected only because it has the name of a protected folder that could
+  // not be located says so.
+  it('says when the protected folder could not be located and a folder of its name is protected', async () => {
+    // Windows temp lives under AppData, which is itself protected, so use the checkout there.
+    const base = process.platform === 'win32' ? process.cwd() : tmpdir();
+    const root = await realpath(await mkdtemp(join(base, '.sprint-coder-ipc-protected-')));
+    const homeVariable = process.platform === 'win32' ? 'USERPROFILE' : 'HOME';
+    const previousHome = process.env[homeVariable];
+    const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+    try {
+      const home = join(root, 'home');
+      const credentialRoot = join(home, '.aws');
+      const loopBack = join(home, '.aws-loop');
+      await mkdir(credentialRoot, { recursive: true });
+      // `.aws` becomes a link loop through `.aws-loop`, so where it leads cannot be found.
+      await symlink(credentialRoot, loopBack, linkType);
+      await rmdir(credentialRoot);
+      await symlink(loopBack, credentialRoot, linkType);
+      const lookalike = join(root, 'elsewhere', '.aws', 'project');
+      await mkdir(lookalike, { recursive: true });
+      const ordinaryCredential = join(root, 'elsewhere', 'keys', '.ssh');
+      await mkdir(ordinaryCredential, { recursive: true });
+      process.env[homeVariable] = home;
+      const sentence = '保護フォルダの実際の場所を特定できず、同じ名前のフォルダを保護しています';
+      expect(protectedProjectFolderWarning([lookalike])?.detail).toContain(
+        `・${lookalike}（認証情報を置くフォルダ。${sentence}）`,
+      );
+      // A folder protected by its own name, not by a guess, does not carry the sentence.
+      const located = protectedProjectFolderWarning([ordinaryCredential])?.detail;
+      expect(located).toContain(`・${ordinaryCredential}（認証情報を置くフォルダ）`);
+      expect(located).not.toContain(sentence);
+    } finally {
+      if (previousHome === undefined) delete process.env[homeVariable];
+      else process.env[homeVariable] = previousHome;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

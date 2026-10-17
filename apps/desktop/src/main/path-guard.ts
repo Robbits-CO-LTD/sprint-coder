@@ -539,8 +539,11 @@ function isAtOrBelowAnyRoot(
   return roots.some((root) => {
     const location = locateProtectedRoot(root);
     return (
-      location.paths.some((path) => isAtOrBelow(path, resolvedPath)) ||
+      location.paths.some((path) =>
+        isAtOrBelow(protectedRootComparisonKey(path), protectedRootComparisonKey(resolvedPath)),
+      ) ||
       (location.identity !== null && hasAncestorWithIdentity(resolvedPath, location.identity)) ||
+      location.places.some((place) => hasAncestorAtPlace(resolvedPath, place)) ||
       (guessUnlocatedRoots &&
         location.name !== null &&
         hasAncestorNamed(resolvedPath, location.name))
@@ -559,11 +562,24 @@ export function setProtectedRootRealpathForTesting(
 
 const MAX_PROTECTED_ROOT_LINK_HOPS = 40;
 
+type DirectoryIdentity = { dev: bigint; ino: bigint };
+
+/** A place known only by its name in a parent directory that can still be found. */
+type ProtectedRootPlace = {
+  name: string;
+  /** The parent as written and, when it can be read, its real path. */
+  parentPaths: string[];
+  /** The parent directory itself, when it can be stat'd. */
+  parentIdentity: DirectoryIdentity | null;
+};
+
 type ProtectedRootLocation = {
   /** Where the root is known to be: as written, each link target on the way, and its real path. */
   paths: string[];
   /** The directory the root leads to, when it can be reached but not named. */
-  identity: { dev: bigint; ino: bigint } | null;
+  identity: DirectoryIdentity | null;
+  /** When not even that can be read: each of `paths` by its name in its parent directory. */
+  places: ProtectedRootPlace[];
   /** Set only when the root exists and where it leads is unknown: the root's own name. */
   name: string | null;
 };
@@ -575,22 +591,31 @@ type ProtectedRootLocation = {
  * - a link is followed by its target text, each target compared as well and resolved in turn;
  * - otherwise the directory it leads to is identified by device and inode, and a path is below the
  *   root when one of its ancestors is that very directory;
- * - and when not even that can be read, a path is treated as below the root when one of its
- *   ancestors has the root's own name (`.aws`), compared without case. The name of a place a link
- *   on the way leads to (`D:\Sync\config`) is not used (#838): it is an ordinary folder name, and
- *   every Workspace with a folder of that name would be protected. Those places are still compared
- *   as whole paths above. This is the only guess, and it can only mark a Workspace protected, never
- *   the other way.
+ * - and when not even that can be read, each known place is still found by its name in its parent
+ *   directory: a path is below the root when one of its ancestors has that name (compared without
+ *   case) and sits in that very parent, identified by its real path or by device and inode. This
+ *   catches a target named through another link (`C:\j\aws-store` with `C:\j -> D:\real`), whose
+ *   whole path never matches a real path;
+ * - and when a parent cannot be read either, a path is treated as below the root when one of its
+ *   ancestors has the root's own name (`.aws`), compared without case. The bare name of a place a
+ *   link on the way leads to (`D:\Sync\config`) is not used (#838): it is an ordinary folder name,
+ *   and every Workspace with a folder of that name would be protected. This is the only guess, and
+ *   it can only mark a Workspace protected, never the other way.
  * A root (or link target) that does not exist is only compared as written: nothing is below it.
  */
 function locateProtectedRoot(root: string): ProtectedRootLocation {
   let current = resolve(root);
   const paths = [current];
   const name = basename(current);
+  const located = (
+    found: Partial<Pick<ProtectedRootLocation, 'identity' | 'places' | 'name'>> = {},
+  ): ProtectedRootLocation => ({ paths, identity: null, places: [], name: null, ...found });
   // More links in a row than this is a loop: nothing is below one, but it still fails closed.
   for (let hop = 0; hop <= MAX_PROTECTED_ROOT_LINK_HOPS; hop += 1) {
     try {
-      return { paths: [...paths, protectedRootRealpath(current)], identity: null, name: null };
+      const real = protectedRootRealpath(current);
+      paths.push(real);
+      return located();
     } catch {
       // Look at what is there instead.
     }
@@ -598,7 +623,7 @@ function locateProtectedRoot(root: string): ProtectedRootLocation {
     try {
       if (lstatSync(current).isSymbolicLink()) target = readlinkSync(current);
     } catch (error) {
-      if (isAbsent(error)) return { paths, identity: null, name: null };
+      if (isAbsent(error)) return located();
     }
     if (target === null) break;
     current = resolve(dirname(current), target);
@@ -606,24 +631,72 @@ function locateProtectedRoot(root: string): ProtectedRootLocation {
   }
   try {
     const stats = statSync(current, { bigint: true });
-    return { paths, identity: { dev: stats.dev, ino: stats.ino }, name: null };
+    return located({ identity: { dev: stats.dev, ino: stats.ino } });
   } catch {
-    return { paths, identity: null, name };
+    return located({ places: [...new Set(paths)].map(placeInParent), name });
   }
 }
 
-function hasAncestorWithIdentity(
-  resolvedPath: string,
-  identity: { dev: bigint; ino: bigint },
-): boolean {
+function placeInParent(path: string): ProtectedRootPlace {
+  const parent = dirname(path);
+  const parentPaths = [parent];
+  let parentIdentity: DirectoryIdentity | null = null;
+  try {
+    parentPaths.push(protectedRootRealpath(parent));
+  } catch {
+    // Compared as written only.
+  }
+  try {
+    const stats = statSync(parent, { bigint: true });
+    parentIdentity = { dev: stats.dev, ino: stats.ino };
+  } catch {
+    // Not identified by device and inode.
+  }
+  return { name: basename(path), parentPaths, parentIdentity };
+}
+
+/**
+ * Protected roots are compared without case on macOS too, whose volumes usually ignore case: a link
+ * target written as `~/Profile/AWS` must still match the real `~/profile/aws`. On a volume that
+ * does respect case this can only mark a path protected, never the other way. Windows paths are
+ * already compared without case.
+ */
+function protectedRootComparisonKey(path: string): string {
+  return process.platform === 'darwin' ? path.toLowerCase() : path;
+}
+
+function hasAncestorAtPlace(resolvedPath: string, place: ProtectedRootPlace): boolean {
+  const wanted = place.name.toLowerCase();
+  if (wanted === '') return false;
+  for (let candidate = resolvedPath; dirname(candidate) !== candidate;) {
+    const parent = dirname(candidate);
+    if (
+      basename(candidate).toLowerCase() === wanted &&
+      (place.parentPaths.some(
+        (path) =>
+          relative(protectedRootComparisonKey(path), protectedRootComparisonKey(parent)) === '',
+      ) ||
+        (place.parentIdentity !== null && hasIdentity(parent, place.parentIdentity)))
+    )
+      return true;
+    candidate = parent;
+  }
+  return false;
+}
+
+function hasIdentity(path: string, identity: DirectoryIdentity): boolean {
+  try {
+    const stats = statSync(path, { bigint: true, throwIfNoEntry: false });
+    return stats !== undefined && stats.dev === identity.dev && stats.ino === identity.ino;
+  } catch {
+    // A place this process cannot stat is not the directory it could stat.
+    return false;
+  }
+}
+
+function hasAncestorWithIdentity(resolvedPath: string, identity: DirectoryIdentity): boolean {
   for (let candidate = resolvedPath; ; candidate = dirname(candidate)) {
-    try {
-      const stats = statSync(candidate, { bigint: true, throwIfNoEntry: false });
-      if (stats !== undefined && stats.dev === identity.dev && stats.ino === identity.ino)
-        return true;
-    } catch {
-      // An ancestor this process cannot stat is not the directory it could stat.
-    }
+    if (hasIdentity(candidate, identity)) return true;
     if (dirname(candidate) === candidate) return false;
   }
 }

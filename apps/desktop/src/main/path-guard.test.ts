@@ -13,7 +13,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { realpathSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { basename, join, parse, resolve, sep } from 'node:path';
 import {
   PathGuardError,
@@ -567,6 +567,47 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
             expect(await classify(unrelated)).toBe('workspace');
           });
         } finally {
+          execFileSync('icacls', [store, '/remove:d', user], { stdio: 'ignore' });
+        }
+      },
+    );
+
+    // Issue #838 follow-up: when the link target can be neither canonicalized nor stat'd and is
+    // named through another junction, neither its whole path nor its identity matches the Project
+    // given by its real path. The target's name in its parent directory (identified by device and
+    // inode) still does, while a folder of that name in another place stays an ordinary Workspace.
+    it.runIf(process.platform === 'win32')(
+      'protects a Project below an unreadable credential link target named through another junction',
+      async () => {
+        const { root, workspace: unrelated } = await fixture();
+        const home = join(root, 'home');
+        const profile = join(root, 'profile');
+        const store = join(profile, 'aws-store');
+        await mkdir(home, { recursive: true });
+        await mkdir(join(store, 'sso', 'cache'), { recursive: true });
+        await symlink(profile, join(root, 'profile-alias'), 'junction');
+        await symlink(join(root, 'profile-alias', 'aws-store'), join(home, '.aws'), 'junction');
+        const project = await realpath(join(store, 'sso', 'cache'));
+        const namedLikeTarget = join(root, 'elsewhere', 'aws-store', 'project');
+        await mkdir(namedLikeTarget, { recursive: true });
+        const user = process.env['USERNAME'];
+        if (user === undefined) throw new Error('USERNAME is not set');
+        // Deny the store folder itself and listing its parent (neither inherited): the store can
+        // be neither resolved nor stat'd, while the folders inside it and its parent still can.
+        execFileSync('icacls', [store, '/deny', `${user}:(F)`], { stdio: 'ignore' });
+        execFileSync('icacls', [profile, '/deny', `${user}:(RD)`], { stdio: 'ignore' });
+        try {
+          expect(() => statSync(store)).toThrow();
+          await withHome(home, async () => {
+            expect(await classify(project)).toBe('credential');
+            expect(protectedWorkspaceRootClassification(project)).toBe('credential');
+            expect(protectedWorkspaceRootLocationUnknown(project)).toBe(false);
+            expect(await classify(namedLikeTarget)).toBe('workspace');
+            expect(protectedWorkspaceRootClassification(namedLikeTarget)).toBeNull();
+            expect(await classify(unrelated)).toBe('workspace');
+          });
+        } finally {
+          execFileSync('icacls', [profile, '/remove:d', user], { stdio: 'ignore' });
           execFileSync('icacls', [store, '/remove:d', user], { stdio: 'ignore' });
         }
       },
