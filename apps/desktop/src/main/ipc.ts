@@ -6324,7 +6324,10 @@ export class IpcRouter {
         ...(pathGuard === undefined ? {} : { pathGuard }),
       },
       evaluation,
-      autoPreset
+      // A reviewer deny the person may still overrule goes to an approval card (Issue #825). Auto
+      // decided nothing then, so no Auto row is recorded; the reviewer's verdict stays in the
+      // permission audit, and the card records what the person decided.
+      autoPreset && evaluation.decision !== 'approval_required'
         ? autoPermissionDecisionSchema.parse({
             id: randomUUID(),
             taskId: request.context.taskId,

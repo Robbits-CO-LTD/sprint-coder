@@ -309,8 +309,9 @@ test.describe('real AI workspace E2E', () => {
         expect.soft(fileCardText).toContain('README.md');
         expect.soft(writeTurn.answer).toContain('SC_WRITE_DONE');
 
-        // b. コマンド実行。「安全時は自動」は「コマンドなどは自動レビューで判定」と説明しているので、
-        // 実行されるか、少なくとも承認カードで人に確かめるのが期待値。続けてフルアクセスでも試す。
+        // b. コマンド実行。「安全時は自動」では、自動レビューが許可しないコマンドは拒否で終わらず承認
+        // カードに回り、許可すれば実行される（#825）。レビューが許可したものはカード無しで実行される。
+        // sendTurn はカードを「1回だけ許可」で通す。続けてフルアクセスでも試す。
         const commandPrompt = (file: string): string =>
           [
             'This is an automated test. Run this exact shell command in the workspace root with your command execution tool (do not create the file with a file-writing tool):',
@@ -339,6 +340,27 @@ test.describe('real AI workspace E2E', () => {
             .soft(out ?? '', `${preset}: ${file} written by the command`)
             .toMatch(/^SC_CMD_OK:v\d+\.\d+\.\d+$/);
           expect.soft(turn.answer, `${preset}: reply`).toMatch(/SC_CMD_DONE v\d+\.\d+\.\d+/);
+          if (preset === 'auto') {
+            const audits = await page.getByTestId('auto-decision-audit').allInnerTexts();
+            console.info(
+              `[real-ai] ${provider.name} [auto] auto-decision-audit: ${JSON.stringify(audits)}`,
+            );
+            const autoAllowed = audits.some(
+              (text) => text.includes('shell.execute') && /自動許可|今回のみ許可/.test(text),
+            );
+            expect
+              .soft(
+                turn.approvals.length > 0 || autoAllowed,
+                'auto: a command is either asked about on a card or allowed by the reviewer',
+              )
+              .toBe(true);
+            expect
+              .soft(
+                audits.filter((text) => text.includes('shell.execute') && text.includes('拒否')),
+                'auto: no command is refused for good',
+              )
+              .toEqual([]);
+          }
           return turn;
         };
         await test.step('b1. run a command at auto', () =>

@@ -223,6 +223,7 @@ import {
   type AccessPreset,
 } from '@sprint-coder/domain';
 import { PermissionBroker } from './permission-broker';
+import { AutoReviewer } from './auto-reviewer';
 import { FileRevisionRegistry } from './file-revision';
 import { ApprovalCoordinator, approvalFactsForTool } from './approval-coordinator';
 import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
@@ -3246,6 +3247,122 @@ describe('Main image attachment dispatch boundary', () => {
       expect(review).not.toHaveBeenCalled();
       expect(autoDecisions).toEqual([undefined, undefined]);
       await harness.dispose();
+    },
+  );
+
+  it.each([
+    ['high', 'reviewer_escalated_high_risk'],
+    ['medium', 'reviewer_escalated_sandbox_full'],
+  ] as const)(
+    'hands a %s-risk command the Auto reviewer refused to the person, never a final deny (Issue #825)',
+    async (risk, reason) => {
+      const registry = new ToolRegistry();
+      registry.register(
+        createToolDefinition({
+          toolId: createToolId({
+            provider: 'builtin',
+            namespace: 'command',
+            name: 'run',
+            version: '1',
+          }),
+          providerName: 'run_command',
+          kind: 'shell',
+          schemaVersion: 1,
+          inputSchema: { type: 'object' },
+          outputSchema: { type: 'object' },
+          sideEffect: 'process',
+          risk,
+          requiredCapabilities: ['shell.execute'],
+          executionTarget: 'command-runner',
+          implementationKind: 'command-runner',
+          priority: 1,
+          workspaceBinding: { kind: 'any' },
+          providerCompatibility: ['mock'],
+        }),
+      );
+      const entry = registry.createSnapshot({ providerId: 'mock', workspaceId: 'workspace-825' })
+        .entries[0]!;
+      const workspacePath = await mkdtemp(join(tmpdir(), 'sprint-coder-825-'));
+      try {
+        const input = await prepareExecutionSpec({
+          workspacePath,
+          executable: process.execPath,
+          argv: ['--version'],
+          cwd: '.',
+        });
+        const request = {
+          context: {
+            taskId: 'task-825',
+            turnId: 'turn-825',
+            workspaceId: 'workspace-825',
+            policyEpoch: 1,
+          },
+          callId: 'call-825',
+          entry,
+          input,
+        } as unknown as ToolAuthorizationRequest;
+        const decide = async (preset: AccessPreset) => {
+          const autoDecisions: unknown[] = [];
+          const expanded = expandAccessPreset(preset);
+          const router = Object.create(IpcRouter.prototype) as {
+            evaluateToolPermission(
+              request: ToolAuthorizationRequest,
+              capability: string,
+            ): Promise<{ decision: string; reason: string }>;
+          };
+          Object.assign(router, {
+            managedWorkerCall: new Map(),
+            autoReviewer: AutoReviewer.createProduction(),
+            publish: () => undefined,
+            permissionBroker: {
+              getPolicy: () => ({ preset, policyEpoch: 1 }),
+              previewExecutionSpec: (evaluationInput: {
+                request: Parameters<typeof evaluatePermissionPolicy>[0]['request'];
+                basePolicy: Omit<
+                  Parameters<typeof evaluatePermissionPolicy>[0]['policy'],
+                  'rememberedGrants' | 'allowRules' | 'approvalPolicy' | 'policyEpoch'
+                >;
+                now: string;
+              }) =>
+                evaluatePermissionPolicy({
+                  request: evaluationInput.request,
+                  now: evaluationInput.now,
+                  policy: {
+                    ...evaluationInput.basePolicy,
+                    rememberedGrants: [],
+                    allowRules: expanded.allowRules,
+                    immutableDeny: expanded.immutableDeny ?? [],
+                    approvalPolicy: expanded.approvalPolicy,
+                    ...(expanded.approvalReason === undefined
+                      ? {}
+                      : { approvalReason: expanded.approvalReason }),
+                    policyEpoch: 1,
+                  },
+                }),
+              commitEvaluation: (_input: unknown, _evaluation: unknown, autoDecision: unknown) => {
+                autoDecisions.push(autoDecision);
+                return undefined;
+              },
+            },
+          });
+          return {
+            result: await router.evaluateToolPermission(request, 'shell.execute'),
+            autoDecisions,
+          };
+        };
+
+        // Auto is never stricter than Ask: the command reaches the same card, and since Auto
+        // decided nothing, no Auto row claims it was denied.
+        await expect(decide('auto')).resolves.toEqual({
+          result: { decision: 'approval_required', reason },
+          autoDecisions: [undefined],
+        });
+        await expect(decide('ask')).resolves.toMatchObject({
+          result: { decision: 'approval_required' },
+        });
+      } finally {
+        await rm(workspacePath, { recursive: true, force: true });
+      }
     },
   );
 

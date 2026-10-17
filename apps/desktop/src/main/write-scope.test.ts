@@ -93,9 +93,10 @@ describe('writeScopeNote (issue #551)', () => {
     expect(writeScopeNote('workspace-write', 'ask')).toBe(
       'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは1回ごとに利用者の承認カードで確認されます。',
     );
-    // issue #526: 「安全時は自動」ではファイルの作成・編集は自動許可、コマンドなどは自動レビューのまま。
+    // issue #526: 「安全時は自動」ではファイルの作成・編集は自動許可。issue #825: コマンドと、自動
+    // レビューが安全と判定しなかった操作は承認カードで確認される。
     expect(writeScopeNote('workspace-write', 'auto')).toBe(
-      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。Workspace内のファイルの作成・編集は自動で許可されます。コマンドなどは自動レビューで判定されます。',
+      'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。Workspace内のファイルの作成・編集は自動で許可されます。コマンドと、自動レビューが安全と判定しなかった操作は承認カードで確認されます。',
     );
     expect(writeScopeNote('workspace-write', 'full')).toBe(
       'Workerは隔離worktreeで変更し、完了後にWorkspaceへ統合します。書き込みは確認なしで反映されます。',

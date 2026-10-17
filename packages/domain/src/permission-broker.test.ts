@@ -391,6 +391,76 @@ describe('PermissionBroker policy evaluation', () => {
     });
   });
 
+  // Issue #825: under Auto every command was refused for good, while Ask asked about it.
+  it.each(['high_risk', 'sandbox_full', 'side_effect', 'unsupported_operation', 'provider_egress'])(
+    'hands a reviewer deny for %s to the person instead of refusing it',
+    (reason) => {
+      const { decisionNonce: _nonce, ...facts } = reviewerAllow();
+      const result = evaluatePermissionPolicy({
+        request: workspaceWriteRequest,
+        policy: {
+          ...basePolicy(),
+          approvalPolicy: 'auto',
+          reviewerDecision: { ...facts, decision: 'deny', reason },
+        },
+        now: NOW,
+      });
+      expect(result).toMatchObject({
+        decision: 'approval_required',
+        reason: `reviewer_escalated_${reason}`,
+        reviewerAudit: { decision: 'deny' },
+      });
+      expect(result.permit).toBeUndefined();
+      expect(result.evaluationTrace.at(-1)).toBe('reviewer');
+    },
+  );
+
+  it.each([
+    ['deny', 'input_digest_mismatch', 'input_digest_mismatch'],
+    ['deny', 'review_request_conflict', 'review_request_conflict'],
+    ['deny', 'reviewer_invented_reason', 'reviewer_invented_reason'],
+    ['timeout', undefined, 'reviewer_timeout'],
+    ['schema_failure', undefined, 'reviewer_schema_failure'],
+    ['model_failure', undefined, 'reviewer_model_failure'],
+  ] as const)('keeps a reviewer %s (%s) final', (decision, reason, expected) => {
+    const { decisionNonce: _nonce, ...facts } = reviewerAllow();
+    const result = evaluatePermissionPolicy({
+      request: workspaceWriteRequest,
+      policy: {
+        ...basePolicy(),
+        approvalPolicy: 'auto',
+        reviewerDecision:
+          decision === 'deny'
+            ? { ...facts, decision, reason: reason ?? '' }
+            : { ...facts, decision },
+      },
+      now: NOW,
+    });
+    expect(result).toMatchObject({ decision: 'deny', reason: expected });
+  });
+
+  it('lets a hard deny win before a reviewer deny could reach the person', () => {
+    const { decisionNonce: _nonce, ...facts } = reviewerAllow();
+    const result = evaluatePermissionPolicy({
+      request: workspaceWriteRequest,
+      policy: {
+        ...basePolicy(),
+        approvalPolicy: 'auto',
+        projectDeny: [
+          {
+            capability: 'workspace.write',
+            resourceSet: { kind: 'all' },
+            operations: ['write'],
+            auditReason: 'project_deny',
+          },
+        ],
+        reviewerDecision: { ...facts, decision: 'deny', reason: 'side_effect' },
+      },
+      now: NOW,
+    });
+    expect(result).toMatchObject({ decision: 'deny', reason: 'project_deny' });
+  });
+
   it.each([
     ['different input digest', { inputDigest: 'd'.repeat(64) }],
     ['malformed input digest', { inputDigest: 'not-a-digest' }],
