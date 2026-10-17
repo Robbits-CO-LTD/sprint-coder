@@ -385,10 +385,7 @@ function classifyWorkspacePath(
       isAtOrBelow('/private/var/root', resolvedPath))
   )
     return 'os-protected';
-  if (
-    workspaceAuthority === undefined &&
-    windowsSystemRoots().some((root) => isAtOrBelow(root, resolvedPath))
-  )
+  if (workspaceAuthority === undefined && isAtOrBelowAnyRoot(windowsSystemRoots(), resolvedPath))
     return 'os-protected';
   if (
     parts.includes('windows') ||
@@ -400,14 +397,17 @@ function classifyWorkspacePath(
     return 'os-protected';
   if (
     workspaceAuthority === undefined &&
-    [
-      join(home, '.ssh'),
-      join(home, '.aws'),
-      join(home, '.gnupg'),
-      join(home, '.kube'),
-      join(home, '.config', 'gcloud'),
-      join(home, 'Library', 'Keychains'),
-    ].some((root) => isAtOrBelow(root, resolvedPath))
+    isAtOrBelowAnyRoot(
+      [
+        ['.ssh'],
+        ['.aws'],
+        ['.gnupg'],
+        ['.kube'],
+        ['.config', 'gcloud'],
+        ['Library', 'Keychains'],
+      ].map((segments) => join(home, ...segments)),
+      resolvedPath,
+    )
   )
     return 'credential';
   if (CREDENTIAL_DIRECTORY_NAMES.some((directory) => credentialParts.includes(directory)))
@@ -422,7 +422,7 @@ function classifyWorkspacePath(
     return 'app-private';
   if (
     workspaceAuthority === undefined &&
-    isAtOrBelow(join(home, 'Library', 'Application Support'), resolvedPath)
+    isAtOrBelowAnyRoot([join(home, 'Library', 'Application Support')], resolvedPath)
   )
     return 'app-private';
   if (credentialParts.includes('library') && credentialParts.includes('application support'))
@@ -484,9 +484,20 @@ function windowsSystemRoots(): string[] {
     `${drive}\\ProgramData`,
     `${drive}\\Program Files`,
     `${drive}\\Program Files (x86)`,
-  ]
-    .filter((root): root is string => root !== undefined && root !== '' && isAbsolute(root))
-    .map((root) => canonicalizeExistingPath(root));
+  ].filter((root): root is string => root !== undefined && root !== '' && isAbsolute(root));
+}
+
+/**
+ * Whether a resolved path is at or below one of the protected roots. Each root is compared both as
+ * written and resolved, because the root itself may be a symlink or junction to another place
+ * (`~/.aws -> /mnt/profile/.aws`) while the guarded path is always the resolved one.
+ */
+function isAtOrBelowAnyRoot(roots: readonly string[], resolvedPath: string): boolean {
+  return roots.some(
+    (root) =>
+      isAtOrBelow(resolve(root), resolvedPath) ||
+      isAtOrBelow(canonicalizeExistingPath(root), resolvedPath),
+  );
 }
 
 // Conservative, portable bounds (POSIX NAME_MAX=255, a total well below any platform's
