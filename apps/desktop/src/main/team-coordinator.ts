@@ -4259,11 +4259,18 @@ export class TeamCoordinator {
       // An integration that stopped (a cherry-pick conflict, a changed Workspace) leaves the
       // execution on `waiting_resume` until a person resumes it. The Leader is told so, or its
       // report wait would see nothing and it could report the work as completed (issue #852).
+      // A sequential Mission's single-repository worktree conflict also leaves the step on
+      // `waiting_resume` (the Mission branch above), so the Leader gets the same blocked report.
+      const integrationBlocked =
+        integrationResume ||
+        (!preflightFailure &&
+          mission !== null &&
+          error instanceof WorktreeIntegrationConflictError);
       this.persistWorkerResult(
         input.teamId,
         worker,
         leader,
-        integrationResume ? integrationBlockedCompletion(error) : failureCompletion,
+        integrationBlocked ? integrationBlockedCompletion(error) : failureCompletion,
         input.executionId,
         attemptId ?? undefined,
       );
