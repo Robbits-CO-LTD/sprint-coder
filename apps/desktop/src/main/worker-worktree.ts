@@ -306,13 +306,17 @@ export class WorkerWorktreeManager {
    * registration list that cannot be read fails the cleanup (the record stays retained) rather than
    * falling back to the short path, which would report a still-registered legacy worktree as removed.
    */
-  private async resolveWorktreePath(repoPath: string, worktreeId: string): Promise<string> {
+  private async resolveWorktreePath(
+    repoPath: string,
+    worktreeId: string,
+    failureCode: 'remove_failed' | 'create_failed' = 'remove_failed',
+  ): Promise<string> {
     const current = this.worktreePathFor(worktreeId);
     const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
     if (current === legacy) return current;
     const wanted = await pathKeys(legacy);
     const listed = (
-      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], failureCode)
     ).stdout;
     for (const line of listed.split('\0'))
       if (line.startsWith('worktree ')) {
@@ -320,6 +324,29 @@ export class WorkerWorktreeManager {
         if (keys.some((key) => wanted.includes(key))) return legacy;
       }
     return current;
+  }
+
+  /**
+   * Before a new worktree is made at the short path, unregisters a legacy `worktree-<id>` record
+   * whose directory is gone. Otherwise cleanup, which resolves the id to that legacy record, would
+   * unregister only it and leave the new short worktree behind. A record that still keeps submodule
+   * commits is not dropped; creation fails instead so nothing is lost.
+   */
+  private async releaseMissingLegacyRegistration(
+    repoPath: string,
+    worktreeId: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (worktreePath === legacy) return;
+    if ((await this.resolveWorktreePath(repoPath, worktreeId, 'create_failed')) !== legacy) return;
+    if (await pathExists(legacy)) return;
+    const { outcome } = await this.unregisterMissingWorktree(repoPath, legacy);
+    if (outcome === 'quarantined')
+      throw new WorktreeError(
+        'create_failed',
+        `legacy worktree record still keeps submodule data: ${legacy}`,
+      );
   }
 
   /** Where to create or resume a worktree: a recorded own path when given, else the current one. */
@@ -423,6 +450,7 @@ export class WorkerWorktreeManager {
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
     await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
+    await this.releaseMissingLegacyRegistration(repoPath, worktreeId, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
     try {
       await this.runGit(

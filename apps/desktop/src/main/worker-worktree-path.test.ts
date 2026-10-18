@@ -226,6 +226,15 @@ describe('worker worktree path (issue #855)', () => {
       expect(listed(repoPath)).toContain(`worktree-${UUID}`);
     });
 
+    it('drops the stale legacy record before creating at the short path, so cleanup removes the new one', async () => {
+      const { repoPath, manager } = await setup();
+      const created = await manager.ensureCreated({ agentId: UUID, repoPath });
+      expect(basename(created.path)).toBe(shortWorktreeDirectoryName(UUID));
+      expect(listed(repoPath)).not.toContain('worktree-');
+      await manager.cleanup({ agentId: UUID, repoPath });
+      expect(listed(repoPath)).not.toContain(shortWorktreeDirectoryName(UUID));
+    });
+
     it('discard unregisters the legacy record using the recorded path', async () => {
       const { repoPath, legacy, manager } = await setup();
       await manager.discard({ agentId: UUID, repoPath, path: legacy });
