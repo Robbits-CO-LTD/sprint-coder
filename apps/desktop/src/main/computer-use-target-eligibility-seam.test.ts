@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -192,10 +192,45 @@ function driver(cases: readonly TargetFacts[]): string {
   return out.join('\n');
 }
 
+/**
+ * Runs a process without blocking the event loop: the build and the run take tens of seconds on CI
+ * macOS, and a blocked worker cannot answer vitest's RPC (`Timeout calling "onTaskUpdate"`).
+ */
+function runAsync(
+  file: string,
+  args: readonly string[],
+  options: { timeout: number; env?: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean },
+): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(file, [...args], {
+      ...(options.env === undefined ? {} : { env: options.env }),
+      windowsVerbatimArguments: options.windowsVerbatimArguments ?? false,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    const timer = setTimeout(() => child.kill(), options.timeout);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on('close', (status) => {
+      clearTimeout(timer);
+      resolvePromise({
+        status,
+        stdout: Buffer.concat(stdout).toString('utf8'),
+        stderr: Buffer.concat(stderr).toString('utf8'),
+      });
+    });
+  });
+}
+
 describe.skipIf(compiler === null && process.env['CI'] === undefined && !expectV2)(
   'target eligibility core differential seam (S5-c-3 PR-1)',
   () => {
-    it('gives the C++ and TS cores the same answer for every case', () => {
+    it('gives the C++ and TS cores the same answer for every case', async () => {
       expect(compiler, 'a C++ compiler is required to run this seam here').not.toBeNull();
       const cases = seamCases();
       expect(cases.length).toBeGreaterThan(1_500);
@@ -205,18 +240,13 @@ describe.skipIf(compiler === null && process.env['CI'] === undefined && !expectV
         const binary = join(root, process.platform === 'win32' ? 'seam.exe' : 'seam');
         writeFileSync(path, driver(cases));
         const command = compiler!.command(path, binary);
-        const built = spawnSync(command.file, command.args, {
-          encoding: 'utf8',
+        const built = await runAsync(command.file, command.args, {
           timeout: 300_000,
           windowsVerbatimArguments: command.verbatim,
           env: { ...process.env, VSLANG: '1033' },
         });
         expect(built.status, `${compiler!.name}\n${built.stdout}\n${built.stderr}`).toBe(0);
-        const run = spawnSync(binary, [], {
-          encoding: 'utf8',
-          timeout: 60_000,
-          maxBuffer: 64 * 1024 * 1024,
-        });
+        const run = await runAsync(binary, [], { timeout: 60_000 });
         expect(run.status, run.stderr).toBe(0);
         // Not trimmed: an empty class, route or mode is a trailing tab, and it is part of the answer.
         const lines = run.stdout.replace(/\r\n/gu, '\n').split('\n');
