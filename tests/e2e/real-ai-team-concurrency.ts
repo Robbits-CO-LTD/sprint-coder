@@ -17,11 +17,13 @@
 //     outputDelta・heartbeat は handleWorkerActivity がログに出さないので使えない。
 //   - 例外として、最初の Runtime が使えずに別の Runtime へ fallback するとき、CLI を起動する前に
 //     「…へfallbackして続行」の activity が出る。そこで、team_attempts.resolved_provider が
-//     requested_provider と違う Attempt が 1 件でもあれば判定不能にする。
+//     requested_provider と違う Attempt が 1 件でもあれば判定不能にする。resolved_provider が
+//     NULL の Attempt は、fallback していないと確かめられないので、これも判定不能に数える。
 //   - rate limit の待機から再開したときは、同じ Attempt がもう一度 running になり `attempt_started`
 //     が記録されるので、その後の最初の CLI の記録から新しい区間として数える。
-//   - CLI が最初の出力を出すまでの分だけ実際の起動より遅い時刻になるので、区間は短めに（同時数は
-//     少なめに）数える。多めに数えることはない。
+//   - CLI が最初の出力を出すまでの分だけ、開始は実際の起動より遅い時刻になる（区間は短めになる）。
+//     一方、終了に使う Main ログは CLI が実際に終わった後に記録されるので、その分だけ区間は少し長く
+//     なりうる。終了側の遅れは、ログを書くまでの短い時間（数十 ms 程度）と見込んでいる。
 // - 終了: 開始より後で、次のうち最も早いもの。
 //   1. Main ログの `team.worker.completed` / `failed` / `canceled`（team-coordinator.ts の
 //      handleWorkerActivity が、Worker Runtime の CLI 実行が終わったときに出す）。これを正とする。
@@ -152,10 +154,12 @@ export async function runningConcurrency(
       (row) =>
         Number(row['provider_call_ordinal'] ?? 0) > 0 || row['state'] === 'waiting_rate_limit',
     ).length;
+    // An Attempt whose resolved provider is unknown (NULL) cannot be shown not to have fallen back,
+    // so it counts here too (the run is then undecidable rather than certified).
     const fallbackAttempts = [...attempts.values()].filter(
       (row) =>
-        row['resolved_provider'] !== null &&
-        row['resolved_provider'] !== undefined &&
+        row['resolved_provider'] === null ||
+        row['resolved_provider'] === undefined ||
         row['resolved_provider'] !== row['requested_provider'],
     ).length;
     const endSources: Record<string, number> = {};
