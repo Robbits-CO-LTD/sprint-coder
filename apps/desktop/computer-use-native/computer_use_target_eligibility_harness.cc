@@ -4,7 +4,7 @@
 // fact taken away from, any golden target never makes it more eligible. It also checks the
 // portable parts of the Windows target facts (PR-2): root placement, leaf, PE subsystem, manifest
 // level, OriginalFilename, resources, the process snapshot, the image-unchanged check and
-// descendants. No platform header, no window, no process. CI compiles
+// descendants, and the v2 package identity (PR-4). No platform header, no window, no process. CI compiles
 // it with MSVC (the Windows v2 harness row) and clang (macOS).
 
 #include "computer_use_native_eligibility.h"
@@ -952,6 +952,99 @@ bool CheckPeResources() {
          Check(!FindPeResources({}, 0x3000, 0x3000, 24, 1).has_value(), "resource-empty-section");
 }
 
+// The v2 package identity (PR-4). The digest below is the one computer-use-grant-identity.test.ts
+// recomputes from the same record, so native and Main agree on the formula.
+bool CheckPackageIdentity() {
+  const std::string install =
+      "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2507.26.0_x64__8wekyb3d8bbwe";
+  const WindowsPackageIdentityFacts store{true,
+                                          "store",
+                                          false,
+                                          "Microsoft.WindowsNotepad_8wekyb3d8bbwe",
+                                          "8wekyb3d8bbwe",
+                                          "windows_apps",
+                                          install + "\\Notepad\\Notepad.exe",
+                                          install};
+  const auto with = [&store](auto change) {
+    WindowsPackageIdentityFacts facts = store;
+    change(facts);
+    return WindowsPackageIdentityFor(facts);
+  };
+  const std::optional<WindowsPackageIdentityParts> notepad = WindowsPackageIdentityFor(store);
+  if (!Check(notepad.has_value() && notepad->family == "Microsoft.WindowsNotepad_8wekyb3d8bbwe" &&
+                 notepad->publisher_id == "8wekyb3d8bbwe" &&
+                 notepad->relative_path == "notepad\\notepad.exe" &&
+                 notepad->preimage == "computer-win-identity-v2-package\n"
+                                      "Microsoft.WindowsNotepad_8wekyb3d8bbwe\n8wekyb3d8bbwe\n"
+                                      "notepad\\notepad.exe" &&
+                 Sha256Hex(notepad->preimage) ==
+                     "bc7613abbec5391168eb61a88ba5914d78b2b5f23dec37219a595c3dec622f6c",
+             "package-identity-store"))
+    return false;
+  // A Store update moves the versioned directory and keeps the identity.
+  const std::string updated =
+      "C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2510.6.0_x64__8wekyb3d8bbwe";
+  const std::optional<WindowsPackageIdentityParts> after = with([&updated](auto &facts) {
+    facts.install_root = updated;
+    facts.image_path = updated + "\\Notepad\\Notepad.exe";
+  });
+  const std::optional<WindowsPackageIdentityParts> system =
+      with([](auto &facts) { facts.signature_kind = "system"; });
+  const std::optional<WindowsPackageIdentityParts> other_image =
+      with([&install](auto &facts) { facts.image_path = install + "\\Notepad\\Helper.exe"; });
+  if (!Check(after.has_value() && after->preimage == notepad->preimage, "package-identity-update") ||
+      !Check(system.has_value() && system->preimage == notepad->preimage, "package-identity-system") ||
+      !Check(other_image.has_value() && other_image->preimage != notepad->preimage,
+             "package-identity-other-image"))
+    return false;
+  // Developer, Enterprise, sideloaded (none), development mode and unread facts keep the Win32
+  // identity: no package identity.
+  const bool refused =
+      !with([](auto &facts) { facts.signature_kind = "developer"; }).has_value() &&
+      !with([](auto &facts) { facts.signature_kind = "enterprise"; }).has_value() &&
+      !with([](auto &facts) { facts.signature_kind = "none"; }).has_value() &&
+      !with([](auto &facts) { facts.signature_kind = "Store"; }).has_value() &&
+      !with([](auto &facts) { facts.signature_kind.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.development_mode = true; }).has_value() &&
+      !with([](auto &facts) { facts.development_mode.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.packaged = false; }).has_value() &&
+      !with([](auto &facts) { facts.packaged.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.family.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.publisher_id.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.image_path.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.install_root.reset(); }).has_value() &&
+      !with([](auto &facts) { facts.install_root = std::string{}; }).has_value() &&
+      !with([](auto &facts) { facts.image_root.reset(); }).has_value();
+  // Outside WindowsApps (a %WINDIR% system package, Program Files, anything else) the Win32 rules
+  // apply, and an image outside its own install location is no package image.
+  const bool placed =
+      !with([](auto &facts) { facts.image_root = "windows_directory"; }).has_value() &&
+      !with([](auto &facts) { facts.image_root = "program_files"; }).has_value() &&
+      !with([](auto &facts) { facts.image_root = "other"; }).has_value() &&
+      !with([](auto &facts) {
+        facts.image_path = "C:\\Program Files\\WindowsApps\\Other_1.0_x64__8wekyb3d8bbwe\\a.exe";
+      }).has_value() &&
+      !with([&install](auto &facts) { facts.image_path = install; }).has_value() &&
+      !with([&install](auto &facts) { facts.image_path = install + "\\"; }).has_value() &&
+      !with([&install](auto &facts) { facts.image_path = install + "X\\a.exe"; }).has_value();
+  // The family must be the publisher's, and nothing may carry the preimage's separator.
+  const bool shaped =
+      !with([](auto &facts) { facts.family = "Microsoft.WindowsNotepad_0000000000000"; })
+           .has_value() &&
+      !with([](auto &facts) { facts.publisher_id = "8WEKYB3D8BBWE"; }).has_value() &&
+      !with([](auto &facts) {
+        facts.family = "Microsoft.WindowsNotepad_8wekyb3d8bbw";
+        facts.publisher_id = "8wekyb3d8bbw";
+      }).has_value() &&
+      !with([](auto &facts) { facts.family = "Microsoft\nNotepad_8wekyb3d8bbwe"; }).has_value() &&
+      !with([](auto &facts) { facts.family = "_8wekyb3d8bbwe"; }).has_value() &&
+      !with([](auto &facts) { facts.family = "8wekyb3d8bbwe"; }).has_value() &&
+      !with([&install](auto &facts) { facts.image_path = install + "\\a\nb.exe"; }).has_value();
+  return Check(refused, "package-identity-only-store-or-system") &&
+         Check(placed, "package-identity-only-under-its-install-root") &&
+         Check(shaped, "package-identity-well-formed");
+}
+
 bool CheckEligibilityMode() {
 #if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)
   // The CI row names the mode it compiled the harness for.
@@ -974,7 +1067,7 @@ int main() {
       !CheckPeSubsystem() || !CheckPeImageSummary() || !CheckManifestLevel() ||
       !CheckVersionInfo() ||
       !CheckDescendantLeaves() || !CheckDescendants() || !CheckProcessSnapshot() ||
-      !CheckImageUnchanged() || !CheckPeResources())
+      !CheckImageUnchanged() || !CheckPeResources() || !CheckPackageIdentity())
     return 1;
   std::cout << "Computer Use target eligibility core: PASS (" << cases.size()
             << " golden vectors)\n";

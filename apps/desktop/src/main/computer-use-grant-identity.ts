@@ -60,12 +60,14 @@ type GrantIdentityComparedField =
   | 'platform'
   | 'identityKind'
   // Covers, per platform: bundle id + Team ID + signing identifier (macOS), signer digest + image
-  // leaf + parent directory (Windows Win32), package family + signer digest (Windows package), and
-  // executable path + executable digest (unverified).
+  // leaf + parent directory (Windows Win32), package family + publisherId + path inside the package
+  // (Windows v2 package), and executable path + executable digest (unverified).
   | 'grantIdentityDigest'
-  // Compared on top of the digest, for every identity. The macOS derivation deliberately excludes
-  // the path so that an ordinary in-place update keeps the grant, and "same signer, different
-  // location" is a different application (ADR v2 §6.3) which has to stop matching.
+  // Compared on top of the digest, for every identity but a matching v2 Windows package (whose
+  // versioned directory moves on every update; its digest carries the path inside the package).
+  // The macOS derivation deliberately excludes the path so that an ordinary in-place update keeps
+  // the grant, and "same signer, different location" is a different application (ADR v2 §6.3)
+  // which has to stop matching.
   | 'executablePath';
 
 /**
@@ -159,7 +161,30 @@ export function computerAppGrantIdentityFrom(identity: unknown): ComputerAppGran
   }
 
   const signerDigest = digest('signerDigest');
-  const packageFamilyName = text('packageFamilyName');
+  if (claimsWindowsPackage(record)) {
+    // A v2 package identity (S5-c-3, #500 PR-4): the family, the publisherId and the image's path
+    // inside the package, which is what native binds into its digest. The versioned install
+    // directory and the bytes are left out, so an ordinary Store update keeps the grant.
+    const windowsPackage = windowsPackageIdentityOf(record);
+    if (windowsPackage === null) return null;
+    return Object.freeze({
+      platform,
+      identityKind: 'verified-signed',
+      grantIdentityDigest: grantDigest('win32-package-v2', [
+        windowsPackage.family,
+        windowsPackage.publisherId,
+        windowsPackage.relativePath,
+      ]),
+      appId: windowsPackage.family,
+      publisher: null,
+      signingIdentifier: null,
+      signerDigest: null,
+      packageFamilyName: windowsPackage.family,
+      executablePath,
+      executableDigest,
+      cdHash: null,
+    });
+  }
   if (signerDigest === null && executableDigest === null) return null;
   const leaf = executableLeafName(platform, executablePath);
   return Object.freeze({
@@ -168,20 +193,18 @@ export function computerAppGrantIdentityFrom(identity: unknown): ComputerAppGran
     grantIdentityDigest:
       signerDigest === null
         ? grantDigest('unverified', [platform, executablePath, executableDigest])
-        : packageFamilyName === null
-          ? grantDigest('win32-signed', [
-              signerDigest,
-              leaf,
-              executableParentDirectory(platform, executablePath),
-            ])
-          : grantDigest('win32-package', [packageFamilyName, signerDigest]),
-    appId: packageFamilyName ?? leaf,
+        : grantDigest('win32-signed', [
+            signerDigest,
+            leaf,
+            executableParentDirectory(platform, executablePath),
+          ]),
+    appId: leaf,
     // V1 verifies a Windows signer by digest and never resolves its common name. Naming the digest
     // as the publisher would put an unreadable hash where the settings screen promises a publisher.
     publisher: null,
     signingIdentifier: null,
     signerDigest,
-    packageFamilyName,
+    packageFamilyName: null,
     executablePath,
     executableDigest,
     cdHash: null,
@@ -211,7 +234,9 @@ export function computerAppGrantIdentityFrom(identity: unknown): ComputerAppGran
  *   `sha256("computer-win-identity-v1-signed\n" + asciiLowercase(path_utf8) + "\n" + signerDigest)`.
  *   `WindowsIdentityJson` (~:1038) writes that same `path_utf8` as `executablePath`, unchanged, and
  *   `signerDigest` as `null` when there is no signature. Only ASCII `A`–`Z` fold, which is what the
- *   native loop does — not a Unicode lowercase.
+ *   native loop does — not a Unicode lowercase. A v2 package (S5-c-3 PR-4, v2 builds only):
+ *   `sha256("computer-win-identity-v2-package\n" + family + "\n" + publisherId + "\n" +
+ *   packageRelativePath)`, the relative path already folded by native.
  *
  * **The formula is chosen by the grant's own signing class, never by trying both.** "Either one
  * matches" would let an unsigned application that calls itself `com.apple.TextEdit` satisfy the
@@ -242,17 +267,82 @@ export function computerAppNativeIdentityDigest(
           `computer-app-identity-v2-unsigned\n${raw('bundleId')}\n${raw('executableDigest')}`,
         );
   }
+  // A package claim is answered only by the v2 package formula (`WindowsPackageIdentityFor` in
+  // computer_use_windows_target_facts.h, hashed by `WindowsTargetPackageIdentity`), which binds the
+  // family, the publisherId and the package-relative path. A v1 native writes
+  // `packageFamilyName: null` and neither of the other two, and its formulas never include a
+  // family, so a record that claims one and fails the v2 shape did not come from native.
+  if (claimsWindowsPackage(record)) {
+    const windowsPackage = windowsPackageIdentityOf(record);
+    if (windowsPackage === null || derived.packageFamilyName !== windowsPackage.family) return null;
+    return nativeDigest(
+      `computer-win-identity-v2-package\n${windowsPackage.family}\n${windowsPackage.publisherId}\n${windowsPackage.relativePath}`,
+    );
+  }
   if (signed !== present('signerDigest')) return null;
-  // Native writes `packageFamilyName: null` for every application today, so a record that claims a
-  // family did not come from native. The claim would change the grant digest (family + signer,
-  // no path) without changing anything native verifies, so there is no honest answer for it.
-  if (record['packageFamilyName'] !== null && record['packageFamilyName'] !== undefined)
-    return null;
   return signed
     ? nativeDigest(
         `computer-win-identity-v1-signed\n${asciiLowercase(raw('executablePath'))}\n${raw('signerDigest')}`,
       )
     : nativeDigest(`computer-win-identity-v1-unsigned\n${raw('executableDigest')}`);
+}
+
+type WindowsPackageIdentity = Readonly<{
+  family: string;
+  publisherId: string;
+  relativePath: string;
+}>;
+
+/** Whether a Windows record speaks for a package at all, by any of the three package fields. */
+function claimsWindowsPackage(record: Record<string, unknown>): boolean {
+  return ['packageFamilyName', 'packagePublisherId', 'packageRelativePath'].some(
+    (key) => record[key] !== null && record[key] !== undefined,
+  );
+}
+
+/**
+ * The v2 package fields exactly as native writes them (`WindowsPackageIdentityJson`), or null.
+ *
+ * Raw strings, no trimming: they are hashed as native hashed them. Every check here is one native
+ * already made, repeated so that a record native could not have written is refused rather than
+ * hashed: the family is a package name followed by `_` and the publisherId, the relative path is
+ * ASCII-folded and is the tail of the executable path, and there is no signer digest (the package
+ * signature, not an embedded one, is what the identity rests on).
+ */
+function windowsPackageIdentityOf(record: Record<string, unknown>): WindowsPackageIdentity | null {
+  const family = record['packageFamilyName'];
+  const publisherId = record['packagePublisherId'];
+  const relativePath = record['packageRelativePath'];
+  const executablePath = record['executablePath'];
+  const executableDigest = record['executableDigest'];
+  if (
+    typeof family !== 'string' ||
+    typeof publisherId !== 'string' ||
+    typeof relativePath !== 'string' ||
+    typeof executablePath !== 'string' ||
+    typeof executableDigest !== 'string' ||
+    record['signerDigest'] !== null
+  )
+    return null;
+  if (
+    !/^[0-9a-z]{13}$/u.test(publisherId) ||
+    !/^[A-Za-z0-9.-]{3,50}_[0-9a-z]{13}$/u.test(family) ||
+    !family.endsWith(`_${publisherId}`) ||
+    !/^[a-f0-9]{64}$/u.test(executableDigest)
+  )
+    return null;
+  if (
+    relativePath === '' ||
+    relativePath.length > 4_096 ||
+    relativePath.startsWith('\\') ||
+    relativePath.startsWith('/') ||
+    // eslint-disable-next-line no-control-regex
+    /[\u0000-\u001f\u007f]/u.test(relativePath) ||
+    asciiLowercase(relativePath) !== relativePath ||
+    !asciiLowercase(executablePath).endsWith(`\\${relativePath}`)
+  )
+    return null;
+  return { family, publisherId, relativePath };
 }
 
 /** Plain SHA-256 hex of the UTF-8 bytes, matching `StringDigest` / `Sha256String`. */
@@ -295,13 +385,14 @@ export function computerAppGrantMismatch(
     return 'signing_class_changed';
   if (
     stored.grantIdentityDigest !== observed.grantIdentityDigest ||
-    // No exemption for a Windows package, although its directory carries the version and an
-    // ordinary Store update therefore re-asks. Skipping the comparison would have to be decided by
-    // `packageFamilyName`, and native does not attest that field yet: it is read from a record with
-    // no MAC, so writing the same family name onto two applications by one signer would make them
-    // one grant with no path check between them. The exemption belongs to the slice in which native
-    // returns the package identity and binds it into the digest it verifies (S5 / S6).
-    stored.executablePath !== observed.executablePath
+    // The one exemption is a v2 Windows package whose grant digest matches (S5-c-3, #500 PR-4).
+    // Its directory carries the version, so the path moves on every Store update, but the digest
+    // already binds the family, the publisherId and the path inside the package, and the observed
+    // side reaches here only through the gate that recomputed native's own v2 package digest from
+    // those fields (`computerAppNativeIdentityDigest`). A family alone never decides it: the
+    // `win32-package-v2` digest cannot be produced from a record without all three.
+    (!isMatchingWindowsPackage(stored, observed) &&
+      stored.executablePath !== observed.executablePath)
   )
     return 'identity_changed';
   if (
@@ -310,6 +401,22 @@ export function computerAppGrantMismatch(
   )
     return 'executable_changed';
   return null;
+}
+
+/** Both sides are the same v2 Windows package grant: one family, one `win32-package-v2` digest. */
+function isMatchingWindowsPackage(
+  stored: ComputerAppGrantIdentity,
+  observed: ComputerAppGrantIdentity,
+): boolean {
+  return (
+    stored.platform === 'win32' &&
+    observed.platform === 'win32' &&
+    stored.identityKind === 'verified-signed' &&
+    observed.identityKind === 'verified-signed' &&
+    observed.packageFamilyName !== null &&
+    stored.packageFamilyName === observed.packageFamilyName &&
+    stored.grantIdentityDigest === observed.grantIdentityDigest
+  );
 }
 
 /**

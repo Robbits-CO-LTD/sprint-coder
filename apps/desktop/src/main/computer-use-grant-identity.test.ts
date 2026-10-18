@@ -39,6 +39,21 @@ function winIdentity(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
+const notepadInstall =
+  'C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2507.26.0_x64__8wekyb3d8bbwe';
+
+/** A v2 package record as `WindowsPackageIdentityJson` writes it (S5-c-3, #500 PR-4). */
+function packageIdentity(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return winIdentity({
+    executablePath: `${notepadInstall}\\Notepad\\Notepad.exe`,
+    signerDigest: null,
+    packageFamilyName: 'Microsoft.WindowsNotepad_8wekyb3d8bbwe',
+    packagePublisherId: '8wekyb3d8bbwe',
+    packageRelativePath: 'notepad\\notepad.exe',
+    ...overrides,
+  });
+}
+
 function derive(identity: Record<string, unknown>): ComputerAppGrantIdentity {
   const derived = computerAppGrantIdentityFrom(identity);
   expect(derived).not.toBeNull();
@@ -98,74 +113,76 @@ describe('grant identity derivation', () => {
     );
   });
 
-  it('separates a Windows package identity from a Win32 image identity', () => {
+  it('separates a v2 Windows package identity from a Win32 image identity', () => {
     const image = derive(winIdentity());
-    const packaged = derive(winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' }));
+    const packaged = derive(packageIdentity());
+    expect(packaged.identityKind).toBe('verified-signed');
     expect(image.grantIdentityDigest).not.toBe(packaged.grantIdentityDigest);
     expect(image.appId).toBe('notes.exe');
-    expect(packaged.appId).toBe('Example.Notes_8wekyb3d8bbwe');
+    expect(packaged.appId).toBe('Microsoft.WindowsNotepad_8wekyb3d8bbwe');
+    expect(packaged.packageFamilyName).toBe('Microsoft.WindowsNotepad_8wekyb3d8bbwe');
     // A Win32 identity is the signer plus where the image lives, so the same signer elsewhere is a
     // different grant.
     const elsewhere = derive(winIdentity({ executablePath: 'C:\\Users\\x\\Downloads\\Notes.exe' }));
     expect(elsewhere.grantIdentityDigest).not.toBe(image.grantIdentityDigest);
-    // A package identity does not include the path, so a servicing update keeps the grant.
-    expect(
-      derive(
-        winIdentity({
-          packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
-          executablePath: 'C:\\Program Files\\WindowsApps\\Example.Notes_2.0\\Notes.exe',
-        }),
-      ).grantIdentityDigest,
-    ).toBe(packaged.grantIdentityDigest);
+    // A record with no package field stays a Win32 identity with no family.
+    expect(image.packageFamilyName).toBeNull();
+    // The family, the publisherId and the path inside the package each make another grant.
+    for (const change of [
+      {
+        packageFamilyName: 'Contoso.Notepad_8wekyb3d8bbwe',
+      },
+      {
+        packageFamilyName: 'Microsoft.WindowsNotepad_0123456789abc',
+        packagePublisherId: '0123456789abc',
+      },
+      {
+        executablePath: `${notepadInstall}\\Notepad\\Helper.exe`,
+        packageRelativePath: 'notepad\\helper.exe',
+      },
+    ])
+      expect(derive(packageIdentity(change)).grantIdentityDigest).not.toBe(
+        packaged.grantIdentityDigest,
+      );
   });
 
-  it('gives a Windows package claim no path exemption until native attests it', () => {
-    // `WindowsApps\<PackageFullName>_<version>_<arch>__<publisherId>\` puts the version in the
-    // directory name, so this re-asks on a Store update. That cost is accepted for now: the only
-    // thing that could switch the comparison off is `packageFamilyName`, which native does not
-    // verify yet and which sits in a record with no MAC (S5 / S6 bind it).
-    const packaged = derive(
-      winIdentity({
-        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
-        executablePath:
-          'C:\\Program Files\\WindowsApps\\Example.Notes_1.0.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
-      }),
-    );
+  it('keeps a v2 Windows package grant across a Store update, and only there', () => {
+    // `WindowsApps\<Name>_<version>_<arch>__<publisherId>\` puts the version in the directory
+    // name, so the path moves on every Store update. The digest native verified binds the family,
+    // the publisherId and the path inside the package, so a matching digest is the exemption.
+    const packaged = derive(packageIdentity());
+    const updatedInstall =
+      'C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2510.6.0_x64__8wekyb3d8bbwe';
     const updated = derive(
-      winIdentity({
-        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
-        executablePath:
-          'C:\\Program Files\\WindowsApps\\Example.Notes_1.1.0.0_x64__8wekyb3d8bbwe\\Notes.exe',
+      packageIdentity({
+        executablePath: `${updatedInstall}\\Notepad\\Notepad.exe`,
         executableDigest: 'f'.repeat(64),
       }),
     );
-    expect(packaged.grantIdentityDigest).toBe(updated.grantIdentityDigest);
-    expect(computerAppGrantMismatch(packaged, updated, false)).toBe('identity_changed');
-    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(false);
-    // The forgery this closes: one signer, two applications, the same family name written on both.
-    const other = derive(
-      winIdentity({
-        packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
-        executablePath: 'C:\\Program Files\\Example\\Other\\Other.exe',
+    expect(updated.grantIdentityDigest).toBe(packaged.grantIdentityDigest);
+    expect(updated.executablePath).not.toBe(packaged.executablePath);
+    expect(computerAppGrantMismatch(packaged, updated, false)).toBeNull();
+    expect(computerAppGrantIdentityMatches(packaged, updated)).toBe(true);
+    expect(computerAppGrantCodeChanged(packaged, updated)).toBe(true);
+    // Another image of the same package is another grant, path or no path.
+    const helper = derive(
+      packageIdentity({
+        executablePath: `${notepadInstall}\\Notepad\\Helper.exe`,
+        packageRelativePath: 'notepad\\helper.exe',
       }),
     );
-    expect(other.grantIdentityDigest).toBe(packaged.grantIdentityDigest);
-    expect(computerAppGrantMismatch(packaged, other, false)).toBe('identity_changed');
-    // A different signer is still a different application, path or no path.
+    expect(computerAppGrantMismatch(packaged, helper, false)).toBe('identity_changed');
+    // A stored row of another family under the same digest is not the exemption (the family is
+    // part of the digest, so this only arises from a row that does not describe one package).
     expect(
       computerAppGrantMismatch(
-        packaged,
-        derive(
-          winIdentity({
-            packageFamilyName: 'Example.Notes_8wekyb3d8bbwe',
-            signerDigest: 'e'.repeat(64),
-          }),
-        ),
+        { ...packaged, packageFamilyName: 'Contoso.Notepad_8wekyb3d8bbwe' },
+        updated,
         false,
       ),
     ).toBe('identity_changed');
-    // The other direction: a plain Win32 image keeps the path comparison, because "the same signer
-    // in a different directory" really is a different application there.
+    // A plain Win32 image keeps the path comparison, because "the same signer in a different
+    // directory" really is a different application there.
     const image = derive(winIdentity());
     expect(
       computerAppGrantMismatch(
@@ -183,6 +200,52 @@ describe('grant identity derivation', () => {
         false,
       ),
     ).toBe('identity_changed');
+    // A Win32 identity is never exempted even if a row were to carry a family.
+    expect(
+      computerAppGrantMismatch(
+        {
+          ...image,
+          packageFamilyName: 'Microsoft.WindowsNotepad_8wekyb3d8bbwe',
+          executablePath: 'c:\\other\\notes.exe',
+        },
+        image,
+        false,
+      ),
+    ).toBe('identity_changed');
+  });
+
+  it('refuses a package record native could not have written', () => {
+    // The S3b forgery: one signer, two applications, the same family name written on both. A
+    // family alone is no package identity any more, so it derives nothing.
+    expect(
+      computerAppGrantIdentityFrom(
+        winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' }),
+      ),
+    ).toBeNull();
+    for (const change of [
+      { packagePublisherId: null },
+      { packagePublisherId: undefined },
+      { packageRelativePath: null },
+      { packageFamilyName: null },
+      { packageFamilyName: 'Microsoft.WindowsNotepad_0123456789abc' },
+      { packageFamilyName: '_8wekyb3d8bbwe' },
+      { packageFamilyName: 'Microsoft Notepad_8wekyb3d8bbwe' },
+      {
+        packagePublisherId: '8WEKYB3D8BBWE',
+        packageFamilyName: 'Microsoft.WindowsNotepad_8WEKYB3D8BBWE',
+      },
+      { packageRelativePath: 'Notepad\\Notepad.exe' },
+      { packageRelativePath: 'notepad\\other.exe' },
+      { packageRelativePath: '\\notepad\\notepad.exe' },
+      { packageRelativePath: '' },
+      { packageRelativePath: 'notepad\nnotepad.exe' },
+      { signerDigest: 'd'.repeat(64) },
+      { executableDigest: null },
+    ])
+      expect(
+        computerAppGrantIdentityFrom(packageIdentity(change)),
+        JSON.stringify(change),
+      ).toBeNull();
   });
 
   it('binds an unsigned application to its executable bytes', () => {
@@ -339,9 +402,40 @@ describe('native identity digest recomputation', () => {
   });
 
   it('refuses a Windows record that claims a package family native never attested', () => {
-    // Native writes `packageFamilyName: null` today. The claim changes the grant digest (family +
-    // signer, no path) while changing nothing native verifies, so the record cannot be bound.
+    // A v1 native writes `packageFamilyName: null`. A family with no v2 package fields changes
+    // nothing native verifies, so the record cannot be bound: no identity, and no digest even
+    // against an identity derived from another record.
     expect(digestOf(winIdentity())).not.toBeNull();
-    expect(digestOf(winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' }))).toBeNull();
+    const familyOnly = winIdentity({ packageFamilyName: 'Example.Notes_8wekyb3d8bbwe' });
+    expect(computerAppGrantIdentityFrom(familyOnly)).toBeNull();
+    expect(computerAppNativeIdentityDigest(familyOnly, derive(winIdentity()))).toBeNull();
+    expect(
+      computerAppNativeIdentityDigest(
+        winIdentity({ packageRelativePath: 'notes.exe' }),
+        derive(winIdentity()),
+      ),
+    ).toBeNull();
+  });
+
+  it('mirrors the v2 package formula', () => {
+    // computer_use_windows_target_facts.h WindowsPackageIdentityFor, hashed by the host's
+    // WindowsTargetPackageIdentity. The same digest is pinned in the target eligibility harness
+    // (CheckPackageIdentity), so both languages hash the same record alike.
+    const expected = sha256(
+      'computer-win-identity-v2-package\nMicrosoft.WindowsNotepad_8wekyb3d8bbwe\n8wekyb3d8bbwe\nnotepad\\notepad.exe',
+    );
+    expect(expected).toBe('bc7613abbec5391168eb61a88ba5914d78b2b5f23dec37219a595c3dec622f6c');
+    expect(digestOf(packageIdentity())).toBe(expected);
+    // The versioned directory is not hashed: a Store update keeps the digest native verifies.
+    expect(
+      digestOf(
+        packageIdentity({
+          executablePath:
+            'C:\\Program Files\\WindowsApps\\Microsoft.WindowsNotepad_11.2510.6.0_x64__8wekyb3d8bbwe\\Notepad\\Notepad.exe',
+        }),
+      ),
+    ).toBe(expected);
+    // The package formula is never answered for an identity derived from a Win32 record.
+    expect(computerAppNativeIdentityDigest(packageIdentity(), derive(winIdentity()))).toBeNull();
   });
 });
