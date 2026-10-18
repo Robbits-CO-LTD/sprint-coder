@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   TeamMcpBridge as ProductionTeamMcpBridge,
+  MAX_CONCURRENT_CONNECTIONS,
   defaultSocketPathFactory,
   type TeamMcpRegistration,
 } from './team-mcp-bridge';
@@ -1455,7 +1456,9 @@ describe.runIf(process.platform === 'win32')('TeamMcpBridge Windows DACL', () =>
     const sockets: ReturnType<typeof createConnection>[] = [];
 
     try {
-      for (let index = 0; index < 16; index += 1) {
+      // Enough for 100 concurrent Workers plus their Leaders and Managers.
+      expect(MAX_CONCURRENT_CONNECTIONS).toBeGreaterThan(100);
+      for (let index = 0; index < MAX_CONCURRENT_CONNECTIONS; index += 1) {
         const socket = createConnection(socketPath);
         await new Promise<void>((resolve, reject) => {
           socket.once('connect', resolve);

@@ -38,7 +38,10 @@ import {
 const MAX_SUN_PATH_BYTES = 100;
 const MAX_PENDING_REQUEST_BYTES = 1024 * 1024;
 const DEFAULT_AUTHENTICATION_TIMEOUT_MS = 5_000;
-const MAX_CONCURRENT_CONNECTIONS = 16;
+/** Every running Leader, Manager and Worker turn holds one bridge connection for its whole run, so
+ * this has to cover the concurrency ceiling (100 Workers, TEAM_MAX_CONCURRENT_EXECUTIONS) plus
+ * Leaders and Managers. 16 refused the 17th live Worker once more than 8 could run at once. */
+export const MAX_CONCURRENT_CONNECTIONS = 128;
 const WINDOWS_POWERSHELL = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
 const WINDOWS_PIPE_BROKER = String.raw`
 $ErrorActionPreference = 'Stop'
@@ -56,7 +59,7 @@ function New-Listener {
   $pipe = [System.IO.Pipes.NamedPipeServerStream]::new(
     $name,
     [System.IO.Pipes.PipeDirection]::InOut,
-    16,
+    ${MAX_CONCURRENT_CONNECTIONS},
     [System.IO.Pipes.PipeTransmissionMode]::Byte,
     [System.IO.Pipes.PipeOptions]::Asynchronous,
     65536,
@@ -97,7 +100,7 @@ function Send-Frame($frame) {
 $listeners = [System.Collections.ArrayList]::new()
 $connections = @{}
 # One pending listener is sufficient because it is replenished immediately after every accept;
-# the NamedPipeServerStream instance limit still caps total concurrent connections at 16.
+# the NamedPipeServerStream instance limit still caps total concurrent connections at ${MAX_CONCURRENT_CONNECTIONS}.
 [void]$listeners.Add((New-Listener))
 $stdin = [Console]::OpenStandardInput()
 $stdinBuffer = [byte[]]::new(65536)
@@ -106,7 +109,7 @@ $stdinRead = $stdin.ReadAsync($stdinBuffer, 0, $stdinBuffer.Length)
 [Console]::Out.WriteLine('{"type":"ready"}')
 [Console]::Out.Flush()
 while ($true) {
-  if ($listeners.Count -eq 0 -and $connections.Count -lt 16) {
+  if ($listeners.Count -eq 0 -and $connections.Count -lt ${MAX_CONCURRENT_CONNECTIONS}) {
     [void]$listeners.Add((New-Listener))
   }
   $connectionList = @($connections.Values)

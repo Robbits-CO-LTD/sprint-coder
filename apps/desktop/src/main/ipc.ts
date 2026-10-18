@@ -202,6 +202,8 @@ import {
   sprintCoderPrePromptSetInputSchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamConcurrencySettingsSchema,
+  teamConcurrencySettingsSetInputSchema,
   computerUseSettingsSchema,
   computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
@@ -2908,6 +2910,32 @@ export class IpcRouter {
         this.runMutation(event, envelope, '', IPC_CHANNELS.settingsSetTeamModelResearch, () =>
           this.persistence.setTeamModelResearchBeforeHiring(input.researchBeforeHiring),
         ).value,
+    );
+    this.handle(
+      IPC_CHANNELS.settingsGetTeamConcurrency,
+      emptyPayloadSchema,
+      teamConcurrencySettingsSchema,
+      () => ({
+        maxConcurrentExecutions: this.persistence.getTeamMaxConcurrentExecutions(),
+      }),
+    );
+    this.handleMutation(
+      IPC_CHANNELS.settingsSetTeamConcurrency,
+      teamConcurrencySettingsSetInputSchema,
+      z.undefined(),
+      (input, event, envelope) => {
+        const result = this.runMutation(
+          event,
+          envelope,
+          '',
+          IPC_CHANNELS.settingsSetTeamConcurrency,
+          () => this.persistence.setTeamMaxConcurrentExecutions(input.maxConcurrentExecutions),
+        );
+        // No restart: the scheduler reads the limit on every admission pass, and a raised one
+        // may start queued Workers right away.
+        this.teamCoordinator.notifyConcurrencyLimitChanged();
+        return result.value;
+      },
     );
     this.handle(
       IPC_CHANNELS.settingsGetComputerUse,

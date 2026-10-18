@@ -35,6 +35,8 @@ function stubBridge(): void {
         getRuntime: () => Promise.resolve(),
         getTeamModelResearch: () => Promise.resolve({ researchBeforeHiring: false }),
         setTeamModelResearch: () => Promise.resolve(),
+        getTeamConcurrency: () => Promise.resolve({ maxConcurrentExecutions: 50 }),
+        setTeamConcurrency: () => Promise.resolve(),
         getComputerUse: () => Promise.resolve(),
         setComputerUse: () => Promise.resolve(),
         getTeamModelSelectionGuidance: () => Promise.resolve({ guidance: '' }),
@@ -86,6 +88,7 @@ describe('which body the flag selects', () => {
     expect(html).not.toContain('ユーザーconfig・MCPをTurnへ引き継ぐ');
     expect(html).toContain('data-testid="settings-team-research"');
     expect(html).toContain('data-testid="settings-team-defaults"');
+    expect(html).toContain('data-testid="settings-team-concurrency"');
     expect(html).toContain('data-testid="settings-team-models"');
     expect(html).toContain('data-testid="settings-team-model-guidance"');
     expect(html).toContain('覚えておいてほしいこと');

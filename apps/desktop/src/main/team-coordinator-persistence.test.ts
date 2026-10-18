@@ -3,7 +3,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { teamDeliveryId, DEFAULT_TEAM_BUDGET_LIMITS } from '@sprint-coder/domain';
+import {
+  teamDeliveryId,
+  DEFAULT_TEAM_BUDGET_LIMITS,
+  effectiveBudgetCap,
+  type BudgetKind,
+} from '@sprint-coder/domain';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 
@@ -20,6 +25,16 @@ function createPersistence(): { persistence: SqlitePersistenceClient; path: stri
   const path = join(directory, 'test.sqlite3');
   return { persistence: new SqlitePersistenceClient(path), path };
 }
+
+/** A default Team's cap: 50 concurrent Workers, under the default app-wide limit of 50. */
+const teamCap = (kind: BudgetKind): number =>
+  effectiveBudgetCap({
+    scope: 'team',
+    kind,
+    storedCap: DEFAULT_TEAM_BUDGET_LIMITS.team[kind],
+    teamConcurrency: 50,
+    appConcurrency: 50,
+  });
 
 const emptyCeiling = {
   entries: [],
@@ -74,22 +89,20 @@ if (runsWithElectronAbi)
         team: DEFAULT_TEAM_BUDGET_LIMITS.team,
         worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
       });
-      expect(statusFor(persistence, teamId, 'team', 'costCents').cap).toBe(
-        DEFAULT_TEAM_BUDGET_LIMITS.team.costCents,
-      );
+      // The stored budget was sized for 8 Workers; a default Team runs 50 (Settings > Team).
+      expect(statusFor(persistence, teamId, 'team', 'costCents').cap).toBe(teamCap('costCents'));
+      expect(teamCap('costCents')).toBe((DEFAULT_TEAM_BUDGET_LIMITS.team.costCents * 50) / 8);
       expect(statusFor(persistence, teamId, 'worker', 'costCents').cap).toBe(
         DEFAULT_TEAM_BUDGET_LIMITS.worker.costCents,
       );
-      expect(statusFor(persistence, teamId, 'global', 'spawnSlots').cap).toBe(
-        DEFAULT_TEAM_BUDGET_LIMITS.global.spawnSlots,
-      );
+      expect(statusFor(persistence, teamId, 'global', 'spawnSlots').cap).toBe(50);
       persistence.close();
     });
 
     it('reserves budget, allows the exact cap, and rejects an over-cap entry', () => {
       const { persistence } = createPersistence();
       const { teamId } = buildActiveTeam(persistence);
-      const cap = DEFAULT_TEAM_BUDGET_LIMITS.team.costCents;
+      const cap = teamCap('costCents');
 
       const reserved = persistence.reserveTeamBudget({
         teamId,
@@ -127,7 +140,7 @@ if (runsWithElectronAbi)
         team.revision,
       );
 
-      const amount = DEFAULT_TEAM_BUDGET_LIMITS.team.costCents + 1_000_000;
+      const amount = teamCap('costCents') + 1_000_000;
       expect(
         persistence.reserveTeamBudget({
           teamId,
@@ -149,7 +162,7 @@ if (runsWithElectronAbi)
           teamId,
           entries: [
             { scope: 'team', kind: 'costCents', amount: 100 },
-            { scope: 'team', kind: 'tokens', amount: DEFAULT_TEAM_BUDGET_LIMITS.team.tokens + 1 },
+            { scope: 'team', kind: 'tokens', amount: teamCap('tokens') + 1 },
           ],
           purpose: 'partial violation',
           now: '2026-07-23T00:00:00.000Z',
@@ -339,19 +352,125 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('counts recent team messages with an inclusive lower bound', () => {
+    it('persists the app-wide Worker concurrency limit, defaulting to 50 and bounded to 1-100', () => {
+      const { persistence, path } = createPersistence();
+      expect(persistence.getTeamMaxConcurrentExecutions()).toBe(50);
+      persistence.setTeamMaxConcurrentExecutions(72);
+      expect(() => persistence.setTeamMaxConcurrentExecutions(0)).toThrow();
+      expect(() => persistence.setTeamMaxConcurrentExecutions(101)).toThrow();
+      expect(() => persistence.setTeamMaxConcurrentExecutions(2.5)).toThrow();
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      expect(reopened.getTeamMaxConcurrentExecutions()).toBe(72);
+      reopened.close();
+    });
+
+    it('sizes spawn slots and the Team budget to the concurrency limits', () => {
       const { persistence } = createPersistence();
-      const { teamId, leaderId, workerId } = buildActiveTeam(persistence);
-      const message = persistence.createTeamMessage({
+      const { teamId } = buildActiveTeam(persistence);
+      expect(persistence.getTeam(teamId).policy.maxConcurrentExecutions).toBe(50);
+      // 50 Workers starting at once fit both the global and the Team spawn pool.
+      const spawns = persistence.reserveTeamBudget({
         teamId,
-        sourceAgentId: leaderId,
-        targetAgentId: workerId,
-        content: 'Hello.',
+        entries: Array.from({ length: 50 }, () => [
+          { scope: 'global' as const, kind: 'spawnSlots' as const, amount: 1 },
+          { scope: 'team' as const, kind: 'spawnSlots' as const, amount: 1 },
+        ]).flat(),
+        purpose: 'spawn-50',
+        now: '2026-10-18T00:00:00.000Z',
       });
-      const at = message.createdAt;
-      const justAfter = new Date(Date.parse(at) + 1).toISOString();
-      expect(persistence.countRecentTeamMessages(teamId, at)).toBe(1);
-      expect(persistence.countRecentTeamMessages(teamId, justAfter)).toBe(0);
+      expect(() =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'spawnSlots', amount: 1 }],
+          purpose: 'spawn-51',
+          now: '2026-10-18T00:00:00.000Z',
+        }),
+      ).toThrow(/team\/spawnSlots/);
+      persistence.releaseTeamBudget({
+        reservationIds: spawns.map(({ id }) => id),
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      // 50 running executions reserve 10 tool calls each; the old fixed Team cap (200) held 20.
+      persistence.reserveTeamBudget({
+        teamId,
+        entries: [{ scope: 'team', kind: 'toolCalls', amount: 500 }],
+        purpose: 'execution-50',
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      // A lowered setting never shrinks the start-up pool below what was stored (24 global, 8 per
+      // Team): starting is not running, and a hire that finds the pool full fails, not waits.
+      persistence.setTeamMaxConcurrentExecutions(1);
+      const lowered = persistence.reserveTeamBudget({
+        teamId,
+        entries: [
+          { scope: 'global', kind: 'spawnSlots', amount: 8 },
+          { scope: 'team', kind: 'spawnSlots', amount: 8 },
+        ],
+        purpose: 'spawn-8-at-limit-1',
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      expect(() =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'spawnSlots', amount: 1 }],
+          purpose: 'spawn-9',
+          now: '2026-10-18T00:00:00.000Z',
+        }),
+      ).toThrow(/team\/spawnSlots/);
+      persistence.releaseTeamBudget({
+        reservationIds: lowered.map(({ id }) => id),
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      persistence.reserveTeamBudget({
+        teamId,
+        entries: [{ scope: 'global', kind: 'spawnSlots', amount: 24 }],
+        purpose: 'spawn-24-at-limit-1',
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      expect(() =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'global', kind: 'spawnSlots', amount: 1 }],
+          purpose: 'spawn-25',
+          now: '2026-10-18T00:00:00.000Z',
+        }),
+      ).toThrow(/global\/spawnSlots/);
+      persistence.close();
+    });
+
+    it('keeps a Team budget at the size it reached when its concurrency is lowered mid-run', () => {
+      const { persistence } = createPersistence();
+      const { teamId } = buildActiveTeam(persistence);
+      const setConcurrency = (maxConcurrentExecutions: number) => {
+        const team = persistence.getTeam(teamId);
+        persistence.updateTeamPolicy(
+          teamId,
+          { ...team.policy, maxConcurrentExecutions },
+          team.revision,
+        );
+      };
+      const reserve = (amount: number, purpose: string) =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'timeMs', amount }],
+          purpose,
+          now: '2026-10-18T00:00:00.000Z',
+        });
+      setConcurrency(80);
+      // 10,000,000 ms of Worker time used at 80, far beyond what 8 Workers' budget (3,600,000) holds.
+      persistence.settleTeamBudget({
+        reservationIds: reserve(10_000_000, 'used').map(({ id }) => id),
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      setConcurrency(8);
+      expect(statusFor(persistence, teamId, 'team', 'timeMs').cap).toBe(36_000_000);
+      expect(reserve(60_000, 'after lowering')).toHaveLength(1);
+      // Raising again never goes below the size already reached either.
+      setConcurrency(20);
+      expect(statusFor(persistence, teamId, 'team', 'timeMs').cap).toBe(36_000_000);
+      // A start-up lease still follows the lowered policy (but not below the stored 8).
+      expect(statusFor(persistence, teamId, 'team', 'spawnSlots').cap).toBe(20);
       persistence.close();
     });
 

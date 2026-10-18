@@ -51,7 +51,7 @@ import {
   type WorkerActivityEvent,
 } from './team-coordinator';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
-import type { TeamEnvelope } from '@sprint-coder/domain';
+import { TEAM_ASSIGNMENT_RATE_LIMIT, type TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
@@ -1094,6 +1094,31 @@ function grokFailureDiagnostic(
   };
 }
 
+/** The failing tests (name and first message) a vitest JSON report names, for a shard failure. */
+function failedShardTests(report: string): string {
+  try {
+    const parsed = JSON.parse(readFileSync(report, 'utf8')) as {
+      testResults?: readonly {
+        assertionResults?: readonly {
+          fullName?: string;
+          status?: string;
+          failureMessages?: readonly string[];
+        }[];
+      }[];
+    };
+    const failed = (parsed.testResults ?? [])
+      .flatMap(({ assertionResults }) => assertionResults ?? [])
+      .filter(({ status }) => status === 'failed')
+      .map(
+        ({ fullName, failureMessages }) =>
+          `FAILED: ${fullName ?? '(unnamed)'}\n${(failureMessages ?? [])[0]?.slice(0, 3_000) ?? ''}`,
+      );
+    return failed.length > 0 ? failed.join('\n\n') : 'No failed test in the shard report';
+  } catch (error) {
+    return `The shard report could not be read: ${String(error)}`;
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -1560,6 +1585,176 @@ if (runsWithElectronAbi)
       expect(JSON.stringify(diagnostics)).not.toContain('sensitive instruction');
       persistence.close();
     });
+
+    it('hands work to 50 Workers in one minute without counting their reports against it (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Fifty Worker Team');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const workers = [];
+      for (let index = 0; index < 50; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      // A Worker with no work keeps the Team active once the 50 finish.
+      const idle = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'idle worker',
+        objective: 'receive notes',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries()) {
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `question ${index}`,
+            doneCriteria: ['return a result'],
+          }),
+        );
+        // Let early Workers report while the Leader is still assigning, as in the 32-Worker run.
+        if (index % 10 === 9) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await waitFor(
+        () =>
+          submissions.every(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        20_000,
+      );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      // 50 assignments and 50 reports: far beyond the 30 free-form messages a minute allows.
+      expect(persistence.getTeamSnapshot(teamId).messages.length).toBeGreaterThanOrEqual(100);
+
+      // Reports and assignments left the free-form budget untouched: 30 messages still fit.
+      const leaderId = persistence.getTeam(teamId).leaderAgentId;
+      for (let index = 0; index < 30; index += 1)
+        await coordinator.sendAgentMessageAs(task.id, leaderId, idle.id, `note ${index}`);
+      await expect(
+        coordinator.sendAgentMessageAs(task.id, leaderId, idle.id, 'one too many'),
+      ).rejects.toThrow('Team message rate limit exceeded');
+      persistence.close();
+    }, 60_000);
+
+    it('queues an assignment beyond the per-minute pace instead of refusing it (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Paced Team');
+      const runtime = new TestWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      // Enough Workers to exceed the assignment pace by one; the Team itself may run all at once.
+      const workers = [];
+      for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, maxConcurrentExecutions: 100, budgetMode: 'unlimited' },
+        team.revision,
+      );
+      persistence.setTeamMaxConcurrentExecutions(100);
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries())
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `question ${index}`,
+            doneCriteria: ['return a result'],
+          }),
+        );
+      // Every assignment was accepted; none was lost to an error.
+      expect(submissions).toHaveLength(TEAM_ASSIGNMENT_RATE_LIMIT.limit + 1);
+      const last = submissions.at(-1)!;
+      await waitFor(
+        () =>
+          submissions
+            .slice(0, -1)
+            .every(
+              ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+            ),
+        20_000,
+      );
+      // The one beyond the pace waits its turn (about a minute later) instead of failing.
+      expect(last.state).toBe('queued');
+      expect(persistence.getTeamExecution(last.executionId).state).toBe('queued');
+      await coordinator.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 60_000);
+
+    it('paces assignments recovered at startup as it paces fresh ones (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Recovered backlog');
+      // Before the restart nothing starts: every assignment is left queued.
+      class HoldingScheduler extends TeamExecutionScheduler {
+        override submit(): void {}
+      }
+      const before = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        new HoldingScheduler(),
+      );
+      const workers = [];
+      for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
+        workers.push(
+          await before.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, maxConcurrentExecutions: 100, budgetMode: 'unlimited' },
+        team.revision,
+      );
+      persistence.setTeamMaxConcurrentExecutions(100);
+      for (const [index, worker] of workers.entries())
+        await before.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: `question ${index}`,
+          doneCriteria: ['return a result'],
+        });
+
+      const after = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      after.recoverOnStartup();
+      await waitFor(
+        () =>
+          persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
+            .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
+        20_000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // 100 recovered assignments start; the one beyond the pace still waits, not fails.
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+      await after.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 60_000);
 
     it.each([
       // A CLI Worker denied by policy (issue #841).
@@ -6592,7 +6787,7 @@ if (runsWithElectronAbi)
         ),
       ).rejects.toThrow('direct child');
 
-      const submissions = [];
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
       for (const manager of managers) {
         submissions.push(
           await coordinator.assignTask({
@@ -6858,8 +7053,10 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('returns durable execution IDs before completion and runs at most eight in parallel', async () => {
+    it('returns durable execution IDs before completion and runs no more in parallel than Settings allows', async () => {
       const persistence = createPersistence();
+      // Settings > Team: the app-wide limit, read by the coordinator's own scheduler.
+      persistence.setTeamMaxConcurrentExecutions(8);
       const task = persistence.createTask('Eight parallel executions');
       const runtime = new BlockingWorkerRuntime();
       const coordinator = new TeamCoordinator(persistence, runtime);
@@ -6912,6 +7109,92 @@ if (runsWithElectronAbi)
           .getTeamSnapshot(teamId)
           .messages.filter(({ executionId }) => executionId !== null),
       ).toHaveLength(20);
+      persistence.close();
+    });
+
+    it('applies a Team policy change to executions already queued, raised or lowered', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Policy change while queued');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (let index = 0; index < 6; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: `objective-${index}`,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const teamId = workers[0]!.teamId;
+      const setLimit = async (maxConcurrentExecutions: number) => {
+        const team = persistence.getTeam(teamId);
+        await coordinator.updatePolicy({
+          taskId: task.id,
+          policy: { ...team.policy, maxConcurrentExecutions },
+          expectedRevision: team.revision,
+        });
+      };
+      await setLimit(2);
+      for (const worker of workers)
+        await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: `execute-${worker.role}`,
+          doneCriteria: ['runtime completes'],
+        });
+      await waitFor(() => runtime.activeExecutions === 2);
+
+      // Raised: queued work starts without anything finishing first.
+      await setLimit(4);
+      await waitFor(() => runtime.activeExecutions === 4);
+
+      // Lowered: the running four finish, then only one runs at a time.
+      await setLimit(1);
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() => runtime.activeExecutions === 1 && runtime.releases.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runtime.activeExecutions).toBe(1);
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+      for (let round = 0; round < 2; round += 1) {
+        for (const release of runtime.releases.splice(0)) release();
+        await waitFor(
+          () =>
+            runtime.releases.length === 1 ||
+            persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
+        );
+        expect(runtime.activeExecutions).toBeLessThanOrEqual(1);
+      }
+      await waitFor(() =>
+        persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
+      );
+      persistence.close();
+    });
+
+    it('lets two Leaders hire at once under an app-wide limit of 1', async () => {
+      const persistence = createPersistence();
+      persistence.setTeamMaxConcurrentExecutions(1);
+      const runtime = new TestWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const tasks = [persistence.createTask('First Team'), persistence.createTask('Second Team')];
+      // A start-up slot is not an execution: both starts overlap, and neither hire fails.
+      const hired = await Promise.all(
+        tasks.map((task, index) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: 'start alongside another Team',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        ),
+      );
+      expect(runtime.maxActiveStarts).toBe(2);
+      expect(hired.map(({ state }) => state)).toEqual(['ready', 'ready']);
       persistence.close();
     });
 
@@ -11314,7 +11597,11 @@ else
             timeout: 420_000,
             maxBuffer: 10 * 1024 * 1024,
           },
-        );
+        ).catch((error: unknown) => {
+          // The JSON reporter keeps the failing tests out of the console, so name them here or a
+          // CI failure shows only "Command failed".
+          throw new Error(`${failedShardTests(report)}\n${String(error)}`.slice(0, 20_000));
+        });
         expect(result.stderr, result.stdout).not.toContain('Failed Tests');
         assertShardReport(JSON.parse(readFileSync(report, 'utf8')), group);
       },

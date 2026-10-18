@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TEAM_GLOBAL_EXECUTION_LIMIT, TeamExecutionScheduler } from './team-execution-scheduler';
 import { ConnectionAdmissionController } from './connection-admission';
 import type { ProviderConnection } from '@sprint-coder/contracts';
@@ -382,8 +382,236 @@ describe('TeamExecutionScheduler', () => {
     await settleScheduler();
   });
 
-  it('runs at most eight jobs and leaves queued jobs outside the active count', async () => {
+  it('runs at most fifty jobs by default and leaves queued jobs outside the active count', async () => {
+    expect(TEAM_GLOBAL_EXECUTION_LIMIT).toBe(50);
     const scheduler = new TeamExecutionScheduler();
+    const gates = Array.from({ length: 52 }, deferred);
+    let active = 0;
+    let maximum = 0;
+    for (let index = 0; index < gates.length; index += 1) {
+      const gate = gates[index]!;
+      scheduler.submit({
+        executionId: `execution-${index}`,
+        workerId: `execution-${index}`,
+        teamId: 'team-1',
+        teamLimit: TEAM_GLOBAL_EXECUTION_LIMIT,
+        run: async () => {
+          active += 1;
+          maximum = Math.max(maximum, active);
+          await gate.promise;
+          active -= 1;
+        },
+      });
+    }
+
+    await settleScheduler();
+    expect(maximum).toBe(50);
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 50,
+      queuedExecutionIds: ['execution-50', 'execution-51'],
+    });
+    for (const gate of gates) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(0);
+  });
+
+  it('reads the global limit from a setting on every admission pass, without a restart', async () => {
+    let setting = 2;
+    const scheduler = new TeamExecutionScheduler(() => setting);
+    const gates = Array.from({ length: 6 }, deferred);
+    for (let index = 0; index < gates.length; index += 1)
+      scheduler.submit({
+        executionId: `execution-${index}`,
+        workerId: `worker-${index}`,
+        teamId: 'team-1',
+        teamLimit: 100,
+        run: () => gates[index]!.promise,
+      });
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(2);
+
+    // Raised: queued work starts as soon as Main is told, with nothing finishing first.
+    setting = 4;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(4);
+
+    // Lowered: nothing running is stopped, and no new work starts until the count drops below it.
+    setting = 1;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(4);
+    for (const gate of gates.slice(0, 3)) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 1,
+      queuedExecutionIds: ['execution-4', 'execution-5'],
+    });
+
+    // Raised again: the two still waiting start.
+    setting = 100;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(3);
+    for (const gate of gates) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+  });
+
+  it('falls back to the default when the setting cannot be read', () => {
+    expect(new TeamExecutionScheduler(() => Number.NaN).currentGlobalLimit()).toBe(50);
+    expect(
+      new TeamExecutionScheduler(() => {
+        throw new Error('database closed');
+      }).currentGlobalLimit(),
+    ).toBe(50);
+    expect(() => new TeamExecutionScheduler(0)).toThrow();
+  });
+
+  it('reads each Team limit on every pass, so a policy change reaches queued jobs', async () => {
+    let teamLimit = 1;
+    const scheduler = new TeamExecutionScheduler(100);
+    scheduler.readTeamLimitsFrom(() => teamLimit);
+    const gates = Array.from({ length: 5 }, deferred);
+    for (let index = 0; index < gates.length; index += 1)
+      scheduler.submit({
+        executionId: `execution-${index}`,
+        workerId: `worker-${index}`,
+        teamId: 'team-1',
+        // What the job was submitted with is superseded by the reader.
+        teamLimit: 3,
+        run: () => gates[index]!.promise,
+      });
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(1);
+
+    teamLimit = 3;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(3);
+
+    teamLimit = 1;
+    scheduler.notifyLimitChanged();
+    for (const gate of gates.slice(0, 3)) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 1,
+      queuedExecutionIds: ['execution-4'],
+    });
+    for (const gate of gates) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+  });
+
+  describe('with fake timers', () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('spends a pace slot only when a job starts, never for one canceled while queued', async () => {
+      vi.useFakeTimers();
+      const scheduler = new TeamExecutionScheduler(10, undefined, { limit: 1, windowMs: 60_000 });
+      const started: string[] = [];
+      const paced = (executionId: string) => ({
+        executionId,
+        workerId: `worker-${executionId}`,
+        teamId: 'team-1',
+        teamLimit: 10,
+        paceKey: 'team-1',
+        run: async () => void started.push(executionId),
+      });
+      scheduler.submit(paced('canceled'));
+      expect(scheduler.cancelQueued('canceled')).toBe(true);
+      scheduler.submit(paced('first'));
+      await settleScheduler();
+      expect(started).toEqual(['first']);
+      // The window's one slot went to the job that started, so the next one waits it out.
+      scheduler.submit(paced('second'));
+      await settleScheduler();
+      expect(started).toEqual(['first']);
+      await vi.advanceTimersByTimeAsync(60_001);
+      await settleScheduler();
+      expect(started).toEqual(['first', 'second']);
+    });
+
+    it('replaces a long retry timer when a shorter wait arrives', async () => {
+      vi.useFakeTimers();
+      const scheduler = new TeamExecutionScheduler(10);
+      const started: string[] = [];
+      scheduler.submit({
+        executionId: 'later',
+        workerId: 'worker-later',
+        teamId: 'team-1',
+        teamLimit: 10,
+        notBeforeMs: Date.now() + 60_000,
+        run: async () => void started.push('later'),
+      });
+      await settleScheduler();
+      scheduler.submit({
+        executionId: 'soon',
+        workerId: 'worker-soon',
+        teamId: 'team-1',
+        teamLimit: 10,
+        notBeforeMs: Date.now() + 1_000,
+        run: async () => void started.push('soon'),
+      });
+      await settleScheduler();
+      await vi.advanceTimersByTimeAsync(1_001);
+      await settleScheduler();
+      expect(started).toEqual(['soon']);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await settleScheduler();
+      expect(started).toEqual(['soon', 'later']);
+    });
+
+    it('starts at most 100 paced assignments a minute even after they waited for slots (issue #854)', async () => {
+      vi.useFakeTimers();
+      let globalLimit = 1;
+      const scheduler = new TeamExecutionScheduler(() => globalLimit);
+      const blocker = deferred();
+      scheduler.submit({
+        executionId: 'other-team',
+        workerId: 'other-worker',
+        teamId: 'team-other',
+        teamLimit: 1,
+        run: () => blocker.promise,
+      });
+      await settleScheduler();
+      const startedAt: number[] = [];
+      for (let index = 0; index <= 100; index += 1)
+        scheduler.submit({
+          executionId: `assignment-${index}`,
+          workerId: `worker-${index}`,
+          teamId: 'team-1',
+          teamLimit: 100,
+          paceKey: 'team-1',
+          run: async () => void startedAt.push(Date.now()),
+        });
+      // The other Team holds the only slot for longer than one pace window.
+      await vi.advanceTimersByTimeAsync(70_000);
+      expect(startedAt).toHaveLength(0);
+
+      const freedAt = Date.now();
+      globalLimit = 200;
+      blocker.resolve();
+      for (let step = 0; step < 10; step += 1) await settleScheduler();
+      // Accepted long ago, but the pace counts starts: 100 now, the 101st waits its turn.
+      expect(startedAt).toHaveLength(100);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(startedAt).toHaveLength(100);
+      await vi.advanceTimersByTimeAsync(1_100);
+      await settleScheduler();
+      expect(startedAt).toHaveLength(101);
+      expect(startedAt.at(-1)! - freedAt).toBeGreaterThanOrEqual(60_000);
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual([]);
+    });
+  });
+
+  it('runs at most eight jobs when configured for eight', async () => {
+    const scheduler = new TeamExecutionScheduler(8);
     const gates = Array.from({ length: 10 }, deferred);
     let active = 0;
     let maximum = 0;

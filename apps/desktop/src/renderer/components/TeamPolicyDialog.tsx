@@ -1,6 +1,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { useAppStore, type TeamPolicyValues } from '../store/appStore';
 import { X } from './icons';
+import {
+  TEAM_CONCURRENCY_DEFAULT,
+  TEAM_CONCURRENCY_RANGE,
+  concurrencyOptions,
+} from '../lib/team-concurrency';
 import type { TeamDetail } from '../types/sprint-coder';
 
 // Team Policy settings UI (Team v2 Core C4b). The backend contract
@@ -19,18 +24,18 @@ import type { TeamDetail } from '../types/sprint-coder';
 // handled: the open animation is a plain CSS `animation` covered by the global
 // `prefers-reduced-motion` squash at the top of index.css, so nothing new opts in to motion.
 
-/** Same bounds the contract enforces (`z.number().int().min(1).max(4)` / `.max(8)`). Kept here so
+/** Same bounds the contract enforces (`z.number().int().min(1).max(4)` / `.max(100)`). Kept here so
  * the inputs cannot express a value the backend will reject for range — the only rejection a user
  * should ever see is the one the client genuinely cannot predict (a stale revision, or a depth
  * that is below the hierarchy that already exists). */
 export const MAX_AGENT_DEPTH_RANGE = { min: 1, max: 4 } as const;
-export const MAX_CONCURRENT_EXECUTIONS_RANGE = { min: 1, max: 8 } as const;
+export const MAX_CONCURRENT_EXECUTIONS_RANGE = TEAM_CONCURRENCY_RANGE;
 
 /** Contract default (DEFAULT_TEAM_POLICY in packages/domain/src/team.ts), used only when a detail
  * predates the policy column and carries no policy at all. */
 const FALLBACK_POLICY: TeamPolicyValues = {
   maxAgentDepth: 4,
-  maxConcurrentExecutions: 8,
+  maxConcurrentExecutions: TEAM_CONCURRENCY_DEFAULT,
   allowWorkerDirectMessages: true,
   budgetMode: 'bounded',
 };
@@ -67,8 +72,8 @@ export function readPolicy(team: TeamDetail['team']): TeamPolicyValues {
   };
 }
 
-/** The integer fields are `<select>`s, not `<input type="number">`s. Both ranges are tiny and
- * closed (1-4, 1-8), and a select cannot hold a half-typed or out-of-range value, so there is no
+/** The integer fields are `<select>`s, not `<input type="number">`s. Both ranges are closed (1-4,
+ * and 1-100 offered in steps), and a select cannot hold a half-typed or out-of-range value, so there is no
  * client-side validation error state to design, announce, or colour — the form is always
  * submittable and the payload is always contract-valid. */
 function integerOptions({ min, max }: { min: number; max: number }): number[] {
@@ -250,7 +255,7 @@ export function TeamPolicyDialog({
                 setValues((v) => ({ ...v, maxConcurrentExecutions: Number(e.target.value) }))
               }
             >
-              {integerOptions(MAX_CONCURRENT_EXECUTIONS_RANGE).map((n) => (
+              {concurrencyOptions(values.maxConcurrentExecutions).map((n) => (
                 <option key={n} value={n}>
                   {n}
                 </option>
@@ -258,7 +263,8 @@ export function TeamPolicyDialog({
             </select>
           </label>
           <p className="settings-hint" id={`${fieldId}-concurrency-desc`}>
-            同じ時間に作業できるWorkerの上限です。少なくすると順番待ちが増えますが、負荷は下がります。
+            このTeamで同じ時間に作業できるWorkerの上限です。少なくすると順番待ちが増えますが、負荷は下がります。
+            アプリ全体の上限（設定 &gt; Team）を超えては動きません。
           </p>
         </div>
 

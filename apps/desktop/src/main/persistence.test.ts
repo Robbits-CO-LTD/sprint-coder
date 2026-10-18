@@ -2996,7 +2996,7 @@ if (runsWithElectronAbi)
       const { persistence, path } = createPersistence();
       expect(persistence.getDefaultTeamPolicy()).toEqual({
         maxAgentDepth: 4,
-        maxConcurrentExecutions: 8,
+        maxConcurrentExecutions: 50,
         allowWorkerDirectMessages: true,
         budgetMode: 'bounded',
       });

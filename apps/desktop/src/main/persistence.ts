@@ -215,6 +215,9 @@ import {
   assertDelegationAllowed,
   assertManagerPolicy,
   assertTeamPolicy,
+  assertTeamConcurrencyLimit,
+  TEAM_DEFAULT_CONCURRENT_EXECUTIONS,
+  effectiveBudgetCap,
   assertWorkerPersistenceInput,
   transitionTeam,
   transitionTeamMessage,
@@ -1517,6 +1520,8 @@ const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
   worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
 });
 const TEAM_POLICY_SEED = JSON.stringify(DEFAULT_TEAM_POLICY);
+/** Key in a Team's budget JSON: the highest concurrency its cumulative budget is sized for. */
+const BUDGET_CONCURRENCY_KEY = 'sizedForConcurrency';
 const MANAGER_POLICY_SEED = JSON.stringify(DEFAULT_MANAGER_POLICY);
 
 /**
@@ -5811,7 +5816,6 @@ export interface PersistenceClient {
     error?: string;
   }): TeamDeliveryRecord;
   getTeamDelivery(messageId: string): TeamDeliveryRecord | null;
-  countRecentTeamMessages(teamId: string, sinceIso: string): number;
   recordWorkerWorktree(input: {
     agentId: string;
     path: string;
@@ -6038,6 +6042,9 @@ export interface PersistenceClient {
   setTeamModelRestriction(restriction: TeamModelRestriction): void;
   getDefaultTeamPolicy(): TeamPolicy;
   setDefaultTeamPolicy(policy: TeamPolicy): void;
+  /** App-wide cap on concurrent Worker executions (Settings > Team). */
+  getTeamMaxConcurrentExecutions(): number;
+  setTeamMaxConcurrentExecutions(limit: number): void;
   getPermissionPolicy(taskId: string): PermissionPolicyRecord;
   setAccessPreset(
     taskId: string,
@@ -9873,8 +9880,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(JSON.stringify(parsed), now, teamId, expectedRevision);
       if (updated.changes !== 1) throw new TeamConflictError();
+      this.keepBudgetSizedFor(current, parsed.maxConcurrentExecutions);
       return this.getTeam(teamId);
     })();
+  }
+
+  /** The concurrency a Team's cumulative budget is sized for: the highest it has been allowed.
+   * Lowering the policy mid-run must not shrink the budget under what the Team already used,
+   * or every later reservation would fail. A Team never changed has no record: its current. */
+  private budgetConcurrency(team: TeamRecord): number {
+    const recorded = (team.budget as Record<string, unknown>)[BUDGET_CONCURRENCY_KEY];
+    const current = team.policy.maxConcurrentExecutions;
+    return typeof recorded === 'number' && Number.isSafeInteger(recorded)
+      ? Math.max(recorded, current)
+      : current;
+  }
+
+  /** Called with the Team as it was before a policy write. */
+  private keepBudgetSizedFor(before: TeamRecord, next: number): void {
+    const sizedFor = Math.max(this.budgetConcurrency(before), next);
+    this.db
+      .prepare('UPDATE teams SET budget_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...before.budget, [BUDGET_CONCURRENCY_KEY]: sizedFor }), before.id);
   }
 
   getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null {
@@ -9926,6 +9953,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         return existing;
       }
       const now = new Date().toISOString();
+      const before = this.getTeam(input.teamId);
       this.db
         .prepare(
           `INSERT INTO team_blueprint_bindings(
@@ -9948,6 +9976,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
            WHERE id = ?`,
         )
         .run(JSON.stringify(blueprint.policy), now, input.teamId);
+      this.keepBudgetSizedFor(before, blueprint.policy.maxConcurrentExecutions);
       return this.getTeamBlueprint(input.teamId)!;
     })();
   }
@@ -13740,13 +13769,6 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return row === undefined ? null : toTeamDelivery(row);
   }
 
-  countRecentTeamMessages(teamId: string, sinceIso: string): number {
-    const row = this.db
-      .prepare(`SELECT COUNT(*) AS n FROM team_messages WHERE team_id = ? AND created_at >= ?`)
-      .get(teamId, sinceIso) as { n: number };
-    return row.n;
-  }
-
   recordWorkerWorktree(input: {
     agentId: string;
     path: string;
@@ -16388,6 +16410,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
       )
       .run(JSON.stringify(policy), new Date().toISOString());
+  }
+
+  getTeamMaxConcurrentExecutions(): number {
+    const row = this.db
+      .prepare("SELECT value FROM settings WHERE key = 'team.max-concurrent-executions'")
+      .get() as { value: string } | undefined;
+    if (row === undefined) return TEAM_DEFAULT_CONCURRENT_EXECUTIONS;
+    try {
+      return assertTeamConcurrencyLimit(JSON.parse(row.value) as number);
+    } catch {
+      return TEAM_DEFAULT_CONCURRENT_EXECUTIONS;
+    }
+  }
+
+  setTeamMaxConcurrentExecutions(limit: number): void {
+    assertTeamConcurrencyLimit(limit);
+    this.db
+      .prepare(
+        `INSERT INTO settings(key, value, updated_at) VALUES ('team.max-concurrent-executions', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      )
+      .run(JSON.stringify(limit), new Date().toISOString());
   }
 
   getBackgroundEpochs(taskId: string): BackgroundEpochs {
@@ -22695,13 +22739,24 @@ export class SqlitePersistenceClient implements PersistenceClient {
     scope: BudgetScope,
     kind: BudgetKind,
   ): number {
+    let storedCap: number;
     if (scope === 'global') {
       const value = globalLimits[kind];
-      return typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS.global[kind];
+      storedCap = typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS.global[kind];
+    } else {
+      const budget = team.budget as Record<string, Partial<Record<BudgetKind, number>> | undefined>;
+      const value = budget[scope]?.[kind];
+      storedCap = typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS[scope][kind];
     }
-    const budget = team.budget as Record<string, Partial<Record<BudgetKind, number>> | undefined>;
-    const value = budget[scope]?.[kind];
-    return typeof value === 'number' ? value : DEFAULT_TEAM_BUDGET_LIMITS[scope][kind];
+    return effectiveBudgetCap({
+      scope,
+      kind,
+      storedCap,
+      // Start-up leases follow the policy as it is now; cumulative usage keeps the size it reached.
+      teamConcurrency:
+        kind === 'spawnSlots' ? team.policy.maxConcurrentExecutions : this.budgetConcurrency(team),
+      appConcurrency: this.getTeamMaxConcurrentExecutions(),
+    });
   }
 
   private budgetTotals(

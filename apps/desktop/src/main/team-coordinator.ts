@@ -60,11 +60,7 @@ import {
 import { killProcessTree } from './process-tree';
 import { redactSecrets } from './secret-redactor';
 import { safeGitSpawnSync } from './safe-git';
-import {
-  TEAM_GLOBAL_EXECUTION_LIMIT,
-  TeamExecutionScheduler,
-  type TeamExecutionJob,
-} from './team-execution-scheduler';
+import { TeamExecutionScheduler, type TeamExecutionJob } from './team-execution-scheduler';
 import { TeamIntegrationScheduler } from './team-integration-scheduler';
 import { ConnectionAdmissionController, type ConnectionWaitReason } from './connection-admission';
 import {
@@ -528,14 +524,45 @@ export class TeamCoordinator {
     readonly workspaceWriteLimits: WorkspaceWriteLimits | null = null,
   ) {
     this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
-    if (executionScheduler !== undefined) {
-      this.executionScheduler = executionScheduler;
-      return;
+    if (executionScheduler !== undefined) this.executionScheduler = executionScheduler;
+    else {
+      const admission = new ConnectionAdmissionController(() => this.now().getTime());
+      for (const connection of this.persistence.listProviderConnections())
+        admission.configure(connection);
+      // Read on every admission pass, so Settings > Team applies to the next execution.
+      this.executionScheduler = new TeamExecutionScheduler(
+        () => this.persistence.getTeamMaxConcurrentExecutions(),
+        admission,
+      );
     }
-    const admission = new ConnectionAdmissionController(() => this.now().getTime());
-    for (const connection of this.persistence.listProviderConnections())
-      admission.configure(connection);
-    this.executionScheduler = new TeamExecutionScheduler(TEAM_GLOBAL_EXECUTION_LIMIT, admission);
+    // A Team's policy is read the same way, so a change applies to work already queued.
+    this.executionScheduler.readTeamLimitsFrom(
+      (teamId) => this.persistence.getTeam(teamId).policy.maxConcurrentExecutions,
+    );
+  }
+
+  /** Settings > Team changed the app-wide limit: a higher one may admit queued work now. */
+  notifyConcurrencyLimitChanged(): void {
+    this.executionScheduler.notifyLimitChanged();
+  }
+
+  /** Free-form messages admitted per Team in the trailing window (Issue #854: reports and
+   * assignments are not counted here). In memory: a restart starts a fresh window. */
+  private readonly messageRateWindows = new Map<string, number[]>();
+
+  private assertMessageRateRoom(teamId: string): void {
+    const nowMs = this.now().getTime();
+    const live = (this.messageRateWindows.get(teamId) ?? []).filter(
+      (at) => at > nowMs - TEAM_MESSAGE_RATE_LIMIT.windowMs,
+    );
+    this.messageRateWindows.set(teamId, live);
+    assertTeamMessageRate({ recentCount: live.length, ...TEAM_MESSAGE_RATE_LIMIT });
+  }
+
+  private recordMessage(teamId: string): void {
+    const admitted = this.messageRateWindows.get(teamId) ?? [];
+    admitted.push(this.now().getTime());
+    this.messageRateWindows.set(teamId, admitted);
   }
 
   private pinnedBlueprint(taskId: string, teamId: string): TeamBlueprintBindingRecord | null {
@@ -768,6 +795,8 @@ export class TeamCoordinator {
       if (this.persistence.getTeamBlueprint(team.id) !== null)
         throw new Error('Team Skillの固定Policyが適用中のため個別Policyを変更できません');
       this.persistence.updateTeamPolicy(team.id, input.policy, input.expectedRevision);
+      // A raised concurrency limit may start queued Workers now; a lowered one holds new starts.
+      this.executionScheduler.notifyLimitChanged();
       const detail = this.detail(team.id);
       this.publish(input.taskId, detail);
       return detail;
@@ -844,17 +873,14 @@ export class TeamCoordinator {
         throw new Error('Requesting Agent not found in Team');
       if (!snapshot.agents.some(({ id }) => id === targetAgentId))
         throw new Error('Target Agent not found in Team');
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
+      this.assertMessageRateRoom(team.id);
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
         sourceAgentId: requesterAgentId,
         targetAgentId,
         content,
       });
+      this.recordMessage(team.id);
       const now = this.isoNow();
       this.persistence.createTeamDelivery({ messageId: message.id, now });
       this.persistence.transitionTeamMessageState(message.id, 'dispatching');
@@ -3184,11 +3210,6 @@ export class TeamCoordinator {
           )
       )
         throw new Error('Worker already has a pending execution');
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
 
       const now = this.isoNow();
       const execution = this.persistence.createTeamExecution({
@@ -3241,6 +3262,9 @@ export class TeamCoordinator {
         teamTaskId: teamTask.id,
         executionId: execution.id,
         doneCriteria: input.doneCriteria,
+        // Issue #854: never refused for pace. The Scheduler counts the assignment when it starts,
+        // and one beyond the Team's pace waits queued until the window has room.
+        paceKey: team.id,
       });
       this.emit(input.taskId, team.id);
       return { executionId: queued.id, state: queued.state };
@@ -3449,11 +3473,8 @@ export class TeamCoordinator {
       // without one (issue #570). The stored Worker keeps its capability for later assignments.
       const workspaceSet = this.runtimeWorkspaceForTask(input.taskId);
       const readOnlyWorker = { ...worker, writeCapable: false };
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
+      // A person's direct message to a Worker counts as a free-form message, not an assignment.
+      this.assertMessageRateRoom(team.id);
 
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
@@ -3461,6 +3482,7 @@ export class TeamCoordinator {
         targetAgentId: worker.id,
         content: input.content,
       });
+      this.recordMessage(team.id);
       const teamTask = this.persistence.createTeamTask({
         teamId: team.id,
         messageId: message.id,
@@ -4872,6 +4894,10 @@ export class TeamCoordinator {
           executionId: execution.id,
           doneCriteria: dispatch.doneCriteria,
           attemptStartReason: 'app_restart',
+          // A recovered assignment is paced as a fresh one is (Issue #854): the pace window lives
+          // in memory, so without this a backlog left at restart would all start at once.
+          // Mission steps are not paced on either path.
+          ...(mission === null ? { paceKey: team.id } : {}),
         });
       }
       for (const execution of this.persistence
@@ -4911,6 +4937,7 @@ export class TeamCoordinator {
     executionId: string;
     doneCriteria: readonly string[];
     attemptStartReason?: TeamAttemptStartReason;
+    paceKey?: string;
   }): void {
     const execution = this.persistence.getTeamExecution(input.executionId);
     if (execution.assigneeAgentId !== input.workerId || execution.teamId !== input.teamId)
@@ -4920,6 +4947,7 @@ export class TeamCoordinator {
       workerId: execution.assigneeAgentId,
       teamId: input.teamId,
       teamLimit: input.teamLimit,
+      ...(input.paceKey === undefined ? {} : { paceKey: input.paceKey }),
       ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
       isReady: () =>
         !this.graphIntegrationWorkers.has(execution.assigneeAgentId) &&
