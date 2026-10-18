@@ -206,6 +206,24 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     await Promise.all(done);
   });
 
+  it('fails a read that still fails when read again after the overlapping integration', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    const { running, releases, done } = heldIntegrations(scheduler, ['a']);
+    await flush();
+    const reads: string[][] = [];
+    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+      reads.push([...running]);
+      throw new Error('user edit');
+    });
+    read.catch(() => undefined);
+    await flush();
+    expect(reads).toHaveLength(1);
+    releases.get('a')!();
+    await expect(read).rejects.toThrow('user edit');
+    expect(reads).toHaveLength(2);
+    await Promise.all(done);
+  });
+
   it('reads again when an integration started and finished during a failed read', async () => {
     const scheduler = new TeamIntegrationScheduler();
     let reads = 0;

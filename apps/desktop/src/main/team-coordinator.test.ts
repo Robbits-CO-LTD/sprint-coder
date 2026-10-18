@@ -4660,6 +4660,61 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 55_000);
 
+    it('still refuses a user edit made beside an integration once the integration ends (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('User edit beside an integration');
+      const runtime = new BlockingSameFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const scheduler = new TeamIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const readme = join(workspace, 'README.md');
+      // Another Worker's integration runs and leaves README.md alone.
+      let releaseIntegration!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseIntegration = resolve;
+      });
+      let integrationRunning = false;
+      const integration = scheduler.submit({
+        executionId: 'other-worker-integration',
+        mutationKeys: [teamRepositoryMutationKey(await manager.resolveRepositoryPath(workspace))],
+        run: async () => {
+          integrationRunning = true;
+          await barrier;
+        },
+      });
+      await waitFor(() => integrationRunning, 5_000);
+      // The user edits README.md meanwhile: a change that is not the integration's.
+      writeFileSync(readme, 'user edit\n');
+      let settled = false;
+      const assignment = coordinator
+        .assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'beside a user edit',
+          doneCriteria: ['README.md is written'],
+          accessMode: 'workspace-write',
+        })
+        .finally(() => {
+          settled = true;
+        });
+      assignment.catch(() => undefined);
+      await waitFor(() => settled || scheduler.snapshot().queuedExecutionIds.length === 1, 10_000);
+      expect(settled).toBe(false);
+      releaseIntegration();
+      await integration;
+      await expect(assignment).rejects.toThrow(/clean/u);
+      const team = persistence.getTeamByTask(task.id)!;
+      expect(persistence.listTeamExecutions(team.id)).toEqual([]);
+      persistence.close();
+    }, 55_000);
+
     it('assigns workspace-write work without waiting behind queued integrations (issue #864)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Assignments beside an integration queue');
