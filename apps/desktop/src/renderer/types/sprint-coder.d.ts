@@ -211,11 +211,6 @@ export type AutoPermissionDecision = {
   createdAt: string;
 };
 
-export type AutoPermissionDecisionCounts = {
-  throughSeq: number;
-  turns: { turnId: string; allow: number; allowOnce: number; deny: number }[];
-};
-
 export type QueuedInput = { ordinal: number; text: string };
 
 export type CommandSummary = {
@@ -517,6 +512,8 @@ export type TurnSnapshot = {
   latestTurnDiff: TurnDiff | null;
   /** Turns closed as interrupted by a restart (issue #842); absent from older backends. */
   interruptedTurnIds?: string[];
+  /** Every Auto decision counted per Turn and kind, up to lastSeq (issue #863). */
+  autoDecisionCounts?: { turnId: string; allow: number; allowOnce: number; deny: number }[];
 };
 
 /** err.code values the IPC layer may attach to a rejected SprintCoderApi promise. */
@@ -1254,7 +1251,6 @@ export interface SprintCoderApi {
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
-    countAutoDecisions(taskId: string): Promise<AutoPermissionDecisionCounts>;
     set(
       taskId: string,
       preset: AccessPreset,

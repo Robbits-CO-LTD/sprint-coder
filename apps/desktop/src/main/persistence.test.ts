@@ -49,6 +49,8 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { parseGapSnapshot, startEventLoopGapSampler } from './persistence-bridge-gap-sampler';
 import { ToolBroker } from './tool-broker';
 import {
+  AUTO_DECISION_LIST_SQL,
+  AUTO_DECISION_TALLY_SQL,
   AcceptanceEvidenceMissingError,
   MAX_VERIFIABLE_POST_IMAGE_BYTES,
   readVerifiablePostImage,
@@ -9127,64 +9129,140 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
-    it('restores denials past a stream of allows and counts every Auto decision per Turn', () => {
-      const { persistence } = createPersistence();
-      const task = persistence.createTask();
-      const turn = startExecutingTurn(persistence, task.id);
-      const request = {
-        taskId: task.id,
-        subjectId: 'tool:builtin:read',
-        capability: 'workspace.read' as const,
-        resource: { kind: 'external' as const, target: 'fixture' },
-        operation: 'read' as const,
-        providerEgress: 'none' as const,
-        sandboxProfile: 'read-only' as const,
-        executionSpecDigest: 'd'.repeat(64),
-        reviewerInputDigest: 'e'.repeat(64),
-        risk: 'low' as const,
-      };
-      const record = (index: number, decision: 'allow' | 'deny') =>
-        persistence.commitPermissionEvaluation(
-          task.id,
-          request,
-          { decision, reason: 'fixture', policyEpoch: 0, evaluationTrace: ['approval-policy'] },
-          {
-            id: `auto-count-${index}`,
-            taskId: task.id,
-            turnId: turn.turnId,
-            callId: `call-count-${index}`,
-            reviewRequestId: `review-count-${index}`,
-            capability: request.capability,
-            source: 'policy',
-            decision,
-            outcome: decision,
-            reason: 'fixture',
-            risk: 'low',
-            model: 'fixture',
-            templateVersion: '1',
-            requestFingerprint: 'f'.repeat(64),
-            executionSpecDigest: request.executionSpecDigest,
-            inputDigest: request.reviewerInputDigest,
-            policyEpoch: 0,
-            createdAt: '2026-10-18T00:00:00.000Z',
-          },
-        );
-      let lastSeq = 0;
-      for (let index = 0; index < 2; index += 1) lastSeq = record(index, 'deny')!.seq;
-      for (let index = 2; index < 252; index += 1) lastSeq = record(index, 'allow')!.seq;
+    describe('Auto decision counts and kept rows (issue #863)', () => {
+      function recordAutoDecisions(persistence: SqlitePersistenceClient, taskId: string) {
+        const request = {
+          taskId,
+          subjectId: 'tool:builtin:read',
+          capability: 'workspace.read' as const,
+          resource: { kind: 'external' as const, target: 'fixture' },
+          operation: 'read' as const,
+          providerEgress: 'none' as const,
+          sandboxProfile: 'read-only' as const,
+          executionSpecDigest: 'd'.repeat(64),
+          reviewerInputDigest: 'e'.repeat(64),
+          risk: 'low' as const,
+        };
+        return (index: number, turnId: string, decision: 'allow' | 'allow_once' | 'deny') =>
+          persistence.commitPermissionEvaluation(
+            taskId,
+            request,
+            { decision, reason: 'fixture', policyEpoch: 0, evaluationTrace: ['approval-policy'] },
+            {
+              id: `auto-count-${index}`,
+              taskId,
+              turnId,
+              callId: `call-count-${index}`,
+              reviewRequestId: `review-count-${index}`,
+              capability: request.capability,
+              source: 'policy',
+              decision,
+              outcome: decision,
+              reason: 'fixture',
+              risk: 'low',
+              model: 'fixture',
+              templateVersion: '1',
+              requestFingerprint: 'f'.repeat(64),
+              executionSpecDigest: request.executionSpecDigest,
+              inputDigest: request.reviewerInputDigest,
+              policyEpoch: 0,
+              createdAt: '2026-10-18T00:00:00.000Z',
+            },
+          )!;
+      }
 
-      const restored = persistence.listAutoPermissionDecisions(task.id);
-      expect(restored.filter(({ decision }) => decision === 'deny').map(({ id }) => id)).toEqual([
-        'auto-count-0',
-        'auto-count-1',
-      ]);
-      expect(restored.filter(({ decision }) => decision === 'allow')).toHaveLength(200);
-      expect(restored.at(-1)?.id).toBe('auto-count-251');
-      expect(persistence.countAutoPermissionDecisions(task.id)).toEqual({
-        throughSeq: lastSeq,
-        turns: [{ turnId: turn.turnId, allow: 250, allowOnce: 0, deny: 2 }],
+      it('restores denials past a stream of allows and counts every decision per Turn', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const record = recordAutoDecisions(persistence, task.id);
+        for (let index = 0; index < 2; index += 1) record(index, turn.turnId, 'deny');
+        record(2, turn.turnId, 'allow_once');
+        let lastSeq = 0;
+        for (let index = 3; index < 253; index += 1)
+          lastSeq = record(index, turn.turnId, 'allow').seq;
+
+        const restored = persistence.listAutoPermissionDecisions(task.id);
+        expect(restored.filter(({ decision }) => decision === 'deny').map(({ id }) => id)).toEqual([
+          'auto-count-0',
+          'auto-count-1',
+        ]);
+        expect(restored.filter(({ decision }) => decision !== 'deny')).toHaveLength(200);
+        expect(restored.map(({ id }) => id)).toEqual(
+          [...restored]
+            .sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }))
+            .map(({ id }) => id),
+        );
+        expect(restored.at(-1)?.id).toBe('auto-count-252');
+        const counts = [{ turnId: turn.turnId, allow: 250, allowOnce: 1, deny: 2 }];
+        expect(persistence.countAutoPermissionDecisions(task.id)).toEqual(counts);
+        // The snapshot carries the same counts, read together with the lastSeq they cover.
+        const snapshot = persistence.snapshot(task.id);
+        expect(snapshot.autoDecisionCounts).toEqual(counts);
+        expect(snapshot.lastSeq).toBeGreaterThanOrEqual(lastSeq);
+        persistence.close();
       });
-      persistence.close();
+
+      it('reads counts and kept rows by key, never by scanning the history', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const record = recordAutoDecisions(persistence, task.id);
+        for (let index = 0; index < 30; index += 1)
+          record(index, turn.turnId, index % 10 === 0 ? 'deny' : 'allow');
+        persistence.close();
+
+        const raw = new Database(path, { readonly: true });
+        try {
+          const plan = (sql: string, ...args: string[]) =>
+            (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]).map(
+              ({ detail }) => detail,
+            );
+          const listPlan = plan(AUTO_DECISION_LIST_SQL, task.id, task.id, task.id);
+          const tallyPlan = plan(AUTO_DECISION_TALLY_SQL, task.id);
+          const tableScan =
+            /^SCAN (auto_permission_decision_events|auto_permission_decision_tallies|turn_events|event)\b/u;
+          expect(listPlan.filter((detail) => tableScan.test(detail))).toEqual([]);
+          expect(tallyPlan.filter((detail) => tableScan.test(detail))).toEqual([]);
+          expect(listPlan.join('\n')).toMatch(/SEARCH auto_permission_decision_events/u);
+          expect(listPlan.join('\n')).toMatch(/SEARCH event USING INDEX/u);
+          expect(tallyPlan.join('\n')).toMatch(/SEARCH auto_permission_decision_tallies/u);
+        } finally {
+          raw.close();
+        }
+      });
+
+      it('backfills the counts and keys of decisions recorded before v103', () => {
+        const fixture = createPersistence();
+        const task = fixture.persistence.createTask();
+        const first = startExecutingTurn(fixture.persistence, task.id);
+        const record = recordAutoDecisions(fixture.persistence, task.id);
+        record(0, first.turnId, 'deny');
+        for (let index = 1; index < 205; index += 1) record(index, first.turnId, 'allow');
+        const counts = fixture.persistence.countAutoPermissionDecisions(task.id);
+        const kept = fixture.persistence.listAutoPermissionDecisions(task.id);
+        fixture.persistence.close();
+
+        const old = new Database(fixture.path);
+        old.exec(`
+          DROP TABLE auto_permission_decision_tallies;
+          DROP TABLE auto_permission_decision_events;
+          DELETE FROM schema_migrations WHERE version = 103;
+        `);
+        old.close();
+
+        const migrated = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+        expect(migrated.countAutoPermissionDecisions(task.id)).toEqual(counts);
+        expect(counts).toEqual([{ turnId: first.turnId, allow: 204, allowOnce: 0, deny: 1 }]);
+        expect(migrated.listAutoPermissionDecisions(task.id)).toEqual(kept);
+        expect(kept[0]?.id).toBe('auto-count-0');
+        // New decisions after the upgrade keep counting from the backfilled values.
+        recordAutoDecisions(migrated, task.id)(999, first.turnId, 'deny');
+        expect(migrated.countAutoPermissionDecisions(task.id)).toEqual([
+          { turnId: first.turnId, allow: 204, allowOnce: 0, deny: 2 },
+        ]);
+        migrated.close();
+      });
     });
 
     it('publishes context usage around audit-only compaction without changing displayed history', () => {
@@ -10482,6 +10560,7 @@ if (runsWithElectronAbi)
         { version: 100 },
         { version: 101 },
         { version: 102 },
+        { version: 103 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],

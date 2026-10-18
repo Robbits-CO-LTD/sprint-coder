@@ -690,9 +690,6 @@ const pendingAutoDecisions = new Map<string, QueuedAutoDecision[]>();
 let pendingAutoDecisionApply: ((fn: (state: AppState) => Partial<AppState>) => void) | null = null;
 let pendingAutoDecisionFrame: number | null = null;
 let pendingAutoDecisionTimer: ReturnType<typeof setTimeout> | null = null;
-// Decisions that arrived while a Task's counts were being read from Main. The read counts up to
-// its own `throughSeq`; these fill in what arrived after it.
-const autoDecisionsDuringCountLoad = new Map<string, QueuedAutoDecision[]>();
 
 function flushAutoDecisions(): void {
   if (pendingAutoDecisionFrame !== null && typeof cancelAnimationFrame === 'function')
@@ -731,7 +728,6 @@ function queueAutoDecision(
   const queued = pendingAutoDecisions.get(taskId);
   if (queued === undefined) pendingAutoDecisions.set(taskId, [entry]);
   else queued.push(entry);
-  autoDecisionsDuringCountLoad.get(taskId)?.push(entry);
   pendingAutoDecisionApply = apply;
   if (pendingAutoDecisionTimer !== null) return;
   pendingAutoDecisionTimer = setTimeout(flushAutoDecisions, 100);
@@ -1775,56 +1771,44 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       const sprintCoder = window.sprintCoder;
 
-      autoDecisionsDuringCountLoad.set(taskId, []);
-      const [
-        messagesResult,
-        snapshot,
-        commandsResult,
-        approvalHistoryResult,
-        autoDecisionsResult,
-        autoDecisionCountsResult,
-      ] = await Promise.all([
-        sprintCoder.tasks
-          .messages(taskId)
-          .then((v) => ({ ok: true as const, v }))
-          .catch((err: unknown) => ({ ok: false as const, err })),
-        typeof sprintCoder.turns.snapshot === 'function'
-          ? sprintCoder.turns.snapshot(taskId).catch(() => null)
-          : Promise.resolve(null),
-        typeof sprintCoder.commands?.list === 'function'
-          ? sprintCoder.commands
-              .list(taskId)
-              .then(async (commands) => {
-                const cards = await Promise.all(
-                  commands.map(async (command): Promise<CommandCardState> => {
-                    const output = await sprintCoder.commands
-                      .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
-                      .catch(() => ({ items: [] as CommandOutputRecord[] }));
-                    return { command, tail: projectCommandTail(output.items) };
-                  }),
-                );
-                return { ok: true as const, cards };
-              })
-              .catch((err: unknown) => ({ ok: false as const, err }))
-          : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
-        typeof sprintCoder.approvals?.listRecent === 'function'
-          ? sprintCoder.approvals
-              .listRecent(taskId)
-              .then((approvals) => ({ ok: true as const, approvals }))
-              .catch((err: unknown) => ({ ok: false as const, err }))
-          : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
-        typeof sprintCoder.permissions?.listAutoDecisions === 'function'
-          ? sprintCoder.permissions
-              .listAutoDecisions(taskId)
-              .then((decisions) => ({ ok: true as const, decisions }))
-              .catch((err: unknown) => ({ ok: false as const, err }))
-          : Promise.resolve({ ok: true as const, decisions: [] as AutoPermissionDecision[] }),
-        typeof sprintCoder.permissions?.countAutoDecisions === 'function'
-          ? sprintCoder.permissions.countAutoDecisions(taskId).catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      const liveDuringCountLoad = autoDecisionsDuringCountLoad.get(taskId) ?? [];
-      autoDecisionsDuringCountLoad.delete(taskId);
+      const [messagesResult, snapshot, commandsResult, approvalHistoryResult, autoDecisionsResult] =
+        await Promise.all([
+          sprintCoder.tasks
+            .messages(taskId)
+            .then((v) => ({ ok: true as const, v }))
+            .catch((err: unknown) => ({ ok: false as const, err })),
+          typeof sprintCoder.turns.snapshot === 'function'
+            ? sprintCoder.turns.snapshot(taskId).catch(() => null)
+            : Promise.resolve(null),
+          typeof sprintCoder.commands?.list === 'function'
+            ? sprintCoder.commands
+                .list(taskId)
+                .then(async (commands) => {
+                  const cards = await Promise.all(
+                    commands.map(async (command): Promise<CommandCardState> => {
+                      const output = await sprintCoder.commands
+                        .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
+                        .catch(() => ({ items: [] as CommandOutputRecord[] }));
+                      return { command, tail: projectCommandTail(output.items) };
+                    }),
+                  );
+                  return { ok: true as const, cards };
+                })
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
+          typeof sprintCoder.approvals?.listRecent === 'function'
+            ? sprintCoder.approvals
+                .listRecent(taskId)
+                .then((approvals) => ({ ok: true as const, approvals }))
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
+          typeof sprintCoder.permissions?.listAutoDecisions === 'function'
+            ? sprintCoder.permissions
+                .listAutoDecisions(taskId)
+                .then((decisions) => ({ ok: true as const, decisions }))
+                .catch((err: unknown) => ({ ok: false as const, err }))
+            : Promise.resolve({ ok: true as const, decisions: [] as AutoPermissionDecision[] }),
+        ]);
 
       if (get().selectedTaskId !== taskId) return; // user switched away while these were in flight
 
@@ -1868,16 +1852,15 @@ export const useAppStore = create<AppState>((set, get) => {
           },
         }));
       }
-      if (autoDecisionCountsResult !== null) {
+      // The snapshot counts every Auto decision up to its lastSeq, read in the same call, and the
+      // subscription below resumes after lastSeq, so each decision is counted exactly once.
+      if (snapshot?.autoDecisionCounts !== undefined) {
         const byTurn: Record<string, AutoDecisionTally> = {};
-        for (const { turnId, allow, allowOnce, deny } of autoDecisionCountsResult.turns)
+        for (const { turnId, allow, allowOnce, deny } of snapshot.autoDecisionCounts)
           byTurn[turnId] = { allow, allowOnce, deny };
-        const loaded = countAutoDecisions(
-          { throughSeq: autoDecisionCountsResult.throughSeq, byTurn },
-          liveDuringCountLoad,
-        );
-        // A read that started before another one for the same Task can be older than what has been
-        // counted live since; keep the newer counts.
+        const loaded: AutoDecisionCountState = { throughSeq: snapshot.lastSeq, byTurn };
+        // A snapshot that started before another one for the same Task can be older than what has
+        // been counted live since; keep the newer counts.
         apply((state) =>
           (state.autoDecisionCountsByTask[taskId]?.throughSeq ?? 0) > loaded.throughSeq
             ? {}
