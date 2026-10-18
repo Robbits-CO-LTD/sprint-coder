@@ -1,11 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AutoPermissionDecision, TurnEvent } from '../types/sprint-coder';
-import {
-  AUTO_DECISION_RETAIN_LIMIT,
-  appendAutoDecisions,
-  handleTurnEvent,
-  useAppStore,
-} from './appStore';
+import type { useAppStore } from './appStore';
+import { AUTO_DECISION_RETAIN_LIMIT, appendAutoDecisions, handleTurnEvent } from './appStore';
 
 type AppState = ReturnType<typeof useAppStore.getState>;
 
