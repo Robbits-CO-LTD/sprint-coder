@@ -762,9 +762,10 @@ async function snapshotLexicalChain(
   workspacePath: string,
   lexicalTarget: string,
 ): Promise<PathChainEntry[]> {
-  const pathParts = relative(workspacePath, lexicalTarget).split(sep).filter(Boolean);
+  const chainBase = await lexicalWorkspaceBase(workspacePath, lexicalTarget);
+  const pathParts = relative(chainBase, lexicalTarget).split(sep).filter(Boolean);
   const chain: PathChainEntry[] = [];
-  let current = workspacePath;
+  let current = chainBase;
   for (const part of pathParts) {
     current = join(current, part);
     try {
@@ -780,6 +781,37 @@ async function snapshotLexicalChain(
     }
   }
   return chain;
+}
+
+/**
+ * Where the lexical chain starts. An absolute target may name the Workspace through an alias of
+ * its canonical path (macOS `/var` -> `/private/var`, an 8.3 short name, a symlinked parent).
+ * Walking `relative(canonical, alias)` climbs out through `..` and snapshots directories outside
+ * the Workspace (for example the shared tmpdir), whose mtime/nlink change with every unrelated
+ * sibling and make revalidation fail spuriously. The chain therefore starts at the outermost
+ * lexical ancestor that canonicalizes to the Workspace itself. What lies above it stays covered:
+ * revalidation re-resolves the whole path and compares the canonical Workspace, its root
+ * identity, the resolved target and the parent/target identities. Without such an ancestor the
+ * previous, stricter walk is kept.
+ */
+async function lexicalWorkspaceBase(workspacePath: string, lexicalTarget: string): Promise<string> {
+  const fromWorkspace = relative(workspacePath, lexicalTarget);
+  if (fromWorkspace !== '..' && !fromWorkspace.startsWith(`..${sep}`) && !isAbsolute(fromWorkspace))
+    return workspacePath;
+  const { root } = parse(lexicalTarget);
+  let candidate = root;
+  for (const part of relative(root, lexicalTarget).split(sep).filter(Boolean)) {
+    candidate = join(candidate, part);
+    let canonical: string;
+    try {
+      canonical = await realpath(candidate);
+    } catch (error) {
+      if (isNotFound(error)) break;
+      throw error;
+    }
+    if (canonical === workspacePath) return candidate;
+  }
+  return workspacePath;
 }
 
 async function resolveExisting(
