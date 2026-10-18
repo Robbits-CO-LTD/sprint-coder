@@ -790,6 +790,23 @@ function summarizeFrames(frames: unknown): unknown {
   };
 }
 
+function expectTeamToFinish(
+  result: DriveResult,
+  token: string,
+  expected: Readonly<{ completed: number; failed: number }>,
+): void {
+  expect
+    .soft(result.stoppedReason, 'Team and Leader must finish before the deadline')
+    .toBe('all-terminal-and-leader-idle');
+  const finalCounts = [...result.answer.matchAll(FINAL_LINE(token))].map((match) => ({
+    completed: Number(match[2]),
+    failed: Number(match[3]),
+  }));
+  expect
+    .soft(finalCounts, 'Leader must account for every Worker in one final line')
+    .toEqual([expected]);
+}
+
 function expectTeamToStayResponsive(result: DriveResult): void {
   // #863 requires timely rendering as well as correct files. Recording a stall must fail the run.
   expect
@@ -1091,6 +1108,7 @@ test.describe('real AI Team scale E2E', () => {
       note('team-scale-tracks.json', result.tracks);
       note('team-scale-last.json', result.last);
       expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_SCALE_DONE', { completed: TEAM_SIZE, failed: 0 });
       expect.soft(summary.hiredWorkers).toBe(TEAM_SIZE);
       expect
         .soft(summary.byEngine)
@@ -1229,6 +1247,7 @@ test.describe('real AI Team scale E2E', () => {
       note('team-overlap-tracks.json', result.tracks);
       note('team-overlap-last.json', result.last);
       expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_OVERLAP_DONE', { completed: 4, failed: 0 });
       expect.soft(summary.hiredWorkers).toBe(4);
       expect.soft(summary.editsPresent).toEqual([1, 2, 3, 4]);
       expect.soft(summary.exactlyExpected).toBe(true);
@@ -1354,6 +1373,7 @@ test.describe('real AI Team scale E2E', () => {
       note('team-conflict-tracks.json', result.tracks);
       note('team-conflict-page.txt', result.pageText);
       expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_CONFLICT_DONE', { completed: 1, failed: 1 });
       // 同期点に届かなかった（どちらかが先に統合された・同じ baseHead にならなかった）なら、衝突が
       // 起きないのは App のせいとは限らない。判定不能として、理由を出して失敗させる。
       expect(
@@ -1372,12 +1392,6 @@ test.describe('real AI Team scale E2E', () => {
       expect.soft(summary.conflictReports).toHaveLength(1);
       expect.soft(summary.conflictReports[0] ?? '').toContain('shared/index.md');
       expect.soft(summary.conflictReports[0] ?? '').toContain('waiting_resume');
-      // Leader の最終回答は指定の 1 行（completed=1 failed=1）でなければならない。無い・形式違いは失敗。
-      expect(
-        summary.finalLines,
-        `Leader の最終回答に「SC_TEAM_CONFLICT_DONE completed=<n> failed=<n>」の行がちょうど 1 つ必要です: ${JSON.stringify(result.answer.slice(-500))}`,
-      ).toHaveLength(1);
-      expect.soft(summary.finalLines[0]).toEqual({ completed: 1, failed: 1 });
       expect.soft(summary.corrupted).toBe(false);
       expect.soft(repo['cherryPickInProgress']).toBe(false);
       expect.soft(String(repo['status']).trim()).toBe('');
