@@ -4378,6 +4378,18 @@ if (runsWithElectronAbi)
       const resumedContent = JSON.parse(resumed!.content) as { status: string; summary: string };
       expect(resumedContent.status).toBe('succeeded');
       expect(resumedContent.summary).toContain('統合しました');
+      // A second (or concurrent) resume is refused and sends no further report.
+      await expect(
+        Promise.all([
+          coordinator.resumeExecutionIntegration(task.id, waiting.executionId),
+          coordinator.resumeExecutionIntegration(task.id, waiting.executionId),
+        ]),
+      ).rejects.toThrow('not waiting to resume');
+      expect(
+        (await waitReports()).reports.filter(
+          ({ executionId }) => executionId === waiting.executionId,
+        ),
+      ).toEqual([]);
       persistence.close();
     }, 55_000);
 
