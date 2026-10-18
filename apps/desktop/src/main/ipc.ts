@@ -672,6 +672,7 @@ import { resolveRuntimeFailureDiagnostic } from '../runtime-host/runtime-failure
 import {
   AUTO_PRESET_WORKSPACE_EDIT_AUDIT_REASON,
   FULL_PRESET_DISCLOSURE_AUDIT_REASON,
+  describeToolSchemaMismatches,
   digestToolCatalogValue,
   permissionRequestFingerprint,
   requiresPerCallHumanApproval,
@@ -9211,15 +9212,22 @@ export class IpcRouter {
           );
         });
         if (invalidToolCall !== undefined) {
-          const guidance = roundTools.find(
-            ({ name }) => name === invalidToolCall.name,
-          )?.description;
+          const invalidDefinition = roundTools.find(({ name }) => name === invalidToolCall.name);
+          const guidance = invalidDefinition?.description;
+          // Where the input differs from the schema, never its values (issue #870).
+          const mismatch =
+            invalidDefinition === undefined
+              ? ''
+              : describeToolSchemaMismatches(
+                  invalidDefinition.inputSchema as never,
+                  invalidToolCall.input,
+                );
           for (const toolCall of roundToolCalls)
             messages.push({
               role: 'tool',
               content: providerToolErrorContent(
                 'INVALID_TOOL_INPUT',
-                `Tool input validation failed for ${invalidToolCall.name}. ${guidance ?? 'Use a tool from the provided catalog and follow its input schema.'}`,
+                `Tool input validation failed for ${invalidToolCall.name}.${mismatch === '' ? '' : ` Mismatch: ${mismatch}.`} ${guidance ?? 'Use a tool from the provided catalog and follow its input schema.'}`,
               ),
               toolCallId: toolCall.callId,
               toolName: toolCall.name,

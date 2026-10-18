@@ -12,6 +12,7 @@ import {
   type ManagedToolLifecycleEvent,
 } from './tool-broker';
 import { secureLogger } from './secure-logger';
+import { WORKSPACE_PATCH_TOOL } from './workspace-patch-tool';
 
 const inputSchema = {
   type: 'object',
@@ -755,6 +756,99 @@ describe('Main ToolBroker', () => {
         input: { text: 'ok' },
       }),
     ).rejects.toThrow('Tool output does not match');
+  });
+
+  describe('schema mismatch hints (issue #870)', () => {
+    const SECRET = 'sk-ant-api03-DO-NOT-LEAK-0123456789abcdef';
+    const PRIVATE_PATH = 'private/customer-ledger-4711.txt';
+
+    async function rejectionFor(input: unknown): Promise<string> {
+      const registry = new ToolRegistry();
+      registry.register(WORKSPACE_PATCH_TOOL);
+      const broker = new ToolBroker(registry, () => 3, authorizeAll);
+      const execute = vi.fn(() => ({}));
+      broker.registerImplementation({
+        toolId: WORKSPACE_PATCH_TOOL.toolId,
+        implementationKind: 'built-in',
+        execute,
+      });
+      broker.startTurn(context, 'mock');
+      const error = await broker
+        .dispatch({
+          taskId: 'task-1',
+          turnId: 'turn-1',
+          callId: 'call-1',
+          providerName: 'apply_patch',
+          input,
+        })
+        .then(
+          () => undefined,
+          (reason: unknown) => reason,
+        );
+      expect(execute).not.toHaveBeenCalled();
+      expect(error).toBeInstanceOf(Error);
+      const message = (error as Error).message;
+      expect(message).toMatch(/^Tool input does not match the pinned schema: /);
+      // Values never leave: neither the secret nor the user's path nor the file text.
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toContain('DO-NOT-LEAK');
+      expect(message).not.toContain(PRIVATE_PATH);
+      expect(message).not.toContain('customer-ledger');
+      return message;
+    }
+
+    it('names the path and expected type of a wrongly typed value', async () => {
+      const message = await rejectionFor({
+        path: PRIVATE_PATH,
+        edits: [{ oldText: SECRET, newText: 7 }],
+      });
+      expect(message).toContain('$.edits[0].newText: expected string, got integer');
+    });
+
+    it('names a missing required key, including one required by a conditional branch', async () => {
+      const message = await rejectionFor({
+        operations: [
+          { kind: 'update', path: PRIVATE_PATH, edits: [{ oldText: SECRET, newText: SECRET }] },
+        ],
+      });
+      expect(message).toContain('$.operations[0]: missing required key "revision"');
+      expect(await rejectionFor({ path: PRIVATE_PATH })).toContain(
+        '$: missing required key "edits"',
+      );
+    });
+
+    it('names a key the schema does not allow and lists the allowed keys', async () => {
+      // The single-file form with a batch-only revision: one plausible shape of W26's attempts.
+      const message = await rejectionFor({
+        path: PRIVATE_PATH,
+        revision: { version: 1, tokenId: SECRET },
+        edits: [{ oldText: SECRET, newText: SECRET }],
+      });
+      expect(message).toContain(
+        '$: unexpected key "revision"; allowed keys: "rootId", "path", "edits", "operations"',
+      );
+    });
+
+    it('describes a secret-looking or long key by its length instead of its text', async () => {
+      const message = await rejectionFor({
+        path: PRIVATE_PATH,
+        edits: [{ oldText: 'a', newText: 'b' }],
+        [SECRET]: true,
+        [PRIVATE_PATH]: true,
+      });
+      expect(message).toContain(`unexpected key (a ${SECRET.length}-character key)`);
+      expect(message).toContain(`unexpected key (a ${PRIVATE_PATH.length}-character key)`);
+    });
+
+    it('caps the hint at five mismatches and a bounded length', async () => {
+      const input: Record<string, unknown> = { path: PRIVATE_PATH, edits: [] };
+      for (let index = 0; index < 40; index += 1) input[`extra_${index}`] = SECRET;
+      const message = await rejectionFor(input);
+      const hint = message.slice('Tool input does not match the pinned schema: '.length);
+      expect(hint.length).toBeLessThanOrEqual(650);
+      expect(hint.split('; ').filter((part) => part.startsWith('$')).length).toBeLessThanOrEqual(5);
+      expect(hint.endsWith('more mismatches omitted')).toBe(true);
+    });
   });
 
   it('rejects dispatch when the Task policy epoch changes after the Turn snapshot', async () => {

@@ -7,6 +7,7 @@ import {
   type ToolRegistry,
   type ToolCatalogEntry,
   type ToolResourceClaim,
+  describeToolSchemaMismatches,
   toolValueMatchesSchema,
 } from '@sprint-coder/domain';
 import { secureLogger } from './secure-logger';
@@ -300,8 +301,12 @@ export class ToolBroker {
       if (implementation.implementationKind !== entry.implementationKind)
         throw new Error('Pinned ToolImplementation kind mismatch');
       const runtimeInput = cloneAndFreeze(request.input);
+      // Say where and how the input differs, never what it holds, so the model can correct the call
+      // instead of repeating it (issue #870). The hint is built from the schema and the input's shape.
       if (!toolValueMatchesSchema(entry.inputSchema, runtimeInput))
-        throw new Error('Tool input does not match the pinned schema');
+        throw new Error(
+          `Tool input does not match the pinned schema: ${describeToolSchemaMismatches(entry.inputSchema, runtimeInput)}`,
+        );
       const pinnedInput =
         implementation.prepare === undefined
           ? runtimeInput

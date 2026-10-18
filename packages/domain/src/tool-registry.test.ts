@@ -4,6 +4,8 @@ import {
   ComputerUseToolRegistry,
   createToolDefinition,
   createToolId,
+  describeToolSchemaMismatches,
+  findToolSchemaMismatches,
   isComputerTargetToolKind,
   isComputerUseToolKind,
   parseToolId,
@@ -312,6 +314,83 @@ describe('Tool Registry domain', () => {
     expect(toolValueMatchesSchema(schema, { kind: 'manager', levels: 1 })).toBe(true);
     expect(toolValueMatchesSchema(schema, { kind: 'manager' })).toBe(false);
     expect(toolValueMatchesSchema(schema, { kind: 'manager', levels: 0 })).toBe(false);
+  });
+
+  it('explains a mismatch by location, type and key name without echoing values (issue #870)', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['leaf', 'manager'] },
+        levels: { type: 'integer', minimum: 1, maximum: 4 },
+        tags: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+    } as const;
+    const secret = 'ghp_SuperSecretValue0123456789abcdef0123';
+    expect(findToolSchemaMismatches(schema, { kind: 'leaf', tags: ['x'] })).toEqual([]);
+    expect(findToolSchemaMismatches(schema, { kind: 'leaf', tags: ['x', 3] })).toEqual([
+      { path: '$.tags[1]', problem: 'type', detail: 'expected string, got integer' },
+    ]);
+    expect(findToolSchemaMismatches(schema, { levels: 2 })).toEqual([
+      { path: '$', problem: 'required', detail: 'missing required key "kind"' },
+    ]);
+    expect(findToolSchemaMismatches(schema, { kind: 'leaf', note: secret })).toEqual([
+      {
+        path: '$',
+        problem: 'unexpected_key',
+        detail: 'unexpected key "note"; allowed keys: "kind", "levels", "tags"',
+      },
+    ]);
+    const described = describeToolSchemaMismatches(schema, {
+      kind: secret,
+      levels: 9,
+      [secret]: secret,
+    });
+    expect(described).toContain('$.kind: must be one of "leaf", "manager"');
+    expect(described).toContain('$.levels: must be <= 4');
+    expect(described).toContain(`unexpected key (a ${secret.length}-character key)`);
+    expect(described).not.toContain('SuperSecret');
+    expect(describeToolSchemaMismatches(schema, { kind: 'leaf' })).toBe('');
+  });
+
+  it('agrees with toolValueMatchesSchema on every value', () => {
+    const schema = {
+      type: 'object',
+      properties: {
+        kind: { type: 'string', enum: ['leaf', 'manager'] },
+        levels: { type: 'integer', minimum: 1, maximum: 4 },
+      },
+      required: ['kind'],
+      additionalProperties: false,
+      allOf: [
+        { if: { properties: { kind: { const: 'manager' } } }, then: { required: ['levels'] } },
+        {
+          if: { properties: { kind: { const: 'leaf' } } },
+          then: { not: { required: ['levels'] } },
+        },
+      ],
+    } as const;
+    for (const value of [
+      { kind: 'leaf' },
+      { kind: 'leaf', levels: 1 },
+      { kind: 'manager', levels: 1 },
+      { kind: 'manager' },
+      { kind: 'manager', levels: 0 },
+      { kind: 'other' },
+      { kind: 'leaf', extra: true },
+      [],
+      'text',
+      null,
+      { kind: 'manager', levels: 1.5 },
+    ]) {
+      const matches = toolValueMatchesSchema(schema, value);
+      expect(findToolSchemaMismatches(schema, value).length === 0).toBe(matches);
+      expect(describeToolSchemaMismatches(schema, value) === '').toBe(matches);
+    }
+    expect(describeToolSchemaMismatches(schema, { kind: 'leaf', levels: 1 })).toBe(
+      '$: must not include "levels" here',
+    );
   });
 
   it('enforces numeric bounds even when a schema omits an explicit type', () => {
