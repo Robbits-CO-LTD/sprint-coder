@@ -256,12 +256,12 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
   - `!FactsAreComplete`（metadata、祖先チェーン、面のどれかが欠ける）。
   - Explorer などのシェル項目の lookup の放棄・曖昧（表示名で照合して 1 つに決まらない）・仮想フォルダ・枠の使用中。S5-c-2 の INV-3 の行が挙げる「表示名の曖昧さ」はこの lookup の曖昧さを指す。
   - chain の ProcessId が対象プロセスと一致しない（別プロセスの要素が混じっている）。
-  - コアの効果分類器が、操作対象のテキストを読めないために takeover を返した場合。具体的には、`TextIsClassifiable` が false の場合と、スクロールで `ScopeIsReadable` か `ScrollValueTextIsClassifiable` が false の場合（`computer_use_effect_classifier.h`）。
+  - コアの効果分類器の決定が `DecisionKind::kTakeover` の場合。理由は問わない（fail-closed。`computer_use_effect_classifier.h` の `Takeover()`）。いま該当するのは、操作対象のテキストを読めない場合（`TextIsClassifiable` が false、スクロールで `ScopeIsReadable` か `ScrollValueTextIsClassifiable` が false）などで、将来ほかの理由で `kTakeover` を返すようになっても漏れない。
     - 例: 分類器が扱えない言語のラベル（ロシア語の「インストール」ボタンなど）や、壊れたテキスト。
     - `FactsAreComplete` は、言語やラベルが分類できるかを検査しない。そのため facts が揃っていても、危険な操作の文言を読めないことがある。
     - V1 の guard は、control type さえあれば分類済みとみなす。PR-5 では、policy language による mode の制限も外す。
     - 一方、interlock の対応表（`MapEffectToInterlock`）は、`kBlocked` 以外を判定なしとして扱う。
-    - この理由を入れないと、§4 が拒否を求める「分類できない危険な操作」が通ってしまう。そのため v2 のセッションでは、コアのこの takeover を interlock の takeover に対応させる（PR-3。harness の行として固定する）。
+    - この理由を入れないと、§4 が拒否を求める「分類できない危険な操作」が通ってしまう。そのため v2 のセッションでは、コアの `kTakeover` を interlock の takeover に対応させる（PR-3）。harness には次の 2 行を固定ケースとして置く。1 つは、facts が完全なまま `TextIsClassifiable` が false になる非ラテン文字のボタン（ロシア語の「Установить」）で、v2 で takeover になる行。もう 1 つは対照として、メモ帳の Document が takeover にならない行。
     - これは次の項の「ordinary と言わない」とは別の理由である。メモ帳の本文はテキストを読めるので、この理由には当たらない。
 - **「コアが ordinary と言わない」ことは takeover の理由にしない。** facts が揃っていてコアが分類できた入力のうち、ordinary 以外の結果は、従来どおりそれぞれの経路（面・E1 / E4 の拒否、承認が閉じている間の E2 / E3 の拒否、セキュア欄の拒否などの V1 の guard）で扱う。たとえばメモ帳の本文は UIA の `Document` で、web のウィンドウではないため origin が unknown になり（`kShadowGapNativeDocument`、S5-c-2 PR-4）、コアは ordinary と判定しない。これを takeover の理由にすると、AC-2 の中心であるメモ帳が動かなくなる。**メモ帳の Document が厳格版でも takeover にならないことを、harness の行として固定する**（PR-3）。§4 の「分類器を適用できなかったラウンドは fail-closed」は、上の理由（facts が欠ける・評価が終わらない）で満たしており、緩めていない。
 - **attest**: 厳格 interlock が v2 のセッションに効いていることは、`interlockEnforced` として native が attest し、Main が照合する（判断 G、§9 の D7 の節）。
