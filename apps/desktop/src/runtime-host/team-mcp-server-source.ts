@@ -16,6 +16,7 @@
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
 import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
+import { TEAM_ASSIGN_TASKS_MAX } from './team-mcp-tool-contract';
 export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
@@ -171,6 +172,34 @@ const TOOLS = [
         access: { type: 'string', enum: ['read-only', 'workspace-write'] },
       },
       required: ['workerId', 'objective', 'doneCriteria'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'team_assign_tasks',
+    description:
+      'Assign formal tasks to many Workers in one call (1-${TEAM_ASSIGN_TASKS_MAX}). Use this instead of repeated team_assign_task calls when assigning several Workers, so they all start together. Each assignment is checked like team_assign_task and succeeds or fails on its own: read results[].ok, and retry only the failed ones.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        assignments: {
+          type: 'array',
+          minItems: 1,
+          maxItems: ${TEAM_ASSIGN_TASKS_MAX},
+          items: {
+            type: 'object',
+            properties: {
+              workerId: { type: 'string' },
+              objective: { type: 'string' },
+              doneCriteria: { type: 'array', items: { type: 'string' }, minItems: 1, maxItems: 20 },
+              access: { type: 'string', enum: ['read-only', 'workspace-write'] },
+            },
+            required: ['workerId', 'objective', 'doneCriteria'],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['assignments'],
       additionalProperties: false,
     },
   },
@@ -491,6 +520,7 @@ function callBridge(tool, args) {
           ? MANAGED_BRIDGE_TIMEOUT_MS
           : tool === 'team_wait_reports' ||
         tool === 'team_wait_events' ||
+        tool === 'team_assign_tasks' ||
         tool === 'team_assign_mission' ||
         tool === 'team_resume_mission'
           ? LONG_BRIDGE_TIMEOUT_MS

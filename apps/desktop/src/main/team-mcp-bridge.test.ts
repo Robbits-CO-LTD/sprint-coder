@@ -12,6 +12,7 @@ import type { TeamCoordinator } from './team-coordinator';
 import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   PROJECT_MEMORY_MCP_TOOL_NAMES,
+  TEAM_CORE_MCP_TOOL_NAMES,
   WORKER_TEAM_MCP_TOOL_NAMES,
 } from '../runtime-host/team-mcp-tool-contract';
 
@@ -33,7 +34,15 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
       throw new Error('not used in this test');
     }),
     listWorkerReports: vi.fn(() => []),
+    assignTask: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
+    assignTasks: vi.fn(
+      async (_taskId: string, assignments: readonly unknown[]) =>
+        assignments.map((_, index) => ({
+          ok: true,
+          submission: { executionId: `execution-batch-${index}`, state: 'queued' },
+        })) as never,
+    ),
     listAgentMessages: vi.fn(() => []),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
@@ -1264,6 +1273,64 @@ socket.once('error', (error) => {
       result: { ok: false, message: expect.stringContaining('read-only') },
     });
     expect(coordinator.assignTaskAs).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a native Leader team_assign_tasks call as one batch bound to the token (issue #864)', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: null } as never);
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-leader', {
+      taskId: 'task-1',
+      token,
+      role: 'leader',
+      allowedTools: TEAM_CORE_MCP_TOOL_NAMES,
+      contextOwner: { type: 'turn', id: 'turn-leader' },
+    });
+
+    const { lines } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_assign_tasks',
+        args: {
+          assignments: [
+            { workerId: 'worker-1', objective: 'one', doneCriteria: ['done'] },
+            {
+              workerId: 'worker-2',
+              objective: 'two',
+              doneCriteria: ['done'],
+              access: 'workspace-write',
+            },
+          ],
+        },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        assigned: 2,
+        failed: 0,
+        results: [
+          { index: 0, workerId: 'worker-1', ok: true, executionId: 'execution-batch-0' },
+          { index: 1, workerId: 'worker-2', ok: true, executionId: 'execution-batch-1' },
+        ],
+      },
+    });
+    expect(coordinator.assignTasks).toHaveBeenCalledTimes(1);
+    expect(coordinator.assignTasks).toHaveBeenCalledWith(
+      'task-1',
+      [
+        expect.objectContaining({ targetAgentId: 'worker-1', accessMode: 'read-only' }),
+        expect.objectContaining({ targetAgentId: 'worker-2', accessMode: 'workspace-write' }),
+      ],
+      null,
+      { type: 'turn', id: 'turn-leader' },
+    );
+    expect(coordinator.assignTask).not.toHaveBeenCalled();
   });
 
   it('closes the connection without responding to an unknown token', async () => {

@@ -1698,6 +1698,249 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 60_000);
 
+    it('assigns many Workers in one batch, each element on its own, checking the Workspace once (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Batch Team');
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      // Each Worker writes its own file, so the integrations never conflict.
+      class OwnFileRuntime extends TestWorkerRuntime {
+        override async execute(
+          input: Parameters<TeamWorkerRuntime['execute']>[0],
+        ): Promise<WorkerRuntimeResult> {
+          if (input.worker.writeCapable && typeof input.workspacePath === 'string')
+            writeFileSync(join(input.workspacePath, `${input.worker.id}.txt`), 'written\n');
+          return super.execute(input);
+        }
+      }
+      // Starts wait until the batch was checked, so only admission's own Workspace checks count.
+      class GatedScheduler extends TeamExecutionScheduler {
+        readonly held: Parameters<TeamExecutionScheduler['submit']>[0][] = [];
+        override submit(job: Parameters<TeamExecutionScheduler['submit']>[0]): void {
+          this.held.push(job);
+        }
+        release(): void {
+          for (const job of this.held.splice(0)) super.submit(job);
+        }
+      }
+      const scheduler = new GatedScheduler();
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new OwnFileRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+        undefined,
+        undefined,
+        manager,
+      );
+      const hire = (role: string, writeCapable: boolean) =>
+        coordinator.hireWorker({
+          taskId: task.id,
+          role,
+          objective: 'write one file',
+          contextInheritancePolicy: 'none',
+          writeCapable,
+        });
+      const writers = [await hire('writer 0', true), await hire('writer 1', true)];
+      const reader = await hire('reader', false);
+      const check = vi.spyOn(manager, 'requireCleanRepositorySet');
+      const assignment = (workerId: string, accessMode: 'read-only' | 'workspace-write') => ({
+        targetAgentId: workerId,
+        content: `work for ${workerId}`,
+        doneCriteria: ['return a result'],
+        accessMode,
+      });
+
+      const outcomes = await coordinator.assignTasks(task.id, [
+        assignment(writers[0]!.id, 'workspace-write'),
+        // A Worker that may not write is refused alone; the others still go out.
+        assignment(reader.id, 'workspace-write'),
+        assignment(writers[1]!.id, 'workspace-write'),
+        assignment('worker-missing', 'read-only'),
+        // The same Worker twice: the first element's execution is already pending.
+        assignment(writers[0]!.id, 'workspace-write'),
+      ]);
+
+      expect(outcomes.map(({ ok }) => ok)).toEqual([true, false, true, false, false]);
+      const message = (index: number) => {
+        const outcome = outcomes[index]!;
+        return outcome.ok ? '' : (outcome.error as Error).message;
+      };
+      expect(message(1)).toBe('workspace-write execution requires a write-capable Worker');
+      expect(message(3)).toBe('Worker not found');
+      expect(message(4)).toBe('Worker already has a pending execution');
+      // Two write elements passed, and the Workspace was checked for writing once.
+      expect(check).toHaveBeenCalledTimes(1);
+      const executionIds = outcomes.flatMap((outcome) =>
+        outcome.ok ? [outcome.submission.executionId] : [],
+      );
+      // Every admitted element was handed to the Scheduler within the batch.
+      expect(scheduler.held.map(({ executionId }) => executionId)).toEqual(executionIds);
+      scheduler.release();
+      await waitFor(
+        () =>
+          executionIds.every(
+            (executionId) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        20_000,
+      );
+      persistence.close();
+    }, 60_000);
+
+    it('refuses every write element of a batch when the Workspace cannot be written, and keeps the rest (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Dirty batch Team');
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, new TestWorkerRuntime(), manager);
+      const hire = (role: string) =>
+        coordinator.hireWorker({
+          taskId: task.id,
+          role,
+          objective: 'one task',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+      const [first, second, third] = [await hire('a'), await hire('b'), await hire('c')];
+      writeFileSync(join(workspace, 'README.md'), 'uncommitted\n');
+      const check = vi.spyOn(manager, 'requireCleanRepositorySet');
+
+      const outcomes = await coordinator.assignTasks(task.id, [
+        {
+          targetAgentId: first.id,
+          content: 'write',
+          doneCriteria: ['done'],
+          accessMode: 'workspace-write',
+        },
+        { targetAgentId: second.id, content: 'read', doneCriteria: ['done'] },
+        {
+          targetAgentId: third.id,
+          content: 'write',
+          doneCriteria: ['done'],
+          accessMode: 'workspace-write',
+        },
+      ]);
+
+      expect(outcomes.map(({ ok }) => ok)).toEqual([false, true, false]);
+      expect(check).toHaveBeenCalledTimes(1);
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      // Only the read-only element left an execution behind.
+      expect(
+        persistence.listTeamExecutions(teamId).map(({ assigneeAgentId }) => assigneeAgentId),
+      ).toEqual([second.id]);
+      await coordinator.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 60_000);
+
+    it('lets a Manager batch only its own direct children, element by element (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Manager batch Team');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const team = persistence.promoteTaskToTeam(task.id);
+      const managerAgent = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: 'Manager',
+          objective: 'delegate',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        },
+        team.leaderAgentId,
+        { maxDirectChildren: 2, maxDelegationLevels: 1, allowManagerChildren: false },
+      );
+      const child = await coordinator.hireWorkerAs(
+        {
+          taskId: task.id,
+          role: 'Child',
+          objective: 'answer',
+          contextInheritancePolicy: 'none',
+          writeCapable: false,
+        },
+        managerAgent.id,
+      );
+      const sibling = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'Leader report',
+        objective: 'answer',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+
+      const outcomes = await coordinator.assignTasks(
+        task.id,
+        [
+          { targetAgentId: sibling.id, content: 'not yours', doneCriteria: ['done'] },
+          { targetAgentId: child.id, content: 'yours', doneCriteria: ['done'] },
+        ],
+        managerAgent.id,
+      );
+
+      expect(outcomes[0]).toMatchObject({ ok: false });
+      expect(((outcomes[0] as { error: Error }).error as Error).message).toBe(
+        'Manager may only assign executions to direct child Agents',
+      );
+      expect(outcomes[1]).toMatchObject({ ok: true });
+      const executionId = (outcomes[1] as { submission: { executionId: string } }).submission
+        .executionId;
+      expect(persistence.getTeamExecution(executionId).createdByAgentId).toBe(managerAgent.id);
+      await waitFor(() => persistence.getTeamExecution(executionId).state === 'completed', 20_000);
+      persistence.close();
+    }, 60_000);
+
+    it('paces a batch that crosses the per-minute limit by queueing, not refusing, the excess (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Paced batch Team');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const workers: Awaited<ReturnType<TeamCoordinator['hireWorker']>>[] = [];
+      for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, maxConcurrentExecutions: 100, budgetMode: 'unlimited' },
+        team.revision,
+      );
+      persistence.setTeamMaxConcurrentExecutions(100);
+      const batch = (slice: typeof workers) =>
+        coordinator.assignTasks(
+          task.id,
+          slice.map((worker, index) => ({
+            targetAgentId: worker.id,
+            content: `question ${index}`,
+            doneCriteria: ['return a result'],
+          })),
+        );
+      // Two batches of 50 and 51: the second crosses the pace of 100 starts a minute.
+      const outcomes = [
+        ...(await batch(workers.slice(0, 50))),
+        ...(await batch(workers.slice(50))),
+      ];
+      expect(outcomes).toHaveLength(TEAM_ASSIGNMENT_RATE_LIMIT.limit + 1);
+      expect(outcomes.every(({ ok }) => ok)).toBe(true);
+      await waitFor(
+        () =>
+          persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
+            .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
+        60_000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The pace counts starts: 100 ran, and the one beyond it waits instead of failing.
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+      await coordinator.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 120_000);
+
     it('paces assignments recovered at startup as it paces fresh ones (issue #854)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Recovered backlog');

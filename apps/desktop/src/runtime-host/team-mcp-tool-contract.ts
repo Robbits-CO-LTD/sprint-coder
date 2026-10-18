@@ -1,3 +1,9 @@
+import { TEAM_DEFAULT_CONCURRENT_EXECUTIONS } from '@sprint-coder/domain';
+
+/** The most assignments one team_assign_tasks call carries (issue #864): a default Team's
+ * concurrency, so one call can start every Worker such a Team runs at once. */
+export const TEAM_ASSIGN_TASKS_MAX = TEAM_DEFAULT_CONCURRENT_EXECUTIONS;
+
 export const PROJECT_MEMORY_MCP_TOOL_NAMES = ['project_memory_remember'] as const;
 export const SKILL_DRAFT_MCP_TOOL_NAMES = ['skill_draft_create'] as const;
 export const TEAM_CORE_MCP_TOOL_NAMES = [
@@ -5,6 +11,7 @@ export const TEAM_CORE_MCP_TOOL_NAMES = [
   'team_record_model_research',
   'team_hire_worker',
   'team_assign_task',
+  'team_assign_tasks',
   'team_assign_mission',
   'team_resume_mission',
   'team_steer_execution',
