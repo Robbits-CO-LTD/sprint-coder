@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { TeamDetail, TeamEvent } from '@sprint-coder/contracts';
+import { diffTeamDetail } from '@sprint-coder/contracts';
+import {
+  fixtureWorker,
+  largeTeamDetail,
+} from '../../../../../packages/contracts/src/team-detail-fixture';
 import { useAppStore } from './appStore';
 
 const taskId = 'task-team-subscription';
@@ -679,6 +684,91 @@ describe('Team state subscription boundary', () => {
       useAppStore.setState({ selectedTaskId: taskId, turnByTask: {} });
       await useAppStore.getState().stopTeamWorker(taskId, 'w');
       expect(useAppStore.getState().error).toContain('stay failure');
+    });
+  });
+
+  describe('Team patches (issue #863)', () => {
+    function stubTeams() {
+      const listeners: Array<(event: TeamEvent) => void> = [];
+      const unsubscribes: Array<ReturnType<typeof vi.fn>> = [];
+      vi.stubGlobal('window', {
+        sprintCoder: {
+          tasks: { messages: vi.fn().mockResolvedValue([]) },
+          turns: {
+            snapshot: vi.fn().mockResolvedValue(null),
+            subscribe: vi.fn().mockReturnValue(vi.fn()),
+          },
+          teams: {
+            get: vi.fn(),
+            subscribe: vi.fn((_id, listener: (event: TeamEvent) => void) => {
+              listeners.push(listener);
+              const unsubscribe = vi.fn();
+              unsubscribes.push(unsubscribe);
+              return unsubscribe;
+            }),
+          },
+        },
+      });
+      return { listeners, unsubscribes };
+    }
+
+    it('applies patches to the detail it holds and keeps what did not change', async () => {
+      const { listeners } = stubTeams();
+      await useAppStore.getState().selectTask(taskId);
+      const base = largeTeamDetail(4, 100);
+      const next = structuredClone(base);
+      next.workers[2]!.liveOutput += ' more';
+      next.workers[3]!.state = 'done';
+      listeners[0]!({ type: 'snapshot', seq: 0, detail: base });
+      listeners[0]!({
+        type: 'patched',
+        seq: 1,
+        teamId: base.team.id,
+        patch: diffTeamDetail(base, next)!,
+      });
+      const held = useAppStore.getState().teamByTask[taskId]!;
+      expect(held).toEqual(next);
+      expect(held.messages).toBe(base.messages);
+      expect(held.workers[1]).toBe(base.workers[1]);
+    });
+
+    it('subscribes again when a patch does not fit what it holds', async () => {
+      const { listeners, unsubscribes } = stubTeams();
+      await useAppStore.getState().selectTask(taskId);
+      const base = largeTeamDetail(2, 10);
+      const next = structuredClone(base);
+      next.workers.push(fixtureWorker(7, ''));
+      listeners[0]!({ type: 'snapshot', seq: 0, detail: { ...base, workers: [] } });
+      listeners[0]!({
+        type: 'patched',
+        seq: 1,
+        teamId: base.team.id,
+        patch: diffTeamDetail(base, next)!,
+      });
+      // Nothing half-applied is shown, and a fresh snapshot is requested.
+      expect(useAppStore.getState().teamByTask[taskId]).toEqual({ ...base, workers: [] });
+      await vi.waitFor(() => expect(listeners).toHaveLength(2));
+      expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+      listeners[1]!({ type: 'snapshot', seq: 1, detail: next });
+      expect(useAppStore.getState().teamByTask[taskId]).toEqual(next);
+    });
+
+    it('does not apply a patch onto a detail read to fill a sequence gap', async () => {
+      const { listeners } = stubTeams();
+      const base = largeTeamDetail(2, 10);
+      vi.mocked(window.sprintCoder!.teams.get).mockResolvedValue(base as never);
+      await useAppStore.getState().selectTask(taskId);
+      listeners[0]!({ type: 'snapshot', seq: 0, detail: base });
+      listeners[0]!({ type: 'updated', seq: 2, detail: base });
+      const next = structuredClone(base);
+      next.team.revision += 1;
+      listeners[0]!({
+        type: 'patched',
+        seq: 3,
+        teamId: base.team.id,
+        patch: diffTeamDetail(base, next)!,
+      });
+      await vi.waitFor(() => expect(listeners).toHaveLength(2));
     });
   });
 });

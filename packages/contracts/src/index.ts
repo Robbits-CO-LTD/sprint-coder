@@ -1278,6 +1278,41 @@ export const teamSubscriptionSnapshotSchema = z
   .strict();
 export type TeamSubscriptionSnapshot = z.infer<typeof teamSubscriptionSnapshotSchema>;
 
+/**
+ * What changed in a Team detail since the previous Team event (issue #863). A 32-Worker Team
+ * detail is about 1 MB, mostly live output and message text, and sending all of it on every
+ * change kept the Renderer behind. A collection lists the items that are new or changed in full;
+ * `order` is the whole id list and is present only when items were added, removed or reordered.
+ * A Worker's live output travels apart from the Worker: the new text is the previous text with
+ * `drop` characters removed from its start and `append` added at its end.
+ */
+function teamCollectionPatchSchema<T extends z.ZodType>(item: T) {
+  return z.object({ upserts: z.array(item), order: z.array(idSchema).optional() }).strict();
+}
+export const teamWorkerPatchSchema = workerSummarySchema.omit({ liveOutput: true });
+export const teamLiveOutputPatchSchema = z
+  .object({
+    agentId: idSchema,
+    drop: z.number().int().min(0).max(20_000),
+    append: z.string().max(20_000),
+  })
+  .strict();
+export const teamDetailPatchSchema = z
+  .object({
+    team: teamSummarySchema.optional(),
+    workers: teamCollectionPatchSchema(teamWorkerPatchSchema).optional(),
+    liveOutputs: z.array(teamLiveOutputPatchSchema).optional(),
+    messages: teamCollectionPatchSchema(teamMessageSummarySchema).optional(),
+    executions: teamCollectionPatchSchema(teamExecutionSummarySchema).optional(),
+    missions: teamCollectionPatchSchema(teamMissionSummarySchema).optional(),
+    activities: teamCollectionPatchSchema(teamActivitySummarySchema).optional(),
+    budgets: z.array(teamBudgetStatusSchema).optional(),
+  })
+  .strict();
+export type TeamDetailPatch = z.infer<typeof teamDetailPatchSchema>;
+type TeamCollectionPatch<T> = { upserts: T[]; order?: string[] | undefined };
+type TeamLiveOutputPatch = z.infer<typeof teamLiveOutputPatchSchema>;
+
 export const teamEventSchema = z.discriminatedUnion('type', [
   teamSubscriptionSnapshotSchema,
   z
@@ -1287,8 +1322,183 @@ export const teamEventSchema = z.discriminatedUnion('type', [
       detail: teamDetailSchema,
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('patched'),
+      seq: z.number().int().min(1),
+      /** The Team the patch belongs to; a different Team is always sent as a whole detail. */
+      teamId: idSchema,
+      patch: teamDetailPatchSchema,
+    })
+    .strict(),
 ]);
 export type TeamEvent = z.infer<typeof teamEventSchema>;
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return a === b || JSON.stringify(a) === JSON.stringify(b);
+}
+
+function hasUniqueIds(items: readonly { id: string }[]): boolean {
+  return new Set(items.map(({ id }) => id)).size === items.length;
+}
+
+function diffCollection<T extends { id: string }>(
+  base: readonly T[],
+  next: readonly T[],
+  same: (a: T, b: T) => boolean = sameJson,
+): TeamCollectionPatch<T> | undefined {
+  const baseById = new Map(base.map((item) => [item.id, item]));
+  const upserts = next.filter((item) => {
+    const previous = baseById.get(item.id);
+    return previous === undefined || !same(previous, item);
+  });
+  const sameOrder = base.length === next.length && base.every(({ id }, i) => id === next[i]?.id);
+  if (sameOrder) return upserts.length === 0 ? undefined : { upserts };
+  return { upserts, order: next.map(({ id }) => id) };
+}
+
+/** Attempts per live-output diff before it falls back to resending the whole text. */
+const LIVE_OUTPUT_DIFF_ATTEMPTS = 8;
+
+function diffLiveOutput(previous: string, next: string): Omit<TeamLiveOutputPatch, 'agentId'> {
+  if (next.startsWith(previous)) return { drop: 0, append: next.slice(previous.length) };
+  // Live output keeps only its last characters, so new text usually pushes old text off the front:
+  // find where the end of the old text now sits in the new one, nearest the end first.
+  const tail = previous.slice(-64);
+  let position = tail === '' ? -1 : next.lastIndexOf(tail);
+  for (let attempt = 0; position !== -1 && attempt < LIVE_OUTPUT_DIFF_ATTEMPTS; attempt += 1) {
+    const kept = position + tail.length;
+    if (kept <= previous.length && next.slice(0, kept) === previous.slice(previous.length - kept))
+      return { drop: previous.length - kept, append: next.slice(kept) };
+    position = position === 0 ? -1 : next.lastIndexOf(tail, position - 1);
+  }
+  return { drop: previous.length, append: next };
+}
+
+function withoutLiveOutput(worker: WorkerSummary): Omit<WorkerSummary, 'liveOutput'> {
+  const { liveOutput: _liveOutput, ...rest } = worker;
+  return rest;
+}
+
+/**
+ * The patch that turns `base` into `next`, or null when only a whole detail can do that: another
+ * Team, or a collection whose ids are not unique. Applying the patch to `base` with
+ * {@link applyTeamDetailPatch} gives a detail equal to `next`.
+ */
+export function diffTeamDetail(base: TeamDetail, next: TeamDetail): TeamDetailPatch | null {
+  if (base.team.id !== next.team.id) return null;
+  const collections = [base, next].flatMap((detail) => [
+    detail.workers,
+    detail.messages,
+    detail.executions,
+    detail.missions,
+    detail.activities,
+  ]);
+  if (!collections.every(hasUniqueIds)) return null;
+  const patch: TeamDetailPatch = {};
+  if (!sameJson(base.team, next.team)) patch.team = next.team;
+  const workers = diffCollection(
+    base.workers.map(withoutLiveOutput),
+    next.workers.map(withoutLiveOutput),
+  );
+  if (workers !== undefined) patch.workers = workers;
+  const baseLiveOutput = new Map(base.workers.map(({ id, liveOutput }) => [id, liveOutput]));
+  const liveOutputs = next.workers.flatMap(({ id, liveOutput }) => {
+    const previous = baseLiveOutput.get(id) ?? '';
+    return liveOutput === previous
+      ? []
+      : [{ agentId: id, ...diffLiveOutput(previous, liveOutput) }];
+  });
+  if (liveOutputs.length > 0) patch.liveOutputs = liveOutputs;
+  const messages = diffCollection(base.messages, next.messages);
+  if (messages !== undefined) patch.messages = messages;
+  const executions = diffCollection(base.executions, next.executions);
+  if (executions !== undefined) patch.executions = executions;
+  const missions = diffCollection(base.missions, next.missions);
+  if (missions !== undefined) patch.missions = missions;
+  const activities = diffCollection(base.activities, next.activities);
+  if (activities !== undefined) patch.activities = activities;
+  if (!sameJson(base.budgets, next.budgets)) patch.budgets = next.budgets;
+  return patch;
+}
+
+export function isEmptyTeamDetailPatch(patch: TeamDetailPatch): boolean {
+  return Object.keys(patch).length === 0;
+}
+
+/** Thrown when a patch does not fit the detail it is applied to; the reader must resynchronize. */
+export class TeamDetailPatchMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TeamDetailPatchMismatchError';
+  }
+}
+
+function applyCollection<T extends { id: string }>(
+  base: T[],
+  patch: TeamCollectionPatch<T> | undefined,
+): T[] {
+  if (patch === undefined) return base;
+  const upserts = new Map(patch.upserts.map((item) => [item.id, item]));
+  if (patch.order === undefined) {
+    const baseIds = new Set(base.map(({ id }) => id));
+    if (patch.upserts.some(({ id }) => !baseIds.has(id)))
+      throw new TeamDetailPatchMismatchError('A new item arrived without the new order');
+    return base.map((item) => upserts.get(item.id) ?? item);
+  }
+  const baseById = new Map(base.map((item) => [item.id, item]));
+  return patch.order.map((id) => {
+    const item = upserts.get(id) ?? baseById.get(id);
+    if (item === undefined) throw new TeamDetailPatchMismatchError(`Unknown item ${id}`);
+    return item;
+  });
+}
+
+/**
+ * Applies a patch made by {@link diffTeamDetail}. Everything the patch leaves unchanged keeps its
+ * identity, so a reader can skip re-rendering what did not change. Throws
+ * {@link TeamDetailPatchMismatchError} when the patch was not made from this detail.
+ */
+export function applyTeamDetailPatch(base: TeamDetail, patch: TeamDetailPatch): TeamDetail {
+  const liveOutputs = new Map((patch.liveOutputs ?? []).map((entry) => [entry.agentId, entry]));
+  let workers = base.workers;
+  if (patch.workers !== undefined || liveOutputs.size > 0) {
+    const baseById = new Map(base.workers.map((worker) => [worker.id, worker]));
+    const upserts = new Map((patch.workers?.upserts ?? []).map((worker) => [worker.id, worker]));
+    const order = patch.workers?.order ?? base.workers.map(({ id }) => id);
+    if (patch.workers?.order === undefined && [...upserts.keys()].some((id) => !baseById.has(id)))
+      throw new TeamDetailPatchMismatchError('A new Worker arrived without the new order');
+    const ids = new Set(order);
+    if ([...liveOutputs.keys()].some((id) => !ids.has(id)))
+      throw new TeamDetailPatchMismatchError('Live output for an unknown Worker');
+    workers = order.map((id) => {
+      const previous = baseById.get(id);
+      const upsert = upserts.get(id);
+      const live = liveOutputs.get(id);
+      if (upsert === undefined && live === undefined) {
+        if (previous === undefined) throw new TeamDetailPatchMismatchError(`Unknown Worker ${id}`);
+        return previous;
+      }
+      const fields = upsert ?? previous;
+      if (fields === undefined) throw new TeamDetailPatchMismatchError(`Unknown Worker ${id}`);
+      const previousOutput = previous?.liveOutput ?? '';
+      if (live !== undefined && live.drop > previousOutput.length)
+        throw new TeamDetailPatchMismatchError('Live output is shorter than the patch expects');
+      const liveOutput =
+        live === undefined ? previousOutput : previousOutput.slice(live.drop) + live.append;
+      return { ...fields, liveOutput };
+    });
+  }
+  return {
+    team: patch.team ?? base.team,
+    workers,
+    messages: applyCollection(base.messages, patch.messages),
+    executions: applyCollection(base.executions, patch.executions),
+    missions: applyCollection(base.missions, patch.missions),
+    activities: applyCollection(base.activities, patch.activities),
+    budgets: patch.budgets ?? base.budgets,
+  };
+}
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02): per-Task camera + Worker node layout, saved with
 // an optimistic-concurrency revision. Bounds mirror useCamera.ts's MIN_SCALE/MAX_SCALE and a

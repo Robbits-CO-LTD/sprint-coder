@@ -28,6 +28,22 @@ describe('createTeamSubscriptionBuffer', () => {
     expect(listener).toHaveBeenCalledWith({ type: 'snapshot', seq: 2, detail: null });
   });
 
+  it('replays buffered patches after the snapshot and drops those it already includes', () => {
+    const listener = vi.fn();
+    const buffer = createTeamSubscriptionBuffer(listener);
+    const patched = (seq: number) =>
+      ({ type: 'patched', seq, teamId: 'team', patch: {} }) as TeamEvent;
+    buffer.push(patched(3));
+    buffer.push(patched(4));
+
+    buffer.activate({ type: 'snapshot', seq: 3, detail: null });
+
+    expect(listener.mock.calls.map(([event]) => [event.type, event.seq])).toEqual([
+      ['snapshot', 3],
+      ['patched', 4],
+    ]);
+  });
+
   it('does not deliver a late snapshot after disposal', () => {
     const listener = vi.fn();
     const buffer = createTeamSubscriptionBuffer(listener);

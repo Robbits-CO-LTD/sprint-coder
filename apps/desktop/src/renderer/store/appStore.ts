@@ -1,4 +1,8 @@
 import { create } from 'zustand';
+import {
+  applyTeamDetailPatch,
+  type TeamDetail as ContractTeamDetail,
+} from '@sprint-coder/contracts';
 import type {
   GraphView,
   ModelSelection,
@@ -984,13 +988,26 @@ export const useAppStore = create<AppState>((set, get) => {
     const live = () => !disposed && isCurrentSelection();
     let lastTeamEventSeq = 0;
     let receivedSnapshot = false;
+    // The detail this stream last built, which the next patch is made against (issue #863). Null
+    // when it is unknown: before the snapshot, or after a gap was filled by a separate read.
+    let streamDetail: TeamDetail | null = null;
+    let resynchronizing = false;
+    // A patch that does not fit what this stream holds can only be repaired by a new snapshot.
+    const resynchronize = () => {
+      if (resynchronizing) return;
+      resynchronizing = true;
+      queueMicrotask(() => {
+        if (live()) subscribeToTeam(taskId, isCurrentSelection);
+      });
+    };
     const unsubscribe = window.sprintCoder!.teams.subscribe(
       taskId,
       (event) => {
-        if (!live()) return;
+        if (!live() || resynchronizing) return;
         if (event.type === 'snapshot') {
           receivedSnapshot = true;
           lastTeamEventSeq = event.seq;
+          streamDetail = event.detail;
           set((state) => ({
             teamByTask: { ...state.teamByTask, [taskId]: event.detail },
             teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
@@ -1000,6 +1017,7 @@ export const useAppStore = create<AppState>((set, get) => {
         if (!receivedSnapshot || event.seq <= lastTeamEventSeq) return;
         if (event.seq !== lastTeamEventSeq + 1) {
           lastTeamEventSeq = event.seq;
+          streamDetail = null;
           const requestedSeq = event.seq;
           void window
             .sprintCoder!.teams.get(taskId)
@@ -1018,6 +1036,28 @@ export const useAppStore = create<AppState>((set, get) => {
             });
           return;
         }
+        let detail: TeamDetail;
+        if (event.type === 'updated') detail = event.detail;
+        else {
+          if (streamDetail === null || streamDetail.team.id !== event.teamId) {
+            resynchronize();
+            return;
+          }
+          try {
+            // Unchanged Workers, messages and executions keep their identity, so only what
+            // changed re-renders.
+            // The Renderer types mirror the contracts by hand (Preload hands the contracts payload
+            // over as is), so the shared patch function is called across that mirror.
+            detail = applyTeamDetailPatch(
+              streamDetail as unknown as ContractTeamDetail,
+              event.patch,
+            ) as unknown as TeamDetail;
+          } catch {
+            resynchronize();
+            return;
+          }
+        }
+        streamDetail = detail;
         lastTeamEventSeq = event.seq;
         set((state) => {
           // First team appearance for the selected task (leader-driven auto-promotion)
@@ -1027,7 +1067,7 @@ export const useAppStore = create<AppState>((set, get) => {
             state.selectedTaskId === taskId &&
             !state.teamViewOpen;
           return {
-            teamByTask: { ...state.teamByTask, [taskId]: event.detail },
+            teamByTask: { ...state.teamByTask, [taskId]: detail },
             teamLoadFailedByTask: { ...state.teamLoadFailedByTask, [taskId]: false },
             ...(firstAppearance ? { teamViewOpen: true } : {}),
           };

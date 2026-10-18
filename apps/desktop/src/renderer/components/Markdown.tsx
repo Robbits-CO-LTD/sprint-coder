@@ -1,4 +1,4 @@
-import { isValidElement, useEffect, useMemo, useRef, useState } from 'react';
+import { isValidElement, memo, useEffect, useMemo, useRef, useState } from 'react';
 import type { ComponentPropsWithoutRef, ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -304,7 +304,11 @@ function TableBlock({ children, node, ...rest }: MarkdownElementProps<'table'>) 
   );
 }
 
-export function Markdown({
+/**
+ * Memoized on its props (issue #863): a Chat re-renders on every Team update, and re-parsing every
+ * message of the conversation each time kept the Renderer busy while a large Team worked.
+ */
+export const Markdown = memo(function Markdown({
   content,
   isStreaming = false,
 }: {
@@ -329,7 +333,7 @@ export function Markdown({
       </ReactMarkdown>
     </div>
   );
-}
+});
 
 function remarkMermaidBudget() {
   return (tree: unknown): void => {

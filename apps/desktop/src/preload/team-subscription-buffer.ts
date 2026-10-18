@@ -16,7 +16,7 @@ export function createTeamSubscriptionBuffer(listener: (event: TeamEvent) => voi
       listener(snapshot);
       let lastSequence = snapshot.seq;
       for (const event of buffered) {
-        if (event.type !== 'updated' || event.seq <= lastSequence) continue;
+        if (event.type === 'snapshot' || event.seq <= lastSequence) continue;
         listener(event);
         lastSequence = event.seq;
       }

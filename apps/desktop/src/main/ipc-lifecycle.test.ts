@@ -87,7 +87,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
     'computerUseApprovalSessionById',
     'computerUseStatusBySession',
     'computerUseQuickStartLatches',
-    'teamSubscriptions',
+    'teamDetailStream',
     'workspaceWatchByTurn',
     'cliTaskTitleJobs',
     'pendingTaskTitles',

@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState, type Ref } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import type {
   TeamExecutionSummary,
   TeamMessageSummary,
   WorkerSummary,
 } from '../../types/sprint-coder';
 import { TeamExecutionStatus } from '../TeamExecutionStatus';
+import { TeamMessageMarkdown } from '../TeamMessageMarkdown';
 import {
   describeMessagePeer,
   describeWorkerModel,
@@ -201,14 +200,7 @@ export function WorkerNode({
           return (
             <div key={m.id} className={`w-line${incoming ? ' msg-in' : ''}`}>
               <span className={`tag${incoming ? '' : ' out'}`}>{peer.tagLabel}</span>
-              <ReactMarkdown
-                remarkPlugins={[remarkGfm]}
-                skipHtml
-                disallowedElements={['img']}
-                unwrapDisallowed
-              >
-                {incoming ? m.content : summarize(m.content)}
-              </ReactMarkdown>
+              <TeamMessageMarkdown text={incoming ? m.content : summarize(m.content)} />
             </div>
           );
         })}
