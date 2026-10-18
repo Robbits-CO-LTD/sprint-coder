@@ -2753,9 +2753,10 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
         target_eligibility_detail::AsciiLower(*facts.image_leaf) == kWindowsTargetFixtureLeaf;
   }
   facts.image_volume = WindowsTargetVolumeKind(held.file.value);
-  // A held file not known to be local is a mismatch already (W-UR), so its bytes are not read for
-  // the signature, the resources or the subsystem: nothing they could say changes the verdict, and
-  // a remote share's owner could make each read fail or stall.
+  // A held file not known to be local already records running_image_matches = false, so its bytes
+  // are not read for the signature, the resources or the subsystem: those facts stay unmeasured,
+  // which makes the verdict unresolvable (incomplete facts are judged before any rule), and a
+  // remote share's owner could otherwise make each read fail or stall.
   if (held.remote != std::optional<bool>(false))
     return measured;
 
