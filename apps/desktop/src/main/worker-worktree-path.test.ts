@@ -171,6 +171,8 @@ describe('worker worktree path (issue #855)', () => {
     });
     const error = await manager.create({ agentId: 'a6', repoPath: tmpdir() }).catch((e) => e);
     expect(error.message).toMatch(/長すぎる/);
+    // The worktree path passed the check, so no (within-limit) length is quoted.
+    expect(error.message).not.toMatch(/文字、上限/);
     expect(error.cause).toBeInstanceOf(WorktreeError);
   });
 
