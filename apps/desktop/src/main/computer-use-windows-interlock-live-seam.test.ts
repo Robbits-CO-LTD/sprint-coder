@@ -13,7 +13,8 @@ import { describe, expect, it } from 'vitest';
 // console class is refused as a shell surface, that a window that does not answer holds the lane at
 // most 500 ms (+ a margin) and a second evaluation right after is refused at once (single-flight),
 // that a cancel before the start creates no UI Automation object, and that an ordinary window is not
-// refused. It also checks that the lane asks the cancellation epoch again after the wait (a cancel that
+// refused. Through the entry's wrapper, a window that does not answer is passed to V1 in a v1 session
+// and is a takeover in a v2 session (S5-c-3 PR-3; the seam is compiled as a v2 build). It also checks that the lane asks the cancellation epoch again after the wait (a cancel that
 // comes after the worker has finished is still a kCanceled), and tabulates WindowsActionPoint against
 // the old formula. Windows only: elsewhere, or where no MSVC can be found, it is skipped (but never in CI,
 // where a runner that cannot compile must not turn this into a silent pass). The build output goes
@@ -133,6 +134,11 @@ static HRESULT CountingCoCreateInstance(REFCLSID clsid, LPUNKNOWN outer, DWORD c
 
 #include "computer_use_windows_uia_source.h"
 #include "computer_use_windows_interlock_capture.h"
+#include "computer_use_native_refusal_table.h"
+// Compiled as a v2 build, so the entry's policy is the session's own (S5-c-3 PR-3): a v2 session is
+// admitted here, and its takeover is the policy's, not that of a basis the build refuses.
+#define SPRINT_CODER_ELIGIBILITY_V2 1
+#include "computer_use_native_eligibility.h"
 
 namespace {
 
@@ -144,6 +150,8 @@ struct WindowsSession {
   RECT observation_bounds{};
   HWND active_window = nullptr;
   std::uint64_t cancel_epoch = 0;
+  sprint_coder::computer_use::EligibilityBasis eligibility_basis =
+      sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
 };
 
 bool ReadJsonString(std::string_view json, std::string_view key, std::string *output) {
@@ -377,6 +385,8 @@ int main(int argc, char **argv) {
   // inside the lane's bound: kBudget, and not a refusal.
   if (readable) {
     PostMessageW(hang.handle, WM_APP + 1, 0, 0);
+    // Twice: the window still does not answer when the sessions' policies are asked below.
+    PostMessageW(hang.handle, WM_APP + 1, 0, 0);
     Sleep(60);
     const auto start = std::chrono::steady_clock::now();
     const InterlockEvaluation first = EvaluateWindowsInterlockOnLane(SessionFor(hang.handle), kClick, "click", ruleset);
@@ -385,6 +395,29 @@ int main(int argc, char **argv) {
     Check(first.no_verdict == InterlockNoVerdict::kBudget && !first.Refuses(), "an_unanswering_window_is_kBudget");
     Check(first_ms <= 500 + 250, "an_unanswering_window_holds_the_lane_at_most_500ms_plus_a_margin");
     Check(WaitIdle(15000), "the_hung_window_worker_ends");
+
+    // S5-c-3 PR-3: the same window through the entry's wrapper, under the session's policy. A v1 session
+    // gets no verdict (V1 decides, as before); a v2 session gets a takeover, from the budget.
+    WindowsSession v1 = SessionFor(hang.handle);
+    v1.eligibility_basis = EligibilityBasis::kV1Allowlist;
+    const InterlockEvaluation v1_answer = WindowsInterlockRefusal(v1, kClick, "click", nullptr);
+    std::cout << "hang window v1 no_verdict=" << static_cast<int>(v1_answer.no_verdict) << "\n";
+    Check(v1_answer.no_verdict == InterlockNoVerdict::kBudget && !v1_answer.Refuses(),
+          "an_unanswering_window_is_passed_to_v1_in_a_v1_session");
+    Check(WaitIdle(15000), "the_v1_session_worker_ends");
+    WindowsSession v2 = SessionFor(hang.handle);
+    v2.eligibility_basis = EligibilityBasis::kV2Denylist;
+    const InterlockEvaluation v2_answer = WindowsInterlockRefusal(v2, kClick, "click", nullptr);
+    std::cout << "hang window v2 outcome=" << static_cast<int>(v2_answer.verdict.outcome)
+              << " taken_over_from=" << static_cast<int>(v2_answer.taken_over_from) << "\n";
+    Check(v2_answer.Refuses() && v2_answer.verdict.outcome == InterlockOutcome::kTakeover &&
+              v2_answer.verdict.reason == InterlockReason::kUnclassified &&
+              v2_answer.taken_over_from == InterlockNoVerdict::kBudget,
+          "an_unanswering_window_is_a_takeover_in_a_v2_session");
+    Check(NativePreflightRefusalAllowed(v2_answer.verdict.DecisionName(), v2_answer.verdict.ReasonCode(),
+                                        v2_answer.verdict.DeniedResult()),
+          "the_v2_takeover_is_a_receipt_table_row");
+    Check(WaitIdle(15000), "the_v2_session_worker_ends");
   }
 
   // 2b. A worker that is stuck past the lane's bound: the lane stops waiting at 500 ms (kBudget).
@@ -404,6 +437,21 @@ int main(int argc, char **argv) {
     std::cout << "stalled second no_verdict=" << static_cast<int>(second.no_verdict) << " ms=" << second_ms << "\n";
     Check(second.no_verdict == InterlockNoVerdict::kBudget && !second.Refuses(), "the_second_evaluation_is_kBudget");
     Check(second_ms < 100, "the_second_evaluation_is_refused_at_once");
+    // S5-c-3 PR-3: while the worker is stuck, the wrapper under each session's policy. Needs no UI
+    // Automation reading, so it runs on every machine.
+    {
+      WindowsSession v1 = session;
+      v1.eligibility_basis = EligibilityBasis::kV1Allowlist;
+      const InterlockEvaluation v1_answer = WindowsInterlockRefusal(v1, kClick, "click", nullptr);
+      Check(v1_answer.no_verdict == InterlockNoVerdict::kBudget && !v1_answer.Refuses(),
+            "a_stuck_lane_is_passed_to_v1_in_a_v1_session");
+      WindowsSession v2 = session;
+      v2.eligibility_basis = EligibilityBasis::kV2Denylist;
+      const InterlockEvaluation v2_answer = WindowsInterlockRefusal(v2, kClick, "click", nullptr);
+      Check(v2_answer.Refuses() && v2_answer.verdict.outcome == InterlockOutcome::kTakeover &&
+                v2_answer.taken_over_from == InterlockNoVerdict::kBudget,
+            "a_stuck_lane_is_a_takeover_in_a_v2_session");
+    }
     // The stuck worker ends, and the next evaluation runs.
     g_stall_ms.store(0);
     Check(WaitIdle(15000), "the_stuck_worker_ends");

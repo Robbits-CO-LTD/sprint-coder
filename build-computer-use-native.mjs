@@ -248,6 +248,9 @@ if (sanitizerSelfCheckOnly) {
       '/std:c++20',
       '/EHsc',
       '/W4',
+      // C4062 (an enumerator a switch does not handle) is off by default; as an error, a reason added to
+      // an enumeration fails the build until every switch that must place it does (S5-c-3 PR-3).
+      '/we4062',
       '/GS',
       '/guard:cf',
       '/sdl',

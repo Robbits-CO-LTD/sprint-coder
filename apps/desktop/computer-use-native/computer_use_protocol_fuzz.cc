@@ -5732,7 +5732,10 @@ bool CheckEffectClassifierCore() {
     unknown.origin = OriginState::kUnknown;
     for (const ActionKind action : kEffAllInputs) {
       unknown.action = action;
-      if (!Check(EffTakeover(unknown, EffAllEnabled()), "effect-origin-unknown")) return false;
+      // Its own reason (S5-c-3 PR-3), so a takeover for the origin is told apart from unreadable text.
+      if (!Check(EffIs(ClassifyEffect(unknown, EffAllEnabled()), DecisionKind::kTakeover,
+                       DecisionReason::kOriginUnknown, EffectClass::kUnclassified),
+                 "effect-origin-unknown")) return false;
     }
     EffectFacts sensitive = EffLabel("ok", ActionKind::kInvoke);
     sensitive.origin = OriginState::kSensitive;
@@ -8566,6 +8569,342 @@ bool CheckWindowsArtifactRead() {
   return true;
 }
 
+// ---- #500 S5-c-3 PR-3: the strict interlock of v2 sessions (ADR v2 section 3.2.5) -------------------
+//
+// The basis a session is bound to selects the policy: v1 keeps the S5-c-2 PR-5 answer (no verdict, V1
+// decides), v2 takes over what the interlocks cannot judge and is answered by the strict map. The table
+// below gives each row to both bases: the v1 answer must be the old map's, the v2 answer the strict one.
+
+bool CheckStrictInterlock() {
+  using namespace sprint_coder::computer_use;
+  using sprint_coder::computer_use::interlock_detail::StrictTextReadable;
+  const EffectRuleset closed;  // the Windows rule set: no approval path
+  const auto receipt_row = [](const InterlockVerdict &verdict) {
+    return NativePreflightRefusalAllowed(verdict.DecisionName(), verdict.ReasonCode(), verdict.DeniedResult()) &&
+           std::string("native_") + std::string(verdict.DispatchCode()) == verdict.ReasonCode();
+  };
+
+  // The basis, its policy and what a build admits.
+  {
+    EligibilityBasis basis = EligibilityBasis::kV2Denylist;
+    if (!Check(ParseEligibilityBasis("v1-allowlist", &basis) && basis == EligibilityBasis::kV1Allowlist &&
+                   ParseEligibilityBasis("v2-denylist", &basis) && basis == EligibilityBasis::kV2Denylist,
+               "strict-basis-names-parse")) return false;
+    for (const char *name : {"", "v2", "V2-denylist", "v2-denylist ", "v1", "denylist"})
+      if (!Check(!ParseEligibilityBasis(name, &basis), "strict-basis-unknown-name-is-not-a-basis")) return false;
+    if (!Check(IncompletePolicyFor(EligibilityBasis::kV1Allowlist) == IncompletePolicy::kDeferToV1 &&
+                   IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover &&
+                   IncompletePolicyFor(static_cast<EligibilityBasis>(0x7f)) == IncompletePolicy::kTakeover,
+               "strict-policy-of-each-basis")) return false;
+    if (!Check(EligibilityBasisAdmitted(EligibilityBasis::kV1Allowlist, false) &&
+                   EligibilityBasisAdmitted(EligibilityBasis::kV1Allowlist, true) &&
+                   !EligibilityBasisAdmitted(EligibilityBasis::kV2Denylist, false) &&
+                   EligibilityBasisAdmitted(EligibilityBasis::kV2Denylist, true) &&
+                   !EligibilityBasisAdmitted(static_cast<EligibilityBasis>(0x7f), true),
+               "strict-a-v1-build-refuses-the-v2-basis")) return false;
+    if (!Check(SessionInterlockPolicy(EligibilityBasis::kV2Denylist, false) == IncompletePolicy::kTakeover &&
+                   SessionInterlockPolicy(EligibilityBasis::kV2Denylist, true) == IncompletePolicy::kTakeover &&
+                   SessionInterlockPolicy(EligibilityBasis::kV1Allowlist, false) == IncompletePolicy::kDeferToV1 &&
+                   SessionInterlockPolicy(EligibilityBasis::kV1Allowlist, true) == IncompletePolicy::kDeferToV1,
+               "strict-session-policy")) return false;
+    // This build's own answer for the basis it was compiled as.
+    if (!Check(EligibilityBasisAdmitted(EligibilityBasis::kV2Denylist, kNativeEligibilityIsV2) == kNativeEligibilityIsV2,
+               "strict-this-build-admits-v2-only-as-a-v2-build")) return false;
+  }
+
+  // Basis x no verdict: a cancel is never a takeover; a budget and incomplete facts are, for v2 only.
+  {
+    struct Row { InterlockNoVerdict none; bool v2_takeover; };
+    const Row rows[] = {{InterlockNoVerdict::kCanceled, false},
+                        {InterlockNoVerdict::kBudget, true},
+                        {InterlockNoVerdict::kIncomplete, true}};
+    for (const Row &row : rows) {
+      InterlockEvaluation evaluation;
+      evaluation.no_verdict = row.none;
+      const InterlockEvaluation v1 = ApplyIncompletePolicy(evaluation, IncompletePolicyFor(EligibilityBasis::kV1Allowlist));
+      if (!Check(!v1.Refuses() && v1.no_verdict == row.none && v1.taken_over_from == InterlockNoVerdict::kNone,
+                 "strict-v1-no-verdict-stays-with-v1")) return false;
+      const InterlockEvaluation v2 = ApplyIncompletePolicy(evaluation, IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+      if (row.v2_takeover) {
+        if (!Check(v2.Refuses() && v2.verdict.outcome == InterlockOutcome::kTakeover &&
+                       v2.verdict.reason == InterlockReason::kUnclassified && v2.taken_over_from == row.none &&
+                       receipt_row(v2.verdict),
+                   "strict-v2-budget-and-incomplete-are-a-takeover")) return false;
+      } else if (!Check(!v2.Refuses() && v2.no_verdict == InterlockNoVerdict::kCanceled,
+                        "strict-v2-cancel-is-not-a-takeover")) {
+        return false;
+      }
+    }
+    // A no-verdict value outside the enumeration, and a policy outside it: the strict side.
+    InterlockEvaluation odd;
+    odd.no_verdict = static_cast<InterlockNoVerdict>(0x7f);
+    if (!Check(ApplyIncompletePolicy(odd, IncompletePolicy::kTakeover).Refuses(), "strict-unknown-no-verdict-is-a-takeover"))
+      return false;
+    InterlockEvaluation budget;
+    budget.no_verdict = InterlockNoVerdict::kBudget;
+    if (!Check(ApplyIncompletePolicy(budget, static_cast<IncompletePolicy>(0x7f)).Refuses(),
+               "strict-unknown-policy-is-a-takeover")) return false;
+    // An evaluation that never reached the map cannot be read as "nothing to refuse" by a v2 session.
+    if (!Check(ApplyIncompletePolicy(InterlockEvaluation{}, IncompletePolicy::kTakeover).Refuses(),
+               "strict-an-unasked-strict-map-is-a-takeover")) return false;
+  }
+
+  // Basis x the core's reason. Each row is given to both maps through the same core decision.
+  const auto document = [](const std::string &label, ActionKind action) {
+    EffectFacts facts = EffBase();
+    facts.action = action;
+    facts.origin = OriginState::kUnknown;  // a Document of a window that is not a web window
+    facts.chain = {NodeFacts{"Document", "", label}, NodeFacts{"Window", "", "Untitled - Notepad"}};
+    return facts;
+  };
+  const std::string cyrillic = u8"\u0423\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c"_u8;  // "Install"
+  struct Expect { InterlockOutcome outcome; InterlockReason reason; };
+  const Expect none{InterlockOutcome::kNone, InterlockReason::kNone};
+  const Expect unclassified{InterlockOutcome::kTakeover, InterlockReason::kUnclassified};
+  const Expect secure{InterlockOutcome::kBlocked, InterlockReason::kSecureField};
+  struct Row {
+    const char *name;
+    EffectFacts facts;
+    DecisionKind kind;
+    DecisionReason reason;
+    Expect v1;
+    Expect v2;
+    NativeDocumentException exception;
+  };
+  std::vector<Row> rows;
+  rows.push_back({"ordinary-button", EffBase(), DecisionKind::kOrdinary, DecisionReason::kNone, none, none,
+                  NativeDocumentException::kNotAsked});
+  {
+    EffectFacts facts = EffLabel(cyrillic, ActionKind::kInvoke);
+    facts.chain[0].role = "Button";
+    rows.push_back({"unreadable-cyrillic-install-button", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified,
+                    none, unclassified, NativeDocumentException::kNotOriginUnknown});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kScroll;
+    facts.chain = {NodeFacts{"Pane", "", cyrillic}, NodeFacts{"Window", "", "Editor"}};
+    rows.push_back({"scroll-scope-unreadable", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified, none,
+                    unclassified, NativeDocumentException::kNotOriginUnknown});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kScroll;
+    facts.text_language_supported = false;
+    facts.chain = {NodeFacts{"ComboBox", "", ""}, NodeFacts{"Window", "", "Editor"}};
+    rows.push_back({"value-scroll-label-unreadable", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified,
+                    none, unclassified, NativeDocumentException::kNotOriginUnknown});
+  }
+  {
+    // A general app's Edit field that is not a password field, labelled CVV: V1's guard lets it through.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {NodeFacts{"Edit", "", "CVV"}, NodeFacts{"Window", "", "Checkout"}};
+    rows.push_back({"credential-cvv-edit", facts, DecisionKind::kBlocked, DecisionReason::kCredential, none, secure,
+                    NativeDocumentException::kNotAsked});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kType;
+    facts.chain = {NodeFacts{"Edit", "", "Password"}, NodeFacts{"Window", "", "Sign in"}};
+    rows.push_back({"secure-password-edit", facts, DecisionKind::kBlocked, DecisionReason::kSecure, none, secure,
+                    NativeDocumentException::kNotAsked});
+  }
+  {
+    // A script opened inside an application (an editor's tree): not refused by the v1 map, refused by v2.
+    EffectFacts facts = EffBase();
+    facts.action = ActionKind::kDoubleClick;
+    facts.target_is_file_item = true;
+    facts.extension_known = true;
+    facts.extension = "bat";
+    facts.chain = {NodeFacts{"TreeItem", "", "run.bat"}, NodeFacts{"Window", "", "Editor"}};
+    rows.push_back({"executable-inside-an-application", facts, DecisionKind::kBlocked,
+                    DecisionReason::kExecutionTrigger, none,
+                    {InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger}, NativeDocumentException::kNotAsked});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.surface = SurfaceKind::kShellLike;
+    facts.action = ActionKind::kType;
+    facts.chain = {NodeFacts{"Edit", "", "Command line"}, NodeFacts{"Window", "", "Editor"}};
+    const Expect shell{InterlockOutcome::kBlocked, InterlockReason::kShellSurface};
+    rows.push_back({"shell-surface", facts, DecisionKind::kBlocked, DecisionReason::kSurface, shell, shell,
+                    NativeDocumentException::kNotAsked});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.mode = SessionMode::kObserveOnly;
+    rows.push_back({"observe-only-mode", facts, DecisionKind::kBlocked, DecisionReason::kObserveOnly, none,
+                    unclassified, NativeDocumentException::kNotAsked});
+  }
+  {
+    EffectFacts facts = EffBase();
+    facts.metadata_complete = false;
+    rows.push_back({"incomplete-facts", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified, none,
+                    unclassified, NativeDocumentException::kNotAsked});
+  }
+  // Notepad's Document (the control): readable, its origin unknown, confirmed to show no web content.
+  for (const ActionKind action : {ActionKind::kClick, ActionKind::kType, ActionKind::kSetText, ActionKind::kKey,
+                                  ActionKind::kScroll, ActionKind::kSelect}) {
+    EffectFacts facts = document("Text editor", action);
+    facts.target_not_web = true;
+    rows.push_back({"notepad-document-not-web", facts, DecisionKind::kTakeover, DecisionReason::kOriginUnknown, none,
+                    none, NativeDocumentException::kApplied});
+  }
+  {
+    EffectFacts facts = document(u8"\u30c6\u30ad\u30b9\u30c8 \u30a8\u30c7\u30a3\u30bf\u30fc"_u8, ActionKind::kType);
+    facts.target_not_web = true;
+    rows.push_back({"notepad-document-not-web-ja", facts, DecisionKind::kTakeover, DecisionReason::kOriginUnknown,
+                    none, none, NativeDocumentException::kApplied});
+  }
+  {
+    // Not confirmed (an unverified identity, a copy of notepad.exe in a writable place, a Store Notepad
+    // before PR-4, a browser): no value. Confirmed web: false. Both keep the takeover.
+    EffectFacts unconfirmed = document("Text editor", ActionKind::kType);
+    rows.push_back({"document-web-not-ruled-out", unconfirmed, DecisionKind::kTakeover, DecisionReason::kOriginUnknown,
+                    none, unclassified, NativeDocumentException::kWebNotRuledOut});
+    EffectFacts web = unconfirmed;
+    web.target_not_web = false;
+    rows.push_back({"document-web", web, DecisionKind::kTakeover, DecisionReason::kOriginUnknown, none, unclassified,
+                    NativeDocumentException::kWebNotRuledOut});
+  }
+  {
+    // A native Document whose origin is unknown AND whose text cannot be read: the readability reason wins.
+    EffectFacts facts = document(cyrillic, ActionKind::kType);
+    facts.target_not_web = true;
+    rows.push_back({"notepad-document-unreadable", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified,
+                    none, unclassified, NativeDocumentException::kNotOriginUnknown});
+  }
+  for (const Row &row : rows) {
+    const std::string name = std::string("strict-row-") + row.name;
+    const EffectDecision decision = ClassifyEffect(row.facts, closed);
+    if (row.name != std::string("incomplete-facts") &&
+        !Check(sprint_coder::computer_use::interlock_detail::FactsAreComplete(row.facts), (name + "-facts-complete").c_str()))
+      return false;
+    if (!Check(decision.kind == row.kind && decision.reason == row.reason, (name + "-core-decision").c_str())) return false;
+    const InterlockVerdict v1 = InterlockForFacts(row.facts, closed);
+    const InterlockVerdict v2 = StrictInterlockForFacts(row.facts, closed);
+    if (!Check(v1.outcome == row.v1.outcome && v1.reason == row.v1.reason, (name + "-v1").c_str())) return false;
+    if (!Check(v2.outcome == row.v2.outcome && v2.reason == row.v2.reason, (name + "-v2").c_str())) return false;
+    if (!Check(v2.document_exception == row.exception, (name + "-exception-record").c_str())) return false;
+    if (v2.Refuses() && !Check(receipt_row(v2), (name + "-v2-is-a-receipt-row").c_str())) return false;
+  }
+
+  // The core's order replaced: a core that judged the origin first would say kOriginUnknown for a
+  // Document it cannot read. The exception measures the readability again and keeps the takeover, and
+  // says that it did not apply and why. The readable Document is the control: still let through.
+  {
+    EffectDecision origin_first;
+    origin_first.effect_class = EffectClass::kUnclassified;
+    origin_first.kind = DecisionKind::kTakeover;
+    origin_first.reason = DecisionReason::kOriginUnknown;
+    EffectFacts unreadable = document(cyrillic, ActionKind::kType);
+    unreadable.target_not_web = true;
+    const InterlockVerdict kept = MapEffectToStrictInterlock(unreadable, origin_first, StrictTextReadable(unreadable), closed);
+    if (!Check(kept.Refuses() && kept.outcome == InterlockOutcome::kTakeover &&
+                   kept.document_exception == NativeDocumentException::kReadabilityUnconfirmed,
+               "strict-origin-first-unreadable-document-is-a-takeover")) return false;
+    // A scroll over a node inside the Document: its scope is that node, whose text cannot be read.
+    EffectFacts unreadable_scroll = document("Text editor", ActionKind::kScroll);
+    unreadable_scroll.chain.insert(unreadable_scroll.chain.begin(), NodeFacts{"Text", "", cyrillic});
+    unreadable_scroll.target_not_web = true;
+    if (!Check(MapEffectToStrictInterlock(unreadable_scroll, origin_first, StrictTextReadable(unreadable_scroll), closed)
+                       .document_exception == NativeDocumentException::kReadabilityUnconfirmed,
+               "strict-origin-first-unreadable-scroll-is-a-takeover")) return false;
+    EffectFacts readable = document("Text editor", ActionKind::kType);
+    readable.target_not_web = true;
+    const InterlockVerdict passed = MapEffectToStrictInterlock(readable, origin_first, StrictTextReadable(readable), closed);
+    if (!Check(!passed.Refuses() && passed.document_exception == NativeDocumentException::kApplied,
+               "strict-origin-first-readable-document-is-let-through")) return false;
+    // The readability not measured: neither true nor false. It is not "not false": a takeover.
+    const InterlockVerdict unmeasured = MapEffectToStrictInterlock(readable, origin_first, std::nullopt, closed);
+    if (!Check(unmeasured.Refuses() && unmeasured.document_exception == NativeDocumentException::kReadabilityUnconfirmed,
+               "strict-unmeasured-readability-is-a-takeover")) return false;
+    // ... and the measurement says "not measured" for facts it cannot read (no chain, past the bounds).
+    EffectFacts empty = readable;
+    empty.chain.clear();
+    EffectFacts long_chain = readable;
+    long_chain.chain.assign(kEffectMaxChainNodes + 1, NodeFacts{"Group", "", "x"});
+    if (!Check(!StrictTextReadable(empty).has_value() && !StrictTextReadable(long_chain).has_value() &&
+                   StrictTextReadable(readable) == std::optional<bool>(true) &&
+                   StrictTextReadable(unreadable) == std::optional<bool>(false),
+               "strict-readability-has-three-states")) return false;
+    // Facts that are not a native Document with an unknown origin: no exception.
+    EffectFacts button = EffBase();
+    button.origin = OriginState::kUnknown;
+    button.target_not_web = true;
+    if (!Check(MapEffectToStrictInterlock(button, origin_first, StrictTextReadable(button), closed).document_exception ==
+                   NativeDocumentException::kNotNativeDocument,
+               "strict-exception-needs-a-document")) return false;
+  }
+
+  // Every kind and every reason the core has is placed; values outside the enumerations are refused.
+  {
+    const EffectFacts facts = EffBase();
+    for (unsigned value = 0; value <= static_cast<unsigned>(DecisionReason::kOriginUnknown); ++value) {
+      EffectDecision blocked;
+      blocked.kind = DecisionKind::kBlocked;
+      blocked.reason = static_cast<DecisionReason>(value);
+      const InterlockVerdict verdict = MapEffectToStrictInterlock(facts, blocked, StrictTextReadable(facts), closed);
+      if (!Check(verdict.Refuses() && receipt_row(verdict), "strict-every-blocked-reason-is-refused")) return false;
+    }
+    for (const unsigned value : {0x40u, 0xeeu, 0xffu}) {
+      EffectDecision blocked;
+      blocked.kind = DecisionKind::kBlocked;
+      blocked.reason = static_cast<DecisionReason>(value);
+      const InterlockVerdict verdict = MapEffectToStrictInterlock(facts, blocked, StrictTextReadable(facts), closed);
+      if (!Check(verdict.Refuses() && verdict.outcome == InterlockOutcome::kTakeover &&
+                     verdict.reason == InterlockReason::kUnclassified,
+                 "strict-out-of-range-blocked-reason-is-refused")) return false;
+      EffectDecision odd_kind;
+      odd_kind.kind = static_cast<DecisionKind>(value);
+      odd_kind.reason = DecisionReason::kNone;
+      const InterlockVerdict odd = MapEffectToStrictInterlock(facts, odd_kind, StrictTextReadable(facts), closed);
+      if (!Check(odd.Refuses() && odd.outcome == InterlockOutcome::kTakeover, "strict-out-of-range-kind-is-a-takeover"))
+        return false;
+    }
+    // Reading is never refused.
+    EffectFacts observe = EffBase();
+    observe.action = ActionKind::kObserve;
+    observe.metadata_complete = false;
+    if (!Check(!StrictInterlockForFacts(observe, closed).Refuses(), "strict-observe-is-never-refused")) return false;
+  }
+
+  // Through the Windows capture: Notepad's Document as BuildWindowsShadowFacts makes it. Nothing on the
+  // production path confirms "not web" yet (the identity list comes with PR-4 / PR-5), so a v2 session
+  // takes it over, and a v1 session is answered exactly as before.
+  {
+    ShadowUiaCapture capture;
+    capture.target_found = true;
+    ShadowUiaNode text;
+    text.control_type = "Document";
+    text.class_name = "RichEditD2DPT";
+    text.name = "Text editor";
+    ShadowUiaNode window;
+    window.control_type = "Window";
+    window.class_name = "Notepad";
+    window.name = "Untitled - Notepad";
+    capture.chain = {text, window};
+    capture.chain_reached_root = true;
+    capture.neighbors_complete = true;
+    capture.window_class_read = true;
+    capture.window_class = "Notepad";
+    capture.process_path_read = true;
+    capture.process_path = "C:\\Windows\\System32\\notepad.exe";
+    const ShadowRequestInfo request = UiaRequest("type");
+    const InterlockEvaluation evaluation = EvaluateWindowsInterlockFromCapture(capture, request, false, closed);
+    const InterlockEvaluation v1 = ApplyIncompletePolicy(evaluation, IncompletePolicyFor(EligibilityBasis::kV1Allowlist));
+    const InterlockEvaluation v2 = ApplyIncompletePolicy(evaluation, IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+    if (!Check(evaluation.no_verdict == InterlockNoVerdict::kNone && !v1.Refuses(), "strict-capture-notepad-v1-unchanged"))
+      return false;
+    if (!Check(v2.Refuses() && v2.verdict.document_exception == NativeDocumentException::kWebNotRuledOut,
+               "strict-capture-notepad-v2-not-confirmed-is-a-takeover")) return false;
+  }
+
+  std::cout << "Computer Use native strict interlock: PASS (" << rows.size() << " basis x reason rows)\n";
+  return true;
+}
+
 int main() {
   if (!CheckNativePreflightClassifier()) return 1;
   std::cout << "Computer Use native classifier core: PASS (16 facts, 100 authority tuples)\n";
@@ -8593,6 +8932,7 @@ int main() {
   if (!CheckWindowsV1DefaultRisk()) return 1;
   if (!CheckClickRule()) return 1;
   if (!CheckInterlockDispatchCodes()) return 1;
+  if (!CheckStrictInterlock()) return 1;
   if (!CheckWindowsInterlockJourneys()) return 1;
   if (!CheckWindowsArtifactRead()) return 1;
   if (!CheckNativeApprovedRisk()) return 1;
