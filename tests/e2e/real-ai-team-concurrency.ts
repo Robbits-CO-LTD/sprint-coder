@@ -2,12 +2,27 @@
 // real-ai-team-scale.spec.ts が使う。Playwright に依存しない純粋な関数にして、保存した DB のコピーと
 // Main ログにも当て直せるようにしている（node 24 の型除去でそのまま import できる書き方に限る）。
 //
-// 区間の取り方（根拠は apps/desktop/src/main 配下のコード）:
-// - 開始: team_v2_activity_events の `attempt_started`。persistence.ts の transitionTeamAttempt が
-//   Attempt を running にするたびに記録する。rate limit の待機から再開したときも、同じ Attempt が
-//   もう一度 running になるので、そのたびに新しい区間として始まる。team_attempts.started_at は最初の
-//   値を COALESCE で保ち続けるので使わない。
-// - 終了: 次のうち、開始より後で最も早いもの。
+// 区間の取り方（根拠は apps/desktop/src 配下のコード）:
+// - 開始: その Attempt の `attempt_started`（team_v2_activity_events）より後で、その Worker の CLI が
+//   実際に出力を出し始めた最初の記録。具体的には Main ログの `team.worker.activity` か
+//   `team.worker.fileChange` の最初の 1 件。
+//   - `attempt_started` そのものは使わない。team-coordinator.ts は dispatch の前にこれを記録し、
+//     その後 team-worker-runtime.ts の execute が probe・catalog の準備（Codex は隔離環境も）を経てから
+//     RuntimeHostClient.start で CLI を起動するので、準備の時間まで区間に入ってしまう。
+//   - `team.worker.accepted` も使わない（execute の冒頭、probe より前に出る）。
+//   - `team.worker.activity` は、team-worker-runtime.ts の RuntimeHostClient のイベント処理が、
+//     Runtime Host から届いた `stage`（claude-normalizer.ts / codex-adapter.ts が CLI の出力を読んで
+//     出す）と `operation`（CLI が始めたツールやコマンド）を activity にしたもの。どちらも CLI が起動して
+//     出力した後にしか届かない。`team.worker.fileChange` も CLI のファイル操作の後に出る。
+//     outputDelta・heartbeat は handleWorkerActivity がログに出さないので使えない。
+//   - 例外として、最初の Runtime が使えずに別の Runtime へ fallback するとき、CLI を起動する前に
+//     「…へfallbackして続行」の activity が出る。そこで、team_attempts.resolved_provider が
+//     requested_provider と違う Attempt が 1 件でもあれば判定不能にする。
+//   - rate limit の待機から再開したときは、同じ Attempt がもう一度 running になり `attempt_started`
+//     が記録されるので、その後の最初の CLI の記録から新しい区間として数える。
+//   - CLI が最初の出力を出すまでの分だけ実際の起動より遅い時刻になるので、区間は短めに（同時数は
+//     少なめに）数える。多めに数えることはない。
+// - 終了: 開始より後で、次のうち最も早いもの。
 //   1. Main ログの `team.worker.completed` / `failed` / `canceled`（team-coordinator.ts の
 //      handleWorkerActivity が、Worker Runtime の CLI 実行が終わったときに出す）。これを正とする。
 //   2. 同じ execution の `execution_waiting`（rate limit・検証・再開待ちへ移った時点。
@@ -16,11 +31,18 @@
 //   3. team_execution_isolation_completions.created_at（finalizing を終えて waiting_integration に
 //      入った時点。統合はこの後なので、統合の時間は区間に入らない）。
 //   4. team_attempts.finished_at（統合の後に記録されるため最後の手段。使ったら fallback として数える）。
+// - 開始・終了のどちらかを Main ログで決められない区間が 1 件でもあれば判定不能（呼び出し側が失敗させる）。
 // - rate limit の待機: execution_waiting の payload.to が waiting_rate_limit のもの、または
 //   team_attempts.provider_call_ordinal が 1 以上の Attempt（recordTeamAttemptRateLimited が増やす）。
 //   1 件でもあれば、同時編集の合格判定には使わない（呼び出し側が判定不能として失敗させる）。
 
-export type WorkerEnd = Readonly<{ workerId: string; at: number; status: string }>;
+export type WorkerEvent = Readonly<{
+  workerId: string;
+  at: number;
+  /** cli: CLI が動いている証拠（activity / fileChange）。end: CLI の実行の終了。 */
+  kind: 'cli' | 'end';
+  status: string;
+}>;
 
 export type RunningConcurrency = Readonly<{
   intervals: number;
@@ -29,7 +51,11 @@ export type RunningConcurrency = Readonly<{
   threshold: number;
   rateLimitWaits: number;
   rateLimitedAttempts: number;
+  /** 別の Runtime へ fallback した Attempt の数。0 でなければ判定不能。 */
+  fallbackAttempts: number;
   endSources: Record<string, number>;
+  /** 開始を Main ログ（CLI の最初の出力）で決められなかった区間の数。0 でなければ判定不能。 */
+  withoutCliStart: number;
   /** 終了を Main ログ（CLI の終了）で決められなかった区間の数。0 でなければ判定不能。 */
   withoutCliEnd: number;
   byProvider: Record<string, { intervals: number; minS: number; maxS: number; avgS: number }>;
@@ -42,31 +68,33 @@ type Db = {
   close: () => void;
 };
 
-/** Main の stdout（secureLogger の JSON 行）から Worker の CLI 実行の終了を拾う。 */
-export function parseWorkerEnds(text: string): WorkerEnd[] {
-  const ends: WorkerEnd[] = [];
+/** Main の stdout（secureLogger の JSON 行）から、Worker の CLI が動いていた証拠と終了を拾う。 */
+export function parseWorkerEvents(text: string): WorkerEvent[] {
+  const events: WorkerEvent[] = [];
   for (const line of text.split(/\r?\n/)) {
     if (!line.includes('"team.worker.')) continue;
     try {
-      const entry = JSON.parse(line) as {
-        event?: string;
-        workerId?: string;
-        timestamp?: string;
-        status?: string;
-      };
-      const match = /^team\.worker\.(completed|failed|canceled)$/.exec(entry.event ?? '');
+      const entry = JSON.parse(line) as { event?: string; workerId?: string; timestamp?: string };
+      const match = /^team\.worker\.(activity|fileChange|completed|failed|canceled)$/.exec(
+        entry.event ?? '',
+      );
       if (match && entry.workerId && entry.timestamp)
-        ends.push({ workerId: entry.workerId, at: Date.parse(entry.timestamp), status: match[1]! });
+        events.push({
+          workerId: entry.workerId,
+          at: Date.parse(entry.timestamp),
+          kind: match[1] === 'activity' || match[1] === 'fileChange' ? 'cli' : 'end',
+          status: match[1]!,
+        });
     } catch {
       /* JSON でない行は無視する */
     }
   }
-  return ends;
+  return events.sort((a, b) => a.at - b.at);
 }
 
 export async function runningConcurrency(
   dbPath: string,
-  workerEnds: readonly WorkerEnd[],
+  workerEvents: readonly WorkerEvent[],
   threshold: number,
 ): Promise<RunningConcurrency> {
   const empty = {
@@ -76,7 +104,9 @@ export async function runningConcurrency(
     threshold,
     rateLimitWaits: 0,
     rateLimitedAttempts: 0,
+    fallbackAttempts: 0,
     endSources: {},
+    withoutCliStart: 0,
     withoutCliEnd: 0,
     byProvider: {},
   };
@@ -95,7 +125,8 @@ export async function runningConcurrency(
     const attempts = new Map(
       db
         .prepare(
-          'SELECT id, finished_at, requested_provider, provider_call_ordinal, state FROM team_attempts',
+          `SELECT id, finished_at, requested_provider, resolved_provider, provider_call_ordinal, state
+           FROM team_attempts`,
         )
         .all()
         .map((row) => [String(row['id']), row]),
@@ -121,43 +152,66 @@ export async function runningConcurrency(
       (row) =>
         Number(row['provider_call_ordinal'] ?? 0) > 0 || row['state'] === 'waiting_rate_limit',
     ).length;
+    const fallbackAttempts = [...attempts.values()].filter(
+      (row) =>
+        row['resolved_provider'] !== null &&
+        row['resolved_provider'] !== undefined &&
+        row['resolved_provider'] !== row['requested_provider'],
+    ).length;
     const endSources: Record<string, number> = {};
     const byProvider: Record<
       string,
       { intervals: number; minS: number; maxS: number; avgS: number }
     > = {};
     const events: [number, number][] = [];
+    let withoutCliStart = 0;
     let withoutCliEnd = 0;
-    for (const start of activities.filter((row) => row['type'] === 'attempt_started')) {
-      const startAt = time(start);
-      const executionId = String(start['execution_id']);
-      const workerId = String(start['subject_agent_id']);
-      const attempt = attempts.get(String(start['attempt_id']));
-      const candidates: [number, string][] = [];
-      const cliEnd = workerEnds
-        .filter((end) => end.workerId === workerId && end.at >= startAt)
-        .sort((a, b) => a.at - b.at)[0];
-      if (cliEnd) candidates.push([cliEnd.at, 'cli_end']);
-      else withoutCliEnd++;
+    for (const started of activities.filter((row) => row['type'] === 'attempt_started')) {
+      const attemptStartedAt = time(started);
+      const executionId = String(started['execution_id']);
+      const workerId = String(started['subject_agent_id']);
+      const attempt = attempts.get(String(started['attempt_id']));
+      // この Attempt の区間を打ち切る App 側の記録（CLI の終了ログ以外）。
+      const appEnds: [number, string][] = [];
       const waiting = activities.find(
         (row) =>
           row['type'] === 'execution_waiting' &&
           String(row['execution_id']) === executionId &&
-          time(row) > startAt,
+          time(row) > attemptStartedAt,
       );
-      if (waiting) candidates.push([time(waiting), `execution_waiting:${payloadTo(waiting)}`]);
+      if (waiting) appEnds.push([time(waiting), `execution_waiting:${payloadTo(waiting)}`]);
       const completion = completions.get(executionId);
-      if (completion !== undefined && completion > startAt)
-        candidates.push([completion, 'isolation_completion']);
+      if (completion !== undefined && completion > attemptStartedAt)
+        appEnds.push([completion, 'isolation_completion']);
       if (attempt && attempt['finished_at'] !== null && attempt['finished_at'] !== undefined)
-        candidates.push([Date.parse(String(attempt['finished_at'])), 'attempt_finished_fallback']);
+        appEnds.push([Date.parse(String(attempt['finished_at'])), 'attempt_finished_fallback']);
+      appEnds.sort((a, b) => a[0] - b[0]);
+      const limit = appEnds[0]?.[0] ?? Number.POSITIVE_INFINITY;
+      // 開始: attempt_started の後、App 側の打ち切りより前に出た、その Worker の最初の CLI の記録。
+      const cliStart = workerEvents.find(
+        (event) =>
+          event.workerId === workerId &&
+          event.kind === 'cli' &&
+          event.at >= attemptStartedAt &&
+          event.at < limit,
+      );
+      if (cliStart === undefined) {
+        withoutCliStart++;
+        continue;
+      }
+      const candidates: [number, string][] = appEnds.filter(([at]) => at > cliStart.at);
+      const cliEnd = workerEvents.find(
+        (event) => event.workerId === workerId && event.kind === 'end' && event.at >= cliStart.at,
+      );
+      if (cliEnd) candidates.push([cliEnd.at, 'cli_end']);
+      else withoutCliEnd++;
       candidates.sort((a, b) => a[0] - b[0]);
       const end = candidates[0] ?? [Date.now(), 'still_running'];
       endSources[end[1]] = (endSources[end[1]] ?? 0) + 1;
-      events.push([startAt, 1], [end[0], -1]);
+      events.push([cliStart.at, 1], [end[0], -1]);
       const provider = String(attempt?.['requested_provider'] ?? 'unknown');
       const bucket = (byProvider[provider] ??= { intervals: 0, minS: Infinity, maxS: 0, avgS: 0 });
-      const seconds = (end[0] - startAt) / 1000;
+      const seconds = (end[0] - cliStart.at) / 1000;
       bucket.avgS = (bucket.avgS * bucket.intervals + seconds) / (bucket.intervals + 1);
       bucket.intervals++;
       bucket.minS = Math.min(bucket.minS, seconds);
@@ -186,7 +240,9 @@ export async function runningConcurrency(
       threshold,
       rateLimitWaits,
       rateLimitedAttempts,
+      fallbackAttempts,
       endSources,
+      withoutCliStart,
       withoutCliEnd,
       byProvider,
     };

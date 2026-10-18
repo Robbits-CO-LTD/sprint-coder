@@ -23,7 +23,7 @@ import {
   shutdown,
   type Provider,
 } from './real-ai-helpers';
-import { parseWorkerEnds, runningConcurrency } from './real-ai-team-concurrency';
+import { parseWorkerEvents, runningConcurrency } from './real-ai-team-concurrency';
 
 // 本物の Claude Code CLI / Codex CLI（ユーザーのサブスク）で、Team の大人数同時編集を確かめる opt-in の
 // スペック。Leader（本物の AI）に Worker 32 人（Claude 16 / Codex 16）を雇わせ、各 Worker に別々の
@@ -552,7 +552,7 @@ function repositoryState(workspace: string): Record<string, unknown> {
   };
 }
 
-/** Main の stdout をそのまま貯める（Worker の CLI 実行の終了時刻を拾うため）。 */
+/** Main の stdout をそのまま貯める（Worker の CLI の起動（最初の出力）と終了の時刻を拾うため）。 */
 const mainOutput = new WeakMap<ElectronApplication, string[]>();
 
 async function launch(profile: string, logName: string): Promise<ElectronApplication> {
@@ -742,7 +742,7 @@ test.describe('real AI Team scale E2E', () => {
       // 同時に CLI が動いていた人数（区間の取り方と根拠は real-ai-team-concurrency.ts の先頭）。
       const dbConcurrency = await runningConcurrency(
         join(profile, 'sprint-coder.sqlite3'),
-        parseWorkerEnds((mainOutput.get(app) ?? []).join('')),
+        parseWorkerEvents((mainOutput.get(app) ?? []).join('')),
         MIN_CONCURRENT,
       );
       const files = assignments.map((a) => {
@@ -801,8 +801,16 @@ test.describe('real AI Team scale E2E', () => {
         `判定不能: rate limit の待機が起きたため、同時編集の合否を判定から除外します（待機 ${dbConcurrency.rateLimitWaits} 件、待機した Attempt ${dbConcurrency.rateLimitedAttempts} 件）`,
       ).toBe(0);
       expect(
+        dbConcurrency.withoutCliStart,
+        `判定不能: CLI の起動（最初の出力）を Main ログで確かめられない区間が ${dbConcurrency.withoutCliStart} 件あります`,
+      ).toBe(0);
+      expect(
         dbConcurrency.withoutCliEnd,
         `判定不能: CLI の終了を Main ログで確かめられない区間が ${dbConcurrency.withoutCliEnd} 件あります`,
+      ).toBe(0);
+      expect(
+        dbConcurrency.fallbackAttempts,
+        `判定不能: 別の Runtime へ fallback した Attempt が ${dbConcurrency.fallbackAttempts} 件あり、CLI の起動時刻を決められません`,
       ).toBe(0);
       expect.soft(dbConcurrency.maxConcurrent).toBeGreaterThanOrEqual(MIN_CONCURRENT);
       expect.soft(dbConcurrency.secondsAtOrAbove).toBeGreaterThan(0);
