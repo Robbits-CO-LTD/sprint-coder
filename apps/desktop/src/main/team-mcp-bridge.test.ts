@@ -1,6 +1,9 @@
 import { spawn, type ChildProcess } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   TeamMcpBridge as ProductionTeamMcpBridge,
@@ -12,8 +15,13 @@ import type { TeamCoordinator } from './team-coordinator';
 import { queryNativeProcessIdentity } from './native-process-identity';
 import {
   PROJECT_MEMORY_MCP_TOOL_NAMES,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+  TEAM_BRIDGE_MAX_REQUEST_BYTES,
+  TEAM_CORE_MCP_TOOL_NAMES,
   WORKER_TEAM_MCP_TOOL_NAMES,
 } from '../runtime-host/team-mcp-tool-contract';
+import { TEAM_MCP_SERVER_SOURCE } from '../runtime-host/team-mcp-server-source';
 
 class TeamMcpBridge extends ProductionTeamMcpBridge {
   override register(turnId: string, registration: TeamMcpRegistration): void {
@@ -33,7 +41,15 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
       throw new Error('not used in this test');
     }),
     listWorkerReports: vi.fn(() => []),
+    assignTask: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-1', state: 'queued' }) as never),
+    assignTasks: vi.fn(
+      async (_taskId: string, assignments: readonly unknown[]) =>
+        assignments.map((_, index) => ({
+          ok: true,
+          submission: { executionId: `execution-batch-${index}`, state: 'queued' },
+        })) as never,
+    ),
     listAgentMessages: vi.fn(() => []),
     hasBusyWorkers: vi.fn(() => false),
     stopWorker: vi.fn(async () => ({ id: 'worker-1', state: 'stopped' }) as never),
@@ -1264,6 +1280,178 @@ socket.once('error', (error) => {
       result: { ok: false, message: expect.stringContaining('read-only') },
     });
     expect(coordinator.assignTaskAs).toHaveBeenCalledTimes(1);
+  });
+
+  it('routes a native Leader team_assign_tasks call as one batch bound to the token (issue #864)', async () => {
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: null } as never);
+    const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+    bridges.push(bridge);
+    const socketPath = await bridge.ensureStarted();
+    const token = TeamMcpBridge.generateToken();
+    bridge.register('turn-leader', {
+      taskId: 'task-1',
+      token,
+      role: 'leader',
+      allowedTools: TEAM_CORE_MCP_TOOL_NAMES,
+      contextOwner: { type: 'turn', id: 'turn-leader' },
+    });
+
+    const { lines } = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_assign_tasks',
+        args: {
+          assignments: [
+            { workerId: 'worker-1', objective: 'one', doneCriteria: ['done'] },
+            {
+              workerId: 'worker-2',
+              objective: 'two',
+              doneCriteria: ['done'],
+              access: 'workspace-write',
+            },
+          ],
+        },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
+    expect(JSON.parse(lines[0] as string)).toMatchObject({
+      ok: true,
+      result: {
+        ok: true,
+        assigned: 2,
+        failed: 0,
+        results: [
+          { index: 0, workerId: 'worker-1', ok: true, executionId: 'execution-batch-0' },
+          { index: 1, workerId: 'worker-2', ok: true, executionId: 'execution-batch-1' },
+        ],
+      },
+    });
+    expect(coordinator.assignTasks).toHaveBeenCalledTimes(1);
+    expect(coordinator.assignTasks).toHaveBeenCalledWith(
+      'task-1',
+      [
+        expect.objectContaining({ targetAgentId: 'worker-1', accessMode: 'read-only' }),
+        expect.objectContaining({ targetAgentId: 'worker-2', accessMode: 'workspace-write' }),
+      ],
+      null,
+      { type: 'turn', id: 'turn-leader' },
+    );
+    expect(coordinator.assignTask).not.toHaveBeenCalled();
+  });
+
+  describe('a team_assign_tasks batch too large for the bridge (issue #864)', () => {
+    const leaderBridge = async () => {
+      const coordinator = fakeCoordinator({ workspaceWriteLimits: null } as never);
+      const bridge = new TeamMcpBridge(coordinator, testSocketPath());
+      bridges.push(bridge);
+      const socketPath = (await bridge.ensureStarted()) as string;
+      const token = TeamMcpBridge.generateToken();
+      bridge.register('turn-leader', {
+        taskId: 'task-1',
+        token,
+        role: 'leader',
+        allowedTools: TEAM_CORE_MCP_TOOL_NAMES,
+        contextOwner: { type: 'turn', id: 'turn-leader' },
+      });
+      return { coordinator, socketPath, token };
+    };
+
+    it('answers a batch between the batch limit and the bridge buffer instead of being dropped', async () => {
+      const { coordinator, socketPath, token } = await leaderBridge();
+      const args = {
+        assignments: Array.from({ length: 25 }, (_, index) => ({
+          workerId: `worker-${index}`,
+          objective: 'あ'.repeat(9_000),
+          doneCriteria: ['done'],
+        })),
+      };
+      const bytes = Buffer.byteLength(JSON.stringify(args), 'utf8');
+      expect(bytes).toBeGreaterThan(TEAM_ASSIGN_TASKS_MAX_BYTES);
+      expect(bytes).toBeLessThan(TEAM_BRIDGE_MAX_REQUEST_BYTES - 1_024);
+
+      const { lines } = await roundTrip(
+        socketPath,
+        { token, tool: 'team_assign_tasks', args },
+        RESPONSE_TIMEOUT_MS,
+      );
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0] as string)).toMatchObject({
+        ok: true,
+        result: {
+          ok: false,
+          code: 'request_too_large',
+          message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+        },
+      });
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
+
+    it('is refused by the real MCP server before the bridge, which stays connected', async () => {
+      const { coordinator, socketPath, token } = await leaderBridge();
+      const directory = mkdtempSync(join(tmpdir(), 'team-mcp-server-'));
+      const scriptPath = join(directory, 'server.cjs');
+      writeFileSync(scriptPath, TEAM_MCP_SERVER_SOURCE);
+      const child = spawn(process.execPath, [scriptPath], {
+        env: { ...process.env, TEAM_BRIDGE_SOCKET: socketPath, TEAM_BRIDGE_TOKEN: token },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+      child.stderr.resume();
+      const replies = new Map<unknown, Record<string, unknown>>();
+      const waiters = new Map<unknown, (reply: Record<string, unknown>) => void>();
+      createInterface({ input: child.stdout }).on('line', (line) => {
+        if (line.trim() === '') return;
+        const reply = JSON.parse(line) as Record<string, unknown>;
+        const waiter = waiters.get(reply['id']);
+        if (waiter === undefined) replies.set(reply['id'], reply);
+        else waiter(reply);
+      });
+      const call = (id: number, name: string, args: unknown) => {
+        child.stdin.write(
+          `${JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } })}\n`,
+        );
+        return new Promise<Record<string, unknown>>((resolve) => {
+          const ready = replies.get(id);
+          if (ready !== undefined) resolve(ready);
+          else waiters.set(id, resolve);
+        });
+      };
+      const text = (reply: Record<string, unknown>) =>
+        (reply['result'] as { content: { text: string }[] }).content[0]!.text;
+      try {
+        // Fifty 7,000-character objectives in a 3-byte script: over 1 MiB of UTF-8.
+        const refused = await call(1, 'team_assign_tasks', {
+          assignments: Array.from({ length: 50 }, (_, index) => ({
+            workerId: `worker-${index}`,
+            objective: 'あ'.repeat(7_000),
+            doneCriteria: ['done'],
+          })),
+        });
+        expect(refused['result']).toMatchObject({ isError: true });
+        expect(JSON.parse(text(refused))).toMatchObject({
+          ok: false,
+          code: 'request_too_large',
+          message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+        });
+        // Any other request too big for the bridge is answered too, not sent to be dropped.
+        const huge = await call(2, 'team_send_to_worker', {
+          workerId: 'worker-1',
+          content: 'あ'.repeat(400_000),
+        });
+        expect(huge['result']).toMatchObject({ isError: true });
+        expect(text(huge)).toContain('too large');
+        // The connection survived both, so the next call still goes through the bridge.
+        const batch = await call(3, 'team_assign_tasks', {
+          assignments: [{ workerId: 'worker-1', objective: 'one', doneCriteria: ['done'] }],
+        });
+        expect(batch['result']).not.toMatchObject({ isError: true });
+        expect(JSON.parse(text(batch))).toMatchObject({ ok: true, assigned: 1 });
+        expect(coordinator.assignTasks).toHaveBeenCalledTimes(1);
+      } finally {
+        child.kill();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }, 20_000);
   });
 
   it('closes the connection without responding to an unknown token', async () => {

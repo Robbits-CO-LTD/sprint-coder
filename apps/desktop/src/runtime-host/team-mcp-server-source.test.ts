@@ -10,7 +10,7 @@ import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
 import { TEAM_MCP_SERVER_SOURCE, TEAM_MCP_TOOL_NAMES } from './team-mcp-server-source';
 import { TEAM_HIRE_WORKER_TOOL } from '../main/team-tools';
 import { GRAPH_TOOLS } from '../main/graph-tools';
-import { WORKER_TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
+import { TEAM_ASSIGN_TASKS_MAX, WORKER_TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 // Exercises the exact script string the Claude adapter writes to disk and hands to the real
 // Claude CLI as an MCP stdio server (see claude-adapter.ts). The JSON-RPC handshake shape asserted
@@ -339,6 +339,17 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       required: ['missionId'],
       additionalProperties: false,
     });
+    // Issue #864: one call carries up to a default Team's concurrency of assignments, each
+    // shaped exactly as team_assign_task's arguments.
+    const batchSchema = tools.find(({ name }) => name === 'team_assign_tasks')?.inputSchema;
+    const singleSchema = tools.find(({ name }) => name === 'team_assign_task')?.inputSchema;
+    expect(batchSchema).toMatchObject({
+      required: ['assignments'],
+      additionalProperties: false,
+      properties: {
+        assignments: { minItems: 1, maxItems: TEAM_ASSIGN_TASKS_MAX, items: singleSchema },
+      },
+    });
   });
 
   it('publishes exactly the Worker inventory and excludes the Manager-only hire tool', async () => {
@@ -551,7 +562,14 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
       method: 'tools/call',
       params: { name: 'team_resume_mission', arguments: { missionId: 'mission-1' } },
     });
-    await vi_waitFor(() => harness.bridgeReceived.length === 4);
+    // A batch of assignments checks every element, so it gets the longer timeout too (issue #864).
+    harness.send({
+      jsonrpc: '2.0',
+      id: 29,
+      method: 'tools/call',
+      params: { name: 'team_assign_tasks', arguments: { assignments: [] } },
+    });
+    await vi_waitFor(() => harness.bridgeReceived.length === 5);
 
     expect((await harness.nextMessage())['id']).toBe(22);
     expect(
@@ -559,8 +577,9 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
         (await harness.nextMessage())['id'],
         (await harness.nextMessage())['id'],
         (await harness.nextMessage())['id'],
+        (await harness.nextMessage())['id'],
       ]),
-    ).toEqual(new Set([23, 24, 25]));
+    ).toEqual(new Set([23, 24, 25, 29]));
   });
 
   it('releases every pending request when the bridge disconnects', async () => {

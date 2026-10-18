@@ -1,11 +1,22 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ModelSelection } from '@sprint-coder/contracts';
+import { TEAM_DEFAULT_CONCURRENT_EXECUTIONS } from '@sprint-coder/domain';
 import {
   executeTeamTool,
+  LEADER_PROVIDER_TOOLS,
+  MANAGER_PROVIDER_TOOLS,
   registerTeamTools,
+  TEAM_ASSIGN_TASKS_TOOL,
   TEAM_WAIT_EVENTS_TOOL,
   TEAM_WAIT_REPORTS_TOOL,
+  WORKER_PROVIDER_TOOLS,
 } from './team-tools';
+import {
+  TEAM_ASSIGN_TASKS_MAX,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+  TEAM_BRIDGE_MAX_REQUEST_BYTES,
+} from '../runtime-host/team-mcp-tool-contract';
 import type { ToolBroker } from './tool-broker';
 import type { TeamCoordinator } from './team-coordinator';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
@@ -652,6 +663,311 @@ describe('executeTeamTool routing', () => {
       executeTeamTool(coordinator, 'task-1', 'team_wait_reports', { extra: true }),
     ).rejects.toThrow();
     await expect(executeTeamTool(coordinator, 'task-1', 'team_stop_worker', {})).rejects.toThrow();
+  });
+});
+
+describe('executeTeamTool team_assign_tasks (issue #864)', () => {
+  const item = (workerId: string, access?: 'read-only' | 'workspace-write') => ({
+    workerId,
+    objective: `work for ${workerId}`,
+    doneCriteria: ['done'],
+    ...(access === undefined ? {} : { access }),
+  });
+
+  it('passes every element to one coordinator batch and reports each element on its own', async () => {
+    const assignTasks = vi.fn(async () => [
+      { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
+      { ok: false, error: new Error('Worker is not ready') },
+    ]);
+    const coordinator = fakeCoordinator({ assignTasks } as never);
+    const result = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_assign_tasks',
+      { assignments: [item('worker-a'), item('worker-b', 'workspace-write')] },
+      { contextOwner: { type: 'turn', id: 'turn-1' } },
+    )) as Record<string, unknown>;
+    expect(assignTasks).toHaveBeenCalledTimes(1);
+    expect(assignTasks).toHaveBeenCalledWith(
+      'task-1',
+      [
+        {
+          targetAgentId: 'worker-a',
+          content: 'work for worker-a',
+          doneCriteria: ['done'],
+          accessMode: 'read-only',
+        },
+        {
+          targetAgentId: 'worker-b',
+          content: 'work for worker-b',
+          doneCriteria: ['done'],
+          accessMode: 'workspace-write',
+        },
+      ],
+      null,
+      { type: 'turn', id: 'turn-1' },
+    );
+    expect(result).toMatchObject({
+      ok: true,
+      assigned: 1,
+      failed: 1,
+      results: [
+        {
+          index: 0,
+          workerId: 'worker-a',
+          ok: true,
+          executionId: 'execution-a',
+          state: 'queued',
+          writeScope: 'read-only',
+        },
+        {
+          index: 1,
+          workerId: 'worker-b',
+          ok: false,
+          message: 'Worker is not ready',
+          writeScope: 'workspace-write',
+        },
+      ],
+    });
+    // No write element was assigned, so the result carries the read-only note.
+    expect(result['workspaceWriteLimit']).toBeUndefined();
+  });
+
+  it('refuses only the write elements of a read-only Manager and still assigns the rest', async () => {
+    const assignTasks = vi.fn(async () => [
+      { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
+    ]);
+    const coordinator = fakeCoordinator({ assignTasks } as never);
+    const result = (await executeTeamTool(
+      coordinator,
+      'task-1',
+      'team_assign_tasks',
+      { assignments: [item('worker-w', 'workspace-write'), item('worker-r')] },
+      {
+        requesterAgentId: 'manager-1',
+        accessCeiling: 'read-only',
+        contextOwner: { type: 'team_execution', id: 'parent-1' },
+      },
+    )) as { results: Array<Record<string, unknown>> };
+    expect(assignTasks).toHaveBeenCalledWith(
+      'task-1',
+      [expect.objectContaining({ targetAgentId: 'worker-r' })],
+      'manager-1',
+      { type: 'team_execution', id: 'parent-1' },
+    );
+    expect(result.results).toMatchObject([
+      { index: 0, workerId: 'worker-w', ok: false, message: expect.stringContaining('read-only') },
+      { index: 1, workerId: 'worker-r', ok: true, executionId: 'execution-a' },
+    ]);
+  });
+
+  it('adds the write notes when a write element was assigned', async () => {
+    const assignTasks = vi.fn(async () => [
+      { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
+    ]);
+    const coordinator = fakeCoordinator({
+      assignTasks,
+      workspaceWriteLimits: { editExisting: false, createDirectory: false },
+    } as never);
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', {
+      assignments: [item('worker-w', 'workspace-write')],
+    })) as Record<string, unknown>;
+    expect(result['workspaceWriteLimit']).toEqual(expect.any(String));
+  });
+
+  it('maps a coordinator failure of the whole batch to an {ok:false} result', async () => {
+    const coordinator = fakeCoordinator({
+      assignTasks: vi.fn(async () => {
+        throw new Error('Team not found');
+      }),
+    } as never);
+    await expect(
+      executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', {
+        assignments: [item('worker-a')],
+      }),
+    ).resolves.toMatchObject({ ok: false, message: 'Team not found' });
+  });
+
+  it('rejects an empty, oversized, or forged batch before the coordinator sees it', async () => {
+    const assignTasks = vi.fn();
+    const coordinator = fakeCoordinator({ assignTasks } as never);
+    const call = (args: unknown) =>
+      executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', args);
+    await expect(call({ assignments: [] })).rejects.toThrow();
+    await expect(
+      call({
+        assignments: Array.from({ length: TEAM_ASSIGN_TASKS_MAX + 1 }, (_, index) =>
+          item(`worker-${index}`),
+        ),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      call({ assignments: [{ ...item('worker-a'), requesterAgentId: 'x' }] }),
+    ).rejects.toThrow();
+    await expect(call({ assignments: [item('worker-a')], taskId: 'task-2' })).rejects.toThrow();
+    await expect(
+      call({ assignments: [{ ...item('worker-a'), doneCriteria: [] }] }),
+    ).rejects.toThrow();
+    expect(assignTasks).not.toHaveBeenCalled();
+  });
+
+  describe('the byte limit that keeps a batch within the CLI bridge', () => {
+    /** Valid arguments whose JSON is exactly `target` bytes of UTF-8, mostly 3-byte characters. */
+    const argsOfBytes = (target: number) => {
+      const assignments = Array.from({ length: 19 }, (_, index) => ({
+        workerId: `worker-${index}`,
+        objective: 'あ'.repeat(9_180),
+        doneCriteria: ['done'],
+      }));
+      const last = assignments.at(-1)!;
+      last.objective = `${'あ'.repeat(9_000)}a`;
+      const pad = target - Buffer.byteLength(JSON.stringify({ assignments }), 'utf8');
+      expect(pad).toBeGreaterThanOrEqual(0);
+      last.objective += 'a'.repeat(pad);
+      expect(last.objective.length).toBeLessThanOrEqual(10_000);
+      const args = { assignments };
+      expect(Buffer.byteLength(JSON.stringify(args), 'utf8')).toBe(target);
+      return args;
+    };
+    const batchCoordinator = () =>
+      fakeCoordinator({
+        assignTasks: vi.fn(async (_taskId: string, assignments: readonly unknown[]) =>
+          assignments.map((_, index) => ({
+            ok: true,
+            submission: { executionId: `execution-${index}`, state: 'queued' },
+          })),
+        ),
+      } as never);
+
+    it('stays well inside the bridge buffer', () => {
+      expect(TEAM_ASSIGN_TASKS_MAX_BYTES).toBeLessThanOrEqual(TEAM_BRIDGE_MAX_REQUEST_BYTES / 2);
+    });
+
+    it('accepts a batch of exactly the limit', async () => {
+      const coordinator = batchCoordinator();
+      const result = await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_tasks',
+        argsOfBytes(TEAM_ASSIGN_TASKS_MAX_BYTES),
+      );
+      expect(result).toMatchObject({ ok: true, assigned: 19 });
+      expect(coordinator.assignTasks).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses the whole batch one byte over the limit, saying to split it', async () => {
+      const coordinator = batchCoordinator();
+      const result = await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_tasks',
+        argsOfBytes(TEAM_ASSIGN_TASKS_MAX_BYTES + 1),
+      );
+      expect(result).toEqual({
+        ok: false,
+        error: 'RequestTooLarge',
+        code: 'request_too_large',
+        message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+      });
+      expect(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE).toContain('Split');
+      expect(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE).not.toMatch(/[0-9]/);
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
+
+    it('counts 3-byte characters by their UTF-8 bytes, not their length', async () => {
+      const coordinator = batchCoordinator();
+      // 350,000 characters, within the per-element limits, but 1,050,000 bytes of UTF-8.
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', {
+        assignments: Array.from({ length: 50 }, (_, index) => ({
+          workerId: `worker-${index}`,
+          objective: '日'.repeat(7_000),
+          doneCriteria: ['done'],
+        })),
+      });
+      expect(result).toMatchObject({ ok: false, code: 'request_too_large' });
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
+
+    it('counts characters by their escaped JSON form, not their length', async () => {
+      const coordinator = batchCoordinator();
+      // 100,000 characters, but each control character escapes to six bytes (\u0001) and each
+      // quote to two, so the JSON the bridge receives is over 500,000 bytes.
+      const args = {
+        assignments: Array.from({ length: 50 }, (_, index) => ({
+          workerId: `worker-${index}`,
+          objective: '\u0001'.repeat(1_800) + '"'.repeat(200),
+          doneCriteria: ['done'],
+        })),
+      };
+      expect(Buffer.byteLength(JSON.stringify(args), 'utf8')).toBeGreaterThan(
+        TEAM_ASSIGN_TASKS_MAX_BYTES,
+      );
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', args);
+      expect(result).toMatchObject({ ok: false, code: 'request_too_large' });
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
+  });
+
+  it('accepts exactly the maximum batch, the default Team concurrency', async () => {
+    expect(TEAM_ASSIGN_TASKS_MAX).toBe(TEAM_DEFAULT_CONCURRENT_EXECUTIONS);
+    const assignTasks = vi.fn(async (_taskId: string, assignments: readonly unknown[]) =>
+      assignments.map((_, index) => ({
+        ok: true,
+        submission: { executionId: `execution-${index}`, state: 'queued' },
+      })),
+    );
+    const coordinator = fakeCoordinator({ assignTasks } as never);
+    const result = (await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', {
+      assignments: Array.from({ length: TEAM_ASSIGN_TASKS_MAX }, (_, index) =>
+        item(`worker-${index}`),
+      ),
+    })) as { assigned: number };
+    expect(result.assigned).toBe(TEAM_ASSIGN_TASKS_MAX);
+  });
+
+  it('is registered on the mock ToolBroker with the Turn as the context owner', async () => {
+    const implementations = new Map<string, (input: unknown, context: unknown) => unknown>();
+    const broker = {
+      registerImplementation: ({
+        toolId,
+        execute,
+      }: {
+        toolId: string;
+        execute: (input: unknown, context: unknown) => unknown;
+      }) => implementations.set(toolId, execute),
+    } as unknown as ToolBroker;
+    const assignTasks = vi.fn(async () => [
+      { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
+    ]);
+    registerTeamTools(broker, fakeCoordinator({ assignTasks } as never));
+    await implementations.get(TEAM_ASSIGN_TASKS_TOOL.toolId)!(
+      { assignments: [item('worker-a')] },
+      { taskId: 'task-1', turnId: 'turn-1' },
+    );
+    expect(assignTasks).toHaveBeenCalledWith('task-1', expect.any(Array), null, {
+      type: 'turn',
+      id: 'turn-1',
+    });
+  });
+
+  it('is offered to Leaders and Managers but not Workers, with the bounded schema', () => {
+    const leaderTool = LEADER_PROVIDER_TOOLS.find(({ name }) => name === 'team_assign_tasks');
+    expect(leaderTool?.inputSchema).toMatchObject({
+      required: ['assignments'],
+      additionalProperties: false,
+      properties: {
+        assignments: {
+          minItems: 1,
+          maxItems: TEAM_ASSIGN_TASKS_MAX,
+          items: {
+            required: ['workerId', 'objective', 'doneCriteria'],
+            additionalProperties: false,
+          },
+        },
+      },
+    });
+    expect(MANAGER_PROVIDER_TOOLS.map(({ name }) => name)).toContain('team_assign_tasks');
+    expect(WORKER_PROVIDER_TOOLS.map(({ name }) => name)).not.toContain('team_assign_tasks');
   });
 });
 

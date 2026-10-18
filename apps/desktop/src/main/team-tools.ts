@@ -22,13 +22,18 @@ import {
   type ToolDefinition,
 } from '@sprint-coder/domain';
 import type { ToolBroker } from './tool-broker';
-import type { TeamCoordinator } from './team-coordinator';
+import type { TeamBatchAssignmentOutcome, TeamCoordinator } from './team-coordinator';
 import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
+import {
+  TEAM_ASSIGN_TASKS_MAX,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+} from '../runtime-host/team-mcp-tool-contract';
 
 const teamToolDefinition = (
   providerName: string,
@@ -147,6 +152,30 @@ export const TEAM_ASSIGN_TASK_TOOL = teamToolDefinition(
   ['workerId', 'objective', 'doneCriteria'],
 );
 
+export const TEAM_ASSIGN_TASKS_TOOL = teamToolDefinition(
+  'team_assign_tasks',
+  'assign-tasks',
+  {
+    assignments: {
+      type: 'array',
+      minItems: 1,
+      maxItems: TEAM_ASSIGN_TASKS_MAX,
+      items: {
+        type: 'object',
+        properties: {
+          workerId: { type: 'string' },
+          objective: { type: 'string' },
+          doneCriteria: { type: 'array', items: { type: 'string' } },
+          access: { type: 'string', enum: ['read-only', 'workspace-write'] },
+        },
+        required: ['workerId', 'objective', 'doneCriteria'],
+        additionalProperties: false,
+      },
+    },
+  },
+  ['assignments'],
+);
+
 export const TEAM_ASSIGN_MISSION_TOOL = teamToolDefinition(
   'team_assign_mission',
   'assign-mission',
@@ -224,6 +253,7 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
   TEAM_LIST_MODELS_TOOL,
   TEAM_HIRE_WORKER_TOOL,
   TEAM_ASSIGN_TASK_TOOL,
+  TEAM_ASSIGN_TASKS_TOOL,
   TEAM_ASSIGN_MISSION_TOOL,
   TEAM_RESUME_MISSION_TOOL,
   TEAM_STEER_EXECUTION_TOOL,
@@ -243,6 +273,7 @@ export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.f
   team_hire_worker:
     '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
   team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
+  team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。`,
   team_assign_mission:
     '10〜30分単位の2〜12工程を順番に実行する永続Missionを作成します。長時間のコーディングに使います。',
   team_resume_mission:
@@ -335,6 +366,7 @@ export type TeamToolName =
   | 'team_record_model_research'
   | 'team_hire_worker'
   | 'team_assign_task'
+  | 'team_assign_tasks'
   | 'team_assign_mission'
   | 'team_resume_mission'
   | 'team_steer_execution'
@@ -353,6 +385,7 @@ export function isTeamToolName(value: unknown): value is TeamToolName {
     value === 'team_record_model_research' ||
     value === 'team_hire_worker' ||
     value === 'team_assign_task' ||
+    value === 'team_assign_tasks' ||
     value === 'team_assign_mission' ||
     value === 'team_resume_mission' ||
     value === 'team_steer_execution' ||
@@ -470,6 +503,11 @@ const assignArgsSchema = z
     objective: z.string().min(1).max(10_000),
     doneCriteria: z.array(z.string().min(1).max(1_000)).min(1).max(20),
     access: z.enum(['read-only', 'workspace-write']).default('read-only'),
+  })
+  .strict();
+const assignTasksArgsSchema = z
+  .object({
+    assignments: z.array(assignArgsSchema).min(1).max(TEAM_ASSIGN_TASKS_MAX),
   })
   .strict();
 const assignMissionArgsSchema = z
@@ -877,6 +915,76 @@ export async function executeTeamTool(
         return teamToolError(error);
       }
     }
+    case 'team_assign_tasks': {
+      // Issue #864: the whole call is refused only for a malformed request, as team_assign_task's
+      // is. Each element then gets team_assign_task's checks and its own result, and the elements
+      // that pass stay assigned whatever happens to the others. A batch too large to cross the CLI
+      // bridge is refused whole on every path, so a Leader meets the same limit everywhere.
+      if (Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8') > TEAM_ASSIGN_TASKS_MAX_BYTES)
+        return {
+          ok: false,
+          error: 'RequestTooLarge',
+          code: 'request_too_large',
+          message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+        };
+      const request = assignTasksArgsSchema.parse(args);
+      const readOnlyCeiling =
+        options.requesterAgentId !== undefined &&
+        (options.accessCeiling ?? 'read-only') === 'read-only';
+      const refused = (): Error =>
+        new Error('read-only execution cannot delegate workspace-write access');
+      const admissible = request.assignments
+        .map((assignment, index) => ({ assignment, index }))
+        .filter(({ assignment }) => !(readOnlyCeiling && assignment.access === 'workspace-write'));
+      let outcomes: readonly TeamBatchAssignmentOutcome[];
+      try {
+        outcomes = await coordinator.assignTasks(
+          taskId,
+          admissible.map(({ assignment }) => ({
+            targetAgentId: assignment.workerId,
+            content: assignment.objective,
+            doneCriteria: assignment.doneCriteria,
+            accessMode: assignment.access,
+          })),
+          options.requesterAgentId ?? null,
+          options.contextOwner,
+        );
+      } catch (error) {
+        return teamToolError(error);
+      }
+      const outcomeByIndex = new Map(
+        admissible.map(({ index }, position) => [index, outcomes[position]]),
+      );
+      const results = request.assignments.map((assignment, index) => {
+        const outcome = outcomeByIndex.get(index);
+        const base = { index, workerId: assignment.workerId, writeScope: assignment.access };
+        if (outcome === undefined) return { ...base, ...teamToolError(refused()) };
+        if (!outcome.ok) return { ...base, ...teamToolError(outcome.error) };
+        return {
+          ...base,
+          ok: true as const,
+          executionId: outcome.submission.executionId,
+          state: outcome.submission.state,
+        };
+      });
+      const assignedWrite = results.some(
+        (result) => result.ok && result.writeScope === 'workspace-write',
+      );
+      const workspaceWriteLimitNote = assignedWrite
+        ? leaderWriteLimitNote(coordinator.workspaceWriteLimits)
+        : '';
+      const assigned = results.filter(({ ok }) => ok).length;
+      return {
+        ok: true,
+        assigned,
+        failed: results.length - assigned,
+        results,
+        writeScopeNote: assignedWrite
+          ? writeScopeNote('workspace-write', coordinator.taskAccessPreset?.(taskId))
+          : writeScopeNote('read-only', undefined),
+        ...(workspaceWriteLimitNote === '' ? {} : { workspaceWriteLimit: workspaceWriteLimitNote }),
+      };
+    }
     case 'team_assign_mission': {
       const request = assignMissionArgsSchema.parse(args);
       try {
@@ -1071,6 +1179,14 @@ export function registerTeamTools(
     implementationKind: 'built-in',
     execute: (input, context) =>
       executeTeamTool(coordinator, context.taskId, 'team_assign_task', input, {
+        contextOwner: { type: 'turn', id: context.turnId },
+      }),
+  });
+  broker.registerImplementation({
+    toolId: TEAM_ASSIGN_TASKS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: (input, context) =>
+      executeTeamTool(coordinator, context.taskId, 'team_assign_tasks', input, {
         contextOwner: { type: 'turn', id: context.turnId },
       }),
   });

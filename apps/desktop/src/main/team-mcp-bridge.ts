@@ -16,6 +16,7 @@ import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
 import type { TeamCoordinator } from './team-coordinator';
 import { secureLogger } from './secure-logger';
 import {
+  TEAM_BRIDGE_MAX_REQUEST_BYTES,
   teamMcpToolNamesForCapabilities,
   type TeamMcpRole,
   type TeamMcpToolName,
@@ -36,7 +37,7 @@ import {
 // tried first; `os.tmpdir()` and the caller-provided (userData-derived) directory are fallbacks
 // for sandboxes where `/tmp` is not writable.
 const MAX_SUN_PATH_BYTES = 100;
-const MAX_PENDING_REQUEST_BYTES = 1024 * 1024;
+const MAX_PENDING_REQUEST_BYTES = TEAM_BRIDGE_MAX_REQUEST_BYTES;
 const DEFAULT_AUTHENTICATION_TIMEOUT_MS = 5_000;
 /** Every running Leader, Manager and Worker turn holds one bridge connection for its whole run, so
  * this has to cover the concurrency ceiling (100 Workers, TEAM_MAX_CONCURRENT_EXECUTIONS) plus

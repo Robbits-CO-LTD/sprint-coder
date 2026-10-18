@@ -135,6 +135,16 @@ export type TeamExecutionSubmission = Readonly<{
   state: TeamExecutionState;
 }>;
 export type TeamExecutionAccess = 'read-only' | 'workspace-write';
+export type TeamTaskAssignment = Readonly<{
+  targetAgentId: string;
+  content: string;
+  doneCriteria: readonly string[];
+  accessMode?: TeamExecutionAccess;
+}>;
+/** One element of a batched assignment (issue #864): its execution, or why it was refused. */
+export type TeamBatchAssignmentOutcome =
+  | Readonly<{ ok: true; submission: TeamExecutionSubmission }>
+  | Readonly<{ ok: false; error: unknown }>;
 export type TeamDiagnosticEvent = Readonly<{
   event: string;
   taskId: string;
@@ -1162,6 +1172,40 @@ export class TeamCoordinator {
     contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
     return this.assignTaskWithAuthority(input, requesterAgentId, contextOwner);
+  }
+
+  /**
+   * Many assignments in one call (issue #864). A Leader that assigns its Workers one call at a time
+   * leaves the first ones finished before the last ones start. Each element gets exactly the checks
+   * a single assignment gets and succeeds or fails alone, and an element that passes is scheduled
+   * at once, so the Scheduler starts it while the next ones are still being admitted. The batch
+   * holds the Team's queue once, in order, and checks the Workspace for writing at most once: a
+   * check passed for one element holds for the rest, which follow it with no await between.
+   */
+  async assignTasks(
+    taskId: string,
+    assignments: readonly TeamTaskAssignment[],
+    requesterAgentId: string | null = null,
+    contextOwner?: TeamContextOwner,
+  ): Promise<readonly TeamBatchAssignmentOutcome[]> {
+    return this.enqueue(taskId, async () => {
+      let writeEligibility: Promise<unknown> | undefined;
+      const outcomes: TeamBatchAssignmentOutcome[] = [];
+      for (const assignment of assignments) {
+        try {
+          const submission = await this.admitAssignment(
+            { ...assignment, taskId },
+            requesterAgentId,
+            contextOwner,
+            () => (writeEligibility ??= this.requireWorkspaceWriteEligibility(taskId)),
+          );
+          outcomes.push({ ok: true, submission });
+        } catch (error) {
+          outcomes.push({ ok: false, error });
+        }
+      }
+      return outcomes;
+    });
   }
 
   async assignMission(
@@ -3192,98 +3236,113 @@ export class TeamCoordinator {
     requesterAgentId: string | null,
     contextOwner?: TeamContextOwner,
   ): Promise<TeamExecutionSubmission> {
-    return this.enqueue(input.taskId, async () => {
-      const team = this.persistence.getTeamByTask(input.taskId);
-      if (team === null || team.state !== 'active') throw new Error('Team must be active');
-      const snapshot = this.persistence.getTeamSnapshot(team.id);
-      const requester = snapshot.agents.find(
-        ({ id }) => id === (requesterAgentId ?? team.leaderAgentId),
-      );
-      const worker = snapshot.agents.find(
-        ({ id, kind }) => id === input.targetAgentId && kind === 'worker',
-      );
-      if (requester === undefined || worker === undefined) throw new Error('Worker not found');
-      if (requesterAgentId !== null) {
-        if (!requester.canDelegate || requester.managerPolicy === null)
-          throw new Error('Only a Manager may assign child executions');
-        if (worker.parentAgentId !== requester.id)
-          throw new Error('Manager may only assign executions to direct child Agents');
-      }
-      if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
-      if ((input.accessMode ?? 'read-only') === 'workspace-write') {
-        if (worker.writeCapable !== true)
-          throw new Error('workspace-write execution requires a write-capable Worker');
-        await this.requireWorkspaceWriteEligibility(input.taskId);
-      }
-      if (
-        this.persistence
-          .listTeamExecutions(team.id)
-          .some(
-            (execution) =>
-              execution.assigneeAgentId === worker.id &&
-              !['completed', 'failed', 'canceled'].includes(execution.state),
-          )
-      )
-        throw new Error('Worker already has a pending execution');
+    return this.enqueue(input.taskId, () =>
+      this.admitAssignment(input, requesterAgentId, contextOwner, () =>
+        this.requireWorkspaceWriteEligibility(input.taskId),
+      ),
+    );
+  }
 
-      const now = this.isoNow();
-      const execution = this.persistence.createTeamExecution({
-        teamId: team.id,
-        assigneeAgentId: worker.id,
-        createdByAgentId: requester.id,
-        instruction: input.content,
-        accessMode: input.accessMode ?? 'read-only',
-        now,
-        ...(contextOwner === undefined ? {} : { contextOwner }),
-      });
-      const message = this.persistence.createTeamMessage({
-        teamId: team.id,
-        sourceAgentId: requester.id,
-        targetAgentId: worker.id,
-        content: input.content,
-        executionId: execution.id,
-      });
-      const teamTask = this.persistence.createTeamTask({
-        teamId: team.id,
-        messageId: message.id,
-        assigneeAgentId: worker.id,
-        createdByAgentId: requester.id,
-        description: input.content,
-        doneCriteria: input.doneCriteria,
-        now,
-      });
-      this.persistence.createTeamDelivery({ messageId: message.id, now });
-      const queued = this.persistence.transitionTeamExecution({
-        executionId: execution.id,
-        to: 'queued',
-        now,
-        queueReason: 'global_concurrency',
-      });
-      this.diagnostic?.({
-        event: 'team.execution.queued',
-        taskId: input.taskId,
-        teamId: team.id,
-        workerId: worker.id,
-        status: 'queued',
-      });
-      this.scheduleExecution({
-        taskId: input.taskId,
-        teamId: team.id,
-        teamLimit: team.policy.maxConcurrentExecutions,
-        leaderId: requester.id,
-        workerId: worker.id,
-        messageId: message.id,
-        messageSeq: message.seq,
-        teamTaskId: teamTask.id,
-        executionId: execution.id,
-        doneCriteria: input.doneCriteria,
-        // Issue #854: never refused for pace. The Scheduler counts the assignment when it starts,
-        // and one beyond the Team's pace waits queued until the window has room.
-        paceKey: team.id,
-      });
-      this.emit(input.taskId, team.id);
-      return { executionId: queued.id, state: queued.state };
+  /** One assignment's checks and records. Runs only inside the Team's queue. */
+  private async admitAssignment(
+    input: TeamSendMessageInput & {
+      doneCriteria: readonly string[];
+      accessMode?: TeamExecutionAccess;
+    },
+    requesterAgentId: string | null,
+    contextOwner: TeamContextOwner | undefined,
+    requireWriteEligibility: () => Promise<unknown>,
+  ): Promise<TeamExecutionSubmission> {
+    const team = this.persistence.getTeamByTask(input.taskId);
+    if (team === null || team.state !== 'active') throw new Error('Team must be active');
+    const snapshot = this.persistence.getTeamSnapshot(team.id);
+    const requester = snapshot.agents.find(
+      ({ id }) => id === (requesterAgentId ?? team.leaderAgentId),
+    );
+    const worker = snapshot.agents.find(
+      ({ id, kind }) => id === input.targetAgentId && kind === 'worker',
+    );
+    if (requester === undefined || worker === undefined) throw new Error('Worker not found');
+    if (requesterAgentId !== null) {
+      if (!requester.canDelegate || requester.managerPolicy === null)
+        throw new Error('Only a Manager may assign child executions');
+      if (worker.parentAgentId !== requester.id)
+        throw new Error('Manager may only assign executions to direct child Agents');
+    }
+    if (!['ready', 'waiting'].includes(worker.state)) throw new Error('Worker is not ready');
+    if ((input.accessMode ?? 'read-only') === 'workspace-write') {
+      if (worker.writeCapable !== true)
+        throw new Error('workspace-write execution requires a write-capable Worker');
+      await requireWriteEligibility();
+    }
+    if (
+      this.persistence
+        .listTeamExecutions(team.id)
+        .some(
+          (execution) =>
+            execution.assigneeAgentId === worker.id &&
+            !['completed', 'failed', 'canceled'].includes(execution.state),
+        )
+    )
+      throw new Error('Worker already has a pending execution');
+
+    const now = this.isoNow();
+    const execution = this.persistence.createTeamExecution({
+      teamId: team.id,
+      assigneeAgentId: worker.id,
+      createdByAgentId: requester.id,
+      instruction: input.content,
+      accessMode: input.accessMode ?? 'read-only',
+      now,
+      ...(contextOwner === undefined ? {} : { contextOwner }),
     });
+    const message = this.persistence.createTeamMessage({
+      teamId: team.id,
+      sourceAgentId: requester.id,
+      targetAgentId: worker.id,
+      content: input.content,
+      executionId: execution.id,
+    });
+    const teamTask = this.persistence.createTeamTask({
+      teamId: team.id,
+      messageId: message.id,
+      assigneeAgentId: worker.id,
+      createdByAgentId: requester.id,
+      description: input.content,
+      doneCriteria: input.doneCriteria,
+      now,
+    });
+    this.persistence.createTeamDelivery({ messageId: message.id, now });
+    const queued = this.persistence.transitionTeamExecution({
+      executionId: execution.id,
+      to: 'queued',
+      now,
+      queueReason: 'global_concurrency',
+    });
+    this.diagnostic?.({
+      event: 'team.execution.queued',
+      taskId: input.taskId,
+      teamId: team.id,
+      workerId: worker.id,
+      status: 'queued',
+    });
+    this.scheduleExecution({
+      taskId: input.taskId,
+      teamId: team.id,
+      teamLimit: team.policy.maxConcurrentExecutions,
+      leaderId: requester.id,
+      workerId: worker.id,
+      messageId: message.id,
+      messageSeq: message.seq,
+      teamTaskId: teamTask.id,
+      executionId: execution.id,
+      doneCriteria: input.doneCriteria,
+      // Issue #854: never refused for pace. The Scheduler counts the assignment when it starts,
+      // and one beyond the Team's pace waits queued until the window has room.
+      paceKey: team.id,
+    });
+    this.emit(input.taskId, team.id);
+    return { executionId: queued.id, state: queued.state };
   }
 
   async steerExecution(

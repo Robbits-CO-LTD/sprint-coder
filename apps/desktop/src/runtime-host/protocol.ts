@@ -840,7 +840,8 @@ function isRuntimeTeamMcpOption(value: unknown): value is RuntimeTeamMcpOption {
     ) &&
     (record['managedTools'] === undefined ||
       (Array.isArray(record['managedTools']) &&
-        record['managedTools'].length <= 32 &&
+        // A Team Leader's managed catalog already reaches the low thirties with every option on.
+        record['managedTools'].length <= 48 &&
         new Set(
           record['managedTools'].map((tool) =>
             typeof tool === 'object' && tool !== null
