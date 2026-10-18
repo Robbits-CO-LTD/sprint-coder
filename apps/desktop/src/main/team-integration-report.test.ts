@@ -5,6 +5,7 @@ import {
   integrationBlockedCompletion,
   integrationResumedCompletion,
 } from './team-coordinator';
+import { WorktreeIntegrationConflictError } from './worker-worktree';
 
 describe('integration blocked report (issue #852)', () => {
   it('stays within the UTF-16 limits even when many emoji paths conflict', () => {
@@ -25,6 +26,15 @@ describe('integration blocked report (issue #852)', () => {
     expect(completion.summary).toContain('部分適用');
     expect(completion.summary).toContain('lib');
     expect(completion.summary).toContain('そのリポジトリは統合前の状態のまま');
+  });
+
+  it('names the conflicting files of a single-repository Mission worktree conflict', () => {
+    const completion = integrationBlockedCompletion(
+      new WorktreeIntegrationConflictError('cherry-pick conflicted', ['docs/a.md']),
+    );
+    expect(completion.status).toBe('failed');
+    expect(completion.summary).toContain('docs/a.md');
+    expect(completion.summary).not.toContain('部分適用');
   });
 
   it('does not claim a partial apply when nothing else was integrated', () => {

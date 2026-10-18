@@ -7358,7 +7358,8 @@ export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
   // A multi-repository isolation always wraps the conflict in TeamIntegrationResumeRequiredError,
   // which carries the repositories already integrated. A WorktreeIntegrationConflictError arrives
   // directly only from a single-repository Mission worktree (`queueMissionWorktreeIntegration`),
-  // where there is no other repository that could have been applied.
+  // where there is no other repository that could have been applied: a TeamMissionWorktreeRecord
+  // names exactly one repoPath. A multi-repository Mission worktree would have to wrap it the same way.
   const conflicted =
     error instanceof TeamIntegrationResumeRequiredError ||
     error instanceof WorktreeIntegrationConflictError
