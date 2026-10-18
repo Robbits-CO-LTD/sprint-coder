@@ -112,22 +112,39 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
   });
 
   it('warms the client side of UI Automation when the host starts, before it serves any path', () => {
-    // HasUiAutomation reads the desktop root once (no app behind it), so the cold start of the host is
-    // not charged to the first app the lane contacts (a slow first contact is a timeout).
-    const has = code(host).slice(
-      code(host).indexOf('bool HasUiAutomation() {'),
-      code(host).indexOf('bool HasGraphicsCaptureFactory() {'),
+    // WarmWindowsV1Automation reads the desktop root once (no app behind it), so the cold start of the
+    // host is not charged to the first app the lane contacts (a slow first contact is a timeout).
+    const c = code(host);
+    const warm = c.slice(
+      c.indexOf('void WarmWindowsV1Automation() {'),
+      c.indexOf('bool HasGraphicsCaptureFactory() {'),
     );
-    expect(has.replace(/\s+/gu, ' ')).toContain('automation->GetRootElement(&desktop)');
-    expect(code(host)).toContain(
-      'result.ui_automation = result.os_supported && HasUiAutomation();',
+    expect(warm.replace(/\s+/gu, ' ')).toContain('automation->GetRootElement(&desktop)');
+    // The probe itself does not warm (ProbeMain, the --probe-json handshake, ends at once).
+    const has = c.slice(
+      c.indexOf('bool HasUiAutomation() {'),
+      c.indexOf('void WarmWindowsV1Automation() {'),
     );
-    // The serving host probes the backend before it connects its pipe, so before any frame.
-    const serve = code(host).slice(code(host).indexOf('int ServeMain('));
-    expect(serve.indexOf('ProbeBackend();')).toBeGreaterThan(0);
-    expect(serve.indexOf('ProbeBackend();')).toBeLessThan(serve.indexOf('ConnectNamedPipe('));
+    expect(has).not.toContain('GetRootElement');
+    const probeMain = c.slice(c.indexOf('int ProbeMain() {'), c.indexOf('int ServeMain('));
+    expect(probeMain).toContain('ProbeBackend();');
+    expect(probeMain).not.toContain('WarmWindowsV1Automation');
+    const backend = c.slice(c.indexOf('BackendProbe ProbeBackend() {'));
+    expect(backend.slice(0, backend.indexOf('\n}\n'))).not.toContain('WarmWindowsV1Automation');
+    // The serving host warms once, after the backend probe and before it connects its pipe.
+    const serve = c.slice(c.indexOf('int ServeMain('));
+    expect(serve.split('WarmWindowsV1Automation();')).toHaveLength(2);
+    expect(serve.indexOf('WarmWindowsV1Automation();')).toBeGreaterThan(
+      serve.indexOf('ProbeBackend();'),
+    );
+    expect(serve.indexOf('WarmWindowsV1Automation();')).toBeLessThan(
+      serve.indexOf('ConnectNamedPipe('),
+    );
     // The live seam starts as the host does.
     expect(program).toContain('const BackendProbe probe = ProbeBackend();');
+    expect(program.indexOf('WarmWindowsV1Automation();')).toBeGreaterThan(
+      program.indexOf('const BackendProbe probe = ProbeBackend();'),
+    );
   });
 
   it('bounds a call with both timeouts, and falls back to the old behaviour visibly', () => {
@@ -909,14 +926,17 @@ bool WaitUntilTheWindowsAnswer(const wchar_t *self, HWND window, HANDLE job) {
 
 int RunDriver(bool ci) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  // As the serving host starts (ServeMain): the backend probe first, which also warms the client side of
-  // UI Automation (HasUiAutomation), so that the cold start of this process is not charged to the first
-  // app it contacts.
+  // As the serving host starts (ServeMain): the backend probe, then the warm-up of the client side of UI
+  // Automation (WarmWindowsV1Automation), so that the cold start of this process is not charged to the
+  // first app it contacts.
   {
     const auto start = std::chrono::steady_clock::now();
     const BackendProbe probe = ProbeBackend();
     std::cout << "host_probe ui_automation=" << probe.ui_automation << " ms=" << Millis(start) << std::endl;
     SeamCheck(probe.ui_automation, "the_host_has_ui_automation");
+    const auto warm_start = std::chrono::steady_clock::now();
+    WarmWindowsV1Automation();
+    std::cout << "host_warm ms=" << Millis(warm_start) << std::endl;
   }
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
@@ -1001,7 +1021,7 @@ int RunDriver(bool ci) {
   }
 
   // The very first V1 call of this new process, to a window of another process, reads it: a cold start
-  // (of this process: the host warms UI Automation when it starts) is not turned into "unreadable" by
+  // (of this process: the serving host warms UI Automation when it starts) is not turned into "unreadable" by
   // the timeout.
   {
     std::string tree;

@@ -4445,25 +4445,33 @@ const char *WindowsV1ObserveReason(WindowsV1UiaStop stop, const char *otherwise)
   return otherwise;
 }
 
-// Whether the V1 lane has UI Automation, and the warm-up of its client side, once, when the host starts
-// (ProbeBackend, before the pipe is served): the first contact a process makes loads UI Automation's
-// client side, and that cost would be charged to the first app the lane contacts, against the
-// slow-contact mark (kWindowsV1UiaSlowContact): an app that answers would be reported as
-// accessibility_timeout. Measured locally (2026-10-18, 40 busy processes on 20 cores, a target window
-// that already answered): the cold first contact took 160-460 ms; after reading the desktop root once
-// (UI Automation's own element, no app behind it, also from another thread) it took 7-34 ms. The read
-// is not a V1 path and decides nothing: its result is ignored.
 bool HasUiAutomation() {
   IUIAutomation *automation = nullptr;
   const HRESULT result =
       CreateWindowsV1Automation(&automation);
   if (FAILED(result) || automation == nullptr)
     return false;
+  automation->Release();
+  return true;
+}
+
+// The warm-up of the client side of UI Automation, once, when the serving host starts (ServeMain,
+// after ProbeBackend and before the pipe is connected; not in ProbeMain, whose process ends at once):
+// the first contact a process makes loads UI Automation's client side, and that cost would be charged
+// to the first app the lane contacts, against the slow-contact mark (kWindowsV1UiaSlowContact): an app
+// that answers would be reported as accessibility_timeout. Measured locally (2026-10-18, 40 busy
+// processes on 20 cores, a target window that already answered): the cold first contact took
+// 160-460 ms; after reading the desktop root once (UI Automation's own element, no app behind it, also
+// from another thread) it took 7-34 ms. The read is not a V1 path and decides nothing: its result is
+// ignored.
+void WarmWindowsV1Automation() {
+  IUIAutomation *automation = nullptr;
+  if (FAILED(CreateWindowsV1Automation(&automation)) || automation == nullptr)
+    return;
   IUIAutomationElement *desktop = nullptr;
   if (SUCCEEDED(automation->GetRootElement(&desktop)) && desktop != nullptr)
     desktop->Release();
   automation->Release();
-  return true;
 }
 
 bool HasGraphicsCaptureFactory() {
@@ -8068,6 +8076,7 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     return 7;
   }
   const BackendProbe probe = ProbeBackend();
+  WarmWindowsV1Automation();
   ScopedKernelHandle connected_event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
   OVERLAPPED connection{};
   connection.hEvent = connected_event.value;
