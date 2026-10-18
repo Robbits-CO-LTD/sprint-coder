@@ -7,6 +7,7 @@ import {
 } from '@sprint-coder/domain';
 import {
   ToolBroker,
+  ToolInputSchemaMismatchError,
   type ToolAuthorizer,
   type BackgroundToolCompletionState,
   type ManagedToolLifecycleEvent,
@@ -786,8 +787,12 @@ describe('Main ToolBroker', () => {
           (reason: unknown) => reason,
         );
       expect(execute).not.toHaveBeenCalled();
-      expect(error).toBeInstanceOf(Error);
+      expect(error).toBeInstanceOf(ToolInputSchemaMismatchError);
+      expect(error).toMatchObject({ code: 'INVALID_TOOL_INPUT' });
       const message = (error as Error).message;
+      expect(message).toBe(
+        `Tool input does not match the pinned schema: ${(error as ToolInputSchemaMismatchError).hint}`,
+      );
       expect(message).toMatch(/^Tool input does not match the pinned schema: /);
       // Values never leave: neither the secret nor the user's path nor the file text.
       expect(message).not.toContain(SECRET);

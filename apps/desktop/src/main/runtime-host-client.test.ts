@@ -24,6 +24,7 @@ vi.mock('electron', () => ({
 }));
 
 import { RuntimeHostClient } from './runtime-host';
+import { ToolInputSchemaMismatchError } from './tool-broker';
 
 function emptyCatalog() {
   return new ToolRegistry().createSnapshot({ providerId: 'codex', workspaceId: null });
@@ -628,6 +629,73 @@ describe('RuntimeHostClient start acknowledgement', () => {
         callId: 'call-read',
         success: true,
         output: { path: 'README.md' },
+      }),
+    );
+    client.dispose();
+  });
+
+  // Issue #870: the Codex / Claude CLI path keeps its wording; the hint already rides in the message.
+  it('returns a schema mismatch to the CLI Runtime with its existing code and wording', async () => {
+    const mismatch = new ToolInputSchemaMismatchError('$: missing required key "edits"');
+    const handleTool = vi.fn(async () => {
+      throw mismatch;
+    });
+    const client = new RuntimeHostClient(
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      'codex',
+      undefined,
+      undefined,
+      handleTool,
+    );
+    const child = children[0]!;
+    child.emit('spawn');
+    const catalog = managedCatalog();
+    client.start('task-tools', 'turn-tools', 'hello', null, 'auto', catalog);
+    await Promise.resolve();
+    const start = child.messages.find((message) => messageType(message) === 'start') as Record<
+      string,
+      unknown
+    >;
+    const envelope = {
+      protocolVersion: start['protocolVersion'],
+      runtimeInstanceId: start['runtimeInstanceId'],
+      taskId: start['taskId'],
+      turnId: start['turnId'],
+      operationId: start['operationId'],
+    };
+    child.emit('message', {
+      ...envelope,
+      seq: 1,
+      type: 'started',
+      acceptedContextFragmentIds: [],
+      acceptedProjectItemIds: [],
+      acceptedProjectSnapshotDigest: null,
+      acceptedPayloadDigest: start['payloadDigest'],
+    });
+    child.emit('message', {
+      ...envelope,
+      seq: 2,
+      type: 'tool_request',
+      request: {
+        callId: 'call-read',
+        toolName: 'read_file',
+        arguments: { path: 'README.md' },
+        catalogDigest: catalog.digest,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(
+        child.messages.find((message) => messageType(message) === 'tool_result'),
+      ).toMatchObject({
+        callId: 'call-read',
+        success: false,
+        output: {
+          code: 'TOOL_EXECUTION_FAILED',
+          message: 'Tool input does not match the pinned schema: $: missing required key "edits"',
+        },
       }),
     );
     client.dispose();

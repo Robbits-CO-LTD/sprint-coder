@@ -106,6 +106,18 @@ export class ToolAuthorizationDeniedError extends Error {
   }
 }
 
+/**
+ * A model's tool input failed the pinned input schema (issue #870). The message is built only
+ * from the value-free hint of `describeToolSchemaMismatches`, so callers may hand it to the model.
+ */
+export class ToolInputSchemaMismatchError extends Error {
+  readonly code = 'INVALID_TOOL_INPUT';
+  constructor(readonly hint: string) {
+    super(`Tool input does not match the pinned schema: ${hint}`);
+    this.name = 'ToolInputSchemaMismatchError';
+  }
+}
+
 type BoundTurn = {
   context: ToolExecutionContext;
   snapshot: ToolCatalogSnapshot;
@@ -304,8 +316,8 @@ export class ToolBroker {
       // Say where and how the input differs, never what it holds, so the model can correct the call
       // instead of repeating it (issue #870). The hint is built from the schema and the input's shape.
       if (!toolValueMatchesSchema(entry.inputSchema, runtimeInput))
-        throw new Error(
-          `Tool input does not match the pinned schema: ${describeToolSchemaMismatches(entry.inputSchema, runtimeInput)}`,
+        throw new ToolInputSchemaMismatchError(
+          describeToolSchemaMismatches(entry.inputSchema, runtimeInput),
         );
       const pinnedInput =
         implementation.prepare === undefined
