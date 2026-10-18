@@ -1081,13 +1081,19 @@ bool IsSupportedWindowsV1Target(
 // then answers unresolvable; nothing here turns a failure into a value that admits.
 //
 //   * Running image. The process's path is read first (QueryFullProcessImageNameW, as V1 reads it
-//     before it opens the file). Then the image section's own file name (GetMappedFileNameW) is
-//     opened and held without write or delete sharing, and asked again: an unchanged name means the
-//     held file is the running image (no name of it can move while it is held). Its volume serial
-//     and file id are compared with those of the file the recorded path names: when the running
-//     image was renamed and another file put at its path after the path was read, they differ,
-//     which is a mismatch (W-UR). Every other fact is read from the held file, so a replacement is
-//     never what is verified.
+//     before it opens the file). The main image is then found from kernel-held data, not from the
+//     target's module list (the PEB Ldr list is writable by the target, so its first entry can be
+//     made to name another file): NtQueryInformationProcess(ProcessImageInformation) gives the
+//     entry point the kernel recorded, VirtualQueryEx confirms it is in a MEM_IMAGE region, and
+//     GetMappedFileNameW on that region's base names the backing file. That file is opened and held
+//     without write or delete sharing, and the kernel name is asked again: an unchanged name means
+//     the held file is the running image (no name of it can move while it is held). Its volume
+//     serial and file id are compared with those of the file the recorded path names: when the
+//     running image was renamed and another file put at its path after the path was read, they
+//     differ, which is a mismatch (W-UR). The module list is read too, but only as a deny-side
+//     cross-check: if it does not name the same file, or cannot be read, that is a mismatch as
+//     well. Every other fact is read from the held file, so a replacement is never what is
+//     verified, and a target whose kernel image name cannot be read is unresolvable.
 //   * Path, root, leaf, volume. The held file's canonical path (GetFinalPathNameByHandleW) placed
 //     among roots canonicalized the same way. The volume is network when the file system says the
 //     file is remote, removable for a removable, optical, RAM, USB, SD, MMC, 1394 or file-backed
@@ -1297,19 +1303,80 @@ WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::string self_sign
   return context;
 }
 
-std::optional<std::wstring> WindowsTargetMappedImageName(HANDLE process) {
+// The device-form name of the file mapped at `address` in `process`, or std::nullopt.
+std::optional<std::wstring> WindowsTargetMappedFileName(HANDLE process, LPVOID address) {
+  std::vector<wchar_t> name(32'768, L'\0');
+  const DWORD length = GetMappedFileNameW(process, address, name.data(),
+                                          static_cast<DWORD>(name.size()));
+  if (length == 0 || length >= name.size())
+    return std::nullopt;
+  return std::wstring(name.data(), length);
+}
+
+// The main image's mapped name from kernel-held data, not from the target's module list (the PEB
+// Ldr list is writable by the target, so its first entry can be made to name another file). The
+// kernel records the image's entry point in SECTION_IMAGE_INFORMATION; that address lies in the
+// main image's MEM_IMAGE mapping, whose backing file GetMappedFileNameW returns. std::nullopt when
+// the kernel data cannot be read (a protected process, a WOW64 mismatch, and such), so the target
+// is unresolvable rather than trusted.
+std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
+  using NtQueryInformationProcessFn =
+      LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+  static const NtQueryInformationProcessFn query = []() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll == nullptr
+               ? nullptr
+               : reinterpret_cast<NtQueryInformationProcessFn>(
+                     GetProcAddress(ntdll, "NtQueryInformationProcess"));
+  }();
+  if (query == nullptr)
+    return std::nullopt;
+  // SECTION_IMAGE_INFORMATION: only TransferAddress (the entry point) is read, but the whole
+  // structure must be supplied, so its x64 layout is pinned.
+  struct SectionImageInformation {
+    PVOID transfer_address;
+    ULONG zero_bits;
+    SIZE_T maximum_stack_size;
+    SIZE_T committed_stack_size;
+    ULONG sub_system_type;
+    ULONG sub_system_version;
+    ULONG operating_system_version;
+    USHORT image_characteristics;
+    USHORT dll_characteristics;
+    USHORT machine;
+    UCHAR image_contains_code;
+    UCHAR image_flags;
+    ULONG loader_flags;
+    ULONG image_file_size;
+    ULONG check_sum;
+  };
+  static_assert(sizeof(SectionImageInformation) == 64,
+                "SECTION_IMAGE_INFORMATION must match the kernel's x64 layout");
+  constexpr ULONG kProcessImageInformation = 37;
+  SectionImageInformation image{};
+  ULONG returned = 0;
+  if (query(process, kProcessImageInformation, &image, sizeof(image), &returned) < 0 ||
+      image.transfer_address == nullptr)
+    return std::nullopt;
+  // The entry point must sit in a MEM_IMAGE region; its allocation base names the mapping.
+  MEMORY_BASIC_INFORMATION region{};
+  if (VirtualQueryEx(process, image.transfer_address, &region, sizeof(region)) !=
+          sizeof(region) ||
+      region.Type != MEM_IMAGE || region.AllocationBase == nullptr)
+    return std::nullopt;
+  return WindowsTargetMappedFileName(process, region.AllocationBase);
+}
+
+// The first module of the target's own list (PEB Ldr). Used only as a deny-side cross-check: it is
+// writable by the target, so it can only add a reason to refuse, never remove one.
+std::optional<std::wstring> WindowsTargetModuleListImageName(HANDLE process) {
   HMODULE image = nullptr;
   DWORD needed = 0;
   if (EnumProcessModulesEx(process, &image, sizeof(image), &needed,
                            LIST_MODULES_DEFAULT) != TRUE ||
       image == nullptr)
     return std::nullopt;
-  std::vector<wchar_t> name(32'768, L'\0');
-  const DWORD length = GetMappedFileNameW(process, image, name.data(),
-                                          static_cast<DWORD>(name.size()));
-  if (length == 0 || length >= name.size())
-    return std::nullopt;
-  return std::wstring(name.data(), length);
+  return WindowsTargetMappedFileName(process, image);
 }
 
 struct WindowsTargetHeldImage {
@@ -1319,14 +1386,16 @@ struct WindowsTargetHeldImage {
   bool matches = false;
 };
 
-// Holds the running image (see the block comment). `recorded` is the process's path as read before
-// (QueryFullProcessImageNameW), or std::nullopt when it could not be read. False when the image
-// cannot be held; `matches` says whether the mapped name stayed the same and the recorded path
-// still names the held file.
+// Holds the running image (see the block comment). The main image is found from kernel-held data
+// (WindowsTargetKernelImageName), never from the target's module list. `recorded` is the process's
+// path as read before (QueryFullProcessImageNameW), or std::nullopt when it could not be read.
+// False when the kernel name is unreadable or its file cannot be held; `matches` says whether the
+// kernel name stayed the same, the recorded path still names the held file, and the target's own
+// module list (a deny-side cross-check) agrees.
 bool HoldWindowsTargetRunningImage(HANDLE process,
                                    const std::optional<std::wstring> &recorded,
                                    WindowsTargetHeldImage *held) {
-  const std::optional<std::wstring> mapped = WindowsTargetMappedImageName(process);
+  const std::optional<std::wstring> mapped = WindowsTargetKernelImageName(process);
   if (!mapped.has_value())
     return false;
   const std::wstring global = L"\\\\?\\GLOBALROOT" + *mapped;
@@ -1345,7 +1414,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       !ReadWindowsFileIdentity(held->file.value, &held->identity) ||
       !CanonicalWindowsPathFromHandle(held->file.value, &held->canonical_path))
     return false;
-  const std::optional<std::wstring> again = WindowsTargetMappedImageName(process);
+  const std::optional<std::wstring> again = WindowsTargetKernelImageName(process);
   WindowsFileIdentity recorded_identity;
   bool recorded_read = recorded.has_value();
   if (recorded_read) {
@@ -1356,9 +1425,14 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
     recorded_read = file.value != INVALID_HANDLE_VALUE &&
                     ReadWindowsFileIdentity(file.value, &recorded_identity);
   }
+  // Deny-side: the module list may name another file (tampered) or be unreadable; either refuses.
+  const std::optional<std::wstring> module_list = WindowsTargetModuleListImageName(process);
+  const bool module_list_agrees =
+      module_list.has_value() && SameWindowsTargetName(*module_list, *mapped);
   held->matches = again.has_value() && SameWindowsTargetName(*again, *mapped) &&
                   recorded_read &&
-                  SameWindowsFileIdentity(held->identity, recorded_identity);
+                  SameWindowsFileIdentity(held->identity, recorded_identity) &&
+                  module_list_agrees;
   return true;
 }
 

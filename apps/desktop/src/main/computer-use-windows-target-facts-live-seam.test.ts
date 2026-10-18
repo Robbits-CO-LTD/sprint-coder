@@ -472,6 +472,24 @@ int wmain(int argc, wchar_t **argv) {
         "fixture_lineage_outsider");
   Check(ClassOf(fixture_facts.facts) == "W6", "fixture_refused_as_w6");
 
+  // The main image is found from kernel-held data, not from the target's module list. For a benign
+  // process both name the running image, so the kernel name equals the held path and the module
+  // list agrees. The kernel helper is also robust: it says nothing for a handle that is not a
+  // process. A test that rewrites the target's Ldr list to disagree is not run here (it would need
+  // to corrupt another process); the deny-side cross-check for that is covered by the swap below.
+  {
+    ScopedKernelHandle probe(
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, fixture_process.info.dwProcessId));
+    const std::optional<std::wstring> kernel = WindowsTargetKernelImageName(probe.value);
+    const std::optional<std::wstring> list = WindowsTargetModuleListImageName(probe.value);
+    Check(kernel.has_value() && list.has_value() && SameWindowsTargetName(*kernel, *list),
+          "kernel_image_name_and_module_list_agree_for_a_benign_process");
+    Check(kernel.has_value() && kernel->ends_with(L"sprint-coder-computer-use-fixture.exe"),
+          "kernel_image_name_is_the_running_image");
+    Check(!WindowsTargetKernelImageName(GetCurrentThread()).has_value(),
+          "kernel_image_name_is_nullopt_without_a_process_handle");
+  }
+
   // The same fixture as this program's own child (W8).
   const WindowsTargetFactsMeasurement child_facts =
       Measure(fixture_process.info.dwProcessId, fixture_window, own);
