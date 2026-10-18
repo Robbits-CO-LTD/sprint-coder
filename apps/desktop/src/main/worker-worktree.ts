@@ -405,6 +405,7 @@ export class WorkerWorktreeManager {
     return new WorktreeError(
       'create_failed',
       worktreePathTooLongMessage(worktreePath.length, this.limit()),
+      { cause: error },
     );
   }
 
@@ -478,6 +479,7 @@ export class WorkerWorktreeManager {
         throw new WorktreeError(
           'create_failed',
           worktreePathTooLongMessage(worktreePath.length, this.limit()),
+          { cause: error },
         );
       throw error;
     }

@@ -130,6 +130,69 @@ describe('worker worktree path (issue #855)', () => {
     expect(error.message).toMatch(/長すぎる/);
   });
 
+  it('runs every Git call with LC_ALL=C, so the stderr matched above is always English', async () => {
+    const worktreesRoot = join(await root(), 'c');
+    const envs: (NodeJS.ProcessEnv | undefined)[] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (
+        _file: string,
+        args: readonly string[],
+        options?: { env?: NodeJS.ProcessEnv },
+      ) => {
+        envs.push(options?.env);
+        return {
+          stdout: args.includes('rev-parse')
+            ? `${'c'.repeat(40)}
+`
+            : '',
+          stderr: '',
+        };
+      },
+    });
+    await manager.create({ agentId: 'a5', repoPath: tmpdir() }).catch(() => undefined);
+    expect(envs.length).toBeGreaterThan(0);
+    for (const env of envs) expect(env?.['LC_ALL']).toBe('C');
+  });
+
+  it("keeps Git's original error as the cause of the converted too-long error", async () => {
+    const worktreesRoot = join(await root(), 'h');
+    const original = Object.assign(new Error("fatal: '$GIT_DIR' too big"), {
+      code: 128,
+      stderr: "fatal: '$GIT_DIR' too big",
+    });
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        if (args.includes('add')) throw original;
+        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+      },
+    });
+    const error = await manager.create({ agentId: 'a6', repoPath: tmpdir() }).catch((e) => e);
+    expect(error.message).toMatch(/長すぎる/);
+    expect(error.cause).toBeInstanceOf(WorktreeError);
+  });
+
+  it('does not call an unrelated worktree add failure too long', async () => {
+    const worktreesRoot = join(await root(), 'u');
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        if (args.includes('add'))
+          throw Object.assign(new Error('fatal: invalid reference: HEAD'), {
+            code: 128,
+            stderr: 'fatal: invalid reference: HEAD',
+          });
+        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+      },
+    });
+    const error = await manager.create({ agentId: 'a7', repoPath: tmpdir() }).catch((e) => e);
+    expect(error).toBeInstanceOf(WorktreeError);
+    expect(error.message).not.toMatch(/長すぎる/);
+  });
+
   it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
     const worktreesRoot = join(await root(), 'w');
     const deepCommon = 'C:/' + 'x/'.repeat(120) + '.git';
