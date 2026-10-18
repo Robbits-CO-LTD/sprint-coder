@@ -383,6 +383,24 @@ bool CheckManifestLevel() {
                "manifest-element-without-level") &&
          Check(!level("<requestedExecutionLevel level=\"asInvoker\"").has_value(),
                "manifest-unclosed-tag") &&
+         Check(level("<assembly><!-- <requestedExecutionLevel level=\"requireAdministrator\"/> -->"
+                     "<requestedExecutionLevel level=\"asInvoker\"/></assembly>") == no,
+               "manifest-sample-tag-in-a-comment") &&
+         Check(level("<assembly><![CDATA[<requestedExecutionLevel level=\"requireAdministrator\"/>]]>"
+                     "<requestedExecutionLevel level=\"asInvoker\"/></assembly>") == no,
+               "manifest-sample-tag-in-cdata") &&
+         Check(level("<?xml version=\"1.0\"?><?sample <requestedExecutionLevel "
+                     "level=\"requireAdministrator\"/> ?><assembly/>") == no,
+               "manifest-sample-tag-in-a-processing-instruction") &&
+         Check(level("<assembly><!-- note --><requestedExecutionLevel level=\"requireAdministrator\"/>"
+                     "<!-- <requestedExecutionLevel level=\"asInvoker\"/> --></assembly>") == yes,
+               "manifest-real-tag-outside-the-comments") &&
+         Check(!level("<assembly><!-- <requestedExecutionLevel level=\"asInvoker\"/></assembly>")
+                    .has_value(),
+               "manifest-unclosed-comment") &&
+         Check(!level("<assembly><![CDATA[ x </assembly>").has_value(), "manifest-unclosed-cdata") &&
+         Check(!level("<?xml version=\"1.0\"<assembly/>").has_value(),
+               "manifest-unclosed-processing-instruction") &&
          CheckManifestEncodings();
 }
 

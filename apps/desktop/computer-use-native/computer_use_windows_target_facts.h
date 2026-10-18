@@ -279,16 +279,50 @@ namespace windows_target_facts_detail {
   return text;
 }
 
+// The manifest text with its comments (`<!-- -->`), CDATA sections (`<![CDATA[ ]]>`) and
+// processing instructions (`<? ?>`) each replaced by a space: none of them is an element, so a
+// sample tag inside one says nothing. One that is not closed: std::nullopt.
+[[nodiscard]] inline std::optional<std::string> ManifestElementsOnly(std::string_view text) {
+  struct Skip {
+    std::string_view open;
+    std::string_view close;
+  };
+  static constexpr Skip kSkips[] = {
+      {"<!--", "-->"}, {"<![CDATA[", "]]>"}, {"<?", "?>"}};
+  std::string output;
+  output.reserve(text.size());
+  std::size_t at = 0;
+  while (at < text.size()) {
+    const Skip *skip = nullptr;
+    for (const Skip &candidate : kSkips)
+      if (text.substr(at, candidate.open.size()) == candidate.open) skip = &candidate;
+    if (skip == nullptr) {
+      output += text[at++];
+      continue;
+    }
+    const std::size_t end = text.find(skip->close, at + skip->open.size());
+    if (end == std::string_view::npos) return std::nullopt;
+    output += ' ';
+    at = end + skip->close.size();
+  }
+  return output;
+}
+
 } // namespace windows_target_facts_detail
 
 // Whether an application manifest asks to run elevated. requireAdministrator and highestAvailable
 // both count (the deny direction); a manifest without requestedExecutionLevel runs as the invoker,
-// which is said only of a manifest read whole as UTF-8 or UTF-16. A level the reader does not know
-// counts as elevated. An encoding or a tag it cannot read: std::nullopt.
+// which is said only of a manifest read whole as UTF-8 or UTF-16. Comments, CDATA sections and
+// processing instructions are not read. A level the reader does not know counts as elevated. An
+// encoding, a tag, or an unclosed comment, CDATA section or processing instruction it cannot read:
+// std::nullopt.
 [[nodiscard]] inline std::optional<bool> ManifestRequiresAdministrator(std::string_view bytes) {
   const std::optional<std::string> decoded = windows_target_facts_detail::ManifestText(bytes);
   if (!decoded.has_value()) return std::nullopt;
-  const std::string_view manifest = *decoded;
+  const std::optional<std::string> elements =
+      windows_target_facts_detail::ManifestElementsOnly(*decoded);
+  if (!elements.has_value()) return std::nullopt;
+  const std::string_view manifest = *elements;
   static constexpr std::string_view kElement = "requestedExecutionLevel";
   bool elevated = false;
   for (std::size_t at = manifest.find(kElement); at != std::string_view::npos;
