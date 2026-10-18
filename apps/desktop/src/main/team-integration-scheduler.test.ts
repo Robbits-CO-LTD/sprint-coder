@@ -118,3 +118,122 @@ describe('TeamIntegrationScheduler.runExclusive', () => {
     ).rejects.toThrow('dirty');
   });
 });
+
+describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () => {
+  function heldIntegrations(scheduler: TeamIntegrationScheduler, ids: readonly string[]) {
+    const running: string[] = [];
+    const releases = new Map<string, () => void>();
+    const done = ids.map((executionId) =>
+      scheduler.submit({
+        executionId,
+        mutationKeys: ['repo'],
+        async run() {
+          running.push(executionId);
+          await new Promise<void>((resolve) => releases.set(executionId, resolve));
+        },
+      }),
+    );
+    return { running, releases, done };
+  }
+
+  it('runs an exclusive read after the running integration and ahead of the queued ones', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    const { running, releases, done } = heldIntegrations(scheduler, ['a', 'b', 'c']);
+    await flush();
+    const observed: string[][] = [];
+    const read = scheduler.runExclusive(['repo'], async () => {
+      observed.push([...running]);
+      return 'clean';
+    });
+    await flush();
+    expect(observed).toEqual([]);
+    expect(scheduler.snapshot().queuedExecutionIds[0]).toMatch(/^exclusive:/u);
+    releases.get('a')!();
+    await expect(read).resolves.toBe('clean');
+    expect(observed).toEqual([['a']]);
+    await flush();
+    expect(running).toEqual(['a', 'b']);
+    releases.get('b')!();
+    await flush();
+    releases.get('c')!();
+    await Promise.all(done);
+  });
+
+  it('keeps a read that succeeds beside a running integration without waiting', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    const { releases, done } = heldIntegrations(scheduler, ['a', 'b']);
+    await flush();
+    await expect(scheduler.readBesideIntegrations(['repo'], async () => 'clean')).resolves.toBe(
+      'clean',
+    );
+    expect(scheduler.snapshot().queuedExecutionIds).toEqual(['b']);
+    releases.get('a')!();
+    await flush();
+    releases.get('b')!();
+    await Promise.all(done);
+  });
+
+  it('fails a read that fails with no integration beside it, without reading again', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    let reads = 0;
+    await expect(
+      scheduler.readBesideIntegrations(['repo'], async () => {
+        reads += 1;
+        throw new Error('dirty');
+      }),
+    ).rejects.toThrow('dirty');
+    expect(reads).toBe(1);
+  });
+
+  it('reads again after the running integration only when a failed read overlapped one', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    const { running, releases, done } = heldIntegrations(scheduler, ['a', 'b']);
+    await flush();
+    const reads: string[][] = [];
+    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+      reads.push([...running]);
+      if (reads.length === 1) throw new Error('cherry-pick in progress');
+      return 'clean';
+    });
+    await flush();
+    expect(reads).toEqual([['a']]);
+    releases.get('a')!();
+    await expect(read).resolves.toBe('clean');
+    expect(reads).toEqual([['a'], ['a']]);
+    await flush();
+    expect(running).toEqual(['a', 'b']);
+    releases.get('b')!();
+    await Promise.all(done);
+  });
+
+  it('fails a read that still fails when read again after the overlapping integration', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    const { running, releases, done } = heldIntegrations(scheduler, ['a']);
+    await flush();
+    const reads: string[][] = [];
+    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+      reads.push([...running]);
+      throw new Error('user edit');
+    });
+    read.catch(() => undefined);
+    await flush();
+    expect(reads).toHaveLength(1);
+    releases.get('a')!();
+    await expect(read).rejects.toThrow('user edit');
+    expect(reads).toHaveLength(2);
+    await Promise.all(done);
+  });
+
+  it('reads again when an integration started and finished during a failed read', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    let reads = 0;
+    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+      reads += 1;
+      if (reads > 1) return 'clean';
+      await scheduler.submit({ executionId: 'a', mutationKeys: ['repo'], async run() {} });
+      throw new Error('cherry-pick in progress');
+    });
+    await expect(read).resolves.toBe('clean');
+    expect(reads).toBe(2);
+  });
+});
