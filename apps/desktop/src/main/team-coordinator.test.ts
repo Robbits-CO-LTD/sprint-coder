@@ -1081,6 +1081,31 @@ function grokFailureDiagnostic(
   };
 }
 
+/** The failing tests (name and first message) a vitest JSON report names, for a shard failure. */
+function failedShardTests(report: string): string {
+  try {
+    const parsed = JSON.parse(readFileSync(report, 'utf8')) as {
+      testResults?: readonly {
+        assertionResults?: readonly {
+          fullName?: string;
+          status?: string;
+          failureMessages?: readonly string[];
+        }[];
+      }[];
+    };
+    const failed = (parsed.testResults ?? [])
+      .flatMap(({ assertionResults }) => assertionResults ?? [])
+      .filter(({ status }) => status === 'failed')
+      .map(
+        ({ fullName, failureMessages }) =>
+          `FAILED: ${fullName ?? '(unnamed)'}\n${(failureMessages ?? [])[0]?.slice(0, 3_000) ?? ''}`,
+      );
+    return failed.length > 0 ? failed.join('\n\n') : 'No failed test in the shard report';
+  } catch (error) {
+    return `The shard report could not be read: ${String(error)}`;
+  }
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -11134,7 +11159,11 @@ else
             timeout: 420_000,
             maxBuffer: 10 * 1024 * 1024,
           },
-        );
+        ).catch((error: unknown) => {
+          // The JSON reporter keeps the failing tests out of the console, so name them here or a
+          // CI failure shows only "Command failed".
+          throw new Error(`${failedShardTests(report)}\n${String(error)}`.slice(0, 20_000));
+        });
         expect(result.stderr, result.stdout).not.toContain('Failed Tests');
         assertShardReport(JSON.parse(readFileSync(report, 'utf8')), group);
       },
