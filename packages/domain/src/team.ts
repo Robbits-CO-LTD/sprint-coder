@@ -1,7 +1,19 @@
 import type { CapabilityCeiling } from './permission';
 
 export const TEAM_MAX_AGENT_DEPTH = 4;
-export const TEAM_MAX_CONCURRENT_EXECUTIONS = 8;
+/** The hard ceiling for concurrent Worker executions, per Team and across the app. The app-wide
+ * setting and every Team policy are validated against it; the contracts mirror it as `max(100)`. */
+export const TEAM_MAX_CONCURRENT_EXECUTIONS = 100;
+/** What a fresh install runs at once (owner decision: about 50 by default, adjustable in Settings). */
+export const TEAM_DEFAULT_CONCURRENT_EXECUTIONS = 50;
+
+export function assertTeamConcurrencyLimit(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > TEAM_MAX_CONCURRENT_EXECUTIONS)
+    throw new Error(
+      `Team concurrent executions must be between 1 and ${TEAM_MAX_CONCURRENT_EXECUTIONS}`,
+    );
+  return value;
+}
 
 export type TeamBudgetMode = 'bounded' | 'unlimited';
 
@@ -44,7 +56,7 @@ export class TeamDelegationError extends Error {
 
 export const DEFAULT_TEAM_POLICY: TeamPolicy = Object.freeze({
   maxAgentDepth: TEAM_MAX_AGENT_DEPTH,
-  maxConcurrentExecutions: TEAM_MAX_CONCURRENT_EXECUTIONS,
+  maxConcurrentExecutions: TEAM_DEFAULT_CONCURRENT_EXECUTIONS,
   allowWorkerDirectMessages: true,
   budgetMode: 'bounded',
 });

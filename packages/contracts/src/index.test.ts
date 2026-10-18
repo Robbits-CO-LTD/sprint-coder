@@ -625,7 +625,7 @@ describe('public contracts', () => {
     expect(() =>
       teamPolicyUpdateInputSchema.parse({
         taskId: 'task-1',
-        policy: { ...teamPolicy, maxConcurrentExecutions: 9 },
+        policy: { ...teamPolicy, maxConcurrentExecutions: 101 },
         expectedRevision: 3,
       }),
     ).toThrow();

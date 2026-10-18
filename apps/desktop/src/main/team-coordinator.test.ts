@@ -50,7 +50,7 @@ import {
   type WorkerActivityEvent,
 } from './team-coordinator';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
-import type { TeamEnvelope } from '@sprint-coder/domain';
+import { TEAM_ASSIGNMENT_RATE_LIMIT, type TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
@@ -1547,6 +1547,117 @@ if (runsWithElectronAbi)
       expect(JSON.stringify(diagnostics)).not.toContain('sensitive instruction');
       persistence.close();
     });
+
+    it('hands work to 50 Workers in one minute without counting their reports against it (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Fifty Worker Team');
+      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      const workers = [];
+      for (let index = 0; index < 50; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      // A Worker with no work keeps the Team active once the 50 finish.
+      const idle = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'idle worker',
+        objective: 'receive notes',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries()) {
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `question ${index}`,
+            doneCriteria: ['return a result'],
+          }),
+        );
+        // Let early Workers report while the Leader is still assigning, as in the 32-Worker run.
+        if (index % 10 === 9) await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await waitFor(
+        () =>
+          submissions.every(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        20_000,
+      );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      // 50 assignments and 50 reports: far beyond the 30 free-form messages a minute allows.
+      expect(persistence.getTeamSnapshot(teamId).messages.length).toBeGreaterThanOrEqual(100);
+
+      // Reports and assignments left the free-form budget untouched: 30 messages still fit.
+      const leaderId = persistence.getTeam(teamId).leaderAgentId;
+      for (let index = 0; index < 30; index += 1)
+        await coordinator.sendAgentMessageAs(task.id, leaderId, idle.id, `note ${index}`);
+      await expect(
+        coordinator.sendAgentMessageAs(task.id, leaderId, idle.id, 'one too many'),
+      ).rejects.toThrow('Team message rate limit exceeded');
+      persistence.close();
+    }, 60_000);
+
+    it('queues an assignment beyond the per-minute pace instead of refusing it (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Paced Team');
+      const runtime = new TestWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      // Enough Workers to exceed the assignment pace by one; the Team itself may run all at once.
+      const workers = [];
+      for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, maxConcurrentExecutions: 100, budgetMode: 'unlimited' },
+        team.revision,
+      );
+      persistence.setTeamMaxConcurrentExecutions(100);
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries())
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: `question ${index}`,
+            doneCriteria: ['return a result'],
+          }),
+        );
+      // Every assignment was accepted; none was lost to an error.
+      expect(submissions).toHaveLength(TEAM_ASSIGNMENT_RATE_LIMIT.limit + 1);
+      const last = submissions.at(-1)!;
+      await waitFor(
+        () =>
+          submissions
+            .slice(0, -1)
+            .every(
+              ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+            ),
+        20_000,
+      );
+      // The one beyond the pace waits its turn (about a minute later) instead of failing.
+      expect(last.state).toBe('queued');
+      expect(persistence.getTeamExecution(last.executionId).state).toBe('queued');
+      await coordinator.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 60_000);
 
     it.each([
       // A CLI Worker denied by policy (issue #841).
@@ -6154,7 +6265,7 @@ if (runsWithElectronAbi)
         ),
       ).rejects.toThrow('direct child');
 
-      const submissions = [];
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
       for (const manager of managers) {
         submissions.push(
           await coordinator.assignTask({
@@ -6420,8 +6531,10 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('returns durable execution IDs before completion and runs at most eight in parallel', async () => {
+    it('returns durable execution IDs before completion and runs no more in parallel than Settings allows', async () => {
       const persistence = createPersistence();
+      // Settings > Team: the app-wide limit, read by the coordinator's own scheduler.
+      persistence.setTeamMaxConcurrentExecutions(8);
       const task = persistence.createTask('Eight parallel executions');
       const runtime = new BlockingWorkerRuntime();
       const coordinator = new TeamCoordinator(persistence, runtime);

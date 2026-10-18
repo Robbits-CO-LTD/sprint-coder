@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_MANAGER_POLICY,
   DEFAULT_TEAM_POLICY,
+  TEAM_DEFAULT_CONCURRENT_EXECUTIONS,
+  TEAM_MAX_CONCURRENT_EXECUTIONS,
   TeamDelegationError,
+  assertTeamConcurrencyLimit,
   assertDelegationAllowed,
   assertManagerPolicy,
   assertTeamMessageAllowed,
@@ -254,8 +257,22 @@ describe('team domain', () => {
     expect(() => assertTeamPolicy({ ...DEFAULT_TEAM_POLICY, maxAgentDepth: 5 })).toThrow(
       'between 1 and 4',
     );
-    expect(() => assertTeamPolicy({ ...DEFAULT_TEAM_POLICY, maxConcurrentExecutions: 9 })).toThrow(
-      'between 1 and 8',
+    expect(() =>
+      assertTeamPolicy({ ...DEFAULT_TEAM_POLICY, maxConcurrentExecutions: 101 }),
+    ).toThrow('between 1 and 100');
+    expect(() => assertTeamPolicy({ ...DEFAULT_TEAM_POLICY, maxConcurrentExecutions: 0 })).toThrow(
+      'between 1 and 100',
     );
+  });
+
+  it('lets a new Team run about 50 Workers at once, up to 100', () => {
+    expect(DEFAULT_TEAM_POLICY.maxConcurrentExecutions).toBe(50);
+    expect(TEAM_DEFAULT_CONCURRENT_EXECUTIONS).toBe(50);
+    expect(TEAM_MAX_CONCURRENT_EXECUTIONS).toBe(100);
+    expect(assertTeamPolicy({ ...DEFAULT_TEAM_POLICY, maxConcurrentExecutions: 100 })).toBeTruthy();
+    expect(assertTeamConcurrencyLimit(1)).toBe(1);
+    expect(assertTeamConcurrencyLimit(100)).toBe(100);
+    for (const invalid of [0, 101, 2.5, Number.NaN])
+      expect(() => assertTeamConcurrencyLimit(invalid)).toThrow('between 1 and 100');
   });
 });

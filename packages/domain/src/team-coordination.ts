@@ -33,6 +33,40 @@ export const DEFAULT_TEAM_BUDGET_LIMITS: Readonly<Record<BudgetScope, TeamBudget
   },
 };
 
+/** The concurrency the stored Team budget defaults were sized for (the former fixed cap of 8). */
+export const TEAM_BUDGET_BASELINE_CONCURRENCY = 8;
+
+/**
+ * The cap a reservation is checked against once concurrency is configurable.
+ *
+ * - `spawnSlots` is a concurrency lease held only while a Worker starts, so it follows the
+ *   concurrency limits themselves: the app-wide setting globally, and the smaller of the Team
+ *   policy and that setting per Team.
+ * - A Team's cumulative budget (cost, tokens, Worker time, tool calls) keeps its per-Worker share:
+ *   the stored defaults were sized for 8 concurrent Workers, so a Team allowed 50 gets 50/8 of
+ *   them. It never shrinks below what is stored, so a small Team keeps what it had before.
+ * - Everything else (global and per-Worker caps) is exactly what is stored.
+ */
+export function effectiveBudgetCap(input: {
+  scope: BudgetScope;
+  kind: BudgetKind;
+  storedCap: number;
+  teamConcurrency: number;
+  appConcurrency: number;
+}): number {
+  if (input.kind === 'spawnSlots') {
+    if (input.scope === 'global') return input.appConcurrency;
+    if (input.scope === 'team') return Math.min(input.teamConcurrency, input.appConcurrency);
+    return input.storedCap;
+  }
+  if (input.scope !== 'team') return input.storedCap;
+  const scaled = Math.ceil(
+    (DEFAULT_TEAM_BUDGET_LIMITS.team[input.kind] * input.teamConcurrency) /
+      TEAM_BUDGET_BASELINE_CONCURRENCY,
+  );
+  return Math.max(input.storedCap, scaled);
+}
+
 export const budgetReservationStates = ['reserved', 'settled', 'released'] as const;
 export type BudgetReservationState = (typeof budgetReservationStates)[number];
 
@@ -102,7 +136,33 @@ export function assertReservationWithinCap(input: {
     throw new TeamBudgetExceededError(input);
 }
 
+/** Free-form messages (Agent to Agent, or a person's direct message to a Worker) per Team. Worker
+ * reports and assignments are not counted here (Issue #854): reports answer work that was already
+ * admitted, and assignments are paced by {@link TEAM_ASSIGNMENT_RATE_LIMIT} instead. */
 export const TEAM_MESSAGE_RATE_LIMIT = { limit: 30, windowMs: 60000 } as const;
+/** Assignments per Team. One beyond it is not refused but queued to start when the window has
+ * room, so a Leader can hand work to every Worker without losing any. Each Worker can hold only one
+ * unfinished execution, so a burst is also bounded by the Team's size. */
+export const TEAM_ASSIGNMENT_RATE_LIMIT = { limit: 100, windowMs: 60000 } as const;
+
+/**
+ * The earliest time (>= `nowMs`) at which one more event fits a sliding window of `limit` events
+ * per `windowMs`. `admittedAtMs` holds the times already admitted in nondecreasing order, and may
+ * include times in the future (events queued for later).
+ */
+export function nextRateWindowSlot(
+  admittedAtMs: readonly number[],
+  nowMs: number,
+  limit: number,
+  windowMs: number,
+): number {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error('Invalid rate limit');
+  if (!Number.isSafeInteger(windowMs) || windowMs < 1) throw new Error('Invalid rate window');
+  const live = admittedAtMs.filter((at) => at > nowMs - windowMs);
+  if (live.length < limit) return nowMs;
+  // The event `limit` places back has to leave the window before one more fits.
+  return Math.max(nowMs, live[live.length - limit]! + windowMs);
+}
 
 export class TeamMessageRateLimitError extends Error {
   readonly limit: number;

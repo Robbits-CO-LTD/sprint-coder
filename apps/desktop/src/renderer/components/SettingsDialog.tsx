@@ -16,6 +16,11 @@ import { LocalAiSettingsSection } from './LocalAiSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
 import { announceComputerUseSettingChanged } from '../lib/computer-use-setting-event';
+import {
+  TEAM_CONCURRENCY_DEFAULT,
+  TEAM_CONCURRENCY_RANGE,
+  concurrencyOptions,
+} from '../lib/team-concurrency';
 import type {
   ComputerUseSettings,
   ProviderModel,
@@ -337,6 +342,7 @@ export function WorkspaceBody({
 
             <WorkspacePage {...page('team')} active={current === 'team'}>
               <TeamDefaultPolicySetting active={open} />
+              <TeamConcurrencySetting active={open} />
               <TeamModelRestrictionSetting active={open} />
               <TeamModelSelectionGuidanceSetting active={open} />
               <TeamResearchSetting active={open} />
@@ -937,11 +943,11 @@ export function recoveryText(recovery: DatabaseRecovery | null): string {
 
 // ---------- Team ----------
 
-/** The bounds the contract already enforces (`min(1).max(4)` / `min(1).max(8)`). Selects rather
- * than number inputs for exactly that reason: a closed range of four or eight values cannot hold a
- * half-typed or out-of-range entry, so there is no client-side validation error to design. */
+/** The bounds the contract already enforces (`min(1).max(4)` / `min(1).max(100)`). Selects rather
+ * than number inputs for exactly that reason: a closed list of values cannot hold a half-typed or
+ * out-of-range entry, so there is no client-side validation error to design. */
 export const TEAM_DEPTH_RANGE = { min: 1, max: 4 } as const;
-export const TEAM_CONCURRENCY_RANGE = { min: 1, max: 8 } as const;
+export { TEAM_CONCURRENCY_RANGE };
 
 export function integerOptions({ min, max }: { min: number; max: number }): number[] {
   return Array.from({ length: max - min + 1 }, (_, i) => min + i);
@@ -1094,14 +1100,15 @@ function TeamDefaultPolicySetting({ active }: { active: boolean }) {
             disabled={disabled}
             onChange={(e) => patch({ maxConcurrentExecutions: Number(e.target.value) })}
           >
-            {integerOptions(TEAM_CONCURRENCY_RANGE).map((n) => (
+            {concurrencyOptions(shown.maxConcurrentExecutions).map((n) => (
               <option key={n} value={n}>
                 {n}
               </option>
             ))}
           </select>
           <small id={`${uid}-concurrency-desc`}>
-            同じ時間に作業できるWorkerの上限です。少なくすると順番待ちは増えますが負荷は下がります。
+            1つのTeamで同じ時間に作業できるWorkerの上限です。少なくすると順番待ちは増えますが負荷は下がります。
+            下の「アプリ全体で同時に動かせるWorkerの数」を超えては動きません。
           </small>
         </label>
       </div>
@@ -1186,10 +1193,152 @@ const BUDGET_MODES: readonly {
  * controls have something valid to render without claiming it is what Main stores. */
 const FALLBACK_POLICY: TeamPolicy = {
   maxAgentDepth: 4,
-  maxConcurrentExecutions: 8,
+  maxConcurrentExecutions: TEAM_CONCURRENCY_DEFAULT,
   allowWorkerDirectMessages: true,
   budgetMode: 'bounded',
 };
+
+/** The app-wide cap on Workers running at once, across every Team. Saved on change, like the other
+ * single-value Team settings: one value has no half-finished combination to protect. Main applies
+ * it to the next Worker it starts, so no restart and no running Worker is stopped. */
+export function TeamConcurrencySetting({ active }: { active: boolean }) {
+  const [api] = useState(teamConcurrencyApi);
+  const [canonical, setCanonical] = useState<number | null>(null);
+  const [shown, setShown] = useState<number | null>(null);
+  const [phase, setPhase] = useState<'idle' | 'loading' | 'saving'>('idle');
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState('');
+  const uid = useId();
+  // Bumped by every read and write, so a response that lost the race can never overwrite a newer
+  // one — the failure mode being a slow load that lands after a save and reverts the select.
+  const generation = useRef(0);
+
+  useEffect(() => {
+    if (!active || api === null) return;
+    const request = ++generation.current;
+    void (async () => {
+      // Yield once so opening the native dialog is the only synchronous work in its parent effect.
+      await Promise.resolve();
+      if (request !== generation.current) return;
+      setCanonical(null);
+      setShown(null);
+      setPhase('loading');
+      setError(null);
+      try {
+        const result = await api.getTeamConcurrency();
+        if (request !== generation.current) return;
+        setCanonical(result.maxConcurrentExecutions);
+        setShown(result.maxConcurrentExecutions);
+        setPhase('idle');
+      } catch {
+        if (request !== generation.current) return;
+        setError('同時に動かせるWorkerの数を読み込めませんでした。設定を開き直してください。');
+        setPhase('idle');
+      }
+    })();
+    return () => {
+      if (request === generation.current) generation.current += 1;
+    };
+  }, [active, api]);
+
+  async function save(next: number): Promise<void> {
+    if (api === null || phase !== 'idle' || next === canonical) return;
+    const request = ++generation.current;
+    const previous = canonical;
+    setShown(next);
+    setPhase('saving');
+    setError(null);
+    setStatus('');
+    try {
+      await api.setTeamConcurrency({ maxConcurrentExecutions: next });
+      if (request !== generation.current) return;
+      setCanonical(next);
+      setStatus(`アプリ全体で同時に動かせるWorkerを${next}人にしました。`);
+    } catch {
+      if (request !== generation.current) return;
+      // Restore the last value Main confirmed, not the one just attempted.
+      setShown(previous);
+      setError('設定を保存できませんでした。直前の値に戻しました。');
+    } finally {
+      if (request === generation.current) setPhase('idle');
+    }
+  }
+
+  const unavailable = api === null;
+  const disabled = unavailable || phase !== 'idle' || shown === null;
+  const value = shown ?? TEAM_CONCURRENCY_DEFAULT;
+
+  return (
+    <div
+      className="settings-group"
+      data-testid="settings-team-concurrency"
+      aria-busy={phase === 'loading'}
+    >
+      <label className="settings-field" htmlFor={`${uid}-global-concurrency`}>
+        <span className="settings-field-label">アプリ全体で同時に動かせるWorkerの数</span>
+        <select
+          id={`${uid}-global-concurrency`}
+          data-testid="settings-team-concurrency-select"
+          aria-describedby={`${uid}-global-concurrency-desc`}
+          value={value}
+          disabled={disabled}
+          onChange={(e) => void save(Number(e.target.value))}
+        >
+          {concurrencyOptions(value).map((n) => (
+            <option key={n} value={n}>
+              {n}
+            </option>
+          ))}
+        </select>
+        <small data-testid="settings-team-concurrency-state">
+          {unavailable
+            ? 'この環境では変更できません'
+            : phase === 'loading'
+              ? '読み込み中'
+              : phase === 'saving'
+                ? '保存中'
+                : shown === null
+                  ? '未取得'
+                  : `${shown}人まで（初期値 ${TEAM_CONCURRENCY_DEFAULT}人）`}
+        </small>
+      </label>
+      <p className="settings-hint" id={`${uid}-global-concurrency-desc`}>
+        すべてのTeamを合わせて、同じ時間に作業できるWorkerの上限です（{TEAM_CONCURRENCY_RANGE.min}〜
+        {TEAM_CONCURRENCY_RANGE.max}
+        人）。上限を超えたWorkerは順番待ちになり、空きができしだい自動で始まります。
+        数を増やすほど、このPCのCPU・メモリの負荷が上がり、Claude /
+        Codexのサブスクリプションの利用上限（レート制限）にも早く達します。PCが重くなる、
+        または利用上限に達しやすいときは少なくしてください。変更は次に始まるWorkerから適用され、
+        動いているWorkerは止まりません。
+      </p>
+      {error !== null && (
+        <p
+          className="settings-skill-error"
+          role="alert"
+          data-testid="settings-team-concurrency-error"
+        >
+          {error}
+        </p>
+      )}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status}
+      </p>
+    </div>
+  );
+}
+
+// Null when the preload bridge predates this setting, which keeps the control disabled instead of
+// throwing on change in an older shell.
+function teamConcurrencyApi(): NonNullable<Window['sprintCoder']>['settings'] | null {
+  const settings = typeof window === 'undefined' ? undefined : window.sprintCoder?.settings;
+  if (
+    settings === undefined ||
+    typeof settings.getTeamConcurrency !== 'function' ||
+    typeof settings.setTeamConcurrency !== 'function'
+  )
+    return null;
+  return settings;
+}
 
 function TeamProviderPermissionCheckbox({
   checked,

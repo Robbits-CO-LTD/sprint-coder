@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_TEAM_BUDGET_LIMITS,
   TEAM_DELIVERY_MAX_ATTEMPTS,
+  TEAM_ASSIGNMENT_RATE_LIMIT,
   TEAM_MESSAGE_RATE_LIMIT,
+  effectiveBudgetCap,
+  nextRateWindowSlot,
   TeamBudgetExceededError,
   TeamIdentityError,
   TeamMessageRateLimitError,
@@ -162,6 +165,65 @@ describe('team message rate limit', () => {
     expect(() => assertTeamMessageRate({ recentCount: 1.2, limit: 30, windowMs: 60000 })).toThrow(
       'Invalid recent message count',
     );
+  });
+});
+
+describe('team assignment pacing (Issue #854)', () => {
+  it('lets a Leader hand work to a full 100-Worker Team within one window', () => {
+    expect(TEAM_ASSIGNMENT_RATE_LIMIT).toEqual({ limit: 100, windowMs: 60000 });
+    expect(TEAM_ASSIGNMENT_RATE_LIMIT.limit).toBeGreaterThan(TEAM_MESSAGE_RATE_LIMIT.limit);
+  });
+
+  it('admits now while the window has room, and otherwise when its oldest event leaves', () => {
+    expect(nextRateWindowSlot([], 1_000, 2, 60_000)).toBe(1_000);
+    expect(nextRateWindowSlot([500], 1_000, 2, 60_000)).toBe(1_000);
+    expect(nextRateWindowSlot([500, 900], 1_000, 2, 60_000)).toBe(60_500);
+    // Events that already left the window do not count.
+    expect(nextRateWindowSlot([-70_000, 900], 1_000, 2, 60_000)).toBe(1_000);
+    // Queued (future) events count, so the next one lines up behind them instead of overlapping.
+    expect(nextRateWindowSlot([500, 900, 60_500], 1_000, 2, 60_000)).toBe(60_900);
+  });
+
+  it('rejects an invalid limit or window', () => {
+    expect(() => nextRateWindowSlot([], 0, 0, 60_000)).toThrow('Invalid rate limit');
+    expect(() => nextRateWindowSlot([], 0, 1, 0)).toThrow('Invalid rate window');
+  });
+});
+
+describe('team budget caps under configurable concurrency', () => {
+  const cap = (input: Partial<Parameters<typeof effectiveBudgetCap>[0]>) =>
+    effectiveBudgetCap({
+      scope: 'team',
+      kind: 'toolCalls',
+      storedCap: 200,
+      teamConcurrency: 50,
+      appConcurrency: 50,
+      ...input,
+    });
+
+  it('ties spawn slots to the concurrency limits', () => {
+    expect(cap({ scope: 'global', kind: 'spawnSlots', storedCap: 24, appConcurrency: 50 })).toBe(
+      50,
+    );
+    expect(cap({ scope: 'global', kind: 'spawnSlots', storedCap: 24, appConcurrency: 4 })).toBe(4);
+    expect(cap({ kind: 'spawnSlots', storedCap: 8, teamConcurrency: 50, appConcurrency: 20 })).toBe(
+      20,
+    );
+    expect(cap({ kind: 'spawnSlots', storedCap: 8, teamConcurrency: 3, appConcurrency: 50 })).toBe(
+      3,
+    );
+    expect(cap({ scope: 'worker', kind: 'spawnSlots', storedCap: 0 })).toBe(0);
+  });
+
+  it('keeps each Worker slot its former share of the Team budget, never less than stored', () => {
+    // 200 tool calls for 8 Workers is 25 per slot; 50 slots get 1,250.
+    expect(cap({})).toBe(1_250);
+    expect(cap({ kind: 'timeMs', storedCap: 3_600_000 })).toBe(22_500_000);
+    expect(cap({ teamConcurrency: 1 })).toBe(200);
+    expect(cap({ teamConcurrency: 8 })).toBe(200);
+    // Global and per-Worker caps are exactly what is stored.
+    expect(cap({ scope: 'global', storedCap: 1000 })).toBe(1000);
+    expect(cap({ scope: 'worker', storedCap: 50 })).toBe(50);
   });
 });
 

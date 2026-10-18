@@ -1098,6 +1098,8 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<{ researchBeforeHiring: boolean }>;
     setTeamModelResearch(input: { researchBeforeHiring: boolean }): Promise<void>;
+    getTeamConcurrency(): Promise<{ maxConcurrentExecutions: number }>;
+    setTeamConcurrency(input: { maxConcurrentExecutions: number }): Promise<void>;
     getComputerUse(): Promise<import('@sprint-coder/contracts').ComputerUseSettings>;
     setComputerUse(input: {
       enabled: boolean;

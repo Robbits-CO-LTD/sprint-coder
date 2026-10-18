@@ -382,8 +382,96 @@ describe('TeamExecutionScheduler', () => {
     await settleScheduler();
   });
 
-  it('runs at most eight jobs and leaves queued jobs outside the active count', async () => {
+  it('runs at most fifty jobs by default and leaves queued jobs outside the active count', async () => {
+    expect(TEAM_GLOBAL_EXECUTION_LIMIT).toBe(50);
     const scheduler = new TeamExecutionScheduler();
+    const gates = Array.from({ length: 52 }, deferred);
+    let active = 0;
+    let maximum = 0;
+    for (let index = 0; index < gates.length; index += 1) {
+      const gate = gates[index]!;
+      scheduler.submit({
+        executionId: `execution-${index}`,
+        workerId: `execution-${index}`,
+        teamId: 'team-1',
+        teamLimit: TEAM_GLOBAL_EXECUTION_LIMIT,
+        run: async () => {
+          active += 1;
+          maximum = Math.max(maximum, active);
+          await gate.promise;
+          active -= 1;
+        },
+      });
+    }
+
+    await settleScheduler();
+    expect(maximum).toBe(50);
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 50,
+      queuedExecutionIds: ['execution-50', 'execution-51'],
+    });
+    for (const gate of gates) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(0);
+  });
+
+  it('reads the global limit from a setting on every admission pass, without a restart', async () => {
+    let setting = 2;
+    const scheduler = new TeamExecutionScheduler(() => setting);
+    const gates = Array.from({ length: 6 }, deferred);
+    for (let index = 0; index < gates.length; index += 1)
+      scheduler.submit({
+        executionId: `execution-${index}`,
+        workerId: `worker-${index}`,
+        teamId: 'team-1',
+        teamLimit: 100,
+        run: () => gates[index]!.promise,
+      });
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(2);
+
+    // Raised: queued work starts as soon as Main is told, with nothing finishing first.
+    setting = 4;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(4);
+
+    // Lowered: nothing running is stopped, and no new work starts until the count drops below it.
+    setting = 1;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(4);
+    for (const gate of gates.slice(0, 3)) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+    expect(scheduler.snapshot()).toMatchObject({
+      activeCount: 1,
+      queuedExecutionIds: ['execution-4', 'execution-5'],
+    });
+
+    // Raised again: the two still waiting start.
+    setting = 100;
+    scheduler.notifyLimitChanged();
+    await settleScheduler();
+    expect(scheduler.snapshot().activeCount).toBe(3);
+    for (const gate of gates) gate.resolve();
+    await settleScheduler();
+    await settleScheduler();
+  });
+
+  it('falls back to the default when the setting cannot be read', () => {
+    expect(new TeamExecutionScheduler(() => Number.NaN).currentGlobalLimit()).toBe(50);
+    expect(
+      new TeamExecutionScheduler(() => {
+        throw new Error('database closed');
+      }).currentGlobalLimit(),
+    ).toBe(50);
+    expect(() => new TeamExecutionScheduler(0)).toThrow();
+  });
+
+  it('runs at most eight jobs when configured for eight', async () => {
+    const scheduler = new TeamExecutionScheduler(8);
     const gates = Array.from({ length: 10 }, deferred);
     let active = 0;
     let maximum = 0;

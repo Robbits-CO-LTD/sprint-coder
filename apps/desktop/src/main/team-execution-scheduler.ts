@@ -1,4 +1,5 @@
 import type { ProviderConnection } from '@sprint-coder/contracts';
+import { TEAM_DEFAULT_CONCURRENT_EXECUTIONS } from '@sprint-coder/domain';
 import { secureLogger } from './secure-logger';
 import type {
   ConnectionAdmissionController,
@@ -6,7 +7,11 @@ import type {
   ConnectionWaitReason,
 } from './connection-admission';
 
-export const TEAM_GLOBAL_EXECUTION_LIMIT = 8;
+export const TEAM_GLOBAL_EXECUTION_LIMIT = TEAM_DEFAULT_CONCURRENT_EXECUTIONS;
+
+/** A fixed limit, or a reader asked on every admission pass so a changed setting applies to the
+ * next execution without a restart (running executions are never preempted by a lower one). */
+export type TeamExecutionLimit = number | (() => number);
 
 export type TeamExecutionJob = Readonly<{
   executionId: string;
@@ -56,11 +61,28 @@ export class TeamExecutionScheduler {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
-    private readonly globalLimit = TEAM_GLOBAL_EXECUTION_LIMIT,
+    private readonly globalLimit: TeamExecutionLimit = TEAM_GLOBAL_EXECUTION_LIMIT,
     private readonly connectionAdmission?: ConnectionAdmissionController,
   ) {
-    if (!Number.isSafeInteger(globalLimit) || globalLimit < 1)
+    if (typeof globalLimit === 'number' && !isPositiveLimit(globalLimit))
       throw new Error('Team global execution limit must be a positive integer');
+  }
+
+  /** The limit this admission pass uses. A reader that fails or returns nonsense falls back to the
+   * default rather than stopping every Team. */
+  currentGlobalLimit(): number {
+    if (typeof this.globalLimit === 'number') return this.globalLimit;
+    try {
+      const value = this.globalLimit();
+      return isPositiveLimit(value) ? value : TEAM_GLOBAL_EXECUTION_LIMIT;
+    } catch {
+      return TEAM_GLOBAL_EXECUTION_LIMIT;
+    }
+  }
+
+  /** A raised limit can admit queued work at once; a lowered one only stops new admissions. */
+  notifyLimitChanged(): void {
+    this.schedulePump();
   }
 
   configureConnection(connection: ProviderConnection): void {
@@ -158,7 +180,8 @@ export class TeamExecutionScheduler {
 
   private pump(): void {
     this.rejectImpossibleJobs();
-    while (this.active.size < this.globalLimit) {
+    const globalLimit = this.currentGlobalLimit();
+    while (this.active.size < globalLimit) {
       const index = this.nextAdmissibleIndex();
       if (index === -1) return;
       const [job] = this.queued.splice(index, 1);
@@ -299,6 +322,10 @@ export class TeamExecutionScheduler {
     }, delayMs);
     this.retryTimer.unref?.();
   }
+}
+
+function isPositiveLimit(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1;
 }
 
 function toAdmissionCandidate(job: QueuedJob): ConnectionAdmissionCandidate {

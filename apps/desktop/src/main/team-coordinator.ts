@@ -50,6 +50,8 @@ import {
   assertDelegationAllowed,
   assertTeamMessageRate,
   buildTeamEnvelope,
+  nextRateWindowSlot,
+  TEAM_ASSIGNMENT_RATE_LIMIT,
   TEAM_MESSAGE_RATE_LIMIT,
   TeamDelegationError,
   type ManagerPolicy,
@@ -59,11 +61,7 @@ import {
 import { killProcessTree } from './process-tree';
 import { redactSecrets } from './secret-redactor';
 import { safeGitSpawnSync } from './safe-git';
-import {
-  TEAM_GLOBAL_EXECUTION_LIMIT,
-  TeamExecutionScheduler,
-  type TeamExecutionJob,
-} from './team-execution-scheduler';
+import { TeamExecutionScheduler, type TeamExecutionJob } from './team-execution-scheduler';
 import { TeamIntegrationScheduler } from './team-integration-scheduler';
 import { ConnectionAdmissionController, type ConnectionWaitReason } from './connection-admission';
 import {
@@ -524,7 +522,62 @@ export class TeamCoordinator {
     const admission = new ConnectionAdmissionController(() => this.now().getTime());
     for (const connection of this.persistence.listProviderConnections())
       admission.configure(connection);
-    this.executionScheduler = new TeamExecutionScheduler(TEAM_GLOBAL_EXECUTION_LIMIT, admission);
+    // Read on every admission pass, so Settings > Team applies to the next execution.
+    this.executionScheduler = new TeamExecutionScheduler(
+      () => this.persistence.getTeamMaxConcurrentExecutions(),
+      admission,
+    );
+  }
+
+  /** Settings > Team changed the app-wide limit: a higher one may admit queued work now. */
+  notifyConcurrencyLimitChanged(): void {
+    this.executionScheduler.notifyLimitChanged();
+  }
+
+  /** Free-form messages admitted per Team in the trailing window (Issue #854: reports and
+   * assignments are not counted here). In memory: a restart starts a fresh window. */
+  private readonly messageRateWindows = new Map<string, number[]>();
+  /** Assignment start times per Team, including ones paced into the future. */
+  private readonly assignmentRateWindows = new Map<string, number[]>();
+
+  private assertMessageRateRoom(teamId: string): void {
+    const nowMs = this.now().getTime();
+    const live = (this.messageRateWindows.get(teamId) ?? []).filter(
+      (at) => at > nowMs - TEAM_MESSAGE_RATE_LIMIT.windowMs,
+    );
+    this.messageRateWindows.set(teamId, live);
+    assertTeamMessageRate({ recentCount: live.length, ...TEAM_MESSAGE_RATE_LIMIT });
+  }
+
+  private recordMessage(teamId: string): void {
+    const admitted = this.messageRateWindows.get(teamId) ?? [];
+    admitted.push(this.now().getTime());
+    this.messageRateWindows.set(teamId, admitted);
+  }
+
+  /** When the next assignment of this Team may start: now, or later once the window has room. An
+   * assignment beyond the limit is queued for that time instead of being refused (Issue #854). */
+  private nextAssignmentSlot(teamId: string): { nowMs: number; slotMs: number } {
+    const nowMs = this.now().getTime();
+    const live = (this.assignmentRateWindows.get(teamId) ?? []).filter(
+      (at) => at > nowMs - TEAM_ASSIGNMENT_RATE_LIMIT.windowMs,
+    );
+    this.assignmentRateWindows.set(teamId, live);
+    return {
+      nowMs,
+      slotMs: nextRateWindowSlot(
+        live,
+        nowMs,
+        TEAM_ASSIGNMENT_RATE_LIMIT.limit,
+        TEAM_ASSIGNMENT_RATE_LIMIT.windowMs,
+      ),
+    };
+  }
+
+  private recordAssignment(teamId: string, slotMs: number): void {
+    const admitted = this.assignmentRateWindows.get(teamId) ?? [];
+    admitted.push(slotMs);
+    this.assignmentRateWindows.set(teamId, admitted);
   }
 
   private pinnedBlueprint(taskId: string, teamId: string): TeamBlueprintBindingRecord | null {
@@ -833,17 +886,14 @@ export class TeamCoordinator {
         throw new Error('Requesting Agent not found in Team');
       if (!snapshot.agents.some(({ id }) => id === targetAgentId))
         throw new Error('Target Agent not found in Team');
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
+      this.assertMessageRateRoom(team.id);
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
         sourceAgentId: requesterAgentId,
         targetAgentId,
         content,
       });
+      this.recordMessage(team.id);
       const now = this.isoNow();
       this.persistence.createTeamDelivery({ messageId: message.id, now });
       this.persistence.transitionTeamMessageState(message.id, 'dispatching');
@@ -3140,11 +3190,7 @@ export class TeamCoordinator {
           )
       )
         throw new Error('Worker already has a pending execution');
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
+      const { nowMs, slotMs } = this.nextAssignmentSlot(team.id);
 
       const now = this.isoNow();
       const execution = this.persistence.createTeamExecution({
@@ -3186,6 +3232,7 @@ export class TeamCoordinator {
         workerId: worker.id,
         status: 'queued',
       });
+      this.recordAssignment(team.id, slotMs);
       this.scheduleExecution({
         taskId: input.taskId,
         teamId: team.id,
@@ -3197,6 +3244,8 @@ export class TeamCoordinator {
         teamTaskId: teamTask.id,
         executionId: execution.id,
         doneCriteria: input.doneCriteria,
+        // The scheduler keeps wall-clock time; only the wait is carried over from the Team's clock.
+        ...(slotMs > nowMs ? { notBeforeMs: Date.now() + (slotMs - nowMs) } : {}),
       });
       this.emit(input.taskId, team.id);
       return { executionId: queued.id, state: queued.state };
@@ -3405,11 +3454,8 @@ export class TeamCoordinator {
       // without one (issue #570). The stored Worker keeps its capability for later assignments.
       const workspaceSet = this.runtimeWorkspaceForTask(input.taskId);
       const readOnlyWorker = { ...worker, writeCapable: false };
-      const since = new Date(this.now().getTime() - TEAM_MESSAGE_RATE_LIMIT.windowMs).toISOString();
-      assertTeamMessageRate({
-        recentCount: this.persistence.countRecentTeamMessages(team.id, since),
-        ...TEAM_MESSAGE_RATE_LIMIT,
-      });
+      // A person's direct message to a Worker counts as a free-form message, not an assignment.
+      this.assertMessageRateRoom(team.id);
 
       const message = this.persistence.createTeamMessage({
         teamId: team.id,
@@ -3417,6 +3463,7 @@ export class TeamCoordinator {
         targetAgentId: worker.id,
         content: input.content,
       });
+      this.recordMessage(team.id);
       const teamTask = this.persistence.createTeamTask({
         teamId: team.id,
         messageId: message.id,
@@ -4854,6 +4901,7 @@ export class TeamCoordinator {
     executionId: string;
     doneCriteria: readonly string[];
     attemptStartReason?: TeamAttemptStartReason;
+    notBeforeMs?: number;
   }): void {
     const execution = this.persistence.getTeamExecution(input.executionId);
     if (execution.assigneeAgentId !== input.workerId || execution.teamId !== input.teamId)
@@ -4863,6 +4911,7 @@ export class TeamCoordinator {
       workerId: execution.assigneeAgentId,
       teamId: input.teamId,
       teamLimit: input.teamLimit,
+      ...(input.notBeforeMs === undefined ? {} : { notBeforeMs: input.notBeforeMs }),
       ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
       isReady: () =>
         !this.graphIntegrationWorkers.has(execution.assigneeAgentId) &&

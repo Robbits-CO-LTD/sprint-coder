@@ -200,6 +200,8 @@ import {
   teamPolicySchema,
   teamModelResearchSettingsSchema,
   teamModelResearchSettingsSetInputSchema,
+  teamConcurrencySettingsSchema,
+  teamConcurrencySettingsSetInputSchema,
   computerUseSettingsSchema,
   computerUseSettingsSetInputSchema,
   teamModelSelectionGuidanceSchema,
@@ -1113,6 +1115,20 @@ const api: SprintCoderApi = {
       invoke(
         IPC_CHANNELS.settingsSetTeamModelResearch,
         teamModelResearchSettingsSetInputSchema,
+        z.undefined(),
+        input,
+      ),
+    getTeamConcurrency: () =>
+      invoke(
+        IPC_CHANNELS.settingsGetTeamConcurrency,
+        emptyPayloadSchema,
+        teamConcurrencySettingsSchema,
+        {},
+      ),
+    setTeamConcurrency: (input) =>
+      invoke(
+        IPC_CHANNELS.settingsSetTeamConcurrency,
+        teamConcurrencySettingsSetInputSchema,
         z.undefined(),
         input,
       ),

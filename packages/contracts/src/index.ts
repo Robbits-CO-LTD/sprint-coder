@@ -290,10 +290,13 @@ export const teamStateSchema = z.enum([
   'completed',
   'failed',
 ]);
+/** Mirrors TEAM_MAX_CONCURRENT_EXECUTIONS in packages/domain/src/team.ts. */
+export const TEAM_CONCURRENCY_MAX = 100;
+export const teamConcurrencyLimitSchema = z.number().int().min(1).max(TEAM_CONCURRENCY_MAX);
 export const teamPolicySchema = z
   .object({
     maxAgentDepth: z.number().int().min(1).max(4),
-    maxConcurrentExecutions: z.number().int().min(1).max(8),
+    maxConcurrentExecutions: teamConcurrencyLimitSchema,
     allowWorkerDirectMessages: z.boolean(),
     budgetMode: z.enum(['bounded', 'unlimited']),
   })
@@ -3919,6 +3922,15 @@ export const teamModelResearchSettingsSchema = z
   .strict();
 export type TeamModelResearchSettings = z.infer<typeof teamModelResearchSettingsSchema>;
 export const teamModelResearchSettingsSetInputSchema = teamModelResearchSettingsSchema;
+/** How many Worker executions may run at once across the whole app (each Team is also held to
+ * its own policy). Applies to executions admitted after the change, without a restart. */
+export const teamConcurrencySettingsSchema = z
+  .object({
+    maxConcurrentExecutions: teamConcurrencyLimitSchema,
+  })
+  .strict();
+export type TeamConcurrencySettings = z.infer<typeof teamConcurrencySettingsSchema>;
+export const teamConcurrencySettingsSetInputSchema = teamConcurrencySettingsSchema;
 /**
  * The user-facing switch for desktop Computer Use (beta). `enabled` is the persisted choice and
  * defaults to off; the rest are Main's facts about what that choice does in this process.
@@ -7239,6 +7251,8 @@ export interface SprintCoderApi {
     setCodexEffort(effort: string): Promise<void>;
     getTeamModelResearch(): Promise<TeamModelResearchSettings>;
     setTeamModelResearch(input: TeamModelResearchSettings): Promise<void>;
+    getTeamConcurrency(): Promise<TeamConcurrencySettings>;
+    setTeamConcurrency(input: TeamConcurrencySettings): Promise<void>;
     /** Computer Use (beta) on/off. Resolves with Main's view after the change. */
     getComputerUse(): Promise<ComputerUseSettings>;
     setComputerUse(input: ComputerUseSettingsSetInput): Promise<ComputerUseSettings>;
@@ -7490,6 +7504,8 @@ export const IPC_CHANNELS = {
   settingsSetCodexEffort: 'sprint-coder:settings:set-codex-effort',
   settingsGetTeamModelResearch: 'sprint-coder:settings:get-team-model-research',
   settingsSetTeamModelResearch: 'sprint-coder:settings:set-team-model-research',
+  settingsGetTeamConcurrency: 'sprint-coder:settings:get-team-concurrency',
+  settingsSetTeamConcurrency: 'sprint-coder:settings:set-team-concurrency',
   settingsGetComputerUse: 'sprint-coder:settings:get-computer-use',
   settingsSetComputerUse: 'sprint-coder:settings:set-computer-use',
   settingsGetTeamModelSelectionGuidance: 'sprint-coder:settings:get-team-model-selection-guidance',
