@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -97,6 +99,12 @@ export type CreateWorktreeInput = Readonly<{
   repoPath: string;
   baseRef?: string;
   worktreeId?: string;
+  /**
+   * The worktree path a persisted record already names (issue #855). When it is one of this
+   * instance's own paths for the id (short or legacy name), the worktree is created or resumed there,
+   * so a record written before the short names keeps pointing at the right directory.
+   */
+  recordedPath?: string;
 }>;
 
 export type CreateWorktreeResult = Readonly<{
@@ -295,19 +303,163 @@ export class WorkerWorktreeManager {
     return repoPath;
   }
 
-  /** Deterministic worktree directory for an execution or agent. */
+  /**
+   * Deterministic worktree directory for an execution or agent. New worktrees use a short hashed
+   * name (issue #855: a deep profile path plus a full UUID name overflowed Git's path limit); a
+   * worktree already created under the legacy `worktree-<id>` name keeps being found there.
+   */
   worktreePathFor(worktreeId: string): string {
     validateWorktreeId(worktreeId);
-    return join(this.worktreesRoot, `worktree-${worktreeId}`);
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (existsSync(legacy)) return legacy;
+    return join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
   }
 
-  /** True only for the exact deterministic directory owned by this app instance. */
-  ownsWorktreePath(worktreeId: string, candidatePath: string): boolean {
-    const expected = resolve(this.worktreePathFor(worktreeId));
+  /**
+   * Like `worktreePathFor`, but a legacy `worktree-<id>` whose directory is gone while Git still
+   * registers it is resolved to the legacy path too, so cleanup unregisters the right record. A
+   * registration list that cannot be read fails the cleanup (the record stays retained) rather than
+   * falling back to the short path, which would report a still-registered legacy worktree as removed.
+   */
+  private async resolveWorktreePath(
+    repoPath: string,
+    worktreeId: string,
+    failureCode: 'remove_failed' | 'create_failed' = 'remove_failed',
+  ): Promise<string> {
+    const current = this.worktreePathFor(worktreeId);
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (current === legacy) return current;
+    const wanted = await pathKeys(legacy);
+    const listed = (
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], failureCode)
+    ).stdout;
+    for (const line of listed.split('\0'))
+      if (line.startsWith('worktree ')) {
+        const keys = await pathKeys(line.slice('worktree '.length));
+        if (keys.some((key) => wanted.includes(key))) return legacy;
+      }
+    return current;
+  }
+
+  /**
+   * Before a new worktree is made at the short path, unregisters a legacy `worktree-<id>` record
+   * whose directory is gone. Otherwise cleanup, which resolves the id to that legacy record, would
+   * unregister only it and leave the new short worktree behind. A record that still keeps submodule
+   * commits, or that Git refuses to release (a locked record), is not dropped; creation fails
+   * instead so nothing is lost or duplicated.
+   */
+  private async releaseMissingLegacyRegistration(
+    repoPath: string,
+    worktreeId: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (worktreePath === legacy) return;
+    if ((await this.resolveWorktreePath(repoPath, worktreeId, 'create_failed')) !== legacy) return;
+    if (await pathExists(legacy)) return;
+    let outcome: CleanupUnchangedWorktreeResult['outcome'];
+    try {
+      ({ outcome } = await this.unregisterMissingWorktree(repoPath, legacy));
+    } catch (error) {
+      // A locked record (or any other refusal) is kept; creation fails rather than duplicating it.
+      throw new WorktreeError(
+        'create_failed',
+        `legacy worktree record could not be released: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+    if (outcome === 'quarantined')
+      throw new WorktreeError(
+        'create_failed',
+        `legacy worktree record still keeps submodule data: ${legacy}`,
+      );
+  }
+
+  /** Where to create or resume a worktree: a recorded own path when given, else the current one. */
+  private targetPathFor(worktreeId: string, recordedPath: string | undefined): string {
+    if (recordedPath !== undefined && this.ownsWorktreePath(worktreeId, recordedPath))
+      return this.ownFormOf(worktreeId, recordedPath);
+    return this.worktreePathFor(worktreeId);
+  }
+
+  /** The own path (short or legacy) a recorded `candidatePath` names; the current one otherwise. */
+  private ownFormOf(worktreeId: string, candidatePath: string): string {
     const candidate = resolve(candidatePath);
-    return this.platform === 'win32'
-      ? expected.toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
-      : expected === candidate;
+    const same = (a: string): boolean =>
+      this.platform === 'win32'
+        ? resolve(a).toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
+        : resolve(a) === candidate;
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    const short = join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
+    if (same(legacy)) return legacy;
+    if (same(short)) return short;
+    return this.worktreePathFor(worktreeId);
+  }
+
+  /** True only for the deterministic directory (short or legacy name) owned by this app instance. */
+  ownsWorktreePath(worktreeId: string, candidatePath: string): boolean {
+    validateWorktreeId(worktreeId);
+    const candidate = resolve(candidatePath);
+    return [
+      join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId)),
+      join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId)),
+    ].some((own) => {
+      const expected = resolve(own);
+      return this.platform === 'win32'
+        ? expected.toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
+        : expected === candidate;
+    });
+  }
+
+  /**
+   * Fails early with a clear message when the worktree path itself is too long, before anything
+   * touches it: on POSIX even a `stat` of an over-long path fails with ENAMETOOLONG.
+   */
+  private pathTooLongError(error: unknown, worktreePath: string): WorktreeError | null {
+    if ((error as NodeJS.ErrnoException | null)?.code !== 'ENAMETOOLONG') return null;
+    return new WorktreeError(
+      'create_failed',
+      worktreePathTooLongMessage(worktreePath.length, this.limit()),
+      { cause: error },
+    );
+  }
+
+  private limit(): number {
+    return this.platform === 'win32' ? WINDOWS_WORKTREE_PATH_LIMIT : POSIX_WORKTREE_PATH_LIMIT;
+  }
+
+  private assertWorktreePathWithinLimit(worktreePath: string): void {
+    const reason = checkWorktreePathLengths({
+      platform: this.platform,
+      worktreePath,
+      gitAdminPath: '',
+    });
+    if (reason !== null) throw new WorktreeError('create_failed', reason);
+  }
+
+  /**
+   * Fails early with a clear message when Git's administration directory for the new worktree would
+   * be too long. That directory lives under the COMMON Git directory, which for a repository that is
+   * itself a linked worktree is not `<repo>/.git` (there `.git` is a file).
+   */
+  private async assertGitAdminPathWithinLimit(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const commonDir = (
+      await this.runGit(repoPath, ['rev-parse', '--git-common-dir'], 'create_failed')
+    ).stdout.trim();
+    const gitAdminPath = join(
+      resolve(repoPath, commonDir === '' ? '.git' : commonDir),
+      'worktrees',
+      basename(worktreePath),
+    );
+    const reason = checkWorktreePathLengths({
+      platform: this.platform,
+      worktreePath,
+      gitAdminPath,
+    });
+    if (reason !== null) throw new WorktreeError('create_failed', reason);
   }
 
   async create({
@@ -315,25 +467,53 @@ export class WorkerWorktreeManager {
     repoPath,
     baseRef = 'HEAD',
     worktreeId = agentId,
+    recordedPath,
   }: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     validateWorktreeId(agentId);
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = this.targetPathFor(worktreeId, recordedPath);
+    // The creation limits guard the new short names only; a recorded legacy path is recreated as
+    // before, and Git's own too-long error is still turned into the clear message below.
+    const isShort =
+      worktreePath === join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
+    if (isShort) this.assertWorktreePathWithinLimit(worktreePath);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
+    if (isShort) await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
+    await this.releaseMissingLegacyRegistration(repoPath, worktreeId, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
-    await this.runGit(
-      repoPath,
-      ['worktree', 'add', '--detach', worktreePath, baseRef],
-      'create_failed',
-    );
+    try {
+      await this.runGit(
+        repoPath,
+        ['worktree', 'add', '--detach', worktreePath, baseRef],
+        'create_failed',
+      );
+    } catch (error) {
+      // Where the file system reports no ENAMETOOLONG (Windows), Git still fails on a path that is
+      // too long; its raw message is turned into the same clear length message.
+      if (error instanceof WorktreeError && GIT_PATH_TOO_LONG.test(error.message))
+        throw new WorktreeError(
+          'create_failed',
+          worktreePathTooLongMessage(worktreePath.length, this.limit()),
+          { cause: error },
+        );
+      throw error;
+    }
     const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
     return { path: worktreePath, baseHead: stdout.trim() };
   }
 
   async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     const worktreeId = input.worktreeId ?? input.agentId;
-    const worktreePath = this.worktreePathFor(worktreeId);
-    if (!(await pathExists(worktreePath))) return this.create(input);
+    const worktreePath = this.targetPathFor(worktreeId, input.recordedPath);
+    // The creation limit is not applied here: an existing worktree must stay resumable. Only an
+    // ENAMETOOLONG from the file system is turned into the clear length message.
+    let exists: boolean;
+    try {
+      exists = await pathExists(worktreePath);
+    } catch (error) {
+      throw this.pathTooLongError(error, worktreePath) ?? error;
+    }
+    if (!exists) return this.create(input);
     const expectedHead = (
       await this.runGit(input.repoPath, ['rev-parse', input.baseRef ?? 'HEAD'], 'create_failed')
     ).stdout.trim();
@@ -469,7 +649,7 @@ export class WorkerWorktreeManager {
     worktreeId = agentId,
   }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = await this.resolveWorktreePath(repoPath, worktreeId);
     if (!(await pathExists(worktreePath))) {
       const { outcome } = await this.unregisterMissingWorktree(repoPath, worktreePath);
       return { outcome };
@@ -506,7 +686,7 @@ export class WorkerWorktreeManager {
   }: CleanupUnchangedWorktreeInput): Promise<CleanupUnchangedWorktreeResult> {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = await this.resolveWorktreePath(repoPath, worktreeId);
     if (!(await pathExists(worktreePath)))
       return this.unregisterMissingWorktree(repoPath, worktreePath);
     const withoutGit = await this.remainsWithoutGit(worktreePath);
@@ -715,7 +895,7 @@ export class WorkerWorktreeManager {
     for (const [index, input] of inputs.entries()) {
       try {
         const found = await this.locateOwnedWorktree(input);
-        const path = found ?? this.worktreePathFor(input.worktreeId ?? input.agentId);
+        const path = found ?? this.ownFormOf(input.worktreeId ?? input.agentId, input.path);
         const entries = byRepository.get(input.repoPath) ?? [];
         entries.push({ index, path });
         byRepository.set(input.repoPath, entries);
@@ -806,7 +986,7 @@ export class WorkerWorktreeManager {
   }: DiscardWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
-    const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
+    const ownPath = worktreePath ?? this.ownFormOf(worktreeId, path);
     if (await this.isLocked(repoPath, ownPath))
       throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
     // `reason` classifies why an automatic reclaim kept a worktree (issue #588); a user-confirmed
@@ -831,7 +1011,7 @@ export class WorkerWorktreeManager {
       return worktreePath === null
         ? await this.recordKeepsSubmodules(
             input.repoPath,
-            this.worktreePathFor(input.worktreeId ?? input.agentId),
+            this.ownFormOf(input.worktreeId ?? input.agentId, input.path),
           )
         : await this.containsSubmodules(input.repoPath, worktreePath);
     } catch {
@@ -863,7 +1043,7 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     if (!this.ownsWorktreePath(worktreeId, path))
       throw new WorktreeError('invalid_input', 'Worktree path is not owned by Sprint Coder');
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = this.ownFormOf(worktreeId, path);
     let entry;
     try {
       entry = await lstat(worktreePath);
@@ -894,7 +1074,7 @@ export class WorkerWorktreeManager {
     if (worktreePath === null)
       throw new WorktreeError(
         'invalid_input',
-        `worktree does not exist: ${this.worktreePathFor(worktreeId)}`,
+        `worktree does not exist: ${this.ownFormOf(worktreeId, path)}`,
       );
     // Git looks upward for a repository, so a directory that is no longer a worktree would be read
     // as whichever repository contains the worktrees root.
@@ -1430,6 +1610,38 @@ function decodeGitChangePath(value: string): string {
   } catch {
     throw new WorktreeError('integration_failed', 'Git change path is not valid UTF-8');
   }
+}
+
+/** Leaves room under Windows MAX_PATH (260) for files inside the worktree and Git's own suffixes. */
+const WINDOWS_WORKTREE_PATH_LIMIT = 200;
+const POSIX_WORKTREE_PATH_LIMIT = 900;
+
+export function legacyWorktreeDirectoryName(worktreeId: string): string {
+  return `worktree-${worktreeId}`;
+}
+
+/** Short deterministic directory name: `w-` plus 10 hex characters of the id's SHA-256. */
+export function shortWorktreeDirectoryName(worktreeId: string): string {
+  return `w-${createHash('sha256').update(worktreeId).digest('hex').slice(0, 10)}`;
+}
+
+/** Returns a Japanese message when a path is too long for Git on `platform`, otherwise null. */
+/** Git's own words for a path it cannot handle because it is too long. */
+const GIT_PATH_TOO_LONG =
+  /(?:'\$GIT_DIR' too big|Filename too long|File name too long|name too long)/iu;
+
+export function checkWorktreePathLengths(
+  input: Readonly<{ platform: NodeJS.Platform; worktreePath: string; gitAdminPath: string }>,
+): string | null {
+  const limit =
+    input.platform === 'win32' ? WINDOWS_WORKTREE_PATH_LIMIT : POSIX_WORKTREE_PATH_LIMIT;
+  const longest = Math.max(input.worktreePath.length, input.gitAdminPath.length);
+  if (longest <= limit) return null;
+  return worktreePathTooLongMessage(longest, limit);
+}
+
+function worktreePathTooLongMessage(length: number, limit: number): string {
+  return `作業用フォルダのパスが長すぎるため、Worker の worktree を作成できません（${length} 文字、上限の目安 ${limit} 文字）。アプリのデータ保存先やリポジトリを、より浅い場所へ移動してから再実行してください。`;
 }
 
 function validateWorktreeId(worktreeId: string): void {

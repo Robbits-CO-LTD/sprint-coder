@@ -5787,6 +5787,7 @@ export class TeamCoordinator {
           worktreeId: isolationWorktreeId(executionId, repository.ordinal),
           repoPath: repository.repoPath,
           baseRef: repository.baseHead,
+          recordedPath: repository.worktreePath,
         });
       return this.updateExecutionIsolation({
         executionId,
