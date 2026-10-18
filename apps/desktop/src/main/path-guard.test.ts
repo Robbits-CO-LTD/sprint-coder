@@ -249,6 +249,49 @@ if ($size -eq 0 -or $size -ge 32768) { throw 'GetShortPathNameW failed' }
     await expect(revalidatePathGuard(guard)).rejects.toBeInstanceOf(PathGuardError);
   });
 
+  it.skipIf(process.platform === 'win32')(
+    'ignores unrelated siblings of an aliased Workspace path but still rejects real substitutions',
+    async () => {
+      // macOS tmpdir() is /var/..., a symlinked alias of /private/var/.... An absolute target
+      // through such an alias used to snapshot the alias' parent (the shared tmpdir) into the
+      // chain, so any unrelated mkdir/rm there failed revalidation with IDENTITY_CHANGED.
+      const { root, workspace, outside } = await fixture();
+      const alias = join(root, 'workspace-alias');
+      await symlink(workspace, alias, 'dir');
+      const guard = await createPathGuard({
+        workspacePath: workspace,
+        targetPath: join(alias, 'src', 'safe.txt'),
+        operation: 'read',
+      });
+      expect(guard.chain.map((entry) => entry.lexicalPath)).toEqual([
+        join(alias, 'src'),
+        join(alias, 'src', 'safe.txt'),
+      ]);
+
+      await mkdir(join(root, 'unrelated-sibling'));
+      await writeFile(join(root, 'unrelated-file.txt'), 'noise');
+      await expect(revalidatePathGuard(guard)).resolves.toMatchObject({
+        resolvedPath: guard.resolvedPath,
+      });
+
+      const target = join(workspace, 'src', 'safe.txt');
+      await rename(target, join(workspace, 'src', 'original.txt'));
+      await writeFile(target, 'safe');
+      await expect(revalidatePathGuard(guard)).rejects.toMatchObject({ code: 'IDENTITY_CHANGED' });
+
+      const repointed = await createPathGuard({
+        workspacePath: workspace,
+        targetPath: join(alias, 'src', 'safe.txt'),
+        operation: 'read',
+      });
+      await mkdir(join(outside, 'src'));
+      await writeFile(join(outside, 'src', 'safe.txt'), 'safe');
+      await rm(alias);
+      await symlink(outside, alias, 'dir');
+      await expect(revalidatePathGuard(repointed)).rejects.toBeInstanceOf(PathGuardError);
+    },
+  );
+
   it('binds execution to the approved inode through an open file handle', async () => {
     const { workspace } = await fixture();
     const guard = await createPathGuard({
