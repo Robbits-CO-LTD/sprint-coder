@@ -616,7 +616,13 @@ async function executeWaitReports(
       cursor?.advance(Math.max(after, cursor.read(), ...reports.map((report) => report.seq)));
       return { ok: true, reports: reports.map(reportPayload) };
     }
-    if (!longPoll || !coordinator.hasBusyWorkers(taskId) || Date.now() >= deadline)
+    // Executions parked for a person's resume already reported and will not report again until
+    // resumed, so they do not keep the wait open (issue #852).
+    if (
+      !longPoll ||
+      !coordinator.hasBusyWorkers(taskId, { progressingOnly: true }) ||
+      Date.now() >= deadline
+    )
       return { ok: true, reports: [] };
     await sleep(Math.min(intervalMs, Math.max(0, deadline - Date.now())), options.signal);
   }

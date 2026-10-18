@@ -76,3 +76,45 @@ describe('TeamIntegrationScheduler', () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe('TeamIntegrationScheduler.runExclusive', () => {
+  it('waits for an integration on the same key and returns its result (issue #853)', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    let releaseIntegration!: () => void;
+    let integrating = false;
+    const integration = scheduler.submit({
+      executionId: 'integration',
+      mutationKeys: ['repo'],
+      async run() {
+        integrating = true;
+        await new Promise<void>((resolve) => {
+          releaseIntegration = resolve;
+        });
+        integrating = false;
+      },
+    });
+    await flush();
+    const observed: boolean[] = [];
+    const check = scheduler.runExclusive(['repo'], async () => {
+      observed.push(integrating);
+      return 'clean';
+    });
+    const other = scheduler.runExclusive(['other-repo'], async () => 'other');
+    await expect(other).resolves.toBe('other');
+    await flush();
+    expect(observed).toEqual([]);
+    releaseIntegration();
+    await integration;
+    await expect(check).resolves.toBe('clean');
+    expect(observed).toEqual([false]);
+  });
+
+  it('passes on the error of the exclusive run', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    await expect(
+      scheduler.runExclusive(['repo'], async () => {
+        throw new Error('dirty');
+      }),
+    ).rejects.toThrow('dirty');
+  });
+});
