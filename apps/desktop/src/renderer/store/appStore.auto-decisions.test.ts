@@ -372,6 +372,14 @@ describe('decisions still queued when a snapshot restores the Task (issue #863)'
       lastSeqByTask: {},
     });
     handleTurnEvent('task-1', autoDecided(299, decision(299)), storeApply);
+    // Exactly at the boundary, and under an id the kept rows do not have, so only the seq
+    // boundary (not the id dedup) can keep it out — the case of a row already pushed out of the
+    // kept window being replayed.
+    handleTurnEvent(
+      'task-1',
+      autoDecided(300, { ...decision(300), id: 'auto-300-replayed' }),
+      storeApply,
+    );
     handleTurnEvent('task-1', autoDecided(301, decision(301)), storeApply);
     vi.runAllTimers();
     const state = useAppStore.getState();
@@ -379,6 +387,9 @@ describe('decisions still queued when a snapshot restores the Task (issue #863)'
       'auto-300',
       'auto-301',
     ]);
-    expect(state.autoDecisionCountsByTask['task-1']?.throughSeq).toBe(301);
+    expect(state.autoDecisionCountsByTask['task-1']).toEqual({
+      throughSeq: 301,
+      byTurn: { 'turn-1': { allow: 301, allowOnce: 0, deny: 0 } },
+    });
   });
 });
