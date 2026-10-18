@@ -388,31 +388,17 @@ int wmain(int argc, wchar_t **argv) {
   // cmd: W-SYS, refused, and its row is its kind only. It has no window of its own (its console is
   // conhost's), so it is judged again with an empty window class. It runs (a suspended process has
   // no loader data yet, which is a running-image mismatch of its own).
-  // In a console of its own (minimized): under the restricted token of an elevated runner, a cmd with
-  // no console exits at once, and a process that is gone measures nothing.
-  const PROCESS_INFORMATION cmd = Start(L"\"" + system32 + L"\\cmd.exe\" /k", CREATE_NEW_CONSOLE);
+  // A new or hidden console under the restricted LUA token fails initialization on windows-2022
+  // (exit 0xc0000142). Inherit this program's console instead. Run a bounded loopback wait rather
+  // than an interactive /k prompt, which could exit on CI's closed stdin. The job ends both children.
+  const PROCESS_INFORMATION cmd = Start(
+      L"\"" + system32 + L"\\cmd.exe\" /d /c \"\"" + system32 +
+          L"\\ping.exe\" -n 120 127.0.0.1 >nul\"", 0);
   Sleep(1000);
   DWORD cmd_exit = 0;
   const bool cmd_exit_read = cmd.hProcess != nullptr && GetExitCodeProcess(cmd.hProcess, &cmd_exit);
   std::cout << "cmd lifecycle: exit_read=" << (cmd_exit_read ? "yes" : "no")
             << " exit=0x" << std::hex << cmd_exit << std::dec << "\n";
-  // Diagnostic comparison for the CI-only early exit: a noninteractive shell must not depend on
-  // opening a console or reading a prompt. This child is owned by the same kill-on-close job.
-  if (cmd_exit_read && cmd_exit != STILL_ACTIVE) {
-    const PROCESS_INFORMATION noninteractive = Start(
-        L"\"" + system32 + L"\\cmd.exe\" /d /c \"\"" + system32 +
-            L"\\ping.exe\" -n 120 127.0.0.1 >nul\"", CREATE_NO_WINDOW);
-    Sleep(1000);
-    DWORD comparison_exit = 0;
-    const bool comparison_read = noninteractive.hProcess != nullptr &&
-                                 GetExitCodeProcess(noninteractive.hProcess, &comparison_exit);
-    WindowsV2Judgement comparison;
-    JudgeWindowsV2Target(noninteractive.dwProcessId, nullptr, context, &comparison);
-    comparison.measured.facts.window_class = std::string{};
-    std::cout << "cmd noninteractive: exit_read=" << (comparison_read ? "yes" : "no")
-              << " exit=0x" << std::hex << comparison_exit << std::dec
-              << " class=" << ClassifyTargetExplained(comparison.measured.facts).deny_class << "\n";
-  }
   Check(cmd.hProcess != nullptr && WaitForSingleObject(cmd.hProcess, 0) == WAIT_TIMEOUT,
         "v2_cmd_is_running");
   WindowsV2Judgement shell;
