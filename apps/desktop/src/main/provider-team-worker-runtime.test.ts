@@ -4,7 +4,7 @@ import {
   type ProviderConnection,
   type ProviderExecutionRequest,
 } from '@sprint-coder/contracts';
-import type { TeamEnvelope } from '@sprint-coder/domain';
+import { ToolRegistry, type TeamEnvelope } from '@sprint-coder/domain';
 import type { AgentRecord } from './persistence';
 import { MainProviderRegistry, type ProviderRuntime } from './provider-runtime';
 import type { ProviderVerificationService } from './provider-verification';
@@ -14,8 +14,8 @@ import {
 } from './provider-team-worker-runtime';
 import { WorkerEgressDeniedError, type WorkerActivityEvent } from './team-coordinator';
 import { WORKER_WRITE_APPROVAL_NOTICE } from './team-worker-runtime';
-import { ToolAuthorizationDeniedError } from './tool-broker';
-import { WorkspacePatchRejection } from './workspace-patch-tool';
+import { ToolAuthorizationDeniedError, ToolBroker } from './tool-broker';
+import { WORKSPACE_PATCH_TOOL, WorkspacePatchRejection } from './workspace-patch-tool';
 import { normalizeGeminiContentStream } from './gemini-content-stream';
 
 const connection: ProviderConnection = {
@@ -1513,6 +1513,63 @@ describe('ProviderAwareTeamWorkerRuntime Managed Local write outcome', () => {
     expect(completion.status).toBe('succeeded');
     expect(completion.risks).toEqual([]);
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  // Issue #870: the API Worker reaches the broker through managedToolSession.execute, so a schema
+  // mismatch has to come back with its hint, not as an opaque execution failure.
+  it('returns a schema mismatch hint to the model without the input values', async () => {
+    const secret = 'sk-ant-api03-DO-NOT-LEAK-0123456789abcdef';
+    const privatePath = 'private/customer-ledger-4711.txt';
+    const registry = new ToolRegistry();
+    registry.register(WORKSPACE_PATCH_TOOL);
+    const broker = new ToolBroker(
+      registry,
+      () => 1,
+      () => ({ decision: 'allow', reason: 'test' }),
+    );
+    const implementation = vi.fn(() => ({}));
+    broker.registerImplementation({
+      toolId: WORKSPACE_PATCH_TOOL.toolId,
+      implementationKind: 'built-in',
+      execute: implementation,
+    });
+    broker.startTurn(
+      { taskId: 'task-870', turnId: 'turn-870', workspaceId: 'workspace-1', policyEpoch: 1 },
+      'openai',
+    );
+    const { adapter, requests, toolMessages } = managedLocalWorker({
+      toolRounds: [['apply_patch']],
+      executeTool: async () =>
+        broker.dispatch({
+          taskId: 'task-870',
+          turnId: 'turn-870',
+          callId: 'call-870',
+          providerName: 'apply_patch',
+          input: {
+            path: privatePath,
+            revision: { version: 1, tokenId: secret },
+            edits: [{ oldText: secret, newText: 7 }],
+          },
+        }),
+    });
+
+    const result = await adapter.execute(execution());
+
+    expect(implementation).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(2);
+    const messages = toolMessages();
+    expect(messages).toEqual([expect.objectContaining({ toolName: 'apply_patch' })]);
+    const content = messages[0]!.content;
+    const parsed = JSON.parse(content) as { ok: boolean; error: { code: string; message: string } };
+    expect(parsed.ok).toBe(false);
+    expect(parsed.error.code).toBe('INVALID_TOOL_INPUT');
+    expect(parsed.error.message).toMatch(/^Tool input does not match the pinned schema: /);
+    expect(parsed.error.message).toContain('$: unexpected key "revision"');
+    expect(parsed.error.message).toContain('$.edits[0].newText: expected string, got integer');
+    expect(content).not.toContain('Workspace tool execution failed');
+    expect(content).not.toContain('DO-NOT-LEAK');
+    expect(content).not.toContain('customer-ledger');
+    expect(workerCompletionSchema.parse(result.completion).status).toBe('succeeded');
   });
 
   it('returns a rejected patch to the model as a tool error and lets it go on', async () => {
