@@ -296,25 +296,23 @@ export class WorkerWorktreeManager {
 
   /**
    * Like `worktreePathFor`, but a legacy `worktree-<id>` whose directory is gone while Git still
-   * registers it is resolved to the legacy path too, so cleanup unregisters the right record.
+   * registers it is resolved to the legacy path too, so cleanup unregisters the right record. A
+   * registration list that cannot be read fails the cleanup (the record stays retained) rather than
+   * falling back to the short path, which would report a still-registered legacy worktree as removed.
    */
   private async resolveWorktreePath(repoPath: string, worktreeId: string): Promise<string> {
     const current = this.worktreePathFor(worktreeId);
     const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
     if (current === legacy) return current;
-    try {
-      const wanted = await pathKeys(legacy);
-      const listed = (
-        await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
-      ).stdout;
-      for (const line of listed.split('\0'))
-        if (line.startsWith('worktree ')) {
-          const keys = await pathKeys(line.slice('worktree '.length));
-          if (keys.some((key) => wanted.includes(key))) return legacy;
-        }
-    } catch {
-      // An unreadable registration list falls back to the deterministic short path.
-    }
+    const wanted = await pathKeys(legacy);
+    const listed = (
+      await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+    ).stdout;
+    for (const line of listed.split('\0'))
+      if (line.startsWith('worktree ')) {
+        const keys = await pathKeys(line.slice('worktree '.length));
+        if (keys.some((key) => wanted.includes(key))) return legacy;
+      }
     return current;
   }
 

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import {
   WorkerWorktreeManager,
   WorktreeError,
@@ -150,14 +150,14 @@ describe('worker worktree path (issue #855)', () => {
   });
 
   describe.skipIf(!gitAvailable())('legacy registration whose directory is gone', () => {
-    async function setup(): Promise<{
+    async function setup(rootName = 'wts'): Promise<{
       repoPath: string;
       legacy: string;
       manager: WorkerWorktreeManager;
     }> {
       const base = await root();
       const repoPath = join(base, 'repo');
-      const worktreesRoot = join(base, 'wts');
+      const worktreesRoot = join(base, rootName);
       await mkdir(repoPath);
       await mkdir(worktreesRoot);
       const git = (cwd: string, ...args: string[]): string =>
@@ -198,6 +198,25 @@ describe('worker worktree path (issue #855)', () => {
       const { repoPath, legacy, manager } = await setup();
       await manager.discard({ agentId: UUID, repoPath, path: legacy });
       expect(listed(repoPath)).not.toContain('worktree-');
+    });
+
+    it('finds the legacy record when the worktree root path contains spaces', async () => {
+      const { repoPath, manager } = await setup('wt root with spaces');
+      await manager.cleanup({ agentId: UUID, repoPath });
+      expect(listed(repoPath)).not.toContain('worktree-');
+    });
+
+    it('keeps the record (fails) when the registration list cannot be read', async () => {
+      const { repoPath, legacy } = await setup();
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot: dirname(legacy),
+        execFileImpl: async (_file: string, args: readonly string[]) => {
+          if (args.includes('list')) throw Object.assign(new Error('git list failed'), { code: 1 });
+          return { stdout: '', stderr: '' };
+        },
+      });
+      await expect(manager.cleanup({ agentId: UUID, repoPath })).rejects.toBeInstanceOf(Error);
+      expect(listed(repoPath)).toContain('worktree-');
     });
   });
 });
