@@ -190,11 +190,12 @@ test.describe('command runner flow', () => {
     await restoredTextarea.press('Enter');
     // Issue #825: Auto is never stricter than Ask. The reviewer will not allow a high-risk command
     // on its own, so the person is asked on the same card instead of the command being refused,
-    // and no Auto row claims a decision Auto did not make.
+    // and no Auto row claims a decision Auto did not make. Auto rows sit behind one summary per
+    // Turn (issue #863), so no summary at all means no row.
     const autoCard = restoredPage.getByTestId('approval-card');
     await expect(autoCard).toBeVisible();
     await expect(autoCard).toContainText('run_command');
-    await expect(restoredPage.getByTestId('auto-decision-audit')).toHaveCount(0);
+    await expect(restoredPage.getByTestId('auto-decision-group')).toHaveCount(0);
     await restoredPage.getByTestId('approval-allow-once').click();
     await expect(
       restoredPage.locator('[data-testid="command-card"].command-card--exited'),
@@ -211,6 +212,6 @@ test.describe('command runner flow', () => {
     await expect(
       auditRestoredPage.locator('[data-testid="command-card"].command-card--exited'),
     ).toHaveCount(2);
-    await expect(auditRestoredPage.getByTestId('auto-decision-audit')).toHaveCount(0);
+    await expect(auditRestoredPage.getByTestId('auto-decision-group')).toHaveCount(0);
   });
 });

@@ -27,6 +27,7 @@ import {
   pickerRows,
   pollUntil,
   processesWithMarker,
+  readAutoDecisionAudits,
   readText,
   recordMainLog,
   selectModel,
@@ -463,7 +464,7 @@ test.describe('real AI workspace E2E (more)', () => {
         console.info(
           `[real-ai] ${provider.name} multi outside leaked=${leaked} approvals=${JSON.stringify(outsideTurn.approvals)}`,
         );
-        const audits = await page.getByTestId('auto-decision-audit').allInnerTexts();
+        const audits = await readAutoDecisionAudits(page);
         console.info(`[real-ai] ${provider.name} multi audits`, JSON.stringify(audits));
         await shot(page, `${provider.name}-4-multi-final`);
         expect.soft(leaked, 'writing outside both roots is refused').toBe(false);

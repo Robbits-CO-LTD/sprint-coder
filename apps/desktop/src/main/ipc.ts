@@ -3761,12 +3761,6 @@ export class IpcRouter {
         return { preset: policy.preset, policyEpoch: policy.policyEpoch };
       },
     );
-    this.handle(
-      IPC_CHANNELS.permissionsListAutoDecisions,
-      taskIdPayloadSchema,
-      z.array(autoPermissionDecisionSchema),
-      (input) => this.persistence.listAutoPermissionDecisions(input.taskId),
-    );
     this.handleMutation(
       IPC_CHANNELS.permissionsSet,
       permissionSetInputSchema,

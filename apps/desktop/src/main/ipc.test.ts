@@ -8018,7 +8018,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.localAIVerify]: installedLocalModelInputSchema,
   [IPC_CHANNELS.localAIDelete]: installedLocalModelInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
-  [IPC_CHANNELS.permissionsListAutoDecisions]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,
   [IPC_CHANNELS.approvalsListRecent]: taskIdPayloadSchema,

@@ -512,6 +512,10 @@ export type TurnSnapshot = {
   latestTurnDiff: TurnDiff | null;
   /** Turns closed as interrupted by a restart (issue #842); absent from older backends. */
   interruptedTurnIds?: string[];
+  /** The kept Auto decision rows up to lastSeq, oldest first (issue #863). */
+  autoDecisions?: AutoPermissionDecision[];
+  /** Every Auto decision counted per Turn and kind, up to lastSeq (issue #863). */
+  autoDecisionCounts?: { turnId: string; allow: number; allowOnce: number; deny: number }[];
 };
 
 /** err.code values the IPC layer may attach to a rejected SprintCoderApi promise. */
@@ -1248,7 +1252,6 @@ export interface SprintCoderApi {
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
-    listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
     set(
       taskId: string,
       preset: AccessPreset,
