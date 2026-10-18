@@ -262,8 +262,14 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
     - 今のコアは、この例外とテキストを読めない場合を区別できない。`ClassifyEffect` はどちらにも同じ `Takeover()`（理由 `kUnclassified`）を返す（`computer_use_effect_classifier.h:965-977`）。`kShadowGapNativeDocument` は集計用の印で、判定を変えない。
     - そこで PR-3 で次の 2 つを足す。
       - コアの理由 `DecisionReason::kOriginUnknown`。origin unknown の分岐だけに付け、テキストを読めない分岐は `kUnclassified` のまま残す。
-      - facts の「対象が web コンテンツか」。UIA の FrameworkId と、対象プロセスの検証済み identity から取る。題名や表示名は使わない。
-    - 例外にできるのは、`kOriginUnknown` で、かつ web コンテンツではないと検証できた Document だけ。web かどうかを決められなければ takeover にする。ブラウザで origin が unknown の場合も takeover のまま。
+      - facts の「対象が web コンテンツではないと確定できるか」。
+        - 確定してよいのは、§3.2.2 の検証済み identity（署名・package・正規化パス）で、対象プロセスが web を描画しない明示表のアプリだと裏づけられた場合だけ。明示表の最初の項目は System32 の notepad と、Store 署名のメモ帳の package。
+        - UIA の `FrameworkId` は対象アプリが自分で申告できる値なので、§3.2.1 の原則どおり、確定の根拠にしない。使ってよいのは「web の疑いあり → takeover」の方向だけ。
+        - 題名や表示名は使わない。
+    - 例外にできるのは、次の 2 つの条件を両方満たす場合だけ。
+      - takeover の理由が `kOriginUnknown` だけである。テキストを読めない場合など、ほかの takeover の理由が重なっていれば、例外にせず takeover のままにする。そのため PR-3 では、コアが origin の判定より前にテキストの可読性を判定する、今の順序（`ClassifyEffect`）を契約で固定する。
+      - 対象が web ではないと確定できた Document である。
+    - 確定できない場合、identity が未検証の場合、ブラウザで origin が unknown の場合は、どれも takeover のままにする。
     - この写し方が要る理由は次のとおり。
       - `FactsAreComplete` は、言語やラベルが分類できるかを検査しない。このため facts が揃っていても、危険な操作の文言を読めないことがある。分類器が扱えない言語のラベル（ロシア語の「インストール」ボタンなど）や、壊れたテキストがその例。
       - V1 の guard は、control type があれば分類済みとみなす。PR-5 では、policy language による mode の制限も外す。
@@ -276,7 +282,11 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
         - v2 で interlock が takeover になること
       - スクロールで `ScopeIsReadable` が false の行と、`ScrollValueTextIsClassifiable` が false の行。どちらも v2 で takeover になる。
       - 対照として、メモ帳の Document。理由が `kOriginUnknown` で、web ではないと検証できているので、takeover にならない。
-      - web かどうかを決められない Document と、ブラウザで origin が unknown の場合。どちらも takeover になる。
+      - 次の場合は、いずれも takeover になる。
+        - native の Document で、origin が unknown で、しかも `TextIsClassifiable` が false の場合。メモ帳の対照の行とは別の行にする。
+        - `FrameworkId` が不明な Document、または web を示す Document。
+        - identity が未検証の Document。
+        - ブラウザで origin が unknown の場合。
       - 対応表に無い決定の種類。`default` 分岐で takeover になる。
 - **上の例外を除き、「コアが ordinary と言わない」ことを独立した takeover の理由にはしない。**
   - facts が揃い、コアが拒否を決められた入力は、従来どおりそれぞれの経路で扱う。経路とは、面・E1 / E4 の拒否、承認が閉じている間の E2 / E3 の拒否、セキュア欄の拒否などの V1 の guard のこと。
