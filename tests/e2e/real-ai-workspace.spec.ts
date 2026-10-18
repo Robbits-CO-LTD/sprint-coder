@@ -13,6 +13,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { assignCurrentTaskToProjectFolder, closeApp, firstWindow, launchApp } from './helpers';
+import { readAutoDecisionAudits } from './real-ai-helpers';
 
 // 本物の Claude Code CLI / Codex CLI（ユーザーのサブスク）で、ワークスペースへの書き込み・
 // コマンド実行・Access preset・再起動復元・Team（Leader + Worker）を確かめる opt-in のスペック。
@@ -341,7 +342,7 @@ test.describe('real AI workspace E2E', () => {
             .toMatch(/^SC_CMD_OK:v\d+\.\d+\.\d+$/);
           expect.soft(turn.answer, `${preset}: reply`).toMatch(/SC_CMD_DONE v\d+\.\d+\.\d+/);
           if (preset === 'auto') {
-            const audits = await page.getByTestId('auto-decision-audit').allInnerTexts();
+            const audits = await readAutoDecisionAudits(page);
             console.info(
               `[real-ai] ${provider.name} [auto] auto-decision-audit: ${JSON.stringify(audits)}`,
             );

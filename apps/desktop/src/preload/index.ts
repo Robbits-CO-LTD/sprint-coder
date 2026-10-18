@@ -35,7 +35,6 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
-  autoPermissionDecisionSchema,
   canvasViewSchema,
   canvasViewSaveInputSchema,
   canvasViewSaveResultSchema,
@@ -1455,13 +1454,6 @@ const api: SprintCoderApi = {
       invoke(IPC_CHANNELS.permissionsGet, taskIdPayloadSchema, permissionSettingsSchema, {
         taskId,
       }),
-    listAutoDecisions: (taskId) =>
-      invoke(
-        IPC_CHANNELS.permissionsListAutoDecisions,
-        taskIdPayloadSchema,
-        z.array(autoPermissionDecisionSchema),
-        { taskId },
-      ),
     set: (taskId, preset, expectedPolicyEpoch) =>
       invoke(IPC_CHANNELS.permissionsSet, permissionSetInputSchema, permissionSettingsSchema, {
         taskId,

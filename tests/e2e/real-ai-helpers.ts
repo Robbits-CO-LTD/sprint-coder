@@ -204,6 +204,14 @@ export async function answerApprovalCard(
   return text;
 }
 
+/** Every Auto decision row on screen. The rows sit behind one summary per Turn (issue #863), so
+ * the closed groups are opened first. */
+export async function readAutoDecisionAudits(page: Page): Promise<string[]> {
+  const closed = page.locator('[data-testid="auto-decision-group"]:not([open]) > summary');
+  while ((await closed.count()) > 0) await closed.first().click();
+  return page.getByTestId('auto-decision-audit').allInnerTexts();
+}
+
 export async function isStopVisible(page: Page): Promise<boolean> {
   return (
     (await page.locator('[data-testid="composer-send-button"].stop').count()) > 0 ||

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Ref } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   TeamExecutionSummary,
   TeamMessageSummary,
@@ -33,13 +33,35 @@ function summarize(content: string): string {
   }
 }
 
+// The card shows the end of a Worker's live output only (issue #863): rendering the whole
+// stream into a <pre> on every update grew with the run, and the reader follows its tail.
+const LIVE_OUTPUT_DISPLAY_CHARS = 4096;
+
+function liveOutputTail(output: string): string {
+  return output.length > LIVE_OUTPUT_DISPLAY_CHARS
+    ? `…${output.slice(output.length - LIVE_OUTPUT_DISPLAY_CHARS)}`
+    : output;
+}
+
 // A single Worker card on the Team Canvas (demo/index.html lines 346-388, `.worker`/`.w-head`/
 // `.w-body`). The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13,
 // team-tools.ts) — this card is purely an OBSERVATION surface: role/objective/status/stop plus the
 // message lines (tagged with the counterpart's own role) and a busy spinner. There is no
 // per-worker composer; the user never
 // addresses a Worker directly, only the Leader.
-export function WorkerNode({
+//
+// Memoized (issue #863): a Team update touches one or two Workers, and every card re-rendering for
+// each one was a large share of the renderer's work with 32 Workers. TeamCanvas passes stable
+// callbacks and per-Worker message lists so an unchanged card skips the render.
+export const WorkerNode = memo(WorkerNodeCard, (previous, next) => {
+  for (const key of Object.keys(next) as (keyof WorkerNodeProps)[])
+    if (key !== 'onElement' && previous[key] !== next[key]) return false;
+  return Object.keys(previous).length === Object.keys(next).length;
+});
+
+type WorkerNodeProps = Parameters<typeof WorkerNodeCard>[0];
+
+function WorkerNodeCard({
   worker,
   parent,
   leaderAgentId,
@@ -53,7 +75,7 @@ export function WorkerNode({
   onStop,
   onResumeMission,
   onResumeIntegration,
-  ref,
+  onElement,
 }: {
   worker: WorkerSummary;
   /** The Worker that hired this one, or null when its parent is the Leader (Team v2 hierarchy).
@@ -64,10 +86,12 @@ export function WorkerNode({
   leaderAgentId: string;
   /** Every Worker in the Team, so a message from a SIBLING Worker can be named by its own role
    * instead of being attributed to the Leader. Same list TeamListView resolves against. */
-  agents: readonly WorkerSummary[];
+  agents: readonly Pick<WorkerSummary, 'id' | 'role'>[];
   x: number;
   y: number;
-  messages: TeamMessageSummary[];
+  /** This Worker's own messages (either end is this Worker), oldest first — split once per
+   * update by TeamCanvas rather than filtered by every card. */
+  messages: readonly TeamMessageSummary[];
   /** Newest persisted execution row for this Worker, or null when it has none (Core C1b). The
    * card below is derived purely from it — `worker.state` never stands in for it. */
   execution: TeamExecutionSummary | null;
@@ -75,10 +99,13 @@ export function WorkerNode({
   /** Keyboard-navigation selection ring (Slice 6.1 canvas keyboard nav) — a plain visual/aria
    * prop; the selection index itself lives in TeamCanvas. */
   selected?: boolean;
-  onStop: () => void;
-  onResumeMission: (() => void) | undefined;
-  onResumeIntegration: (() => void) | undefined;
-  ref?: Ref<HTMLDivElement>;
+  onStop: (workerId: string) => void;
+  onResumeMission: (missionId: string) => void;
+  onResumeIntegration: (executionId: string) => void;
+  /** Called with this card's element when it mounts and with null when it unmounts. Not part of
+   * the memo comparison: the newest handler is kept in a ref, and the element is attached once
+   * per mount with the handler of the render that mounted it. */
+  onElement: (workerId: string, element: HTMLDivElement | null) => void;
 }) {
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
   const dotClass = statusDotClass(worker.state);
@@ -88,9 +115,18 @@ export function WorkerNode({
   const historyRef = useRef<HTMLDivElement>(null);
   const [followingLatest, setFollowingLatest] = useState(true);
 
-  const relevant = messages
-    .filter((m) => m.targetAgentId === worker.id || m.sourceAgentId === worker.id)
-    .sort((a, b) => a.seq - b.seq);
+  const relevant = messages;
+  const onElementRef = useRef(onElement);
+  useLayoutEffect(() => {
+    onElementRef.current = onElement;
+  });
+  const workerId = worker.id;
+  const attachElement = useCallback(
+    (element: HTMLDivElement | null) => onElementRef.current(workerId, element),
+    [workerId],
+  );
+  const missionId = execution?.missionId ?? null;
+  const executionId = execution?.id ?? null;
 
   useEffect(() => {
     const element = historyRef.current;
@@ -99,7 +135,7 @@ export function WorkerNode({
 
   return (
     <div
-      ref={ref}
+      ref={attachElement}
       className={`worker${selected ? ' node-selected' : ''}`}
       id={`team-agent-${worker.id}`}
       data-testid="team-worker"
@@ -134,7 +170,12 @@ export function WorkerNode({
             {worker.state === 'stopped' ? '停止済み' : worker.state}
           </span>
         </span>
-        <button type="button" className="w-stop-btn" disabled={!canStop} onClick={onStop}>
+        <button
+          type="button"
+          className="w-stop-btn"
+          disabled={!canStop}
+          onClick={() => onStop(workerId)}
+        >
           解雇
         </button>
       </div>
@@ -172,8 +213,10 @@ export function WorkerNode({
       <TeamExecutionStatus
         execution={execution}
         variant="canvas"
-        onResume={onResumeMission}
-        onResumeIntegration={onResumeIntegration}
+        onResume={missionId === null ? undefined : () => onResumeMission(missionId)}
+        onResumeIntegration={
+          executionId === null ? undefined : () => onResumeIntegration(executionId)
+        }
         resumeDisabled={teamBusy}
       />
       <div
@@ -207,7 +250,7 @@ export function WorkerNode({
         {worker.liveOutput !== '' && (
           <div className="w-line w-live-output">
             <span className="tag">Live</span>
-            <pre>{worker.liveOutput}</pre>
+            <pre>{liveOutputTail(worker.liveOutput)}</pre>
           </div>
         )}
         {worker.state === 'busy' && (
