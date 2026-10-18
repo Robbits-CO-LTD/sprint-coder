@@ -4248,7 +4248,7 @@ if (runsWithElectronAbi)
       const persistence = createPersistence();
       const task = persistence.createTask('Conflicting writers report to the Leader');
       const runtime = new BlockingSameFileRuntime();
-      const { manager } = configureGitWorkspace(persistence, task.id);
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
       const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
       const workers = await Promise.all(
         ['first writer', 'second writer'].map((role) =>
@@ -4348,6 +4348,36 @@ if (runsWithElectronAbi)
         )?.currentActivity,
       ).toContain('waiting_resume');
       expect(coordinator.hasUnfinishedTeamWork(task.id)).toBe(true);
+
+      // A person resolves the conflict (here: backs out the first writer) and resumes; the Leader
+      // then hears that the execution completed after all.
+      expect(
+        spawnSync('git', [
+          '-C',
+          workspace,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          '-c',
+          'core.autocrlf=false',
+          'revert',
+          '--no-edit',
+          'HEAD',
+        ]).status,
+      ).toBe(0);
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+      await coordinator.resumeExecutionIntegration(task.id, waiting.executionId);
+      expect(persistence.getTeamExecution(waiting.executionId).state).toBe('completed');
+      const resumed = (await waitReports()).reports.find(
+        ({ executionId }) => executionId === waiting.executionId,
+      );
+      expect(resumed).toBeDefined();
+      const resumedContent = JSON.parse(resumed!.content) as { status: string; summary: string };
+      expect(resumedContent.status).toBe('succeeded');
+      expect(resumedContent.summary).toContain('統合しました');
       persistence.close();
     }, 55_000);
 
@@ -4925,7 +4955,7 @@ if (runsWithElectronAbi)
       expect(content.summary).toContain('secondary');
       expect(content.summary).toContain('README.md');
       persistence.close();
-    });
+    }, 55_000);
 
     it('maps two repositories into isolated roots and integrates Secondary before Primary', async () => {
       const persistence = createPersistence();

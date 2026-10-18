@@ -40,6 +40,7 @@ import {
   type PublicError,
   type ProviderConnection,
   type WorkerCompletion,
+  type WorkerReport,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
@@ -1283,6 +1284,7 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
+          this.reportResumedIntegration(team.id, execution.id, completion.attemptId, resumedReport);
           // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
           if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
             this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
@@ -2607,6 +2609,7 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
+          this.reportResumedIntegration(team.id, execution.id, hold.attemptId, hold.report);
           // A Graph step saves no isolation completion, so a cleanup it could not record is not
           // retried.
           if (isolation !== null)
@@ -2706,6 +2709,7 @@ export class TeamCoordinator {
           to: 'completed',
           now: this.isoNow(),
         });
+        this.reportResumedIntegration(team.id, execution.id, completion.attemptId, report);
         // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
         if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
           this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
@@ -5382,6 +5386,36 @@ export class TeamCoordinator {
     return null;
   }
 
+  /**
+   * After a person resumed a stopped integration and it succeeded, tells the Leader so with a new
+   * report (issue #852): the earlier blocked report said the execution would not complete. The
+   * integration is already committed, so a report that cannot be written does not undo it.
+   */
+  private reportResumedIntegration(
+    teamId: string,
+    executionId: string,
+    attemptId: string,
+    report: WorkerReport,
+  ): void {
+    const execution = this.persistence.getTeamExecution(executionId);
+    const agents = this.persistence.getTeamSnapshot(teamId).agents;
+    const leader = agents.find(({ id }) => id === execution.createdByAgentId);
+    const worker = agents.find(({ id }) => id === execution.assigneeAgentId);
+    if (leader === undefined || worker === undefined) return;
+    try {
+      this.persistWorkerResult(
+        teamId,
+        worker,
+        leader,
+        integrationResumedCompletion(report),
+        executionId,
+        attemptId,
+      );
+    } catch {
+      // Best effort: the execution is completed either way and the Team view shows it.
+    }
+  }
+
   private persistWorkerResult(
     teamId: string,
     worker: AgentRecord,
@@ -7321,6 +7355,10 @@ function reportLine(text: string, maxLength: number): string {
  * execution waits for a person to resume it, so it is never read as completed.
  */
 export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
+  // A multi-repository isolation always wraps the conflict in TeamIntegrationResumeRequiredError,
+  // which carries the repositories already integrated. A WorktreeIntegrationConflictError arrives
+  // directly only from a single-repository Mission worktree (`queueMissionWorktreeIntegration`),
+  // where there is no other repository that could have been applied.
   const conflicted =
     error instanceof TeamIntegrationResumeRequiredError ||
     error instanceof WorktreeIntegrationConflictError
@@ -7371,6 +7409,33 @@ export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
     artifacts: [],
     verification: [{ name: 'workspace-integration', outcome: 'fail' }],
     risks: ['人による再開待ち: waiting_resume (integration)'],
+  });
+}
+
+/**
+ * The Leader-facing report of an execution whose stopped integration a person resumed and that then
+ * integrated (issue #852). It supersedes the earlier blocked report for the same execution.
+ */
+export function integrationResumedCompletion(report: WorkerReport): WorkerCompletion {
+  const notice =
+    '人が統合を再開し、Workerの変更を作業場所へ統合しました。このexecutionは完了しています。先に届いた「waiting_resume（integration）で完了しない」という報告は、この報告で置き換えてください。';
+  const parsed = workerCompletionSchema.safeParse({
+    status: 'succeeded',
+    summary: fitUtf16(`${notice}${report.summary}`, 4_000),
+    artifacts: report.artifacts,
+    verification: [
+      ...report.verification.slice(0, 19),
+      { name: 'workspace-integration', outcome: 'pass' },
+    ],
+    risks: report.risks,
+  });
+  if (parsed.success) return parsed.data;
+  return workerCompletionSchema.parse({
+    status: 'succeeded',
+    summary: notice,
+    artifacts: [],
+    verification: [{ name: 'workspace-integration', outcome: 'pass' }],
+    risks: [],
   });
 }
 
