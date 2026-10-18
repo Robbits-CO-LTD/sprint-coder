@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
 import {
   chmod,
   lstat,
@@ -280,19 +282,42 @@ export class WorkerWorktreeManager {
     return repoPath;
   }
 
-  /** Deterministic worktree directory for an execution or agent. */
+  /**
+   * Deterministic worktree directory for an execution or agent. New worktrees use a short hashed
+   * name (issue #855: a deep profile path plus a full UUID name overflowed Git's path limit); a
+   * worktree already created under the legacy `worktree-<id>` name keeps being found there.
+   */
   worktreePathFor(worktreeId: string): string {
     validateWorktreeId(worktreeId);
-    return join(this.worktreesRoot, `worktree-${worktreeId}`);
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (existsSync(legacy)) return legacy;
+    return join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
   }
 
-  /** True only for the exact deterministic directory owned by this app instance. */
+  /** True only for the deterministic directory (short or legacy name) owned by this app instance. */
   ownsWorktreePath(worktreeId: string, candidatePath: string): boolean {
-    const expected = resolve(this.worktreePathFor(worktreeId));
+    validateWorktreeId(worktreeId);
     const candidate = resolve(candidatePath);
-    return this.platform === 'win32'
-      ? expected.toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
-      : expected === candidate;
+    return [
+      join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId)),
+      join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId)),
+    ].some((own) => {
+      const expected = resolve(own);
+      return this.platform === 'win32'
+        ? expected.toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
+        : expected === candidate;
+    });
+  }
+
+  /** Fails early with a clear message when Git could not create a worktree at `worktreePath`. */
+  private assertPathLengthsWithinLimit(repoPath: string, worktreePath: string): void {
+    const gitAdminPath = join(repoPath, '.git', 'worktrees', basename(worktreePath));
+    const reason = checkWorktreePathLengths({
+      platform: this.platform,
+      worktreePath,
+      gitAdminPath,
+    });
+    if (reason !== null) throw new WorktreeError('create_failed', reason);
   }
 
   async create({
@@ -305,6 +330,7 @@ export class WorkerWorktreeManager {
     const worktreePath = this.worktreePathFor(worktreeId);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
+    this.assertPathLengthsWithinLimit(repoPath, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
     await this.runGit(
       repoPath,
@@ -1398,6 +1424,30 @@ function decodeGitChangePath(value: string): string {
   } catch {
     throw new WorktreeError('integration_failed', 'Git change path is not valid UTF-8');
   }
+}
+
+/** Leaves room under Windows MAX_PATH (260) for files inside the worktree and Git's own suffixes. */
+const WINDOWS_WORKTREE_PATH_LIMIT = 200;
+const POSIX_WORKTREE_PATH_LIMIT = 900;
+
+export function legacyWorktreeDirectoryName(worktreeId: string): string {
+  return `worktree-${worktreeId}`;
+}
+
+/** Short deterministic directory name: `w-` plus 10 hex characters of the id's SHA-256. */
+export function shortWorktreeDirectoryName(worktreeId: string): string {
+  return `w-${createHash('sha256').update(worktreeId).digest('hex').slice(0, 10)}`;
+}
+
+/** Returns a Japanese message when a path is too long for Git on `platform`, otherwise null. */
+export function checkWorktreePathLengths(
+  input: Readonly<{ platform: NodeJS.Platform; worktreePath: string; gitAdminPath: string }>,
+): string | null {
+  const limit =
+    input.platform === 'win32' ? WINDOWS_WORKTREE_PATH_LIMIT : POSIX_WORKTREE_PATH_LIMIT;
+  const longest = Math.max(input.worktreePath.length, input.gitAdminPath.length);
+  if (longest <= limit) return null;
+  return `作業用フォルダのパスが長すぎるため、Worker の worktree を作成できません（${longest} 文字、上限の目安 ${limit} 文字）。アプリのデータ保存先やリポジトリを、より浅い場所へ移動してから再実行してください。`;
 }
 
 function validateWorktreeId(worktreeId: string): void {
