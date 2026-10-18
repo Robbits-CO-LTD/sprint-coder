@@ -199,6 +199,22 @@ export type CleanRepository = Readonly<{
   rootPaths: readonly string[];
 }>;
 
+type RepositoryState = Readonly<{
+  repoPath: string;
+  head: string;
+  operationMarkerPaths: readonly string[];
+}>;
+
+/** Files Git keeps while a merge, cherry-pick, revert, bisect, or rebase is in progress. */
+const REPOSITORY_OPERATION_MARKERS = [
+  'MERGE_HEAD',
+  'CHERRY_PICK_HEAD',
+  'REVERT_HEAD',
+  'BISECT_LOG',
+  'rebase-apply',
+  'rebase-merge',
+] as const;
+
 const WORKTREE_ID_PATTERN = /^[0-9a-zA-Z-]+$/;
 const GIT_TIMEOUT_MS = 30_000;
 /** How long a Windows lock on a worktree being removed is waited out before it is kept. */
@@ -247,11 +263,13 @@ export class WorkerWorktreeManager {
   ): Promise<readonly CleanRepository[]> {
     if (rootPaths.length === 0) throw new WorktreeError('invalid_input', 'Workspace has no roots');
     const rootsByRepository = new Map<string, string[]>();
+    const stateByRepository = new Map<string, RepositoryState>();
     for (const rootPath of rootPaths) {
-      const repoPath = await this.resolveRepositoryPath(rootPath);
-      const roots = rootsByRepository.get(repoPath) ?? [];
+      const state = await this.readRepositoryState(rootPath);
+      const roots = rootsByRepository.get(state.repoPath) ?? [];
       roots.push(await realpath(resolve(rootPath)));
-      rootsByRepository.set(repoPath, roots);
+      rootsByRepository.set(state.repoPath, roots);
+      if (!stateByRepository.has(state.repoPath)) stateByRepository.set(state.repoPath, state);
     }
     const repoPaths = [...rootsByRepository.keys()].sort();
     for (const [index, repoPath] of repoPaths.entries())
@@ -263,26 +281,19 @@ export class WorkerWorktreeManager {
           );
     const repositories: CleanRepository[] = [];
     for (const repoPath of repoPaths) {
-      const { head } = await this.requireCleanBase(repoPath);
-      for (const marker of [
-        'MERGE_HEAD',
-        'CHERRY_PICK_HEAD',
-        'REVERT_HEAD',
-        'BISECT_LOG',
-        'rebase-apply',
-        'rebase-merge',
-      ]) {
-        const gitPath = await this.runGit(
-          repoPath,
-          ['rev-parse', '--git-path', marker],
-          'create_failed',
+      const { head, operationMarkerPaths } = stateByRepository.get(repoPath)!;
+      const status = await this.runGit(repoPath, ['status', '--porcelain'], 'create_failed');
+      if (status.stdout.trim() !== '')
+        throw new WorktreeError(
+          'base_changed',
+          'Workspace must be clean before a workspace-write Mission step starts',
         );
-        if (await pathExists(resolve(repoPath, gitPath.stdout.trim())))
+      for (const markerPath of operationMarkerPaths)
+        if (await pathExists(markerPath))
           throw new WorktreeError(
             'base_changed',
             'Git operation is already in progress in a workspace repository',
           );
-      }
       repositories.push(
         Object.freeze({
           repoPath,
@@ -292,6 +303,46 @@ export class WorkerWorktreeManager {
       );
     }
     return Object.freeze(repositories);
+  }
+
+  /**
+   * A root's repository, HEAD, and in-progress operation markers from one `git rev-parse`
+   * (issue #864). Each Git call costs two processes (the config probe and the command), and the
+   * write-eligibility check runs for every workspace-write assignment and Worker start, so asking
+   * for these one at a time made each assignment wait on about twenty processes.
+   */
+  private async readRepositoryState(rootPath: string): Promise<RepositoryState> {
+    const cwd = resolve(rootPath);
+    const { stdout } = await this.runGit(
+      cwd,
+      [
+        'rev-parse',
+        '--show-toplevel',
+        'HEAD',
+        ...REPOSITORY_OPERATION_MARKERS.flatMap((marker) => ['--git-path', marker]),
+      ],
+      'create_failed',
+    );
+    const lines = stdout.split(/\r?\n/u);
+    if (lines.at(-1) === '') lines.pop();
+    const [toplevel, head, ...markerPaths] = lines;
+    if (
+      toplevel === undefined ||
+      head === undefined ||
+      markerPaths.length !== REPOSITORY_OPERATION_MARKERS.length ||
+      markerPaths.some((path) => path.trim() === '')
+    )
+      throw new WorktreeError('create_failed', 'Git returned an invalid repository state');
+    const repoPath = await realpath(resolve(toplevel.trim()));
+    if (!isAbsolute(repoPath))
+      throw new WorktreeError('create_failed', 'Git returned an invalid repository path');
+    validateGitHead(head.trim());
+    return {
+      repoPath,
+      head: head.trim(),
+      // `--git-path` prints a path relative to the directory Git ran in.
+      operationMarkerPaths: markerPaths.map((path) => resolve(cwd, path.trim())),
+    };
   }
 
   /** Resolve the lock namespace without rejecting another integration's temporary working state. */

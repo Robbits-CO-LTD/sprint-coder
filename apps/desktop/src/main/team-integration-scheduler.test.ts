@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { TeamIntegrationScheduler } from './team-integration-scheduler';
 
+const repoKeys = async () => ['repo'];
+
 async function flush(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -163,7 +165,7 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     const scheduler = new TeamIntegrationScheduler();
     const { releases, done } = heldIntegrations(scheduler, ['a', 'b']);
     await flush();
-    await expect(scheduler.readBesideIntegrations(['repo'], async () => 'clean')).resolves.toBe(
+    await expect(scheduler.readBesideIntegrations(repoKeys, async () => 'clean')).resolves.toBe(
       'clean',
     );
     expect(scheduler.snapshot().queuedExecutionIds).toEqual(['b']);
@@ -177,7 +179,7 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     const scheduler = new TeamIntegrationScheduler();
     let reads = 0;
     await expect(
-      scheduler.readBesideIntegrations(['repo'], async () => {
+      scheduler.readBesideIntegrations(repoKeys, async () => {
         reads += 1;
         throw new Error('dirty');
       }),
@@ -190,7 +192,7 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     const { running, releases, done } = heldIntegrations(scheduler, ['a', 'b']);
     await flush();
     const reads: string[][] = [];
-    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+    const read = scheduler.readBesideIntegrations(repoKeys, async () => {
       reads.push([...running]);
       if (reads.length === 1) throw new Error('cherry-pick in progress');
       return 'clean';
@@ -211,7 +213,7 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     const { running, releases, done } = heldIntegrations(scheduler, ['a']);
     await flush();
     const reads: string[][] = [];
-    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+    const read = scheduler.readBesideIntegrations(repoKeys, async () => {
       reads.push([...running]);
       throw new Error('user edit');
     });
@@ -227,7 +229,7 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
   it('reads again when an integration started and finished during a failed read', async () => {
     const scheduler = new TeamIntegrationScheduler();
     let reads = 0;
-    const read = scheduler.readBesideIntegrations(['repo'], async () => {
+    const read = scheduler.readBesideIntegrations(repoKeys, async () => {
       reads += 1;
       if (reads > 1) return 'clean';
       await scheduler.submit({ executionId: 'a', mutationKeys: ['repo'], async run() {} });
@@ -235,5 +237,40 @@ describe('TeamIntegrationScheduler reads beside integrations (issue #864)', () =
     });
     await expect(read).resolves.toBe('clean');
     expect(reads).toBe(2);
+  });
+});
+
+describe('TeamIntegrationScheduler resolves keys only to read again (issue #864)', () => {
+  it('resolves no keys for a read that succeeds or fails alone', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    let resolved = 0;
+    const keys = async () => {
+      resolved += 1;
+      return ['repo'];
+    };
+    await expect(scheduler.readBesideIntegrations(keys, async () => 'clean')).resolves.toBe(
+      'clean',
+    );
+    await expect(
+      scheduler.readBesideIntegrations(keys, async () => {
+        throw new Error('dirty');
+      }),
+    ).rejects.toThrow('dirty');
+    expect(resolved).toBe(0);
+  });
+
+  it('fails as it is when an overlapped read has no keys to read again on', async () => {
+    const scheduler = new TeamIntegrationScheduler();
+    let reads = 0;
+    const read = scheduler.readBesideIntegrations(
+      async () => [],
+      async () => {
+        reads += 1;
+        await scheduler.submit({ executionId: 'a', mutationKeys: ['repo'], async run() {} });
+        throw new Error('not a repository');
+      },
+    );
+    await expect(read).rejects.toThrow('not a repository');
+    expect(reads).toBe(1);
   });
 });

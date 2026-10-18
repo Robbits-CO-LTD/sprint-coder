@@ -6011,6 +6011,8 @@ export class TeamCoordinator {
    * integration on the same repositories overlapped is checked again, between integrations, after
    * the running one alone (issue #864). Anything it still finds dirty is not this app's, and an
    * assignment never waits behind the queue of integrations while it holds the Team's queue.
+   * The repositories are resolved only for that second check, so a passing check costs no Git
+   * call beyond its own.
    */
   private async outsideIntegration<T>(
     rootPaths: readonly string[],
@@ -6018,17 +6020,15 @@ export class TeamCoordinator {
   ): Promise<T> {
     const manager = this.worktreeManager;
     if (manager === undefined) throw new Error('Worker worktree support is unavailable');
-    // A root that is not in a repository is refused by the check itself, with its own error.
-    const repositories = (
-      await Promise.all(
+    return this.integrationScheduler.readBesideIntegrations(async () => {
+      // A root that is not in a repository is refused by the check itself, with its own error.
+      const repositories = await Promise.all(
         rootPaths.map((path) => manager.resolveRepositoryPath(path).catch(() => null)),
-      )
-    ).filter((path): path is string => path !== null);
-    if (repositories.length === 0) return check();
-    return this.integrationScheduler.readBesideIntegrations(
-      repositories.map(teamRepositoryMutationKey),
-      check,
-    );
+      );
+      return repositories
+        .filter((path): path is string => path !== null)
+        .map(teamRepositoryMutationKey);
+    }, check);
   }
 
   /**

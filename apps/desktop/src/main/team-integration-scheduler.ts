@@ -17,8 +17,8 @@ type QueuedIntegration = TeamIntegrationJob & {
 export class TeamIntegrationScheduler {
   private readonly queued: QueuedIntegration[] = [];
   private readonly active = new Map<string, QueuedIntegration>();
-  /** How many integrations have started on each mutation key, for `readBesideIntegrations`. */
-  private readonly integrationStarts = new Map<string, number>();
+  /** How many integrations have started, for `readBesideIntegrations`. */
+  private integrationStarts = 0;
   private pumpScheduled = false;
 
   submit(job: TeamIntegrationJob): Promise<void> {
@@ -50,41 +50,37 @@ export class TeamIntegrationScheduler {
   }
 
   /**
-   * Runs a read of the parent checkout beside the integrations on `mutationKeys`, without waiting
-   * for them (issue #864). An integration leaves its own changes in the checkout only while it
-   * runs, so a read that succeeds is kept. A read that fails while an integration ran on those keys
-   * may have seen that integration's temporary state (issue #853), so it is read again between
-   * integrations with `runExclusive`, which waits for the running integration only. A read that
+   * Runs a read of a parent checkout beside the integrations, without waiting for them
+   * (issue #864). An integration leaves its own changes in the checkout only while it runs, so a
+   * read that succeeds is kept. A read that fails while any integration ran may have seen that
+   * integration's temporary state (issue #853), so it is read again between the integrations on
+   * `mutationKeys` with `runExclusive`, which waits for the running integration only. A read that
    * fails with no integration beside it saw the checkout's own state and fails as it is.
+   *
+   * The keys are resolved only for that second read: resolving them costs Git calls, and the
+   * check runs for every workspace-write assignment and Worker start. Without them, whether an
+   * integration ran beside the read is answered for every key, which at worst reads a failing
+   * check once more.
    */
   async readBesideIntegrations<T>(
-    mutationKeys: readonly string[],
+    mutationKeys: () => Promise<readonly string[]>,
     read: () => Promise<T>,
   ): Promise<T> {
-    const keys = normalizedKeys(mutationKeys);
-    const integratingBefore = this.integrating(keys);
-    const startsBefore = this.integrationStartCount(keys);
+    const integratingBefore = this.integrating();
+    const startsBefore = this.integrationStarts;
     try {
       return await read();
     } catch (error) {
-      if (
-        !integratingBefore &&
-        !this.integrating(keys) &&
-        this.integrationStartCount(keys) === startsBefore
-      )
+      if (!integratingBefore && !this.integrating() && this.integrationStarts === startsBefore)
         throw error;
+      const keys = await mutationKeys();
+      if (keys.length === 0) throw error;
       return this.runExclusive(keys, read);
     }
   }
 
-  private integrating(keys: readonly string[]): boolean {
-    return [...this.active.values()].some(
-      (job) => !job.exclusiveRead && job.mutationKeys.some((key) => keys.includes(key)),
-    );
-  }
-
-  private integrationStartCount(keys: readonly string[]): number {
-    return keys.reduce((sum, key) => sum + (this.integrationStarts.get(key) ?? 0), 0);
+  private integrating(): boolean {
+    return [...this.active.values()].some((job) => !job.exclusiveRead);
   }
 
   private async enqueue(job: TeamIntegrationJob, exclusiveRead: boolean): Promise<void> {
@@ -144,9 +140,7 @@ export class TeamIntegrationScheduler {
       const [job] = this.queued.splice(index, 1);
       if (job === undefined) return;
       this.active.set(job.executionId, job);
-      if (!job.exclusiveRead)
-        for (const key of job.mutationKeys)
-          this.integrationStarts.set(key, (this.integrationStarts.get(key) ?? 0) + 1);
+      if (!job.exclusiveRead) this.integrationStarts += 1;
       void this.run(job);
     }
   }

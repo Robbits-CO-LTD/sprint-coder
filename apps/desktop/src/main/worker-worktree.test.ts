@@ -266,6 +266,46 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     ).rejects.toThrow('Nested Git repositories');
   });
 
+  it('checks a clean repository set with one rev-parse per root and one status per repository (issue #864)', async () => {
+    const { repoPath, head, worktreesRoot } = await fixture();
+    const secondary = join(repoPath, 'packages', 'secondary');
+    await mkdir(secondary, { recursive: true });
+    const commands: string[] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      execFileImpl: async (file, args, options) => {
+        const directory = args.indexOf('-C');
+        // The config probe runs before each command; count the commands themselves.
+        if (!args.includes('--list')) commands.push(args[directory + 2] ?? '');
+        const result = await execFileAsync(file, [...args], {
+          env: options.env,
+          timeout: options.timeout,
+        });
+        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+      },
+    });
+    await expect(manager.requireCleanRepositorySet([repoPath, secondary])).resolves.toEqual([
+      {
+        repoPath: await realpath(repoPath),
+        head,
+        rootPaths: [await realpath(repoPath), await realpath(secondary)],
+      },
+    ]);
+    expect(commands).toEqual(['rev-parse', 'rev-parse', 'status']);
+  });
+
+  it('finds an operation in progress from a root below the repository top (issue #864)', async () => {
+    const { repoPath, head, manager } = await fixture();
+    const secondary = join(repoPath, 'packages', 'secondary');
+    await mkdir(secondary, { recursive: true });
+    const gitDirectory = (await git(['-C', repoPath, 'rev-parse', '--git-dir'])).trim();
+    await writeFile(join(repoPath, gitDirectory, 'CHERRY_PICK_HEAD'), head);
+    await expect(manager.requireCleanRepositorySet([secondary])).rejects.toMatchObject({
+      code: 'base_changed',
+      message: 'Git operation is already in progress in a workspace repository',
+    });
+  });
+
   it('rejects a second create for the same agentId', async () => {
     const { repoPath, manager } = await fixture();
     await manager.create({ agentId: 'agent-2', repoPath });
