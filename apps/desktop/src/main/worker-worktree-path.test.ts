@@ -168,6 +168,34 @@ describe('worker worktree path (issue #855)', () => {
     });
   });
 
+  it('recreates a recorded legacy path longer than the new-creation limit without the length check', async () => {
+    const worktreesRoot = join(await root(), 'k'.repeat(170));
+    const legacy = join(worktreesRoot, `worktree-${UUID}`);
+    const calls: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        calls.push([...args]);
+        return {
+          stdout: args.includes('rev-parse')
+            ? `${'b'.repeat(40)}
+`
+            : '',
+          stderr: '',
+        };
+      },
+    });
+    expect(legacy.length).toBeGreaterThan(200);
+    const created = await manager.ensureCreated({
+      agentId: UUID,
+      repoPath: tmpdir(),
+      recordedPath: legacy,
+    });
+    expect(created.path).toBe(legacy);
+    expect(calls.some((args) => args.includes('add'))).toBe(true);
+  });
+
   describe.skipIf(!gitAvailable())('legacy registration whose directory is gone', () => {
     async function setup(rootName = 'wts'): Promise<{
       repoPath: string;
@@ -232,6 +260,16 @@ describe('worker worktree path (issue #855)', () => {
       expect(basename(created.path)).toBe(shortWorktreeDirectoryName(UUID));
       expect(listed(repoPath)).not.toContain('worktree-');
       await manager.cleanup({ agentId: UUID, repoPath });
+      expect(listed(repoPath)).not.toContain(shortWorktreeDirectoryName(UUID));
+    });
+
+    it('fails (and keeps the record) when the stale legacy record is locked', async () => {
+      const { repoPath, legacy, manager } = await setup();
+      execFileSync('git', ['worktree', 'lock', legacy], { cwd: repoPath });
+      const error = await manager.ensureCreated({ agentId: UUID, repoPath }).catch((e) => e);
+      expect(error).toBeInstanceOf(WorktreeError);
+      expect(error.code).toBe('create_failed');
+      expect(listed(repoPath)).toContain(`worktree-${UUID}`);
       expect(listed(repoPath)).not.toContain(shortWorktreeDirectoryName(UUID));
     });
 

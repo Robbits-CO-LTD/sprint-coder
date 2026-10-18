@@ -330,7 +330,8 @@ export class WorkerWorktreeManager {
    * Before a new worktree is made at the short path, unregisters a legacy `worktree-<id>` record
    * whose directory is gone. Otherwise cleanup, which resolves the id to that legacy record, would
    * unregister only it and leave the new short worktree behind. A record that still keeps submodule
-   * commits is not dropped; creation fails instead so nothing is lost.
+   * commits, or that Git refuses to release (a locked record), is not dropped; creation fails
+   * instead so nothing is lost or duplicated.
    */
   private async releaseMissingLegacyRegistration(
     repoPath: string,
@@ -341,7 +342,17 @@ export class WorkerWorktreeManager {
     if (worktreePath === legacy) return;
     if ((await this.resolveWorktreePath(repoPath, worktreeId, 'create_failed')) !== legacy) return;
     if (await pathExists(legacy)) return;
-    const { outcome } = await this.unregisterMissingWorktree(repoPath, legacy);
+    let outcome: CleanupUnchangedWorktreeResult['outcome'];
+    try {
+      ({ outcome } = await this.unregisterMissingWorktree(repoPath, legacy));
+    } catch (error) {
+      // A locked record (or any other refusal) is kept; creation fails rather than duplicating it.
+      throw new WorktreeError(
+        'create_failed',
+        `legacy worktree record could not be released: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
     if (outcome === 'quarantined')
       throw new WorktreeError(
         'create_failed',
@@ -444,12 +455,14 @@ export class WorkerWorktreeManager {
   }: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = this.targetPathFor(worktreeId, recordedPath);
-    // The creation limit guards the new short names; a recorded legacy path is recreated as before.
-    if (worktreePath === join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId)))
-      this.assertWorktreePathWithinLimit(worktreePath);
+    // The creation limits guard the new short names only; a recorded legacy path is recreated as
+    // before, and Git's own too-long error is still turned into the clear message below.
+    const isShort =
+      worktreePath === join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
+    if (isShort) this.assertWorktreePathWithinLimit(worktreePath);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
-    await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
+    if (isShort) await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
     await this.releaseMissingLegacyRegistration(repoPath, worktreeId, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
     try {
