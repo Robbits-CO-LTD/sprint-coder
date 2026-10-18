@@ -17,6 +17,7 @@
     "build:native-safe-fs": "node build-native-safe-fs.mjs",
     "build:native-safe-fs:test": "node build-native-safe-fs.mjs --test",
     "build:computer-use-native": "node build-computer-use-native.mjs",
+    "generate:computer-use-deny-ruleset": "node generate-computer-use-deny-ruleset.mjs",
     "generate:computer-use-final-gate-evidence": "node generate-computer-use-final-gate-evidence.mjs",
     "verify:computer-use-final-gate": "node verify-computer-use-final-gate.mjs",
     "build:sandbox-runner": "node build-sandbox-runner.mjs",
