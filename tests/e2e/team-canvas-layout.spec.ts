@@ -129,7 +129,10 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
   // proven on the pure layout in placement.test.ts. What only the real app can show is that cards
   // hired ONE AT A TIME — each freezing its slot on first mount — still land on that same grid
   // instead of a single strip, and that a Team larger than the old 32-entry cap still saves.
-  for (const workerCount of [34, 100]) {
+  for (const [workerCount, rowCount] of [
+    [34, 6],
+    [100, 18],
+  ] as const) {
     test(`fits ${workerCount} Workers in a six-column grid and restores the complete view`, async () => {
       const userDataDir = createUserDataDir('canvas-layout-large-team');
       let app: ElectronApplication | null = null;
@@ -168,7 +171,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
         }
         // Six columns, filled in three-row chunks rather than a single tall strip.
         expect(new Set(rects.map(({ x }) => x)).size).toBe(6);
-        expect(new Set(rects.map(({ y }) => y)).size).toBe(Math.ceil(workerCount / 6));
+        expect(new Set(rects.map(({ y }) => y)).size).toBe(rowCount);
 
         await page.getByTestId('team-canvas-fit').click();
         const allCardsInsideCanvas = async () =>
