@@ -89,7 +89,7 @@ describe('Windows major E2E workflow', () => {
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeGreaterThan(-1);
     expect(windowsResultJob.indexOf(e2eAssertion)).toBeLessThan(fullMatrixBranch);
     expect(workflow.replace(/\s+/gu, ' ')).toContain(
-      'needs: [quality-result, macos-result, windows-result, computer-use-native-gate, archify-packaged]',
+      'needs: [ quality-result, macos-result, windows-result, computer-use-native-gate, computer-use-windows-v2-harness, archify-packaged, ]',
     );
   });
 });

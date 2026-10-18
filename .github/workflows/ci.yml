@@ -174,6 +174,19 @@ jobs:
           ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
             UBSAN_OPTIONS=halt_on_error=1 \
             "${harness}"
+          # S5-c-3 PR-1: the shared target eligibility core, compiled by clang as well.
+          target="${RUNNER_TEMP}/computer-use-target-eligibility-harness"
+          /usr/bin/clang++ \
+            -std=c++20 -O1 -g -fno-omit-frame-pointer -Wall -Wextra \
+            -fsanitize=address,undefined \
+            -I apps/desktop/computer-use-native \
+            -I apps/desktop/computer-use-native/generated \
+            -DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=${{ matrix.eligibility == 'v2' && '1' || '0' }} \
+            apps/desktop/computer-use-native/computer_use_target_eligibility_harness.cc \
+            -o "${target}"
+          ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 \
+            UBSAN_OPTIONS=halt_on_error=1 \
+            "${target}"
 
       - name: Run protocol harness and attempt Windows ASan
         if: runner.os == 'Windows'
@@ -216,6 +229,61 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: cargo test --locked --manifest-path apps/desktop/sandbox-runner/Cargo.toml --test windows_command
+
+  computer-use-windows-v2-harness:
+    # S5-c-3 PR-1 (#500): Windows may not build a v2 (deny-list) native yet, so
+    # build-computer-use-eligibility.mjs and the contracts still refuse it. This row compiles only
+    # the portable harnesses and the target eligibility seam as v2 with MSVC; no artifact is built.
+    name: Computer Use native Windows v2 harness
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Initialize MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
+        with:
+          arch: x64
+
+      - name: Check the generated deny ruleset is current
+        run: node generate-computer-use-deny-ruleset.mjs --check
+
+      - name: Run the portable harnesses compiled as v2
+        shell: pwsh
+        run: |
+          $include = 'apps/desktop/computer-use-native'
+          foreach ($name in 'computer_use_protocol_fuzz', 'computer_use_target_eligibility_harness') {
+            $source = Join-Path $include "$name.cc"
+            $binary = Join-Path $env:RUNNER_TEMP "$name-v2.exe"
+            $object = Join-Path $env:RUNNER_TEMP "$name-v2.obj"
+            # /utf-8: the harness sources carry CJK lexicon terms; the default code page would misread them.
+            & cl.exe /nologo /std:c++20 /EHsc /W4 /GS /sdl /utf-8 /DSPRINT_CODER_ELIGIBILITY_V2=1 /DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=1 "/I$include" $source "/Fo$object" "/Fe$binary"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $binary
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Run the target eligibility seam compiled as v2
+        working-directory: apps/desktop
+        env:
+          COMPUTER_USE_SEAM_ELIGIBILITY_V2: '1'
+        run: >-
+          npx vitest run
+          src/main/computer-use-target-eligibility.test.ts
+          src/main/computer-use-target-eligibility-seam.test.ts
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
@@ -1028,7 +1096,14 @@ jobs:
     name: CI required
     if: always()
     needs:
-      [quality-result, macos-result, windows-result, computer-use-native-gate, archify-packaged]
+      [
+        quality-result,
+        macos-result,
+        windows-result,
+        computer-use-native-gate,
+        computer-use-windows-v2-harness,
+        archify-packaged,
+      ]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -1038,10 +1113,12 @@ jobs:
           MACOS_RESULT: ${{ needs.macos-result.result }}
           WINDOWS_RESULT: ${{ needs.windows-result.result }}
           COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
+          COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT: ${{ needs.computer-use-windows-v2-harness.result }}
           ARCHIFY_RESULT: ${{ needs.archify-packaged.result }}
         run: |
           test "${QUALITY_RESULT}" = 'success'
           test "${MACOS_RESULT}" = 'success'
           test "${WINDOWS_RESULT}" = 'success'
           test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'
+          test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = 'success'
           test "${ARCHIFY_RESULT}" = 'success'

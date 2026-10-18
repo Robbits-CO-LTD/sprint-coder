@@ -305,6 +305,40 @@ describe('workflow security boundaries', () => {
     expect(harness).toContain('eligibility-mode-matches-matrix');
   });
 
+  it('compiles only the harnesses and the target eligibility seam as v2 on Windows, and requires them', () => {
+    // S5-c-3 PR-1: Windows still may not build a v2 artifact, so this row builds none; it passes
+    // the v2 mode to the compiler of the portable harnesses and the seam only.
+    const ci = workflows['.github/workflows/ci.yml'];
+    const row = jobBlock(ci, 'computer-use-windows-v2-harness');
+    expect(row).toContain('name: Computer Use native Windows v2 harness');
+    expect(row).toContain('runs-on: windows-2022');
+    expect(row).not.toContain('build:computer-use-native');
+    expect(row).not.toContain('--eligibility');
+    expect(stepBlock(row, 'Check the generated deny ruleset is current')).toContain(
+      'node generate-computer-use-deny-ruleset.mjs --check',
+    );
+    const harnesses = stepBlock(row, 'Run the portable harnesses compiled as v2');
+    expect(harnesses).toContain(
+      "'computer_use_protocol_fuzz', 'computer_use_target_eligibility_harness'",
+    );
+    expect(harnesses).toContain(
+      '/DSPRINT_CODER_ELIGIBILITY_V2=1 /DSPRINT_CODER_EXPECT_ELIGIBILITY_V2=1',
+    );
+    const seam = stepBlock(row, 'Run the target eligibility seam compiled as v2');
+    expect(seam).toContain("COMPUTER_USE_SEAM_ELIGIBILITY_V2: '1'");
+    expect(seam).toContain('src/main/computer-use-target-eligibility-seam.test.ts');
+    const required = jobBlock(ci, 'required');
+    expect(required).toContain('computer-use-windows-v2-harness,');
+    expect(required).toContain('test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = \'success\'');
+    // The Windows build route itself still refuses v2 (the PR that lifts it is the enabling one).
+    const gate = jobBlock(ci, 'computer-use-native-gate');
+    expect(gate).not.toMatch(/os: windows-2022\n\s+eligibility: v2/u);
+    // The macOS rows run the same target eligibility harness with clang.
+    expect(stepBlock(gate, 'Run protocol harness with macOS sanitizers')).toContain(
+      'computer_use_target_eligibility_harness.cc',
+    );
+  });
+
   it('never asks a distributed or acceptance build for the deny-list', () => {
     // Every route that builds the Computer Use native for a package, by either spelling of its
     // name, must leave the mode at its v1 default. Only the CI gate chooses a mode.

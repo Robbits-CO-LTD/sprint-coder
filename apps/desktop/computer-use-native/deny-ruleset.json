@@ -1,0 +1,963 @@
+{
+  "$comment": "S5-c-3 (#500) deny ruleset, the single source of the target eligibility core. generate-computer-use-deny-ruleset.mjs writes computer_use_deny_ruleset_generated.h and src/main/computer-use-deny-ruleset.generated.ts from it. The data is shared by both platforms and each platform carries its own version (decision H); a change to what one platform sees changes that platform's content hash, which must come with a new version and a new ledger entry in computer-use-target-eligibility.test.ts. Signals marked denyOnly (leaf, OriginalFilename, window class) are used only to refuse: they never appear in a route and are never negated. Titles and display names are not signals. Signer organization strings, package families and leaf names are deny-direction lists that #777 (item 5) still has to measure.",
+  "schemaVersion": 1,
+  "platforms": {
+    "win32": {
+      "rulesetVersion": 2,
+      "eligibleMaximumMode": "full_access_app",
+      "upperMaximumMode": "observe_only"
+    }
+  },
+  "signals": [
+    {
+      "name": "imageRoot",
+      "type": "enum",
+      "platforms": ["win32"],
+      "values": [
+        "windows_directory",
+        "program_files",
+        "local_programs",
+        "windows_apps",
+        "self_install",
+        "temp",
+        "downloads",
+        "other"
+      ]
+    },
+    {
+      "name": "imageRelativePath",
+      "type": "string",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "imageLeaf",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    },
+    {
+      "name": "imageVolume",
+      "type": "enum",
+      "platforms": ["win32"],
+      "values": ["fixed", "network", "removable"]
+    },
+    {
+      "name": "runningImageMatches",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "signature",
+      "type": "enum",
+      "platforms": ["win32"],
+      "values": ["valid", "unsigned", "invalid"]
+    },
+    {
+      "name": "signerOrganization",
+      "type": "string",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "signerMicrosoftRoot",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "signerIsSelf",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "acceptanceFixture",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "peSubsystem",
+      "type": "enum",
+      "platforms": ["win32"],
+      "values": ["gui", "console", "other"]
+    },
+    {
+      "name": "originalFilename",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    },
+    {
+      "name": "requiresAdministrator",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenElevated",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenOtherUser",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenOtherSession",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenProtected",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenUiAccess",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenIntegrityAboveSelf",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenAppContainer",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "packaged",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "packageFamily",
+      "type": "string",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "packageSignatureKind",
+      "type": "enum",
+      "platforms": ["win32"],
+      "values": ["none", "store", "system", "developer", "enterprise"]
+    },
+    {
+      "name": "packageDevelopmentMode",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "ownDescendant",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "descendantShell",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "descendantPseudoConsole",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "windowClass",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    }
+  ],
+  "classes": [
+    {
+      "id": "W-UR",
+      "verdict": "denied"
+    },
+    {
+      "id": "W7",
+      "verdict": "denied"
+    },
+    {
+      "id": "W8",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-PX",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-SYS",
+      "verdict": "denied"
+    },
+    {
+      "id": "W1",
+      "verdict": "denied"
+    },
+    {
+      "id": "W2",
+      "verdict": "denied"
+    },
+    {
+      "id": "W3",
+      "verdict": "denied"
+    },
+    {
+      "id": "W4",
+      "verdict": "denied"
+    },
+    {
+      "id": "W5",
+      "verdict": "denied"
+    },
+    {
+      "id": "W6",
+      "verdict": "denied"
+    },
+    {
+      "id": "W10",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-NR",
+      "verdict": "denied"
+    },
+    {
+      "id": "C",
+      "verdict": "upper"
+    }
+  ],
+  "lists": {
+    "windowsDirectoryExplicit": ["system32\\notepad.exe"]
+  },
+  "routes": [
+    {
+      "id": "windows_directory_explicit",
+      "platforms": ["win32"],
+      "note": "The %WINDIR% explicit table, carried over from the V1 rule (System32 notepad, Microsoft signed).",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_directory"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "list": "windowsDirectoryExplicit"
+        },
+        {
+          "signal": "packaged",
+          "match": "false"
+        },
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["valid"]
+        },
+        {
+          "signal": "signerMicrosoftRoot",
+          "match": "true"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
+      ]
+    },
+    {
+      "id": "general_application",
+      "platforms": ["win32"],
+      "note": "Decision A (Program Files and %LOCALAPPDATA%\\Programs only) and decision B (Microsoft signed outside %WINDIR% is not eligible for now). Unsigned reaches the upper class C (decision C).",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["program_files", "local_programs"]
+        },
+        {
+          "signal": "packaged",
+          "match": "false"
+        },
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["valid", "unsigned"]
+        },
+        {
+          "signal": "signerMicrosoftRoot",
+          "match": "false"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
+      ]
+    },
+    {
+      "id": "package",
+      "platforms": ["win32"],
+      "note": "A Store or System signed package under the WindowsApps root. Developer, sideloaded and development mode packages are not a package route.",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_apps"]
+        },
+        {
+          "signal": "packaged",
+          "match": "true"
+        },
+        {
+          "signal": "packageSignatureKind",
+          "match": "equals",
+          "values": ["store", "system"]
+        },
+        {
+          "signal": "packageDevelopmentMode",
+          "match": "false"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
+      ]
+    }
+  ],
+  "rules": [
+    {
+      "class": "W-UR",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageVolume",
+          "match": "equals",
+          "values": ["network", "removable"]
+        }
+      ]
+    },
+    {
+      "class": "W-UR",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "runningImageMatches",
+          "match": "false"
+        }
+      ]
+    },
+    {
+      "class": "W-UR",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["invalid"]
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenElevated",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenOtherUser",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenOtherSession",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenProtected",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenUiAccess",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W7",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenIntegrityAboveSelf",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W8",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["self_install"]
+        }
+      ]
+    },
+    {
+      "class": "W8",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "ownDescendant",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W8",
+      "platforms": ["win32"],
+      "note": "Sprint Coder's own signer; the acceptance fixture is excused only when the native says it is in acceptance mode.",
+      "when": [
+        {
+          "signal": "signerIsSelf",
+          "match": "true"
+        },
+        {
+          "signal": "acceptanceFixture",
+          "match": "false"
+        }
+      ]
+    },
+    {
+      "class": "W-PX",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "tokenAppContainer",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W-PX",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "equals",
+          "values": ["applicationframehost.exe", "wwahost.exe"]
+        }
+      ]
+    },
+    {
+      "class": "W-SYS",
+      "platforms": ["win32"],
+      "note": "Everything under %WINDIR% that is not on the explicit table (settings, security prompts, shell surfaces, LOLBins, Explorer).",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_directory"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "negate": true,
+          "list": "windowsDirectoryExplicit"
+        }
+      ]
+    },
+    {
+      "class": "W1",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["windows.immersivecontrolpanel_"]
+        }
+      ]
+    },
+    {
+      "class": "W2",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["microsoft.sechealthui_"]
+        }
+      ]
+    },
+    {
+      "class": "W2",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "windowClass",
+          "match": "equals",
+          "values": ["credential dialog xaml host"]
+        }
+      ]
+    },
+    {
+      "class": "W3",
+      "platforms": ["win32"],
+      "note": "Every application of a password manager publisher is refused.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": [
+            "agilebits inc.",
+            "bitwarden inc.",
+            "dashlane, inc.",
+            "keeper security, inc.",
+            "lastpass us lp",
+            "dominik reichl",
+            "droidmonkey apps, llc",
+            "sinew software systems pvt ltd",
+            "siber systems inc"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W3",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["agilebits.", "8bitsolutionsllc.bitwardendesktop_", "keepersecurityinc."]
+        }
+      ]
+    },
+    {
+      "class": "W3",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": [
+            "1password*.exe",
+            "bitwarden*.exe",
+            "keepass*.exe",
+            "keeper*.exe",
+            "lastpass*.exe",
+            "dashlane*.exe",
+            "enpass*.exe",
+            "roboform*.exe",
+            "nordpass*.exe",
+            "proton pass*.exe"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["console"]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["microsoft.windowsterminal"]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "note": "GUI terminals and SSH clients by publisher. Provisional publisher strings, to be measured in #777 (item 5); deny-direction only.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": [
+            "simon tatham",
+            "vandyke software, inc.",
+            "netsarang computer, inc.",
+            "mobatek",
+            "termius corporation",
+            "eugene pankov",
+            "martin prikryl",
+            "bitvise limited"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "windowClass",
+          "match": "equals",
+          "values": [
+            "consolewindowclass",
+            "pseudoconsolewindow",
+            "cascadia_hosting_window_class",
+            "mintty",
+            "virtualconsoleclass",
+            "putty"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": [
+            "cmd.exe",
+            "powershell*.exe",
+            "pwsh*.exe",
+            "wt.exe",
+            "windowsterminal.exe",
+            "openconsole.exe",
+            "conhost.exe",
+            "bash.exe",
+            "sh.exe",
+            "zsh.exe",
+            "fish.exe",
+            "nu.exe",
+            "wsl*.exe",
+            "ubuntu*.exe",
+            "debian.exe",
+            "kali.exe",
+            "mintty.exe",
+            "git-bash.exe",
+            "git-cmd.exe",
+            "alacritty.exe",
+            "wezterm*.exe",
+            "hyper.exe",
+            "tabby.exe",
+            "kitty*.exe",
+            "conemu*.exe",
+            "cmder.exe",
+            "warp.exe",
+            "putty*.exe",
+            "securecrt*.exe",
+            "xshell*.exe",
+            "mobaxterm*.exe",
+            "termius*.exe",
+            "winscp*.exe",
+            "bvssh*.exe",
+            "kitty_portable*.exe"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W5",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": [
+            "teamviewer germany gmbh",
+            "anydesk software gmbh",
+            "citrix systems, inc.",
+            "vmware, inc.",
+            "oracle america, inc.",
+            "parsec cloud, inc.",
+            "realvnc limited",
+            "splashtop inc.",
+            "logmein, inc.",
+            "purslane ltd.",
+            "devolutions inc.",
+            "royal apps gmbh",
+            "mremoteng"
+          ]
+        }
+      ],
+      "note": "Remote desktop, VM consoles and remote management by publisher. Provisional publisher strings, to be measured in #777 (item 5); deny-direction only."
+    },
+    {
+      "class": "W5",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": [
+            "microsoft.remotedesktop",
+            "microsoftcorporationii.windows365",
+            "microsoftcorporationii.quickassist"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W5",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": [
+            "mstsc.exe",
+            "msrdc*.exe",
+            "rustdesk*.exe",
+            "teamviewer*.exe",
+            "anydesk*.exe",
+            "vncviewer*.exe",
+            "tvnviewer.exe",
+            "parsecd.exe",
+            "vmware*.exe",
+            "vmplayer.exe",
+            "vmconnect.exe",
+            "virtualbox*.exe",
+            "quickassist.exe",
+            "remoting_*.exe",
+            "wfica32.exe",
+            "cdviewer.exe",
+            "remotedesktopmanager*.exe",
+            "royalts*.exe",
+            "mremoteng*.exe"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W6",
+      "platforms": ["win32"],
+      "note": "Outside the install roots (%TEMP%, Downloads) nothing is eligible.",
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["temp", "downloads"]
+        }
+      ]
+    },
+    {
+      "class": "W6",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "requiresAdministrator",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "W6",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": ["setup*", "*install*", "*update*.exe", "unins*.exe", "msiexec.exe"]
+        }
+      ]
+    },
+    {
+      "class": "W6",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "originalFilename",
+          "match": "glob",
+          "values": ["setup*", "*install*", "msiexec.exe"]
+        }
+      ]
+    },
+    {
+      "class": "W6",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "windowClass",
+          "match": "equals",
+          "values": ["msidialogcloseclass", "msidialognocloseclass", "twizardform"]
+        }
+      ]
+    },
+    {
+      "class": "W10",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": ["python software foundation", "openjs foundation", "autohotkey foundation llc"]
+        }
+      ]
+    },
+    {
+      "class": "W10",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": [
+            "python*.exe",
+            "py.exe",
+            "pyw.exe",
+            "node.exe",
+            "java.exe",
+            "javaw.exe",
+            "jshell.exe",
+            "electron.exe",
+            "autohotkey*.exe",
+            "ruby*.exe",
+            "perl.exe",
+            "php*.exe",
+            "deno.exe",
+            "bun.exe",
+            "lua*.exe",
+            "rscript.exe",
+            "julia.exe",
+            "tclsh*.exe",
+            "wish*.exe",
+            "wscript.exe",
+            "cscript.exe",
+            "mshta.exe"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "W10",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "originalFilename",
+          "match": "glob",
+          "values": ["python*.exe", "node.exe", "java*.exe", "electron.exe", "autohotkey*.exe"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "descendantShell",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "when": [
+        {
+          "signal": "descendantPseudoConsole",
+          "match": "true"
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "note": "Decision C: unsigned is capped until the Windows approval path exists.",
+      "when": [
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["unsigned"]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "note": "IDE, container and launcher publishers.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": ["jetbrains s.r.o.", "anysphere, inc.", "docker inc", "docker, inc."]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "note": "Decision D: browsers stay observe_only in S5-c-3.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": [
+            "google llc",
+            "mozilla corporation",
+            "brave software, inc.",
+            "opera norway as",
+            "vivaldi technologies as"
+          ]
+        }
+      ]
+    },
+    {
+      "class": "C",
+      "platforms": ["win32"],
+      "note": "Decision D: browsers by leaf as well.",
+      "when": [
+        {
+          "signal": "imageLeaf",
+          "match": "glob",
+          "values": [
+            "chrome.exe",
+            "chromium.exe",
+            "msedge.exe",
+            "firefox.exe",
+            "brave.exe",
+            "opera.exe",
+            "vivaldi.exe",
+            "waterfox.exe",
+            "librewolf.exe",
+            "floorp.exe",
+            "iexplore.exe",
+            "arc.exe"
+          ]
+        }
+      ]
+    }
+  ]
+}
