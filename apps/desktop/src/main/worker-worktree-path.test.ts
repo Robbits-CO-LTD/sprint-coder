@@ -91,6 +91,25 @@ describe('worker worktree path (issue #855)', () => {
     expect(called).toBe(false);
   });
 
+  it('reports an over-long path from ensureCreated too, before touching it', async () => {
+    const worktreesRoot = join(await root(), 'e'.repeat(300));
+    let called = false;
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async () => {
+        called = true;
+        return { stdout: '', stderr: '' };
+      },
+    });
+    const error = await manager
+      .ensureCreated({ agentId: 'a3', repoPath: tmpdir() })
+      .catch((e) => e);
+    expect(error).toBeInstanceOf(WorktreeError);
+    expect(error.message).toMatch(/長すぎる/);
+    expect(called).toBe(false);
+  });
+
   it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
     const worktreesRoot = join(await root(), 'w');
     const deepCommon = 'C:/' + 'x/'.repeat(120) + '.git';

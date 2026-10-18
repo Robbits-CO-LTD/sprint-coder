@@ -372,6 +372,8 @@ export class WorkerWorktreeManager {
   async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     const worktreeId = input.worktreeId ?? input.agentId;
     const worktreePath = this.worktreePathFor(worktreeId);
+    // As in `create`: an over-long path is reported before `stat` can fail on it with ENAMETOOLONG.
+    this.assertWorktreePathWithinLimit(worktreePath);
     if (!(await pathExists(worktreePath))) return this.create(input);
     const expectedHead = (
       await this.runGit(input.repoPath, ['rev-parse', input.baseRef ?? 'HEAD'], 'create_failed')
