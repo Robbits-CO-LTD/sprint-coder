@@ -187,15 +187,20 @@ test.describe('Auto decision flood on the Leader Timeline (issue #863)', () => {
       `[perf] auto-decision flood ${FLOOD_COUNT}@${FLOOD_PER_SECOND}/s: ${JSON.stringify(metrics)}`,
     );
 
-    // One summary line for the Turn instead of one row per decision. It still says how many
-    // decisions are kept, and opening it shows them.
+    // One summary line for the Turn instead of one row per decision. It counts every decision of
+    // the Turn, says how many rows are not kept, and opening it shows the newest ones.
     const group = page.getByTestId('auto-decision-group');
     await expect(group).toHaveCount(1);
     await expect(page.getByTestId('auto-decision-audit')).toHaveCount(0);
     const summary = page.getByTestId('auto-decision-summary');
+    const omitted = FLOOD_COUNT - 200;
     await expect(summary).toContainText('Auto');
-    await expect(summary).toContainText('自動許可 200件');
-    await expect(summary).toContainText('最新200件');
+    await expect(summary).toContainText(`自動許可 ${FLOOD_COUNT}件`);
+    await expect(summary).toContainText(`${omitted}件は省略、最新200件を表示`);
+    await expect(summary).toHaveAttribute(
+      'aria-label',
+      `Auto判定 ${FLOOD_COUNT}件。自動許可 ${FLOOD_COUNT}件（${omitted}件は省略、最新200件を表示）`,
+    );
     await summary.click();
     await expect(page.getByTestId('auto-decision-audit')).toHaveCount(200);
     await expect(page.getByTestId('auto-decision-audit').last()).toContainText(

@@ -211,6 +211,11 @@ export type AutoPermissionDecision = {
   createdAt: string;
 };
 
+export type AutoPermissionDecisionCounts = {
+  throughSeq: number;
+  turns: { turnId: string; allow: number; allowOnce: number; deny: number }[];
+};
+
 export type QueuedInput = { ordinal: number; text: string };
 
 export type CommandSummary = {
@@ -1249,6 +1254,7 @@ export interface SprintCoderApi {
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
+    countAutoDecisions(taskId: string): Promise<AutoPermissionDecisionCounts>;
     set(
       taskId: string,
       preset: AccessPreset,

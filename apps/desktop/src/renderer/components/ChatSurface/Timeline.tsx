@@ -9,7 +9,7 @@ import type {
   TurnDiffEntry,
 } from '../../types/sprint-coder';
 import { useShallow } from 'zustand/react/shallow';
-import { AUTO_DECISION_RETAIN_LIMIT, useAppStore } from '../../store/appStore';
+import { useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
 import {
@@ -69,6 +69,7 @@ export function Timeline({
   const commands = useAppStore((s) => s.commandsByTask[taskId]) ?? NO_COMMANDS;
   const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
+  const autoDecisionTallies = useAppStore((s) => s.autoDecisionCountsByTask[taskId]?.byTurn);
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
   const interruptedTurnIds =
     useAppStore((s) => s.interruptedTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
@@ -132,8 +133,8 @@ export function Timeline({
     return rows;
   }, [workerBreakdownCells]);
   // One group per Turn, built once per change instead of filtering every decision for every
-  // message. The group holding the oldest kept decision may have lost earlier ones to the
-  // in-memory window, so only it says the list is cut.
+  // message. Each group's counts come from the per-Turn tally, which keeps counting decisions
+  // whose rows left the in-memory window.
   const autoDecisionsByTurn = useMemo(() => {
     const byTurn = new Map<string, AutoPermissionDecision[]>();
     for (const decision of autoDecisions) {
@@ -143,8 +144,6 @@ export function Timeline({
     }
     return byTurn;
   }, [autoDecisions]);
-  const truncatedAutoDecisionTurnId =
-    autoDecisions.length >= AUTO_DECISION_RETAIN_LIMIT ? (autoDecisions[0]?.turnId ?? null) : null;
   const activityGroups = useMemo(
     () => groupActivitiesByMessage(messages, activities),
     [messages, activities],
@@ -478,9 +477,9 @@ export function Timeline({
                 ))}
                 <AutoDecisionAuditGroup
                   decisions={autoDecisionRows}
-                  retainedLimit={
-                    message.turnId !== null && message.turnId === truncatedAutoDecisionTurnId
-                      ? AUTO_DECISION_RETAIN_LIMIT
+                  tally={
+                    message.author === 'user' && message.turnId !== null
+                      ? (autoDecisionTallies?.[message.turnId] ?? null)
                       : null
                   }
                 />

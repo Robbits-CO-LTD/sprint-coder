@@ -9127,6 +9127,66 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it('restores denials past a stream of allows and counts every Auto decision per Turn', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask();
+      const turn = startExecutingTurn(persistence, task.id);
+      const request = {
+        taskId: task.id,
+        subjectId: 'tool:builtin:read',
+        capability: 'workspace.read' as const,
+        resource: { kind: 'external' as const, target: 'fixture' },
+        operation: 'read' as const,
+        providerEgress: 'none' as const,
+        sandboxProfile: 'read-only' as const,
+        executionSpecDigest: 'd'.repeat(64),
+        reviewerInputDigest: 'e'.repeat(64),
+        risk: 'low' as const,
+      };
+      const record = (index: number, decision: 'allow' | 'deny') =>
+        persistence.commitPermissionEvaluation(
+          task.id,
+          request,
+          { decision, reason: 'fixture', policyEpoch: 0, evaluationTrace: ['approval-policy'] },
+          {
+            id: `auto-count-${index}`,
+            taskId: task.id,
+            turnId: turn.turnId,
+            callId: `call-count-${index}`,
+            reviewRequestId: `review-count-${index}`,
+            capability: request.capability,
+            source: 'policy',
+            decision,
+            outcome: decision,
+            reason: 'fixture',
+            risk: 'low',
+            model: 'fixture',
+            templateVersion: '1',
+            requestFingerprint: 'f'.repeat(64),
+            executionSpecDigest: request.executionSpecDigest,
+            inputDigest: request.reviewerInputDigest,
+            policyEpoch: 0,
+            createdAt: '2026-10-18T00:00:00.000Z',
+          },
+        );
+      let lastSeq = 0;
+      for (let index = 0; index < 2; index += 1) lastSeq = record(index, 'deny')!.seq;
+      for (let index = 2; index < 252; index += 1) lastSeq = record(index, 'allow')!.seq;
+
+      const restored = persistence.listAutoPermissionDecisions(task.id);
+      expect(restored.filter(({ decision }) => decision === 'deny').map(({ id }) => id)).toEqual([
+        'auto-count-0',
+        'auto-count-1',
+      ]);
+      expect(restored.filter(({ decision }) => decision === 'allow')).toHaveLength(200);
+      expect(restored.at(-1)?.id).toBe('auto-count-251');
+      expect(persistence.countAutoPermissionDecisions(task.id)).toEqual({
+        throughSeq: lastSeq,
+        turns: [{ turnId: turn.turnId, allow: 250, allowOnce: 0, deny: 2 }],
+      });
+      persistence.close();
+    });
+
     it('publishes context usage around audit-only compaction without changing displayed history', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();

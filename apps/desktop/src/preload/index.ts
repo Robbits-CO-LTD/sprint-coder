@@ -35,6 +35,7 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
+  autoPermissionDecisionCountsSchema,
   autoPermissionDecisionSchema,
   canvasViewSchema,
   canvasViewSaveInputSchema,
@@ -1460,6 +1461,13 @@ const api: SprintCoderApi = {
         IPC_CHANNELS.permissionsListAutoDecisions,
         taskIdPayloadSchema,
         z.array(autoPermissionDecisionSchema),
+        { taskId },
+      ),
+    countAutoDecisions: (taskId) =>
+      invoke(
+        IPC_CHANNELS.permissionsCountAutoDecisions,
+        taskIdPayloadSchema,
+        autoPermissionDecisionCountsSchema,
         { taskId },
       ),
     set: (taskId, preset, expectedPolicyEpoch) =>

@@ -2143,6 +2143,26 @@ export const autoPermissionDecisionSchema = z
   .strict();
 export type AutoPermissionDecision = z.infer<typeof autoPermissionDecisionSchema>;
 
+/** Every Auto decision of a Task counted per Turn and kind (issue #863). The list itself is capped,
+ * so the Timeline's summary reads the counts from here; `throughSeq` is the newest decision event
+ * counted, so a live event at or below it is not counted twice. */
+export const autoPermissionDecisionCountsSchema = z
+  .object({
+    throughSeq: z.number().int().nonnegative(),
+    turns: z.array(
+      z
+        .object({
+          turnId: idSchema,
+          allow: z.number().int().nonnegative(),
+          allowOnce: z.number().int().nonnegative(),
+          deny: z.number().int().nonnegative(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type AutoPermissionDecisionCounts = z.infer<typeof autoPermissionDecisionCountsSchema>;
+
 export const approvalResolveInputSchema = z
   .object({
     taskId: idSchema,
@@ -7548,6 +7568,7 @@ export interface SprintCoderApi {
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
+    countAutoDecisions(taskId: string): Promise<AutoPermissionDecisionCounts>;
     set(
       taskId: string,
       preset: AccessPreset,
@@ -7762,6 +7783,7 @@ export const IPC_CHANNELS = {
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',
+  permissionsCountAutoDecisions: 'sprint-coder:permissions:count-auto-decisions',
   approvalsListPending: 'sprint-coder:approvals:list-pending',
   approvalsListRecent: 'sprint-coder:approvals:list-recent',
   approvalsResolve: 'sprint-coder:approvals:resolve',

@@ -83,6 +83,7 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
+  autoPermissionDecisionCountsSchema,
   autoPermissionDecisionSchema,
   canvasViewSchema,
   canvasViewSaveInputSchema,
@@ -3766,6 +3767,12 @@ export class IpcRouter {
       taskIdPayloadSchema,
       z.array(autoPermissionDecisionSchema),
       (input) => this.persistence.listAutoPermissionDecisions(input.taskId),
+    );
+    this.handle(
+      IPC_CHANNELS.permissionsCountAutoDecisions,
+      taskIdPayloadSchema,
+      autoPermissionDecisionCountsSchema,
+      (input) => this.persistence.countAutoPermissionDecisions(input.taskId),
     );
     this.handleMutation(
       IPC_CHANNELS.permissionsSet,

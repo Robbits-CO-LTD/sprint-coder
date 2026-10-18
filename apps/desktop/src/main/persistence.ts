@@ -122,6 +122,7 @@ import {
   type ChatMessage,
   type ApprovalDecision,
   type AutoPermissionDecision,
+  type AutoPermissionDecisionCounts,
   type ApprovalState,
   type ApprovalSummary,
   type ClaudeEffort,
@@ -6184,6 +6185,7 @@ export interface PersistenceClient {
     maxBytes: number;
   }): CommandOutputPage;
   listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[];
+  countAutoPermissionDecisions(taskId: string): AutoPermissionDecisionCounts;
   getBackgroundEpochs(taskId: string): BackgroundEpochs;
   createBackgroundActivity(input: {
     id: string;
@@ -20623,15 +20625,60 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return (
       this.db
         .prepare(
-          `SELECT payload_json FROM turn_events
-           WHERE task_id = ? AND type = 'permission.auto_decided'
-           ORDER BY seq DESC LIMIT 200`,
+          // The newest 200 denials and the newest 200 other decisions (issue #863): a stream of
+          // allows must not push the rarer denials out of the audit the Timeline restores.
+          `SELECT seq, payload_json FROM (
+             SELECT seq, payload_json FROM turn_events
+             WHERE task_id = ? AND type = 'permission.auto_decided'
+               AND json_extract(payload_json, '$.autoDecision.decision') IS NOT 'deny'
+             ORDER BY seq DESC LIMIT 200
+           )
+           UNION ALL
+           SELECT seq, payload_json FROM (
+             SELECT seq, payload_json FROM turn_events
+             WHERE task_id = ? AND type = 'permission.auto_decided'
+               AND json_extract(payload_json, '$.autoDecision.decision') IS 'deny'
+             ORDER BY seq DESC LIMIT 200
+           )
+           ORDER BY seq`,
         )
-        .all(taskId) as { payload_json: string }[]
+        .all(taskId, taskId) as { payload_json: string }[]
     )
       .map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)))
-      .flatMap((event) => (event.type === 'permission.auto_decided' ? [event.autoDecision] : []))
-      .reverse();
+      .flatMap((event) => (event.type === 'permission.auto_decided' ? [event.autoDecision] : []));
+  }
+
+  countAutoPermissionDecisions(taskId: string): AutoPermissionDecisionCounts {
+    this.assertTask(taskId);
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(payload_json, '$.autoDecision.turnId') AS turn_id,
+                json_extract(payload_json, '$.autoDecision.decision') AS decision,
+                COUNT(*) AS count, MAX(seq) AS through_seq
+         FROM turn_events
+         WHERE task_id = ? AND type = 'permission.auto_decided'
+         GROUP BY turn_id, decision`,
+      )
+      .all(taskId) as { turn_id: string; decision: string; count: number; through_seq: number }[];
+    const turns = new Map<
+      string,
+      { turnId: string; allow: number; allowOnce: number; deny: number }
+    >();
+    let throughSeq = 0;
+    for (const row of rows) {
+      throughSeq = Math.max(throughSeq, row.through_seq);
+      const turn = turns.get(row.turn_id) ?? {
+        turnId: row.turn_id,
+        allow: 0,
+        allowOnce: 0,
+        deny: 0,
+      };
+      if (row.decision === 'allow') turn.allow += row.count;
+      else if (row.decision === 'allow_once') turn.allowOnce += row.count;
+      else if (row.decision === 'deny') turn.deny += row.count;
+      turns.set(row.turn_id, turn);
+    }
+    return { throughSeq, turns: [...turns.values()] };
   }
 
   executeOperation<T>(
