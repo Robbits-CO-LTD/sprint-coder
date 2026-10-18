@@ -725,6 +725,18 @@
       }
     },
     {
+      "name": "a string with U+0000 keeps every byte in both cores (over-long after the NUL is unresolvable)",
+      "repeat": {
+        "imageRelativePath": {
+          "unit": "\u0000a",
+          "count": 600
+        }
+      },
+      "expect": {
+        "kind": "unresolvable"
+      }
+    },
+    {
       "name": "an over-long measured string is unresolvable",
       "repeat": {
         "imageRelativePath": {

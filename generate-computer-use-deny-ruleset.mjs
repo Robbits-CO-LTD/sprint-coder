@@ -572,7 +572,12 @@ export function cppFactsStatements(model, variable, facts) {
     const field = `${variable}.${snake(signal.name)}`;
     if (value === null || value === undefined) lines.push(`${field}.reset();`);
     else if (signal.type === 'boolean') lines.push(`${field} = ${value ? 'true' : 'false'};`);
-    else lines.push(`${field} = std::string(${cppStringLiteral(value)});`);
+    // Built with an explicit byte length: a fact may hold U+0000, and std::string(const char*) would
+    // stop there, so C++ and TS would no longer see the same facts.
+    else
+      lines.push(
+        `${field} = std::string(${cppStringLiteral(value)}, ${Buffer.byteLength(value, 'utf8')});`,
+      );
   }
   return lines;
 }
