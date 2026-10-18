@@ -1322,7 +1322,9 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
 
 // Whether a handle's file is on a remote volume (an SMB share and such), which some report with a
 // local file system name like "NTFS"; GetFileInformationByHandleEx(FileRemoteProtocolInfo) is the
-// authority. std::nullopt when it cannot be asked.
+// authority. Local is said only on ERROR_INVALID_PARAMETER, which is what a local NTFS file answers
+// (measured on Windows 11 and pinned by the live seam: a local fixture is "not remote"). Any other
+// failure, ERROR_NOT_SUPPORTED included, is unknown (std::nullopt), which callers treat as W-UR.
 std::optional<bool> WindowsTargetFileIsRemote(HANDLE file) {
   FILE_REMOTE_PROTOCOL_INFO remote{};
   if (GetFileInformationByHandleEx(file, FileRemoteProtocolInfo, &remote, sizeof(remote)))
@@ -1408,11 +1410,22 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
       if (probe_handle.value != INVALID_HANDLE_VALUE)
         probe_file_system = WindowsTargetFileSystemName(probe_handle.value);
     }
+    // A freshly copied exe can be held briefly by another reader (an anti-virus scan, say), which
+    // fails the move with a sharing violation; retry for up to about a second before giving up.
+    const auto move = [](const std::wstring &from, const std::wstring &to) {
+      for (int attempt = 0; attempt < 20; ++attempt) {
+        if (MoveFileExW(from.c_str(), to.c_str(), 0) == TRUE)
+          return true;
+        const DWORD error = GetLastError();
+        if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED)
+          return false;
+        Sleep(50);
+      }
+      return false;
+    };
     if (probe_file_system.has_value() &&
-        ReadProcessPath(process.hProcess, &before) &&
-        MoveFileExW(first.c_str(), second.c_str(), 0) == TRUE &&
-        ReadProcessPath(process.hProcess, &renamed) &&
-        MoveFileExW(second.c_str(), third.c_str(), 0) == TRUE &&
+        ReadProcessPath(process.hProcess, &before) && move(first, second) &&
+        ReadProcessPath(process.hProcess, &renamed) && move(second, third) &&
         ReadProcessPath(process.hProcess, &moved)) {
       WindowsTargetRenameProbe probe;
       probe.follows = SameWindowsTargetName(before, first) &&
@@ -1624,7 +1637,20 @@ struct WindowsTargetHeldImage {
   bool matches = false;
   // The held file's file system (lower-cased), for the caller to compare with the rename probe's.
   std::optional<std::string> file_system;
+  // Whether the held file is on a remote volume (std::nullopt: unknown).
+  std::optional<bool> remote;
 };
+
+// Whether the running image may be said to match: the hold matched, the held file is known not to
+// be remote, and the one-time rename probe followed on the same file system as the held file's.
+// Pure, so the seam can drive each input (a remote or unknown volume, a probe on another file
+// system, a probe that did not follow) without a real SMB share. Anything missing is false.
+bool WindowsTargetRunningImageMatches(bool held_matches, std::optional<bool> remote,
+                                      const std::optional<std::string> &file_system,
+                                      const std::optional<WindowsTargetRenameProbe> &probe) {
+  return held_matches && remote == std::optional<bool>(false) && probe.has_value() &&
+         probe->follows && file_system.has_value() && *file_system == probe->file_system;
+}
 
 // Opens a Win32 path read-only (sharing everything, so a running image can be opened) and returns
 // its canonical path and file identity, or std::nullopt when it cannot be opened or read.
@@ -1706,6 +1732,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       SameWindowsFileIdentity(kernel_file->identity, held->identity) &&
       WindowsTargetStableIdVolume(held->file.value);
   held->file_system = WindowsTargetFileSystemName(held->file.value);
+  held->remote = WindowsTargetFileIsRemote(held->file.value);
   // Auxiliary deny-side checks.
   const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
   const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
@@ -2467,10 +2494,10 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
   // only when the probe followed and the target's own file system is the same. A target on another
   // file system (e.g. temp is NTFS and the target is on ReFS or a Dev Drive) is unresolvable until
   // a probe for that file system is available. Fail closed on anything missing.
-  const bool rename_follow_known =
-      held.matches && context.rename_probe.has_value() && context.rename_probe->follows &&
-      held.file_system.has_value() && *held.file_system == context.rename_probe->file_system;
-  facts.running_image_matches = rename_follow_known;
+  // The held file must also be known not to be remote, checked here on top of the volume class
+  // (image_volume "network" is W-UR on its own path).
+  facts.running_image_matches = WindowsTargetRunningImageMatches(
+      held.matches, held.remote, held.file_system, context.rename_probe);
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);

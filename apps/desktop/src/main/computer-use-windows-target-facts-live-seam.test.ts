@@ -517,6 +517,30 @@ int wmain(int argc, wchar_t **argv) {
         "fixture_lineage_outsider");
   Check(ClassOf(fixture_facts.facts) == "W6", "fixture_refused_as_w6");
 
+  // Remote volumes. A local fixture answers "not remote" (ERROR_INVALID_PARAMETER is the local
+  // answer), and the running-image gate refuses a remote or unknown volume even when everything
+  // else matches. A target on a network volume is also W-UR through image_volume. No SMB share is
+  // needed: the remote result is substituted.
+  {
+    ScopedKernelHandle local(CreateFileW(fixture.c_str(), FILE_READ_ATTRIBUTES,
+                                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    Check(WindowsTargetFileIsRemote(local.value) == std::optional<bool>(false),
+          "local_fixture_is_not_remote");
+    const std::optional<std::string> ntfs = std::string("ntfs");
+    Check(WindowsTargetRunningImageMatches(true, false, ntfs, rename_probe),
+          "running_image_gate_passes_local");
+    Check(!WindowsTargetRunningImageMatches(true, true, ntfs, rename_probe) &&
+              !WindowsTargetRunningImageMatches(true, std::nullopt, ntfs, rename_probe),
+          "running_image_gate_refuses_remote_or_unknown_volume");
+    TargetFacts network = fixture_facts.facts;
+    network.image_volume = std::string("network");
+    Check(ClassOf(network) == "W-UR", "network_volume_target_is_w_ur");
+    network = fixture_facts.facts;
+    network.running_image_matches = WindowsTargetRunningImageMatches(true, true, ntfs, rename_probe);
+    Check(ClassOf(network) == "W-UR", "remote_held_file_target_is_w_ur");
+  }
+
   // Fail-closed: the same target is unresolvable when the probe did not follow, when the probe is
   // missing, and when it followed but on a different file system than the target's (here the target
   // is NTFS, so a probe keyed to another file system does not apply). Substitutable here.
