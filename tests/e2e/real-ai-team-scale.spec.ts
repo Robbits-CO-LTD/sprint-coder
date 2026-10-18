@@ -485,6 +485,7 @@ type DriveResult = Readonly<{
   maxActivePhases: number;
   maxWorkingPhases: number;
   maxUiLatencyMs: number;
+  maxReadTeamLatencyMs: number;
   maxMainLatencyMs: number;
   longTasks: unknown;
   /** Renderer の中で貯めたフレーム間隔・長いアニメーションフレーム・可視状態（最後に 1 回読む）。 */
@@ -555,6 +556,7 @@ async function driveTeam(
   let maxActivePhases = 0;
   let maxWorkingPhases = 0;
   let maxUiLatencyMs = 0;
+  let maxReadTeamLatencyMs = 0;
   let leaderIdleSince: number | null = null;
   let stalledSince: number | null = null;
   let rateLimitedSince: number | null = null;
@@ -608,6 +610,7 @@ async function driveTeam(
       ),
     );
     countOutcome('readTeam', team);
+    maxReadTeamLatencyMs = Math.max(maxReadTeamLatencyMs, stages['readTeam']!.ms);
     if (team.status === 'ok') last = team.value;
     const { gitWorktrees, appDirs } = await stage('git', () => ({
       gitWorktrees: gitWorktreeCount(input.workspace),
@@ -746,6 +749,7 @@ async function driveTeam(
     maxActivePhases,
     maxWorkingPhases,
     maxUiLatencyMs,
+    maxReadTeamLatencyMs,
     maxMainLatencyMs,
     longTasks: await page
       .evaluate(() => (window as unknown as { __scLongTasks?: unknown }).__scLongTasks ?? null)
@@ -784,6 +788,22 @@ function summarizeFrames(frames: unknown): unknown {
     maxTimerDriftMs: Math.max(0, ...(recorder.timerDrifts ?? []).map(({ driftMs }) => driftMs)),
     longAnimationFramesOver200ms: recorder.longAnimationFrames?.length ?? 0,
   };
+}
+
+function expectTeamToStayResponsive(result: DriveResult): void {
+  // #863 requires timely rendering as well as correct files. Recording a stall must fail the run.
+  expect
+    .soft(result.observeOutcomes.raf, 'animation-frame observations')
+    .toEqual({ timedOut: 0, failed: 0 });
+  expect
+    .soft(result.observeOutcomes.readTeam, 'Team snapshot observations')
+    .toEqual({ timedOut: 0, failed: 0 });
+  expect.soft(result.maxUiLatencyMs, 'maximum animation-frame response').toBeLessThanOrEqual(3000);
+  expect
+    .soft(result.maxReadTeamLatencyMs, 'maximum Team snapshot response')
+    .toBeLessThanOrEqual(3000);
+  const frames = result.frames as { maxFrameGapMs?: number } | null;
+  expect.soft(frames?.maxFrameGapMs, 'maximum recorded rendering gap').toBeLessThanOrEqual(3000);
 }
 
 /** 実行区間（running を観測した最初〜最後）の重なりの最大数。 */
@@ -948,6 +968,7 @@ function summarize(result: DriveResult, assignments: readonly Assignment[]) {
     maxActiveIsolationPhases: result.maxActivePhases,
     maxWorkingIsolationPhases: result.maxWorkingPhases,
     maxUiLatencyMs: result.maxUiLatencyMs,
+    maxReadTeamLatencyMs: result.maxReadTeamLatencyMs,
     maxMainLatencyMs: result.maxMainLatencyMs,
     longTasks: result.longTasks,
     frames: summarizeFrames(result.frames),
@@ -1069,6 +1090,7 @@ test.describe('real AI Team scale E2E', () => {
       note('team-scale-page.txt', result.pageText);
       note('team-scale-tracks.json', result.tracks);
       note('team-scale-last.json', result.last);
+      expectTeamToStayResponsive(result);
       expect.soft(summary.hiredWorkers).toBe(TEAM_SIZE);
       expect
         .soft(summary.byEngine)
@@ -1206,6 +1228,7 @@ test.describe('real AI Team scale E2E', () => {
       note('team-overlap-page.txt', result.pageText);
       note('team-overlap-tracks.json', result.tracks);
       note('team-overlap-last.json', result.last);
+      expectTeamToStayResponsive(result);
       expect.soft(summary.hiredWorkers).toBe(4);
       expect.soft(summary.editsPresent).toEqual([1, 2, 3, 4]);
       expect.soft(summary.exactlyExpected).toBe(true);
@@ -1330,6 +1353,7 @@ test.describe('real AI Team scale E2E', () => {
       });
       note('team-conflict-tracks.json', result.tracks);
       note('team-conflict-page.txt', result.pageText);
+      expectTeamToStayResponsive(result);
       // 同期点に届かなかった（どちらかが先に統合された・同じ baseHead にならなかった）なら、衝突が
       // 起きないのは App のせいとは限らない。判定不能として、理由を出して失敗させる。
       expect(

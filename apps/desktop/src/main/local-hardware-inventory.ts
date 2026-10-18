@@ -140,7 +140,9 @@ function joinGpuMemory(
 
 async function defaultGpuInfo(): Promise<unknown> {
   const { app } = await import('electron');
-  return app.getGPUInfo('complete');
+  // Device identity is all we consume. Complete information also enumerates Dawn
+  // adapters on the GPU thread and can stall rendering during repeated Team hires.
+  return app.getGPUInfo('basic');
 }
 
 async function optionalProbe<T>(probe: (() => Promise<T>) | undefined): Promise<T | null> {

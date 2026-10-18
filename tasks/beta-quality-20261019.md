@@ -74,3 +74,21 @@ Graph / DFlash / モデル / Skills の再検証16件 PASS。camera/placement un
 ### 未完了の公開条件
 
 UI 残件、実 AI 全経路、実 AI 32 人 Team、packaged app、最新 head の CI とレビュー、配布物・署名・notarization。Claude の利用制限による未実施を PASS とみなさない。現時点では公開しない。
+
+### 実 AI と32人 Team の追加確認
+
+- Codex の実ファイル編集・コマンド・承認拒否と許可・履歴復元2件、停止・実子プロセス終了・再起動・複数root・日本語UTF-8の4件がPASS。Skill revision、画像PNG生成、reasoning各段階と不正値拒否も実CLIでPASS。
+- Team基本ケース1件はLeaderが選んだClaude Workerの利用制限で失敗。外部制限として残し、PASSに含めない。
+- `63d19335`のCodex 32人は32件の正確な生成物と統合、実CLI32同時、30以上の同時実行145秒を確認。ただし描画間隔最大59,050ms、rAF応答のtimeoutが1件あり、性能の受け入れはFAIL。従来テストは性能値を記録するだけだったため、rAF/Team取得のtimeout・失敗0、各最大応答と描画間隔3秒以内を明示assertする。
+
+### #863 描画停止のRCA（2026-10-19）
+
+- RCA Mode: **Root Cause Confirmed**。A=YES / B=YES / C=YES / D=YES。
+- 症状と再現: 実Codex Leaderに32人の雇用だけを依頼し、Worker実行なしでも描画が46,413ms停止。foregroundでも54,665ms、reduced motionでも75,621ms。独立profileで3回再現した。
+- 原因箇所: `apps/desktop/src/main/local-hardware-inventory.ts`のdefault GPU probeが`app.getGPUInfo('complete')`を呼んでいた。
+- 原因経路: Teamのmodel一覧/雇用検証 → `ipc.ts`の`refreshModelCatalog` → Managed Local `listModels` / `ManagedLocalController.listProviderModels` → `collectLocalHardwareSnapshot` → GPU complete probe。モデル検証のたびに再収集される。
+- 独立証拠: 同一再現のChromium traceでGPU主スレッドの`gpu_info_collector::CollectDawnInfo`が33回、合計77,307ms、1回約2.3～2.5秒。親taskは`gpu_service_impl.cc`の`GetDawnInfo`。rendererの最大taskは72ms、JS timer最大遅延33msで、継続的なJS処理・フォーカス・アニメーション・32 CLI同時実行は原因から除外。
+- 修正方針: 消費する`gpuDevice`情報を取得できる`basic`に限定する。Electron同梱型定義もvendor/device IDのみ必要な場合のbasicを推奨。空きRAMのcache、GPU無効化、CSS変更は加えない。別経路のGPU取得は検索で見つからず、GPU memoryは既存の独立probeの観測を保持する。
+- 回帰テスト: default probeのbasic指定とdevice facts / memory joinを検証。修正前はcompleteの呼び出しで1 FAIL、最小修正後6 PASS。
+- 同じ実Codex Leader / 32人雇用 / 非foreground条件で再検証し、32人雇用完了、最大描画間隔100ms、JS timer最大遅延67ms。Chromium traceの`CollectDawnInfo`は0回（修正前33回）。雇用時の同じ症状が消えたことを確認した。独立コードレビューの追加findingは0。生trace・調査用specはローカル一時領域に保持し、配布sourceには残さない。
+- 実作業32人の厳格な性能受け入れは次の検証で確認する。この再現テストのみで全経路の完了とはしない。
