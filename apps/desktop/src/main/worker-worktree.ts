@@ -307,7 +307,7 @@ export class WorkerWorktreeManager {
       const listed = (
         await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
       ).stdout;
-      for (const line of listed.split(' '))
+      for (const line of listed.split('\0'))
         if (line.startsWith('worktree ')) {
           const keys = await pathKeys(line.slice('worktree '.length));
           if (keys.some((key) => wanted.includes(key))) return legacy;
