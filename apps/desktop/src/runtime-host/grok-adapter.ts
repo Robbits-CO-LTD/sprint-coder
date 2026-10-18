@@ -237,7 +237,7 @@ export async function probeGrok(
     return {
       available: true,
       readiness: 'ready',
-      version: 'e2e-fixture',
+      version: 'grok 0.0.0',
       models: [AUTO, { ...AUTO, id: 'grok-fixture', displayName: 'Grok fixture' }],
     };
   // A later detection is the next chance to confirm that an earlier probe's CLI has stopped. It

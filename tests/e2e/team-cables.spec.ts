@@ -91,7 +91,10 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
 
       const taskId = await currentTaskId(page);
-      const workerAgentId = await page.getByTestId('team-worker').first().getAttribute('data-agent-id');
+      const workerAgentId = await page
+        .getByTestId('team-worker')
+        .first()
+        .getAttribute('data-agent-id');
       const leaderAgentId: string = await page.evaluate(
         async (id) => (await window.sprintCoder!.teams.get(id))!.team.leaderAgentId,
         taskId,
@@ -163,19 +166,23 @@ test.describe('Phase 6 Slice 6.4: Communication cable', () => {
       await page.getByTestId('team-canvas-fit').click();
       await page.waitForTimeout(700);
 
-      // Pan the camera far away (drag an empty area of the canvas — its bottom-left corner,
-      // clear of the top `.team-header-overlay`, the bottom-right `.team-canvas-controls`, and
-      // any node, since Fit view centers the Leader/Worker cluster) so the Worker ends up clipped
-      // outside the viewport.
-      const canvasBox = await page.locator('.team-canvas').boundingBox();
-      if (!canvasBox) throw new Error('team-canvas not found');
-      const startX = canvasBox.x + 30;
-      const startY = canvasBox.y + canvasBox.height - 30;
+      // Spawn/fit animations can put the Leader over a fixed corner. Hit-test for actual blank
+      // canvas so this drag cannot start in the timeline, which correctly preserves text selection.
+      const { x: startX, y: startY } = await page.locator('.team-canvas').evaluate((canvas) => {
+        const rect = canvas.getBoundingClientRect();
+        for (const y of [rect.bottom - 30, rect.top + 80, rect.top + rect.height / 2]) {
+          for (const x of [rect.left + 30, rect.right - 30, rect.left + rect.width / 2]) {
+            if (document.elementFromPoint(x, y) === canvas) return { x, y };
+          }
+        }
+        throw new Error('No blank canvas point for the offscreen pan');
+      });
       await page.mouse.move(startX, startY);
       await page.mouse.down();
       await page.mouse.move(startX + 2200, startY + 1600, { steps: 15 });
       await page.mouse.up();
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'user');
+      await expect(page.getByTestId('team-worker').first()).not.toBeInViewport();
 
       const transformBefore = await readWorldTransform(page);
 

@@ -120,6 +120,12 @@ test.describe('final UI layout gate', () => {
       await page.keyboard.press('Escape');
       await expect(access).toHaveAttribute('aria-expanded', 'false');
 
+      // The legacy picker deliberately disables models for Mock. Select the available CLI
+      // through its UI before checking model-menu interaction, as a user would.
+      if (await page.getByTestId('runtime-selector').count()) {
+        await page.getByTestId('runtime-selector').click();
+        await page.getByTestId('runtime-option-codex').click();
+      }
       await expect(model).toBeEnabled();
       await model.click();
       await expect(model).toHaveAttribute('aria-expanded', 'true');

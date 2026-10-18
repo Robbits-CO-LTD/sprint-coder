@@ -10748,7 +10748,9 @@ if (runsWithElectronAbi)
         expect(() => validateCanvasCamera({ x: Number.NaN, y: 0, scale: 1 })).toThrow(
           InvalidCanvasViewError,
         );
-        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.1 })).toThrow(
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.04 })).not.toThrow();
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.173333 })).not.toThrow();
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.039 })).toThrow(
           InvalidCanvasViewError,
         );
         expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 2 })).toThrow(
@@ -10791,12 +10793,12 @@ if (runsWithElectronAbi)
 
         const created = persistence.saveCanvasView({
           taskId: task.id,
-          camera: { x: 10, y: 20, scale: 0.8 },
+          camera: { x: 10, y: 20, scale: 0.103 },
           nodePositions: {},
           revision: 0,
         });
         expect(created.revision).toBe(1);
-        expect(created.camera).toEqual({ x: 10, y: 20, scale: 0.8 });
+        expect(created.camera).toEqual({ x: 10, y: 20, scale: 0.103 });
 
         const updated = persistence.saveCanvasView({
           taskId: task.id,

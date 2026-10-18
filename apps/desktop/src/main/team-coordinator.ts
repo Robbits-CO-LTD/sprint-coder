@@ -4449,7 +4449,7 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
         } else this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
-      } catch (error) {
+      } catch {
         this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
       }
     }

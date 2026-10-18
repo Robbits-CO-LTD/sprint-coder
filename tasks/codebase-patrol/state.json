@@ -1,9 +1,9 @@
 {
   "schema_version": 3,
   "repository": "Robbits-CO-LTD/sprint-coder",
-  "last_report_commit": "4684eb356d8308995c5eb10a518b11f6df2bca83",
-  "last_report": "tasks/codebase-patrol/20260829T091118Z-4684eb3/report.md",
-  "publication_mode": "auto-file",
+  "last_report_commit": "f3f24ad78df92cd2b1ca54e7f04d1185d8ab2fd2",
+  "last_report": "tasks/codebase-patrol/20261018T155600Z-f3f24ad/report.md",
+  "publication_mode": "report-only",
   "created_issues": [
     {
       "repository": "Robbits-CO-LTD/sprint-coder",

@@ -29,6 +29,10 @@ test('shows draft-only models and gates DFlash settings on bundled support and a
       const now = new Date().toISOString();
       insert.run('a'.repeat(64), 'fixture/target', 'c'.repeat(40), now, now, 'normal');
       insert.run('b'.repeat(64), 'fixture/draft', 'c'.repeat(40), now, now, 'draft-dflash');
+      insert.run('d'.repeat(64), 'fixture/incomplete-draft', 'c'.repeat(40), now, now, 'draft-dflash');
+      // Selection requires installed artifact metadata; saving must still verify the actual file.
+      // Deliberately leave fixture.gguf absent so the integrity check rejects the save.
+      db.prepare("INSERT INTO local_model_artifacts(model_id, ordinal, filename, sha256, byte_length, role, state) VALUES (?, 1, 'fixture.gguf', ?, 1024, 'model', 'installed')").run('b'.repeat(64), 'e'.repeat(64));
       db.close();
     `,
         join(REPO_ROOT, 'node_modules', 'better-sqlite3'),
@@ -49,9 +53,11 @@ test('shows draft-only models and gates DFlash settings on bundled support and a
     const target = page.getByTestId(`local-ai-launch-${'a'.repeat(64)}`);
     await target.getByText('投機的デコード（DFlash2）', { exact: true }).click();
     await expect(target.getByRole('combobox', { name: '方式', exact: true })).toHaveValue('off');
-    const supported = await page.evaluate(
-      async () => (await window.sprintCoder!.localAI.speculativeSettings('a'.repeat(64))).supported,
+    const view = await page.evaluate(
+      async () => await window.sprintCoder!.localAI.speculativeSettings('a'.repeat(64)),
     );
+    const supported = view.supported;
+    expect(view.eligibleDrafts.map((draft) => draft.id)).toEqual(['b'.repeat(64)]);
     await expect(target.locator('option[value="draft-dflash"]')).toHaveJSProperty(
       'disabled',
       !supported,

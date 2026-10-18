@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type {
   GraphSelection,
   GraphSourceRef,
@@ -36,6 +36,10 @@ export function GraphSourcesPanel({
   );
   const [loading, setLoading] = useState<string | null>(null);
   const alive = useRef(true);
+  const latestFreshness = useRef(freshness);
+  useLayoutEffect(() => {
+    latestFreshness.current = freshness;
+  }, [freshness]);
   const annotation = view.annotations?.find(
     (value) => value.elementKind === selection.kind && value.elementId === selection.id,
   );
@@ -66,16 +70,42 @@ export function GraphSourcesPanel({
     const api = window.sprintCoder?.graphs;
     if (typeof api?.previewSource !== 'function' || loading !== null) return;
     setLoading(source.id);
-    const sequence = freshness?.sequence;
     setError(null);
     try {
-      const preview = await api.previewSource({
-        taskId: view.taskId,
-        renderRevision: view.renderRevision,
-        sourceId: source.id,
-      });
-      if (alive.current)
+      const settle = () =>
+        api.checkSources({
+          taskId: view.taskId,
+          instanceId: view.instanceId,
+          renderRevision: view.renderRevision,
+        });
+      // Focus refreshes may already be queued while React still displays the old
+      // status. Bind this explicit read to Main's settled sequence, not that prop.
+      let checked = await settle();
+      // A monitor recheck can finish while this explicit read is in flight. Re-read
+      // against its settled sequence, rather than hiding a valid result or relabeling
+      // an older excerpt as fresh. Later invalidations still hide completed previews.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (!alive.current) return;
+        if (checked?.phase === 'checking') {
+          checked = await settle();
+          if (!alive.current) return;
+          if (checked.phase !== 'checked') continue;
+        }
+        const sequence = checked?.sequence;
+        const preview = await api.previewSource({
+          taskId: view.taskId,
+          renderRevision: view.renderRevision,
+          sourceId: source.id,
+        });
+        if (!alive.current) return;
+        if ((latestFreshness.current?.sequence ?? 0) > (sequence ?? 0)) {
+          checked = await settle();
+          continue;
+        }
         setPreviews((current) => ({ ...current, [source.id]: { value: preview, sequence } }));
+        return;
+      }
+      if (alive.current) setError('参照先の更新が続いています。もう一度確認してください。');
     } catch {
       if (alive.current) setError('根拠参照を確認できませんでした。');
     } finally {

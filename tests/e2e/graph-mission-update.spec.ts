@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import {
@@ -11,7 +11,6 @@ import {
   launchApp,
   removeUserDataDir,
   assignCurrentTaskToProjectFolder,
-  REPO_ROOT,
 } from './helpers';
 
 async function openPlan(page: Page) {
@@ -67,7 +66,7 @@ test('discusses a selected graph node, stops affected write work, re-agrees and 
   test.setTimeout(180000);
   const profile = createUserDataDir('graph-constraint-update');
   const workspace = await mkdtemp(
-    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-update-'),
+    join(process.platform === 'win32' ? homedir() : tmpdir(), '.sc-graph-update-'),
   );
   await writeFile(
     join(workspace, 'graph-source.ts'),

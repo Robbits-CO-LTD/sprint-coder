@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   collectLocalHardwareSnapshot,
   parseDarwinAvailableMemory,
@@ -6,7 +6,61 @@ import {
 
 const GiB = 2 ** 30;
 
+vi.mock('electron', () => ({ app: { getGPUInfo: vi.fn() } }));
+
 describe('local hardware inventory', () => {
+  it('uses the basic GPU probe and preserves device facts and native memory observations', async () => {
+    const { app } = await import('electron');
+    vi.mocked(app.getGPUInfo).mockResolvedValueOnce({
+      gpuDevice: [
+        {
+          active: true,
+          vendorId: 0x10de,
+          deviceId: 1234,
+          vendorString: 'NVIDIA',
+          deviceString: 'Fixture GPU',
+        },
+      ],
+    });
+    const snapshot = await collectLocalHardwareSnapshot({
+      platform: () => 'win32',
+      architecture: () => 'x64',
+      totalMemory: () => 32 * GiB,
+      freeMemory: () => 20 * GiB,
+      cpuInfo: () => [{ model: 'Fixture CPU' }],
+      gpuMemory: async () => [
+        {
+          vendorId: 0x10de,
+          deviceId: 1234,
+          memory: {
+            dedicatedTotalBytes: 12 * GiB,
+            dedicatedAvailableBytes: 10 * GiB,
+            sharedTotalBytes: 16 * GiB,
+            unifiedTotalBytes: null,
+          },
+        },
+      ],
+    });
+    expect(app.getGPUInfo).toHaveBeenCalledExactlyOnceWith('basic');
+    expect(snapshot).toMatchObject({
+      gpuDevicesStatus: 'known',
+      gpus: [
+        {
+          active: true,
+          vendorId: 0x10de,
+          deviceId: 1234,
+          vendorName: 'NVIDIA',
+          deviceName: 'Fixture GPU',
+          memory: {
+            dedicatedTotalBytes: 12 * GiB,
+            dedicatedAvailableBytes: 10 * GiB,
+            sharedTotalBytes: 16 * GiB,
+          },
+        },
+      ],
+    });
+  });
+
   it('counts only reclaimable macOS pages as available memory', () => {
     expect(
       parseDarwinAvailableMemory(`Mach Virtual Memory Statistics: (page size of 16384 bytes)

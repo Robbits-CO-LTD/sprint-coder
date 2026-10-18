@@ -1509,7 +1509,7 @@ export const canvasCameraSchema = z
   .object({
     x: canvasWorldCoordinateSchema,
     y: canvasWorldCoordinateSchema,
-    scale: z.number().finite().min(0.18).max(1.6),
+    scale: z.number().finite().min(0.04).max(1.6),
   })
   .strict();
 export type CanvasCamera = z.infer<typeof canvasCameraSchema>;

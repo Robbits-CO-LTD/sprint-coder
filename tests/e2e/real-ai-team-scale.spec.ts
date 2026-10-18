@@ -39,10 +39,15 @@ import { parseWorkerEvents, runningConcurrency } from './real-ai-team-concurrenc
 // Leader: SPRINT_CODER_REAL_AI_TEAM_LEADER=claude（既定）| codex
 // 人数:   SPRINT_CODER_REAL_AI_TEAM_SIZE=32（既定、偶数）
 // 予算:   SPRINT_CODER_REAL_AI_TEAM_BUDGET=unlimited で既定の Team ポリシーを予算無制限にする。
+// scale の Worker: SPRINT_CODER_REAL_AI_TEAM_WORKERS=codex で Codex のみ。既定は mixed。
+// 単一 Provider の回は mixed の受入結果とは区別する。overlap / conflict は常に mixed。
 
 const LEADER: Provider =
   process.env['SPRINT_CODER_REAL_AI_TEAM_LEADER'] === 'codex' ? CODEX : CLAUDE;
 const TEAM_SIZE = Number(process.env['SPRINT_CODER_REAL_AI_TEAM_SIZE'] ?? 32);
+const SCALE_WORKERS = process.env['SPRINT_CODER_REAL_AI_TEAM_WORKERS'] ?? 'mixed';
+if (SCALE_WORKERS !== 'mixed' && SCALE_WORKERS !== 'codex')
+  throw new Error('SPRINT_CODER_REAL_AI_TEAM_WORKERS must be mixed or codex');
 const BUDGET_UNLIMITED = process.env['SPRINT_CODER_REAL_AI_TEAM_BUDGET'] === 'unlimited';
 // 32 人のうち、同時に作業中（isolation の phase が running）だった人数の下限。
 const MIN_CONCURRENT = Number(process.env['SPRINT_CODER_REAL_AI_TEAM_MIN_CONCURRENT'] ?? 30);
@@ -177,7 +182,7 @@ function leaderPrompt(
   return [
     `This is an automated ${title} of team mode. Follow these steps exactly and use only the team tools; never create or edit any file yourself.`,
     '1. Call team_list_models once (no filters needed). It is required before hiring.',
-    `2. Hire exactly ${assignments.length} workers with team_hire_worker: agentKind "worker", writeCapable true, contextInheritancePolicy "summary", modelSelectionReason "Scale test requested by the user: half the workers use Claude and half use Codex", and exactly the role and modelSelection listed below for each worker. Do not change the model of any worker. Issue the hire calls in parallel (many tool calls in one message). Do not assign any task until every worker is hired.`,
+    `2. Hire exactly ${assignments.length} workers with team_hire_worker: agentKind "worker", writeCapable true, contextInheritancePolicy "summary", modelSelectionReason "Scale test requested by the user: use exactly the modelSelection listed for each worker", and exactly the role and modelSelection listed below for each worker. Do not change the model of any worker. Issue the hire calls in parallel (many tool calls in one message). Do not assign any task until every worker is hired.`,
     '3. After all workers are hired, call team_assign_tasks once with one entry in assignments for every worker, each with access "workspace-write" and exactly the objective and doneCriteria listed for its role, so that all workers run at the same time. Do not wait for any task to finish. If an assignment is reported as queued, that is fine; do not repeat it. Repeat only the entries whose results[].ok is false.',
     `4. Then call team_wait_reports repeatedly until all ${assignments.length} workers have reported. Do not retry, reassign or steer any task.`,
     `5. Finally end your reply with exactly one line in this exact format, with nothing else on that line: \`${finalToken} completed=<number of completed tasks> failed=<number of failed tasks>\` (for example \`${finalToken} completed=3 failed=0\`). Count a task as failed when its report is failed or it is waiting_resume.`,
@@ -480,6 +485,7 @@ type DriveResult = Readonly<{
   maxActivePhases: number;
   maxWorkingPhases: number;
   maxUiLatencyMs: number;
+  maxReadTeamLatencyMs: number;
   maxMainLatencyMs: number;
   longTasks: unknown;
   /** Renderer の中で貯めたフレーム間隔・長いアニメーションフレーム・可視状態（最後に 1 回読む）。 */
@@ -550,6 +556,7 @@ async function driveTeam(
   let maxActivePhases = 0;
   let maxWorkingPhases = 0;
   let maxUiLatencyMs = 0;
+  let maxReadTeamLatencyMs = 0;
   let leaderIdleSince: number | null = null;
   let stalledSince: number | null = null;
   let rateLimitedSince: number | null = null;
@@ -603,6 +610,7 @@ async function driveTeam(
       ),
     );
     countOutcome('readTeam', team);
+    maxReadTeamLatencyMs = Math.max(maxReadTeamLatencyMs, stages['readTeam']!.ms);
     if (team.status === 'ok') last = team.value;
     const { gitWorktrees, appDirs } = await stage('git', () => ({
       gitWorktrees: gitWorktreeCount(input.workspace),
@@ -741,6 +749,7 @@ async function driveTeam(
     maxActivePhases,
     maxWorkingPhases,
     maxUiLatencyMs,
+    maxReadTeamLatencyMs,
     maxMainLatencyMs,
     longTasks: await page
       .evaluate(() => (window as unknown as { __scLongTasks?: unknown }).__scLongTasks ?? null)
@@ -779,6 +788,39 @@ function summarizeFrames(frames: unknown): unknown {
     maxTimerDriftMs: Math.max(0, ...(recorder.timerDrifts ?? []).map(({ driftMs }) => driftMs)),
     longAnimationFramesOver200ms: recorder.longAnimationFrames?.length ?? 0,
   };
+}
+
+function expectTeamToFinish(
+  result: DriveResult,
+  token: string,
+  expected: Readonly<{ completed: number; failed: number }>,
+): void {
+  expect
+    .soft(result.stoppedReason, 'Team and Leader must finish before the deadline')
+    .toBe('all-terminal-and-leader-idle');
+  const finalCounts = [...result.answer.matchAll(FINAL_LINE(token))].map((match) => ({
+    completed: Number(match[2]),
+    failed: Number(match[3]),
+  }));
+  expect
+    .soft(finalCounts, 'Leader must account for every Worker in one final line')
+    .toEqual([expected]);
+}
+
+function expectTeamToStayResponsive(result: DriveResult): void {
+  // #863 requires timely rendering as well as correct files. Recording a stall must fail the run.
+  expect
+    .soft(result.observeOutcomes.raf, 'animation-frame observations')
+    .toEqual({ timedOut: 0, failed: 0 });
+  expect
+    .soft(result.observeOutcomes.readTeam, 'Team snapshot observations')
+    .toEqual({ timedOut: 0, failed: 0 });
+  expect.soft(result.maxUiLatencyMs, 'maximum animation-frame response').toBeLessThanOrEqual(3000);
+  expect
+    .soft(result.maxReadTeamLatencyMs, 'maximum Team snapshot response')
+    .toBeLessThanOrEqual(3000);
+  const frames = result.frames as { maxFrameGapMs?: number } | null;
+  expect.soft(frames?.maxFrameGapMs, 'maximum recorded rendering gap').toBeLessThanOrEqual(3000);
 }
 
 /** 実行区間（running を観測した最初〜最後）の重なりの最大数。 */
@@ -830,11 +872,13 @@ async function prepareTask(
   page: Page,
   workspace: string,
   projectName: string,
+  workerProviders: 'mixed' | 'codex' = 'mixed',
 ): Promise<{
   taskId: string;
   leaderModel: string;
-  claude: Selection;
+  claude: Selection | null;
   codex: Selection;
+  selectionFor: (provider: 'claude' | 'codex') => Selection;
   teamConcurrency: number | null;
 }> {
   const settings = await page.evaluate(async () => {
@@ -859,13 +903,18 @@ async function prepareTask(
   const leaderModel = await selectModel(page, LEADER);
   await setAccess(page, 'auto');
   const taskId = await page.evaluate(async () => (await window.sprintCoder!.tasks.list())[0]!.id);
-  const claude = await catalogSelection(page, taskId, CLAUDE);
+  const claude = workerProviders === 'mixed' ? await catalogSelection(page, taskId, CLAUDE) : null;
   const codex = await catalogSelection(page, taskId, CODEX);
   const teamConcurrency =
     typeof settings.teamConcurrency === 'object'
       ? settings.teamConcurrency.maxConcurrentExecutions
       : null;
-  return { taskId, leaderModel, claude, codex, teamConcurrency };
+  const selectionFor = (provider: 'claude' | 'codex'): Selection => {
+    const selection = provider === 'claude' ? claude : codex;
+    if (selection === null) throw new Error(`No ${provider} Worker catalog was requested`);
+    return selection;
+  };
+  return { taskId, leaderModel, claude, codex, selectionFor, teamConcurrency };
 }
 
 function summarize(result: DriveResult, assignments: readonly Assignment[]) {
@@ -936,6 +985,7 @@ function summarize(result: DriveResult, assignments: readonly Assignment[]) {
     maxActiveIsolationPhases: result.maxActivePhases,
     maxWorkingIsolationPhases: result.maxWorkingPhases,
     maxUiLatencyMs: result.maxUiLatencyMs,
+    maxReadTeamLatencyMs: result.maxReadTeamLatencyMs,
     maxMainLatencyMs: result.maxMainLatencyMs,
     longTasks: result.longTasks,
     frames: summarizeFrames(result.frames),
@@ -956,7 +1006,7 @@ test.describe('real AI Team scale E2E', () => {
   );
 
   // 1. 32 人（Claude 16 / Codex 16）が別々のファイルを同時に書く。
-  test(`team-scale: ${TEAM_SIZE} workers (half Claude, half Codex) write distinct files concurrently`, async () => {
+  test(`team-scale: ${TEAM_SIZE} workers (${SCALE_WORKERS === 'mixed' ? 'half Claude, half Codex' : 'Codex only'}) write distinct files concurrently`, async () => {
     test.setTimeout(OVERALL_MS + 10 * 60_000);
     expect(TEAM_SIZE % 2, 'TEAM_SIZE must be even').toBe(0);
     const workspace = makeTeamWorkspace('team-scale', TEAM_SIZE);
@@ -968,6 +1018,7 @@ test.describe('real AI Team scale E2E', () => {
       workspace,
       profile,
       leader: LEADER.name,
+      workerProviders: SCALE_WORKERS,
       size: TEAM_SIZE,
       budgetUnlimited: BUDGET_UNLIMITED,
     });
@@ -978,18 +1029,18 @@ test.describe('real AI Team scale E2E', () => {
     try {
       page = await firstWindow(app);
       collectRendererErrors(page, errors);
-      const prepared = await prepareTask(page, workspace, 'RealAI team scale');
+      const prepared = await prepareTask(page, workspace, 'RealAI team scale', SCALE_WORKERS);
       taskId = prepared.taskId;
       const assignments: Assignment[] = Array.from({ length: TEAM_SIZE }, (_, i) => {
         const index = i + 1;
-        const provider = index % 2 === 1 ? 'claude' : 'codex';
+        const provider = SCALE_WORKERS === 'codex' ? 'codex' : index % 2 === 1 ? 'claude' : 'codex';
         const file = `src/worker-${pad(index)}.txt`;
         const content = `SC_FILE_${pad(index)}_${provider}`;
         return {
           index,
           role: `W${pad(index)}-${provider}`,
           provider,
-          selection: provider === 'claude' ? prepared.claude : prepared.codex,
+          selection: prepared.selectionFor(provider),
           objective: `Create the file \`${file}\` with exactly ${ROWS + 1} lines: the first line is \`${content}\`, followed by the ${ROWS} lines \`W${pad(index)} row 01\`, \`W${pad(index)} row 02\`, ... up to \`W${pad(index)} row ${ROWS}\` (two-digit row numbers), every line ending with one newline and nothing else in the file. Do not create, modify or delete any other file.${SLOW_NOTE}`,
           criterion: `${file} has exactly ${ROWS + 1} lines starting with ${content} and ending with W${pad(index)} row ${ROWS}, confirmed by reading it back`,
         };
@@ -1056,8 +1107,16 @@ test.describe('real AI Team scale E2E', () => {
       note('team-scale-page.txt', result.pageText);
       note('team-scale-tracks.json', result.tracks);
       note('team-scale-last.json', result.last);
+      expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_SCALE_DONE', { completed: TEAM_SIZE, failed: 0 });
       expect.soft(summary.hiredWorkers).toBe(TEAM_SIZE);
-      expect.soft(summary.byEngine).toEqual({ claude: TEAM_SIZE / 2, codex: TEAM_SIZE / 2 });
+      expect
+        .soft(summary.byEngine)
+        .toEqual(
+          SCALE_WORKERS === 'codex'
+            ? { codex: TEAM_SIZE }
+            : { claude: TEAM_SIZE / 2, codex: TEAM_SIZE / 2 },
+        );
       expect.soft(summary.filesTrimmedMatch).toBe(TEAM_SIZE);
       expect.soft(unexpectedFiles).toEqual([]);
       expect.soft(String(repo['status']).trim()).toBe('');
@@ -1131,7 +1190,7 @@ test.describe('real AI Team scale E2E', () => {
           index,
           role: `S${index}-${provider}`,
           provider,
-          selection: provider === 'claude' ? prepared.claude : prepared.codex,
+          selection: prepared.selectionFor(provider),
           objective: `Edit the existing file \`shared/index.md\`: replace the single line \`TODO-${index}\` with \`DONE-${index} by ${provider}\`. Change nothing else in that file (other sections are being edited by other workers) and do not touch any other file.`,
           criterion: `shared/index.md contains the line DONE-${index} by ${provider} in Section ${index}, confirmed by reading it back`,
         };
@@ -1187,6 +1246,8 @@ test.describe('real AI Team scale E2E', () => {
       note('team-overlap-page.txt', result.pageText);
       note('team-overlap-tracks.json', result.tracks);
       note('team-overlap-last.json', result.last);
+      expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_OVERLAP_DONE', { completed: 4, failed: 0 });
       expect.soft(summary.hiredWorkers).toBe(4);
       expect.soft(summary.editsPresent).toEqual([1, 2, 3, 4]);
       expect.soft(summary.exactlyExpected).toBe(true);
@@ -1225,7 +1286,7 @@ test.describe('real AI Team scale E2E', () => {
         index: i + 1,
         role: `C${i + 1}-${provider}`,
         provider,
-        selection: provider === 'claude' ? prepared.claude : prepared.codex,
+        selection: prepared.selectionFor(provider),
         objective: `First wait for the go signal: use read_file to read the file \`${GO_MARKER}\` in the workspace root. If it does not exist yet, call team_wait_events once and then try read_file again; keep repeating this until \`${GO_MARKER}\` exists (the test harness creates it within a few minutes, once every worker is ready). Do not edit anything before \`${GO_MARKER}\` exists, and never create, modify or delete \`${GO_MARKER}\` yourself. Then edit the existing file \`shared/index.md\`: replace the single line \`TODO-1\` with \`OWNED-BY-${provider}\`. Change nothing else and do not touch any other file.`,
         criterion: `shared/index.md contains the line OWNED-BY-${provider} in Section 1, confirmed by reading it back`,
       }));
@@ -1311,6 +1372,8 @@ test.describe('real AI Team scale E2E', () => {
       });
       note('team-conflict-tracks.json', result.tracks);
       note('team-conflict-page.txt', result.pageText);
+      expectTeamToStayResponsive(result);
+      expectTeamToFinish(result, 'SC_TEAM_CONFLICT_DONE', { completed: 1, failed: 1 });
       // 同期点に届かなかった（どちらかが先に統合された・同じ baseHead にならなかった）なら、衝突が
       // 起きないのは App のせいとは限らない。判定不能として、理由を出して失敗させる。
       expect(
@@ -1329,12 +1392,6 @@ test.describe('real AI Team scale E2E', () => {
       expect.soft(summary.conflictReports).toHaveLength(1);
       expect.soft(summary.conflictReports[0] ?? '').toContain('shared/index.md');
       expect.soft(summary.conflictReports[0] ?? '').toContain('waiting_resume');
-      // Leader の最終回答は指定の 1 行（completed=1 failed=1）でなければならない。無い・形式違いは失敗。
-      expect(
-        summary.finalLines,
-        `Leader の最終回答に「SC_TEAM_CONFLICT_DONE completed=<n> failed=<n>」の行がちょうど 1 つ必要です: ${JSON.stringify(result.answer.slice(-500))}`,
-      ).toHaveLength(1);
-      expect.soft(summary.finalLines[0]).toEqual({ completed: 1, failed: 1 });
       expect.soft(summary.corrupted).toBe(false);
       expect.soft(repo['cherryPickInProgress']).toBe(false);
       expect.soft(String(repo['status']).trim()).toBe('');

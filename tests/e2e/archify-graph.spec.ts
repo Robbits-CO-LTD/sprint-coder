@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { expect, test, type Page } from '@playwright/test';
 import { mkdtemp, rm, writeFile, rename } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   closeApp,
@@ -11,7 +11,6 @@ import {
   launchApp,
   removeUserDataDir,
   assignCurrentTaskToProjectFolder,
-  REPO_ROOT,
 } from './helpers';
 import { clickWithSidebarVector } from './feature-setup';
 
@@ -124,7 +123,8 @@ async function assertGraphSelectionWithEvidence(
 test('binds an authorized file read and detects changed source bytes after restart', async ({}, testInfo) => {
   const profile = createUserDataDir('graph-source-proposal');
   const workspace = await mkdtemp(
-    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-source-'),
+    // Codex checkouts can live below .codex, which is correctly protected by the app.
+    join(process.platform === 'win32' ? homedir() : tmpdir(), '.sc-graph-source-'),
   );
   await writeFile(
     join(workspace, 'graph-source.ts'),
@@ -650,7 +650,7 @@ for (const starts of [false, true])
     if (realWorkers) test.setTimeout(900_000);
     const profile = createUserDataDir('graph-mission-review');
     const workspace = await mkdtemp(
-      join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-review-'),
+      join(process.platform === 'win32' ? homedir() : tmpdir(), '.sc-graph-review-'),
     );
     await writeFile(
       join(workspace, 'graph-source.ts'),
@@ -853,7 +853,7 @@ for (const starts of [false, true])
 test('resumes one interrupted graph step by hand after a relaunch', async ({}, testInfo) => {
   const profile = createUserDataDir('graph-mission-relaunch');
   const workspace = await mkdtemp(
-    join(process.platform === 'win32' ? REPO_ROOT : tmpdir(), '.sc-graph-relaunch-'),
+    join(process.platform === 'win32' ? homedir() : tmpdir(), '.sc-graph-relaunch-'),
   );
   await writeFile(
     join(workspace, 'graph-source.ts'),
