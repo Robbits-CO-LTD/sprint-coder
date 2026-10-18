@@ -1745,7 +1745,8 @@ if (runsWithElectronAbi)
         () =>
           persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
             .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
-        20_000,
+        // Hiring and running 101 Workers takes about 23 s locally and several times that on CI macOS.
+        90_000,
       );
       await new Promise((resolve) => setTimeout(resolve, 100));
       // 100 recovered assignments start; the one beyond the pace still waits, not fails.
@@ -1754,7 +1755,7 @@ if (runsWithElectronAbi)
       ).toHaveLength(1);
       await after.stopAll(task.id).catch(() => undefined);
       persistence.close();
-    }, 60_000);
+    }, 180_000);
 
     it.each([
       // A CLI Worker denied by policy (issue #841).
