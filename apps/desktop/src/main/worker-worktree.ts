@@ -294,6 +294,44 @@ export class WorkerWorktreeManager {
     return join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
   }
 
+  /**
+   * Like `worktreePathFor`, but a legacy `worktree-<id>` whose directory is gone while Git still
+   * registers it is resolved to the legacy path too, so cleanup unregisters the right record.
+   */
+  private async resolveWorktreePath(repoPath: string, worktreeId: string): Promise<string> {
+    const current = this.worktreePathFor(worktreeId);
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    if (current === legacy) return current;
+    try {
+      const wanted = await pathKeys(legacy);
+      const listed = (
+        await this.runGit(repoPath, ['worktree', 'list', '--porcelain', '-z'], 'remove_failed')
+      ).stdout;
+      for (const line of listed.split(' '))
+        if (line.startsWith('worktree ')) {
+          const keys = await pathKeys(line.slice('worktree '.length));
+          if (keys.some((key) => wanted.includes(key))) return legacy;
+        }
+    } catch {
+      // An unreadable registration list falls back to the deterministic short path.
+    }
+    return current;
+  }
+
+  /** The own path (short or legacy) a recorded `candidatePath` names; the current one otherwise. */
+  private ownFormOf(worktreeId: string, candidatePath: string): string {
+    const candidate = resolve(candidatePath);
+    const same = (a: string): boolean =>
+      this.platform === 'win32'
+        ? resolve(a).toLocaleLowerCase('en-US') === candidate.toLocaleLowerCase('en-US')
+        : resolve(a) === candidate;
+    const legacy = join(this.worktreesRoot, legacyWorktreeDirectoryName(worktreeId));
+    const short = join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId));
+    if (same(legacy)) return legacy;
+    if (same(short)) return short;
+    return this.worktreePathFor(worktreeId);
+  }
+
   /** True only for the deterministic directory (short or legacy name) owned by this app instance. */
   ownsWorktreePath(worktreeId: string, candidatePath: string): boolean {
     validateWorktreeId(worktreeId);
@@ -313,6 +351,18 @@ export class WorkerWorktreeManager {
    * Fails early with a clear message when the worktree path itself is too long, before anything
    * touches it: on POSIX even a `stat` of an over-long path fails with ENAMETOOLONG.
    */
+  private pathTooLongError(error: unknown, worktreePath: string): WorktreeError | null {
+    if ((error as NodeJS.ErrnoException | null)?.code !== 'ENAMETOOLONG') return null;
+    return new WorktreeError(
+      'create_failed',
+      worktreePathTooLongMessage(worktreePath.length, this.limit()),
+    );
+  }
+
+  private limit(): number {
+    return this.platform === 'win32' ? WINDOWS_WORKTREE_PATH_LIMIT : POSIX_WORKTREE_PATH_LIMIT;
+  }
+
   private assertWorktreePathWithinLimit(worktreePath: string): void {
     const reason = checkWorktreePathLengths({
       platform: this.platform,
@@ -372,9 +422,15 @@ export class WorkerWorktreeManager {
   async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     const worktreeId = input.worktreeId ?? input.agentId;
     const worktreePath = this.worktreePathFor(worktreeId);
-    // As in `create`: an over-long path is reported before `stat` can fail on it with ENAMETOOLONG.
-    this.assertWorktreePathWithinLimit(worktreePath);
-    if (!(await pathExists(worktreePath))) return this.create(input);
+    // The creation limit is not applied here: an existing worktree must stay resumable. Only an
+    // ENAMETOOLONG from the file system is turned into the clear length message.
+    let exists: boolean;
+    try {
+      exists = await pathExists(worktreePath);
+    } catch (error) {
+      throw this.pathTooLongError(error, worktreePath) ?? error;
+    }
+    if (!exists) return this.create(input);
     const expectedHead = (
       await this.runGit(input.repoPath, ['rev-parse', input.baseRef ?? 'HEAD'], 'create_failed')
     ).stdout.trim();
@@ -510,7 +566,7 @@ export class WorkerWorktreeManager {
     worktreeId = agentId,
   }: CleanupWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = await this.resolveWorktreePath(repoPath, worktreeId);
     if (!(await pathExists(worktreePath))) {
       const { outcome } = await this.unregisterMissingWorktree(repoPath, worktreePath);
       return { outcome };
@@ -547,7 +603,7 @@ export class WorkerWorktreeManager {
   }: CleanupUnchangedWorktreeInput): Promise<CleanupUnchangedWorktreeResult> {
     validateWorktreeId(agentId);
     validateGitHead(baseHead);
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = await this.resolveWorktreePath(repoPath, worktreeId);
     if (!(await pathExists(worktreePath)))
       return this.unregisterMissingWorktree(repoPath, worktreePath);
     const withoutGit = await this.remainsWithoutGit(worktreePath);
@@ -756,7 +812,7 @@ export class WorkerWorktreeManager {
     for (const [index, input] of inputs.entries()) {
       try {
         const found = await this.locateOwnedWorktree(input);
-        const path = found ?? this.worktreePathFor(input.worktreeId ?? input.agentId);
+        const path = found ?? this.ownFormOf(input.worktreeId ?? input.agentId, input.path);
         const entries = byRepository.get(input.repoPath) ?? [];
         entries.push({ index, path });
         byRepository.set(input.repoPath, entries);
@@ -847,7 +903,7 @@ export class WorkerWorktreeManager {
   }: DiscardWorktreeInput): Promise<CleanupWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = await this.locateOwnedWorktree({ agentId, repoPath, path, worktreeId });
-    const ownPath = worktreePath ?? this.worktreePathFor(worktreeId);
+    const ownPath = worktreePath ?? this.ownFormOf(worktreeId, path);
     if (await this.isLocked(repoPath, ownPath))
       throw new WorktreeError('locked', `Worktree is locked by Git: ${ownPath}`);
     // `reason` classifies why an automatic reclaim kept a worktree (issue #588); a user-confirmed
@@ -872,7 +928,7 @@ export class WorkerWorktreeManager {
       return worktreePath === null
         ? await this.recordKeepsSubmodules(
             input.repoPath,
-            this.worktreePathFor(input.worktreeId ?? input.agentId),
+            this.ownFormOf(input.worktreeId ?? input.agentId, input.path),
           )
         : await this.containsSubmodules(input.repoPath, worktreePath);
     } catch {
@@ -904,7 +960,7 @@ export class WorkerWorktreeManager {
     validateWorktreeId(agentId);
     if (!this.ownsWorktreePath(worktreeId, path))
       throw new WorktreeError('invalid_input', 'Worktree path is not owned by Sprint Coder');
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = this.ownFormOf(worktreeId, path);
     let entry;
     try {
       entry = await lstat(worktreePath);
@@ -935,7 +991,7 @@ export class WorkerWorktreeManager {
     if (worktreePath === null)
       throw new WorktreeError(
         'invalid_input',
-        `worktree does not exist: ${this.worktreePathFor(worktreeId)}`,
+        `worktree does not exist: ${this.ownFormOf(worktreeId, path)}`,
       );
     // Git looks upward for a repository, so a directory that is no longer a worktree would be read
     // as whichever repository contains the worktrees root.
@@ -1477,7 +1533,11 @@ export function checkWorktreePathLengths(
     input.platform === 'win32' ? WINDOWS_WORKTREE_PATH_LIMIT : POSIX_WORKTREE_PATH_LIMIT;
   const longest = Math.max(input.worktreePath.length, input.gitAdminPath.length);
   if (longest <= limit) return null;
-  return `作業用フォルダのパスが長すぎるため、Worker の worktree を作成できません（${longest} 文字、上限の目安 ${limit} 文字）。アプリのデータ保存先やリポジトリを、より浅い場所へ移動してから再実行してください。`;
+  return worktreePathTooLongMessage(longest, limit);
+}
+
+function worktreePathTooLongMessage(length: number, limit: number): string {
+  return `作業用フォルダのパスが長すぎるため、Worker の worktree を作成できません（${length} 文字、上限の目安 ${limit} 文字）。アプリのデータ保存先やリポジトリを、より浅い場所へ移動してから再実行してください。`;
 }
 
 function validateWorktreeId(worktreeId: string): void {

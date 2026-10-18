@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import {
@@ -91,7 +92,7 @@ describe('worker worktree path (issue #855)', () => {
     expect(called).toBe(false);
   });
 
-  it('reports an over-long path from ensureCreated too, before touching it', async () => {
+  it('reports an over-long new path from ensureCreated (via create), before running git', async () => {
     const worktreesRoot = join(await root(), 'e'.repeat(300));
     let called = false;
     const manager = new WorkerWorktreeManager({
@@ -128,4 +129,84 @@ describe('worker worktree path (issue #855)', () => {
     expect(calls.some((args) => args.includes('--git-common-dir'))).toBe(true);
     expect(calls.some((args) => args.includes('add'))).toBe(false);
   });
+
+  it('still resumes an existing legacy worktree whose path exceeds the new-creation limit', async () => {
+    const worktreesRoot = join(await root(), 'l'.repeat(230));
+    const legacy = join(worktreesRoot, `worktree-${UUID}`);
+    await mkdir(legacy, { recursive: true });
+    const head = 'a'.repeat(40);
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => ({
+        stdout: args.includes('rev-parse') ? `${head}\n` : '',
+        stderr: '',
+      }),
+    });
+    await expect(manager.ensureCreated({ agentId: UUID, repoPath: tmpdir() })).resolves.toEqual({
+      path: legacy,
+      baseHead: head,
+    });
+  });
+
+  describe.skipIf(!gitAvailable())('legacy registration whose directory is gone', () => {
+    async function setup(): Promise<{
+      repoPath: string;
+      legacy: string;
+      manager: WorkerWorktreeManager;
+    }> {
+      const base = await root();
+      const repoPath = join(base, 'repo');
+      const worktreesRoot = join(base, 'wts');
+      await mkdir(repoPath);
+      await mkdir(worktreesRoot);
+      const git = (cwd: string, ...args: string[]): string =>
+        execFileSync('git', ['-c', 'user.name=T', '-c', 'user.email=t@e.x', ...args], {
+          cwd,
+          encoding: 'utf8',
+        });
+      git(repoPath, 'init', '-q');
+      await writeFile(join(repoPath, 'a.txt'), 'a\n');
+      git(repoPath, 'add', '.');
+      git(repoPath, 'commit', '-q', '-m', 'init');
+      const legacy = join(worktreesRoot, `worktree-${UUID}`);
+      git(repoPath, 'worktree', 'add', '--detach', legacy, 'HEAD');
+      await rm(legacy, { recursive: true, force: true });
+      expect(git(repoPath, 'worktree', 'list', '--porcelain')).toContain('worktree-');
+      return { repoPath, legacy, manager: new WorkerWorktreeManager({ worktreesRoot }) };
+    }
+    const listed = (repoPath: string): string =>
+      execFileSync('git', ['worktree', 'list', '--porcelain'], { cwd: repoPath, encoding: 'utf8' });
+
+    it('cleanup unregisters the legacy record', async () => {
+      const { repoPath, manager } = await setup();
+      await manager.cleanup({ agentId: UUID, repoPath });
+      expect(listed(repoPath)).not.toContain('worktree-');
+    });
+
+    it('cleanupUnchanged unregisters the legacy record', async () => {
+      const { repoPath, manager } = await setup();
+      const baseHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoPath,
+        encoding: 'utf8',
+      }).trim();
+      await manager.cleanupUnchanged({ agentId: UUID, repoPath, baseHead });
+      expect(listed(repoPath)).not.toContain('worktree-');
+    });
+
+    it('discard unregisters the legacy record using the recorded path', async () => {
+      const { repoPath, legacy, manager } = await setup();
+      await manager.discard({ agentId: UUID, repoPath, path: legacy });
+      expect(listed(repoPath)).not.toContain('worktree-');
+    });
+  });
 });
+
+function gitAvailable(): boolean {
+  try {
+    execFileSync('git', ['--version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
