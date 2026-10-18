@@ -9010,6 +9010,43 @@ bool CheckStrictInterlock() {
       if (!Check(strict_v2(secret, strict).verdict.reason == InterlockReason::kSecureField &&
                      strict_v2(shell, strict).verdict.reason == InterlockReason::kShellSurface,
                  "strict-capture-foreign-chain-refusal-reasons")) return false;
+      // A takeover that already had its reason keeps it, and its effect class: an installer button
+      // (execution trigger) and an action of an observe-only session (the review of #881).
+      ShadowUiaCapture installer = owned();
+      installer.chain[0].control_type = "Button";
+      installer.chain[0].class_name = "Button";
+      installer.chain[0].name = "Install";
+      const ShadowRequestInfo invoke = UiaRequest("invoke");
+      ShadowRequestInfo observe_only = request;
+      observe_only.maximum_mode = "observe_only";
+      ShadowUiaCapture document_capture = owned();
+      const std::pair<ShadowUiaCapture *, const ShadowRequestInfo *> takeovers[] = {
+          {&installer, &invoke}, {&document_capture, &observe_only}};
+      for (const auto &[which, asked] : takeovers) {
+        ShadowUiaCapture mine = *which;
+        for (ShadowUiaNode &node : mine.chain) node.process_id = 4242;
+        ShadowUiaCapture foreign_copy = mine;
+        foreign_copy.chain[0].process_id = 777;
+        const auto answer = [&](const ShadowUiaCapture &capture_of) {
+          return ApplyIncompletePolicy(
+              EvaluateWindowsInterlockFromCapture(capture_of, *asked, false, closed, strict),
+              IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+        };
+        const InterlockEvaluation own = answer(mine);
+        const InterlockEvaluation other = answer(foreign_copy);
+        if (!Check(own.Refuses() && other.Refuses() && other.verdict.outcome == own.verdict.outcome &&
+                       other.verdict.reason == own.verdict.reason &&
+                       other.verdict.effect_class == own.verdict.effect_class,
+                   "strict-capture-foreign-chain-keeps-a-takeover-with-its-reason")) return false;
+      }
+      ShadowUiaCapture installer_foreign = installer;
+      installer_foreign.chain[0].process_id = 777;
+      const InterlockEvaluation installer_answer = ApplyIncompletePolicy(
+          EvaluateWindowsInterlockFromCapture(installer_foreign, invoke, false, closed, strict),
+          IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+      if (!Check(installer_answer.verdict.reason == InterlockReason::kExecutionTrigger &&
+                     installer_answer.verdict.outcome == InterlockOutcome::kTakeover,
+                 "strict-capture-foreign-chain-installer-keeps-the-execution-trigger")) return false;
     }
     WindowsStrictCaptureIdentity no_session_pid = strict;
     no_session_pid.process_id = 0;

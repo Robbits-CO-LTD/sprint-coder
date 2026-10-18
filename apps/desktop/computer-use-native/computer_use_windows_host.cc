@@ -3908,8 +3908,60 @@ BOOL CALLBACK CollectWindowsV2TopLevel(HWND window, LPARAM parameter) {
   return TRUE;
 }
 
+// The bytes the list_targets envelope around its rows takes ({"generation":N,"rulesetVersion":N,
+// "truncated":false,"targets":[ and ]}), with room to spare: the rows get the rest of one frame's
+// metadata. A response over kMaxMetadataBytes could not be framed (EncodeFrame answers nothing), the
+// write would fail and the pipe would close, ending every session of this helper with the list.
+inline constexpr std::size_t kWindowsListTargetsEnvelopeBytes = 256;
+inline constexpr std::size_t kWindowsListTargetsRowBytes =
+    kMaxMetadataBytes - kWindowsListTargetsEnvelopeBytes;
+
+// The rows of one list_targets, bounded by count (kWindowsListTargetsRowLimit) and by bytes (the
+// joined rows, commas included, within the byte limit). A row that does not fit is not added, and
+// no row after it is either: the list is truncated there. A single row larger than the limit (an
+// executable path of tens of kilobytes) is never sent.
+class WindowsV2ListRows {
+public:
+  explicit WindowsV2ListRows(std::size_t byte_limit) : byte_limit_(byte_limit) {}
+
+  void push_back(const std::string &row) {
+    if (Full())
+      return;
+    const std::size_t added = row.size() + (count_ == 0 ? 0 : 1);
+    if (joined_.size() + added > byte_limit_) {
+      truncated_ = true;
+      return;
+    }
+    if (count_ != 0)
+      joined_.push_back(',');
+    joined_ += row;
+    ++count_;
+  }
+  [[nodiscard]] bool Full() const {
+    return truncated_ || count_ >= kWindowsListTargetsRowLimit;
+  }
+  [[nodiscard]] bool Truncated() const { return truncated_; }
+  [[nodiscard]] std::size_t size() const { return count_; }
+  [[nodiscard]] const std::string &Joined() const { return joined_; }
+
+private:
+  std::size_t byte_limit_;
+  std::string joined_;
+  std::size_t count_ = 0;
+  bool truncated_ = false;
+};
+
+std::string WindowsV2ListResponse(std::uint64_t generation, std::uint32_t ruleset_version,
+                                  bool truncated, const WindowsV2ListRows &rows) {
+  return "{\"generation\":" + std::to_string(generation) +
+         ",\"rulesetVersion\":" + std::to_string(ruleset_version) +
+         ",\"truncated\":" + (truncated ? "true" : "false") + ",\"targets\":[" + rows.Joined() +
+         "]}";
+}
+
 // list_targets (ADR v2 section 5.2): every top-level application window, judged per process, at most
-// kWindowsListTargetsRowLimit rows within kWindowsListTargetsBudgetMs.
+// kWindowsListTargetsRowLimit rows and kWindowsListTargetsRowBytes bytes of rows, within
+// kWindowsListTargetsBudgetMs.
 bool ListWindowsTargets(std::string *response, std::string *reason) {
   if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
     (void)response;
@@ -3927,10 +3979,10 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
     const std::uint64_t generation = ++windows_v2_list_generation;
     // One judgement per process; std::nullopt for a process whose measurement ran past the budget.
     std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
-    std::vector<std::string> rows;
+    WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
     bool truncated = false;
     for (const HWND window : windows) {
-      if (rows.size() >= kWindowsListTargetsRowLimit) {
+      if (rows.Full()) {
         truncated = true;
         break;
       }
@@ -4001,15 +4053,14 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
           std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
           "}");
     }
-    *response = "{\"generation\":" + std::to_string(generation) +
-                ",\"rulesetVersion\":" + std::to_string(DenyRulesetVersion(TargetPlatform::kWin32)) +
-                ",\"truncated\":" + (truncated ? "true" : "false") + ",\"targets\":[";
-    for (std::size_t index = 0; index < rows.size(); ++index) {
-      if (index != 0)
-        *response += ',';
-      *response += rows[index];
+    *response = WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
+                                      truncated || rows.Truncated(), rows);
+    // Bounded above; this is the belt: an answer that could not be framed is never handed on.
+    if (response->size() > kMaxMetadataBytes) {
+      response->clear();
+      *reason = "list_targets_unavailable";
+      return false;
     }
-    *response += "]}";
     return true;
   }
 }

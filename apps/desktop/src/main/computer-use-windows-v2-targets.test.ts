@@ -48,7 +48,10 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     // The bounds: 64 rows and a time budget.
     expect(v2Block).toContain('inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;');
     expect(v2Block).toMatch(/kWindowsListTargetsBudgetMs = \d/u);
-    expect(v2Block).toContain('if (rows.size() >= kWindowsListTargetsRowLimit) {');
+    expect(v2Block).toContain('if (rows.Full()) {');
+    // ... and a byte bound: the response always fits one frame (kMaxMetadataBytes).
+    expect(v2Block).toContain('WindowsV2ListRows rows(kWindowsListTargetsRowBytes);');
+    expect(v2Block).toContain('if (response->size() > kMaxMetadataBytes) {');
   });
 
   it('gives a refused row its kind and nothing else', () => {
@@ -208,23 +211,70 @@ void Check(bool ok, const char *name) {
 // Nothing is skipped: the same judgement runs on both kinds of runner. Null when this program is not
 // elevated (the token it has already is that one).
 HANDLE g_child_token = nullptr;
-bool PrepareChildToken() {
-  if (!IsProcessElevated(GetCurrentProcessId())) return true;
-  SAFER_LEVEL_HANDLE level = nullptr;
-  if (!SaferCreateLevel(SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, &level, nullptr))
-    return false;
-  const BOOL computed = SaferComputeTokenFromLevel(level, nullptr, &g_child_token, 0, nullptr);
-  SaferCloseLevel(level);
-  if (!computed) return false;
+// Whether a token says it is elevated (TokenElevation), or nothing when it cannot be read.
+std::optional<bool> TokenIsElevated(HANDLE token) {
+  TOKEN_ELEVATION elevation{};
+  DWORD length = 0;
+  if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &length) != TRUE)
+    return std::nullopt;
+  return elevation.TokenIsElevated != 0;
+}
+
+bool LowerToMediumIntegrity(HANDLE token) {
   PSID medium = nullptr;
   if (!ConvertStringSidToSidW(L"S-1-16-8192", &medium)) return false;
   TOKEN_MANDATORY_LABEL label{};
   label.Label.Attributes = SE_GROUP_INTEGRITY;
   label.Label.Sid = medium;
-  const BOOL lowered = SetTokenInformation(g_child_token, TokenIntegrityLevel, &label,
-                                           sizeof(label) + GetLengthSid(medium));
+  const BOOL lowered =
+      SetTokenInformation(token, TokenIntegrityLevel, &label, sizeof(label) + GetLengthSid(medium));
   LocalFree(medium);
   return lowered == TRUE;
+}
+
+// The candidates, in order: the SAFER normal-user token, then a restricted LUA token of this
+// program's own (Administrators deny-only, privileges removed). The first one the kernel reports as
+// not elevated is used. g_unelevatable is set when none is (a runner whose user's processes are all
+// elevated, as on a machine with UAC turned off): then every target is elevated, and the correct
+// verdict for each of them is W7, which is what the program checks there.
+bool g_unelevatable = false;
+bool PrepareChildToken() {
+  if (!IsProcessElevated(GetCurrentProcessId())) return true;
+  std::vector<std::pair<const char *, HANDLE>> candidates;
+  SAFER_LEVEL_HANDLE level = nullptr;
+  if (SaferCreateLevel(SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, &level, nullptr)) {
+    HANDLE token = nullptr;
+    if (SaferComputeTokenFromLevel(level, nullptr, &token, 0, nullptr)) candidates.push_back({"safer", token});
+    SaferCloseLevel(level);
+  }
+  HANDLE own = nullptr;
+  if (OpenProcessToken(GetCurrentProcess(), TOKEN_ALL_ACCESS, &own)) {
+    BYTE administrators[SECURITY_MAX_SID_SIZE];
+    DWORD size = sizeof(administrators);
+    SID_AND_ATTRIBUTES deny{};
+    HANDLE token = nullptr;
+    if (CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, administrators, &size)) {
+      deny.Sid = administrators;
+      if (CreateRestrictedToken(own, LUA_TOKEN | DISABLE_MAX_PRIVILEGE, 1, &deny, 0, nullptr, 0,
+                                nullptr, &token))
+        candidates.push_back({"restricted-lua", token});
+    }
+    CloseHandle(own);
+  }
+  for (auto &[name, token] : candidates) {
+    const bool lowered = LowerToMediumIntegrity(token);
+    const std::optional<bool> elevated = TokenIsElevated(token);
+    std::cout << "child token " << name << ": medium=" << (lowered ? "yes" : "no") << " elevated="
+              << (elevated.has_value() ? (*elevated ? "yes" : "no") : "-") << "\n";
+    if (g_child_token == nullptr && lowered && elevated == std::optional<bool>(false)) {
+      g_child_token = token;
+      token = nullptr;
+    }
+  }
+  for (auto &candidate : candidates)
+    if (candidate.second != nullptr) CloseHandle(candidate.second);
+  g_unelevatable = g_child_token == nullptr;
+  return true;
 }
 
 PROCESS_INFORMATION Start(std::wstring command, DWORD flags) {
@@ -323,11 +373,42 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
             << " class=" << ClassifyTargetExplained(shell_window.facts).deny_class << "\n";
   Check(!shell.Selectable() && shell.app_identity.empty() && !shell.package.has_value() &&
             WindowsV2VerdictFor(shell_window).kind == TargetVerdictKind::kDenied &&
-            ClassifyTargetExplained(shell_window.facts).deny_class == "W-SYS",
+            ClassifyTargetExplained(shell_window.facts).deny_class == (g_unelevatable ? "W7" : "W-SYS"),
         "v2_cmd_is_refused");
   Check(WindowsV2RefusedRow(TargetVerdictKind::kDenied) == "{\"kind\":\"denied\"}" &&
             WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable) == "{\"kind\":\"unresolvable\"}",
         "v2_refused_rows_are_the_kind_only");
+
+  // The response fits one frame (the review of #881): the rows are bounded in bytes as well as in
+  // count, and a row that does not fit ends the list there (truncated).
+  {
+    WindowsV2ListRows at_limit(9);
+    at_limit.push_back("abcd");
+    at_limit.push_back("abcd");  // 4 + 1 + 4 = 9: exactly the limit
+    WindowsV2ListRows over_limit(8);
+    over_limit.push_back("abcd");
+    over_limit.push_back("abcd");  // 9 > 8: one byte over
+    over_limit.push_back("a");     // after a refusal, nothing more
+    Check(at_limit.size() == 2 && !at_limit.Truncated() && at_limit.Joined() == "abcd,abcd" &&
+              over_limit.size() == 1 && over_limit.Truncated() && over_limit.Joined() == "abcd",
+          "v2_list_rows_stop_at_the_byte_limit");
+    // A row with a very long title or path is never sent, and the list says it is cut.
+    WindowsV2ListRows long_row(kWindowsListTargetsRowBytes);
+    long_row.push_back("{\"kind\":\"upper\",\"title\":\"" + std::string(70 * 1024, 'x') + "\"}");
+    Check(long_row.size() == 0 && long_row.Truncated(), "v2_list_rows_refuse_a_row_over_the_limit");
+    // Many windows of one process with long rows: the list stops below one frame's metadata.
+    WindowsV2ListRows many(kWindowsListTargetsRowBytes);
+    const std::string row = "{\"kind\":\"upper\",\"title\":\"" + std::string(2000, 't') + "\"}";
+    for (int index = 0; index < 64; ++index) many.push_back(row);
+    const std::string response = WindowsV2ListResponse(~std::uint64_t{0}, 0xffffffffu, true, many);
+    Check(many.Truncated() && many.size() > 0 && many.size() < 64 &&
+              response.size() <= kMaxMetadataBytes &&
+              IsBoundedUtf8(std::span<const std::uint8_t>(
+                  reinterpret_cast<const std::uint8_t *>(response.data()), response.size())),
+          "v2_list_response_fits_one_frame");
+    std::cout << "list rows: " << many.size() << " rows of " << row.size() << " bytes, response "
+              << response.size() << " of " << kMaxMetadataBytes << " bytes\n";
+  }
 
   // A general application: the acceptance fixture, copied under %LOCALAPPDATA%\Programs (decision A)
   // by the test. Unsigned, so the upper class C: selectable, with the core's mode observe_only.
@@ -340,17 +421,32 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
   std::cout << "fixture: verdict=" << TargetVerdictKindName(judged.verdict.kind)
             << " mode=" << judged.verdict.maximum_mode
             << " root=" << judged.measured.facts.image_root.value_or("-") << "\n";
-  Check(judged.verdict.kind == TargetVerdictKind::kUpper &&
-            judged.verdict.maximum_mode == "observe_only" &&
-            judged.measured.facts.image_root == std::optional<std::string>("local_programs") &&
-            !judged.package.has_value() &&
-            judged.app_identity == judged.executable.identity.identity_digest &&
-            !judged.process_start.empty(),
-        "v2_fixture_is_the_upper_class_with_the_core_mode");
+  std::cout << "fixture token: elevated=" << (judged.measured.facts.token_elevated.value_or(true) ? "yes" : "no")
+            << " integrity above this program=" << (judged.measured.facts.token_integrity_above_self.value_or(true) ? "yes" : "no")
+            << "\n";
+  if (g_unelevatable) {
+    // This runner cannot start a process of this user that is not elevated (no candidate token was
+    // reported unelevated: a machine with UAC off). Every target is then elevated, and the correct
+    // judgement is W7 for each one, the fixture included: that is what is checked here instead of
+    // the selectable path, which runs where an unelevated process can be started (Windows with UAC).
+    std::cout << "runner cannot start an unelevated process: every target is checked to be W7\n";
+    WindowsTargetFactsMeasurement with_class = judged.measured;
+    Check(judged.verdict.kind == TargetVerdictKind::kDenied &&
+              ClassifyTargetExplained(with_class.facts).deny_class == "W7",
+          "v2_fixture_on_an_elevated_only_runner_is_w7");
+  } else {
+    Check(judged.verdict.kind == TargetVerdictKind::kUpper &&
+              judged.verdict.maximum_mode == "observe_only" &&
+              judged.measured.facts.image_root == std::optional<std::string>("local_programs") &&
+              !judged.package.has_value() &&
+              judged.app_identity == judged.executable.identity.identity_digest &&
+              !judged.process_start.empty(),
+          "v2_fixture_is_the_upper_class_with_the_core_mode");
+    Check(!IsProcessElevated(app.dwProcessId), "v2_fixture_runs_unelevated");
+  }
   Check(!WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key, judged.table_key,
                                       std::nullopt, false),
         "v2_fixture_is_not_in_the_not_web_table");
-  Check(!IsProcessElevated(app.dwProcessId), "v2_fixture_runs_unelevated");
   {
     // Each window is judged with its own class, from the process's facts measured without a window:
     // a console window the process allocated (W4) or a window gone before its class was read
@@ -377,10 +473,14 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
     const auto at = [&](const std::optional<std::string> &which) {
       return WindowsV2VerdictForWindowClass(&process, which).kind;
     };
-    Check(real.has_value() && first == second && second == third &&
-              at(console) == TargetVerdictKind::kDenied && at(gone) == TargetVerdictKind::kUnresolvable &&
-              at(real) == TargetVerdictKind::kUpper &&
-              WindowsV2VerdictForWindowClass(&process, real).maximum_mode == "observe_only" &&
+    const bool expected =
+        g_unelevatable
+            ? at(console) == TargetVerdictKind::kDenied && at(gone) == TargetVerdictKind::kUnresolvable &&
+                  at(real) == TargetVerdictKind::kDenied
+            : at(console) == TargetVerdictKind::kDenied && at(gone) == TargetVerdictKind::kUnresolvable &&
+                  at(real) == TargetVerdictKind::kUpper &&
+                  WindowsV2VerdictForWindowClass(&process, real).maximum_mode == "observe_only";
+    Check(real.has_value() && first == second && second == third && expected &&
               !process.measured.facts.window_class.has_value(),
           "v2_each_window_is_judged_by_its_own_class_in_any_order");
   }
@@ -400,8 +500,13 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
     const std::string identity = judged.app_identity;
     const std::string executable = judged.executable.identity.executable_digest;
     std::string mode;
-    Check(admit(Metadata(version, 7), true, identity, executable, &mode) && mode == "observe_only",
-          "v2_start_admits_the_listed_target_with_the_core_mode");
+    if (g_unelevatable)
+      Check(!admit(Metadata(version, 7), true, identity, executable, &mode) &&
+                !admit(Metadata(version, 6), false, identity, executable, &mode),
+            "v2_start_refuses_an_elevated_target");
+    else
+      Check(admit(Metadata(version, 7), true, identity, executable, &mode) && mode == "observe_only",
+            "v2_start_admits_the_listed_target_with_the_core_mode");
     Check(!admit(Metadata(version + 1, 7), true, identity, executable, &mode) &&
               !admit(Metadata(0, 7), true, identity, executable, &mode) &&
               !admit("{\"targetGeneration\":7}", true, identity, executable, &mode),
@@ -410,8 +515,9 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
               !admit("{\"denyRulesetVersion\":" + std::to_string(version) + "}", true, identity,
                      executable, &mode),
           "v2_start_refuses_a_stale_list");
-    Check(admit(Metadata(version, 6), false, identity, executable, &mode),
-          "v2_resume_does_not_need_the_latest_list");
+    if (!g_unelevatable)
+      Check(admit(Metadata(version, 6), false, identity, executable, &mode),
+            "v2_resume_does_not_need_the_latest_list");
     Check(!admit(Metadata(version, 7), true, std::string(64, 'a'), executable, &mode) &&
               !admit(Metadata(version, 7), true, identity, std::string(64, 'b'), &mode),
           "v2_start_refuses_another_identity");
@@ -435,11 +541,22 @@ const bool elevated = IsProcessElevated(GetCurrentProcessId());
               << " packaged=" << (facts.packaged.has_value() ? (*facts.packaged ? "true" : "false") : "-")
               << " root=" << facts.image_root.value_or("-")
               << " package_identity=" << (note.package.has_value() ? "yes" : "no") << "\n";
-    Check(note.Selectable() && note.verdict.maximum_mode == "full_access_app",
-          "v2_notepad_is_selectable_with_the_core_mode");
     const bool not_web =
         WindowsTargetIsNotWebByTable(facts, note.held_key, note.table_key, std::nullopt, false);
-    if (facts.packaged == std::optional<bool>(true))
+    if (g_unelevatable) {
+      Check(note.verdict.kind == TargetVerdictKind::kDenied &&
+                ClassifyTargetExplained(facts).deny_class == "W7",
+            "v2_notepad_on_an_elevated_only_runner_is_w7");
+      // The table itself does not read the token: System32's own image is still its entry.
+      if (facts.packaged == std::optional<bool>(false))
+        Check(WindowsTargetIsNotWebByTable(facts, note.measured.file_identity.has_value()
+                                                      ? std::optional<WindowsFileKey>(WindowsFileKeyOf(*note.measured.file_identity))
+                                                      : std::nullopt,
+                                           WindowsV2SystemNotepadKey(), std::nullopt, false),
+              "v2_system_notepad_is_in_the_not_web_table");
+    } else if (!(note.Selectable() && note.verdict.maximum_mode == "full_access_app")) {
+      Check(false, "v2_notepad_is_selectable_with_the_core_mode");
+    } else if (facts.packaged == std::optional<bool>(true))
       Check(note.package.has_value() && note.app_identity == note.package->identity_digest && !not_web,
             "v2_packaged_notepad_is_bound_to_its_package_digest");
     else
