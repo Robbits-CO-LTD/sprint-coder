@@ -51,7 +51,8 @@ const ROWS = 60;
 const GO_MARKER = '.sc-go';
 /** Leader に指定する最終行の形式。`<token> completed=<n> failed=<n>`。 */
 const FINAL_LINE = (token: string): RegExp =>
-  new RegExp(`^${token} completed=(\\d+) failed=(\\d+)\\s*$`, 'gm');
+  // One pair of backticks around the line still counts: the prompt shows the format that way.
+  new RegExp(`^(\`?)${token} completed=(\\d+) failed=(\\d+)\\1\\s*$`, 'gm');
 // 各 Worker にファイルを 31 回に分けて書かせ、1 人の作業時間を数分に延ばす。Leader は割り当てを
 // 1 件ずつ（数秒おきに）出すので、30 秒ほどで終わる作業では 30 人が同時に動く瞬間が作れない。
 // 0 を指定すると 1 回で書かせる（割り当ての速さを見るとき）。
@@ -997,8 +998,8 @@ test.describe('real AI Team scale E2E', () => {
         sync,
         finalBaseHeads: (result.last?.executions ?? []).map((e) => e.baseHeads),
         finalLines: [...result.answer.matchAll(FINAL_LINE('SC_TEAM_CONFLICT_DONE'))].map((m) => ({
-          completed: Number(m[1]),
-          failed: Number(m[2]),
+          completed: Number(m[2]),
+          failed: Number(m[3]),
         })),
         // 衝突した側の Worker から Leader へ届いた failed 報告（衝突したファイルと waiting_resume を含む）。
         conflictReports: (result.last?.leaderMessages ?? [])
