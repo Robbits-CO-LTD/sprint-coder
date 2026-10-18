@@ -194,6 +194,19 @@ describe('worker worktree path (issue #855)', () => {
       expect(listed(repoPath)).not.toContain('worktree-');
     });
 
+    it('recreates a preparing record at its recorded legacy path, not at the new short path', async () => {
+      const { repoPath, legacy, manager } = await setup();
+      // The legacy registration is gone too: only the persisted record still names the legacy path.
+      execFileSync('git', ['worktree', 'prune'], { cwd: repoPath });
+      const created = await manager.ensureCreated({
+        agentId: UUID,
+        repoPath,
+        recordedPath: legacy,
+      });
+      expect(created.path).toBe(legacy);
+      expect(listed(repoPath)).toContain(`worktree-${UUID}`);
+    });
+
     it('discard unregisters the legacy record using the recorded path', async () => {
       const { repoPath, legacy, manager } = await setup();
       await manager.discard({ agentId: UUID, repoPath, path: legacy });

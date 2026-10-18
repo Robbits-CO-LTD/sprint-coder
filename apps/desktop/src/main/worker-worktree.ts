@@ -84,6 +84,12 @@ export type CreateWorktreeInput = Readonly<{
   repoPath: string;
   baseRef?: string;
   worktreeId?: string;
+  /**
+   * The worktree path a persisted record already names (issue #855). When it is one of this
+   * instance's own paths for the id (short or legacy name), the worktree is created or resumed there,
+   * so a record written before the short names keeps pointing at the right directory.
+   */
+  recordedPath?: string;
 }>;
 
 export type CreateWorktreeResult = Readonly<{
@@ -316,6 +322,13 @@ export class WorkerWorktreeManager {
     return current;
   }
 
+  /** Where to create or resume a worktree: a recorded own path when given, else the current one. */
+  private targetPathFor(worktreeId: string, recordedPath: string | undefined): string {
+    if (recordedPath !== undefined && this.ownsWorktreePath(worktreeId, recordedPath))
+      return this.ownFormOf(worktreeId, recordedPath);
+    return this.worktreePathFor(worktreeId);
+  }
+
   /** The own path (short or legacy) a recorded `candidatePath` names; the current one otherwise. */
   private ownFormOf(worktreeId: string, candidatePath: string): string {
     const candidate = resolve(candidatePath);
@@ -400,10 +413,13 @@ export class WorkerWorktreeManager {
     repoPath,
     baseRef = 'HEAD',
     worktreeId = agentId,
+    recordedPath,
   }: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     validateWorktreeId(agentId);
-    const worktreePath = this.worktreePathFor(worktreeId);
-    this.assertWorktreePathWithinLimit(worktreePath);
+    const worktreePath = this.targetPathFor(worktreeId, recordedPath);
+    // The creation limit guards the new short names; a recorded legacy path is recreated as before.
+    if (worktreePath === join(this.worktreesRoot, shortWorktreeDirectoryName(worktreeId)))
+      this.assertWorktreePathWithinLimit(worktreePath);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
     await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
@@ -419,7 +435,7 @@ export class WorkerWorktreeManager {
 
   async ensureCreated(input: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     const worktreeId = input.worktreeId ?? input.agentId;
-    const worktreePath = this.worktreePathFor(worktreeId);
+    const worktreePath = this.targetPathFor(worktreeId, input.recordedPath);
     // The creation limit is not applied here: an existing worktree must stay resumable. Only an
     // ENAMETOOLONG from the file system is turned into the clear length message.
     let exists: boolean;
