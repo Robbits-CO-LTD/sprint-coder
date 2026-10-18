@@ -2787,6 +2787,19 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
 }
 // END windows target facts
 
+bool ScreenBoundsPhysicalForWindow(HWND window, RECT *bounds) {
+  return window != nullptr && ClientBoundsPhysical(window, bounds);
+}
+
+std::string RectJson(const RECT &bounds) {
+  return "{\"x\":" + std::to_string(bounds.left) +
+         ",\"y\":" + std::to_string(bounds.top) +
+         ",\"width\":" +
+         std::to_string(bounds.right - bounds.left) +
+         ",\"height\":" +
+         std::to_string(bounds.bottom - bounds.top) + "}";
+}
+
 // BEGIN windows package identity (#500 S5-c-3 PR-4)
 // The v2 identity of a package target. A Store or System signed package under WindowsApps is
 // identified by its family, its publisherId and the image's path inside the package
@@ -2852,19 +2865,6 @@ std::string WindowsPackageIdentityJson(const WindowsExecutableIdentity &identity
          "}";
 }
 // END windows package identity
-
-bool ScreenBoundsPhysicalForWindow(HWND window, RECT *bounds) {
-  return window != nullptr && ClientBoundsPhysical(window, bounds);
-}
-
-std::string RectJson(const RECT &bounds) {
-  return "{\"x\":" + std::to_string(bounds.left) +
-         ",\"y\":" + std::to_string(bounds.top) +
-         ",\"width\":" +
-         std::to_string(bounds.right - bounds.left) +
-         ",\"height\":" +
-         std::to_string(bounds.bottom - bounds.top) + "}";
-}
 
 std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
                                 std::uint32_t pid = 0) {

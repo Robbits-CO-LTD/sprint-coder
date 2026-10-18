@@ -625,7 +625,7 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 
 - **主**: pid ベースの動的コード署名検証。macOS は `SecCodeCopyGuestWithAttributes`（`kSecGuestAttributePid`）で走っているプロセスのコードオブジェクトを取り、`SecCodeCheckValidity` を通す。Windows は実行中イメージ（`QueryFullProcessImageName` で得たイメージを、プロセスがロックしているファイルハンドル経由で）検証し、volume serial + file id で同一性を確認する（既存の `WindowsSessionExecutableMatches`、`computer_use_windows_host.cc:962-979` の枠組みを流用）。
 - **補助**: 従来の静的検証。動的検証が使えない環境では静的にフォールバックし、その旨を `identityKind` に反映する（`verified-signed-static`）。
-- **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。
+- **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。例外は Windows の v2 package だけで、正規化パスの代わりに、package family と win32-package-v2 の grant digest（family・publisherId・package 内の相対パスを束縛する）が保存済み grant と一致することを条件にする（S5-c-3 PR-4。版の入ったディレクトリ名は Store の更新のたびに変わるため）。
 - **cdHash が前回と変わったこと自体は記録する**（`last_cd_hash` / `cd_hash_changed_at`）。再確認は求めないが、設定画面のアプリ詳細に「〈日時〉にアプリが更新されました」と出す。異常に頻繁な変化はユーザーが気づける。
 
 `grant_identity_digest` の定義（**V1 の identityDigest と別物**）:
@@ -642,9 +642,9 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 | 事象                                                             | 挙動                                                                                                                                                                                                          |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 署名者 / Team ID / signing identifier が変わった                 | grant 無効 → 再確認（カード再表示）                                                                                                                                                                           |
-| 実行ファイルパスが変わった（別の場所の同名アプリ）               | grant 無効 → 再確認                                                                                                                                                                                           |
+| 実行ファイルパスが変わった（別の場所の同名アプリ）               | grant 無効 → 再確認。ただし Windows の v2 package で、package family と win32-package-v2 の grant digest が保存済み grant と一致する場合は、パスの変化（版の入った install ディレクトリの変化）では再確認しない（S5-c-3 PR-4） |
 | `unverified` アプリの実行ファイル digest が変わった              | grant 無効 → 再確認                                                                                                                                                                                           |
-| `verified-signed` アプリが更新された（digest / cdHash だけ変化） | **署名者・Team ID・signing identifier・正規化パスがすべて同一で、かつ動的コード署名検証（§6.2.1）が有効な場合に限り**再確認しない（grant 継続）。セッション束縛は新しい digest で取り直し、更新日時を記録する |
+| `verified-signed` アプリが更新された（digest / cdHash だけ変化） | **署名者・Team ID・signing identifier・正規化パスがすべて同一で、かつ動的コード署名検証（§6.2.1）が有効な場合に限り**再確認しない（grant 継続）。Windows の v2 package は、正規化パスの代わりに package family と win32-package-v2 の grant digest の一致を条件にする（S5-c-3 PR-4）。セッション束縛は新しい digest で取り直し、更新日時を記録する |
 | 署名が有効 → 無効に変わった、または動的検証が通らなくなった      | grant 無効 → 再確認（mode も下がる）                                                                                                                                                                          |
 | grant レコードの MAC が一致しない（T14）                         | そのレコードは存在しないものとして扱う（＝次回カードが出る）。設定画面に破棄を記録                                                                                                                            |
 | `denyRulesetVersion` が上がり、そのアプリが禁止クラスになった    | grant **失効**（再確認もしない）。設定画面に「ルール更新により無効化」と表示                                                                                                                                  |
