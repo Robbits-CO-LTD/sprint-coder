@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { FileRevisionRegistry } from './file-revision';
 import { toolValueMatchesSchema } from '@sprint-coder/domain';
 import {
@@ -28,6 +29,25 @@ afterEach(async () => {
 });
 
 const SOURCE = ['function alpha(input) {', '  return input + 1;', '}', ''].join('\n');
+
+// Windows refuses to rename a directory while any process holds a handle inside it without
+// FILE_SHARE_DELETE. An on-access scanner briefly opening the file harness() just wrote does
+// exactly that, from outside this process, and the rename fails with EPERM before the code under
+// test runs. Only those transient sharing errors are retried, and only a bounded number of times;
+// any other failure, or one that persists, still fails the test.
+async function renameDirectoryAway(from: string, to: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transient = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (process.platform !== 'win32' || !transient || attempt >= 10) throw error;
+      await delay(20 * attempt);
+    }
+  }
+}
 
 async function harness(content = SOURCE) {
   const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-patch-tool-'));
@@ -452,7 +472,7 @@ describe('the agent edit tool', () => {
   it('rejects a replacement directory at the sealed root path', async () => {
     const { workspace, deps, patchWriteGuard, patchReadGuard } = await harness();
     const original = `${workspace}-original`;
-    await rename(workspace, original);
+    await renameDirectoryAway(workspace, original);
     roots.push(original);
     await mkdir(join(workspace, 'src'), { recursive: true });
     await writeFile(join(workspace, 'src', 'a.txt'), SOURCE);
