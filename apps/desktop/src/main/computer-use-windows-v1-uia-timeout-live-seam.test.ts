@@ -111,6 +111,42 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(code(uiaSource)).not.toMatch(/CLSID_CUIAutomation(?!8)/u);
   });
 
+  it('warms the client side of UI Automation when the host starts, before it serves any path', () => {
+    // WarmWindowsV1Automation reads the desktop root once (no app behind it), so the cold start of the
+    // host is not charged to the first app the lane contacts (a slow first contact is a timeout).
+    const c = code(host);
+    const warm = c.slice(
+      c.indexOf('void WarmWindowsV1Automation() {'),
+      c.indexOf('bool HasGraphicsCaptureFactory() {'),
+    );
+    expect(warm.replace(/\s+/gu, ' ')).toContain('automation->GetRootElement(&desktop)');
+    // The probe itself does not warm (ProbeMain, the --probe-json handshake, ends at once).
+    const has = c.slice(
+      c.indexOf('bool HasUiAutomation() {'),
+      c.indexOf('void WarmWindowsV1Automation() {'),
+    );
+    expect(has).not.toContain('GetRootElement');
+    const probeMain = c.slice(c.indexOf('int ProbeMain() {'), c.indexOf('int ServeMain('));
+    expect(probeMain).toContain('ProbeBackend();');
+    expect(probeMain).not.toContain('WarmWindowsV1Automation');
+    const backend = c.slice(c.indexOf('BackendProbe ProbeBackend() {'));
+    expect(backend.slice(0, backend.indexOf('\n}\n'))).not.toContain('WarmWindowsV1Automation');
+    // The serving host warms once, after the backend probe and before it connects its pipe.
+    const serve = c.slice(c.indexOf('int ServeMain('));
+    expect(serve.split('WarmWindowsV1Automation();')).toHaveLength(2);
+    expect(serve.indexOf('WarmWindowsV1Automation();')).toBeGreaterThan(
+      serve.indexOf('ProbeBackend();'),
+    );
+    expect(serve.indexOf('WarmWindowsV1Automation();')).toBeLessThan(
+      serve.indexOf('ConnectNamedPipe('),
+    );
+    // The live seam starts as the host does.
+    expect(program).toContain('const BackendProbe probe = ProbeBackend();');
+    expect(program.indexOf('WarmWindowsV1Automation();')).toBeGreaterThan(
+      program.indexOf('const BackendProbe probe = ProbeBackend();'),
+    );
+  });
+
   it('bounds a call with both timeouts, and falls back to the old behaviour visibly', () => {
     const bounded = uiaSource.slice(
       uiaSource.indexOf('inline bool CreateBoundedAutomation('),
@@ -609,6 +645,7 @@ const program = String.raw`
 #include "computer_use_windows_host.cc"
 #undef wmain
 
+#include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -842,8 +879,65 @@ bool BringToForeground(HWND window) {
   return GetForegroundWindow() == window;
 }
 
+// The readiness probe, a process of its own: it contacts the window until two contacts in a row come
+// back quickly (well inside the slow-contact mark of the V1 lane), at most for 20 s. It uses a plain UI
+// Automation of its own, not the V1 lane's: it only waits, it checks nothing of the host.
+int RunReadinessProbe(HWND window) {
+  CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  IUIAutomation *automation = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_CUIAutomation8, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&automation))) ||
+      automation == nullptr)
+    return 2;
+  const auto start = std::chrono::steady_clock::now();
+  int quick = 0;
+  while (Millis(start) < 20'000) {
+    const auto at = std::chrono::steady_clock::now();
+    IUIAutomationElement *element = nullptr;
+    const HRESULT result = automation->ElementFromHandle(window, &element);
+    const bool answered = SUCCEEDED(result) && element != nullptr && Millis(at) < 150;
+    if (element != nullptr) element->Release();
+    quick = answered ? quick + 1 : 0;
+    if (quick == 2) break;
+    Sleep(50);
+  }
+  automation->Release();
+  return quick == 2 ? 0 : 1;
+}
+
+// Runs the readiness probe in the job of the window process and waits for it (bounded).
+bool WaitUntilTheWindowsAnswer(const wchar_t *self, HWND window, HANDLE job) {
+  std::wstring command = std::wstring(L"\"") + self + L"\" probe " + std::to_wstring(reinterpret_cast<std::uintptr_t>(window));
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION probe{};
+  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED, nullptr, nullptr, &startup, &probe))
+    return false;
+  const bool in_job = AssignProcessToJobObject(job, probe.hProcess) != 0;
+  ResumeThread(probe.hThread);
+  DWORD code = 1;
+  if (WaitForSingleObject(probe.hProcess, 25'000) == WAIT_OBJECT_0)
+    GetExitCodeProcess(probe.hProcess, &code);
+  else
+    TerminateProcess(probe.hProcess, 1);
+  CloseHandle(probe.hProcess);
+  CloseHandle(probe.hThread);
+  return in_job && code == 0;
+}
+
 int RunDriver(bool ci) {
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // As the serving host starts (ServeMain): the backend probe, then the warm-up of the client side of UI
+  // Automation (WarmWindowsV1Automation), so that the cold start of this process is not charged to the
+  // first app it contacts.
+  {
+    const auto start = std::chrono::steady_clock::now();
+    const BackendProbe probe = ProbeBackend();
+    std::cout << "host_probe ui_automation=" << probe.ui_automation << " ms=" << Millis(start) << std::endl;
+    SeamCheck(probe.ui_automation, "the_host_has_ui_automation");
+    const auto warm_start = std::chrono::steady_clock::now();
+    WarmWindowsV1Automation();
+    std::cout << "host_warm ms=" << Millis(warm_start) << std::endl;
+  }
   wchar_t self[MAX_PATH]{};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
   SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
@@ -912,8 +1006,23 @@ int RunDriver(bool ci) {
   static_assert(kBound < 1000, "one call and its margin stay inside the 1 s Cancel acknowledgment");
   const long long kHeldUp = 250;               // a call that came back sooner was never held up
 
-  // The very first call of this new process, to a window of another process, reads it: a cold start
-  // is not turned into "unreadable" by the timeout.
+  // The window process is only a moment old, and its windows do not answer UI Automation at once: a
+  // first contact in its first second or two came back after 0.7-1.8 s (no timeout set) while the same
+  // window answered WM_NULL and a raw WM_GETOBJECT at once, and after about 1.5-4 s every contact took
+  // 1-20 ms (measured locally, 2026-10-18). That is the cold start of the TARGET; a slow first contact
+  // with a cold target is a timeout by design (accessibility_timeout, transient) and it is what made the
+  // first-call check below flaky (#820). It is not what that check is about, so a third process (not this
+  // one, whose first call must stay its first) waits until the window answers before the check.
+  {
+    const auto start = std::chrono::steady_clock::now();
+    const bool ready = WaitUntilTheWindowsAnswer(self, ordinary, job);
+    std::cout << "target_ready=" << ready << " ms=" << Millis(start) << std::endl;
+    SeamCheck(ready, "the_window_process_answers_ui_automation");
+  }
+
+  // The very first V1 call of this new process, to a window of another process, reads it: a cold start
+  // (of this process: the serving host warms UI Automation when it starts) is not turned into "unreadable" by
+  // the timeout.
   {
     std::string tree;
     std::size_t nodes = 0;
@@ -1226,6 +1335,8 @@ int RunDriver(bool ci) {
 int main(int argc, char **argv) {
   const std::string mode = argc > 1 ? argv[1] : "";
   if (mode == "window-process") return sc820::RunWindowProcess();
+  if (mode == "probe" && argc > 2)
+    return sc820::RunReadinessProbe(reinterpret_cast<HWND>(static_cast<std::uintptr_t>(std::strtoull(argv[2], nullptr, 10))));
   return sc820::RunDriver(mode == "ci");
 }
 `;
