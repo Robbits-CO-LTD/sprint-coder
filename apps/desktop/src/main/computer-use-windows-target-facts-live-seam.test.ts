@@ -632,6 +632,86 @@ int wmain(int argc, wchar_t **argv) {
     }
   }
 
+  // S5-c-3 PR-5 (#500, the PR-2 review's merge condition): the anchor's premises fixed without a
+  // machine that has them. The fixture's running image is held as MeasureWindowsTargetFacts holds it,
+  // then the held image's volume is substituted (a remote volume, an unknown remoteness, another
+  // file system than the probe's, an unreadable volume) and the facts are read from it as the
+  // production path reads them (MeasureWindowsTargetHeldFacts). Each is W-UR or unresolvable, the
+  // running image never matches, and nothing an admission rests on is given: no verdict is
+  // selectable, and for a remote or unknown volume no signature, subsystem or OriginalFilename is
+  // read at all. The control (the hold as it is) still matches.
+  {
+    ScopedKernelHandle process(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE,
+                                           fixture_process.info.dwProcessId));
+    std::wstring recorded_path;
+    const bool recorded = process.value != nullptr && ReadProcessPath(process.value, &recorded_path);
+    Check(recorded, "anchor_seam_fixture_path_read");
+    const WindowsTargetFactsMeasurement base =
+        Measure(fixture_process.info.dwProcessId, fixture_window, outsider);
+    const auto held_facts = [&](auto change) {
+      WindowsTargetHeldImage held;
+      const bool holds = HoldWindowsTargetRunningImage(
+          process.value, std::optional<std::wstring>(recorded_path), &held);
+      Check(holds, "anchor_seam_fixture_held");
+      change(held);
+      WindowsTargetFactsMeasurement measured = base;
+      MeasureWindowsTargetHeldFacts(held, outsider, &measured);
+      return measured;
+    };
+    const auto selectable = [](const WindowsTargetFactsMeasurement &m) {
+      const TargetVerdictKind kind = ClassifyTarget(m.facts).kind;
+      return kind == TargetVerdictKind::kEligible || kind == TargetVerdictKind::kUpper;
+    };
+    const WindowsTargetFactsMeasurement control = held_facts([](WindowsTargetHeldImage &) {});
+    Check(Is(control.facts.running_image_matches, true) &&
+              control.facts.signature.has_value() && control.facts.pe_subsystem.has_value(),
+          "anchor_seam_control_matches");
+    const WindowsTargetFactsMeasurement remote =
+        held_facts([](WindowsTargetHeldImage &h) { h.remote = true; });
+    const WindowsTargetFactsMeasurement unknown_remote =
+        held_facts([](WindowsTargetHeldImage &h) { h.remote.reset(); });
+    for (const WindowsTargetFactsMeasurement *m : {&remote, &unknown_remote}) {
+      Check(Is(m->facts.running_image_matches, false) && !selectable(*m) &&
+                (ClassOf(m->facts) == "W-UR" || ClassOf(m->facts) == "unresolvable"),
+            "anchor_seam_remote_or_unknown_volume_is_w_ur");
+      Check(!m->facts.signature.has_value() && !m->facts.signer_microsoft_root.has_value() &&
+                !m->facts.pe_subsystem.has_value() && !m->facts.original_filename.has_value() &&
+                m->signer_thumbprint.empty(),
+            "anchor_seam_remote_volume_reads_no_admitting_fact");
+    }
+    const WindowsTargetFactsMeasurement refs = held_facts([](WindowsTargetHeldImage &h) {
+      if (h.volume.has_value()) h.volume->file_system = "refs";
+    });
+    const WindowsTargetFactsMeasurement no_volume =
+        held_facts([](WindowsTargetHeldImage &h) { h.volume.reset(); });
+    for (const WindowsTargetFactsMeasurement *m : {&refs, &no_volume})
+      Check(Is(m->facts.running_image_matches, false) && !selectable(*m) &&
+                ClassOf(m->facts) == "W-UR",
+            "anchor_seam_other_file_system_than_the_probe_is_w_ur");
+    // A probe that failed (no answer), did not follow, or followed on another file system: the same.
+    WindowsTargetRenameProbe no_follow;
+    no_follow.volume = rename_probe->volume;
+    WindowsTargetRenameProbe other_fs;
+    other_fs.follows = true;
+    other_fs.volume = rename_probe->volume;
+    other_fs.volume.file_system = "refs";
+    for (const std::optional<WindowsTargetRenameProbe> &probe :
+         {std::optional<WindowsTargetRenameProbe>(), std::optional<WindowsTargetRenameProbe>(no_follow),
+          std::optional<WindowsTargetRenameProbe>(other_fs)}) {
+      WindowsTargetFactsContext degraded = outsider;
+      degraded.rename_probe = probe;
+      WindowsTargetHeldImage held;
+      Check(HoldWindowsTargetRunningImage(process.value, std::optional<std::wstring>(recorded_path),
+                                          &held),
+            "anchor_seam_fixture_held_for_probe");
+      WindowsTargetFactsMeasurement measured = base;
+      MeasureWindowsTargetHeldFacts(held, degraded, &measured);
+      Check(Is(measured.facts.running_image_matches, false) && !selectable(measured) &&
+                ClassOf(measured.facts) == "W-UR",
+            "anchor_seam_probe_failure_is_w_ur");
+    }
+  }
+
   // The main image is found from kernel-held data, not from the target's module list. For a benign
   // process both name the running image, so the kernel name equals the held path and the module
   // list agrees. The kernel helper is also robust: it says nothing for a handle that is not a
@@ -869,39 +949,83 @@ int wmain(int argc, wchar_t **argv) {
     Check(GetFileAttributesW(dotted.c_str()) == INVALID_FILE_ATTRIBUTES, "trailing_dot_file_removed");
   }
 
-  // A real AnyCPU .NET exe, if one ships with Windows, must not disagree with the kernel header
-  // (the loader converts it PE32 -> PE32+). Copy it to a writable temp path (the anchor renames
-  // during measurement), start it suspended, and read its facts. Skipped when none is found.
+  // S5-c-3 PR-5 (#500, the PR-2 review's merge condition, measured on this runner): IL-only .NET
+  // images, each copied to the scratch directory and started suspended (never run). For each, the
+  // kernel's SECTION_IMAGE_INFORMATION is read directly and set beside the file's PE header: PE32
+  // AnyCPU (AddInUtil, EdmGen, dfsvc), PE32 32BITREQUIRED (Framework InstallUtil) and, as the
+  // control, PE32+ IL-only (Framework64 InstallUtil). PR-2 expected the loader's PE32 -> PE32+
+  // conversion to show in the kernel's record; on Windows 11 26200 it does not: every compared
+  // value equals the header (machine included), and the recorded entry point is the preferred
+  // ImageBase + AddressOfEntryPoint, outside every MEM_IMAGE region. So the running image cannot be
+  // held from the kernel's record and the target is unresolvable: no IL-only image is admitted by
+  // this path, and none is admitted by skipping a header field (the skip was removed). A runner
+  // whose kernel record differs from the header fails here, so the exclusion list is looked at again.
   {
+    struct SectionImageInformation {
+      PVOID transfer_address;
+      ULONG zero_bits;
+      SIZE_T maximum_stack_size;
+      SIZE_T committed_stack_size;
+      ULONG sub_system_type;
+      ULONG sub_system_version;
+      ULONG operating_system_version;
+      USHORT image_characteristics;
+      USHORT dll_characteristics;
+      USHORT machine;
+      UCHAR image_contains_code;
+      UCHAR image_flags;
+      ULONG loader_flags;
+      ULONG image_file_size;
+      ULONG check_sum;
+    };
+    using QueryFn = LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    const auto query = reinterpret_cast<QueryFn>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
     std::vector<wchar_t> windows(32768, L'\0');
     const UINT wn = GetSystemWindowsDirectoryW(windows.data(), static_cast<UINT>(windows.size()));
     const std::wstring root(windows.data(), wn);
-    const std::wstring candidates[] = {
-        root + L"\\Microsoft.NET\\Framework64\\v4.0.30319\\InstallUtil.exe",
-        root + L"\\Microsoft.NET\\Framework64\\v4.0.30319\\RegSvcs.exe",
-        root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\InstallUtil.exe"};
-    std::wstring dotnet;
-    for (const std::wstring &c : candidates)
-      if (dotnet.empty() && GetFileAttributesW(c.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        std::vector<std::uint8_t> head(4096);
-        HANDLE h = CreateFileW(c.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL, nullptr);
-        DWORD got = 0;
-        OVERLAPPED at{};
-        const bool read = h != INVALID_HANDLE_VALUE &&
-                          ReadFile(h, head.data(), static_cast<DWORD>(head.size()), &got, &at) == TRUE;
-        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
-        head.resize(got);
-        const std::optional<PeImageSummary> s = ParsePeImageSummary(head);
-        if (read && s.has_value() && s->clr_bitness_convertible == std::optional<bool>(true))
-          dotnet = c;
+    struct Candidate {
+      std::wstring path;
+      bool any_cpu;
+      const char *name;
+    };
+    const Candidate candidates[] = {
+        {root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\AddInUtil.exe", true, "AddInUtil (PE32 AnyCPU)"},
+        {root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\EdmGen.exe", true, "EdmGen (PE32 AnyCPU)"},
+        {root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\dfsvc.exe", true, "dfsvc (PE32 AnyCPU, GUI)"},
+        {root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\InstallUtil.exe", false,
+         "InstallUtil (PE32 32BITREQUIRED)"},
+        {root + L"\\Microsoft.NET\\Framework64\\v4.0.30319\\InstallUtil.exe", false,
+         "InstallUtil (PE32+ IL-only)"}};
+    int measured_any_cpu = 0;
+    int index = 0;
+    for (const Candidate &candidate : candidates) {
+      ++index;
+      if (GetFileAttributesW(candidate.path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::cout << "il-only " << candidate.name << ": not on this machine; skipped\n";
+        continue;
       }
-    if (!dotnet.empty()) {
-      const std::wstring copy = scratch + L"\\sc500-dotnet.exe";
-      Check(CopyFileW(dotnet.c_str(), copy.c_str(), FALSE) == TRUE, "anycpu_dotnet_copied");
+      const std::wstring copy = scratch + L"\\sc500-ilonly-" + std::to_wstring(index) + L".exe";
+      Check(CopyFileW(candidate.path.c_str(), copy.c_str(), FALSE) == TRUE, "il_only_copied");
+      std::vector<std::uint8_t> head(64 * 1024);
+      DWORD got = 0;
+      LARGE_INTEGER size{};
+      {
+        ScopedKernelHandle file(CreateFileW(copy.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        Check(file.value != INVALID_HANDLE_VALUE &&
+                  ReadFile(file.value, head.data(), static_cast<DWORD>(head.size()), &got, nullptr) ==
+                      TRUE &&
+                  GetFileSizeEx(file.value, &size) == TRUE,
+              "il_only_header_read");
+      }
+      head.resize(got);
+      const std::optional<PeImageSummary> summary = ParsePeImageSummary(head);
+      Check(summary.has_value() &&
+                summary->clr_bitness_convertible == std::optional<bool>(candidate.any_cpu),
+            "il_only_header_says_which_is_any_cpu");
+      if (!summary.has_value()) continue;
       Sleep(100);
-      // Start suspended and never resume: the image is mapped at creation, so its facts are
-      // measurable, while the util never runs (it would otherwise exit at once with no args).
       STARTUPINFOW startup{};
       startup.cb = sizeof(startup);
       PROCESS_INFORMATION info{};
@@ -909,24 +1033,53 @@ int wmain(int argc, wchar_t **argv) {
       const bool started =
           CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
                          CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
-      Check(started, "anycpu_dotnet_started");
-      if (started) AssignProcessToJobObject(g_job, info.hProcess);
-      const WindowsTargetFactsMeasurement net_facts =
-          Measure(info.dwProcessId, nullptr, outsider);
-      Print("anycpu dotnet", net_facts);
-      // When the image resolved, the AnyCPU exe's running image matches despite the PE32->PE32+
-      // conversion (the header cross-check skips the converted fields), so it is not W-UR for that
-      // reason. If the image could not be held in this environment (empty path), skip rather than
-      // fail: the deterministic guarantee is the harness CLR test. The header cross-check never
-      // refused it (that is the regression guarded here).
-      if (net_facts.facts.running_image_matches.has_value())
-        Check(Is(net_facts.facts.running_image_matches, true),
-              "anycpu_dotnet_running_image_matches_despite_bitness_conversion");
-      else
-        std::cout << "anycpu dotnet image not resolvable here; skipped\n";
-    } else {
-      std::cout << "no AnyCPU .NET exe found; skipped\n";
+      Check(started, "il_only_started");
+      if (!started) continue;
+      AssignProcessToJobObject(g_job, info.hProcess);
+      g_started.push_back(info.hProcess);
+      CloseHandle(info.hThread);
+      SectionImageInformation kernel{};
+      ULONG returned = 0;
+      const bool kernel_read = query != nullptr &&
+                               query(info.hProcess, 37, &kernel, sizeof(kernel), &returned) >= 0;
+      MEMORY_BASIC_INFORMATION region{};
+      const bool in_image =
+          kernel_read &&
+          VirtualQueryEx(info.hProcess, kernel.transfer_address, &region, sizeof(region)) ==
+              sizeof(region) &&
+          region.Type == MEM_IMAGE;
+      std::cout << "il-only " << candidate.name << ": file machine=0x" << std::hex
+                << summary->machine << " kernel machine=0x" << kernel.machine << " file entry=0x"
+                << summary->entry_rva << " kernel transfer=0x"
+                << reinterpret_cast<std::uintptr_t>(kernel.transfer_address)
+                << " in MEM_IMAGE=" << (in_image ? "yes" : "no") << " checksum file/kernel=0x"
+                << summary->check_sum << "/0x" << kernel.check_sum << " image size file/kernel=0x"
+                << size.QuadPart << "/0x" << kernel.image_file_size << " stack file/kernel=0x"
+                << summary->stack_reserve.value_or(0) << "/0x" << kernel.maximum_stack_size
+                << " characteristics file/kernel=0x" << summary->image_characteristics.value_or(0)
+                << "/0x" << kernel.image_characteristics << " dll file/kernel=0x"
+                << summary->dll_characteristics.value_or(0) << "/0x" << kernel.dll_characteristics
+                << std::dec << "\n";
+      Check(kernel_read && kernel.machine == summary->machine &&
+                kernel.sub_system_type == summary->subsystem_code &&
+                kernel.check_sum == summary->check_sum &&
+                kernel.image_file_size == static_cast<ULONG>(size.QuadPart) &&
+                summary->image_characteristics ==
+                    std::optional<std::uint16_t>(kernel.image_characteristics) &&
+                summary->dll_characteristics ==
+                    std::optional<std::uint16_t>(kernel.dll_characteristics) &&
+                summary->stack_reserve == std::optional<std::uint64_t>(kernel.maximum_stack_size) &&
+                summary->stack_commit == std::optional<std::uint64_t>(kernel.committed_stack_size),
+            "il_only_kernel_record_equals_the_header");
+      const WindowsTargetFactsMeasurement net_facts = Measure(info.dwProcessId, nullptr, outsider);
+      Print(candidate.name, net_facts);
+      const TargetVerdictKind kind = ClassifyTarget(net_facts.facts).kind;
+      Check(!Is(net_facts.facts.running_image_matches, true) &&
+                kind != TargetVerdictKind::kEligible && kind != TargetVerdictKind::kUpper,
+            "il_only_image_is_not_admitted_through_the_kernel_record");
+      if (candidate.any_cpu) ++measured_any_cpu;
     }
+    std::cout << "il-only AnyCPU images measured: " << measured_any_cpu << "\n";
   }
 
   // A process that does not exist: nothing is measured.
@@ -971,12 +1124,15 @@ const ci = process.env['CI'] !== undefined;
 const onWindows = process.platform === 'win32';
 
 describe('Windows target facts seam source', () => {
-  it('cuts the facts block, and nothing in the host calls it or the core yet', () => {
+  it('cuts the facts block, and only the v2 targets block calls it or the core', () => {
     const block = cut('// BEGIN windows target facts', '// END windows target facts');
     expect(block).toContain('WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(');
-    // Measured, never judged, in the host: the core decides once PR-5 calls this.
-    expect(host).not.toMatch(/ClassifyTarget|TargetFactsAreComplete/u);
-    const outside = host.replace(block, '');
+    // S5-c-3 PR-5: the facts are judged by the core only in the v2 targets block (list_targets and
+    // the v2 start, resume and per-input judgement).
+    const v2 = cut('// BEGIN windows v2 targets', '// END windows v2 targets');
+    expect(block).not.toMatch(/ClassifyTarget|TargetFactsAreComplete/u);
+    expect(host.replace(v2, '')).not.toMatch(/ClassifyTarget|TargetFactsAreComplete/u);
+    const outside = host.replace(block, '').replace(v2, '');
     for (const name of [
       'MeasureWindowsTargetFacts',
       'CurrentWindowsTargetFactsContext',
@@ -1042,8 +1198,10 @@ describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
         '  } else {',
       ].join('\n'),
     );
-    // Nothing outside the block calls it or writes its fields yet (PR-5 wires it).
-    const outside = host.replace(block, '');
+    // Nothing outside the block calls it or writes its fields but the v2 targets block (PR-5).
+    const outside = host
+      .replace(block, '')
+      .replace(cut('// BEGIN windows v2 targets', '// END windows v2 targets'), '');
     for (const name of [
       'WindowsTargetPackageIdentity',
       'WindowsPackageIdentityJson',

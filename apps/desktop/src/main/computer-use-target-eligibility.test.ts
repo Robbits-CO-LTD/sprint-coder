@@ -348,7 +348,7 @@ describe('target facts source contract', () => {
     for (const source of [tsCore, cppCore]) expect(source).not.toMatch(/displayName|display_name/u);
   });
 
-  it('is called from nowhere yet', () => {
+  it('is called only from the Windows host v2 targets block', () => {
     const mainDirectory = __dirname;
     const allowed = new Set([
       'computer-use-target-eligibility.ts',
@@ -376,7 +376,15 @@ describe('target facts source contract', () => {
         name === 'computer_use_deny_ruleset_generated.h'
       )
         continue;
-      const source = readNative(name);
+      // PR-5: the host judges with the core only inside its v2 targets block (list_targets and the
+      // v2 start, resume and per-input judgement).
+      const read = readNative(name);
+      const v2From = read.indexOf('// BEGIN windows v2 targets');
+      const v2To = read.indexOf('// END windows v2 targets');
+      const source =
+        name === 'computer_use_windows_host.cc' && v2From >= 0 && v2To > v2From
+          ? read.slice(0, v2From) + read.slice(v2To)
+          : read;
       expect(source, name).not.toMatch(
         /\bClassifyTarget(?:Explained)?\(|TargetFactsAreComplete\(/u,
       );

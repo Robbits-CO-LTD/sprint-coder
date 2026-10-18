@@ -1045,6 +1045,66 @@ bool CheckPackageIdentity() {
          Check(shaped, "package-identity-well-formed");
 }
 
+// S5-c-3 PR-5: the explicit "not web" table (System32 notepad: signature, canonical path, volume serial
+// and file id). Only the very file is the entry; every other copy or change keeps the takeover.
+bool CheckNotWebTable() {
+  TargetFacts notepad;
+  notepad.platform = TargetPlatform::kWin32;
+  notepad.running_image_matches = true;
+  notepad.signature = std::string("valid");
+  notepad.signer_microsoft_root = true;
+  notepad.packaged = false;
+  notepad.image_root = std::string("windows_directory");
+  notepad.image_relative_path = std::string("System32\\notepad.exe");
+  WindowsFileKey file;
+  file.volume_serial = 0x1234;
+  file.file_id[0] = 7;
+  WindowsFileKey other = file;
+  other.file_id[15] = 1;
+  WindowsFileKey other_volume = file;
+  other_volume.volume_serial = 0x9999;
+  const auto is = [](const TargetFacts &facts, std::optional<WindowsFileKey> held,
+                     std::optional<WindowsFileKey> table, std::optional<WindowsFileKey> recorded,
+                     bool session) {
+    return WindowsTargetIsNotWebByTable(facts, held, table, recorded, session);
+  };
+  const bool entry = is(notepad, file, file, std::nullopt, false) && is(notepad, file, file, file, true);
+  bool refused = true;
+  // A copy anywhere else, a Store Notepad, another leaf, an unverified or non-Microsoft signature, a
+  // mismatched running image, and each fact not measured.
+  const auto without = [&](auto change) {
+    TargetFacts facts = notepad;
+    change(facts);
+    return !is(facts, file, file, file, true);
+  };
+  refused = refused && without([](TargetFacts &f) { f.image_root = std::string("local_programs"); });
+  refused = refused && without([](TargetFacts &f) {
+              f.image_root = std::string("windows_apps");
+              f.packaged = true;
+            });
+  refused = refused && without([](TargetFacts &f) { f.image_relative_path = std::string("SysWOW64\\notepad.exe"); });
+  refused = refused && without([](TargetFacts &f) { f.image_relative_path = std::string("system32\\notepad.exe.exe"); });
+  refused = refused && without([](TargetFacts &f) { f.signature = std::string("unsigned"); });
+  refused = refused && without([](TargetFacts &f) { f.signer_microsoft_root = false; });
+  refused = refused && without([](TargetFacts &f) { f.running_image_matches = false; });
+  refused = refused && without([](TargetFacts &f) { f.running_image_matches.reset(); });
+  refused = refused && without([](TargetFacts &f) { f.signature.reset(); });
+  refused = refused && without([](TargetFacts &f) { f.signer_microsoft_root.reset(); });
+  refused = refused && without([](TargetFacts &f) { f.packaged.reset(); });
+  refused = refused && without([](TargetFacts &f) { f.image_root.reset(); });
+  refused = refused && without([](TargetFacts &f) { f.image_relative_path.reset(); });
+  // Not the file the system path names, the system path not opened, the held file not read, and a file
+  // id or a volume that changed since the session recorded it: none comes back by itself.
+  const bool files = !is(notepad, other, file, std::nullopt, false) &&
+                     !is(notepad, file, std::nullopt, std::nullopt, false) &&
+                     !is(notepad, std::nullopt, file, std::nullopt, false) &&
+                     !is(notepad, other, other, file, true) &&
+                     !is(notepad, other_volume, other_volume, file, true) &&
+                     !is(notepad, file, file, std::nullopt, true);
+  return Check(entry, "not-web-table-system-notepad") && Check(refused, "not-web-table-only-the-entry") &&
+         Check(files, "not-web-table-only-the-very-file");
+}
+
 bool CheckEligibilityMode() {
 #if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)
   // The CI row names the mode it compiled the harness for.
@@ -1067,7 +1127,8 @@ int main() {
       !CheckPeSubsystem() || !CheckPeImageSummary() || !CheckManifestLevel() ||
       !CheckVersionInfo() ||
       !CheckDescendantLeaves() || !CheckDescendants() || !CheckProcessSnapshot() ||
-      !CheckImageUnchanged() || !CheckPeResources() || !CheckPackageIdentity())
+      !CheckImageUnchanged() || !CheckPeResources() || !CheckPackageIdentity() ||
+      !CheckNotWebTable())
     return 1;
   std::cout << "Computer Use target eligibility core: PASS (" << cases.size()
             << " golden vectors)\n";

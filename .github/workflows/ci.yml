@@ -288,11 +288,14 @@ jobs:
 
       # S5-c-3 PR-2 (#500): the host's target facts measured on processes the seam starts itself
       # (cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage, a rename swap).
+      # PR-5 adds the anchor premises (remote, another file system, a failed probe), the IL-only
+      # images, and the v2 judgement of processes the seam starts itself (built as v1 and as v2).
       - name: Run the Windows target facts live seam
         working-directory: apps/desktop
         run: >-
           npx vitest run
           src/main/computer-use-windows-target-facts-live-seam.test.ts
+          src/main/computer-use-windows-v2-targets.test.ts
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}

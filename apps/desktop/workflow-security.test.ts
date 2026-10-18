@@ -331,6 +331,10 @@ describe('workflow security boundaries', () => {
     expect(stepBlock(row, 'Run the Windows target facts live seam')).toContain(
       'src/main/computer-use-windows-target-facts-live-seam.test.ts',
     );
+    // S5-c-3 PR-5: the v2 judgement of processes the seam starts itself, on the same runner.
+    expect(stepBlock(row, 'Run the Windows target facts live seam')).toContain(
+      'src/main/computer-use-windows-v2-targets.test.ts',
+    );
     const required = jobBlock(ci, 'required');
     expect(required).toContain('computer-use-windows-v2-harness,');
     expect(required).toContain('test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = \'success\'');

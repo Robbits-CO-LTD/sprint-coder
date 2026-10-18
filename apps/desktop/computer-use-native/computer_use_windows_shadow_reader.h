@@ -98,6 +98,21 @@ public:
     (void)signature;
     return ShadowReadResult::kAbsent;
   }
+  // S5-c-3 PR-5: the process that provides an element (UIA_ProcessIdPropertyId) and its framework
+  // (UIA_FrameworkIdPropertyId), asked only for the chain of a v2 session's capture. A source that
+  // cannot read them says "absent", which the strict interlock takes over.
+  virtual ShadowReadResult ProcessId(Element element, std::uint32_t *process_id) {
+    (void)element;
+    (void)process_id;
+    return ShadowReadResult::kAbsent;
+  }
+  virtual ShadowReadResult FrameworkId(Element element, std::size_t maximum_bytes,
+                                       std::string *output) {
+    (void)element;
+    (void)maximum_bytes;
+    (void)output;
+    return ShadowReadResult::kAbsent;
+  }
 };
 
 namespace windows_shadow_reader_detail {
@@ -106,6 +121,7 @@ constexpr std::size_t kSearchStringBytes = 4096; // what the v1 search reads
 constexpr std::size_t kSearchMaxDepth = 16;      // the v1 search depth
 constexpr std::size_t kUrlBytes = 2048;
 constexpr std::size_t kPathBytes = 1024;
+constexpr std::size_t kFrameworkBytes = 64;
 
 [[nodiscard]] inline bool IsSemanticKind(std::string_view kind) {
   // "copy" (#785 T15-4w) finds its node exactly as the semantic actions do: by the target id.
@@ -121,6 +137,10 @@ public:
 
   explicit WindowsShadowReader(ShadowUiaSource &source)
       : source_(source), gate_(source.NowNs()) {}
+
+  // S5-c-3 PR-5: also read who provides each element of the chain (its process and framework).
+  // Only a v2 session's interlock asks for it; every other capture makes the calls it made before.
+  void ReadChainIdentity(bool read) { read_chain_identity_ = read; }
 
   // The action was canceled (or stopped being valid) during the capture: the caller records a
   // skipped capture rather than a classification.
@@ -244,6 +264,12 @@ private:
   ShadowReadResult ControlSignature(Element element, std::string *signature) {
     return Gated([&] { return source_.ControlSignature(element, signature); });
   }
+  ShadowReadResult ProcessId(Element element, std::uint32_t *process_id) {
+    return Gated([&] { return source_.ProcessId(element, process_id); });
+  }
+  ShadowReadResult FrameworkId(Element element, std::size_t maximum_bytes, std::string *output) {
+    return Gated([&] { return source_.FrameworkId(element, maximum_bytes, output); });
+  }
   // The capture is over: a cancel, or a deadline passed during the last call, makes it incomplete.
   void Finish() { (void)gate_.Finish(source_.NowNs(), source_.ActionStillValid()); }
   // END gated source calls
@@ -321,6 +347,18 @@ private:
     for (std::size_t depth = 0; depth < kShadowMaxCaptureNodes; ++depth) {
       chain_elements_.push_back(current);
       capture->chain.push_back(ReadNode(current));
+      if (read_chain_identity_) {
+        ShadowUiaNode &read = capture->chain.back();
+        std::uint32_t process_id = 0;
+        // A process id that is absent, failed or zero stays 0 (not read): never "the same process".
+        if (ShadowSettle(ProcessId(current, &process_id), &read.read_failed))
+          read.process_id = process_id;
+        std::string framework;
+        if (ShadowSettle(FrameworkId(current, kFrameworkBytes, &framework), &read.read_failed)) {
+          read.framework_read = true;
+          read.framework_id = std::move(framework);
+        }
+      }
       const ShadowUiaNode &node = capture->chain.back();
       // The value of a Document is the address of the page only in a browser: in an editor it is
       // the text of the document, which is not read.
@@ -479,6 +517,7 @@ private:
   // The node the last Capture located, for ReadTargetValue.
   bool has_target_ = false;
   Element target_element_ = 0;
+  bool read_chain_identity_ = false;
   std::vector<Element> chain_elements_;
 };
 

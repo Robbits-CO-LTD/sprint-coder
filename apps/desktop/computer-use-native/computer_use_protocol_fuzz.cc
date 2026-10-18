@@ -2913,6 +2913,10 @@ struct FakeUiaNode {
   ShadowReadResult children_result = ShadowReadResult::kOk;
   ShadowReadResult url_result = ShadowReadResult::kOk;
   ShadowReadResult item_result = ShadowReadResult::kOk;
+  // Who provides the node (S5-c-3 PR-5): 0 = the source says "absent".
+  std::uint32_t process_id = 0;
+  ShadowReadResult framework_result = ShadowReadResult::kAbsent;
+  std::string framework_id;
 };
 
 class FakeUia final : public ShadowUiaSource {
@@ -3055,6 +3059,22 @@ public:
     ++core_calls;
     if (core_result != ShadowReadResult::kOk) return core_result;
     return ShadowCheckText(core_path, maximum_bytes, output);
+  }
+  long identity_calls = 0;
+  ShadowReadResult ProcessId(Element element, std::uint32_t *process_id) override {
+    Tick();
+    ++identity_calls;
+    const FakeUiaNode &node = nodes[element];
+    if (node.process_id == 0) return ShadowReadResult::kAbsent;
+    *process_id = node.process_id;
+    return ShadowReadResult::kOk;
+  }
+  ShadowReadResult FrameworkId(Element element, std::size_t maximum_bytes, std::string *output) override {
+    Tick();
+    ++identity_calls;
+    const FakeUiaNode &node = nodes[element];
+    if (node.framework_result != ShadowReadResult::kOk) return node.framework_result;
+    return ShadowCheckText(node.framework_id, maximum_bytes, output);
   }
   ShadowReadResult ControlSignature(Element element, std::string *signature) override {
     Tick();
@@ -8655,6 +8675,8 @@ bool CheckStrictInterlock() {
     facts.action = action;
     facts.origin = OriginState::kUnknown;  // a Document of a window that is not a web window
     facts.chain = {NodeFacts{"Document", "", label}, NodeFacts{"Window", "", "Untitled - Notepad"}};
+    // Notepad's text area has its siblings read whole (the capture's neighbors_complete).
+    facts.neighbor_labels_complete = true;
     return facts;
   };
   const std::string cyrillic = u8"\u0423\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c"_u8;  // "Install"
@@ -8774,6 +8796,32 @@ bool CheckStrictInterlock() {
     facts.target_not_web = true;
     rows.push_back({"notepad-document-unreadable", facts, DecisionKind::kTakeover, DecisionReason::kUnclassified,
                     none, unclassified, NativeDocumentException::kNotOriginUnknown});
+  }
+  // S5-c-3 PR-5 (#876 review): a Document confirmed not web, whose core takeover is the unknown origin
+  // only because the core stops there. The rules after the origin are asked again with the origin
+  // settled, and each still keeps the takeover; the record says the exception did not hide them.
+  {
+    EffectFacts observe_only = document("Text editor", ActionKind::kType);
+    observe_only.mode = SessionMode::kObserveOnly;
+    EffectFacts supervised = document("Text editor", ActionKind::kType);
+    supervised.mode = SessionMode::kSupervised;
+    EffectFacts confirm = document("Buy now", ActionKind::kClick);
+    EffectFacts open_unknown = document("report", ActionKind::kDoubleClick);
+    open_unknown.target_is_file_item = true;
+    open_unknown.extension_known = false;
+    EffectFacts captions_unread = document("Text editor", ActionKind::kType);
+    captions_unread.neighbor_labels_complete = false;
+    const std::pair<const char *, EffectFacts *> remaining[] = {
+        {"document-not-web-observe-only", &observe_only},
+        {"document-not-web-supervised", &supervised},
+        {"document-not-web-confirmation-word", &confirm},
+        {"document-not-web-open-with-unknown-extension", &open_unknown},
+        {"document-not-web-captions-not-read", &captions_unread}};
+    for (const auto &[name, facts] : remaining) {
+      facts->target_not_web = true;
+      rows.push_back({name, *facts, DecisionKind::kTakeover, DecisionReason::kOriginUnknown, none, unclassified,
+                      NativeDocumentException::kAnotherRuleRemains});
+    }
   }
   for (const Row &row : rows) {
     const std::string name = std::string("strict-row-") + row.name;
@@ -8899,6 +8947,107 @@ bool CheckStrictInterlock() {
       return false;
     if (!Check(v2.Refuses() && v2.verdict.document_exception == NativeDocumentException::kWebNotRuledOut,
                "strict-capture-notepad-v2-not-confirmed-is-a-takeover")) return false;
+
+    // S5-c-3 PR-5: a v2 session's capture carries who provides each element. Notepad's own chain, its
+    // Document saying a native framework, and the verified identity table saying "not web": let through.
+    const auto owned = [&capture]() {
+      ShadowUiaCapture copy = capture;
+      for (ShadowUiaNode &node : copy.chain) {
+        node.process_id = 4242;
+        node.framework_read = true;
+        node.framework_id = "Win32";
+      }
+      return copy;
+    };
+    WindowsStrictCaptureIdentity strict;
+    strict.asked = true;
+    strict.process_id = 4242;
+    strict.target_not_web = true;
+    const auto strict_v2 = [&](const ShadowUiaCapture &which, const WindowsStrictCaptureIdentity &identity) {
+      return ApplyIncompletePolicy(EvaluateWindowsInterlockFromCapture(which, request, false, closed, identity),
+                                   IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+    };
+    const InterlockEvaluation confirmed = strict_v2(owned(), strict);
+    if (!Check(!confirmed.Refuses() && confirmed.verdict.document_exception == NativeDocumentException::kApplied,
+               "strict-capture-notepad-v2-confirmed-not-web-is-let-through")) return false;
+    // The v1 answer of the same capture does not move.
+    if (!Check(!ApplyIncompletePolicy(EvaluateWindowsInterlockFromCapture(owned(), request, false, closed, strict),
+                                      IncompletePolicyFor(EligibilityBasis::kV1Allowlist)).Refuses(),
+               "strict-capture-identity-leaves-v1-as-it-was")) return false;
+    // An element of the chain another process provides, or one whose process is not known: a takeover.
+    ShadowUiaCapture foreign = owned();
+    foreign.chain[0].process_id = 777;
+    ShadowUiaCapture unknown_process = owned();
+    unknown_process.chain[1].process_id = 0;
+    for (const ShadowUiaCapture *which : {&foreign, &unknown_process}) {
+      const InterlockEvaluation taken = strict_v2(*which, strict);
+      if (!Check(taken.Refuses() && taken.verdict.outcome == InterlockOutcome::kTakeover &&
+                     receipt_row(taken.verdict),
+                 "strict-capture-chain-of-another-or-unknown-process-is-a-takeover")) return false;
+    }
+    WindowsStrictCaptureIdentity no_session_pid = strict;
+    no_session_pid.process_id = 0;
+    if (!Check(strict_v2(owned(), no_session_pid).Refuses(), "strict-capture-without-the-session-pid-is-a-takeover"))
+      return false;
+    // FrameworkId only takes the confirmation away: a web framework anywhere in the chain, or a Document
+    // that does not say its framework (empty, or not read).
+    ShadowUiaCapture web = owned();
+    web.chain[1].framework_id = "Chrome";
+    ShadowUiaCapture unsaid = owned();
+    unsaid.chain[0].framework_id.clear();
+    ShadowUiaCapture unread = owned();
+    unread.chain[0].framework_read = false;
+    for (const ShadowUiaCapture *which : {&web, &unsaid, &unread}) {
+      const InterlockEvaluation taken = strict_v2(*which, strict);
+      if (!Check(taken.Refuses() && taken.verdict.document_exception == NativeDocumentException::kWebNotRuledOut,
+                 "strict-capture-framework-web-or-unsaid-is-a-takeover")) return false;
+    }
+    if (!Check(WindowsCaptureTargetNotWeb(web, true) == std::optional<bool>(false) &&
+                   !WindowsCaptureTargetNotWeb(unsaid, true).has_value() &&
+                   WindowsCaptureTargetNotWeb(owned(), true) == std::optional<bool>(true),
+               "strict-capture-framework-says-web-or-nothing")) return false;
+    // FrameworkId never confirms by itself: without the verified table's value, a native framework is
+    // still a takeover.
+    for (const std::optional<bool> &verified : {std::optional<bool>(), std::optional<bool>(false)}) {
+      WindowsStrictCaptureIdentity unverified = strict;
+      unverified.target_not_web = verified;
+      if (!Check(WindowsCaptureTargetNotWeb(owned(), verified) == verified &&
+                     strict_v2(owned(), unverified).verdict.document_exception ==
+                         NativeDocumentException::kWebNotRuledOut,
+                 "strict-capture-framework-alone-never-confirms")) return false;
+    }
+  }
+
+  // The reader asks who provides each element only for a v2 session's capture.
+  {
+    FakeUia source;
+    const int window = source.Add(-1, "Window", "Untitled - Notepad", "Notepad");
+    const int text = source.Add(window, "Document", "Text editor", "RichEditD2DPT");
+    source.root = window;
+    source.focused = text;
+    for (FakeUiaNode &node : source.nodes) {
+      node.process_id = 4242;
+      node.framework_result = ShadowReadResult::kOk;
+      node.framework_id = "Win32";
+    }
+    WindowsStrictCaptureIdentity strict;
+    const InterlockEvaluation v1_capture =
+        EvaluateWindowsInterlockOnSource(source, "type", "", UiaRequest("type"), closed, strict);
+    if (!Check(source.identity_calls == 0 && !v1_capture.Refuses(), "strict-reader-v1-asks-no-identity")) return false;
+    strict.asked = true;
+    strict.process_id = 4242;
+    strict.target_not_web = true;
+    const InterlockEvaluation v2_capture = ApplyIncompletePolicy(
+        EvaluateWindowsInterlockOnSource(source, "type", "", UiaRequest("type"), closed, strict),
+        IncompletePolicyFor(EligibilityBasis::kV2Denylist));
+    if (!Check(source.identity_calls == 4 && !v2_capture.Refuses() &&
+                   v2_capture.verdict.document_exception == NativeDocumentException::kApplied,
+               "strict-reader-v2-reads-the-chain-identity")) return false;
+    source.nodes[static_cast<std::size_t>(text)].process_id = 0;  // the source cannot say
+    if (!Check(ApplyIncompletePolicy(
+                   EvaluateWindowsInterlockOnSource(source, "type", "", UiaRequest("type"), closed, strict),
+                   IncompletePolicyFor(EligibilityBasis::kV2Denylist)).Refuses(),
+               "strict-reader-v2-unread-process-is-a-takeover")) return false;
   }
 
   std::cout << "Computer Use native strict interlock: PASS (" << rows.size() << " basis x reason rows)\n";

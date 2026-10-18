@@ -118,6 +118,10 @@ enum class NativeDocumentException : std::uint8_t {
   kReadabilityUnconfirmed, // the text was not confirmed readable (false, or not measured)
   kWebNotRuledOut,         // the target was not confirmed to show no web content
   kNotNativeDocument,      // the facts are not those of a Document with an unknown origin
+  // S5-c-3 PR-5: the Document was confirmed not web, but the same facts with the origin settled
+  // still give the core something other than an ordinary action (a refusal, a takeover or an
+  // approval): the exception does not hide what the core would have said after the origin.
+  kAnotherRuleRemains,
 };
 
 struct InterlockVerdict {
@@ -400,10 +404,30 @@ MapEffectToStrictInterlock(const EffectFacts &facts, const EffectDecision &decis
   case DecisionKind::kTakeover: {
     const NativeDocumentException exception =
         NativeDocumentExceptionFor(facts, decision, text_readable);
-    InterlockVerdict verdict = exception == NativeDocumentException::kApplied
-                                   ? InterlockVerdict{}
-                                   : StrictUnclassified(decision.effect_class);
-    verdict.document_exception = exception;
+    if (exception != NativeDocumentException::kApplied) {
+      InterlockVerdict verdict = StrictUnclassified(decision.effect_class);
+      verdict.document_exception = exception;
+      return verdict;
+    }
+    // S5-c-3 PR-5 (#876 review): the core stops at the unknown origin, so the rules it judges after
+    // the origin (observe-only, supervised, confirmation words, an open with an unknown extension,
+    // the captions beside a text field that could not be read: ADR 3.5-5) were never asked. The
+    // facts are judged again with the origin settled, as kOrdinary rather than kNotApplicable so
+    // that the caption rule still applies, and the exception holds only when that gives an
+    // ordinary action. A refusal stays a refusal; a takeover or an approval (Windows has no
+    // approval path) is a takeover.
+    EffectFacts settled = facts;
+    settled.origin = OriginState::kOrdinary;
+    const EffectDecision again = ClassifyEffect(settled, ruleset);
+    if (again.kind == DecisionKind::kOrdinary) {
+      InterlockVerdict verdict;
+      verdict.document_exception = NativeDocumentException::kApplied;
+      return verdict;
+    }
+    InterlockVerdict verdict = again.kind == DecisionKind::kBlocked
+                                   ? StrictBlocked(again)
+                                   : StrictUnclassified(again.effect_class);
+    verdict.document_exception = NativeDocumentException::kAnotherRuleRemains;
     return verdict;
   }
   }

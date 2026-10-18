@@ -14,6 +14,7 @@
 
 #include "computer_use_target_eligibility.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -1041,6 +1042,44 @@ WindowsPackageIdentityFor(const WindowsPackageIdentityFacts &facts) {
   parts.preimage = std::string(kWindowsPackageIdentityDomain) + "\n" + parts.family + "\n" +
                    parts.publisher_id + "\n" + parts.relative_path;
   return parts;
+}
+
+// ---- S5-c-3 PR-5: the explicit table of targets that show no web content (ADR v2 section 3.2.5) ----
+
+// A file as the volume knows it: the volume serial and the 128-bit file id, read from a handle.
+struct WindowsFileKey {
+  std::uint64_t volume_serial = 0;
+  std::array<std::uint8_t, 16> file_id{};
+  friend bool operator==(const WindowsFileKey &, const WindowsFileKey &) = default;
+};
+
+// The one entry of the table so far: System32's notepad.exe. Path relative to %WINDIR%, ASCII lower.
+inline constexpr std::string_view kWindowsNotWebSystemNotepad = "system32\\notepad.exe";
+
+// Whether the measured target is the table's entry, so its Document may be taken as showing no web
+// content. Every condition is "there and true": the running image matched and was verified signed to
+// the Microsoft root, it is not a package, it lies at %WINDIR%\System32\notepad.exe, and the held
+// file is the very file that path names now (`table`, opened from the system directory by the host)
+// and, once a session has recorded one (`session_recorded`), the file it recorded at its start
+// (`recorded`). A copy of notepad.exe anywhere else, a Store Notepad, or a System32 notepad whose
+// volume serial or file id changed since the session started (an OS update) is not the entry: false,
+// and its Document stays a takeover. Nothing the app reports (a title, a framework, a class) is read.
+[[nodiscard]] inline bool WindowsTargetIsNotWebByTable(const TargetFacts &facts,
+                                                       const std::optional<WindowsFileKey> &held,
+                                                       const std::optional<WindowsFileKey> &table,
+                                                       const std::optional<WindowsFileKey> &recorded,
+                                                       bool session_recorded) {
+  if (!(facts.running_image_matches.has_value() && *facts.running_image_matches)) return false;
+  if (!(facts.signature.has_value() && *facts.signature == "valid")) return false;
+  if (!(facts.signer_microsoft_root.has_value() && *facts.signer_microsoft_root)) return false;
+  if (!(facts.packaged.has_value() && !*facts.packaged)) return false;
+  if (!(facts.image_root.has_value() && *facts.image_root == "windows_directory")) return false;
+  if (!facts.image_relative_path.has_value() ||
+      target_eligibility_detail::AsciiLower(*facts.image_relative_path) != kWindowsNotWebSystemNotepad)
+    return false;
+  if (!held.has_value() || !table.has_value() || !(*held == *table)) return false;
+  if (session_recorded && !(recorded.has_value() && *recorded == *held)) return false;
+  return true;
 }
 
 } // namespace sprint_coder::computer_use
