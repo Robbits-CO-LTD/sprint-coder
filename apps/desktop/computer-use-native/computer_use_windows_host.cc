@@ -180,6 +180,10 @@ struct WindowsSession {
   std::string signer_digest;
   std::string policy_language = "unknown";
   std::string maximum_mode = "observe_only";
+  // What the session's eligibility stands on, bound when it is created and never changed by a resume
+  // (S5-c-3 PR-3). It selects the interlocks' policy: kDeferToV1 for v1, kTakeover for v2.
+  sprint_coder::computer_use::EligibilityBasis eligibility_basis =
+      sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
   std::uint64_t cancel_epoch = 0;
   std::uint64_t observation_revision = 0;
   bool has_observation = false;
@@ -3752,6 +3756,24 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     *reason = "session_input_invalid";
     return false;
   }
+  // The eligibility basis the session is bound to (S5-c-3 PR-3). No field is the v1 basis, the only
+  // one this function admits through (the V1 allow-list below). A field that is there must name a
+  // basis; one this build does not admit (v2 in a v1 build) is refused.
+  sprint_coder::computer_use::EligibilityBasis eligibility_basis =
+      sprint_coder::computer_use::EligibilityBasis::kV1Allowlist;
+  if (metadata.find("\"eligibilityBasis\"") != std::string::npos) {
+    std::string basis_name;
+    if (!ReadJsonString(metadata, "eligibilityBasis", &basis_name) ||
+        !sprint_coder::computer_use::ParseEligibilityBasis(basis_name, &eligibility_basis)) {
+      *reason = "session_input_invalid";
+      return false;
+    }
+  }
+  if (!sprint_coder::computer_use::EligibilityBasisAdmitted(
+          eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2)) {
+    *reason = "eligibility_basis_unsupported";
+    return false;
+  }
   ReadJsonString(metadata, "signerDigest", &expected_signer_digest);
   const int path_length = MultiByteToWideChar(
       CP_UTF8, MB_ERR_INVALID_CHARS, canonical_path_utf8.data(),
@@ -3820,6 +3842,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
        active_before_focus->second.app_identity != app_identity ||
        active_before_focus->second.window_identity != actual_window_identity ||
        active_before_focus->second.process_start != process_start ||
+       active_before_focus->second.eligibility_basis != eligibility_basis ||
        !WindowsSessionProcessMatches(active_before_focus->second) ||
        !WindowsSessionExecutableMatches(active_before_focus->second,
                                         process_executable))) {
@@ -3932,6 +3955,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
         existing->second.window_identity != actual_window_identity ||
         existing->second.maximum_mode != maximum_mode ||
         existing->second.process_start != process_start ||
+        existing->second.eligibility_basis != eligibility_basis ||
         !WindowsSessionProcessMatches(existing->second) ||
         existing->second.cancel_epoch != cancel_epoch ||
         effective_cancel_epoch != cancel_epoch ||
@@ -3978,6 +4002,7 @@ bool StartWindowsSession(const Frame &request, const std::string &metadata,
     session.signer_digest = process_executable.identity.signer_digest;
     session.policy_language = process_executable.identity.policy_language;
     session.maximum_mode = maximum_mode;
+    session.eligibility_basis = eligibility_basis;
     session.cancel_epoch = effective_cancel_epoch;
     sessions.emplace(session_key, std::move(session));
   }
@@ -7210,7 +7235,12 @@ WindowsInterlockRefusal(const WindowsSession &session, const std::string &metada
   if (!evaluation.Refuses() &&
       evaluation.no_verdict != sprint_coder::computer_use::InterlockNoVerdict::kNone)
     CountWindowsInterlockNoVerdict(evaluation.no_verdict);
-  return evaluation;
+  // The session's policy (S5-c-3 PR-3): a v1 session keeps the answer as it is (no verdict, V1
+  // decides); a v2 session takes over what the interlocks could not judge and is answered by the strict
+  // map. A basis this build does not admit is answered strictly.
+  return sprint_coder::computer_use::ApplyIncompletePolicy(
+      evaluation, sprint_coder::computer_use::SessionInterlockPolicy(
+                      session.eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2));
 }
 // END sync interlock entry
 

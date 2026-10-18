@@ -28,21 +28,103 @@
 //     Once the rule set trusts the approval, the core says "approval" and the approval decides.
 // Everything else the core says (secure and credential fields, confirmations, supervised actions,
 // sensitive origins, observe-only, unclassified) is not an interlock and is left to v1.
+//
+// S5-c-3 PR-3 (#500, ADR v2 section 3.2.5): the STRICT map (MapEffectToStrictInterlock) is the rule
+// of the second stage, for a session bound to the v2 eligibility basis only. It is a separate
+// function: the map above is unchanged and stays the rule of every v1 session. NOTHING creates a v2
+// session yet (a v1 build refuses the basis, and no v2 Windows native can be built).
 
 #include "computer_use_effect_classifier.h"
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace sprint_coder::computer_use {
 
+// What a session's eligibility stands on, bound when the session is created (ADR v2 section 3.2.5).
+// The names are the contract's computerUseEligibilityModeSchema values.
+enum class EligibilityBasis : std::uint8_t { kV1Allowlist, kV2Denylist };
+// What "no verdict" means for a session: V1 decides (S5-c-2 PR-5), or a person takes over (D13).
+// Shared with the macOS S4-3, which widens eligibility the same way.
+enum class IncompletePolicy : std::uint8_t { kDeferToV1, kTakeover };
+
+[[nodiscard]] constexpr IncompletePolicy IncompletePolicyFor(EligibilityBasis basis) {
+  switch (basis) {
+  case EligibilityBasis::kV1Allowlist:
+    return IncompletePolicy::kDeferToV1;
+  case EligibilityBasis::kV2Denylist:
+    return IncompletePolicy::kTakeover;
+  }
+  // A value outside the enumeration: the strict side.
+  return IncompletePolicy::kTakeover;
+}
+static_assert(IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover,
+              "a v2 session must take over what the interlocks cannot judge");
+static_assert(IncompletePolicyFor(EligibilityBasis::kV1Allowlist) == IncompletePolicy::kDeferToV1,
+              "a v1 session keeps the S5-c-2 PR-5 behaviour");
+
+// The basis a session asks for, by its contract name. Anything else is not a basis.
+[[nodiscard]] inline bool ParseEligibilityBasis(std::string_view name, EligibilityBasis *basis) {
+  if (name == "v1-allowlist") {
+    *basis = EligibilityBasis::kV1Allowlist;
+    return true;
+  }
+  if (name == "v2-denylist") {
+    *basis = EligibilityBasis::kV2Denylist;
+    return true;
+  }
+  return false;
+}
+
+// Whether a native compiled as `build_is_v2` may hold a session of `basis`: a v1 build refuses the
+// v2 basis (it has no deny-list); a v2 build keeps the v1 sessions it admits through the V1 allow-list.
+[[nodiscard]] constexpr bool EligibilityBasisAdmitted(EligibilityBasis basis, bool build_is_v2) {
+  switch (basis) {
+  case EligibilityBasis::kV1Allowlist:
+    return true;
+  case EligibilityBasis::kV2Denylist:
+    return build_is_v2;
+  }
+  return false;
+}
+
+// The policy a session's interlocks run under. A basis the build does not admit gets the strict one
+// (such a session is refused when it is created, so this never relaxes anything).
+[[nodiscard]] constexpr IncompletePolicy SessionInterlockPolicy(EligibilityBasis basis,
+                                                                bool build_is_v2) {
+  return EligibilityBasisAdmitted(basis, build_is_v2) ? IncompletePolicyFor(basis)
+                                                      : IncompletePolicy::kTakeover;
+}
+
 enum class InterlockOutcome : std::uint8_t { kNone, kBlocked, kTakeover };
-enum class InterlockReason : std::uint8_t { kNone, kShellSurface, kExecutionTrigger, kApprovalClosed };
+// kSecureField and kUnclassified come from the strict map only (S5-c-3 PR-3).
+enum class InterlockReason : std::uint8_t {
+  kNone,
+  kShellSurface,
+  kExecutionTrigger,
+  kApprovalClosed,
+  kSecureField,
+  kUnclassified,
+};
+
+// What the strict map did with its one exception (a native Document whose only takeover is the unknown
+// origin, ADR v2 section 3.2.5). Applied and each "not applied" are different values, so the verdict
+// itself says why a Document was or was not let through.
+enum class NativeDocumentException : std::uint8_t {
+  kNotAsked,               // not a takeover of the core, or not the strict map
+  kApplied,                // let through: the only takeover reason was the unknown origin
+  kNotOriginUnknown,       // the core's takeover had another reason
+  kReadabilityUnconfirmed, // the text was not confirmed readable (false, or not measured)
+  kWebNotRuledOut,         // the target was not confirmed to show no web content
+  kNotNativeDocument,      // the facts are not those of a Document with an unknown origin
+};
 
 struct InterlockVerdict {
   InterlockOutcome outcome = InterlockOutcome::kNone;
   InterlockReason reason = InterlockReason::kNone;
   EffectClass effect_class = EffectClass::kOrdinary;
+  NativeDocumentException document_exception = NativeDocumentException::kNotAsked;
 
   [[nodiscard]] bool Refuses() const { return outcome != InterlockOutcome::kNone; }
   // The native reason code of the refusal; empty when there is no verdict.
@@ -55,6 +137,10 @@ struct InterlockVerdict {
     case InterlockReason::kApprovalClosed:
       // Its own code, so that one code means one (decision, result) pair in the receipt table.
       return "native_approval_not_enabled";
+    case InterlockReason::kSecureField:
+      return "native_secure_field_blocked";
+    case InterlockReason::kUnclassified:
+      return "native_target_unclassified";
     case InterlockReason::kNone:
       break;
     }
@@ -70,6 +156,10 @@ struct InterlockVerdict {
       return "execution_trigger_blocked";
     case InterlockReason::kApprovalClosed:
       return "approval_not_enabled";
+    case InterlockReason::kSecureField:
+      return "secure_field_blocked";
+    case InterlockReason::kUnclassified:
+      return "target_unclassified";
     case InterlockReason::kNone:
       break;
     }
@@ -87,13 +177,14 @@ struct InterlockVerdict {
     }
     return {};
   }
-  // The result the receipt carries: a block is rejected, a takeover is paused for a person.
+  // The result the receipt carries: a block is rejected, a takeover is paused for a person. The
+  // unclassified takeover is the receipt table's own row (takeover, rejected), as V1 sends it.
   [[nodiscard]] std::string_view DeniedResult() const {
     switch (outcome) {
     case InterlockOutcome::kBlocked:
       return "rejected";
     case InterlockOutcome::kTakeover:
-      return "paused";
+      return reason == InterlockReason::kUnclassified ? "rejected" : "paused";
     case InterlockOutcome::kNone:
       break;
     }
@@ -211,6 +302,119 @@ MapEffectToInterlock(const EffectFacts &facts, const EffectDecision &decision,
 [[nodiscard]] inline InterlockVerdict InterlockForFacts(const EffectFacts &facts,
                                                         const EffectRuleset &ruleset = EffectRuleset{}) {
   return MapEffectToInterlock(facts, ClassifyEffect(facts, ruleset), ruleset);
+}
+
+// ---- S5-c-3 PR-3: the strict map (v2 sessions only, ADR v2 section 3.2.5) --------------------------
+
+namespace interlock_detail {
+
+// Whether the text the core judges this action on is readable, measured again here and not taken from
+// the core's order of checks: the label rule for an action, the readable scope (and, for a wheel that
+// can change a value, its label) for a scroll. No value when it cannot be measured (facts outside the
+// core's bounds, or no chain); only a value that is there and true lets the exception apply.
+[[nodiscard]] inline std::optional<bool> StrictTextReadable(const EffectFacts &facts) {
+  using namespace effect_detail;
+  if (facts.chain.empty() || !WithinBounds(facts)) return std::nullopt;
+  if (facts.action != ActionKind::kScroll) return TextIsClassifiable(facts);
+  const std::size_t scope = ScrollScope(facts);
+  if (!ScopeIsReadable(facts, scope)) return false;
+  if (ScrollChangesValue(facts, scope)) return ScrollValueTextIsClassifiable(facts, scope);
+  return true;
+}
+
+[[nodiscard]] inline bool ChainHasDocument(const EffectFacts &facts) {
+  for (const NodeFacts &node : facts.chain)
+    if (effect_detail::IsPageRoot(node)) return true;
+  return false;
+}
+
+// The one exception to "a takeover of the core is a takeover": a Document that is confirmed to show no
+// web content, whose only takeover reason is its unknown origin (Notepad's text area). Every condition is
+// "there and true"; anything not measured keeps the takeover.
+[[nodiscard]] inline NativeDocumentException
+NativeDocumentExceptionFor(const EffectFacts &facts, const EffectDecision &decision,
+                           const std::optional<bool> &text_readable) {
+  if (decision.kind != DecisionKind::kTakeover || decision.reason != DecisionReason::kOriginUnknown)
+    return NativeDocumentException::kNotOriginUnknown;
+  if (!(text_readable.has_value() && *text_readable))
+    return NativeDocumentException::kReadabilityUnconfirmed;
+  if (!(facts.target_not_web.has_value() && *facts.target_not_web))
+    return NativeDocumentException::kWebNotRuledOut;
+  if (facts.origin != OriginState::kUnknown || !ChainHasDocument(facts))
+    return NativeDocumentException::kNotNativeDocument;
+  return NativeDocumentException::kApplied;
+}
+
+[[nodiscard]] inline InterlockVerdict StrictUnclassified(EffectClass effect_class) {
+  return Refusal(InterlockOutcome::kTakeover, InterlockReason::kUnclassified, effect_class);
+}
+
+// Every refusal of the core is a refusal here, whatever its reason. The switch names every reason and
+// has no default, so a reason added to the core fails the build (-Werror=switch, /we4062) until it is
+// placed; a value outside the enumeration falls out of the switch and is refused.
+[[nodiscard]] inline InterlockVerdict StrictBlocked(const EffectDecision &decision) {
+  switch (decision.reason) {
+  case DecisionReason::kSecure:
+  case DecisionReason::kCredential:
+    return Refusal(InterlockOutcome::kBlocked, InterlockReason::kSecureField, decision.effect_class);
+  case DecisionReason::kSurface:
+    return Refusal(InterlockOutcome::kBlocked, InterlockReason::kShellSurface, decision.effect_class);
+  case DecisionReason::kExecutionTrigger:
+    return Refusal(InterlockOutcome::kTakeover, InterlockReason::kExecutionTrigger,
+                   decision.effect_class);
+  case DecisionReason::kApprovalNotEnabled:
+    return Refusal(InterlockOutcome::kBlocked, InterlockReason::kApprovalClosed, decision.effect_class);
+  case DecisionReason::kNone:
+  case DecisionReason::kUnclassified:
+  case DecisionReason::kSensitiveOrigin:
+  case DecisionReason::kObserveOnly:
+  case DecisionReason::kOriginUnknown:
+    break;
+  }
+  return StrictUnclassified(decision.effect_class);
+}
+
+} // namespace interlock_detail
+
+// The strict map: what a v2 session refuses for the core's decision. Reading is never refused. Incomplete
+// facts are a takeover. A refusal of the map above stays that refusal (same codes). Then every kind of
+// decision is placed: ordinary and an approval are no verdict (the approval path, as before), a refusal
+// is a refusal whatever its reason, a takeover is a takeover except the native Document above. The
+// switch names every kind and has no default; a kind outside the enumeration is a takeover.
+// `text_readable` is StrictTextReadable(facts) on the production path.
+[[nodiscard]] inline InterlockVerdict
+MapEffectToStrictInterlock(const EffectFacts &facts, const EffectDecision &decision,
+                           const std::optional<bool> &text_readable,
+                           const EffectRuleset &ruleset = EffectRuleset{}) {
+  using namespace interlock_detail;
+  if (facts.action == ActionKind::kObserve) return {};
+  if (!FactsAreComplete(facts)) return StrictUnclassified(EffectClass::kUnclassified);
+  const InterlockVerdict mapped = MapEffectToInterlock(facts, decision, ruleset);
+  if (mapped.Refuses()) return mapped;
+  switch (decision.kind) {
+  case DecisionKind::kOrdinary:
+  case DecisionKind::kApproval:
+    return {};
+  case DecisionKind::kBlocked:
+    return StrictBlocked(decision);
+  case DecisionKind::kTakeover: {
+    const NativeDocumentException exception =
+        NativeDocumentExceptionFor(facts, decision, text_readable);
+    InterlockVerdict verdict = exception == NativeDocumentException::kApplied
+                                   ? InterlockVerdict{}
+                                   : StrictUnclassified(decision.effect_class);
+    verdict.document_exception = exception;
+    return verdict;
+  }
+  }
+  return StrictUnclassified(decision.effect_class);
+}
+
+// The core's decision for `facts`, then the strict map, with the readability measured from the facts.
+[[nodiscard]] inline InterlockVerdict
+StrictInterlockForFacts(const EffectFacts &facts, const EffectRuleset &ruleset = EffectRuleset{}) {
+  return MapEffectToStrictInterlock(facts, ClassifyEffect(facts, ruleset),
+                                    interlock_detail::StrictTextReadable(facts), ruleset);
 }
 
 } // namespace sprint_coder::computer_use

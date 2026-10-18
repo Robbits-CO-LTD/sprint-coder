@@ -52,9 +52,16 @@ describe('Computer Use effect classifier core (classifier v2, C1)', () => {
   it('is portable: standard headers only, nothing that reads the process', () => {
     const includes = [...header.matchAll(/^#include <([^>]+)>/gmu)].map((entry) => entry[1]);
     for (const include of includes)
-      expect(['array', 'cstddef', 'cstdint', 'span', 'string', 'string_view', 'vector']).toContain(
-        include,
-      );
+      expect([
+        'array',
+        'cstddef',
+        'cstdint',
+        'optional',
+        'span',
+        'string',
+        'string_view',
+        'vector',
+      ]).toContain(include);
     expect(header).toContain('#include "computer_use_native_approval_ticket.h"');
     expect(header).not.toMatch(/getenv|environ|argv|napi|<chrono>|<random>|#import|CoreGraphics/u);
   });

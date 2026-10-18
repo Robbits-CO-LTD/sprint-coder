@@ -32,6 +32,7 @@
           "-Wall",
           "-Wextra",
           "-Werror=return-type",
+          "-Werror=switch",
           "-fstack-protector-strong",
           "-D_FORTIFY_SOURCE=2"
         ]

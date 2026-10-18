@@ -32,12 +32,48 @@ enum class InterlockNoVerdict : std::uint8_t {
 struct InterlockEvaluation {
   InterlockVerdict verdict;
   InterlockNoVerdict no_verdict = InterlockNoVerdict::kNone;
+  // What the strict map (S5-c-3 PR-3) said for the same facts, for a session whose policy is
+  // kTakeover; only ApplyIncompletePolicy reads it. Until the map has been asked it is a takeover, so
+  // an evaluation that never reached the map can never be read as "nothing to refuse".
+  InterlockVerdict strict_verdict = interlock_detail::StrictUnclassified(EffectClass::kUnclassified);
+  // Set by ApplyIncompletePolicy when a no verdict became a takeover: the reason it had.
+  InterlockNoVerdict taken_over_from = InterlockNoVerdict::kNone;
 
   // Only a complete, positive match refuses.
   [[nodiscard]] bool Refuses() const {
     return no_verdict == InterlockNoVerdict::kNone && verdict.Refuses();
   }
 };
+
+// The evaluation as a session of `policy` reads it (ADR v2 section 3.2.5). kDeferToV1 leaves it as it is
+// (S5-c-2 PR-5: no verdict, V1 decides). kTakeover answers with the strict map, and turns a budget that
+// ran out and incomplete facts into a takeover; a cancel stays no verdict (a person or Stop ended the
+// action, there is nothing to take over). Both switches name every value and have no default; a value
+// outside an enumeration is a takeover.
+[[nodiscard]] inline InterlockEvaluation ApplyIncompletePolicy(const InterlockEvaluation &evaluation,
+                                                               IncompletePolicy policy) {
+  switch (policy) {
+  case IncompletePolicy::kDeferToV1:
+    return evaluation;
+  case IncompletePolicy::kTakeover:
+    break;
+  }
+  InterlockEvaluation result = evaluation;
+  switch (evaluation.no_verdict) {
+  case InterlockNoVerdict::kNone:
+    result.verdict = evaluation.strict_verdict;
+    return result;
+  case InterlockNoVerdict::kCanceled:
+    return result;
+  case InterlockNoVerdict::kBudget:
+  case InterlockNoVerdict::kIncomplete:
+    break;
+  }
+  result.verdict = interlock_detail::StrictUnclassified(EffectClass::kUnclassified);
+  result.taken_over_from = evaluation.no_verdict;
+  result.no_verdict = InterlockNoVerdict::kNone;
+  return result;
+}
 
 // `stopped_by_cancel`: the capture stopped because the action was no longer valid (the platform
 // reader's cancellation flag). The capture's own `budget_exhausted` says the budget ran out. Both
@@ -60,6 +96,7 @@ EvaluateInterlockFromCapture(const ShadowAxCapture &capture, const ShadowRequest
     return result;
   }
   result.verdict = InterlockForFacts(built.facts, ruleset);
+  result.strict_verdict = StrictInterlockForFacts(built.facts, ruleset);
   return result;
 }
 

@@ -51,6 +51,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -144,6 +145,10 @@ struct EffectFacts {
   // element). At most kEffectMaxNeighborLabels, each at most kEffectMaxLabelBytes.
   std::vector<std::string> neighbor_labels;
   bool neighbor_labels_complete = false;
+  // The target is confirmed to show no web content (S5-c-3 PR-3, ADR v2 section 3.2.5): only from a
+  // verified identity on an explicit list, never from a title or a framework the app reports. The core
+  // never reads it; the strict interlock map does, and only a value that is there and true counts.
+  std::optional<bool> target_not_web;
 };
 
 enum class EffectClass : std::uint8_t {
@@ -172,6 +177,9 @@ enum class DecisionReason : std::uint8_t {
   kSensitiveOrigin,
   kObserveOnly,
   kApprovalNotEnabled,
+  // A takeover for an origin that could not be read (a browser, or a native Document: S5-c-3 PR-3).
+  // Text the lexicon cannot read stays kUnclassified, so the two are told apart.
+  kOriginUnknown,
 };
 
 struct EffectDecision {
@@ -974,7 +982,8 @@ enum class MatchMode : std::uint8_t { kBounded, kPrefix, kSubstring };
 
   // A browser that cannot show where it is, or shows a sensitive place, is a person's. A text
   // field whose neighbouring captions could not be read is, too (ADR 3.5-5).
-  if (facts.origin == OriginState::kUnknown) return Takeover();
+  if (facts.origin == OriginState::kUnknown)
+    return Make(EffectClass::kUnclassified, DecisionKind::kTakeover, DecisionReason::kOriginUnknown);
   if (facts.origin == OriginState::kSensitive)
     return Make(EffectClass::kSurface, DecisionKind::kTakeover, DecisionReason::kSensitiveOrigin);
   if (reads_neighbors && facts.origin != OriginState::kNotApplicable &&

@@ -16,7 +16,12 @@ const harness = read('computer_use_protocol_fuzz.cc');
 describe('interlock map (classifier v2, S4-1-0)', () => {
   it('is portable: standard headers and the classifier only, no platform conditional, no approval vocabulary', () => {
     expect(header).toContain('#pragma once');
-    const allowed = new Set(['"computer_use_effect_classifier.h"', '<cstdint>', '<string_view>']);
+    const allowed = new Set([
+      '"computer_use_effect_classifier.h"',
+      '<cstdint>',
+      '<optional>',
+      '<string_view>',
+    ]);
     for (const match of header.matchAll(/^\s*#\s*include\s+(\S+)/gmu))
       expect(allowed.has(match[1]!), match[1]).toBe(true);
     expect(header).not.toMatch(/#\s*if(n?def)?\s+.*(_WIN32|__APPLE__|__linux__|_MSC_VER)/u);
@@ -117,5 +122,74 @@ describe('interlock map (classifier v2, S4-1-0)', () => {
     expect(harness).toContain('#include "computer_use_native_interlock.h"');
     expect(harness).toContain('CheckNativeInterlockMap()');
     expect(harness).toContain('Computer Use native interlock map: PASS');
+  });
+});
+
+// S5-c-3 PR-3 (#500, ADR v2 section 3.2.5): the strict map of v2 sessions and the session's basis.
+// The rows (basis x reason, Notepad's Document, the CVV field) are in the harness; what is tied here
+// is the shape that keeps unknown values on the refusing side and the build flags that make a new
+// enumerator a compile error.
+describe('strict interlock of v2 sessions (S5-c-3 PR-3)', () => {
+  const capture = read('computer_use_native_interlock_capture.h');
+  const host = read('computer_use_windows_host.cc');
+  const repositoryRoot = join(__dirname, '../../../..');
+  const strict = header.slice(header.indexOf('// ---- S5-c-3 PR-3: the strict map'));
+  const code = (text: string): string => text.replace(/\/\/.*$/gmu, '');
+
+  it('fixes the v2 basis to the takeover policy at compile time', () => {
+    expect(header).toContain(
+      'static_assert(IncompletePolicyFor(EligibilityBasis::kV2Denylist) == IncompletePolicy::kTakeover,',
+    );
+    expect(header).toContain(
+      'enum class IncompletePolicy : std::uint8_t { kDeferToV1, kTakeover };',
+    );
+  });
+
+  it('places every reason and kind in a switch without a default, and refuses after it', () => {
+    expect(strict.length).toBeGreaterThan(500);
+    expect(code(strict)).not.toMatch(/\bdefault\s*:/u);
+    expect(code(capture.slice(capture.indexOf('ApplyIncompletePolicy')))).not.toMatch(
+      /\bdefault\s*:/u,
+    );
+    expect(code(strict)).toContain('switch (decision.reason) {');
+    expect(code(strict)).toContain('switch (decision.kind) {');
+    expect(code(strict)).toContain('return StrictUnclassified(decision.effect_class);\n}');
+  });
+
+  it('treats only a value that is there and true as true', () => {
+    for (const text of [header, capture])
+      expect(code(text)).not.toMatch(/value_or\s*\(\s*true|!=\s*false|==\s*false\s*\)/u);
+    expect(code(strict)).toContain('if (!(text_readable.has_value() && *text_readable))');
+    expect(code(strict)).toContain(
+      'if (!(facts.target_not_web.has_value() && *facts.target_not_web))',
+    );
+  });
+
+  it('binds the basis to the Windows session and applies its policy on both interlock calls', () => {
+    expect(host).toContain(
+      'if (!sprint_coder::computer_use::EligibilityBasisAdmitted(\n          eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2)) {',
+    );
+    expect(host).toContain('*reason = "eligibility_basis_unsupported";');
+    expect(host).toContain('session.eligibility_basis = eligibility_basis;');
+    expect(host.match(/eligibility_basis != eligibility_basis/gu)).toHaveLength(2);
+    expect(host).toContain('return sprint_coder::computer_use::ApplyIncompletePolicy(');
+    expect(host).toContain(
+      'session.eligibility_basis, sprint_coder::computer_use::kNativeEligibilityIsV2)',
+    );
+  });
+
+  it('makes an unhandled enumerator a build error where the native and the harnesses are built', () => {
+    const build = readFileSync(join(repositoryRoot, 'build-computer-use-native.mjs'), 'utf8');
+    const gyp = read('binding.gyp');
+    const ci = readFileSync(join(repositoryRoot, '.github/workflows/ci.yml'), 'utf8');
+    expect(build).toContain("'/we4062',");
+    expect(gyp).toContain('"-Werror=switch"');
+    expect(ci.match(/\/W4 \/GS \/sdl \/utf-8 \/we4062 /gu)).toHaveLength(2);
+    expect(ci.match(/-fno-omit-frame-pointer[^\n]*-Werror=switch \\/gu)).toHaveLength(2);
+  });
+
+  it('is exercised by the harness, which prints its line', () => {
+    expect(harness).toContain('if (!CheckStrictInterlock()) return 1;');
+    expect(harness).toContain('Computer Use native strict interlock: PASS');
   });
 });

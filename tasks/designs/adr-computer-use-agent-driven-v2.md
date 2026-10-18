@@ -7,6 +7,7 @@
 
 ## 改訂履歴
 
+- 2026-10-18 S5-c-3 PR-3（厳格 interlock）を反映した。§3.2.5 に PR-3 で実装した範囲と後続に残すものを書き、対応表の `default` 分岐を「`default` を置かずに列挙子をすべて並べ、`switch` を抜けた値を拒否する」に改めた（未処理の列挙子は `-Werror=switch` と `/we4062` でビルドエラーにする）。§10 の判断 K を PR-2（#868）の結論（`WTD_REVOKE_NONE` のまま）とその 4 つの理由に書き直し、PR-2 で残ったリスク（anchor の前提、ヘッダ照合が補助であること、process herpaderping 型の書き換え、系譜で追えない子孫など）を残るリスクの 2 と 9 に足した。
 - 2026-10-18 S5-c-3「Windows の適格性の拡大」の設計を反映した（#500 の PR-0。ドキュメントだけで、コードと本番の挙動は変えない）。主な変更は 6 点。
   1. **§3.2 を書き直した**。Windows の禁止クラスを W-SYS、W1〜W10、W-PX、W-UR と上限クラス C の表にし、検証済み属性（facts）の一覧を足した（§3.2.2 / §3.2.3）。
   2. **原則を明記した**（§3.2.1）。許可の根拠にするのは検証済みの属性だけで、leaf 名・window class・VERSIONINFO は拒否の方向（不適格にする・mode を下げる）にだけ使う。題名と表示名は facts の型にフィールドを持たない。これに合わせて **W3**（署名者 + leaf 名の組 → 署名者の発行者表で拒否し、leaf 名は単独でも拒否）と **W6**（`setup*.exe` などを単独で拒否根拠にしない → 単独で拒否してよい）を改めた。旧版の書き方は、leaf 名が一致しないことを理由に拒否を外す読み方を許していたためである。
@@ -257,7 +258,7 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
   - Explorer などのシェル項目の lookup の放棄・曖昧（表示名で照合して 1 つに決まらない）・仮想フォルダ・枠の使用中。S5-c-2 の INV-3 の行が挙げる「表示名の曖昧さ」はこの lookup の曖昧さを指す。
   - chain の ProcessId が対象プロセスと一致しない（別プロセスの要素が混じっている）。
   - コアの効果分類器が決めたのが ordinary の許可でも、明示的な拒否（`kBlocked`）でもない場合。v2 のセッションでは fail-closed の写し方をする（PR-3）。
-    - 対象は `DecisionKind::kTakeover` と、将来増える種類。対応表に無い種類は `default` 分岐で takeover にする。
+    - 対象は `DecisionKind::kTakeover` と、将来増える種類。対応表の `switch` には `default` を置かず、列挙子をすべて並べる。種類が増えたら、コンパイラが未処理の列挙子をエラーにする（GCC/Clang は `-Werror=switch`、MSVC は `/we4062`。どちらも native と harness を実際にビルドする設定に入れる。PR-3）。`switch` を抜けた値（範囲外の値）は takeover にする。
     - 例外は 1 つだけ。web コンテンツではない native の Document で、origin が unknown のために出た takeover。メモ帳の本文がこれに当たる。
     - 今のコアは、この例外とテキストを読めない場合を区別できない。`ClassifyEffect` はどちらにも同じ `Takeover()`（理由 `kUnclassified`）を返す（`computer_use_effect_classifier.h:965-977`）。`kShadowGapNativeDocument` は集計用の印で、判定を変えない。
     - そこで PR-3 で次の 2 つを足す。
@@ -295,19 +296,22 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
         - `FrameworkId` が不明な Document、または web を示す Document。
         - identity が未検証の Document。
         - ブラウザで origin が unknown の場合。
-      - 対応表に無い決定の種類。`default` 分岐で takeover になる。
+      - 対応表に無い決定の種類（範囲外の値）。`switch` を抜けて takeover になる。
 - **上の例外を除き、「コアが ordinary と言わない」ことを独立した takeover の理由にはしない。**
   - **v2 のセッションでは、コアの `kBlocked` を理由によらずすべて interlock の拒否に写す**（PR-3。有効化 PR-6 の前提）。
     - 今の `MapEffectToInterlock`（`computer_use_native_interlock.h:154`）は、`kBlocked` のうち面（`kSurface`）と E1 / E4 の実行の引き金だけを拒否に写す。それ以外の理由は「判定なし」に戻す。
     - その結果、資格情報（`kCredential`）とセキュア欄（`kSecure`）の拒否は、V1 の guard に任されている。
     - ところが Windows の V1 の guard（`ClassifyWindowsUiaElementSelf` と `ContainsWindowsRiskText`）は、コアの資格情報の語彙と同じ範囲を判定しない。たとえば `IsPassword` が false で `CVV` と表示された Edit 欄は、コアが `kCredential` で拒否する。それでも V1 は通してしまう。
     - このまま適格性を広げると、§3.5 の「資格情報の入力は無条件に拒否」を満たせない。そのため v2 では、コアの拒否を V1 に任せず、対応表で明示的に拒否する。
-    - 対応表に無い拒否の理由は、`default` 分岐で拒否にする。
+    - 拒否の理由の `switch` も `default` を置かずに列挙子をすべて並べ、`switch` を抜けた値（範囲外の値）は拒否にする。理由が増えたら、上と同じくコンパイラが未処理の列挙子をエラーにする。
     - harness には、`IsPassword` が false で `CVV` と表示された一般アプリの Edit 欄の行を置く。コアは `kCredential` で拒否し、v2 の interlock も拒否になる。
   - コアが `kBlocked` 以外の決定を返した入力のうち、承認（`kApproval`）の経路があるものは、従来どおり承認の経路で扱う。`kBlocked` の拒否と、上の takeover はこの限りではない。経路とは、面・E1 / E4 の拒否、承認が閉じている間の E2 / E3 の拒否、セキュア欄の拒否などの V1 の guard のこと。
   - メモ帳の本文は UIA の `Document` で、web のウィンドウではないため origin が unknown になる（`kShadowGapNativeDocument`、S5-c-2 PR-4）。これを takeover にすると、AC-2 の中心であるメモ帳が動かなくなる。このため、上の例外として扱う。
   - §4 の「分類器を適用できなかったラウンドは fail-closed」は、上の理由（facts が欠ける・評価が終わらない・コアの takeover）で満たしている。緩めていない。
 - **attest**: 厳格 interlock が v2 のセッションに効いていることは、`interlockEnforced` として native が attest し、Main が照合する（判断 G、§9 の D7 の節）。
+- **PR-3 で実装した範囲（2026-10-18）**: portable な `computer_use_native_interlock.h` に `EligibilityBasis`、`IncompletePolicy`、`static_assert`、厳格版の対応表（`MapEffectToStrictInterlock`）を置いた。例外を適用したか、適用しなかった理由は何かを、判定結果（`NativeDocumentException`）に別々の値で残す。Windows の host は、セッションの作成時に根拠を束縛し（要求の `eligibilityBasis`。無ければ v1。v1 ビルドは v2 を `eligibility_basis_unsupported` で拒否する。resume で根拠は変えられない）、preflight と dispatch の両方の interlock でその根拠の policy を使う。次は後続の PR に残す。
+  - facts「対象が web ではないと確定できるか」（`target_not_web`）を本番の経路で埋めること。明示表（System32 の notepad の署名・正規化パス・volume serial と file id）と、それを v2 のセッションの facts に渡す配線は、v2 の経路を配線する PR-5 で入れる（Store 版は PR-4 の後）。それまでは値が無いので、v2 のセッションではメモ帳の Document も takeover になる（fail-closed）。v1 のセッションは変わらない。
+  - chain の ProcessId の不一致を facts の欠落として扱うこと（PR-5 の v2 の経路で入れる）。`FrameworkId` を「web の疑いあり → takeover」の方向に使うこと。
 
 #### 3.2.6 UWP / `ApplicationFrameHost.exe`
 
@@ -1163,19 +1167,37 @@ grant はグローバル・無期限を推奨（§6.5）だが、1 度使った�
 | H    | ruleset のデータは両 OS で共有し、版は platform ごとに持つ                                     | 版を同時に上げると、Windows の有効化が macOS の #777 待ちになる                                                                                 |
 | I    | カタログ署名は facts の精度を上げるためだけに使い、許可の根拠にはしない                        | 許可は W-SYS と明示表で決める                                                                                                                   |
 | J    | grant の署名者は、leaf thumbprint のまま識別する                                               | 安全側。証明書が変わる頻度（#777 の実測 5）を測ってから見直す                                                                                   |
-| K    | 失効確認は cache-only のままにし、残るリスクとして記録する                                     | 下の「残るリスク」の 1                                                                                                                          |
+| K    | 失効確認は `WTD_REVOKE_NONE` のままにし、残るリスクとして記録する（PR-2 #868 で確定）          | cache の失効情報を見る方式は採らない。理由は下の「残るリスク」の 1                                                                              |
 | L    | リリースを win32 v2 にするのは、S9a の Windows 受入が PASS した後                              | PR-6 は v2 ビルドで flag を立てたときだけ広がり、release-beta は v1 のまま（契約で固定する）                                                    |
 
 **S5-c-3 の残るリスク**:
 
-1. **失効した証明書（判断 K）**: 現行の native は `WinVerifyTrust` を `WTD_REVOKE_NONE` で呼び、失効を確認していない。判断 K の「cache-only」は、ネットワークに失効情報を取りに行かない（列挙や入力のたびに外部へ通信しない、オフラインで結果が変わらない）ことを指す。このため、漏えいなどで失効した署名者の証明書で署名されたアプリも、禁止クラスに当たらなければ適格になりうる。受け方は次のとおり。禁止クラスは署名者だけでなく構造（CUI、console の class、ConPTY の子孫、root の区分）でも判定する。§3.6 と §3.7 の interlock は署名に関係なく掛かる。grant は leaf thumbprint に束縛される（判断 J）ので、許可済みアプリの証明書が差し替われば再確認になる。OS 側のマルウェア対策（Defender、SmartScreen）はこの ADR の範囲外とする。PR-2 で、cache にある失効情報だけを見る（`WTD_CACHE_ONLY_URL_RETRIEVAL` と失効確認の組）か、`WTD_REVOKE_NONE` のままにするかを決める。どちらにしても、失効の確認に失敗したことを適格の根拠にはしない。
-2. **実行中イメージのすり替え**: rename による置き換えを PR-2 の seam で塞げなければ、PR-6 を出さない。
+1. **失効した証明書（判断 K）**: native は `WinVerifyTrust` を `WTD_REVOKE_NONE` で呼び、失効を確認しない。`WTD_CACHE_ONLY_URL_RETRIEVAL` も付けるので、ネットワークにも出ない（列挙や入力のたびに外部へ通信しない、オフラインで結果が変わらない）。PR-2（#868）で、cache にある失効情報だけを見る方式（`WTD_CACHE_ONLY_URL_RETRIEVAL` と失効確認の組）は、次の 4 つの理由で採らないと決めた。
+   1. ほとんどのファイルでは cache に失効情報が無く、結果は「オフライン」になる。失効の確認に失敗したことは適格の根拠にできないので、見に行っても多くの場合は何も変わらない。
+   2. 答えが返る場合も、その PC が何を cache していたかで結果が変わる。同じ対象を別の PC が違って判定したり、セッションの途中で判定が変わったりしうる。
+   3. 一覧に出す対象ごとに、`WinVerifyTrust` にかかる時間が 2 倍になる。
+   4. 失効した署名者を CI の runner で再現できないため、テストされない経路を出荷することになる。
+
+   このため、漏えいなどで失効した署名者の証明書で署名されたアプリも、禁止クラスに当たらなければ適格になりうる。受け方は次のとおり。禁止クラスは署名者だけでなく構造（CUI、console の class、ConPTY の子孫、root の区分）でも判定する。§3.6 と §3.7 の interlock は署名に関係なく掛かる。grant は leaf thumbprint に束縛される（判断 J）ので、許可済みアプリの証明書が差し替われば再確認になる。OS 側のマルウェア対策（Defender、SmartScreen）はこの ADR の範囲外とする。
+2. **実行中イメージのすり替え**: rename による置き換えを PR-2 の seam で塞げなければ、PR-6 を出さない。PR-2（#868）の照合と、3 回目の独立レビューを受けて残ったリスクは次のとおり。
+   - **本当の守りは anchor の照合である。** 保持したあとに `QueryFullProcessImageNameW`（カーネルの image file object の名前）を取り直し、その名前で開いたファイルの正規化パスと file id が、保持したファイルと一致することを必須にする。この守りは「その名前が rename に追従する」ことを前提にする。追従しない Windows ビルドでは防げない。
+     - PR-6 の前提: サポートするすべての Windows（windows-2022 の CI、Windows 10 1903 以降、Windows 11）で追従するかを確かめる。追従しない環境では実行時の検査で全対象が W-UR になる（fail-closed）ことも確かめる。#868 の live seam が windows-2022 でどちらの挙動を出したかを CI のログで確かめる。
+     - rename 追従の実行時検査は temp のボリュームで走るので、そのファイルシステムの結果しか分からない。target のファイルシステムや `FileSystemFlags` が検査したものと違う場合（ReFS、Dev Drive など）、remote の場合、検査が失敗した場合は W-UR にする。PR-5 のマージ前に、この 3 つが W-UR になり、facts が許可側の値を返さないことをテストで固定する。
+   - **ヘッダの突き合わせは補助にすぎない。** `SECTION_IMAGE_INFORMATION`（entry point、subsystem、machine、checksum、サイズ、characteristics）と保持したファイルのヘッダの照合は、拒否の方向にだけ使う。checksum は Authenticode のハッシュの対象外で、署名を壊さずに合わせられる。攻撃側が元のイメージを自分で作れば、entry RVA、subsystem、machine も合わせられる。
+     - AnyCPU の IL-only .NET exe は、64bit のローダが PE32 を PE32+ に変換するので、カーネルの値がファイルのヘッダと食い違う。変換の対象なら subsystem 以外の照合を外す。PR-5 のマージ前に、実機（InstallUtil などを保持できる環境）で値を測り、PE32 の AnyCPU だけが変換されることを、PE32+ の IL-only exe を対照にして確かめる。
+   - **実行中イメージの書き換え（process herpaderping 型）**: 保持したファイルの ChangeTime がプロセスの作成時刻以降（等しい場合を含む）なら不一致（W-UR）とする。`FILE_BASIC_INFO` が読めない場合も不一致とする。LastWriteTime は使わない（正当なファイルでも未来の時刻がありうる。ChangeTime を巻き戻せる書き手は LastWriteTime も巻き戻せる）。
+     - 残るリスク: `FILE_WRITE_ATTRIBUTES` を持つ書き手は ChangeTime を巻き戻せる。
+     - 残るリスク: section の作成の後、プロセスオブジェクトの作成の前に書き換えられると、時刻は作成時刻より前になるので検出できない。
+     - 付随する挙動: 起動後に rename されたファイルも ChangeTime が進むので W-UR になる。バックアップツールなどが起動中のファイルに属性を書いた場合も W-UR になる（誤って W-UR になる頻度は PR-5 の実測で確かめる）。
+   - **manifest と OriginalFilename**: 保持したハンドルから `SEC_IMAGE_NO_EXECUTE` で map したイメージから、SEH で守ったコピーを通して読む。読み込みの I/O の失敗や読めないページは unresolvable になる。保持したファイルがローカルだと確定しない場合は、署名・リソース・subsystem を読まない。言語版の間で OriginalFilename が食い違えば unresolvable、manifest はどれかの言語版が昇格を求めていれば昇格として扱う。
+   - **remote の判定**: 保持したハンドルの `FileFsDeviceInformation`（`FILE_REMOTE_DEVICE`）を主とし、`FileRemoteProtocolInfo` を補助とする。どちらかが remote を示すか、判定できない場合は W-UR にする。`FileRemoteProtocolInfo` の挙動が Windows 10 1903 でも同じかは、PR-6 の前提として確かめる。
 3. **発行者表の取りこぼし（T3）**: CUI、console の class、ConPTY の子孫による構造的な判定と、面単位の拒否の二重で受ける。版を上げたときは grant を失効させる。ブラウザの表（判断 D）から漏れた Chromium 系のブラウザは `full_access_app` になりうるが、§3.5 と §3.6 の interlock と、§4 の「分類器を適用できなかったラウンドは fail-closed」で受ける。
 4. **厳格 interlock の使い勝手**: UIA が疎なアプリ（Qt、Java）では takeover が多発しうる（#777 の実測 4）。メモ帳の Document の行が誤って takeover になると AC-2 が崩れるので、harness の行として固定する。
 5. **列挙のコスト**: プロセスごとの `WinVerifyTrust` と SHA-256 で、`list_targets` が数秒になりうる。予算を超えた行は `unresolvable` にする。
 6. **偽の package**: sideload の package は `SignatureKind` と `DEVELOPMENT_MODE` で除き、Win32 の式で判定する。
 7. **ずれ**: native と Main、表と版、macOS とのずれは、golden vector と内容ハッシュの契約で縛る。macOS の S4-3 が共有コアを使わないと、AC の「両 OS で同じ挙動」が崩れる。
 8. **AC-2 の完全な達成は後に残る**: ブラウザと Explorer を後回しにした（判断 D と E）ので、AC-2 の完全な達成は S7 と承認経路の後になる。
+9. **系譜で追えない子孫（PR-2 #868）**: 中間のプロセスが終了した子孫（Windows は親を付け替えない）と、親を偽装して起動された子は追えない。`descendant_shell = false` は「生きた親子の連鎖でたどれる範囲に shell が無い」という意味でしかない。job object は列挙できないので使えない。孤児を補助の信号にする案は採らない（無関係な shell が 1 つあるだけで、長く動いている対象がすべて上限 C になり、しかも親の偽装で回避できる）。上限 C の目的（自分の画面に shell や ConPTY を載せるアプリ）は、ConPTY を載せている間はその所有者が生きた子孫として連鎖に現れるので満たされる。意図的に shell を隠す対象は facts では防げない。
 
 ---
 

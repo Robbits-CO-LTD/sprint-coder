@@ -52,6 +52,7 @@ EvaluateWindowsInterlockFromCapture(const ShadowUiaCapture &capture, const Shado
     return result;
   }
   result.verdict = InterlockForFacts(built.facts, ruleset);
+  result.strict_verdict = StrictInterlockForFacts(built.facts, ruleset);
   return result;
 }
 
