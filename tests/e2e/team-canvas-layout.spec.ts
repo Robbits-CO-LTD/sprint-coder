@@ -133,7 +133,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
     [34, 6],
     [100, 18],
   ] as const) {
-    test(`fits ${workerCount} Workers in a six-column grid and restores the complete view`, async () => {
+    test(`fits ${workerCount} Workers in a six-column grid and persists the view through restart`, async () => {
       const userDataDir = createUserDataDir('canvas-layout-large-team');
       let app: ElectronApplication | null = null;
       try {
@@ -204,25 +204,48 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
           )
           .toBe(workerCount);
 
+        await expect
+          .poll(async () => {
+            const saved = await page.evaluate(
+              (id) => window.sprintCoder!.teams.getCanvasView(id),
+              taskId,
+            );
+            const current = await readWorldTransform(page);
+            return (
+              saved !== null &&
+              Math.abs(saved.camera.scale - current.s) < 0.0001 &&
+              Math.abs(saved.camera.x - current.x) < 1 &&
+              Math.abs(saved.camera.y - current.y) < 1
+            );
+          })
+          .toBe(true);
+        const savedBeforeRestart = await page.evaluate(
+          (id) => window.sprintCoder!.teams.getCanvasView(id),
+          taskId,
+        );
+        if (!savedBeforeRestart) throw new Error('The complete Canvas view was not saved');
+
         await closeApp(app);
         app = await launchApp(userDataDir);
         const restored = await firstWindow(app);
-        await expect(restored.getByTestId('team-worker')).toHaveCount(workerCount);
+        await restored.getByTestId('team-toggle').click();
+        await expect(restored.getByTestId('team-list')).toBeVisible();
+        // Startup recovery stops unassigned Workers. Their durable coordinates must still survive.
+        await expect(restored.getByTestId('team-worker')).toHaveCount(0);
+        const savedAfterRestart = await restored.evaluate(
+          (id) => window.sprintCoder!.teams.getCanvasView(id),
+          taskId,
+        );
+        expect(savedAfterRestart?.nodePositions).toEqual(savedBeforeRestart.nodePositions);
         await expect
-          .poll(() =>
-            restored.getByTestId('team-worker').evaluateAll((nodes) => {
-              const bounds = document.querySelector('.team-canvas')!.getBoundingClientRect();
-              return nodes.every((node) => {
-                const card = node.getBoundingClientRect();
-                return (
-                  card.left >= bounds.left - 1 &&
-                  card.right <= bounds.right + 1 &&
-                  card.top >= bounds.top - 1 &&
-                  card.bottom <= bounds.bottom + 1
-                );
-              });
-            }),
-          )
+          .poll(async () => {
+            const camera = await readWorldTransform(restored);
+            return (
+              Math.abs(camera.s - savedBeforeRestart.camera.scale) < 0.0001 &&
+              Math.abs(camera.x - savedBeforeRestart.camera.x) < 2 &&
+              Math.abs(camera.y - savedBeforeRestart.camera.y) < 2
+            );
+          })
           .toBe(true);
       } finally {
         await closeApp(app);
