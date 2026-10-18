@@ -1120,6 +1120,30 @@ function failedShardTests(report: string): string {
   }
 }
 
+/** A Scheduler whose assignment pace reads a clock the test moves, not wall time (Issue #854). */
+function pacedSchedulerWithClock(persistence: SqlitePersistenceClient) {
+  let nowMs = Date.now();
+  const scheduler = new TeamExecutionScheduler(
+    () => persistence.getTeamMaxConcurrentExecutions(),
+    undefined,
+    TEAM_ASSIGNMENT_RATE_LIMIT,
+    () => nowMs,
+  );
+  /** Has admission look at the queue again, as a finished run or a retry timer would. */
+  const settle = async () => {
+    scheduler.notifyReadinessChanged();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+  return {
+    scheduler,
+    settle,
+    async advance(ms: number) {
+      nowMs += ms;
+      await settle();
+    },
+  };
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
@@ -1890,7 +1914,17 @@ if (runsWithElectronAbi)
     it('paces a batch that crosses the per-minute limit by queueing, not refusing, the excess (issue #864)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Paced batch Team');
-      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      // The pace clock holds still, so a runner slower than the one-minute window cannot let the
+      // 101st start before the check below (as with the recovered backlog further down).
+      const pace = pacedSchedulerWithClock(persistence);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        pace.scheduler,
+      );
       const workers: Awaited<ReturnType<TeamCoordinator['hireWorker']>>[] = [];
       for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
         workers.push(
@@ -1932,7 +1966,7 @@ if (runsWithElectronAbi)
             .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
         60_000,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await pace.settle();
       // The pace counts starts: 100 ran, and the one beyond it waits instead of failing.
       expect(
         persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
@@ -1983,7 +2017,18 @@ if (runsWithElectronAbi)
           doneCriteria: ['return a result'],
         });
 
-      const after = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      // The pace window is a minute of wall time, and a loaded CI macOS runner can spend longer than
+      // that running the 100, after which the 101st may rightly start. The pace reads this clock
+      // instead, held still until the test moves it, so only the pace decides what starts.
+      const pace = pacedSchedulerWithClock(persistence);
+      const after = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        pace.scheduler,
+      );
       after.recoverOnStartup();
       await waitFor(
         () =>
@@ -1992,11 +2037,21 @@ if (runsWithElectronAbi)
         // Hiring and running 101 Workers takes about 23 s locally and several times that on CI macOS.
         90_000,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      // 100 recovered assignments start; the one beyond the pace still waits, not fails.
+      // 100 recovered assignments start; the one beyond the pace still waits, not fails, even when
+      // admission looks at it again.
+      await pace.settle();
       expect(
         persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
       ).toHaveLength(1);
+      // Once the window has passed, the waiting one starts like any other.
+      await pace.advance(TEAM_ASSIGNMENT_RATE_LIMIT.windowMs);
+      await waitFor(
+        () =>
+          persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
+            .length ===
+          TEAM_ASSIGNMENT_RATE_LIMIT.limit + 1,
+        20_000,
+      );
       await after.stopAll(task.id).catch(() => undefined);
       persistence.close();
     }, 180_000);
