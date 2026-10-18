@@ -4837,6 +4837,10 @@ export class TeamCoordinator {
           executionId: execution.id,
           doneCriteria: dispatch.doneCriteria,
           attemptStartReason: 'app_restart',
+          // A recovered assignment is paced as a fresh one is (Issue #854): the pace window lives
+          // in memory, so without this a backlog left at restart would all start at once.
+          // Mission steps are not paced on either path.
+          ...(mission === null ? { paceKey: team.id } : {}),
         });
       }
       for (const execution of this.persistence

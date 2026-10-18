@@ -1659,6 +1659,65 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 60_000);
 
+    it('paces assignments recovered at startup as it paces fresh ones (issue #854)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Recovered backlog');
+      // Before the restart nothing starts: every assignment is left queued.
+      class HoldingScheduler extends TeamExecutionScheduler {
+        override submit(): void {}
+      }
+      const before = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        new HoldingScheduler(),
+      );
+      const workers = [];
+      for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
+        workers.push(
+          await before.hireWorker({
+            taskId: task.id,
+            role: `worker ${index}`,
+            objective: 'answer one question',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        );
+      const teamId = persistence.getTeamByTask(task.id)!.id;
+      const team = persistence.getTeam(teamId);
+      persistence.updateTeamPolicy(
+        teamId,
+        { ...team.policy, maxConcurrentExecutions: 100, budgetMode: 'unlimited' },
+        team.revision,
+      );
+      persistence.setTeamMaxConcurrentExecutions(100);
+      for (const [index, worker] of workers.entries())
+        await before.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: `question ${index}`,
+          doneCriteria: ['return a result'],
+        });
+
+      const after = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      after.recoverOnStartup();
+      await waitFor(
+        () =>
+          persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
+            .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
+        20_000,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // 100 recovered assignments start; the one beyond the pace still waits, not fails.
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+      await after.stopAll(task.id).catch(() => undefined);
+      persistence.close();
+    }, 60_000);
+
     it.each([
       // A CLI Worker denied by policy (issue #841).
       ['codex' as const, [] as string[], 'policy:parent_ceiling'],

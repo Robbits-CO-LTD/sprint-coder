@@ -439,6 +439,41 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('keeps a Team budget at the size it reached when its concurrency is lowered mid-run', () => {
+      const { persistence } = createPersistence();
+      const { teamId } = buildActiveTeam(persistence);
+      const setConcurrency = (maxConcurrentExecutions: number) => {
+        const team = persistence.getTeam(teamId);
+        persistence.updateTeamPolicy(
+          teamId,
+          { ...team.policy, maxConcurrentExecutions },
+          team.revision,
+        );
+      };
+      const reserve = (amount: number, purpose: string) =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'timeMs', amount }],
+          purpose,
+          now: '2026-10-18T00:00:00.000Z',
+        });
+      setConcurrency(80);
+      // 10,000,000 ms of Worker time used at 80, far beyond what 8 Workers' budget (3,600,000) holds.
+      persistence.settleTeamBudget({
+        reservationIds: reserve(10_000_000, 'used').map(({ id }) => id),
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      setConcurrency(8);
+      expect(statusFor(persistence, teamId, 'team', 'timeMs').cap).toBe(36_000_000);
+      expect(reserve(60_000, 'after lowering')).toHaveLength(1);
+      // Raising again never goes below the size already reached either.
+      setConcurrency(20);
+      expect(statusFor(persistence, teamId, 'team', 'timeMs').cap).toBe(36_000_000);
+      // A start-up lease still follows the lowered policy (but not below the stored 8).
+      expect(statusFor(persistence, teamId, 'team', 'spawnSlots').cap).toBe(20);
+      persistence.close();
+    });
+
     it('records and transitions a worker worktree', () => {
       const { persistence } = createPersistence();
       const { teamId, workerId } = buildActiveTeam(persistence);

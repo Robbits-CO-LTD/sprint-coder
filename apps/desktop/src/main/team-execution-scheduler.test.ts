@@ -511,6 +511,32 @@ describe('TeamExecutionScheduler', () => {
       vi.useRealTimers();
     });
 
+    it('spends a pace slot only when a job starts, never for one canceled while queued', async () => {
+      vi.useFakeTimers();
+      const scheduler = new TeamExecutionScheduler(10, undefined, { limit: 1, windowMs: 60_000 });
+      const started: string[] = [];
+      const paced = (executionId: string) => ({
+        executionId,
+        workerId: `worker-${executionId}`,
+        teamId: 'team-1',
+        teamLimit: 10,
+        paceKey: 'team-1',
+        run: async () => void started.push(executionId),
+      });
+      scheduler.submit(paced('canceled'));
+      expect(scheduler.cancelQueued('canceled')).toBe(true);
+      scheduler.submit(paced('first'));
+      await settleScheduler();
+      expect(started).toEqual(['first']);
+      // The window's one slot went to the job that started, so the next one waits it out.
+      scheduler.submit(paced('second'));
+      await settleScheduler();
+      expect(started).toEqual(['first']);
+      await vi.advanceTimersByTimeAsync(60_001);
+      await settleScheduler();
+      expect(started).toEqual(['first', 'second']);
+    });
+
     it('replaces a long retry timer when a shorter wait arrives', async () => {
       vi.useFakeTimers();
       const scheduler = new TeamExecutionScheduler(10);

@@ -1520,6 +1520,8 @@ const TEAM_BUDGET_STRUCTURED_SEED = JSON.stringify({
   worker: DEFAULT_TEAM_BUDGET_LIMITS.worker,
 });
 const TEAM_POLICY_SEED = JSON.stringify(DEFAULT_TEAM_POLICY);
+/** Key in a Team's budget JSON: the highest concurrency its cumulative budget is sized for. */
+const BUDGET_CONCURRENCY_KEY = 'sizedForConcurrency';
 const MANAGER_POLICY_SEED = JSON.stringify(DEFAULT_MANAGER_POLICY);
 
 /**
@@ -9878,8 +9880,28 @@ export class SqlitePersistenceClient implements PersistenceClient {
         )
         .run(JSON.stringify(parsed), now, teamId, expectedRevision);
       if (updated.changes !== 1) throw new TeamConflictError();
+      this.keepBudgetSizedFor(current, parsed.maxConcurrentExecutions);
       return this.getTeam(teamId);
     })();
+  }
+
+  /** The concurrency a Team's cumulative budget is sized for: the highest it has been allowed.
+   * Lowering the policy mid-run must not shrink the budget under what the Team already used,
+   * or every later reservation would fail. A Team never changed has no record: its current. */
+  private budgetConcurrency(team: TeamRecord): number {
+    const recorded = (team.budget as Record<string, unknown>)[BUDGET_CONCURRENCY_KEY];
+    const current = team.policy.maxConcurrentExecutions;
+    return typeof recorded === 'number' && Number.isSafeInteger(recorded)
+      ? Math.max(recorded, current)
+      : current;
+  }
+
+  /** Called with the Team as it was before a policy write. */
+  private keepBudgetSizedFor(before: TeamRecord, next: number): void {
+    const sizedFor = Math.max(this.budgetConcurrency(before), next);
+    this.db
+      .prepare('UPDATE teams SET budget_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...before.budget, [BUDGET_CONCURRENCY_KEY]: sizedFor }), before.id);
   }
 
   getTeamBlueprint(teamId: string): TeamBlueprintBindingRecord | null {
@@ -9931,6 +9953,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
         return existing;
       }
       const now = new Date().toISOString();
+      const before = this.getTeam(input.teamId);
       this.db
         .prepare(
           `INSERT INTO team_blueprint_bindings(
@@ -9953,6 +9976,7 @@ export class SqlitePersistenceClient implements PersistenceClient {
            WHERE id = ?`,
         )
         .run(JSON.stringify(blueprint.policy), now, input.teamId);
+      this.keepBudgetSizedFor(before, blueprint.policy.maxConcurrentExecutions);
       return this.getTeamBlueprint(input.teamId)!;
     })();
   }
@@ -22728,7 +22752,9 @@ export class SqlitePersistenceClient implements PersistenceClient {
       scope,
       kind,
       storedCap,
-      teamConcurrency: team.policy.maxConcurrentExecutions,
+      // Start-up leases follow the policy as it is now; cumulative usage keeps the size it reached.
+      teamConcurrency:
+        kind === 'spawnSlots' ? team.policy.maxConcurrentExecutions : this.budgetConcurrency(team),
       appConcurrency: this.getTeamMaxConcurrentExecutions(),
     });
   }
