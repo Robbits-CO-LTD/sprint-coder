@@ -36,10 +36,14 @@ export const AutoDecisionAuditRow = memo(function AutoDecisionAuditRow({
 export const AutoDecisionAuditGroup = memo(function AutoDecisionAuditGroup({
   decisions,
   tally,
+  onExpand,
 }: {
   decisions: readonly AutoPermissionDecision[];
   /** Every decision of this Turn counted by kind, or null when only the rows are known. */
   tally: AutoDecisionTally | null;
+  /** Called when the reader opens the group, so the Timeline stops following the tail: the rows
+   * grow the content in place, and following would pull the reader away from them. */
+  onExpand?: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const counts = tally ?? tallyRows(decisions);
@@ -61,7 +65,11 @@ export const AutoDecisionAuditGroup = memo(function AutoDecisionAuditGroup({
       className="auto-decision-group"
       data-testid="auto-decision-group"
       open={open}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
+      onToggle={(event) => {
+        const next = event.currentTarget.open;
+        setOpen(next);
+        if (next) onExpand?.();
+      }}
     >
       <summary
         className="approval-audit-row"

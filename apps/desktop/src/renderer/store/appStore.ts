@@ -1748,19 +1748,21 @@ export const useAppStore = create<AppState>((set, get) => {
       if (typeof window.sprintCoder?.files?.list === 'function')
         void window.sprintCoder.files
           .list(taskId)
-          .then((records) =>
+          .then((records) => {
+            if (!isCurrentSelection()) return;
             apply((state) => ({
               fileChangesByTask: { ...state.fileChangesByTask, [taskId]: records },
-            })),
-          )
+            }));
+          })
           .catch(() => undefined);
 
       if (typeof window.sprintCoder?.images?.list === 'function')
         void window.sprintCoder.images
           .list(taskId)
-          .then((images) =>
-            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
-          )
+          .then((images) => {
+            if (!isCurrentSelection()) return;
+            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } }));
+          })
           .catch(() => undefined);
 
       void get().loadGraphVersions(taskId);
@@ -1803,7 +1805,11 @@ export const useAppStore = create<AppState>((set, get) => {
           : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
       ]);
 
-      if (get().selectedTaskId !== taskId) return; // user switched away while these were in flight
+      // Nothing from these reads lands unless this is still the newest selection (issue #863): a
+      // reselection of the same Task (A→B→A, or clicking the selected Task again) starts newer
+      // reads, and an older snapshot arriving after them would roll the rows, counts and lastSeq
+      // back while the newer selection's subscription has already resumed after its own lastSeq.
+      if (!isCurrentSelection()) return;
 
       if (messagesResult.ok) {
         set((state) => ({
@@ -1856,15 +1862,9 @@ export const useAppStore = create<AppState>((set, get) => {
         for (const { turnId, allow, allowOnce, deny } of snapshot.autoDecisionCounts)
           byTurn[turnId] = { allow, allowOnce, deny };
         const loaded: AutoDecisionCountState = { throughSeq: snapshot.lastSeq, byTurn };
-        // A snapshot that started before another one for the same Task can be older than what has
-        // been counted live since; keep the newer counts.
-        apply((state) =>
-          (state.autoDecisionCountsByTask[taskId]?.throughSeq ?? 0) > loaded.throughSeq
-            ? {}
-            : {
-                autoDecisionCountsByTask: { ...state.autoDecisionCountsByTask, [taskId]: loaded },
-              },
-        );
+        apply((state) => ({
+          autoDecisionCountsByTask: { ...state.autoDecisionCountsByTask, [taskId]: loaded },
+        }));
       }
 
       let afterSeq: number | undefined;

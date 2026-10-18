@@ -203,6 +203,9 @@ test.describe('Auto decision flood on the Leader Timeline (issue #863)', () => {
     );
     await summary.click();
     await expect(page.getByTestId('auto-decision-audit')).toHaveCount(200);
+    // Opening the group grows the Timeline in place; it stops following the tail so the rows can be
+    // read, and offers 最新へ instead.
+    await expect(page.getByTestId('timeline-jump-latest')).toBeVisible();
     await expect(page.getByTestId('auto-decision-audit').last()).toContainText(
       `e2e flood ${FLOOD_COUNT}/${FLOOD_COUNT}`,
     );

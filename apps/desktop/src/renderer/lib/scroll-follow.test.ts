@@ -146,3 +146,33 @@ describe('createTailFollower (issue #863)', () => {
     expect(node.scrollTop).toBe(800);
   });
 });
+
+describe('createTailFollower.stopFollowing (issue #863)', () => {
+  it('stops following without a scroll event, until 最新へ or a scroll back to the bottom', () => {
+    const frames: (() => void)[] = [];
+    const node = { scrollTop: 600, scrollHeight: 1_000, clientHeight: 400 };
+    const follower = createTailFollower({
+      request: (callback) => frames.push(callback),
+      cancel: (handle) => {
+        frames[handle - 1] = () => undefined;
+      },
+    });
+    follower.schedule(node);
+    // Opening a collapsed group grows the content but moves nothing.
+    node.scrollHeight = 5_000;
+    follower.stopFollowing();
+    for (const frame of frames.splice(0)) frame();
+    expect(node.scrollTop).toBe(600);
+    follower.schedule(node);
+    for (const frame of frames.splice(0)) frame();
+    expect(node.scrollTop).toBe(600);
+
+    // Scrolling back to the bottom resumes following.
+    node.scrollTop = 4_600;
+    expect(follower.observeScroll(node, isPinnedToBottom(node))).toBe(true);
+    node.scrollHeight = 5_200;
+    follower.schedule(node);
+    for (const frame of frames.splice(0)) frame();
+    expect(node.scrollTop).toBe(5_200);
+  });
+});

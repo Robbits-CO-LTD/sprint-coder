@@ -239,6 +239,15 @@ export function Timeline({
     );
   }, [taskId, tailFollower]);
 
+  // Opening an Auto decision group grows the content above the tail without a scroll event, so
+  // the follower and the jump button have to be told the reader is reading (issue #863).
+  const leaveTail = useCallback(() => {
+    tailFollower.stopFollowing();
+    setFollowState((prev) =>
+      prev.taskId === taskId && !prev.following ? prev : { taskId, following: false },
+    );
+  }, [taskId, tailFollower]);
+
   const jumpToLatest = useCallback(() => {
     tailFollower.scrollNow(scrollRef.current);
     setFollowState({ taskId, following: true });
@@ -467,6 +476,7 @@ export function Timeline({
                 ))}
                 <AutoDecisionAuditGroup
                   decisions={autoDecisionRows}
+                  onExpand={leaveTail}
                   tally={
                     message.author === 'user' && message.turnId !== null
                       ? (autoDecisionTallies?.[message.turnId] ?? null)

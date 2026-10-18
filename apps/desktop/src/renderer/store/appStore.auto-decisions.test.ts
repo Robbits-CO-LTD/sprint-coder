@@ -217,3 +217,94 @@ describe('Auto decisions restored with a Task (issue #863)', () => {
     expect(subscribe).toHaveBeenCalledWith('task-1', expect.any(Function), { afterSeq: 7 });
   });
 });
+
+describe('an older selection of the same Task (issue #863)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function deferredSnapshot() {
+    let resolve!: (value: unknown) => void;
+    const promise = new Promise((done) => {
+      resolve = done;
+    });
+    return { promise, resolve };
+  }
+
+  function snapshotAt(lastSeq: number, decisions: AutoPermissionDecision[]) {
+    const tally = { allow: 0, allowOnce: 0, deny: 0 };
+    for (const { decision: kind } of decisions)
+      if (kind === 'deny') tally.deny += 1;
+      else if (kind === 'allow_once') tally.allowOnce += 1;
+      else tally.allow += 1;
+    return {
+      lastSeq,
+      activeTurn: null,
+      queued: [],
+      pendingApprovals: [],
+      activatedSkills: [],
+      latestTurnDiff: null,
+      autoDecisions: decisions,
+      autoDecisionCounts: [{ turnId: 'turn-1', ...tally }],
+    };
+  }
+
+  function stubSnapshots(snapshots: Promise<unknown>[]) {
+    const snapshot = vi.fn();
+    for (const next of snapshots) snapshot.mockReturnValueOnce(next);
+    snapshot.mockResolvedValue(null);
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { messages: vi.fn().mockResolvedValue([]) },
+        turns: { snapshot, subscribe: vi.fn().mockReturnValue(vi.fn()) },
+      },
+    });
+  }
+
+  const older = [decision(10)];
+  const newer = [decision(10), decision(11, { decision: 'deny', outcome: 'deny' })];
+
+  function expectNewer() {
+    const state = useAppStore.getState();
+    expect(state.autoDecisionsByTask['task-1']?.map(({ id }) => id)).toEqual([
+      'auto-10',
+      'auto-11',
+    ]);
+    expect(state.autoDecisionCountsByTask['task-1']).toEqual({
+      throughSeq: 11,
+      byTurn: { 'turn-1': { allow: 1, allowOnce: 0, deny: 1 } },
+    });
+    expect(state.lastSeqByTask['task-1']).toBe(11);
+  }
+
+  it('keeps the newer reads when the first of two selections of the same Task answers last', async () => {
+    const first = deferredSnapshot();
+    const second = deferredSnapshot();
+    stubSnapshots([first.promise, second.promise]);
+
+    const firstSelection = useAppStore.getState().selectTask('task-1');
+    const secondSelection = useAppStore.getState().selectTask('task-1');
+    second.resolve(snapshotAt(11, newer));
+    await secondSelection;
+    expectNewer();
+
+    first.resolve(snapshotAt(10, older));
+    await firstSelection;
+    expectNewer();
+  });
+
+  it('keeps the newer reads across A→B→A when the first A answers last', async () => {
+    const firstA = deferredSnapshot();
+    const secondA = deferredSnapshot();
+    stubSnapshots([firstA.promise, Promise.resolve(null), secondA.promise]);
+
+    const firstSelection = useAppStore.getState().selectTask('task-1');
+    await useAppStore.getState().selectTask('task-2');
+    const secondSelection = useAppStore.getState().selectTask('task-1');
+    secondA.resolve(snapshotAt(11, newer));
+    await secondSelection;
+    expectNewer();
+
+    firstA.resolve(snapshotAt(10, older));
+    await firstSelection;
+    expectNewer();
+  });
+});

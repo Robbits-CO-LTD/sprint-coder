@@ -55,6 +55,12 @@ export type TailFollower = {
    * so a reader who scrolls up before an already scheduled frame is not pulled back down.
    */
   observeScroll(target: TailScrollTarget, pinned: boolean): boolean;
+  /**
+   * The reader asked to read something above the tail without scrolling (opening a collapsed
+   * group grows the content but moves nothing, so no scroll event says so). Following stops until
+   * 最新へ or a scroll back to the bottom.
+   */
+  stopFollowing(): void;
   /** Drops a scheduled scroll (unmount). */
   cancel(): void;
 };
@@ -101,6 +107,10 @@ export function createTailFollower(
     scrollNow(target) {
       following = true;
       if (target !== null) write(target);
+    },
+    stopFollowing() {
+      following = false;
+      cancel();
     },
     observeScroll(target, pinned) {
       const own = writtenTop !== null && Math.abs(target.scrollTop - writtenTop) <= 1;

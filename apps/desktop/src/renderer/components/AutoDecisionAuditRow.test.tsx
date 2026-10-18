@@ -104,3 +104,29 @@ it('keeps the summary of a Turn whose rows were all pushed out of memory', () =>
   );
   view.dispose();
 });
+
+it('tells the Timeline when the reader opens the group, and only then', () => {
+  const view = mount();
+  const onExpand = vi.fn();
+  act(() =>
+    view.root.render(
+      <AutoDecisionAuditGroup
+        decisions={[decision(1, 'allow')]}
+        tally={null}
+        onExpand={onExpand}
+      />,
+    ),
+  );
+  const details = view.container.querySelector('details')!;
+  act(() => {
+    details.open = true;
+    details.dispatchEvent(new Event('toggle'));
+  });
+  expect(onExpand).toHaveBeenCalledTimes(1);
+  act(() => {
+    details.open = false;
+    details.dispatchEvent(new Event('toggle'));
+  });
+  expect(onExpand).toHaveBeenCalledTimes(1);
+  view.dispose();
+});
