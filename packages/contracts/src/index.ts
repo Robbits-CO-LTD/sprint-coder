@@ -2437,6 +2437,12 @@ export const turnSnapshotSchema = z
      */
     interruptedTurnIds: z.array(idSchema).max(4_096).default([]),
     /**
+     * The Task's kept Auto decision rows — the newest 200 denials and the newest 200 others, oldest
+     * first — up to `lastSeq` (issue #863). Read in the same call as the counts below and
+     * `lastSeq`, so a decision recorded while the snapshot waited is in all three or in none.
+     */
+    autoDecisions: z.array(autoPermissionDecisionSchema).default([]),
+    /**
      * Every Auto decision of the Task counted per Turn and kind, up to `lastSeq` (issue #863). The
      * list of decisions is capped, so the Timeline's per-Turn summary reads its counts from here.
      */
@@ -7563,7 +7569,6 @@ export interface SprintCoderApi {
   };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
-    listAutoDecisions(taskId: string): Promise<AutoPermissionDecision[]>;
     set(
       taskId: string,
       preset: AccessPreset,
@@ -7777,7 +7782,6 @@ export const IPC_CHANNELS = {
   localAIDelete: 'sprint-coder:local-ai:delete',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
-  permissionsListAutoDecisions: 'sprint-coder:permissions:list-auto-decisions',
   approvalsListPending: 'sprint-coder:approvals:list-pending',
   approvalsListRecent: 'sprint-coder:approvals:list-recent',
   approvalsResolve: 'sprint-coder:approvals:resolve',

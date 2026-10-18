@@ -9199,6 +9199,11 @@ if (runsWithElectronAbi)
         // The snapshot carries the same counts, read together with the lastSeq they cover.
         const snapshot = persistence.snapshot(task.id);
         expect(snapshot.autoDecisionCounts).toEqual(counts);
+        // ...and the kept rows, so a denial recorded before the snapshot is in its rows too.
+        expect(snapshot.autoDecisions).toEqual(restored);
+        expect(snapshot.autoDecisions.filter(({ decision }) => decision === 'deny')).toHaveLength(
+          2,
+        );
         expect(snapshot.lastSeq).toBeGreaterThanOrEqual(lastSeq);
         persistence.close();
       });

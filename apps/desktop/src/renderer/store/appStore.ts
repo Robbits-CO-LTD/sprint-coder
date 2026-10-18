@@ -1771,44 +1771,37 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       const sprintCoder = window.sprintCoder;
 
-      const [messagesResult, snapshot, commandsResult, approvalHistoryResult, autoDecisionsResult] =
-        await Promise.all([
-          sprintCoder.tasks
-            .messages(taskId)
-            .then((v) => ({ ok: true as const, v }))
-            .catch((err: unknown) => ({ ok: false as const, err })),
-          typeof sprintCoder.turns.snapshot === 'function'
-            ? sprintCoder.turns.snapshot(taskId).catch(() => null)
-            : Promise.resolve(null),
-          typeof sprintCoder.commands?.list === 'function'
-            ? sprintCoder.commands
-                .list(taskId)
-                .then(async (commands) => {
-                  const cards = await Promise.all(
-                    commands.map(async (command): Promise<CommandCardState> => {
-                      const output = await sprintCoder.commands
-                        .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
-                        .catch(() => ({ items: [] as CommandOutputRecord[] }));
-                      return { command, tail: projectCommandTail(output.items) };
-                    }),
-                  );
-                  return { ok: true as const, cards };
-                })
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
-          typeof sprintCoder.approvals?.listRecent === 'function'
-            ? sprintCoder.approvals
-                .listRecent(taskId)
-                .then((approvals) => ({ ok: true as const, approvals }))
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
-          typeof sprintCoder.permissions?.listAutoDecisions === 'function'
-            ? sprintCoder.permissions
-                .listAutoDecisions(taskId)
-                .then((decisions) => ({ ok: true as const, decisions }))
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, decisions: [] as AutoPermissionDecision[] }),
-        ]);
+      const [messagesResult, snapshot, commandsResult, approvalHistoryResult] = await Promise.all([
+        sprintCoder.tasks
+          .messages(taskId)
+          .then((v) => ({ ok: true as const, v }))
+          .catch((err: unknown) => ({ ok: false as const, err })),
+        typeof sprintCoder.turns.snapshot === 'function'
+          ? sprintCoder.turns.snapshot(taskId).catch(() => null)
+          : Promise.resolve(null),
+        typeof sprintCoder.commands?.list === 'function'
+          ? sprintCoder.commands
+              .list(taskId)
+              .then(async (commands) => {
+                const cards = await Promise.all(
+                  commands.map(async (command): Promise<CommandCardState> => {
+                    const output = await sprintCoder.commands
+                      .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
+                      .catch(() => ({ items: [] as CommandOutputRecord[] }));
+                    return { command, tail: projectCommandTail(output.items) };
+                  }),
+                );
+                return { ok: true as const, cards };
+              })
+              .catch((err: unknown) => ({ ok: false as const, err }))
+          : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
+        typeof sprintCoder.approvals?.listRecent === 'function'
+          ? sprintCoder.approvals
+              .listRecent(taskId)
+              .then((approvals) => ({ ok: true as const, approvals }))
+              .catch((err: unknown) => ({ ok: false as const, err }))
+          : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
+      ]);
 
       if (get().selectedTaskId !== taskId) return; // user switched away while these were in flight
 
@@ -1844,11 +1837,15 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       }
 
-      if (autoDecisionsResult.ok) {
+      // The kept Auto decision rows come in the snapshot, read with its lastSeq and counts
+      // (issue #863): a decision recorded while the snapshot waited for the Task's mailbox is in
+      // the rows and the counts together, or in neither and replayed after lastSeq.
+      const snapshotAutoDecisions = snapshot?.autoDecisions;
+      if (snapshotAutoDecisions !== undefined) {
         apply((state) => ({
           autoDecisionsByTask: {
             ...state.autoDecisionsByTask,
-            [taskId]: autoDecisionsResult.decisions,
+            [taskId]: snapshotAutoDecisions,
           },
         }));
       }

@@ -4830,13 +4830,13 @@ const migrations = [
         count INTEGER NOT NULL CHECK (count > 0),
         through_seq INTEGER NOT NULL,
         PRIMARY KEY (task_id, turn_id, decision)
-      ) WITHOUT ROWID;
+      );
       CREATE TABLE auto_permission_decision_events (
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
         denied INTEGER NOT NULL CHECK (denied IN (0, 1)),
         seq INTEGER NOT NULL,
         PRIMARY KEY (task_id, denied, seq)
-      ) WITHOUT ROWID;
+      );
       INSERT OR IGNORE INTO auto_permission_decision_events(task_id, denied, seq)
         SELECT task_id,
                CASE WHEN json_extract(payload_json, '$.autoDecision.decision') = 'deny'
@@ -20491,8 +20491,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
               entries: this.getDisplayTurnDiff(taskId, latestCompletedTurn.id),
             },
       interruptedTurnIds: interruptedTurns.map(({ id }) => id),
-      // Read in the same call as lastSeq, so they count exactly the decisions up to it and a
-      // subscription that resumes after lastSeq neither misses nor repeats one (issue #863).
+      // Read in the same call as lastSeq, so the rows and counts cover exactly the decisions up
+      // to it and a subscription that resumes after lastSeq neither misses nor repeats one
+      // (issue #863).
+      autoDecisions: this.listAutoPermissionDecisions(taskId),
       autoDecisionCounts: this.countAutoPermissionDecisions(taskId),
     });
   }

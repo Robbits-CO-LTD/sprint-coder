@@ -288,21 +288,37 @@ function appWorktreeDirCount(profile: string): number {
 /** 観測の 1 回分で待つ上限。Renderer が詰まっても観測そのものは止めない（issue #863）。 */
 const OBSERVE_TIMEOUT_MS = 30_000;
 
-/** 30 秒で打ち切る。打ち切ったかどうかと、元の処理が後から返った時刻（started からの ms）を残す。 */
+/** 観測の結果。すぐ失敗した（評価エラー・コンテキストの破棄など）ことと、30 秒で打ち切ったことを分ける。 */
+type Observed<T> =
+  { status: 'ok'; value: T } | { status: 'timedOut' } | { status: 'failed'; error: string };
+
+/** 打ち切った後に元の処理が決着した時刻（開始からの ms）と、その決着が成功か失敗か。 */
+type LateSettle = { returnedAfterMs: number; outcome: 'resolved' | 'rejected'; error?: string };
+
+function shortError(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200);
+}
+
+/** 30 秒で打ち切る。打ち切った後に元の処理が決着したら、その時刻と成否を onLateSettle に渡す。 */
 function withObserveTimeout<T>(
   work: Promise<T>,
-  onLateReturn: (returnedAfterMs: number) => void,
-): Promise<{ value: T; timedOut: false } | { value: undefined; timedOut: true }> {
+  onLateSettle: (late: LateSettle) => void,
+): Promise<Observed<T>> {
   const started = Date.now();
   let settled = false;
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      resolve({ value: undefined, timedOut: true });
+      resolve({ status: 'timedOut' });
       void work.then(
-        () => onLateReturn(Date.now() - started),
-        () => onLateReturn(Date.now() - started),
+        () => onLateSettle({ returnedAfterMs: Date.now() - started, outcome: 'resolved' }),
+        (error: unknown) =>
+          onLateSettle({
+            returnedAfterMs: Date.now() - started,
+            outcome: 'rejected',
+            error: shortError(error),
+          }),
       );
     }, OBSERVE_TIMEOUT_MS);
     work.then(
@@ -310,13 +326,13 @@ function withObserveTimeout<T>(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ value, timedOut: false });
+        resolve({ status: 'ok', value });
       },
-      () => {
+      (error: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
-        resolve({ value: undefined, timedOut: true });
+        resolve({ status: 'failed', error: shortError(error) });
       },
     );
   });
@@ -327,8 +343,8 @@ type PageFocus = Readonly<{ visibilityState: string; hasFocus: boolean }>;
 /** 次のフレームまでの時間と、そのときの visibilityState / hasFocus を取る。 */
 async function uiLatency(
   page: Page,
-  onLateReturn: (returnedAfterMs: number) => void,
-): Promise<{ ms: number; timedOut: boolean; focus: PageFocus | null }> {
+  onLateSettle: (late: LateSettle) => void,
+): Promise<{ ms: number; observed: Observed<PageFocus> }> {
   const started = Date.now();
   const result = await withObserveTimeout(
     page.evaluate(
@@ -339,9 +355,9 @@ async function uiLatency(
           ),
         ),
     ),
-    onLateReturn,
+    onLateSettle,
   );
-  return { ms: Date.now() - started, timedOut: result.timedOut, focus: result.value ?? null };
+  return { ms: Date.now() - started, observed: result };
 }
 
 /** Main から見たウィンドウの状態とプロセスごとの CPU。Main は詰まっていないので待たずに返る。 */
@@ -468,8 +484,10 @@ type DriveResult = Readonly<{
   longTasks: unknown;
   /** Renderer の中で貯めたフレーム間隔・長いアニメーションフレーム・可視状態（最後に 1 回読む）。 */
   frames: unknown;
-  /** 打ち切った rAF / readTeam が、後から返った時刻（driveTeam 開始からの ms）。 */
+  /** 打ち切った rAF / readTeam が、後から決着した時刻（開始からの ms）と成否。 */
   lateReturns: unknown[];
+  /** rAF / readTeam を 30 秒で打ち切った回数と、すぐ失敗した回数（別の事象として数える）。 */
+  observeOutcomes: Record<'raf' | 'readTeam', { timedOut: number; failed: number }>;
   gpuFeatureStatus: unknown;
   pageText: string;
   approvals: string[];
@@ -514,6 +532,14 @@ async function driveTeam(
   await page.getByTestId('composer-send-button').click();
   const started = Date.now();
   const lateReturns: unknown[] = [];
+  const observeOutcomes = {
+    raf: { timedOut: 0, failed: 0 },
+    readTeam: { timedOut: 0, failed: 0 },
+  };
+  const countOutcome = (what: 'raf' | 'readTeam', observed: Observed<unknown>): void => {
+    if (observed.status === 'timedOut') observeOutcomes[what].timedOut++;
+    else if (observed.status === 'failed') observeOutcomes[what].failed++;
+  };
   let maxMainLatencyMs = 0;
   const timeline: unknown[] = [];
   const tracks = new Map<string, ExecutionTrack>();
@@ -559,28 +585,25 @@ async function driveTeam(
     maxMainLatencyMs = Math.max(maxMainLatencyMs, mainLatency);
     const mainWindow = await stage('mainWindow', () => mainWindowState(app));
     const ui = await stage('raf', () =>
-      uiLatency(page, (returnedAfterMs) =>
-        lateReturns.push({
-          tick: tickTick,
-          what: 'raf',
-          startedAt: now - started,
-          returnedAfterMs,
-        }),
+      uiLatency(page, (late) =>
+        lateReturns.push({ tick: tickTick, what: 'raf', startedAt: now - started, ...late }),
       ),
     );
+    countOutcome('raf', ui.observed);
     const latency = ui.ms;
     maxUiLatencyMs = Math.max(maxUiLatencyMs, latency);
     const team = await stage('readTeam', () =>
-      withObserveTimeout(readTeam(page, input.taskId), (returnedAfterMs) =>
+      withObserveTimeout(readTeam(page, input.taskId), (late) =>
         lateReturns.push({
           tick: tickTick,
           what: 'readTeam',
           startedAt: stages['readTeam']?.at ?? now - started,
-          returnedAfterMs,
+          ...late,
         }),
       ),
     );
-    if (!team.timedOut) last = team.value;
+    countOutcome('readTeam', team);
+    if (team.status === 'ok') last = team.value;
     const { gitWorktrees, appDirs } = await stage('git', () => ({
       gitWorktrees: gitWorktreeCount(input.workspace),
       appDirs: appWorktreeDirCount(input.profile),
@@ -644,9 +667,10 @@ async function driveTeam(
       t: now - started,
       // t は Tick の開始。snapshot（readTeam）の時刻は stages.readTeam.at を見る。
       stages,
-      uiTimedOut: ui.timedOut,
-      readTeamTimedOut: team.timedOut,
-      pageFocus: ui.focus,
+      // ok / timedOut（30 秒で打ち切り）/ failed（すぐ失敗。error に理由）を分けて残す。
+      ui: ui.observed.status === 'failed' ? ui.observed : { status: ui.observed.status },
+      readTeam: team.status === 'failed' ? team : { status: team.status },
+      pageFocus: ui.observed.status === 'ok' ? ui.observed.value : null,
       mainWindow,
       workers: (last?.workers ?? []).filter(({ kind }) => kind === 'worker').length,
       executions: executions.length,
@@ -725,6 +749,7 @@ async function driveTeam(
       .evaluate(() => (window as unknown as { __scFrames?: unknown }).__scFrames ?? null)
       .catch(() => null),
     lateReturns,
+    observeOutcomes,
     gpuFeatureStatus,
     pageText: await page
       .locator('body')
@@ -915,6 +940,7 @@ function summarize(result: DriveResult, assignments: readonly Assignment[]) {
     longTasks: result.longTasks,
     frames: summarizeFrames(result.frames),
     lateReturns: result.lateReturns,
+    observeOutcomes: result.observeOutcomes,
     gpuFeatureStatus: result.gpuFeatureStatus,
     wallMs: result.wallMs,
     stoppedReason: result.stoppedReason,

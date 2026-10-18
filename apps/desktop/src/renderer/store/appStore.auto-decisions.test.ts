@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AutoPermissionDecision, TurnEvent } from '../types/sprint-coder';
-import type { useAppStore } from './appStore';
 import {
   AUTO_DECISION_RETAIN_LIMIT,
   appendAutoDecisions,
   countAutoDecisions,
   handleTurnEvent,
+  useAppStore,
 } from './appStore';
 
 type AppState = ReturnType<typeof useAppStore.getState>;
@@ -172,5 +172,48 @@ describe('Auto decisions in the store (issue #863)', () => {
       'auto-4',
       'auto-5',
     ]);
+  });
+});
+
+describe('Auto decisions restored with a Task (issue #863)', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('takes the rows and counts from the snapshot, so a denial recorded while it waited is in both', async () => {
+    // Main read the snapshot after a mutation released the Task's mailbox: the denial recorded
+    // meanwhile (seq 7) is in its rows, its counts and its lastSeq together.
+    const denial = decision(7, { decision: 'deny', outcome: 'deny', reason: 'outside the roots' });
+    const subscribe = vi.fn().mockReturnValue(vi.fn());
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { messages: vi.fn().mockResolvedValue([]) },
+        turns: {
+          snapshot: vi.fn().mockResolvedValue({
+            lastSeq: 7,
+            activeTurn: null,
+            queued: [],
+            pendingApprovals: [],
+            activatedSkills: [],
+            latestTurnDiff: null,
+            autoDecisions: [decision(6), denial],
+            autoDecisionCounts: [{ turnId: 'turn-1', allow: 1, allowOnce: 0, deny: 1 }],
+          }),
+          subscribe,
+        },
+      },
+    });
+
+    await useAppStore.getState().selectTask('task-1');
+
+    const state = useAppStore.getState();
+    expect(state.autoDecisionsByTask['task-1']?.map(({ id, reason }) => [id, reason])).toEqual([
+      ['auto-6', 'reason 6'],
+      ['auto-7', 'outside the roots'],
+    ]);
+    expect(state.autoDecisionCountsByTask['task-1']).toEqual({
+      throughSeq: 7,
+      byTurn: { 'turn-1': { allow: 1, allowOnce: 0, deny: 1 } },
+    });
+    // The subscription resumes after the same lastSeq, so nothing up to it is replayed again.
+    expect(subscribe).toHaveBeenCalledWith('task-1', expect.any(Function), { afterSeq: 7 });
   });
 });
