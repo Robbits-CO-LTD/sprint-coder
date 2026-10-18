@@ -476,11 +476,7 @@ export class WorkerWorktreeManager {
       // Where the file system reports no ENAMETOOLONG (Windows), Git still fails on a path that is
       // too long; its raw message is turned into the same clear length message.
       if (error instanceof WorktreeError && GIT_PATH_TOO_LONG.test(error.message))
-        throw new WorktreeError(
-          'create_failed',
-          worktreePathTooLongMessage(worktreePath.length, this.limit()),
-          { cause: error },
-        );
+        throw new WorktreeError('create_failed', gitPathTooLongMessage(), { cause: error });
       throw error;
     }
     const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
@@ -1606,6 +1602,15 @@ export function checkWorktreePathLengths(
   const longest = Math.max(input.worktreePath.length, input.gitAdminPath.length);
   if (longest <= limit) return null;
   return worktreePathTooLongMessage(longest, limit);
+}
+
+/**
+ * Git refused a path while creating the worktree. The worktree path itself passed the length check,
+ * so a file inside the repository is what grew too long; no length is quoted, since the worktree
+ * path's own length would read as within the limit.
+ */
+function gitPathTooLongMessage(): string {
+  return '作業用フォルダの中のファイルを含めたパスが長すぎるため、Worker の worktree を作成できません。アプリのデータ保存先やリポジトリを、より浅い場所へ移動してから再実行してください。';
 }
 
 function worktreePathTooLongMessage(length: number, limit: number): string {
