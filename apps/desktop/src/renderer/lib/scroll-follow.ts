@@ -41,3 +41,73 @@ export function distanceFromBottom({
 export function isPinnedToBottom(metrics: ScrollMetrics, threshold = FOLLOW_THRESHOLD_PX): boolean {
   return distanceFromBottom(metrics) <= threshold;
 }
+
+/** The part of the scrollport the tail follower writes to. */
+export type TailScrollTarget = { scrollTop: number; readonly scrollHeight: number };
+
+export type TailFollower = {
+  /** Scrolls `target` to the tail on the next frame, once however many updates ask before it. */
+  schedule(target: TailScrollTarget | null): void;
+  /** Scrolls `target` to the tail now (task switch, 最新へ) and resumes following. */
+  scrollNow(target: TailScrollTarget | null): void;
+  /**
+   * Whether a scroll event still means "following". The scroll handler calls it synchronously,
+   * so a reader who scrolls up before an already scheduled frame is not pulled back down.
+   */
+  observeScroll(target: TailScrollTarget, pinned: boolean): boolean;
+  /** Drops a scheduled scroll (unmount). */
+  cancel(): void;
+};
+
+/**
+ * Coalesces "follow the tail" into one scroll per frame (issue #863): reading `scrollHeight`
+ * forces a layout of the whole Timeline, and several store updates can land in one frame.
+ *
+ * A scroll event decides whether the reader is still following. It is not enough to ask whether
+ * the scrollport is at the bottom: content that grew after the follower's own scroll and before
+ * the event leaves it short of the bottom without the reader having moved. So an event whose
+ * position is still the one the follower wrote keeps following; any other position away from the
+ * bottom is the reader leaving the tail, which takes effect at once — the frame callback checks it
+ * — even though React has not committed the "not following" render yet.
+ */
+export function createTailFollower(
+  frames: {
+    request: (callback: () => void) => number;
+    cancel: (handle: number) => void;
+  } = {
+    request: (callback) => requestAnimationFrame(callback),
+    cancel: (handle) => cancelAnimationFrame(handle),
+  },
+): TailFollower {
+  let following = true;
+  let pending: number | null = null;
+  let writtenTop: number | null = null;
+  const cancel = (): void => {
+    if (pending !== null) frames.cancel(pending);
+    pending = null;
+  };
+  const write = (target: TailScrollTarget): void => {
+    target.scrollTop = target.scrollHeight;
+    writtenTop = target.scrollTop;
+  };
+  return {
+    schedule(target) {
+      if (target === null || !following || pending !== null) return;
+      pending = frames.request(() => {
+        pending = null;
+        if (following) write(target);
+      });
+    },
+    scrollNow(target) {
+      following = true;
+      if (target !== null) write(target);
+    },
+    observeScroll(target, pinned) {
+      const own = writtenTop !== null && Math.abs(target.scrollTop - writtenTop) <= 1;
+      following = pinned || (following && own);
+      if (!following) cancel();
+      return following;
+    },
+    cancel,
+  };
+}

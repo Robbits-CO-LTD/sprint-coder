@@ -10,7 +10,7 @@ import type {
 } from '../../types/sprint-coder';
 import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/appStore';
-import { isPinnedToBottom } from '../../lib/scroll-follow';
+import { createTailFollower, isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
 import {
   executionStateLabel,
@@ -223,47 +223,37 @@ export function Timeline({
   const [followState, setFollowState] = useState({ taskId, following: true });
   const following = followState.taskId === taskId ? followState.following : true;
 
+  // Following the tail reads scrollHeight, which forces a layout of the whole Timeline. Several
+  // store updates can land in one frame (issue #863), so they share one scroll on the next frame.
+  // The scroll handler asks the follower synchronously whether the reader left the tail, so a
+  // scroll already scheduled for this frame does not pull a reader who scrolled up back down.
+  const [tailFollower] = useState(() => createTailFollower());
+  useEffect(() => () => tailFollower.cancel(), [tailFollower]);
+
   const handleScroll = useCallback(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const next = isPinnedToBottom(node);
+    const next = tailFollower.observeScroll(node, isPinnedToBottom(node));
     setFollowState((prev) =>
       prev.taskId === taskId && prev.following === next ? prev : { taskId, following: next },
     );
-  }, [taskId]);
+  }, [taskId, tailFollower]);
 
   const jumpToLatest = useCallback(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    tailFollower.scrollNow(scrollRef.current);
     setFollowState({ taskId, following: true });
-  }, [taskId]);
+  }, [taskId, tailFollower]);
 
   // Switching tasks starts the reader at the newest message. Timeline is not keyed by taskId, so
   // the DOM scroll position carries over from the task we just left.
   useEffect(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [taskId]);
+    tailFollower.scrollNow(scrollRef.current);
+  }, [taskId, tailFollower]);
 
-  // Following the tail reads scrollHeight, which forces a layout of the whole Timeline. Several
-  // store updates can land in one frame (issue #863), so they share one scroll on the next frame.
-  // A pending scroll is dropped when the reader stops following (or the Timeline unmounts).
-  const followFrameRef = useRef<number | null>(null);
-  useEffect(
-    () => () => {
-      if (followFrameRef.current !== null) cancelAnimationFrame(followFrameRef.current);
-      followFrameRef.current = null;
-    },
-    [following],
-  );
   useEffect(() => {
-    if (!following || followFrameRef.current !== null) return;
-    followFrameRef.current = requestAnimationFrame(() => {
-      followFrameRef.current = null;
-      const node = scrollRef.current;
-      if (node) node.scrollTop = node.scrollHeight;
-    });
+    if (following) tailFollower.schedule(scrollRef.current);
   }, [
+    tailFollower,
     following,
     messages,
     approvals,
