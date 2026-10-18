@@ -263,11 +263,14 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
     - そこで PR-3 で次の 2 つを足す。
       - コアの理由 `DecisionReason::kOriginUnknown`。origin unknown の分岐だけに付け、テキストを読めない分岐は `kUnclassified` のまま残す。
       - facts の「対象が web コンテンツではないと確定できるか」。
-        - 確定してよいのは、§3.2.2 の検証済み identity（署名・package・正規化パス）で、対象プロセスが web を描画しない明示表のアプリだと裏づけられた場合だけ。明示表の最初の項目は System32 の notepad と、Store 署名のメモ帳の package。
+        - 確定してよいのは、§3.2.2 の検証済み identity（署名・package・正規化パス）で、対象プロセスが web を描画しない明示表のアプリだと裏づけられた場合だけ。明示表の最初の項目は System32 の notepad だけとする。
+          - この notepad は、署名・正規化パス・volume serial と file id で固定する。ユーザーが書き込める場所にある同名のコピーは、takeover のままにする。
+          - Store 署名のメモ帳の package を表に足すのは、PR-4 の後にする。PR-4 で native が package identity（family と publisherId）を返し、検証済み digest に束縛するようになるまでは足さない。
+          - それまでの native は `packageFamilyName` を検証しない。MAC の無い identity JSON の値を読んで照合しても、「検証済み」にはならない。
         - UIA の `FrameworkId` は対象アプリが自分で申告できる値なので、§3.2.1 の原則どおり、確定の根拠にしない。使ってよいのは「web の疑いあり → takeover」の方向だけ。
         - 題名や表示名は使わない。
     - 例外にできるのは、次の 2 つの条件を両方満たす場合だけ。
-      - takeover の理由が `kOriginUnknown` だけである。テキストを読めない場合など、ほかの takeover の理由が重なっていれば、例外にせず takeover のままにする。そのため PR-3 では、コアが origin の判定より前にテキストの可読性を判定する、今の順序（`ClassifyEffect`）を契約で固定する。
+      - takeover の理由が `kOriginUnknown` だけである。テキストを読めない場合など、ほかの takeover の理由が重なっていれば、例外にせず takeover のままにする。コアの判定順（今は可読性が先）には頼らない。例外を適用する側で、`TextIsClassifiable`（スクロールでは `ScopeIsReadable` と `ScrollValueTextIsClassifiable`）を独立にもう一度確かめる。どれか 1 つでも false なら、例外にしない。将来コアの判定の順序を入れ替えても、可読性の理由が隠れることはない。
       - 対象が web ではないと確定できた Document である。
     - 確定できない場合、identity が未検証の場合、ブラウザで origin が unknown の場合は、どれも takeover のままにする。
     - この写し方が要る理由は次のとおり。
@@ -284,6 +287,8 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
       - 対照として、メモ帳の Document。理由が `kOriginUnknown` で、web ではないと検証できているので、takeover にならない。
       - 次の場合は、いずれも takeover になる。
         - native の Document で、origin が unknown で、しかも `TextIsClassifiable` が false の場合。メモ帳の対照の行とは別の行にする。
+        - 上の場合で、コアが origin を先に判定して `kOriginUnknown` を返すように差し替えたもの。例外を適用する側がもう一度確かめるので、それでも takeover になる。判定順に頼っていないことを示す行。
+        - ユーザーが書き込める場所にある `notepad.exe` の同名コピーと、PR-4 より前の Store 版メモ帳。どちらも takeover になる。
         - `FrameworkId` が不明な Document、または web を示す Document。
         - identity が未検証の Document。
         - ブラウザで origin が unknown の場合。
