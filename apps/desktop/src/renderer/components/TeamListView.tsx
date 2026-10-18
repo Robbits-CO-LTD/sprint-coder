@@ -1,9 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { TeamMessageMarkdown } from './TeamMessageMarkdown';
 import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
 import { TeamRetainedWorktreesDialog, TeamRetainedWorktreesTrigger } from './TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../lib/team-execution-display';
@@ -304,14 +303,7 @@ export function TeamListView({
                               the Canvas's Markdown <p> produces ("Leaderから本文" vs
                               "Leaderから\n\n本文"). `.w-line :where(p, …)` styles both alike, and
                               raw HTML/images stay out of the DOM exactly as on the Canvas. */}
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            skipHtml
-                            disallowedElements={['img']}
-                            unwrapDisallowed
-                          >
-                            {incoming ? m.content : summarize(m.content)}
-                          </ReactMarkdown>
+                          <TeamMessageMarkdown text={incoming ? m.content : summarize(m.content)} />
                         </li>
                       );
                     })}

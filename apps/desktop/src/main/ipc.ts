@@ -75,6 +75,7 @@ import {
   startActivationIntent,
 } from '../computer-use-activation-intent';
 import { TeamSubscriptionRegistry } from './team-subscription-registry';
+import { TeamDetailStream } from './team-detail-stream';
 import { z } from 'zod';
 import {
   IPC_CHANNELS,
@@ -1253,7 +1254,17 @@ export class IpcRouter {
   private readonly managedCodingHarness: ManagedCodingHarness;
   private readonly autoReviewer = AutoReviewer.createProduction();
   private readonly teamCoordinator: TeamCoordinator;
-  private readonly teamSubscriptions = new TeamSubscriptionRegistry();
+  // Team events go out as patches against the detail each subscriber already holds (issue #863).
+  private readonly teamDetailStream = new TeamDetailStream(
+    new TeamSubscriptionRegistry(),
+    (taskId, event) => {
+      if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+      this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
+        taskId,
+        event: teamEventSchema.parse(event),
+      });
+    },
+  );
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
@@ -1701,19 +1712,7 @@ export class IpcRouter {
     this.teamCoordinator = new TeamCoordinator(
       persistence,
       this.teamWorkerRuntime,
-      (taskId, detail) => {
-        if (
-          this.teamSubscriptions.hasSubscribers(taskId) &&
-          !this.window.isDestroyed() &&
-          !this.window.webContents.isDestroyed()
-        ) {
-          const seq = this.teamSubscriptions.nextSequence(taskId);
-          this.window.webContents.send(IPC_CHANNELS.teamsEvent, {
-            taskId,
-            event: teamEventSchema.parse({ type: 'updated', seq, detail }),
-          });
-        }
-      },
+      (taskId, detail) => this.teamDetailStream.publish(taskId, detail),
       undefined,
       // Long Team work is split into bounded Mission steps. A step may run for up to 30 minutes;
       // heartbeat and progress leases inside TeamCoordinator detect dead/stalled runtimes sooner.
@@ -4492,18 +4491,19 @@ export class IpcRouter {
       IPC_CHANNELS.teamsSubscribe,
       teamSubscriptionInputSchema,
       teamSubscriptionSnapshotSchema,
-      (input) => ({
-        type: 'snapshot',
-        seq: this.teamSubscriptions.subscribe(input.taskId, input.subscriptionId),
-        detail: this.teamCoordinator.get(input.taskId),
-      }),
+      (input) =>
+        this.teamDetailStream.subscribe(
+          input.taskId,
+          input.subscriptionId,
+          this.teamCoordinator.get(input.taskId),
+        ),
     );
     this.handle(
       IPC_CHANNELS.teamsUnsubscribe,
       teamSubscriptionInputSchema,
       z.undefined(),
       (input) => {
-        this.teamSubscriptions.unsubscribe(input.taskId, input.subscriptionId);
+        this.teamDetailStream.unsubscribe(input.taskId, input.subscriptionId);
         return undefined;
       },
     );
@@ -5294,7 +5294,7 @@ export class IpcRouter {
     );
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
-    this.teamSubscriptions.clear();
+    this.teamDetailStream.clear();
     this.approvalCoordinator.dispose();
     await this.managedCodingHarness.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the

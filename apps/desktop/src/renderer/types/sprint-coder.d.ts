@@ -1000,7 +1000,14 @@ export interface SprintCoderApi {
       listener: (
         event:
           | { type: 'snapshot'; seq: number; detail: TeamDetail | null }
-          | { type: 'updated'; seq: number; detail: TeamDetail },
+          | { type: 'updated'; seq: number; detail: TeamDetail }
+          // What changed since the previous event (issue #863); apply it to the detail held.
+          | {
+              type: 'patched';
+              seq: number;
+              teamId: string;
+              patch: import('@sprint-coder/contracts').TeamDetailPatch;
+            },
       ) => void,
       onError?: () => void,
     ): () => void;
