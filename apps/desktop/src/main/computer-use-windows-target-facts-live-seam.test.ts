@@ -384,11 +384,17 @@ int wmain(int argc, wchar_t **argv) {
   outsider.lineage_root_pid = idle.info.dwProcessId;
   outsider.lineage_root_creation = WindowsTargetCreationTime(idle.info.hProcess).value_or(0);
   outsider.acceptance_mode = true;
+  // The rename-follow probe runs once and must confirm it on this (NTFS) machine; the measurements
+  // below rely on it, so set it on the outsider context.
+  const std::optional<bool> rename_follows = WindowsTargetRenameFollows();
+  Check(rename_follows == std::optional<bool>(true), "rename_follow_probe_confirms_on_this_machine");
+  outsider.rename_follows = rename_follows;
   // This program stands in for Main: CurrentWindowsTargetFactsContext takes Main's pid as the
   // lineage root, so this process (and its children) are Sprint Coder's own.
   WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "", true);
   own.roots = outsider.roots;
-  Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId(),
+  Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId() &&
+            own.rename_follows == std::optional<bool>(true),
         "contexts_built");
   Check(CurrentWindowsTargetFactsContext(0, "", true).lineage_root_pid == 0,
         "lineage_root_unmeasured_without_main");
@@ -509,6 +515,17 @@ int wmain(int argc, wchar_t **argv) {
             Is(fixture_facts.facts.descendant_pseudo_console, false),
         "fixture_lineage_outsider");
   Check(ClassOf(fixture_facts.facts) == "W6", "fixture_refused_as_w6");
+
+  // Fail-closed: if the rename-follow probe did not confirm (false or unknown), the same target's
+  // running image does not match, so it is unresolvable. The result is substitutable here.
+  for (const std::optional<bool> probe : {std::optional<bool>(false), std::optional<bool>()}) {
+    WindowsTargetFactsContext degraded = outsider;
+    degraded.rename_follows = probe;
+    const WindowsTargetFactsMeasurement m =
+        Measure(fixture_process.info.dwProcessId, fixture_window, degraded);
+    Check(Is(m.facts.running_image_matches, false) && ClassOf(m.facts) == "W-UR",
+          "unconfirmed_rename_follow_makes_the_target_unresolvable");
+  }
 
   // The main image is found from kernel-held data, not from the target's module list. For a benign
   // process both name the running image, so the kernel name equals the held path and the module

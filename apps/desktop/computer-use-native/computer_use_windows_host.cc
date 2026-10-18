@@ -1091,7 +1091,16 @@ bool IsSupportedWindowsV1Target(
 //     it names the kernel's image file object, which follows a rename of the running image, so when
 //     a target unmaps its image and maps another file B at the entry point's address (and rewrites
 //     its Ldr list), the re-read still names the real image and opens a different file than the one
-//     held, which is a mismatch (W-UR). The held file's PE header against the kernel summary (entry
+//     held, which is a mismatch (W-UR). This rests on QueryFullProcessImageNameW following a
+//     rename, which a one-time probe confirms on this machine (WindowsTargetRenameFollows); unless
+//     it did, no running image matches. The name is read once before the open and once after, both
+//     must agree (a rename racing the open is caught, since the file-id compare still ties the
+//     opened file to the real image's id), and the held file must sit on a volume with a stable
+//     128-bit file id (NTFS or ReFS). A hard-link count is not required: Windows servicing
+//     hard-links legitimate system binaries (WinSxS), the eligible System32 image among them, and
+//     the name and file-id checks already defeat a hard link placed at the old name (it carries the
+//     other file's id). The PE header
+//     against the kernel summary (entry
 //     RVA, subsystem, machine, checksum, image file size, characteristics, stack sizes), the
 //     recorded path still naming the held file, the kernel mapped name staying put, and the module
 //     list are auxiliary deny-side checks. Any mismatch, or a target whose kernel data or re-read
@@ -1154,6 +1163,11 @@ struct WindowsTargetFactsContext {
   std::uint64_t lineage_root_creation = 0;
   std::string self_signer_thumbprint;
   bool acceptance_mode = false;
+  // Whether QueryFullProcessImageNameW follows a rename of the running image on this machine,
+  // measured once (WindowsTargetRenameFollows). The running-image anchor rests on it, so when it
+  // is anything but true (false, or the probe could not run) no target's running image matches,
+  // and every target is unresolvable.
+  std::optional<bool> rename_follows;
 };
 
 struct WindowsTargetFactsMeasurement {
@@ -1294,6 +1308,67 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
   return roots;
 }
 
+// Measures, once, whether QueryFullProcessImageNameW follows a rename of a running image on this
+// machine. A copy of this helper's own exe is started SUSPENDED (so it never runs a single
+// instruction: no behaviour, no pipe, no window), its kernel image name is read, the file is
+// renamed on disk, and the name is read again. It follows when the second name is the new one. The
+// child is held in a job that kills it on close, and the temp files are deleted. std::nullopt when
+// the probe could not run (copy, launch or rename failed), which the caller treats as "does not
+// follow" (fail closed). The probe is not cheap (a process create and teardown), so it is done
+// once per helper and cached in the context.
+std::optional<bool> WindowsTargetRenameFollows() {
+  std::vector<wchar_t> module(32'768, L'\0');
+  const DWORD module_length =
+      GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+  std::vector<wchar_t> temp(32'768, L'\0');
+  const DWORD temp_length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
+  if (module_length == 0 || module_length >= module.size() || temp_length == 0 ||
+      temp_length >= temp.size())
+    return std::nullopt;
+  const std::wstring directory(temp.data(), temp_length);
+  const std::wstring stem = directory + L"sc-rename-probe-" +
+                            std::to_wstring(GetCurrentProcessId()) + L"-" +
+                            std::to_wstring(GetTickCount64());
+  const std::wstring first = stem + L"-a.exe";
+  const std::wstring second = stem + L"-b.exe";
+  if (CopyFileW(std::wstring(module.data(), module_length).c_str(), first.c_str(), TRUE) != TRUE)
+    return std::nullopt;
+  ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  std::optional<bool> follows;
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  std::wstring command = L"\"" + first + L"\"";
+  if (job.value != nullptr &&
+      SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
+                              sizeof(limits)) &&
+      CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                     CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup,
+                     &process)) {
+    AssignProcessToJobObject(job.value, process.hProcess);
+    std::wstring before;
+    std::wstring after;
+    if (ReadProcessPath(process.hProcess, &before) &&
+        MoveFileExW(first.c_str(), second.c_str(), 0) == TRUE &&
+        ReadProcessPath(process.hProcess, &after))
+      follows = SameWindowsTargetName(before, first) && SameWindowsTargetName(after, second);
+    TerminateProcess(process.hProcess, 0);
+    WaitForSingleObject(process.hProcess, 2'000);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+  }
+  // Delete after the child is gone so its image section no longer holds the file. A short retry
+  // covers the brief window while the kernel finishes tearing the mapping down.
+  for (const std::wstring &file : {first, second})
+    for (int attempt = 0; attempt < 20 && GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES;
+         ++attempt)
+      if (DeleteFileW(file.c_str()) != TRUE)
+        Sleep(50);
+  return follows;
+}
+
 // The context of a measurement made by this helper: the roots with Sprint Coder's install root,
 // and the lineage root for W8 ("Sprint Coder's own"). The lineage root is the Main process (the
 // Electron app that ServeMain's parent check verified), not this helper: Main and all its
@@ -1317,6 +1392,7 @@ WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pi
   }
   context.self_signer_thumbprint = std::move(self_signer_thumbprint);
   context.acceptance_mode = acceptance_mode;
+  context.rename_follows = WindowsTargetRenameFollows();
   return context;
 }
 
@@ -1512,6 +1588,18 @@ std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstr
 // image, not B. If that name cannot be read or opened, the result is unresolvable. The held file's
 // PE header against the kernel summary, the recorded path still naming the held file, the kernel
 // mapped name staying put, and the module list are auxiliary deny-side checks on top.
+// Whether the held file is on a volume whose 128-bit file id is stable (NTFS or ReFS). On FAT and
+// similar the id is not dependable, so file-id matching cannot be trusted and the target is
+// unresolvable. Network and removable volumes are already W-UR by imageVolume.
+bool WindowsTargetStableIdVolume(HANDLE file) {
+  std::array<wchar_t, MAX_PATH + 1> file_system{};
+  if (GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, nullptr,
+                                    file_system.data(),
+                                    static_cast<DWORD>(file_system.size())) != TRUE)
+    return false;
+  return _wcsicmp(file_system.data(), L"NTFS") == 0 || _wcsicmp(file_system.data(), L"ReFS") == 0;
+}
+
 bool HoldWindowsTargetRunningImage(HANDLE process,
                                    const std::optional<std::wstring> &recorded,
                                    WindowsTargetHeldImage *held) {
@@ -1535,15 +1623,22 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       !CanonicalWindowsPathFromHandle(held->file.value, &held->canonical_path))
     return false;
   // Anchor: after holding, the kernel image name (it follows a rename of the running image, unlike
-  // a view the target remapped) must open the same file as the one held. Unreadable -> W-UR.
-  std::wstring kernel_path;
+  // a view the target remapped) must open the same file as the one held. The name is read once
+  // before the open and once after, and both must agree, so a rename that races the open (to put a
+  // hard link to another file at the old name) is caught. The held file must have a single name
+  // and sit on a volume with a stable 128-bit file id. Anything unreadable -> W-UR.
+  std::wstring kernel_path_before;
+  std::wstring kernel_path_after;
   const std::optional<WindowsPathIdentity> kernel_file =
-      ReadProcessPath(process, &kernel_path) ? WindowsTargetOpenPathIdentity(kernel_path)
-                                             : std::nullopt;
+      ReadProcessPath(process, &kernel_path_before)
+          ? WindowsTargetOpenPathIdentity(kernel_path_before)
+          : std::nullopt;
   const bool anchored =
-      kernel_file.has_value() &&
+      kernel_file.has_value() && ReadProcessPath(process, &kernel_path_after) &&
+      SameWindowsTargetName(kernel_path_before, kernel_path_after) &&
       SameWindowsTargetName(kernel_file->canonical_path, held->canonical_path) &&
-      SameWindowsFileIdentity(kernel_file->identity, held->identity);
+      SameWindowsFileIdentity(kernel_file->identity, held->identity) &&
+      WindowsTargetStableIdVolume(held->file.value);
   // Auxiliary deny-side checks.
   const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
   const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
@@ -2300,7 +2395,9 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
   WindowsTargetHeldImage held;
   if (!HoldWindowsTargetRunningImage(process.value, recorded, &held))
     return measured;
-  facts.running_image_matches = held.matches;
+  // The running-image anchor rests on QueryFullProcessImageNameW following a rename, so unless the
+  // one-time probe confirmed it does on this machine, no running image matches (fail closed).
+  facts.running_image_matches = held.matches && context.rename_follows == std::optional<bool>(true);
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
