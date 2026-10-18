@@ -51,7 +51,11 @@ it('summarizes a Turn of Auto decisions and renders the rows only while open (is
   const view = mount();
   const decisions = [decision(1, 'allow'), decision(2, 'allow'), decision(3, 'deny')];
 
-  act(() => view.root.render(<AutoDecisionAuditGroup decisions={decisions} tally={null} />));
+  act(() =>
+    view.root.render(
+      <AutoDecisionAuditGroup onExpand={() => {}} decisions={decisions} tally={null} />,
+    ),
+  );
   expect(view.summary()?.textContent).toContain('Auto');
   expect(view.summary()?.textContent).toContain('自動許可 2件 · 拒否 1件');
   expect(view.summary()?.textContent).not.toContain('省略');
@@ -67,7 +71,9 @@ it('summarizes a Turn of Auto decisions and renders the rows only while open (is
   expect(view.rows()[2]?.textContent).toContain('拒否');
   expect(view.rows()[2]?.textContent).toContain('shell.execute');
 
-  act(() => view.root.render(<AutoDecisionAuditGroup decisions={[]} tally={null} />));
+  act(() =>
+    view.root.render(<AutoDecisionAuditGroup onExpand={() => {}} decisions={[]} tally={null} />),
+  );
   expect(view.container.querySelector('[data-testid="auto-decision-group"]')).toBeNull();
   view.dispose();
 });
@@ -77,6 +83,7 @@ it('counts from the Turn tally and says how many rows are not shown', () => {
   act(() =>
     view.root.render(
       <AutoDecisionAuditGroup
+        onExpand={() => {}}
         decisions={[decision(1, 'allow'), decision(2, 'deny')]}
         tally={{ allow: 250, allowOnce: 0, deny: 3 }}
       />,
@@ -94,7 +101,11 @@ it('keeps the summary of a Turn whose rows were all pushed out of memory', () =>
   const view = mount();
   act(() =>
     view.root.render(
-      <AutoDecisionAuditGroup decisions={[]} tally={{ allow: 0, allowOnce: 1, deny: 2 }} />,
+      <AutoDecisionAuditGroup
+        onExpand={() => {}}
+        decisions={[]}
+        tally={{ allow: 0, allowOnce: 1, deny: 2 }}
+      />,
     ),
   );
   expect(view.container.querySelector('[data-testid="auto-decision-group"]')).not.toBeNull();

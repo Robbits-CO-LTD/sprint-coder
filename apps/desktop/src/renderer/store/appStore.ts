@@ -705,17 +705,32 @@ function flushAutoDecisions(): void {
     const autoDecisionsByTask = { ...state.autoDecisionsByTask };
     const autoDecisionCountsByTask = { ...state.autoDecisionCountsByTask };
     for (const [taskId, queued] of batches) {
+      // Rows and counts take only decisions newer than what the Task already holds: a snapshot
+      // applied while this batch waited already restored everything up to its lastSeq, and adding
+      // those older rows again would push the newest ones out of the kept window.
+      const boundary = autoDecisionCountsByTask[taskId]?.throughSeq ?? 0;
+      const fresh = queued.filter(({ seq }) => seq > boundary);
+      if (fresh.length === 0) continue;
       autoDecisionsByTask[taskId] = appendAutoDecisions(
         autoDecisionsByTask[taskId] ?? [],
-        queued.map(({ decision }) => decision),
+        fresh.map(({ decision }) => decision),
       );
       autoDecisionCountsByTask[taskId] = countAutoDecisions(
         autoDecisionCountsByTask[taskId],
-        queued,
+        fresh,
       );
     }
     return { autoDecisionsByTask, autoDecisionCountsByTask };
   });
+}
+
+/** Drops a Task's queued decisions that a snapshot up to `lastSeq` already holds (issue #863). */
+function discardQueuedAutoDecisionsThrough(taskId: string, lastSeq: number): void {
+  const queued = pendingAutoDecisions.get(taskId);
+  if (queued === undefined) return;
+  const newer = queued.filter(({ seq }) => seq > lastSeq);
+  if (newer.length === 0) pendingAutoDecisions.delete(taskId);
+  else pendingAutoDecisions.set(taskId, newer);
 }
 
 function queueAutoDecision(
@@ -1846,6 +1861,8 @@ export const useAppStore = create<AppState>((set, get) => {
       // The kept Auto decision rows come in the snapshot, read with its lastSeq and counts
       // (issue #863): a decision recorded while the snapshot waited for the Task's mailbox is in
       // the rows and the counts together, or in neither and replayed after lastSeq.
+      // Decisions still queued from the previous subscription are in this snapshot already.
+      if (snapshot) discardQueuedAutoDecisionsThrough(taskId, snapshot.lastSeq);
       const snapshotAutoDecisions = snapshot?.autoDecisions;
       if (snapshotAutoDecisions !== undefined) {
         apply((state) => ({

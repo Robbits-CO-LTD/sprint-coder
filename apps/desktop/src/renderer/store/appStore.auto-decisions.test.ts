@@ -308,3 +308,77 @@ describe('an older selection of the same Task (issue #863)', () => {
     expectNewer();
   });
 });
+
+describe('decisions still queued when a snapshot restores the Task (issue #863)', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const storeApply = (fn: (state: AppState) => Partial<AppState>) =>
+    useAppStore.setState((state) => fn(state));
+
+  it('keeps the snapshot rows when an older queued batch flushes after it', async () => {
+    vi.useFakeTimers();
+    useAppStore.setState({
+      autoDecisionsByTask: {},
+      autoDecisionCountsByTask: {},
+      lastSeqByTask: {},
+    });
+    // A replay of decisions 1..200 is still queued for the next frame...
+    for (let seq = 1; seq <= 200; seq += 1)
+      handleTurnEvent('task-1', autoDecided(seq, decision(seq)), storeApply);
+    // ...when the Task is selected again and its snapshot restores the newest 200 (201..400).
+    const newest = Array.from({ length: 200 }, (_, index) => decision(201 + index));
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        tasks: { messages: vi.fn().mockResolvedValue([]) },
+        turns: {
+          snapshot: vi.fn().mockResolvedValue({
+            lastSeq: 400,
+            activeTurn: null,
+            queued: [],
+            pendingApprovals: [],
+            activatedSkills: [],
+            latestTurnDiff: null,
+            autoDecisions: newest,
+            autoDecisionCounts: [{ turnId: 'turn-1', allow: 400, allowOnce: 0, deny: 0 }],
+          }),
+          subscribe: vi.fn().mockReturnValue(vi.fn()),
+        },
+      },
+    });
+    await useAppStore.getState().selectTask('task-1');
+    vi.runAllTimers();
+
+    const state = useAppStore.getState();
+    const rows = state.autoDecisionsByTask['task-1'] ?? [];
+    expect(rows).toHaveLength(200);
+    expect(rows[0]?.id).toBe('auto-201');
+    expect(rows.at(-1)?.id).toBe('auto-400');
+    expect(state.autoDecisionCountsByTask['task-1']).toEqual({
+      throughSeq: 400,
+      byTurn: { 'turn-1': { allow: 400, allowOnce: 0, deny: 0 } },
+    });
+  });
+
+  it('does not add rows at or below what the Task already holds when a batch flushes', () => {
+    vi.useFakeTimers();
+    useAppStore.setState({
+      autoDecisionsByTask: { 'task-1': [decision(300)] },
+      autoDecisionCountsByTask: {
+        'task-1': { throughSeq: 300, byTurn: { 'turn-1': { allow: 300, allowOnce: 0, deny: 0 } } },
+      },
+      lastSeqByTask: {},
+    });
+    handleTurnEvent('task-1', autoDecided(299, decision(299)), storeApply);
+    handleTurnEvent('task-1', autoDecided(301, decision(301)), storeApply);
+    vi.runAllTimers();
+    const state = useAppStore.getState();
+    expect(state.autoDecisionsByTask['task-1']?.map(({ id }) => id)).toEqual([
+      'auto-300',
+      'auto-301',
+    ]);
+    expect(state.autoDecisionCountsByTask['task-1']?.throughSeq).toBe(301);
+  });
+});

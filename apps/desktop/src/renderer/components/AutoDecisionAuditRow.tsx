@@ -43,7 +43,7 @@ export const AutoDecisionAuditGroup = memo(function AutoDecisionAuditGroup({
   tally: AutoDecisionTally | null;
   /** Called when the reader opens the group, so the Timeline stops following the tail: the rows
    * grow the content in place, and following would pull the reader away from them. */
-  onExpand?: () => void;
+  onExpand: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const counts = tally ?? tallyRows(decisions);
@@ -68,7 +68,7 @@ export const AutoDecisionAuditGroup = memo(function AutoDecisionAuditGroup({
       onToggle={(event) => {
         const next = event.currentTarget.open;
         setOpen(next);
-        if (next) onExpand?.();
+        if (next) onExpand();
       }}
     >
       <summary
