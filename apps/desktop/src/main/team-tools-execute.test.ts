@@ -887,6 +887,25 @@ describe('executeTeamTool team_assign_tasks (issue #864)', () => {
       expect(result).toMatchObject({ ok: false, code: 'request_too_large' });
       expect(coordinator.assignTasks).not.toHaveBeenCalled();
     });
+
+    it('counts characters by their escaped JSON form, not their length', async () => {
+      const coordinator = batchCoordinator();
+      // 100,000 characters, but each control character escapes to six bytes (\u0001) and each
+      // quote to two, so the JSON the bridge receives is over 500,000 bytes.
+      const args = {
+        assignments: Array.from({ length: 50 }, (_, index) => ({
+          workerId: `worker-${index}`,
+          objective: '\u0001'.repeat(1_800) + '"'.repeat(200),
+          doneCriteria: ['done'],
+        })),
+      };
+      expect(Buffer.byteLength(JSON.stringify(args), 'utf8')).toBeGreaterThan(
+        TEAM_ASSIGN_TASKS_MAX_BYTES,
+      );
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', args);
+      expect(result).toMatchObject({ ok: false, code: 'request_too_large' });
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
   });
 
   it('accepts exactly the maximum batch, the default Team concurrency', async () => {
