@@ -16,7 +16,12 @@
 //    TeamCoordinator/persistence directly and holds no taskId of its own — the bridge is the only
 //    thing that knows which Task/turn this socket connection belongs to.
 import { SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA } from '@sprint-coder/contracts';
-import { TEAM_ASSIGN_TASKS_MAX } from './team-mcp-tool-contract';
+import {
+  TEAM_ASSIGN_TASKS_MAX,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+  TEAM_BRIDGE_MAX_REQUEST_BYTES,
+} from './team-mcp-tool-contract';
 export { TEAM_MCP_TOOL_NAMES } from './team-mcp-tool-contract';
 
 export const TEAM_MCP_SERVER_SOURCE = `'use strict';
@@ -24,6 +29,11 @@ const net = require('net');
 
 const SOCKET_PATH = process.env.TEAM_BRIDGE_SOCKET;
 const TOKEN = process.env.TEAM_BRIDGE_TOKEN;
+// The bridge drops a connection whose request outgrows its buffer, before it can answer, and that
+// takes every other pending call with it. A request that cannot fit is answered here instead.
+const BRIDGE_MAX_REQUEST_BYTES = ${TEAM_BRIDGE_MAX_REQUEST_BYTES};
+const ASSIGN_TASKS_MAX_BYTES = ${TEAM_ASSIGN_TASKS_MAX_BYTES};
+const ASSIGN_TASKS_TOO_LARGE_MESSAGE = ${JSON.stringify(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE)};
 
 const TOOLS = [
   {
@@ -178,7 +188,7 @@ const TOOLS = [
   {
     name: 'team_assign_tasks',
     description:
-      'Assign formal tasks to many Workers in one call (1-${TEAM_ASSIGN_TASKS_MAX}). Use this instead of repeated team_assign_task calls when assigning several Workers, so they all start together. Each assignment is checked like team_assign_task and succeeds or fails on its own: read results[].ok, and retry only the failed ones.',
+      'Assign formal tasks to many Workers in one call (1-${TEAM_ASSIGN_TASKS_MAX}). Use this instead of repeated team_assign_task calls when assigning several Workers, so they all start together. Each assignment is checked like team_assign_task and succeeds or fails on its own: read results[].ok, and retry only the failed ones. If many long objectives do not fit in one call, split them into several smaller calls.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -421,6 +431,11 @@ function writeBridgeRequest(connection, tool, args, timeoutMs) {
       return;
     }
     const requestId = bridgeRequestId();
+    const line = JSON.stringify({ requestId: requestId, token: TOKEN, tool: tool, args: args }) + '\\n';
+    if (Buffer.byteLength(line, 'utf8') > BRIDGE_MAX_REQUEST_BYTES) {
+      reject(new Error('team bridge request is too large: ' + tool + '. Split it into several smaller calls.'));
+      return;
+    }
     const timer = setTimeout(() => {
       if (!connection.pending.delete(requestId)) return;
       reject(new Error('team bridge request timed out: ' + tool));
@@ -428,9 +443,7 @@ function writeBridgeRequest(connection, tool, args, timeoutMs) {
     timer.unref();
     connection.pending.set(requestId, { resolve, reject, timer });
     try {
-      sock.write(
-        JSON.stringify({ requestId: requestId, token: TOKEN, tool: tool, args: args }) + '\\n',
-      );
+      sock.write(line);
     } catch (error) {
       if (connection.pending.delete(requestId)) {
         clearTimeout(timer);
@@ -615,6 +628,31 @@ function handleLine(line) {
         jsonrpc: '2.0',
         id: message.id,
         result: { content: [{ type: 'text', text: 'team bridge is not configured' }], isError: true },
+      });
+      return;
+    }
+    // Same refusal executeTeamTool gives, answered before the arguments reach the bridge.
+    if (
+      name === 'team_assign_tasks' &&
+      Buffer.byteLength(JSON.stringify(args), 'utf8') > ASSIGN_TASKS_MAX_BYTES
+    ) {
+      send({
+        jsonrpc: '2.0',
+        id: message.id,
+        result: {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                ok: false,
+                error: 'RequestTooLarge',
+                code: 'request_too_large',
+                message: ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+              }),
+            },
+          ],
+          isError: true,
+        },
       });
       return;
     }

@@ -11,7 +11,12 @@ import {
   TEAM_WAIT_REPORTS_TOOL,
   WORKER_PROVIDER_TOOLS,
 } from './team-tools';
-import { TEAM_ASSIGN_TASKS_MAX } from '../runtime-host/team-mcp-tool-contract';
+import {
+  TEAM_ASSIGN_TASKS_MAX,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+  TEAM_BRIDGE_MAX_REQUEST_BYTES,
+} from '../runtime-host/team-mcp-tool-contract';
 import type { ToolBroker } from './tool-broker';
 import type { TeamCoordinator } from './team-coordinator';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
@@ -804,6 +809,84 @@ describe('executeTeamTool team_assign_tasks (issue #864)', () => {
       call({ assignments: [{ ...item('worker-a'), doneCriteria: [] }] }),
     ).rejects.toThrow();
     expect(assignTasks).not.toHaveBeenCalled();
+  });
+
+  describe('the byte limit that keeps a batch within the CLI bridge', () => {
+    /** Valid arguments whose JSON is exactly `target` bytes of UTF-8, mostly 3-byte characters. */
+    const argsOfBytes = (target: number) => {
+      const assignments = Array.from({ length: 19 }, (_, index) => ({
+        workerId: `worker-${index}`,
+        objective: 'あ'.repeat(9_180),
+        doneCriteria: ['done'],
+      }));
+      const last = assignments.at(-1)!;
+      last.objective = `${'あ'.repeat(9_000)}a`;
+      const pad = target - Buffer.byteLength(JSON.stringify({ assignments }), 'utf8');
+      expect(pad).toBeGreaterThanOrEqual(0);
+      last.objective += 'a'.repeat(pad);
+      expect(last.objective.length).toBeLessThanOrEqual(10_000);
+      const args = { assignments };
+      expect(Buffer.byteLength(JSON.stringify(args), 'utf8')).toBe(target);
+      return args;
+    };
+    const batchCoordinator = () =>
+      fakeCoordinator({
+        assignTasks: vi.fn(async (_taskId: string, assignments: readonly unknown[]) =>
+          assignments.map((_, index) => ({
+            ok: true,
+            submission: { executionId: `execution-${index}`, state: 'queued' },
+          })),
+        ),
+      } as never);
+
+    it('stays well inside the bridge buffer', () => {
+      expect(TEAM_ASSIGN_TASKS_MAX_BYTES).toBeLessThanOrEqual(TEAM_BRIDGE_MAX_REQUEST_BYTES / 2);
+    });
+
+    it('accepts a batch of exactly the limit', async () => {
+      const coordinator = batchCoordinator();
+      const result = await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_tasks',
+        argsOfBytes(TEAM_ASSIGN_TASKS_MAX_BYTES),
+      );
+      expect(result).toMatchObject({ ok: true, assigned: 19 });
+      expect(coordinator.assignTasks).toHaveBeenCalledTimes(1);
+    });
+
+    it('refuses the whole batch one byte over the limit, saying to split it', async () => {
+      const coordinator = batchCoordinator();
+      const result = await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_tasks',
+        argsOfBytes(TEAM_ASSIGN_TASKS_MAX_BYTES + 1),
+      );
+      expect(result).toEqual({
+        ok: false,
+        error: 'RequestTooLarge',
+        code: 'request_too_large',
+        message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+      });
+      expect(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE).toContain('Split');
+      expect(TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE).not.toMatch(/[0-9]/);
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
+
+    it('counts 3-byte characters by their UTF-8 bytes, not their length', async () => {
+      const coordinator = batchCoordinator();
+      // 350,000 characters, within the per-element limits, but 1,050,000 bytes of UTF-8.
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_assign_tasks', {
+        assignments: Array.from({ length: 50 }, (_, index) => ({
+          workerId: `worker-${index}`,
+          objective: '日'.repeat(7_000),
+          doneCriteria: ['done'],
+        })),
+      });
+      expect(result).toMatchObject({ ok: false, code: 'request_too_large' });
+      expect(coordinator.assignTasks).not.toHaveBeenCalled();
+    });
   });
 
   it('accepts exactly the maximum batch, the default Team concurrency', async () => {

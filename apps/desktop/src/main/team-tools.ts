@@ -29,7 +29,11 @@ import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
-import { TEAM_ASSIGN_TASKS_MAX } from '../runtime-host/team-mcp-tool-contract';
+import {
+  TEAM_ASSIGN_TASKS_MAX,
+  TEAM_ASSIGN_TASKS_MAX_BYTES,
+  TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+} from '../runtime-host/team-mcp-tool-contract';
 
 const teamToolDefinition = (
   providerName: string,
@@ -269,7 +273,7 @@ export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.f
   team_hire_worker:
     '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
   team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
-  team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、失敗した要素だけを出し直します。`,
+  team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。`,
   team_assign_mission:
     '10〜30分単位の2〜12工程を順番に実行する永続Missionを作成します。長時間のコーディングに使います。',
   team_resume_mission:
@@ -914,7 +918,15 @@ export async function executeTeamTool(
     case 'team_assign_tasks': {
       // Issue #864: the whole call is refused only for a malformed request, as team_assign_task's
       // is. Each element then gets team_assign_task's checks and its own result, and the elements
-      // that pass stay assigned whatever happens to the others.
+      // that pass stay assigned whatever happens to the others. A batch too large to cross the CLI
+      // bridge is refused whole on every path, so a Leader meets the same limit everywhere.
+      if (Buffer.byteLength(JSON.stringify(args) ?? '', 'utf8') > TEAM_ASSIGN_TASKS_MAX_BYTES)
+        return {
+          ok: false,
+          error: 'RequestTooLarge',
+          code: 'request_too_large',
+          message: TEAM_ASSIGN_TASKS_TOO_LARGE_MESSAGE,
+        };
       const request = assignTasksArgsSchema.parse(args);
       const readOnlyCeiling =
         options.requesterAgentId !== undefined &&
