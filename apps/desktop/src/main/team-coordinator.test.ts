@@ -4898,7 +4898,8 @@ if (runsWithElectronAbi)
       const manager = new WorkerWorktreeManager({ worktreesRoot });
       const realIntegrate = manager.integrate.bind(manager);
       vi.spyOn(manager, 'integrate').mockImplementation(async (input) => {
-        if (input.repoPath === primaryRepo)
+        // Compare names: on Windows CI the temp path can come back in a different (8.3) form.
+        if (basename(input.repoPath) === basename(primaryRepo))
           throw new WorktreeIntegrationConflictError('cherry-pick conflicted', ['README.md']);
         return realIntegrate(input);
       });
