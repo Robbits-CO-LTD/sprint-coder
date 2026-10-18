@@ -285,14 +285,172 @@ function appWorktreeDirCount(profile: string): number {
   return readdirSync(dir).filter((name) => /^(w-|worktree-)/.test(name)).length;
 }
 
-/** 1 Tick ごとに Team の状態・worktree の数・UI の応答時間を取る。 */
-async function uiLatencyMs(page: Page): Promise<number> {
+/** 観測の 1 回分で待つ上限。Renderer が詰まっても観測そのものは止めない（issue #863）。 */
+const OBSERVE_TIMEOUT_MS = 30_000;
+
+/** 30 秒で打ち切る。打ち切ったかどうかと、元の処理が後から返った時刻（started からの ms）を残す。 */
+function withObserveTimeout<T>(
+  work: Promise<T>,
+  onLateReturn: (returnedAfterMs: number) => void,
+): Promise<{ value: T; timedOut: false } | { value: undefined; timedOut: true }> {
   const started = Date.now();
-  await Promise.race([
-    page.evaluate(() => new Promise<number>((resolve) => requestAnimationFrame(() => resolve(1)))),
-    new Promise((resolve) => setTimeout(resolve, 30_000)),
-  ]).catch(() => undefined);
-  return Date.now() - started;
+  let settled = false;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ value: undefined, timedOut: true });
+      void work.then(
+        () => onLateReturn(Date.now() - started),
+        () => onLateReturn(Date.now() - started),
+      );
+    }, OBSERVE_TIMEOUT_MS);
+    work.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ value, timedOut: false });
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ value: undefined, timedOut: true });
+      },
+    );
+  });
+}
+
+type PageFocus = Readonly<{ visibilityState: string; hasFocus: boolean }>;
+
+/** 次のフレームまでの時間と、そのときの visibilityState / hasFocus を取る。 */
+async function uiLatency(
+  page: Page,
+  onLateReturn: (returnedAfterMs: number) => void,
+): Promise<{ ms: number; timedOut: boolean; focus: PageFocus | null }> {
+  const started = Date.now();
+  const result = await withObserveTimeout(
+    page.evaluate(
+      () =>
+        new Promise<PageFocus>((resolve) =>
+          requestAnimationFrame(() =>
+            resolve({ visibilityState: document.visibilityState, hasFocus: document.hasFocus() }),
+          ),
+        ),
+    ),
+    onLateReturn,
+  );
+  return { ms: Date.now() - started, timedOut: result.timedOut, focus: result.value ?? null };
+}
+
+/** Main から見たウィンドウの状態とプロセスごとの CPU。Main は詰まっていないので待たずに返る。 */
+async function mainWindowState(app: ElectronApplication): Promise<unknown> {
+  return app
+    .evaluate(({ app: electronApp, BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      return {
+        isVisible: window?.isVisible() ?? null,
+        isFocused: window?.isFocused() ?? null,
+        isMinimized: window?.isMinimized() ?? null,
+        metrics: electronApp.getAppMetrics().map((metric) => ({
+          type: metric.type,
+          pid: metric.pid,
+          cpu: Math.round(metric.cpu.percentCPUUsage * 10) / 10,
+          idleWakeups: metric.cpu.idleWakeupsPerSecond,
+        })),
+      };
+    })
+    .catch((error: unknown) => ({ error: String(error) }));
+}
+
+/**
+ * Renderer の中でフレームの間隔・タイマーのずれ・長いアニメーションフレームを記録し続ける。
+ * 観測の Tick とは独立に貯め、最後に 1 回だけ読み出す（詰まった Renderer に毎回聞かない）。
+ */
+async function installFrameRecorder(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const epochAtZero = Date.now() - performance.now();
+    const at = (time: number): number => Math.round(epochAtZero + time);
+    const recorder = {
+      epochAtZero,
+      frames: 0,
+      maxFrameGapMs: 0,
+      frameGaps: [] as { at: number; gapMs: number }[],
+      timerDrifts: [] as { at: number; driftMs: number }[],
+      longAnimationFrames: [] as unknown[],
+      visibility: [] as { at: number; event: string; visibilityState: string; hasFocus: boolean }[],
+    };
+    Object.defineProperty(window, '__scFrames', { value: recorder, configurable: true });
+    let lastFrame = performance.now();
+    const frame = (time: number): void => {
+      recorder.frames++;
+      const gap = time - lastFrame;
+      recorder.maxFrameGapMs = Math.max(recorder.maxFrameGapMs, gap);
+      if (gap > 250 && recorder.frameGaps.length < 2_000)
+        recorder.frameGaps.push({ at: at(lastFrame), gapMs: Math.round(gap) });
+      lastFrame = time;
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+    let lastTimer = performance.now();
+    setInterval(() => {
+      const now = performance.now();
+      const drift = now - lastTimer - 100;
+      if (drift > 250 && recorder.timerDrifts.length < 2_000)
+        recorder.timerDrifts.push({ at: at(lastTimer), driftMs: Math.round(drift) });
+      lastTimer = now;
+    }, 100);
+    try {
+      new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration < 200 || recorder.longAnimationFrames.length >= 1_000) continue;
+          const loaf = entry as PerformanceEntry & {
+            blockingDuration?: number;
+            renderStart?: number;
+            styleAndLayoutStart?: number;
+            scripts?: readonly (PerformanceEntry & {
+              invoker?: string;
+              invokerType?: string;
+              sourceURL?: string;
+              sourceFunctionName?: string;
+              forcedStyleAndLayoutDuration?: number;
+            })[];
+          };
+          recorder.longAnimationFrames.push({
+            at: at(loaf.startTime),
+            durationMs: Math.round(loaf.duration),
+            blockingMs: Math.round(loaf.blockingDuration ?? 0),
+            renderStart: Math.round((loaf.renderStart ?? 0) - loaf.startTime),
+            styleAndLayoutStart: Math.round((loaf.styleAndLayoutStart ?? 0) - loaf.startTime),
+            scripts: (loaf.scripts ?? []).slice(0, 8).map((script) => ({
+              durationMs: Math.round(script.duration),
+              invoker: script.invoker,
+              invokerType: script.invokerType,
+              sourceFunctionName: script.sourceFunctionName,
+              sourceURL: script.sourceURL?.split('/').slice(-2).join('/'),
+              forcedLayoutMs: Math.round(script.forcedStyleAndLayoutDuration ?? 0),
+            })),
+          });
+        }
+      }).observe({ type: 'long-animation-frame', buffered: false });
+    } catch {
+      // long-animation-frame の無い Chromium では、フレーム間隔だけを残す。
+    }
+    const visibility = (event: string): void => {
+      if (recorder.visibility.length < 2_000)
+        recorder.visibility.push({
+          at: Date.now(),
+          event,
+          visibilityState: document.visibilityState,
+          hasFocus: document.hasFocus(),
+        });
+    };
+    visibility('install');
+    document.addEventListener('visibilitychange', () => visibility('visibilitychange'));
+    window.addEventListener('focus', () => visibility('focus'));
+    window.addEventListener('blur', () => visibility('blur'));
+  });
 }
 
 type DriveResult = Readonly<{
@@ -308,6 +466,11 @@ type DriveResult = Readonly<{
   maxUiLatencyMs: number;
   maxMainLatencyMs: number;
   longTasks: unknown;
+  /** Renderer の中で貯めたフレーム間隔・長いアニメーションフレーム・可視状態（最後に 1 回読む）。 */
+  frames: unknown;
+  /** 打ち切った rAF / readTeam が、後から返った時刻（driveTeam 開始からの ms）。 */
+  lateReturns: unknown[];
+  gpuFeatureStatus: unknown;
   pageText: string;
   approvals: string[];
   last: TeamSnapshot | null;
@@ -343,9 +506,14 @@ async function driveTeam(
       }
     }).observe({ type: 'longtask', buffered: false });
   });
+  await installFrameRecorder(page);
+  const gpuFeatureStatus = await app
+    .evaluate(({ app: electronApp }) => electronApp.getGPUFeatureStatus())
+    .catch(() => null);
   await page.getByTestId('composer-textarea').fill(input.prompt);
   await page.getByTestId('composer-send-button').click();
   const started = Date.now();
+  const lateReturns: unknown[] = [];
   let maxMainLatencyMs = 0;
   const timeline: unknown[] = [];
   const tracks = new Map<string, ExecutionTrack>();
@@ -364,6 +532,17 @@ async function driveTeam(
   let tick = 0;
   while (Date.now() - started < OVERALL_MS) {
     tick++;
+    // 段階ごとの開始時刻（started からの ms）と所要時間。どこで時間を使ったかを後から分けられる。
+    const stages: Record<string, { at: number; ms: number }> = {};
+    const stage = async <T>(name: string, work: () => Promise<T> | T): Promise<T> => {
+      const stageStarted = Date.now();
+      try {
+        return await work();
+      } finally {
+        stages[name] = { at: stageStarted - started, ms: Date.now() - stageStarted };
+      }
+    };
+    const tickTick = tick;
     const card = page.getByTestId('approval-card').first();
     if (await card.isVisible().catch(() => false)) {
       const text = (await card.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
@@ -375,14 +554,37 @@ async function driveTeam(
     }
     const now = Date.now();
     const mainStarted = Date.now();
-    await app.evaluate(() => 1).catch(() => undefined);
+    await stage('main', () => app.evaluate(() => 1).catch(() => undefined));
     const mainLatency = Date.now() - mainStarted;
     maxMainLatencyMs = Math.max(maxMainLatencyMs, mainLatency);
-    const latency = await uiLatencyMs(page);
+    const mainWindow = await stage('mainWindow', () => mainWindowState(app));
+    const ui = await stage('raf', () =>
+      uiLatency(page, (returnedAfterMs) =>
+        lateReturns.push({
+          tick: tickTick,
+          what: 'raf',
+          startedAt: now - started,
+          returnedAfterMs,
+        }),
+      ),
+    );
+    const latency = ui.ms;
     maxUiLatencyMs = Math.max(maxUiLatencyMs, latency);
-    last = await readTeam(page, input.taskId).catch(() => last);
-    const gitWorktrees = gitWorktreeCount(input.workspace);
-    const appDirs = appWorktreeDirCount(input.profile);
+    const team = await stage('readTeam', () =>
+      withObserveTimeout(readTeam(page, input.taskId), (returnedAfterMs) =>
+        lateReturns.push({
+          tick: tickTick,
+          what: 'readTeam',
+          startedAt: stages['readTeam']?.at ?? now - started,
+          returnedAfterMs,
+        }),
+      ),
+    );
+    if (!team.timedOut) last = team.value;
+    const { gitWorktrees, appDirs } = await stage('git', () => ({
+      gitWorktrees: gitWorktreeCount(input.workspace),
+      appDirs: appWorktreeDirCount(input.profile),
+    }));
     maxGitWorktrees = Math.max(maxGitWorktrees, gitWorktrees);
     maxAppWorktreeDirs = Math.max(maxAppWorktreeDirs, appDirs);
     const executions = last?.executions ?? [];
@@ -432,11 +634,20 @@ async function driveTeam(
     for (const { state } of executions) counts[state] = (counts[state] ?? 0) + 1;
     const phases: Record<string, number> = {};
     for (const { phase } of executions) if (phase) phases[phase] = (phases[phase] ?? 0) + 1;
-    const leaderBusy =
-      (await isStopVisible(page)) ||
-      (await page.getByTestId('streaming-assistant-message').count()) > 0;
+    const leaderBusy = await stage(
+      'dom',
+      async () =>
+        (await isStopVisible(page)) ||
+        (await page.getByTestId('streaming-assistant-message').count()) > 0,
+    );
     timeline.push({
       t: now - started,
+      // t は Tick の開始。snapshot（readTeam）の時刻は stages.readTeam.at を見る。
+      stages,
+      uiTimedOut: ui.timedOut,
+      readTeamTimedOut: team.timedOut,
+      pageFocus: ui.focus,
+      mainWindow,
       workers: (last?.workers ?? []).filter(({ kind }) => kind === 'worker').length,
       executions: executions.length,
       counts,
@@ -510,6 +721,11 @@ async function driveTeam(
     longTasks: await page
       .evaluate(() => (window as unknown as { __scLongTasks?: unknown }).__scLongTasks ?? null)
       .catch(() => null),
+    frames: await page
+      .evaluate(() => (window as unknown as { __scFrames?: unknown }).__scFrames ?? null)
+      .catch(() => null),
+    lateReturns,
+    gpuFeatureStatus,
     pageText: await page
       .locator('body')
       .innerText()
@@ -517,6 +733,26 @@ async function driveTeam(
     approvals,
     last,
     answer: answer.trim(),
+  };
+}
+
+/** summary には件数と最大値だけを載せる（全件は frames.json に残す）。 */
+function summarizeFrames(frames: unknown): unknown {
+  if (frames === null || typeof frames !== 'object') return null;
+  const recorder = frames as {
+    frames?: number;
+    maxFrameGapMs?: number;
+    frameGaps?: { gapMs: number }[];
+    timerDrifts?: { driftMs: number }[];
+    longAnimationFrames?: unknown[];
+  };
+  return {
+    frames: recorder.frames,
+    maxFrameGapMs: Math.round(recorder.maxFrameGapMs ?? 0),
+    frameGapsOver250ms: recorder.frameGaps?.length ?? 0,
+    frameGapsOver1s: (recorder.frameGaps ?? []).filter(({ gapMs }) => gapMs > 1_000).length,
+    maxTimerDriftMs: Math.max(0, ...(recorder.timerDrifts ?? []).map(({ driftMs }) => driftMs)),
+    longAnimationFramesOver200ms: recorder.longAnimationFrames?.length ?? 0,
   };
 }
 
@@ -677,6 +913,9 @@ function summarize(result: DriveResult, assignments: readonly Assignment[]) {
     maxUiLatencyMs: result.maxUiLatencyMs,
     maxMainLatencyMs: result.maxMainLatencyMs,
     longTasks: result.longTasks,
+    frames: summarizeFrames(result.frames),
+    lateReturns: result.lateReturns,
+    gpuFeatureStatus: result.gpuFeatureStatus,
     wallMs: result.wallMs,
     stoppedReason: result.stoppedReason,
     approvals: result.approvals.length,
@@ -783,6 +1022,11 @@ test.describe('real AI Team scale E2E', () => {
       console.info('[real-ai] team-scale summary', JSON.stringify(summary, null, 2));
       note('team-scale-summary.json', summary);
       note('team-scale-timeline.json', result.timeline);
+      note('team-scale-frames.json', {
+        frames: result.frames,
+        lateReturns: result.lateReturns,
+        gpuFeatureStatus: result.gpuFeatureStatus,
+      });
       note('team-scale-page.txt', result.pageText);
       note('team-scale-tracks.json', result.tracks);
       note('team-scale-last.json', result.last);
@@ -909,6 +1153,11 @@ test.describe('real AI Team scale E2E', () => {
       console.info('[real-ai] team-overlap summary', JSON.stringify(summary, null, 2));
       note('team-overlap-summary.json', summary);
       note('team-overlap-timeline.json', result.timeline);
+      note('team-overlap-frames.json', {
+        frames: result.frames,
+        lateReturns: result.lateReturns,
+        gpuFeatureStatus: result.gpuFeatureStatus,
+      });
       note('team-overlap-page.txt', result.pageText);
       note('team-overlap-tracks.json', result.tracks);
       note('team-overlap-last.json', result.last);
@@ -1029,6 +1278,11 @@ test.describe('real AI Team scale E2E', () => {
       console.info('[real-ai] team-conflict summary', JSON.stringify(summary, null, 2));
       note('team-conflict-summary.json', summary);
       note('team-conflict-timeline.json', result.timeline);
+      note('team-conflict-frames.json', {
+        frames: result.frames,
+        lateReturns: result.lateReturns,
+        gpuFeatureStatus: result.gpuFeatureStatus,
+      });
       note('team-conflict-tracks.json', result.tracks);
       note('team-conflict-page.txt', result.pageText);
       // 同期点に届かなかった（どちらかが先に統合された・同じ baseHead にならなかった）なら、衝突が
