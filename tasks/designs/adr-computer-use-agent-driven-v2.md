@@ -7,6 +7,7 @@
 
 ## 改訂履歴
 
+- 2026-10-18 S5-c-3 PR-4（package identity）を反映した。v2 ビルドの native は、Store または System の署名の package（development mode でなく、WindowsApps の根の配下で、その package の install location の中にあるもの）を `sha256("computer-win-identity-v2-package\n" + family + "\n" + publisherId + "\n" + package 内の相対パス)` で識別する（相対パスは ASCII を小文字に揃える。family は「package 名 + `_` + publisherId」の形でなければならない）。Developer、Enterprise、sideload、development mode、WindowsApps の外の package は、これまでどおり Win32 の式で識別する。v1 ビルドは package identity を返さず、V1 の identity JSON と digest の式は 1 byte も変えない（source 契約で固定）。Main は、v2 package の 3 つの欄から native の digest を再計算できた記録だけを package として扱い（family だけを名乗る記録は束縛不能のまま）、保存済み grant と `win32-package-v2` の grant digest が一致する場合に限ってパスの比較を外す（改訂履歴 2026-09-21 の 18 を、この束縛が入った範囲で解く）。§6.2 の package の式を改めた。まだどこからも呼ばれない（PR-5 で list_targets と v2 の start / resume / 入力ごとの再判定に配線する）。
 - 2026-10-18 S5-c-3 PR-3（厳格 interlock）を反映した。§3.2.5 に PR-3 で実装した範囲と後続に残すものを書き、対応表の `default` 分岐を「`default` を置かずに列挙子をすべて並べ、`switch` を抜けた値を拒否する」に改めた（未処理の列挙子は `-Werror=switch` と `/we4062` でビルドエラーにする）。§10 の判断 K を PR-2（#868）の結論（`WTD_REVOKE_NONE` のまま）とその 4 つの理由に書き直し、PR-2 で残ったリスク（anchor の前提、ヘッダ照合が補助であること、process herpaderping 型の書き換え、系譜で追えない子孫など）を残るリスクの 2 と 9 に足した。
 - 2026-10-18 S5-c-3「Windows の適格性の拡大」の設計を反映した（#500 の PR-0。ドキュメントだけで、コードと本番の挙動は変えない）。主な変更は 6 点。
   1. **§3.2 を書き直した**。Windows の禁止クラスを W-SYS、W1〜W10、W-PX、W-UR と上限クラス C の表にし、検証済み属性（facts）の一覧を足した（§3.2.2 / §3.2.3）。
@@ -238,7 +239,7 @@ facts は native が対象プロセスごとに取り、Main に返す。Main �
 次のいずれかで、かつ §3.2.3 の禁止クラスのどれにも当たらないものだけを適格にする。それ以外は不適格（token なし）。
 
 1. 署名が検証できた、package でない GUI アプリで、Program Files（両方）または `%LOCALAPPDATA%\Programs` の配下にあるもの（判断 A）。`%WINDIR%` の外にある Microsoft 署名のアプリ（PowerShell 7、Sysinternals、Edge など）は、当面は不適格とし、明示表に載せたものから順に足す（判断 B）。
-2. Store または System の署名の package（Windows 11 のメモ帳を含む）。family と publisherId を native identity digest に束縛し、package root からの相対パスで照合する（PR-4。改訂履歴 2026-09-21 の 18「パス比較の免除の取りやめ」を解くのはこの束縛が入ってからで、v2 の package の digest が一致する記録に限る）。
+2. Store または System の署名の package（Windows 11 のメモ帳を含む）。family と publisherId を native identity digest に束縛し、package root からの相対パスで照合する（PR-4。改訂履歴 2026-09-21 の 18「パス比較の免除の取りやめ」を解くのはこの束縛が入ってからで、v2 の package の digest が一致する記録に限る）。**PR-4 で実装した範囲（2026-10-18）**: digest の式と、それを作る native の関数（`WindowsPackageIdentityFor`、`WindowsTargetPackageIdentity`、`WindowsPackageIdentityJson`。v1 ビルドは常に「無し」）、Main の再計算とパス比較の免除。後続に残すものは、native の応答の schema（contracts の `computerWindowsAppIdentitySchema`）に `packagePublisherId` と `packageRelativePath` を足すこと、v2 の start と resume で package の digest を照合すること、`computerTargetVerifiedIdentity` が package を署名済みとして示すこと（いずれも PR-5）。
 3. `%WINDIR%` の明示表にあるもの（System32 の `notepad.exe`。V1 の規則を引き継ぐ）。
 
 mode は §4 のとおり、通常アプリは `full_access_app` である。ただし Windows では、S5-c-3 の時点で次を `observe_only` にする（§4 の Windows の注記）。
@@ -624,14 +625,14 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 
 - **主**: pid ベースの動的コード署名検証。macOS は `SecCodeCopyGuestWithAttributes`（`kSecGuestAttributePid`）で走っているプロセスのコードオブジェクトを取り、`SecCodeCheckValidity` を通す。Windows は実行中イメージ（`QueryFullProcessImageName` で得たイメージを、プロセスがロックしているファイルハンドル経由で）検証し、volume serial + file id で同一性を確認する（既存の `WindowsSessionExecutableMatches`、`computer_use_windows_host.cc:962-979` の枠組みを流用）。
 - **補助**: 従来の静的検証。動的検証が使えない環境では静的にフォールバックし、その旨を `identityKind` に反映する（`verified-signed-static`）。
-- **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。
+- **「更新では再確認しない」の条件を厳密化**: 署名者 / Team ID / signing identifier / 正規化パスが**すべて同一**で、かつ**動的検証が有効**な場合に限る。どれか 1 つでも欠ければ再確認。例外は Windows の v2 package だけで、正規化パスの代わりに、package family と win32-package-v2 の grant digest（family・publisherId・package 内の相対パスを束縛する）が保存済み grant と一致することを条件にする（S5-c-3 PR-4。版の入ったディレクトリ名は Store の更新のたびに変わるため）。
 - **cdHash が前回と変わったこと自体は記録する**（`last_cd_hash` / `cd_hash_changed_at`）。再確認は求めないが、設定画面のアプリ詳細に「〈日時〉にアプリが更新されました」と出す。異常に頻繁な変化はユーザーが気づける。
 
 `grant_identity_digest` の定義（**V1 の identityDigest と別物**）:
 
 - `verified-signed` / macOS: `H(platform, bundleId, teamId, signingIdentifier)`
 - `verified-signed` / Windows（Win32）: `H(platform, signerDigest, canonical image leaf 名, 親ディレクトリ)`
-- `verified-signed` / Windows（パッケージ）: `H(platform, packageFamilyName, signerDigest)`
+- `verified-signed` / Windows（パッケージ）: `H(packageFamilyName, publisherId, package 内の相対パス)`（S5-c-3 PR-4。v2 の package identity の記録だけ。式の名前は `win32-package-v2`。native の digest も同じ 3 つを束縛する）
 - `unverified`: `H(platform, executablePath, executableDigest)`
 
 狙いは「**通常のアプリ更新では再確認しない／署名者や実体が変わったら必ず再確認する**」の両立。V1 は実行ファイル digest を identity に含めていたため、Windows では更新のたびに `refreshSignedWindowsProfile`（`computer-use-controller.ts:584-614`）で digest を差し替える特別扱いが要った。v2 では署名クラスの identity を grant に使い、実行時の digest / cdHash は**セッション束縛側**（毎回の再検証）でだけ使う。
@@ -641,9 +642,9 @@ V1 の identity は、パスから実行ファイルを開いて静的に署名�
 | 事象                                                             | 挙動                                                                                                                                                                                                          |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 署名者 / Team ID / signing identifier が変わった                 | grant 無効 → 再確認（カード再表示）                                                                                                                                                                           |
-| 実行ファイルパスが変わった（別の場所の同名アプリ）               | grant 無効 → 再確認                                                                                                                                                                                           |
+| 実行ファイルパスが変わった（別の場所の同名アプリ）               | grant 無効 → 再確認。ただし Windows の v2 package で、package family と win32-package-v2 の grant digest が保存済み grant と一致する場合は、パスの変化（版の入った install ディレクトリの変化）では再確認しない（S5-c-3 PR-4） |
 | `unverified` アプリの実行ファイル digest が変わった              | grant 無効 → 再確認                                                                                                                                                                                           |
-| `verified-signed` アプリが更新された（digest / cdHash だけ変化） | **署名者・Team ID・signing identifier・正規化パスがすべて同一で、かつ動的コード署名検証（§6.2.1）が有効な場合に限り**再確認しない（grant 継続）。セッション束縛は新しい digest で取り直し、更新日時を記録する |
+| `verified-signed` アプリが更新された（digest / cdHash だけ変化） | **署名者・Team ID・signing identifier・正規化パスがすべて同一で、かつ動的コード署名検証（§6.2.1）が有効な場合に限り**再確認しない（grant 継続）。Windows の v2 package は、正規化パスの代わりに package family と win32-package-v2 の grant digest の一致を条件にする（S5-c-3 PR-4）。セッション束縛は新しい digest で取り直し、更新日時を記録する |
 | 署名が有効 → 無効に変わった、または動的検証が通らなくなった      | grant 無効 → 再確認（mode も下がる）                                                                                                                                                                          |
 | grant レコードの MAC が一致しない（T14）                         | そのレコードは存在しないものとして扱う（＝次回カードが出る）。設定画面に破棄を記録                                                                                                                            |
 | `denyRulesetVersion` が上がり、そのアプリが禁止クラスになった    | grant **失効**（再確認もしない）。設定画面に「ルール更新により無効化」と表示                                                                                                                                  |

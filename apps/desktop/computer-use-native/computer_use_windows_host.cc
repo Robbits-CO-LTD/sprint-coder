@@ -1156,8 +1156,8 @@ bool IsSupportedWindowsV1Target(
 //     level above this process's, and AppContainer. An item that cannot be read is given as the
 //     refusing value (true).
 //   * Package. Family, full name and publisherId from the process handle, development mode from
-//     the package information, SignatureKind from the package catalog (C++/WinRT). They may admit
-//     only once PR-4 binds them to the identity digest.
+//     the package information, SignatureKind from the package catalog (C++/WinRT). PR-4 binds the
+//     family and the publisherId to the identity digest (the windows package identity block, below).
 //   * Lineage. One kernel snapshot (SystemProcessInformation) gives every process's parent pid
 //     and creation time without opening any process; descendants follow parent pids only to
 //     processes created no earlier (FindWindowsDescendants), so a reused pid is not a parent.
@@ -2799,6 +2799,72 @@ std::string RectJson(const RECT &bounds) {
          ",\"height\":" +
          std::to_string(bounds.bottom - bounds.top) + "}";
 }
+
+// BEGIN windows package identity (#500 S5-c-3 PR-4)
+// The v2 identity of a package target. A Store or System signed package under WindowsApps is
+// identified by its family, its publisherId and the image's path inside the package
+// (WindowsPackageIdentityFor), so an ordinary Store update, which moves the versioned install
+// directory and the bytes, keeps the identity, while another publisher, or another image in the
+// same package, does not. Every other target keeps the Win32 identity. v2 builds only: a v1 build
+// always answers std::nullopt, and the V1 identity (BuildLockedWindowsExecutableIdentity) and its
+// JSON (WindowsIdentityJson) stay byte for byte what they were. Nothing calls this yet: PR-5 uses
+// it for list_targets and the v2 start, resume and per-input checks. The executable identity must
+// be of the very file the facts held (file id and path), and the running image must have matched,
+// or there is no package identity.
+struct WindowsPackageIdentity {
+  std::string family;
+  std::string publisher_id;
+  std::string relative_path;
+  std::string identity_digest;
+};
+
+std::optional<WindowsPackageIdentity>
+WindowsTargetPackageIdentity(const WindowsTargetFactsMeasurement &measured,
+                             const WindowsExecutableIdentity &identity) {
+  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
+    (void)measured;
+    (void)identity;
+    return std::nullopt;
+  } else {
+    if (measured.facts.running_image_matches != std::optional<bool>(true) ||
+        !measured.file_identity.has_value() ||
+        !SameWindowsFileIdentity(*measured.file_identity, identity.file_identity) ||
+        !SameWindowsTargetName(measured.image_path, identity.path))
+      return std::nullopt;
+    // The relative path is taken from the path the JSON carries, so Main's suffix check reads the
+    // same string.
+    const std::optional<sprint_coder::computer_use::WindowsPackageIdentityParts> parts =
+        sprint_coder::computer_use::WindowsPackageIdentityFor(
+            {measured.facts.packaged, measured.facts.package_signature_kind,
+             measured.facts.package_development_mode, measured.facts.package_family,
+             measured.package_publisher_id, measured.facts.image_root, identity.path_utf8,
+             measured.package_install_root});
+    if (!parts.has_value())
+      return std::nullopt;
+    return WindowsPackageIdentity{parts->family, parts->publisher_id, parts->relative_path,
+                                  Sha256String(parts->preimage)};
+  }
+}
+
+// The identity JSON of a package target: WindowsIdentityJson's fields, with the package digest as
+// identityDigest, no signer digest (the package signature, not an embedded one, is what the
+// identity rests on), and the family, publisherId and package-relative path that Main recomputes
+// the digest from (computerAppNativeIdentityDigest). The mode is the v2 core's, given by PR-5.
+std::string WindowsPackageIdentityJson(const WindowsExecutableIdentity &identity,
+                                       const WindowsPackageIdentity &package,
+                                       std::string_view maximum_mode, std::uint32_t pid = 0) {
+  return "{\"platform\":\"win32\",\"identityDigest\":\"" + package.identity_digest +
+         "\",\"executablePath\":\"" + JsonEscape(identity.path_utf8) +
+         "\",\"executableDigest\":\"" + identity.executable_digest +
+         "\",\"signerDigest\":null,\"packageFamilyName\":\"" + JsonEscape(package.family) +
+         "\",\"packagePublisherId\":\"" + JsonEscape(package.publisher_id) +
+         "\",\"packageRelativePath\":\"" + JsonEscape(package.relative_path) +
+         "\",\"appUserModelId\":null,\"displayName\":\"" + JsonEscape(identity.display_name) +
+         "\",\"policyLanguage\":\"" + identity.policy_language + "\",\"maximumMode\":\"" +
+         JsonEscape(maximum_mode) + "\"" + (pid == 0 ? "" : ",\"pid\":" + std::to_string(pid)) +
+         "}";
+}
+// END windows package identity
 
 std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
                                 std::uint32_t pid = 0) {

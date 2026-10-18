@@ -995,6 +995,76 @@ describe('Windows target facts seam source', () => {
   });
 });
 
+// S5-c-3 PR-4 (#500): the v2 package identity is added beside the V1 identity, never in it. The V1
+// identity JSON and the V1 digest formula are pinned here as text, so a v1 build writes byte for
+// byte what it wrote before, and the package identity is answered only by a v2 build.
+const v1IdentityJson = String.raw`std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
+                                std::uint32_t pid = 0) {
+  return "{\"platform\":\"win32\",\"identityDigest\":\"" +
+         identity.identity_digest + "\",\"executablePath\":\"" +
+         JsonEscape(identity.path_utf8) + "\",\"executableDigest\":\"" +
+         identity.executable_digest + "\",\"signerDigest\":" +
+         (identity.signer_digest.empty()
+              ? "null"
+              : "\"" + identity.signer_digest + "\"") +
+         ",\"packageFamilyName\":null,\"appUserModelId\":null,\"displayName\":"
+         "\"" +
+         JsonEscape(identity.display_name) + "\"" +
+         ",\"policyLanguage\":\"" + identity.policy_language + "\"" +
+         ",\"maximumMode\":\"" + MaximumModeForWindowsExecutable(identity) +
+         "\"" +
+         (pid == 0 ? "" : ",\"pid\":" + std::to_string(pid)) + "}";
+}
+
+`;
+const v1IdentityDigest = String.raw`  const std::string identity_digest =
+      signer_digest.empty()
+          ? Sha256String("computer-win-identity-v1-unsigned\n" +
+                         executable_digest)
+          : Sha256String("computer-win-identity-v1-signed\n" + normalized_path +
+                         "\n" + signer_digest);`;
+
+describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
+  it('leaves the V1 identity byte for byte, and answers a package identity only in a v2 build', () => {
+    expect(cut('std::string WindowsIdentityJson(', 'bool PickWindowsExecutable(')).toBe(
+      v1IdentityJson,
+    );
+    expect(host.split(v1IdentityDigest)).toHaveLength(2);
+    const block = cut('// BEGIN windows package identity', '// END windows package identity');
+    // The v1 build's answer is std::nullopt before anything is read.
+    expect(block).toContain(
+      [
+        '                             const WindowsExecutableIdentity &identity) {',
+        '  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {',
+        '    (void)measured;',
+        '    (void)identity;',
+        '    return std::nullopt;',
+        '  } else {',
+      ].join('\n'),
+    );
+    // Nothing outside the block calls it or writes its fields yet (PR-5 wires it).
+    const outside = host.replace(block, '');
+    for (const name of [
+      'WindowsTargetPackageIdentity',
+      'WindowsPackageIdentityJson',
+      'WindowsPackageIdentityFor',
+      'packagePublisherId',
+      'packageRelativePath',
+    ])
+      expect(outside, name).not.toContain(name);
+    // Main recomputes the digest with the same domain the portable formula uses.
+    const facts = readFileSync(
+      join(nativeDirectory, 'computer_use_windows_target_facts.h'),
+      'utf8',
+    );
+    const grant = readFileSync(join(__dirname, 'computer-use-grant-identity.ts'), 'utf8');
+    expect(facts).toContain(
+      'inline constexpr std::string_view kWindowsPackageIdentityDomain = "computer-win-identity-v2-package";',
+    );
+    expect(grant).toContain('`computer-win-identity-v2-package\\n${windowsPackage.family}');
+  });
+});
+
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows target facts, live (#500 S5-c-3 PR-2)',
   () => {

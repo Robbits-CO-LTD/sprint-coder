@@ -6,7 +6,7 @@
 // the leaf, the PE subsystem, the resources of an image (located and found without the loader),
 // the manifest's execution level, OriginalFilename out of a VS_VERSIONINFO resource, whether an
 // image file changed after its process was created, a SystemProcessInformation snapshot, and the
-// descendants of a process in it. No platform header, so
+// descendants of a process in it, and the v2 package identity (PR-4). No platform header, so
 // MSVC (/W4 /sdl) and clang both compile it, and the target eligibility harness checks it.
 //
 // Every reader here fails closed: bytes it cannot read give std::nullopt (the core then answers
@@ -952,6 +952,95 @@ struct WindowsImageFileTimes {
   if (!times.has_value() || !process_creation.has_value() || times->change_time <= 0)
     return false;
   return static_cast<std::uint64_t>(times->change_time) < *process_creation;
+}
+
+// The v2 package identity (S5-c-3, #500 PR-4). A package target's native identity digest is
+// sha256 of this preimage: the domain, the package family, the publisherId and the image's path
+// inside the package's install location (ASCII case folded), one per line. The version lives in
+// the install directory's name, so it is left out and an ordinary Store update keeps the digest;
+// the family and the publisherId come from the process handle and bind who published it.
+// Only a Store or System signed package that is not in development mode, whose image is under
+// the windows_apps root and under its own install location, has one. Everything else (Developer,
+// Enterprise and sideloaded packages, development mode, a package outside WindowsApps, anything
+// unread) gets std::nullopt and keeps the Win32 identity. The family must end in "_" plus the
+// publisherId, and none of the three may carry a separator the preimage uses. Mirrored by
+// computerAppNativeIdentityDigest (computer-use-grant-identity.ts).
+inline constexpr std::string_view kWindowsPackageIdentityDomain = "computer-win-identity-v2-package";
+
+struct WindowsPackageIdentityFacts {
+  std::optional<bool> packaged;
+  std::optional<std::string> signature_kind;
+  std::optional<bool> development_mode;
+  std::optional<std::string> family;
+  std::optional<std::string> publisher_id;
+  // The facts' imageRoot, the held image's canonical path and the package's canonical install
+  // location (GetPackagePathByFullName on the target's own full name).
+  std::optional<std::string> image_root;
+  std::optional<std::string> image_path;
+  std::optional<std::string> install_root;
+};
+
+struct WindowsPackageIdentityParts {
+  std::string family;
+  std::string publisher_id;
+  std::string relative_path;
+  std::string preimage;
+};
+
+namespace windows_target_facts_detail {
+
+// A publisherId: 13 characters of lower-case letters and digits.
+[[nodiscard]] inline bool IsPackagePublisherId(std::string_view value) {
+  if (value.size() != 13) return false;
+  for (const char letter : value)
+    if (!((letter >= 'a' && letter <= 'z') || (letter >= '0' && letter <= '9'))) return false;
+  return true;
+}
+
+// A package family name: a package name (3 to 50 of letters, digits, '.' and '-'), '_', and the
+// publisherId.
+[[nodiscard]] inline bool IsPackageFamilyOf(std::string_view family, std::string_view publisher) {
+  if (family.size() < publisher.size() + 4 || family.size() > publisher.size() + 51) return false;
+  const std::size_t name_length = family.size() - publisher.size() - 1;
+  if (family[name_length] != '_' || family.substr(name_length + 1) != publisher) return false;
+  for (const char letter : family.substr(0, name_length))
+    if (!((letter >= 'a' && letter <= 'z') || (letter >= 'A' && letter <= 'Z') ||
+          (letter >= '0' && letter <= '9') || letter == '.' || letter == '-'))
+      return false;
+  return true;
+}
+
+} // namespace windows_target_facts_detail
+
+[[nodiscard]] inline std::optional<WindowsPackageIdentityParts>
+WindowsPackageIdentityFor(const WindowsPackageIdentityFacts &facts) {
+  using namespace windows_target_facts_detail;
+  if (!facts.packaged.has_value() || !*facts.packaged || !facts.signature_kind.has_value() ||
+      (*facts.signature_kind != "store" && *facts.signature_kind != "system") ||
+      !facts.development_mode.has_value() || *facts.development_mode ||
+      !facts.family.has_value() || !facts.publisher_id.has_value() ||
+      !facts.image_root.has_value() || *facts.image_root != "windows_apps" ||
+      !facts.image_path.has_value() || !facts.install_root.has_value() ||
+      facts.install_root->empty())
+    return std::nullopt;
+  if (!IsPackagePublisherId(*facts.publisher_id) ||
+      !IsPackageFamilyOf(*facts.family, *facts.publisher_id))
+    return std::nullopt;
+  const WindowsImageRootPrefix own[] = {{"windows_apps", *facts.install_root}};
+  const WindowsImagePlacement placement = PlaceWindowsImage(*facts.image_path, own);
+  if (placement.root != "windows_apps" || placement.relative_path.empty() ||
+      placement.relative_path.size() > 4'096 || IsSeparator(placement.relative_path.front()))
+    return std::nullopt;
+  std::string relative;
+  relative.reserve(placement.relative_path.size());
+  for (const char letter : placement.relative_path) {
+    if (static_cast<unsigned char>(letter) < 0x20 || letter == 0x7f) return std::nullopt;
+    relative += AsciiFold(letter);
+  }
+  WindowsPackageIdentityParts parts{*facts.family, *facts.publisher_id, std::move(relative), {}};
+  parts.preimage = std::string(kWindowsPackageIdentityDomain) + "\n" + parts.family + "\n" +
+                   parts.publisher_id + "\n" + parts.relative_path;
+  return parts;
 }
 
 } // namespace sprint_coder::computer_use
