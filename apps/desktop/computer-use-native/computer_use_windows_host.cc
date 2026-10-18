@@ -1801,6 +1801,21 @@ bool WindowsTargetStableIdVolume(HANDLE file) {
   return volume.has_value() && WindowsTargetFileSystemHasStableId(volume->file_system);
 }
 
+// Whether the process's running image is known to be local, from the kernel's name of it
+// (PROCESS_NAME_NATIVE), before the file is opened (S5-c-3 PR-5): an image on a network redirector,
+// or one whose name cannot be read, is never opened or read, since an unresponsive share would hold
+// the helper's one request lane. Such a target stays unmeasured (unresolvable).
+bool WindowsTargetImageKnownLocal(HANDLE process) {
+  std::vector<wchar_t> name(32'768, L'\0');
+  DWORD length = static_cast<DWORD>(name.size());
+  if (QueryFullProcessImageNameW(process, PROCESS_NAME_NATIVE, name.data(), &length) != TRUE ||
+      length == 0 || length >= name.size())
+    return false;
+  const std::optional<std::string> native =
+      WindowsTargetUtf8(std::wstring_view(name.data(), length));
+  return native.has_value() && !sprint_coder::computer_use::WindowsNativeImageIsRemote(*native);
+}
+
 bool HoldWindowsTargetRunningImage(HANDLE process,
                                    const std::optional<std::wstring> &recorded,
                                    WindowsTargetHeldImage *held) {
@@ -2613,7 +2628,8 @@ InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessN
           ? std::optional<std::wstring>(std::move(recorded_path))
           : std::nullopt;
   WindowsTargetHeldImage held;
-  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held) ||
+  if (!WindowsTargetImageKnownLocal(process.value) ||
+      !HoldWindowsTargetRunningImage(process.value, recorded, &held) ||
       !WindowsTargetRunningImageMatches(held.matches, held.remote, held.volume,
                                         rename_probe))
     return result;
@@ -2817,7 +2833,8 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
           ? std::optional<std::wstring>(std::move(recorded_path))
           : std::nullopt;
   WindowsTargetHeldImage held;
-  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held))
+  if (!WindowsTargetImageKnownLocal(process.value) ||
+      !HoldWindowsTargetRunningImage(process.value, recorded, &held))
     return measured;
   MeasureWindowsTargetHeldFacts(held, context, &measured);
   return measured;
@@ -3917,7 +3934,9 @@ inline constexpr std::size_t kWindowsListTargetsRowBytes =
     kMaxMetadataBytes - kWindowsListTargetsEnvelopeBytes;
 
 // The rows of one list_targets, bounded by count (kWindowsListTargetsRowLimit) and by bytes (the
-// joined rows, commas included, within the byte limit). A row that does not fit is not added, and
+// joined rows, commas included, within the byte limit). A row is counted as it is sent: already
+// escaped (JsonEscape writes a control character as six bytes, \u00XX), so the bound is of the
+// bytes on the wire, not of the raw title or path. A row that does not fit is not added, and
 // no row after it is either: the list is truncated there. A single row larger than the limit (an
 // executable path of tens of kilobytes) is never sent.
 class WindowsV2ListRows {
@@ -3957,6 +3976,19 @@ std::string WindowsV2ListResponse(std::uint64_t generation, std::uint32_t rulese
          ",\"rulesetVersion\":" + std::to_string(ruleset_version) +
          ",\"truncated\":" + (truncated ? "true" : "false") + ",\"targets\":[" + rows.Joined() +
          "]}";
+}
+
+// The last check of a list_targets answer (the rows are bounded above; this is the belt). An answer
+// that could not be framed is never handed on: false, with a reason, so HandlePipeRequest answers with
+// its small error frame (ErrorPayload) and the pipe and every session on it stay up.
+bool FinishWindowsV2ListResponse(std::string built, std::string *response, std::string *reason) {
+  if (built.empty() || built.size() > kMaxMetadataBytes) {
+    response->clear();
+    *reason = "list_targets_unavailable";
+    return false;
+  }
+  *response = std::move(built);
+  return true;
 }
 
 // list_targets (ADR v2 section 5.2): every top-level application window, judged per process, at most
@@ -4053,15 +4085,10 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
           std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
           "}");
     }
-    *response = WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
-                                      truncated || rows.Truncated(), rows);
-    // Bounded above; this is the belt: an answer that could not be framed is never handed on.
-    if (response->size() > kMaxMetadataBytes) {
-      response->clear();
-      *reason = "list_targets_unavailable";
-      return false;
-    }
-    return true;
+    return FinishWindowsV2ListResponse(
+        WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
+                              truncated || rows.Truncated(), rows),
+        response, reason);
   }
 }
 
@@ -8589,7 +8616,6 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
     return 2;
   if (parent_pid == 0 || !IsActualParentProcess(parent_pid))
     return 2;
-  windows_v2_main_pid = parent_pid;
   HANDLE parent = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
                               FALSE, parent_pid);
   if (parent == nullptr)
@@ -8660,6 +8686,9 @@ int ServeMain(const std::wstring &pipe_name, DWORD parent_pid) {
   std::atomic<bool> serving{authenticated_client};
   std::thread parent_watcher;
   if (authenticated_client) {
+    // The lineage root of the v2 facts (W8): Main, the parent this helper verified and the one client
+    // its pipe accepted, fixed before the first request (the facts context reads it once, then).
+    windows_v2_main_pid = static_cast<std::uint32_t>(client_pid);
     parent_watcher = std::thread([parent, pipe, &serving]() {
       while (serving.load(std::memory_order_acquire)) {
         if (WaitForSingleObject(parent, 100) == WAIT_OBJECT_0) {

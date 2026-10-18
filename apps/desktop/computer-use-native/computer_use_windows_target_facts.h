@@ -1044,6 +1044,25 @@ WindowsPackageIdentityFor(const WindowsPackageIdentityFacts &facts) {
   return parts;
 }
 
+// ---- S5-c-3 PR-5: a running image on a network redirector, told before its file is touched -----
+
+// Whether a process's kernel image name (QueryFullProcessImageNameW with PROCESS_NAME_NATIVE, a
+// string the kernel holds, read without opening the file) is on a network redirector: SMB through
+// the multiple UNC provider (\Device\Mup\, which UNC paths and mapped drives both resolve to), the
+// LanMan and WebDAV redirectors, or a remote desktop client drive. Such an image is never opened:
+// an unresponsive share can hold a CreateFileW or a read for minutes, and the helper serves one
+// request at a time. ASCII case is folded; a name of any other form is not called remote here (the
+// volume checks after the open still apply to it).
+[[nodiscard]] inline bool WindowsNativeImageIsRemote(std::string_view native_path) {
+  static constexpr std::string_view kRemotePrefixes[] = {
+      "\\device\\mup\\", "\\device\\lanmanredirector\\", "\\device\\webdavredirector\\",
+      "\\device\\rdpdr\\", "\\device\\tsclient\\"};
+  const std::string lowered = target_eligibility_detail::AsciiLower(native_path);
+  for (const std::string_view prefix : kRemotePrefixes)
+    if (std::string_view(lowered).substr(0, prefix.size()) == prefix) return true;
+  return false;
+}
+
 // ---- S5-c-3 PR-5: the explicit table of targets that show no web content (ADR v2 section 3.2.5) ----
 
 // A file as the volume knows it: the volume serial and the 128-bit file id, read from a handle.

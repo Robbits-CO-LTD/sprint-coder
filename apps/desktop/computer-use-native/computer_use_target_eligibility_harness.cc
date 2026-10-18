@@ -1105,6 +1105,20 @@ bool CheckNotWebTable() {
          Check(files, "not-web-table-only-the-very-file");
 }
 
+// S5-c-3 PR-5: a running image on a network redirector is told from the kernel's name, never opened.
+bool CheckNativeImageRemote() {
+  const bool remote = WindowsNativeImageIsRemote("\\Device\\Mup\\server\\share\\app.exe") &&
+                      WindowsNativeImageIsRemote("\\DEVICE\\MUP\\;Z:000\\server\\share\\app.exe") &&
+                      WindowsNativeImageIsRemote("\\Device\\LanmanRedirector\\;Z:0\\s\\a.exe") &&
+                      WindowsNativeImageIsRemote("\\Device\\WebDavRedirector\\host\\a.exe") &&
+                      WindowsNativeImageIsRemote("\\Device\\RdpDr\\;C:1\\tsclient\\a.exe");
+  const bool local = !WindowsNativeImageIsRemote("\\Device\\HarddiskVolume3\\Windows\\System32\\notepad.exe") &&
+                     !WindowsNativeImageIsRemote("\\Device\\Mupx\\a.exe") &&
+                     !WindowsNativeImageIsRemote("");
+  return Check(remote, "native-image-on-a-redirector-is-remote") &&
+         Check(local, "native-image-on-a-local-volume-is-not-remote");
+}
+
 bool CheckEligibilityMode() {
 #if defined(SPRINT_CODER_EXPECT_ELIGIBILITY_V2)
   // The CI row names the mode it compiled the harness for.
@@ -1128,7 +1142,7 @@ int main() {
       !CheckVersionInfo() ||
       !CheckDescendantLeaves() || !CheckDescendants() || !CheckProcessSnapshot() ||
       !CheckImageUnchanged() || !CheckPeResources() || !CheckPackageIdentity() ||
-      !CheckNotWebTable())
+      !CheckNotWebTable() || !CheckNativeImageRemote())
     return 1;
   std::cout << "Computer Use target eligibility core: PASS (" << cases.size()
             << " golden vectors)\n";
