@@ -294,6 +294,30 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect(commands).toEqual(['rev-parse', 'rev-parse', 'status']);
   });
 
+  it('finds a bisect in progress from a root reached through a directory link (issue #864)', async () => {
+    const { repoPath, manager } = await fixture();
+    const deep = join(repoPath, 'sub', 'deep');
+    await mkdir(deep, { recursive: true });
+    // The link sits two levels below a folder outside the repository, so Git's `../../.git/...`
+    // resolved against the link instead of the real directory names a file that does not exist.
+    const linksRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-root-link-'));
+    cleanupRoots.push(linksRoot);
+    await mkdir(join(linksRoot, 'links'));
+    const linkedRoot = join(linksRoot, 'links', 'deeplink');
+    await symlink(deep, linkedRoot, process.platform === 'win32' ? 'junction' : 'dir');
+    await expect(manager.requireCleanRepositorySet([linkedRoot])).resolves.toHaveLength(1);
+
+    // A bisect leaves `git status` empty; only its marker shows the operation in progress.
+    await git(['-C', repoPath, 'bisect', 'start']);
+    const gitDirectory = (await git(['-C', repoPath, 'rev-parse', '--git-dir'])).trim();
+    await expect(stat(join(repoPath, gitDirectory, 'BISECT_LOG'))).resolves.toBeDefined();
+    expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
+    await expect(manager.requireCleanRepositorySet([linkedRoot])).rejects.toMatchObject({
+      code: 'base_changed',
+      message: 'Git operation is already in progress in a workspace repository',
+    });
+  });
+
   it('finds an operation in progress from a root below the repository top (issue #864)', async () => {
     const { repoPath, head, manager } = await fixture();
     const secondary = join(repoPath, 'packages', 'secondary');

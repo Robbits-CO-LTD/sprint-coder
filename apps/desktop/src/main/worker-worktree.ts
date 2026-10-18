@@ -312,7 +312,12 @@ export class WorkerWorktreeManager {
    * for these one at a time made each assignment wait on about twenty processes.
    */
   private async readRepositoryState(rootPath: string): Promise<RepositoryState> {
-    const cwd = resolve(rootPath);
+    // Git runs in, and its relative `--git-path` output is resolved against, the root's real path:
+    // through a junction or symlink Git reports paths from the real directory, and resolving them
+    // against the link would look for an operation marker in the wrong place.
+    const cwd = await realpath(resolve(rootPath)).catch((error: unknown) => {
+      throw new WorktreeError('create_failed', errorMessage(error), { cause: error });
+    });
     const { stdout } = await this.runGit(
       cwd,
       [
@@ -340,7 +345,7 @@ export class WorkerWorktreeManager {
     return {
       repoPath,
       head: head.trim(),
-      // `--git-path` prints a path relative to the directory Git ran in.
+      // `--git-path` prints a path relative to the (real) directory Git ran in.
       operationMarkerPaths: markerPaths.map((path) => resolve(cwd, path.trim())),
     };
   }
