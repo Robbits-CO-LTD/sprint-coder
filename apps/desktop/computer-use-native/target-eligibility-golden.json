@@ -127,6 +127,22 @@
       }
     },
     {
+      "name": "a SystemApps packaged image stays W-SYS (decision: WINDIR package not overridden)",
+      "set": {
+        "imageRoot": "windows_directory",
+        "imageRelativePath": "systemappsmicrosoft.windows.startmenuexperiencehost_cw5n1h2txyewystartmenuexperiencehost.exe",
+        "imageLeaf": "startmenuexperiencehost.exe",
+        "packaged": true,
+        "packageSignatureKind": "system",
+        "packageFamily": "microsoft.windows.startmenuexperiencehost_cw5n1h2txyewy",
+        "signerMicrosoftRoot": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-SYS"
+      }
+    },
+    {
       "name": "Store notepad package",
       "set": {
         "imageRoot": "windows_apps",

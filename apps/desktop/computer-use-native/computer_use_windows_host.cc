@@ -1160,11 +1160,17 @@ inline constexpr std::string_view kWindowsTargetFixtureLeaf =
 
 enum class WindowsTargetSignatureSource : std::uint8_t { kNone, kEmbedded, kCatalog };
 
+// A volume's file system (lower-cased name and the FileSystemFlags), read from a held handle.
+struct WindowsTargetVolume {
+  std::string file_system;
+  std::uint32_t flags = 0;
+};
+
 // What the one-time rename-follow probe found: whether QueryFullProcessImageNameW follows a rename
-// of a running image on the probed volume, and that volume's file system (lower-cased).
+// of a running image on the probed volume, and that volume's file system (name and flags).
 struct WindowsTargetRenameProbe {
   bool follows = false;
-  std::string file_system;
+  WindowsTargetVolume volume;
 };
 
 // What the caller knows that the target cannot tell: the roots (in precedence order), the process
@@ -1320,36 +1326,86 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
   return roots;
 }
 
-// Whether a handle's file is on a remote volume (an SMB share and such), which some report with a
-// local file system name like "NTFS"; GetFileInformationByHandleEx(FileRemoteProtocolInfo) is the
-// authority. Local is said only on ERROR_INVALID_PARAMETER, which is what a local NTFS file answers
-// (measured on Windows 11 and pinned by the live seam: a local fixture is "not remote"). Any other
-// failure, ERROR_NOT_SUPPORTED included, is unknown (std::nullopt), which callers treat as W-UR.
+// Whether a handle's file is on a remote volume (an SMB share and such, which can report a local
+// file system name like "NTFS"). The decision is made from the held handle, so it holds through
+// UNC, SUBST and mount points, unlike a drive-letter or path-prefix test. The primary is the
+// kernel's FileFsDeviceInformation (its Characteristics FILE_REMOTE_DEVICE bit, read with
+// NtQueryVolumeInformationFile); FileRemoteProtocolInfo is a supplementary remote signal. Remote
+// (true) when either shows remote; local (false) only when the device info is readable and local;
+// std::nullopt (unknown, treated as W-UR) when the device info cannot be read.
 std::optional<bool> WindowsTargetFileIsRemote(HANDLE file) {
+  // IO_STATUS_BLOCK is in <winternl.h>, which this TU does not include; its x64 layout is two
+  // pointer-sized words, pinned here as the one is for SECTION_IMAGE_INFORMATION.
+  struct IoStatusBlock {
+    PVOID pointer;
+    ULONG_PTR information;
+  };
+  using NtQueryVolumeInformationFileFn =
+      LONG(WINAPI *)(HANDLE, IoStatusBlock *, PVOID, ULONG, int);
+  static const NtQueryVolumeInformationFileFn query = []() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll == nullptr ? nullptr
+                            : reinterpret_cast<NtQueryVolumeInformationFileFn>(
+                                  GetProcAddress(ntdll, "NtQueryVolumeInformationFile"));
+  }();
+  if (query == nullptr)
+    return std::nullopt;
+  struct FileFsDeviceInformation {
+    ULONG device_type;
+    ULONG characteristics;
+  };
+  constexpr int kFileFsDeviceInformation = 4;
+  constexpr ULONG kFileRemoteDevice = 0x10; // FILE_REMOTE_DEVICE
+  FileFsDeviceInformation device{};
+  IoStatusBlock status{};
+  if (query(file, &status, &device, sizeof(device), kFileFsDeviceInformation) < 0)
+    return std::nullopt;
+  if ((device.characteristics & kFileRemoteDevice) != 0)
+    return true;
   FILE_REMOTE_PROTOCOL_INFO remote{};
   if (GetFileInformationByHandleEx(file, FileRemoteProtocolInfo, &remote, sizeof(remote)))
     return true;
-  return GetLastError() == ERROR_INVALID_PARAMETER ? std::optional<bool>(false) : std::nullopt;
+  return false;
 }
 
-// The file system name (e.g. "NTFS", "ReFS") of the volume a handle's file is on, lower-cased, or
-// std::nullopt. A remote volume is std::nullopt whatever name it reports.
-std::optional<std::string> WindowsTargetFileSystemName(HANDLE file) {
+// The volume (file system name lower-cased, and FileSystemFlags) of a handle's file, or
+// std::nullopt. A remote or unknown-remoteness volume is std::nullopt whatever name it reports.
+std::optional<WindowsTargetVolume> WindowsTargetReadVolume(HANDLE file) {
   if (WindowsTargetFileIsRemote(file) != std::optional<bool>(false))
     return std::nullopt;
   std::array<wchar_t, MAX_PATH + 1> name{};
-  if (GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, nullptr, name.data(),
+  DWORD flags = 0;
+  if (GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, &flags, name.data(),
                                     static_cast<DWORD>(name.size())) != TRUE)
     return std::nullopt;
   std::string lowered = Utf8FromWide(name.data());
   for (char &letter : lowered)
     if (letter >= 'A' && letter <= 'Z') letter = static_cast<char>(letter - 'A' + 'a');
-  return lowered;
+  return WindowsTargetVolume{std::move(lowered), flags};
 }
 
 // Whether a file system's 128-bit file id is dependable: NTFS or ReFS.
 bool WindowsTargetFileSystemHasStableId(std::string_view file_system) {
   return file_system == "ntfs" || file_system == "refs";
+}
+
+// Opens a Win32 path read-only (sharing everything, so a running image can be opened) and returns
+// its canonical path and file identity, or std::nullopt when it cannot be opened or read.
+struct WindowsPathIdentity {
+  std::wstring canonical_path;
+  WindowsFileIdentity identity;
+};
+std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstring &path) {
+  ScopedKernelHandle file(CreateFileW(
+      path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, nullptr));
+  WindowsPathIdentity result;
+  if (file.value == INVALID_HANDLE_VALUE ||
+      !ReadWindowsFileIdentity(file.value, &result.identity) ||
+      !CanonicalWindowsPathFromHandle(file.value, &result.canonical_path))
+    return std::nullopt;
+  return result;
 }
 
 // Measures, once, whether QueryFullProcessImageNameW follows a rename of a running image. A copy of
@@ -1396,19 +1452,21 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
                      CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup,
                      &process)) {
     AssignProcessToJobObject(job.value, process.hProcess);
-    std::wstring before;
-    std::wstring renamed;
-    std::wstring moved;
-    // The file system of the probe volume, read from the copied file itself.
-    std::optional<std::string> probe_file_system;
+    // The probe volume and the copied file's identity, read from the copied file itself.
+    std::optional<WindowsTargetVolume> probe_volume;
+    std::optional<WindowsFileIdentity> probe_id;
     {
       ScopedKernelHandle probe_handle(CreateFileW(first.c_str(), FILE_READ_ATTRIBUTES,
                                                   FILE_SHARE_READ | FILE_SHARE_WRITE |
                                                       FILE_SHARE_DELETE,
                                                   nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
                                                   nullptr));
-      if (probe_handle.value != INVALID_HANDLE_VALUE)
-        probe_file_system = WindowsTargetFileSystemName(probe_handle.value);
+      WindowsFileIdentity identity;
+      if (probe_handle.value != INVALID_HANDLE_VALUE) {
+        probe_volume = WindowsTargetReadVolume(probe_handle.value);
+        if (ReadWindowsFileIdentity(probe_handle.value, &identity))
+          probe_id = identity;
+      }
     }
     // A freshly copied exe can be held briefly by another reader (an anti-virus scan, say), which
     // fails the move with a sharing violation; retry for up to about a second before giving up.
@@ -1423,17 +1481,31 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
       }
       return false;
     };
-    if (probe_file_system.has_value() &&
-        ReadProcessPath(process.hProcess, &before) && move(first, second) &&
-        ReadProcessPath(process.hProcess, &renamed) && move(second, third) &&
-        ReadProcessPath(process.hProcess, &moved)) {
+    // The kernel image name, opened and normalized the same way as the expected location, names the
+    // same file (so a TEMP reached through a junction, SUBST or an 8.3 short name still matches).
+    const auto names_the_file = [&](const std::wstring &expected) {
+      std::wstring reported;
+      if (!ReadProcessPath(process.hProcess, &reported)) return false;
+      const std::optional<WindowsPathIdentity> from_kernel =
+          WindowsTargetOpenPathIdentity(reported);
+      const std::optional<WindowsPathIdentity> from_expected =
+          WindowsTargetOpenPathIdentity(expected);
+      return from_kernel.has_value() && from_expected.has_value() && probe_id.has_value() &&
+             SameWindowsTargetName(from_kernel->canonical_path, from_expected->canonical_path) &&
+             SameWindowsFileIdentity(from_kernel->identity, *probe_id) &&
+             SameWindowsFileIdentity(from_expected->identity, *probe_id);
+    };
+    if (probe_volume.has_value() && probe_id.has_value()) {
+      const bool at_first = names_the_file(first);
+      const bool at_second = move(first, second) && names_the_file(second);
+      const bool at_third = at_second && move(second, third) && names_the_file(third);
       WindowsTargetRenameProbe probe;
-      probe.follows = SameWindowsTargetName(before, first) &&
-                      SameWindowsTargetName(renamed, second) &&
-                      SameWindowsTargetName(moved, third);
-      probe.file_system = *probe_file_system;
+      probe.follows = at_first && at_second && at_third;
+      probe.volume = *probe_volume;
       result = probe;
     }
+    // Terminate on every path (success, failure, the lambdas above throwing): the job also kills it
+    // on close, so the child cannot outlive this function.
     TerminateProcess(process.hProcess, 0);
     WaitForSingleObject(process.hProcess, 2'000);
     CloseHandle(process.hThread);
@@ -1596,8 +1668,17 @@ bool WindowsHeldImageDisagreesWithKernel(HANDLE file, const WindowsTargetKernelI
   header.resize(read);
   const std::optional<sprint_coder::computer_use::PeImageSummary> summary =
       sprint_coder::computer_use::ParsePeImageSummary(header);
-  if (!summary.has_value() || summary->entry_rva != kernel.entry_rva ||
-      summary->subsystem_code != kernel.subsystem || summary->machine != kernel.machine ||
+  if (!summary.has_value() || summary->subsystem_code != kernel.subsystem)
+    return true;
+  // An AnyCPU IL-only image is converted from PE32 to PE32+ by the 64-bit loader, so the kernel's
+  // machine, entry point, sizes, checksum and characteristics differ from the file header. These
+  // fields are skipped for such an image; the subsystem (above) is unaffected, and the anchor (the
+  // kernel name re-read and file id) is the real defense, so skipping them does not weaken it.
+  const bool convertible =
+      summary->clr_bitness_convertible == std::optional<bool>(true);
+  if (convertible)
+    return false;
+  if (summary->entry_rva != kernel.entry_rva || summary->machine != kernel.machine ||
       summary->check_sum != kernel.check_sum)
     return true;
   if (summary->image_characteristics.has_value() &&
@@ -1635,40 +1716,24 @@ struct WindowsTargetHeldImage {
   std::wstring canonical_path;
   WindowsFileIdentity identity;
   bool matches = false;
-  // The held file's file system (lower-cased), for the caller to compare with the rename probe's.
-  std::optional<std::string> file_system;
+  // The held file's volume (file system name and flags), for the caller to compare with the rename
+  // probe's; std::nullopt when the volume is remote or could not be read.
+  std::optional<WindowsTargetVolume> volume;
   // Whether the held file is on a remote volume (std::nullopt: unknown).
   std::optional<bool> remote;
 };
 
 // Whether the running image may be said to match: the hold matched, the held file is known not to
-// be remote, and the one-time rename probe followed on the same file system as the held file's.
-// Pure, so the seam can drive each input (a remote or unknown volume, a probe on another file
-// system, a probe that did not follow) without a real SMB share. Anything missing is false.
+// be remote, and the one-time rename probe followed on a volume whose file system name and flags
+// are the same as the held file's. Pure, so the seam can drive each input (a remote or unknown
+// volume, a probe on another file system or with different flags, a probe that did not follow)
+// without a real SMB share. Anything missing is false.
 bool WindowsTargetRunningImageMatches(bool held_matches, std::optional<bool> remote,
-                                      const std::optional<std::string> &file_system,
+                                      const std::optional<WindowsTargetVolume> &volume,
                                       const std::optional<WindowsTargetRenameProbe> &probe) {
   return held_matches && remote == std::optional<bool>(false) && probe.has_value() &&
-         probe->follows && file_system.has_value() && *file_system == probe->file_system;
-}
-
-// Opens a Win32 path read-only (sharing everything, so a running image can be opened) and returns
-// its canonical path and file identity, or std::nullopt when it cannot be opened or read.
-struct WindowsPathIdentity {
-  std::wstring canonical_path;
-  WindowsFileIdentity identity;
-};
-std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstring &path) {
-  ScopedKernelHandle file(CreateFileW(
-      path.c_str(), FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL, nullptr));
-  WindowsPathIdentity result;
-  if (file.value == INVALID_HANDLE_VALUE ||
-      !ReadWindowsFileIdentity(file.value, &result.identity) ||
-      !CanonicalWindowsPathFromHandle(file.value, &result.canonical_path))
-    return std::nullopt;
-  return result;
+         probe->follows && volume.has_value() &&
+         volume->file_system == probe->volume.file_system && volume->flags == probe->volume.flags;
 }
 
 // Holds the running image (see the block comment). The main image is found from kernel-held data
@@ -1688,8 +1753,8 @@ std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstr
 // similar the id is not dependable, so file-id matching cannot be trusted and the target is
 // unresolvable. Network and removable volumes are already W-UR by imageVolume.
 bool WindowsTargetStableIdVolume(HANDLE file) {
-  const std::optional<std::string> file_system = WindowsTargetFileSystemName(file);
-  return file_system.has_value() && WindowsTargetFileSystemHasStableId(*file_system);
+  const std::optional<WindowsTargetVolume> volume = WindowsTargetReadVolume(file);
+  return volume.has_value() && WindowsTargetFileSystemHasStableId(volume->file_system);
 }
 
 bool HoldWindowsTargetRunningImage(HANDLE process,
@@ -1731,7 +1796,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       SameWindowsTargetName(kernel_file->canonical_path, held->canonical_path) &&
       SameWindowsFileIdentity(kernel_file->identity, held->identity) &&
       WindowsTargetStableIdVolume(held->file.value);
-  held->file_system = WindowsTargetFileSystemName(held->file.value);
+  held->volume = WindowsTargetReadVolume(held->file.value);
   held->remote = WindowsTargetFileIsRemote(held->file.value);
   // Auxiliary deny-side checks.
   const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
@@ -1931,8 +1996,14 @@ WindowsTargetSignature VerifyWindowsTargetCatalog(HANDLE file,
     HCATINFO catalog = CryptCATAdminEnumCatalogFromHash(
         admin, hash.data(), hash_bytes, 0, nullptr);
     if (catalog == nullptr) {
+      // Only ERROR_NOT_FOUND means "no catalog carries this hash"; any other reason (the catalog
+      // store locked, CryptSvc stopped, out of memory) is unresolvable, not "unsigned", so a
+      // catalog-signed Microsoft binary is not let through to the upper class by a transient error.
+      const DWORD error = GetLastError();
       CryptCATAdminReleaseContext(admin, 0);
-      continue;
+      if (error == ERROR_NOT_FOUND)
+        continue;
+      return signature;
     }
     CATALOG_INFO information{};
     information.cbStruct = sizeof(information);
@@ -2356,9 +2427,12 @@ struct WindowsTargetDescendant {
 // its OriginalFilename is on the W4 leaf table; a console host by the same names. The names are
 // read whether or not the image is signed (they only cap). A descendant that cannot be opened, is
 // no longer the process the snapshot saw, or whose image cannot be read and held counts as a shell
-// (the upper class C).
+// (the upper class C). The hold must pass the same gate as the target's own
+// (WindowsTargetRunningImageMatches: not remote, and the rename probe followed on the descendant's
+// file system); a descendant that does not is a shell too, never "not a shell".
 WindowsTargetDescendant
-InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessNode &node) {
+InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessNode &node,
+                               const std::optional<WindowsTargetRenameProbe> &rename_probe) {
   using namespace sprint_coder::computer_use;
   WindowsTargetDescendant result;
   result.console_host = WindowsLeafIsConsoleHost(node.leaf);
@@ -2378,7 +2452,9 @@ InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessN
           ? std::optional<std::wstring>(std::move(recorded_path))
           : std::nullopt;
   WindowsTargetHeldImage held;
-  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held) || !held.matches)
+  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held) ||
+      !WindowsTargetRunningImageMatches(held.matches, held.remote, held.volume,
+                                        rename_probe))
     return result;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
   const std::optional<std::string> subsystem = WindowsTargetPeSubsystem(held.file.value);
@@ -2423,7 +2499,7 @@ void MeasureWindowsTargetLineage(const WindowsTargetFactsContext &context,
         break;
       }
       const WindowsTargetDescendant descendant =
-          InspectWindowsTargetDescendant((*nodes)[index]);
+          InspectWindowsTargetDescendant((*nodes)[index], context.rename_probe);
       shell = shell || descendant.shell;
       pseudo_console = pseudo_console || descendant.console_host;
     }
@@ -2497,7 +2573,7 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
   // The held file must also be known not to be remote, checked here on top of the volume class
   // (image_volume "network" is W-UR on its own path).
   facts.running_image_matches = WindowsTargetRunningImageMatches(
-      held.matches, held.remote, held.file_system, context.rename_probe);
+      held.matches, held.remote, held.volume, context.rename_probe);
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
@@ -2509,10 +2585,14 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
       facts.image_relative_path = std::move(placement.relative_path);
     }
     // A verified package's own install location is its windows_apps root, so a Store app on a
-    // volume other than the system drive is placed as a package rather than "other". This is only
-    // reached for a target that is itself a package (package_install_root comes from its own
-    // GetPackageFullName), so it never gives windows_apps to a non-package exe.
-    if (facts.packaged == std::optional<bool>(true) && measured.package_install_root.has_value()) {
+    // volume other than the system drive is placed as a package rather than "other". The override
+    // applies only when the standard placement found no known root ("other"): a package under
+    // %WINDIR% (SystemApps), Program Files or self_install keeps that root, so a %WINDIR% system
+    // package stays windows_directory (W-SYS) and does not slip onto the package route. This is
+    // only reached for a target that is itself a package, so it never gives a non-package exe
+    // windows_apps either.
+    if (facts.packaged == std::optional<bool>(true) && facts.image_root == std::string("other") &&
+        measured.package_install_root.has_value()) {
       const sprint_coder::computer_use::WindowsImageRootPrefix roots[] = {
           {"windows_apps", *measured.package_install_root}};
       WindowsImagePlacement placement = PlaceWindowsImage(*path, roots);

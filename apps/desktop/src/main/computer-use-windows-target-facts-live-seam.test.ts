@@ -283,6 +283,15 @@ std::optional<DWORD> ChildWithLeaf(DWORD parent, std::string_view leaf) {
   return std::nullopt;
 }
 
+bool HasProcessWithLeaf(const std::wstring &prefix) {
+  const std::optional<std::vector<WindowsProcessNode>> nodes = SnapshotWindowsTargetProcesses();
+  if (!nodes.has_value()) return false;
+  const std::string needle = target_eligibility_detail::AsciiLower(Utf8FromWide(prefix));
+  for (const WindowsProcessNode &node : *nodes)
+    if (target_eligibility_detail::AsciiLower(node.leaf).rfind(needle, 0) == 0) return true;
+  return false;
+}
+
 int Idle() {
   Sleep(INFINITE);
   return 0;
@@ -387,9 +396,35 @@ int wmain(int argc, wchar_t **argv) {
   // The rename-follow probe runs once and must confirm it on this (NTFS) machine, with the move
   // followed and the probe volume's file system reported; the measurements below rely on it.
   const std::optional<WindowsTargetRenameProbe> rename_probe = WindowsTargetRenameFollows();
-  Check(rename_probe.has_value() && rename_probe->follows && rename_probe->file_system == "ntfs",
+  Check(rename_probe.has_value() && rename_probe->follows &&
+            rename_probe->volume.file_system == "ntfs",
         "rename_follow_probe_confirms_on_this_machine");
   outsider.rename_probe = rename_probe;
+  // The probe starts and tears down a suspended child; none of its processes outlive it.
+  Check(!HasProcessWithLeaf(L"sc-rename-probe-"), "rename_probe_leaves_no_process");
+  // TEMP reached through an 8.3 short name still follows: the probe normalizes both sides with
+  // GetFinalPathNameByHandleW before comparing. (If 8.3 is disabled, the short path equals the long
+  // one, which is still a valid run of the probe.)
+  {
+    std::vector<wchar_t> temp(32768, L'\0');
+    const DWORD n = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
+    std::vector<wchar_t> short_temp(32768, L'\0');
+    const DWORD s = n > 0 && n < temp.size()
+                        ? GetShortPathNameW(temp.data(), short_temp.data(),
+                                            static_cast<DWORD>(short_temp.size()))
+                        : 0;
+    if (s > 0 && s < short_temp.size()) {
+      std::vector<wchar_t> saved(32768, L'\0');
+      const DWORD saved_n = GetEnvironmentVariableW(L"TMP", saved.data(),
+                                                    static_cast<DWORD>(saved.size()));
+      SetEnvironmentVariableW(L"TMP", short_temp.data());
+      SetEnvironmentVariableW(L"TEMP", short_temp.data());
+      const std::optional<WindowsTargetRenameProbe> via_short = WindowsTargetRenameFollows();
+      SetEnvironmentVariableW(L"TMP", saved_n > 0 ? saved.data() : temp.data());
+      SetEnvironmentVariableW(L"TEMP", saved_n > 0 ? saved.data() : temp.data());
+      Check(via_short.has_value() && via_short->follows, "rename_probe_follows_through_8_3_temp");
+    }
+  }
   // This program stands in for Main: CurrentWindowsTargetFactsContext takes Main's pid as the
   // lineage root, so this process (and its children) are Sprint Coder's own.
   WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "", true);
@@ -527,17 +562,27 @@ int wmain(int argc, wchar_t **argv) {
                                          nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
     Check(WindowsTargetFileIsRemote(local.value) == std::optional<bool>(false),
           "local_fixture_is_not_remote");
-    const std::optional<std::string> ntfs = std::string("ntfs");
-    Check(WindowsTargetRunningImageMatches(true, false, ntfs, rename_probe),
+    const std::optional<WindowsTargetVolume> vol =
+        rename_probe.has_value() ? std::optional<WindowsTargetVolume>(rename_probe->volume)
+                                 : std::nullopt;
+    Check(WindowsTargetRunningImageMatches(true, false, vol, rename_probe),
           "running_image_gate_passes_local");
-    Check(!WindowsTargetRunningImageMatches(true, true, ntfs, rename_probe) &&
-              !WindowsTargetRunningImageMatches(true, std::nullopt, ntfs, rename_probe),
+    Check(!WindowsTargetRunningImageMatches(true, true, vol, rename_probe) &&
+              !WindowsTargetRunningImageMatches(true, std::nullopt, vol, rename_probe),
           "running_image_gate_refuses_remote_or_unknown_volume");
+    // Different file system, or different volume flags, than the probe's: not a match.
+    WindowsTargetVolume other_fs_vol = rename_probe->volume;
+    other_fs_vol.file_system = "refs";
+    WindowsTargetVolume other_flags_vol = rename_probe->volume;
+    other_flags_vol.flags ^= 0x1u;
+    Check(!WindowsTargetRunningImageMatches(true, false, other_fs_vol, rename_probe) &&
+              !WindowsTargetRunningImageMatches(true, false, other_flags_vol, rename_probe),
+          "running_image_gate_refuses_other_file_system_or_flags");
     TargetFacts network = fixture_facts.facts;
     network.image_volume = std::string("network");
     Check(ClassOf(network) == "W-UR", "network_volume_target_is_w_ur");
     network = fixture_facts.facts;
-    network.running_image_matches = WindowsTargetRunningImageMatches(true, true, ntfs, rename_probe);
+    network.running_image_matches = WindowsTargetRunningImageMatches(true, true, vol, rename_probe);
     Check(ClassOf(network) == "W-UR", "remote_held_file_target_is_w_ur");
   }
 
@@ -547,10 +592,11 @@ int wmain(int argc, wchar_t **argv) {
   {
     WindowsTargetRenameProbe no_follow;
     no_follow.follows = false;
-    no_follow.file_system = "ntfs";
+    no_follow.volume = rename_probe->volume;
     WindowsTargetRenameProbe other_fs;
     other_fs.follows = true;
-    other_fs.file_system = "refs";
+    other_fs.volume = rename_probe->volume;
+    other_fs.volume.file_system = "refs";
     const std::optional<WindowsTargetRenameProbe> probes[] = {
         no_follow, other_fs, std::optional<WindowsTargetRenameProbe>()};
     for (const std::optional<WindowsTargetRenameProbe> &probe : probes) {
@@ -686,6 +732,65 @@ int wmain(int argc, wchar_t **argv) {
               Is(after.facts.pe_subsystem, "gui"),
           "facts_are_not_of_the_replacement");
     Check(ClassOf(after.facts) == (follows ? "W6" : "W-UR"), "fresh_measurement_class");
+  }
+
+  // A real AnyCPU .NET exe, if one ships with Windows, must not disagree with the kernel header
+  // (the loader converts it PE32 -> PE32+). Copy it to a writable temp path (the anchor renames
+  // during measurement), start it suspended, and read its facts. Skipped when none is found.
+  {
+    std::vector<wchar_t> windows(32768, L'\0');
+    const UINT wn = GetSystemWindowsDirectoryW(windows.data(), static_cast<UINT>(windows.size()));
+    const std::wstring root(windows.data(), wn);
+    const std::wstring candidates[] = {
+        root + L"\\Microsoft.NET\\Framework64\\v4.0.30319\\InstallUtil.exe",
+        root + L"\\Microsoft.NET\\Framework64\\v4.0.30319\\RegSvcs.exe",
+        root + L"\\Microsoft.NET\\Framework\\v4.0.30319\\InstallUtil.exe"};
+    std::wstring dotnet;
+    for (const std::wstring &c : candidates)
+      if (dotnet.empty() && GetFileAttributesW(c.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::vector<std::uint8_t> head(4096);
+        HANDLE h = CreateFileW(c.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                               FILE_ATTRIBUTE_NORMAL, nullptr);
+        DWORD got = 0;
+        OVERLAPPED at{};
+        const bool read = h != INVALID_HANDLE_VALUE &&
+                          ReadFile(h, head.data(), static_cast<DWORD>(head.size()), &got, &at) == TRUE;
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        head.resize(got);
+        const std::optional<PeImageSummary> s = ParsePeImageSummary(head);
+        if (read && s.has_value() && s->clr_bitness_convertible == std::optional<bool>(true))
+          dotnet = c;
+      }
+    if (!dotnet.empty()) {
+      const std::wstring copy = scratch + L"\\sc500-dotnet.exe";
+      Check(CopyFileW(dotnet.c_str(), copy.c_str(), FALSE) == TRUE, "anycpu_dotnet_copied");
+      // Start suspended and never resume: the image is mapped at creation, so its facts are
+      // measurable, while the util never runs (it would otherwise exit at once with no args).
+      STARTUPINFOW startup{};
+      startup.cb = sizeof(startup);
+      PROCESS_INFORMATION info{};
+      std::wstring command = L"\"" + copy + L"\"";
+      const bool started =
+          CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
+                         CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup, &info);
+      Check(started, "anycpu_dotnet_started");
+      if (started) AssignProcessToJobObject(g_job, info.hProcess);
+      const WindowsTargetFactsMeasurement net_facts =
+          Measure(info.dwProcessId, nullptr, outsider);
+      Print("anycpu dotnet", net_facts);
+      // When the image resolved, the AnyCPU exe's running image matches despite the PE32->PE32+
+      // conversion (the header cross-check skips the converted fields), so it is not W-UR for that
+      // reason. If the image could not be held in this environment (empty path), skip rather than
+      // fail: the deterministic guarantee is the harness CLR test. The header cross-check never
+      // refused it (that is the regression guarded here).
+      if (net_facts.facts.running_image_matches.has_value())
+        Check(Is(net_facts.facts.running_image_matches, true),
+              "anycpu_dotnet_running_image_matches_despite_bitness_conversion");
+      else
+        std::cout << "anycpu dotnet image not resolvable here; skipped\n";
+    } else {
+      std::cout << "no AnyCPU .NET exe found; skipped\n";
+    }
   }
 
   // A process that does not exist: nothing is measured.

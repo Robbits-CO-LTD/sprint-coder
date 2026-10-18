@@ -220,6 +220,12 @@ struct PeImageSummary {
   std::optional<std::uint16_t> dll_characteristics;
   std::optional<std::uint64_t> stack_reserve;
   std::optional<std::uint64_t> stack_commit;
+  // True when the CLR header marks an IL-only image without 32BITREQUIRED or 32BITPREFERRED: on
+  // 64-bit Windows the loader converts such an AnyCPU image from PE32 to PE32+, so the kernel's
+  // SECTION_IMAGE_INFORMATION differs from the file header (machine, entry point, sizes, checksum).
+  // The kernel cross-check skips those fields for it. std::nullopt when the CLR header is absent or
+  // could not be read.
+  std::optional<bool> clr_bitness_convertible;
 };
 
 // Reads a PE image's header. Every read is bounds-checked (ReadLe) and every offset is formed with
@@ -291,6 +297,50 @@ ParsePeImageSummary(std::span<const std::uint8_t> bytes) {
         ReadLe(bytes, *optional + security_end - 4, 4);
     if (count.has_value() && *count >= 5 && security_size.has_value())
       summary.has_cert_table = *security_size != 0;
+  }
+  // The CLR runtime header is data directory 14. Reading its Flags needs the directory's RVA mapped
+  // to a file offset through the section table (sections begin after the optional header). Every
+  // read is bounds-checked; anything missing leaves clr_bitness_convertible std::nullopt.
+  const std::size_t clr_dir = (plus ? 112 : 96) + 14 * 8;
+  const std::optional<std::size_t> clr_dir_end = OffsetWithin(*optional, clr_dir + 8, size);
+  const std::optional<std::uint32_t> clr_count = ReadLe(bytes, *optional + count_at, 4);
+  if (*optional_size >= clr_dir + 8 && clr_dir_end.has_value() && clr_count.has_value() &&
+      *clr_count >= 15) {
+    const std::optional<std::uint32_t> clr_rva = ReadLe(bytes, *optional + clr_dir, 4);
+    const std::optional<std::uint32_t> clr_size = ReadLe(bytes, *optional + clr_dir + 4, 4);
+    const std::optional<std::uint32_t> sections = ReadLe(bytes, *pe + 6, 2);
+    if (clr_rva.has_value() && *clr_rva != 0 && clr_size.has_value() && *clr_size != 0 &&
+        sections.has_value()) {
+      const std::optional<std::size_t> table = OffsetWithin(*optional, *optional_size, size);
+      std::optional<std::size_t> clr_offset;
+      for (std::size_t index = 0; table.has_value() && index < *sections; ++index) {
+        const std::optional<std::size_t> header = OffsetWithin(*table, index * 40 + 40, size);
+        if (!header.has_value()) break;
+        const std::size_t at = *table + index * 40;
+        const std::optional<std::uint32_t> virtual_size = ReadLe(bytes, at + 8, 4);
+        const std::optional<std::uint32_t> virtual_address = ReadLe(bytes, at + 12, 4);
+        const std::optional<std::uint32_t> raw_size = ReadLe(bytes, at + 16, 4);
+        const std::optional<std::uint32_t> raw_pointer = ReadLe(bytes, at + 20, 4);
+        if (!virtual_size.has_value() || !virtual_address.has_value() || !raw_size.has_value() ||
+            !raw_pointer.has_value())
+          break;
+        const std::uint32_t span = *virtual_size > *raw_size ? *virtual_size : *raw_size;
+        if (*clr_rva >= *virtual_address && *clr_rva < *virtual_address + span)
+          clr_offset = OffsetWithin(*raw_pointer, *clr_rva - *virtual_address, size);
+      }
+      // COR20 header: cb(4), runtime version(4), MetaData(8), Flags(4) at offset 16.
+      if (clr_offset.has_value()) {
+        const std::optional<std::uint32_t> flags = ReadLe(bytes, *clr_offset + 16, 4);
+        if (flags.has_value()) {
+          constexpr std::uint32_t kIlOnly = 0x00000001;
+          constexpr std::uint32_t k32BitRequired = 0x00000002;
+          constexpr std::uint32_t k32BitPreferred = 0x00020000;
+          summary.clr_bitness_convertible = (*flags & kIlOnly) != 0 &&
+                                            (*flags & k32BitRequired) == 0 &&
+                                            (*flags & k32BitPreferred) == 0;
+        }
+      }
+    }
   }
   return summary;
 }

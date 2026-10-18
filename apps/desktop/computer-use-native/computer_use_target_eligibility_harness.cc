@@ -300,6 +300,8 @@ void PutLe(std::vector<std::uint8_t> &bytes, std::size_t at, std::uint32_t value
     bytes[at + index] = static_cast<std::uint8_t>((value >> (8 * index)) & 0xff);
 }
 
+bool CheckPeClrImage();
+
 bool CheckPeImageSummary() {
   const std::optional<bool> yes = true;
   const std::optional<bool> no = false;
@@ -355,7 +357,56 @@ bool CheckPeImageSummary() {
                "pe-summary-huge-rva-count-in-range-reads-safely") &&
          Check(huge_cut.has_value() && !huge_cut->has_cert_table.has_value(),
                "pe-summary-huge-rva-count-cut-short-is-unknown") &&
-         Check(!far.has_value(), "pe-summary-e-lfanew-out-of-range");
+         Check(!far.has_value(), "pe-summary-e-lfanew-out-of-range") && CheckPeClrImage();
+}
+
+// A PE32 image with one section and a CLR (COR20) header whose Flags are `clr_flags`.
+std::vector<std::uint8_t> ClrImage(std::uint32_t clr_flags) {
+  std::vector<std::uint8_t> bytes(0x1800, 0);
+  bytes[0] = 'M';
+  bytes[1] = 'Z';
+  bytes[0x3c] = 0x80;
+  bytes[0x80] = 'P';
+  bytes[0x81] = 'E';
+  PutLe(bytes, 0x80 + 6, 1, 2);                 // NumberOfSections = 1 (COFF header offset 2)
+  PutLe(bytes, 0x80 + 20, 240, 2);              // SizeOfOptionalHeader
+  PutLe(bytes, 0x80 + 24, 0x10b, 2);            // PE32 magic
+  PutLe(bytes, 0x80 + 24 + 68, 2, 2);           // Subsystem = GUI
+  PutLe(bytes, 0x80 + 24 + 92, 16, 4);          // NumberOfRvaAndSizes (PE32)
+  // Data directory 14 (CLR) at optional offset 96 + 14*8: RVA then size.
+  PutLe(bytes, 0x80 + 24 + 96 + 14 * 8, 0x2000, 4);
+  PutLe(bytes, 0x80 + 24 + 96 + 14 * 8 + 4, 0x48, 4);
+  // One section header, after the optional header (0x80 + 24 + 240 = 0x118).
+  const std::size_t section = 0x80 + 24 + 240;
+  PutLe(bytes, section + 8, 0x1000, 4);  // VirtualSize
+  PutLe(bytes, section + 12, 0x1000, 4); // VirtualAddress
+  PutLe(bytes, section + 16, 0x1400, 4); // SizeOfRawData
+  PutLe(bytes, section + 20, 0x400, 4);  // PointerToRawData
+  // COR20 header at RVA 0x2000 -> file 0x400 + (0x2000 - 0x1000) = 0x1400; Flags at +16.
+  PutLe(bytes, 0x1400 + 16, clr_flags, 4);
+  return bytes;
+}
+
+bool CheckPeClrImage() {
+  constexpr std::uint32_t kIlOnly = 0x1;
+  constexpr std::uint32_t k32BitRequired = 0x2;
+  constexpr std::uint32_t k32BitPreferred = 0x20000;
+  const std::optional<bool> yes = true;
+  const std::optional<bool> no = false;
+  const std::optional<PeImageSummary> any_cpu = ParsePeImageSummary(ClrImage(kIlOnly));
+  const std::optional<PeImageSummary> required =
+      ParsePeImageSummary(ClrImage(kIlOnly | k32BitRequired));
+  const std::optional<PeImageSummary> preferred =
+      ParsePeImageSummary(ClrImage(kIlOnly | k32BitPreferred));
+  const std::optional<PeImageSummary> native = ParsePeImageSummary(PeHeader(0x10b, 2));
+  return Check(any_cpu.has_value() && any_cpu->clr_bitness_convertible == yes,
+               "pe-clr-anycpu-il-only-is-convertible") &&
+         Check(required.has_value() && required->clr_bitness_convertible == no,
+               "pe-clr-32bit-required-is-not-convertible") &&
+         Check(preferred.has_value() && preferred->clr_bitness_convertible == no,
+               "pe-clr-32bit-preferred-is-not-convertible") &&
+         Check(native.has_value() && !native->clr_bitness_convertible.has_value(),
+               "pe-no-clr-header-is-unknown");
 }
 
 // ASCII text as UTF-16 bytes, little or big endian, with or without the BOM.
