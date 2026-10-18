@@ -392,6 +392,27 @@ int wmain(int argc, wchar_t **argv) {
   // no console exits at once, and a process that is gone measures nothing.
   const PROCESS_INFORMATION cmd = Start(L"\"" + system32 + L"\\cmd.exe\" /k", CREATE_NEW_CONSOLE);
   Sleep(1000);
+  DWORD cmd_exit = 0;
+  const bool cmd_exit_read = cmd.hProcess != nullptr && GetExitCodeProcess(cmd.hProcess, &cmd_exit);
+  std::cout << "cmd lifecycle: exit_read=" << (cmd_exit_read ? "yes" : "no")
+            << " exit=0x" << std::hex << cmd_exit << std::dec << "\n";
+  // Diagnostic comparison for the CI-only early exit: a noninteractive shell must not depend on
+  // opening a console or reading a prompt. This child is owned by the same kill-on-close job.
+  if (cmd_exit_read && cmd_exit != STILL_ACTIVE) {
+    const PROCESS_INFORMATION noninteractive = Start(
+        L"\"" + system32 + L"\\cmd.exe\" /d /c \"\"" + system32 +
+            L"\\ping.exe\" -n 120 127.0.0.1 >nul\"", CREATE_NO_WINDOW);
+    Sleep(1000);
+    DWORD comparison_exit = 0;
+    const bool comparison_read = noninteractive.hProcess != nullptr &&
+                                 GetExitCodeProcess(noninteractive.hProcess, &comparison_exit);
+    WindowsV2Judgement comparison;
+    JudgeWindowsV2Target(noninteractive.dwProcessId, nullptr, context, &comparison);
+    comparison.measured.facts.window_class = std::string{};
+    std::cout << "cmd noninteractive: exit_read=" << (comparison_read ? "yes" : "no")
+              << " exit=0x" << std::hex << comparison_exit << std::dec
+              << " class=" << ClassifyTargetExplained(comparison.measured.facts).deny_class << "\n";
+  }
   Check(cmd.hProcess != nullptr && WaitForSingleObject(cmd.hProcess, 0) == WAIT_TIMEOUT,
         "v2_cmd_is_running");
   WindowsV2Judgement shell;
