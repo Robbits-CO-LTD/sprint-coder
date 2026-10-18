@@ -1,0 +1,35 @@
+import { describe, expect, it } from 'vitest';
+import { workerCompletionSchema } from '@sprint-coder/contracts';
+import {
+  TeamIntegrationResumeRequiredError,
+  integrationBlockedCompletion,
+} from './team-coordinator';
+
+describe('integration blocked report (issue #852)', () => {
+  it('stays within the UTF-16 limits even when many emoji paths conflict', () => {
+    const files = Array.from({ length: 30 }, (_, i) => `${'😀'.repeat(190)}-${i}.md`);
+    const completion = integrationBlockedCompletion(
+      new TeamIntegrationResumeRequiredError('conflict', files),
+    );
+    expect(() => workerCompletionSchema.parse(completion)).not.toThrow();
+    expect(completion.summary.length).toBeLessThanOrEqual(4_000);
+    expect(completion.verification[0]!.detail!.length).toBeLessThanOrEqual(2_000);
+    expect(completion.summary).not.toMatch(/[\uD800-\uDBFF]$/u);
+  });
+
+  it('says the other repositories were already integrated (partial apply)', () => {
+    const completion = integrationBlockedCompletion(
+      new TeamIntegrationResumeRequiredError('conflict', ['app › README.md'], ['lib']),
+    );
+    expect(completion.summary).toContain('部分適用');
+    expect(completion.summary).toContain('lib');
+    expect(completion.summary).toContain('そのリポジトリは統合前の状態のまま');
+  });
+
+  it('does not claim a partial apply when nothing else was integrated', () => {
+    const completion = integrationBlockedCompletion(
+      new TeamIntegrationResumeRequiredError('conflict', ['README.md']),
+    );
+    expect(completion.summary).not.toContain('部分適用');
+  });
+});

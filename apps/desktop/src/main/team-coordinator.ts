@@ -270,11 +270,13 @@ export class WorkerEgressDeniedError extends Error {
   }
 }
 
-class TeamIntegrationResumeRequiredError extends Error {
+export class TeamIntegrationResumeRequiredError extends Error {
   constructor(
     message: string,
     /** Labelled paths Git reported as conflicting, when a cherry-pick conflicted (issue #852). */
     readonly conflictedFiles: readonly string[] = [],
+    /** Labels of the other repositories already integrated before the conflict (partial apply). */
+    readonly integratedRepositories: readonly string[] = [],
   ) {
     super(message);
     this.name = 'TeamIntegrationResumeRequiredError';
@@ -6188,6 +6190,10 @@ export class TeamCoordinator {
         error instanceof WorktreeIntegrationConflictError && integratingOrdinal !== null
           ? this.labelIsolationPaths(isolation, integratingOrdinal, error.conflictedFiles)
           : [];
+      const integratedRepositories =
+        error instanceof WorktreeIntegrationConflictError && integratingOrdinal !== null
+          ? this.integratedRepositoryLabels(isolation, integratingOrdinal)
+          : [];
       isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_resume',
@@ -6198,6 +6204,7 @@ export class TeamCoordinator {
       throw new TeamIntegrationResumeRequiredError(
         isolation.reason ?? 'Integration failed',
         conflicted,
+        integratedRepositories,
       );
     } finally {
       this.persistence.releaseTeamIntegrationRootLeases(isolation.executionId);
@@ -6401,6 +6408,21 @@ export class TeamCoordinator {
   }
 
   /** Repository-relative paths of one isolation repository, named by the Workspace root they are in. */
+  /** Root labels of the repositories other than `exceptOrdinal` already integrated into the Workspace. */
+  private integratedRepositoryLabels(
+    isolation: TeamExecutionIsolationRecord,
+    exceptOrdinal: number,
+  ): readonly string[] {
+    return isolation.repositories
+      .filter(({ ordinal, state }) => ordinal !== exceptOrdinal && state === 'integrated')
+      .map(({ ordinal }) => {
+        const labels = isolation.roots
+          .filter(({ repositoryOrdinal }) => repositoryOrdinal === ordinal)
+          .map(({ rootLabel }) => rootLabel);
+        return labels.length > 0 ? labels.join(' / ') : `repository-${ordinal}`;
+      });
+  }
+
   private labelIsolationPaths(
     isolation: TeamExecutionIsolationRecord,
     ordinal: number,
@@ -7274,6 +7296,19 @@ const TEAM_MESSAGE_CONTENT_LIMIT = 100_000;
 const INTEGRATION_RESUME_ACTIVITY = '統合が止まったため、人による再開待ち（waiting_resume）';
 const INTEGRATION_BLOCKED_FILE_LIMIT = 20;
 
+/**
+ * `text` cut at a code-point boundary so its UTF-16 length (what zod's `max` counts) stays within
+ * `maxLength`.
+ */
+function fitUtf16(text: string, maxLength: number): string {
+  let out = '';
+  for (const character of text) {
+    if (out.length + character.length > maxLength) break;
+    out += character;
+  }
+  return out;
+}
+
 /** One secret-redacted line without control characters, for text a Leader report quotes. */
 function reportLine(text: string, maxLength: number): string {
   // eslint-disable-next-line no-control-regex
@@ -7285,7 +7320,7 @@ function reportLine(text: string, maxLength: number): string {
  * #852): it names the conflicting files, says the Workspace was left as before, and that the
  * execution waits for a person to resume it, so it is never read as completed.
  */
-function integrationBlockedCompletion(error: unknown): WorkerCompletion {
+export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
   const conflicted =
     error instanceof TeamIntegrationResumeRequiredError ||
     error instanceof WorktreeIntegrationConflictError
@@ -7296,6 +7331,14 @@ function integrationBlockedCompletion(error: unknown): WorkerCompletion {
     .map((path) => reportLine(path, 200))
     .filter((path) => path !== '');
   const more = conflicted.length - files.length;
+  const integratedRepositories =
+    error instanceof TeamIntegrationResumeRequiredError
+      ? error.integratedRepositories.map((label) => reportLine(label, 200)).filter((l) => l !== '')
+      : [];
+  const partial =
+    integratedRepositories.length > 0
+      ? `ただし、ほかのリポジトリ（${integratedRepositories.join(', ')}）への統合はすでに完了しており、作業場所に反映されています（部分適用）。`
+      : '';
   const reason = reportLine(error instanceof Error ? error.message : String(error), 500);
   const detail =
     files.length > 0
@@ -7303,17 +7346,17 @@ function integrationBlockedCompletion(error: unknown): WorkerCompletion {
       : `理由: ${reason === '' ? '不明' : reason}`;
   const summary =
     files.length > 0
-      ? `Workerの変更を作業場所へ統合しようとしたところ、Gitのcherry-pickが衝突しました。Appはcherry-pickを中止し、作業場所は統合前の状態のままです。${detail}。このexecutionはwaiting_resume（integration）で、人が衝突を解消して再開するまで完了しません。completedとして扱わないでください。`
+      ? `Workerの変更を作業場所へ統合しようとしたところ、Gitのcherry-pickが衝突しました。Appは衝突したリポジトリのcherry-pickを中止し、そのリポジトリは統合前の状態のままです。${partial}${detail}。このexecutionはwaiting_resume（integration）で、人が衝突を解消して再開するまで完了しません。completedとして扱わないでください。`
       : `Workerの変更を作業場所へ統合できませんでした。${detail}。このexecutionはwaiting_resume（integration）で、人が再開するまで完了しません。completedとして扱わないでください。`;
   return workerCompletionSchema.parse({
     status: 'failed',
-    summary: Array.from(summary).slice(0, 4_000).join(''),
+    summary: fitUtf16(summary, 4_000),
     artifacts: [],
     verification: [
       {
         name: 'workspace-integration',
         outcome: 'fail',
-        detail: Array.from(detail).slice(0, 2_000).join(''),
+        detail: fitUtf16(detail, 2_000),
       },
     ],
     risks: ['人による再開待ち: waiting_resume (integration)'],
