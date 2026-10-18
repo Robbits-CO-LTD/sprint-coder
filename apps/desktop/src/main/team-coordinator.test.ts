@@ -43,6 +43,7 @@ import {
   executeWithWatchdog,
   priorConversationForAgent,
   runtimeStopConfirmed,
+  teamRepositoryMutationKey,
   type TeamDiagnosticEvent,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
@@ -54,11 +55,17 @@ import { TEAM_ASSIGNMENT_RATE_LIMIT, type TeamEnvelope } from '@sprint-coder/dom
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { executeTeamTool } from './team-tools';
 import { ConnectionAdmissionController } from './connection-admission';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
-import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
+import {
+  WorkerWorktreeManager,
+  WorktreeError,
+  WorktreeIntegrationConflictError,
+  type TreeRemovalFs,
+} from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
 import { managedLocalConnection } from './managed-local-provider-runtime';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -564,6 +571,12 @@ class ConflictingWorktreeRuntime extends TestWorkerRuntime {
     writeFileSync(join(input.workspacePath, 'worker-only.txt'), 'preserve worker result\n');
     writeFileSync(join(this.primaryWorkspace, 'outside.txt'), 'external change\n');
     return super.execute(input);
+  }
+}
+
+class ConflictingIntegrationManager extends WorkerWorktreeManager {
+  override async integrate(): Promise<never> {
+    throw new WorktreeIntegrationConflictError('cherry-pick conflicted', ['README.md']);
   }
 }
 
@@ -4432,6 +4445,220 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 55_000);
 
+    it('reports a conflicting integration to the Leader as blocked and ends the report wait (issue #852)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Conflicting writers report to the Leader');
+      const runtime = new BlockingSameFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const workers = await Promise.all(
+        ['first writer', 'second writer'].map((role) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        ),
+      );
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries())
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: index === 0 ? 'first version' : 'second version',
+            doneCriteria: ['README.md is integrated'],
+            accessMode: 'workspace-write',
+          }),
+        );
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2, 15_000);
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.some(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        15_000,
+      );
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.every(({ executionId }) =>
+            ['completed', 'waiting_resume'].includes(
+              persistence.getTeamExecution(executionId).state,
+            ),
+          ),
+        15_000,
+      );
+      const waiting = submissions.find(
+        ({ executionId }) => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+      )!;
+      expect(waiting).toBeDefined();
+
+      let cursor = 0;
+      const waitReports = () =>
+        executeTeamTool(
+          coordinator,
+          task.id,
+          'team_wait_reports',
+          {},
+          {
+            longPoll: true,
+            longPollTimeoutMs: 10_000,
+            longPollIntervalMs: 5,
+            waitReportsCursor: {
+              read: () => cursor,
+              advance: (seq: number) => {
+                cursor = Math.max(cursor, seq);
+              },
+            },
+          },
+        ) as Promise<{
+          ok: true;
+          reports: readonly { executionId: string | null; content: string }[];
+        }>;
+      const collected: { executionId: string | null; content: string }[] = [];
+      while (collected.length < 2) {
+        const result = await waitReports();
+        expect(result.reports.length).toBeGreaterThan(0);
+        collected.push(...result.reports);
+      }
+      const blocked = collected.find(({ executionId }) => executionId === waiting.executionId);
+      expect(blocked).toBeDefined();
+      const content = JSON.parse(blocked!.content) as { status: string; summary: string };
+      expect(content.status).toBe('failed');
+      expect(content.summary).toContain('README.md');
+      expect(content.summary).toContain('waiting_resume');
+      expect(content.summary).toContain('completedとして扱わないでください');
+
+      // Nothing else will report until a person resumes the integration, so the wait ends.
+      const started = Date.now();
+      await expect(waitReports()).resolves.toEqual({ ok: true, reports: [] });
+      expect(Date.now() - started).toBeLessThan(5_000);
+
+      const detail = coordinator.get(task.id)!;
+      expect(detail.executions.find(({ id }) => id === waiting.executionId)).toMatchObject({
+        state: 'waiting_resume',
+        isolation: { phase: 'waiting_resume' },
+      });
+      expect(
+        detail.workers.find(
+          ({ id }) => id === persistence.getTeamExecution(waiting.executionId).assigneeAgentId,
+        )?.currentActivity,
+      ).toContain('waiting_resume');
+      expect(coordinator.hasUnfinishedTeamWork(task.id)).toBe(true);
+
+      // A person resolves the conflict (here: backs out the first writer) and resumes; the Leader
+      // then hears that the execution completed after all.
+      expect(
+        spawnSync('git', [
+          '-C',
+          workspace,
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.com',
+          '-c',
+          'core.autocrlf=false',
+          'revert',
+          '--no-edit',
+          'HEAD',
+        ]).status,
+      ).toBe(0);
+      expect(
+        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
+      ).toBe('');
+      await coordinator.resumeExecutionIntegration(task.id, waiting.executionId);
+      expect(persistence.getTeamExecution(waiting.executionId).state).toBe('completed');
+      const resumed = (await waitReports()).reports.find(
+        ({ executionId }) => executionId === waiting.executionId,
+      );
+      expect(resumed).toBeDefined();
+      const resumedContent = JSON.parse(resumed!.content) as { status: string; summary: string };
+      expect(resumedContent.status).toBe('succeeded');
+      expect(resumedContent.summary).toContain('統合しました');
+      // A second (or concurrent) resume is refused and sends no further report.
+      await expect(
+        Promise.all([
+          coordinator.resumeExecutionIntegration(task.id, waiting.executionId),
+          coordinator.resumeExecutionIntegration(task.id, waiting.executionId),
+        ]),
+      ).rejects.toThrow('not waiting to resume');
+      expect(
+        (await waitReports()).reports.filter(
+          ({ executionId }) => executionId === waiting.executionId,
+        ),
+      ).toEqual([]);
+      persistence.close();
+    }, 55_000);
+
+    it('checks a workspace-write assignment only between integrations into the Workspace (issue #853)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Assignment beside an integration');
+      const runtime = new BlockingSameFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const scheduler = new TeamIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const assign = () =>
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'after integration',
+          doneCriteria: ['README.md is written'],
+          accessMode: 'workspace-write',
+        });
+      const readme = join(workspace, 'README.md');
+
+      // A Workspace the user left dirty is still refused.
+      writeFileSync(readme, 'user edit\n');
+      await expect(assign()).rejects.toThrow(/clean/u);
+      writeFileSync(readme, 'base\n');
+
+      // Another Worker's integration holds the parent checkout mid cherry-pick.
+      let releaseIntegration!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseIntegration = resolve;
+      });
+      let integrationRunning = false;
+      const integration = scheduler.submit({
+        executionId: 'other-worker-integration',
+        mutationKeys: [teamRepositoryMutationKey(await manager.resolveRepositoryPath(workspace))],
+        run: async () => {
+          writeFileSync(readme, 'cherry-pick in progress\n');
+          integrationRunning = true;
+          await barrier;
+          writeFileSync(readme, 'base\n');
+        },
+      });
+      await waitFor(() => integrationRunning, 5_000);
+      let settled = false;
+      const assignment = assign().finally(() => {
+        settled = true;
+      });
+      assignment.catch(() => undefined);
+      await waitFor(() => settled || scheduler.snapshot().queuedExecutionIds.length === 1, 10_000);
+      expect(settled).toBe(false);
+      releaseIntegration();
+      await integration;
+      const submission = await assignment;
+      await waitFor(() => runtime.releases.length === 1, 15_000);
+      runtime.releases.shift()?.();
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
+      );
+      persistence.close();
+    }, 55_000);
+
     it.each(['legacy', 'project'] as const)(
       'serializes legacy Mission and Project integration with %s arriving first',
       async (firstArrival) => {
@@ -4805,6 +5032,144 @@ if (runsWithElectronAbi)
       });
       persistence.close();
     });
+
+    it('names the already-integrated Secondary when Primary then conflicts (issue #852, partial apply)', async () => {
+      const persistence = createPersistence();
+      const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));
+      const secondaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-secondary-')),
+      );
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-multi-worktrees-'));
+      cleanup.push(primaryRepo, secondaryRepo, worktreesRoot);
+      for (const [repo, label] of [
+        [primaryRepo, 'primary'],
+        [secondaryRepo, 'secondary'],
+      ] as const) {
+        expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+        writeFileSync(join(repo, 'README.md'), `${label}\n`);
+        expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            repo,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ]).status,
+        ).toBe(0);
+      }
+      const primaryRootId = '10000000-0000-4000-8000-000000000001';
+      const secondaryRootId = '10000000-0000-4000-8000-000000000002';
+      const project = persistence.createProject({
+        name: 'Two repositories',
+        folders: [
+          {
+            id: primaryRootId,
+            path: primaryRepo,
+            canonicalPath: primaryRepo,
+            label: 'primary',
+            role: 'primary',
+            workspaceKey: '1'.repeat(64),
+            rootIdentityDigest: 'a'.repeat(64),
+          },
+          {
+            id: secondaryRootId,
+            path: secondaryRepo,
+            canonicalPath: secondaryRepo,
+            label: 'secondary',
+            role: 'secondary',
+            workspaceKey: '2'.repeat(64),
+            rootIdentityDigest: 'b'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Multi-repository Mission', false, project.id);
+      const runtime = new MultiRootWritingRuntime();
+      const manager = new WorkerWorktreeManager({ worktreesRoot });
+      const realIntegrate = manager.integrate.bind(manager);
+      vi.spyOn(manager, 'integrate').mockImplementation(async (input) => {
+        // Compare names: on Windows CI the temp path can come back in a different (8.3) form.
+        if (basename(input.repoPath) === basename(primaryRepo))
+          throw new WorktreeIntegrationConflictError('cherry-pick conflicted', ['README.md']);
+        return realIntegrate(input);
+      });
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write both repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'verify both repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write both repositories',
+        doneCriteria: ['both repositories integrated'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write both roots',
+            doneCriteria: ['both outputs exist'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify both roots',
+            doneCriteria: ['both outputs inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+      const executionId = mission.steps[0]!.executionId;
+      await waitFor(
+        () => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+        20_000,
+      );
+      expect(readFileSync(join(secondaryRepo, 'worker-output.txt'), 'utf8')).toBe('secondary\n');
+      let cursor = 0;
+      const reports: { executionId: string | null; content: string }[] = [];
+      const deadline = Date.now() + 20_000;
+      while (!reports.some((report) => report.executionId === executionId)) {
+        expect(Date.now()).toBeLessThan(deadline);
+        const result = (await executeTeamTool(
+          coordinator,
+          task.id,
+          'team_wait_reports',
+          {},
+          {
+            longPoll: true,
+            longPollTimeoutMs: 1_000,
+            longPollIntervalMs: 5,
+            waitReportsCursor: {
+              read: () => cursor,
+              advance: (seq: number) => {
+                cursor = Math.max(cursor, seq);
+              },
+            },
+          },
+        )) as { reports: readonly { executionId: string | null; content: string }[] };
+        reports.push(...result.reports);
+      }
+      const blocked = reports.find((report) => report.executionId === executionId)!;
+      const content = JSON.parse(blocked.content) as { status: string; summary: string };
+      expect(content.status).toBe('failed');
+      expect(content.summary).toContain('部分適用');
+      expect(content.summary).toContain('secondary');
+      expect(content.summary).toContain('README.md');
+      persistence.close();
+    }, 55_000);
 
     it('maps two repositories into isolated roots and integrates Secondary before Primary', async () => {
       const persistence = createPersistence();
@@ -5584,6 +5949,79 @@ if (runsWithElectronAbi)
       ).toBe('base\n');
       persistence.close();
     }, 30_000);
+
+    it('tells the Leader a sequential Mission worktree conflict is blocked, naming the files (issue #852)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Conflicting sequential Mission worktree');
+      const { worktreesRoot } = configureGitWorkspace(persistence, task.id);
+      const runtime = new WorktreeWritingRuntime();
+      const manager = new ConflictingIntegrationManager({ worktreesRoot });
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write in isolation',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'conflict in the Mission worktree',
+        doneCriteria: ['blocked is reported'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'perform isolated write',
+            doneCriteria: ['worker-output.txt exists'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: writer.id,
+            objective: 'verify after resume',
+            doneCriteria: ['integrated output inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+      await waitFor(
+        () => persistence.getTeamMission(mission.id).state === 'waiting_resume',
+        20_000,
+      );
+      const executionId = mission.steps[0]!.executionId;
+      expect(persistence.getTeamMissionWorktree(executionId)).not.toBeNull();
+      let cursor = 0;
+      const reports: { executionId: string | null; content: string }[] = [];
+      const deadline = Date.now() + 20_000;
+      while (!reports.some((report) => report.executionId === executionId)) {
+        expect(Date.now()).toBeLessThan(deadline);
+        const result = (await executeTeamTool(
+          coordinator,
+          task.id,
+          'team_wait_reports',
+          {},
+          {
+            longPoll: true,
+            longPollTimeoutMs: 1_000,
+            longPollIntervalMs: 5,
+            waitReportsCursor: {
+              read: () => cursor,
+              advance: (seq: number) => {
+                cursor = Math.max(cursor, seq);
+              },
+            },
+          },
+        )) as { reports: readonly { executionId: string | null; content: string }[] };
+        reports.push(...result.reports);
+      }
+      const content = JSON.parse(
+        reports.find((report) => report.executionId === executionId)!.content,
+      ) as { status: string; summary: string };
+      expect(content.status).toBe('failed');
+      expect(content.summary).toContain('README.md');
+      expect(content.summary).toContain('waiting_resume');
+      expect(content.summary).toContain('completedとして扱わないでください');
+      persistence.close();
+    }, 55_000);
 
     it('resumes idempotently when the app stops after Git integration but before checkpointing', async () => {
       const persistence = createPersistence();

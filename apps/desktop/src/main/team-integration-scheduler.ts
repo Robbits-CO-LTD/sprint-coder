@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 export type TeamIntegrationJob = Readonly<{
   executionId: string;
   mutationKeys: readonly string[];
@@ -17,7 +19,29 @@ export class TeamIntegrationScheduler {
   private nextOrdinal = 1;
   private pumpScheduled = false;
 
-  async submit(job: TeamIntegrationJob): Promise<void> {
+  submit(job: TeamIntegrationJob): Promise<void> {
+    return this.enqueue(job);
+  }
+
+  /**
+   * Runs `run` in the same FIFO as the integrations holding any of `mutationKeys`, so it never
+   * overlaps one (issue #853): a read of a parent checkout then sees it only before or after an
+   * integration changes it. A snapshot lists it under an `exclusive:` ID.
+   */
+  async runExclusive<T>(mutationKeys: readonly string[], run: () => Promise<T>): Promise<T> {
+    let result: { value: T } | undefined;
+    await this.enqueue({
+      executionId: `exclusive:${randomUUID()}`,
+      mutationKeys,
+      run: async () => {
+        result = { value: await run() };
+      },
+    });
+    if (result === undefined) throw new Error('Exclusive run completed without a result');
+    return result.value;
+  }
+
+  private async enqueue(job: TeamIntegrationJob): Promise<void> {
     const executionId = job.executionId.trim();
     const mutationKeys = [...new Set(job.mutationKeys.map((key) => key.trim()))].sort();
     if (executionId === '') throw new Error('Integration execution ID is required');

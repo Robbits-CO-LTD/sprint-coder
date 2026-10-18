@@ -2265,6 +2265,13 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         // The step's summary carries the same reason to the Graph panel.
         const detail = coordinator.get(f.task.id)!;
         expect(detail.executions.find(({ id }) => id === first)?.terminalReason).toBe(reason);
+        // The parked step reports its failure to the Leader, so a report wait does not stay
+        // empty while the step waits for a person to resume it (issue #852).
+        const reports = coordinator.listWorkerReports(f.task.id, 0);
+        expect(reports.map(({ executionId }) => executionId)).toContain(first);
+        expect(
+          JSON.parse(reports.find(({ executionId }) => executionId === first)!.content),
+        ).toMatchObject({ status: 'failed', summary: reason });
         expect(diagnostics).toContainEqual(
           expect.objectContaining({
             event: 'team.attempt.egress_denied',

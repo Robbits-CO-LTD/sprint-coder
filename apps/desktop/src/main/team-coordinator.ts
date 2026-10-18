@@ -40,6 +40,7 @@ import {
   type PublicError,
   type ProviderConnection,
   type WorkerCompletion,
+  type WorkerReport,
   type WorkerSummary,
 } from '@sprint-coder/contracts';
 import { createHash } from 'node:crypto';
@@ -81,7 +82,11 @@ import type {
   TeamSnapshot,
   TeamV2ActivityRecord,
 } from './persistence';
-import { WorktreeError, type WorkerWorktreeManager } from './worker-worktree';
+import {
+  WorktreeError,
+  WorktreeIntegrationConflictError,
+  type WorkerWorktreeManager,
+} from './worker-worktree';
 import type { WorkspaceWriteLimits } from './workspace-write-limits';
 import { RetainedWorktreeError, retainedWorktreeBlockedReason } from './team-retained-worktrees';
 import {
@@ -262,8 +267,14 @@ export class WorkerEgressDeniedError extends Error {
   }
 }
 
-class TeamIntegrationResumeRequiredError extends Error {
-  constructor(message: string) {
+export class TeamIntegrationResumeRequiredError extends Error {
+  constructor(
+    message: string,
+    /** Labelled paths Git reported as conflicting, when a cherry-pick conflicted (issue #852). */
+    readonly conflictedFiles: readonly string[] = [],
+    /** Labels of the other repositories already integrated before the conflict (partial apply). */
+    readonly integratedRepositories: readonly string[] = [],
+  ) {
     super(message);
     this.name = 'TeamIntegrationResumeRequiredError';
   }
@@ -1299,6 +1310,7 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
+          this.reportResumedIntegration(team.id, execution.id, completion.attemptId, resumedReport);
           // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
           if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
             this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
@@ -1800,6 +1812,16 @@ export class TeamCoordinator {
           confirmation: { kind: 'attempt-stopped', attemptId },
           now: this.isoNow(),
         });
+        // The held step waits on `waiting_resume` for a person to resume its integration, so the
+        // Leader is told it is blocked rather than left waiting for a report (issue #852).
+        this.persistWorkerResult(
+          execution.teamId,
+          worker,
+          leader,
+          integrationBlockedCompletion(error),
+          execution.id,
+          attemptId,
+        );
       } else {
         // A Turn whose process-tree exit went unconfirmed has already left its runtime, so a stop
         // would return without stopping anything (issue #556). The direct path's rule decides it:
@@ -1819,19 +1841,39 @@ export class TeamCoordinator {
         }
         if (runtimeSettled && !this.graphWorkerStopConfirmed(worker.id, execution.id))
           runtimeSettled = false;
+        const outcome = this.executionInterruptions.has(execution.id) ? 'canceled' : 'failed';
         this.persistence.interruptGraphStep({
           missionId: graph.missionId,
           stepKey,
           generation: step.generation,
           reservationId: owner.id,
           attemptId,
-          outcome: this.executionInterruptions.has(execution.id) ? 'canceled' : 'failed',
+          outcome,
           reason,
           confirmation: runtimeSettled
             ? { kind: 'attempt-stopped', attemptId }
             : { kind: 'unconfirmed' },
           now: this.isoNow(),
         });
+        // A failed step waits on `waiting_resume` for a person, so the Leader gets its failure
+        // report rather than an empty report wait (issue #852). A cancel was asked for and is not.
+        if (outcome === 'failed')
+          this.persistWorkerResult(
+            execution.teamId,
+            worker,
+            leader,
+            workerCompletionSchema.parse({
+              status: 'failed',
+              summary: reason === '' ? 'Graph execution failed' : reason,
+              artifacts: [],
+              verification: [
+                { name: 'worker-runtime', outcome: 'fail', detail: reason.slice(0, 2_000) },
+              ],
+              risks: [`人による再開待ち: waiting_resume (${reason.slice(0, 440) || 'failed'})`],
+            }),
+            execution.id,
+            attemptId,
+          );
         if (worktree) this.quarantineMissionWorktree(execution.id, error);
         if (isolation) this.quarantineExecutionIsolation(execution.id, error);
       }
@@ -2593,6 +2635,7 @@ export class TeamCoordinator {
             ),
             now: this.isoNow(),
           });
+          this.reportResumedIntegration(team.id, execution.id, hold.attemptId, hold.report);
           // A Graph step saves no isolation completion, so a cleanup it could not record is not
           // retried.
           if (isolation !== null)
@@ -2692,6 +2735,7 @@ export class TeamCoordinator {
           to: 'completed',
           now: this.isoNow(),
         });
+        this.reportResumedIntegration(team.id, execution.id, completion.attemptId, report);
         // A cleanup it could not record keeps the completion for the startup recovery (issue #569).
         if (await this.cleanupIntegratedExecutionIsolation(integrated, completion.agentId))
           this.persistence.deleteTeamExecutionIsolationCompletion(execution.id);
@@ -4234,15 +4278,24 @@ export class TeamCoordinator {
           now: this.isoNow(),
         });
       if (preflightFailure && mission !== null) this.cancelMissionRemainder(execution.id, 'failed');
-      if (!integrationResume)
-        this.persistWorkerResult(
-          input.teamId,
-          worker,
-          leader,
-          failureCompletion,
-          input.executionId,
-          attemptId ?? undefined,
-        );
+      // An integration that stopped (a cherry-pick conflict, a changed Workspace) leaves the
+      // execution on `waiting_resume` until a person resumes it. The Leader is told so, or its
+      // report wait would see nothing and it could report the work as completed (issue #852).
+      // A sequential Mission's single-repository worktree conflict also leaves the step on
+      // `waiting_resume` (the Mission branch above), so the Leader gets the same blocked report.
+      const integrationBlocked =
+        integrationResume ||
+        (!preflightFailure &&
+          mission !== null &&
+          error instanceof WorktreeIntegrationConflictError);
+      this.persistWorkerResult(
+        input.teamId,
+        worker,
+        leader,
+        integrationBlocked ? integrationBlockedCompletion(error) : failureCompletion,
+        input.executionId,
+        attemptId ?? undefined,
+      );
       const current = this.persistence
         .getTeamSnapshot(input.teamId)
         .agents.find(({ id }) => id === worker.id);
@@ -4254,7 +4307,11 @@ export class TeamCoordinator {
           worker.id,
           preflightFailure || (mission === null && !integrationResume) ? 'failed' : 'waiting',
         );
-      this.persistence.setWorkerCurrentActivity(worker.id, null, this.isoNow());
+      this.persistence.setWorkerCurrentActivity(
+        worker.id,
+        integrationResume ? INTEGRATION_RESUME_ACTIVITY : null,
+        this.isoNow(),
+      );
       const delivery = this.persistence.getTeamDelivery(input.messageId);
       if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
         this.persistence.transitionTeamDelivery({
@@ -5004,14 +5061,28 @@ export class TeamCoordinator {
     this.emit(taskId, teamId);
   }
 
-  /** True while a durable execution is queued/running or a legacy dispatch is busy. */
-  hasBusyWorkers(taskId: string): boolean {
+  /**
+   * True while a durable execution is queued/running or a legacy dispatch is busy. With
+   * `progressingOnly`, an execution parked on `waiting_resume` for a person (an integration that
+   * stopped, a failed Mission step) is not counted: nothing reports until it is resumed, so a
+   * report wait must not keep polling for it (issue #852). A Graph step already resumed and only
+   * waiting for admission is still counted.
+   */
+  hasBusyWorkers(taskId: string, options: { progressingOnly?: boolean } = {}): boolean {
     const team = this.persistence.getTeamByTask(taskId);
     if (team === null) return false;
     if (
       this.persistence
         .listTeamExecutions(team.id)
-        .some(({ state }) => !['completed', 'failed', 'canceled'].includes(state))
+        .some(
+          ({ id, state }) =>
+            !['completed', 'failed', 'canceled'].includes(state) &&
+            !(
+              options.progressingOnly === true &&
+              state === 'waiting_resume' &&
+              !this.graphScheduledExecutions.has(id)
+            ),
+        )
     )
       return true;
     const snapshot = this.persistence.getTeamSnapshot(team.id);
@@ -5350,6 +5421,36 @@ export class TeamCoordinator {
     return null;
   }
 
+  /**
+   * After a person resumed a stopped integration and it succeeded, tells the Leader so with a new
+   * report (issue #852): the earlier blocked report said the execution would not complete. The
+   * integration is already committed, so a report that cannot be written does not undo it.
+   */
+  private reportResumedIntegration(
+    teamId: string,
+    executionId: string,
+    attemptId: string,
+    report: WorkerReport,
+  ): void {
+    const execution = this.persistence.getTeamExecution(executionId);
+    const agents = this.persistence.getTeamSnapshot(teamId).agents;
+    const leader = agents.find(({ id }) => id === execution.createdByAgentId);
+    const worker = agents.find(({ id }) => id === execution.assigneeAgentId);
+    if (leader === undefined || worker === undefined) return;
+    try {
+      this.persistWorkerResult(
+        teamId,
+        worker,
+        leader,
+        integrationResumedCompletion(report),
+        executionId,
+        attemptId,
+      );
+    } catch {
+      // Best effort: the execution is completed either way and the Team view shows it.
+    }
+  }
+
   private persistWorkerResult(
     teamId: string,
     worker: AgentRecord,
@@ -5395,7 +5496,9 @@ export class TeamCoordinator {
       execution.assigneeAgentId === message.sourceAgentId &&
       execution.createdByAgentId === message.targetAgentId &&
       attempt.executionId === execution.id &&
-      ['completed', 'failed', 'canceled'].includes(execution.state) &&
+      // `waiting_resume` is terminal until a person resumes it: an integration that stopped or a
+      // failed Mission step reports to the Leader then, and the wait must deliver it (issue #852).
+      ['completed', 'failed', 'canceled', 'waiting_resume'].includes(execution.state) &&
       ['completed', 'failed', 'canceled', 'interrupted'].includes(attempt.state)
     );
   }
@@ -5662,7 +5765,10 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
     }
-    const { head } = await this.worktreeManager.requireCleanBase(repoPath);
+    const manager = this.worktreeManager;
+    const { head } = await this.outsideIntegration([repoPath], () =>
+      manager.requireCleanBase(repoPath),
+    );
     this.assertPreflightNotCanceled(executionId);
     const created = await this.worktreeManager.create({
       agentId,
@@ -5716,6 +5822,7 @@ export class TeamCoordinator {
           worktreeId: isolationWorktreeId(executionId, repository.ordinal),
           repoPath: repository.repoPath,
           baseRef: repository.baseHead,
+          recordedPath: repository.worktreePath,
         });
       return this.updateExecutionIsolation({
         executionId,
@@ -5876,7 +5983,35 @@ export class TeamCoordinator {
     const unhealthy = workspace.roots.find(({ status }) => status !== 'available');
     if (unhealthy !== undefined)
       throw new Error(`workspace-write root is not available: ${unhealthy.label}`);
-    return this.worktreeManager.requireCleanRepositorySet(workspace.roots.map(({ path }) => path));
+    const manager = this.worktreeManager;
+    const rootPaths = workspace.roots.map(({ path }) => path);
+    return this.outsideIntegration(rootPaths, () => manager.requireCleanRepositorySet(rootPaths));
+  }
+
+  /**
+   * Runs a check that the parent checkout is clean in the same queue as integrations into it
+   * (issue #853). An integration cherry-picks into that checkout, and while it runs `git status`
+   * shows its changes and a `CHERRY_PICK_HEAD`, so a check beside it could refuse a clean
+   * Workspace. Queued behind the integrations on the same repositories, the check sees the
+   * checkout only before or after one, so anything it still finds dirty is not this app's.
+   */
+  private async outsideIntegration<T>(
+    rootPaths: readonly string[],
+    check: () => Promise<T>,
+  ): Promise<T> {
+    const manager = this.worktreeManager;
+    if (manager === undefined) throw new Error('Worker worktree support is unavailable');
+    // A root that is not in a repository is refused by the check itself, with its own error.
+    const repositories = (
+      await Promise.all(
+        rootPaths.map((path) => manager.resolveRepositoryPath(path).catch(() => null)),
+      )
+    ).filter((path): path is string => path !== null);
+    if (repositories.length === 0) return check();
+    return this.integrationScheduler.runExclusive(
+      repositories.map(teamRepositoryMutationKey),
+      check,
+    );
   }
 
   /**
@@ -6053,6 +6188,7 @@ export class TeamCoordinator {
     if (this.worktreeManager === undefined)
       throw new Error('Mission worktree manager is unavailable');
     let isolation = initial;
+    let integratingOrdinal: number | null = null;
     try {
       this.persistence.acquireTeamIntegrationRootLeases({
         executionId: isolation.executionId,
@@ -6078,6 +6214,7 @@ export class TeamCoordinator {
       for (const repository of integrationOrder.filter(({ state }) =>
         ['ready', 'integrated'].includes(state),
       )) {
+        integratingOrdinal = repository.ordinal;
         if (repository.workerHead === null)
           throw new Error('All repositories must be finalized before integration');
         if (repository.state === 'integrated' && repository.integratedHead === null)
@@ -6119,6 +6256,14 @@ export class TeamCoordinator {
       });
     } catch (error) {
       const reason = (error instanceof Error ? error.message : String(error)).slice(0, 2_000);
+      const conflicted =
+        error instanceof WorktreeIntegrationConflictError && integratingOrdinal !== null
+          ? this.labelIsolationPaths(isolation, integratingOrdinal, error.conflictedFiles)
+          : [];
+      const integratedRepositories =
+        error instanceof WorktreeIntegrationConflictError && integratingOrdinal !== null
+          ? this.integratedRepositoryLabels(isolation, integratingOrdinal)
+          : [];
       isolation = this.updateExecutionIsolation({
         executionId: isolation.executionId,
         phase: 'waiting_resume',
@@ -6126,7 +6271,11 @@ export class TeamCoordinator {
         reason: reason === '' ? 'Repository integration requires resume' : reason,
         now: this.isoNow(),
       });
-      throw new TeamIntegrationResumeRequiredError(isolation.reason ?? 'Integration failed');
+      throw new TeamIntegrationResumeRequiredError(
+        isolation.reason ?? 'Integration failed',
+        conflicted,
+        integratedRepositories,
+      );
     } finally {
       this.persistence.releaseTeamIntegrationRootLeases(isolation.executionId);
     }
@@ -6323,20 +6472,44 @@ export class TeamCoordinator {
   }
 
   private isolationChangedFiles(isolation: TeamExecutionIsolationRecord): readonly string[] {
-    return isolation.repositories.flatMap(({ ordinal, repoPath, changedFiles }) => {
-      const roots = isolation.roots.filter(
-        ({ repositoryOrdinal }) => repositoryOrdinal === ordinal,
-      );
-      return changedFiles.map((path) => {
-        const root = roots.find((candidate) => {
-          const prefix = relative(repoPath, candidate.sourcePath).split(sep).join('/');
-          return prefix === '' || path === prefix || path.startsWith(`${prefix}/`);
-        });
-        if (root === undefined) return `repository-${ordinal} › ${path}`;
-        const prefix = relative(repoPath, root.sourcePath).split(sep).join('/');
-        const rootedPath = prefix === '' ? path : path.slice(prefix.length + 1);
-        return `${root.rootLabel} › ${rootedPath}`;
+    return isolation.repositories.flatMap(({ ordinal, changedFiles }) =>
+      this.labelIsolationPaths(isolation, ordinal, changedFiles),
+    );
+  }
+
+  /** Repository-relative paths of one isolation repository, named by the Workspace root they are in. */
+  /** Root labels of the repositories other than `exceptOrdinal` already integrated into the Workspace. */
+  private integratedRepositoryLabels(
+    isolation: TeamExecutionIsolationRecord,
+    exceptOrdinal: number,
+  ): readonly string[] {
+    return isolation.repositories
+      .filter(({ ordinal, state }) => ordinal !== exceptOrdinal && state === 'integrated')
+      .map(({ ordinal }) => {
+        const labels = isolation.roots
+          .filter(({ repositoryOrdinal }) => repositoryOrdinal === ordinal)
+          .map(({ rootLabel }) => rootLabel);
+        return labels.length > 0 ? labels.join(' / ') : `repository-${ordinal}`;
       });
+  }
+
+  private labelIsolationPaths(
+    isolation: TeamExecutionIsolationRecord,
+    ordinal: number,
+    paths: readonly string[],
+  ): readonly string[] {
+    const repository = isolation.repositories.find((candidate) => candidate.ordinal === ordinal);
+    if (repository === undefined) return paths.map((path) => `repository-${ordinal} › ${path}`);
+    const roots = isolation.roots.filter(({ repositoryOrdinal }) => repositoryOrdinal === ordinal);
+    return paths.map((path) => {
+      const root = roots.find((candidate) => {
+        const prefix = relative(repository.repoPath, candidate.sourcePath).split(sep).join('/');
+        return prefix === '' || path === prefix || path.startsWith(`${prefix}/`);
+      });
+      if (root === undefined) return `repository-${ordinal} › ${path}`;
+      const prefix = relative(repository.repoPath, root.sourcePath).split(sep).join('/');
+      const rootedPath = prefix === '' ? path : path.slice(prefix.length + 1);
+      return `${root.rootLabel} › ${rootedPath}`;
     });
   }
 
@@ -7190,6 +7363,119 @@ export function captureGitWorkspaceFingerprint(workspacePath: string | null): {
 // The most a Team message may hold (persistence `createTeamMessage`).
 const TEAM_MESSAGE_CONTENT_LIMIT = 100_000;
 
+const INTEGRATION_RESUME_ACTIVITY = '統合が止まったため、人による再開待ち（waiting_resume）';
+const INTEGRATION_BLOCKED_FILE_LIMIT = 20;
+
+/**
+ * `text` cut at a code-point boundary so its UTF-16 length (what zod's `max` counts) stays within
+ * `maxLength`.
+ */
+function fitUtf16(text: string, maxLength: number): string {
+  let out = '';
+  for (const character of text) {
+    if (out.length + character.length > maxLength) break;
+    out += character;
+  }
+  return out;
+}
+
+/** One secret-redacted line without control characters, for text a Leader report quotes. */
+function reportLine(text: string, maxLength: number): string {
+  // eslint-disable-next-line no-control-regex
+  return commitMessageLine(text.replace(/[\u0000-\u001f\u007f]/gu, ' '), maxLength);
+}
+
+/**
+ * The Leader-facing report of an execution whose integration into the Workspace stopped (issue
+ * #852): it names the conflicting files, says the Workspace was left as before, and that the
+ * execution waits for a person to resume it, so it is never read as completed.
+ */
+export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
+  // A multi-repository isolation always wraps the conflict in TeamIntegrationResumeRequiredError,
+  // which carries the repositories already integrated. A WorktreeIntegrationConflictError arrives
+  // directly only from a single-repository Mission worktree (`queueMissionWorktreeIntegration`),
+  // where there is no other repository that could have been applied: a TeamMissionWorktreeRecord
+  // names exactly one repoPath. A multi-repository Mission worktree would have to wrap it the same way.
+  const conflicted =
+    error instanceof TeamIntegrationResumeRequiredError ||
+    error instanceof WorktreeIntegrationConflictError
+      ? error.conflictedFiles
+      : [];
+  const files = conflicted
+    .slice(0, INTEGRATION_BLOCKED_FILE_LIMIT)
+    .map((path) => reportLine(path, 200))
+    .filter((path) => path !== '');
+  const more = conflicted.length - files.length;
+  const integratedRepositories =
+    error instanceof TeamIntegrationResumeRequiredError
+      ? error.integratedRepositories.map((label) => reportLine(label, 200)).filter((l) => l !== '')
+      : [];
+  const partial =
+    integratedRepositories.length > 0
+      ? `ただし、ほかのリポジトリ（${integratedRepositories.join(', ')}）への統合はすでに完了しており、作業場所に反映されています（部分適用）。`
+      : '';
+  const reason = reportLine(error instanceof Error ? error.message : String(error), 500);
+  const detail =
+    files.length > 0
+      ? `衝突したファイル: ${files.join(', ')}${more > 0 ? ` ほか${more}件` : ''}`
+      : `理由: ${reason === '' ? '不明' : reason}`;
+  const summary =
+    files.length > 0
+      ? `Workerの変更を作業場所へ統合しようとしたところ、Gitのcherry-pickが衝突しました。Appは衝突したリポジトリのcherry-pickを中止し、そのリポジトリは統合前の状態のままです。${partial}${detail}。このexecutionはwaiting_resume（integration）で、人が衝突を解消して再開するまで完了しません。completedとして扱わないでください。`
+      : `Workerの変更を作業場所へ統合できませんでした。${detail}。このexecutionはwaiting_resume（integration）で、人が再開するまで完了しません。completedとして扱わないでください。`;
+  const parsed = workerCompletionSchema.safeParse({
+    status: 'failed',
+    summary: fitUtf16(summary, 4_000),
+    artifacts: [],
+    verification: [
+      {
+        name: 'workspace-integration',
+        outcome: 'fail',
+        detail: fitUtf16(detail, 2_000),
+      },
+    ],
+    risks: ['人による再開待ち: waiting_resume (integration)'],
+  });
+  if (parsed.success) return parsed.data;
+  // A fixed report that always fits, so the Leader still hears of the stop (and the caller's later
+  // state transitions run) even if the quoted text were ever rejected.
+  return workerCompletionSchema.parse({
+    status: 'failed',
+    summary:
+      'Workerの変更を作業場所へ統合できませんでした。このexecutionはwaiting_resume（integration）で、人が再開するまで完了しません。completedとして扱わないでください。',
+    artifacts: [],
+    verification: [{ name: 'workspace-integration', outcome: 'fail' }],
+    risks: ['人による再開待ち: waiting_resume (integration)'],
+  });
+}
+
+/**
+ * The Leader-facing report of an execution whose stopped integration a person resumed and that then
+ * integrated (issue #852). It supersedes the earlier blocked report for the same execution.
+ */
+export function integrationResumedCompletion(report: WorkerReport): WorkerCompletion {
+  const notice =
+    '人が統合を再開し、Workerの変更を作業場所へ統合しました。このexecutionは完了しています。先に届いた「waiting_resume（integration）で完了しない」という報告は、この報告で置き換えてください。';
+  const parsed = workerCompletionSchema.safeParse({
+    status: 'succeeded',
+    summary: fitUtf16(`${notice}${report.summary}`, 4_000),
+    artifacts: report.artifacts,
+    verification: [
+      ...report.verification.slice(0, 19),
+      { name: 'workspace-integration', outcome: 'pass' },
+    ],
+    risks: report.risks,
+  });
+  if (parsed.success) return parsed.data;
+  return workerCompletionSchema.parse({
+    status: 'succeeded',
+    summary: notice,
+    artifacts: [],
+    verification: [{ name: 'workspace-integration', outcome: 'pass' }],
+    risks: [],
+  });
+}
+
 /**
  * The Worker result the Leader reads. Per-criterion reports can push it past what a Team message
  * holds; they are then left out of the message, since the task's report and done evidence keep
@@ -7323,6 +7609,12 @@ function isolationLeaseBindings(
   return [...isolation.roots, ...repositories];
 }
 
+/** The integration-queue key every job that changes the parent checkout of `repoPath` holds. */
+export function teamRepositoryMutationKey(repoPath: string): string {
+  const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
+  return createHash('sha256').update(`team-repository\0${canonicalKey}`).digest('hex');
+}
+
 function repositoryLeaseBinding(
   repoPath: string,
   ordinal: number,
@@ -7330,7 +7622,7 @@ function repositoryLeaseBinding(
   const canonicalKey = process.platform === 'win32' ? repoPath.toLowerCase() : repoPath;
   return {
     rootId: `repository-${ordinal}`,
-    mutationKey: createHash('sha256').update(`team-repository\0${canonicalKey}`).digest('hex'),
+    mutationKey: teamRepositoryMutationKey(repoPath),
     identity: createHash('sha256')
       .update(`team-repository-identity\0${canonicalKey}`)
       .digest('hex'),
