@@ -280,78 +280,261 @@ export function createToolDefinition(input: ToolDefinitionInput): ToolDefinition
 }
 
 export function toolValueMatchesSchema(schema: JsonValue, value: unknown): boolean {
-  if (!isPlainJsonValue(value)) return false;
-  if (typeof schema !== 'object' || schema === null || Array.isArray(schema)) return false;
+  return findToolSchemaMismatches(schema, value, 1).length === 0;
+}
+
+export type ToolSchemaMismatchProblem =
+  | 'not_json'
+  | 'schema'
+  | 'type'
+  | 'enum'
+  | 'const'
+  | 'range'
+  | 'item_count'
+  | 'required'
+  | 'unexpected_key'
+  | 'forbidden';
+/**
+ * One reason a tool value failed its pinned schema (issue #870). `path` and `detail` are built
+ * from the schema (property names, types, enum/const literals, bounds) and from the value's shape
+ * (JSON types, array indexes, the names of keys the schema does not allow). The value's own
+ * strings and numbers are never copied in, so the text is safe to return to the model.
+ */
+export type ToolSchemaMismatch = Readonly<{
+  path: string;
+  problem: ToolSchemaMismatchProblem;
+  detail: string;
+}>;
+
+/**
+ * The single validator behind {@link toolValueMatchesSchema}: a value matches exactly when this
+ * finds nothing. `maxIssues` stops the walk early; 1 is the plain yes/no check.
+ */
+export function findToolSchemaMismatches(
+  schema: JsonValue,
+  value: unknown,
+  maxIssues = Number.POSITIVE_INFINITY,
+): readonly ToolSchemaMismatch[] {
+  const sink: MismatchSink = { issues: [], limit: Math.max(1, maxIssues) };
+  // Recursive, so one check at the top covers every nested value the walk visits.
+  if (!isPlainJsonValue(value))
+    report(sink, [], 'not_json', 'value is not plain JSON (finite numbers, no class instances)');
+  else walkToolSchema(schema, value, [], sink);
+  return sink.issues;
+}
+
+const TOOL_SCHEMA_HINT_MAX_ISSUES = 5;
+const TOOL_SCHEMA_HINT_MAX_LENGTH = 600;
+
+/**
+ * A bounded, value-free explanation of why `value` does not match `schema`, for a tool error the
+ * model can act on: at most five mismatches and 600 characters. Returns '' when it matches.
+ */
+export function describeToolSchemaMismatches(schema: JsonValue, value: unknown): string {
+  const issues = findToolSchemaMismatches(schema, value, TOOL_SCHEMA_HINT_MAX_ISSUES + 1);
+  const parts: string[] = [];
+  let length = 0;
+  for (const issue of issues.slice(0, TOOL_SCHEMA_HINT_MAX_ISSUES)) {
+    const part = `${issue.path}: ${issue.detail}`;
+    if (length + part.length + 2 > TOOL_SCHEMA_HINT_MAX_LENGTH) break;
+    parts.push(part);
+    length += part.length + 2;
+  }
+  if (parts.length === 0 && issues.length > 0)
+    parts.push(`${issues[0]!.path}: ${issues[0]!.detail}`.slice(0, TOOL_SCHEMA_HINT_MAX_LENGTH));
+  if (issues.length > parts.length) parts.push('more mismatches omitted');
+  return parts.join('; ');
+}
+
+type MismatchSink = { issues: ToolSchemaMismatch[]; limit: number };
+type SchemaPathSegment = string | number;
+
+function report(
+  sink: MismatchSink,
+  path: readonly SchemaPathSegment[],
+  problem: ToolSchemaMismatchProblem,
+  detail: string,
+): void {
+  if (sink.issues.length < sink.limit)
+    sink.issues.push(Object.freeze({ path: formatSchemaPath(path), problem, detail }));
+}
+
+function schemaMatches(schema: JsonValue, value: JsonValue): boolean {
+  const probe: MismatchSink = { issues: [], limit: 1 };
+  walkToolSchema(schema, value, [], probe);
+  return probe.issues.length === 0;
+}
+
+function walkToolSchema(
+  schema: JsonValue,
+  value: JsonValue,
+  path: readonly SchemaPathSegment[],
+  sink: MismatchSink,
+): void {
+  if (sink.issues.length >= sink.limit) return;
+  if (typeof schema !== 'object' || schema === null || Array.isArray(schema))
+    return report(sink, path, 'schema', 'the pinned schema here cannot be satisfied');
   const record = schema as Record<string, JsonValue>;
   const enumValues = record['enum'];
   if (
     Array.isArray(enumValues) &&
     !enumValues.some((candidate) => stableStringify(candidate) === stableStringify(value))
   )
-    return false;
+    report(sink, path, 'enum', `must be one of ${describeLiterals(enumValues)}`);
   if (record['const'] !== undefined && stableStringify(record['const']) !== stableStringify(value))
-    return false;
+    report(sink, path, 'const', `must equal ${describeLiteral(record['const'])}`);
   const allOf = record['allOf'];
-  if (Array.isArray(allOf) && !allOf.every((entry) => toolValueMatchesSchema(entry, value)))
-    return false;
+  if (Array.isArray(allOf)) for (const entry of allOf) walkToolSchema(entry, value, path, sink);
   const condition = record['if'];
-  if (
-    condition !== undefined &&
-    toolValueMatchesSchema(condition, value) &&
-    record['then'] !== undefined &&
-    !toolValueMatchesSchema(record['then'], value)
-  )
-    return false;
-  if (record['not'] !== undefined && toolValueMatchesSchema(record['not'], value)) return false;
+  if (condition !== undefined && record['then'] !== undefined && schemaMatches(condition, value))
+    walkToolSchema(record['then'], value, path, sink);
+  if (record['not'] !== undefined && schemaMatches(record['not'], value))
+    report(sink, path, 'forbidden', describeForbidden(record['not']));
 
   const type = record['type'];
   if (type === undefined) {
     if (record['minimum'] !== undefined || record['maximum'] !== undefined) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) return false;
-      if (typeof record['minimum'] === 'number' && value < record['minimum']) return false;
-      if (typeof record['maximum'] === 'number' && value > record['maximum']) return false;
+      if (typeof value !== 'number')
+        return report(sink, path, 'type', `expected number, got ${jsonTypeOf(value)}`);
+      if (!numberWithinBounds(record, value, path, sink)) return;
     }
-    if (record['properties'] === undefined && record['required'] === undefined) return true;
-  } else if (type === 'string') return typeof value === 'string';
-  else if (type === 'number' || type === 'integer') {
-    if (
-      typeof value !== 'number' ||
-      !Number.isFinite(value) ||
-      (type === 'integer' && !Number.isInteger(value))
-    )
-      return false;
-    if (typeof record['minimum'] === 'number' && value < record['minimum']) return false;
-    if (typeof record['maximum'] === 'number' && value > record['maximum']) return false;
-    return true;
-  } else if (type === 'boolean') return typeof value === 'boolean';
-  else if (type === 'null') return value === null;
+    if (record['properties'] === undefined && record['required'] === undefined) return;
+  } else if (type === 'string' || type === 'boolean' || type === 'null') {
+    if (jsonTypeOf(value) !== type)
+      report(sink, path, 'type', `expected ${type}, got ${jsonTypeOf(value)}`);
+    return;
+  } else if (type === 'number' || type === 'integer') {
+    if (typeof value !== 'number' || (type === 'integer' && !Number.isInteger(value)))
+      return report(sink, path, 'type', `expected ${type}, got ${jsonTypeOf(value)}`);
+    numberWithinBounds(record, value, path, sink);
+    return;
+  }
   if (type === 'array') {
-    if (!Array.isArray(value)) return false;
+    if (!Array.isArray(value))
+      return report(sink, path, 'type', `expected array, got ${jsonTypeOf(value)}`);
     const items = record['items'];
     const minItems = record['minItems'];
     const maxItems = record['maxItems'];
-    if (typeof minItems === 'number' && value.length < minItems) return false;
-    if (typeof maxItems === 'number' && value.length > maxItems) return false;
-    return items === undefined || value.every((item) => toolValueMatchesSchema(items, item));
+    if (typeof minItems === 'number' && value.length < minItems)
+      report(sink, path, 'item_count', `must have at least ${minItems} item(s)`);
+    if (typeof maxItems === 'number' && value.length > maxItems)
+      report(sink, path, 'item_count', `must have at most ${maxItems} item(s)`);
+    if (items !== undefined)
+      value.forEach((item, index) => walkToolSchema(items, item, [...path, index], sink));
+    return;
   }
   if (
     type !== undefined &&
     type !== 'object' &&
     (record['properties'] !== undefined || record['required'] !== undefined)
   )
-    return false;
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
-  const object = value as Record<string, unknown>;
+    return report(sink, path, 'schema', 'the pinned schema here cannot be satisfied');
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    return report(sink, path, 'type', `expected object, got ${jsonTypeOf(value)}`);
+  const object = value as { readonly [key: string]: JsonValue };
   const properties = (record['properties'] ?? {}) as Record<string, JsonValue>;
   const required = (record['required'] ?? []) as readonly JsonValue[];
-  if (!required.every((key) => typeof key === 'string' && Object.hasOwn(object, key))) return false;
-  if (record['additionalProperties'] === false) {
-    const allowed = new Set(Object.keys(properties));
-    if (Object.keys(object).some((key) => !allowed.has(key))) return false;
+  for (const key of required) {
+    if (typeof key !== 'string')
+      report(sink, path, 'schema', 'the pinned schema here cannot be satisfied');
+    else if (!Object.hasOwn(object, key))
+      report(sink, path, 'required', `missing required key ${JSON.stringify(key)}`);
   }
-  return Object.entries(properties).every(
-    ([key, propertySchema]) =>
-      !Object.hasOwn(object, key) || toolValueMatchesSchema(propertySchema, object[key]),
+  if (record['additionalProperties'] === false) {
+    const allowed = Object.keys(properties);
+    for (const key of Object.keys(object))
+      if (!allowed.includes(key))
+        report(
+          sink,
+          path,
+          'unexpected_key',
+          `unexpected key ${describeInputKey(key)}; allowed keys: ${describeKeyList(allowed)}`,
+        );
+  }
+  for (const [key, propertySchema] of Object.entries(properties))
+    if (Object.hasOwn(object, key))
+      walkToolSchema(propertySchema, object[key]!, [...path, key], sink);
+}
+
+function numberWithinBounds(
+  record: Record<string, JsonValue>,
+  value: number,
+  path: readonly SchemaPathSegment[],
+  sink: MismatchSink,
+): boolean {
+  const minimum = record['minimum'];
+  const maximum = record['maximum'];
+  if (typeof minimum === 'number' && value < minimum) {
+    report(sink, path, 'range', `must be >= ${minimum}`);
+    return false;
+  }
+  if (typeof maximum === 'number' && value > maximum) {
+    report(sink, path, 'range', `must be <= ${maximum}`);
+    return false;
+  }
+  return true;
+}
+
+function jsonTypeOf(value: JsonValue): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'number') return Number.isInteger(value) ? 'integer' : 'number';
+  return typeof value;
+}
+
+function describeForbidden(schema: JsonValue): string {
+  const record = schema as Record<string, JsonValue>;
+  const required = record['required'];
+  if (
+    Object.keys(record).length === 1 &&
+    Array.isArray(required) &&
+    required.every((key) => typeof key === 'string')
+  )
+    return `must not include ${describeKeyList(required as string[])} here`;
+  return 'matches a shape the pinned schema forbids here';
+}
+
+const MAX_LISTED = 12;
+const MAX_LITERAL_LENGTH = 40;
+
+// Schema-owned text only: enum/const literals and property names come from the pinned definition.
+function describeLiteral(value: JsonValue): string {
+  const text = JSON.stringify(value);
+  return text.length <= MAX_LITERAL_LENGTH ? text : `${text.slice(0, MAX_LITERAL_LENGTH - 1)}…`;
+}
+
+function describeLiterals(values: readonly JsonValue[]): string {
+  const shown = values.slice(0, MAX_LISTED).map(describeLiteral);
+  if (values.length > MAX_LISTED) shown.push('…');
+  return shown.join(', ');
+}
+
+function describeKeyList(keys: readonly string[]): string {
+  if (keys.length === 0) return '(none)';
+  const shown = keys.slice(0, MAX_LISTED).map((key) => describeLiteral(key));
+  if (keys.length > MAX_LISTED) shown.push('…');
+  return shown.join(', ');
+}
+
+// A key the model sent is input, not schema. Echo it only when it is short and identifier-like, so
+// a secret or a pasted line used as a key is described by its length instead of its text.
+const ECHOABLE_INPUT_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,23}$/;
+function describeInputKey(key: string): string {
+  return ECHOABLE_INPUT_KEY.test(key) ? JSON.stringify(key) : `(a ${key.length}-character key)`;
+}
+
+function formatSchemaPath(path: readonly SchemaPathSegment[]): string {
+  return (
+    '$' +
+    path
+      .map((segment) =>
+        typeof segment === 'number'
+          ? `[${segment}]`
+          : /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(segment)
+            ? `.${segment}`
+            : `[${describeLiteral(segment)}]`,
+      )
+      .join('')
   );
 }
 
