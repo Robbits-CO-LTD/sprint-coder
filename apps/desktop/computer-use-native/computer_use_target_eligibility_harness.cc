@@ -401,6 +401,24 @@ bool CheckManifestLevel() {
          Check(!level("<assembly><![CDATA[ x </assembly>").has_value(), "manifest-unclosed-cdata") &&
          Check(!level("<?xml version=\"1.0\"<assembly/>").has_value(),
                "manifest-unclosed-processing-instruction") &&
+         Check(level("<requestedExecutionLevel foo=\"a>b\" level=\"requireAdministrator\"/>") == yes,
+               "manifest-gt-in-a-double-quoted-value") &&
+         Check(level("<requestedExecutionLevel foo='>' level='requireAdministrator'/>") == yes,
+               "manifest-gt-in-a-single-quoted-value") &&
+         Check(level("<requestedExecutionLevel foo='a\">b' level=\"asInvoker\"/>") == no,
+               "manifest-other-quote-inside-a-value") &&
+         Check(!level("<assembly><requestedExecutionLevel foo=\"a>b level=\"asInvoker\"/></assembly>")
+                    .has_value(),
+               "manifest-unclosed-quote-to-the-end") &&
+         Check(level("<requestedExecutionLevel level=\"asInvoker\"/>"
+                     "<requestedExecutionLevel uiAccess=\"false\" level=\"highestAvailable\"/>") ==
+                   yes,
+               "manifest-later-element-elevated") &&
+         Check(level("<requestedExecutionLevel level=\"asInvoker\" level=\"requireAdministrator\"/>") ==
+                   yes,
+               "manifest-repeated-level-any-elevated") &&
+         Check(level("<requestedExecutionLevelX level=\"requireAdministrator\"/><assembly/>") == no,
+               "manifest-longer-element-name-is-another-element") &&
          CheckManifestEncodings();
 }
 

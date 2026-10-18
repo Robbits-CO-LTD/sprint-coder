@@ -325,17 +325,38 @@ namespace windows_target_facts_detail {
   const std::string_view manifest = *elements;
   static constexpr std::string_view kElement = "requestedExecutionLevel";
   bool elevated = false;
+  std::size_t next = 0;
   for (std::size_t at = manifest.find(kElement); at != std::string_view::npos;
-       at = manifest.find(kElement, at + kElement.size())) {
-    // The element itself (`<requestedExecutionLevel` or `<prefix:requestedExecutionLevel`).
+       at = manifest.find(kElement, next)) {
+    next = at + kElement.size();
+    // The element itself (`<requestedExecutionLevel` or `<prefix:requestedExecutionLevel`), its
+    // name ending there (not `requestedExecutionLevelX`).
     std::size_t open = at;
     while (open > 0 && manifest[open - 1] != '<' && manifest[open - 1] != '>' &&
            manifest[open - 1] != ' ' && manifest[open - 1] != '/')
       --open;
     if (open == 0 || manifest[open - 1] != '<') continue;
-    const std::size_t close = manifest.find('>', at);
+    if (next < manifest.size() && std::string_view(" \t\r\n/>").find(manifest[next]) ==
+                                      std::string_view::npos)
+      continue;
+    // The tag ends at the first `>` outside a quoted attribute value (a value may hold `>`).
+    std::size_t close = std::string_view::npos;
+    char quote = '\0';
+    for (std::size_t cursor = next; cursor < manifest.size(); ++cursor) {
+      const char letter = manifest[cursor];
+      if (quote != '\0') {
+        if (letter == quote) quote = '\0';
+      } else if (letter == '"' || letter == '\'') {
+        quote = letter;
+      } else if (letter == '>') {
+        close = cursor;
+        break;
+      }
+    }
     if (close == std::string_view::npos) return std::nullopt;
-    std::string_view tag = manifest.substr(at + kElement.size(), close - at - kElement.size());
+    std::string_view tag = manifest.substr(next, close - next);
+    next = close + 1;
+    // Every level the element carries (a repeated attribute is malformed; any elevated one counts).
     std::optional<std::string_view> level;
     while (true) {
       const std::size_t name_begin = tag.find_first_not_of(" \t\r\n/");
@@ -351,11 +372,13 @@ namespace windows_target_facts_detail {
         return std::nullopt;
       const std::size_t end_quote = tag.find(tag[quote_at], quote_at + 1);
       if (end_quote == std::string_view::npos) return std::nullopt;
-      if (name == "level") level = tag.substr(quote_at + 1, end_quote - quote_at - 1);
+      if (name == "level") {
+        level = tag.substr(quote_at + 1, end_quote - quote_at - 1);
+        if (*level != "asInvoker") elevated = true;
+      }
       tag.remove_prefix(end_quote + 1);
     }
     if (!level.has_value()) return std::nullopt;
-    if (*level != "asInvoker") elevated = true;
   }
   return elevated;
 }
