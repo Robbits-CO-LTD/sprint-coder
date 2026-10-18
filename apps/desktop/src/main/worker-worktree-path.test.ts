@@ -90,4 +90,23 @@ describe('worker worktree path (issue #855)', () => {
     expect(error.message).toMatch(/長すぎる/);
     expect(called).toBe(false);
   });
+
+  it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
+    const worktreesRoot = join(await root(), 'w');
+    const deepCommon = 'C:/' + 'x/'.repeat(120) + '.git';
+    const calls: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        calls.push([...args]);
+        return { stdout: args.includes('--git-common-dir') ? deepCommon : '', stderr: '' };
+      },
+    });
+    const error = await manager.create({ agentId: 'a2', repoPath: tmpdir() }).catch((e) => e);
+    expect(error).toBeInstanceOf(WorktreeError);
+    expect(error.message).toMatch(/長すぎる/);
+    expect(calls.some((args) => args.includes('--git-common-dir'))).toBe(true);
+    expect(calls.some((args) => args.includes('add'))).toBe(false);
+  });
 });

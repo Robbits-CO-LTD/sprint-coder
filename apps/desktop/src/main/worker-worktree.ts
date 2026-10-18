@@ -309,9 +309,36 @@ export class WorkerWorktreeManager {
     });
   }
 
-  /** Fails early with a clear message when Git could not create a worktree at `worktreePath`. */
-  private assertPathLengthsWithinLimit(repoPath: string, worktreePath: string): void {
-    const gitAdminPath = join(repoPath, '.git', 'worktrees', basename(worktreePath));
+  /**
+   * Fails early with a clear message when the worktree path itself is too long, before anything
+   * touches it: on POSIX even a `stat` of an over-long path fails with ENAMETOOLONG.
+   */
+  private assertWorktreePathWithinLimit(worktreePath: string): void {
+    const reason = checkWorktreePathLengths({
+      platform: this.platform,
+      worktreePath,
+      gitAdminPath: '',
+    });
+    if (reason !== null) throw new WorktreeError('create_failed', reason);
+  }
+
+  /**
+   * Fails early with a clear message when Git's administration directory for the new worktree would
+   * be too long. That directory lives under the COMMON Git directory, which for a repository that is
+   * itself a linked worktree is not `<repo>/.git` (there `.git` is a file).
+   */
+  private async assertGitAdminPathWithinLimit(
+    repoPath: string,
+    worktreePath: string,
+  ): Promise<void> {
+    const commonDir = (
+      await this.runGit(repoPath, ['rev-parse', '--git-common-dir'], 'create_failed')
+    ).stdout.trim();
+    const gitAdminPath = join(
+      resolve(repoPath, commonDir === '' ? '.git' : commonDir),
+      'worktrees',
+      basename(worktreePath),
+    );
     const reason = checkWorktreePathLengths({
       platform: this.platform,
       worktreePath,
@@ -328,9 +355,10 @@ export class WorkerWorktreeManager {
   }: CreateWorktreeInput): Promise<CreateWorktreeResult> {
     validateWorktreeId(agentId);
     const worktreePath = this.worktreePathFor(worktreeId);
+    this.assertWorktreePathWithinLimit(worktreePath);
     if (await pathExists(worktreePath))
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
-    this.assertPathLengthsWithinLimit(repoPath, worktreePath);
+    await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
     await this.runGit(
       repoPath,
