@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "repository": "Robbits-CO-LTD/sprint-coder",
+  "source_sha": "f3f24ad78df92cd2b1ca54e7f04d1185d8ab2fd2",
+  "mode": "focused",
+  "publication_mode": "report-only",
+  "findings": [
+    {
+      "rule_id": "ERR-02",
+      "severity": "P2",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/renderer/components/TeamCanvas/useCamera.ts",
+      "symbol_or_endpoint": "camToFit / canvas autosave bounds",
+      "fingerprint": "08b46cd38a677f18cbac34ff9ac47e83e46c41b8846f40839c9a89e18d222d8f",
+      "status": "root_cause_confirmed",
+      "notes": "34 Worker UI scale=0.173333; save requires >=0.18; saved view=null. Regression tests fail before patch."
+    },
+    {
+      "rule_id": "DEP-01",
+      "severity": "P2",
+      "defect_confidence": "MEDIUM",
+      "path": "package-lock.json",
+      "symbol_or_endpoint": "production sharp / undici / yaml dependency versions",
+      "fingerprint": "76353fa7f5c697c72c6195351482c2e2ba0b2dec12752395c5464c922ea78e31",
+      "status": "patch_verification_in_progress",
+      "notes": "Baseline production audit high=2 moderate=1 low=3. Exploitability is conditional and not established on Windows. Three direct updates and DOMPurify update produce high=0 moderate=0 low=2 in isolated audit."
+    },
+    {
+      "rule_id": "DEAD-01",
+      "severity": "P2",
+      "defect_confidence": "HIGH",
+      "path": "apps/desktop/src/main/prepared-execution-image.ts",
+      "symbol_or_endpoint": "unused sameStats private helper",
+      "fingerprint": "a6578709e080da548c1d1c497bc0432b8196cbbf80ec583ad0dfa86d726bffa8",
+      "status": "removed_pending_final_lint",
+      "notes": "Lint warning and no callsites. No runtime behavior change."
+    }
+  ]
+}

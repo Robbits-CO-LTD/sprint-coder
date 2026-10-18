@@ -4890,7 +4890,7 @@ export const AUTO_DECISION_TALLY_SQL =
 /** Placeholder a Task is born with. Auto-naming replaces it on the first message (issue #4). */
 export const DEFAULT_TASK_TITLE = '新しいタスク';
 
-export const CANVAS_MIN_SCALE = 0.18;
+export const CANVAS_MIN_SCALE = 0.04;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
 // A sanity bound on the payload, not a domain limit — a Team has no headcount cap and the Canvas

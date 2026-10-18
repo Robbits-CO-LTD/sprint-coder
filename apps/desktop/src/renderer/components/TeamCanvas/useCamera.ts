@@ -10,7 +10,8 @@ import type { CameraOwner } from './cameraOwnership';
 export type Rect = { x: number; y: number; w: number; h: number };
 export type CamState = { x: number; y: number; s: number };
 
-export const MIN_SCALE = 0.18;
+// A large Team must fit in the minimum-size window as well as round-trip through persistence.
+export const MIN_SCALE = 0.04;
 export const MAX_SCALE = 1.6;
 const DOT_GRID_PX = 26;
 
@@ -189,7 +190,8 @@ export function useCamera(onSettle?: () => void) {
     const maxY = Math.max(...rects.map((r) => r.y + r.h)) + pad;
     const vw = canvas?.clientWidth ?? 1;
     const vh = canvas?.clientHeight ?? 1;
-    const s = Math.min(vw / (maxX - minX), vh / (maxY - minY), 1.4);
+    // Automatic views must obey the same bounds as wheel zoom and persisted canvas state.
+    const s = Math.max(MIN_SCALE, Math.min(vw / (maxX - minX), vh / (maxY - minY), 1.4));
     return {
       s,
       x: (vw - (maxX - minX) * s) / 2 - minX * s,
@@ -201,7 +203,10 @@ export function useCamera(onSettle?: () => void) {
     const canvas = canvasRef.current;
     const vw = canvas?.clientWidth ?? 1;
     const vh = canvas?.clientHeight ?? 1;
-    const s = Math.min((vh * occupancy) / rect.h, (vw * occupancy) / rect.w, 1.3);
+    const s = Math.max(
+      MIN_SCALE,
+      Math.min((vh * occupancy) / rect.h, (vw * occupancy) / rect.w, 1.3),
+    );
     return { s, x: vw / 2 - (rect.x + rect.w / 2) * s, y: vh / 2 - (rect.y + rect.h / 2) * s };
   }, []);
 

@@ -129,67 +129,104 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
   // proven on the pure layout in placement.test.ts. What only the real app can show is that cards
   // hired ONE AT A TIME — each freezing its slot on first mount — still land on that same grid
   // instead of a single strip, and that a Team larger than the old 32-entry cap still saves.
-  test('lays a large flat Team out as a 3-row grid and persists more than 32 positions', async () => {
-    const workerCount = 34;
-    const userDataDir = createUserDataDir('canvas-layout-large-team');
-    let app: ElectronApplication | null = null;
-    try {
-      app = await launchApp(userDataDir);
-      const page = await firstWindow(app);
-      await page.getByTestId('sidebar-new-task-button').click();
-      await page.getByTestId('team-toggle').click();
+  for (const workerCount of [34, 100]) {
+    test(`fits ${workerCount} Workers in a six-column grid and restores the complete view`, async () => {
+      const userDataDir = createUserDataDir('canvas-layout-large-team');
+      let app: ElectronApplication | null = null;
+      try {
+        app = await launchApp(userDataDir);
+        const page = await firstWindow(app);
+        await page.getByTestId('sidebar-new-task-button').click();
+        await page.getByTestId('team-toggle').click();
 
-      for (let index = 0; index < workerCount; index += 1) {
-        await hireWorker(page, `担当${index + 1}`, `担当${index + 1}の作業を進める`);
-      }
-
-      const cards = page.getByTestId('team-worker');
-      await expect(cards).toHaveCount(workerCount);
-      const rects = await cards.evaluateAll((workers) =>
-        workers.map((worker) => {
-          const element = worker as HTMLElement;
-          return {
-            x: Number.parseFloat(element.style.left),
-            y: Number.parseFloat(element.style.top),
-            w: element.offsetWidth,
-            h: element.offsetHeight,
-          };
-        }),
-      );
-      for (let left = 0; left < rects.length; left += 1) {
-        for (let right = left + 1; right < rects.length; right += 1) {
-          const a = rects[left]!;
-          const b = rects[right]!;
-          expect(
-            a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
-            `card ${left} overlaps card ${right}`,
-          ).toBe(false);
+        for (let index = 0; index < workerCount; index += 1) {
+          await hireWorker(page, `担当${index + 1}`, `担当${index + 1}の作業を進める`);
         }
-      }
-      // 34 cards = one full 6x3 chunk plus 16 in the chunk below: six columns, six rows — not the
-      // 34-row strip one column per depth produced.
-      expect(new Set(rects.map(({ x }) => x)).size).toBe(6);
-      expect(new Set(rects.map(({ y }) => y)).size).toBe(6);
 
-      const taskId = await currentTaskId(page);
-      await expect
-        .poll(
-          async () =>
-            page.evaluate(
-              async (id) =>
-                Object.keys(
-                  (await window.sprintCoder!.teams.getCanvasView(id))?.nodePositions ?? {},
-                ).length,
-              taskId,
-            ),
-          { timeout: 30_000 },
-        )
-        .toBe(workerCount);
-    } finally {
-      await closeApp(app);
-      removeUserDataDir(userDataDir);
-    }
-  });
+        const cards = page.getByTestId('team-worker');
+        await expect(cards).toHaveCount(workerCount);
+        const rects = await cards.evaluateAll((workers) =>
+          workers.map((worker) => {
+            const element = worker as HTMLElement;
+            return {
+              x: Number.parseFloat(element.style.left),
+              y: Number.parseFloat(element.style.top),
+              w: element.offsetWidth,
+              h: element.offsetHeight,
+            };
+          }),
+        );
+        for (let left = 0; left < rects.length; left += 1) {
+          for (let right = left + 1; right < rects.length; right += 1) {
+            const a = rects[left]!;
+            const b = rects[right]!;
+            expect(
+              a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y,
+              `card ${left} overlaps card ${right}`,
+            ).toBe(false);
+          }
+        }
+        // Six columns, filled in three-row chunks rather than a single tall strip.
+        expect(new Set(rects.map(({ x }) => x)).size).toBe(6);
+        expect(new Set(rects.map(({ y }) => y)).size).toBe(Math.ceil(workerCount / 6));
+
+        await page.getByTestId('team-canvas-fit').click();
+        const allCardsInsideCanvas = async () =>
+          cards.evaluateAll((nodes) => {
+            const bounds = document.querySelector('.team-canvas')!.getBoundingClientRect();
+            return nodes.every((node) => {
+              const card = node.getBoundingClientRect();
+              return (
+                card.left >= bounds.left - 1 &&
+                card.right <= bounds.right + 1 &&
+                card.top >= bounds.top - 1 &&
+                card.bottom <= bounds.bottom + 1
+              );
+            });
+          });
+        await expect.poll(allCardsInsideCanvas).toBe(true);
+
+        const taskId = await currentTaskId(page);
+        await expect
+          .poll(
+            async () =>
+              page.evaluate(
+                async (id) =>
+                  Object.keys(
+                    (await window.sprintCoder!.teams.getCanvasView(id))?.nodePositions ?? {},
+                  ).length,
+                taskId,
+              ),
+            { timeout: 30_000 },
+          )
+          .toBe(workerCount);
+
+        await closeApp(app);
+        app = await launchApp(userDataDir);
+        const restored = await firstWindow(app);
+        await expect(restored.getByTestId('team-worker')).toHaveCount(workerCount);
+        await expect
+          .poll(() =>
+            restored.getByTestId('team-worker').evaluateAll((nodes) => {
+              const bounds = document.querySelector('.team-canvas')!.getBoundingClientRect();
+              return nodes.every((node) => {
+                const card = node.getBoundingClientRect();
+                return (
+                  card.left >= bounds.left - 1 &&
+                  card.right <= bounds.right + 1 &&
+                  card.top >= bounds.top - 1 &&
+                  card.bottom <= bounds.bottom + 1
+                );
+              });
+            }),
+          )
+          .toBe(true);
+      } finally {
+        await closeApp(app);
+        removeUserDataDir(userDataDir);
+      }
+    });
+  }
 
   test('persists a dragged node position and camera across restart, and hides the stopped Worker', async () => {
     const userDataDir = createUserDataDir('canvas-layout-persist');

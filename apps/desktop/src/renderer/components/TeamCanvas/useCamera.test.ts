@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
-import { act, createElement } from 'react';
+import { act, createElement, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { preservesNestedScroll, useCamera } from './useCamera';
+import { MIN_SCALE, preservesNestedScroll, useCamera } from './useCamera';
+import { canvasCameraSchema } from '@sprint-coder/contracts';
 
 describe('preservesNestedScroll', () => {
   it.each(['.timeline-scroll', '.w-body'])(
@@ -27,8 +28,10 @@ describe('preservesNestedScroll', () => {
   });
 });
 
-function CameraCanvas() {
-  const { canvasRef, worldRef } = useCamera();
+function CameraCanvas({ capture }: { capture?: (camera: ReturnType<typeof useCamera>) => void }) {
+  const camera = useCamera();
+  const { canvasRef, worldRef } = camera;
+  useEffect(() => capture?.(camera), [capture, camera]);
   return createElement(
     'section',
     { ref: canvasRef, 'data-testid': 'camera-canvas' },
@@ -54,6 +57,7 @@ describe('camera pointer capture', () => {
   let root: Root;
   let canvas: HTMLElement;
   let capture: ReturnType<typeof vi.fn>;
+  let camera: ReturnType<typeof useCamera>;
 
   beforeEach(() => {
     vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -68,7 +72,15 @@ describe('camera pointer capture', () => {
     container = document.createElement('div');
     document.body.append(container);
     root = createRoot(container);
-    act(() => root.render(createElement(CameraCanvas)));
+    act(() =>
+      root.render(
+        createElement(CameraCanvas, {
+          capture: (value) => {
+            camera = value;
+          },
+        }),
+      ),
+    );
     canvas = container.querySelector<HTMLElement>('[data-testid="camera-canvas"]')!;
     capture = vi.fn();
     canvas.setPointerCapture = capture;
@@ -102,5 +114,44 @@ describe('camera pointer capture', () => {
     expect(
       container.querySelector<HTMLElement>('[data-testid="camera-world"]')!.style.transform,
     ).toBe('translate(50px, 50px) scale(1)');
+  });
+
+  it('keeps a large Team fit inside the scale accepted by canvas persistence', () => {
+    Object.defineProperties(canvas, {
+      clientWidth: { value: 900 },
+      clientHeight: { value: 700 },
+    });
+    const fitted = camera.camToFit([{ x: 0, y: 0, w: 8000, h: 2400 }]);
+    expect(fitted.s).toBeLessThan(0.18);
+    expect(fitted.x).toBeGreaterThanOrEqual(0);
+    expect(fitted.y).toBeGreaterThanOrEqual(0);
+    expect(fitted.x + 8000 * fitted.s).toBeLessThanOrEqual(900);
+    expect(fitted.y + 2400 * fitted.s).toBeLessThanOrEqual(700);
+    expect(
+      canvasCameraSchema.safeParse({ x: fitted.x, y: fitted.y, scale: fitted.s }).success,
+    ).toBe(true);
+  });
+
+  it('keeps focus targets inside the scale accepted by canvas persistence', () => {
+    Object.defineProperties(canvas, {
+      clientWidth: { value: 900 },
+      clientHeight: { value: 700 },
+    });
+    const focused = camera.camToFocus({ x: 0, y: 0, w: 8000, h: 2400 });
+    expect(focused.s).toBeGreaterThanOrEqual(MIN_SCALE);
+    expect(focused.s).toBeLessThan(0.18);
+    expect(
+      canvasCameraSchema.safeParse({ x: focused.x, y: focused.y, scale: focused.s }).success,
+    ).toBe(true);
+  });
+
+  it('bounds very large fit and focus targets at the minimum persistable scale', () => {
+    Object.defineProperties(canvas, {
+      clientWidth: { value: 900 },
+      clientHeight: { value: 700 },
+    });
+    const target = { x: 0, y: 0, w: 40000, h: 40000 };
+    expect(camera.camToFit([target]).s).toBe(MIN_SCALE);
+    expect(camera.camToFocus(target).s).toBe(MIN_SCALE);
   });
 });

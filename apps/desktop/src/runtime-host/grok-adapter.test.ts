@@ -7,6 +7,7 @@ import {
   grokAuthenticationMethod,
   grokMcpInventoryReady,
   grokModelsFromInitialize,
+  probeGrok,
 } from './grok-adapter';
 import {
   RUNTIME_PROTOCOL_VERSION,
@@ -294,6 +295,33 @@ describe('Grok ACP adapter process lifecycle', () => {
 });
 
 describe('Grok catalog and capability gates', () => {
+  it('publishes an E2E capability fixture that passes the host protocol validator', async () => {
+    const probe = await probeGrok('__must_not_be_spawned__', {
+      SPRINT_CODER_E2E_CLI_FIXTURES: '1',
+    });
+    expect(
+      isRuntimeToMainEnvelope({
+        protocolVersion: RUNTIME_PROTOCOL_VERSION,
+        runtimeInstanceId: 'fixture-host',
+        taskId: '',
+        turnId: '',
+        seq: 1,
+        operationId: 'hello',
+        type: 'hello',
+        codexAvailable: false,
+        codexReadiness: 'unavailable',
+        codexModels: [],
+        claudeAvailable: false,
+        claudeReadiness: 'unavailable',
+        claudeModels: [],
+        grokAvailable: probe.available,
+        grokReadiness: probe.readiness,
+        grokModels: probe.models,
+        grokVersion: probe.version,
+      }),
+    ).toBe(true);
+  });
+
   it('uses the CLI catalog instead of hardcoded current model IDs', () => {
     const models = grokModelsFromInitialize({
       _meta: {

@@ -29,7 +29,7 @@ test.describe('Settings v2 and Skill selection', () => {
     await page.getByTestId('settings-nav-team').click();
     await expect(page.getByTestId('settings-team-defaults')).toBeVisible();
     await expect(page.getByTestId('settings-team-default-depth')).toHaveValue('4');
-    await expect(page.getByTestId('settings-team-default-concurrency')).toHaveValue('8');
+    await expect(page.getByTestId('settings-team-default-concurrency')).toHaveValue('50');
     await expect(page.getByTestId('settings-team-research')).toBeVisible();
 
     await page.getByTestId('settings-nav-skills').click();
