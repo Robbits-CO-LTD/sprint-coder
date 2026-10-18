@@ -9,7 +9,8 @@ import { describe, expect, it } from 'vitest';
 // cut out as they are and compiled into a program that measures processes it starts itself: cmd,
 // the conhost under it, a copy of cmd under another name, mstsc, the acceptance fixture (built
 // here), the fixture as this program's own child, a process with a shell below it, one with a
-// pseudo console below it, and the fixture after its running image was renamed and another file put
+// renamed copy of cmd below it (found by its running image, not its name), one with a GUI below it,
+// one with a pseudo console below it, and the fixture after its running image was renamed and another file put
 // at its path once that path had been read. Each measurement is checked fact by fact, and then
 // judged by the shared core (computer_use_target_eligibility.h) to show which class refuses it. The
 // rename must come out as a mismatch of the running image, with every fact read from the running
@@ -254,18 +255,16 @@ int Idle() {
   return 0;
 }
 
-// A process with a shell below it.
-int ShellHost(const std::wstring &cmd) {
-  Started shell = [&]() {
-    Started s;
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    std::wstring command = L"\"" + cmd + L"\" /d /k";
-    s.ok = CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
-                          nullptr, nullptr, &startup, &s.info) == TRUE;
-    return s;
-  }();
-  if (!shell.ok) return 3;
+// A process with one child below it: the command line it is given.
+int ChildHost(std::wstring command) {
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  startup.dwFlags = STARTF_USESHOWWINDOW;
+  startup.wShowWindow = SW_SHOWMINNOACTIVE;
+  PROCESS_INFORMATION info{};
+  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                      nullptr, &startup, &info))
+    return 3;
   Sleep(INFINITE);
   return 0;
 }
@@ -313,7 +312,12 @@ int wmain(int argc, wchar_t **argv) {
   const std::wstring cmd = system32 + L"\\cmd.exe";
   const std::wstring mode = argc > 1 ? argv[1] : L"";
   if (mode == L"idle") return Idle();
-  if (mode == L"shellhost") return ShellHost(cmd);
+  if (mode == L"childhost" && argc > 2) {
+    // The program quoted, its switches as they are.
+    std::wstring command = std::wstring(L"\"") + argv[2] + L"\"";
+    for (int index = 3; index < argc; ++index) command += std::wstring(L" ") + argv[index];
+    return ChildHost(command);
+  }
   if (mode == L"ptyhost") return PtyHost(system32 + L"\\PING.EXE");
   if (argc < 4) return 2;
   const bool ci = mode == L"ci";
@@ -475,20 +479,38 @@ int wmain(int argc, wchar_t **argv) {
   Check(Is(child_facts.facts.own_descendant, true), "own_child_is_own_descendant");
   Check(ClassOf(child_facts.facts) == "W8", "own_child_refused_as_w8");
 
-  // A process with a shell below it, and one with a pseudo console below it (upper class C).
-  const Started shell_host = Start(L"\"" + self + L"\" shellhost", CREATE_NO_WINDOW);
+  // A process with a shell below it, one with a renamed copy of a shell below it, one with a GUI
+  // below it, and one with a pseudo console below it (upper class C). Descendants are judged by
+  // their running images: the renamed copy is a console image whose OriginalFilename is cmd's.
+  const Started shell_host =
+      Start(L"\"" + self + L"\" childhost \"" + cmd + L"\" /d /k", CREATE_NO_WINDOW);
+  const Started renamed_host =
+      Start(L"\"" + self + L"\" childhost \"" + renamed + L"\" /d /k", CREATE_NO_WINDOW);
+  const Started gui_host =
+      Start(L"\"" + self + L"\" childhost \"" + fixture + L"\"", CREATE_NO_WINDOW);
   const Started pty_host = Start(L"\"" + self + L"\" ptyhost", CREATE_NO_WINDOW);
-  Check(shell_host.ok && pty_host.ok, "lineage_hosts_started");
+  Check(shell_host.ok && renamed_host.ok && gui_host.ok && pty_host.ok, "lineage_hosts_started");
   Sleep(1500);
   const WindowsTargetFactsMeasurement shell_host_facts = Measure(shell_host.info.dwProcessId, nullptr, outsider);
   const WindowsTargetFactsMeasurement pty_host_facts = Measure(pty_host.info.dwProcessId, nullptr, outsider);
   Print("shell host", shell_host_facts);
+  const WindowsTargetFactsMeasurement renamed_host_facts =
+      Measure(renamed_host.info.dwProcessId, nullptr, outsider);
+  const WindowsTargetFactsMeasurement gui_host_facts =
+      Measure(gui_host.info.dwProcessId, nullptr, outsider);
   Print("pty host", pty_host_facts);
+  Print("renamed shell host", renamed_host_facts);
+  Print("gui host", gui_host_facts);
   Check(Is(shell_host_facts.facts.descendant_shell, true), "shell_below_is_found");
+  Check(ChildWithLeaf(renamed_host.info.dwProcessId, "sc500-not-a-shell.exe").has_value(),
+        "renamed_shell_runs_below_its_host");
+  Check(Is(renamed_host_facts.facts.descendant_shell, true), "renamed_shell_below_is_found");
+  Check(ClassOf(renamed_host_facts.facts) != "eligible", "renamed_shell_below_is_not_eligible");
+  // (The host is a console program, so its own conhost is below it: only the shell fact is shown.)
+  Check(Is(gui_host_facts.facts.descendant_shell, false), "gui_below_is_no_shell");
   Check(ChildWithLeaf(pty_host.info.dwProcessId, "conhost.exe").has_value(), "pty_conhost_below_host");
-  Check(Is(pty_host_facts.facts.descendant_pseudo_console, true) &&
-            Is(pty_host_facts.facts.descendant_shell, false),
-        "pseudo_console_below_is_found");
+  // The program in the pseudo console (ping) is a console image, so it is a shell as well.
+  Check(Is(pty_host_facts.facts.descendant_pseudo_console, true), "pseudo_console_below_is_found");
   Check(Is(shell_host_facts.facts.own_descendant, false) && Is(pty_host_facts.facts.own_descendant, false),
         "lineage_hosts_are_outsiders");
 

@@ -200,14 +200,95 @@ ParsePeSubsystem(std::span<const std::uint8_t> bytes) {
   }
 }
 
+namespace windows_target_facts_detail {
+
+[[nodiscard]] inline bool IsWellFormedUtf8(std::string_view text) {
+  for (std::size_t index = 0; index < text.size();) {
+    const auto lead = static_cast<unsigned char>(text[index]);
+    std::size_t length = 0;
+    std::uint32_t code = 0;
+    if (lead < 0x80) {
+      length = 1;
+      code = lead;
+    } else if (lead >= 0xc2 && lead <= 0xdf) {
+      length = 2;
+      code = lead & 0x1f;
+    } else if (lead >= 0xe0 && lead <= 0xef) {
+      length = 3;
+      code = lead & 0x0f;
+    } else if (lead >= 0xf0 && lead <= 0xf4) {
+      length = 4;
+      code = lead & 0x07;
+    } else {
+      return false;
+    }
+    if (index + length > text.size()) return false;
+    for (std::size_t next = 1; next < length; ++next) {
+      const auto unit = static_cast<unsigned char>(text[index + next]);
+      if ((unit & 0xc0) != 0x80) return false;
+      code = (code << 6) | (unit & 0x3f);
+    }
+    if ((length == 3 && code < 0x800) || (length == 4 && (code < 0x10000 || code > 0x10ffff)) ||
+        (code >= 0xd800 && code <= 0xdfff))
+      return false;
+    index += length;
+  }
+  return true;
+}
+
+// A manifest's bytes as UTF-8: UTF-8 (with or without its BOM) as it is, UTF-16 (little or big
+// endian, by its BOM or by the NUL bytes ASCII leaves in every other place) converted. Anything
+// else (UTF-32, a NUL left in the text, bytes that are not well-formed): std::nullopt.
+[[nodiscard]] inline std::optional<std::string> ManifestText(std::string_view bytes) {
+  const auto byte = [&bytes](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
+  if (bytes.size() >= 4 && ((byte(0) == 0xff && byte(1) == 0xfe && byte(2) == 0 && byte(3) == 0) ||
+                            (byte(0) == 0 && byte(1) == 0 && byte(2) == 0xfe && byte(3) == 0xff)))
+    return std::nullopt;
+  std::optional<bool> big_endian;
+  std::size_t skip = 0;
+  if (bytes.size() >= 2 && byte(0) == 0xff && byte(1) == 0xfe) {
+    big_endian = false;
+    skip = 2;
+  } else if (bytes.size() >= 2 && byte(0) == 0xfe && byte(1) == 0xff) {
+    big_endian = true;
+    skip = 2;
+  } else if (bytes.size() >= 2 && byte(0) != 0 && byte(1) == 0) {
+    big_endian = false;
+  } else if (bytes.size() >= 2 && byte(0) == 0 && byte(1) != 0) {
+    big_endian = true;
+  }
+  std::string text;
+  if (big_endian.has_value()) {
+    if ((bytes.size() - skip) % 2 != 0) return std::nullopt;
+    std::vector<char16_t> units;
+    units.reserve((bytes.size() - skip) / 2);
+    for (std::size_t index = skip; index < bytes.size(); index += 2)
+      units.push_back(static_cast<char16_t>(*big_endian ? (byte(index) << 8) | byte(index + 1)
+                                                        : byte(index) | (byte(index + 1) << 8)));
+    std::optional<std::string> converted = Utf8FromUtf16(units);
+    if (!converted.has_value()) return std::nullopt;
+    text = std::move(*converted);
+  } else {
+    if (bytes.size() >= 3 && byte(0) == 0xef && byte(1) == 0xbb && byte(2) == 0xbf)
+      bytes.remove_prefix(3);
+    text = std::string(bytes);
+  }
+  // A resource may be padded with NULs after the text; a NUL inside it is not text.
+  while (!text.empty() && text.back() == '\0') text.pop_back();
+  if (text.find('\0') != std::string::npos || !IsWellFormedUtf8(text)) return std::nullopt;
+  return text;
+}
+
+} // namespace windows_target_facts_detail
+
 // Whether an application manifest asks to run elevated. requireAdministrator and highestAvailable
-// both count (the deny direction); a manifest without requestedExecutionLevel runs as the invoker.
-// A level the reader does not know counts as elevated. A tag it cannot read: std::nullopt.
-[[nodiscard]] inline std::optional<bool> ManifestRequiresAdministrator(std::string_view manifest) {
-  if (manifest.size() >= 3 && static_cast<unsigned char>(manifest[0]) == 0xef &&
-      static_cast<unsigned char>(manifest[1]) == 0xbb &&
-      static_cast<unsigned char>(manifest[2]) == 0xbf)
-    manifest.remove_prefix(3);
+// both count (the deny direction); a manifest without requestedExecutionLevel runs as the invoker,
+// which is said only of a manifest read whole as UTF-8 or UTF-16. A level the reader does not know
+// counts as elevated. An encoding or a tag it cannot read: std::nullopt.
+[[nodiscard]] inline std::optional<bool> ManifestRequiresAdministrator(std::string_view bytes) {
+  const std::optional<std::string> decoded = windows_target_facts_detail::ManifestText(bytes);
+  if (!decoded.has_value()) return std::nullopt;
+  const std::string_view manifest = *decoded;
   static constexpr std::string_view kElement = "requestedExecutionLevel";
   bool elevated = false;
   for (std::size_t at = manifest.find(kElement); at != std::string_view::npos;

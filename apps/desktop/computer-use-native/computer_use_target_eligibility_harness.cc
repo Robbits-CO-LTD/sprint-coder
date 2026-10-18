@@ -294,6 +294,59 @@ bool CheckPeSubsystem() {
          Check(!ParsePeSubsystem({}).has_value(), "pe-empty");
 }
 
+// ASCII text as UTF-16 bytes, little or big endian, with or without the BOM.
+std::string Utf16Bytes(std::string_view ascii, bool big_endian, bool bom) {
+  std::string bytes;
+  const auto unit = [&bytes, big_endian](unsigned int value) {
+    const char low = static_cast<char>(value & 0xff);
+    const char high = static_cast<char>((value >> 8) & 0xff);
+    bytes += big_endian ? high : low;
+    bytes += big_endian ? low : high;
+  };
+  if (bom) unit(0xfeff);
+  for (const char letter : ascii) unit(static_cast<unsigned char>(letter));
+  return bytes;
+}
+
+// The encodings a manifest can come in: UTF-16 is read, and what cannot be read is std::nullopt,
+// never "no elevation asked" (the reader must not fail open on an encoding).
+bool CheckManifestEncodings() {
+  const auto level = [](const std::string &manifest) {
+    return ManifestRequiresAdministrator(manifest);
+  };
+  const std::string admin = "<?xml version=\"1.0\" encoding=\"UTF-16\"?><assembly>"
+                            "<requestedExecutionLevel level=\"requireAdministrator\"/></assembly>";
+  const std::string invoker = "<assembly><requestedExecutionLevel level=\"asInvoker\"/></assembly>";
+  const std::optional<bool> no = false;
+  const std::optional<bool> yes = true;
+  std::string utf32 = {'\xff', '\xfe', '\0', '\0'};
+  for (const char letter : std::string_view("<a/>")) {
+    utf32 += letter;
+    utf32 += std::string(3, '\0');
+  }
+  std::string odd = Utf16Bytes(admin, false, true);
+  odd.pop_back();
+  const std::string with_nul =
+      std::string("<assembly>") + '\0' + "<requestedExecutionLevel level=\"requireAdministrator\"/>";
+  return Check(level(Utf16Bytes(admin, false, true)) == yes, "manifest-utf16le-bom") &&
+         Check(level(Utf16Bytes(admin, false, false)) == yes, "manifest-utf16le-no-bom") &&
+         Check(level(Utf16Bytes(admin, true, true)) == yes, "manifest-utf16be-bom") &&
+         Check(level(Utf16Bytes(admin, true, false)) == yes, "manifest-utf16be-no-bom") &&
+         Check(level(Utf16Bytes(invoker, false, true)) == no, "manifest-utf16le-as-invoker") &&
+         Check(level(Utf16Bytes("<assembly/>", true, true)) == no, "manifest-utf16-without-level") &&
+         Check(!level(utf32).has_value(), "manifest-utf32-unreadable") &&
+         Check(!level(odd).has_value(), "manifest-utf16-odd-length-unreadable") &&
+         Check(!level("<assembly>\xff\xfe</assembly>").has_value(), "manifest-not-utf8-unreadable") &&
+         Check(!level("<assembly>\xc0\xaf</assembly>").has_value(),
+               "manifest-overlong-utf8-unreadable") &&
+         Check(!level(with_nul).has_value(), "manifest-nul-in-utf8-unreadable") &&
+         Check(level(admin + std::string(3, '\0')) == yes &&
+                   level(Utf16Bytes(admin, false, true) + std::string(2, '\0')) == yes,
+               "manifest-trailing-nul-padding") &&
+         Check(level("<assembly><!-- \xe6\x97\xa5\xe6\x9c\xac --></assembly>") == no,
+               "manifest-utf8-multibyte-without-level");
+}
+
 bool CheckManifestLevel() {
   const auto level = [](std::string_view manifest) {
     return ManifestRequiresAdministrator(manifest);
@@ -329,7 +382,8 @@ bool CheckManifestLevel() {
          Check(!level("<requestedExecutionLevel uiAccess=\"false\"/>").has_value(),
                "manifest-element-without-level") &&
          Check(!level("<requestedExecutionLevel level=\"asInvoker\"").has_value(),
-               "manifest-unclosed-tag");
+               "manifest-unclosed-tag") &&
+         CheckManifestEncodings();
 }
 
 // A VS_VERSIONINFO-style block: wLength, wValueLength, wType, key, padding, value, children.

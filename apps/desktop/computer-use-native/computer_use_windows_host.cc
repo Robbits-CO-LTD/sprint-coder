@@ -1118,8 +1118,17 @@ bool IsSupportedWindowsV1Target(
 //   * Lineage. A Toolhelp snapshot with every process's creation time; descendants follow parent
 //     pids only to processes created no earlier (FindWindowsDescendants), so a reused pid is not a
 //     parent. A child whose parent has exited cannot be traced: the system does not reparent it.
+//     Each descendant is read from its own running image, held as the target's is: a non-GUI
+//     subsystem, or a leaf or OriginalFilename on the W4 table, is a shell, so a renamed copy of
+//     a shell is one too; a descendant that cannot be read is taken as a shell. At most
+//     kWindowsTargetDescendantInspectLimit descendants within kWindowsTargetDescendantBudgetMs;
+//     beyond that the descendant facts are not measured.
 
 inline constexpr std::size_t kWindowsTargetDescendantLimit = 1024;
+// The descendants of one target that are read from their images, and the time that may take.
+// More than that, or longer: the descendant facts are not measured (unresolvable).
+inline constexpr std::size_t kWindowsTargetDescendantInspectLimit = 64;
+inline constexpr ULONGLONG kWindowsTargetDescendantBudgetMs = 2'000;
 inline constexpr std::string_view kWindowsTargetFixtureLeaf =
     "sprint-coder-computer-use-fixture.exe";
 
@@ -1657,6 +1666,26 @@ void ReadWindowsTargetResources(const std::wstring &path, bool signature_verifie
   FreeLibrary(image);
 }
 
+// OriginalFilename of an image held by the caller, whatever its signature ("" without one), for
+// the deny direction only. std::nullopt when the resources cannot be read.
+std::optional<std::string> WindowsTargetOriginalFilename(const std::wstring &path) {
+  HMODULE image = LoadLibraryExW(
+      path.c_str(), nullptr,
+      LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+  if (image == nullptr)
+    return std::nullopt;
+  bool absent = false;
+  const std::optional<std::span<const std::uint8_t>> version =
+      WindowsTargetResource(image, RT_VERSION, &absent);
+  std::optional<std::string> original;
+  if (version.has_value())
+    original = sprint_coder::computer_use::VersionInfoOriginalFilename(*version);
+  else if (absent)
+    original = std::string{};
+  FreeLibrary(image);
+  return original;
+}
+
 std::optional<std::vector<std::uint8_t>> WindowsTargetTokenInformation(
     HANDLE token, TOKEN_INFORMATION_CLASS information_class) {
   DWORD bytes = 0;
@@ -1868,6 +1897,52 @@ SnapshotWindowsTargetProcesses() {
   return nodes;
 }
 
+struct WindowsTargetDescendant {
+  bool shell = false;
+  bool console_host = false;
+};
+
+// What one descendant is, read from its running image as the target's is (held, with the path it
+// was recorded under): a shell when its subsystem is not GUI, or when its leaf, its image's leaf or
+// its OriginalFilename is on the W4 leaf table; a console host by the same names. The names are
+// read whether or not the image is signed (they only cap). A descendant that cannot be opened, is
+// no longer the process the snapshot saw, or whose image cannot be read and held counts as a shell
+// (the upper class C).
+WindowsTargetDescendant
+InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessNode &node) {
+  using namespace sprint_coder::computer_use;
+  WindowsTargetDescendant result;
+  result.console_host = WindowsLeafIsConsoleHost(node.leaf);
+  result.shell = true;
+  if (WindowsLeafIsShell(node.leaf))
+    return result;
+  ScopedKernelHandle process(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ,
+                                         FALSE, node.pid));
+  if (process.value == nullptr)
+    return result;
+  const std::optional<std::uint64_t> creation = WindowsTargetCreationTime(process.value);
+  if (!creation.has_value() || !node.creation.has_value() || *creation != *node.creation)
+    return result;
+  std::wstring recorded_path;
+  const std::optional<std::wstring> recorded =
+      ReadProcessPath(process.value, &recorded_path)
+          ? std::optional<std::wstring>(std::move(recorded_path))
+          : std::nullopt;
+  WindowsTargetHeldImage held;
+  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held) || !held.matches)
+    return result;
+  const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
+  const std::optional<std::string> subsystem = WindowsTargetPeSubsystem(held.file.value);
+  const std::optional<std::string> original = WindowsTargetOriginalFilename(held.canonical_path);
+  if (!path.has_value() || !subsystem.has_value() || !original.has_value())
+    return result;
+  const std::string leaf = WindowsImageLeaf(*path);
+  result.console_host = result.console_host || WindowsLeafIsConsoleHost(leaf) ||
+                        WindowsLeafIsConsoleHost(*original);
+  result.shell = *subsystem != "gui" || WindowsLeafIsShell(leaf) || WindowsLeafIsShell(*original);
+  return result;
+}
+
 void MeasureWindowsTargetLineage(const WindowsTargetFactsContext &context,
                                  WindowsTargetFactsMeasurement *measured) {
   using namespace sprint_coder::computer_use;
@@ -1884,16 +1959,30 @@ void MeasureWindowsTargetLineage(const WindowsTargetFactsContext &context,
           parent.creation.has_value() && *parent.creation <= creation)
         measured->parent_pid = parent.pid;
   }
+  // Every descendant is read from its running image, within a count and a time budget; a set of
+  // descendants that does not fit them is not measured (unresolvable).
   const WindowsDescendants below = FindWindowsDescendants(
       *nodes, measured->pid, creation, kWindowsTargetDescendantLimit);
-  bool shell = below.truncated;
-  bool pseudo_console = below.truncated;
-  for (const std::size_t index : below.nodes) {
-    shell = shell || WindowsLeafIsShell((*nodes)[index].leaf);
-    pseudo_console = pseudo_console || WindowsLeafIsConsoleHost((*nodes)[index].leaf);
+  if (!below.truncated && below.nodes.size() <= kWindowsTargetDescendantInspectLimit) {
+    const ULONGLONG deadline = GetTickCount64() + kWindowsTargetDescendantBudgetMs;
+    bool shell = false;
+    bool pseudo_console = false;
+    bool within_budget = true;
+    for (const std::size_t index : below.nodes) {
+      if (GetTickCount64() > deadline) {
+        within_budget = false;
+        break;
+      }
+      const WindowsTargetDescendant descendant =
+          InspectWindowsTargetDescendant((*nodes)[index]);
+      shell = shell || descendant.shell;
+      pseudo_console = pseudo_console || descendant.console_host;
+    }
+    if (within_budget && GetTickCount64() <= deadline) {
+      measured->facts.descendant_shell = shell;
+      measured->facts.descendant_pseudo_console = pseudo_console;
+    }
   }
-  measured->facts.descendant_shell = shell;
-  measured->facts.descendant_pseudo_console = pseudo_console;
   // Without a lineage root nothing can say what is Sprint Coder's own: not measured.
   if (context.lineage_root_pid == 0)
     return;
