@@ -7348,7 +7348,7 @@ export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
     files.length > 0
       ? `Workerの変更を作業場所へ統合しようとしたところ、Gitのcherry-pickが衝突しました。Appは衝突したリポジトリのcherry-pickを中止し、そのリポジトリは統合前の状態のままです。${partial}${detail}。このexecutionはwaiting_resume（integration）で、人が衝突を解消して再開するまで完了しません。completedとして扱わないでください。`
       : `Workerの変更を作業場所へ統合できませんでした。${detail}。このexecutionはwaiting_resume（integration）で、人が再開するまで完了しません。completedとして扱わないでください。`;
-  return workerCompletionSchema.parse({
+  const parsed = workerCompletionSchema.safeParse({
     status: 'failed',
     summary: fitUtf16(summary, 4_000),
     artifacts: [],
@@ -7359,6 +7359,17 @@ export function integrationBlockedCompletion(error: unknown): WorkerCompletion {
         detail: fitUtf16(detail, 2_000),
       },
     ],
+    risks: ['人による再開待ち: waiting_resume (integration)'],
+  });
+  if (parsed.success) return parsed.data;
+  // A fixed report that always fits, so the Leader still hears of the stop (and the caller's later
+  // state transitions run) even if the quoted text were ever rejected.
+  return workerCompletionSchema.parse({
+    status: 'failed',
+    summary:
+      'Workerの変更を作業場所へ統合できませんでした。このexecutionはwaiting_resume（integration）で、人が再開するまで完了しません。completedとして扱わないでください。',
+    artifacts: [],
+    verification: [{ name: 'workspace-integration', outcome: 'fail' }],
     risks: ['人による再開待ち: waiting_resume (integration)'],
   });
 }

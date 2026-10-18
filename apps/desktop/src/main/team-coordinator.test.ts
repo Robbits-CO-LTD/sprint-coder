@@ -60,7 +60,12 @@ import { ConnectionAdmissionController } from './connection-admission';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
 import { ProviderRateLimitedError } from './provider-rate-limit-retry';
-import { WorkerWorktreeManager, WorktreeError, type TreeRemovalFs } from './worker-worktree';
+import {
+  WorkerWorktreeManager,
+  WorktreeError,
+  WorktreeIntegrationConflictError,
+  type TreeRemovalFs,
+} from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
 import { managedLocalConnection } from './managed-local-provider-runtime';
 import { ProviderWorkspaceTools } from './provider-workspace-tools';
@@ -4782,6 +4787,143 @@ if (runsWithElectronAbi)
         state: 'failed',
         lastError: 'simulated crash after first worktree creation',
       });
+      persistence.close();
+    });
+
+    it('names the already-integrated Secondary when Primary then conflicts (issue #852, partial apply)', async () => {
+      const persistence = createPersistence();
+      const primaryRepo = realpathSync(mkdtempSync(join(tmpdir(), 'sprint-coder-team-primary-')));
+      const secondaryRepo = realpathSync(
+        mkdtempSync(join(tmpdir(), 'sprint-coder-team-secondary-')),
+      );
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-multi-worktrees-'));
+      cleanup.push(primaryRepo, secondaryRepo, worktreesRoot);
+      for (const [repo, label] of [
+        [primaryRepo, 'primary'],
+        [secondaryRepo, 'secondary'],
+      ] as const) {
+        expect(spawnSync('git', ['init', '-q', repo]).status).toBe(0);
+        writeFileSync(join(repo, 'README.md'), `${label}\n`);
+        expect(spawnSync('git', ['-C', repo, 'add', 'README.md']).status).toBe(0);
+        expect(
+          spawnSync('git', [
+            '-C',
+            repo,
+            '-c',
+            'user.name=Test',
+            '-c',
+            'user.email=test@example.com',
+            'commit',
+            '-q',
+            '-m',
+            'base',
+          ]).status,
+        ).toBe(0);
+      }
+      const primaryRootId = '10000000-0000-4000-8000-000000000001';
+      const secondaryRootId = '10000000-0000-4000-8000-000000000002';
+      const project = persistence.createProject({
+        name: 'Two repositories',
+        folders: [
+          {
+            id: primaryRootId,
+            path: primaryRepo,
+            canonicalPath: primaryRepo,
+            label: 'primary',
+            role: 'primary',
+            workspaceKey: '1'.repeat(64),
+            rootIdentityDigest: 'a'.repeat(64),
+          },
+          {
+            id: secondaryRootId,
+            path: secondaryRepo,
+            canonicalPath: secondaryRepo,
+            label: 'secondary',
+            role: 'secondary',
+            workspaceKey: '2'.repeat(64),
+            rootIdentityDigest: 'b'.repeat(64),
+          },
+        ],
+      });
+      const task = persistence.createTask('Multi-repository Mission', false, project.id);
+      const runtime = new MultiRootWritingRuntime();
+      const manager = new WorkerWorktreeManager({ worktreesRoot });
+      const realIntegrate = manager.integrate.bind(manager);
+      vi.spyOn(manager, 'integrate').mockImplementation(async (input) => {
+        if (input.repoPath === primaryRepo)
+          throw new WorktreeIntegrationConflictError('cherry-pick conflicted', ['README.md']);
+        return realIntegrate(input);
+      });
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const writer = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write both repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const reader = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'reader',
+        objective: 'verify both repositories',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const mission = await coordinator.assignMission({
+        taskId: task.id,
+        objective: 'write both repositories',
+        doneCriteria: ['both repositories integrated'],
+        steps: [
+          {
+            workerId: writer.id,
+            objective: 'write both roots',
+            doneCriteria: ['both outputs exist'],
+            access: 'workspace-write',
+          },
+          {
+            workerId: reader.id,
+            objective: 'verify both roots',
+            doneCriteria: ['both outputs inspected'],
+            access: 'read-only',
+          },
+        ],
+      });
+      const executionId = mission.steps[0]!.executionId;
+      await waitFor(
+        () => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+        20_000,
+      );
+      expect(readFileSync(join(secondaryRepo, 'worker-output.txt'), 'utf8')).toBe('secondary\n');
+      let cursor = 0;
+      const reports: { executionId: string | null; content: string }[] = [];
+      const deadline = Date.now() + 20_000;
+      while (!reports.some((report) => report.executionId === executionId)) {
+        expect(Date.now()).toBeLessThan(deadline);
+        const result = (await executeTeamTool(
+          coordinator,
+          task.id,
+          'team_wait_reports',
+          {},
+          {
+            longPoll: true,
+            longPollTimeoutMs: 1_000,
+            longPollIntervalMs: 5,
+            waitReportsCursor: {
+              read: () => cursor,
+              advance: (seq: number) => {
+                cursor = Math.max(cursor, seq);
+              },
+            },
+          },
+        )) as { reports: readonly { executionId: string | null; content: string }[] };
+        reports.push(...result.reports);
+      }
+      const blocked = reports.find((report) => report.executionId === executionId)!;
+      const content = JSON.parse(blocked.content) as { status: string; summary: string };
+      expect(content.status).toBe('failed');
+      expect(content.summary).toContain('部分適用');
+      expect(content.summary).toContain('secondary');
+      expect(content.summary).toContain('README.md');
       persistence.close();
     });
 
