@@ -22,6 +22,10 @@
 #include <wincrypt.h>
 #include <winnls.h>
 #include <wintrust.h>
+#include <mscat.h>
+#include <appmodel.h>
+#include <psapi.h>
+#include <winioctl.h>
 
 #if defined(_MSC_VER) && __has_include(<winrt/Windows.Graphics.Capture.h>) && \
     __has_include(<windows.graphics.capture.interop.h>) && \
@@ -39,6 +43,16 @@
 #include <wrl/client.h>
 #else
 #define SPRINT_CODER_HAS_WINDOWS_GRAPHICS_CAPTURE 0
+#endif
+
+// The package catalog the v2 target facts read SignatureKind from (S5-c-3, #500 PR-2).
+#if defined(_MSC_VER) && __has_include(<winrt/Windows.ApplicationModel.h>) &&     \
+    __has_include(<winrt/Windows.Management.Deployment.h>)
+#define SPRINT_CODER_HAS_WINDOWS_PACKAGE_CATALOG 1
+#include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Management.Deployment.h>
+#else
+#define SPRINT_CODER_HAS_WINDOWS_PACKAGE_CATALOG 0
 #endif
 
 #if defined(SPRINT_CODER_REQUIRE_WINDOWS_GRAPHICS_CAPTURE) &&                  \
@@ -83,6 +97,7 @@
 #include "computer_use_windows_interlock_capture.h"
 #include "computer_use_native_refusal_table.h"
 #include "computer_use_windows_artifact_read.h"
+#include "computer_use_windows_target_facts.h"
 
 namespace {
 
@@ -1056,6 +1071,925 @@ bool IsSupportedWindowsV1Target(
     const WindowsExecutableIdentity &identity) {
   return MaximumModeForWindowsExecutable(identity) == "full_access_app";
 }
+
+// BEGIN windows target facts (#500 S5-c-3 PR-2)
+// The facts the v2 target eligibility core reads (TargetFacts in
+// computer_use_deny_ruleset_generated.h), measured for one process through handles. Nothing calls
+// this yet: PR-5 makes list_targets and the v2 start, resume and per-input checks use it. No V1
+// path changes: the V1 identity, its embedded-only signer read (ReadAuthenticodeSignerDigest) and
+// its allow-list stay as they are. A fact that cannot be measured stays std::nullopt, and the core
+// then answers unresolvable; nothing here turns a failure into a value that admits.
+//
+//   * Running image. The process's path is read first (QueryFullProcessImageNameW, as V1 reads it
+//     before it opens the file). Then the image section's own file name (GetMappedFileNameW) is
+//     opened and held without write or delete sharing, and asked again: an unchanged name means the
+//     held file is the running image (no name of it can move while it is held). Its volume serial
+//     and file id are compared with those of the file the recorded path names: when the running
+//     image was renamed and another file put at its path after the path was read, they differ,
+//     which is a mismatch (W-UR). Every other fact is read from the held file, so a replacement is
+//     never what is verified.
+//   * Path, root, leaf, volume. The held file's canonical path (GetFinalPathNameByHandleW) placed
+//     among roots canonicalized the same way. The volume is network when the file system says the
+//     file is remote, removable for a removable, optical, RAM, USB, SD, MMC, 1394 or file-backed
+//     virtual disk, and fixed otherwise; a volume that cannot be asked is not measured.
+//   * Signature. WinVerifyTrust on the held file: the embedded signature, or, when the file has
+//     none, a catalog that carries its hash. The leaf's thumbprint and O, and
+//     CERT_CHAIN_POLICY_MICROSOFT_ROOT, come from the chain WinVerifyTrust verified (not from a
+//     comparison of the O). A catalog signature makes the facts more exact but never admits
+//     (decision I): outside %WINDIR% a catalog-only file is given to the core as unsigned (the
+//     upper class at most), while its O and its Microsoft root still refuse.
+//   * Decision K (revocation). WinVerifyTrust runs with WTD_REVOKE_NONE and
+//     WTD_CACHE_ONLY_URL_RETRIEVAL, as V1 does: no revocation check and no network. A cache-only
+//     revocation check was considered and not taken: (1) for most files the cache holds no
+//     revocation data, so the check answers "offline", which must not admit and so changes
+//     nothing; (2) when it does answer, the answer depends on what this machine happened to cache,
+//     so the same target could be judged differently by two machines or flip within a session;
+//     (3) it doubles the WinVerifyTrust cost of every listed target; (4) no CI runner can show a
+//     revoked signer, so the path would ship untested. The residual risk is ADR §10 risk 1.
+//   * PE subsystem from the held file's header; the manifest's execution level and
+//     OriginalFilename from its resources. OriginalFilename is read only when the signature
+//     verified (embedded or catalog), and is "" otherwise.
+//   * Token. Elevation, another user, another session, a protected process, UIAccess, an integrity
+//     level above this process's, and AppContainer. An item that cannot be read is given as the
+//     refusing value (true).
+//   * Package. Family, full name and publisherId from the process handle, development mode from
+//     the package information, SignatureKind from the package catalog (C++/WinRT). They may admit
+//     only once PR-4 binds them to the identity digest.
+//   * Lineage. A Toolhelp snapshot with every process's creation time; descendants follow parent
+//     pids only to processes created no earlier (FindWindowsDescendants), so a reused pid is not a
+//     parent. A child whose parent has exited cannot be traced: the system does not reparent it.
+
+inline constexpr std::size_t kWindowsTargetDescendantLimit = 1024;
+inline constexpr std::string_view kWindowsTargetFixtureLeaf =
+    "sprint-coder-computer-use-fixture.exe";
+
+enum class WindowsTargetSignatureSource : std::uint8_t { kNone, kEmbedded, kCatalog };
+
+// What the caller knows that the target cannot tell: the roots (in precedence order), the process
+// whose descendants are Sprint Coder's own, this helper's signer, and the acceptance mode.
+struct WindowsTargetFactsContext {
+  std::optional<std::vector<sprint_coder::computer_use::WindowsImageRootPrefix>> roots;
+  std::uint32_t lineage_root_pid = 0;
+  std::uint64_t lineage_root_creation = 0;
+  std::string self_signer_thumbprint;
+  bool acceptance_mode = false;
+};
+
+struct WindowsTargetFactsMeasurement {
+  sprint_coder::computer_use::TargetFacts facts;
+  std::uint32_t pid = 0;
+  std::optional<std::uint64_t> creation;
+  // The parent, when the snapshot names one created no later than the target.
+  std::optional<std::uint32_t> parent_pid;
+  std::wstring image_path;
+  std::optional<WindowsFileIdentity> file_identity;
+  WindowsTargetSignatureSource signature_source = WindowsTargetSignatureSource::kNone;
+  std::string signer_thumbprint;
+  std::optional<std::string> package_full_name;
+  std::optional<std::string> package_publisher_id;
+};
+
+struct WindowsTargetSignature {
+  // "valid", "unsigned" or "invalid", as verified (before decision I).
+  std::optional<std::string> state;
+  WindowsTargetSignatureSource source = WindowsTargetSignatureSource::kNone;
+  std::string thumbprint;
+  std::optional<std::string> organization;
+  std::optional<bool> microsoft_root;
+};
+
+std::optional<std::uint64_t> WindowsTargetCreationTime(HANDLE process) {
+  FILETIME created{}, exited{}, kernel{}, user{};
+  if (process == nullptr ||
+      GetProcessTimes(process, &created, &exited, &kernel, &user) != TRUE)
+    return std::nullopt;
+  return (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) |
+         created.dwLowDateTime;
+}
+
+std::optional<std::string> WindowsTargetUtf8(std::wstring_view value) {
+  if (value.empty())
+    return std::string{};
+  std::string converted = Utf8FromWide(value);
+  if (converted.empty())
+    return std::nullopt;
+  return converted;
+}
+
+bool SameWindowsTargetName(std::wstring_view left, std::wstring_view right) {
+  return left.size() == right.size() &&
+         CompareStringOrdinal(left.data(), static_cast<int>(left.size()),
+                              right.data(), static_cast<int>(right.size()),
+                              TRUE) == CSTR_EQUAL;
+}
+
+// A directory canonicalized the way image paths are, or "" when it cannot be opened.
+std::string CanonicalWindowsTargetDirectory(const std::wstring &directory) {
+  if (directory.empty())
+    return {};
+  ScopedKernelHandle handle(CreateFileW(
+      directory.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr));
+  std::wstring canonical;
+  if (handle.value == INVALID_HANDLE_VALUE ||
+      !CanonicalWindowsPathFromHandle(handle.value, &canonical))
+    return {};
+  return Utf8FromWide(canonical);
+}
+
+std::wstring WindowsTargetKnownFolder(REFKNOWNFOLDERID folder) {
+  PWSTR path = nullptr;
+  std::wstring result;
+  if (SUCCEEDED(SHGetKnownFolderPath(folder, KF_FLAG_DONT_VERIFY, nullptr,
+                                     &path)) &&
+      path != nullptr)
+    result = path;
+  CoTaskMemFree(path);
+  return result;
+}
+
+// Sprint Coder's own install root: the parent of the helper's `resources` directory in a package,
+// or the helper's directory otherwise (a development build).
+std::wstring WindowsTargetSelfInstallRoot() {
+  std::vector<wchar_t> buffer(32'768, L'\0');
+  const DWORD length = GetModuleFileNameW(nullptr, buffer.data(),
+                                          static_cast<DWORD>(buffer.size()));
+  if (length == 0 || static_cast<std::size_t>(length) >= buffer.size())
+    return {};
+  std::wstring directory(buffer.data(), length);
+  const std::size_t leaf = directory.find_last_of(L"\\/");
+  if (leaf == std::wstring::npos)
+    return {};
+  directory.resize(leaf);
+  const std::size_t slash = directory.find_last_of(L"\\/");
+  if (slash != std::wstring::npos &&
+      SameWindowsTargetName(std::wstring_view(directory).substr(slash + 1),
+                            L"resources"))
+    directory.resize(slash);
+  return directory;
+}
+
+// The roots in precedence order (the first one a path lies under names it). std::nullopt when the
+// self install root was given but cannot be canonicalized: Sprint Coder's own files would then
+// pass as an ordinary root. A root that does not exist holds nothing and is left out.
+std::optional<std::vector<sprint_coder::computer_use::WindowsImageRootPrefix>>
+CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
+  using sprint_coder::computer_use::WindowsImageRootPrefix;
+  std::vector<WindowsImageRootPrefix> roots;
+  if (!self_install_root.empty()) {
+    std::string self = CanonicalWindowsTargetDirectory(self_install_root);
+    if (self.empty())
+      return std::nullopt;
+    roots.push_back({"self_install", std::move(self)});
+  }
+  const auto add = [&roots](std::string_view root, const std::wstring &directory) {
+    std::string prefix = CanonicalWindowsTargetDirectory(directory);
+    if (!prefix.empty())
+      roots.push_back({root, std::move(prefix)});
+  };
+  const std::string program_files = CanonicalWindowsTargetDirectory(
+      WindowsTargetKnownFolder(FOLDERID_ProgramFiles));
+  // WindowsApps lists nothing to a user, so its own name is spelled rather than opened.
+  if (!program_files.empty())
+    roots.push_back({"windows_apps", program_files + "\\WindowsApps"});
+  std::vector<wchar_t> windows(32'768, L'\0');
+  const UINT windows_length = GetSystemWindowsDirectoryW(
+      windows.data(), static_cast<UINT>(windows.size()));
+  if (windows_length > 0 && windows_length < windows.size())
+    add("windows_directory", std::wstring(windows.data(), windows_length));
+  if (!program_files.empty())
+    roots.push_back({"program_files", program_files});
+  add("program_files", WindowsTargetKnownFolder(FOLDERID_ProgramFilesX86));
+  add("local_programs", WindowsTargetKnownFolder(FOLDERID_UserProgramFiles));
+  std::vector<wchar_t> temp(32'768, L'\0');
+  const DWORD temp_length =
+      GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
+  if (temp_length > 0 && temp_length < temp.size())
+    add("temp", std::wstring(temp.data(), temp_length));
+  add("downloads", WindowsTargetKnownFolder(FOLDERID_Downloads));
+  return roots;
+}
+
+// The context of a measurement made by this helper: the roots with its own install root, this
+// process as the lineage root, and the signer and mode the caller gives.
+WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::string self_signer_thumbprint,
+                                                           bool acceptance_mode) {
+  WindowsTargetFactsContext context;
+  context.roots = CurrentWindowsTargetRoots(WindowsTargetSelfInstallRoot());
+  const std::optional<std::uint64_t> creation =
+      WindowsTargetCreationTime(GetCurrentProcess());
+  if (creation.has_value()) {
+    context.lineage_root_pid = GetCurrentProcessId();
+    context.lineage_root_creation = *creation;
+  }
+  context.self_signer_thumbprint = std::move(self_signer_thumbprint);
+  context.acceptance_mode = acceptance_mode;
+  return context;
+}
+
+std::optional<std::wstring> WindowsTargetMappedImageName(HANDLE process) {
+  HMODULE image = nullptr;
+  DWORD needed = 0;
+  if (EnumProcessModulesEx(process, &image, sizeof(image), &needed,
+                           LIST_MODULES_DEFAULT) != TRUE ||
+      image == nullptr)
+    return std::nullopt;
+  std::vector<wchar_t> name(32'768, L'\0');
+  const DWORD length = GetMappedFileNameW(process, image, name.data(),
+                                          static_cast<DWORD>(name.size()));
+  if (length == 0 || length >= name.size())
+    return std::nullopt;
+  return std::wstring(name.data(), length);
+}
+
+struct WindowsTargetHeldImage {
+  ScopedKernelHandle file;
+  std::wstring canonical_path;
+  WindowsFileIdentity identity;
+  bool matches = false;
+};
+
+// Holds the running image (see the block comment). `recorded` is the process's path as read before
+// (QueryFullProcessImageNameW), or std::nullopt when it could not be read. False when the image
+// cannot be held; `matches` says whether the mapped name stayed the same and the recorded path
+// still names the held file.
+bool HoldWindowsTargetRunningImage(HANDLE process,
+                                   const std::optional<std::wstring> &recorded,
+                                   WindowsTargetHeldImage *held) {
+  const std::optional<std::wstring> mapped = WindowsTargetMappedImageName(process);
+  if (!mapped.has_value())
+    return false;
+  const std::wstring global = L"\\\\?\\GLOBALROOT" + *mapped;
+  held->file.value =
+      CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (held->file.value == INVALID_HANDLE_VALUE) {
+    held->file.value = nullptr;
+    return false;
+  }
+  FILE_ATTRIBUTE_TAG_INFO tag{};
+  if (!GetFileInformationByHandleEx(held->file.value, FileAttributeTagInfo, &tag,
+                                    sizeof(tag)) ||
+      (tag.FileAttributes &
+       (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0 ||
+      !ReadWindowsFileIdentity(held->file.value, &held->identity) ||
+      !CanonicalWindowsPathFromHandle(held->file.value, &held->canonical_path))
+    return false;
+  const std::optional<std::wstring> again = WindowsTargetMappedImageName(process);
+  WindowsFileIdentity recorded_identity;
+  bool recorded_read = recorded.has_value();
+  if (recorded_read) {
+    ScopedKernelHandle file(CreateFileW(
+        recorded->c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    recorded_read = file.value != INVALID_HANDLE_VALUE &&
+                    ReadWindowsFileIdentity(file.value, &recorded_identity);
+  }
+  held->matches = again.has_value() && SameWindowsTargetName(*again, *mapped) &&
+                  recorded_read &&
+                  SameWindowsFileIdentity(held->identity, recorded_identity);
+  return true;
+}
+
+std::optional<std::string> WindowsTargetVolumeKind(HANDLE file) {
+  FILE_REMOTE_PROTOCOL_INFO remote{};
+  if (GetFileInformationByHandleEx(file, FileRemoteProtocolInfo, &remote,
+                                   sizeof(remote)))
+    return "network";
+  constexpr DWORD flags = FILE_NAME_NORMALIZED | VOLUME_NAME_GUID;
+  std::vector<wchar_t> buffer(32'768, L'\0');
+  const DWORD length = GetFinalPathNameByHandleW(
+      file, buffer.data(), static_cast<DWORD>(buffer.size()), flags);
+  if (length == 0 || length >= buffer.size())
+    return std::nullopt;
+  const std::wstring path(buffer.data(), length);
+  static constexpr std::wstring_view volume_prefix = L"\\\\?\\Volume{";
+  const std::size_t end = path.find(L'\\', volume_prefix.size());
+  if (!path.starts_with(volume_prefix) || end == std::wstring::npos)
+    return std::nullopt;
+  const std::wstring root = path.substr(0, end + 1);
+  switch (GetDriveTypeW(root.c_str())) {
+  case DRIVE_REMOTE:
+    return "network";
+  case DRIVE_REMOVABLE:
+  case DRIVE_CDROM:
+  case DRIVE_RAMDISK:
+    return "removable";
+  case DRIVE_FIXED:
+    break;
+  default:
+    return std::nullopt;
+  }
+  ScopedKernelHandle volume(CreateFileW(
+      path.substr(0, end).c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      nullptr, OPEN_EXISTING, 0, nullptr));
+  if (volume.value == INVALID_HANDLE_VALUE)
+    return std::nullopt;
+  STORAGE_PROPERTY_QUERY query{};
+  query.PropertyId = StorageDeviceProperty;
+  query.QueryType = PropertyStandardQuery;
+  std::array<std::uint8_t, 1024> descriptor{};
+  DWORD returned = 0;
+  if (!DeviceIoControl(volume.value, IOCTL_STORAGE_QUERY_PROPERTY, &query,
+                       sizeof(query), descriptor.data(),
+                       static_cast<DWORD>(descriptor.size()), &returned,
+                       nullptr) ||
+      returned < sizeof(STORAGE_DEVICE_DESCRIPTOR))
+    return std::nullopt;
+  STORAGE_DEVICE_DESCRIPTOR device{};
+  std::memcpy(&device, descriptor.data(), sizeof(device));
+  switch (device.BusType) {
+  case BusTypeUsb:
+  case BusType1394:
+  case BusTypeSd:
+  case BusTypeMmc:
+  case BusTypeFileBackedVirtual:
+    return "removable";
+  case BusTypeiScsi:
+    return "network";
+  default:
+    return "fixed";
+  }
+}
+
+// The verified signer of the state WinVerifyTrust left open.
+bool ReadWindowsTargetSigner(HANDLE state, WindowsTargetSignature *signature) {
+  CRYPT_PROVIDER_DATA *provider = WTHelperProvDataFromStateData(state);
+  CRYPT_PROVIDER_SGNR *signer =
+      provider == nullptr ? nullptr
+                          : WTHelperGetProvSignerFromChain(provider, 0, FALSE, 0);
+  CRYPT_PROVIDER_CERT *leaf =
+      signer == nullptr ? nullptr : WTHelperGetProvCertFromChain(signer, 0);
+  if (leaf == nullptr || leaf->pCert == nullptr ||
+      signer->pChainContext == nullptr)
+    return false;
+  std::array<std::uint8_t, 32> thumbprint{};
+  DWORD thumbprint_bytes = static_cast<DWORD>(thumbprint.size());
+  if (CertGetCertificateContextProperty(leaf->pCert, CERT_SHA256_HASH_PROP_ID,
+                                        thumbprint.data(),
+                                        &thumbprint_bytes) != TRUE ||
+      thumbprint_bytes != thumbprint.size())
+    return false;
+  static constexpr char hexadecimal[] = "0123456789abcdef";
+  signature->thumbprint.clear();
+  for (const std::uint8_t byte : thumbprint) {
+    signature->thumbprint += hexadecimal[byte >> 4];
+    signature->thumbprint += hexadecimal[byte & 0xf];
+  }
+  void *organization_oid = const_cast<char *>(szOID_ORGANIZATION_NAME);
+  const DWORD characters = CertGetNameStringW(
+      leaf->pCert, CERT_NAME_ATTR_TYPE, 0, organization_oid, nullptr, 0);
+  if (characters == 1) {
+    signature->organization = std::string{};
+  } else if (characters > 1 && characters <= 1'024) {
+    std::wstring organization(characters, L'\0');
+    if (CertGetNameStringW(leaf->pCert, CERT_NAME_ATTR_TYPE, 0,
+                           organization_oid, organization.data(),
+                           characters) == characters) {
+      organization.resize(characters - 1);
+      signature->organization = WindowsTargetUtf8(organization);
+    }
+  }
+  // A Microsoft product root (the policy without flags), or the application root (Microsoft Root
+  // Certificate Authority 2011), which that flag checks instead of the product roots.
+  for (const DWORD flags :
+       {DWORD{0}, DWORD{MICROSOFT_ROOT_CERT_CHAIN_POLICY_CHECK_APPLICATION_ROOT_FLAG}}) {
+    CERT_CHAIN_POLICY_PARA policy{};
+    policy.cbSize = sizeof(policy);
+    policy.dwFlags = flags;
+    CERT_CHAIN_POLICY_STATUS status{};
+    status.cbSize = sizeof(status);
+    if (CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_MICROSOFT_ROOT,
+                                         signer->pChainContext, &policy,
+                                         &status) != TRUE) {
+      signature->microsoft_root.reset();
+      break;
+    }
+    signature->microsoft_root = status.dwError == ERROR_SUCCESS;
+    if (*signature->microsoft_root)
+      break;
+  }
+  return true;
+}
+
+// Runs WinVerifyTrust (decision K: no revocation, no network) and reads the signer on success.
+// The verdict, or std::nullopt when it verified but its signer could not be read.
+std::optional<LONG> VerifyWindowsTargetTrust(WINTRUST_DATA *trust,
+                                             WindowsTargetSignature *signature) {
+  trust->cbStruct = sizeof(*trust);
+  trust->dwUIChoice = WTD_UI_NONE;
+  trust->fdwRevocationChecks = WTD_REVOKE_NONE;
+  trust->dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE |
+                       WTD_DISABLE_MD2_MD4;
+  trust->dwStateAction = WTD_STATEACTION_VERIFY;
+  GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+  const LONG verified = WinVerifyTrust(nullptr, &policy, trust);
+  const bool read = verified == ERROR_SUCCESS &&
+                    ReadWindowsTargetSigner(trust->hWVTStateData, signature);
+  trust->dwStateAction = WTD_STATEACTION_CLOSE;
+  WinVerifyTrust(nullptr, &policy, trust);
+  if (verified == ERROR_SUCCESS && !read)
+    return std::nullopt;
+  return verified;
+}
+
+bool RewindWindowsTargetFile(HANDLE file) {
+  LARGE_INTEGER beginning{};
+  return SetFilePointerEx(file, beginning, nullptr, FILE_BEGIN) == TRUE;
+}
+
+// A catalog that carries the file's hash (SHA-256, then SHA-1 for older catalogs). The state is
+// "unsigned" when no catalog carries it, and std::nullopt when the catalogs cannot be asked.
+WindowsTargetSignature VerifyWindowsTargetCatalog(HANDLE file,
+                                                  const std::wstring &path) {
+  WindowsTargetSignature signature;
+  for (const wchar_t *algorithm : {BCRYPT_SHA256_ALGORITHM, BCRYPT_SHA1_ALGORITHM}) {
+    HCATADMIN admin = nullptr;
+    if (!CryptCATAdminAcquireContext2(&admin, nullptr, algorithm, nullptr, 0) ||
+        admin == nullptr)
+      return signature;
+    DWORD hash_bytes = 0;
+    std::vector<std::uint8_t> hash;
+    bool hashed = RewindWindowsTargetFile(file);
+    if (hashed) {
+      CryptCATAdminCalcHashFromFileHandle2(admin, file, &hash_bytes, nullptr, 0);
+      hash.resize(hash_bytes);
+      hashed = hash_bytes > 0 && hash_bytes <= 64 && RewindWindowsTargetFile(file) &&
+               CryptCATAdminCalcHashFromFileHandle2(admin, file, &hash_bytes,
+                                                    hash.data(), 0) == TRUE;
+    }
+    if (!hashed) {
+      CryptCATAdminReleaseContext(admin, 0);
+      return signature;
+    }
+    HCATINFO catalog = CryptCATAdminEnumCatalogFromHash(
+        admin, hash.data(), hash_bytes, 0, nullptr);
+    if (catalog == nullptr) {
+      CryptCATAdminReleaseContext(admin, 0);
+      continue;
+    }
+    CATALOG_INFO information{};
+    information.cbStruct = sizeof(information);
+    std::wstring tag;
+    static constexpr wchar_t hexadecimal[] = L"0123456789ABCDEF";
+    for (const std::uint8_t byte : hash) {
+      tag += hexadecimal[byte >> 4];
+      tag += hexadecimal[byte & 0xf];
+    }
+    std::optional<LONG> verified;
+    if (CryptCATCatalogInfoFromContext(catalog, &information, 0) == TRUE &&
+        RewindWindowsTargetFile(file)) {
+      WINTRUST_CATALOG_INFO member{};
+      member.cbStruct = sizeof(member);
+      member.pcwszCatalogFilePath = information.wszCatalogFile;
+      member.pcwszMemberTag = tag.c_str();
+      member.pcwszMemberFilePath = path.c_str();
+      member.hMemberFile = file;
+      member.pbCalculatedFileHash = hash.data();
+      member.cbCalculatedFileHash = hash_bytes;
+      member.hCatAdmin = admin;
+      WINTRUST_DATA trust{};
+      trust.dwUnionChoice = WTD_CHOICE_CATALOG;
+      trust.pCatalog = &member;
+      verified = VerifyWindowsTargetTrust(&trust, &signature);
+    }
+    CryptCATAdminReleaseCatalogContext(admin, catalog, 0);
+    CryptCATAdminReleaseContext(admin, 0);
+    if (!verified.has_value())
+      return signature;
+    signature.source = WindowsTargetSignatureSource::kCatalog;
+    signature.state = *verified == ERROR_SUCCESS ? "valid" : "invalid";
+    return signature;
+  }
+  signature.state = "unsigned";
+  return signature;
+}
+
+// The embedded signature, or the catalog when the file carries none. A present embedded signature
+// that does not verify is invalid; the catalog is not asked to stand in for it.
+WindowsTargetSignature VerifyWindowsTargetSignature(HANDLE file,
+                                                    const std::wstring &path) {
+  WindowsTargetSignature signature;
+  if (!RewindWindowsTargetFile(file))
+    return signature;
+  WINTRUST_FILE_INFO file_info{};
+  file_info.cbStruct = sizeof(file_info);
+  file_info.pcwszFilePath = path.c_str();
+  file_info.hFile = file;
+  WINTRUST_DATA trust{};
+  trust.dwUnionChoice = WTD_CHOICE_FILE;
+  trust.pFile = &file_info;
+  const std::optional<LONG> verified = VerifyWindowsTargetTrust(&trust, &signature);
+  if (!verified.has_value())
+    return signature;
+  if (*verified == TRUST_E_NOSIGNATURE)
+    return VerifyWindowsTargetCatalog(file, path);
+  signature.source = WindowsTargetSignatureSource::kEmbedded;
+  signature.state = *verified == ERROR_SUCCESS ? "valid" : "invalid";
+  return signature;
+}
+
+std::optional<std::string> WindowsTargetPeSubsystem(HANDLE file) {
+  std::vector<std::uint8_t> header(64 * 1024);
+  OVERLAPPED at{};
+  DWORD read = 0;
+  if (ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &read,
+               &at) != TRUE)
+    return std::nullopt;
+  header.resize(read);
+  return sprint_coder::computer_use::ParsePeSubsystem(header);
+}
+
+bool WindowsTargetResourceIsAbsent(DWORD error) {
+  return error == ERROR_RESOURCE_TYPE_NOT_FOUND ||
+         error == ERROR_RESOURCE_NAME_NOT_FOUND ||
+         error == ERROR_RESOURCE_DATA_NOT_FOUND ||
+         error == ERROR_RESOURCE_LANG_NOT_FOUND;
+}
+
+std::optional<std::span<const std::uint8_t>>
+WindowsTargetResource(HMODULE image, LPCWSTR type, bool *absent) {
+  *absent = false;
+  HRSRC found = FindResourceW(image, MAKEINTRESOURCEW(1), type);
+  if (found == nullptr) {
+    *absent = WindowsTargetResourceIsAbsent(GetLastError());
+    return std::nullopt;
+  }
+  HGLOBAL loaded = LoadResource(image, found);
+  const DWORD size = SizeofResource(image, found);
+  const void *data = loaded == nullptr ? nullptr : LockResource(loaded);
+  if (data == nullptr || size == 0)
+    return std::nullopt;
+  return std::span<const std::uint8_t>(static_cast<const std::uint8_t *>(data), size);
+}
+
+// The manifest's execution level and, when the signature verified, OriginalFilename. The held
+// file cannot be written, renamed or deleted, so the path names it while the resources are read.
+void ReadWindowsTargetResources(const std::wstring &path, bool signature_verified,
+                                sprint_coder::computer_use::TargetFacts *facts) {
+  if (!signature_verified)
+    facts->original_filename = std::string{};
+  HMODULE image = LoadLibraryExW(
+      path.c_str(), nullptr,
+      LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+  if (image == nullptr)
+    return;
+  bool absent = false;
+  const std::optional<std::span<const std::uint8_t>> manifest =
+      WindowsTargetResource(image, RT_MANIFEST, &absent);
+  if (manifest.has_value())
+    facts->requires_administrator =
+        sprint_coder::computer_use::ManifestRequiresAdministrator(std::string_view(
+            reinterpret_cast<const char *>(manifest->data()), manifest->size()));
+  else if (absent)
+    facts->requires_administrator = false;
+  if (signature_verified) {
+    const std::optional<std::span<const std::uint8_t>> version =
+        WindowsTargetResource(image, RT_VERSION, &absent);
+    if (version.has_value())
+      facts->original_filename =
+          sprint_coder::computer_use::VersionInfoOriginalFilename(*version);
+    else if (absent)
+      facts->original_filename = std::string{};
+  }
+  FreeLibrary(image);
+}
+
+std::optional<std::vector<std::uint8_t>> WindowsTargetTokenInformation(
+    HANDLE token, TOKEN_INFORMATION_CLASS information_class) {
+  DWORD bytes = 0;
+  GetTokenInformation(token, information_class, nullptr, 0, &bytes);
+  if (bytes == 0 || bytes > 64 * 1024)
+    return std::nullopt;
+  std::vector<std::uint8_t> buffer(bytes);
+  if (GetTokenInformation(token, information_class, buffer.data(), bytes,
+                          &bytes) != TRUE)
+    return std::nullopt;
+  return buffer;
+}
+
+std::optional<DWORD> WindowsTargetTokenDword(HANDLE token,
+                                             TOKEN_INFORMATION_CLASS information_class) {
+  DWORD value = 0;
+  DWORD bytes = 0;
+  if (GetTokenInformation(token, information_class, &value, sizeof(value),
+                          &bytes) != TRUE ||
+      bytes != sizeof(value))
+    return std::nullopt;
+  return value;
+}
+
+std::optional<DWORD> WindowsTargetIntegrityRid(HANDLE token) {
+  const std::optional<std::vector<std::uint8_t>> label =
+      WindowsTargetTokenInformation(token, TokenIntegrityLevel);
+  if (!label.has_value() || label->size() < sizeof(TOKEN_MANDATORY_LABEL))
+    return std::nullopt;
+  const auto *mandatory =
+      reinterpret_cast<const TOKEN_MANDATORY_LABEL *>(label->data());
+  PSID sid = mandatory->Label.Sid;
+  if (sid == nullptr || !IsValidSid(sid) || *GetSidSubAuthorityCount(sid) == 0)
+    return std::nullopt;
+  return *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1u);
+}
+
+// The 7 token items. Anything unreadable is the refusing value.
+void MeasureWindowsTargetToken(HANDLE process,
+                               sprint_coder::computer_use::TargetFacts *facts) {
+  facts->token_elevated = true;
+  facts->token_other_user = true;
+  facts->token_other_session = true;
+  facts->token_protected = true;
+  facts->token_ui_access = true;
+  facts->token_integrity_above_self = true;
+  facts->token_app_container = true;
+  PROCESS_PROTECTION_LEVEL_INFORMATION protection{};
+  if (GetProcessInformation(process, ProcessProtectionLevelInfo, &protection,
+                            sizeof(protection)) == TRUE)
+    facts->token_protected = protection.ProtectionLevel != PROTECTION_LEVEL_NONE;
+  HANDLE own = GetCurrentProcessToken();
+  ScopedKernelHandle token;
+  if (OpenProcessToken(process, TOKEN_QUERY, &token.value) != TRUE)
+    return;
+  if (const std::optional<DWORD> elevated =
+          WindowsTargetTokenDword(token.value, TokenElevation))
+    facts->token_elevated = *elevated != 0;
+  const std::optional<std::vector<std::uint8_t>> user =
+      WindowsTargetTokenInformation(token.value, TokenUser);
+  const std::optional<std::vector<std::uint8_t>> own_user =
+      WindowsTargetTokenInformation(own, TokenUser);
+  if (user.has_value() && own_user.has_value() &&
+      user->size() >= sizeof(TOKEN_USER) && own_user->size() >= sizeof(TOKEN_USER)) {
+    PSID target_sid = reinterpret_cast<const TOKEN_USER *>(user->data())->User.Sid;
+    PSID own_sid = reinterpret_cast<const TOKEN_USER *>(own_user->data())->User.Sid;
+    if (target_sid != nullptr && own_sid != nullptr && IsValidSid(target_sid) &&
+        IsValidSid(own_sid))
+      facts->token_other_user = EqualSid(target_sid, own_sid) != TRUE;
+  }
+  const std::optional<DWORD> session = WindowsTargetTokenDword(token.value, TokenSessionId);
+  const std::optional<DWORD> own_session = WindowsTargetTokenDword(own, TokenSessionId);
+  if (session.has_value() && own_session.has_value())
+    facts->token_other_session = *session != *own_session;
+  if (const std::optional<DWORD> ui_access =
+          WindowsTargetTokenDword(token.value, TokenUIAccess))
+    facts->token_ui_access = *ui_access != 0;
+  const std::optional<DWORD> integrity = WindowsTargetIntegrityRid(token.value);
+  const std::optional<DWORD> own_integrity = WindowsTargetIntegrityRid(own);
+  if (integrity.has_value() && own_integrity.has_value())
+    facts->token_integrity_above_self = *integrity > *own_integrity;
+  if (const std::optional<DWORD> app_container =
+          WindowsTargetTokenDword(token.value, TokenIsAppContainer))
+    facts->token_app_container = *app_container != 0;
+}
+
+std::optional<std::string> WindowsTargetPackageSignatureKind(const std::wstring &full_name) {
+#if SPRINT_CODER_HAS_WINDOWS_PACKAGE_CATALOG
+  try {
+    const winrt::Windows::ApplicationModel::Package package =
+        winrt::Windows::Management::Deployment::PackageManager().FindPackageForUser(
+            L"", full_name);
+    if (package == nullptr)
+      return std::nullopt;
+    switch (package.SignatureKind()) {
+    case winrt::Windows::ApplicationModel::PackageSignatureKind::None:
+      return "none";
+    case winrt::Windows::ApplicationModel::PackageSignatureKind::Developer:
+      return "developer";
+    case winrt::Windows::ApplicationModel::PackageSignatureKind::Enterprise:
+      return "enterprise";
+    case winrt::Windows::ApplicationModel::PackageSignatureKind::Store:
+      return "store";
+    case winrt::Windows::ApplicationModel::PackageSignatureKind::System:
+      return "system";
+    }
+  } catch (...) {
+  }
+#else
+  (void)full_name;
+#endif
+  return std::nullopt;
+}
+
+std::optional<bool> WindowsTargetPackageDevelopmentMode(const std::wstring &full_name) {
+  PACKAGE_INFO_REFERENCE reference = nullptr;
+  if (OpenPackageInfoByFullName(full_name.c_str(), 0, &reference) != ERROR_SUCCESS)
+    return std::nullopt;
+  std::optional<bool> development;
+  UINT32 bytes = 0;
+  UINT32 count = 0;
+  constexpr UINT32 filter = PACKAGE_FILTER_HEAD | PACKAGE_FILTER_DIRECT;
+  if (GetPackageInfo(reference, filter, &bytes, nullptr, &count) ==
+          ERROR_INSUFFICIENT_BUFFER &&
+      bytes > 0 && bytes <= 1024 * 1024) {
+    std::vector<std::uint8_t> buffer(bytes);
+    if (GetPackageInfo(reference, filter, &bytes, buffer.data(), &count) ==
+        ERROR_SUCCESS) {
+      const auto *packages = reinterpret_cast<const PACKAGE_INFO *>(buffer.data());
+      for (UINT32 index = 0; index < count; ++index)
+        if (packages[index].packageFullName != nullptr &&
+            SameWindowsTargetName(packages[index].packageFullName, full_name))
+          development = (packages[index].flags & PACKAGE_PROPERTY_DEVELOPMENT_MODE) != 0;
+    }
+  }
+  ClosePackageInfo(reference);
+  return development;
+}
+
+void MeasureWindowsTargetPackage(HANDLE process, WindowsTargetFactsMeasurement *measured) {
+  sprint_coder::computer_use::TargetFacts &facts = measured->facts;
+  UINT32 length = 0;
+  const LONG probed = GetPackageFullName(process, &length, nullptr);
+  if (probed == APPMODEL_ERROR_NO_PACKAGE) {
+    facts.packaged = false;
+    facts.package_family = std::string{};
+    facts.package_signature_kind = "none";
+    facts.package_development_mode = false;
+    return;
+  }
+  if (probed != ERROR_INSUFFICIENT_BUFFER || length == 0 || length > 1024)
+    return;
+  std::wstring full_name(length, L'\0');
+  if (GetPackageFullName(process, &length, full_name.data()) != ERROR_SUCCESS ||
+      length == 0)
+    return;
+  full_name.resize(length - 1);
+  facts.packaged = true;
+  measured->package_full_name = WindowsTargetUtf8(full_name);
+  UINT32 family_length = 0;
+  if (GetPackageFamilyName(process, &family_length, nullptr) ==
+          ERROR_INSUFFICIENT_BUFFER &&
+      family_length > 0 && family_length <= 1024) {
+    std::wstring family(family_length, L'\0');
+    if (GetPackageFamilyName(process, &family_length, family.data()) ==
+            ERROR_SUCCESS &&
+        family_length > 0) {
+      family.resize(family_length - 1);
+      facts.package_family = WindowsTargetUtf8(family);
+    }
+  }
+  UINT32 id_bytes = 0;
+  if (PackageIdFromFullName(full_name.c_str(), PACKAGE_INFORMATION_BASIC,
+                            &id_bytes, nullptr) == ERROR_INSUFFICIENT_BUFFER &&
+      id_bytes > 0 && id_bytes <= 64 * 1024) {
+    std::vector<std::uint8_t> id(id_bytes);
+    if (PackageIdFromFullName(full_name.c_str(), PACKAGE_INFORMATION_BASIC,
+                              &id_bytes, id.data()) == ERROR_SUCCESS) {
+      const auto *package = reinterpret_cast<const PACKAGE_ID *>(id.data());
+      if (package->publisherId != nullptr)
+        measured->package_publisher_id = WindowsTargetUtf8(package->publisherId);
+    }
+  }
+  facts.package_development_mode = WindowsTargetPackageDevelopmentMode(full_name);
+  facts.package_signature_kind = WindowsTargetPackageSignatureKind(full_name);
+}
+
+// Every process with its parent pid, its creation time (when it can be opened) and its leaf.
+std::optional<std::vector<sprint_coder::computer_use::WindowsProcessNode>>
+SnapshotWindowsTargetProcesses() {
+  ScopedKernelHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
+  if (snapshot.value == INVALID_HANDLE_VALUE)
+    return std::nullopt;
+  std::vector<sprint_coder::computer_use::WindowsProcessNode> nodes;
+  PROCESSENTRY32W entry{};
+  entry.dwSize = sizeof(entry);
+  if (Process32FirstW(snapshot.value, &entry) != TRUE)
+    return std::nullopt;
+  do {
+    sprint_coder::computer_use::WindowsProcessNode node;
+    node.pid = entry.th32ProcessID;
+    node.parent_pid = entry.th32ParentProcessID;
+    ScopedKernelHandle process(
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
+    node.creation = WindowsTargetCreationTime(process.value);
+    node.leaf = Utf8FromWide(entry.szExeFile);
+    nodes.push_back(std::move(node));
+  } while (Process32NextW(snapshot.value, &entry) == TRUE && nodes.size() < 65'536);
+  return nodes;
+}
+
+void MeasureWindowsTargetLineage(const WindowsTargetFactsContext &context,
+                                 WindowsTargetFactsMeasurement *measured) {
+  using namespace sprint_coder::computer_use;
+  const std::optional<std::vector<WindowsProcessNode>> nodes =
+      SnapshotWindowsTargetProcesses();
+  if (!nodes.has_value() || !measured->creation.has_value())
+    return;
+  const std::uint64_t creation = *measured->creation;
+  for (const WindowsProcessNode &node : *nodes) {
+    if (node.pid != measured->pid || node.creation != creation)
+      continue;
+    for (const WindowsProcessNode &parent : *nodes)
+      if (parent.pid == node.parent_pid && parent.pid != node.pid &&
+          parent.creation.has_value() && *parent.creation <= creation)
+        measured->parent_pid = parent.pid;
+  }
+  const WindowsDescendants below = FindWindowsDescendants(
+      *nodes, measured->pid, creation, kWindowsTargetDescendantLimit);
+  bool shell = below.truncated;
+  bool pseudo_console = below.truncated;
+  for (const std::size_t index : below.nodes) {
+    shell = shell || WindowsLeafIsShell((*nodes)[index].leaf);
+    pseudo_console = pseudo_console || WindowsLeafIsConsoleHost((*nodes)[index].leaf);
+  }
+  measured->facts.descendant_shell = shell;
+  measured->facts.descendant_pseudo_console = pseudo_console;
+  // Without a lineage root nothing can say what is Sprint Coder's own: not measured.
+  if (context.lineage_root_pid == 0)
+    return;
+  const WindowsDescendants own = FindWindowsDescendants(
+      *nodes, context.lineage_root_pid, context.lineage_root_creation,
+      kWindowsTargetDescendantLimit);
+  bool own_descendant = own.truncated || (measured->pid == context.lineage_root_pid &&
+                                          creation == context.lineage_root_creation);
+  for (const std::size_t index : own.nodes)
+    own_descendant = own_descendant || ((*nodes)[index].pid == measured->pid &&
+                                        (*nodes)[index].creation == creation);
+  measured->facts.own_descendant = own_descendant;
+}
+
+std::optional<std::string> WindowsTargetWindowClass(HWND window, std::uint32_t pid) {
+  DWORD owner = 0;
+  if (window == nullptr || GetWindowThreadProcessId(window, &owner) == 0 ||
+      owner != pid)
+    return std::nullopt;
+  std::array<wchar_t, 257> name{};
+  const int length = GetClassNameW(window, name.data(), static_cast<int>(name.size()));
+  if (length <= 0)
+    return std::nullopt;
+  return WindowsTargetUtf8(std::wstring_view(name.data(), static_cast<std::size_t>(length)));
+}
+
+// Measures one target process (and the window it is asked about, which may be null). The result
+// is only facts: judging them is the core's, and nothing here calls it.
+WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
+    std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context) {
+  using namespace sprint_coder::computer_use;
+  WindowsTargetFactsMeasurement measured;
+  measured.pid = pid;
+  measured.facts.platform = TargetPlatform::kWin32;
+  ScopedKernelHandle process(
+      OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
+  if (process.value == nullptr || GetProcessId(process.value) != pid)
+    return measured;
+  measured.creation = WindowsTargetCreationTime(process.value);
+  if (!measured.creation.has_value())
+    return measured;
+  TargetFacts &facts = measured.facts;
+  MeasureWindowsTargetToken(process.value, &facts);
+  MeasureWindowsTargetPackage(process.value, &measured);
+  facts.window_class = WindowsTargetWindowClass(window, pid);
+  MeasureWindowsTargetLineage(context, &measured);
+
+  // The recorded path first, as V1 reads it, then the running image: a rename in between leaves
+  // the recorded path naming another file, which is a mismatch.
+  std::wstring recorded_path;
+  const std::optional<std::wstring> recorded =
+      ReadProcessPath(process.value, &recorded_path)
+          ? std::optional<std::wstring>(std::move(recorded_path))
+          : std::nullopt;
+  WindowsTargetHeldImage held;
+  if (!HoldWindowsTargetRunningImage(process.value, recorded, &held))
+    return measured;
+  facts.running_image_matches = held.matches;
+  measured.image_path = held.canonical_path;
+  measured.file_identity = held.identity;
+  const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
+  if (path.has_value()) {
+    facts.image_leaf = WindowsImageLeaf(*path);
+    if (context.roots.has_value()) {
+      WindowsImagePlacement placement = PlaceWindowsImage(*path, *context.roots);
+      facts.image_root = std::move(placement.root);
+      facts.image_relative_path = std::move(placement.relative_path);
+    }
+    facts.acceptance_fixture =
+        context.acceptance_mode &&
+        target_eligibility_detail::AsciiLower(*facts.image_leaf) == kWindowsTargetFixtureLeaf;
+  }
+  facts.image_volume = WindowsTargetVolumeKind(held.file.value);
+
+  const WindowsTargetSignature signature =
+      VerifyWindowsTargetSignature(held.file.value, held.canonical_path);
+  measured.signature_source = signature.source;
+  if (signature.state.has_value()) {
+    const bool verified = *signature.state == "valid";
+    measured.signer_thumbprint = verified ? signature.thumbprint : std::string{};
+    // Decision I: a catalog admits nothing outside %WINDIR%.
+    const bool catalog_outside_windows =
+        signature.source == WindowsTargetSignatureSource::kCatalog &&
+        facts.image_root.value_or("") != "windows_directory";
+    facts.signature = verified && catalog_outside_windows ? std::string("unsigned")
+                                                          : *signature.state;
+    facts.signer_organization = verified ? signature.organization : std::string{};
+    facts.signer_microsoft_root = verified ? signature.microsoft_root : false;
+    facts.signer_is_self = verified && !context.self_signer_thumbprint.empty() &&
+                           signature.thumbprint == context.self_signer_thumbprint;
+    ReadWindowsTargetResources(held.canonical_path, verified, &facts);
+  }
+  facts.pe_subsystem = WindowsTargetPeSubsystem(held.file.value);
+  return measured;
+}
+// END windows target facts
 
 bool ScreenBoundsPhysicalForWindow(HWND window, RECT *bounds) {
   return window != nullptr && ClientBoundsPhysical(window, bounds);
