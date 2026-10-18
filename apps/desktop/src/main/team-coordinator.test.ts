@@ -4716,6 +4716,77 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 55_000);
 
+    it('checks each of 32 workspace-write assignments with two Git commands (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Thirty-two assignments');
+      const runtime = new BlockingDistinctFileRuntime();
+      configureGitWorkspace(persistence, task.id);
+      const worktreesRoot = mkdtempSync(join(tmpdir(), 'sprint-coder-team-worktrees-'));
+      cleanup.push(worktreesRoot);
+      let counting = false;
+      const commands: string[] = [];
+      const manager = new WorkerWorktreeManager({
+        worktreesRoot,
+        execFileImpl: async (file, args, options) => {
+          // The config probe that runs before each command is not counted.
+          if (counting && !args.includes('--list'))
+            commands.push(args[args.indexOf('-C') + 2] ?? '');
+          const result = await promisify(execFile)(file, [...args], {
+            env: options.env,
+            timeout: options.timeout,
+            windowsHide: true,
+          });
+          return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        },
+      });
+      // One execution runs and the others stay queued, so only the assignments call Git.
+      const coordinator = new TeamCoordinator(
+        persistence,
+        runtime,
+        undefined,
+        undefined,
+        undefined,
+        new TeamExecutionScheduler(1),
+        undefined,
+        undefined,
+        manager,
+      );
+      const workers: Awaited<ReturnType<typeof coordinator.hireWorker>>[] = [];
+      for (let index = 0; index < 32; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `writer-${index}`,
+            objective: 'write',
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        );
+      const assign = (index: number) =>
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: workers[index]!.id,
+          content: `file-${index}`,
+          doneCriteria: [`file-${index}.txt is written`],
+          accessMode: 'workspace-write',
+        });
+      await assign(0);
+      await waitFor(() => runtime.releases.length === 1, 15_000);
+      counting = true;
+      for (let index = 1; index < 32; index += 1)
+        expect((await assign(index)).state).toBe('queued');
+      counting = false;
+      // Each check reads the repository state with one `rev-parse` and its changes with one
+      // `status`, instead of ten commands (twenty processes) before.
+      expect(commands.filter((command) => command === 'rev-parse')).toHaveLength(31);
+      expect(commands.filter((command) => command === 'status')).toHaveLength(31);
+      expect(commands).toHaveLength(62);
+      const stopped = coordinator.stopAll(task.id).catch(() => undefined);
+      runtime.releases.splice(0).forEach((release) => release());
+      await stopped;
+      persistence.close();
+    }, 120_000);
+
     it('assigns workspace-write work without waiting behind queued integrations (issue #864)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Assignments beside an integration queue');
