@@ -24,69 +24,206 @@
         "other"
       ]
     },
-    { "name": "imageRelativePath", "type": "string", "platforms": ["win32"] },
-    { "name": "imageLeaf", "type": "string", "platforms": ["win32"], "denyOnly": true },
+    {
+      "name": "imageRelativePath",
+      "type": "string",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "imageLeaf",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    },
     {
       "name": "imageVolume",
       "type": "enum",
       "platforms": ["win32"],
       "values": ["fixed", "network", "removable"]
     },
-    { "name": "runningImageMatches", "type": "boolean", "platforms": ["win32"] },
+    {
+      "name": "runningImageMatches",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
     {
       "name": "signature",
       "type": "enum",
       "platforms": ["win32"],
       "values": ["valid", "unsigned", "invalid"]
     },
-    { "name": "signerOrganization", "type": "string", "platforms": ["win32"] },
-    { "name": "signerMicrosoftRoot", "type": "boolean", "platforms": ["win32"] },
-    { "name": "signerIsSelf", "type": "boolean", "platforms": ["win32"] },
-    { "name": "acceptanceFixture", "type": "boolean", "platforms": ["win32"] },
+    {
+      "name": "signerOrganization",
+      "type": "string",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "signerMicrosoftRoot",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "signerIsSelf",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "acceptanceFixture",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
     {
       "name": "peSubsystem",
       "type": "enum",
       "platforms": ["win32"],
       "values": ["gui", "console", "other"]
     },
-    { "name": "originalFilename", "type": "string", "platforms": ["win32"], "denyOnly": true },
-    { "name": "requiresAdministrator", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenElevated", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenOtherUser", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenOtherSession", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenProtected", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenUiAccess", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenIntegrityAboveSelf", "type": "boolean", "platforms": ["win32"] },
-    { "name": "tokenAppContainer", "type": "boolean", "platforms": ["win32"] },
-    { "name": "packaged", "type": "boolean", "platforms": ["win32"] },
-    { "name": "packageFamily", "type": "string", "platforms": ["win32"] },
+    {
+      "name": "originalFilename",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    },
+    {
+      "name": "requiresAdministrator",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenElevated",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenOtherUser",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenOtherSession",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenProtected",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenUiAccess",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenIntegrityAboveSelf",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "tokenAppContainer",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "packaged",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "packageFamily",
+      "type": "string",
+      "platforms": ["win32"]
+    },
     {
       "name": "packageSignatureKind",
       "type": "enum",
       "platforms": ["win32"],
       "values": ["none", "store", "system", "developer", "enterprise"]
     },
-    { "name": "packageDevelopmentMode", "type": "boolean", "platforms": ["win32"] },
-    { "name": "ownDescendant", "type": "boolean", "platforms": ["win32"] },
-    { "name": "descendantShell", "type": "boolean", "platforms": ["win32"] },
-    { "name": "descendantPseudoConsole", "type": "boolean", "platforms": ["win32"] },
-    { "name": "windowClass", "type": "string", "platforms": ["win32"], "denyOnly": true }
+    {
+      "name": "packageDevelopmentMode",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "ownDescendant",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "descendantShell",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "descendantPseudoConsole",
+      "type": "boolean",
+      "platforms": ["win32"]
+    },
+    {
+      "name": "windowClass",
+      "type": "string",
+      "platforms": ["win32"],
+      "denyOnly": true
+    }
   ],
   "classes": [
-    { "id": "W-UR", "verdict": "denied" },
-    { "id": "W7", "verdict": "denied" },
-    { "id": "W8", "verdict": "denied" },
-    { "id": "W-PX", "verdict": "denied" },
-    { "id": "W-SYS", "verdict": "denied" },
-    { "id": "W1", "verdict": "denied" },
-    { "id": "W2", "verdict": "denied" },
-    { "id": "W3", "verdict": "denied" },
-    { "id": "W4", "verdict": "denied" },
-    { "id": "W5", "verdict": "denied" },
-    { "id": "W6", "verdict": "denied" },
-    { "id": "W10", "verdict": "denied" },
-    { "id": "W-NR", "verdict": "denied" },
-    { "id": "C", "verdict": "upper" }
+    {
+      "id": "W-UR",
+      "verdict": "denied"
+    },
+    {
+      "id": "W7",
+      "verdict": "denied"
+    },
+    {
+      "id": "W8",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-PX",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-SYS",
+      "verdict": "denied"
+    },
+    {
+      "id": "W1",
+      "verdict": "denied"
+    },
+    {
+      "id": "W2",
+      "verdict": "denied"
+    },
+    {
+      "id": "W3",
+      "verdict": "denied"
+    },
+    {
+      "id": "W4",
+      "verdict": "denied"
+    },
+    {
+      "id": "W5",
+      "verdict": "denied"
+    },
+    {
+      "id": "W6",
+      "verdict": "denied"
+    },
+    {
+      "id": "W10",
+      "verdict": "denied"
+    },
+    {
+      "id": "W-NR",
+      "verdict": "denied"
+    },
+    {
+      "id": "C",
+      "verdict": "upper"
+    }
   ],
   "lists": {
     "windowsDirectoryExplicit": ["system32\\notepad.exe"]
@@ -97,12 +234,34 @@
       "platforms": ["win32"],
       "note": "The %WINDIR% explicit table, carried over from the V1 rule (System32 notepad, Microsoft signed).",
       "when": [
-        { "signal": "imageRoot", "match": "equals", "values": ["windows_directory"] },
-        { "signal": "imageRelativePath", "match": "equals", "list": "windowsDirectoryExplicit" },
-        { "signal": "packaged", "match": "false" },
-        { "signal": "signature", "match": "equals", "values": ["valid"] },
-        { "signal": "signerMicrosoftRoot", "match": "true" },
-        { "signal": "peSubsystem", "match": "equals", "values": ["gui"] }
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_directory"]
+        },
+        {
+          "signal": "imageRelativePath",
+          "match": "equals",
+          "list": "windowsDirectoryExplicit"
+        },
+        {
+          "signal": "packaged",
+          "match": "false"
+        },
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["valid"]
+        },
+        {
+          "signal": "signerMicrosoftRoot",
+          "match": "true"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
       ]
     },
     {
@@ -115,10 +274,24 @@
           "match": "equals",
           "values": ["program_files", "local_programs"]
         },
-        { "signal": "packaged", "match": "false" },
-        { "signal": "signature", "match": "equals", "values": ["valid", "unsigned"] },
-        { "signal": "signerMicrosoftRoot", "match": "false" },
-        { "signal": "peSubsystem", "match": "equals", "values": ["gui"] }
+        {
+          "signal": "packaged",
+          "match": "false"
+        },
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["valid", "unsigned"]
+        },
+        {
+          "signal": "signerMicrosoftRoot",
+          "match": "false"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
       ]
     },
     {
@@ -126,11 +299,29 @@
       "platforms": ["win32"],
       "note": "A Store or System signed package under the WindowsApps root. Developer, sideloaded and development mode packages are not a package route.",
       "when": [
-        { "signal": "imageRoot", "match": "equals", "values": ["windows_apps"] },
-        { "signal": "packaged", "match": "true" },
-        { "signal": "packageSignatureKind", "match": "equals", "values": ["store", "system"] },
-        { "signal": "packageDevelopmentMode", "match": "false" },
-        { "signal": "peSubsystem", "match": "equals", "values": ["gui"] }
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_apps"]
+        },
+        {
+          "signal": "packaged",
+          "match": "true"
+        },
+        {
+          "signal": "packageSignatureKind",
+          "match": "equals",
+          "values": ["store", "system"]
+        },
+        {
+          "signal": "packageDevelopmentMode",
+          "match": "false"
+        },
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["gui"]
+        }
       ]
     }
   ],
@@ -138,71 +329,140 @@
     {
       "class": "W-UR",
       "platforms": ["win32"],
-      "when": [{ "signal": "imageVolume", "match": "equals", "values": ["network", "removable"] }]
+      "when": [
+        {
+          "signal": "imageVolume",
+          "match": "equals",
+          "values": ["network", "removable"]
+        }
+      ]
     },
     {
       "class": "W-UR",
       "platforms": ["win32"],
-      "when": [{ "signal": "runningImageMatches", "match": "false" }]
+      "when": [
+        {
+          "signal": "runningImageMatches",
+          "match": "false"
+        }
+      ]
     },
     {
       "class": "W-UR",
       "platforms": ["win32"],
-      "when": [{ "signal": "signature", "match": "equals", "values": ["invalid"] }]
+      "when": [
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["invalid"]
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenElevated", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenElevated",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenOtherUser", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenOtherUser",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenOtherSession", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenOtherSession",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenProtected", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenProtected",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenUiAccess", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenUiAccess",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W7",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenIntegrityAboveSelf", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenIntegrityAboveSelf",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W8",
       "platforms": ["win32"],
-      "when": [{ "signal": "imageRoot", "match": "equals", "values": ["self_install"] }]
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["self_install"]
+        }
+      ]
     },
     {
       "class": "W8",
       "platforms": ["win32"],
-      "when": [{ "signal": "ownDescendant", "match": "true" }]
+      "when": [
+        {
+          "signal": "ownDescendant",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W8",
       "platforms": ["win32"],
       "note": "Sprint Coder's own signer; the acceptance fixture is excused only when the native says it is in acceptance mode.",
       "when": [
-        { "signal": "signerIsSelf", "match": "true" },
-        { "signal": "acceptanceFixture", "match": "false" }
+        {
+          "signal": "signerIsSelf",
+          "match": "true"
+        },
+        {
+          "signal": "acceptanceFixture",
+          "match": "false"
+        }
       ]
     },
     {
       "class": "W-PX",
       "platforms": ["win32"],
-      "when": [{ "signal": "tokenAppContainer", "match": "true" }]
+      "when": [
+        {
+          "signal": "tokenAppContainer",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W-PX",
@@ -220,7 +480,11 @@
       "platforms": ["win32"],
       "note": "Everything under %WINDIR% that is not on the explicit table (settings, security prompts, shell surfaces, LOLBins, Explorer).",
       "when": [
-        { "signal": "imageRoot", "match": "equals", "values": ["windows_directory"] },
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["windows_directory"]
+        },
         {
           "signal": "imageRelativePath",
           "match": "equals",
@@ -244,14 +508,22 @@
       "class": "W2",
       "platforms": ["win32"],
       "when": [
-        { "signal": "packageFamily", "match": "prefix", "values": ["microsoft.sechealthui_"] }
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["microsoft.sechealthui_"]
+        }
       ]
     },
     {
       "class": "W2",
       "platforms": ["win32"],
       "when": [
-        { "signal": "windowClass", "match": "equals", "values": ["credential dialog xaml host"] }
+        {
+          "signal": "windowClass",
+          "match": "equals",
+          "values": ["credential dialog xaml host"]
+        }
       ]
     },
     {
@@ -312,13 +584,44 @@
     {
       "class": "W4",
       "platforms": ["win32"],
-      "when": [{ "signal": "peSubsystem", "match": "equals", "values": ["console"] }]
+      "when": [
+        {
+          "signal": "peSubsystem",
+          "match": "equals",
+          "values": ["console"]
+        }
+      ]
     },
     {
       "class": "W4",
       "platforms": ["win32"],
       "when": [
-        { "signal": "packageFamily", "match": "prefix", "values": ["microsoft.windowsterminal"] }
+        {
+          "signal": "packageFamily",
+          "match": "prefix",
+          "values": ["microsoft.windowsterminal"]
+        }
+      ]
+    },
+    {
+      "class": "W4",
+      "platforms": ["win32"],
+      "note": "GUI terminals and SSH clients by publisher. Provisional publisher strings, to be measured in #777 (item 5); deny-direction only.",
+      "when": [
+        {
+          "signal": "signerOrganization",
+          "match": "equals",
+          "values": [
+            "simon tatham",
+            "vandyke software, inc.",
+            "netsarang computer, inc.",
+            "mobatek",
+            "termius corporation",
+            "eugene pankov",
+            "martin prikryl",
+            "bitvise limited"
+          ]
+        }
       ]
     },
     {
@@ -374,7 +677,14 @@
             "conemu*.exe",
             "cmder.exe",
             "warp.exe",
-            "putty*.exe"
+            "putty*.exe",
+            "securecrt*.exe",
+            "xshell*.exe",
+            "mobaxterm*.exe",
+            "termius*.exe",
+            "winscp*.exe",
+            "bvssh*.exe",
+            "kitty_portable*.exe"
           ]
         }
       ]
@@ -396,10 +706,14 @@
             "realvnc limited",
             "splashtop inc.",
             "logmein, inc.",
-            "purslane ltd."
+            "purslane ltd.",
+            "devolutions inc.",
+            "royal apps gmbh",
+            "mremoteng"
           ]
         }
-      ]
+      ],
+      "note": "Remote desktop, VM consoles and remote management by publisher. Provisional publisher strings, to be measured in #777 (item 5); deny-direction only."
     },
     {
       "class": "W5",
@@ -439,7 +753,10 @@
             "quickassist.exe",
             "remoting_*.exe",
             "wfica32.exe",
-            "cdviewer.exe"
+            "cdviewer.exe",
+            "remotedesktopmanager*.exe",
+            "royalts*.exe",
+            "mremoteng*.exe"
           ]
         }
       ]
@@ -448,12 +765,23 @@
       "class": "W6",
       "platforms": ["win32"],
       "note": "Outside the install roots (%TEMP%, Downloads) nothing is eligible.",
-      "when": [{ "signal": "imageRoot", "match": "equals", "values": ["temp", "downloads"] }]
+      "when": [
+        {
+          "signal": "imageRoot",
+          "match": "equals",
+          "values": ["temp", "downloads"]
+        }
+      ]
     },
     {
       "class": "W6",
       "platforms": ["win32"],
-      "when": [{ "signal": "requiresAdministrator", "match": "true" }]
+      "when": [
+        {
+          "signal": "requiresAdministrator",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "W6",
@@ -547,18 +875,34 @@
     {
       "class": "C",
       "platforms": ["win32"],
-      "when": [{ "signal": "descendantShell", "match": "true" }]
+      "when": [
+        {
+          "signal": "descendantShell",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "C",
       "platforms": ["win32"],
-      "when": [{ "signal": "descendantPseudoConsole", "match": "true" }]
+      "when": [
+        {
+          "signal": "descendantPseudoConsole",
+          "match": "true"
+        }
+      ]
     },
     {
       "class": "C",
       "platforms": ["win32"],
       "note": "Decision C: unsigned is capped until the Windows approval path exists.",
-      "when": [{ "signal": "signature", "match": "equals", "values": ["unsigned"] }]
+      "when": [
+        {
+          "signal": "signature",
+          "match": "equals",
+          "values": ["unsigned"]
+        }
+      ]
     },
     {
       "class": "C",

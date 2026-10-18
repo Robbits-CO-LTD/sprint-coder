@@ -32,11 +32,20 @@
     "windowClass": "contosoeditorwindow"
   },
   "cases": [
-    { "name": "signed general app under Program Files", "expect": { "kind": "eligible" } },
+    {
+      "name": "signed general app under Program Files",
+      "expect": {
+        "kind": "eligible"
+      }
+    },
     {
       "name": "signed general app under LOCALAPPDATA Programs (decision A)",
-      "set": { "imageRoot": "local_programs" },
-      "expect": { "kind": "eligible" }
+      "set": {
+        "imageRoot": "local_programs"
+      },
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "Electron app with a renamed binary (decision F)",
@@ -45,12 +54,19 @@
         "originalFilename": "slack.exe",
         "windowClass": "chrome_widgetwin_1"
       },
-      "expect": { "kind": "eligible" }
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "upper case leaf is folded before matching",
-      "set": { "imageLeaf": "CMD.EXE" },
-      "expect": { "kind": "denied", "class": "W4" }
+      "set": {
+        "imageLeaf": "CMD.EXE"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
     },
     {
       "name": "System32 notepad on the explicit table",
@@ -63,7 +79,9 @@
         "signerMicrosoftRoot": true,
         "windowClass": "notepad"
       },
-      "expect": { "kind": "eligible" }
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "System32 notepad without a valid signature is not on the route",
@@ -75,7 +93,10 @@
         "signerOrganization": "",
         "originalFilename": ""
       },
-      "expect": { "kind": "denied", "class": "W-NR" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     },
     {
       "name": "Explorer under WINDIR (decision E)",
@@ -87,7 +108,10 @@
         "signerMicrosoftRoot": true,
         "windowClass": "cabinetwclass"
       },
-      "expect": { "kind": "denied", "class": "W-SYS" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-SYS"
+      }
     },
     {
       "name": "a LOLBin under System32",
@@ -97,7 +121,10 @@
         "imageLeaf": "rundll32.exe",
         "signerMicrosoftRoot": true
       },
-      "expect": { "kind": "denied", "class": "W-SYS" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-SYS"
+      }
     },
     {
       "name": "Store notepad package",
@@ -111,7 +138,9 @@
         "packageFamily": "microsoft.windowsnotepad_8wekyb3d8bbwe",
         "packageSignatureKind": "store"
       },
-      "expect": { "kind": "eligible" }
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "sideloaded developer package",
@@ -121,7 +150,10 @@
         "packageFamily": "contoso.editor_abcdefghijklm",
         "packageSignatureKind": "developer"
       },
-      "expect": { "kind": "denied", "class": "W-NR" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     },
     {
       "name": "Store package in development mode",
@@ -132,7 +164,10 @@
         "packageSignatureKind": "store",
         "packageDevelopmentMode": true
       },
-      "expect": { "kind": "denied", "class": "W-NR" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     },
     {
       "name": "Settings package (W1)",
@@ -142,7 +177,10 @@
         "packageFamily": "windows.immersivecontrolpanel_cw5n1h2txyewy",
         "packageSignatureKind": "system"
       },
-      "expect": { "kind": "denied", "class": "W1" }
+      "expect": {
+        "kind": "denied",
+        "class": "W1"
+      }
     },
     {
       "name": "Windows Security package (W2)",
@@ -152,27 +190,52 @@
         "packageFamily": "microsoft.sechealthui_8wekyb3d8bbwe",
         "packageSignatureKind": "system"
       },
-      "expect": { "kind": "denied", "class": "W2" }
+      "expect": {
+        "kind": "denied",
+        "class": "W2"
+      }
     },
     {
       "name": "credential prompt window class (W2)",
-      "set": { "windowClass": "Credential Dialog Xaml Host" },
-      "expect": { "kind": "denied", "class": "W2" }
+      "set": {
+        "windowClass": "Credential Dialog Xaml Host"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W2"
+      }
     },
     {
       "name": "password manager publisher, any application (W3)",
-      "set": { "signerOrganization": "agilebits inc.", "imageLeaf": "1password-updater-ui.exe" },
-      "expect": { "kind": "denied", "class": "W3" }
+      "set": {
+        "signerOrganization": "agilebits inc.",
+        "imageLeaf": "1password-updater-ui.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W3"
+      }
     },
     {
       "name": "password manager by leaf (W3)",
-      "set": { "imageLeaf": "keepassxc.exe", "signerOrganization": "unknown publisher" },
-      "expect": { "kind": "denied", "class": "W3" }
+      "set": {
+        "imageLeaf": "keepassxc.exe",
+        "signerOrganization": "unknown publisher"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W3"
+      }
     },
     {
       "name": "console subsystem (W4)",
-      "set": { "peSubsystem": "console" },
-      "expect": { "kind": "denied", "class": "W4" }
+      "set": {
+        "peSubsystem": "console"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
     },
     {
       "name": "Windows Terminal package (W4)",
@@ -182,117 +245,232 @@
         "packageFamily": "microsoft.windowsterminal_8wekyb3d8bbwe",
         "packageSignatureKind": "store"
       },
-      "expect": { "kind": "denied", "class": "W4" }
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
     },
     {
       "name": "pseudo console window class (W4)",
-      "set": { "windowClass": "PseudoConsoleWindow" },
-      "expect": { "kind": "denied", "class": "W4" }
+      "set": {
+        "windowClass": "PseudoConsoleWindow"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
     },
     {
       "name": "remote desktop publisher (W5)",
-      "set": { "signerOrganization": "teamviewer germany gmbh" },
-      "expect": { "kind": "denied", "class": "W5" }
+      "set": {
+        "signerOrganization": "teamviewer germany gmbh"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W5"
+      }
     },
     {
       "name": "remote desktop by leaf (W5)",
-      "set": { "imageLeaf": "rustdesk.exe" },
-      "expect": { "kind": "denied", "class": "W5" }
+      "set": {
+        "imageLeaf": "rustdesk.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W5"
+      }
     },
     {
       "name": "image under TEMP (W6)",
-      "set": { "imageRoot": "temp" },
-      "expect": { "kind": "denied", "class": "W6" }
+      "set": {
+        "imageRoot": "temp"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W6"
+      }
     },
     {
       "name": "requireAdministrator manifest (W6)",
-      "set": { "requiresAdministrator": true },
-      "expect": { "kind": "denied", "class": "W6" }
+      "set": {
+        "requiresAdministrator": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W6"
+      }
     },
     {
       "name": "installer leaf (W6)",
-      "set": { "imageLeaf": "contosoinstaller.exe" },
-      "expect": { "kind": "denied", "class": "W6" }
+      "set": {
+        "imageLeaf": "contosoinstaller.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W6"
+      }
     },
     {
       "name": "renamed installer caught by OriginalFilename (W6)",
-      "set": { "imageLeaf": "contoso.exe", "originalFilename": "setup.exe" },
-      "expect": { "kind": "denied", "class": "W6" }
+      "set": {
+        "imageLeaf": "contoso.exe",
+        "originalFilename": "setup.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W6"
+      }
     },
     {
       "name": "elevated token (W7)",
-      "set": { "tokenElevated": true },
-      "expect": { "kind": "denied", "class": "W7" }
+      "set": {
+        "tokenElevated": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W7"
+      }
     },
     {
       "name": "UIAccess token (W7)",
-      "set": { "tokenUiAccess": true },
-      "expect": { "kind": "denied", "class": "W7" }
+      "set": {
+        "tokenUiAccess": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W7"
+      }
     },
     {
       "name": "another session (W7)",
-      "set": { "tokenOtherSession": true },
-      "expect": { "kind": "denied", "class": "W7" }
+      "set": {
+        "tokenOtherSession": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W7"
+      }
     },
     {
       "name": "Sprint Coder install root (W8)",
-      "set": { "imageRoot": "self_install" },
-      "expect": { "kind": "denied", "class": "W8" }
+      "set": {
+        "imageRoot": "self_install"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W8"
+      }
     },
     {
       "name": "own descendant (W8)",
-      "set": { "ownDescendant": true },
-      "expect": { "kind": "denied", "class": "W8" }
+      "set": {
+        "ownDescendant": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W8"
+      }
     },
     {
       "name": "own signer outside acceptance mode (W8)",
-      "set": { "signerIsSelf": true },
-      "expect": { "kind": "denied", "class": "W8" }
+      "set": {
+        "signerIsSelf": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W8"
+      }
     },
     {
       "name": "own signer as the acceptance fixture is not refused as W8",
-      "set": { "signerIsSelf": true, "acceptanceFixture": true },
-      "expect": { "kind": "eligible" }
+      "set": {
+        "signerIsSelf": true,
+        "acceptanceFixture": true
+      },
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "interpreter by leaf (W10)",
-      "set": { "imageLeaf": "python3.12.exe" },
-      "expect": { "kind": "denied", "class": "W10" }
+      "set": {
+        "imageLeaf": "python3.12.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W10"
+      }
     },
     {
       "name": "generic electron.exe (W10)",
-      "set": { "imageLeaf": "electron.exe" },
-      "expect": { "kind": "denied", "class": "W10" }
+      "set": {
+        "imageLeaf": "electron.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W10"
+      }
     },
     {
       "name": "renamed interpreter caught by OriginalFilename (W10)",
-      "set": { "imageLeaf": "tool.exe", "originalFilename": "node.exe" },
-      "expect": { "kind": "denied", "class": "W10" }
+      "set": {
+        "imageLeaf": "tool.exe",
+        "originalFilename": "node.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W10"
+      }
     },
     {
       "name": "ApplicationFrameHost proxy (W-PX)",
-      "set": { "imageLeaf": "applicationframehost.exe" },
-      "expect": { "kind": "denied", "class": "W-PX" }
+      "set": {
+        "imageLeaf": "applicationframehost.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-PX"
+      }
     },
     {
       "name": "AppContainer token (W-PX)",
-      "set": { "tokenAppContainer": true },
-      "expect": { "kind": "denied", "class": "W-PX" }
+      "set": {
+        "tokenAppContainer": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-PX"
+      }
     },
     {
       "name": "network volume (W-UR)",
-      "set": { "imageVolume": "network" },
-      "expect": { "kind": "denied", "class": "W-UR" }
+      "set": {
+        "imageVolume": "network"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-UR"
+      }
     },
     {
       "name": "running image does not match (W-UR)",
-      "set": { "runningImageMatches": false },
-      "expect": { "kind": "denied", "class": "W-UR" }
+      "set": {
+        "runningImageMatches": false
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-UR"
+      }
     },
     {
       "name": "invalid signature (W-UR)",
-      "set": { "signature": "invalid" },
-      "expect": { "kind": "denied", "class": "W-UR" }
+      "set": {
+        "signature": "invalid"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-UR"
+      }
     },
     {
       "name": "Microsoft signed outside WINDIR (decision B)",
@@ -301,32 +479,59 @@
         "signerOrganization": "microsoft corporation",
         "signerMicrosoftRoot": true
       },
-      "expect": { "kind": "denied", "class": "W-NR" }
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     },
     {
       "name": "image outside every install root",
-      "set": { "imageRoot": "other" },
-      "expect": { "kind": "denied", "class": "W-NR" }
+      "set": {
+        "imageRoot": "other"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W-NR"
+      }
     },
     {
       "name": "unsigned general app is capped (decision C)",
-      "set": { "signature": "unsigned", "signerOrganization": "", "originalFilename": "" },
-      "expect": { "kind": "upper" }
+      "set": {
+        "signature": "unsigned",
+        "signerOrganization": "",
+        "originalFilename": ""
+      },
+      "expect": {
+        "kind": "upper"
+      }
     },
     {
       "name": "IDE publisher is capped (C)",
-      "set": { "signerOrganization": "jetbrains s.r.o.", "imageLeaf": "idea64.exe" },
-      "expect": { "kind": "upper" }
+      "set": {
+        "signerOrganization": "jetbrains s.r.o.",
+        "imageLeaf": "idea64.exe"
+      },
+      "expect": {
+        "kind": "upper"
+      }
     },
     {
       "name": "shell descendant is capped (C)",
-      "set": { "descendantShell": true },
-      "expect": { "kind": "upper" }
+      "set": {
+        "descendantShell": true
+      },
+      "expect": {
+        "kind": "upper"
+      }
     },
     {
       "name": "ConPTY descendant is capped (C)",
-      "set": { "descendantPseudoConsole": true },
-      "expect": { "kind": "upper" }
+      "set": {
+        "descendantPseudoConsole": true
+      },
+      "expect": {
+        "kind": "upper"
+      }
     },
     {
       "name": "browser is capped (decision D)",
@@ -335,42 +540,219 @@
         "signerOrganization": "google llc",
         "windowClass": "chrome_widgetwin_1"
       },
-      "expect": { "kind": "upper" }
+      "expect": {
+        "kind": "upper"
+      }
     },
     {
       "name": "a refusal wins over the cap",
-      "set": { "descendantShell": true, "tokenElevated": true },
-      "expect": { "kind": "denied", "class": "W7" }
+      "set": {
+        "descendantShell": true,
+        "tokenElevated": true
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W7"
+      }
     },
     {
       "name": "one unmeasured fact is unresolvable",
       "unknown": ["windowClass"],
-      "expect": { "kind": "unresolvable" }
+      "expect": {
+        "kind": "unresolvable"
+      }
     },
     {
       "name": "an unmeasured token is unresolvable",
       "unknown": ["tokenElevated"],
-      "expect": { "kind": "unresolvable" }
+      "expect": {
+        "kind": "unresolvable"
+      }
     },
     {
       "name": "an enum value the ruleset does not know is unresolvable",
-      "set": { "imageRoot": "program files" },
-      "expect": { "kind": "unresolvable" }
+      "set": {
+        "imageRoot": "program files"
+      },
+      "expect": {
+        "kind": "unresolvable"
+      }
+    },
+    {
+      "name": "SecureCRT by publisher (W4)",
+      "set": {
+        "signerOrganization": "VanDyke Software, Inc.",
+        "imageLeaf": "scrt.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "Xshell by publisher (W4)",
+      "set": {
+        "signerOrganization": "netsarang computer, inc.",
+        "imageLeaf": "xsh.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "PuTTY by publisher (W4)",
+      "set": {
+        "signerOrganization": "simon tatham",
+        "imageLeaf": "pageant.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "MobaXterm by publisher (W4)",
+      "set": {
+        "signerOrganization": "mobatek",
+        "imageLeaf": "moba.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "Termius by publisher (W4)",
+      "set": {
+        "signerOrganization": "termius corporation",
+        "imageLeaf": "app.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "Tabby by publisher (W4)",
+      "set": {
+        "signerOrganization": "eugene pankov",
+        "imageLeaf": "app.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "WinSCP by publisher (W4)",
+      "set": {
+        "signerOrganization": "martin prikryl",
+        "imageLeaf": "app.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "SecureCRT by leaf (W4)",
+      "set": {
+        "imageLeaf": "SecureCRT.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W4"
+      }
+    },
+    {
+      "name": "Devolutions Remote Desktop Manager by publisher (W5)",
+      "set": {
+        "signerOrganization": "devolutions inc.",
+        "imageLeaf": "app.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W5"
+      }
+    },
+    {
+      "name": "Royal TS by publisher (W5)",
+      "set": {
+        "signerOrganization": "royal apps gmbh",
+        "imageLeaf": "app.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W5"
+      }
+    },
+    {
+      "name": "mRemoteNG by leaf (W5)",
+      "set": {
+        "signature": "unsigned",
+        "signerOrganization": "",
+        "originalFilename": "",
+        "imageLeaf": "mRemoteNG.exe"
+      },
+      "expect": {
+        "kind": "denied",
+        "class": "W5"
+      }
+    },
+    {
+      "name": "a 1026-byte multibyte string is unresolvable (UTF-8 bytes are counted)",
+      "repeat": {
+        "imageRelativePath": {
+          "unit": "あ",
+          "count": 342
+        }
+      },
+      "expect": {
+        "kind": "unresolvable"
+      }
+    },
+    {
+      "name": "a string of exactly 1024 bytes is accepted",
+      "repeat": {
+        "imageRelativePath": {
+          "unit": "a",
+          "count": 1024
+        }
+      },
+      "expect": {
+        "kind": "eligible"
+      }
     },
     {
       "name": "an over-long measured string is unresolvable",
-      "repeat": { "imageRelativePath": { "unit": "a", "count": 1025 } },
-      "expect": { "kind": "unresolvable" }
+      "repeat": {
+        "imageRelativePath": {
+          "unit": "a",
+          "count": 1025
+        }
+      },
+      "expect": {
+        "kind": "unresolvable"
+      }
     },
     {
       "name": "a platform with no ruleset is unresolvable",
-      "set": { "platform": "darwin" },
-      "expect": { "kind": "unresolvable" }
+      "set": {
+        "platform": "darwin"
+      },
+      "expect": {
+        "kind": "unresolvable"
+      }
     },
     {
       "name": "a non-ASCII leaf is compared byte for byte",
-      "set": { "imageLeaf": "メモ帳.exe" },
-      "expect": { "kind": "eligible" }
+      "set": {
+        "imageLeaf": "メモ帳.exe"
+      },
+      "expect": {
+        "kind": "eligible"
+      }
     }
   ]
 }

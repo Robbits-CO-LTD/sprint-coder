@@ -248,7 +248,12 @@ inline void AppendWhen(std::string *text, const TargetCondition &condition) {
     }
     text += '\n';
   }
+  // Only the classes this platform can answer with: W-NR (no route) and those its rules name.
   for (const TargetClassSpec &entry : kTargetClasses) {
+    bool used = entry.id == "W-NR";
+    for (const TargetRule &rule : kTargetRules)
+      used = used || ((rule.platforms & bit) != 0 && rule.class_id == entry.id);
+    if (!used) continue;
     text += "class\t";
     text += entry.id;
     text += '\t';

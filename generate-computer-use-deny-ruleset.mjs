@@ -242,7 +242,14 @@ export function denyRulesetCanonicalText(model, platform) {
           '\t',
         ),
       );
-  for (const entry of model.classes) lines.push(`class\t${entry.id}\t${entry.verdict}`);
+  // Only the classes this platform can answer with: W-NR (no route) and those its rules name.
+  // A class another platform adds must not change this platform's hash (decision H).
+  const used = new Set(
+    model.rules.filter((rule) => rule.platforms.includes(platform)).map((rule) => rule.class),
+  );
+  for (const entry of model.classes)
+    if (entry.id === 'W-NR' || used.has(entry.id))
+      lines.push(`class\t${entry.id}\t${entry.verdict}`);
   const when = (condition) =>
     [
       'when',

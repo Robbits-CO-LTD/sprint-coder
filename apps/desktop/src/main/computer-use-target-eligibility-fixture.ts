@@ -43,6 +43,13 @@ const NEUTRAL_STRINGS = [
   'メモ帳.exe',
   'ÉDITEUR.EXE',
   'Contoso Installer Helper.EXE',
+  // Around the 1024-byte limit, counted in UTF-8 bytes (a kana is three bytes).
+  'a'.repeat(1023),
+  'a'.repeat(1024),
+  'a'.repeat(1025),
+  'あ'.repeat(341),
+  'あ'.repeat(342),
+  'メモ帳'.repeat(200),
 ];
 
 function stringPool(signal: string): readonly string[] {

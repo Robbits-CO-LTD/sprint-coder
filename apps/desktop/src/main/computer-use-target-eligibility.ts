@@ -20,18 +20,16 @@ import {
 export type { TargetFacts, TargetPlatformName } from './computer-use-deny-ruleset.generated';
 
 type Ruleset = typeof DENY_RULESET;
-type Mode = Ruleset['platforms'][keyof Ruleset['platforms']]['eligibleMaximumMode'];
+type PlatformRuleset = Ruleset['platforms'][keyof Ruleset['platforms']];
+/** The mode an eligible target may be bound with, as the generated ruleset states it. */
+export type TargetEligibleMode = PlatformRuleset['eligibleMaximumMode'];
+/** The mode a capped (upper) target may be bound with, as the generated ruleset states it. */
+export type TargetUpperMode = PlatformRuleset['upperMaximumMode'];
 type Condition = Readonly<{
   signal: string;
   match: 'true' | 'false' | 'equals' | 'prefix' | 'glob';
   negate: boolean;
   values: readonly string[];
-}>;
-type PlatformRuleset = Readonly<{
-  rulesetVersion: number;
-  eligibleMaximumMode: string;
-  upperMaximumMode: string;
-  contentSha256: string;
 }>;
 
 /** A measured string longer than this (in UTF-8 bytes) is treated as not measured. */
@@ -39,8 +37,8 @@ export const TARGET_FACT_MAX_BYTES = 1024;
 
 /** What leaves the core. A refusal says nothing but that it is one. */
 export type TargetEligibility =
-  | Readonly<{ kind: 'eligible'; maximumMode: Mode }>
-  | Readonly<{ kind: 'upper'; maximumMode: Mode }>
+  | Readonly<{ kind: 'eligible'; maximumMode: TargetEligibleMode }>
+  | Readonly<{ kind: 'upper'; maximumMode: TargetUpperMode }>
   | Readonly<{ kind: 'denied' }>
   | Readonly<{ kind: 'unresolvable' }>;
 
@@ -77,9 +75,13 @@ function globMatches(pattern: string, text: string): boolean {
   return p === pattern.length;
 }
 
+// A checked widening (an assignment, not a cast): only the key type is widened.
+const PLATFORM_RULESETS: Readonly<Record<string, PlatformRuleset | undefined>> =
+  DENY_RULESET.platforms;
+
 function rulesetFor(platform: unknown): PlatformRuleset | null {
-  if (typeof platform !== 'string' || !Object.hasOwn(DENY_RULESET.platforms, platform)) return null;
-  return (DENY_RULESET.platforms as Readonly<Record<string, PlatformRuleset>>)[platform] ?? null;
+  if (typeof platform !== 'string' || !Object.hasOwn(PLATFORM_RULESETS, platform)) return null;
+  return PLATFORM_RULESETS[platform] ?? null;
 }
 
 const fact = (facts: TargetFacts, name: string): unknown =>
@@ -146,12 +148,12 @@ export function classifyTargetExplained(facts: TargetFacts): TargetClassificatio
   for (const rule of rules)
     if (rule.verdict === 'upper' && applies(rule) && allHold(facts, rule.when))
       return {
-        verdict: { kind: 'upper', maximumMode: ruleset.upperMaximumMode as Mode },
+        verdict: { kind: 'upper', maximumMode: ruleset.upperMaximumMode },
         denyClass: null,
         route: route.id,
       };
   return {
-    verdict: { kind: 'eligible', maximumMode: ruleset.eligibleMaximumMode as Mode },
+    verdict: { kind: 'eligible', maximumMode: ruleset.eligibleMaximumMode },
     denyClass: null,
     route: route.id,
   };
@@ -201,7 +203,13 @@ export function denyRulesetCanonicalText(platform: string): string | null {
           '\t',
         ),
       );
-  for (const entry of DENY_RULESET.classes) lines.push(`class\t${entry.id}\t${entry.verdict}`);
+  // Only the classes this platform can answer with: W-NR (no route) and those its rules name.
+  const used = new Set<string>(
+    DENY_RULESET.rules.filter((rule) => applies(rule)).map((rule) => rule.class),
+  );
+  for (const entry of DENY_RULESET.classes)
+    if (entry.id === 'W-NR' || used.has(entry.id))
+      lines.push(`class\t${entry.id}\t${entry.verdict}`);
   for (const route of DENY_RULESET.routes)
     if (applies(route)) {
       lines.push(`route\t${route.id}`);

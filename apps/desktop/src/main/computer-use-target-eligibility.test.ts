@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   DENY_RULESET_PATHS,
   denyRulesetCanonicalText as generatorCanonicalText,
@@ -16,7 +16,10 @@ import {
   denyRulesetCanonicalText,
   denyRulesetRecordedSha256,
   denyRulesetVersion,
+  type TargetEligibility,
+  type TargetEligibleMode,
   type TargetFacts,
+  type TargetUpperMode,
 } from './computer-use-target-eligibility';
 import {
   randomTargetFacts,
@@ -36,11 +39,12 @@ const golden = materializeGoldenCases(model);
 /**
  * Every content a platform's ruleset has ever had, by version. Changing what a platform sees
  * changes its hash: give it a new version in deny-ruleset.json and add the pair here (never edit
- * or remove a recorded pair). Each platform has its own versions (decision H).
+ * or remove a pair once it is on main; v2 was re-recorded on the unmerged PR-1 branch). Each
+ * platform has its own versions (decision H).
  */
 const RULESET_LEDGER: Readonly<Record<string, Readonly<Record<number, string>>>> = {
   win32: {
-    2: 'aff3243e50526eda6508c910b21c6f129f865f23f9dc8d1a2f4824998afa6ef5',
+    2: '06a9ae9573a2a192bb80a00a713736576bcdcade21eb199d12efb26952a4fb4f',
   },
 };
 
@@ -171,6 +175,68 @@ describe('deny ruleset content hash and version', () => {
     expect(loadDenyRuleset(JSON.stringify(bumped)).platforms.win32!.contentSha256).toBe(
       model.platforms.win32!.contentSha256,
     );
+
+    // Another platform's ruleset (its signal, class, route and rule) leaves win32's hash alone,
+    // and a win32 change leaves that platform's hash alone (decision H).
+    type Json = {
+      platforms: Record<string, unknown>;
+      signals: unknown[];
+      classes: unknown[];
+      routes: unknown[];
+      rules: { platforms: string[]; when: { values?: string[] }[] }[];
+    };
+    const withDarwin = structuredClone(source) as unknown as Json;
+    withDarwin.platforms.darwin = {
+      rulesetVersion: 1,
+      eligibleMaximumMode: 'full_access_app',
+      upperMaximumMode: 'supervised',
+    };
+    withDarwin.signals.push({ name: 'bundleIdentifier', type: 'string', platforms: ['darwin'] });
+    withDarwin.classes.push({ id: 'M1', verdict: 'denied' });
+    withDarwin.routes.push({
+      id: 'darwin_application',
+      platforms: ['darwin'],
+      when: [{ signal: 'bundleIdentifier', match: 'prefix', values: ['com.'] }],
+    });
+    withDarwin.rules.push({
+      class: 'M1',
+      platforms: ['darwin'],
+      when: [{ signal: 'bundleIdentifier', match: 'equals', values: ['com.apple.terminal'] }],
+    } as unknown as Json['rules'][number]);
+    const both = loadDenyRuleset(JSON.stringify(withDarwin));
+    expect(both.platforms.win32!.contentSha256).toBe(model.platforms.win32!.contentSha256);
+    expect(generatorCanonicalText(both, 'win32')).toBe(generatorCanonicalText(model, 'win32'));
+    expect(generatorCanonicalText(both, 'darwin')).toContain('class\tM1\tdenied');
+    expect(generatorCanonicalText(both, 'darwin')).not.toContain('class\tW4\t');
+    const darwinHash = both.platforms.darwin!.contentSha256;
+    const win32Changed = structuredClone(withDarwin);
+    win32Changed.rules[win32Changed.rules.length - 2]!.when[0]!.values!.push('example.exe');
+    const afterWin32 = loadDenyRuleset(JSON.stringify(win32Changed));
+    expect(afterWin32.platforms.win32!.contentSha256).not.toBe(
+      model.platforms.win32!.contentSha256,
+    );
+    expect(afterWin32.platforms.darwin!.contentSha256).toBe(darwinHash);
+  });
+});
+
+describe('target eligibility outward types', () => {
+  it('types each admitted kind with the mode the generated ruleset gives it', () => {
+    type Eligible = Extract<TargetEligibility, { kind: 'eligible' }>;
+    type Upper = Extract<TargetEligibility, { kind: 'upper' }>;
+    expectTypeOf<Upper['maximumMode']>().toEqualTypeOf<'observe_only'>();
+    expectTypeOf<Eligible['maximumMode']>().toEqualTypeOf<'full_access_app'>();
+    expectTypeOf<TargetUpperMode>().toEqualTypeOf<
+      (typeof DENY_RULESET.platforms)['win32']['upperMaximumMode']
+    >();
+    expectTypeOf<TargetEligibleMode>().toEqualTypeOf<
+      (typeof DENY_RULESET.platforms)['win32']['eligibleMaximumMode']
+    >();
+    // A caller can compare an upper verdict with observe_only without a type error.
+    const verdict = classifyTarget(golden[0]!.facts as unknown as TargetFacts);
+    if (verdict.kind === 'upper') expect(verdict.maximumMode === 'observe_only').toBe(true);
+    const upper = golden.find((entry) => entry.expect.kind === 'upper')!;
+    const capped = classifyTarget(upper.facts as unknown as TargetFacts);
+    expect(capped.kind === 'upper' && capped.maximumMode === 'observe_only').toBe(true);
   });
 });
 
