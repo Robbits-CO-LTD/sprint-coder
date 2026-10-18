@@ -10,8 +10,10 @@ import { describe, expect, it } from 'vitest';
 // the conhost under it, a copy of cmd under another name, mstsc, the acceptance fixture (built
 // here), the fixture as this program's own child, a process with a shell below it, one with a
 // renamed copy of cmd below it (found by its running image, not its name), one with a GUI below it,
-// one with a pseudo console below it, and the fixture after its running image was renamed and another file put
-// at its path once that path had been read. Each measurement is checked fact by fact, and then
+// one with a pseudo console below it, the fixture after its running image was renamed and another file put
+// at its path once that path had been read, a copy whose image file changed after its process was
+// created, and a copy of cmd run from a trailing-dot name whose resources must be read through the
+// held handle (the dot-less name holds another file). Each measurement is checked fact by fact, and then
 // judged by the shared core (computer_use_target_eligibility.h) to show which class refuses it. The
 // rename must come out as a mismatch of the running image, with every fact read from the running
 // image and none from the replacement: if it did not, the expansion (PR-6) must not ship.
@@ -435,6 +437,24 @@ int wmain(int argc, wchar_t **argv) {
   Check(CurrentWindowsTargetFactsContext(0, "", true).lineage_root_pid == 0,
         "lineage_root_unmeasured_without_main");
 
+  // The snapshot gives every process its creation time without opening it, so a process this
+  // program may not open (a SYSTEM service when not elevated) is still told apart from a parent
+  // whose pid it reused.
+  {
+    const std::optional<std::vector<WindowsProcessNode>> nodes = SnapshotWindowsTargetProcesses();
+    bool timed = nodes.has_value() && nodes->size() > 4;
+    std::size_t unopenable = 0;
+    for (const WindowsProcessNode &node : nodes.value_or(std::vector<WindowsProcessNode>{})) {
+      if (node.pid <= 4) continue;
+      timed = timed && node.creation.has_value() && *node.creation > 0;
+      ScopedKernelHandle opened(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, node.pid));
+      if (opened.value == nullptr) ++unopenable;
+    }
+    std::cout << "snapshot processes=" << (nodes.has_value() ? nodes->size() : 0)
+              << " not openable here=" << unopenable << "\n";
+    Check(timed, "snapshot_gives_every_process_a_creation_time");
+  }
+
   // cmd, and the conhost below it.
   const Started shell = Start(L"\"" + cmd + L"\" /d /k", CREATE_NO_WINDOW);
   Check(shell.ok, "cmd_started");
@@ -482,6 +502,9 @@ int wmain(int argc, wchar_t **argv) {
   // catalog by its hash, but outside %WINDIR% a catalog admits nothing (decision I).
   const std::wstring renamed = scratch + L"\\sc500-not-a-shell.exe";
   Check(CopyFileW(cmd.c_str(), renamed.c_str(), FALSE) == TRUE, "renamed_cmd_copied");
+  // A copy's ChangeTime is the copy's moment; the process must be created on a later clock tick, or
+  // the image counts as changed at its creation (WindowsImageUnchangedSinceCreation's boundary).
+  Sleep(100);
   const Started renamed_shell = Start(L"\"" + renamed + L"\" /d /k", CREATE_NO_WINDOW);
   Check(renamed_shell.ok, "renamed_cmd_started");
   Sleep(800);
@@ -632,6 +655,7 @@ int wmain(int argc, wchar_t **argv) {
   // class). Fails closed rather than treating a broken signature as "no signature".
   const std::wstring bad_sig = scratch + L"\\sc500-bad-sig.exe";
   if (WriteBadSignatureCopy(fixture, bad_sig)) {
+    Sleep(100);
     const Started bad = Start(L"\"" + bad_sig + L"\"", 0);
     Check(bad.ok, "bad_signature_copy_started");
     WaitForInputIdle(bad.info.hProcess, 10000);
@@ -694,6 +718,7 @@ int wmain(int argc, wchar_t **argv) {
   const std::wstring swap = scratch + L"\\sc500-swap.exe";
   const std::wstring moved = scratch + L"\\sc500-swap-moved.exe";
   Check(CopyFileW(fixture.c_str(), swap.c_str(), FALSE) == TRUE, "swap_copied");
+  Sleep(100);
   const Started swapped = Start(L"\"" + swap + L"\"", 0);
   Check(swapped.ok, "swap_started");
   WaitForInputIdle(swapped.info.hProcess, 10000);
@@ -717,21 +742,100 @@ int wmain(int argc, wchar_t **argv) {
     Check(ClassOf(stale.facts) == "W-UR", "rename_replacement_refused_as_w_ur");
 
     // Measured afresh, the path is read again. Whether the system's recorded path follows a rename
-    // depends on the Windows build; either way the facts are of the running image, and they match
-    // exactly when the recorded path names it.
+    // depends on the Windows build; either way the facts are of the running image. The rename
+    // itself moved the image's ChangeTime past the process's creation, so it no longer counts as
+    // unchanged since its start, and the fresh measurement is a mismatch whichever way the
+    // recorded path went.
     const WindowsTargetFactsMeasurement after = Measure(swapped.info.dwProcessId, nullptr, outsider);
     Print("swap after", after);
     std::wstring recorded_after;
     const bool follows = ReadProcessPath(swapped.info.hProcess, &recorded_after) &&
                          recorded_after.ends_with(L"\\sc500-swap-moved.exe");
     std::cout << "recorded path follows the rename=" << follows << "\n";
-    Check(Is(after.facts.running_image_matches, follows), "fresh_match_is_whether_the_path_names_the_image");
+    Check(!raced.unchanged, "renamed_running_image_is_changed_since_its_creation");
+    Check(Is(after.facts.running_image_matches, false), "fresh_match_after_a_rename_is_a_mismatch");
     Check(after.image_path.ends_with(L"\\sc500-swap-moved.exe"), "facts_are_of_the_running_image");
     Check(Is(after.facts.signature, "unsigned") &&
               after.signature_source == WindowsTargetSignatureSource::kNone &&
               Is(after.facts.pe_subsystem, "gui"),
           "facts_are_not_of_the_replacement");
-    Check(ClassOf(after.facts) == (follows ? "W6" : "W-UR"), "fresh_measurement_class");
+    Check(ClassOf(after.facts) == "W-UR", "fresh_measurement_class");
+  }
+
+  // The image file changed after its process was created (process herpaderping rewrites the bytes
+  // after the section exists; a running image cannot be opened for writing, so here only its times
+  // are moved, through FILE_WRITE_ATTRIBUTES, which is what such a rewrite leaves behind). Before
+  // the change the running image matches; after it, it is a mismatch (W-UR).
+  {
+    const std::wstring touched = scratch + L"\\sc500-touched.exe";
+    Check(CopyFileW(fixture.c_str(), touched.c_str(), FALSE) == TRUE, "touched_copied");
+    Sleep(100);
+    const Started process = Start(L"\"" + touched + L"\"", 0);
+    Check(process.ok, "touched_started");
+    WaitForInputIdle(process.info.hProcess, 10000);
+    const WindowsTargetFactsMeasurement untouched = Measure(process.info.dwProcessId, nullptr, outsider);
+    Check(Is(untouched.facts.running_image_matches, true), "image_unchanged_since_creation_matches");
+    Sleep(100);
+    bool moved_times = false;
+    {
+      ScopedKernelHandle writer(CreateFileW(touched.c_str(), FILE_WRITE_ATTRIBUTES,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+      FILETIME now{};
+      GetSystemTimeAsFileTime(&now);
+      moved_times = writer.value != INVALID_HANDLE_VALUE &&
+                    SetFileTime(writer.value, nullptr, nullptr, &now) == TRUE;
+    }
+    Check(moved_times, "touched_image_times_moved");
+    const WindowsTargetFactsMeasurement changed = Measure(process.info.dwProcessId, nullptr, outsider);
+    Print("touched", changed);
+    Check(Is(changed.facts.running_image_matches, false) && ClassOf(changed.facts) == "W-UR",
+          "image_written_after_creation_is_a_mismatch");
+    WindowsTargetHeldImage held;
+    Check(HoldWindowsTargetRunningImage(process.info.hProcess, std::nullopt, &held) && !held.unchanged,
+          "image_written_after_creation_is_not_unchanged");
+  }
+
+  // The resources are read through the held handle, never by the path again. A copy of cmd runs as
+  // "sc500-dot.exe." (a trailing dot, reachable only through \\?\), and the fixture sits at
+  // "sc500-dot.exe", the name Win32 normalization makes of the first. Read by path, the resources
+  // would be the fixture's; read through the held image, they are cmd's.
+  {
+    const std::wstring dotted = L"\\\\?\\" + scratch + L"\\sc500-dot.exe.";
+    const std::wstring plain = scratch + L"\\sc500-dot.exe";
+    Check(CopyFileW(cmd.c_str(), dotted.c_str(), FALSE) == TRUE &&
+              CopyFileW(fixture.c_str(), plain.c_str(), FALSE) == TRUE,
+          "trailing_dot_files_written");
+    Sleep(100);
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    PROCESS_INFORMATION info{};
+    std::wstring command = L"\"" + dotted + L"\" /d /k";
+    const bool started = CreateProcessW(dotted.c_str(), command.data(), nullptr, nullptr, FALSE,
+                                        CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr,
+                                        &startup, &info) == TRUE;
+    Check(started, "trailing_dot_image_started");
+    if (started) {
+      AssignProcessToJobObject(g_job, info.hProcess);
+      WindowsTargetHeldImage held;
+      const bool holding = HoldWindowsTargetRunningImage(info.hProcess, std::nullopt, &held);
+      Check(holding && held.canonical_path.ends_with(L"\\sc500-dot.exe."),
+            "trailing_dot_running_image_is_held");
+      Check(holding && Is(WindowsTargetOriginalFilename(held.file.value), "cmd.exe"),
+            "resources_are_read_through_the_held_handle");
+      TargetFacts facts;
+      if (holding) ReadWindowsTargetResources(held.file.value, true, &facts);
+      Check(Is(facts.original_filename, "cmd.exe") && Is(facts.requires_administrator, false),
+            "verified_resources_are_of_the_held_image");
+      TerminateProcess(info.hProcess, 0);
+      WaitForSingleObject(info.hProcess, 5000);
+      CloseHandle(info.hThread);
+      CloseHandle(info.hProcess);
+    }
+    for (int attempt = 0; attempt < 50 && GetFileAttributesW(dotted.c_str()) != INVALID_FILE_ATTRIBUTES;
+         ++attempt)
+      if (DeleteFileW(dotted.c_str()) != TRUE) Sleep(100);
+    Check(GetFileAttributesW(dotted.c_str()) == INVALID_FILE_ATTRIBUTES, "trailing_dot_file_removed");
   }
 
   // A real AnyCPU .NET exe, if one ships with Windows, must not disagree with the kernel header
@@ -764,6 +868,7 @@ int wmain(int argc, wchar_t **argv) {
     if (!dotnet.empty()) {
       const std::wstring copy = scratch + L"\\sc500-dotnet.exe";
       Check(CopyFileW(dotnet.c_str(), copy.c_str(), FALSE) == TRUE, "anycpu_dotnet_copied");
+      Sleep(100);
       // Start suspended and never resume: the image is mapped at creation, so its facts are
       // measurable, while the util never runs (it would otherwise exit at once with no args).
       STARTUPINFOW startup{};

@@ -3,7 +3,8 @@
 // against the one the generator recorded, and checks monotonicity: a refusal signal added to, or a
 // fact taken away from, any golden target never makes it more eligible. It also checks the
 // portable parts of the Windows target facts (PR-2): root placement, leaf, PE subsystem, manifest
-// level, OriginalFilename and descendants. No platform header, no window, no process. CI compiles
+// level, OriginalFilename, resources, the process snapshot, the image-unchanged check and
+// descendants. No platform header, no window, no process. CI compiles
 // it with MSVC (the Windows v2 harness row) and clang (macOS).
 
 #include "computer_use_native_eligibility.h"
@@ -639,6 +640,8 @@ bool CheckDescendantLeaves() {
                "console-host-leaves");
 }
 
+bool CheckDescendantTimes();
+
 bool CheckDescendants() {
   // 100 (created at 10) -> 200 (20) -> 300 (30); 400 names 200 as its parent but was created
   // before it (200 is a reused pid); 500 could not be opened; 600 is under 500; 700 is its own
@@ -665,7 +668,282 @@ bool CheckDescendants() {
          Check(pids(below_cmd) == std::vector<std::uint32_t>({300}), "descendants-reused-pid") &&
          Check(limited.truncated && limited.nodes.size() == 2, "descendants-limit") &&
          Check(loop.nodes.empty(), "descendants-self-parent") &&
-         Check(FindWindowsDescendants(nodes, 900, 1, 64).nodes.empty(), "descendants-none");
+         Check(FindWindowsDescendants(nodes, 900, 1, 64).nodes.empty(), "descendants-none") &&
+         CheckDescendantTimes();
+}
+
+bool CheckDescendantTimes() {
+  // The target 100 (created at 50). 900 is a SYSTEM orphan this helper could never open, created at
+  // 10 under a parent that had pid 100 before the target reused it: with its time read from the
+  // kernel snapshot it is not the target's child. 910 was created in the same tick as the target
+  // (the deny direction: a child). 920 has no time (a source that cannot give one): a child, as are
+  // its own children (930).
+  const std::vector<WindowsProcessNode> nodes = {
+      {100, 4, 50, "app.exe"},        {900, 100, 10, "orphan.exe"},
+      {910, 100, 50, "same-tick.exe"}, {920, 100, std::nullopt, "untimed.exe"},
+      {930, 920, 60, "below.exe"},
+  };
+  std::vector<std::uint32_t> pids;
+  for (const std::size_t index : FindWindowsDescendants(nodes, 100, 50, 64).nodes)
+    pids.push_back(nodes[index].pid);
+  std::sort(pids.begin(), pids.end());
+  return Check(std::find(pids.begin(), pids.end(), 900u) == pids.end(),
+               "descendants-earlier-orphan-under-a-reused-pid-is-not-adopted") &&
+         Check(std::find(pids.begin(), pids.end(), 910u) != pids.end(),
+               "descendants-same-instant-is-a-child") &&
+         Check(pids == std::vector<std::uint32_t>({910, 920, 930}),
+               "descendants-untimed-is-a-child-with-its-children");
+}
+
+// A SystemProcessInformation buffer laid out at `address`: one 0x100-byte entry per process, each
+// with its image name at entry + 0xc0.
+struct SnapshotProcess {
+  std::uint64_t pid;
+  std::uint64_t parent;
+  std::uint64_t created;
+  std::u16string name;
+};
+
+void PutLe64(std::vector<std::uint8_t> &bytes, std::size_t at, std::uint64_t value) {
+  PutLe(bytes, at, static_cast<std::uint32_t>(value & 0xffffffffu), 4);
+  PutLe(bytes, at + 4, static_cast<std::uint32_t>(value >> 32), 4);
+}
+
+std::vector<std::uint8_t> SnapshotBuffer(const std::vector<SnapshotProcess> &processes,
+                                         std::uint64_t address) {
+  constexpr std::size_t kEntry = 0x100;
+  std::vector<std::uint8_t> bytes(processes.size() * kEntry, 0);
+  for (std::size_t index = 0; index < processes.size(); ++index) {
+    const std::size_t at = index * kEntry;
+    const SnapshotProcess &process = processes[index];
+    PutLe(bytes, at, index + 1 < processes.size() ? static_cast<std::uint32_t>(kEntry) : 0, 4);
+    PutLe64(bytes, at + kWindowsProcessEntryCreateTime, process.created);
+    PutLe(bytes, at + kWindowsProcessEntryImageNameLength,
+          static_cast<std::uint32_t>(process.name.size() * 2), 2);
+    PutLe64(bytes, at + kWindowsProcessEntryImageNameBuffer,
+            process.name.empty() ? 0 : address + at + 0xc0);
+    for (std::size_t unit = 0; unit < process.name.size(); ++unit)
+      PutLe(bytes, at + 0xc0 + unit * 2, process.name[unit], 2);
+    PutLe64(bytes, at + kWindowsProcessEntryPid, process.pid);
+    PutLe64(bytes, at + kWindowsProcessEntryParentPid, process.parent);
+  }
+  return bytes;
+}
+
+bool CheckProcessSnapshot() {
+  constexpr std::uint64_t kAddress = 0x7ff600010000u;
+  const std::vector<SnapshotProcess> processes = {
+      {0, 0, 0, u""}, {4, 0, 100, u"System"}, {1234, 4, 0x01d9000000000000u, u"App.exe"}};
+  const std::vector<std::uint8_t> buffer = SnapshotBuffer(processes, kAddress);
+  const std::optional<std::vector<WindowsProcessNode>> nodes =
+      ParseWindowsProcessSnapshot(buffer, kAddress, 64);
+  const bool fields =
+      nodes.has_value() && nodes->size() == 3 && (*nodes)[0].pid == 0 && (*nodes)[0].leaf.empty() &&
+      (*nodes)[1].pid == 4 && (*nodes)[1].creation == std::optional<std::uint64_t>(100) &&
+      (*nodes)[2].pid == 1234 && (*nodes)[2].parent_pid == 4 &&
+      (*nodes)[2].creation == std::optional<std::uint64_t>(0x01d9000000000000u) &&
+      (*nodes)[2].leaf == "App.exe";
+  std::vector<std::uint8_t> next_outside = buffer;
+  PutLe(next_outside, 0x100, 0x10000, 4);
+  // An entry whose NextEntryOffset (0x50) lands inside itself, on bytes that read as a whole entry
+  // (pid 9, the last): overlapping entries are refused, not read twice.
+  std::vector<std::uint8_t> next_inside_entry(0x100, 0);
+  PutLe(next_inside_entry, 0, 0x50, 4);
+  PutLe(next_inside_entry, 0x50 + kWindowsProcessEntryPid, 9, 4);
+  std::vector<std::uint8_t> name_outside = buffer;
+  PutLe64(name_outside, 0x200 + kWindowsProcessEntryImageNameBuffer, kAddress + 0x10000);
+  std::vector<std::uint8_t> name_below = buffer;
+  PutLe64(name_below, 0x200 + kWindowsProcessEntryImageNameBuffer, kAddress - 2);
+  std::vector<std::uint8_t> odd_name = buffer;
+  PutLe(odd_name, 0x200 + kWindowsProcessEntryImageNameLength, 3, 2);
+  std::vector<std::uint8_t> wide_pid = buffer;
+  PutLe64(wide_pid, 0x200 + kWindowsProcessEntryPid, 0x100000000u);
+  std::vector<std::uint8_t> truncated = buffer;
+  truncated.resize(0x200 + kWindowsProcessEntryMinimum - 1);
+  std::vector<std::uint8_t> surrogate = buffer;
+  PutLe(surrogate, 0x200 + 0xc0, 0xd800, 2);
+  const std::optional<std::vector<WindowsProcessNode>> unpaired =
+      ParseWindowsProcessSnapshot(surrogate, kAddress, 64);
+  return Check(fields, "snapshot-parent-creation-and-leaf-from-one-snapshot") &&
+         Check(!ParseWindowsProcessSnapshot(next_outside, kAddress, 64).has_value(),
+               "snapshot-next-entry-outside") &&
+         Check(!ParseWindowsProcessSnapshot(next_inside_entry, kAddress, 64).has_value(),
+               "snapshot-next-entry-inside-the-entry") &&
+         Check(!ParseWindowsProcessSnapshot(name_outside, kAddress, 64).has_value() &&
+                   !ParseWindowsProcessSnapshot(name_below, kAddress, 64).has_value(),
+               "snapshot-name-outside-the-buffer") &&
+         Check(!ParseWindowsProcessSnapshot(odd_name, kAddress, 64).has_value(),
+               "snapshot-odd-name-length") &&
+         Check(!ParseWindowsProcessSnapshot(wide_pid, kAddress, 64).has_value(),
+               "snapshot-pid-wider-than-32-bits") &&
+         Check(!ParseWindowsProcessSnapshot(truncated, kAddress, 64).has_value(),
+               "snapshot-truncated-entry") &&
+         Check(!ParseWindowsProcessSnapshot(buffer, kAddress, 2).has_value(),
+               "snapshot-more-than-the-limit") &&
+         Check(!ParseWindowsProcessSnapshot({}, kAddress, 64).has_value(), "snapshot-empty") &&
+         Check(unpaired.has_value() && (*unpaired)[2].leaf.empty() && (*unpaired)[2].pid == 1234,
+               "snapshot-unpaired-surrogate-name-is-empty");
+}
+
+bool CheckImageUnchanged() {
+  using Time = std::optional<std::int64_t>;
+  const std::optional<std::uint64_t> created = 1'000;
+  return Check(WindowsImageUnchangedSinceCreation(Time(500), Time(400), created),
+               "image-unchanged-before-creation") &&
+         Check(!WindowsImageUnchangedSinceCreation(Time(1'000), Time(400), created),
+               "image-change-time-at-creation-is-changed") &&
+         Check(!WindowsImageUnchangedSinceCreation(Time(500), Time(1'000), created),
+               "image-write-time-at-creation-is-changed") &&
+         Check(!WindowsImageUnchangedSinceCreation(Time(1'001), Time(400), created),
+               "image-changed-after-creation") &&
+         Check(!WindowsImageUnchangedSinceCreation(Time(500), Time(2'000), created),
+               "image-written-after-creation") &&
+         Check(!WindowsImageUnchangedSinceCreation(std::nullopt, Time(400), created) &&
+                   !WindowsImageUnchangedSinceCreation(Time(500), std::nullopt, created) &&
+                   !WindowsImageUnchangedSinceCreation(Time(500), Time(400), std::nullopt),
+               "image-times-unread-is-changed") &&
+         Check(!WindowsImageUnchangedSinceCreation(Time(0), Time(400), created) &&
+                   !WindowsImageUnchangedSinceCreation(Time(500), Time(-1), created),
+               "image-time-zero-or-negative-is-changed");
+}
+
+// A PE32+ header with 16 data directories, the resource directory (2) at `resource_rva` of
+// `resource_size`, and one section at `section_rva` of `virtual_size` (raw `raw_size`).
+std::vector<std::uint8_t> ResourceHeader(std::uint32_t resource_rva, std::uint32_t resource_size,
+                                         std::uint32_t section_rva, std::uint32_t virtual_size,
+                                         std::uint32_t raw_size) {
+  std::vector<std::uint8_t> bytes = PeHeader(0x20b, 2);
+  bytes.resize(bytes.size() + 40, 0);
+  PutLe(bytes, 0x80 + 6, 1, 2);
+  PutLe(bytes, 0x80 + 24 + 108, 16, 4);
+  PutLe(bytes, 0x80 + 24 + 112 + 2 * 8, resource_rva, 4);
+  PutLe(bytes, 0x80 + 24 + 112 + 2 * 8 + 4, resource_size, 4);
+  const std::size_t section = 0x80 + 24 + 240;
+  PutLe(bytes, section + 8, virtual_size, 4);
+  PutLe(bytes, section + 12, section_rva, 4);
+  PutLe(bytes, section + 16, raw_size, 4);
+  PutLe(bytes, section + 20, 0x400, 4);
+  return bytes;
+}
+
+// A resource section at RVA 0x3000: type `type` -> name 1 -> `languages` data entries, each 4
+// bytes ("abcd", "efgh", ...). The root also carries a named entry first, which is skipped.
+std::vector<std::uint8_t> ResourceTree(std::uint16_t type, std::size_t languages) {
+  std::vector<std::uint8_t> bytes(0x400, 0);
+  constexpr std::uint32_t kHigh = 0x80000000u;
+  // Root at 0: one named entry (to a name string at 0x300), one id entry.
+  PutLe(bytes, 12, 1, 2);
+  PutLe(bytes, 14, 1, 2);
+  PutLe(bytes, 16, kHigh | 0x300, 4);
+  PutLe(bytes, 20, kHigh | 0x80, 4);
+  PutLe(bytes, 24, type, 4);
+  PutLe(bytes, 28, kHigh | 0x20, 4);
+  // Name directory at 0x20: id 1.
+  PutLe(bytes, 0x20 + 14, 1, 2);
+  PutLe(bytes, 0x20 + 16, 1, 4);
+  PutLe(bytes, 0x20 + 20, kHigh | 0x40, 4);
+  // Language directory at 0x40, its data entries at 0x100 + 16 * n, the data at 0x200 + 4 * n.
+  PutLe(bytes, 0x40 + 14, static_cast<std::uint32_t>(languages), 2);
+  for (std::size_t index = 0; index < languages; ++index) {
+    PutLe(bytes, 0x40 + 16 + index * 8, static_cast<std::uint32_t>(0x409 + index), 4);
+    PutLe(bytes, 0x40 + 16 + index * 8 + 4, static_cast<std::uint32_t>(0x100 + 16 * index), 4);
+    PutLe(bytes, 0x100 + 16 * index, static_cast<std::uint32_t>(0x3000 + 0x200 + 4 * index), 4);
+    PutLe(bytes, 0x100 + 16 * index + 4, 4, 4);
+    for (std::size_t letter = 0; letter < 4; ++letter)
+      bytes[0x200 + 4 * index + letter] = static_cast<std::uint8_t>('a' + 4 * index + letter);
+  }
+  return bytes;
+}
+
+bool CheckPeResources() {
+  const std::optional<PeResourceSection> located =
+      LocatePeResourceSection(ResourceHeader(0x3000, 0x400, 0x3000, 0x1000, 0x600));
+  const std::optional<PeResourceSection> raw_sized =
+      LocatePeResourceSection(ResourceHeader(0x3100, 0x100, 0x3000, 0, 0x600));
+  const std::optional<PeResourceSection> none =
+      LocatePeResourceSection(ResourceHeader(0, 0, 0x3000, 0x1000, 0x600));
+  std::vector<std::uint8_t> two_directories = ResourceHeader(0x3000, 0x400, 0x3000, 0x1000, 0x600);
+  PutLe(two_directories, 0x80 + 24 + 108, 2, 4);
+  std::vector<std::uint8_t> cut_table = ResourceHeader(0x3000, 0x400, 0x3000, 0x1000, 0x600);
+  cut_table.resize(cut_table.size() - 20);
+  std::vector<std::uint8_t> not_pe = ResourceHeader(0x3000, 0x400, 0x3000, 0x1000, 0x600);
+  not_pe[0] = 'X';
+  const bool location =
+      Check(located.has_value() && located->present && located->section_rva == 0x3000 &&
+                located->section_size == 0x1000 && located->directory_rva == 0x3000,
+            "resource-section-located") &&
+      Check(raw_sized.has_value() && raw_sized->present && raw_sized->section_size == 0x600,
+            "resource-section-without-virtual-size-uses-raw-size") &&
+      Check(none.has_value() && !none->present, "resource-directory-empty-is-absent") &&
+      Check(LocatePeResourceSection(two_directories).has_value() &&
+                !LocatePeResourceSection(two_directories)->present,
+            "resource-directory-beyond-rva-count-is-absent") &&
+      Check(!LocatePeResourceSection(ResourceHeader(0x9000, 0x400, 0x3000, 0x1000, 0x600))
+                 .has_value(),
+            "resource-directory-in-no-section") &&
+      Check(!LocatePeResourceSection(
+                 ResourceHeader(0x3000, 0x400, 0x3000, kPeResourceSectionLimit + 1, 0x600))
+                 .has_value(),
+            "resource-section-over-the-limit") &&
+      Check(!LocatePeResourceSection(cut_table).has_value(), "resource-section-table-truncated") &&
+      Check(!LocatePeResourceSection(not_pe).has_value(), "resource-section-not-pe");
+
+  const auto text = [](const std::span<const std::uint8_t> data) {
+    return std::string(data.begin(), data.end());
+  };
+  const std::vector<std::uint8_t> one = ResourceTree(24, 1);
+  const std::optional<std::vector<std::span<const std::uint8_t>>> found =
+      FindPeResources(one, 0x3000, 0x3000, 24, 1);
+  const std::vector<std::uint8_t> two = ResourceTree(16, 2);
+  const std::optional<std::vector<std::span<const std::uint8_t>>> both =
+      FindPeResources(two, 0x3000, 0x3000, 16, 1);
+  const std::optional<std::vector<std::span<const std::uint8_t>>> no_language =
+      FindPeResources(ResourceTree(24, 0), 0x3000, 0x3000, 24, 1);
+  const std::optional<std::vector<std::span<const std::uint8_t>>> other_type =
+      FindPeResources(one, 0x3000, 0x3000, 16, 1);
+  const std::optional<std::vector<std::span<const std::uint8_t>>> other_name =
+      FindPeResources(one, 0x3000, 0x3000, 24, 2);
+  std::vector<std::uint8_t> language_directory = one;
+  PutLe(language_directory, 0x40 + 16 + 4, 0x80000000u | 0x100, 4);
+  std::vector<std::uint8_t> type_is_data = one;
+  PutLe(type_is_data, 28, 0x20, 4);
+  std::vector<std::uint8_t> subdirectory_outside = one;
+  PutLe(subdirectory_outside, 0x20 + 20, 0x80000000u | 0x7ffffff0u, 4);
+  std::vector<std::uint8_t> too_many_entries = one;
+  PutLe(too_many_entries, 0x40 + 14, 0xffff, 2);
+  std::vector<std::uint8_t> data_too_long = one;
+  PutLe(data_too_long, 0x100 + 4, 0x10000, 4);
+  std::vector<std::uint8_t> data_below = one;
+  PutLe(data_below, 0x100, 0x2000, 4);
+  std::vector<std::uint8_t> data_empty = one;
+  PutLe(data_empty, 0x100 + 4, 0, 4);
+  return location &&
+         Check(found.has_value() && found->size() == 1 && text((*found)[0]) == "abcd",
+               "resource-found") &&
+         Check(both.has_value() && both->size() == 2 && text((*both)[0]) == "abcd" &&
+                   text((*both)[1]) == "efgh",
+               "resource-every-language") &&
+         Check(other_type.has_value() && other_type->empty(), "resource-type-absent") &&
+         Check(other_name.has_value() && other_name->empty(), "resource-name-absent") &&
+         Check(no_language.has_value() && no_language->empty(), "resource-no-language-is-absent") &&
+         Check(!FindPeResources(language_directory, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-language-level-not-data") &&
+         Check(!FindPeResources(type_is_data, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-type-entry-not-a-directory") &&
+         Check(!FindPeResources(subdirectory_outside, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-subdirectory-outside") &&
+         Check(!FindPeResources(too_many_entries, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-entries-outside") &&
+         Check(!FindPeResources(data_too_long, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-data-outside") &&
+         Check(!FindPeResources(data_below, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-data-below-the-section") &&
+         Check(!FindPeResources(data_empty, 0x3000, 0x3000, 24, 1).has_value(),
+               "resource-data-empty") &&
+         Check(!FindPeResources(one, 0x3000, 0x5000, 24, 1).has_value() &&
+                   !FindPeResources(one, 0x3000, 0x2000, 24, 1).has_value(),
+               "resource-directory-outside-the-section") &&
+         Check(!FindPeResources({}, 0x3000, 0x3000, 24, 1).has_value(), "resource-empty-section");
 }
 
 bool CheckEligibilityMode() {
@@ -689,7 +967,8 @@ int main() {
       !CheckGolden(cases) || !CheckMonotonic(cases) || !CheckWindowsImagePlacement() ||
       !CheckPeSubsystem() || !CheckPeImageSummary() || !CheckManifestLevel() ||
       !CheckVersionInfo() ||
-      !CheckDescendantLeaves() || !CheckDescendants())
+      !CheckDescendantLeaves() || !CheckDescendants() || !CheckProcessSnapshot() ||
+      !CheckImageUnchanged() || !CheckPeResources())
     return 1;
   std::cout << "Computer Use target eligibility core: PASS (" << cases.size()
             << " golden vectors)\n";

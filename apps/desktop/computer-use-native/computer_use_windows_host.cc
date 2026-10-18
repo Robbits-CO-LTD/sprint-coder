@@ -1108,8 +1108,15 @@ bool IsSupportedWindowsV1Target(
 //     against the kernel summary (entry
 //     RVA, subsystem, machine, checksum, image file size, characteristics, stack sizes), the
 //     recorded path still naming the held file, the kernel mapped name staying put, and the module
-//     list are auxiliary deny-side checks. Any mismatch, or a target whose kernel data or re-read
-//     name cannot be read, is W-UR. Every other fact is read from the held file. Residual risk: the
+//     list are auxiliary deny-side checks. The held file must also be unchanged since the process
+//     was created: its ChangeTime and LastWriteTime both before the creation time (a writer that
+//     kept its handle across the image section's creation can rewrite the file afterwards, as in
+//     process herpaderping, and the facts would then be of the new bytes); a time that cannot be
+//     read, or one at or after the creation, is a mismatch. Times can be set back by a writer
+//     with FILE_WRITE_ATTRIBUTES, and a rewrite before the process object was created is older
+//     than it, so this narrows the attack rather than closing it (ADR §10 risk). Any mismatch, or
+//     a target whose kernel data or re-read name cannot be read, is W-UR. Every other fact is read
+//     from the held file. Residual risk: the
 //     header cross-check is not by itself sufficient (checksum is outside the Authenticode hash and
 //     an attacker who builds the original image can match the rest), so the defense rests on the
 //     re-read naming the real image, which assumes QueryFullProcessImageNameW follows the rename;
@@ -1134,16 +1141,30 @@ bool IsSupportedWindowsV1Target(
 //     revoked signer, so the path would ship untested. The residual risk is ADR §10 risk 1.
 //   * PE subsystem from the held file's header; the manifest's execution level and
 //     OriginalFilename from its resources. OriginalFilename is read only when the signature
-//     verified (embedded or catalog), and is "" otherwise.
+//     verified (embedded or catalog), and is "" otherwise. The resources are read through the held
+//     handle (an image view of it, ReadWindowsTargetResourceSection), never by opening the path
+//     again, and found without the loader (FindPeResources), so no .mui file is consulted.
 //   * Token. Elevation, another user, another session, a protected process, UIAccess, an integrity
 //     level above this process's, and AppContainer. An item that cannot be read is given as the
 //     refusing value (true).
 //   * Package. Family, full name and publisherId from the process handle, development mode from
 //     the package information, SignatureKind from the package catalog (C++/WinRT). They may admit
 //     only once PR-4 binds them to the identity digest.
-//   * Lineage. A Toolhelp snapshot with every process's creation time; descendants follow parent
-//     pids only to processes created no earlier (FindWindowsDescendants), so a reused pid is not a
-//     parent. A child whose parent has exited cannot be traced: the system does not reparent it.
+//   * Lineage. One kernel snapshot (SystemProcessInformation) gives every process's parent pid
+//     and creation time without opening any process; descendants follow parent pids only to
+//     processes created no earlier (FindWindowsDescendants), so a reused pid is not a parent.
+//     Residual risk: a child whose parent has exited cannot be traced (the system does not
+//     reparent it), nor one started with another parent named (PROC_THREAD_ATTRIBUTE_PARENT_
+//     PROCESS), so descendant_shell = false says "no shell below that a live chain shows". No
+//     orphan signal is used, after weighing these: (a) the target's job (the job's processes
+//     cannot be listed without a handle to the job, which a process handle does not give); (b)
+//     orphans (same user and session, parent gone, created after the target), which would cap
+//     every long-running target at C for any unrelated detached shell the user started later
+//     (a terminal closed under its shell, `start` from a closed cmd), and which a hostile target
+//     still evades by naming another parent. What the cap is for, an app that hosts a shell or a
+//     pseudo console in its own surface, keeps the owner of that console alive below the target
+//     (a pseudo console ends with its owner's handle), so a live chain shows it; hiding a shell
+//     on purpose is the target lying, which these facts cannot prevent (ADR §10 risk).
 //     Each descendant is read from its own running image, held as the target's is: a non-GUI
 //     subsystem, or a leaf or OriginalFilename on the W4 table, is a shell, so a renamed copy of
 //     a shell is one too; a descendant that cannot be read is taken as a shell. At most
@@ -1716,6 +1737,9 @@ struct WindowsTargetHeldImage {
   std::wstring canonical_path;
   WindowsFileIdentity identity;
   bool matches = false;
+  // Whether the held file was neither written nor had its metadata changed since the process was
+  // created (WindowsImageUnchangedSinceCreation); part of `matches`, kept apart for the seam.
+  bool unchanged = false;
   // The held file's volume (file system name and flags), for the caller to compare with the rename
   // probe's; std::nullopt when the volume is remote or could not be read.
   std::optional<WindowsTargetVolume> volume;
@@ -1811,9 +1835,22 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   const std::optional<std::wstring> module_list = WindowsTargetModuleListImageName(process);
   const bool module_list_agrees =
       module_list.has_value() && SameWindowsTargetName(*module_list, kernel->mapped_name);
+  // The held file's bytes are the ones mapped only if nothing rewrote it after the process was
+  // created (process herpaderping: a writer that kept its handle across the section's creation
+  // overwrites the file, and the signature and resources would then be read from the new bytes).
+  // The hold shares no write, so nothing can write while it is held; what was written before is
+  // told by the file's ChangeTime and LastWriteTime, which must both be before the creation time.
+  // A rename also moves ChangeTime, so a running image renamed since its start is a mismatch too.
+  FILE_BASIC_INFO basic{};
+  const bool basic_read = GetFileInformationByHandleEx(held->file.value, FileBasicInfo, &basic,
+                                                       sizeof(basic)) == TRUE;
+  held->unchanged = sprint_coder::computer_use::WindowsImageUnchangedSinceCreation(
+      basic_read ? std::optional<std::int64_t>(basic.ChangeTime.QuadPart) : std::nullopt,
+      basic_read ? std::optional<std::int64_t>(basic.LastWriteTime.QuadPart) : std::nullopt,
+      WindowsTargetCreationTime(process));
   held->matches = anchored && !header_disagrees && again.has_value() &&
                   SameWindowsTargetName(again->mapped_name, kernel->mapped_name) &&
-                  recorded_agrees && module_list_agrees;
+                  recorded_agrees && module_list_agrees && held->unchanged;
   return true;
 }
 
@@ -2109,79 +2146,144 @@ std::optional<std::string> WindowsTargetPeSubsystem(HANDLE file) {
   return sprint_coder::computer_use::ParsePeSubsystem(header);
 }
 
-bool WindowsTargetResourceIsAbsent(DWORD error) {
-  return error == ERROR_RESOURCE_TYPE_NOT_FOUND ||
-         error == ERROR_RESOURCE_NAME_NOT_FOUND ||
-         error == ERROR_RESOURCE_DATA_NOT_FOUND ||
-         error == ERROR_RESOURCE_LANG_NOT_FOUND;
+// The resource section of the held file, copied out of an image view of the held handle itself.
+// The file is never opened again by its path: a path loses what the handle names (a Win32 path
+// drops a trailing dot or space, so "app.exe." and "app.exe" name two files, and a path longer than
+// MAX_PATH would not open), while the held handle cannot be written, renamed or deleted under it.
+// The view is an image section (SEC_IMAGE_NO_EXECUTE, which needs only the GENERIC_READ the hold
+// has, and maps nothing executable), so the kernel lays the file out as the loader does and refuses
+// what it would not load. The view's base is not handed to FindResourceW: a base whose low bits are
+// clear reads to the loader as a module it mapped, and its lookup may go to a language's .mui file
+// (another, unverified file); the resources are found by FindPeResources instead. A section page
+// that is not committed and readable (a section without IMAGE_SCN_MEM_READ maps no-access) is not
+// read, so a crafted image cannot fault this helper. `present` false: the image has no resources.
+// std::nullopt: the image cannot be mapped or read (the facts read from it are then unmeasured).
+struct WindowsTargetResourceSection {
+  sprint_coder::computer_use::PeResourceSection where;
+  std::vector<std::uint8_t> bytes;
+};
+
+std::optional<WindowsTargetResourceSection> ReadWindowsTargetResourceSection(HANDLE file) {
+  ScopedKernelHandle mapping(CreateFileMappingW(
+      file, nullptr, PAGE_READONLY | SEC_IMAGE_NO_EXECUTE, 0, 0, nullptr));
+  if (mapping.value == nullptr)
+    return std::nullopt;
+  const auto *view = static_cast<const std::uint8_t *>(
+      MapViewOfFile(mapping.value, FILE_MAP_READ, 0, 0, 0));
+  if (view == nullptr)
+    return std::nullopt;
+  struct Unmap {
+    const void *view;
+    ~Unmap() { UnmapViewOfFile(view); }
+  } unmap{view};
+  // Whether [offset, offset + length) of the view is committed and readable, page region by region.
+  const auto readable = [view](std::size_t offset, std::size_t length) {
+    std::size_t at = offset;
+    while (at < offset + length) {
+      MEMORY_BASIC_INFORMATION region{};
+      if (VirtualQuery(view + at, &region, sizeof(region)) != sizeof(region) ||
+          region.AllocationBase != view || region.State != MEM_COMMIT ||
+          (region.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
+          (region.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY)) == 0)
+        return false;
+      const std::size_t region_end = static_cast<std::size_t>(
+          static_cast<const std::uint8_t *>(region.BaseAddress) + region.RegionSize - view);
+      if (region_end <= at)
+        return false;
+      at = region_end;
+    }
+    return true;
+  };
+  // The header page (the first region of the view), up to 64 KiB of it.
+  MEMORY_BASIC_INFORMATION first{};
+  if (VirtualQuery(view, &first, sizeof(first)) != sizeof(first))
+    return std::nullopt;
+  const std::size_t header_size =
+      first.RegionSize < 64 * 1024 ? static_cast<std::size_t>(first.RegionSize) : 64 * 1024;
+  if (!readable(0, header_size))
+    return std::nullopt;
+  WindowsTargetResourceSection result;
+  const std::optional<sprint_coder::computer_use::PeResourceSection> where =
+      sprint_coder::computer_use::LocatePeResourceSection(
+          std::span<const std::uint8_t>(view, header_size));
+  if (!where.has_value())
+    return std::nullopt;
+  result.where = *where;
+  if (!where->present)
+    return result;
+  if (!readable(where->section_rva, where->section_size))
+    return std::nullopt;
+  result.bytes.assign(view + where->section_rva, view + where->section_rva + where->section_size);
+  return result;
 }
 
-std::optional<std::span<const std::uint8_t>>
-WindowsTargetResource(HMODULE image, LPCWSTR type, bool *absent) {
-  *absent = false;
-  HRSRC found = FindResourceW(image, MAKEINTRESOURCEW(1), type);
-  if (found == nullptr) {
-    *absent = WindowsTargetResourceIsAbsent(GetLastError());
+// One resource (id 1 of `type`) of a resource section, or std::nullopt when it cannot be read.
+// Absent: an empty list.
+std::optional<std::vector<std::span<const std::uint8_t>>>
+WindowsTargetResources(const WindowsTargetResourceSection &section, std::uint16_t type) {
+  if (!section.where.present)
+    return std::vector<std::span<const std::uint8_t>>{};
+  return sprint_coder::computer_use::FindPeResources(section.bytes, section.where.section_rva,
+                                                     section.where.directory_rva, type, 1);
+}
+
+// OriginalFilename of version resource 1: "" when there is none, std::nullopt when it cannot be
+// read or when its languages disagree (a name the loader might pick is then not one this can say).
+std::optional<std::string> WindowsTargetSectionOriginalFilename(
+    const WindowsTargetResourceSection &section) {
+  const std::optional<std::vector<std::span<const std::uint8_t>>> versions =
+      WindowsTargetResources(section, 16 /* RT_VERSION */);
+  if (!versions.has_value())
     return std::nullopt;
+  std::optional<std::string> original = std::string{};
+  for (std::size_t index = 0; index < versions->size(); ++index) {
+    const std::optional<std::string> read =
+        sprint_coder::computer_use::VersionInfoOriginalFilename((*versions)[index]);
+    if (!read.has_value() || (index > 0 && read != original))
+      return std::nullopt;
+    original = read;
   }
-  HGLOBAL loaded = LoadResource(image, found);
-  const DWORD size = SizeofResource(image, found);
-  const void *data = loaded == nullptr ? nullptr : LockResource(loaded);
-  if (data == nullptr || size == 0)
-    return std::nullopt;
-  return std::span<const std::uint8_t>(static_cast<const std::uint8_t *>(data), size);
+  return original;
 }
 
-// The manifest's execution level and, when the signature verified, OriginalFilename. The held
-// file cannot be written, renamed or deleted, so the path names it while the resources are read.
-void ReadWindowsTargetResources(const std::wstring &path, bool signature_verified,
+// The manifest's execution level and, when the signature verified, OriginalFilename, read from the
+// held file through its handle (ReadWindowsTargetResourceSection). The manifest asks for elevation
+// when any of its languages does (the deny direction); without one the process runs as the invoker.
+void ReadWindowsTargetResources(HANDLE file, bool signature_verified,
                                 sprint_coder::computer_use::TargetFacts *facts) {
   if (!signature_verified)
     facts->original_filename = std::string{};
-  HMODULE image = LoadLibraryExW(
-      path.c_str(), nullptr,
-      LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-  if (image == nullptr)
+  const std::optional<WindowsTargetResourceSection> section =
+      ReadWindowsTargetResourceSection(file);
+  if (!section.has_value())
     return;
-  bool absent = false;
-  const std::optional<std::span<const std::uint8_t>> manifest =
-      WindowsTargetResource(image, RT_MANIFEST, &absent);
-  if (manifest.has_value())
-    facts->requires_administrator =
-        sprint_coder::computer_use::ManifestRequiresAdministrator(std::string_view(
-            reinterpret_cast<const char *>(manifest->data()), manifest->size()));
-  else if (absent)
-    facts->requires_administrator = false;
-  if (signature_verified) {
-    const std::optional<std::span<const std::uint8_t>> version =
-        WindowsTargetResource(image, RT_VERSION, &absent);
-    if (version.has_value())
-      facts->original_filename =
-          sprint_coder::computer_use::VersionInfoOriginalFilename(*version);
-    else if (absent)
-      facts->original_filename = std::string{};
+  const std::optional<std::vector<std::span<const std::uint8_t>>> manifests =
+      WindowsTargetResources(*section, 24 /* RT_MANIFEST */);
+  if (manifests.has_value()) {
+    std::optional<bool> elevated = false;
+    for (const std::span<const std::uint8_t> manifest : *manifests) {
+      const std::optional<bool> level = sprint_coder::computer_use::ManifestRequiresAdministrator(
+          std::string_view(reinterpret_cast<const char *>(manifest.data()), manifest.size()));
+      if (!level.has_value()) {
+        elevated.reset();
+        break;
+      }
+      elevated = *elevated || *level;
+    }
+    facts->requires_administrator = elevated;
   }
-  FreeLibrary(image);
+  if (signature_verified)
+    facts->original_filename = WindowsTargetSectionOriginalFilename(*section);
 }
 
 // OriginalFilename of an image held by the caller, whatever its signature ("" without one), for
-// the deny direction only. std::nullopt when the resources cannot be read.
-std::optional<std::string> WindowsTargetOriginalFilename(const std::wstring &path) {
-  HMODULE image = LoadLibraryExW(
-      path.c_str(), nullptr,
-      LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_IMAGE_RESOURCE);
-  if (image == nullptr)
+// the deny direction only, read through the held handle. std::nullopt when it cannot be read.
+std::optional<std::string> WindowsTargetOriginalFilename(HANDLE file) {
+  const std::optional<WindowsTargetResourceSection> section =
+      ReadWindowsTargetResourceSection(file);
+  if (!section.has_value())
     return std::nullopt;
-  bool absent = false;
-  const std::optional<std::span<const std::uint8_t>> version =
-      WindowsTargetResource(image, RT_VERSION, &absent);
-  std::optional<std::string> original;
-  if (version.has_value())
-    original = sprint_coder::computer_use::VersionInfoOriginalFilename(*version);
-  else if (absent)
-    original = std::string{};
-  FreeLibrary(image);
-  return original;
+  return WindowsTargetSectionOriginalFilename(*section);
 }
 
 std::optional<std::vector<std::uint8_t>> WindowsTargetTokenInformation(
@@ -2393,28 +2495,45 @@ void MeasureWindowsTargetPackage(HANDLE process, WindowsTargetFactsMeasurement *
   measured->package_install_root = WindowsTargetPackageInstallRoot(full_name);
 }
 
-// Every process with its parent pid, its creation time (when it can be opened) and its leaf.
+// Every process with its parent pid, its creation time and its leaf, all from one kernel snapshot
+// (NtQuerySystemInformation(SystemProcessInformation), parsed by ParseWindowsProcessSnapshot). No
+// process is opened, so a process this helper may not open (a SYSTEM orphan, a protected process)
+// still carries its creation time, and a reused pid is told from a parent by time for every node
+// (opening each one, as before, left those without a time and adopted them as children). The
+// parent pid and the time come from the same snapshot, so they agree with each other. std::nullopt
+// when the snapshot cannot be taken or read (the lineage is then not measured).
 std::optional<std::vector<sprint_coder::computer_use::WindowsProcessNode>>
 SnapshotWindowsTargetProcesses() {
-  ScopedKernelHandle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0));
-  if (snapshot.value == INVALID_HANDLE_VALUE)
+  using NtQuerySystemInformationFn = LONG(WINAPI *)(ULONG, PVOID, ULONG, PULONG);
+  static const NtQuerySystemInformationFn query = []() {
+    const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    return ntdll == nullptr ? nullptr
+                            : reinterpret_cast<NtQuerySystemInformationFn>(
+                                  GetProcAddress(ntdll, "NtQuerySystemInformation"));
+  }();
+  if (query == nullptr)
     return std::nullopt;
-  std::vector<sprint_coder::computer_use::WindowsProcessNode> nodes;
-  PROCESSENTRY32W entry{};
-  entry.dwSize = sizeof(entry);
-  if (Process32FirstW(snapshot.value, &entry) != TRUE)
-    return std::nullopt;
-  do {
-    sprint_coder::computer_use::WindowsProcessNode node;
-    node.pid = entry.th32ProcessID;
-    node.parent_pid = entry.th32ParentProcessID;
-    ScopedKernelHandle process(
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID));
-    node.creation = WindowsTargetCreationTime(process.value);
-    node.leaf = Utf8FromWide(entry.szExeFile);
-    nodes.push_back(std::move(node));
-  } while (Process32NextW(snapshot.value, &entry) == TRUE && nodes.size() < 65'536);
-  return nodes;
+  constexpr ULONG kSystemProcessInformation = 5;
+  constexpr LONG kStatusInfoLengthMismatch = static_cast<LONG>(0xC0000004L);
+  constexpr std::size_t kSnapshotLimit = 64u * 1024u * 1024u;
+  std::vector<std::uint8_t> buffer(1024u * 1024u);
+  // Processes come and go between the size query and the read, so grow and retry a few times.
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    ULONG needed = 0;
+    const LONG status = query(kSystemProcessInformation, buffer.data(),
+                              static_cast<ULONG>(buffer.size()), &needed);
+    if (status >= 0)
+      return sprint_coder::computer_use::ParseWindowsProcessSnapshot(
+          buffer, reinterpret_cast<std::uintptr_t>(buffer.data()), 65'536);
+    if (status != kStatusInfoLengthMismatch)
+      return std::nullopt;
+    const std::size_t grown = std::max<std::size_t>(buffer.size() * 2,
+                                                    static_cast<std::size_t>(needed) + 64 * 1024);
+    if (grown > kSnapshotLimit)
+      return std::nullopt;
+    buffer.assign(grown, 0);
+  }
+  return std::nullopt;
 }
 
 struct WindowsTargetDescendant {
@@ -2458,7 +2577,7 @@ InspectWindowsTargetDescendant(const sprint_coder::computer_use::WindowsProcessN
     return result;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
   const std::optional<std::string> subsystem = WindowsTargetPeSubsystem(held.file.value);
-  const std::optional<std::string> original = WindowsTargetOriginalFilename(held.canonical_path);
+  const std::optional<std::string> original = WindowsTargetOriginalFilename(held.file.value);
   if (!path.has_value() || !subsystem.has_value() || !original.has_value())
     return result;
   const std::string leaf = WindowsImageLeaf(*path);
@@ -2485,7 +2604,9 @@ void MeasureWindowsTargetLineage(const WindowsTargetFactsContext &context,
         measured->parent_pid = parent.pid;
   }
   // Every descendant is read from its running image, within a count and a time budget; a set of
-  // descendants that does not fit them is not measured (unresolvable).
+  // descendants that does not fit them is not measured (unresolvable). "No shell" covers only the
+  // descendants a live parent chain reaches: one below an exited intermediate is not seen (the
+  // lineage note in the block comment says why no orphan signal stands in for it).
   const WindowsDescendants below = FindWindowsDescendants(
       *nodes, measured->pid, creation, kWindowsTargetDescendantLimit);
   if (!below.truncated && below.nodes.size() <= kWindowsTargetDescendantInspectLimit) {
@@ -2623,7 +2744,7 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
     facts.signer_microsoft_root = verified ? signature.microsoft_root : false;
     facts.signer_is_self = verified && !context.self_signer_thumbprint.empty() &&
                            signature.thumbprint == context.self_signer_thumbprint;
-    ReadWindowsTargetResources(held.canonical_path, verified, &facts);
+    ReadWindowsTargetResources(held.file.value, verified, &facts);
   }
   facts.pe_subsystem = WindowsTargetPeSubsystem(held.file.value);
   return measured;

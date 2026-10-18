@@ -3,8 +3,10 @@
 // The portable parts of the Windows target facts (S5-c-3, #500 PR-2). The Windows host measures a
 // target through handles (the `windows target facts` block of computer_use_windows_host.cc) and
 // leaves to this header what needs no platform API: where a canonical path lies among the roots,
-// the leaf, the PE subsystem, the manifest's execution level, OriginalFilename out of a
-// VS_VERSIONINFO resource, and the descendants of a process in a snapshot. No platform header, so
+// the leaf, the PE subsystem, the resources of an image (located and found without the loader),
+// the manifest's execution level, OriginalFilename out of a VS_VERSIONINFO resource, whether an
+// image file changed after its process was created, a SystemProcessInformation snapshot, and the
+// descendants of a process in it. No platform header, so
 // MSVC (/W4 /sdl) and clang both compile it, and the target eligibility harness checks it.
 //
 // Every reader here fails closed: bytes it cannot read give std::nullopt (the core then answers
@@ -595,6 +597,153 @@ VersionInfoOriginalFilename(std::span<const std::uint8_t> resource) {
   return std::string{};
 }
 
+// Where a PE image's resource directory lies, in the image layout (RVAs, as the loader maps it): the
+// section that holds the directory (its RVA and its mapped size, VirtualSize or, when that is 0,
+// SizeOfRawData) and the directory's own RVA. `present` is false when the image has no resource
+// directory (fewer than three data directories, or directory 2 empty): its resources are absent.
+struct PeResourceSection {
+  bool present = false;
+  std::uint32_t section_rva = 0;
+  std::uint32_t section_size = 0;
+  std::uint32_t directory_rva = 0;
+};
+
+// A resource section larger than this is not read (unresolvable): the host copies it out whole.
+inline constexpr std::uint32_t kPeResourceSectionLimit = 32u * 1024u * 1024u;
+
+// Locates the resource section from a PE image's header bytes (the header page of a mapped image,
+// or the start of the file: the header is the same in both). A directory that lies in no section,
+// a section larger than kPeResourceSectionLimit, or a header that does not let this be read:
+// std::nullopt.
+[[nodiscard]] inline std::optional<PeResourceSection>
+LocatePeResourceSection(std::span<const std::uint8_t> header) {
+  using windows_target_facts_detail::OffsetWithin;
+  using windows_target_facts_detail::ReadLe;
+  const std::size_t size = header.size();
+  if (size < 0x40 || header[0] != 'M' || header[1] != 'Z') return std::nullopt;
+  const std::optional<std::uint32_t> pe = ReadLe(header, 0x3c, 4);
+  if (!pe.has_value()) return std::nullopt;
+  const std::optional<std::size_t> optional = OffsetWithin(*pe, 24, size);
+  if (!optional.has_value()) return std::nullopt;
+  const std::optional<std::uint32_t> signature = ReadLe(header, *pe, 4);
+  const std::optional<std::uint32_t> sections = ReadLe(header, *pe + 6, 2);
+  const std::optional<std::uint32_t> optional_size = ReadLe(header, *pe + 20, 2);
+  const std::optional<std::uint32_t> magic = ReadLe(header, *optional, 2);
+  if (signature != std::optional<std::uint32_t>(0x00004550u) || !sections.has_value() ||
+      !optional_size.has_value() || !magic.has_value() || (*magic != 0x10b && *magic != 0x20b))
+    return std::nullopt;
+  const bool plus = *magic == 0x20b;
+  const std::size_t count_at = plus ? 108 : 92;
+  const std::size_t resource_at = (plus ? 112 : 96) + 2 * 8;
+  PeResourceSection result;
+  // An optional header too short to hold NumberOfRvaAndSizes has no data directories at all.
+  if (*optional_size < count_at + 4) return result;
+  const std::optional<std::uint32_t> count = ReadLe(header, *optional + count_at, 4);
+  if (!count.has_value()) return std::nullopt;
+  // No third data directory, or one the optional header does not cover: no resource directory.
+  if (*count < 3 || *optional_size < resource_at + 8) return result;
+  const std::optional<std::uint32_t> rva = ReadLe(header, *optional + resource_at, 4);
+  const std::optional<std::uint32_t> length = ReadLe(header, *optional + resource_at + 4, 4);
+  if (!rva.has_value() || !length.has_value()) return std::nullopt;
+  if (*rva == 0 || *length == 0) return result;
+  const std::optional<std::size_t> table = OffsetWithin(*optional, *optional_size, size);
+  if (!table.has_value()) return std::nullopt;
+  for (std::size_t index = 0; index < *sections; ++index) {
+    const std::optional<std::size_t> entry_end = OffsetWithin(*table, index * 40 + 40, size);
+    if (!entry_end.has_value()) return std::nullopt;
+    const std::size_t at = *table + index * 40;
+    const std::optional<std::uint32_t> virtual_size = ReadLe(header, at + 8, 4);
+    const std::optional<std::uint32_t> virtual_address = ReadLe(header, at + 12, 4);
+    const std::optional<std::uint32_t> raw_size = ReadLe(header, at + 16, 4);
+    if (!virtual_size.has_value() || !virtual_address.has_value() || !raw_size.has_value())
+      return std::nullopt;
+    const std::uint32_t mapped = *virtual_size != 0 ? *virtual_size : *raw_size;
+    if (*rva < *virtual_address || *rva - *virtual_address >= mapped) continue;
+    if (mapped > kPeResourceSectionLimit) return std::nullopt;
+    result.present = true;
+    result.section_rva = *virtual_address;
+    result.section_size = mapped;
+    result.directory_rva = *rva;
+    return result;
+  }
+  return std::nullopt;
+}
+
+// The data of every language of the resource (type id, name id), read from a resource section's
+// bytes (`section` holds the RVAs [section_rva, section_rva + section.size())). Absent (the type or
+// the name is not there): an empty list. Each level is the IMAGE_RESOURCE_DIRECTORY layout (16
+// bytes, then NumberOfNamedEntries + NumberOfIdEntries entries of 8 bytes; a subdirectory's offset
+// is relative to the directory root and has its high bit set); the three levels are fixed (type,
+// name, language), so nothing can loop. A directory or an entry outside the section, a language
+// level that is not data, or data outside the section: std::nullopt (unresolvable). The loader's
+// own lookup is not used: FindResource would also consult a language's .mui file, which is another
+// file than the held one and not verified.
+[[nodiscard]] inline std::optional<std::vector<std::span<const std::uint8_t>>>
+FindPeResources(std::span<const std::uint8_t> section, std::uint32_t section_rva,
+                std::uint32_t directory_rva, std::uint16_t type_id, std::uint16_t name_id) {
+  using windows_target_facts_detail::OffsetWithin;
+  using windows_target_facts_detail::ReadLe;
+  if (directory_rva < section_rva || directory_rva - section_rva >= section.size())
+    return std::nullopt;
+  const std::size_t root = directory_rva - section_rva;
+  // The entries of the directory at `at` (relative to the root), as (name, offset) pairs.
+  struct Entry {
+    std::uint32_t name;
+    std::uint32_t offset;
+  };
+  const auto entries = [&](std::size_t relative) -> std::optional<std::vector<Entry>> {
+    const std::optional<std::size_t> at = OffsetWithin(root, relative, section.size());
+    if (!at.has_value() || !OffsetWithin(*at, 16, section.size()).has_value()) return std::nullopt;
+    const std::optional<std::uint32_t> named = ReadLe(section, *at + 12, 2);
+    const std::optional<std::uint32_t> ids = ReadLe(section, *at + 14, 2);
+    if (!named.has_value() || !ids.has_value()) return std::nullopt;
+    const std::size_t total = static_cast<std::size_t>(*named) + *ids;
+    if (!OffsetWithin(*at + 16, total * 8, section.size()).has_value()) return std::nullopt;
+    std::vector<Entry> list;
+    list.reserve(total);
+    for (std::size_t index = 0; index < total; ++index)
+      list.push_back({*ReadLe(section, *at + 16 + index * 8, 4),
+                      *ReadLe(section, *at + 16 + index * 8 + 4, 4)});
+    return list;
+  };
+  constexpr std::uint32_t kHighBit = 0x80000000u;
+  // The subdirectory an id entry names in the directory at `relative`: std::nullopt when the
+  // directory cannot be read, 0 when the id is not there, or the subdirectory's offset + 1.
+  const auto find = [&](std::size_t relative, std::uint16_t id) -> std::optional<std::size_t> {
+    const std::optional<std::vector<Entry>> list = entries(relative);
+    if (!list.has_value()) return std::nullopt;
+    for (const Entry &entry : *list) {
+      if ((entry.name & kHighBit) != 0 || entry.name != id) continue;
+      if ((entry.offset & kHighBit) == 0) return std::nullopt;
+      return static_cast<std::size_t>(entry.offset & ~kHighBit) + 1;
+    }
+    return std::size_t{0};
+  };
+  std::vector<std::span<const std::uint8_t>> found;
+  const std::optional<std::size_t> type = find(0, type_id);
+  if (!type.has_value()) return std::nullopt;
+  if (*type == 0) return found;
+  const std::optional<std::size_t> name = find(*type - 1, name_id);
+  if (!name.has_value()) return std::nullopt;
+  if (*name == 0) return found;
+  const std::optional<std::vector<Entry>> languages = entries(*name - 1);
+  if (!languages.has_value()) return std::nullopt;
+  for (const Entry &language : *languages) {
+    if ((language.offset & kHighBit) != 0) return std::nullopt;
+    const std::optional<std::size_t> data_at = OffsetWithin(root, language.offset, section.size());
+    if (!data_at.has_value() || !OffsetWithin(*data_at, 16, section.size()).has_value())
+      return std::nullopt;
+    const std::uint32_t data_rva = *ReadLe(section, *data_at, 4);
+    const std::uint32_t data_size = *ReadLe(section, *data_at + 4, 4);
+    if (data_rva < section_rva || data_size == 0) return std::nullopt;
+    const std::size_t data_offset = data_rva - section_rva;
+    if (!OffsetWithin(data_offset, data_size, section.size()).has_value()) return std::nullopt;
+    found.push_back(section.subspan(data_offset, data_size));
+  }
+  // A name without a language is absent, as the loader has it (ERROR_RESOURCE_LANG_NOT_FOUND).
+  return found;
+}
+
 // A leaf a descendant shell has: the W4 leaf rule of the deny ruleset (so the list stays one),
 // without the console hosts, which say a pseudo console instead.
 [[nodiscard]] inline bool WindowsLeafIsConsoleHost(std::string_view leaf) {
@@ -621,7 +770,10 @@ VersionInfoOriginalFilename(std::span<const std::uint8_t> resource) {
   return false;
 }
 
-// One process of a snapshot. `creation` is std::nullopt when the host could not open the process.
+// One process of a snapshot. The host reads every node's creation time from the same kernel
+// snapshot as its parent pid (SystemProcessInformation's CreateTime), without opening the process,
+// so a process this helper may not open (a SYSTEM orphan, a protected process) still has one.
+// `creation` is std::nullopt only for a source that cannot give it (see FindWindowsDescendants).
 struct WindowsProcessNode {
   std::uint32_t pid = 0;
   std::uint32_t parent_pid = 0;
@@ -636,10 +788,22 @@ struct WindowsDescendants {
 };
 
 // The processes descended from (root_pid, root_creation), as indices into `nodes`. A process is a
-// child of another when its parent pid names that process and it was created no earlier: a pid the
-// system reused after the child started names a later process, which is not its parent. A process
-// whose creation time could not be read is taken as a child (the deny direction), and so are its
-// own children.
+// child of another when its parent pid names that process and it was created no earlier (the same
+// time counts as a child: the deny direction): a pid the system reused after the child started
+// names a later process, which is not its parent. A process whose creation time is missing is taken
+// as a child (the deny direction), and so are its own children: without a time a reused pid cannot
+// be told from a real parent, and leaving it out would let a real child go unseen. The host's
+// snapshot gives every process a time, so this applies only to a source that cannot; the cost it
+// once had (a process the helper could not open, adopted through a reused pid) is gone with it.
+//
+// Residual risk (not traced): a descendant whose parent chain passes through a process that has
+// exited. Windows does not reparent an orphan, so its parent pid names a process that is gone (or,
+// later, an unrelated process created after it, which the creation-time rule above refuses), and
+// nothing in a snapshot ties it back to the target. Nor can a snapshot see a child the target
+// started with another parent (PROC_THREAD_ATTRIBUTE_PARENT_PROCESS). The descendant facts are an
+// upper-class cap (C) for apps that host a shell or a pseudo console in their own surface, which
+// keeps its owner alive below the target; they are not a boundary against a target that hides one.
+// See the lineage note in the host's facts block for why no orphan signal is used.
 [[nodiscard]] inline WindowsDescendants
 FindWindowsDescendants(std::span<const WindowsProcessNode> nodes, std::uint32_t root_pid,
                        std::uint64_t root_creation, std::size_t limit) {
@@ -673,6 +837,111 @@ FindWindowsDescendants(std::span<const WindowsProcessNode> nodes, std::uint32_t 
     }
   }
   return result;
+}
+
+// The byte layout (x64) of one SYSTEM_PROCESS_INFORMATION entry, as
+// NtQuerySystemInformation(SystemProcessInformation) returns it: NextEntryOffset at 0, CreateTime
+// at 32, ImageName (a UNICODE_STRING: Length, MaximumLength, a pointer at 8) at 56,
+// UniqueProcessId at 80 and InheritedFromUniqueProcessId at 88. Pinned here, as the host pins
+// SECTION_IMAGE_INFORMATION, so the parser below needs no platform header.
+inline constexpr std::size_t kWindowsProcessEntryNext = 0;
+inline constexpr std::size_t kWindowsProcessEntryCreateTime = 32;
+inline constexpr std::size_t kWindowsProcessEntryImageNameLength = 56;
+inline constexpr std::size_t kWindowsProcessEntryImageNameBuffer = 64;
+inline constexpr std::size_t kWindowsProcessEntryPid = 80;
+inline constexpr std::size_t kWindowsProcessEntryParentPid = 88;
+inline constexpr std::size_t kWindowsProcessEntryMinimum = 96;
+
+namespace windows_target_facts_detail {
+
+[[nodiscard]] inline std::optional<std::uint64_t> ReadLe64(std::span<const std::uint8_t> bytes,
+                                                           std::size_t at) {
+  const std::optional<std::size_t> high_at = OffsetWithin(at, 4, bytes.size());
+  if (!high_at.has_value()) return std::nullopt;
+  const std::optional<std::uint32_t> low = ReadLe(bytes, at, 4);
+  const std::optional<std::uint32_t> high = ReadLe(bytes, *high_at, 4);
+  if (!low.has_value() || !high.has_value()) return std::nullopt;
+  return (static_cast<std::uint64_t>(*high) << 32) | *low;
+}
+
+} // namespace windows_target_facts_detail
+
+// Every process of a SystemProcessInformation buffer, with its parent pid, its creation time and
+// its leaf, all from the one kernel snapshot (no process is opened). `buffer_address` is where the
+// buffer lies in memory: an ImageName points into the buffer itself. An entry that runs outside the
+// buffer, a NextEntryOffset that does not move past the entry, a pid wider than 32 bits, an image
+// name that does not lie inside the buffer, or more than `limit` entries: std::nullopt (the lineage
+// is then not measured). A name that is not valid UTF-16 is given as "" (the name only refuses, and
+// the descendant's running image is read regardless).
+[[nodiscard]] inline std::optional<std::vector<WindowsProcessNode>>
+ParseWindowsProcessSnapshot(std::span<const std::uint8_t> buffer, std::uint64_t buffer_address,
+                            std::size_t limit) {
+  using windows_target_facts_detail::OffsetWithin;
+  using windows_target_facts_detail::ReadLe;
+  using windows_target_facts_detail::ReadLe64;
+  std::vector<WindowsProcessNode> nodes;
+  std::size_t at = 0;
+  while (true) {
+    const std::optional<std::size_t> entry_end =
+        OffsetWithin(at, kWindowsProcessEntryMinimum, buffer.size());
+    if (!entry_end.has_value() || nodes.size() >= limit) return std::nullopt;
+    const std::optional<std::uint32_t> next = ReadLe(buffer, at + kWindowsProcessEntryNext, 4);
+    const std::optional<std::uint64_t> created =
+        ReadLe64(buffer, at + kWindowsProcessEntryCreateTime);
+    const std::optional<std::uint32_t> name_length =
+        ReadLe(buffer, at + kWindowsProcessEntryImageNameLength, 2);
+    const std::optional<std::uint64_t> name_pointer =
+        ReadLe64(buffer, at + kWindowsProcessEntryImageNameBuffer);
+    const std::optional<std::uint64_t> pid = ReadLe64(buffer, at + kWindowsProcessEntryPid);
+    const std::optional<std::uint64_t> parent =
+        ReadLe64(buffer, at + kWindowsProcessEntryParentPid);
+    if (!next.has_value() || !created.has_value() || !name_length.has_value() ||
+        !name_pointer.has_value() || !pid.has_value() || !parent.has_value() ||
+        *pid > 0xffffffffu || *parent > 0xffffffffu || (*name_length % 2) != 0)
+      return std::nullopt;
+    WindowsProcessNode node;
+    node.pid = static_cast<std::uint32_t>(*pid);
+    node.parent_pid = static_cast<std::uint32_t>(*parent);
+    node.creation = *created;
+    if (*name_length != 0) {
+      if (*name_pointer < buffer_address) return std::nullopt;
+      const std::uint64_t name_offset = *name_pointer - buffer_address;
+      if (name_offset > buffer.size() ||
+          !OffsetWithin(static_cast<std::size_t>(name_offset), *name_length, buffer.size())
+               .has_value())
+        return std::nullopt;
+      std::vector<char16_t> units;
+      for (std::size_t unit = 0; unit < *name_length; unit += 2)
+        units.push_back(static_cast<char16_t>(
+            *ReadLe(buffer, static_cast<std::size_t>(name_offset) + unit, 2)));
+      node.leaf = windows_target_facts_detail::Utf8FromUtf16(units).value_or(std::string{});
+    }
+    nodes.push_back(std::move(node));
+    if (*next == 0) return nodes;
+    if (*next < kWindowsProcessEntryMinimum) return std::nullopt;
+    const std::optional<std::size_t> following = OffsetWithin(at, *next, buffer.size());
+    if (!following.has_value()) return std::nullopt;
+    at = *following;
+  }
+}
+
+// Whether the held image file is unchanged since the process was created (process herpaderping:
+// a writer that kept its handle across the image section's creation rewrites the file afterwards,
+// so the bytes read later are not the bytes mapped). Both the file's ChangeTime and its
+// LastWriteTime (FILE_BASIC_INFO, 100 ns units since 1601, as the process creation time is) must
+// be present, positive and strictly before the creation time: the same instant is taken as after
+// (the deny direction; both clocks tick coarsely, so a write in the creation's tick cannot be
+// ordered). Anything missing is false. Residual risk: a writer with FILE_WRITE_ATTRIBUTES can set
+// both times back, and a rewrite made before the process object was created (after the section
+// was) is older than the creation; neither is caught here.
+[[nodiscard]] inline bool WindowsImageUnchangedSinceCreation(
+    std::optional<std::int64_t> change_time, std::optional<std::int64_t> last_write_time,
+    std::optional<std::uint64_t> process_creation) {
+  if (!change_time.has_value() || !last_write_time.has_value() || !process_creation.has_value() ||
+      *change_time <= 0 || *last_write_time <= 0)
+    return false;
+  return static_cast<std::uint64_t>(*change_time) < *process_creation &&
+         static_cast<std::uint64_t>(*last_write_time) < *process_creation;
 }
 
 } // namespace sprint_coder::computer_use
