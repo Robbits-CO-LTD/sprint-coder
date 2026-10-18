@@ -201,16 +201,20 @@ describe('team budget caps under configurable concurrency', () => {
       ...input,
     });
 
-  it('ties spawn slots to the concurrency limits', () => {
+  it('grows spawn slots with the concurrency limits, never below what is stored', () => {
     expect(cap({ scope: 'global', kind: 'spawnSlots', storedCap: 24, appConcurrency: 50 })).toBe(
       50,
     );
-    expect(cap({ scope: 'global', kind: 'spawnSlots', storedCap: 24, appConcurrency: 4 })).toBe(4);
     expect(cap({ kind: 'spawnSlots', storedCap: 8, teamConcurrency: 50, appConcurrency: 20 })).toBe(
       20,
     );
+    // A low setting must not make concurrent hires fail: a start-up lease is not an execution.
+    expect(cap({ scope: 'global', kind: 'spawnSlots', storedCap: 24, appConcurrency: 1 })).toBe(24);
     expect(cap({ kind: 'spawnSlots', storedCap: 8, teamConcurrency: 3, appConcurrency: 50 })).toBe(
-      3,
+      8,
+    );
+    expect(cap({ kind: 'spawnSlots', storedCap: 8, teamConcurrency: 50, appConcurrency: 1 })).toBe(
+      8,
     );
     expect(cap({ scope: 'worker', kind: 'spawnSlots', storedCap: 0 })).toBe(0);
   });

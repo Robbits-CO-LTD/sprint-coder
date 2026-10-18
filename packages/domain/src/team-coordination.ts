@@ -39,9 +39,10 @@ export const TEAM_BUDGET_BASELINE_CONCURRENCY = 8;
 /**
  * The cap a reservation is checked against once concurrency is configurable.
  *
- * - `spawnSlots` is a concurrency lease held only while a Worker starts, so it follows the
- *   concurrency limits themselves: the app-wide setting globally, and the smaller of the Team
- *   policy and that setting per Team.
+ * - `spawnSlots` is a lease held only while a Worker starts, not a running execution, and a hire
+ *   that finds it full fails rather than waits. So it grows with the concurrency limits (the
+ *   app-wide setting globally, the smaller of the Team policy and that setting per Team) but never
+ *   drops below what is stored: a low setting must not make two Leaders hiring at once fail.
  * - A Team's cumulative budget (cost, tokens, Worker time, tool calls) keeps its per-Worker share:
  *   the stored defaults were sized for 8 concurrent Workers, so a Team allowed 50 gets 50/8 of
  *   them. It never shrinks below what is stored, so a small Team keeps what it had before.
@@ -55,8 +56,9 @@ export function effectiveBudgetCap(input: {
   appConcurrency: number;
 }): number {
   if (input.kind === 'spawnSlots') {
-    if (input.scope === 'global') return input.appConcurrency;
-    if (input.scope === 'team') return Math.min(input.teamConcurrency, input.appConcurrency);
+    if (input.scope === 'global') return Math.max(input.storedCap, input.appConcurrency);
+    if (input.scope === 'team')
+      return Math.max(input.storedCap, Math.min(input.teamConcurrency, input.appConcurrency));
     return input.storedCap;
   }
   if (input.scope !== 'team') return input.storedCap;

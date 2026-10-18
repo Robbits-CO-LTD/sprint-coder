@@ -398,19 +398,41 @@ if (runsWithElectronAbi)
         purpose: 'execution-50',
         now: '2026-10-18T00:00:00.000Z',
       });
-      // A lowered app-wide setting lowers the spawn pool with it.
-      persistence.setTeamMaxConcurrentExecutions(2);
+      // A lowered setting never shrinks the start-up pool below what was stored (24 global, 8 per
+      // Team): starting is not running, and a hire that finds the pool full fails, not waits.
+      persistence.setTeamMaxConcurrentExecutions(1);
+      const lowered = persistence.reserveTeamBudget({
+        teamId,
+        entries: [
+          { scope: 'global', kind: 'spawnSlots', amount: 8 },
+          { scope: 'team', kind: 'spawnSlots', amount: 8 },
+        ],
+        purpose: 'spawn-8-at-limit-1',
+        now: '2026-10-18T00:00:00.000Z',
+      });
+      expect(() =>
+        persistence.reserveTeamBudget({
+          teamId,
+          entries: [{ scope: 'team', kind: 'spawnSlots', amount: 1 }],
+          purpose: 'spawn-9',
+          now: '2026-10-18T00:00:00.000Z',
+        }),
+      ).toThrow(/team\/spawnSlots/);
+      persistence.releaseTeamBudget({
+        reservationIds: lowered.map(({ id }) => id),
+        now: '2026-10-18T00:00:00.000Z',
+      });
       persistence.reserveTeamBudget({
         teamId,
-        entries: [{ scope: 'global', kind: 'spawnSlots', amount: 2 }],
-        purpose: 'spawn-2',
+        entries: [{ scope: 'global', kind: 'spawnSlots', amount: 24 }],
+        purpose: 'spawn-24-at-limit-1',
         now: '2026-10-18T00:00:00.000Z',
       });
       expect(() =>
         persistence.reserveTeamBudget({
           teamId,
           entries: [{ scope: 'global', kind: 'spawnSlots', amount: 1 }],
-          purpose: 'spawn-3',
+          purpose: 'spawn-25',
           now: '2026-10-18T00:00:00.000Z',
         }),
       ).toThrow(/global\/spawnSlots/);

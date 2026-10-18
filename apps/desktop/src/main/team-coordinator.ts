@@ -50,8 +50,6 @@ import {
   assertDelegationAllowed,
   assertTeamMessageRate,
   buildTeamEnvelope,
-  nextRateWindowSlot,
-  TEAM_ASSIGNMENT_RATE_LIMIT,
   TEAM_MESSAGE_RATE_LIMIT,
   TeamDelegationError,
   type ManagerPolicy,
@@ -515,17 +513,20 @@ export class TeamCoordinator {
     readonly workspaceWriteLimits: WorkspaceWriteLimits | null = null,
   ) {
     this.integrationScheduler = integrationScheduler ?? new TeamIntegrationScheduler();
-    if (executionScheduler !== undefined) {
-      this.executionScheduler = executionScheduler;
-      return;
+    if (executionScheduler !== undefined) this.executionScheduler = executionScheduler;
+    else {
+      const admission = new ConnectionAdmissionController(() => this.now().getTime());
+      for (const connection of this.persistence.listProviderConnections())
+        admission.configure(connection);
+      // Read on every admission pass, so Settings > Team applies to the next execution.
+      this.executionScheduler = new TeamExecutionScheduler(
+        () => this.persistence.getTeamMaxConcurrentExecutions(),
+        admission,
+      );
     }
-    const admission = new ConnectionAdmissionController(() => this.now().getTime());
-    for (const connection of this.persistence.listProviderConnections())
-      admission.configure(connection);
-    // Read on every admission pass, so Settings > Team applies to the next execution.
-    this.executionScheduler = new TeamExecutionScheduler(
-      () => this.persistence.getTeamMaxConcurrentExecutions(),
-      admission,
+    // A Team's policy is read the same way, so a change applies to work already queued.
+    this.executionScheduler.readTeamLimitsFrom(
+      (teamId) => this.persistence.getTeam(teamId).policy.maxConcurrentExecutions,
     );
   }
 
@@ -537,8 +538,6 @@ export class TeamCoordinator {
   /** Free-form messages admitted per Team in the trailing window (Issue #854: reports and
    * assignments are not counted here). In memory: a restart starts a fresh window. */
   private readonly messageRateWindows = new Map<string, number[]>();
-  /** Assignment start times per Team, including ones paced into the future. */
-  private readonly assignmentRateWindows = new Map<string, number[]>();
 
   private assertMessageRateRoom(teamId: string): void {
     const nowMs = this.now().getTime();
@@ -553,31 +552,6 @@ export class TeamCoordinator {
     const admitted = this.messageRateWindows.get(teamId) ?? [];
     admitted.push(this.now().getTime());
     this.messageRateWindows.set(teamId, admitted);
-  }
-
-  /** When the next assignment of this Team may start: now, or later once the window has room. An
-   * assignment beyond the limit is queued for that time instead of being refused (Issue #854). */
-  private nextAssignmentSlot(teamId: string): { nowMs: number; slotMs: number } {
-    const nowMs = this.now().getTime();
-    const live = (this.assignmentRateWindows.get(teamId) ?? []).filter(
-      (at) => at > nowMs - TEAM_ASSIGNMENT_RATE_LIMIT.windowMs,
-    );
-    this.assignmentRateWindows.set(teamId, live);
-    return {
-      nowMs,
-      slotMs: nextRateWindowSlot(
-        live,
-        nowMs,
-        TEAM_ASSIGNMENT_RATE_LIMIT.limit,
-        TEAM_ASSIGNMENT_RATE_LIMIT.windowMs,
-      ),
-    };
-  }
-
-  private recordAssignment(teamId: string, slotMs: number): void {
-    const admitted = this.assignmentRateWindows.get(teamId) ?? [];
-    admitted.push(slotMs);
-    this.assignmentRateWindows.set(teamId, admitted);
   }
 
   private pinnedBlueprint(taskId: string, teamId: string): TeamBlueprintBindingRecord | null {
@@ -810,6 +784,8 @@ export class TeamCoordinator {
       if (this.persistence.getTeamBlueprint(team.id) !== null)
         throw new Error('Team Skillの固定Policyが適用中のため個別Policyを変更できません');
       this.persistence.updateTeamPolicy(team.id, input.policy, input.expectedRevision);
+      // A raised concurrency limit may start queued Workers now; a lowered one holds new starts.
+      this.executionScheduler.notifyLimitChanged();
       const detail = this.detail(team.id);
       this.publish(input.taskId, detail);
       return detail;
@@ -3190,7 +3166,6 @@ export class TeamCoordinator {
           )
       )
         throw new Error('Worker already has a pending execution');
-      const { nowMs, slotMs } = this.nextAssignmentSlot(team.id);
 
       const now = this.isoNow();
       const execution = this.persistence.createTeamExecution({
@@ -3232,7 +3207,6 @@ export class TeamCoordinator {
         workerId: worker.id,
         status: 'queued',
       });
-      this.recordAssignment(team.id, slotMs);
       this.scheduleExecution({
         taskId: input.taskId,
         teamId: team.id,
@@ -3244,8 +3218,9 @@ export class TeamCoordinator {
         teamTaskId: teamTask.id,
         executionId: execution.id,
         doneCriteria: input.doneCriteria,
-        // The scheduler keeps wall-clock time; only the wait is carried over from the Team's clock.
-        ...(slotMs > nowMs ? { notBeforeMs: Date.now() + (slotMs - nowMs) } : {}),
+        // Issue #854: never refused for pace. The Scheduler counts the assignment when it starts,
+        // and one beyond the Team's pace waits queued until the window has room.
+        paceKey: team.id,
       });
       this.emit(input.taskId, team.id);
       return { executionId: queued.id, state: queued.state };
@@ -4901,7 +4876,7 @@ export class TeamCoordinator {
     executionId: string;
     doneCriteria: readonly string[];
     attemptStartReason?: TeamAttemptStartReason;
-    notBeforeMs?: number;
+    paceKey?: string;
   }): void {
     const execution = this.persistence.getTeamExecution(input.executionId);
     if (execution.assigneeAgentId !== input.workerId || execution.teamId !== input.teamId)
@@ -4911,7 +4886,7 @@ export class TeamCoordinator {
       workerId: execution.assigneeAgentId,
       teamId: input.teamId,
       teamLimit: input.teamLimit,
-      ...(input.notBeforeMs === undefined ? {} : { notBeforeMs: input.notBeforeMs }),
+      ...(input.paceKey === undefined ? {} : { paceKey: input.paceKey }),
       ...this.connectionSchedulingFields(execution, input.taskId, input.teamId),
       isReady: () =>
         !this.graphIntegrationWorkers.has(execution.assigneeAgentId) &&

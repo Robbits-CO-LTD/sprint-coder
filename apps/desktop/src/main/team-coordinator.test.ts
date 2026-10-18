@@ -6590,6 +6590,92 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('applies a Team policy change to executions already queued, raised or lowered', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Policy change while queued');
+      const runtime = new BlockingWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const workers = [];
+      for (let index = 0; index < 6; index += 1)
+        workers.push(
+          await coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: `objective-${index}`,
+            contextInheritancePolicy: 'summary',
+            writeCapable: false,
+          }),
+        );
+      const teamId = workers[0]!.teamId;
+      const setLimit = async (maxConcurrentExecutions: number) => {
+        const team = persistence.getTeam(teamId);
+        await coordinator.updatePolicy({
+          taskId: task.id,
+          policy: { ...team.policy, maxConcurrentExecutions },
+          expectedRevision: team.revision,
+        });
+      };
+      await setLimit(2);
+      for (const worker of workers)
+        await coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: `execute-${worker.role}`,
+          doneCriteria: ['runtime completes'],
+        });
+      await waitFor(() => runtime.activeExecutions === 2);
+
+      // Raised: queued work starts without anything finishing first.
+      await setLimit(4);
+      await waitFor(() => runtime.activeExecutions === 4);
+
+      // Lowered: the running four finish, then only one runs at a time.
+      await setLimit(1);
+      for (const release of runtime.releases.splice(0)) release();
+      await waitFor(() => runtime.activeExecutions === 1 && runtime.releases.length === 1);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(runtime.activeExecutions).toBe(1);
+      expect(
+        persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
+      ).toHaveLength(1);
+      for (let round = 0; round < 2; round += 1) {
+        for (const release of runtime.releases.splice(0)) release();
+        await waitFor(
+          () =>
+            runtime.releases.length === 1 ||
+            persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
+        );
+        expect(runtime.activeExecutions).toBeLessThanOrEqual(1);
+      }
+      await waitFor(() =>
+        persistence.listTeamExecutions(teamId).every(({ state }) => state === 'completed'),
+      );
+      persistence.close();
+    });
+
+    it('lets two Leaders hire at once under an app-wide limit of 1', async () => {
+      const persistence = createPersistence();
+      persistence.setTeamMaxConcurrentExecutions(1);
+      const runtime = new TestWorkerRuntime();
+      const coordinator = new TeamCoordinator(persistence, runtime);
+      const tasks = [persistence.createTask('First Team'), persistence.createTask('Second Team')];
+      // A start-up slot is not an execution: both starts overlap, and neither hire fails.
+      const hired = await Promise.all(
+        tasks.map((task, index) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role: `worker-${index}`,
+            objective: 'start alongside another Team',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          }),
+        ),
+      );
+      expect(runtime.maxActiveStarts).toBe(2);
+      expect(hired.map(({ state }) => state)).toEqual(['ready', 'ready']);
+      persistence.close();
+    });
+
     it('steers and cancels queued executions before they consume a runtime slot', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Queued execution control');

@@ -1,5 +1,9 @@
 import type { ProviderConnection } from '@sprint-coder/contracts';
-import { TEAM_DEFAULT_CONCURRENT_EXECUTIONS } from '@sprint-coder/domain';
+import {
+  nextRateWindowSlot,
+  TEAM_ASSIGNMENT_RATE_LIMIT,
+  TEAM_DEFAULT_CONCURRENT_EXECUTIONS,
+} from '@sprint-coder/domain';
 import { secureLogger } from './secure-logger';
 import type {
   ConnectionAdmissionController,
@@ -32,8 +36,14 @@ export type TeamExecutionJob = Readonly<{
   isReady?(): boolean;
   onReadinessError?(error: unknown): void;
   notBeforeMs?: number;
+  /** Jobs sharing a key (a Team's fresh assignments) start at most `admissionPace.limit` per
+   * window. Counted when the job actually starts, not when it was accepted, so a backlog that
+   * waited for slots cannot all start at once (Issue #854). Beyond it the job waits, not fails. */
+  paceKey?: string;
   run(): Promise<void>;
 }>;
+
+export type TeamAdmissionPace = Readonly<{ limit: number; windowMs: number }>;
 
 export type TeamExecutionSchedulerSnapshot = Readonly<{
   activeCount: number;
@@ -59,13 +69,37 @@ export class TeamExecutionScheduler {
   private nextOrdinal = 1;
   private pumpScheduled = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** When the timer above fires (Date.now() time), so a shorter wait can replace it. */
+  private retryAtMs = 0;
+  /** The current per-Team limit, read on every admission pass; null keeps each job's own. */
+  private teamLimitReader: ((teamId: string) => number) | null = null;
+  /** Start times (Date.now()) per pace key within the trailing window. */
+  private readonly paceWindows = new Map<string, number[]>();
 
   constructor(
     private readonly globalLimit: TeamExecutionLimit = TEAM_GLOBAL_EXECUTION_LIMIT,
     private readonly connectionAdmission?: ConnectionAdmissionController,
+    private readonly admissionPace: TeamAdmissionPace = TEAM_ASSIGNMENT_RATE_LIMIT,
   ) {
     if (typeof globalLimit === 'number' && !isPositiveLimit(globalLimit))
       throw new Error('Team global execution limit must be a positive integer');
+  }
+
+  /** The earliest time this job's pace allows it to start (now when it has room or no key). */
+  private paceSlot(job: QueuedJob, now: number): number {
+    if (job.paceKey === undefined) return now;
+    const live = (this.paceWindows.get(job.paceKey) ?? []).filter(
+      (at) => at > now - this.admissionPace.windowMs,
+    );
+    this.paceWindows.set(job.paceKey, live);
+    return nextRateWindowSlot(live, now, this.admissionPace.limit, this.admissionPace.windowMs);
+  }
+
+  private recordPacedStart(job: QueuedJob): void {
+    if (job.paceKey === undefined) return;
+    const starts = this.paceWindows.get(job.paceKey) ?? [];
+    starts.push(Date.now());
+    this.paceWindows.set(job.paceKey, starts);
   }
 
   /** The limit this admission pass uses. A reader that fails or returns nonsense falls back to the
@@ -83,6 +117,28 @@ export class TeamExecutionScheduler {
   /** A raised limit can admit queued work at once; a lowered one only stops new admissions. */
   notifyLimitChanged(): void {
     this.schedulePump();
+  }
+
+  /** Reads each Team's limit (its policy) on every admission pass instead of the value a job was
+   * submitted with, so a policy changed while work is queued applies to that work too. */
+  readTeamLimitsFrom(reader: (teamId: string) => number): void {
+    this.teamLimitReader = reader;
+    this.schedulePump();
+  }
+
+  private teamLimitOf(job: QueuedJob, cache: Map<string, number>): number {
+    const cached = cache.get(job.teamId);
+    if (cached !== undefined) return cached;
+    let limit = job.teamLimit;
+    if (this.teamLimitReader !== null)
+      try {
+        const value = this.teamLimitReader(job.teamId);
+        if (isPositiveLimit(value)) limit = value;
+      } catch {
+        // A Team that cannot be read keeps the limit it was submitted with.
+      }
+    cache.set(job.teamId, limit);
+    return limit;
   }
 
   configureConnection(connection: ProviderConnection): void {
@@ -187,6 +243,7 @@ export class TeamExecutionScheduler {
       const [job] = this.queued.splice(index, 1);
       if (job === undefined) return;
       if (job.connection !== undefined) this.connectionAdmission?.admit(toAdmissionCandidate(job));
+      this.recordPacedStart(job);
       this.active.set(job.executionId, job);
       this.preflightExecutionIds.add(job.executionId);
       // The job owns durable failure recording. Admission control must still release its slot
@@ -252,21 +309,26 @@ export class TeamExecutionScheduler {
       activeByTeam.set(job.teamId, (activeByTeam.get(job.teamId) ?? 0) + 1);
     // A readiness error callback may remove its invalid job. Compute indices after callbacks.
     const ready = new Set([...this.queued].filter((job) => this.isJobReady(job)));
+    const teamLimits = new Map<string, number>();
     const teamAdmissible = this.queued
       .map((job, index) => ({ job, index }))
       .filter(
         ({ job }) =>
           !activeWorkers.has(job.workerId) &&
-          (activeByTeam.get(job.teamId) ?? 0) < job.teamLimit &&
+          (activeByTeam.get(job.teamId) ?? 0) < this.teamLimitOf(job, teamLimits) &&
           ready.has(job),
       );
     if (teamAdmissible.length === 0) return -1;
     const now = Date.now();
-    const timeAdmissible = teamAdmissible.filter(
-      ({ job }) => job.notBeforeMs === undefined || job.notBeforeMs <= now,
+    const startAt = new Map(
+      teamAdmissible.map(({ job }) => [
+        job,
+        Math.max(job.notBeforeMs ?? now, this.paceSlot(job, now)),
+      ]),
     );
+    const timeAdmissible = teamAdmissible.filter(({ job }) => startAt.get(job)! <= now);
     if (timeAdmissible.length === 0) {
-      const earliest = Math.min(...teamAdmissible.map(({ job }) => job.notBeforeMs ?? now));
+      const earliest = Math.min(...startAt.values());
       this.scheduleRetry(Math.max(1, earliest - now));
       return -1;
     }
@@ -315,7 +377,14 @@ export class TeamExecutionScheduler {
   }
 
   private scheduleRetry(delayMs: number): void {
-    if (this.retryTimer !== null) return;
+    const atMs = Date.now() + delayMs;
+    // A pending timer that fires no later already covers this wait. A shorter wait (a 250 ms
+    // Connection retry behind a minute of assignment pacing) replaces it instead of waiting it out.
+    if (this.retryTimer !== null) {
+      if (this.retryAtMs <= atMs) return;
+      clearTimeout(this.retryTimer);
+    }
+    this.retryAtMs = atMs;
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.schedulePump();
