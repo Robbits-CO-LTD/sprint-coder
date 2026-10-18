@@ -384,17 +384,18 @@ int wmain(int argc, wchar_t **argv) {
   outsider.lineage_root_pid = idle.info.dwProcessId;
   outsider.lineage_root_creation = WindowsTargetCreationTime(idle.info.hProcess).value_or(0);
   outsider.acceptance_mode = true;
-  // The rename-follow probe runs once and must confirm it on this (NTFS) machine; the measurements
-  // below rely on it, so set it on the outsider context.
-  const std::optional<bool> rename_follows = WindowsTargetRenameFollows();
-  Check(rename_follows == std::optional<bool>(true), "rename_follow_probe_confirms_on_this_machine");
-  outsider.rename_follows = rename_follows;
+  // The rename-follow probe runs once and must confirm it on this (NTFS) machine, with the move
+  // followed and the probe volume's file system reported; the measurements below rely on it.
+  const std::optional<WindowsTargetRenameProbe> rename_probe = WindowsTargetRenameFollows();
+  Check(rename_probe.has_value() && rename_probe->follows && rename_probe->file_system == "ntfs",
+        "rename_follow_probe_confirms_on_this_machine");
+  outsider.rename_probe = rename_probe;
   // This program stands in for Main: CurrentWindowsTargetFactsContext takes Main's pid as the
   // lineage root, so this process (and its children) are Sprint Coder's own.
   WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "", true);
   own.roots = outsider.roots;
   Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId() &&
-            own.rename_follows == std::optional<bool>(true),
+            own.rename_probe.has_value() && own.rename_probe->follows,
         "contexts_built");
   Check(CurrentWindowsTargetFactsContext(0, "", true).lineage_root_pid == 0,
         "lineage_root_unmeasured_without_main");
@@ -516,15 +517,26 @@ int wmain(int argc, wchar_t **argv) {
         "fixture_lineage_outsider");
   Check(ClassOf(fixture_facts.facts) == "W6", "fixture_refused_as_w6");
 
-  // Fail-closed: if the rename-follow probe did not confirm (false or unknown), the same target's
-  // running image does not match, so it is unresolvable. The result is substitutable here.
-  for (const std::optional<bool> probe : {std::optional<bool>(false), std::optional<bool>()}) {
-    WindowsTargetFactsContext degraded = outsider;
-    degraded.rename_follows = probe;
-    const WindowsTargetFactsMeasurement m =
-        Measure(fixture_process.info.dwProcessId, fixture_window, degraded);
-    Check(Is(m.facts.running_image_matches, false) && ClassOf(m.facts) == "W-UR",
-          "unconfirmed_rename_follow_makes_the_target_unresolvable");
+  // Fail-closed: the same target is unresolvable when the probe did not follow, when the probe is
+  // missing, and when it followed but on a different file system than the target's (here the target
+  // is NTFS, so a probe keyed to another file system does not apply). Substitutable here.
+  {
+    WindowsTargetRenameProbe no_follow;
+    no_follow.follows = false;
+    no_follow.file_system = "ntfs";
+    WindowsTargetRenameProbe other_fs;
+    other_fs.follows = true;
+    other_fs.file_system = "refs";
+    const std::optional<WindowsTargetRenameProbe> probes[] = {
+        no_follow, other_fs, std::optional<WindowsTargetRenameProbe>()};
+    for (const std::optional<WindowsTargetRenameProbe> &probe : probes) {
+      WindowsTargetFactsContext degraded = outsider;
+      degraded.rename_probe = probe;
+      const WindowsTargetFactsMeasurement m =
+          Measure(fixture_process.info.dwProcessId, fixture_window, degraded);
+      Check(Is(m.facts.running_image_matches, false) && ClassOf(m.facts) == "W-UR",
+            "unconfirmed_rename_follow_makes_the_target_unresolvable");
+    }
   }
 
   // The main image is found from kernel-held data, not from the target's module list. For a benign

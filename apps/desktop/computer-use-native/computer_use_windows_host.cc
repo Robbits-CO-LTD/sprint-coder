@@ -1092,11 +1092,16 @@ bool IsSupportedWindowsV1Target(
 //     a target unmaps its image and maps another file B at the entry point's address (and rewrites
 //     its Ldr list), the re-read still names the real image and opens a different file than the one
 //     held, which is a mismatch (W-UR). This rests on QueryFullProcessImageNameW following a
-//     rename, which a one-time probe confirms on this machine (WindowsTargetRenameFollows); unless
-//     it did, no running image matches. The name is read once before the open and once after, both
-//     must agree (a rename racing the open is caught, since the file-id compare still ties the
-//     opened file to the real image's id), and the held file must sit on a volume with a stable
-//     128-bit file id (NTFS or ReFS). A hard-link count is not required: Windows servicing
+//     rename, which a one-time probe confirms (WindowsTargetRenameFollows): it renames a suspended
+//     copy of this helper within its directory and then moves it to another directory on the temp
+//     volume, and both must be followed. The probe speaks only for the temp volume's file system,
+//     so a target matches only when the probe followed and the target's own file system is the same
+//     (a target on another file system, e.g. a Dev Drive's ReFS when temp is NTFS, is W-UR until a
+//     probe for it exists). The kernel name is read once before the open and once after, both must
+//     agree (a rename racing the open is caught, since the file-id compare still ties the opened
+//     file to the real image's id), the held file must sit on a volume with a stable 128-bit file
+//     id (NTFS or ReFS), and that volume must not be remote (SMB can report "NTFS", so
+//     FileRemoteProtocolInfo decides). A hard-link count is not required: Windows servicing
 //     hard-links legitimate system binaries (WinSxS), the eligible System32 image among them, and
 //     the name and file-id checks already defeat a hard link placed at the old name (it carries the
 //     other file's id). The PE header
@@ -1155,6 +1160,13 @@ inline constexpr std::string_view kWindowsTargetFixtureLeaf =
 
 enum class WindowsTargetSignatureSource : std::uint8_t { kNone, kEmbedded, kCatalog };
 
+// What the one-time rename-follow probe found: whether QueryFullProcessImageNameW follows a rename
+// of a running image on the probed volume, and that volume's file system (lower-cased).
+struct WindowsTargetRenameProbe {
+  bool follows = false;
+  std::string file_system;
+};
+
 // What the caller knows that the target cannot tell: the roots (in precedence order), the process
 // whose descendants are Sprint Coder's own, this helper's signer, and the acceptance mode.
 struct WindowsTargetFactsContext {
@@ -1163,11 +1175,11 @@ struct WindowsTargetFactsContext {
   std::uint64_t lineage_root_creation = 0;
   std::string self_signer_thumbprint;
   bool acceptance_mode = false;
-  // Whether QueryFullProcessImageNameW follows a rename of the running image on this machine,
-  // measured once (WindowsTargetRenameFollows). The running-image anchor rests on it, so when it
-  // is anything but true (false, or the probe could not run) no target's running image matches,
-  // and every target is unresolvable.
-  std::optional<bool> rename_follows;
+  // The one-time rename-follow probe (WindowsTargetRenameFollows): whether the kernel image name
+  // follows a rename on the probed (temp) volume, and that volume's file system. The running-image
+  // anchor rests on it, so a target matches only when the probe followed and the target's own file
+  // system is the same as the probed one; otherwise the target is unresolvable.
+  std::optional<WindowsTargetRenameProbe> rename_probe;
 };
 
 struct WindowsTargetFactsMeasurement {
@@ -1308,15 +1320,45 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
   return roots;
 }
 
-// Measures, once, whether QueryFullProcessImageNameW follows a rename of a running image on this
-// machine. A copy of this helper's own exe is started SUSPENDED (so it never runs a single
-// instruction: no behaviour, no pipe, no window), its kernel image name is read, the file is
-// renamed on disk, and the name is read again. It follows when the second name is the new one. The
-// child is held in a job that kills it on close, and the temp files are deleted. std::nullopt when
-// the probe could not run (copy, launch or rename failed), which the caller treats as "does not
-// follow" (fail closed). The probe is not cheap (a process create and teardown), so it is done
-// once per helper and cached in the context.
-std::optional<bool> WindowsTargetRenameFollows() {
+// Whether a handle's file is on a remote volume (an SMB share and such), which some report with a
+// local file system name like "NTFS"; GetFileInformationByHandleEx(FileRemoteProtocolInfo) is the
+// authority. std::nullopt when it cannot be asked.
+std::optional<bool> WindowsTargetFileIsRemote(HANDLE file) {
+  FILE_REMOTE_PROTOCOL_INFO remote{};
+  if (GetFileInformationByHandleEx(file, FileRemoteProtocolInfo, &remote, sizeof(remote)))
+    return true;
+  return GetLastError() == ERROR_INVALID_PARAMETER ? std::optional<bool>(false) : std::nullopt;
+}
+
+// The file system name (e.g. "NTFS", "ReFS") of the volume a handle's file is on, lower-cased, or
+// std::nullopt. A remote volume is std::nullopt whatever name it reports.
+std::optional<std::string> WindowsTargetFileSystemName(HANDLE file) {
+  if (WindowsTargetFileIsRemote(file) != std::optional<bool>(false))
+    return std::nullopt;
+  std::array<wchar_t, MAX_PATH + 1> name{};
+  if (GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, nullptr, name.data(),
+                                    static_cast<DWORD>(name.size())) != TRUE)
+    return std::nullopt;
+  std::string lowered = Utf8FromWide(name.data());
+  for (char &letter : lowered)
+    if (letter >= 'A' && letter <= 'Z') letter = static_cast<char>(letter - 'A' + 'a');
+  return lowered;
+}
+
+// Whether a file system's 128-bit file id is dependable: NTFS or ReFS.
+bool WindowsTargetFileSystemHasStableId(std::string_view file_system) {
+  return file_system == "ntfs" || file_system == "refs";
+}
+
+// Measures, once, whether QueryFullProcessImageNameW follows a rename of a running image. A copy of
+// this helper's own exe is started SUSPENDED (so it never runs a single instruction: no behaviour,
+// no pipe, no window), its kernel image name is read, the file is renamed within its directory and
+// then moved to another directory on the same volume, and the name is read after each; it follows
+// only when both moves are followed. The child is held in a job that kills it on close and the temp
+// files are deleted. std::nullopt when the probe could not run (copy, launch, rename or move
+// failed, or the temp file system is unknown or remote), which the caller treats as fail closed.
+// The probe runs on the temp volume, so its result speaks only for that volume's file system.
+std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
   std::vector<wchar_t> module(32'768, L'\0');
   const DWORD module_length =
       GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
@@ -1329,14 +1371,18 @@ std::optional<bool> WindowsTargetRenameFollows() {
   const std::wstring stem = directory + L"sc-rename-probe-" +
                             std::to_wstring(GetCurrentProcessId()) + L"-" +
                             std::to_wstring(GetTickCount64());
+  // A subdirectory on the same volume, for the cross-directory move.
+  const std::wstring subdirectory = stem + L"-dir";
   const std::wstring first = stem + L"-a.exe";
   const std::wstring second = stem + L"-b.exe";
+  const std::wstring third = subdirectory + L"\\c.exe";
   if (CopyFileW(std::wstring(module.data(), module_length).c_str(), first.c_str(), TRUE) != TRUE)
     return std::nullopt;
+  CreateDirectoryW(subdirectory.c_str(), nullptr);
   ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-  std::optional<bool> follows;
+  std::optional<WindowsTargetRenameProbe> result;
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
@@ -1349,11 +1395,32 @@ std::optional<bool> WindowsTargetRenameFollows() {
                      &process)) {
     AssignProcessToJobObject(job.value, process.hProcess);
     std::wstring before;
-    std::wstring after;
-    if (ReadProcessPath(process.hProcess, &before) &&
+    std::wstring renamed;
+    std::wstring moved;
+    // The file system of the probe volume, read from the copied file itself.
+    std::optional<std::string> probe_file_system;
+    {
+      ScopedKernelHandle probe_handle(CreateFileW(first.c_str(), FILE_READ_ATTRIBUTES,
+                                                  FILE_SHARE_READ | FILE_SHARE_WRITE |
+                                                      FILE_SHARE_DELETE,
+                                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                                                  nullptr));
+      if (probe_handle.value != INVALID_HANDLE_VALUE)
+        probe_file_system = WindowsTargetFileSystemName(probe_handle.value);
+    }
+    if (probe_file_system.has_value() &&
+        ReadProcessPath(process.hProcess, &before) &&
         MoveFileExW(first.c_str(), second.c_str(), 0) == TRUE &&
-        ReadProcessPath(process.hProcess, &after))
-      follows = SameWindowsTargetName(before, first) && SameWindowsTargetName(after, second);
+        ReadProcessPath(process.hProcess, &renamed) &&
+        MoveFileExW(second.c_str(), third.c_str(), 0) == TRUE &&
+        ReadProcessPath(process.hProcess, &moved)) {
+      WindowsTargetRenameProbe probe;
+      probe.follows = SameWindowsTargetName(before, first) &&
+                      SameWindowsTargetName(renamed, second) &&
+                      SameWindowsTargetName(moved, third);
+      probe.file_system = *probe_file_system;
+      result = probe;
+    }
     TerminateProcess(process.hProcess, 0);
     WaitForSingleObject(process.hProcess, 2'000);
     CloseHandle(process.hThread);
@@ -1361,12 +1428,13 @@ std::optional<bool> WindowsTargetRenameFollows() {
   }
   // Delete after the child is gone so its image section no longer holds the file. A short retry
   // covers the brief window while the kernel finishes tearing the mapping down.
-  for (const std::wstring &file : {first, second})
+  for (const std::wstring &file : {first, second, third})
     for (int attempt = 0; attempt < 20 && GetFileAttributesW(file.c_str()) != INVALID_FILE_ATTRIBUTES;
          ++attempt)
       if (DeleteFileW(file.c_str()) != TRUE)
         Sleep(50);
-  return follows;
+  RemoveDirectoryW(subdirectory.c_str());
+  return result;
 }
 
 // The context of a measurement made by this helper: the roots with Sprint Coder's install root,
@@ -1392,7 +1460,7 @@ WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pi
   }
   context.self_signer_thumbprint = std::move(self_signer_thumbprint);
   context.acceptance_mode = acceptance_mode;
-  context.rename_follows = WindowsTargetRenameFollows();
+  context.rename_probe = WindowsTargetRenameFollows();
   return context;
 }
 
@@ -1554,6 +1622,8 @@ struct WindowsTargetHeldImage {
   std::wstring canonical_path;
   WindowsFileIdentity identity;
   bool matches = false;
+  // The held file's file system (lower-cased), for the caller to compare with the rename probe's.
+  std::optional<std::string> file_system;
 };
 
 // Opens a Win32 path read-only (sharing everything, so a running image can be opened) and returns
@@ -1592,12 +1662,8 @@ std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstr
 // similar the id is not dependable, so file-id matching cannot be trusted and the target is
 // unresolvable. Network and removable volumes are already W-UR by imageVolume.
 bool WindowsTargetStableIdVolume(HANDLE file) {
-  std::array<wchar_t, MAX_PATH + 1> file_system{};
-  if (GetVolumeInformationByHandleW(file, nullptr, 0, nullptr, nullptr, nullptr,
-                                    file_system.data(),
-                                    static_cast<DWORD>(file_system.size())) != TRUE)
-    return false;
-  return _wcsicmp(file_system.data(), L"NTFS") == 0 || _wcsicmp(file_system.data(), L"ReFS") == 0;
+  const std::optional<std::string> file_system = WindowsTargetFileSystemName(file);
+  return file_system.has_value() && WindowsTargetFileSystemHasStableId(*file_system);
 }
 
 bool HoldWindowsTargetRunningImage(HANDLE process,
@@ -1639,6 +1705,7 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       SameWindowsTargetName(kernel_file->canonical_path, held->canonical_path) &&
       SameWindowsFileIdentity(kernel_file->identity, held->identity) &&
       WindowsTargetStableIdVolume(held->file.value);
+  held->file_system = WindowsTargetFileSystemName(held->file.value);
   // Auxiliary deny-side checks.
   const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
   const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
@@ -2395,9 +2462,15 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
   WindowsTargetHeldImage held;
   if (!HoldWindowsTargetRunningImage(process.value, recorded, &held))
     return measured;
-  // The running-image anchor rests on QueryFullProcessImageNameW following a rename, so unless the
-  // one-time probe confirmed it does on this machine, no running image matches (fail closed).
-  facts.running_image_matches = held.matches && context.rename_follows == std::optional<bool>(true);
+  // The running-image anchor rests on QueryFullProcessImageNameW following a rename. The one-time
+  // probe confirms that only for the file system it ran on (the temp volume), so the target matches
+  // only when the probe followed and the target's own file system is the same. A target on another
+  // file system (e.g. temp is NTFS and the target is on ReFS or a Dev Drive) is unresolvable until
+  // a probe for that file system is available. Fail closed on anything missing.
+  const bool rename_follow_known =
+      held.matches && context.rename_probe.has_value() && context.rename_probe->follows &&
+      held.file_system.has_value() && *held.file_system == context.rename_probe->file_system;
+  facts.running_image_matches = rename_follow_known;
   measured.image_path = held.canonical_path;
   measured.file_identity = held.identity;
   const std::optional<std::string> path = WindowsTargetUtf8(held.canonical_path);
