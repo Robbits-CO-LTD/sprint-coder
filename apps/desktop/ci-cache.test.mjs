@@ -526,11 +526,13 @@ describe('full CI partition contract', () => {
     );
     const required = workflow.jobs.required;
     expect(required.needs).toContain('computer-use-native-gate');
+    expect(required.needs).toContain('computer-use-windows-v2-harness');
     const macResult = workflow.jobs['macos-result'];
     expect(macResult.needs).toContain('computer-use-native-gate');
     for (const status of ['success', 'failure', 'cancelled', 'skipped', '']) {
       for (const [verification, dependency] of [
         [required.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
+        [required.steps[0], 'COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT'],
         [macResult.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
         [macResult.steps[0], 'MACOS_TEST_RESULT'],
       ]) {
@@ -541,6 +543,7 @@ describe('full CI partition contract', () => {
             MACOS_RESULT: 'success',
             WINDOWS_RESULT: 'success',
             COMPUTER_USE_NATIVE_RESULT: 'success',
+            COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT: 'success',
             ARCHIFY_RESULT: 'success',
             PACKAGE_TEST_RESULT: 'success',
             MACOS_TEST_RESULT: 'success',
