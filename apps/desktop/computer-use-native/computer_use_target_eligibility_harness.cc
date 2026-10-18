@@ -360,8 +360,9 @@ bool CheckPeImageSummary() {
          Check(!far.has_value(), "pe-summary-e-lfanew-out-of-range") && CheckPeClrImage();
 }
 
-// A PE32 image with one section and a CLR (COR20) header whose Flags are `clr_flags`.
-std::vector<std::uint8_t> ClrImage(std::uint32_t clr_flags) {
+// A PE32 (or, with `plus`, PE32+) image with one section and a CLR (COR20) header whose Flags are
+// `clr_flags`.
+std::vector<std::uint8_t> ClrImage(std::uint32_t clr_flags, bool plus = false) {
   std::vector<std::uint8_t> bytes(0x1800, 0);
   bytes[0] = 'M';
   bytes[1] = 'Z';
@@ -370,12 +371,13 @@ std::vector<std::uint8_t> ClrImage(std::uint32_t clr_flags) {
   bytes[0x81] = 'E';
   PutLe(bytes, 0x80 + 6, 1, 2);                 // NumberOfSections = 1 (COFF header offset 2)
   PutLe(bytes, 0x80 + 20, 240, 2);              // SizeOfOptionalHeader
-  PutLe(bytes, 0x80 + 24, 0x10b, 2);            // PE32 magic
+  PutLe(bytes, 0x80 + 24, plus ? 0x20b : 0x10b, 2); // PE32 / PE32+ magic
   PutLe(bytes, 0x80 + 24 + 68, 2, 2);           // Subsystem = GUI
-  PutLe(bytes, 0x80 + 24 + 92, 16, 4);          // NumberOfRvaAndSizes (PE32)
-  // Data directory 14 (CLR) at optional offset 96 + 14*8: RVA then size.
-  PutLe(bytes, 0x80 + 24 + 96 + 14 * 8, 0x2000, 4);
-  PutLe(bytes, 0x80 + 24 + 96 + 14 * 8 + 4, 0x48, 4);
+  const std::size_t directories = plus ? 112 : 96;
+  PutLe(bytes, 0x80 + 24 + directories - 4, 16, 4); // NumberOfRvaAndSizes
+  // Data directory 14 (CLR): RVA then size.
+  PutLe(bytes, 0x80 + 24 + directories + 14 * 8, 0x2000, 4);
+  PutLe(bytes, 0x80 + 24 + directories + 14 * 8 + 4, 0x48, 4);
   // One section header, after the optional header (0x80 + 24 + 240 = 0x118).
   const std::size_t section = 0x80 + 24 + 240;
   PutLe(bytes, section + 8, 0x1000, 4);  // VirtualSize
@@ -399,6 +401,9 @@ bool CheckPeClrImage() {
   const std::optional<PeImageSummary> preferred =
       ParsePeImageSummary(ClrImage(kIlOnly | k32BitPreferred));
   const std::optional<PeImageSummary> native = ParsePeImageSummary(PeHeader(0x10b, 2));
+  // A PE32+ IL-only image is not converted by the loader, so it keeps the full kernel cross-check.
+  const std::optional<PeImageSummary> plus_il_only =
+      ParsePeImageSummary(ClrImage(kIlOnly, /*plus=*/true));
   return Check(any_cpu.has_value() && any_cpu->clr_bitness_convertible == yes,
                "pe-clr-anycpu-il-only-is-convertible") &&
          Check(required.has_value() && required->clr_bitness_convertible == no,
@@ -406,7 +411,9 @@ bool CheckPeClrImage() {
          Check(preferred.has_value() && preferred->clr_bitness_convertible == no,
                "pe-clr-32bit-preferred-is-not-convertible") &&
          Check(native.has_value() && !native->clr_bitness_convertible.has_value(),
-               "pe-no-clr-header-is-unknown");
+               "pe-no-clr-header-is-unknown") &&
+         Check(plus_il_only.has_value() && plus_il_only->clr_bitness_convertible == no,
+               "pe-clr-pe32plus-il-only-is-not-convertible");
 }
 
 // ASCII text as UTF-16 bytes, little or big endian, with or without the BOM.

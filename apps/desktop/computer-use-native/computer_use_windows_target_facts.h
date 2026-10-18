@@ -220,7 +220,7 @@ struct PeImageSummary {
   std::optional<std::uint16_t> dll_characteristics;
   std::optional<std::uint64_t> stack_reserve;
   std::optional<std::uint64_t> stack_commit;
-  // True when the CLR header marks an IL-only image without 32BITREQUIRED or 32BITPREFERRED: on
+  // True when a PE32 image's CLR header marks it IL-only without 32BITREQUIRED or 32BITPREFERRED: on
   // 64-bit Windows the loader converts such an AnyCPU image from PE32 to PE32+, so the kernel's
   // SECTION_IMAGE_INFORMATION differs from the file header (machine, entry point, sizes, checksum).
   // The kernel cross-check skips those fields for it. std::nullopt when the CLR header is absent or
@@ -335,7 +335,9 @@ ParsePeImageSummary(std::span<const std::uint8_t> bytes) {
           constexpr std::uint32_t kIlOnly = 0x00000001;
           constexpr std::uint32_t k32BitRequired = 0x00000002;
           constexpr std::uint32_t k32BitPreferred = 0x00020000;
-          summary.clr_bitness_convertible = (*flags & kIlOnly) != 0 &&
+          // Only a PE32 (magic 0x10b) image is converted; a PE32+ IL-only image already loads as
+          // is, so it keeps the full cross-check.
+          summary.clr_bitness_convertible = !plus && (*flags & kIlOnly) != 0 &&
                                             (*flags & k32BitRequired) == 0 &&
                                             (*flags & k32BitPreferred) == 0;
         }
