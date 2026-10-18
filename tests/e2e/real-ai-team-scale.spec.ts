@@ -23,6 +23,7 @@ import {
   shutdown,
   type Provider,
 } from './real-ai-helpers';
+import { parseWorkerEnds, runningConcurrency } from './real-ai-team-concurrency';
 
 // 本物の Claude Code CLI / Codex CLI（ユーザーのサブスク）で、Team の大人数同時編集を確かめる opt-in の
 // スペック。Leader（本物の AI）に Worker 32 人（Claude 16 / Codex 16）を雇わせ、各 Worker に別々の
@@ -506,87 +507,6 @@ async function driveTeam(
 }
 
 /** 実行区間（running を観測した最初〜最後）の重なりの最大数。 */
-type AttemptConcurrency = Readonly<{
-  attempts: number;
-  maxConcurrent: number;
-  secondsAtOrAboveMin: number;
-  byProvider: Record<string, { attempts: number; minS: number; maxS: number; avgS: number }>;
-  error?: string;
-}>;
-
-/**
- * App の DB（team_attempts）に記録された Attempt の開始・終了時刻から、本当に同時に動いていた
- * Worker の最大数を数える。画面のサンプリングは Renderer が忙しいと間隔が空くので、こちらを正とする。
- * 読み取り専用で開く（WAL なので App が動いていても読める）。
- */
-async function attemptConcurrency(profile: string): Promise<AttemptConcurrency> {
-  try {
-    const sqlite = (await import('node:sqlite')) as unknown as {
-      DatabaseSync: new (
-        path: string,
-        options: { readOnly: boolean },
-      ) => {
-        prepare: (sql: string) => { all: () => Record<string, unknown>[] };
-        close: () => void;
-      };
-    };
-    const db = new sqlite.DatabaseSync(join(profile, 'sprint-coder.sqlite3'), { readOnly: true });
-    const rows = db
-      .prepare(
-        'SELECT started_at, finished_at, requested_provider FROM team_attempts WHERE started_at IS NOT NULL',
-      )
-      .all();
-    db.close();
-    const events: [number, number][] = [];
-    const byProvider: Record<
-      string,
-      { attempts: number; minS: number; maxS: number; avgS: number }
-    > = {};
-    for (const row of rows) {
-      const start = Date.parse(String(row['started_at']));
-      const end = row['finished_at'] === null ? Date.now() : Date.parse(String(row['finished_at']));
-      events.push([start, 1], [end, -1]);
-      const key = String(row['requested_provider'] ?? 'unknown');
-      const bucket = (byProvider[key] ??= { attempts: 0, minS: Infinity, maxS: 0, avgS: 0 });
-      const seconds = (end - start) / 1000;
-      bucket.avgS = (bucket.avgS * bucket.attempts + seconds) / (bucket.attempts + 1);
-      bucket.attempts++;
-      bucket.minS = Math.min(bucket.minS, seconds);
-      bucket.maxS = Math.max(bucket.maxS, seconds);
-    }
-    events.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    let current = 0;
-    let max = 0;
-    let above = 0;
-    let previous: number | null = null;
-    for (const [at, delta] of events) {
-      if (previous !== null && current >= MIN_CONCURRENT) above += at - previous;
-      current += delta;
-      max = Math.max(max, current);
-      previous = at;
-    }
-    for (const bucket of Object.values(byProvider)) {
-      bucket.avgS = Math.round(bucket.avgS);
-      bucket.minS = Math.round(bucket.minS);
-      bucket.maxS = Math.round(bucket.maxS);
-    }
-    return {
-      attempts: rows.length,
-      maxConcurrent: max,
-      secondsAtOrAboveMin: Math.round(above / 1000),
-      byProvider,
-    };
-  } catch (error) {
-    return {
-      attempts: 0,
-      maxConcurrent: 0,
-      secondsAtOrAboveMin: 0,
-      byProvider: {},
-      error: String(error).slice(0, 300),
-    };
-  }
-}
-
 function maxOverlap(tracks: readonly ExecutionTrack[]): number {
   const events: [number, number][] = [];
   for (const track of tracks)
@@ -618,9 +538,16 @@ function repositoryState(workspace: string): Record<string, unknown> {
   };
 }
 
+/** Main の stdout をそのまま貯める（Worker の CLI 実行の終了時刻を拾うため）。 */
+const mainOutput = new WeakMap<ElectronApplication, string[]>();
+
 async function launch(profile: string, logName: string): Promise<ElectronApplication> {
   const app = await launchApp(profile, undefined, REAL_RUNTIME_ENV);
   recordMainLog(app, logName);
+  const chunks: string[] = [];
+  mainOutput.set(app, chunks);
+  for (const stream of [app.process().stdout, app.process().stderr])
+    stream?.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
   return app;
 }
 
@@ -666,10 +593,7 @@ async function prepareTask(
   return { taskId, leaderModel, claude, codex, teamConcurrency };
 }
 
-function summarize(
-  result: DriveResult,
-  assignments: readonly Assignment[],
-): Record<string, unknown> {
+function summarize(result: DriveResult, assignments: readonly Assignment[]) {
   const workers = (result.last?.workers ?? []).filter(({ kind }) => kind === 'worker');
   const byEngine: Record<string, number> = {};
   for (const worker of workers) byEngine[worker.engine] = (byEngine[worker.engine] ?? 0) + 1;
@@ -801,7 +725,12 @@ test.describe('real AI Team scale E2E', () => {
         label: 'team-scale',
       });
       await shot(page, 'team-scale-final');
-      const dbConcurrency = await attemptConcurrency(profile);
+      // 同時に CLI が動いていた人数（区間の取り方と根拠は real-ai-team-concurrency.ts の先頭）。
+      const dbConcurrency = await runningConcurrency(
+        join(profile, 'sprint-coder.sqlite3'),
+        parseWorkerEnds((mainOutput.get(app) ?? []).join('')),
+        MIN_CONCURRENT,
+      );
       const files = assignments.map((a) => {
         const path = `src/worker-${pad(a.index)}.txt`;
         const text = normalize(readText(join(workspace, path)));
@@ -849,10 +778,20 @@ test.describe('real AI Team scale E2E', () => {
       expect.soft(unexpectedFiles).toEqual([]);
       expect.soft(String(repo['status']).trim()).toBe('');
       expect.soft(repo['cherryPickInProgress']).toBe(false);
-      // 30 人以上が本当に同時に作業していたこと（Worker の CLI が動いている phase=running の数）。
-      // 判定は App の DB の Attempt 時刻で行う（画面のサンプリング値は参考として記録する）。
-      expect.soft(dbConcurrency.error).toBeUndefined();
+      // 30 人以上が本当に同時に CLI を動かしていたこと。rate limit の待機が 1 件でもあれば、待機中の
+      // Worker も worktree を持ったままなので重なりを正しく判定できない。判定不能として失敗させる。
+      // 画面のサンプリング値（maxWorkingIsolationPhases など）は参考として記録するだけにする。
+      expect(dbConcurrency.error, '同時実行数を DB から読めませんでした').toBeUndefined();
+      expect(
+        dbConcurrency.rateLimitWaits + dbConcurrency.rateLimitedAttempts,
+        `判定不能: rate limit の待機が起きたため、同時編集の合否を判定から除外します（待機 ${dbConcurrency.rateLimitWaits} 件、待機した Attempt ${dbConcurrency.rateLimitedAttempts} 件）`,
+      ).toBe(0);
+      expect(
+        dbConcurrency.withoutCliEnd,
+        `判定不能: CLI の終了を Main ログで確かめられない区間が ${dbConcurrency.withoutCliEnd} 件あります`,
+      ).toBe(0);
       expect.soft(dbConcurrency.maxConcurrent).toBeGreaterThanOrEqual(MIN_CONCURRENT);
+      expect.soft(dbConcurrency.secondsAtOrAbove).toBeGreaterThan(0);
       expect.soft(summary.maxAppWorktreeDirs).toBeGreaterThanOrEqual(MIN_CONCURRENT);
       // 実行ごとに別々の worktree（パスの重なり・入れ子なし）。
       const paths = result.tracks.flatMap((track) =>
