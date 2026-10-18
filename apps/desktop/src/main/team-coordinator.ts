@@ -445,6 +445,13 @@ const leafWorkerCeiling = Object.freeze({
 const DEFAULT_WORKER_DELIVERY_TIMEOUT_MS = 30 * 60_000;
 const WORKER_HEARTBEAT_TIMEOUT_MS = 60_000;
 const WORKER_IDLE_TIMEOUT_MS = 15 * 60_000;
+/**
+ * The shortest gap between two Team publishes caused by Worker progress (issue #863). Every
+ * publish carries the whole Team detail, so one publish per streamed line flooded the screen with
+ * thousands of snapshots in a 32-Worker Team and left it minutes behind. Progress is sent at most
+ * once per interval per Team, always ending on the latest state; state changes are never delayed.
+ */
+export const TEAM_PROGRESS_PUBLISH_INTERVAL_MS = 250;
 const executionEstimate = Object.freeze({
   costCents: 100,
   tokens: 20_000,
@@ -498,6 +505,11 @@ export class TeamCoordinator {
   private readonly transientWorkerActivity = new Map<
     string,
     { liveOutput: string; reasoningActive: boolean }
+  >();
+  /** Per Team: when it was last published, and the pending progress publish, if any (#863). */
+  private readonly progressPublishes = new Map<
+    string,
+    { lastPublishedAt: number; pending: ReturnType<typeof setTimeout> | null }
   >();
   private readonly executionScheduler: TeamExecutionScheduler;
   private readonly integrationScheduler: TeamIntegrationScheduler;
@@ -680,7 +692,7 @@ export class TeamCoordinator {
         now,
       );
     if (event.type === 'outputDelta' || event.type === 'reasoningPresence') {
-      this.emit(taskId, teamId);
+      this.emitProgress(taskId, teamId);
       return;
     }
     this.persistence.recordTeamActivity({
@@ -690,7 +702,10 @@ export class TeamCoordinator {
       payload: event,
       now,
     });
-    this.emit(taskId, teamId);
+    // A finished, failed or canceled Worker is a state change and goes out at once; the rest is
+    // progress (issue #863).
+    if (terminal) this.emit(taskId, teamId);
+    else this.emitProgress(taskId, teamId);
   }
 
   get(taskId: string): TeamDetail | null {
@@ -7092,8 +7107,44 @@ export class TeamCoordinator {
     });
   }
 
+  /** Publishes the Team now. Use for state changes and for answers to a person's action. */
   private emit(taskId: string, teamId: string): void {
+    const throttle = this.progressPublishes.get(teamId);
+    if (throttle?.pending != null) clearTimeout(throttle.pending);
+    // Recorded before publishing, so a publish that throws still opens a new progress window.
+    this.progressPublishes.set(teamId, { lastPublishedAt: performance.now(), pending: null });
     this.publish(taskId, this.detail(teamId));
+  }
+
+  /**
+   * Publishes Worker progress (live output, reasoning, stage labels, file changes) with trailing
+   * coalescing (issue #863): the first one after a quiet interval goes out at once; later ones wait
+   * for the interval to pass and then publish a single, freshly built detail with the latest state.
+   * Any {@link emit} in between already carries that state and cancels the wait.
+   */
+  private emitProgress(taskId: string, teamId: string): void {
+    const throttle = this.progressPublishes.get(teamId);
+    if (throttle?.pending != null) return;
+    const waitMs =
+      throttle === undefined
+        ? 0
+        : throttle.lastPublishedAt + TEAM_PROGRESS_PUBLISH_INTERVAL_MS - performance.now();
+    if (throttle === undefined || waitMs <= 0) {
+      // Nothing was published within the interval: this progress goes out at once.
+      this.emit(taskId, teamId);
+      return;
+    }
+    const pending = setTimeout(() => {
+      if (this.progressPublishes.get(teamId)?.pending !== pending) return;
+      try {
+        this.emit(taskId, teamId);
+      } catch {
+        // A progress notice is best effort; the Team may have been removed while it waited.
+      }
+    }, waitMs);
+    // A pending progress notice must not keep the process alive.
+    pending.unref?.();
+    this.progressPublishes.set(teamId, { lastPublishedAt: throttle.lastPublishedAt, pending });
   }
 
   private enqueue<T>(taskId: string, action: () => Promise<T>): Promise<T> {

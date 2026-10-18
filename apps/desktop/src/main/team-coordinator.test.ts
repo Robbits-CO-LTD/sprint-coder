@@ -33,6 +33,7 @@ import { SqlitePersistenceClient, TeamConflictError } from './persistence';
 import { countRequiredTeamWorkers } from './ipc';
 import {
   DeterministicTeamWorkerRuntime,
+  TEAM_PROGRESS_PUBLISH_INTERVAL_MS,
   TeamCoordinator,
   WORKER_SELF_REPORTED_EVIDENCE_PREFIX,
   WorkerEgressDeniedError,
@@ -11406,9 +11407,10 @@ if (runsWithElectronAbi)
         targetAgentId: worker.id,
         content: 'go',
       });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      const live = snapshots.at(-1)?.workers.find(({ id }) => id === worker.id);
-      expect(live).toMatchObject({
+      // Progress is coalesced (issue #863), so the live state arrives with the trailing publish.
+      const liveWorker = () => snapshots.at(-1)?.workers.find(({ id }) => id === worker.id);
+      await waitFor(() => liveWorker()?.liveOutput === '途中出力');
+      expect(liveWorker()).toMatchObject({
         state: 'busy',
         currentActivity: '方針を検討中',
         reasoningActive: true,
@@ -11422,6 +11424,176 @@ if (runsWithElectronAbi)
         reasoningActive: false,
         liveOutput: '',
       });
+      persistence.close();
+    });
+
+    // Issue #863: a Worker that streams thousands of progress events must not publish the whole
+    // Team detail once per event, and the screen must still end on the latest progress.
+    function streamingRuntime(
+      stream: (onEvent: (event: WorkerActivityEvent) => void) => Promise<void>,
+    ): { runtime: TeamWorkerRuntime; release(): void } {
+      let release: () => void = () => undefined;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          await stream((event) => input.onEvent?.(event));
+          await gate;
+          input.onEvent?.({ type: 'completed' });
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: '完了',
+              artifacts: [],
+              verification: [],
+              risks: [],
+              criteria: allCriteriaDone(input.doneCriteria, '完了'),
+            },
+          };
+        },
+        async stop() {},
+      };
+      return { runtime, release: () => release() };
+    }
+
+    it('coalesces a burst of Worker progress into a bounded number of publishes ending on the latest state', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      const snapshots: TeamDetail[] = [];
+      let streamStartIndex = -1;
+      let streamEndIndex = -1;
+      let streamedMs = 0;
+      const { runtime, release } = streamingRuntime(async (onEvent) => {
+        streamStartIndex = snapshots.length;
+        const startedAt = performance.now();
+        // 2,000 progress events spread over about one second, like many busy Workers.
+        for (let batch = 0; batch < 20; batch += 1) {
+          for (let index = 0; index < 100; index += 1) {
+            const n = batch * 100 + index;
+            onEvent({ type: 'outputDelta', text: `${n},` });
+            if (index % 10 === 0)
+              onEvent({ type: 'activity', phase: 'executing', label: `step ${n}`, at: '' });
+            if (index % 25 === 0)
+              onEvent({ type: 'fileChange', changes: [{ path: `f${n}.txt`, kind: 'add' }] });
+          }
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        streamedMs = performance.now() - startedAt;
+        streamEndIndex = snapshots.length;
+      });
+      const coordinator = new TeamCoordinator(persistence, runtime, (_taskId, detail) => {
+        snapshots.push(detail);
+      });
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'stream',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const dispatch = coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'go',
+      });
+      await waitFor(() => streamEndIndex >= 0, 10_000);
+
+      // At most one publish per interval while streaming, plus the leading one.
+      const published = streamEndIndex - streamStartIndex;
+      expect(published).toBeGreaterThan(0);
+      expect(published).toBeLessThanOrEqual(
+        Math.ceil(streamedMs / TEAM_PROGRESS_PUBLISH_INTERVAL_MS) + 1,
+      );
+      // The trailing publish always delivers the latest progress.
+      const liveWorker = () => snapshots.at(-1)?.workers.find(({ id }) => id === worker.id);
+      await waitFor(() => liveWorker()?.liveOutput.endsWith('1999,') === true);
+      expect(liveWorker()).toMatchObject({ state: 'busy', currentActivity: 'step 1990' });
+
+      release();
+      await dispatch;
+      persistence.close();
+    });
+
+    it('publishes a Worker state change at once and drops the pending progress publish', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask();
+      const snapshots: TeamDetail[] = [];
+      let publishedByTerminal = -1;
+      let afterTerminal = -1;
+      let progressPending = false;
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const runtime: TeamWorkerRuntime = {
+        async start() {
+          return { pid: null };
+        },
+        async execute(input) {
+          input.onEvent?.({ type: 'outputDelta', text: 'a' });
+          input.onEvent?.({ type: 'outputDelta', text: 'b' });
+          const beforeBurstEnd = snapshots.length;
+          input.onEvent?.({ type: 'outputDelta', text: 'c' });
+          progressPending = snapshots.length === beforeBurstEnd;
+          const beforeTerminal = snapshots.length;
+          input.onEvent?.({ type: 'completed' });
+          publishedByTerminal = snapshots.length - beforeTerminal;
+          afterTerminal = snapshots.length;
+          await hold;
+          return {
+            claims: {
+              deliveryId: input.envelope.deliveryId,
+              sourceAgentId: input.envelope.sourceAgentId,
+              targetAgentId: input.envelope.targetAgentId,
+            },
+            completion: {
+              status: 'succeeded',
+              summary: '完了',
+              artifacts: [],
+              verification: [],
+              risks: [],
+              criteria: allCriteriaDone(input.doneCriteria, '完了'),
+            },
+          };
+        },
+        async stop() {},
+      };
+      const coordinator = new TeamCoordinator(persistence, runtime, (_taskId, detail) => {
+        snapshots.push(detail);
+      });
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'worker',
+        objective: 'stream',
+        contextInheritancePolicy: 'none',
+        writeCapable: false,
+      });
+      const dispatch = coordinator.sendToWorker({
+        taskId: task.id,
+        targetAgentId: worker.id,
+        content: 'go',
+      });
+      await waitFor(() => afterTerminal >= 0);
+
+      // Progress right after a publish waits, but the completion goes out synchronously.
+      expect(progressPending).toBe(true);
+      expect(publishedByTerminal).toBe(1);
+      expect(snapshots.at(-1)?.workers.find(({ id }) => id === worker.id)?.liveOutput).toBe('');
+      // The wait for the earlier progress was dropped: nothing more is published on its timer.
+      await new Promise((resolve) => setTimeout(resolve, TEAM_PROGRESS_PUBLISH_INTERVAL_MS * 2));
+      expect(snapshots.length).toBe(afterTerminal);
+
+      release();
+      await dispatch;
       persistence.close();
     });
 
