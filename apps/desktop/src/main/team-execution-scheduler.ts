@@ -69,17 +69,19 @@ export class TeamExecutionScheduler {
   private nextOrdinal = 1;
   private pumpScheduled = false;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  /** When the timer above fires (Date.now() time), so a shorter wait can replace it. */
+  /** When the timer above fires (`now()` time), so a shorter wait can replace it. */
   private retryAtMs = 0;
   /** The current per-Team limit, read on every admission pass; null keeps each job's own. */
   private teamLimitReader: ((teamId: string) => number) | null = null;
-  /** Start times (Date.now()) per pace key within the trailing window. */
+  /** Start times (`now()`) per pace key within the trailing window. */
   private readonly paceWindows = new Map<string, number[]>();
 
   constructor(
     private readonly globalLimit: TeamExecutionLimit = TEAM_GLOBAL_EXECUTION_LIMIT,
     private readonly connectionAdmission?: ConnectionAdmissionController,
     private readonly admissionPace: TeamAdmissionPace = TEAM_ASSIGNMENT_RATE_LIMIT,
+    /** The clock the pace window and retry timing read (milliseconds since the epoch). */
+    private readonly now: () => number = () => Date.now(),
   ) {
     if (typeof globalLimit === 'number' && !isPositiveLimit(globalLimit))
       throw new Error('Team global execution limit must be a positive integer');
@@ -98,7 +100,7 @@ export class TeamExecutionScheduler {
   private recordPacedStart(job: QueuedJob): void {
     if (job.paceKey === undefined) return;
     const starts = this.paceWindows.get(job.paceKey) ?? [];
-    starts.push(Date.now());
+    starts.push(this.now());
     this.paceWindows.set(job.paceKey, starts);
   }
 
@@ -319,7 +321,7 @@ export class TeamExecutionScheduler {
           ready.has(job),
       );
     if (teamAdmissible.length === 0) return -1;
-    const now = Date.now();
+    const now = this.now();
     const startAt = new Map(
       teamAdmissible.map(({ job }) => [
         job,
@@ -377,7 +379,7 @@ export class TeamExecutionScheduler {
   }
 
   private scheduleRetry(delayMs: number): void {
-    const atMs = Date.now() + delayMs;
+    const atMs = this.now() + delayMs;
     // A pending timer that fires no later already covers this wait. A shorter wait (a 250 ms
     // Connection retry behind a minute of assignment pacing) replaces it instead of waiting it out.
     if (this.retryTimer !== null) {
