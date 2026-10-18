@@ -111,6 +111,25 @@ describe('worker worktree path (issue #855)', () => {
     expect(called).toBe(false);
   });
 
+  it("turns Git's own too-long error into the clear message (no ENAMETOOLONG on Windows)", async () => {
+    const worktreesRoot = join(await root(), 'g');
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot,
+      platform: 'win32',
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        if (args.includes('add'))
+          throw Object.assign(new Error("fatal: '$GIT_DIR' too big"), {
+            code: 128,
+            stderr: "fatal: '$GIT_DIR' too big",
+          });
+        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+      },
+    });
+    const error = await manager.create({ agentId: 'a4', repoPath: tmpdir() }).catch((e) => e);
+    expect(error).toBeInstanceOf(WorktreeError);
+    expect(error.message).toMatch(/長すぎる/);
+  });
+
   it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
     const worktreesRoot = join(await root(), 'w');
     const deepCommon = 'C:/' + 'x/'.repeat(120) + '.git';

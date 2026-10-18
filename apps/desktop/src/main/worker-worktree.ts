@@ -424,11 +424,22 @@ export class WorkerWorktreeManager {
       throw new WorktreeError('create_failed', `worktree already exists: ${worktreePath}`);
     await this.assertGitAdminPathWithinLimit(repoPath, worktreePath);
     await mkdir(this.worktreesRoot, { recursive: true });
-    await this.runGit(
-      repoPath,
-      ['worktree', 'add', '--detach', worktreePath, baseRef],
-      'create_failed',
-    );
+    try {
+      await this.runGit(
+        repoPath,
+        ['worktree', 'add', '--detach', worktreePath, baseRef],
+        'create_failed',
+      );
+    } catch (error) {
+      // Where the file system reports no ENAMETOOLONG (Windows), Git still fails on a path that is
+      // too long; its raw message is turned into the same clear length message.
+      if (error instanceof WorktreeError && GIT_PATH_TOO_LONG.test(error.message))
+        throw new WorktreeError(
+          'create_failed',
+          worktreePathTooLongMessage(worktreePath.length, this.limit()),
+        );
+      throw error;
+    }
     const { stdout } = await this.runGit(worktreePath, ['rev-parse', 'HEAD'], 'create_failed');
     return { path: worktreePath, baseHead: stdout.trim() };
   }
@@ -1540,6 +1551,10 @@ export function shortWorktreeDirectoryName(worktreeId: string): string {
 }
 
 /** Returns a Japanese message when a path is too long for Git on `platform`, otherwise null. */
+/** Git's own words for a path it cannot handle because it is too long. */
+const GIT_PATH_TOO_LONG =
+  /(?:'\$GIT_DIR' too big|Filename too long|File name too long|name too long)/iu;
+
 export function checkWorktreePathLengths(
   input: Readonly<{ platform: NodeJS.Platform; worktreePath: string; gitAdminPath: string }>,
 ): string | null {
