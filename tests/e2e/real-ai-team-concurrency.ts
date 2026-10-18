@@ -156,7 +156,7 @@ export async function runningConcurrency(
     ).length;
     // An Attempt whose resolved provider is unknown (NULL) cannot be shown not to have fallen back,
     // so it counts here too (the run is then undecidable rather than certified).
-    const fallbackAttempts = [...attempts.values()].filter(
+    let fallbackAttempts = [...attempts.values()].filter(
       (row) =>
         row['resolved_provider'] === null ||
         row['resolved_provider'] === undefined ||
@@ -175,6 +175,9 @@ export async function runningConcurrency(
       const executionId = String(started['execution_id']);
       const workerId = String(started['subject_agent_id']);
       const attempt = attempts.get(String(started['attempt_id']));
+      // An interval whose Attempt row is missing has no provider to check for a fallback, so the
+      // run is undecidable rather than certified.
+      if (attempt === undefined) fallbackAttempts++;
       // この Attempt の区間を打ち切る App 側の記録（CLI の終了ログ以外）。
       const appEnds: [number, string][] = [];
       const waiting = activities.find(
