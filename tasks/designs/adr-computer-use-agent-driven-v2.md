@@ -265,12 +265,12 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
       - facts の「対象が web コンテンツではないと確定できるか」。
         - 確定してよいのは、§3.2.2 の検証済み identity（署名・package・正規化パス）で、対象プロセスが web を描画しない明示表のアプリだと裏づけられた場合だけ。明示表の最初の項目は System32 の notepad だけとする。
           - この notepad は、署名・正規化パス・volume serial と file id で固定する。ユーザーが書き込める場所にある同名のコピーは、takeover のままにする。
-          - Store 署名のメモ帳の package を表に足すのは、PR-4 の後にする。PR-4 で native が package identity（family と publisherId）を返し、検証済み digest に束縛するようになるまでは足さない。
+          - Store 署名のメモ帳の package を表に足すのは、PR-4 の後にする。Windows 11 の既定のメモ帳は packaged なので、AC-2 の Windows 実機受入（メモ帳の本文入力）は PR-4 より後になる。§9 の S5-c-3 の段落でも、この順序を前提として扱う。PR-4 で native が package identity（family と publisherId）を返し、検証済み digest に束縛するようになるまでは足さない。
           - それまでの native は `packageFamilyName` を検証しない。MAC の無い identity JSON の値を読んで照合しても、「検証済み」にはならない。
         - UIA の `FrameworkId` は対象アプリが自分で申告できる値なので、§3.2.1 の原則どおり、確定の根拠にしない。使ってよいのは「web の疑いあり → takeover」の方向だけ。
         - 題名や表示名は使わない。
     - 例外にできるのは、次の 2 つの条件を両方満たす場合だけ。
-      - takeover の理由が `kOriginUnknown` だけである。テキストを読めない場合など、ほかの takeover の理由が重なっていれば、例外にせず takeover のままにする。コアの判定順（今は可読性が先）には頼らない。例外を適用する側で、`TextIsClassifiable`（スクロールでは `ScopeIsReadable` と `ScrollValueTextIsClassifiable`）を独立にもう一度確かめる。どれか 1 つでも false なら、例外にしない。将来コアの判定の順序を入れ替えても、可読性の理由が隠れることはない。
+      - takeover の理由が `kOriginUnknown` だけである。テキストを読めない場合など、ほかの takeover の理由が重なっていれば、例外にせず takeover のままにする。コアの判定順（今は可読性が先）には頼らない。例外を適用する側で、`TextIsClassifiable`（スクロールでは `ScopeIsReadable` と `ScrollValueTextIsClassifiable`）を独立にもう一度確かめる。例外にするのは、それらがすべて true だと確定した場合だけにする。値を取得できなかった場合や評価できなかった場合も、false と同じく例外にせず takeover に倒す。将来コアの判定の順序を入れ替えても、可読性の理由が隠れることはない。
       - 対象が web ではないと確定できた Document である。
     - 確定できない場合、identity が未検証の場合、ブラウザで origin が unknown の場合は、どれも takeover のままにする。
     - この写し方が要る理由は次のとおり。
@@ -287,8 +287,10 @@ mode は §4 のとおり、通常アプリは `full_access_app` である。た
       - 対照として、メモ帳の Document。理由が `kOriginUnknown` で、web ではないと検証できているので、takeover にならない。
       - 次の場合は、いずれも takeover になる。
         - native の Document で、origin が unknown で、しかも `TextIsClassifiable` が false の場合。メモ帳の対照の行とは別の行にする。
-        - 上の場合で、コアが origin を先に判定して `kOriginUnknown` を返すように差し替えたもの。例外を適用する側がもう一度確かめるので、それでも takeover になる。判定順に頼っていないことを示す行。
-        - ユーザーが書き込める場所にある `notepad.exe` の同名コピーと、PR-4 より前の Store 版メモ帳。どちらも takeover になる。
+        - 判定順の差し替え。コアが origin を先に判定して `kOriginUnknown` を返すように差し替えたうえで、次の 2 行を置く。
+          - テキストを読めない Document（`TextIsClassifiable` が false）。例外を適用する側がもう一度確かめるので、takeover になる。例外が正しく外れたことを示す行。
+          - 対照として、テキストを読めるメモ帳の Document（origin は unknown）。takeover にならない。例外を潰しすぎていないことを示す行。
+        - ユーザーが書き込める場所にある `notepad.exe` の同名コピー、PR-4 より前の Store 版メモ帳、OS の更新などで volume serial と file id が記録と変わった System32 の notepad。どれも takeover になる（fail-closed）。
         - `FrameworkId` が不明な Document、または web を示す Document。
         - identity が未検証の Document。
         - ブラウザで origin が unknown の場合。
@@ -798,7 +800,7 @@ computer_start がここで返る → { sessionId, state, stopReason, mode, roun
 **既知の限界**: (a) preflight から dispatch までの TOCTOU（ticket の有効期間は 5 s）は、dispatch の直前の再評価（click の事実である最後の入力の時刻も評価のたびに読み直す）と、その後の V1 の再検証で狭める。評価は最大 500 ms かかるので、評価の後に次の 2 つを足した。key / type は、フォーカス署名の照合を評価の後にもう一度行い（`focused_target_changed`、入力 0 回）、click は、評価が「開かない」と判断した click について、最後の V1 の再検証の後、`SendInput` の直前に `GetLastInputInfo` の時刻を読み直し、評価の時点から進んでいたら click を送らずに `focused_target_changed` で止める（既存のコードを流用している。click ではこのコードは「評価の後に外部入力が入った」を表し、フォーカスの移動ではない。Main の写し方は他の同種のコードと同じ `rejected`）（再評価はしない fail closed。評価の間に人がマウスを動かした場合もこれで止まり、agent は再試行する）。評価から入力までの、さらに短い時間差は構造上残る。(b) 二重クリックの判定は、システムの最後の入力の時刻（`GetLastInputInfo`）だけで行い、人の入力と agent の入力を区別しない。人が操作している最中（二重クリックの時間内）の agent の click は「開く」側になるが、拒否されるのは実行トリガの項目だけである。拒否の理由に「人の入力と重なった可能性」を出すことは今回しない（受領書の表に行を足さない）。必要になったら別の判断とする。(c) 評価の時間が上限に達したときの件数は `OutputDebugStringA` に出る。
 **INV-3**: S5-c-2 は適格性を広げない（`eligibility.json`、各版、attest、`list_targets` の適格性、`IsSupportedWindowsV1Target`、`MaximumModeForWindowsExecutable` は動かさない。source 契約で固定した）。S5-c-3（Windows で適格性を広げる PR）は次を受入条件にする: 不完全な facts、表示名の曖昧さ、lookup の放棄を takeover に倒すこと。interlock が有効であることを attest すること。
 
-**S5-c-3（Windows の適格性の拡大。2026-10-18 に計画と判断を記録）**: 上の INV-3 の受入条件は、§3.2.5 で範囲を確定した（「表示名の曖昧さ」は、シェル項目を表示名で照合したときの lookup の曖昧さを指す。ウィンドウ題や表示名を facts に入れる意味ではない。§3.2.1 の 3）。interlock の attest は D7 の節の 7（`interlockEnforced`）とする。計画の全体は #500 のコメントにあり、PR は次の 7 本に分ける。PR-1〜PR-5 は本番の挙動を変えない。
+**S5-c-3（Windows の適格性の拡大。2026-10-18 に計画と判断を記録）**: 上の INV-3 の受入条件は、§3.2.5 で範囲を確定した（「表示名の曖昧さ」は、シェル項目を表示名で照合したときの lookup の曖昧さを指す。ウィンドウ題や表示名を facts に入れる意味ではない。§3.2.1 の 3）。interlock の attest は D7 の節の 7（`interlockEnforced`）とする。計画の全体は #500 のコメントにあり、PR は次の 7 本に分ける。PR-1〜PR-5 は本番の挙動を変えない。 Windows 11 の既定のメモ帳は packaged なので、web でない Document の明示表に入るのは PR-4 の後になる（§3.2.5）。このため AC-2 の Windows 実機受入（メモ帳への本文入力）も PR-4 より後に行う。
 
 | PR   | 内容                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        | 本番の挙動                                                                                              |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
