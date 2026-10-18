@@ -47,6 +47,11 @@ const BUDGET_UNLIMITED = process.env['SPRINT_CODER_REAL_AI_TEAM_BUDGET'] === 'un
 // 32 人のうち、同時に作業中（isolation の phase が running）だった人数の下限。
 const MIN_CONCURRENT = Number(process.env['SPRINT_CODER_REAL_AI_TEAM_MIN_CONCURRENT'] ?? 30);
 const ROWS = 60;
+/** 衝突シナリオで、両方の Worker の worktree が揃ってから置く「編集してよい」の目印。 */
+const GO_MARKER = '.sc-go';
+/** Leader に指定する最終行の形式。`<token> completed=<n> failed=<n>`。 */
+const FINAL_LINE = (token: string): RegExp =>
+  new RegExp(`^${token} completed=(\\d+) failed=(\\d+)\\s*$`, 'gm');
 // 各 Worker にファイルを 31 回に分けて書かせ、1 人の作業時間を数分に延ばす。Leader は割り当てを
 // 1 件ずつ（数秒おきに）出すので、30 秒ほどで終わる作業では 30 人が同時に動く瞬間が作れない。
 // 0 を指定すると 1 回で書かせる（割り当ての速さを見るとき）。
@@ -122,6 +127,9 @@ function makeTeamWorkspace(label: string, sections: number): string {
   ).join('\n');
   writeFileSync(join(root, 'shared', 'index.md'), `# Shared index\n\n${body}`);
   git(root, 'init', '-q', '-b', 'main');
+  // 衝突シナリオの同期用の目印（GO_MARKER）は git に無視させる。info/exclude は worktree と共有され、
+  // status にも出ないので、App の「作業場所がきれいか」の確認や Worker の変更に混ざらない。
+  writeFileSync(join(root, '.git', 'info', 'exclude'), `${GO_MARKER}\n`, { flag: 'a' });
   commit(root, 'init');
   return root;
 }
@@ -171,7 +179,7 @@ function leaderPrompt(
     `2. Hire exactly ${assignments.length} workers with team_hire_worker: agentKind "worker", writeCapable true, contextInheritancePolicy "summary", modelSelectionReason "Scale test requested by the user: half the workers use Claude and half use Codex", and exactly the role and modelSelection listed below for each worker. Do not change the model of any worker. Issue the hire calls in parallel (many tool calls in one message). Do not assign any task until every worker is hired.`,
     '3. After all workers are hired, call team_assign_task for every worker with access "workspace-write" and exactly the objective and doneCriteria listed for its role. Issue all assignments together in parallel (all tool calls in one message if you can), without waiting for any task to finish, so that all workers run at the same time. If an assignment is reported as queued, that is fine; do not repeat it.',
     `4. Then call team_wait_reports repeatedly until all ${assignments.length} workers have reported. Do not retry, reassign or steer any task.`,
-    `5. Finally reply with \`${finalToken}\` followed by the number of completed and failed tasks.`,
+    `5. Finally end your reply with exactly one line in this exact format, with nothing else on that line: \`${finalToken} completed=<number of completed tasks> failed=<number of failed tasks>\` (for example \`${finalToken} completed=3 failed=0\`). Count a task as failed when its report is failed or it is waiting_resume.`,
     'Workers:',
     ...rows,
   ].join('\n');
@@ -212,6 +220,7 @@ type TeamSnapshot = Readonly<{
     requestedModel: string | null;
     phase: string | null;
     worktreePaths: string[];
+    baseHeads: string[];
     changedFiles: string[];
     isolationReason: string | null;
   }[];
@@ -246,6 +255,7 @@ async function readTeam(page: Page, taskId: string): Promise<TeamSnapshot | null
         requestedModel: e.requestedModel,
         phase: e.isolation?.phase ?? null,
         worktreePaths: (e.isolation?.repositories ?? []).map((r) => r.worktreePath),
+        baseHeads: (e.isolation?.repositories ?? []).map((r) => r.baseHead),
         changedFiles: (e.isolation?.repositories ?? []).flatMap((r) => r.changedFiles),
         isolationReason: e.isolation?.reason ?? null,
       })),
@@ -313,6 +323,8 @@ async function driveTeam(
     prompt: string;
     expectedExecutions: number;
     label: string;
+    /** 毎回の観測の後に呼ぶ（衝突シナリオの同期に使う）。 */
+    onTick?: (snapshot: TeamSnapshot | null) => Promise<void>;
   }>,
 ): Promise<DriveResult> {
   const answers = page.getByTestId('assistant-message');
@@ -471,6 +483,7 @@ async function driveTeam(
         .catch(() => undefined);
       break;
     }
+    if (input.onTick) await input.onTick(last);
     if (tick % 20 === 0) await shot(page, `${input.label}-progress-${tick}`);
     await page.waitForTimeout(3_000);
   }
@@ -929,9 +942,18 @@ test.describe('real AI Team scale E2E', () => {
         role: `C${i + 1}-${provider}`,
         provider,
         selection: provider === 'claude' ? prepared.claude : prepared.codex,
-        objective: `Edit the existing file \`shared/index.md\`: replace the single line \`TODO-1\` with \`OWNED-BY-${provider}\`. Change nothing else and do not touch any other file.`,
+        objective: `First wait for the go signal: use read_file to read the file \`${GO_MARKER}\` in the workspace root. If it does not exist yet, call team_wait_events once and then try read_file again; keep repeating this until \`${GO_MARKER}\` exists (the test harness creates it within a few minutes, once every worker is ready). Do not edit anything before \`${GO_MARKER}\` exists, and never create, modify or delete \`${GO_MARKER}\` yourself. Then edit the existing file \`shared/index.md\`: replace the single line \`TODO-1\` with \`OWNED-BY-${provider}\`. Change nothing else and do not touch any other file.`,
         criterion: `shared/index.md contains the line OWNED-BY-${provider} in Section 1, confirmed by reading it back`,
       }));
+      // 同期点: 2 人の isolation が両方とも running になり、同じ baseHead から準備され、その時点で
+      // Workspace の HEAD もまだその baseHead のまま（どちらも統合されていない）ことを確かめてから、
+      // 両方の worktree に目印を置く。Worker は目印が現れるまで編集しない。
+      const sync: {
+        releasedAt: number | null;
+        baseHead: string | null;
+        worktrees: string[];
+        lastSeen: unknown;
+      } = { releasedAt: null, baseHead: null, worktrees: [], lastSeen: null };
       const result = await driveTeam(app, page, {
         taskId: prepared.taskId,
         workspace,
@@ -939,6 +961,31 @@ test.describe('real AI Team scale E2E', () => {
         prompt: leaderPrompt('same-line conflict test', assignments, 'SC_TEAM_CONFLICT_DONE'),
         expectedExecutions: 2,
         label: 'team-conflict',
+        onTick: async (snapshot) => {
+          if (sync.releasedAt !== null || snapshot === null) return;
+          const executions = snapshot.executions;
+          sync.lastSeen = executions.map((e) => ({
+            state: e.state,
+            phase: e.phase,
+            baseHeads: e.baseHeads,
+          }));
+          if (
+            executions.length !== 2 ||
+            !executions.every(
+              (e) =>
+                e.phase === 'running' && e.worktreePaths.length === 1 && e.baseHeads.length === 1,
+            )
+          )
+            return;
+          const bases = new Set(executions.map((e) => e.baseHeads[0]!));
+          const head = tryGit(workspace, 'rev-parse', 'HEAD').trim();
+          if (bases.size !== 1 || !bases.has(head)) return;
+          for (const e of executions) writeFileSync(join(e.worktreePaths[0]!, GO_MARKER), 'go\n');
+          sync.releasedAt = Date.now();
+          sync.baseHead = head;
+          sync.worktrees = executions.map((e) => e.worktreePaths[0]!);
+          console.info(`[real-ai] team-conflict go marker placed base=${head}`);
+        },
       });
       await shot(page, 'team-conflict-final');
       const after = normalize(readText(join(workspace, 'shared', 'index.md')));
@@ -947,6 +994,12 @@ test.describe('real AI Team scale E2E', () => {
         ...summarize(result, assignments),
         after,
         winners: (['claude', 'codex'] as const).filter((p) => after?.includes(`OWNED-BY-${p}`)),
+        sync,
+        finalBaseHeads: (result.last?.executions ?? []).map((e) => e.baseHeads),
+        finalLines: [...result.answer.matchAll(FINAL_LINE('SC_TEAM_CONFLICT_DONE'))].map((m) => ({
+          completed: Number(m[1]),
+          failed: Number(m[2]),
+        })),
         // 衝突した側の Worker から Leader へ届いた failed 報告（衝突したファイルと waiting_resume を含む）。
         conflictReports: (result.last?.leaderMessages ?? [])
           .filter((m) => m.content.includes('衝突したファイル'))
@@ -969,6 +1022,16 @@ test.describe('real AI Team scale E2E', () => {
       note('team-conflict-timeline.json', result.timeline);
       note('team-conflict-tracks.json', result.tracks);
       note('team-conflict-page.txt', result.pageText);
+      // 同期点に届かなかった（どちらかが先に統合された・同じ baseHead にならなかった）なら、衝突が
+      // 起きないのは App のせいとは限らない。判定不能として、理由を出して失敗させる。
+      expect(
+        sync.releasedAt,
+        `判定不能: 2 人の worktree が同じ baseHead で揃う前に進んだため、衝突の扱いを判定できません（最後に見た状態: ${JSON.stringify(sync.lastSeen)}）`,
+      ).not.toBeNull();
+      expect(
+        new Set(summary.finalBaseHeads.flat()).size,
+        `判定不能: 2 人の baseHead が違います ${JSON.stringify(summary.finalBaseHeads)}`,
+      ).toBe(1);
       // 片方だけが統合され、もう片方は衝突として waiting_resume で止まり、Leader に failed 報告が届く。
       expect.soft(summary.winners).toHaveLength(1);
       expect
@@ -977,8 +1040,12 @@ test.describe('real AI Team scale E2E', () => {
       expect.soft(summary.conflictReports).toHaveLength(1);
       expect.soft(summary.conflictReports[0] ?? '').toContain('shared/index.md');
       expect.soft(summary.conflictReports[0] ?? '').toContain('waiting_resume');
-      // Leader の最終回答が「失敗 0」と言い切らないこと（衝突を知らされている）。
-      expect.soft(result.answer).not.toMatch(/(^|\D)0 failed|失敗\s*0(?!\d)/);
+      // Leader の最終回答は指定の 1 行（completed=1 failed=1）でなければならない。無い・形式違いは失敗。
+      expect(
+        summary.finalLines,
+        `Leader の最終回答に「SC_TEAM_CONFLICT_DONE completed=<n> failed=<n>」の行がちょうど 1 つ必要です: ${JSON.stringify(result.answer.slice(-500))}`,
+      ).toHaveLength(1);
+      expect.soft(summary.finalLines[0]).toEqual({ completed: 1, failed: 1 });
       expect.soft(summary.corrupted).toBe(false);
       expect.soft(repo['cherryPickInProgress']).toBe(false);
       expect.soft(String(repo['status']).trim()).toBe('');
