@@ -12,6 +12,8 @@ apps/desktop/managed-local/build/
 apps/desktop/.vite-user-data/
 *.log
 *.pdb
+# MSVC objects: build-computer-use-native.mjs compiles from the repository root without /Fo.
+*.obj
 test-results/
 playwright-report/
 .dev-data/

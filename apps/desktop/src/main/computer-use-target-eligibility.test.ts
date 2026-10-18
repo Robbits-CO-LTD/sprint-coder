@@ -362,6 +362,13 @@ describe('target facts source contract', () => {
         /computer-use-target-eligibility|computer-use-deny-ruleset/u,
       );
     }
+    // PR-2 (#500): the Windows target facts fill TargetFacts, so their portable header reads the
+    // core's tables and the Windows host includes that header. The host still judges nothing: no
+    // native source but the core's own files and the harness names the core's entry points.
+    const factsReaders = new Set([
+      'computer_use_windows_target_facts.h',
+      'computer_use_windows_host.cc',
+    ]);
     for (const name of readdirSync(nativeDirectory)) {
       if (!/\.(cc|mm|h)$/u.test(name)) continue;
       if (
@@ -369,9 +376,17 @@ describe('target facts source contract', () => {
         name === 'computer_use_deny_ruleset_generated.h'
       )
         continue;
-      expect(readNative(name), name).not.toMatch(
-        /computer_use_target_eligibility|computer_use_deny_ruleset/u,
+      const source = readNative(name);
+      expect(source, name).not.toMatch(
+        /\bClassifyTarget(?:Explained)?\(|TargetFactsAreComplete\(/u,
+      );
+      if (factsReaders.has(name)) continue;
+      expect(source, name).not.toMatch(
+        /computer_use_target_eligibility|computer_use_deny_ruleset|computer_use_windows_target_facts/u,
       );
     }
+    const host = readNative('computer_use_windows_host.cc');
+    expect(host).toContain('#include "computer_use_windows_target_facts.h"');
+    expect(host).not.toMatch(/#include "computer_use_(?:target_eligibility|deny_ruleset)/u);
   });
 });

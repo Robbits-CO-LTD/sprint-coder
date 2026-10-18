@@ -234,6 +234,7 @@ jobs:
     # S5-c-3 PR-1 (#500): Windows may not build a v2 (deny-list) native yet, so
     # build-computer-use-eligibility.mjs and the contracts still refuse it. This row compiles only
     # the portable harnesses and the target eligibility seam as v2 with MSVC; no artifact is built.
+    # PR-2 adds the live seam of the host's target facts (still called from nowhere).
     name: Computer Use native Windows v2 harness
     runs-on: windows-2022
     timeout-minutes: 15
@@ -284,6 +285,14 @@ jobs:
           npx vitest run
           src/main/computer-use-target-eligibility.test.ts
           src/main/computer-use-target-eligibility-seam.test.ts
+
+      # S5-c-3 PR-2 (#500): the host's target facts measured on processes the seam starts itself
+      # (cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage, a rename swap).
+      - name: Run the Windows target facts live seam
+        working-directory: apps/desktop
+        run: >-
+          npx vitest run
+          src/main/computer-use-windows-target-facts-live-seam.test.ts
 
   test-macos:
     name: macOS test shard ${{ matrix.shard }}

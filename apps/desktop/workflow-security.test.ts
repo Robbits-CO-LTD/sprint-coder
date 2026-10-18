@@ -327,6 +327,10 @@ describe('workflow security boundaries', () => {
     const seam = stepBlock(row, 'Run the target eligibility seam compiled as v2');
     expect(seam).toContain("COMPUTER_USE_SEAM_ELIGIBILITY_V2: '1'");
     expect(seam).toContain('src/main/computer-use-target-eligibility-seam.test.ts');
+    // S5-c-3 PR-2: the host's target facts, live on the same runner (MSVC is on its PATH).
+    expect(stepBlock(row, 'Run the Windows target facts live seam')).toContain(
+      'src/main/computer-use-windows-target-facts-live-seam.test.ts',
+    );
     const required = jobBlock(ci, 'required');
     expect(required).toContain('computer-use-windows-v2-harness,');
     expect(required).toContain('test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = \'success\'');

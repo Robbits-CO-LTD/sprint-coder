@@ -20,7 +20,7 @@ struct TargetGoldenCase {
 
 inline std::vector<TargetGoldenCase> TargetGoldenCases() {
   std::vector<TargetGoldenCase> cases;
-  cases.reserve(68);
+  cases.reserve(69);
   {
     TargetFacts facts;
     facts.platform = TargetPlatform::kWin32;
@@ -284,6 +284,39 @@ inline std::vector<TargetGoldenCase> TargetGoldenCases() {
     facts.descendant_pseudo_console = false;
     facts.window_class = std::string("contosoeditorwindow", 19);
     cases.push_back({"a LOLBin under System32", facts, TargetVerdictKind::kDenied, "W-SYS"});
+  }
+  {
+    TargetFacts facts;
+    facts.platform = TargetPlatform::kWin32;
+    facts.image_root = std::string("windows_directory", 17);
+    facts.image_relative_path = std::string("systemappsmicrosoft.windows.startmenuexperiencehost_cw5n1h2txyewystartmenuexperiencehost.exe", 92);
+    facts.image_leaf = std::string("startmenuexperiencehost.exe", 27);
+    facts.image_volume = std::string("fixed", 5);
+    facts.running_image_matches = true;
+    facts.signature = std::string("valid", 5);
+    facts.signer_organization = std::string("contoso ltd", 11);
+    facts.signer_microsoft_root = true;
+    facts.signer_is_self = false;
+    facts.acceptance_fixture = false;
+    facts.pe_subsystem = std::string("gui", 3);
+    facts.original_filename = std::string("editor.exe", 10);
+    facts.requires_administrator = false;
+    facts.token_elevated = false;
+    facts.token_other_user = false;
+    facts.token_other_session = false;
+    facts.token_protected = false;
+    facts.token_ui_access = false;
+    facts.token_integrity_above_self = false;
+    facts.token_app_container = false;
+    facts.packaged = true;
+    facts.package_family = std::string("microsoft.windows.startmenuexperiencehost_cw5n1h2txyewy", 55);
+    facts.package_signature_kind = std::string("system", 6);
+    facts.package_development_mode = false;
+    facts.own_descendant = false;
+    facts.descendant_shell = false;
+    facts.descendant_pseudo_console = false;
+    facts.window_class = std::string("contosoeditorwindow", 19);
+    cases.push_back({"a SystemApps packaged image stays W-SYS (decision: WINDIR package not overridden)", facts, TargetVerdictKind::kDenied, "W-SYS"});
   }
   {
     TargetFacts facts;
