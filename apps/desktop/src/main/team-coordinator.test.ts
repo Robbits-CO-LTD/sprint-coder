@@ -4660,6 +4660,95 @@ if (runsWithElectronAbi)
       persistence.close();
     }, 55_000);
 
+    it('assigns workspace-write work without waiting behind queued integrations (issue #864)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Assignments beside an integration queue');
+      const runtime = new BlockingDistinctFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const scheduler = new TeamIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+      const hire = () =>
+        coordinator.hireWorker({
+          taskId: task.id,
+          role: 'writer',
+          objective: 'write',
+          contextInheritancePolicy: 'none',
+          writeCapable: true,
+        });
+      const first = await hire();
+      const second = await hire();
+      const assign = (workerId: string, content: string) =>
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: workerId,
+          content,
+          doneCriteria: [`${content}.txt is written`],
+          accessMode: 'workspace-write',
+        });
+      const readme = join(workspace, 'README.md');
+      const key = teamRepositoryMutationKey(await manager.resolveRepositoryPath(workspace));
+      // Other Workers' integrations into the Workspace, each held until it is released.
+      const running: string[] = [];
+      const releases = new Map<string, () => void>();
+      const integrate = (executionId: string, dirty: boolean) =>
+        scheduler.submit({
+          executionId,
+          mutationKeys: [key],
+          run: async () => {
+            if (dirty) writeFileSync(readme, `${executionId} cherry-pick in progress\n`);
+            running.push(executionId);
+            await new Promise<void>((resolve) => releases.set(executionId, resolve));
+            if (dirty) writeFileSync(readme, 'base\n');
+          },
+        });
+      const integrations = [
+        integrate('integration-a', false),
+        integrate('integration-b', true),
+        integrate('integration-c', true),
+      ];
+      await waitFor(() => releases.has('integration-a'), 5_000);
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual(['integration-b', 'integration-c']);
+
+      // A clean Workspace is assigned, and the Worker starts, while the integrations still wait.
+      const firstSubmission = await assign(first.id, 'first');
+      expect(firstSubmission.state).toBe('queued');
+      await waitFor(() => runtime.releases.length === 1, 15_000);
+      expect(running).toEqual(['integration-a']);
+      expect(scheduler.snapshot().queuedExecutionIds).toEqual(['integration-b', 'integration-c']);
+
+      // Mid cherry-pick the check is repeated after the running integration only (issue #853),
+      // ahead of the integration queued behind it.
+      releases.get('integration-a')!();
+      await waitFor(() => releases.has('integration-b'), 5_000);
+      let settled = false;
+      const secondAssignment = assign(second.id, 'second').finally(() => {
+        settled = true;
+      });
+      secondAssignment.catch(() => undefined);
+      await waitFor(
+        () =>
+          settled || scheduler.snapshot().queuedExecutionIds[0]?.startsWith('exclusive:') === true,
+        10_000,
+      );
+      expect(settled).toBe(false);
+      releases.get('integration-b')!();
+      const secondSubmission = await secondAssignment;
+      expect(secondSubmission.state).toBe('queued');
+      // The assignment settled with integration-c still held: it never waited for that one.
+      await waitFor(() => releases.has('integration-c'), 5_000);
+      releases.get('integration-c')!();
+      await Promise.all(integrations);
+
+      await waitFor(() => runtime.releases.length === 2, 15_000);
+      runtime.releases.splice(0).forEach((release) => release());
+      for (const { executionId } of [firstSubmission, secondSubmission])
+        await waitFor(
+          () => persistence.getTeamExecution(executionId).state === 'completed',
+          15_000,
+        );
+      persistence.close();
+    }, 55_000);
+
     it.each(['legacy', 'project'] as const)(
       'serializes legacy Mission and Project integration with %s arriving first',
       async (firstArrival) => {

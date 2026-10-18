@@ -5989,11 +5989,13 @@ export class TeamCoordinator {
   }
 
   /**
-   * Runs a check that the parent checkout is clean in the same queue as integrations into it
-   * (issue #853). An integration cherry-picks into that checkout, and while it runs `git status`
-   * shows its changes and a `CHERRY_PICK_HEAD`, so a check beside it could refuse a clean
-   * Workspace. Queued behind the integrations on the same repositories, the check sees the
-   * checkout only before or after one, so anything it still finds dirty is not this app's.
+   * Runs a check that the parent checkout is clean so that an integration into it cannot fail the
+   * check (issue #853). An integration cherry-picks into that checkout, and while it runs
+   * `git status` shows its changes and a `CHERRY_PICK_HEAD`, so a check beside it could refuse a
+   * clean Workspace. The check runs at once, beside the integrations, and only a refusal that an
+   * integration on the same repositories overlapped is checked again, between integrations, after
+   * the running one alone (issue #864). Anything it still finds dirty is not this app's, and an
+   * assignment never waits behind the queue of integrations while it holds the Team's queue.
    */
   private async outsideIntegration<T>(
     rootPaths: readonly string[],
@@ -6008,7 +6010,7 @@ export class TeamCoordinator {
       )
     ).filter((path): path is string => path !== null);
     if (repositories.length === 0) return check();
-    return this.integrationScheduler.runExclusive(
+    return this.integrationScheduler.readBesideIntegrations(
       repositories.map(teamRepositoryMutationKey),
       check,
     );
