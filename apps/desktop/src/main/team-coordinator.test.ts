@@ -43,6 +43,7 @@ import {
   executeWithWatchdog,
   priorConversationForAgent,
   runtimeStopConfirmed,
+  teamRepositoryMutationKey,
   type TeamDiagnosticEvent,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
@@ -54,6 +55,7 @@ import type { TeamEnvelope } from '@sprint-coder/domain';
 import { nextGraphDocument } from './graph-document';
 import { graphMissionContextDigest, graphMissionContextFor } from './graph-mission-review';
 import { TeamExecutionScheduler } from './team-execution-scheduler';
+import { executeTeamTool } from './team-tools';
 import { ConnectionAdmissionController } from './connection-admission';
 import { MAIN_CONFIRMED_REPORT_EVIDENCE, allCriteriaDone } from './team-worker-criteria';
 import { TeamIntegrationScheduler, type TeamIntegrationJob } from './team-integration-scheduler';
@@ -4233,6 +4235,178 @@ if (runsWithElectronAbi)
       );
       expect(spawnSync('git', ['-C', workspace, 'status', '--porcelain']).stdout.toString()).toBe(
         '',
+      );
+      persistence.close();
+    }, 55_000);
+
+    it('reports a conflicting integration to the Leader as blocked and ends the report wait (issue #852)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Conflicting writers report to the Leader');
+      const runtime = new BlockingSameFileRuntime();
+      const { manager } = configureGitWorkspace(persistence, task.id);
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager);
+      const workers = await Promise.all(
+        ['first writer', 'second writer'].map((role) =>
+          coordinator.hireWorker({
+            taskId: task.id,
+            role,
+            objective: role,
+            contextInheritancePolicy: 'none',
+            writeCapable: true,
+          }),
+        ),
+      );
+      const submissions: Awaited<ReturnType<TeamCoordinator['assignTask']>>[] = [];
+      for (const [index, worker] of workers.entries())
+        submissions.push(
+          await coordinator.assignTask({
+            taskId: task.id,
+            targetAgentId: worker.id,
+            content: index === 0 ? 'first version' : 'second version',
+            doneCriteria: ['README.md is integrated'],
+            accessMode: 'workspace-write',
+          }),
+        );
+      await waitFor(() => runtime.activeExecutions === 2 && runtime.releases.length === 2, 15_000);
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.some(
+            ({ executionId }) => persistence.getTeamExecution(executionId).state === 'completed',
+          ),
+        15_000,
+      );
+      runtime.releases.shift()?.();
+      await waitFor(
+        () =>
+          submissions.every(({ executionId }) =>
+            ['completed', 'waiting_resume'].includes(
+              persistence.getTeamExecution(executionId).state,
+            ),
+          ),
+        15_000,
+      );
+      const waiting = submissions.find(
+        ({ executionId }) => persistence.getTeamExecution(executionId).state === 'waiting_resume',
+      )!;
+      expect(waiting).toBeDefined();
+
+      let cursor = 0;
+      const waitReports = () =>
+        executeTeamTool(
+          coordinator,
+          task.id,
+          'team_wait_reports',
+          {},
+          {
+            longPoll: true,
+            longPollTimeoutMs: 10_000,
+            longPollIntervalMs: 5,
+            waitReportsCursor: {
+              read: () => cursor,
+              advance: (seq: number) => {
+                cursor = Math.max(cursor, seq);
+              },
+            },
+          },
+        ) as Promise<{
+          ok: true;
+          reports: readonly { executionId: string | null; content: string }[];
+        }>;
+      const collected: { executionId: string | null; content: string }[] = [];
+      while (collected.length < 2) {
+        const result = await waitReports();
+        expect(result.reports.length).toBeGreaterThan(0);
+        collected.push(...result.reports);
+      }
+      const blocked = collected.find(({ executionId }) => executionId === waiting.executionId);
+      expect(blocked).toBeDefined();
+      const content = JSON.parse(blocked!.content) as { status: string; summary: string };
+      expect(content.status).toBe('failed');
+      expect(content.summary).toContain('README.md');
+      expect(content.summary).toContain('waiting_resume');
+      expect(content.summary).toContain('completedとして扱わないでください');
+
+      // Nothing else will report until a person resumes the integration, so the wait ends.
+      const started = Date.now();
+      await expect(waitReports()).resolves.toEqual({ ok: true, reports: [] });
+      expect(Date.now() - started).toBeLessThan(5_000);
+
+      const detail = coordinator.get(task.id)!;
+      expect(detail.executions.find(({ id }) => id === waiting.executionId)).toMatchObject({
+        state: 'waiting_resume',
+        isolation: { phase: 'waiting_resume' },
+      });
+      expect(
+        detail.workers.find(
+          ({ id }) => id === persistence.getTeamExecution(waiting.executionId).assigneeAgentId,
+        )?.currentActivity,
+      ).toContain('waiting_resume');
+      expect(coordinator.hasUnfinishedTeamWork(task.id)).toBe(true);
+      persistence.close();
+    }, 55_000);
+
+    it('checks a workspace-write assignment only between integrations into the Workspace (issue #853)', async () => {
+      const persistence = createPersistence();
+      const task = persistence.createTask('Assignment beside an integration');
+      const runtime = new BlockingSameFileRuntime();
+      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
+      const scheduler = new TeamIntegrationScheduler();
+      const coordinator = coordinatorWithWorktrees(persistence, runtime, manager, scheduler);
+      const worker = await coordinator.hireWorker({
+        taskId: task.id,
+        role: 'writer',
+        objective: 'write',
+        contextInheritancePolicy: 'none',
+        writeCapable: true,
+      });
+      const assign = () =>
+        coordinator.assignTask({
+          taskId: task.id,
+          targetAgentId: worker.id,
+          content: 'after integration',
+          doneCriteria: ['README.md is written'],
+          accessMode: 'workspace-write',
+        });
+      const readme = join(workspace, 'README.md');
+
+      // A Workspace the user left dirty is still refused.
+      writeFileSync(readme, 'user edit\n');
+      await expect(assign()).rejects.toThrow(/clean/u);
+      writeFileSync(readme, 'base\n');
+
+      // Another Worker's integration holds the parent checkout mid cherry-pick.
+      let releaseIntegration!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        releaseIntegration = resolve;
+      });
+      let integrationRunning = false;
+      const integration = scheduler.submit({
+        executionId: 'other-worker-integration',
+        mutationKeys: [teamRepositoryMutationKey(await manager.resolveRepositoryPath(workspace))],
+        run: async () => {
+          writeFileSync(readme, 'cherry-pick in progress\n');
+          integrationRunning = true;
+          await barrier;
+          writeFileSync(readme, 'base\n');
+        },
+      });
+      await waitFor(() => integrationRunning, 5_000);
+      let settled = false;
+      const assignment = assign().finally(() => {
+        settled = true;
+      });
+      assignment.catch(() => undefined);
+      await waitFor(() => settled || scheduler.snapshot().queuedExecutionIds.length === 1, 10_000);
+      expect(settled).toBe(false);
+      releaseIntegration();
+      await integration;
+      const submission = await assignment;
+      await waitFor(() => runtime.releases.length === 1, 15_000);
+      runtime.releases.shift()?.();
+      await waitFor(
+        () => persistence.getTeamExecution(submission.executionId).state === 'completed',
+        15_000,
       );
       persistence.close();
     }, 55_000);

@@ -42,6 +42,21 @@ export class WorktreeError extends Error {
   }
 }
 
+/**
+ * A cherry-pick that stopped on conflicting paths (issue #852). The cherry-pick was already aborted,
+ * so the parent checkout is clean again. `conflictedFiles` are the repository-relative paths Git
+ * reported as unmerged, read before the abort, for the Leader-facing report.
+ */
+export class WorktreeIntegrationConflictError extends WorktreeError {
+  constructor(
+    message: string,
+    readonly conflictedFiles: readonly string[],
+    options?: Readonly<{ cause?: unknown }>,
+  ) {
+    super('integration_failed', message, options);
+  }
+}
+
 export type ExecFileResult = Readonly<{ stdout: string; stderr: string }>;
 
 export type ExecFileOptions = Readonly<{
@@ -1207,7 +1222,24 @@ export class WorkerWorktreeManager {
         'integration_failed',
       );
     } catch (error) {
+      // Read the unmerged paths before the abort clears them, so the Leader is told which files
+      // conflicted (issue #852). A failed read only loses the names, never the abort.
+      const unmerged = await this.tryRunGit(repoPath, [
+        'diff',
+        '--name-only',
+        '--diff-filter=U',
+        '-z',
+      ]);
       await this.tryRunGit(repoPath, ['cherry-pick', '--abort']);
+      const conflictedFiles = [
+        ...new Set((unmerged?.stdout ?? '').split('\0').filter((path) => path !== '')),
+      ];
+      if (conflictedFiles.length > 0)
+        throw new WorktreeIntegrationConflictError(
+          error instanceof Error ? error.message : 'Cherry-pick conflicted',
+          conflictedFiles,
+          { cause: error },
+        );
       if (error instanceof WorktreeError)
         throw new WorktreeError('integration_failed', error.message, { cause: error });
       throw error;
