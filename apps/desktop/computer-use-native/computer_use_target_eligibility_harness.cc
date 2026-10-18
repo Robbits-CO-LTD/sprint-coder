@@ -294,6 +294,36 @@ bool CheckPeSubsystem() {
          Check(!ParsePeSubsystem({}).has_value(), "pe-empty");
 }
 
+void PutLe(std::vector<std::uint8_t> &bytes, std::size_t at, std::uint32_t value,
+           std::size_t width) {
+  for (std::size_t index = 0; index < width; ++index)
+    bytes[at + index] = static_cast<std::uint8_t>((value >> (8 * index)) & 0xff);
+}
+
+bool CheckPeImageSummary() {
+  // A PE32+ image with a machine, an entry RVA, a checksum, and (optionally) a certificate table.
+  std::vector<std::uint8_t> bytes = PeHeader(0x20b, 2);
+  PutLe(bytes, 0x80 + 4, 0x8664, 2);            // Machine (AMD64)
+  PutLe(bytes, 0x80 + 24 + 16, 0x1234, 4);      // AddressOfEntryPoint
+  PutLe(bytes, 0x80 + 24 + 64, 0xabcdef, 4);    // CheckSum
+  PutLe(bytes, 0x80 + 24 + 108, 16, 4);         // NumberOfRvaAndSizes (PE32+)
+  const std::optional<PeImageSummary> plain = ParsePeImageSummary(bytes);
+  std::vector<std::uint8_t> with_cert = bytes;
+  // The certificate table is data directory 4; its size is the second dword of its entry.
+  PutLe(with_cert, 0x80 + 24 + 112 + 4 * 8 + 4, 0x400, 4);
+  const std::optional<PeImageSummary> cert = ParsePeImageSummary(with_cert);
+  std::vector<std::uint8_t> no_dirs = bytes;
+  PutLe(no_dirs, 0x80 + 24 + 108, 4, 4); // only 4 directories: no security entry
+  PutLe(no_dirs, 0x80 + 24 + 112 + 4 * 8 + 4, 0x400, 4);
+  const std::optional<PeImageSummary> few = ParsePeImageSummary(no_dirs);
+  return Check(plain.has_value() && plain->subsystem == "gui" && plain->subsystem_code == 2 &&
+                   plain->machine == 0x8664 && plain->entry_rva == 0x1234 &&
+                   plain->check_sum == 0xabcdef && !plain->has_cert_table,
+               "pe-summary-fields") &&
+         Check(cert.has_value() && cert->has_cert_table, "pe-summary-cert-table-present") &&
+         Check(few.has_value() && !few->has_cert_table, "pe-summary-no-security-directory");
+}
+
 // ASCII text as UTF-16 bytes, little or big endian, with or without the BOM.
 std::string Utf16Bytes(std::string_view ascii, bool big_endian, bool bom) {
   std::string bytes;
@@ -565,7 +595,8 @@ int main() {
   const std::vector<TargetGoldenCase> cases = TargetGoldenCases();
   if (!CheckEligibilityMode() || !CheckGlob() || !CheckTables() || !CheckContentHash() ||
       !CheckGolden(cases) || !CheckMonotonic(cases) || !CheckWindowsImagePlacement() ||
-      !CheckPeSubsystem() || !CheckManifestLevel() || !CheckVersionInfo() ||
+      !CheckPeSubsystem() || !CheckPeImageSummary() || !CheckManifestLevel() ||
+      !CheckVersionInfo() ||
       !CheckDescendantLeaves() || !CheckDescendants())
     return 1;
   std::cout << "Computer Use target eligibility core: PASS (" << cases.size()

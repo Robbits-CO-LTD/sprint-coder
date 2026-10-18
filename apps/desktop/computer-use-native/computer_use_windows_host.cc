@@ -1084,16 +1084,20 @@ bool IsSupportedWindowsV1Target(
 //     before it opens the file). The main image is then found from kernel-held data, not from the
 //     target's module list (the PEB Ldr list is writable by the target, so its first entry can be
 //     made to name another file): NtQueryInformationProcess(ProcessImageInformation) gives the
-//     entry point the kernel recorded, VirtualQueryEx confirms it is in a MEM_IMAGE region, and
-//     GetMappedFileNameW on that region's base names the backing file. That file is opened and held
-//     without write or delete sharing, and the kernel name is asked again: an unchanged name means
-//     the held file is the running image (no name of it can move while it is held). Its volume
-//     serial and file id are compared with those of the file the recorded path names: when the
-//     running image was renamed and another file put at its path after the path was read, they
-//     differ, which is a mismatch (W-UR). The module list is read too, but only as a deny-side
-//     cross-check: if it does not name the same file, or cannot be read, that is a mismatch as
-//     well. Every other fact is read from the held file, so a replacement is never what is
-//     verified, and a target whose kernel image name cannot be read is unresolvable.
+//     entry point and header summary the kernel recorded at creation, VirtualQueryEx confirms the
+//     entry point is in a MEM_IMAGE region, and GetMappedFileNameW on that region's base names the
+//     backing file. That file is opened and held without write or delete sharing. The held file's
+//     PE header (entry RVA, subsystem, machine, checksum) must equal what the kernel recorded: the
+//     target can unmap the image view and map another file at the entry point's address (and
+//     rewrite its Ldr list), but it cannot change what the kernel captured at creation, so a
+//     remapped or substituted file is refused. The kernel name is asked again (unchanged while the
+//     file is held), the held file's volume serial and file id are compared with those of the file
+//     the recorded path names (a rename-and-replace after the path was read differs, a mismatch),
+//     and the module list is read only as a deny-side cross-check. Any mismatch, or a target whose
+//     kernel data cannot be read, is W-UR. Every other fact is read from the held file. Residual
+//     risk: an attacker who builds a replacement whose entry RVA, subsystem, machine and checksum
+//     all equal the real image's (ADR §10 risk), on an OS where the recorded path does not follow
+//     the rename, could still pass; the checksum match makes this hard but not impossible.
 //   * Path, root, leaf, volume. The held file's canonical path (GetFinalPathNameByHandleW) placed
 //     among roots canonicalized the same way. The volume is network when the file system says the
 //     file is remote, removable for a removable, optical, RAM, USB, SD, MMC, 1394 or file-backed
@@ -1162,6 +1166,8 @@ struct WindowsTargetFactsMeasurement {
   std::string signer_thumbprint;
   std::optional<std::string> package_full_name;
   std::optional<std::string> package_publisher_id;
+  // The verified package's install location, canonicalized, when the target is a package.
+  std::optional<std::string> package_install_root;
 };
 
 struct WindowsTargetSignature {
@@ -1286,16 +1292,25 @@ CurrentWindowsTargetRoots(const std::wstring &self_install_root) {
   return roots;
 }
 
-// The context of a measurement made by this helper: the roots with its own install root, this
-// process as the lineage root, and the signer and mode the caller gives.
-WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::string self_signer_thumbprint,
+// The context of a measurement made by this helper: the roots with Sprint Coder's install root,
+// and the lineage root for W8 ("Sprint Coder's own"). The lineage root is the Main process (the
+// Electron app that ServeMain's parent check verified), not this helper: Main and all its
+// descendants, this helper and the agent's child processes among them, are Sprint Coder's own, and
+// the root itself counts, so a development-mode Main image (electron.exe) is W8 too. `main_pid` is
+// 0 only when it cannot be opened, which leaves the lineage unmeasured (own_descendant stays
+// unset, so the target is unresolvable rather than wrongly not-own).
+WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pid,
+                                                           std::string self_signer_thumbprint,
                                                            bool acceptance_mode) {
   WindowsTargetFactsContext context;
   context.roots = CurrentWindowsTargetRoots(WindowsTargetSelfInstallRoot());
+  ScopedKernelHandle main(
+      OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, main_pid));
   const std::optional<std::uint64_t> creation =
-      WindowsTargetCreationTime(GetCurrentProcess());
-  if (creation.has_value()) {
-    context.lineage_root_pid = GetCurrentProcessId();
+      main.value == nullptr ? std::nullopt : WindowsTargetCreationTime(main.value);
+  if (main_pid != 0 && creation.has_value() &&
+      GetProcessId(main.value) == main_pid) {
+    context.lineage_root_pid = main_pid;
     context.lineage_root_creation = *creation;
   }
   context.self_signer_thumbprint = std::move(self_signer_thumbprint);
@@ -1313,13 +1328,23 @@ std::optional<std::wstring> WindowsTargetMappedFileName(HANDLE process, LPVOID a
   return std::wstring(name.data(), length);
 }
 
-// The main image's mapped name from kernel-held data, not from the target's module list (the PEB
-// Ldr list is writable by the target, so its first entry can be made to name another file). The
-// kernel records the image's entry point in SECTION_IMAGE_INFORMATION; that address lies in the
-// main image's MEM_IMAGE mapping, whose backing file GetMappedFileNameW returns. std::nullopt when
-// the kernel data cannot be read (a protected process, a WOW64 mismatch, and such), so the target
-// is unresolvable rather than trusted.
-std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
+// The main image from kernel-held data, not from the target's module list (the PEB Ldr list is
+// writable by the target, so its first entry can be made to name another file). The kernel records
+// the image's entry point and header summary in SECTION_IMAGE_INFORMATION; the entry point lies in
+// the main image's MEM_IMAGE mapping, whose backing file GetMappedFileNameW returns, and the header
+// values are later matched against the held file's PE header, since the target can remap another
+// file at that address but cannot change what the kernel captured at creation.
+struct WindowsTargetKernelImage {
+  std::wstring mapped_name;
+  // The entry point as a file RVA (TransferAddress - the image's allocation base), and the header
+  // values the kernel captured from the real image at process creation.
+  std::uint32_t entry_rva = 0;
+  std::uint16_t subsystem = 0;
+  std::uint16_t machine = 0;
+  std::uint32_t check_sum = 0;
+};
+
+std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process) {
   using NtQueryInformationProcessFn =
       LONG(WINAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
   static const NtQueryInformationProcessFn query = []() {
@@ -1331,8 +1356,7 @@ std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
   }();
   if (query == nullptr)
     return std::nullopt;
-  // SECTION_IMAGE_INFORMATION: only TransferAddress (the entry point) is read, but the whole
-  // structure must be supplied, so its x64 layout is pinned.
+  // SECTION_IMAGE_INFORMATION, whose x64 layout is pinned so the whole structure can be supplied.
   struct SectionImageInformation {
     PVOID transfer_address;
     ULONG zero_bits;
@@ -1362,9 +1386,43 @@ std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
   MEMORY_BASIC_INFORMATION region{};
   if (VirtualQueryEx(process, image.transfer_address, &region, sizeof(region)) !=
           sizeof(region) ||
-      region.Type != MEM_IMAGE || region.AllocationBase == nullptr)
+      region.Type != MEM_IMAGE || region.AllocationBase == nullptr ||
+      image.transfer_address < region.AllocationBase)
     return std::nullopt;
-  return WindowsTargetMappedFileName(process, region.AllocationBase);
+  const std::optional<std::wstring> mapped =
+      WindowsTargetMappedFileName(process, region.AllocationBase);
+  if (!mapped.has_value())
+    return std::nullopt;
+  WindowsTargetKernelImage info;
+  info.mapped_name = *mapped;
+  info.entry_rva = static_cast<std::uint32_t>(
+      reinterpret_cast<std::uintptr_t>(image.transfer_address) -
+      reinterpret_cast<std::uintptr_t>(region.AllocationBase));
+  info.subsystem = static_cast<std::uint16_t>(image.sub_system_type);
+  info.machine = image.machine;
+  info.check_sum = image.check_sum;
+  return info;
+}
+
+std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
+  const std::optional<WindowsTargetKernelImage> info = WindowsTargetKernelImageInfo(process);
+  return info.has_value() ? std::optional<std::wstring>(info->mapped_name) : std::nullopt;
+}
+
+// Whether a held file's PE header is the image the kernel recorded for the process at creation: a
+// remapped or substituted file carries a different entry RVA, subsystem, machine or checksum.
+bool WindowsHeldImageMatchesKernel(HANDLE file, const WindowsTargetKernelImage &kernel) {
+  std::vector<std::uint8_t> header(64 * 1024);
+  OVERLAPPED at{};
+  DWORD read = 0;
+  if (ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &read, &at) != TRUE)
+    return false;
+  header.resize(read);
+  const std::optional<sprint_coder::computer_use::PeImageSummary> summary =
+      sprint_coder::computer_use::ParsePeImageSummary(header);
+  return summary.has_value() && summary->entry_rva == kernel.entry_rva &&
+         summary->subsystem_code == kernel.subsystem && summary->machine == kernel.machine &&
+         summary->check_sum == kernel.check_sum;
 }
 
 // The first module of the target's own list (PEB Ldr). Used only as a deny-side cross-check: it is
@@ -1387,18 +1445,19 @@ struct WindowsTargetHeldImage {
 };
 
 // Holds the running image (see the block comment). The main image is found from kernel-held data
-// (WindowsTargetKernelImageName), never from the target's module list. `recorded` is the process's
+// (WindowsTargetKernelImageInfo), never from the target's module list. `recorded` is the process's
 // path as read before (QueryFullProcessImageNameW), or std::nullopt when it could not be read.
-// False when the kernel name is unreadable or its file cannot be held; `matches` says whether the
-// kernel name stayed the same, the recorded path still names the held file, and the target's own
-// module list (a deny-side cross-check) agrees.
+// False when the kernel data is unreadable or its file cannot be held; `matches` says whether the
+// held file's PE header is the one the kernel recorded (so a remapped view of another file is
+// refused), the kernel name stayed the same, the recorded path still names the held file, and the
+// target's own module list (a deny-side cross-check) agrees.
 bool HoldWindowsTargetRunningImage(HANDLE process,
                                    const std::optional<std::wstring> &recorded,
                                    WindowsTargetHeldImage *held) {
-  const std::optional<std::wstring> mapped = WindowsTargetKernelImageName(process);
-  if (!mapped.has_value())
+  const std::optional<WindowsTargetKernelImage> kernel = WindowsTargetKernelImageInfo(process);
+  if (!kernel.has_value())
     return false;
-  const std::wstring global = L"\\\\?\\GLOBALROOT" + *mapped;
+  const std::wstring global = L"\\\\?\\GLOBALROOT" + kernel->mapped_name;
   held->file.value =
       CreateFileW(global.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                   OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -1414,7 +1473,12 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       !ReadWindowsFileIdentity(held->file.value, &held->identity) ||
       !CanonicalWindowsPathFromHandle(held->file.value, &held->canonical_path))
     return false;
-  const std::optional<std::wstring> again = WindowsTargetKernelImageName(process);
+  // The held file must be the image the kernel recorded at creation: this binds it to kernel-held
+  // data the target cannot change, so remapping another file at the entry point's address (and
+  // rewriting the Ldr list) does not pass. The header is read at an explicit offset, so it leaves
+  // the handle's position alone for the facts that follow.
+  const bool kernel_image = WindowsHeldImageMatchesKernel(held->file.value, *kernel);
+  const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
   WindowsFileIdentity recorded_identity;
   bool recorded_read = recorded.has_value();
   if (recorded_read) {
@@ -1428,8 +1492,9 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   // Deny-side: the module list may name another file (tampered) or be unreadable; either refuses.
   const std::optional<std::wstring> module_list = WindowsTargetModuleListImageName(process);
   const bool module_list_agrees =
-      module_list.has_value() && SameWindowsTargetName(*module_list, *mapped);
-  held->matches = again.has_value() && SameWindowsTargetName(*again, *mapped) &&
+      module_list.has_value() && SameWindowsTargetName(*module_list, kernel->mapped_name);
+  held->matches = kernel_image && again.has_value() &&
+                  SameWindowsTargetName(again->mapped_name, kernel->mapped_name) &&
                   recorded_read &&
                   SameWindowsFileIdentity(held->identity, recorded_identity) &&
                   module_list_agrees;
@@ -1560,7 +1625,8 @@ bool ReadWindowsTargetSigner(HANDLE state, WindowsTargetSignature *signature) {
 // Runs WinVerifyTrust (decision K: no revocation, no network) and reads the signer on success.
 // The verdict, or std::nullopt when it verified but its signer could not be read.
 std::optional<LONG> VerifyWindowsTargetTrust(WINTRUST_DATA *trust,
-                                             WindowsTargetSignature *signature) {
+                                             WindowsTargetSignature *signature,
+                                             DWORD *last_error = nullptr) {
   trust->cbStruct = sizeof(*trust);
   trust->dwUIChoice = WTD_UI_NONE;
   trust->fdwRevocationChecks = WTD_REVOKE_NONE;
@@ -1569,6 +1635,10 @@ std::optional<LONG> VerifyWindowsTargetTrust(WINTRUST_DATA *trust,
   trust->dwStateAction = WTD_STATEACTION_VERIFY;
   GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
   const LONG verified = WinVerifyTrust(nullptr, &policy, trust);
+  // GetLastError() right after WinVerifyTrust tells apart a truly absent signature from a present
+  // but malformed one (both can return TRUST_E_NOSIGNATURE); the close below overwrites it.
+  if (last_error != nullptr)
+    *last_error = GetLastError();
   const bool read = verified == ERROR_SUCCESS &&
                     ReadWindowsTargetSigner(trust->hWVTStateData, signature);
   trust->dwStateAction = WTD_STATEACTION_CLOSE;
@@ -1650,8 +1720,25 @@ WindowsTargetSignature VerifyWindowsTargetCatalog(HANDLE file,
   return signature;
 }
 
+// Whether the held file has an embedded certificate table (the security data directory).
+bool WindowsTargetHasCertTable(HANDLE file) {
+  std::vector<std::uint8_t> header(64 * 1024);
+  OVERLAPPED at{};
+  DWORD read = 0;
+  if (ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &read, &at) != TRUE)
+    return false;
+  header.resize(read);
+  const std::optional<sprint_coder::computer_use::PeImageSummary> summary =
+      sprint_coder::computer_use::ParsePeImageSummary(header);
+  return summary.has_value() && summary->has_cert_table;
+}
+
 // The embedded signature, or the catalog when the file carries none. A present embedded signature
-// that does not verify is invalid; the catalog is not asked to stand in for it.
+// that does not verify is invalid; the catalog is not asked to stand in for it. "Carries none" is
+// decided as the Microsoft sample does: WinVerifyTrust returns TRUST_E_NOSIGNATURE and GetLastError
+// is one of NOSIGNATURE / SUBJECT_FORM_UNKNOWN / PROVIDER_UNKNOWN, and the PE has no certificate
+// table. A NOSIGNATURE verdict with any other last error, or with a certificate table present (a
+// malformed or truncated embedded signature), is invalid, not a reason to try the catalog.
 WindowsTargetSignature VerifyWindowsTargetSignature(HANDLE file,
                                                     const std::wstring &path) {
   WindowsTargetSignature signature;
@@ -1664,13 +1751,25 @@ WindowsTargetSignature VerifyWindowsTargetSignature(HANDLE file,
   WINTRUST_DATA trust{};
   trust.dwUnionChoice = WTD_CHOICE_FILE;
   trust.pFile = &file_info;
-  const std::optional<LONG> verified = VerifyWindowsTargetTrust(&trust, &signature);
+  DWORD last_error = 0;
+  const std::optional<LONG> verified = VerifyWindowsTargetTrust(&trust, &signature, &last_error);
   if (!verified.has_value())
     return signature;
-  if (*verified == TRUST_E_NOSIGNATURE)
+  if (*verified == ERROR_SUCCESS) {
+    signature.source = WindowsTargetSignatureSource::kEmbedded;
+    signature.state = "valid";
+    return signature;
+  }
+  const bool no_signature =
+      *verified == TRUST_E_NOSIGNATURE &&
+      (last_error == static_cast<DWORD>(TRUST_E_NOSIGNATURE) ||
+       last_error == static_cast<DWORD>(TRUST_E_SUBJECT_FORM_UNKNOWN) ||
+       last_error == static_cast<DWORD>(TRUST_E_PROVIDER_UNKNOWN)) &&
+      !WindowsTargetHasCertTable(file);
+  if (no_signature)
     return VerifyWindowsTargetCatalog(file, path);
   signature.source = WindowsTargetSignatureSource::kEmbedded;
-  signature.state = *verified == ERROR_SUCCESS ? "valid" : "invalid";
+  signature.state = "invalid";
   return signature;
 }
 
@@ -1874,6 +1973,27 @@ std::optional<std::string> WindowsTargetPackageSignatureKind(const std::wstring 
   return std::nullopt;
 }
 
+// The install location of a package, by its full name, canonicalized. The name comes from the
+// target's own package identity (GetPackageFullName on its handle), so this is used only to place
+// a target that is already a package: a non-package exe under some X:\WindowsApps is never given
+// this root. std::nullopt when the package has no path.
+std::optional<std::string> WindowsTargetPackageInstallRoot(const std::wstring &full_name) {
+  UINT32 length = 0;
+  if (GetPackagePathByFullName(full_name.c_str(), &length, nullptr) !=
+          ERROR_INSUFFICIENT_BUFFER ||
+      length == 0 || length > 32'768)
+    return std::nullopt;
+  std::wstring path(length, L'\0');
+  if (GetPackagePathByFullName(full_name.c_str(), &length, path.data()) != ERROR_SUCCESS ||
+      length == 0)
+    return std::nullopt;
+  path.resize(length - 1);
+  const std::string canonical = CanonicalWindowsTargetDirectory(path);
+  if (canonical.empty())
+    return std::nullopt;
+  return canonical;
+}
+
 std::optional<bool> WindowsTargetPackageDevelopmentMode(const std::wstring &full_name) {
   PACKAGE_INFO_REFERENCE reference = nullptr;
   if (OpenPackageInfoByFullName(full_name.c_str(), 0, &reference) != ERROR_SUCCESS)
@@ -1945,6 +2065,7 @@ void MeasureWindowsTargetPackage(HANDLE process, WindowsTargetFactsMeasurement *
   }
   facts.package_development_mode = WindowsTargetPackageDevelopmentMode(full_name);
   facts.package_signature_kind = WindowsTargetPackageSignatureKind(full_name);
+  measured->package_install_root = WindowsTargetPackageInstallRoot(full_name);
 }
 
 // Every process with its parent pid, its creation time (when it can be opened) and its leaf.
@@ -2124,6 +2245,19 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
       WindowsImagePlacement placement = PlaceWindowsImage(*path, *context.roots);
       facts.image_root = std::move(placement.root);
       facts.image_relative_path = std::move(placement.relative_path);
+    }
+    // A verified package's own install location is its windows_apps root, so a Store app on a
+    // volume other than the system drive is placed as a package rather than "other". This is only
+    // reached for a target that is itself a package (package_install_root comes from its own
+    // GetPackageFullName), so it never gives windows_apps to a non-package exe.
+    if (facts.packaged == std::optional<bool>(true) && measured.package_install_root.has_value()) {
+      const sprint_coder::computer_use::WindowsImageRootPrefix roots[] = {
+          {"windows_apps", *measured.package_install_root}};
+      WindowsImagePlacement placement = PlaceWindowsImage(*path, roots);
+      if (placement.root == "windows_apps") {
+        facts.image_root = std::move(placement.root);
+        facts.image_relative_path = std::move(placement.relative_path);
+      }
     }
     facts.acceptance_fixture =
         context.acceptance_mode &&

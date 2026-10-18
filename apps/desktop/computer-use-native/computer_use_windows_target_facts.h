@@ -179,25 +179,58 @@ PlaceWindowsImage(std::string_view canonical_path, std::span<const WindowsImageR
   return std::string(slash == std::string_view::npos ? path : path.substr(slash + 1));
 }
 
-// The PE optional header's subsystem: "gui", "console" or "other". Not a PE image: std::nullopt.
-[[nodiscard]] inline std::optional<std::string>
-ParsePeSubsystem(std::span<const std::uint8_t> bytes) {
+// The fields of a PE image the facts and the kernel cross-check need. subsystem is "gui",
+// "console" or "other"; subsystem_code, machine and check_sum are the raw header values;
+// entry_rva is the optional header's AddressOfEntryPoint; has_cert_table is whether the security
+// data directory (the embedded Authenticode certificate table) is present and non-empty.
+struct PeImageSummary {
+  std::string subsystem;
+  std::uint16_t subsystem_code = 0;
+  std::uint16_t machine = 0;
+  std::uint32_t check_sum = 0;
+  std::uint32_t entry_rva = 0;
+  bool has_cert_table = false;
+};
+
+// Reads a PE image's header. Not a PE image (or one too short to read): std::nullopt.
+[[nodiscard]] inline std::optional<PeImageSummary>
+ParsePeImageSummary(std::span<const std::uint8_t> bytes) {
   using windows_target_facts_detail::ReadLe;
   if (bytes.size() < 0x40 || bytes[0] != 'M' || bytes[1] != 'Z') return std::nullopt;
   const std::size_t pe = ReadLe(bytes, 0x3c, 4);
-  // Signature (4), file header (20), then the optional header: its magic (2) and, 68 bytes in for
-  // both PE32 and PE32+, the subsystem (2).
+  // Signature (4), file header (20), then the optional header: magic (2), AddressOfEntryPoint at
+  // 16, CheckSum at 64, Subsystem at 68 (the same for PE32 and PE32+), then the data directories.
   if (pe > bytes.size() || bytes.size() - pe < 24 + 70) return std::nullopt;
   if (bytes[pe] != 'P' || bytes[pe + 1] != 'E' || bytes[pe + 2] != 0 || bytes[pe + 3] != 0)
     return std::nullopt;
   const std::size_t optional_size = ReadLe(bytes, pe + 20, 2);
   const std::uint32_t magic = ReadLe(bytes, pe + 24, 2);
   if (optional_size < 70 || (magic != 0x10b && magic != 0x20b)) return std::nullopt;
-  switch (ReadLe(bytes, pe + 24 + 68, 2)) {
-  case 2: return "gui";
-  case 3: return "console";
-  default: return "other";
-  }
+  PeImageSummary summary;
+  summary.machine = static_cast<std::uint16_t>(ReadLe(bytes, pe + 4, 2));
+  summary.entry_rva = ReadLe(bytes, pe + 24 + 16, 4);
+  summary.check_sum = ReadLe(bytes, pe + 24 + 64, 4);
+  summary.subsystem_code = static_cast<std::uint16_t>(ReadLe(bytes, pe + 24 + 68, 2));
+  summary.subsystem = summary.subsystem_code == 2   ? "gui"
+                      : summary.subsystem_code == 3 ? "console"
+                                                    : "other";
+  // The certificate table is data directory 4 (8 bytes each): its VA and, at +4, its size. The
+  // directories begin at the optional header's offset 96 (PE32) or 112 (PE32+).
+  const std::size_t directories = pe + 24 + (magic == 0x20b ? 112 : 96);
+  const std::size_t count = ReadLe(bytes, pe + 24 + (magic == 0x20b ? 108 : 92), 4);
+  const std::size_t security = directories + 4 * 8;
+  if (count > 4 && optional_size >= (magic == 0x20b ? 112 : 96) + 5 * 8 &&
+      security + 8 <= bytes.size())
+    summary.has_cert_table = ReadLe(bytes, security + 4, 4) != 0;
+  return summary;
+}
+
+// The PE optional header's subsystem: "gui", "console" or "other". Not a PE image: std::nullopt.
+[[nodiscard]] inline std::optional<std::string>
+ParsePeSubsystem(std::span<const std::uint8_t> bytes) {
+  const std::optional<PeImageSummary> summary = ParsePeImageSummary(bytes);
+  if (!summary.has_value()) return std::nullopt;
+  return summary->subsystem;
 }
 
 namespace windows_target_facts_detail {
@@ -240,7 +273,9 @@ namespace windows_target_facts_detail {
 // endian, by its BOM or by the NUL bytes ASCII leaves in every other place) converted. Anything
 // else (UTF-32, a NUL left in the text, bytes that are not well-formed): std::nullopt.
 [[nodiscard]] inline std::optional<std::string> ManifestText(std::string_view bytes) {
-  const auto byte = [&bytes](std::size_t index) { return static_cast<unsigned char>(bytes[index]); };
+  const auto byte = [&bytes](std::size_t index) {
+    return static_cast<unsigned char>(bytes[index]);
+  };
   if (bytes.size() >= 4 && ((byte(0) == 0xff && byte(1) == 0xfe && byte(2) == 0 && byte(3) == 0) ||
                             (byte(0) == 0 && byte(1) == 0 && byte(2) == 0xfe && byte(3) == 0xff)))
     return std::nullopt;

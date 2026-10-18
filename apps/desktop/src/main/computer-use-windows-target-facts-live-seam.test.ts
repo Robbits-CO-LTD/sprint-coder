@@ -195,6 +195,39 @@ struct Started {
   bool ok = false;
 };
 
+// Copies the source to the destination and sets its PE certificate table directory size to a
+// nonzero value without adding a real signature: the embedded signature is then malformed, so the
+// facts must call it invalid (W-UR), not unsigned. Returns false if the file could not be patched.
+bool WriteBadSignatureCopy(const std::wstring &source, const std::wstring &destination) {
+  HANDLE in = CreateFileW(source.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (in == INVALID_HANDLE_VALUE) return false;
+  std::vector<std::uint8_t> bytes(4 * 1024 * 1024);
+  DWORD read = 0;
+  const bool ok = ReadFile(in, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) == TRUE;
+  CloseHandle(in);
+  if (!ok || read < 0x400) return false;
+  bytes.resize(read);
+  const std::size_t pe = bytes[0x3c] | (bytes[0x3d] << 8) | (bytes[0x3e] << 16) | (bytes[0x3f] << 24);
+  if (pe + 24 + 240 > bytes.size() || bytes[pe] != 'P' || bytes[pe + 1] != 'E') return false;
+  const std::uint16_t magic = static_cast<std::uint16_t>(bytes[pe + 24] | (bytes[pe + 25] << 8));
+  const std::size_t security_size = pe + 24 + (magic == 0x20b ? 112 : 96) + 4 * 8 + 4;
+  if (security_size + 4 > bytes.size()) return false;
+  bytes[security_size] = 0x00;
+  bytes[security_size + 1] = 0x04; // a nonzero certificate table size
+  bytes[security_size + 2] = 0x00;
+  bytes[security_size + 3] = 0x00;
+  HANDLE out = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (out == INVALID_HANDLE_VALUE) return false;
+  DWORD written = 0;
+  const bool wrote = WriteFile(out, bytes.data(), static_cast<DWORD>(bytes.size()), &written,
+                               nullptr) == TRUE &&
+                     written == bytes.size();
+  CloseHandle(out);
+  return wrote;
+}
+
 Started Start(std::wstring command, DWORD flags) {
   Started started;
   STARTUPINFOW startup{};
@@ -351,9 +384,14 @@ int wmain(int argc, wchar_t **argv) {
   outsider.lineage_root_pid = idle.info.dwProcessId;
   outsider.lineage_root_creation = WindowsTargetCreationTime(idle.info.hProcess).value_or(0);
   outsider.acceptance_mode = true;
-  WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext("", true);
+  // This program stands in for Main: CurrentWindowsTargetFactsContext takes Main's pid as the
+  // lineage root, so this process (and its children) are Sprint Coder's own.
+  WindowsTargetFactsContext own = CurrentWindowsTargetFactsContext(GetCurrentProcessId(), "", true);
   own.roots = outsider.roots;
-  Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId(), "contexts_built");
+  Check(outsider.roots.has_value() && own.lineage_root_pid == GetCurrentProcessId(),
+        "contexts_built");
+  Check(CurrentWindowsTargetFactsContext(0, "", true).lineage_root_pid == 0,
+        "lineage_root_unmeasured_without_main");
 
   // cmd, and the conhost below it.
   const Started shell = Start(L"\"" + cmd + L"\" /d /k", CREATE_NO_WINDOW);
@@ -488,6 +526,24 @@ int wmain(int argc, wchar_t **argv) {
           "kernel_image_name_is_the_running_image");
     Check(!WindowsTargetKernelImageName(GetCurrentThread()).has_value(),
           "kernel_image_name_is_nullopt_without_a_process_handle");
+  }
+
+  // A copy of the fixture with a non-empty certificate table directory but no real signature: a
+  // malformed embedded signature is invalid (W-UR), not unsigned (which would reach the upper
+  // class). Fails closed rather than treating a broken signature as "no signature".
+  const std::wstring bad_sig = scratch + L"\\sc500-bad-sig.exe";
+  if (WriteBadSignatureCopy(fixture, bad_sig)) {
+    const Started bad = Start(L"\"" + bad_sig + L"\"", 0);
+    Check(bad.ok, "bad_signature_copy_started");
+    WaitForInputIdle(bad.info.hProcess, 10000);
+    const WindowsTargetFactsMeasurement bad_facts = Measure(bad.info.dwProcessId, nullptr, outsider);
+    Print("bad signature", bad_facts);
+    Check(Is(bad_facts.facts.signature, "invalid") &&
+              bad_facts.signature_source == WindowsTargetSignatureSource::kEmbedded,
+          "malformed_embedded_signature_is_invalid_not_unsigned");
+    Check(ClassOf(bad_facts.facts) == "W-UR", "malformed_embedded_signature_refused_as_w_ur");
+  } else {
+    Check(false, "bad_signature_copy_written");
   }
 
   // The same fixture as this program's own child (W8).
