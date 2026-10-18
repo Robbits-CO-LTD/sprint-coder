@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AutoPermissionDecision, TurnEvent } from '@sprint-coder/contracts';
+import type { AutoPermissionDecision, TurnEvent } from '../types/sprint-coder';
 import {
   AUTO_DECISION_RETAIN_LIMIT,
   appendAutoDecisions,
   handleTurnEvent,
-  type AppState,
+  useAppStore,
 } from './appStore';
+
+type AppState = ReturnType<typeof useAppStore.getState>;
 
 function decision(index: number, overrides: Partial<AutoPermissionDecision> = {}) {
   return {
