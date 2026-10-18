@@ -54,7 +54,7 @@ describe('worker worktree path (issue #855)', () => {
   it('reports over-long paths in Japanese and accepts normal ones', () => {
     const long = 'C:' + '/a'.repeat(125);
     expect(
-      checkWorktreePathLengths({ platform: 'win32', worktreePath: long, gitAdminPath: 'C:\r' }),
+      checkWorktreePathLengths({ platform: 'win32', worktreePath: long, gitAdminPath: 'C:/r' }),
     ).toMatch(/長すぎる/);
     expect(
       checkWorktreePathLengths({
