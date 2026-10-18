@@ -3781,6 +3781,8 @@ std::optional<sprint_coder::computer_use::WindowsFileKey> WindowsV2SystemNotepad
 
 struct WindowsV2Judgement {
   sprint_coder::computer_use::TargetVerdict verdict;
+  // The process's facts. Measured without a window: the window class is a fact of each window and
+  // is put in by WindowsV2VerdictForWindowClass (the judgement of one window), never cached.
   WindowsTargetFactsMeasurement measured;
   LockedWindowsExecutable executable;
   std::optional<WindowsPackageIdentity> package;
@@ -3788,6 +3790,9 @@ struct WindowsV2Judgement {
   std::string process_start;
   std::optional<sprint_coder::computer_use::WindowsFileKey> held_key;
   std::optional<sprint_coder::computer_use::WindowsFileKey> table_key;
+  // The identity above is read once, the first time a window of the process is selectable.
+  bool identity_read = false;
+  bool identity_ok = false;
 
   [[nodiscard]] bool Selectable() const {
     using sprint_coder::computer_use::TargetVerdictKind;
@@ -3808,43 +3813,71 @@ WindowsV2VerdictFor(const WindowsTargetFactsMeasurement &measured) {
   return verdict;
 }
 
-// Judges one process (through one of its windows, whose class is a fact). A selectable verdict also
-// carries the V1 identity of the very file the facts were read from (same file id and path), the
-// package identity when the core took the package route, and the process start identity; when any
-// of them cannot be had, the verdict is unresolvable.
-void JudgeWindowsV2Target(std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context,
-                          WindowsV2Judgement *out) {
-  using namespace sprint_coder::computer_use;
-  out->measured = MeasureWindowsTargetFacts(pid, window, context);
-  out->verdict = WindowsV2VerdictFor(out->measured);
-  if (!out->Selectable())
-    return;
-  const TargetVerdict unresolvable{TargetVerdictKind::kUnresolvable, {}};
+// The process half of a judgement: its facts, measured once (list_targets keeps one per process).
+void MeasureWindowsV2Process(std::uint32_t pid, const WindowsTargetFactsContext &context,
+                             WindowsV2Judgement *out) {
+  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);
+  out->verdict = sprint_coder::computer_use::TargetVerdict{};
+}
+
+// The identity a selectable window is bound with: the V1 identity of the very file the facts were
+// read from (same file id and path), the package identity when the core took the package route,
+// and the process start identity. Read once per process; false when any of it cannot be had.
+bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
+  if (out->identity_read)
+    return out->identity_ok;
+  out->identity_read = true;
+  const std::uint32_t pid = out->measured.pid;
   if (!out->measured.file_identity.has_value() ||
       !OpenLockedProcessExecutable(pid, &out->executable) ||
       !SameWindowsFileIdentity(out->executable.identity.file_identity,
                                *out->measured.file_identity) ||
       !SameWindowsTargetName(out->executable.identity.path, out->measured.image_path) ||
-      !ReadProcessStartIdentity(pid, &out->process_start)) {
-    out->verdict = unresolvable;
-    return;
-  }
+      !ReadProcessStartIdentity(pid, &out->process_start))
+    return false;
   out->package = WindowsTargetPackageIdentity(out->measured, out->executable.identity);
   // The core admitted a package; without the package identity there is nothing to bind it to.
-  if (out->measured.facts.packaged == std::optional<bool>(true) && !out->package.has_value()) {
-    out->verdict = unresolvable;
-    return;
-  }
+  if (out->measured.facts.packaged == std::optional<bool>(true) && !out->package.has_value())
+    return false;
   out->app_identity =
       out->package.has_value() ? out->package->identity_digest : out->executable.identity.identity_digest;
   out->held_key = WindowsFileKeyOf(*out->measured.file_identity);
   out->table_key = WindowsV2SystemNotepadKey();
+  out->identity_ok = true;
+  return true;
 }
 
-// The identity JSON of a v2 row: the V1 fields with the core's mode, or the package's.
-std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged) {
+// The judgement of one window of the process: the process's facts with this window's own class.
+// Each window is judged by itself, so neither the order the windows are listed in nor another
+// window of the process (a console it allocated, a window gone between listing and measuring)
+// changes its answer. A class that cannot be read leaves the facts incomplete: unresolvable.
+sprint_coder::computer_use::TargetVerdict
+WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
+                               const std::optional<std::string> &window_class) {
+  using namespace sprint_coder::computer_use;
+  WindowsTargetFactsMeasurement for_window = process->measured;
+  for_window.facts.window_class = window_class;
+  TargetVerdict verdict = WindowsV2VerdictFor(for_window);
+  if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
+      !EnsureWindowsV2Identity(process))
+    verdict = TargetVerdict{TargetVerdictKind::kUnresolvable, {}};
+  return verdict;
+}
+
+// Judges one window of one process (the start, the resume and every input of a v2 session).
+void JudgeWindowsV2Target(std::uint32_t pid, HWND window, const WindowsTargetFactsContext &context,
+                          WindowsV2Judgement *out) {
+  MeasureWindowsV2Process(pid, context, out);
+  const std::optional<std::string> window_class = WindowsTargetWindowClass(window, pid);
+  out->verdict = WindowsV2VerdictForWindowClass(out, window_class);
+  out->measured.facts.window_class = window_class;
+}
+
+// The identity JSON of a v2 row: the V1 fields with the mode of the window the row is for, or the
+// package's.
+std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_view window_mode) {
   const WindowsExecutableIdentity &identity = judged.executable.identity;
-  const std::string mode(judged.verdict.maximum_mode);
+  const std::string mode(window_mode);
   if (judged.package.has_value())
     return WindowsPackageIdentityJson(identity, *judged.package, mode);
   return "{\"platform\":\"win32\",\"identityDigest\":\"" + identity.identity_digest +
@@ -3905,12 +3938,14 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
       if (GetWindowThreadProcessId(window, &owner) == 0 || owner == 0 ||
           owner == GetCurrentProcessId())
         continue;
+      // The process's facts are measured once, without a window (the first window listed decides
+      // nothing about the others); each window is then judged with its own class.
       auto found = judged.find(owner);
       if (found == judged.end()) {
         std::optional<std::shared_ptr<WindowsV2Judgement>> entry;
         if (GetTickCount64() <= deadline) {
           auto judgement = std::make_shared<WindowsV2Judgement>();
-          JudgeWindowsV2Target(owner, window, context, judgement.get());
+          MeasureWindowsV2Process(owner, context, judgement.get());
           if (GetTickCount64() <= deadline)
             entry = std::move(judgement);
         }
@@ -3920,17 +3955,15 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
         rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
         continue;
       }
-      const WindowsV2Judgement &judgement = **found->second;
-      // The window class is a fact of this window: the process's facts with it, judged again.
-      WindowsTargetFactsMeasurement for_window = judgement.measured;
-      for_window.facts.window_class = WindowsTargetWindowClass(window, owner);
+      WindowsV2Judgement &judgement = **found->second;
+      // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
+      // after it was listed) is unresolvable on its own; it does not touch its process's others.
       const TargetVerdict verdict =
-          judgement.Selectable() ? WindowsV2VerdictFor(for_window) : judgement.verdict;
+          WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner));
       RECT client{};
       RECT screen{};
       if (!(verdict.kind == TargetVerdictKind::kEligible ||
-            verdict.kind == TargetVerdictKind::kUpper) ||
-          verdict.maximum_mode != judgement.verdict.maximum_mode) {
+            verdict.kind == TargetVerdictKind::kUpper)) {
         rows.push_back(WindowsV2RefusedRow(verdict.kind == TargetVerdictKind::kUnresolvable
                                                ? TargetVerdictKind::kUnresolvable
                                                : TargetVerdictKind::kDenied));
@@ -3965,7 +3998,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
           ",\"height\":" + std::to_string(client.bottom - client.top) +
           "},\"screenBounds\":" + RectJson(screen) +
           ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
-          std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement) +
+          std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
           "}");
     }
     *response = "{\"generation\":" + std::to_string(generation) +

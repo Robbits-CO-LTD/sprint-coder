@@ -113,10 +113,13 @@ EvaluateWindowsInterlockFromCapture(const ShadowUiaCapture &capture, const Shado
   }
   result.verdict = InterlockForFacts(built.facts, ruleset);
   // A v2 session's chain must be the target process's own (ADR v2 section 3.2.5): an element another
-  // process provides (or one whose process is unknown) is a takeover, whatever the core says.
-  result.strict_verdict = strict.asked && !WindowsCaptureChainOwnedBy(capture, strict.process_id)
-                              ? interlock_detail::StrictUnclassified(EffectClass::kUnclassified)
-                              : StrictInterlockForFacts(built.facts, ruleset);
+  // process provides (or one whose process is unknown) makes a takeover of what the strict map would
+  // let through. A refusal of the strict map stays that refusal, with its reason and effect class (a
+  // refusal ranks above a takeover, as in MapEffectToStrictInterlock).
+  result.strict_verdict = StrictInterlockForFacts(built.facts, ruleset);
+  if (strict.asked && !WindowsCaptureChainOwnedBy(capture, strict.process_id) &&
+      !result.strict_verdict.Refuses())
+    result.strict_verdict = interlock_detail::StrictUnclassified(EffectClass::kUnclassified);
   return result;
 }
 

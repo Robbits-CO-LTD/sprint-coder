@@ -8985,6 +8985,32 @@ bool CheckStrictInterlock() {
                      receipt_row(taken.verdict),
                  "strict-capture-chain-of-another-or-unknown-process-is-a-takeover")) return false;
     }
+    // ... but a refusal of the core stays that refusal, with its reason: a secure field, and a shell
+    // surface, in a chain whose owner does not match (the review of #881).
+    {
+      ShadowUiaCapture secret = owned();
+      secret.chain[0].control_type = "Edit";
+      secret.chain[0].class_name = "Edit";
+      secret.chain[0].name = "Password";
+      secret.chain[0].is_password = true;
+      ShadowUiaCapture shell = owned();
+      shell.window_class = "ConsoleWindowClass";
+      shell.chain[1].class_name = "ConsoleWindowClass";
+      for (ShadowUiaCapture *which : {&secret, &shell}) {
+        const InterlockEvaluation owned_answer = strict_v2(*which, strict);
+        which->chain[0].process_id = 777;
+        const InterlockEvaluation foreign_answer = strict_v2(*which, strict);
+        if (!Check(owned_answer.Refuses() && owned_answer.verdict.outcome == InterlockOutcome::kBlocked &&
+                       foreign_answer.verdict.outcome == InterlockOutcome::kBlocked &&
+                       foreign_answer.verdict.reason == owned_answer.verdict.reason &&
+                       foreign_answer.verdict.effect_class == owned_answer.verdict.effect_class &&
+                       receipt_row(foreign_answer.verdict),
+                   "strict-capture-foreign-chain-keeps-a-refusal-with-its-reason")) return false;
+      }
+      if (!Check(strict_v2(secret, strict).verdict.reason == InterlockReason::kSecureField &&
+                     strict_v2(shell, strict).verdict.reason == InterlockReason::kShellSurface,
+                 "strict-capture-foreign-chain-refusal-reasons")) return false;
+    }
     WindowsStrictCaptureIdentity no_session_pid = strict;
     no_session_pid.process_id = 0;
     if (!Check(strict_v2(owned(), no_session_pid).Refuses(), "strict-capture-without-the-session-pid-is-a-takeover"))

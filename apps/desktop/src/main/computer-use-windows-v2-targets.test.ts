@@ -64,6 +64,25 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(pushes.length - refused.length).toBe(1);
   });
 
+  it('measures a process without a window and judges every window by its own class', () => {
+    const list = cut(
+      'bool ListWindowsTargets(std::string *response, std::string *reason) {',
+      'bool RejudgeWindowsV2Session(',
+    );
+    // The cached per-process facts are measured with no window, so the first window listed (a console
+    // the app allocated, a window already gone) decides nothing for the others (the review of #881).
+    expect(list).toContain('MeasureWindowsV2Process(owner, context, judgement.get());');
+    expect(list).not.toContain('JudgeWindowsV2Target(');
+    expect(list).toContain(
+      'WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner));',
+    );
+    // Each row carries its own window's mode; no row is refused for another window's mode.
+    expect(list).not.toContain('judgement.verdict');
+    expect(list).toContain('WindowsV2IdentityJson(judgement, verdict.maximum_mode)');
+    const measure = cut('void MeasureWindowsV2Process(', 'bool EnsureWindowsV2Identity(');
+    expect(measure).toContain('MeasureWindowsTargetFacts(pid, nullptr, context);');
+  });
+
   it('takes the v2 mode from the core, never from the policy language', () => {
     expect(v2Block).not.toContain('MaximumModeForWindowsExecutable');
     expect(v2Block).not.toContain('IsPolicyLanguageSupported');
@@ -165,6 +184,10 @@ const program = String.raw`
 #include "computer_use_windows_host.cc"
 #undef wmain
 
+#include <winsafer.h>
+
+#include <algorithm>
+#include <initializer_list>
 #include <iostream>
 
 namespace {
@@ -179,15 +202,47 @@ void Check(bool ok, const char *name) {
   }
 }
 
+// An elevated runner (windows-2022 runs as an administrator) starts every child elevated, and an
+// elevated target is W7 before anything else is judged. So the targets are started the way a person's
+// own apps run: with this user's normal-user token (SAFER_LEVELID_NORMALUSER) at medium integrity.
+// Nothing is skipped: the same judgement runs on both kinds of runner. Null when this program is not
+// elevated (the token it has already is that one).
+HANDLE g_child_token = nullptr;
+bool PrepareChildToken() {
+  if (!IsProcessElevated(GetCurrentProcessId())) return true;
+  SAFER_LEVEL_HANDLE level = nullptr;
+  if (!SaferCreateLevel(SAFER_SCOPEID_USER, SAFER_LEVELID_NORMALUSER, SAFER_LEVEL_OPEN, &level, nullptr))
+    return false;
+  const BOOL computed = SaferComputeTokenFromLevel(level, nullptr, &g_child_token, 0, nullptr);
+  SaferCloseLevel(level);
+  if (!computed) return false;
+  PSID medium = nullptr;
+  if (!ConvertStringSidToSidW(L"S-1-16-8192", &medium)) return false;
+  TOKEN_MANDATORY_LABEL label{};
+  label.Label.Attributes = SE_GROUP_INTEGRITY;
+  label.Label.Sid = medium;
+  const BOOL lowered = SetTokenInformation(g_child_token, TokenIntegrityLevel, &label,
+                                           sizeof(label) + GetLengthSid(medium));
+  LocalFree(medium);
+  return lowered == TRUE;
+}
+
 PROCESS_INFORMATION Start(std::wstring command, DWORD flags) {
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   startup.dwFlags = STARTF_USESHOWWINDOW;
   startup.wShowWindow = SW_SHOWMINNOACTIVE;
   PROCESS_INFORMATION info{};
-  if (!CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, flags | CREATE_SUSPENDED,
-                      nullptr, nullptr, &startup, &info))
+  const BOOL created =
+      g_child_token != nullptr
+          ? CreateProcessAsUserW(g_child_token, nullptr, command.data(), nullptr, nullptr, FALSE,
+                                 flags | CREATE_SUSPENDED, nullptr, nullptr, &startup, &info)
+          : CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, flags | CREATE_SUSPENDED,
+                           nullptr, nullptr, &startup, &info);
+  if (!created) {
+    std::cout << "start failed: " << GetLastError() << "\n";
     return {};
+  }
   AssignProcessToJobObject(g_job, info.hProcess);
   if ((flags & CREATE_SUSPENDED) == 0) ResumeThread(info.hThread);
   return info;
@@ -230,6 +285,12 @@ int wmain(int argc, wchar_t **argv) {
   std::vector<wchar_t> system(32768, L'\0');
   const UINT length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
   const std::wstring system32(system.data(), length);
+
+const bool elevated = IsProcessElevated(GetCurrentProcessId());
+  Check(PrepareChildToken(), "child_token_prepared");
+  std::cout << "runner elevated=" << (elevated ? "yes" : "no")
+            << " targets started " << (g_child_token != nullptr ? "with the normal-user token" : "as they are")
+            << "\n";
 
 #if SPRINT_CODER_ELIGIBILITY_V2 == 0
   (void)fixture;
@@ -289,6 +350,40 @@ int wmain(int argc, wchar_t **argv) {
   Check(!WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key, judged.table_key,
                                       std::nullopt, false),
         "v2_fixture_is_not_in_the_not_web_table");
+  Check(!IsProcessElevated(app.dwProcessId), "v2_fixture_runs_unelevated");
+  {
+    // Each window is judged with its own class, from the process's facts measured without a window:
+    // a console window the process allocated (W4) or a window gone before its class was read
+    // (unresolvable) does not change the answer for its real window, in whichever order they come.
+    WindowsV2Judgement process;
+    MeasureWindowsV2Process(app.dwProcessId, context, &process);
+    const std::optional<std::string> real = WindowsTargetWindowClass(app_window, app.dwProcessId);
+    const std::optional<std::string> console = std::string("ConsoleWindowClass");
+    const std::optional<std::string> gone;
+    const auto kinds = [&](std::initializer_list<const std::optional<std::string> *> order) {
+      std::vector<std::pair<std::string, std::string>> answers;
+      for (const std::optional<std::string> *window_class : order) {
+        const TargetVerdict verdict = WindowsV2VerdictForWindowClass(&process, *window_class);
+        answers.emplace_back(window_class->value_or("-"),
+                             std::string(TargetVerdictKindName(verdict.kind)) + "/" +
+                                 std::string(verdict.maximum_mode));
+      }
+      std::sort(answers.begin(), answers.end());
+      return answers;
+    };
+    const auto first = kinds({&console, &gone, &real});
+    const auto second = kinds({&real, &console, &gone});
+    const auto third = kinds({&gone, &real, &console});
+    const auto at = [&](const std::optional<std::string> &which) {
+      return WindowsV2VerdictForWindowClass(&process, which).kind;
+    };
+    Check(real.has_value() && first == second && second == third &&
+              at(console) == TargetVerdictKind::kDenied && at(gone) == TargetVerdictKind::kUnresolvable &&
+              at(real) == TargetVerdictKind::kUpper &&
+              WindowsV2VerdictForWindowClass(&process, real).maximum_mode == "observe_only" &&
+              !process.measured.facts.window_class.has_value(),
+          "v2_each_window_is_judged_by_its_own_class_in_any_order");
+  }
   {
     // The admission of a start: this build's ruleset version, the latest list, the very target.
     windows_v2_list_generation = 7;
