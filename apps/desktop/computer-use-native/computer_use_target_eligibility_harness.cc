@@ -786,25 +786,31 @@ bool CheckProcessSnapshot() {
 }
 
 bool CheckImageUnchanged() {
-  using Time = std::optional<std::int64_t>;
+  using Times = std::optional<WindowsImageFileTimes>;
+  const auto times = [](std::int64_t change, std::int64_t last_write) {
+    return Times(WindowsImageFileTimes{change, last_write});
+  };
   const std::optional<std::uint64_t> created = 1'000;
-  return Check(WindowsImageUnchangedSinceCreation(Time(500), Time(400), created),
+  return Check(WindowsImageUnchangedSinceCreation(times(500, 400), created),
                "image-unchanged-before-creation") &&
-         Check(!WindowsImageUnchangedSinceCreation(Time(1'000), Time(400), created),
+         Check(!WindowsImageUnchangedSinceCreation(times(1'000, 400), created),
                "image-change-time-at-creation-is-changed") &&
-         Check(!WindowsImageUnchangedSinceCreation(Time(500), Time(1'000), created),
-               "image-write-time-at-creation-is-changed") &&
-         Check(!WindowsImageUnchangedSinceCreation(Time(1'001), Time(400), created),
+         Check(!WindowsImageUnchangedSinceCreation(times(1'001, 400), created),
                "image-changed-after-creation") &&
-         Check(!WindowsImageUnchangedSinceCreation(Time(500), Time(2'000), created),
-               "image-written-after-creation") &&
-         Check(!WindowsImageUnchangedSinceCreation(std::nullopt, Time(400), created) &&
-                   !WindowsImageUnchangedSinceCreation(Time(500), std::nullopt, created) &&
-                   !WindowsImageUnchangedSinceCreation(Time(500), Time(400), std::nullopt),
+         // A future LastWriteTime (a ZIP's DOS local time from another time zone, a copy from a
+         // machine whose clock ran ahead) with a ChangeTime before the creation: unchanged.
+         Check(WindowsImageUnchangedSinceCreation(times(500, 2'000), created) &&
+                   WindowsImageUnchangedSinceCreation(times(500, 1'000), created),
+               "image-future-write-time-with-past-change-time-is-unchanged") &&
+         Check(WindowsImageUnchangedSinceCreation(times(500, 0), created) &&
+                   WindowsImageUnchangedSinceCreation(times(500, -1), created),
+               "image-write-time-is-not-judged") &&
+         Check(!WindowsImageUnchangedSinceCreation(std::nullopt, created) &&
+                   !WindowsImageUnchangedSinceCreation(times(500, 400), std::nullopt),
                "image-times-unread-is-changed") &&
-         Check(!WindowsImageUnchangedSinceCreation(Time(0), Time(400), created) &&
-                   !WindowsImageUnchangedSinceCreation(Time(500), Time(-1), created),
-               "image-time-zero-or-negative-is-changed");
+         Check(!WindowsImageUnchangedSinceCreation(times(0, 400), created) &&
+                   !WindowsImageUnchangedSinceCreation(times(-1, 400), created),
+               "image-change-time-zero-or-negative-is-changed");
 }
 
 // A PE32+ header with 16 data directories, the resource directory (2) at `resource_rva` of

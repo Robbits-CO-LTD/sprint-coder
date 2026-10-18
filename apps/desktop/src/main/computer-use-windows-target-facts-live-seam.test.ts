@@ -764,11 +764,29 @@ int wmain(int argc, wchar_t **argv) {
 
   // The image file changed after its process was created (process herpaderping rewrites the bytes
   // after the section exists; a running image cannot be opened for writing, so here only its times
-  // are moved, through FILE_WRITE_ATTRIBUTES, which is what such a rewrite leaves behind). Before
-  // the change the running image matches; after it, it is a mismatch (W-UR).
+  // are moved, through FILE_WRITE_ATTRIBUTES, which moves ChangeTime as such a rewrite does). Before
+  // the change the running image matches, although its LastWriteTime was set a day into the future
+  // before it started (as a ZIP unpacked in another time zone leaves it): only ChangeTime is judged.
+  // After the change, it is a mismatch (W-UR).
   {
     const std::wstring touched = scratch + L"\\sc500-touched.exe";
     Check(CopyFileW(fixture.c_str(), touched.c_str(), FALSE) == TRUE, "touched_copied");
+    bool future_written = false;
+    {
+      ScopedKernelHandle writer(CreateFileW(touched.c_str(), FILE_WRITE_ATTRIBUTES,
+                                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                            nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+      FILETIME now{};
+      GetSystemTimeAsFileTime(&now);
+      ULARGE_INTEGER later{};
+      later.LowPart = now.dwLowDateTime;
+      later.HighPart = now.dwHighDateTime;
+      later.QuadPart += 24ull * 60 * 60 * 10'000'000;
+      FILETIME future{later.LowPart, later.HighPart};
+      future_written = writer.value != INVALID_HANDLE_VALUE &&
+                       SetFileTime(writer.value, nullptr, nullptr, &future) == TRUE;
+    }
+    Check(future_written, "touched_last_write_time_set_in_the_future");
     Sleep(100);
     const Started process = Start(L"\"" + touched + L"\"", 0);
     Check(process.ok, "touched_started");
@@ -794,6 +812,19 @@ int wmain(int argc, wchar_t **argv) {
     WindowsTargetHeldImage held;
     Check(HoldWindowsTargetRunningImage(process.info.hProcess, std::nullopt, &held) && !held.unchanged,
           "image_written_after_creation_is_not_unchanged");
+  }
+
+  // A view read that faults is caught and is a failed read, not a crash of the helper. (A page-in
+  // I/O error, EXCEPTION_IN_PAGE_ERROR, needs a failing volume; an access violation is the same
+  // filter's other case, and an inaccessible address gives one here.)
+  {
+    std::array<std::uint8_t, 8> sink{};
+    Check(!CopyWindowsTargetView(sink.data(), reinterpret_cast<const void *>(std::uintptr_t{0x10}),
+                                 sink.size()),
+          "view_copy_fault_is_a_failed_read");
+    const std::array<std::uint8_t, 8> source{1, 2, 3, 4, 5, 6, 7, 8};
+    Check(CopyWindowsTargetView(sink.data(), source.data(), source.size()) && sink == source,
+          "view_copy_copies");
   }
 
   // The resources are read through the held handle, never by the path again. A copy of cmd runs as

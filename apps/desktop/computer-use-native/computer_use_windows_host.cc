@@ -1109,10 +1109,14 @@ bool IsSupportedWindowsV1Target(
 //     RVA, subsystem, machine, checksum, image file size, characteristics, stack sizes), the
 //     recorded path still naming the held file, the kernel mapped name staying put, and the module
 //     list are auxiliary deny-side checks. The held file must also be unchanged since the process
-//     was created: its ChangeTime and LastWriteTime both before the creation time (a writer that
-//     kept its handle across the image section's creation can rewrite the file afterwards, as in
-//     process herpaderping, and the facts would then be of the new bytes); a time that cannot be
-//     read, or one at or after the creation, is a mismatch. Times can be set back by a writer
+//     was created: its ChangeTime before the creation time (a writer that kept its handle across
+//     the image section's creation can rewrite the file afterwards, as in process herpaderping,
+//     and the facts would then be of the new bytes; on NTFS and ReFS a data write, SetFileTime
+//     and a rename all move ChangeTime); a time that cannot be read, or one at or after the
+//     creation, is a mismatch. LastWriteTime is not judged: it may lie in the future for an
+//     honest file (a ZIP's DOS local time unpacked in another time zone, a copy from a machine
+//     whose clock ran ahead), and a writer who can set ChangeTime back can set it back too. The
+//     ChangeTime can be set back by a writer
 //     with FILE_WRITE_ATTRIBUTES, and a rewrite before the process object was created is older
 //     than it, so this narrows the attack rather than closing it (ADR §10 risk). Any mismatch, or
 //     a target whose kernel data or re-read name cannot be read, is W-UR. Every other fact is read
@@ -1839,14 +1843,16 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
   // created (process herpaderping: a writer that kept its handle across the section's creation
   // overwrites the file, and the signature and resources would then be read from the new bytes).
   // The hold shares no write, so nothing can write while it is held; what was written before is
-  // told by the file's ChangeTime and LastWriteTime, which must both be before the creation time.
-  // A rename also moves ChangeTime, so a running image renamed since its start is a mismatch too.
+  // told by the file's ChangeTime, which must be before the creation time (LastWriteTime is not
+  // judged; see WindowsImageUnchangedSinceCreation). A rename also moves ChangeTime, so a running
+  // image renamed since its start is a mismatch too. FILE_BASIC_INFO unreadable: a mismatch.
   FILE_BASIC_INFO basic{};
   const bool basic_read = GetFileInformationByHandleEx(held->file.value, FileBasicInfo, &basic,
                                                        sizeof(basic)) == TRUE;
   held->unchanged = sprint_coder::computer_use::WindowsImageUnchangedSinceCreation(
-      basic_read ? std::optional<std::int64_t>(basic.ChangeTime.QuadPart) : std::nullopt,
-      basic_read ? std::optional<std::int64_t>(basic.LastWriteTime.QuadPart) : std::nullopt,
+      basic_read ? std::optional<sprint_coder::computer_use::WindowsImageFileTimes>(
+                       {basic.ChangeTime.QuadPart, basic.LastWriteTime.QuadPart})
+                 : std::nullopt,
       WindowsTargetCreationTime(process));
   held->matches = anchored && !header_disagrees && again.has_value() &&
                   SameWindowsTargetName(again->mapped_name, kernel->mapped_name) &&
@@ -2156,12 +2162,31 @@ std::optional<std::string> WindowsTargetPeSubsystem(HANDLE file) {
 // clear reads to the loader as a module it mapped, and its lookup may go to a language's .mui file
 // (another, unverified file); the resources are found by FindPeResources instead. A section page
 // that is not committed and readable (a section without IMAGE_SCN_MEM_READ maps no-access) is not
-// read, so a crafted image cannot fault this helper. `present` false: the image has no resources.
-// std::nullopt: the image cannot be mapped or read (the facts read from it are then unmeasured).
+// read, and every read of the view (the header and the section) is a copy into a local buffer made
+// by CopyWindowsTargetView under SEH, so neither a crafted image nor a page-in that fails (an SMB
+// share dropped, a USB volume pulled, a bad sector: EXCEPTION_IN_PAGE_ERROR) can fault this helper;
+// either makes the read unresolvable. Only the copies are parsed. `present` false: the image has
+// no resources. std::nullopt: the image cannot be mapped or read (the facts read from it are then
+// unmeasured).
 struct WindowsTargetResourceSection {
   sprint_coder::computer_use::PeResourceSection where;
   std::vector<std::uint8_t> bytes;
 };
+
+// Copies `length` bytes of a mapped view. A fault while doing so (EXCEPTION_IN_PAGE_ERROR when the
+// page cannot be read in, EXCEPTION_ACCESS_VIOLATION when it is not accessible) is caught and is
+// false; any other exception passes on. No C++ object lives here (SEH cannot unwind one, C2712).
+bool CopyWindowsTargetView(void *destination, const void *source, std::size_t length) {
+  __try {
+    std::memcpy(destination, source, length);
+  } __except (GetExceptionCode() == EXCEPTION_IN_PAGE_ERROR ||
+                      GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
+    return false;
+  }
+  return true;
+}
 
 std::optional<WindowsTargetResourceSection> ReadWindowsTargetResourceSection(HANDLE file) {
   ScopedKernelHandle mapping(CreateFileMappingW(
@@ -2200,20 +2225,21 @@ std::optional<WindowsTargetResourceSection> ReadWindowsTargetResourceSection(HAN
     return std::nullopt;
   const std::size_t header_size =
       first.RegionSize < 64 * 1024 ? static_cast<std::size_t>(first.RegionSize) : 64 * 1024;
-  if (!readable(0, header_size))
+  std::vector<std::uint8_t> header(header_size);
+  if (!readable(0, header_size) || !CopyWindowsTargetView(header.data(), view, header_size))
     return std::nullopt;
   WindowsTargetResourceSection result;
   const std::optional<sprint_coder::computer_use::PeResourceSection> where =
-      sprint_coder::computer_use::LocatePeResourceSection(
-          std::span<const std::uint8_t>(view, header_size));
+      sprint_coder::computer_use::LocatePeResourceSection(header);
   if (!where.has_value())
     return std::nullopt;
   result.where = *where;
   if (!where->present)
     return result;
-  if (!readable(where->section_rva, where->section_size))
+  result.bytes.resize(where->section_size);
+  if (!readable(where->section_rva, where->section_size) ||
+      !CopyWindowsTargetView(result.bytes.data(), view + where->section_rva, where->section_size))
     return std::nullopt;
-  result.bytes.assign(view + where->section_rva, view + where->section_rva + where->section_size);
   return result;
 }
 
@@ -2727,6 +2753,11 @@ WindowsTargetFactsMeasurement MeasureWindowsTargetFacts(
         target_eligibility_detail::AsciiLower(*facts.image_leaf) == kWindowsTargetFixtureLeaf;
   }
   facts.image_volume = WindowsTargetVolumeKind(held.file.value);
+  // A held file not known to be local is a mismatch already (W-UR), so its bytes are not read for
+  // the signature, the resources or the subsystem: nothing they could say changes the verdict, and
+  // a remote share's owner could make each read fail or stall.
+  if (held.remote != std::optional<bool>(false))
+    return measured;
 
   const WindowsTargetSignature signature =
       VerifyWindowsTargetSignature(held.file.value, held.canonical_path);

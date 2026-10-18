@@ -927,21 +927,31 @@ ParseWindowsProcessSnapshot(std::span<const std::uint8_t> buffer, std::uint64_t 
 
 // Whether the held image file is unchanged since the process was created (process herpaderping:
 // a writer that kept its handle across the image section's creation rewrites the file afterwards,
-// so the bytes read later are not the bytes mapped). Both the file's ChangeTime and its
-// LastWriteTime (FILE_BASIC_INFO, 100 ns units since 1601, as the process creation time is) must
-// be present, positive and strictly before the creation time: the same instant is taken as after
-// (the deny direction; both clocks tick coarsely, so a write in the creation's tick cannot be
-// ordered). Anything missing is false. Residual risk: a writer with FILE_WRITE_ATTRIBUTES can set
-// both times back, and a rewrite made before the process object was created (after the section
+// so the bytes read later are not the bytes mapped). The file's ChangeTime (FILE_BASIC_INFO, 100 ns
+// units since 1601, as the process creation time is) must be present, positive and strictly before
+// the creation time: the same instant is taken as after (the deny direction; both clocks tick
+// coarsely, so a change in the creation's tick cannot be ordered). On NTFS and ReFS a data write,
+// SetFileTime and a rename all move ChangeTime. LastWriteTime is not judged: an honest file can
+// carry one in the future (a ZIP's DOS local time unpacked in another time zone, a copy from a
+// machine whose clock ran ahead), and a writer who can set ChangeTime back can set LastWriteTime
+// back as well, so it would refuse honest files and catch nothing more. Anything missing is false.
+// A file system that does not keep ChangeTime would not be covered, but the hold already requires
+// NTFS or ReFS (a stable file id). Residual risk: a writer with FILE_WRITE_ATTRIBUTES can set
+// ChangeTime back, and a rewrite made before the process object was created (after the section
 // was) is older than the creation; neither is caught here.
+// The times of FILE_BASIC_INFO this reads (LastWriteTime is carried so the harness can show it is
+// not judged).
+struct WindowsImageFileTimes {
+  std::int64_t change_time = 0;
+  std::int64_t last_write_time = 0;
+};
+
 [[nodiscard]] inline bool WindowsImageUnchangedSinceCreation(
-    std::optional<std::int64_t> change_time, std::optional<std::int64_t> last_write_time,
+    const std::optional<WindowsImageFileTimes> &times,
     std::optional<std::uint64_t> process_creation) {
-  if (!change_time.has_value() || !last_write_time.has_value() || !process_creation.has_value() ||
-      *change_time <= 0 || *last_write_time <= 0)
+  if (!times.has_value() || !process_creation.has_value() || times->change_time <= 0)
     return false;
-  return static_cast<std::uint64_t>(*change_time) < *process_creation &&
-         static_cast<std::uint64_t>(*last_write_time) < *process_creation;
+  return static_cast<std::uint64_t>(times->change_time) < *process_creation;
 }
 
 } // namespace sprint_coder::computer_use
