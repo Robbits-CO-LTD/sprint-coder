@@ -301,7 +301,9 @@ void PutLe(std::vector<std::uint8_t> &bytes, std::size_t at, std::uint32_t value
 }
 
 bool CheckPeImageSummary() {
-  // A PE32+ image with a machine, an entry RVA, a checksum, and (optionally) a certificate table.
+  const std::optional<bool> yes = true;
+  const std::optional<bool> no = false;
+  // A PE32+ image with a machine, an entry RVA, a checksum, and 16 data directories.
   std::vector<std::uint8_t> bytes = PeHeader(0x20b, 2);
   PutLe(bytes, 0x80 + 4, 0x8664, 2);            // Machine (AMD64)
   PutLe(bytes, 0x80 + 24 + 16, 0x1234, 4);      // AddressOfEntryPoint
@@ -312,16 +314,48 @@ bool CheckPeImageSummary() {
   // The certificate table is data directory 4; its size is the second dword of its entry.
   PutLe(with_cert, 0x80 + 24 + 112 + 4 * 8 + 4, 0x400, 4);
   const std::optional<PeImageSummary> cert = ParsePeImageSummary(with_cert);
-  std::vector<std::uint8_t> no_dirs = bytes;
-  PutLe(no_dirs, 0x80 + 24 + 108, 4, 4); // only 4 directories: no security entry
-  PutLe(no_dirs, 0x80 + 24 + 112 + 4 * 8 + 4, 0x400, 4);
-  const std::optional<PeImageSummary> few = ParsePeImageSummary(no_dirs);
+  std::vector<std::uint8_t> few_dirs = bytes;
+  PutLe(few_dirs, 0x80 + 24 + 108, 4, 4); // only 4 directories: no security entry
+  PutLe(few_dirs, 0x80 + 24 + 112 + 4 * 8 + 4, 0x400, 4);
+  const std::optional<PeImageSummary> few = ParsePeImageSummary(few_dirs);
+  // A header truncated before NumberOfRvaAndSizes (PE32+ reads pe+24+108): the cert table is
+  // unknown (std::nullopt), never "none", and the fields before it are still read.
+  std::vector<std::uint8_t> truncated_dirs(bytes.begin(), bytes.begin() + 222);
+  const std::optional<PeImageSummary> short_header = ParsePeImageSummary(truncated_dirs);
+  // SizeOfOptionalHeader that claims more than the bytes hold: the directory count is not read.
+  std::vector<std::uint8_t> lying_size = bytes;
+  PutLe(lying_size, 0x80 + 20, 4096, 2);
+  lying_size.resize(0x80 + 24 + 100);
+  const std::optional<PeImageSummary> lying = ParsePeImageSummary(lying_size);
+  // A huge NumberOfRvaAndSizes must not widen any read: with the fixed security slot inside the
+  // bytes it reads it safely, and with the bytes cut short it falls back to unknown, never OOB.
+  std::vector<std::uint8_t> huge_count = bytes;
+  PutLe(huge_count, 0x80 + 24 + 108, 0xffffffff, 4);
+  const std::optional<PeImageSummary> huge = ParsePeImageSummary(huge_count);
+  std::vector<std::uint8_t> huge_count_cut = huge_count;
+  huge_count_cut.resize(0x80 + 24 + 120); // past the count, before the security slot
+  const std::optional<PeImageSummary> huge_cut = ParsePeImageSummary(huge_count_cut);
+  // e_lfanew (PE offset) past the end of the bytes.
+  std::vector<std::uint8_t> far_pe = bytes;
+  PutLe(far_pe, 0x3c, 0x7fffffff, 4);
+  const std::optional<PeImageSummary> far = ParsePeImageSummary(far_pe);
   return Check(plain.has_value() && plain->subsystem == "gui" && plain->subsystem_code == 2 &&
                    plain->machine == 0x8664 && plain->entry_rva == 0x1234 &&
-                   plain->check_sum == 0xabcdef && !plain->has_cert_table,
+                   plain->check_sum == 0xabcdef && plain->has_cert_table == no,
                "pe-summary-fields") &&
-         Check(cert.has_value() && cert->has_cert_table, "pe-summary-cert-table-present") &&
-         Check(few.has_value() && !few->has_cert_table, "pe-summary-no-security-directory");
+         Check(cert.has_value() && cert->has_cert_table == yes, "pe-summary-cert-table-present") &&
+         Check(few.has_value() && !few->has_cert_table.has_value(),
+               "pe-summary-too-few-directories-is-unknown") &&
+         Check(short_header.has_value() && short_header->entry_rva == 0x1234 &&
+                   !short_header->has_cert_table.has_value(),
+               "pe-summary-truncated-directories-is-unknown") &&
+         Check(lying.has_value() && !lying->has_cert_table.has_value(),
+               "pe-summary-optional-size-beyond-bytes-is-unknown") &&
+         Check(huge.has_value() && huge->has_cert_table == no,
+               "pe-summary-huge-rva-count-in-range-reads-safely") &&
+         Check(huge_cut.has_value() && !huge_cut->has_cert_table.has_value(),
+               "pe-summary-huge-rva-count-cut-short-is-unknown") &&
+         Check(!far.has_value(), "pe-summary-e-lfanew-out-of-range");
 }
 
 // ASCII text as UTF-16 bytes, little or big endian, with or without the BOM.

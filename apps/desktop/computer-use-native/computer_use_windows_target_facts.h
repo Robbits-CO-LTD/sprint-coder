@@ -43,12 +43,24 @@ namespace windows_target_facts_detail {
 
 [[nodiscard]] constexpr bool IsSeparator(char letter) { return letter == '\\' || letter == '/'; }
 
-[[nodiscard]] inline std::uint32_t ReadLe(std::span<const std::uint8_t> bytes, std::size_t at,
-                                          std::size_t width) {
+// A little-endian value of `width` (1 to 4) bytes at `at`, or std::nullopt when any of it lies
+// outside `bytes`. The bound is checked without adding to `at`, so no offset can overflow past it.
+[[nodiscard]] inline std::optional<std::uint32_t>
+ReadLe(std::span<const std::uint8_t> bytes, std::size_t at, std::size_t width) {
+  if (width == 0 || width > 4 || at > bytes.size() || width > bytes.size() - at)
+    return std::nullopt;
   std::uint32_t value = 0;
   for (std::size_t index = 0; index < width; ++index)
     value |= static_cast<std::uint32_t>(bytes[at + index]) << (8 * index);
   return value;
+}
+
+// `base + offset`, or std::nullopt when it would overflow or pass `limit`.
+[[nodiscard]] constexpr std::optional<std::size_t> OffsetWithin(std::size_t base,
+                                                                std::size_t offset,
+                                                                std::size_t limit) {
+  if (base > limit || offset > limit - base) return std::nullopt;
+  return base + offset;
 }
 
 // UTF-16LE code units to UTF-8; an unpaired surrogate gives std::nullopt.
@@ -88,8 +100,11 @@ namespace windows_target_facts_detail {
 ReadUtf16z(std::span<const std::uint8_t> bytes, std::size_t at, std::size_t end,
            std::size_t *after) {
   std::vector<char16_t> units;
-  for (std::size_t cursor = at; cursor + 1 < end; cursor += 2) {
-    const auto unit = static_cast<char16_t>(ReadLe(bytes, cursor, 2));
+  if (end > bytes.size()) return std::nullopt;
+  for (std::size_t cursor = at; cursor < end && end - cursor >= 2; cursor += 2) {
+    const std::optional<std::uint32_t> read = ReadLe(bytes, cursor, 2);
+    if (!read.has_value()) return std::nullopt;
+    const auto unit = static_cast<char16_t>(*read);
     if (unit == 0) {
       *after = cursor + 2;
       return units;
@@ -99,7 +114,9 @@ ReadUtf16z(std::span<const std::uint8_t> bytes, std::size_t at, std::size_t end,
   return std::nullopt;
 }
 
-[[nodiscard]] constexpr std::size_t Align4(std::size_t offset) {
+// The offset rounded up to a multiple of 4; std::nullopt when that would overflow.
+[[nodiscard]] constexpr std::optional<std::size_t> Align4(std::size_t offset) {
+  if (offset > static_cast<std::size_t>(-1) - 3) return std::nullopt;
   return (offset + 3) & ~std::size_t{3};
 }
 
@@ -122,22 +139,26 @@ struct VersionBlock {
 
 [[nodiscard]] inline std::optional<VersionBlock>
 ReadVersionBlock(std::span<const std::uint8_t> bytes, std::size_t at, std::size_t limit) {
-  if (at + 6 > limit) return std::nullopt;
+  if (limit > bytes.size() || !OffsetWithin(at, 6, limit).has_value()) return std::nullopt;
   VersionBlock block;
   block.begin = at;
-  const std::size_t length = ReadLe(bytes, at, 2);
-  if (length < 6 || at + length > limit) return std::nullopt;
-  block.end = at + length;
-  block.value_length = ReadLe(bytes, at + 2, 2);
-  const std::uint32_t type = ReadLe(bytes, at + 4, 2);
-  if (type > 1) return std::nullopt;
-  block.text = type == 1;
+  const std::optional<std::uint32_t> length = ReadLe(bytes, at, 2);
+  const std::optional<std::uint32_t> value_length = ReadLe(bytes, at + 2, 2);
+  const std::optional<std::uint32_t> type = ReadLe(bytes, at + 4, 2);
+  if (!length.has_value() || !value_length.has_value() || !type.has_value() || *length < 6)
+    return std::nullopt;
+  const std::optional<std::size_t> end = OffsetWithin(at, *length, limit);
+  if (!end.has_value() || *type > 1) return std::nullopt;
+  block.end = *end;
+  block.value_length = *value_length;
+  block.text = *type == 1;
   std::size_t after = 0;
   std::optional<std::vector<char16_t>> key = ReadUtf16z(bytes, at + 6, block.end, &after);
   if (!key.has_value()) return std::nullopt;
   block.key = std::move(*key);
-  block.value = Align4(after);
-  if (block.value > block.end) return std::nullopt;
+  const std::optional<std::size_t> value = Align4(after);
+  if (!value.has_value() || *value > block.end) return std::nullopt;
+  block.value = *value;
   return block;
 }
 
@@ -182,46 +203,95 @@ PlaceWindowsImage(std::string_view canonical_path, std::span<const WindowsImageR
 // The fields of a PE image the facts and the kernel cross-check need. subsystem is "gui",
 // "console" or "other"; subsystem_code, machine and check_sum are the raw header values;
 // entry_rva is the optional header's AddressOfEntryPoint; has_cert_table is whether the security
-// data directory (the embedded Authenticode certificate table) is present and non-empty.
+// data directory (the embedded Authenticode certificate table) is present and non-empty, or
+// std::nullopt when the header does not let that be read (the directories lie outside the bytes
+// or the optional header, or there are fewer than five): unknown, which the signature check treats
+// as invalid, never as "no certificate table".
 struct PeImageSummary {
   std::string subsystem;
   std::uint16_t subsystem_code = 0;
   std::uint16_t machine = 0;
   std::uint32_t check_sum = 0;
   std::uint32_t entry_rva = 0;
-  bool has_cert_table = false;
+  std::optional<bool> has_cert_table;
+  // Auxiliary header values for the kernel cross-check, each std::nullopt when the optional header
+  // (as SizeOfOptionalHeader declares it) or the bytes do not cover it.
+  std::optional<std::uint16_t> image_characteristics;
+  std::optional<std::uint16_t> dll_characteristics;
+  std::optional<std::uint64_t> stack_reserve;
+  std::optional<std::uint64_t> stack_commit;
 };
 
-// Reads a PE image's header. Not a PE image (or one too short to read): std::nullopt.
+// Reads a PE image's header. Every read is bounds-checked (ReadLe) and every offset is formed with
+// OffsetWithin, which compares before it adds. Not a PE image, or a header that does not fit in
+// the bytes read: std::nullopt.
 [[nodiscard]] inline std::optional<PeImageSummary>
 ParsePeImageSummary(std::span<const std::uint8_t> bytes) {
+  using windows_target_facts_detail::OffsetWithin;
   using windows_target_facts_detail::ReadLe;
-  if (bytes.size() < 0x40 || bytes[0] != 'M' || bytes[1] != 'Z') return std::nullopt;
-  const std::size_t pe = ReadLe(bytes, 0x3c, 4);
-  // Signature (4), file header (20), then the optional header: magic (2), AddressOfEntryPoint at
-  // 16, CheckSum at 64, Subsystem at 68 (the same for PE32 and PE32+), then the data directories.
-  if (pe > bytes.size() || bytes.size() - pe < 24 + 70) return std::nullopt;
-  if (bytes[pe] != 'P' || bytes[pe + 1] != 'E' || bytes[pe + 2] != 0 || bytes[pe + 3] != 0)
+  const std::size_t size = bytes.size();
+  if (size < 0x40 || bytes[0] != 'M' || bytes[1] != 'Z') return std::nullopt;
+  const std::optional<std::uint32_t> pe = ReadLe(bytes, 0x3c, 4);
+  if (!pe.has_value()) return std::nullopt;
+  // Signature (4) and file header (20) before the optional header.
+  const std::optional<std::size_t> optional = OffsetWithin(*pe, 24, size);
+  if (!optional.has_value()) return std::nullopt;
+  const std::optional<std::uint32_t> signature = ReadLe(bytes, *pe, 4);
+  const std::optional<std::uint32_t> machine = ReadLe(bytes, *pe + 4, 2);
+  const std::optional<std::uint32_t> optional_size = ReadLe(bytes, *pe + 20, 2);
+  const std::optional<std::uint32_t> magic = ReadLe(bytes, *optional, 2);
+  if (signature != std::optional<std::uint32_t>(0x00004550u) || !machine.has_value() ||
+      !optional_size.has_value() || *optional_size < 70 || !magic.has_value() ||
+      (*magic != 0x10b && *magic != 0x20b))
     return std::nullopt;
-  const std::size_t optional_size = ReadLe(bytes, pe + 20, 2);
-  const std::uint32_t magic = ReadLe(bytes, pe + 24, 2);
-  if (optional_size < 70 || (magic != 0x10b && magic != 0x20b)) return std::nullopt;
+  // AddressOfEntryPoint at 16, CheckSum at 64, Subsystem at 68 (the same for PE32 and PE32+).
+  const std::optional<std::uint32_t> entry = ReadLe(bytes, *optional + 16, 4);
+  const std::optional<std::uint32_t> check_sum = ReadLe(bytes, *optional + 64, 4);
+  const std::optional<std::uint32_t> subsystem = ReadLe(bytes, *optional + 68, 2);
+  if (!entry.has_value() || !check_sum.has_value() || !subsystem.has_value())
+    return std::nullopt;
   PeImageSummary summary;
-  summary.machine = static_cast<std::uint16_t>(ReadLe(bytes, pe + 4, 2));
-  summary.entry_rva = ReadLe(bytes, pe + 24 + 16, 4);
-  summary.check_sum = ReadLe(bytes, pe + 24 + 64, 4);
-  summary.subsystem_code = static_cast<std::uint16_t>(ReadLe(bytes, pe + 24 + 68, 2));
+  summary.machine = static_cast<std::uint16_t>(*machine);
+  summary.entry_rva = *entry;
+  summary.check_sum = *check_sum;
+  summary.subsystem_code = static_cast<std::uint16_t>(*subsystem);
   summary.subsystem = summary.subsystem_code == 2   ? "gui"
                       : summary.subsystem_code == 3 ? "console"
                                                     : "other";
-  // The certificate table is data directory 4 (8 bytes each): its VA and, at +4, its size. The
-  // directories begin at the optional header's offset 96 (PE32) or 112 (PE32+).
-  const std::size_t directories = pe + 24 + (magic == 0x20b ? 112 : 96);
-  const std::size_t count = ReadLe(bytes, pe + 24 + (magic == 0x20b ? 108 : 92), 4);
-  const std::size_t security = directories + 4 * 8;
-  if (count > 4 && optional_size >= (magic == 0x20b ? 112 : 96) + 5 * 8 &&
-      security + 8 <= bytes.size())
-    summary.has_cert_table = ReadLe(bytes, security + 4, 4) != 0;
+  const bool wide = *magic == 0x20b;
+  // A field at `offset` of `width` bytes inside the declared optional header, read checked.
+  const auto field = [&](std::size_t offset, std::size_t width) -> std::optional<std::uint64_t> {
+    if (*optional_size < offset + width) return std::nullopt;
+    std::uint64_t value = 0;
+    for (std::size_t part = 0; part < width; part += 4) {
+      const std::optional<std::uint32_t> read =
+          ReadLe(bytes, *optional + offset + part, width - part < 4 ? width - part : 4);
+      if (!read.has_value()) return std::nullopt;
+      value |= static_cast<std::uint64_t>(*read) << (8 * part);
+    }
+    return value;
+  };
+  if (const std::optional<std::uint32_t> characteristics = ReadLe(bytes, *pe + 22, 2))
+    summary.image_characteristics = static_cast<std::uint16_t>(*characteristics);
+  if (const std::optional<std::uint64_t> dll = field(70, 2))
+    summary.dll_characteristics = static_cast<std::uint16_t>(*dll);
+  // SizeOfStackReserve / SizeOfStackCommit: 4 bytes each at 72 and 76 (PE32), 8 at 72 and 80.
+  summary.stack_reserve = field(72, wide ? 8 : 4);
+  summary.stack_commit = field(wide ? 80 : 76, wide ? 8 : 4);
+  // NumberOfRvaAndSizes at 92 (PE32) or 108 (PE32+), then the directories (8 bytes each); the
+  // certificate table is directory 4, its size the second dword. All of it must lie inside both
+  // the optional header (as SizeOfOptionalHeader declares it) and the bytes; otherwise unknown.
+  const bool plus = *magic == 0x20b;
+  const std::size_t count_at = plus ? 108 : 92;
+  const std::size_t security_end = (plus ? 112 : 96) + 5 * 8;
+  const std::optional<std::size_t> directories_end = OffsetWithin(*optional, security_end, size);
+  if (*optional_size >= security_end && directories_end.has_value()) {
+    const std::optional<std::uint32_t> count = ReadLe(bytes, *optional + count_at, 4);
+    const std::optional<std::uint32_t> security_size =
+        ReadLe(bytes, *optional + security_end - 4, 4);
+    if (count.has_value() && *count >= 5 && security_size.has_value())
+      summary.has_cert_table = *security_size != 0;
+  }
   return summary;
 }
 
@@ -425,7 +495,14 @@ VersionInfoOriginalFilename(std::span<const std::uint8_t> resource) {
   using namespace windows_target_facts_detail;
   const std::optional<VersionBlock> root = ReadVersionBlock(resource, 0, resource.size());
   if (!root.has_value() || !UnitsEqual(root->key, "VS_VERSION_INFO")) return std::nullopt;
-  std::size_t child = Align4(root->value + root->value_length);
+  // The fixed file info must fit in the root block; each next offset is formed checked.
+  const std::optional<std::size_t> fixed_end =
+      OffsetWithin(root->value, root->value_length, root->end);
+  const std::optional<std::size_t> first =
+      fixed_end.has_value() ? Align4(*fixed_end) : std::nullopt;
+  if (!first.has_value()) return std::nullopt;
+  std::size_t child = *first;
+  const auto next = [](std::size_t end) { return Align4(end); };
   while (child < root->end) {
     const std::optional<VersionBlock> info = ReadVersionBlock(resource, child, root->end);
     if (!info.has_value()) return std::nullopt;
@@ -440,21 +517,28 @@ VersionInfoOriginalFilename(std::span<const std::uint8_t> resource) {
           if (UnitsEqual(entry->key, "OriginalFilename")) {
             // The value runs to its NUL, or to the end of the entry when a linker left that out.
             std::vector<char16_t> value;
-            for (std::size_t cursor = entry->value; entry->value_length != 0 &&
-                                                    cursor + 1 < entry->end;
+            for (std::size_t cursor = entry->value;
+                 entry->value_length != 0 && cursor < entry->end && entry->end - cursor >= 2;
                  cursor += 2) {
-              const auto unit = static_cast<char16_t>(ReadLe(resource, cursor, 2));
-              if (unit == 0) break;
-              value.push_back(unit);
+              const std::optional<std::uint32_t> unit = ReadLe(resource, cursor, 2);
+              if (!unit.has_value()) return std::nullopt;
+              if (*unit == 0) break;
+              value.push_back(static_cast<char16_t>(*unit));
             }
             return Utf8FromUtf16(value);
           }
-          entry_at = Align4(entry->end);
+          const std::optional<std::size_t> after_entry = next(entry->end);
+          if (!after_entry.has_value()) return std::nullopt;
+          entry_at = *after_entry;
         }
-        table_at = Align4(table->end);
+        const std::optional<std::size_t> after_table = next(table->end);
+        if (!after_table.has_value()) return std::nullopt;
+        table_at = *after_table;
       }
     }
-    child = Align4(info->end);
+    const std::optional<std::size_t> after_info = next(info->end);
+    if (!after_info.has_value()) return std::nullopt;
+    child = *after_info;
   }
   return std::string{};
 }

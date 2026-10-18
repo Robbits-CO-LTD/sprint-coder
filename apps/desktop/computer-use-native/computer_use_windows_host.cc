@@ -1086,18 +1086,20 @@ bool IsSupportedWindowsV1Target(
 //     made to name another file): NtQueryInformationProcess(ProcessImageInformation) gives the
 //     entry point and header summary the kernel recorded at creation, VirtualQueryEx confirms the
 //     entry point is in a MEM_IMAGE region, and GetMappedFileNameW on that region's base names the
-//     backing file. That file is opened and held without write or delete sharing. The held file's
-//     PE header (entry RVA, subsystem, machine, checksum) must equal what the kernel recorded: the
-//     target can unmap the image view and map another file at the entry point's address (and
-//     rewrite its Ldr list), but it cannot change what the kernel captured at creation, so a
-//     remapped or substituted file is refused. The kernel name is asked again (unchanged while the
-//     file is held), the held file's volume serial and file id are compared with those of the file
-//     the recorded path names (a rename-and-replace after the path was read differs, a mismatch),
-//     and the module list is read only as a deny-side cross-check. Any mismatch, or a target whose
-//     kernel data cannot be read, is W-UR. Every other fact is read from the held file. Residual
-//     risk: an attacker who builds a replacement whose entry RVA, subsystem, machine and checksum
-//     all equal the real image's (ADR §10 risk), on an OS where the recorded path does not follow
-//     the rename, could still pass; the checksum match makes this hard but not impossible.
+//     backing file. That file is opened and held without write or delete sharing. The anchor that
+//     the held file is the running image is a re-read of QueryFullProcessImageNameW after the hold:
+//     it names the kernel's image file object, which follows a rename of the running image, so when
+//     a target unmaps its image and maps another file B at the entry point's address (and rewrites
+//     its Ldr list), the re-read still names the real image and opens a different file than the one
+//     held, which is a mismatch (W-UR). The held file's PE header against the kernel summary (entry
+//     RVA, subsystem, machine, checksum, image file size, characteristics, stack sizes), the
+//     recorded path still naming the held file, the kernel mapped name staying put, and the module
+//     list are auxiliary deny-side checks. Any mismatch, or a target whose kernel data or re-read
+//     name cannot be read, is W-UR. Every other fact is read from the held file. Residual risk: the
+//     header cross-check is not by itself sufficient (checksum is outside the Authenticode hash and
+//     an attacker who builds the original image can match the rest), so the defense rests on the
+//     re-read naming the real image, which assumes QueryFullProcessImageNameW follows the rename;
+//     an OS where it does not would not be protected (to be confirmed before PR-6; ADR §10 risk).
 //   * Path, root, leaf, volume. The held file's canonical path (GetFinalPathNameByHandleW) placed
 //     among roots canonicalized the same way. The volume is network when the file system says the
 //     file is remote, removable for a removable, optical, RAM, USB, SD, MMC, 1394 or file-backed
@@ -1336,12 +1338,20 @@ std::optional<std::wstring> WindowsTargetMappedFileName(HANDLE process, LPVOID a
 // file at that address but cannot change what the kernel captured at creation.
 struct WindowsTargetKernelImage {
   std::wstring mapped_name;
-  // The entry point as a file RVA (TransferAddress - the image's allocation base), and the header
-  // values the kernel captured from the real image at process creation.
+  // The entry point as a file RVA (TransferAddress - the mapping's allocation base, both from the
+  // kernel: TransferAddress from SECTION_IMAGE_INFORMATION and the base from VirtualQueryEx's VAD,
+  // not from the PEB), and the header values the kernel captured from the real image at creation.
+  // These are an auxiliary deny-side cross-check; the running image's identity is anchored by the
+  // post-hold re-read of the kernel image name (see HoldWindowsTargetRunningImage).
   std::uint32_t entry_rva = 0;
   std::uint16_t subsystem = 0;
   std::uint16_t machine = 0;
   std::uint32_t check_sum = 0;
+  std::uint32_t image_file_size = 0;
+  std::uint16_t image_characteristics = 0;
+  std::uint16_t dll_characteristics = 0;
+  std::uint64_t stack_reserve = 0;
+  std::uint64_t stack_commit = 0;
 };
 
 std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE process) {
@@ -1401,6 +1411,11 @@ std::optional<WindowsTargetKernelImage> WindowsTargetKernelImageInfo(HANDLE proc
   info.subsystem = static_cast<std::uint16_t>(image.sub_system_type);
   info.machine = image.machine;
   info.check_sum = image.check_sum;
+  info.image_file_size = image.image_file_size;
+  info.image_characteristics = image.image_characteristics;
+  info.dll_characteristics = image.dll_characteristics;
+  info.stack_reserve = static_cast<std::uint64_t>(image.maximum_stack_size);
+  info.stack_commit = static_cast<std::uint64_t>(image.committed_stack_size);
   return info;
 }
 
@@ -1409,20 +1424,41 @@ std::optional<std::wstring> WindowsTargetKernelImageName(HANDLE process) {
   return info.has_value() ? std::optional<std::wstring>(info->mapped_name) : std::nullopt;
 }
 
-// Whether a held file's PE header is the image the kernel recorded for the process at creation: a
-// remapped or substituted file carries a different entry RVA, subsystem, machine or checksum.
-bool WindowsHeldImageMatchesKernel(HANDLE file, const WindowsTargetKernelImage &kernel) {
+// An auxiliary deny-side check: whether a held file's PE header disagrees with what the kernel
+// recorded for the process at creation. A field is compared only when both sides carry it, so a
+// field the header does not cover never refuses on its own; a field that is present and differs
+// does. This is not the anchor (the kernel can be fooled on checksum, which Authenticode does not
+// cover, and an attacker who builds the original can match the rest); the anchor is the post-hold
+// name re-read. False means a disagreement was found.
+bool WindowsHeldImageDisagreesWithKernel(HANDLE file, const WindowsTargetKernelImage &kernel) {
   std::vector<std::uint8_t> header(64 * 1024);
   OVERLAPPED at{};
   DWORD read = 0;
   if (ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &read, &at) != TRUE)
-    return false;
+    return true;
   header.resize(read);
   const std::optional<sprint_coder::computer_use::PeImageSummary> summary =
       sprint_coder::computer_use::ParsePeImageSummary(header);
-  return summary.has_value() && summary->entry_rva == kernel.entry_rva &&
-         summary->subsystem_code == kernel.subsystem && summary->machine == kernel.machine &&
-         summary->check_sum == kernel.check_sum;
+  if (!summary.has_value() || summary->entry_rva != kernel.entry_rva ||
+      summary->subsystem_code != kernel.subsystem || summary->machine != kernel.machine ||
+      summary->check_sum != kernel.check_sum)
+    return true;
+  if (summary->image_characteristics.has_value() &&
+      *summary->image_characteristics != kernel.image_characteristics)
+    return true;
+  if (summary->dll_characteristics.has_value() &&
+      *summary->dll_characteristics != kernel.dll_characteristics)
+    return true;
+  if (summary->stack_reserve.has_value() && *summary->stack_reserve != kernel.stack_reserve)
+    return true;
+  if (summary->stack_commit.has_value() && *summary->stack_commit != kernel.stack_commit)
+    return true;
+  // ImageFileSize is the size of the image file; compare it with the held file's actual size.
+  LARGE_INTEGER size{};
+  if (kernel.image_file_size != 0 && GetFileSizeEx(file, &size) == TRUE &&
+      static_cast<std::uint64_t>(size.QuadPart) != kernel.image_file_size)
+    return true;
+  return false;
 }
 
 // The first module of the target's own list (PEB Ldr). Used only as a deny-side cross-check: it is
@@ -1444,13 +1480,38 @@ struct WindowsTargetHeldImage {
   bool matches = false;
 };
 
+// Opens a Win32 path read-only (sharing everything, so a running image can be opened) and returns
+// its canonical path and file identity, or std::nullopt when it cannot be opened or read.
+struct WindowsPathIdentity {
+  std::wstring canonical_path;
+  WindowsFileIdentity identity;
+};
+std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstring &path) {
+  ScopedKernelHandle file(CreateFileW(
+      path.c_str(), FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL, nullptr));
+  WindowsPathIdentity result;
+  if (file.value == INVALID_HANDLE_VALUE ||
+      !ReadWindowsFileIdentity(file.value, &result.identity) ||
+      !CanonicalWindowsPathFromHandle(file.value, &result.canonical_path))
+    return std::nullopt;
+  return result;
+}
+
 // Holds the running image (see the block comment). The main image is found from kernel-held data
 // (WindowsTargetKernelImageInfo), never from the target's module list. `recorded` is the process's
 // path as read before (QueryFullProcessImageNameW), or std::nullopt when it could not be read.
-// False when the kernel data is unreadable or its file cannot be held; `matches` says whether the
-// held file's PE header is the one the kernel recorded (so a remapped view of another file is
-// refused), the kernel name stayed the same, the recorded path still names the held file, and the
-// target's own module list (a deny-side cross-check) agrees.
+// False when the kernel data is unreadable or its file cannot be held.
+//
+// `matches` is anchored by re-reading the kernel image name (QueryFullProcessImageNameW) after the
+// file is held, and requiring that name to open the same file (canonical path and file id) as the
+// held one. QueryFullProcessImageNameW names the kernel's image file object, which follows a
+// rename of the running image, so a target that unmaps its image and maps another file B at the
+// entry point's address (then rewrites its Ldr list) is caught: the re-read still names the real
+// image, not B. If that name cannot be read or opened, the result is unresolvable. The held file's
+// PE header against the kernel summary, the recorded path still naming the held file, the kernel
+// mapped name staying put, and the module list are auxiliary deny-side checks on top.
 bool HoldWindowsTargetRunningImage(HANDLE process,
                                    const std::optional<std::wstring> &recorded,
                                    WindowsTargetHeldImage *held) {
@@ -1473,31 +1534,32 @@ bool HoldWindowsTargetRunningImage(HANDLE process,
       !ReadWindowsFileIdentity(held->file.value, &held->identity) ||
       !CanonicalWindowsPathFromHandle(held->file.value, &held->canonical_path))
     return false;
-  // The held file must be the image the kernel recorded at creation: this binds it to kernel-held
-  // data the target cannot change, so remapping another file at the entry point's address (and
-  // rewriting the Ldr list) does not pass. The header is read at an explicit offset, so it leaves
-  // the handle's position alone for the facts that follow.
-  const bool kernel_image = WindowsHeldImageMatchesKernel(held->file.value, *kernel);
+  // Anchor: after holding, the kernel image name (it follows a rename of the running image, unlike
+  // a view the target remapped) must open the same file as the one held. Unreadable -> W-UR.
+  std::wstring kernel_path;
+  const std::optional<WindowsPathIdentity> kernel_file =
+      ReadProcessPath(process, &kernel_path) ? WindowsTargetOpenPathIdentity(kernel_path)
+                                             : std::nullopt;
+  const bool anchored =
+      kernel_file.has_value() &&
+      SameWindowsTargetName(kernel_file->canonical_path, held->canonical_path) &&
+      SameWindowsFileIdentity(kernel_file->identity, held->identity);
+  // Auxiliary deny-side checks.
+  const bool header_disagrees = WindowsHeldImageDisagreesWithKernel(held->file.value, *kernel);
   const std::optional<WindowsTargetKernelImage> again = WindowsTargetKernelImageInfo(process);
-  WindowsFileIdentity recorded_identity;
-  bool recorded_read = recorded.has_value();
-  if (recorded_read) {
-    ScopedKernelHandle file(CreateFileW(
-        recorded->c_str(), FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
-    recorded_read = file.value != INVALID_HANDLE_VALUE &&
-                    ReadWindowsFileIdentity(file.value, &recorded_identity);
+  bool recorded_agrees = recorded.has_value();
+  if (recorded_agrees) {
+    const std::optional<WindowsPathIdentity> recorded_file =
+        WindowsTargetOpenPathIdentity(*recorded);
+    recorded_agrees = recorded_file.has_value() &&
+                      SameWindowsFileIdentity(recorded_file->identity, held->identity);
   }
-  // Deny-side: the module list may name another file (tampered) or be unreadable; either refuses.
   const std::optional<std::wstring> module_list = WindowsTargetModuleListImageName(process);
   const bool module_list_agrees =
       module_list.has_value() && SameWindowsTargetName(*module_list, kernel->mapped_name);
-  held->matches = kernel_image && again.has_value() &&
+  held->matches = anchored && !header_disagrees && again.has_value() &&
                   SameWindowsTargetName(again->mapped_name, kernel->mapped_name) &&
-                  recorded_read &&
-                  SameWindowsFileIdentity(held->identity, recorded_identity) &&
-                  module_list_agrees;
+                  recorded_agrees && module_list_agrees;
   return true;
 }
 
@@ -1720,17 +1782,18 @@ WindowsTargetSignature VerifyWindowsTargetCatalog(HANDLE file,
   return signature;
 }
 
-// Whether the held file has an embedded certificate table (the security data directory).
-bool WindowsTargetHasCertTable(HANDLE file) {
+// Whether the held file has an embedded certificate table (the security data directory), or
+// std::nullopt when its header cannot be read or does not say (unknown, never "none").
+std::optional<bool> WindowsTargetHasCertTable(HANDLE file) {
   std::vector<std::uint8_t> header(64 * 1024);
   OVERLAPPED at{};
   DWORD read = 0;
   if (ReadFile(file, header.data(), static_cast<DWORD>(header.size()), &read, &at) != TRUE)
-    return false;
+    return std::nullopt;
   header.resize(read);
   const std::optional<sprint_coder::computer_use::PeImageSummary> summary =
       sprint_coder::computer_use::ParsePeImageSummary(header);
-  return summary.has_value() && summary->has_cert_table;
+  return summary.has_value() ? summary->has_cert_table : std::nullopt;
 }
 
 // The embedded signature, or the catalog when the file carries none. A present embedded signature
@@ -1765,7 +1828,9 @@ WindowsTargetSignature VerifyWindowsTargetSignature(HANDLE file,
       (last_error == static_cast<DWORD>(TRUST_E_NOSIGNATURE) ||
        last_error == static_cast<DWORD>(TRUST_E_SUBJECT_FORM_UNKNOWN) ||
        last_error == static_cast<DWORD>(TRUST_E_PROVIDER_UNKNOWN)) &&
-      !WindowsTargetHasCertTable(file);
+      // Only a header that says "no certificate table" lets the catalog be asked; an unknown one
+      // is invalid (fail closed).
+      WindowsTargetHasCertTable(file) == std::optional<bool>(false);
   if (no_signature)
     return VerifyWindowsTargetCatalog(file, path);
   signature.source = WindowsTargetSignatureSource::kEmbedded;
