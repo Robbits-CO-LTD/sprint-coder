@@ -93,6 +93,8 @@ function mutate(detail: TeamDetail, rng: Random, counter: { value: number }): Te
 
 describe('Team detail patches (issue #863)', () => {
   it('rebuilds exactly the next detail over long random histories, also after crossing IPC', () => {
+    // 40 seeds × 60 steps of a 50-message Team, each patch validated and cloned: about 2 s locally
+    // and 8 s on a busy CI runner, so it gets an explicit budget rather than the 5 s default.
     for (let seed = 1; seed <= 40; seed += 1) {
       const rng = random(seed);
       const counter = { value: 0 };
@@ -109,7 +111,7 @@ describe('Team detail patches (issue #863)', () => {
         truth = next;
       }
     }
-  });
+  }, 60_000);
 
   it('keeps everything the patch leaves alone, so only what changed re-renders', () => {
     const base = largeTeamDetail(32, 2_000);
