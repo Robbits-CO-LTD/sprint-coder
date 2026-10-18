@@ -606,13 +606,77 @@ function upsertApprovalHistory(
   );
 }
 
-function upsertAutoDecision(
+/** How many Auto decisions a Task keeps in memory: the same newest 200 that a reload reads back
+ * (`listAutoPermissionDecisions`), so the Timeline shows the same set live and after a restart. */
+export const AUTO_DECISION_RETAIN_LIMIT = 200;
+
+/**
+ * Appends live Auto decisions in arrival order (issue #863). They arrive as turn events in `seq`
+ * order, so no sort is needed; a decision already held (same id) is replaced in place, and only
+ * the newest {@link AUTO_DECISION_RETAIN_LIMIT} are kept. A long Team run records thousands, and
+ * the old filter-and-sort over an unbounded list on every event was the renderer's main cost.
+ */
+export function appendAutoDecisions(
   decisions: readonly AutoPermissionDecision[],
-  decision: AutoPermissionDecision,
+  incoming: readonly AutoPermissionDecision[],
 ): AutoPermissionDecision[] {
-  return [...decisions.filter(({ id }) => id !== decision.id), decision].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
-  );
+  const next = [...decisions];
+  const indexById = new Map(next.map(({ id }, index) => [id, index]));
+  for (const decision of incoming) {
+    const index = indexById.get(decision.id);
+    if (index === undefined) {
+      indexById.set(decision.id, next.length);
+      next.push(decision);
+    } else next[index] = decision;
+  }
+  return next.length > AUTO_DECISION_RETAIN_LIMIT
+    ? next.slice(next.length - AUTO_DECISION_RETAIN_LIMIT)
+    : next;
+}
+
+// Live Auto decisions waiting for the next frame (issue #863). Main records about 17 per second
+// during a long Team run; folding each frame's worth into one store update keeps the Timeline from
+// re-rendering once per decision. The fallback timer still delivers them while the window is
+// hidden and animation frames are paused.
+const pendingAutoDecisions = new Map<string, AutoPermissionDecision[]>();
+let pendingAutoDecisionApply: ((fn: (state: AppState) => Partial<AppState>) => void) | null = null;
+let pendingAutoDecisionFrame: number | null = null;
+let pendingAutoDecisionTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushAutoDecisions(): void {
+  if (pendingAutoDecisionFrame !== null && typeof cancelAnimationFrame === 'function')
+    cancelAnimationFrame(pendingAutoDecisionFrame);
+  if (pendingAutoDecisionTimer !== null) clearTimeout(pendingAutoDecisionTimer);
+  pendingAutoDecisionFrame = null;
+  pendingAutoDecisionTimer = null;
+  const apply = pendingAutoDecisionApply;
+  const batches = [...pendingAutoDecisions];
+  pendingAutoDecisions.clear();
+  if (apply === null || batches.length === 0) return;
+  apply((state) => {
+    const autoDecisionsByTask = { ...state.autoDecisionsByTask };
+    for (const [taskId, decisions] of batches)
+      autoDecisionsByTask[taskId] = appendAutoDecisions(
+        autoDecisionsByTask[taskId] ?? [],
+        decisions,
+      );
+    return { autoDecisionsByTask };
+  });
+}
+
+function queueAutoDecision(
+  taskId: string,
+  decision: AutoPermissionDecision,
+  apply: (fn: (state: AppState) => Partial<AppState>) => void,
+): void {
+  const queued = pendingAutoDecisions.get(taskId);
+  if (queued === undefined) pendingAutoDecisions.set(taskId, [decision]);
+  else queued.push(decision);
+  pendingAutoDecisionApply = apply;
+  if (pendingAutoDecisionTimer !== null) return;
+  pendingAutoDecisionTimer = setTimeout(flushAutoDecisions, 100);
+  if (typeof requestAnimationFrame === 'function')
+    pendingAutoDecisionFrame = requestAnimationFrame(flushAutoDecisions);
 }
 
 export function handleTurnEvent(
@@ -765,12 +829,7 @@ export function handleTurnEvent(
       break;
     }
     case 'permission.auto_decided': {
-      apply((state) => ({
-        autoDecisionsByTask: {
-          ...state.autoDecisionsByTask,
-          [taskId]: upsertAutoDecision(state.autoDecisionsByTask[taskId] ?? [], ev.autoDecision),
-        },
-      }));
+      queueAutoDecision(taskId, ev.autoDecision, apply);
       break;
     }
     case 'message.delta': {

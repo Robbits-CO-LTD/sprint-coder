@@ -77,11 +77,17 @@ type RuntimePersistence = Pick<
       | 'completeBackgroundActivity'
       | 'getTeamByTask'
       | 'recordFileChanges'
+      | 'commitPermissionEvaluation'
     >
   >;
 
 const executionStages: TurnStage[] = ['understanding', 'planning', 'executing'];
 const E2E_HOLD_MOCK_STREAM_FLAG = 'SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA';
+// Issue #863 reproduction: a long real Team run makes Main record thousands of Auto decisions on
+// the Leader's Task. Mock never asks the reviewer, so this opt-in (count, and events per second)
+// lets an isolated E2E process feed the renderer the same stream without a real model.
+const E2E_AUTO_DECISION_FLOOD_FLAG = 'SPRINT_CODER_E2E_MOCK_AUTO_DECISION_FLOOD';
+const E2E_AUTO_DECISION_FLOOD_RATE_FLAG = 'SPRINT_CODER_E2E_MOCK_AUTO_DECISION_FLOOD_PER_SECOND';
 
 export class MockRuntimeAdapter {
   private readonly active = new Map<string, ActiveTurn>();
@@ -344,6 +350,8 @@ export class MockRuntimeAdapter {
         },
         ...(recorder === undefined ? {} : { recorder }),
       });
+      if (teamFixtureActive) await this.floodAutoDecisionsForE2E(taskId, turnId, control);
+      if (control.canceled) return;
       // A tool that ran above may already have anchored itself into this Turn's assistant message
       // (a rendered graph); the reply continues in that message rather than starting a second one.
       const messageId = this.persistence.assistantMessageIdFor(taskId, turnId) ?? randomUUID();
@@ -391,6 +399,69 @@ export class MockRuntimeAdapter {
       else this.toolBroker.finishTurn(taskId, turnId);
       this.active.delete(turnId);
       control.resolveSettled();
+    }
+  }
+
+  /** E2E-only (issue #863): records `count` Auto decisions on this Turn at a steady rate. */
+  private async floodAutoDecisionsForE2E(
+    taskId: string,
+    turnId: string,
+    control: ActiveTurn,
+  ): Promise<void> {
+    const count = Number(process.env[E2E_AUTO_DECISION_FLOOD_FLAG] ?? 0);
+    const perSecond = Number(process.env[E2E_AUTO_DECISION_FLOOD_RATE_FLAG] ?? 100);
+    const commit = this.persistence.commitPermissionEvaluation;
+    if (!Number.isInteger(count) || count <= 0 || !(perSecond > 0) || commit === undefined) return;
+    const policyEpoch = this.persistence.getPermissionPolicy?.(taskId).policyEpoch ?? 0;
+    const startedAt = Date.now();
+    let emitted = 0;
+    while (emitted < count && !control.canceled) {
+      const due = Math.min(count, Math.floor(((Date.now() - startedAt) / 1000) * perSecond) + 1);
+      for (; emitted < due; emitted += 1) {
+        const callId = `e2e-flood-${turnId}-${emitted}`;
+        const request = {
+          taskId,
+          subjectId: 'tool:builtin:read',
+          capability: 'workspace.read' as const,
+          resource: { kind: 'external' as const, target: `e2e-flood-${emitted}` },
+          operation: 'read' as const,
+          providerEgress: 'none' as const,
+          sandboxProfile: 'read-only' as const,
+          executionSpecDigest: 'd'.repeat(64),
+          reviewerInputDigest: 'e'.repeat(64),
+          risk: 'low' as const,
+        };
+        const evaluation = {
+          decision: 'allow' as const,
+          reason: 'e2e_flood',
+          policyEpoch,
+          evaluationTrace: ['approval-policy' as const],
+        };
+        await this.serialize(taskId, () => {
+          const event = commit.call(this.persistence, taskId, request, evaluation, {
+            id: callId,
+            taskId,
+            turnId,
+            callId,
+            reviewRequestId: callId,
+            capability: request.capability,
+            source: 'policy',
+            decision: 'allow',
+            outcome: 'allow',
+            reason: `e2e flood ${emitted + 1}/${count}`,
+            risk: 'low',
+            model: 'e2e-flood',
+            templateVersion: '1',
+            requestFingerprint: 'f'.repeat(64),
+            executionSpecDigest: request.executionSpecDigest,
+            inputDigest: request.reviewerInputDigest,
+            policyEpoch,
+            createdAt: new Date().toISOString(),
+          });
+          if (event !== undefined) this.publish(event);
+        });
+      }
+      await pause(10);
     }
   }
 

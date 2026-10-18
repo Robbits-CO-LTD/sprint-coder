@@ -8,7 +8,8 @@ import type {
   TurnDiff,
   TurnDiffEntry,
 } from '../../types/sprint-coder';
-import { useAppStore } from '../../store/appStore';
+import { useShallow } from 'zustand/react/shallow';
+import { AUTO_DECISION_RETAIN_LIMIT, useAppStore } from '../../store/appStore';
 import { isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
 import {
@@ -25,7 +26,7 @@ import { ComputerUseAppGrantCard } from '../ComputerUseAppGrantCard';
 import { useComputerUseAppGrant } from '../../hooks/useComputerUseAppGrant';
 import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
-import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
+import { AutoDecisionAuditGroup } from '../AutoDecisionAuditRow';
 import { TurnDiffCard } from '../TurnDiffCard';
 import { GeneratedImageCard, MissingGeneratedImageNotice } from '../GeneratedImageCard';
 import { FileChangeCard } from '../FileChangeCard';
@@ -118,8 +119,32 @@ export function Timeline({
   // "誰を雇い、誰に任せたか" reads in the same column as the conversation. Message order and every
   // per-message card association below stay exactly as they were; a task with no Team activity
   // gets the shared empty grouping and renders the timeline it rendered before.
-  const teamDetail = useAppStore((s) => s.teamByTask[taskId]);
-  const activities = teamDetail?.activities ?? NO_ACTIVITIES;
+  // Only the parts the Timeline shows are selected (issue #863): a Team update that changes a
+  // Worker's live output or a message no longer re-renders the whole Timeline.
+  const activities = useAppStore((s) => s.teamByTask[taskId]?.activities) ?? NO_ACTIVITIES;
+  const workerBreakdownCells = useAppStore(
+    useShallow((s) => workerBreakdownCellsFor(s.teamByTask[taskId])),
+  );
+  const workerBreakdownAll = useMemo(() => {
+    const rows: { role: string; status: string }[] = [];
+    for (let index = 0; index + 1 < workerBreakdownCells.length; index += 2)
+      rows.push({ role: workerBreakdownCells[index]!, status: workerBreakdownCells[index + 1]! });
+    return rows;
+  }, [workerBreakdownCells]);
+  // One group per Turn, built once per change instead of filtering every decision for every
+  // message. The group holding the oldest kept decision may have lost earlier ones to the
+  // in-memory window, so only it says the list is cut.
+  const autoDecisionsByTurn = useMemo(() => {
+    const byTurn = new Map<string, AutoPermissionDecision[]>();
+    for (const decision of autoDecisions) {
+      const group = byTurn.get(decision.turnId);
+      if (group === undefined) byTurn.set(decision.turnId, [decision]);
+      else group.push(decision);
+    }
+    return byTurn;
+  }, [autoDecisions]);
+  const truncatedAutoDecisionTurnId =
+    autoDecisions.length >= AUTO_DECISION_RETAIN_LIMIT ? (autoDecisions[0]?.turnId ?? null) : null;
   const activityGroups = useMemo(
     () => groupActivitiesByMessage(messages, activities),
     [messages, activities],
@@ -221,10 +246,24 @@ export function Timeline({
     if (node) node.scrollTop = node.scrollHeight;
   }, [taskId]);
 
+  // Following the tail reads scrollHeight, which forces a layout of the whole Timeline. Several
+  // store updates can land in one frame (issue #863), so they share one scroll on the next frame.
+  // A pending scroll is dropped when the reader stops following (or the Timeline unmounts).
+  const followFrameRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (followFrameRef.current !== null) cancelAnimationFrame(followFrameRef.current);
+      followFrameRef.current = null;
+    },
+    [following],
+  );
   useEffect(() => {
-    if (!following) return;
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (!following || followFrameRef.current !== null) return;
+    followFrameRef.current = requestAnimationFrame(() => {
+      followFrameRef.current = null;
+      const node = scrollRef.current;
+      if (node) node.scrollTop = node.scrollHeight;
+    });
   }, [
     following,
     messages,
@@ -327,8 +366,8 @@ export function Timeline({
                 : [];
             const autoDecisionRows =
               message.author === 'user' && message.turnId !== null
-                ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
-                : [];
+                ? (autoDecisionsByTurn.get(message.turnId) ?? NO_AUTO_DECISIONS)
+                : NO_AUTO_DECISIONS;
             const turnImages =
               message.author === 'user' && message.turnId !== null
                 ? images.filter((image) => image.turnId === message.turnId)
@@ -356,12 +395,7 @@ export function Timeline({
                 : undefined;
             const workspaceDiff = mergeWorkspaceDiffs(persistedDiff, runtimeSummary?.diff);
             const workerBreakdown =
-              message.id === latestAssistantMessageId
-                ? (teamDetail?.workers ?? []).map((worker) => ({
-                    role: worker.role,
-                    status: workerBreakdownStatus(worker, teamDetail),
-                  }))
-                : [];
+              message.id === latestAssistantMessageId ? workerBreakdownAll : [];
             // A request that produced nothing must not read as success (issue #11). Detected from the
             // stored message, which is exactly why the directive is kept in the message text rather
             // than injected invisibly in the adapter.
@@ -442,9 +476,14 @@ export function Timeline({
                 {approvalRows.map((approval) => (
                   <ApprovalAuditRow key={approval.id} approval={approval} />
                 ))}
-                {autoDecisionRows.map((decision) => (
-                  <AutoDecisionAuditRow key={decision.id} decision={decision} />
-                ))}
+                <AutoDecisionAuditGroup
+                  decisions={autoDecisionRows}
+                  retainedLimit={
+                    message.turnId !== null && message.turnId === truncatedAutoDecisionTurnId
+                      ? AUTO_DECISION_RETAIN_LIMIT
+                      : null
+                  }
+                />
                 {commandCards.map((card) => (
                   <CommandCard key={card.command.id} taskId={taskId} card={card} />
                 ))}
@@ -589,6 +628,23 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
     persisted.path === runtime.path &&
     persisted.destination === runtime.destination
   );
+}
+
+const NO_BREAKDOWN_CELLS: readonly string[] = [];
+const breakdownCellsByTeam = new WeakMap<TeamDetail, readonly string[]>();
+
+/** The Turn summary's Worker breakdown as flat [role, status, ...] cells, so a shallow compare of
+ * the selection skips a re-render when a Team update did not change what the summary shows. */
+function workerBreakdownCellsFor(team: TeamDetail | null | undefined): readonly string[] {
+  if (team === null || team === undefined) return NO_BREAKDOWN_CELLS;
+  const cached = breakdownCellsByTeam.get(team);
+  if (cached !== undefined) return cached;
+  const cells = team.workers.flatMap((worker) => [
+    worker.role,
+    workerBreakdownStatus(worker, team),
+  ]);
+  breakdownCellsByTeam.set(team, cells);
+  return cells;
 }
 
 /**
