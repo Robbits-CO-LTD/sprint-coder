@@ -1,8 +1,8 @@
 import {
   GROK_WINDOWS_PROCESS_TREE_STOP_BUDGET_MS,
   POSIX_RUNTIME_PROCESS_TREE_STOP_BUDGET_MS,
+  WINDOWS_CLI_JOB_STOP_TIMEOUT_MS,
 } from './stop-budget';
-import { WINDOWS_CLI_JOB_STOP_TIMEOUT_MS } from './owned-cli-process';
 
 // Main must wait longer than the Runtime Host's sequential version and authentication probes.
 // Keep these budgets in one module so adding another probe cannot silently outrun the hello timer.

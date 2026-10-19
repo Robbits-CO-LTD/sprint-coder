@@ -12,7 +12,6 @@ const fixture = vi.hoisted(() => ({
 }));
 
 vi.mock('./owned-cli-process', () => ({
-  WINDOWS_CLI_JOB_STOP_TIMEOUT_MS: 2000,
   stopOwnedCliProcess: vi.fn(async () => fixture.stopped),
   spawnOwnedCliProcess: vi.fn(() => {
     if (fixture.spawnThrows) throw new Error('spawn failed');

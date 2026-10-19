@@ -5,6 +5,7 @@ import {
 } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { nativeSafeFsAddonPath } from '../main/native-safe-fs';
+import { WINDOWS_CLI_JOB_STOP_TIMEOUT_MS } from './stop-budget';
 import {
   assignProcessToOwnedJob,
   closeOwnedJob,
@@ -14,7 +15,7 @@ import {
   windowsJobWrapperCommand,
 } from '../main/windows-process-job';
 
-export const WINDOWS_CLI_JOB_STOP_TIMEOUT_MS = 2_000;
+export { WINDOWS_CLI_JOB_STOP_TIMEOUT_MS } from './stop-budget';
 const JOB_POLL_MS = 25;
 type OwnedCli = {
   id: string;
