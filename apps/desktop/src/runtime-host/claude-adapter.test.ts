@@ -325,6 +325,7 @@ describe('Claude runtime probe', () => {
             reasoning: expect.objectContaining({ value: true, source: 'official_curated' }),
           },
         }),
+        expect.objectContaining({ id: 'claude-opus-5-5', displayName: 'Opus 5.5' }),
         expect.objectContaining({ id: 'claude-opus-5' }),
         expect.objectContaining({ id: 'claude-fable-5', displayName: 'Fable 5' }),
         expect.objectContaining({ id: 'claude-fable-5-1', displayName: 'Fable 5.1' }),
@@ -487,6 +488,7 @@ describe('Claude runtime probe', () => {
     for (const model of [
       'auto',
       'sonnet',
+      'claude-opus-5-5',
       'claude-opus-5',
       'claude-fable-5',
       'claude-fable-5-1',
