@@ -136,8 +136,16 @@ function createCommandBoundary(workspace: string) {
 }
 
 describe('managed command policy changes (issue #885)', () => {
-  it('executes a real command with output and exit status after changing policy during the Turn', async () => {
-    expect((await probeSandboxRunner()).available).toBe(true);
+  it('executes a real command with output and exit status after changing policy during the Turn', async ({
+    skip,
+  }) => {
+    const sandbox = await probeSandboxRunner();
+    if (
+      process.platform === 'linux' &&
+      sandbox.reason === 'bubblewrap_landlock_seccomp_probe_failed'
+    )
+      skip('Linux host does not support the sandbox filesystem boundary probe');
+    expect(sandbox.available).toBe(true);
     const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-policy-command-'));
     roots.push(workspace);
     const { boundary, commandRows } = createCommandBoundary(workspace);
