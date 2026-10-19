@@ -116,6 +116,12 @@ const CLAUDE_MODELS: CodexModelOption[] = [
     capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {
+    id: 'claude-opus-5-5',
+    displayName: 'Opus 5.5',
+    description: '複雑な推論・コーディング・レビュー向け（claude-opus-5-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
+  },
+  {
     id: 'claude-opus-5',
     displayName: 'Opus 5',
     description: '複雑な推論・コーディング向け（claude-opus-5）',
