@@ -25,8 +25,8 @@ async function withApp(
   }
 }
 
-test.describe('Generation Canvas reasoning', () => {
-  test('uses a large Canvas while active and settles into one compact history row', async () => {
+test.describe('Run status header reasoning', () => {
+  test('shows a one-line status header while active and keeps it after completion', async () => {
     await withApp(
       'reasoning-height',
       async (page, app) => {
@@ -36,19 +36,16 @@ test.describe('Generation Canvas reasoning', () => {
         const runCard = page.getByTestId('run-card');
         await expect(runCard).toBeVisible();
         const activeHeight = await runCard.evaluate((el) => el.getBoundingClientRect().height);
-        expect(activeHeight).toBeGreaterThan(88);
+        expect(activeHeight).toBeLessThan(56);
         await expect(runCard).toContainText('思考中');
         await expect(runCard).toContainText('中'); // the current stage is always text
         await expect(page.getByTestId('run-card-stop-button')).toBeVisible();
-        await expect(page.getByTestId('run-stage-progress')).toBeVisible();
-        await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
-          'aria-hidden',
-          'true',
-        );
-        await expect(page.locator('.generation-pixel')).toHaveCount(9);
+        // The status is words only: no icon grid and no progress rail.
+        await expect(runCard.locator('.generation-indicator, .generation-pixel')).toHaveCount(0);
+        await expect(page.getByTestId('run-stage-progress')).toHaveCount(0);
         await expect(page.locator('.stage-row')).toHaveCount(0);
 
-        // Answer tokens stream below the Canvas without replacing it.
+        // Answer tokens stream below the header without replacing it.
         await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({
           timeout: 30_000,
         });
@@ -58,10 +55,7 @@ test.describe('Generation Canvas reasoning', () => {
           process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '0';
         });
         await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
-        await expect(page.getByTestId('generation-indicator')).toHaveAttribute(
-          'data-pattern',
-          'settled',
-        );
+        await expect(runCard).toContainText('完了');
         await expect
           .poll(() => runCard.evaluate((el) => el.getBoundingClientRect().height))
           .toBeLessThan(56);
@@ -88,7 +82,6 @@ test.describe('Generation Canvas reasoning', () => {
       await expect(toggle).toHaveAttribute('aria-expanded', 'true');
       const panel = page.getByTestId('reasoning-panel');
       await expect(panel).toBeVisible();
-      await expect(page.getByTestId('run-stage-progress')).toBeVisible();
 
       // Real paragraphs, not the empty-state line.
       await expect(page.locator('.think-para').first()).toBeVisible();
@@ -196,7 +189,7 @@ test.describe('Generation Canvas reasoning', () => {
   });
 
   test('keeps every state legible and stops repeated motion when reduced motion is requested', async () => {
-    await withApp('generation-reduced-motion', async (page) => {
+    await withApp('run-header-reduced-motion', async (page) => {
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.getByTestId('composer-textarea').fill('動きを減らした生成表示を確認したい');
       await page.getByTestId('composer-textarea').press('Enter');
@@ -205,13 +198,12 @@ test.describe('Generation Canvas reasoning', () => {
       await expect(runCard).toBeVisible();
       await expect(runCard).toContainText('思考中');
       await expect(runCard.locator('.run-stage-inline')).not.toHaveText('');
-      await expect(page.getByTestId('generation-indicator')).toHaveAttribute('aria-hidden', 'true');
-      expect(
-        await page
-          .locator('.generation-pixel')
-          .first()
-          .evaluate((el) => getComputedStyle(el).animationName),
-      ).toBe('none');
+      const title = runCard.locator('.run-title').first();
+      expect(await title.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+      // The sheen's transparent fill must be replaced, or the stopped label would be invisible.
+      expect(await title.evaluate((el) => getComputedStyle(el).webkitTextFillColor)).not.toBe(
+        'rgba(0, 0, 0, 0)',
+      );
 
       await expect(runCard).toHaveAttribute('data-run-status', 'completed', { timeout: 30_000 });
       await expect(runCard).toContainText('完了');
@@ -219,8 +211,8 @@ test.describe('Generation Canvas reasoning', () => {
     });
   });
 
-  test('fits the active Canvas inside the Team Leader node without clipping', async () => {
-    await withApp('generation-team-node', async (page) => {
+  test('fits the active status header inside the Team Leader node without clipping', async () => {
+    await withApp('run-header-team-node', async (page) => {
       await page.getByTestId('team-toggle').click();
       const leader = page.locator('.surface--node');
       await expect(leader).toBeVisible();
@@ -248,8 +240,8 @@ test.describe('Generation Canvas reasoning', () => {
           clientWidth: card.clientWidth,
         };
       });
-      expect(geometry.intrinsicHeight).toBeGreaterThanOrEqual(100);
-      expect(geometry.intrinsicHeight).toBeLessThanOrEqual(110);
+      // One line in the node too: the Leader card is a fixed size, so the header must not grow.
+      expect(geometry.intrinsicHeight).toBeLessThanOrEqual(40);
       expect(geometry.left).toBeGreaterThanOrEqual(geometry.leaderLeft);
       expect(geometry.right).toBeLessThanOrEqual(geometry.leaderRight);
       expect(geometry.scrollWidth).toBe(geometry.clientWidth);

@@ -2471,20 +2471,17 @@ button {
 .msg-user {
   align-items: flex-end;
 }
-/* The user's turn is the only thing in the timeline drawn as a bubble, and the clipped bottom-right
-   corner is what points it at its sender — the same trick every chat client uses, kept because it
-   is orientation, not decoration. */
+/* The user's turn is the only thing in the timeline drawn as a bubble: a flat, right-aligned pill.
+   The answer is plain text on the page, so the bubble alone is enough to tell the two apart. */
 .msg-user .bubble {
-  background: var(--bg-elevated);
-  border: 1px solid var(--hairline);
-  padding: 10px 16px;
-  border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
-  max-width: 82%;
-  font-size: 15px;
+  background: var(--bg-hover);
+  padding: 9px 15px;
+  border-radius: 16px;
+  max-width: 76%;
+  font-size: 14px;
   line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
-  box-shadow: var(--shadow-1);
 }
 .message-attachment-list {
   display: flex;
@@ -2519,25 +2516,11 @@ button {
   white-space: nowrap;
 }
 .msg-assistant .bubble {
-  font-size: 15px;
-  line-height: 1.65;
+  font-size: 14px;
+  line-height: 1.75;
   max-width: 100%;
   white-space: pre-wrap;
   word-break: break-word;
-}
-.msg-label {
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-.caret::after {
-  content: '▍';
-  color: var(--accent);
-  animation: blink 1s steps(2) infinite;
-}
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }
 
 .sys-notice {
@@ -2550,171 +2533,26 @@ button {
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 
-/* Run Card */
+/* Run Card — one quiet header line over the answer (Codex-style): status word, stage, elapsed time
+   and a text-only stop control, separated from the answer by a hairline. No surface of its own. */
 .run-card {
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  background: var(--bg-panel);
-  overflow: hidden;
-  box-shadow: var(--shadow-1);
+  margin-top: 12px;
+  border-bottom: 1px solid var(--hairline-strong);
   animation: msgIn var(--t-standard) var(--ease-ui);
   transition: opacity 160ms var(--ease-ui);
 }
 .run-head {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
-  gap: 14px;
-  min-height: 76px;
-  padding: 13px 16px 9px;
-}
-.generation-indicator {
-  display: grid;
-  place-items: center;
-  width: 48px;
-  height: 48px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
-  background: var(--bg-elevated);
-  color: var(--accent);
-  flex: none;
-}
-.generation-grid {
-  display: grid;
-  grid-template-columns: repeat(3, 6px);
-  grid-template-rows: repeat(3, 6px);
-  gap: 2px;
-}
-.generation-pixel {
-  width: 6px;
-  height: 6px;
-  border-radius: 1px;
-  background: currentColor;
-  opacity: 0.15;
-}
-.generation-indicator--drive .generation-pixel,
-.generation-indicator--dots .generation-pixel {
-  animation: generationPixelOn 650ms ease-in-out infinite;
-}
-.generation-indicator--dots .generation-pixel {
-  border-radius: 50%;
-}
-.generation-indicator--drive .generation-pixel:nth-child(1),
-.generation-indicator--dots .generation-pixel:nth-child(1) {
-  animation-delay: 90ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(2),
-.generation-indicator--dots .generation-pixel:nth-child(2) {
-  animation-delay: 180ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(3),
-.generation-indicator--dots .generation-pixel:nth-child(3) {
-  animation-delay: 270ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(4),
-.generation-indicator--dots .generation-pixel:nth-child(4) {
-  animation-delay: 0ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(5),
-.generation-indicator--dots .generation-pixel:nth-child(5) {
-  animation-delay: 90ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(6),
-.generation-indicator--dots .generation-pixel:nth-child(6) {
-  animation-delay: 180ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(7),
-.generation-indicator--dots .generation-pixel:nth-child(7) {
-  animation-delay: 90ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(8),
-.generation-indicator--dots .generation-pixel:nth-child(8) {
-  animation-delay: 180ms;
-}
-.generation-indicator--drive .generation-pixel:nth-child(9),
-.generation-indicator--dots .generation-pixel:nth-child(9) {
-  animation-delay: 270ms;
-}
-.generation-indicator--orbit .generation-pixel {
-  animation: generationPixelOn 950ms ease-in-out infinite;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(1) {
-  animation-delay: 0ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(2) {
-  animation-delay: 110ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(3) {
-  animation-delay: 220ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(4) {
-  animation-delay: 770ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(5) {
-  animation: none;
-  opacity: 0.07;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(6) {
-  animation-delay: 330ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(7) {
-  animation-delay: 660ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(8) {
-  animation-delay: 550ms;
-}
-.generation-indicator--orbit .generation-pixel:nth-child(9) {
-  animation-delay: 440ms;
-}
-.generation-indicator--paused {
-  color: var(--warning);
-}
-.generation-indicator--paused .generation-pixel {
-  opacity: 0.24;
-}
-.generation-indicator--paused .generation-pixel:nth-child(1),
-.generation-indicator--paused .generation-pixel:nth-child(5),
-.generation-indicator--paused .generation-pixel:nth-child(9) {
-  opacity: 0.9;
-}
-.generation-indicator--settled .generation-pixel {
-  opacity: 0.24;
-}
-.generation-indicator--settled .generation-pixel:nth-child(1),
-.generation-indicator--settled .generation-pixel:nth-child(3),
-.generation-indicator--settled .generation-pixel:nth-child(5),
-.generation-indicator--settled .generation-pixel:nth-child(7),
-.generation-indicator--settled .generation-pixel:nth-child(9) {
-  opacity: 0.9;
-}
-.run-card[data-run-status='completed'] .generation-indicator--settled {
-  color: var(--success);
-}
-.run-card[data-run-status='failed'] .generation-indicator--settled,
-.run-card[data-run-status='interrupted'] .generation-indicator--settled {
-  color: var(--danger);
-}
-.run-card[data-run-status='canceled'] .generation-indicator--settled {
-  color: var(--text-secondary);
-}
-@keyframes generationPixelOn {
-  0%,
-  100% {
-    opacity: 0.15;
-  }
-  18%,
-  42% {
-    opacity: 1;
-  }
-  62% {
-    opacity: 0.15;
-  }
+  gap: 12px;
+  min-height: 30px;
+  padding: 0 0 8px;
 }
 .run-copy {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
+  flex: 1;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
 }
 .run-meta {
@@ -2726,145 +2564,40 @@ button {
 }
 .run-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 400;
+  color: var(--text-secondary);
 }
 .run-elapsed {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
 .run-stop {
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--text-secondary);
-  border: 1px solid var(--hairline);
-  padding: 3px 11px;
+  padding: 2px 8px;
   border-radius: var(--r-sm);
 }
 .run-stop:hover:not(:disabled) {
   color: var(--danger);
-  border-color: var(--danger-line);
+  background: var(--danger-wash);
 }
 .run-stop:disabled {
   opacity: 0.55;
   cursor: default;
 }
-.run-canvas-shell {
-  display: grid;
-  grid-template-rows: 1fr;
-  opacity: 1;
-  transition:
-    grid-template-rows 320ms var(--ease-spatial),
-    opacity 240ms var(--ease-ui);
-}
-.run-canvas-clip {
-  min-height: 0;
-  overflow: hidden;
-}
-.run-stage-progress {
-  display: flex;
-  gap: 4px;
-  padding: 2px 16px 14px 78px;
-}
-.run-stage-seg {
-  flex: 1;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--neutral-wash);
-  transition: background-color var(--t-quick) var(--ease-ui);
-}
-.run-stage-seg.done {
-  background: var(--text-secondary);
-}
-.run-stage-seg.current,
-.run-stage-seg.complete {
-  background: var(--accent);
-}
-.run-stage-seg.waiting {
-  background: var(--warning);
-}
-.run-stage-seg.failed {
-  background: var(--danger);
-}
-.run-card.compact {
-  opacity: 0.85;
-}
-.run-card.compact .run-head {
-  grid-template-columns: 18px minmax(0, 1fr) auto;
-  gap: 9px;
-  min-height: 0;
-  padding: 9px 16px;
-}
-.run-card.compact .generation-indicator {
-  width: 18px;
-  height: 18px;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-}
-.run-card.compact .generation-grid {
-  grid-template-columns: repeat(3, 3px);
-  grid-template-rows: repeat(3, 3px);
-  gap: 1px;
-}
-.run-card.compact .generation-pixel {
-  width: 3px;
-  height: 3px;
-}
-.run-card.compact .run-copy {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
-.run-card.compact .run-stage-inline::before {
+.run-stage-inline::before {
   content: '· ';
 }
-.run-card.compact .run-canvas-shell {
-  grid-template-rows: 0fr;
-  opacity: 0;
-}
 .run-card--node .run-head {
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  gap: 10px;
-  min-height: 78px;
-  padding: 10px 12px 7px;
-}
-.run-card--node .generation-indicator {
-  width: 40px;
-  height: 40px;
-}
-.run-card--node .generation-grid {
-  grid-template-columns: repeat(3, 5px);
-  grid-template-rows: repeat(3, 5px);
-}
-.run-card--node .generation-pixel {
-  width: 5px;
-  height: 5px;
-}
-.run-card--node .run-stage-progress {
-  padding: 4px 12px 16px 62px;
-}
-.run-card--node.compact .run-head {
-  grid-template-columns: 16px minmax(0, 1fr) auto;
-  min-height: 0;
-  padding: 7px 12px;
-}
-.run-card--node.compact .generation-indicator {
-  width: 16px;
-  height: 16px;
-}
-.run-card--node.compact .generation-grid {
-  grid-template-columns: repeat(3, 3px);
-  grid-template-rows: repeat(3, 3px);
-}
-.run-card--node.compact .generation-pixel {
-  width: 3px;
-  height: 3px;
+  min-height: 26px;
+  padding: 0 0 6px;
 }
 
 /* Command Card */
 .command-card {
-  width: min(680px, calc(100% - 44px));
-  margin: 6px 0 16px 44px;
+  width: 100%;
+  margin: 6px 0 16px;
   overflow: hidden;
   border: 1px solid var(--hairline);
   border-radius: var(--r-lg);
@@ -3680,10 +3413,14 @@ button {
   margin: -14px 0 0;
   padding: 2px 0;
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 11.5px;
+  opacity: 0.7;
+  transition: opacity var(--t-quick) var(--ease-ui);
 }
-.turn-context-button:hover {
-  color: var(--accent);
+.turn-context-button:hover,
+.turn-context-button:focus-visible {
+  color: var(--text-primary);
+  opacity: 1;
 }
 .ctx-permission-wrap {
   position: relative;
@@ -4804,13 +4541,12 @@ button.composer-permission-chip[aria-expanded='true'] {
    the file-change rows' shape so the two readings of "what changed" read as one family. Only hover
    transitions, so `prefers-reduced-motion` has nothing new to suppress. */
 .turn-diff-card {
-  margin: 8px 0 16px 48px;
+  margin: 4px 0 12px;
   min-width: 0;
   padding: 11px 13px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-1);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 12px;
+  background: var(--bg-panel);
 }
 
 .turn-diff-head {
@@ -5502,16 +5238,14 @@ button.composer-permission-chip[aria-expanded='true'] {
    as a message. Purely typographic: the type is legible as words (no colour-only meaning) and
    nothing animates, so `prefers-reduced-motion` has nothing new to suppress. */
 .team-activity-group {
-  width: min(680px, calc(100% - 44px));
-  margin: 2px 0 8px 44px;
-  border-bottom: 1px solid var(--hairline);
+  margin: -6px 0 0;
 }
 .team-activity-group > summary {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
-  padding: 7px 2px;
+  min-height: 28px;
+  padding: 4px 0;
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.55;
@@ -5537,17 +5271,16 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-activity-list {
   display: grid;
-  gap: 8px;
-  padding: 4px 0 12px;
+  gap: 2px;
+  padding: 2px 0 10px;
 }
 .team-work-transcript {
   min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--neutral-wash);
+  margin-bottom: 6px;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--hairline-strong);
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 .team-work-transcript-label {
   margin: 0 0 8px;
@@ -5575,14 +5308,11 @@ button.composer-permission-chip[aria-expanded='true'] {
   grid-template-columns: auto 1fr;
   align-items: baseline;
   column-gap: 10px;
-  row-gap: 2px;
-  width: min(680px, calc(100% - 44px));
-  margin: 0 0 0 44px;
-  padding: 7px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--neutral-wash);
-  font-size: 12px;
+  row-gap: 1px;
+  min-width: 0;
+  padding: 3px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 .team-activity-time {
   color: var(--text-secondary);
@@ -5591,7 +5321,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .team-activity-headline {
   margin: 0;
   min-width: 0;
-  color: var(--text-primary);
+  color: var(--text-secondary);
 }
 .team-activity-detail {
   grid-column: 2;
@@ -6133,23 +5863,22 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: none;
 }
 
-/* The "currently thinking" sweep. `linear`, not an ease: an eased loop produces a visible "breath"
-   every cycle that catches peripheral vision, which is exactly what a background indicator must not
-   do. The three gradient stops are all colours already audited against --bg-surface, so the label
-   stays above 4.5:1 at every phase of the sweep (asserted in lib/contrast.test.ts). */
+/* The "currently thinking" sweep: a grey label with a lighter band passing through it. `linear`,
+   not an ease: an eased loop produces a visible "breath" every cycle that catches peripheral vision,
+   which is exactly what a background indicator must not do. Both stops are audited against the
+   timeline background, so the label stays above 4.5:1 at every phase (lib/contrast.test.ts). */
 .run-title.sheen {
   background: linear-gradient(
     100deg,
-    var(--text-primary) 20%,
-    var(--accent) 40%,
-    var(--ai-accent) 60%,
-    var(--text-primary) 80%
+    var(--text-secondary) 30%,
+    var(--text-primary) 50%,
+    var(--text-secondary) 70%
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: thinkSheen 1400ms linear infinite;
+  animation: thinkSheen 1800ms linear infinite;
 }
 @keyframes thinkSheen {
   from {
@@ -6161,20 +5890,16 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 
 .run-reasoning {
-  padding: 0 16px 14px;
+  padding: 0 0 12px;
   animation: thinkParaIn 160ms var(--ease-ui);
-}
-.run-card--node .run-reasoning {
-  padding: 0 12px 10px;
 }
 
 .think-panel {
   margin-top: 0;
   max-height: 208px;
   overflow-y: auto;
-  background: var(--bg-elevated);
-  border-radius: var(--r-sm);
-  padding: 10px 12px;
+  border-left: 2px solid var(--hairline-strong);
+  padding: 2px 0 2px 12px;
   font-size: 12.5px;
   line-height: 1.7;
   color: var(--text-secondary);
@@ -6221,17 +5946,11 @@ button.composer-permission-chip[aria-expanded='true'] {
    `background-clip: text` and a transparent text fill, stopping the animation alone can leave the
    label invisible. The colour is reset to a solid one here so the text is always painted. */
 @media (prefers-reduced-motion: reduce) {
-  .generation-pixel {
-    animation: none !important;
-  }
-  .run-canvas-shell {
-    transition: none;
-  }
   .run-title.sheen {
     animation: none;
     background: none;
-    -webkit-text-fill-color: var(--text-primary);
-    color: var(--text-primary);
+    -webkit-text-fill-color: var(--text-secondary);
+    color: var(--text-secondary);
   }
   .think-para.latest {
     animation: none;
@@ -6244,10 +5963,6 @@ button.composer-permission-chip[aria-expanded='true'] {
 /* Forced colours strip the gradient but keep `-webkit-text-fill-color: transparent`, which would
    erase the label entirely. */
 @media (forced-colors: active) {
-  .generation-indicator {
-    border-color: CanvasText;
-    color: CanvasText;
-  }
   .run-title.sheen {
     background: none;
     -webkit-text-fill-color: CanvasText;
