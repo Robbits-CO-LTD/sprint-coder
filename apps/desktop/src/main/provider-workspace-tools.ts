@@ -787,6 +787,7 @@ export class ManagedCodingHarness {
   }
 
   async policyEpochChanged(taskId: string): Promise<void> {
+    this.broker.refreshTaskPolicyEpoch(taskId);
     this.deps.graphs?.policyEpochChanged?.(taskId);
     await this.commandSessions?.terminateTask(taskId);
   }

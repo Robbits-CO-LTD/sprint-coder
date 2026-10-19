@@ -18,6 +18,8 @@ import { CommandRunner, CommandRunnerError, type CommandResult } from './command
 import * as commandRunnerModule from './command-runner';
 import { ManagedCommandSessions } from './managed-command-sessions';
 import { probeSandboxRunner } from './sandbox-runner';
+import { ProviderWorkspaceTools } from './provider-workspace-tools';
+import { getTrustedWindowsSystemDirectory } from './prepared-execution-image';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -132,6 +134,76 @@ function createCommandBoundary(workspace: string) {
   } as unknown as CommandToolBoundary;
   return { boundary, commandRows, backgroundTransitions, backgroundCompletions, publish };
 }
+
+describe('managed command policy changes (issue #885)', () => {
+  it('executes a real command with output and exit status after changing policy during the Turn', async ({
+    skip,
+  }) => {
+    const sandbox = await probeSandboxRunner();
+    if (
+      process.platform === 'linux' &&
+      sandbox.reason === 'bubblewrap_landlock_seccomp_probe_failed'
+    )
+      skip('Linux host does not support the sandbox filesystem boundary probe');
+    expect(sandbox.available).toBe(true);
+    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-policy-command-'));
+    roots.push(workspace);
+    const { boundary, commandRows } = createCommandBoundary(workspace);
+    let epoch = 1;
+    const authorizedEpochs: number[] = [];
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => boundary.persistence.readTurnWorkspaceSet('turn-policy-command'),
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => epoch,
+      authorizer: ({ context }) => {
+        authorizedEpochs.push(context.policyEpoch);
+        return { decision: 'allow', reason: 'test', beforeExecute: () => true };
+      },
+      command: boundary,
+    });
+    tools.setCommandSandboxAvailable(true);
+    const owner = {
+      taskId: 'task-policy-command',
+      turnId: 'turn-policy-command',
+      workspaceId: 'a'.repeat(64),
+      policyEpoch: 1,
+    };
+    tools.startTurn(owner, 'codex');
+    const call = (callId: string) =>
+      tools.broker.dispatch({
+        ...owner,
+        callId,
+        providerName: 'exec_command',
+        input: {
+          executable:
+            process.platform === 'win32'
+              ? join(getTrustedWindowsSystemDirectory(), 'cmd.exe')
+              : '/bin/echo',
+          argv:
+            process.platform === 'win32'
+              ? ['/d', '/s', '/c', 'echo policy-command-ok']
+              : ['policy-command-ok'],
+          purpose: 'verify command execution after a policy change',
+        },
+      });
+    try {
+      await expect(call('before-change')).resolves.toMatchObject({
+        exitCode: 0,
+        stdout: expect.stringContaining('policy-command-ok'),
+      });
+      epoch = 2;
+      await tools.policyEpochChanged(owner.taskId);
+      await expect(call('after-change')).resolves.toMatchObject({
+        exitCode: 0,
+        stdout: expect.stringContaining('policy-command-ok'),
+      });
+      expect(authorizedEpochs).toEqual([1, 2]);
+      expect([...commandRows.values()].map(({ state }) => state)).toEqual(['exited', 'exited']);
+    } finally {
+      await tools.dispose();
+    }
+  });
+});
 
 describe('managed command root selection (issue #840)', () => {
   it('runs in the secondary root when cwd is an absolute path inside it and rootId is omitted', async () => {

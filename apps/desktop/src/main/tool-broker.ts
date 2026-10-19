@@ -200,6 +200,20 @@ export class ToolBroker {
     return this.turns.get(turnKey(taskId, turnId))?.snapshot;
   }
 
+  refreshTaskPolicyEpoch(taskId: string): void {
+    const policyEpoch = this.getCurrentPolicyEpoch(taskId);
+    for (const [key, bound] of this.turns) {
+      if (bound.context.taskId !== taskId || bound.context.policyEpoch === policyEpoch) continue;
+      // Only future dispatches use the new policy. Replacing the binding leaves pending
+      // authorizations/queued calls attached to the old one, so they still fail revalidation.
+      // Keep the pinned catalog, gates, claimed IDs and audit ordinal across this boundary.
+      this.turns.set(key, {
+        ...bound,
+        context: Object.freeze({ ...bound.context, policyEpoch }),
+      });
+    }
+  }
+
   finishTurn(taskId: string, turnId: string): void {
     this.turns.delete(turnKey(taskId, turnId));
   }
