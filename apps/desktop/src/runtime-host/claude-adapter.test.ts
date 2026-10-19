@@ -303,7 +303,7 @@ describe('Claude runtime probe', () => {
     });
   });
 
-  it('publishes the curated model catalog for isolated E2E without spawning a CLI', async () => {
+  it('publishes the fixture model catalog for isolated E2E without spawning a CLI', async () => {
     await expect(
       probeClaude('__must_not_be_spawned__', { SPRINT_CODER_E2E_CLI_FIXTURES: '1' }),
     ).resolves.toMatchObject({

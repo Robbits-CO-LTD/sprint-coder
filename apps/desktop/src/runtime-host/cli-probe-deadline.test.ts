@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import type * as ChildProcessModule from 'node:child_process';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -10,8 +11,9 @@ vi.mock('node:child_process', async (importOriginal) => ({
   ...(await importOriginal<typeof ChildProcessModule>()),
   spawn: vi.fn((_command: string, args: string[]) => {
     const child = Object.assign(new EventEmitter(), {
-      stdout: new EventEmitter(),
-      stderr: new EventEmitter(),
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
       kill: vi.fn(),
     });
     fixture.children.push(child);
@@ -53,7 +55,7 @@ describe('CLI candidate selection deadline', () => {
       const result = probe(probe === probeClaude ? 'claude-fixture' : 'codex-fixture', {});
       await vi.advanceTimersByTimeAsync(10_700);
       await expect(result).resolves.toMatchObject({ available: true, readiness: 'ready' });
-      expect(fixture.children).toHaveLength(3);
+      expect(fixture.children).toHaveLength(4);
     },
   );
 

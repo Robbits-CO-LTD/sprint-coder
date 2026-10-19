@@ -22,7 +22,6 @@ import {
   handleCodexNotification,
   parseCodexModels,
   probeCodex,
-  readCodexModels,
   resolveCodexCommand,
   terminateCodexProcessTree,
   isUnsupportedMultiRootError,
@@ -606,96 +605,6 @@ describe('Codex runtime probe', () => {
     );
     expect(isUnsupportedMultiRootError(new Error('authentication failed'))).toBe(false);
   });
-  it('reads the default model cache from the OS user home when HOME is absent', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-model-home-'));
-    temporaryRoots.push(home);
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await writeFile(
-      join(home, '.codex', 'models_cache.json'),
-      JSON.stringify({
-        models: [
-          {
-            slug: 'gpt-test',
-            display_name: 'GPT Test',
-            description: 'Windows model cache fixture',
-            visibility: 'list',
-          },
-        ],
-      }),
-    );
-
-    expect(readCodexModels({}, home).map(({ id }) => id)).toEqual(['auto', 'gpt-test']);
-  });
-
-  it('preserves an explicit HOME override when CODEX_HOME is absent', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-model-override-'));
-    temporaryRoots.push(home);
-    await mkdir(join(home, '.codex'), { recursive: true });
-    await writeFile(
-      join(home, '.codex', 'models_cache.json'),
-      JSON.stringify({
-        models: [
-          {
-            slug: 'gpt-home-override',
-            display_name: 'GPT Home Override',
-            description: 'Explicit HOME fixture',
-            visibility: 'list',
-          },
-        ],
-      }),
-    );
-
-    expect(
-      readCodexModels({ HOME: home }, join(home, 'ignored-os-home')).map(({ id }) => id),
-    ).toEqual(['auto', 'gpt-home-override']);
-  });
-
-  it('reads Astra and its advertised effort levels from the CLI catalog', async () => {
-    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-astra-catalog-'));
-    temporaryRoots.push(home);
-    const cache = join(home, 'codex');
-    await mkdir(cache);
-    await writeFile(
-      join(cache, 'models_cache.json'),
-      JSON.stringify({
-        models: [
-          {
-            slug: 'gpt-6-astra',
-            display_name: 'GPT-6-Astra',
-            description: 'Our most capable model for complex, demanding work.',
-            visibility: 'list',
-            input_modalities: ['text', 'image'],
-            default_reasoning_level: 'medium',
-            supported_reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'].map(
-              (effort) => ({ effort, description: effort }),
-            ),
-          },
-        ],
-      }),
-    );
-
-    const model = readCodexModels({ CODEX_HOME: cache }, home).find(
-      ({ id }) => id === 'gpt-6-astra',
-    );
-    expect(model).toMatchObject({
-      id: 'gpt-6-astra',
-      displayName: 'GPT-6-Astra',
-      defaultEffort: 'medium',
-      capabilities: { toolCalling: { value: true }, multimodalInput: { value: true } },
-    });
-    expect(model?.efforts?.map(({ id }) => id)).toEqual([
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-      'max',
-      'ultra',
-    ]);
-    expect(buildCodexArgs('gpt-6-astra', 'max')).toEqual(
-      expect.arrayContaining(['model="gpt-6-astra"', 'model_reasoning_effort="max"']),
-    );
-  });
-
   it('resolves the user-local Codex CLI when a packaged macOS app has a system-only PATH', async () => {
     const home = await mkdtemp(join(tmpdir(), 'sprint-coder-codex-home-'));
     temporaryRoots.push(home);
@@ -1389,21 +1298,21 @@ describe('Codex runtime probe', () => {
     }
   });
 
-  it('exposes only visible, valid model metadata from the Codex cache', () => {
+  it('exposes only visible, valid model metadata from the Codex model/list', () => {
     expect(
       parseCodexModels({
-        models: [
+        data: [
           {
-            slug: 'gpt-5.6-terra',
-            display_name: 'GPT-5.6-Terra',
+            model: 'gpt-5.6-terra',
+            displayName: 'GPT-5.6-Terra',
             description: 'Balanced',
-            visibility: 'list',
+            hidden: false,
           },
           {
-            slug: 'hidden',
-            display_name: 'Hidden',
+            model: 'hidden',
+            displayName: 'Hidden',
             description: 'Internal',
-            visibility: 'hide',
+            hidden: true,
           },
         ],
       }),
@@ -1422,23 +1331,24 @@ describe('Codex runtime probe', () => {
     ]);
   });
 
-  // issue #6: the valid reasoning levels are per-model and published by the CLI itself, so they are
-  // read out of the same cache entry rather than hardcoded. Shape mirrors the real
-  // models_cache.json on codex-cli 0.144.4.
-  it('reads the per-model reasoning levels and default out of the cache entry', () => {
+  // Reasoning levels vary by model and come from the CLI model/list response.
+  it('reads the per-model reasoning levels and default out of the model/list entry', () => {
     const [model] = parseCodexModels({
-      models: [
+      data: [
         {
-          slug: 'gpt-5.6-sol',
-          display_name: 'GPT-5.6-Sol',
+          model: 'gpt-5.6-sol',
+          displayName: 'GPT-5.6-Sol',
           description: 'Fast',
-          visibility: 'list',
-          default_reasoning_level: 'low',
-          supported_reasoning_levels: [
-            { effort: 'low', description: 'Fast responses with lighter reasoning' },
-            { effort: 'ultra', description: 'Maximum reasoning with automatic task delegation' },
+          hidden: false,
+          defaultReasoningEffort: 'low',
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: 'Fast responses with lighter reasoning' },
+            {
+              reasoningEffort: 'ultra',
+              description: 'Maximum reasoning with automatic task delegation',
+            },
           ],
-          input_modalities: ['text', 'image'],
+          inputModalities: ['text', 'image'],
         },
       ],
     });
@@ -1460,15 +1370,15 @@ describe('Codex runtime probe', () => {
     });
   });
 
-  it('publishes a negative image capability when the cache explicitly lists text only', () => {
+  it('publishes a negative image capability when the model/list explicitly lists text only', () => {
     const [model] = parseCodexModels({
-      models: [
+      data: [
         {
-          slug: 'text-only',
-          display_name: 'Text only',
+          model: 'text-only',
+          displayName: 'Text only',
           description: '',
-          visibility: 'list',
-          input_modalities: ['text'],
+          hidden: false,
+          inputModalities: ['text'],
         },
       ],
     });
@@ -1478,25 +1388,28 @@ describe('Codex runtime probe', () => {
     });
   });
 
-  it('leaves the levels absent when the cache entry does not publish usable ones', () => {
+  it('leaves the levels absent when the model/list entry does not publish usable ones', () => {
     const models = parseCodexModels({
-      models: [
+      data: [
         // No levels at all.
-        { slug: 'a', display_name: 'A', description: '', visibility: 'list' },
+        { model: 'a', displayName: 'A', description: '', hidden: false },
         // Present but unusable: wrong container, and entries with no valid `effort`.
         {
-          slug: 'b',
-          display_name: 'B',
+          model: 'b',
+          displayName: 'B',
           description: '',
-          visibility: 'list',
-          supported_reasoning_levels: 'high',
+          hidden: false,
+          supportedReasoningEfforts: 'high',
         },
         {
-          slug: 'c',
-          display_name: 'C',
+          model: 'c',
+          displayName: 'C',
           description: '',
-          visibility: 'list',
-          supported_reasoning_levels: [{ description: 'no effort key' }, { effort: 'NOT-A-SLUG' }],
+          hidden: false,
+          supportedReasoningEfforts: [
+            { description: 'no effort key' },
+            { reasoningEffort: 'NOT-A-SLUG' },
+          ],
         },
       ],
     });
@@ -1510,14 +1423,14 @@ describe('Codex runtime probe', () => {
     // Clamping to an unadvertised default would fail the turn just as hard as the value it
     // replaced, so an out-of-set default falls back to the first advertised level instead.
     const [model] = parseCodexModels({
-      models: [
+      data: [
         {
-          slug: 'd',
-          display_name: 'D',
+          model: 'd',
+          displayName: 'D',
           description: '',
-          visibility: 'list',
-          default_reasoning_level: 'minimal',
-          supported_reasoning_levels: [{ effort: 'low', description: '' }],
+          hidden: false,
+          defaultReasoningEffort: 'minimal',
+          supportedReasoningEfforts: [{ reasoningEffort: 'low', description: '' }],
         },
       ],
     });
@@ -1526,17 +1439,17 @@ describe('Codex runtime probe', () => {
 
   it('drops duplicate levels and caps the list', () => {
     const [model] = parseCodexModels({
-      models: [
+      data: [
         {
-          slug: 'e',
-          display_name: 'E',
+          model: 'e',
+          displayName: 'E',
           description: '',
-          visibility: 'list',
-          supported_reasoning_levels: [
-            { effort: 'low', description: 'first' },
-            { effort: 'low', description: 'duplicate' },
+          hidden: false,
+          supportedReasoningEfforts: [
+            { reasoningEffort: 'low', description: 'first' },
+            { reasoningEffort: 'low', description: 'duplicate' },
             ...Array.from({ length: 20 }, (_unused, index) => ({
-              effort: `lvl${index}`,
+              reasoningEffort: `lvl${index}`,
               description: '',
             })),
           ],
