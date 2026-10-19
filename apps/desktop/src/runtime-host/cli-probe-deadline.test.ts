@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type * as ChildProcessModule from 'node:child_process';
+import type * as CliModelProbe from './cli-model-probe';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fixture = vi.hoisted(() => ({
@@ -35,6 +36,13 @@ vi.mock('node:child_process', async (importOriginal) => ({
   }),
 }));
 
+// This fixture only implements version/help/auth processes, not the Windows Job startup gate.
+// Metadata transport and cleanup have their own protocol and ownership tests.
+vi.mock('./cli-model-probe', async (importOriginal) => ({
+  ...(await importOriginal<typeof CliModelProbe>()),
+  probeCliModels: vi.fn(async () => []),
+}));
+
 import { probeCliCommandCandidates } from './cli-command-resolution';
 import { probeCodex } from './codex-adapter';
 import { probeClaude } from './claude-adapter';
@@ -55,7 +63,7 @@ describe('CLI candidate selection deadline', () => {
       const result = probe(probe === probeClaude ? 'claude-fixture' : 'codex-fixture', {});
       await vi.advanceTimersByTimeAsync(10_700);
       await expect(result).resolves.toMatchObject({ available: true, readiness: 'ready' });
-      expect(fixture.children).toHaveLength(4);
+      expect(fixture.children).toHaveLength(3);
     },
   );
 
