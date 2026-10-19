@@ -3949,9 +3949,9 @@ export const codexModelIdSchema = z
  * A reasoning effort level a specific model advertises as supported.
  *
  * Unlike Claude's fixed `claudeEffortSchema`, Codex's valid set is per-model and published by the
- * CLI itself — `~/.codex/models_cache.json` carries `supported_reasoning_levels` (each with the
- * CLI's own description text) and `default_reasoning_level` per model. So this is deliberately an
- * open string rather than an enum: the authority is that file, not this schema, and a new model
+ * CLI itself — app-server `model/list` carries `supportedReasoningEfforts` (each with the
+ * CLI's own description text) and `defaultReasoningEffort` per model. So this is deliberately an
+ * open string rather than an enum: the authority is the CLI, not this schema, and a new model
  * that advertises a level this build has never heard of must still be selectable.
  *
  * Getting it wrong is not cosmetic. Passing an unsupported level fails the whole turn — the API
@@ -3978,7 +3978,7 @@ export const codexModelOptionSchema = z
     displayName: z.string().min(1).max(128),
     description: z.string().max(300),
     // Reasoning levels this model advertises, newest-CLI-first. Absent (rather than empty) means
-    // "this provider does not publish a per-model set" — Claude's curated entries leave it off and
+    // "this provider does not publish a per-model set" — Claude's discovered entries leave it off and
     // keep using `claudeEffortSchema`; Codex's `auto` sentinel leaves it off because the concrete
     // model it resolves to is chosen by the CLI, so nothing can be promised about its set.
     efforts: z.array(effortOptionSchema).max(16).optional(),

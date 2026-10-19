@@ -7,7 +7,6 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -50,6 +49,7 @@ import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
+import { modelRecord, probeCliModels } from './cli-model-probe';
 import {
   RUNTIME_FIRST_EVENT_TIMEOUT_MS,
   RUNTIME_IDLE_TIMEOUT_MS,
@@ -101,7 +101,7 @@ export type CodexProbe = {
 };
 
 const CODEX_CLI_REFERENCE = 'https://developers.openai.com/codex/cli/reference';
-const CODEX_MODEL_CACHE_REFERENCE = 'Codex CLI models_cache.json';
+const CODEX_MODEL_LIST_REFERENCE = 'Codex CLI app-server model/list';
 export const CODEX_MANAGED_TOOL_GUIDANCE = `This is a Sprint Coder host-tools integration.
 There is no native Codex execution environment. The native read-only sandbox and never approval
 policy do not describe the separately supplied host tools. Workspace reads, edits and commands
@@ -147,8 +147,8 @@ const E2E_CODEX_MODELS: CodexModelOption[] = [
     capabilities: {
       toolCalling: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
       structuredOutput: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
-      multimodalInput: codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
-      reasoning: codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
+      multimodalInput: codexRuntimeCapability(true, CODEX_MODEL_LIST_REFERENCE),
+      reasoning: codexRuntimeCapability(true, CODEX_MODEL_LIST_REFERENCE),
     },
   },
 ];
@@ -194,7 +194,18 @@ export async function probeCodex(
       : authentication === 'unauthenticated'
         ? 'authentication_required'
         : 'ready',
-    models: availability.available ? readCodexModels() : [],
+    models: availability.available
+      ? [
+          CODEX_AUTO_MODEL,
+          ...parseCodexModels({
+            data: await probeCliModels(
+              'codex',
+              cli!.executable,
+              minimalEnvironment(environment),
+            ).catch(() => []),
+          }),
+        ]
+      : [],
   };
 }
 
@@ -1389,31 +1400,20 @@ export function buildCodexArgs(
 }
 
 /**
- * Reads a model's advertised reasoning levels out of its models_cache.json entry.
- *
- * The CLI publishes `supported_reasoning_levels: [{ effort, description }]` plus
- * `default_reasoning_level` per model, so the effort candidates are data, not a curated guess.
- * They genuinely differ — verified 2026-07-25 against codex-cli 0.144.4's own cache:
- *   GPT-5.6-Sol / GPT-5.6-Terra    low medium high xhigh max ultra
- *   GPT-5.6-Luna                   low medium high xhigh max
- *   GPT-5.5 / 5.4 / 5.4-Mini / 5.3-Codex-Spark
- *                                  low medium high xhigh
- * Offering a level the selected model does not advertise fails the entire turn (API 400 ->
- * `codex exec` exits 1), so a single fixed list would ship a real defect rather than a cosmetic
- * one. Unparseable or absent levels yield `undefined`, which the settings read treats as "no
- * override available" and leaves the CLI's own default in place.
+ * Effort candidates and defaults come from model/list. Unknown or absent levels leave the
+ * CLI default in place; an unsupported override would fail the entire turn.
  */
 function parseSupportedEfforts(
   record: Record<string, unknown>,
 ): Pick<CodexModelOption, 'efforts' | 'defaultEffort'> {
-  const levels = record['supported_reasoning_levels'];
+  const levels = record['supportedReasoningEfforts'];
   if (!Array.isArray(levels)) return {};
   const efforts: EffortOption[] = [];
   const seen = new Set<string>();
   for (const level of levels) {
     if (typeof level !== 'object' || level === null) continue;
     const entry = level as Record<string, unknown>;
-    const id = entry['effort'];
+    const id = entry['reasoningEffort'];
     const description = entry['description'];
     if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id) || seen.has(id)) continue;
     seen.add(id);
@@ -1424,7 +1424,7 @@ function parseSupportedEfforts(
     if (efforts.length === 16) break;
   }
   if (efforts.length === 0) return {};
-  const fallback = record['default_reasoning_level'];
+  const fallback = record['defaultReasoningEffort'];
   // Only trust the advertised default if it is actually one of the advertised levels — otherwise
   // clamping would substitute a value that fails just as hard as the one it replaced.
   const defaultEffort =
@@ -1436,44 +1436,41 @@ function parseCodexModelCapabilities(
   record: Record<string, unknown>,
   efforts: Pick<CodexModelOption, 'efforts' | 'defaultEffort'>,
 ): NonNullable<CodexModelOption['capabilities']> {
-  const modalities = record['input_modalities'];
+  const modalities = record['inputModalities'];
   const multimodalInput = Array.isArray(modalities)
-    ? codexRuntimeCapability(modalities.includes('image'), CODEX_MODEL_CACHE_REFERENCE)
+    ? codexRuntimeCapability(modalities.includes('image'), CODEX_MODEL_LIST_REFERENCE)
     : unknownCapability;
   return {
     // These are Codex CLI execution-surface capabilities (`tools` and `--output-schema`), while
-    // image input and reasoning support are genuinely per-model fields published by the cache.
+    // image input and reasoning support are genuinely per-model fields published by model/list.
     toolCalling: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
     structuredOutput: codexRuntimeCapability(true, CODEX_CLI_REFERENCE),
     multimodalInput,
     reasoning:
       efforts.efforts === undefined
         ? unknownCapability
-        : codexRuntimeCapability(true, CODEX_MODEL_CACHE_REFERENCE),
+        : codexRuntimeCapability(true, CODEX_MODEL_LIST_REFERENCE),
   };
 }
 
 export function parseCodexModels(value: unknown): CodexModelOption[] {
-  if (typeof value !== 'object' || value === null || !('models' in value)) return [];
-  const models = (value as { models?: unknown }).models;
+  const models = modelRecord(value)['data'];
   if (!Array.isArray(models)) return [];
   const result: CodexModelOption[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(['auto']);
   for (const item of models) {
     if (typeof item !== 'object' || item === null) continue;
     const record = item as Record<string, unknown>;
-    const id = record['slug'];
-    const displayName = record['display_name'];
+    const id = record['model'];
+    const displayName = record['displayName'];
     const description = record['description'];
     if (
-      record['visibility'] !== 'list' ||
+      record['hidden'] === true ||
       typeof id !== 'string' ||
       !/^[A-Za-z0-9._:-]{1,128}$/.test(id) ||
       typeof displayName !== 'string' ||
       displayName.length === 0 ||
-      displayName.length > 128 ||
       typeof description !== 'string' ||
-      description.length > 300 ||
       seen.has(id)
     )
       continue;
@@ -1481,29 +1478,15 @@ export function parseCodexModels(value: unknown): CodexModelOption[] {
     const efforts = parseSupportedEfforts(record);
     result.push({
       id,
-      displayName,
-      description,
+      displayName: displayName.slice(0, 128),
+      description: description.slice(0, 300),
       ...efforts,
       capabilities: parseCodexModelCapabilities(record, efforts),
     });
-    if (result.length === 31) break;
+    // A partial authoritative catalog would reset saved selections that were cut off.
+    if (result.length > 31) return [];
   }
   return result;
-}
-
-export function readCodexModels(
-  environment: Readonly<NodeJS.ProcessEnv> = process.env,
-  userHome: string = homedir(),
-): CodexModelOption[] {
-  const codexRoot = environment['CODEX_HOME'] ?? join(environment['HOME'] ?? userHome, '.codex');
-  try {
-    const parsed = JSON.parse(
-      readFileSync(join(codexRoot, 'models_cache.json'), 'utf8'),
-    ) as unknown;
-    return [CODEX_AUTO_MODEL, ...parseCodexModels(parsed)];
-  } catch {
-    return [CODEX_AUTO_MODEL];
-  }
 }
 
 export function resolveCodexCommand(

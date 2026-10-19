@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 describe('Runtime Host Windows console policy', () => {
   it.each([
     'authentication-probe.ts',
+    'cli-model-probe.ts',
     'claude-adapter.ts',
     'codex-adapter.ts',
     'process-tree.ts',

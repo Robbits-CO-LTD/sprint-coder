@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { GROK_WINDOWS_PROCESS_TREE_STOP_BUDGET_MS } from './stop-budget';
 import {
   RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+  RUNTIME_MODEL_PROBE_TIMEOUT_MS,
+  RUNTIME_MODEL_PROBE_STOP_BUDGET_MS,
   RUNTIME_HOST_HELLO_TIMEOUT_MS,
   RUNTIME_VERSION_PROBE_TIMEOUT_MS,
   GROK_PROBE_BUDGET_MS,
@@ -12,7 +14,10 @@ import {
 describe('Runtime Host probe budget', () => {
   it('keeps Main alive beyond the complete sequential CLI probe budget', () => {
     expect(RUNTIME_HOST_HELLO_TIMEOUT_MS).toBeGreaterThan(
-      RUNTIME_CLI_SELECTION_BUDGET_MS + RUNTIME_AUTH_PROBE_TIMEOUT_MS,
+      RUNTIME_CLI_SELECTION_BUDGET_MS +
+        RUNTIME_AUTH_PROBE_TIMEOUT_MS +
+        RUNTIME_MODEL_PROBE_TIMEOUT_MS +
+        RUNTIME_MODEL_PROBE_STOP_BUDGET_MS,
     );
     expect(RUNTIME_CLI_SELECTION_BUDGET_MS).toBeGreaterThanOrEqual(
       4 * RUNTIME_VERSION_PROBE_TIMEOUT_MS,
