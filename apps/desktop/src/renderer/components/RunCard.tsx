@@ -2,14 +2,13 @@ import { useEffect, useId, useState } from 'react';
 import { STAGE_LABEL, useAppStore, type TurnRuntimeState } from '../store/appStore';
 import { formatElapsed } from '../lib/format';
 import { teamRunProgress } from '../lib/team-progress';
-import { turnProgress } from '../lib/turn-progress';
-import { GenerationIndicator } from './GenerationIndicator';
 import { ReasoningPanel } from './ReasoningPanel';
 
-// Active turns use a Generation Canvas: the indicator communicates motion and the text communicates
-// state, while the five-segment rail reports only stages the Runtime has actually reached. Terminal
-// turns keep the same DOM and settle into one compact history row, so streaming content can begin
-// below without replacing the status surface.
+// A single quiet header line above the answer, in the manner of Codex: the status word carries the
+// motion (a grey sheen while the model works), the stage and elapsed time sit beside it as muted
+// text, and a hairline separates it from the answer. No icon or progress rail — the words already
+// say what is happening. Terminal turns keep the same DOM, so streaming content can begin below
+// without replacing the status line.
 //
 // `data-testid="run-card"`, `data-run-status` (same six values) and
 // `data-testid="run-card-stop-button"` are preserved exactly: eight existing E2E specs key off them,
@@ -58,12 +57,6 @@ export function RunCard({
       : turn.status === 'failed'
         ? 'blocked'
         : 'done';
-  const progress = turnProgress({
-    reachedIndex: turn.reachedStageIndex,
-    stage: turn.stage,
-    status: turn.status,
-  });
-
   // Degraded path as a first-class case: plenty of turns produce no reasoning at all (verified —
   // Claude emits thinking blocks at `--effort max` on a demanding prompt, and not at `--effort high`
   // on a trivial one). With nothing to show, the pill becomes a plain label rather than a disclosure
@@ -98,7 +91,6 @@ export function RunCard({
       data-expanded={expanded ? 'true' : 'false'}
     >
       <div className="run-head">
-        <GenerationIndicator stage={turn.stage} status={turn.status} />
         <div className="run-copy">
           {hasReasoning ? (
             <button
@@ -142,15 +134,6 @@ export function RunCard({
               停止
             </button>
           )}
-        </div>
-      </div>
-      <div className="run-canvas-shell" aria-hidden={!isActive}>
-        <div className="run-canvas-clip">
-          <div className="run-stage-progress" role="presentation" data-testid="run-stage-progress">
-            {progress.segments.map((segment, index) => (
-              <span key={index} className={`run-stage-seg ${segment}`} />
-            ))}
-          </div>
         </div>
       </div>
       {expanded && hasReasoning && (
