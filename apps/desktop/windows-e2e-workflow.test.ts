@@ -8,14 +8,17 @@ const workflow = readFileSync(resolve(repoRoot, '.github/workflows/ci.yml'), 'ut
 const config = readFileSync(resolve(repoRoot, 'playwright.windows.config.ts'), 'utf8');
 const documentation = readFileSync(resolve(repoRoot, 'docs/WINDOWS_E2E.md'), 'utf8');
 
-const windowsE2EJob = workflow.slice(
-  workflow.indexOf('\n  e2e-windows:'),
-  workflow.indexOf('\n  macos-result:'),
-);
-const windowsResultJob = workflow.slice(
-  workflow.indexOf('\n  windows-result:'),
-  workflow.indexOf('\n  required:'),
-);
+function jobBlock(name: string): string {
+  const header = `\n  ${name}:`;
+  const start = workflow.indexOf(header);
+  expect(start, `job ${name} must exist`).toBeGreaterThanOrEqual(0);
+  const tail = workflow.slice(start + header.length);
+  const next = /\n {2}[A-Za-z0-9_-]+:/u.exec(tail);
+  return workflow.slice(start, next ? start + header.length + next.index : undefined);
+}
+
+const windowsE2EJob = jobBlock('e2e-windows');
+const requiredJob = jobBlock('required');
 
 describe('Windows major E2E workflow', () => {
   it('selects every required local flow explicitly and excludes credentialed opt-in specs', () => {
@@ -63,8 +66,8 @@ describe('Windows major E2E workflow', () => {
     expect(config).toContain("['html', { open: 'never', outputFolder: 'playwright-report' }]");
   });
 
-  it('runs on every CI invocation and uploads evidence without masking the test exit code', () => {
-    expect(windowsE2EJob).not.toContain("if: needs.classify.outputs.full_matrix == 'true'");
+  it('runs for the full scope and uploads evidence without masking the test exit code', () => {
+    expect(windowsE2EJob).toContain("if: needs.classify.outputs.full_matrix == 'true'");
     expect(windowsE2EJob).toContain('ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756');
     expect(windowsE2EJob).toContain('uses: ./.github/actions/prepare-sandbox');
     expect(windowsE2EJob).toContain('--config playwright.windows.config.ts');
@@ -79,17 +82,12 @@ describe('Windows major E2E workflow', () => {
     expect(windowsE2EJob).toContain('if-no-files-found: warn');
   });
 
-  it('requires Windows E2E success in both fast and full result paths', () => {
-    const e2eAssertion = 'test "${WINDOWS_E2E_RESULT}" = \'success\'';
-    const fullMatrixBranch = windowsResultJob.indexOf('if [[ "${FULL_MATRIX}" == \'true\' ]]');
-
-    expect(windowsResultJob.replace(/\s+/gu, '').replace(/,\]/gu, ']')).toContain(
-      'needs:[classify,windows-smoke,platform-tests,package-linux,package-windows,e2e-windows,electron-bridges]',
-    );
-    expect(windowsResultJob.indexOf(e2eAssertion)).toBeGreaterThan(-1);
-    expect(windowsResultJob.indexOf(e2eAssertion)).toBeLessThan(fullMatrixBranch);
-    expect(workflow.replace(/\s+/gu, ' ')).toContain(
-      'needs: [ quality-result, macos-result, windows-result, computer-use-native-gate, computer-use-windows-v2-harness, archify-packaged, ]',
-    );
+  it('feeds Windows E2E into the scope-aware gate that requires success for full validation', () => {
+    expect(requiredJob).toContain('e2e-windows,');
+    expect(requiredJob).toContain('electron-bridges,');
+    expect(requiredJob).toContain('CI_SCOPE_JSON: ${{ needs.classify.outputs.scope_json }}');
+    expect(requiredJob).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
+    expect(requiredJob).toContain('run: node ci-scope.mjs gate');
+    expect(requiredJob).toContain('if: always()');
   });
 });

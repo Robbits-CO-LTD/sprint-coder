@@ -1,6 +1,6 @@
 # Windows主要E2E
 
-GitHub Actionsの `Windows major E2E` は、PR、mainへのpush、手動実行のすべてで起動します。Windows固有のパス、入力、Electron起動の回帰を、マージ前に検出するためのテストです。
+GitHub Actionsの `Windows major E2E` は、全検証に分類されたPR、mainへのpush、手動実行で起動します。文書と確認済みのRenderer表示変更は対象を絞ったcheckへ回し、Windows固有のパス、入力、Electron起動に関わる変更は全検証で確認します。分類できない変更も全検証へ戻します。
 
 ## 対象
 

@@ -1,5 +1,9 @@
 # CI runtime reduction
 
+Historical full-validation optimization (PR #743). The next iteration is the
+[change-scoped PR CI plan](ci-scope-plan-20261020.md), authorized on 2026-10-20.
+The unconditional matrix described below remains the full-validation path.
+
 ## Goal and confirmed cause
 
 Keep all existing validation on every PR, aiming for approximately five minutes.

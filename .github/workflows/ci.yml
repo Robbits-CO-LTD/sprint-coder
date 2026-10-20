@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions: {}
 
@@ -23,15 +23,34 @@ jobs:
     permissions:
       contents: read
     outputs:
+      mode: ${{ steps.scope.outputs.mode }}
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
+      e2e_specs: ${{ steps.scope.outputs.e2e_specs }}
+      e2e_matrix: ${{ steps.scope.outputs.e2e_matrix }}
+      scope_json: ${{ steps.scope.outputs.scope_json }}
     steps:
-      - name: Require full platform coverage
+      - name: Checkout complete comparison history
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Select checks from the complete pull request
         id: scope
-        shell: bash
-        run: echo 'full_matrix=true' >> "$GITHUB_OUTPUT"
+        run: node ci-scope.mjs classify
+      - name: Check documentation whitespace
+        if: steps.scope.outputs.mode == 'docs'
+        env:
+          CI_DIFF_BASE: ${{ github.event.pull_request.base.sha }}
+          CI_DIFF_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: git diff --check "${CI_DIFF_BASE}...${CI_DIFF_HEAD}"
 
   quality:
     name: quality (${{ matrix.label }})
+    needs: classify
+    if: needs.classify.outputs.mode != 'docs'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -63,21 +82,10 @@ jobs:
       - name: Run ${{ matrix.label }}
         run: npm run ${{ matrix.command }}
 
-  quality-result:
-    # Preserve the existing required check name while the three quality gates run in parallel.
-    name: build (ubuntu-latest)
-    if: always()
-    needs: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Verify quality gates
-        env:
-          QUALITY_RESULT: ${{ needs.quality.result }}
-        run: test "${QUALITY_RESULT}" = 'success'
-
   package-tests:
     name: package tests
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -101,6 +109,8 @@ jobs:
 
   computer-use-native-gate:
     name: Computer Use native Gate 0 (${{ matrix.label }})
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -236,6 +246,8 @@ jobs:
     # the portable harnesses and the target eligibility seam as v2 with MSVC; no artifact is built.
     # PR-2 adds the live seam of the host's target facts (still called from nowhere).
     name: Computer Use native Windows v2 harness
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: windows-2022
     timeout-minutes: 15
     permissions:
@@ -297,6 +309,7 @@ jobs:
   test-macos:
     name: macOS test shard ${{ matrix.shard }}
     needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
@@ -388,8 +401,10 @@ jobs:
           done
 
   package-macos:
-    # Every CI invocation proves the production Forge boundary and its pinned Managed Local bundle.
+    # Full CI proves the production Forge boundary and its pinned Managed Local bundle.
     name: macOS production package smoke
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: macos-latest
     timeout-minutes: 20
     permissions:
@@ -490,66 +505,6 @@ jobs:
           name: archify-packaged-macos
           path: test-results
           if-no-files-found: ignore
-  windows-smoke:
-    name: Windows focused smoke
-    needs: classify
-    if: github.event_name == 'pull_request' && needs.classify.outputs.full_matrix != 'true'
-    runs-on: windows-2022
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Build managed sandbox runner
-        uses: ./.github/actions/prepare-sandbox
-
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-
-      - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
-        run: npm run build:native-safe-fs
-
-      - name: Warm Windows process identity query
-        shell: pwsh
-        run: |
-          $windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-          $identity = & $windowsPowerShell -NoProfile -NonInteractive -Command `
-            '(Get-Process -Id $PID -ErrorAction Stop).StartTime.ToUniversalTime().Ticks'
-          if ($LASTEXITCODE -ne 0 -or -not $identity) {
-            throw 'Windows process identity query warm-up failed'
-          }
-
-      - name: Test Windows platform boundaries
-        working-directory: apps/desktop
-        run: >-
-          npx vitest run
-          src/main/command-runner.test.ts
-          src/main/native-file-publication.test.ts
-          src/main/process-tree.test.ts
-          src/main/team-mcp-bridge.test.ts
-          src/main/windows-acl.test.ts
-          src/main/workspace-edit.test.ts
-          src/main/workspace-watcher.test.ts
-          src/runtime-host/team-mcp-node-command.test.ts
-          --maxWorkers=1
-
   platform-tests:
     name: ${{ matrix.label }} test shard ${{ matrix.shard }}
     needs: classify
@@ -657,6 +612,7 @@ jobs:
   electron-bridges:
     name: ${{ matrix.label }} ${{ matrix.suite }} Electron bridge ${{ matrix.shard }}/4
     needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     permissions:
@@ -892,6 +848,7 @@ jobs:
   e2e-windows:
     name: Windows major E2E (${{ matrix.group }})
     needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: windows-2022
     timeout-minutes: 40
     permissions:
@@ -963,77 +920,10 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  macos-result:
-    name: build (macos-latest)
-    if: always()
-    needs:
-      [
-        classify,
-        package-tests,
-        test-macos,
-        package-macos,
-        electron-bridges,
-        computer-use-native-gate,
-      ]
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Verify macOS and package coverage
-        shell: bash
-        env:
-          PACKAGE_TEST_RESULT: ${{ needs.package-tests.result }}
-          MACOS_TEST_RESULT: ${{ needs.test-macos.result }}
-          MACOS_PACKAGE_RESULT: ${{ needs.package-macos.result }}
-          ELECTRON_BRIDGE_RESULT: ${{ needs.electron-bridges.result }}
-          COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
-        run: |
-          set -euo pipefail
-          test "${PACKAGE_TEST_RESULT}" = 'success'
-          test "${MACOS_TEST_RESULT}" = 'success'
-          test "${MACOS_PACKAGE_RESULT}" = 'success'
-          test "${ELECTRON_BRIDGE_RESULT}" = 'success'
-          test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'
-
-  windows-result:
-    name: build (windows-2022)
-    if: always()
-    needs:
-      [
-        classify,
-        windows-smoke,
-        platform-tests,
-        package-linux,
-        package-windows,
-        e2e-windows,
-        electron-bridges,
-      ]
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Verify selected platform coverage
-        shell: bash
-        env:
-          FULL_MATRIX: ${{ needs.classify.outputs.full_matrix }}
-          SMOKE_RESULT: ${{ needs.windows-smoke.result }}
-          TEST_RESULT: ${{ needs.platform-tests.result }}
-          LINUX_PACKAGE_RESULT: ${{ needs.package-linux.result }}
-          WINDOWS_PACKAGE_RESULT: ${{ needs.package-windows.result }}
-          WINDOWS_E2E_RESULT: ${{ needs.e2e-windows.result }}
-          ELECTRON_BRIDGE_RESULT: ${{ needs.electron-bridges.result }}
-        run: |
-          set -euo pipefail
-          test "${WINDOWS_E2E_RESULT}" = 'success'
-          test "${ELECTRON_BRIDGE_RESULT}" = 'success'
-          if [[ "${FULL_MATRIX}" == 'true' ]]; then
-            test "${TEST_RESULT}" = 'success'
-            test "${LINUX_PACKAGE_RESULT}" = 'success'
-            test "${WINDOWS_PACKAGE_RESULT}" = 'success'
-          else
-            test "${SMOKE_RESULT}" = 'success'
-          fi
-
   archify-packaged:
     name: Archify packaged (${{ matrix.os }}, ${{ matrix.shard }}/2)
+    needs: classify
+    if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     permissions:
@@ -1101,33 +991,158 @@ jobs:
           path: test-results
           if-no-files-found: ignore
 
+  renderer-tests:
+    name: Renderer unit tests
+    needs: classify
+    if: needs.classify.outputs.mode != 'docs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify CI selection and test execution contracts
+        run: npm test --workspace @sprint-coder/desktop -- ci-scope.test.mjs ci-renderer-tests.test.mjs ci-cache.test.mjs ci-test-sequencer.test.ts workflow-security.test.ts windows-e2e-workflow.test.ts forge.config.test.ts
+      - name: Run Renderer tests and verify executed cases
+        run: node ci-renderer-tests.mjs unit
+      - name: Upload Renderer test evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: renderer-unit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/ci-renderer
+          if-no-files-found: warn
+
+  renderer-e2e:
+    name: Focused UI E2E (${{ matrix.os }})
+    needs: classify
+    if: needs.classify.outputs.e2e_specs != '[]' && needs.classify.outputs.e2e_specs != ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.classify.outputs.e2e_matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        uses: ./.github/actions/install-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Electron binary
+        run: node node_modules/electron/install.js
+
+      - name: Install Linux sandbox dependency
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Build managed sandbox runner
+        uses: ./.github/actions/prepare-sandbox
+
+      - name: Restore better-sqlite3 Electron ABI binary
+        id: better-sqlite-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
+          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
+
+      - name: Rebuild better-sqlite3 for Electron ABI
+        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
+        working-directory: apps/desktop
+        run: node ../../build-better-sqlite3.mjs
+
+      - name: Restore NativeSafeFs Electron ABI binary
+        id: native-safe-fs-cache
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+        with:
+          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
+          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
+
+      - name: Build NativeSafeFs for Electron ABI
+        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
+        run: npm run build:native-safe-fs
+
+      - name: Configure Linux Chromium sandbox helper
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (!s.isFile() || s.isSymbolicLink()) process.exit(1);"
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (s.uid !== 0 || s.gid !== 0 || (s.mode & 0o7777) !== 0o4755) process.exit(1);"
+
+      - name: Run selected UI cases on Linux
+        if: runner.os == 'Linux'
+        env:
+          CI_E2E_SPECS: ${{ toJSON(matrix.specs) }}
+          SPRINT_CODER_E2E_HIDDEN: '1'
+        run: xvfb-run -a node ci-renderer-tests.mjs e2e
+      - name: Run selected UI cases on macOS
+        if: runner.os == 'macOS'
+        env:
+          CI_E2E_SPECS: ${{ toJSON(matrix.specs) }}
+          SPRINT_CODER_E2E_HIDDEN: '0'
+        run: node ci-renderer-tests.mjs e2e
+      - name: Upload focused UI evidence
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: renderer-e2e-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/ci-renderer
+          if-no-files-found: warn
+
   required:
     name: CI required
     if: always()
     needs:
       [
-        quality-result,
-        macos-result,
-        windows-result,
+        classify,
+        quality,
+        renderer-tests,
+        renderer-e2e,
+        package-tests,
         computer-use-native-gate,
         computer-use-windows-v2-harness,
+        test-macos,
+        package-macos,
+        platform-tests,
+        electron-bridges,
+        package-linux,
+        package-windows,
+        e2e-windows,
         archify-packaged,
       ]
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
     steps:
-      - name: Verify required checks
+      - name: Checkout gate implementation
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Verify every selected check completed successfully
         env:
-          QUALITY_RESULT: ${{ needs.quality-result.result }}
-          MACOS_RESULT: ${{ needs.macos-result.result }}
-          WINDOWS_RESULT: ${{ needs.windows-result.result }}
-          COMPUTER_USE_NATIVE_RESULT: ${{ needs.computer-use-native-gate.result }}
-          COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT: ${{ needs.computer-use-windows-v2-harness.result }}
-          ARCHIFY_RESULT: ${{ needs.archify-packaged.result }}
-        run: |
-          test "${QUALITY_RESULT}" = 'success'
-          test "${MACOS_RESULT}" = 'success'
-          test "${WINDOWS_RESULT}" = 'success'
-          test "${COMPUTER_USE_NATIVE_RESULT}" = 'success'
-          test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = 'success'
-          test "${ARCHIFY_RESULT}" = 'success'
+          CI_SCOPE_JSON: ${{ needs.classify.outputs.scope_json }}
+          CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}
+        run: node ci-scope.mjs gate
