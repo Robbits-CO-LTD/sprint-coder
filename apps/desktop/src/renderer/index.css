@@ -1,8 +1,8 @@
 /* Sprint Coder renderer
-   Visual direction: a matte industrial workspace — neutral charcoal surfaces separated by tone
-   rather than by lines, relief built from a top highlight and a contact shadow rather than from
-   borders, and colour spent only where it carries meaning. Reference points are Linear's ordering,
-   Vercel's quiet, and Braun/Sony's matte hardware, not a dark "gaming" chrome. */
+   Visual direction: a quiet, near-black developer workspace in the lineage of T3 Code, Linear and
+   Vercel — neutral zinc surfaces, edges drawn by faint white hairlines rather than by heavy shadow,
+   one restrained blue spent only where it carries meaning (send, focus, in-progress), and type
+   that does the ordering. The working column is the brightest plane; navigation recedes. */
 
 :root {
   /* Surfaces. A six-step matte charcoal ladder, neutral with only a trace of cool cast so it reads
@@ -10,16 +10,16 @@
      relative luminance apart): panels are told apart by tone, not by a border between them, which
      is what keeps the shell quiet when many of them are on screen at once. The sidebar sits *below*
      the canvas so navigation recedes and the working surface is the brightest plane. */
-  --bg-app: #1c1c1f;
-  --bg-sidebar: #171719;
-  --bg-panel: #212124;
-  --bg-elevated: #26262a;
-  --bg-hover: #2b2b30;
-  --bg-selected: #313138;
+  --bg-app: #131315;
+  --bg-sidebar: #0e0e10;
+  --bg-panel: #18181b;
+  --bg-elevated: #1c1c1f;
+  --bg-hover: #232327;
+  --bg-selected: #2a2a2f;
 
   /* Text */
   --text-primary: #ededf0;
-  --text-secondary: #a8a8b2;
+  --text-secondary: #a1a1aa;
   --text-muted: #c9c9d2;
   /* Disabled text is exempt from WCAG 1.4.3, so this one keeps the specified value. Its use is
      confined to genuinely inactive controls; anything a user is expected to read uses
@@ -30,7 +30,7 @@
      --hairline (below) or by a tone step. --border-subtle is decorative separation only (1.36:1,
      nowhere near 3:1) and must never be the sole indicator of a control's bounds; --border-strong
      is the one to reach for when the boundary carries meaning. */
-  --border-subtle: #33333a;
+  --border-subtle: #2a2a30;
   --border-strong: #8a8a95;
 
   /* Brand / interaction. The accent is softened and desaturated from the old signal blue — it is a
@@ -44,7 +44,7 @@
   --accent-ink: #061019;
   /* An accent-tinted *fill*, not a foreground. Use --text-primary for copy placed on this surface;
      --accent remains an interaction/state colour rather than body text on its own tint. */
-  --accent-muted: #26344a;
+  --accent-muted: #1f2d44;
   --focus-ring: #8ab0f0;
 
   /* State */
@@ -55,7 +55,7 @@
 
   /* AI */
   --ai-accent: #d4a7ff;
-  --ai-surface: #262330;
+  --ai-surface: #1f1c27;
 
   /* Radius scale. The UI is built from squares with softened corners — no pills, no circles except
      where the shape is literally a dot. Five steps, one per structural level, tightened from the
@@ -66,6 +66,8 @@
   --r-md: 8px; /* popovers, menus, toasts, code blocks */
   --r-lg: 10px; /* cards, dialogs, the composer */
   --r-xl: 14px; /* full panels and floating node surfaces */
+  --r-composer: 20px; /* the composer alone: the one soft object the eye returns to */
+  --sidebar-width: 264px;
 
   /* Tinted lines and washes are derived from the interaction palette. They stay local to active,
      focused and informational elements instead of tinting the workspace background. */
@@ -84,29 +86,30 @@
   /* Hairlines. The default separator across the app — light-on-dark at a few percent, so it reads
      as the edge where one matte plane meets another rather than as a drawn line. --hairline-strong
      is for edges that also have to survive on top of a raised surface. */
-  --hairline: rgba(255, 255, 255, 0.055);
-  --hairline-strong: rgba(255, 255, 255, 0.09);
+  --hairline: rgba(255, 255, 255, 0.065);
+  --hairline-strong: rgba(255, 255, 255, 0.1);
 
   /* Relief. The house recipe for anything pressable: a matte fill, a 1px highlight along the top
      face where light would catch it, and a tight contact shadow underneath. This is what replaces
      the old outline-everything approach — a control reads as raised because of how it is lit, not
      because a border was drawn around it. */
   --relief:
-    inset 0 1px 0 var(--hairline-strong), inset 0 0 0 1px rgba(255, 255, 255, 0.035),
-    0 1px 1.5px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.18);
+    inset 0 0 0 1px var(--hairline-strong), inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 1px 2px rgba(0, 0, 0, 0.24);
   --relief-hover:
-    inset 0 1px 0 rgba(255, 255, 255, 0.13), inset 0 0 0 1px rgba(255, 255, 255, 0.05),
-    0 1px 1.5px rgba(0, 0, 0, 0.34), 0 4px 12px rgba(0, 0, 0, 0.24);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.14), inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 1px 2px rgba(0, 0, 0, 0.28);
   /* Pressed controls lose their highlight and take the shadow inside — the face goes down. */
-  --relief-press: inset 0 1px 3px rgba(0, 0, 0, 0.42), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
-  /* Recessed: fields and wells, cut into the surface rather than sitting on it. */
-  --inset-well: inset 0 1px 2px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(0, 0, 0, 0.16);
+  --relief-press: inset 0 1px 2px rgba(0, 0, 0, 0.36), inset 0 0 0 1px var(--hairline);
+  /* Recessed: fields and wells — a hairline edge on a slightly darker face. */
+  --inset-well: inset 0 0 0 1px var(--hairline-strong), inset 0 1px 2px rgba(0, 0, 0, 0.22);
 
   /* Elevation. Three steps for detached surfaces (cards, popovers, dialogs). Softer and wider than
      before so a floating panel reads as hovering over the workspace instead of being cut out of it. */
-  --shadow-1: inset 0 0 0 1px var(--hairline), 0 1px 2px rgba(0, 0, 0, 0.28);
+  --shadow-1: inset 0 0 0 1px var(--hairline);
   --shadow-2:
-    inset 0 0 0 1px var(--hairline), 0 2px 5px rgba(0, 0, 0, 0.26), 0 12px 32px rgba(0, 0, 0, 0.3);
+    inset 0 0 0 1px var(--hairline-strong), 0 2px 6px rgba(0, 0, 0, 0.28),
+    0 16px 40px rgba(0, 0, 0, 0.36);
   --shadow-3:
     inset 0 0 0 1px var(--hairline-strong), 0 8px 24px rgba(0, 0, 0, 0.34),
     0 32px 80px rgba(0, 0, 0, 0.46);
@@ -114,7 +117,7 @@
   /* The one content measure in the app. The conversation, the empty state and the composer all lay
      out against it, so every block of content in the working surface shares the same two vertical
      edges from the top of the window to the bottom. --gutter is the breathing room outside it. */
-  --measure: 704px;
+  --measure: 736px;
   --gutter: 28px;
 
   --ease-ui: cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -407,7 +410,7 @@ body {
   margin: 0;
   color: rgba(255, 255, 255, 0.5);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: 0.14em;
   text-transform: uppercase;
 }
@@ -431,7 +434,7 @@ body {
 .setup-wordmark {
   color: var(--text-primary);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.18em;
 }
@@ -452,7 +455,7 @@ body {
   gap: 5px;
   color: rgba(255, 255, 255, 0.28);
   font-family: var(--font-mono);
-  font-size: 9px;
+  font-size: 10px;
   transition: color var(--t-standard) var(--ease-ui);
 }
 
@@ -496,7 +499,7 @@ body {
   margin: 0 0 16px;
   color: var(--accent);
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.2em;
 }
@@ -867,11 +870,11 @@ button {
 }
 
 ::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: color-mix(in srgb, var(--text-primary) 12%, transparent);
+  background: color-mix(in srgb, var(--text-primary) 9%, transparent);
   /* 2px, not the scale: the thumb's content box is 6px wide, so any scale step would round it back
      into the capsule this pass is removing everywhere else. */
   border-radius: 2px;
@@ -914,8 +917,10 @@ button {
   background: var(--bg-app);
 }
 
-/* macOS keeps its native traffic lights; Windows supplies three product-owned controls. The rest
-   stays intentionally quiet: product name, graphite chrome and one hairline before navigation. */
+/* macOS keeps its native traffic lights; Windows supplies three product-owned controls. The bar is
+   painted as two planes that continue the columns below it — the sidebar's tone over the sidebar,
+   the canvas tone over the conversation — so the sidebar reads as one full-height column (as in
+   T3 Code / Codex) instead of the window being cut by a horizontal strip. */
 .app-titlebar {
   position: relative;
   z-index: 20;
@@ -924,15 +929,16 @@ button {
   align-items: center;
   height: 40px;
   padding: 0 16px;
-  border-bottom: 1px solid var(--hairline);
-  /* Opaque and unfiltered: nothing scrolls beneath the window frame, so the translucency and the
-     saturation boost were pure effect — and a saturating bar is exactly the sort of thing that made
-     the chrome feel consumer rather than instrument-grade. */
-  background: var(--bg-sidebar);
+  background: linear-gradient(
+    to right,
+    var(--bg-sidebar) 0 calc(var(--sidebar-width) - 1px),
+    var(--hairline-strong) calc(var(--sidebar-width) - 1px) var(--sidebar-width),
+    var(--bg-app) var(--sidebar-width)
+  );
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 550;
-  letter-spacing: 0.015em;
+  letter-spacing: 0.01em;
   line-height: 1;
   user-select: none;
   -webkit-app-region: drag;
@@ -946,8 +952,14 @@ button {
   content: '';
   pointer-events: none;
 }
+/* When there is no sidebar column under the bar (collapsed, overlaid, Team mode) the whole bar is
+   the canvas tone. */
+.app-frame:has(.app-shell.sidebar-collapsed, .app-shell.sidebar-overlay, .app-shell.team-mode)
+  .app-titlebar {
+  background: var(--bg-app);
+}
 .app-titlebar-name {
-  opacity: 0.94;
+  opacity: 0.8;
 }
 .app-titlebar--macos {
   /* Native traffic lights end around x=68. Leave a deliberate 32px breathing space before the
@@ -1044,13 +1056,14 @@ button {
    so no dividing line is needed to say where one ends and the other begins. Padding is generous by
    design: the list is the only dense thing in here, and it reads far better with room around it. */
 .sidebar {
-  width: 288px;
+  width: var(--sidebar-width);
   flex: none;
   background: var(--bg-sidebar);
+  box-shadow: inset -1px 0 0 var(--hairline);
   display: flex;
   flex-direction: column;
-  padding: 16px 14px 12px;
-  gap: 4px;
+  padding: 6px 10px 10px;
+  gap: 2px;
   transition:
     transform var(--t-standard) var(--ease-ui),
     opacity var(--t-standard) var(--ease-ui);
@@ -1065,7 +1078,7 @@ button {
 /* ---------- Sidebar collapse (issue #12) ----------
    Two distinct forms, because the problem is different at each size.
 
-   Wide: the sidebar is a flex sibling, so collapsing has to actually give its 288px back to the
+   Wide: the sidebar is a flex sibling, so collapsing has to actually give its width back to the
    conversation — width goes to 0 rather than the panel merely sliding out of sight.
 
    Narrow (<=900px, the same breakpoint the Team List View switches at): the sidebar stops being a
@@ -1096,7 +1109,7 @@ button {
   top: 0;
   bottom: 0;
   left: 0;
-  width: min(288px, 82vw);
+  width: min(var(--sidebar-width), 82vw);
   z-index: 9;
   box-shadow: 12px 0 32px rgba(0, 0, 0, 0.45);
 }
@@ -1151,34 +1164,35 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 11px;
-  border-radius: var(--r-sm);
-  background: var(--bg-elevated);
+  height: 34px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  background: var(--neutral-wash);
   border: none;
   color: var(--text-primary);
   font-weight: 550;
   font-size: 13px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   width: 100%;
   text-align: left;
   transition:
     background var(--t-quick) var(--ease-ui),
     box-shadow var(--t-quick) var(--ease-ui);
-  box-shadow: var(--relief);
+  box-shadow: inset 0 0 0 1px var(--hairline);
 }
 .sb-new .icon {
   color: var(--text-secondary);
   transition: color var(--t-quick) var(--ease-ui);
 }
 .sb-new:hover:not(:disabled) {
-  background: var(--bg-hover);
-  box-shadow: var(--relief-hover);
+  background: var(--neutral-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
 }
 .sb-new:hover:not(:disabled) .icon {
   color: var(--text-primary);
 }
 .sb-new:active:not(:disabled) {
-  background: var(--bg-elevated);
+  background: var(--neutral-wash);
   box-shadow: var(--relief-press);
 }
 .sb-new:disabled {
@@ -1195,10 +1209,11 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 9px;
-  border-radius: var(--r-sm);
-  margin-bottom: 10px;
-  background: var(--bg-app);
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-md);
+  margin-bottom: 6px;
+  background: transparent;
   color: var(--text-secondary);
   border: none;
   box-shadow: var(--inset-well);
@@ -1251,13 +1266,12 @@ button {
 
 .sb-section {
   width: 100%;
-  padding: 14px 7px 5px;
+  padding: 14px 8px 6px;
   color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.07em;
+  font-size: 11.5px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
   text-align: left;
-  text-transform: uppercase;
 }
 .sb-section--toggle:hover {
   color: var(--text-primary);
@@ -1281,10 +1295,11 @@ button {
   min-width: 0;
   align-items: center;
   gap: 6px;
-  padding: 7px 6px;
-  color: var(--text-primary);
-  font-size: 12.5px;
-  font-weight: 650;
+  height: 30px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 550;
   text-align: left;
 }
 .sb-project-toggle > span:nth-child(2) {
@@ -1295,7 +1310,7 @@ button {
 .sb-count {
   margin-left: auto;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 .sb-project-new-task {
@@ -1312,9 +1327,12 @@ button {
   color: var(--text-primary);
 }
 .sb-project-tasks {
-  margin-left: 10px;
-  padding-left: 5px;
-  border-left: 1px solid var(--hairline);
+  margin-left: 0;
+  padding-left: 0;
+}
+/* Tasks sit under their project by indent alone — no tree line. */
+.sb-project-tasks .sb-item {
+  padding-left: 28px;
 }
 .sb-project-empty {
   padding: 6px 10px 8px;
@@ -1325,7 +1343,7 @@ button {
   width: 100%;
   padding: 6px 10px;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
   text-align: left;
 }
 .sb-task-archive > button:hover {
@@ -1333,7 +1351,7 @@ button {
 }
 
 .sb-group {
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.1em;
   color: var(--text-secondary);
@@ -1341,40 +1359,21 @@ button {
   text-transform: uppercase;
 }
 
-/* The selected Task is marked twice — tinted fill *and* an accent bar down the leading edge — so it
-   stays findable when the list is long and every row is the same length of elided Japanese. The bar
-   is drawn as a pseudo-element rather than a border so it does not shift the row's text by 3px the
-   moment selection moves. */
+/* The selected Task is a brighter row: a white wash plus primary-colour text. No accent rail — in a
+   list this quiet, one tone step is enough to say "you are here", and the row stays findable in a
+   long column of elided Japanese without spending the accent on navigation. */
 .sb-row {
   position: relative;
   display: flex;
   align-items: center;
-  border-radius: var(--r-sm);
+  border-radius: var(--r-md);
   transition: background var(--t-quick) var(--ease-ui);
 }
-.sb-row::before {
-  content: '';
-  position: absolute;
-  left: -1px;
-  top: 5px;
-  bottom: 5px;
-  width: 2px;
-  border-radius: 2px;
-  background: var(--accent);
-  opacity: 0;
-  transition: opacity var(--t-quick) var(--ease-ui);
-}
 .sb-row:hover {
-  background: var(--bg-hover);
+  background: var(--neutral-wash);
 }
-/* Selection is carried by the raised fill and the 2px rail alone. The tinted inset edges this
-   replaces put a third accent-coloured mark on the same row, which is what made a single selected
-   Task look like an alert. */
 .sb-row.active {
-  background: var(--bg-selected);
-}
-.sb-row.active::before {
-  opacity: 1;
+  background: var(--neutral-wash-strong);
 }
 
 .sb-item {
@@ -1384,7 +1383,8 @@ button {
   flex: 1;
   min-width: 0;
   text-align: left;
-  padding: 9px 11px;
+  height: 32px;
+  padding: 0 10px;
   font-size: 13px;
   line-height: 1.45;
   color: var(--text-secondary);
@@ -1432,7 +1432,7 @@ button {
   border-radius: var(--r-xs);
   background: var(--neutral-wash);
   color: var(--text-secondary);
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 500;
 }
 .sb-row:hover .sb-item {
@@ -1440,7 +1440,7 @@ button {
 }
 .sb-row.active .sb-item {
   color: var(--text-primary);
-  font-weight: 550;
+  font-weight: 500;
 }
 .sb-item .pin {
   margin-right: 4px;
@@ -1666,7 +1666,7 @@ button {
 }
 .project-folder-path {
   color: var(--text-secondary);
-  font: 10.5px/1.4 var(--font-mono);
+  font: 11px/1.4 var(--font-mono);
 }
 .project-folder-health {
   color: var(--warning);
@@ -1890,12 +1890,12 @@ button {
    hairline — the old panel fill plus saturating backdrop-blur made a strip of navigation read as a
    loud object sitting on top of the conversation. */
 .task-header {
-  height: 46px;
+  height: 44px;
   flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 14px;
+  padding: 0 14px 0 12px;
   background: transparent;
   border-bottom: 1px solid var(--hairline);
   transition:
@@ -1923,8 +1923,8 @@ button {
    cheapest way to make an editable label look editable without adding a second control. */
 .task-title {
   font-weight: 550;
-  font-size: 13px;
-  color: var(--text-muted);
+  font-size: 13.5px;
+  color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1981,18 +1981,18 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 72px;
-  height: 30px;
-  padding: 0 14px;
+  min-width: 64px;
+  height: 28px;
+  padding: 0 12px;
   overflow: hidden;
   border: none;
-  border-radius: var(--r-sm);
-  background: var(--bg-elevated);
+  border-radius: var(--r-md);
+  background: transparent;
   color: var(--text-muted);
   font-size: 12.5px;
   font-weight: 550;
   letter-spacing: 0.005em;
-  box-shadow: var(--relief);
+  box-shadow: inset 0 0 0 1px var(--hairline-strong);
   transition:
     color var(--t-quick) var(--ease-ui),
     background var(--t-quick) var(--ease-ui),
@@ -2000,11 +2000,11 @@ button {
 }
 .team-btn:hover:not(:disabled) {
   color: var(--text-primary);
-  background: var(--bg-hover);
-  box-shadow: var(--relief-hover);
+  background: var(--neutral-wash);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
 }
 .team-btn:active:not(:disabled) {
-  background: var(--bg-elevated);
+  background: var(--neutral-wash);
   box-shadow: var(--relief-press);
 }
 .team-btn:disabled {
@@ -2040,9 +2040,9 @@ button {
   }
 }
 .icon-btn {
-  width: 30px;
-  height: 30px;
-  border-radius: var(--r-sm);
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-md);
   display: grid;
   place-items: center;
   color: var(--text-secondary);
@@ -2316,16 +2316,20 @@ button {
   text-align: left;
 }
 .timeline-welcome-content {
+  display: flex;
   width: 100%;
   margin: auto 0;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
 }
 /* Smaller, and with the blue bloom behind it removed — the mark identifies the app, it does not
    need to glow to do that. */
 .timeline-welcome-mark {
   position: relative;
-  width: 44px;
-  height: 44px;
-  margin-bottom: 26px;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 22px;
   animation: welcomeIn var(--t-cinematic) var(--ease-spatial) both;
 }
 .timeline-welcome-mark img {
@@ -2345,12 +2349,12 @@ button {
 /* The eyebrow is set in the same quiet grey as other section labels. It used to be the only blue
    thing above the fold, which made a piece of static branding read like a live status. */
 .timeline-welcome-kicker {
-  margin: 0 0 14px !important;
+  margin: 0 0 12px !important;
   color: var(--text-secondary) !important;
-  font-size: 10.5px !important;
+  font-size: 11px !important;
   font-weight: 600;
   line-height: 1 !important;
-  letter-spacing: 0.14em !important;
+  letter-spacing: 0.12em !important;
 }
 /* Dropped from a 46px display headline to something close to a document title. At the old size the
    greeting was the loudest object in the app on every empty Task; the presence now comes from the
@@ -2365,7 +2369,7 @@ button {
 }
 .timeline-welcome p {
   max-width: 460px;
-  margin: 14px 0 0;
+  margin: 12px auto 0;
   color: var(--text-secondary);
   font-size: 13.5px;
   line-height: 1.75;
@@ -2375,29 +2379,32 @@ button {
 .timeline-welcome-actions {
   width: 100%;
   max-width: 520px;
-  margin-top: 44px;
+  margin-top: 36px;
+  text-align: left;
   animation: welcomeIn var(--t-cinematic) 140ms var(--ease-spatial) both;
 }
 .timeline-welcome-actions-label {
   display: block;
-  margin-bottom: 10px;
+  margin: 0 0 8px 2px;
   color: var(--text-secondary);
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
+  font-size: 11.5px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
 }
 .timeline-welcome-suggestions {
-  border-top: 1px solid var(--hairline);
+  display: grid;
+  gap: 6px;
 }
 .timeline-welcome-suggestion {
   display: flex;
   width: 100%;
-  min-height: 46px;
+  min-height: 42px;
   align-items: center;
   justify-content: space-between;
   gap: 18px;
-  padding: 0 4px;
-  border-bottom: 1px solid var(--hairline);
+  padding: 0 14px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-lg);
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
@@ -2410,7 +2417,6 @@ button {
 /* Hover is a neutral wash, not a blue sweep: these are three ordinary suggestions, and tinting them
    made them look like the app's primary call to action. */
 .timeline-welcome-suggestion:hover {
-  padding-inline: 10px;
   color: var(--text-primary);
   background: var(--neutral-wash);
 }
@@ -2474,10 +2480,11 @@ button {
 /* The user's turn is the only thing in the timeline drawn as a bubble: a flat, right-aligned pill.
    The answer is plain text on the page, so the bubble alone is enough to tell the two apart. */
 .msg-user .bubble {
-  background: var(--bg-hover);
-  padding: 9px 15px;
-  border-radius: 16px;
-  max-width: 76%;
+  background: var(--neutral-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  padding: 10px 15px;
+  border-radius: 18px;
+  max-width: 80%;
   font-size: 14px;
   line-height: 1.65;
   white-space: pre-wrap;
@@ -2599,10 +2606,9 @@ button {
   width: 100%;
   margin: 6px 0 16px;
   overflow: hidden;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
+  border: 1px solid var(--hairline-strong);
+  border-radius: 12px;
   background: var(--bg-panel);
-  box-shadow: var(--shadow-1);
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 .command-card__head {
@@ -2634,7 +2640,7 @@ button {
   border-radius: var(--r-xs);
   color: var(--text-secondary);
   background: var(--bg-hover);
-  font-size: 10px;
+  font-size: 11px;
 }
 .command-card__duration {
   margin-left: auto;
@@ -2713,7 +2719,7 @@ button {
 .command-card__output-line.is-stderr::before {
   content: 'stderr ';
   color: var(--warning);
-  font-size: 9px;
+  font-size: 10px;
   text-transform: uppercase;
 }
 .command-card__notice {
@@ -2735,14 +2741,20 @@ button {
   font-size: 11px;
 }
 
+/* Waiting on the user is the one state in the timeline that must be found at a glance, but it is
+   carried by a warm edge and the warning glyph — not by a filled yellow block and a lifted shadow. */
 .approval-card {
-  width: min(680px, 100%);
-  margin: 8px 0 16px 44px;
-  padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--warning) 30%, transparent);
-  border-radius: var(--r-lg);
-  background: color-mix(in srgb, var(--warning) 6%, var(--bg-elevated));
-  box-shadow: var(--shadow-2);
+  width: 100%;
+  margin: 6px 0 16px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--warning) 28%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--warning) 4%, var(--bg-panel));
+}
+/* The card takes focus when it appears; keep its own corners instead of the global 4px ring. */
+.approval-card:focus-visible {
+  border-radius: 12px;
+  outline-offset: 3px;
 }
 .approval-card__head {
   display: flex;
@@ -2754,9 +2766,9 @@ button {
   place-items: center;
   width: 28px;
   height: 28px;
-  border-radius: var(--r-sm);
-  color: var(--bg-app);
-  background: var(--warning);
+  border-radius: var(--r-md);
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 14%, transparent);
   font-weight: 800;
 }
 .approval-card__tool {
@@ -2810,19 +2822,26 @@ button {
   gap: 8px;
 }
 .approval-card__actions button {
-  padding: 7px 11px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--bg-hover);
-  font-size: 12px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 550;
 }
-.approval-card__actions button:hover {
-  border-color: var(--accent);
+.approval-card__actions button:hover:not(:disabled) {
+  background: var(--neutral-wash);
 }
+/* The one filled control in the card: the recommended answer. */
 .approval-card__actions .primary {
-  color: var(--accent);
-  border-color: var(--accent-line);
-  background: var(--bg-selected);
+  color: var(--accent-ink);
+  border-color: transparent;
+  background: var(--accent);
+}
+.approval-card__actions .primary:hover:not(:disabled) {
+  background: var(--accent-hover);
 }
 .approval-card__actions button:disabled {
   opacity: 0.5;
@@ -2836,8 +2855,8 @@ button {
   display: flex;
   align-items: center;
   gap: 7px;
-  width: min(680px, calc(100% - 44px));
-  margin: 4px 0 10px 44px;
+  width: 100%;
+  margin: 4px 0 10px;
   padding: 7px 12px;
   border: 1px solid var(--hairline);
   border-radius: var(--r-sm);
@@ -2852,7 +2871,7 @@ button {
 .approval-audit__scope {
   margin-left: auto;
   color: var(--text-secondary);
-  font: 10px/1.5 var(--font-mono);
+  font: 11px/1.5 var(--font-mono);
 }
 /* One Turn's Auto decisions behind one summary line (issue #863). */
 .auto-decision-group > summary {
@@ -2874,7 +2893,7 @@ button {
 /* ---------- ContextBar + Composer ---------- */
 .composer-zone {
   flex: none;
-  padding: 10px var(--gutter) 22px;
+  padding: 8px var(--gutter) 18px;
 }
 .composer-inner {
   max-width: var(--measure);
@@ -2888,23 +2907,20 @@ button {
    inside is the hairline that separates the strip from the field. */
 .composer-panel {
   position: relative;
-  border-radius: var(--r-lg);
+  border-radius: var(--r-composer);
   background: var(--bg-elevated);
   box-shadow:
-    inset 0 1px 0 var(--hairline-strong),
-    inset 0 0 0 1px var(--hairline),
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 30px rgba(0, 0, 0, 0.26);
+    inset 0 0 0 1px var(--hairline-strong),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 12px 28px -18px rgba(0, 0, 0, 0.6);
   transition: box-shadow var(--t-quick) var(--ease-ui);
 }
-/* Focus lifts the whole panel rather than outlining the textarea inside it. */
+/* Focus brightens the panel's own edge rather than outlining the textarea inside it. */
 .composer-panel:focus-within {
   box-shadow:
-    inset 0 1px 0 var(--hairline-strong),
-    inset 0 0 0 1px var(--accent-line-soft),
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 30px rgba(0, 0, 0, 0.26),
-    0 0 0 3px var(--accent-wash);
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 12px 28px -18px rgba(0, 0, 0, 0.6);
 }
 .goal-progress {
   display: grid;
@@ -2937,7 +2953,7 @@ button {
   gap: 7px;
   min-width: 0;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .goal-progress-label {
   color: var(--text-primary);
@@ -3019,12 +3035,11 @@ button {
   gap: 6px;
   min-height: 34px;
   margin: 0;
-  padding: 5px 8px;
+  padding: 6px 10px 0;
   border: none;
-  border-bottom: 1px solid var(--hairline);
   border-radius: 0;
   background: transparent;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   flex-wrap: wrap;
 }
@@ -3116,7 +3131,7 @@ button {
   background: color-mix(in srgb, var(--bg-panel) 80%, transparent);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04);
   color: var(--text-secondary);
-  font: 10px/14px var(--font-mono);
+  font: 11px/14px var(--font-mono);
   text-align: center;
 }
 .project-picker-search {
@@ -3189,7 +3204,7 @@ button {
   justify-content: space-between;
   padding: 10px 14px 5px;
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.045em;
   line-height: 15px;
@@ -3256,7 +3271,7 @@ button {
 .project-picker-options small {
   overflow: hidden;
   color: var(--text-secondary);
-  font: 9.5px/14px var(--font-mono);
+  font: 10.5px/14px var(--font-mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3444,7 +3459,8 @@ button {
   padding: 2px 0;
   color: var(--text-secondary);
   font-size: 11.5px;
-  opacity: 0.7;
+  /* 0.8, not lower: on the near-black canvas 0.7 lands at 4.1:1 and fails WCAG AA. */
+  opacity: 0.8;
   transition: opacity var(--t-quick) var(--ease-ui);
 }
 .turn-context-button:hover,
@@ -3627,7 +3643,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   background: transparent;
   border: none;
   border-radius: 0;
-  padding: 12px 14px 10px;
+  padding: 8px 12px 10px 16px;
 }
 .slash-command-menu {
   position: absolute;
@@ -3654,7 +3670,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   gap: 16px;
   padding: 5px 9px 7px;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.02em;
 }
 .slash-command-item {
@@ -3699,7 +3715,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   color: var(--text-secondary);
-  font-size: 9.5px;
+  font-size: 10.5px;
   white-space: nowrap;
 }
 .slash-command-item.unavailable .slash-command-name,
@@ -3746,7 +3762,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .composer-skill-chip > span {
   color: var(--accent);
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3856,8 +3872,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   align-items: center;
   gap: 2px;
   margin-top: 10px;
-  padding-top: 9px;
-  border-top: 1px solid var(--hairline);
+  margin-left: -6px;
 }
 .composer-run-controls {
   display: flex;
@@ -3932,10 +3947,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   line-height: 1.45;
 }
 .cmp-chip {
-  font-size: 11.5px;
+  min-height: 28px;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text-secondary);
-  padding: 5px 8px;
-  border-radius: var(--r-sm);
+  padding: 0 9px;
+  border-radius: var(--r-md);
   border: 1px solid transparent;
   transition:
     background var(--t-quick) var(--ease-ui),
@@ -4091,7 +4108,7 @@ button.composer-permission-chip[aria-expanded='true'] {
    the two together. */
 .mpv2-group-cue {
   padding: 0 10px;
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -4151,7 +4168,7 @@ button.composer-permission-chip[aria-expanded='true'] {
    called upstream, so no brand name is written down here. */
 .mpv2-rail-label {
   min-width: 0;
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -4195,7 +4212,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--hairline);
   border-radius: 999px;
   background: var(--bg-app);
-  font-size: 9.5px;
+  font-size: 10.5px;
   font-weight: 600;
   color: var(--text-secondary);
   overflow: hidden;
@@ -4210,7 +4227,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .mpv2-conn {
   flex: 0 1 auto;
   max-width: 42%;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4250,17 +4267,16 @@ button.composer-permission-chip[aria-expanded='true'] {
 .send-btn {
   margin-left: 0;
   flex: none;
-  width: 30px;
-  height: 30px;
-  border-radius: var(--r-sm);
+  width: 32px;
+  height: 32px;
+  /* The one round control in the app: the send key is the point every turn ends on. */
+  border-radius: 50%;
   background: var(--accent);
-  color: var(--bg-app);
+  color: var(--accent-ink);
   display: grid;
   place-items: center;
   font-size: 15px;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 1px 2px rgba(0, 0, 0, 0.32);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24);
   /* Deliberately not transitioning `background`. This button swaps between "unavailable" and "the
      primary action" as the turn state changes, and interpolating that swap paints a stretch of
      in-between colour that is neither state and that its label cannot be read against — axe catches
@@ -4275,11 +4291,12 @@ button.composer-permission-chip[aria-expanded='true'] {
    behind the label, putting the 11px "キュー" at 3.15:1. The face carries the button on its own. */
 .send-btn.queue {
   width: auto;
-  min-width: 30px;
+  min-width: 32px;
   grid-auto-flow: column;
   gap: 5px;
-  padding-inline: 9px;
+  padding-inline: 11px;
   border: none;
+  border-radius: 16px;
 }
 .send-btn-label {
   font-size: 11px;
@@ -4288,6 +4305,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .send-btn:hover:not(:disabled) {
   background: var(--accent-hover);
+  transform: scale(1.04);
 }
 .send-btn:active:not(:disabled) {
   transform: scale(0.96);
@@ -4296,16 +4314,16 @@ button.composer-permission-chip[aria-expanded='true'] {
 /* An opaque matte face rather than a translucent wash, so the unavailable state is a real surface
    that reads the same wherever the button sits. */
 .send-btn:disabled {
-  background: var(--bg-hover);
+  background: var(--bg-selected);
   color: var(--text-secondary);
-  box-shadow: var(--relief);
+  box-shadow: none;
   cursor: default;
 }
 .send-btn.stop {
-  background: var(--bg-elevated);
+  background: var(--danger-wash);
   color: var(--danger);
   border: 1px solid color-mix(in srgb, var(--danger) 32%, transparent);
-  box-shadow: var(--relief);
+  box-shadow: none;
 }
 .send-btn.stop:hover:not(:disabled) {
   background: var(--danger-wash);
@@ -4573,7 +4591,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .turn-diff-card {
   margin: 4px 0 12px;
   min-width: 0;
-  padding: 11px 13px 10px;
+  padding: 12px 14px;
   border: 1px solid var(--hairline-strong);
   border-radius: 12px;
   background: var(--bg-panel);
@@ -4678,7 +4696,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--hairline);
   border-radius: var(--r-xs);
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.04em;
 }
 /* Colour is never the only signal — each chip also carries its own word. */
@@ -4732,30 +4750,30 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 
 .turn-diff-action {
-  padding: 4px 10px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--bg-panel);
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-md);
+  background: transparent;
   color: var(--text-secondary);
-  font-size: 11.5px;
+  font-size: 12px;
+  font-weight: 550;
   transition:
     color var(--t-quick) var(--ease-ui),
     background var(--t-quick) var(--ease-ui),
     border-color var(--t-quick) var(--ease-ui);
 }
 .turn-diff-action:hover {
-  border-color: var(--accent-line);
-  background: var(--bg-hover);
+  background: var(--neutral-wash);
   color: var(--text-primary);
 }
+/* Primary by weight, not by colour: review is the next step, not an alert. */
 .turn-diff-action--primary {
-  border-color: var(--accent-line-soft);
-  background: var(--accent-wash);
-  color: var(--accent);
+  background: var(--neutral-wash);
+  color: var(--text-primary);
 }
 .turn-diff-action--primary:hover {
-  border-color: var(--accent);
-  background: var(--accent-wash-strong);
+  background: var(--neutral-wash-strong);
 }
 
 .skill-draft-card {
@@ -4780,7 +4798,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .skill-draft-card header span {
   color: var(--accent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -4800,7 +4818,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .skill-draft-card code {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .skill-draft-card details {
   font-size: 12px;
@@ -5362,7 +5380,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-activity-time {
   color: var(--text-secondary);
-  font: 10px/1.6 var(--font-mono);
+  font: 11px/1.6 var(--font-mono);
 }
 .team-activity-headline {
   margin: 0;
@@ -5550,7 +5568,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--text-primary);
 }
 .w-line .tag {
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--info);
   margin-right: 7px;
   border: 1px solid color-mix(in srgb, var(--info) 35%, transparent);
@@ -5781,7 +5799,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .tlv-usage dt {
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-size: 10px;
+  font-size: 11px;
 }
 .tlv-usage dd {
   margin: 0;
@@ -6053,7 +6071,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .composer-plus {
   display: grid;
   place-items: center;
-  width: 30px;
+  width: 28px;
   padding: 0;
 }
 .composer-plus-menu {
@@ -6495,7 +6513,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-nav button > small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.35;
 }
 /* Each nav row owns a real page. Only that page is visible; the page itself may scroll when its
@@ -6556,7 +6574,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-eyebrow {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -6682,7 +6700,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-provider-permission small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .team-provider-actions {
   display: flex;
@@ -6750,7 +6768,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .team-model-row small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .team-model-row.unavailable {
   opacity: 0.72;
@@ -7080,7 +7098,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border: 1px solid var(--accent-line-soft);
   border-radius: var(--r-xs);
   color: var(--accent);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
 }
@@ -7228,7 +7246,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .settings-skill-draft-card code {
   align-self: flex-start;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .settings-skill-draft-files {
   margin-top: 5px;
@@ -7249,7 +7267,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border-radius: var(--r-sm);
   background: var(--bg-app);
   color: var(--text-primary);
-  font: 10.5px/1.5 var(--font-mono);
+  font: 11px/1.5 var(--font-mono);
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -7497,7 +7515,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: block;
   margin-top: 8px;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-subsection {
   display: flex;
@@ -7540,7 +7558,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .local-ai-download-list span,
 .local-ai-installed-list small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-download-list progress {
   flex: 1 1 180px;
@@ -7576,7 +7594,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .local-ai-inference-heading small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-inference-controls {
   display: flex;
@@ -7588,7 +7606,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: 0 1 180px;
 }
 .local-ai-inference-controls .settings-field-label {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-inference-controls input[type='number'] {
   width: 100%;
@@ -7600,7 +7618,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 8px 0 0;
 }
 .local-ai-inference-card code {
-  font-size: 10px;
+  font-size: 11px;
 }
 .local-ai-effective-settings {
   margin-top: 8px;
@@ -7610,7 +7628,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   background: var(--bg-panel);
 }
 .local-ai-effective-settings > strong {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-effective-settings dl {
   display: grid;
@@ -7626,7 +7644,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .local-ai-effective-settings dd {
   margin: 0;
   overflow-wrap: anywhere;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-effective-settings dt {
   color: var(--text-secondary);
@@ -7649,7 +7667,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .local-ai-launch-heading small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-launch-controls {
   display: flex;
@@ -7662,7 +7680,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   min-width: 120px;
 }
 .local-ai-launch-controls .settings-field-label {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-launch-controls input[type='number'],
 .local-ai-launch-controls select {
@@ -7679,7 +7697,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   background: var(--bg-panel);
 }
 .local-ai-launch-effective > strong {
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-launch-effective dl {
   display: grid;
@@ -7695,7 +7713,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .local-ai-launch-effective dd {
   margin: 0;
   overflow-wrap: anywhere;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-launch-effective dt {
   color: var(--text-secondary);
@@ -7851,11 +7869,11 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .local-ai-result-row small {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-installability {
   flex: none;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-installability.state-installable {
   color: var(--success);
@@ -7954,7 +7972,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .local-ai-artifacts small {
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: 11px;
 }
 .local-ai-install-confirm {
   margin-top: 12px;
@@ -7992,7 +8010,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .local-ai-fit-summary dd {
   margin: 0;
   overflow-wrap: anywhere;
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .local-ai-fit-summary dt {
   color: var(--text-secondary);
@@ -8344,7 +8362,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .settings-provider-form-heading > span {
   flex: none;
   color: var(--success);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .settings-provider-basic-fields {
   display: grid;
@@ -8525,20 +8543,19 @@ button.composer-permission-chip[aria-expanded='true'] {
    One card per Runtime tool call that wrote files. Deliberately quiet: an edit is normal in this
    app, so the card marks the boundary and gets out of the way rather than competing with the
    conversation. */
+/* A work-log entry, not a card: what the agent touched, in muted type on the page itself. The
+   boxed summary of the whole Turn (TurnDiffCard) is the one place that gets a surface. */
 .filechange-card {
   align-self: flex-start;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   max-width: 100%;
   min-width: 0;
-  padding: 9px 12px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-md);
-  background: var(--bg-elevated);
+  padding: 2px 0;
 }
 .filechange-title {
-  font-size: 11.5px;
+  font-size: 12.5px;
   color: var(--text-secondary);
 }
 .filechange-list {
@@ -8570,7 +8587,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .filechange-kind {
   flex: none;
-  font-size: 10.5px;
+  font-size: 11px;
   letter-spacing: 0.04em;
   padding: 1px 6px;
   border-radius: var(--r-xs);
@@ -8650,7 +8667,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .computer-use-eyebrow {
   color: var(--text-secondary);
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 650;
   letter-spacing: 0.11em;
 }
@@ -9010,7 +9027,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .computer-grant-card__untrusted-note {
   margin-left: 6px;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .computer-grant-card__unsigned {
   color: var(--warning);
@@ -9101,7 +9118,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .computer-use-grant__name-note {
   margin-left: 6px;
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 400;
 }
 .computer-use-grant__facts {
@@ -9131,7 +9148,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 .computer-use-grant__updated {
   color: var(--text-secondary);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .computer-use-grant__revoke {
   min-height: 32px;
@@ -9149,7 +9166,7 @@ button.composer-permission-chip[aria-expanded='true'] {
 .computer-use-reason-code {
   margin: 0;
   color: var(--text-secondary);
-  font: 10.5px/1.5 var(--font-mono);
+  font: 11px/1.5 var(--font-mono);
   overflow-wrap: anywhere;
 }
 .computer-use-unavailable-dialog .computer-use-primary {
@@ -9221,7 +9238,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   border-radius: var(--r-xs);
   color: var(--accent-hover);
   background: var(--accent-wash);
-  font-size: 10.5px;
+  font-size: 11px;
 }
 .computer-use-rail__facts {
   min-width: 0;
