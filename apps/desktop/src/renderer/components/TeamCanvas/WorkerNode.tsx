@@ -120,6 +120,10 @@ function WorkerNodeCard({
 
   const thread = workerThread(messages, worker.activityLog ?? []);
   const attention = executionNeedsAttention(execution);
+  const newestStep = worker.activityLog?.at(-1);
+  const newestStepAt = newestStep?.at;
+  const newestStepLabel = newestStep?.label;
+  const newestMessageId = messages.at(-1)?.id;
   const onElementRef = useRef(onElement);
   useLayoutEffect(() => {
     onElementRef.current = onElement;
@@ -135,7 +139,17 @@ function WorkerNodeCard({
   useEffect(() => {
     const element = historyRef.current;
     if (element !== null && followingLatest) element.scrollTop = element.scrollHeight;
-  }, [followingLatest, thread.length, worker.liveOutput, worker.currentActivity]);
+    // Keyed on the newest entry, not on the count: once the log reaches its cap a new step replaces
+    // the oldest and the length stays the same.
+  }, [
+    followingLatest,
+    thread.length,
+    newestStepAt,
+    newestStepLabel,
+    newestMessageId,
+    worker.liveOutput,
+    worker.currentActivity,
+  ]);
 
   return (
     <div

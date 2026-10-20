@@ -34,10 +34,14 @@ const WHEEL_SETTLE_MS = 260;
  * it: a Worker thread now fills most of its card, and a short one swallowing the wheel would leave
  * no part of the card that zooms the Canvas.
  */
+/** Scrollports inside Canvas nodes: the Leader's timeline, and a Worker card's thread, the
+ * attention strip above it and the 詳細 panel that opens over it. */
+export const NESTED_SCROLLPORTS = '.timeline-scroll, .w-body, .w-attention, .w-details-panel';
+
 export function preservesNestedScroll(target: EventTarget | null): boolean {
   const element = target as { closest?: (selectors: string) => Element | null } | null;
   if (typeof element?.closest !== 'function') return false;
-  const scrollport = element.closest('.timeline-scroll, .w-body') as {
+  const scrollport = element.closest(NESTED_SCROLLPORTS) as {
     scrollHeight?: unknown;
     clientHeight?: unknown;
   } | null;
