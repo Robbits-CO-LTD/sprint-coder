@@ -148,3 +148,12 @@ PR #896はRendererのみで短縮候補。PR #897は操作・layoutとE2Eの追�
 - 新しい依存関係・課金runner・定期実行は追加しない。文書はclassify＋gate、表示関数はquality 3 job＋Renderer＋classify＋gate、操作を含む表示部品はfocused E2Eを追加する。
 - ローカル検証: 全workspace型check、lint、Prettier、actionlint、Renderer 106 files / 1005 tests PASS。分類・report・workflow接続のfocused testは最終版で確認する。Actionsの実測は別途記録する。
 - 復旧: 分類をfull固定に戻すと既存検証範囲へ復帰できる。新gate自体の問題ではこのCI変更commitをrevertする。branch rulesの変更は不要。
+
+
+### 実行確認
+
+- ローカル: CI関連7ファイルは173 PASS・既存のOS別2 SKIP、全workspace型checkと更新後desktop型check、lint、Prettier、actionlintはPASS。
+- 新runnerの実Electron E2E: `keyboard-smoke.spec.ts` の必須1 case PASS、0 SKIP。隔離worktreeのfresh build（localhost:5174）と専用データ領域を使用し、既存の5173は保持した。事前収集と実行reportの一致を確認。実画面操作は6.0秒、build/setupは別計測。
+- 初回Actions [39422374321](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/39422374321): 新Renderer jobとqualityはPASS。旧集約job名・無条件Windows E2E・shellコマンド文字列に固定されたworkflowテスト3箇所でFAILしたため残りを取消した。製品の実行失敗ではなく、旧CI契約への固定が原因とログ・対象テストで確認した。
+- 対応: 既存workflowテストを新gateの依存入力へ接続し、同じ失敗・取消・skip拒否を分類/集約テストで維持した。新CIの専用契約test stepへこれらの既存workflowテストも含めた。修正後Actionsは最新headで再確認する。
+- 軽量PRの所要時間はまだ実測していない。上記の分類テストやfull runを、短縮達成の証拠として扱わない。

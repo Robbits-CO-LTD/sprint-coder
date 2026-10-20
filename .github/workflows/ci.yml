@@ -1011,7 +1011,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Verify CI selection and test execution contracts
-        run: npm test --workspace @sprint-coder/desktop -- ci-scope.test.mjs ci-renderer-tests.test.mjs ci-cache.test.mjs ci-test-sequencer.test.ts
+        run: npm test --workspace @sprint-coder/desktop -- ci-scope.test.mjs ci-renderer-tests.test.mjs ci-cache.test.mjs ci-test-sequencer.test.ts workflow-security.test.ts windows-e2e-workflow.test.ts forge.config.test.ts
       - name: Run Renderer tests and verify executed cases
         run: node ci-renderer-tests.mjs unit
       - name: Upload Renderer test evidence

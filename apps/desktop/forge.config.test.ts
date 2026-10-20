@@ -500,12 +500,9 @@ describe('release artifacts', () => {
     const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
     const macPackageJob = ciWorkflow.slice(
       ciWorkflow.indexOf('\n  package-macos:'),
-      ciWorkflow.indexOf('\n  windows-smoke:'),
+      ciWorkflow.indexOf('\n  platform-tests:'),
     );
-    const macResultJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('\n  macos-result:'),
-      ciWorkflow.indexOf('\n  windows-result:'),
-    );
+    const requiredJob = ciWorkflow.slice(ciWorkflow.indexOf('\n  required:'));
     const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
     const unsignedVerifier = readFileSync(
       resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
@@ -531,9 +528,11 @@ describe('release artifacts', () => {
     );
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
-    expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');
-    expect(ciWorkflow).toContain('Require full platform coverage');
-    expect(ciWorkflow).not.toContain('full_matrix=false');
+    expect(macPackageJob).toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(requiredJob).toContain('package-macos,');
+    expect(requiredJob).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
+    expect(requiredJob).toContain('run: node ci-scope.mjs gate');
+    expect(ciWorkflow).toContain('Select checks from the complete pull request');
     expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(2);
     expect(macPackageJob).toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
     expect(macPackageJob).toContain('src/main/managed-local-runtime-supervisor.test.ts');

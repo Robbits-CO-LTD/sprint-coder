@@ -333,7 +333,9 @@ describe('workflow security boundaries', () => {
     );
     const required = jobBlock(ci, 'required');
     expect(required).toContain('computer-use-windows-v2-harness,');
-    expect(required).toContain('test "${COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT}" = \'success\'');
+    expect(required).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
+    expect(required).toContain('run: node ci-scope.mjs gate');
+    expect(row).toContain("if: needs.classify.outputs.full_matrix == 'true'");
     // The Windows build route itself still refuses v2 (the PR that lifts it is the enabling one).
     const gate = jobBlock(ci, 'computer-use-native-gate');
     expect(gate).not.toMatch(/os: windows-2022\n\s+eligibility: v2/u);
