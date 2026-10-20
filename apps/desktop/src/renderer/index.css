@@ -5292,26 +5292,16 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex-direction: column;
   width: 480px;
   height: 420px;
-  background: var(--bg-panel);
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-lg);
-  box-shadow: var(--shadow-3);
+  background: var(--bg-app);
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-xl);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.36);
   overflow: hidden;
   /* Default opacity 1 (not 0): only a genuinely *new* spawn gets the `.spawn` class (see
      TeamCanvas's baseline-seeding), and that animation's own `from{opacity:0}` keyframe covers
      the fade-in. Defaulting the base class to 0 would leave every already-existing Worker card
      invisible on re-entry into Team mode, since baseline cards never receive `.spawn`. */
   opacity: 1;
-}
-.w-activity {
-  flex: none;
-  padding: 7px 15px;
-  border-bottom: 1px solid var(--hairline);
-  color: var(--text-secondary);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 /* Team Activity Card (Core C1b) — the persisted execution row, rendered identically on the Canvas
    Worker card and in the List. Purely typographic: every state is legible as words, so nothing
@@ -5507,7 +5497,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: none;
   align-items: center;
   gap: 10px;
-  padding: 11px 15px;
+  padding: 12px 14px 11px;
   border-bottom: 1px solid var(--hairline);
   position: relative;
 }
@@ -5532,7 +5522,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--text-secondary);
   flex: none;
 }
@@ -5572,12 +5562,12 @@ button.composer-permission-chip[aria-expanded='true'] {
   }
 }
 .w-stop-btn {
-  font-size: 11px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  border: 1px solid var(--hairline);
-  padding: 2px 9px;
-  border-radius: var(--r-sm);
-  margin-left: 8px;
+  border: 1px solid var(--hairline-strong);
+  padding: 3px 9px;
+  border-radius: var(--r-md);
+  margin-left: 6px;
   flex: none;
 }
 .w-stop-btn:hover:not(:disabled) {
@@ -5589,15 +5579,18 @@ button.composer-permission-chip[aria-expanded='true'] {
   cursor: default;
 }
 .w-body {
-  padding: 12px 15px;
+  padding: 14px 16px 10px;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 10px;
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
+/* Message lines. Shared with the List view's recent exchanges (`.tlv-recent .w-line`): the parity
+   spec diffs their innerText, so the markup is the same in both and only the Canvas card dresses
+   them as a thread. */
 .w-line {
   font-size: 12.5px;
   color: var(--text-secondary);
@@ -5610,52 +5603,9 @@ button.composer-permission-chip[aria-expanded='true'] {
 .w-line :where(pre, table) {
   overflow-x: auto;
 }
-.w-live-output pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  color: var(--text-primary);
-}
 .w-line :where(a, code) {
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-.w-footer {
-  flex: none;
-  min-height: 34px;
-  padding: 6px 15px;
-  border-top: 1px solid var(--hairline);
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--text-secondary);
-  font-size: 11px;
-}
-.w-latest-btn {
-  margin-left: auto;
-  color: var(--accent);
-}
-.w-details {
-  position: relative;
-}
-.w-details[open] dl {
-  position: absolute;
-  right: 0;
-  bottom: 22px;
-  width: 260px;
-  padding: 10px;
-  border: 1px solid var(--hairline);
-  border-radius: var(--r-sm);
-  background: var(--bg-panel);
-  box-shadow: var(--shadow-2);
-}
-.w-details dl {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  gap: 4px 8px;
-}
-.w-details dd {
-  margin: 0;
-  overflow-wrap: anywhere;
 }
 .w-line.msg-in {
   color: var(--text-primary);
@@ -5672,12 +5622,183 @@ button.composer-permission-chip[aria-expanded='true'] {
   color: var(--accent);
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
 }
-.w-run {
+/* On the Canvas card the thread reads like a T3 Code / Codex conversation with the composer taken
+   away: the Leader's request is the one bubble (it is the "user" here), and the Worker's report is
+   plain text on the page. The tag becomes a small caption above each. */
+.worker .w-line .tag {
+  display: block;
+  width: fit-content;
+  margin: 0 0 4px;
+  padding: 0;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 550;
+  letter-spacing: 0.02em;
+}
+.worker .w-line.msg-in {
+  align-self: flex-end;
+  max-width: 88%;
+  padding: 8px 12px;
+  border-radius: 14px;
+  background: var(--neutral-wash-strong);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.worker .w-line.msg-in .tag {
+  margin-left: auto;
+}
+.worker .w-line.msg-out {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.worker .w-line :where(p) {
+  margin: 0;
+}
+.worker .w-line :where(p + p) {
+  margin-top: 6px;
+}
+/* One work-log row per step: icon, then the tool or file it touched — muted, one line. */
+.w-step {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  min-height: 22px;
   color: var(--text-secondary);
+  font-size: 12.5px;
+  animation: msgIn var(--t-quick) var(--ease-ui);
+}
+.w-step + .w-step {
+  margin-top: -6px;
+}
+.w-step-icon {
+  flex: none;
+  color: var(--text-secondary);
+}
+/* Tool names and paths are code; runtime statuses are prose. */
+.w-step--tool .w-step-label,
+.w-step--read .w-step-label,
+.w-step--search .w-step-label,
+.w-step--edit .w-step-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.w-step-label {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The Worker's own text as it streams. */
+.w-stream {
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.w-run {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.w-run-title {
+  flex: none;
+  font-weight: 500;
+}
+.w-run-detail {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w-empty {
+  margin: auto 0;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  text-align: center;
+}
+/* An execution that needs the user (waiting to resume, rate limit, failure, isolation alert) is the
+   only execution fact kept on the card itself. */
+.w-attention {
+  flex: none;
+  max-height: 140px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border-bottom: 1px solid var(--hairline);
+  background: color-mix(in srgb, var(--warning) 4%, transparent);
+}
+.w-footer {
+  position: relative;
+  flex: none;
+  min-height: 32px;
+  padding: 4px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 11.5px;
+}
+.w-latest-btn {
+  margin-right: auto;
+  color: var(--text-secondary);
+}
+.w-latest-btn:hover {
+  color: var(--text-primary);
+}
+.w-details > summary {
+  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  list-style: none;
+}
+.w-details > summary::-webkit-details-marker {
+  display: none;
+}
+.w-details > summary:hover,
+.w-details[open] > summary {
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
+/* Opens over the thread rather than growing the card: the card's 480x420 is load-bearing for the
+   Canvas placement grid and the cable endpoints. */
+.w-details-panel {
+  position: absolute;
+  right: 10px;
+  bottom: 34px;
+  left: 10px;
+  z-index: 2;
+  max-height: 300px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 4px;
+  border: 1px solid var(--hairline-strong);
+  border-radius: var(--r-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-2);
+}
+.w-details dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  margin: 6px 12px 4px;
+}
+.w-details dt {
+  color: var(--text-secondary);
+}
+.w-details dd {
+  margin: 0;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
 }
 .w-run .spinner {
   width: 11px;
@@ -5876,6 +5997,34 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin: 0;
   font-size: 12.5px;
   color: var(--text-secondary);
+}
+.tlv-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.tlv-steps .w-step + .w-step {
+  margin-top: 0;
+}
+.tlv-details > summary {
+  width: fit-content;
+  padding: 2px 6px;
+  margin-left: -6px;
+  border-radius: var(--r-sm);
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.tlv-details > summary:hover,
+.tlv-details[open] > summary {
+  color: var(--text-primary);
+  background: var(--neutral-wash);
+}
+.tlv-details[open] > :not(summary) {
+  margin-top: 8px;
 }
 .tlv-usage {
   display: flex;

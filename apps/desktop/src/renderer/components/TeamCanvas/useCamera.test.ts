@@ -2,11 +2,11 @@
 import { act, createElement, useEffect } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MIN_SCALE, preservesNestedScroll, useCamera } from './useCamera';
+import { MIN_SCALE, NESTED_SCROLLPORTS, preservesNestedScroll, useCamera } from './useCamera';
 import { canvasCameraSchema } from '@sprint-coder/contracts';
 
 describe('preservesNestedScroll', () => {
-  it.each(['.timeline-scroll', '.w-body'])(
+  it.each(['.timeline-scroll', '.w-body', '.w-attention', '.w-details-panel'])(
     'keeps wheel gestures inside the %s scrollport',
     (matchedSelector) => {
       const closest = vi.fn((selectors: string) =>
@@ -14,9 +14,20 @@ describe('preservesNestedScroll', () => {
       );
 
       expect(preservesNestedScroll({ closest } as unknown as EventTarget)).toBe(true);
-      expect(closest).toHaveBeenCalledWith('.timeline-scroll, .w-body');
+      expect(closest).toHaveBeenCalledWith(NESTED_SCROLLPORTS);
     },
   );
+
+  it('gives the wheel back to the camera when the scrollport has nothing to scroll', () => {
+    const scrollport = (scrollHeight: number) =>
+      ({ scrollHeight, clientHeight: 300 }) as unknown as Element;
+    expect(
+      preservesNestedScroll({ closest: () => scrollport(300) } as unknown as EventTarget),
+    ).toBe(false);
+    expect(
+      preservesNestedScroll({ closest: () => scrollport(900) } as unknown as EventTarget),
+    ).toBe(true);
+  });
 
   it('leaves wheel gestures on the canvas to camera controls', () => {
     expect(

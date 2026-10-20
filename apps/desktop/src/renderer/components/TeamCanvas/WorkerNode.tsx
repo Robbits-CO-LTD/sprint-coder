@@ -12,6 +12,8 @@ import {
   workerRuntimeLabel,
 } from '../../lib/team-activity-display';
 import { describeHierarchy } from './placement';
+import { WorkStep } from '../WorkStep';
+import { executionNeedsAttention, workerThread, workStepLabel } from '../../lib/worker-thread';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
@@ -43,12 +45,13 @@ function liveOutputTail(output: string): string {
     : output;
 }
 
-// A single Worker card on the Team Canvas (demo/index.html lines 346-388, `.worker`/`.w-head`/
-// `.w-body`). The Leader hires and dispatches Workers on its own during its Turn (FR-TEAM-06/13,
-// team-tools.ts) — this card is purely an OBSERVATION surface: role/objective/status/stop plus the
-// message lines (tagged with the counterpart's own role) and a busy spinner. There is no
-// per-worker composer; the user never
-// addresses a Worker directly, only the Leader.
+// A single Worker card on the Team Canvas. The Leader hires and dispatches Workers on its own
+// during its Turn (FR-TEAM-06/13, team-tools.ts) — this card is purely an OBSERVATION surface,
+// drawn as a read-only T3 Code / Codex thread with no composer: the Leader's request, the Worker's
+// steps (tool calls, file edits) as one-line work-log rows, its streaming text, and its report back
+// to the Leader. Who the Worker is and how it runs (hierarchy, model, Connection, execution facts,
+// Thread, tokens) sits behind 詳細; only an execution that needs the user is surfaced on the card.
+// The user never addresses a Worker directly, only the Leader.
 //
 // Memoized (issue #863): a Team update touches one or two Workers, and every card re-rendering for
 // each one was a large share of the renderer's work with 32 Workers. TeamCanvas passes stable
@@ -115,7 +118,12 @@ function WorkerNodeCard({
   const historyRef = useRef<HTMLDivElement>(null);
   const [followingLatest, setFollowingLatest] = useState(true);
 
-  const relevant = messages;
+  const thread = workerThread(messages, worker.activityLog ?? []);
+  const attention = executionNeedsAttention(execution);
+  const newestStep = worker.activityLog?.at(-1);
+  const newestStepAt = newestStep?.at;
+  const newestStepLabel = newestStep?.label;
+  const newestMessageId = messages.at(-1)?.id;
   const onElementRef = useRef(onElement);
   useLayoutEffect(() => {
     onElementRef.current = onElement;
@@ -131,7 +139,17 @@ function WorkerNodeCard({
   useEffect(() => {
     const element = historyRef.current;
     if (element !== null && followingLatest) element.scrollTop = element.scrollHeight;
-  }, [followingLatest, relevant.length, worker.currentActivity]);
+    // Keyed on the newest entry, not on the count: once the log reaches its cap a new step replaces
+    // the oldest and the length stays the same.
+  }, [
+    followingLatest,
+    thread.length,
+    newestStepAt,
+    newestStepLabel,
+    newestMessageId,
+    worker.liveOutput,
+    worker.currentActivity,
+  ]);
 
   return (
     <div
@@ -179,46 +197,19 @@ function WorkerNodeCard({
           解雇
         </button>
       </div>
-      <div className="w-activity" aria-live="polite">
-        {worker.currentActivity ??
-          (worker.state === 'done'
-            ? '完了'
-            : worker.state === 'stopped'
-              ? '停止済み'
-              : worker.state)}
-      </div>
-      {/* Which model this Worker actually got, and on which Connection (Team v2). The exact same
-          block, from the exact same helper, is rendered by TeamListView — only the variant class
-          differs, exactly as TeamExecutionStatus does it — so List/Canvas parity holds by
-          construction. Reuses the execution card's own key/value classes so no new styling (and no
-          new animation for `prefers-reduced-motion` to suppress) is introduced. Inert: no button,
-          no `tabIndex`, no `<details>`, so the Canvas's arrow-key node order is unchanged. */}
-      <div className="team-exec team-exec-canvas" data-testid="team-worker-model">
-        {/* Where this Worker sits in the Team's agent tree (Team v2 hierarchy). Same helper, same
-            wording, same testid as TeamListView's row — the depth/parent/kind facts must read
-            identically in both views. */}
-        <p className="team-exec-row" data-testid="team-worker-hierarchy">
-          <span className="team-exec-key">階層</span>
-          <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
-        </p>
-        <p className="team-exec-row" data-testid="team-worker-model-name">
-          <span className="team-exec-key">モデル</span>
-          <span className="team-exec-value team-exec-instruction">{model.modelLabel}</span>
-        </p>
-        <p className="team-exec-row" data-testid="team-worker-model-connection">
-          <span className="team-exec-key">Connection</span>
-          <span className="team-exec-value team-exec-instruction">{model.connectionLabel}</span>
-        </p>
-      </div>
-      <TeamExecutionStatus
-        execution={execution}
-        variant="canvas"
-        onResume={missionId === null ? undefined : () => onResumeMission(missionId)}
-        onResumeIntegration={
-          executionId === null ? undefined : () => onResumeIntegration(executionId)
-        }
-        resumeDisabled={teamBusy}
-      />
+      {attention && (
+        <div className="w-attention">
+          <TeamExecutionStatus
+            execution={execution}
+            variant="canvas"
+            onResume={missionId === null ? undefined : () => onResumeMission(missionId)}
+            onResumeIntegration={
+              executionId === null ? undefined : () => onResumeIntegration(executionId)
+            }
+            resumeDisabled={teamBusy}
+          />
+        </div>
+      )}
       <div
         className="w-body"
         ref={historyRef}
@@ -227,13 +218,14 @@ function WorkerNodeCard({
           const element = event.currentTarget;
           setFollowingLatest(element.scrollHeight - element.scrollTop - element.clientHeight < 32);
         }}
-        aria-label={`${worker.role}の通信履歴`}
+        aria-label={`${worker.role}の作業`}
       >
-        {relevant.map((m) => {
+        {thread.map((item) => {
+          if (item.kind === 'step') return <WorkStep key={`step-${item.index}`} step={item.step} />;
+          const m = item.message;
           // Who the line is with comes from the message's own persisted agent ids (the shared
-          // helper TeamListView calls with the same context), not from the old assumption that a
-          // Worker only ever talks to the Leader. Direction is decided exactly as before, so
-          // ordering, styling and the rendered body are unchanged.
+          // helper TeamListView calls with the same context). The line keeps its markup — tag
+          // first, then the Markdown body — because the List/Canvas parity spec diffs innerText.
           const peer = describeMessagePeer(m, {
             agentId: worker.id,
             leaderAgentId,
@@ -241,35 +233,39 @@ function WorkerNodeCard({
           });
           const incoming = peer.direction === 'incoming';
           return (
-            <div key={m.id} className={`w-line${incoming ? ' msg-in' : ''}`}>
+            <div key={m.id} className={`w-line${incoming ? ' msg-in' : ' msg-out'}`}>
               <span className={`tag${incoming ? '' : ' out'}`}>{peer.tagLabel}</span>
               <TeamMessageMarkdown text={incoming ? m.content : summarize(m.content)} />
             </div>
           );
         })}
         {worker.liveOutput !== '' && (
-          <div className="w-line w-live-output">
-            <span className="tag">Live</span>
-            <pre>{liveOutputTail(worker.liveOutput)}</pre>
-          </div>
+          // The Worker's own text as it streams — the answer forming, not a log panel.
+          <div className="w-stream">{liveOutputTail(worker.liveOutput)}</div>
         )}
         {worker.state === 'busy' && (
           <div className="w-run">
-            <span className="spinner" aria-hidden="true" />
-            <span>
-              {worker.currentActivity ?? (worker.reasoningActive ? '方針を検討中…' : '実行中…')}
+            <span className="w-run-title run-title sheen">
+              {worker.reasoningActive ? '思考中' : '作業中'}
             </span>
+            {/* The current step, unless the log just above already ends with it. */}
+            {worker.currentActivity !== null &&
+              worker.currentActivity !== worker.activityLog?.at(-1)?.label && (
+                <span className="w-run-detail">{workStepLabel(worker.currentActivity)}</span>
+              )}
           </div>
+        )}
+        {thread.length === 0 && worker.liveOutput === '' && worker.state !== 'busy' && (
+          <p className="w-empty">
+            {worker.state === 'done'
+              ? '完了'
+              : worker.state === 'stopped'
+                ? '停止済み'
+                : 'Leaderからの依頼を待っています'}
+          </p>
         )}
       </div>
       <div className="w-footer">
-        <time dateTime={worker.updatedAt}>
-          更新{' '}
-          {new Date(worker.updatedAt).toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-          })}
-        </time>
         {!followingLatest && (
           <button
             type="button"
@@ -285,14 +281,53 @@ function WorkerNodeCard({
         )}
         <details className="w-details">
           <summary>詳細</summary>
-          <dl>
-            <dt>状態</dt>
-            <dd>{worker.state === 'stopped' ? '停止済み' : worker.state}</dd>
-            <dt>Thread</dt>
-            <dd>{worker.threadId}</dd>
-            <dt>Token</dt>
-            <dd>{worker.usage.tokens}</dd>
-          </dl>
+          <div className="w-details-panel">
+            {/* Which model this Worker actually got, on which Connection, and where it sits in the
+                agent tree. Same helpers, same wording, same testids as TeamListView, so the two
+                views never disagree. */}
+            <div className="team-exec team-exec-canvas" data-testid="team-worker-model">
+              <p className="team-exec-row" data-testid="team-worker-hierarchy">
+                <span className="team-exec-key">階層</span>
+                <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
+              </p>
+              <p className="team-exec-row" data-testid="team-worker-model-name">
+                <span className="team-exec-key">モデル</span>
+                <span className="team-exec-value team-exec-instruction">{model.modelLabel}</span>
+              </p>
+              <p className="team-exec-row" data-testid="team-worker-model-connection">
+                <span className="team-exec-key">Connection</span>
+                <span className="team-exec-value team-exec-instruction">
+                  {model.connectionLabel}
+                </span>
+              </p>
+            </div>
+            {!attention && (
+              <TeamExecutionStatus
+                execution={execution}
+                variant="canvas"
+                onResume={missionId === null ? undefined : () => onResumeMission(missionId)}
+                onResumeIntegration={
+                  executionId === null ? undefined : () => onResumeIntegration(executionId)
+                }
+                resumeDisabled={teamBusy}
+              />
+            )}
+            <dl>
+              <dt>Thread</dt>
+              <dd>{worker.threadId}</dd>
+              <dt>Token</dt>
+              <dd>{worker.usage.tokens}</dd>
+              <dt>更新</dt>
+              <dd>
+                <time dateTime={worker.updatedAt}>
+                  {new Date(worker.updatedAt).toLocaleTimeString([], {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })}
+                </time>
+              </dd>
+            </dl>
+          </div>
         </details>
       </div>
     </div>

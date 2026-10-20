@@ -28,11 +28,27 @@ export const LOD2_MAX_SCALE = 0.32;
 // "end" signal, unlike pointerup for a pan drag, so this is a plain quiet-period debounce.
 const WHEEL_SETTLE_MS = 260;
 
+/** Scrollports inside Canvas nodes: the Leader's timeline, and a Worker card's thread, the
+ * attention strip above it and the 詳細 panel that opens over it. */
+export const NESTED_SCROLLPORTS = '.timeline-scroll, .w-body, .w-attention, .w-details-panel';
+
+/**
+ * Whether a wheel over `target` belongs to a scrollport inside a node (the Leader's timeline, a
+ * Worker's thread) rather than to the camera. Only a scrollport that has something to scroll keeps
+ * it: a Worker thread now fills most of its card, and a short one swallowing the wheel would leave
+ * no part of the card that zooms the Canvas.
+ */
 export function preservesNestedScroll(target: EventTarget | null): boolean {
   const element = target as { closest?: (selectors: string) => Element | null } | null;
-  return (
-    typeof element?.closest === 'function' && element.closest('.timeline-scroll, .w-body') !== null
-  );
+  if (typeof element?.closest !== 'function') return false;
+  const scrollport = element.closest(NESTED_SCROLLPORTS) as {
+    scrollHeight?: unknown;
+    clientHeight?: unknown;
+  } | null;
+  if (scrollport === null) return false;
+  if (typeof scrollport.scrollHeight !== 'number' || typeof scrollport.clientHeight !== 'number')
+    return true;
+  return scrollport.scrollHeight > scrollport.clientHeight + 1;
 }
 
 export function useCamera(onSettle?: () => void) {
@@ -256,9 +272,10 @@ export function useCamera(onSettle?: () => void) {
       if (wasDragging) onSettleRef.current?.();
     }
     function onWheel(e: WheelEvent) {
-      // The Leader timeline and Worker report body are scrollports inside the canvas. Let their
-      // native vertical scrolling win instead of turning the same wheel gesture into camera zoom.
-      // `overscroll-behavior: contain` on both scrollports prevents a gesture at either edge from
+      // NESTED_SCROLLPORTS (the Leader timeline, a Worker's thread, attention strip and 詳細 panel)
+      // are scrollports inside the canvas. When one has something to scroll, let its native
+      // vertical scrolling win instead of turning the same wheel gesture into camera zoom.
+      // `overscroll-behavior: contain` on each of them prevents a gesture at either edge from
       // chaining into the canvas or the surrounding app.
       if (preservesNestedScroll(e.target)) return;
       e.preventDefault();

@@ -54,6 +54,7 @@ import {
   teamMissionCheckpointSchema,
   type GraphDocument,
   type GraphGeneration,
+  type WorkerActivityEntry,
 } from '@sprint-coder/contracts';
 import {
   parseStoredGraphDocument,
@@ -355,6 +356,7 @@ import {
 } from './assurance';
 import type { SaveOutcome } from './workspace-edit';
 import type { UserFileSaveIntent } from './user-file-save-saga';
+import { workerActivityEntry } from './worker-activity-log';
 
 class SqliteEditSagaLeaseHandle {
   timer: ReturnType<typeof setTimeout> | null = null;
@@ -5847,6 +5849,8 @@ export interface PersistenceClient {
     payload: unknown;
     now: string;
   }): void;
+  /** A Worker's newest tool-call / file-change steps across all its Team Tasks, oldest first. */
+  listRecentWorkerActivity(agentId: string, limit: number): WorkerActivityEntry[];
   completeTeamTaskWithReport(input: {
     teamTaskId: string;
     agentId: string;
@@ -13527,6 +13531,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
         JSON.stringify(input.payload),
         input.now,
       );
+  }
+
+  listRecentWorkerActivity(agentId: string, limit: number): WorkerActivityEntry[] {
+    // Reached through the assignee index on team_tasks; team_activity_events has no agent index.
+    const rows = this.db
+      .prepare(
+        `SELECT e.type, e.payload_json, e.recorded_at
+           FROM team_activity_events e
+           JOIN team_tasks t ON t.id = e.team_task_id
+          WHERE t.assignee_agent_id = ?
+            AND e.agent_id = ?
+            AND e.type IN ('activity', 'fileChange')
+          ORDER BY e.recorded_at DESC, e.rowid DESC
+          LIMIT ?`,
+      )
+      .all(agentId, agentId, limit) as {
+      type: string;
+      payload_json: string;
+      recorded_at: string;
+    }[];
+    const entries: WorkerActivityEntry[] = [];
+    for (const row of rows.reverse()) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(row.payload_json);
+      } catch {
+        continue;
+      }
+      const entry = workerActivityEntry(row.type, payload, row.recorded_at);
+      if (entry !== null) entries.push(entry);
+    }
+    return entries;
   }
 
   completeTeamTaskWithReport(input: {
