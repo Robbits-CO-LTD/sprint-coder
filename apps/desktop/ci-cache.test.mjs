@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
+import { classifyChanges, verifyRequiredJobs } from '../../ci-scope.mjs';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   clearDependencyToolCaches,
@@ -308,6 +309,44 @@ describe('CI cache reuse and fallback', () => {
   });
 });
 
+describe('CI scope wiring', () => {
+  it.each([
+    ['README.md', ['classify', 'required']],
+    [
+      'apps/desktop/src/renderer/lib/format.ts',
+      ['classify', 'quality', 'renderer-tests', 'required'],
+    ],
+    [
+      'apps/desktop/src/renderer/components/RunCard.tsx',
+      ['classify', 'quality', 'renderer-tests', 'renderer-e2e', 'required'],
+    ],
+  ])('selects only the planned workflow jobs for %s', (path, expected) => {
+    const scope = classifyChanges([{ path, status: 'M' }]);
+    const outputs = {
+      mode: scope.mode,
+      full_matrix: String(scope.fullMatrix),
+      e2e_specs: JSON.stringify(scope.e2eSpecs),
+    };
+    const selected = Object.entries(workflow.jobs)
+      .filter(([, job]) => {
+        if (!job.if) return true;
+        let expression = job.if.replaceAll('always()', 'true');
+        for (const [key, value] of Object.entries(outputs))
+          expression = expression.replaceAll(
+            `needs.classify.outputs.${key}`,
+            JSON.stringify(value),
+          );
+        return runInNewContext(expression, {}, { timeout: 100 });
+      })
+      .map(([id]) => id);
+    expect(new Set(selected)).toEqual(new Set(expected));
+    const results = Object.fromEntries(
+      workflow.jobs.required.needs.map((id) => [id, selected.includes(id) ? 'success' : 'skipped']),
+    );
+    expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
+  });
+});
+
 describe('full CI partition contract', () => {
   it.skipIf(process.platform === 'win32')(
     'waits for both Mac checks and rejects either failure',
@@ -425,15 +464,17 @@ describe('full CI partition contract', () => {
     },
   );
 
-  it('requires full coverage on every PR and includes all Linux/Windows shards', () => {
+  it('keeps all Linux/Windows shards and native boundaries required for full validation', () => {
     const output = join(fixture(), 'output');
     const classifier = workflow.jobs.classify.steps.find((step) => step.id === 'scope');
-    const run = spawnSync('bash', ['-c', classifier.run], {
-      env: { ...process.env, GITHUB_OUTPUT: output },
+    const run = spawnSync(process.execPath, ['ci-scope.mjs', 'classify'], {
+      cwd: repo,
+      env: { ...process.env, GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_OUTPUT: output },
       encoding: 'utf8',
     });
     expect(run.status).toBe(0);
-    expect(readFileSync(output, 'utf8').trim()).toBe('full_matrix=true');
+    expect(classifier.run).toBe('node ci-scope.mjs classify');
+    expect(readFileSync(output, 'utf8')).toContain('full_matrix=true');
     const entries = workflow.jobs['platform-tests'].strategy.matrix.include;
     expect(entries.filter((entry) => entry.label === 'Linux').map((entry) => entry.shard)).toEqual([
       '1/3',
@@ -503,7 +544,7 @@ describe('full CI partition contract', () => {
     expect(archify.strategy.matrix.shard).toEqual([1, 2]);
     expect(archify.strategy.matrix.os).toEqual(['windows-2022']);
     const macPackage = workflow.jobs['package-macos'];
-    expect(macPackage.needs).toBeUndefined();
+    expect(macPackage.needs).toBe('classify');
     const packageIndex = macPackage.steps.findIndex(
       (step) => step.name === 'Production package smoke',
     );
@@ -527,34 +568,19 @@ describe('full CI partition contract', () => {
     const required = workflow.jobs.required;
     expect(required.needs).toContain('computer-use-native-gate');
     expect(required.needs).toContain('computer-use-windows-v2-harness');
-    const macResult = workflow.jobs['macos-result'];
-    expect(macResult.needs).toContain('computer-use-native-gate');
-    for (const status of ['success', 'failure', 'cancelled', 'skipped', '']) {
-      for (const [verification, dependency] of [
-        [required.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
-        [required.steps[0], 'COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT'],
-        [macResult.steps[0], 'COMPUTER_USE_NATIVE_RESULT'],
-        [macResult.steps[0], 'MACOS_TEST_RESULT'],
-      ]) {
-        const invocation = spawnSync('bash', ['-e', '-c', verification.run], {
-          env: {
-            ...process.env,
-            QUALITY_RESULT: 'success',
-            MACOS_RESULT: 'success',
-            WINDOWS_RESULT: 'success',
-            COMPUTER_USE_NATIVE_RESULT: 'success',
-            COMPUTER_USE_WINDOWS_V2_HARNESS_RESULT: 'success',
-            ARCHIFY_RESULT: 'success',
-            PACKAGE_TEST_RESULT: 'success',
-            MACOS_TEST_RESULT: 'success',
-            MACOS_PACKAGE_RESULT: 'success',
-            ELECTRON_BRIDGE_RESULT: 'success',
-            [dependency]: status,
-          },
-          encoding: 'utf8',
-        });
-        expect(invocation.status === 0).toBe(status === 'success');
-      }
+    const scope = classifyChanges([], { eventName: 'push' });
+    const successful = Object.fromEntries(required.needs.map((id) => [id, 'success']));
+    expect(() => verifyRequiredJobs(scope, successful)).not.toThrow();
+    for (const dependency of [
+      'computer-use-native-gate',
+      'computer-use-windows-v2-harness',
+      'test-macos',
+      'package-macos',
+      'electron-bridges',
+    ]) {
+      expect(required.needs).toContain(dependency);
+      for (const status of ['failure', 'cancelled', 'skipped', ''])
+        expect(() => verifyRequiredJobs(scope, { ...successful, [dependency]: status })).toThrow();
     }
 
     const runArchify = archify.steps.find((step) =>
@@ -581,32 +607,6 @@ describe('full CI partition contract', () => {
       expect(step.run).toContain('src/main/graph-mission-persistence.test.ts');
     }
     expect(linuxTest.run).not.toContain('--exclude');
-    for (const name of ['macos-result', 'windows-result']) {
-      const result = workflow.jobs[name];
-      expect(result.needs).toContain('electron-bridges');
-      const verification = result.steps.find((step) =>
-        step.run?.includes('ELECTRON_BRIDGE_RESULT'),
-      );
-      for (const status of ['success', 'failure', 'cancelled', 'skipped']) {
-        const invocation = spawnSync('bash', ['-c', verification.run], {
-          env: {
-            ...process.env,
-            PACKAGE_TEST_RESULT: 'success',
-            MACOS_TEST_RESULT: 'success',
-            MACOS_PACKAGE_RESULT: 'success',
-            WINDOWS_E2E_RESULT: 'success',
-            FULL_MATRIX: 'true',
-            TEST_RESULT: 'success',
-            LINUX_PACKAGE_RESULT: 'success',
-            WINDOWS_PACKAGE_RESULT: 'success',
-            ELECTRON_BRIDGE_RESULT: status,
-            COMPUTER_USE_NATIVE_RESULT: 'success',
-          },
-          encoding: 'utf8',
-        });
-        expect(invocation.status === 0).toBe(status === 'success');
-      }
-    }
     for (const job of Object.values(workflow.jobs)) {
       const depsIndex = job.steps?.findIndex(
         (step) => step.uses === './.github/actions/install-deps',
