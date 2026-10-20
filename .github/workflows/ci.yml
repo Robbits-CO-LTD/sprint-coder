@@ -1080,6 +1080,15 @@ jobs:
         if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
 
+      - name: Configure Linux Chromium sandbox helper
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (!s.isFile() || s.isSymbolicLink()) process.exit(1);"
+          sudo chown root:root node_modules/electron/dist/chrome-sandbox
+          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
+          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (s.uid !== 0 || s.gid !== 0 || (s.mode & 0o7777) !== 0o4755) process.exit(1);"
+
       - name: Run selected UI cases on Linux
         if: runner.os == 'Linux'
         env:

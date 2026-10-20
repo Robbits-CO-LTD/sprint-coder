@@ -310,6 +310,23 @@ describe('CI cache reuse and fallback', () => {
 });
 
 describe('CI scope wiring', () => {
+  it('configures the Linux sandbox helper before starting the focused dev app', () => {
+    const job = workflow.jobs['renderer-e2e'];
+    const setup = job.steps.findIndex(
+      (step) => step.name === 'Configure Linux Chromium sandbox helper',
+    );
+    const exercise = job.steps.findIndex((step) => step.name === 'Run selected UI cases on Linux');
+    expect(setup).toBeGreaterThanOrEqual(0);
+    expect(exercise).toBeGreaterThan(setup);
+    expect(job.steps[setup].if).toBe("runner.os == 'Linux'");
+    expect(job.steps[setup].run).toContain('sudo chown root:root');
+    expect(job.steps[setup].run).toContain('sudo chmod 4755');
+    expect(job.steps[setup].run).toContain('s.uid !== 0 || s.gid !== 0');
+    expect(job.steps[setup].run).toContain('s.isSymbolicLink()');
+    expect(JSON.stringify(job)).not.toContain('--no-sandbox');
+    expect(JSON.stringify(job)).not.toContain('ELECTRON_DISABLE_SANDBOX');
+  });
+
   it.each([
     ['README.md', ['classify', 'required']],
     [

@@ -153,8 +153,11 @@ PR #896はRendererのみで短縮候補。PR #897は操作・layoutとE2Eの追�
 
 ### 実行確認
 
-- ローカル: CI関連7ファイルは175 PASS・既存のOS別2 SKIP、全workspace型checkと更新後desktop型check、lint、Prettier、actionlintはPASS。
+- ローカル: CI関連7ファイルは176 PASS・既存のOS別2 SKIP、全workspace型checkと更新後desktop型check、lint、Prettier、actionlintはPASS。
 - 新runnerの実Electron E2E: `keyboard-smoke.spec.ts` の必須1 case PASS、0 SKIP。隔離worktreeのfresh build（localhost:5174）と専用データ領域を使用し、既存の5173は保持した。事前収集と実行reportの一致を確認。実画面操作は6.0秒、build/setupは別計測。
 - 初回Actions [39422374321](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/39422374321): 新Renderer jobとqualityはPASS。旧集約job名・無条件Windows E2E・shellコマンド文字列に固定されたworkflowテスト3箇所でFAILしたため残りを取消した。製品の実行失敗ではなく、旧CI契約への固定が原因とログ・対象テストで確認した。
 - 対応: 既存workflowテストを新gateの依存入力へ接続し、同じ失敗・取消・skip拒否を分類/集約テストで維持した。新CIの専用契約test stepへこれらの既存workflowテストも含めた。修正後Actionsは最新headで再確認する。
 - 軽量PRの所要時間はまだ実測していない。上記の分類テストやfull runを、短縮達成の証拠として扱わない。
+
+
+Linux focused起動の前提: [初回job](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/39426860200/job/118641582245)で、Forgeが起動するElectronがSUID helperの所有者・mode不足で終了し、Vite終了後にrenderer接続が拒否されたことを確認した。focused job内のLinux限定stepで、helperの通常ファイル確認、root所有・4755設定、所有者とmodeの事後検証を行う。sandbox無効化・timeout延長・製品コード変更は行わず、同じキーボード操作を最新CIで再確認する。
