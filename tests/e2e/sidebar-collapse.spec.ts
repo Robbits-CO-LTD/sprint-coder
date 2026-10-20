@@ -78,6 +78,106 @@ test.describe('sidebar collapse', () => {
     }
   });
 
+  test('dragging the edge resizes the sidebar, the width persists, and double-click resets it', async () => {
+    const dir = createUserDataDir('sidebar-resize');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(dir);
+      let page = await firstWindow(app);
+      await setWindowSize(app, page, 1440, 900);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await expect(page.getByTestId('composer-textarea')).toBeVisible();
+
+      const resizer = page.getByTestId('sidebar-resizer');
+      await expect(resizer).toBeVisible();
+      const startWidth = await sidebarWidth(page);
+      const box = await resizer.boundingBox();
+      expect(box).not.toBeNull();
+      if (box === null) return;
+      const x = box.x + box.width / 2;
+      const y = box.y + box.height / 2;
+      await page.mouse.move(x, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 60, y, { steps: 6 });
+      await page.mouse.up();
+      const dragged = await sidebarWidth(page);
+      expect(dragged).toBeGreaterThan(startWidth + 50);
+      await expect(resizer).toHaveAttribute('aria-valuenow', String(Math.round(dragged)));
+      // The titlebar's sidebar-coloured plane follows the same custom property.
+      expect(
+        await page.evaluate(() =>
+          getComputedStyle(document.querySelector('.app-frame')!).getPropertyValue(
+            '--sidebar-width',
+          ),
+        ),
+      ).toBe(`${Math.round(dragged)}px`);
+
+      // Clamped: the conversation column always keeps its minimum.
+      await page.mouse.move(x + 60, y);
+      await page.mouse.down();
+      await page.mouse.move(x + 2000, y, { steps: 6 });
+      await page.mouse.up();
+      expect(await sidebarWidth(page)).toBeLessThanOrEqual(480);
+      expect(await mainWidth(page)).toBeGreaterThanOrEqual(520);
+      const clamped = await sidebarWidth(page);
+
+      // Persisted across a restart.
+      await closeApp(app);
+      app = await launchApp(dir);
+      page = await firstWindow(app);
+      await setWindowSize(app, page, 1440, 900);
+      await expect(page.getByTestId('sidebar-resizer')).toBeVisible();
+      expect(Math.abs((await sidebarWidth(page)) - clamped)).toBeLessThanOrEqual(1);
+
+      // Keyboard: the separator is focusable and arrows step the width.
+      const resizerAgain = page.getByTestId('sidebar-resizer');
+      await resizerAgain.focus();
+      await page.keyboard.press('ArrowLeft');
+      expect(await sidebarWidth(page)).toBeLessThan(clamped);
+
+      // Double-click restores the default width.
+      await resizerAgain.dblclick();
+      expect(Math.round(await sidebarWidth(page))).toBe(264);
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(dir);
+    }
+  });
+
+  test('the keyboard shortcut toggles the sidebar', async () => {
+    const dir = createUserDataDir('sidebar-shortcut');
+    let app: ElectronApplication | null = null;
+    try {
+      app = await launchApp(dir);
+      const page = await firstWindow(app);
+      await setWindowSize(app, page, 1440, 900);
+      await page.getByTestId('sidebar-new-task-button').click();
+      await expect(page.getByTestId('composer-textarea')).toBeVisible();
+      const toggle = page.getByTestId('sidebar-toggle');
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+      const shortcut = process.platform === 'darwin' ? 'Meta+B' : 'Control+B';
+      await expect(toggle).toHaveAttribute('aria-keyshortcuts', shortcut);
+      await page.keyboard.press(shortcut);
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      expect(await sidebarWidth(page)).toBe(0);
+      await expect(page.getByTestId('sidebar-resizer')).toHaveCount(0);
+      await page.keyboard.press(shortcut);
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+      // Inert while a modal is open: collapsing would hide a modal that lives in the sidebar and
+      // leave the window blocked behind it.
+      await page.getByTestId('sidebar-settings-button').click();
+      await expect(page.getByTestId('settings-dialog')).toBeVisible();
+      await page.keyboard.press(shortcut);
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(await sidebarWidth(page)).toBeGreaterThan(200);
+    } finally {
+      await closeApp(app);
+      removeUserDataDir(dir);
+    }
+  });
+
   test('at the minimum window size the sidebar starts collapsed and opens as an overlay', async () => {
     const dir = createUserDataDir('sidebar-collapse-narrow');
     let app: ElectronApplication | null = null;

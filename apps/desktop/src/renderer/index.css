@@ -1118,6 +1118,47 @@ button {
   pointer-events: none;
 }
 
+/* The sidebar's draggable right edge (SidebarResizer). A 7px hit area centred on the edge; the
+   visible part is a 2px line that only appears on hover, focus or drag, so the resting edge stays
+   the quiet hairline. */
+.sidebar-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--sidebar-width) - 4px);
+  z-index: 6;
+  width: 7px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.sidebar-resizer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 2px;
+  width: 2px;
+  background: transparent;
+  content: '';
+  transition: background var(--t-quick) var(--ease-ui);
+}
+.sidebar-resizer:hover::after,
+.sidebar-resizer.is-dragging::after {
+  background: var(--border-strong);
+}
+.sidebar-resizer:focus-visible {
+  outline: none;
+}
+.sidebar-resizer:focus-visible::after {
+  background: var(--focus-ring);
+}
+body.is-resizing-sidebar {
+  cursor: col-resize;
+  user-select: none;
+}
+body.is-resizing-sidebar iframe {
+  pointer-events: none;
+}
+
 /* Dismiss surface for the overlaid sidebar. A real button so it is keyboard-reachable and named,
    rather than a bare div that only responds to a pointer. */
 .sidebar-scrim {
@@ -4245,6 +4286,54 @@ button.composer-permission-chip[aria-expanded='true'] {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+/* Holds the listbox and, while the first page of a search is pending, the spinner drawn over the
+   middle of it. */
+.mpv2-list-wrap {
+  position: relative;
+}
+.mpv2-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  pointer-events: none;
+  animation: mpv2LoadingIn var(--t-quick) var(--ease-ui) both;
+}
+/* Shown only after a short beat, so a search that answers at once does not flash a spinner. */
+@keyframes mpv2LoadingIn {
+  0%,
+  60% {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.mpv2-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--neutral-wash-strong);
+  border-top-color: var(--text-primary);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  /* A still ring would read as a stuck control; a slow pulse still says "working" without motion
+     across the screen. */
+  .mpv2-spinner {
+    animation: mpv2Pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes mpv2Pulse {
+    50% {
+      opacity: 0.4;
+    }
+  }
 }
 .mpv2-empty,
 .mpv2-more {
