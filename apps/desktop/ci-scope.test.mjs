@@ -156,7 +156,21 @@ describe('CI change boundaries', () => {
     }
   });
 
-  it('keeps only explicitly changed free specs when widening a mixed renderer diff to full', () => {
+  it('keeps display coverage when another changed path widens the scope to full', () => {
+    const display = `${renderer}components/RunCard.tsx`;
+    const narrow = classifyChanges(changes(display));
+    for (const extra of ['package.json', 'apps/desktop/src/main/ipc.ts']) {
+      const wide = classifyChanges(changes(display, extra));
+      expect(wide.mode).toBe('full');
+      expect(wide.e2eSpecs).toEqual(narrow.e2eSpecs);
+    }
+    const mixed = classifyChanges(changes(display, 'package.json', spec('sidebar-collapse')));
+    expect(new Set(mixed.e2eSpecs)).toEqual(
+      new Set([...narrow.e2eSpecs, spec('sidebar-collapse')]),
+    );
+  });
+
+  it('retains explicitly changed specs for integration-sensitive UI paths', () => {
     const scope = classifyChanges(
       changes(
         `${renderer}components/Sidebar.tsx`,
@@ -231,6 +245,13 @@ describe('required CI result aggregation', () => {
     'renderer-e2e',
   ];
   const results = (value) => Object.fromEntries(allJobs.map((job) => [job, value]));
+
+  it('requires focused display checks when a mixed change also requires the full scope', () => {
+    const scope = classifyChanges(changes(`${renderer}components/RunCard.tsx`, 'package.json'));
+    expect(() =>
+      verifyRequiredJobs(scope, { ...results('success'), 'renderer-e2e': 'skipped' }),
+    ).toThrow('renderer-e2e: skipped');
+  });
 
   it('accepts docs only when classification itself succeeded', () => {
     const scope = classifyChanges(changes('README.md'));

@@ -178,7 +178,7 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
   }
   const mode = full ? 'full' : hasRenderer ? 'renderer' : 'docs';
   if (mode === 'renderer') reason = 'Reviewed renderer display paths';
-  const e2eSpecs = mode === 'renderer' ? rendererSpecs : changedSpecs;
+  const e2eSpecs = new Set([...rendererSpecs, ...changedSpecs]);
   return { mode, fullMatrix: mode === 'full', e2eSpecs: [...e2eSpecs].sort(), reason };
 }
 

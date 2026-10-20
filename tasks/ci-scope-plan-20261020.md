@@ -144,6 +144,7 @@ PR #896はRendererのみで短縮候補。PR #897は操作・layoutとE2Eの追�
 - `ci-scope.mjs` がPR全体のmerge-base diffを分類し、docs / renderer / fullを選ぶ。削除・rename・未知パスはfull。実行対象SHAとPR base/headをsummaryに残す。
 - 初期のRenderer軽量対象は確認済みの表示部品・表示関数に限定。Workspace削除を扱うTeamRetainedWorktreesなどの操作境界や未知componentはfullにする。
 - `CI required` はclassifyと全予定jobのsuccessを要求する。失敗・取消・予定jobのskip/欠落を拒否する。既存のfull matrix、native、installer、Electronブリッジのassertionは保持する。
+- 混合変更でfullへ拡大しても、表示部品から選んだE2Eと変更specの和集合を維持する。RunCardとMain/manifestの混合差分で、UI用の取消・timeline検証が消えないことを回帰テストで確認する。
 - `ci-renderer-tests.mjs` がRenderer unitの0件・失敗・skipを拒否する。focused E2Eは事前収集したケースと実行reportを比較し、必須ケースの欠落・予定外skip・再試行を拒否する。事前宣言された非対象skipは別集計する。
 - 新しい依存関係・課金runner・定期実行は追加しない。文書はclassify＋gate、表示関数はquality 3 job＋Renderer＋classify＋gate、操作を含む表示部品はfocused E2Eを追加する。
 - ローカル検証: 全workspace型check、lint、Prettier、actionlint、Renderer 106 files / 1005 tests PASS。分類・report・workflow接続のfocused testは最終版で確認する。Actionsの実測は別途記録する。
@@ -152,7 +153,7 @@ PR #896はRendererのみで短縮候補。PR #897は操作・layoutとE2Eの追�
 
 ### 実行確認
 
-- ローカル: CI関連7ファイルは173 PASS・既存のOS別2 SKIP、全workspace型checkと更新後desktop型check、lint、Prettier、actionlintはPASS。
+- ローカル: CI関連7ファイルは175 PASS・既存のOS別2 SKIP、全workspace型checkと更新後desktop型check、lint、Prettier、actionlintはPASS。
 - 新runnerの実Electron E2E: `keyboard-smoke.spec.ts` の必須1 case PASS、0 SKIP。隔離worktreeのfresh build（localhost:5174）と専用データ領域を使用し、既存の5173は保持した。事前収集と実行reportの一致を確認。実画面操作は6.0秒、build/setupは別計測。
 - 初回Actions [39422374321](https://github.com/Robbits-CO-LTD/sprint-coder/actions/runs/39422374321): 新Renderer jobとqualityはPASS。旧集約job名・無条件Windows E2E・shellコマンド文字列に固定されたworkflowテスト3箇所でFAILしたため残りを取消した。製品の実行失敗ではなく、旧CI契約への固定が原因とログ・対象テストで確認した。
 - 対応: 既存workflowテストを新gateの依存入力へ接続し、同じ失敗・取消・skip拒否を分類/集約テストで維持した。新CIの専用契約test stepへこれらの既存workflowテストも含めた。修正後Actionsは最新headで再確認する。
