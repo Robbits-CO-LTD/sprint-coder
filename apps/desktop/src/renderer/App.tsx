@@ -25,6 +25,7 @@ import {
   readStoredSidebarCollapsed,
   readStoredSidebarWidth,
   SIDEBAR_DEFAULT_WIDTH,
+  sidebarAvailableWidth,
   writeStoredSidebarCollapsed,
   writeStoredSidebarWidth,
 } from './lib/sidebar-preference';
@@ -197,7 +198,6 @@ export default function App() {
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
-  const paintedSidebarWidth = clampSidebarWidth(sidebarWidth, viewportWidth);
   const commitSidebarWidth = useCallback((width: number) => {
     setSidebarWidth(width);
     writeStoredSidebarWidth(width);
@@ -247,6 +247,13 @@ export default function App() {
   // must not make this component and TeamCanvas (still finishing its own exit) render at once.
   const teamListActive =
     teamViewOpen && teamViewPreference === 'list' && !exiting && selectedTask !== null;
+  // A docked right panel takes its width before the conversation does, so the sidebar's limit is
+  // measured against what is left. Overlay forms (narrow window, compact graph) take nothing.
+  const sidebarRoom = sidebarAvailableWidth(viewportWidth, {
+    graph: graphOpen && selectedTask !== null && !teamViewOpen && !sidebarOverlay,
+    teamList: teamListActive && !narrowViewport,
+  });
+  const paintedSidebarWidth = clampSidebarWidth(sidebarWidth, sidebarRoom);
   // Render-time sync (not an effect — react-hooks/set-state-in-effect convention, see
   // TaskHeader/GoalChip): keep `surfaceMode` following `teamCanvasActive`, except during
   // the tail of `requestExitTeam`, which explicitly forces 'main' one commit *before* the store
@@ -403,6 +410,7 @@ export default function App() {
           {!showSetupWizard && !chromeInert && !sidebarCollapsed && !sidebarOverlay && (
             <SidebarResizer
               width={paintedSidebarWidth}
+              availableWidth={sidebarRoom}
               onResize={setSidebarWidth}
               onResizeEnd={commitSidebarWidth}
               onReset={resetSidebarWidth}

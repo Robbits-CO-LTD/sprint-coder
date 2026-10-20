@@ -12,17 +12,37 @@ const KEY_STEP_LARGE = 48;
 
 export function SidebarResizer({
   width,
+  availableWidth,
   onResize,
   onResizeEnd,
   onReset,
 }: {
   width: number;
+  /** Room shared by the sidebar and the conversation (window minus any docked right panel). */
+  availableWidth: number;
   onResize: (width: number) => void;
   onResizeEnd: (width: number) => void;
   onReset: () => void;
 }) {
   const drag = useRef<{ startX: number; startWidth: number; width: number } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const onResizeEndRef = useRef(onResizeEnd);
+  useEffect(() => {
+    onResizeEndRef.current = onResizeEnd;
+  }, [onResizeEnd]);
+
+  // The handle can disappear mid-drag (⌘B collapses the sidebar, Team mode hides the chrome). A
+  // detached element never receives its pointerup, so settle the drag here or the painted width
+  // would never be saved.
+  useEffect(
+    () => () => {
+      const current = drag.current;
+      if (current === null) return;
+      drag.current = null;
+      onResizeEndRef.current(current.width);
+    },
+    [],
+  );
 
   // While a drag is in flight the cursor must stay `col-resize` and text must not select, wherever
   // the pointer wanders — and an iframe (the graph panel) must not swallow the pointer stream.
@@ -45,7 +65,7 @@ export function SidebarResizer({
     if (current === null) return;
     const next = clampSidebarWidth(
       current.startWidth + event.clientX - current.startX,
-      window.innerWidth,
+      availableWidth,
     );
     if (next === current.width) return;
     current.width = next;
@@ -66,10 +86,10 @@ export function SidebarResizer({
     if (event.key === 'ArrowLeft') next = width - step;
     else if (event.key === 'ArrowRight') next = width + step;
     else if (event.key === 'Home') next = SIDEBAR_MIN_WIDTH;
-    else if (event.key === 'End') next = maxSidebarWidth(window.innerWidth);
+    else if (event.key === 'End') next = maxSidebarWidth(availableWidth);
     if (next === null) return;
     event.preventDefault();
-    const clamped = clampSidebarWidth(next, window.innerWidth);
+    const clamped = clampSidebarWidth(next, availableWidth);
     onResize(clamped);
     onResizeEnd(clamped);
   }
@@ -80,7 +100,7 @@ export function SidebarResizer({
       aria-orientation="vertical"
       aria-label="Task履歴の幅"
       aria-valuemin={SIDEBAR_MIN_WIDTH}
-      aria-valuemax={maxSidebarWidth(window.innerWidth)}
+      aria-valuemax={maxSidebarWidth(availableWidth)}
       aria-valuenow={width}
       tabIndex={0}
       className={`sidebar-resizer${dragging ? ' is-dragging' : ''}`}

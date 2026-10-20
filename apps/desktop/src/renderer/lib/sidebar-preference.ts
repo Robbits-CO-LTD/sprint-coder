@@ -59,13 +59,34 @@ export const SIDEBAR_MAX_WIDTH = 480;
  */
 export const MAIN_MIN_WIDTH = 520;
 
-/** The widest the sidebar may be in a window this wide — never below the minimum. */
-export function maxSidebarWidth(viewportWidth: number): number {
-  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, viewportWidth - MAIN_MIN_WIDTH));
+/** Docked right-hand panels, mirrored from index.css: `.graph-panel` and `.team-list-view`. */
+const TEAM_LIST_DOCKED_WIDTH = 460;
+const GRAPH_PANEL_MAX_WIDTH = 900;
+const GRAPH_PANEL_VIEWPORT_SHARE = 0.52;
+
+/**
+ * The width the sidebar and the conversation share: the window minus whatever panel is docked on
+ * the right, since that panel takes its width before the conversation does.
+ */
+export function sidebarAvailableWidth(
+  viewportWidth: number,
+  docked: { graph: boolean; teamList: boolean },
+): number {
+  let panel = 0;
+  if (docked.graph) {
+    panel += Math.min(viewportWidth * GRAPH_PANEL_VIEWPORT_SHARE, GRAPH_PANEL_MAX_WIDTH);
+  }
+  if (docked.teamList) panel += TEAM_LIST_DOCKED_WIDTH;
+  return viewportWidth - panel;
 }
 
-export function clampSidebarWidth(width: number, viewportWidth: number): number {
-  return Math.round(Math.min(maxSidebarWidth(viewportWidth), Math.max(SIDEBAR_MIN_WIDTH, width)));
+/** The widest the sidebar may be beside this much room — never below the minimum. */
+export function maxSidebarWidth(availableWidth: number): number {
+  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, availableWidth - MAIN_MIN_WIDTH));
+}
+
+export function clampSidebarWidth(width: number, availableWidth: number): number {
+  return Math.round(Math.min(maxSidebarWidth(availableWidth), Math.max(SIDEBAR_MIN_WIDTH, width)));
 }
 
 /** `null` when nothing usable is stored — the caller then uses the default width. */

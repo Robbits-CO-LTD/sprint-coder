@@ -3,6 +3,7 @@ import {
   clampSidebarWidth,
   defaultSidebarCollapsed,
   maxSidebarWidth,
+  sidebarAvailableWidth,
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from './sidebar-preference';
@@ -48,5 +49,25 @@ describe('clampSidebarWidth', () => {
   it('never goes below the minimum, even when the window has no room to spare', () => {
     expect(maxSidebarWidth(600)).toBe(SIDEBAR_MIN_WIDTH);
     expect(clampSidebarWidth(400, 600)).toBe(SIDEBAR_MIN_WIDTH);
+  });
+});
+
+describe('sidebarAvailableWidth', () => {
+  it('is the whole window when nothing is docked on the right', () => {
+    expect(sidebarAvailableWidth(1500, { graph: false, teamList: false })).toBe(1500);
+  });
+
+  it('subtracts a docked graph panel (52vw, capped at 900px)', () => {
+    // 1500 * 0.52 = 780 → 720 left, so the sidebar may only grow to 720 - 520 = 200 → the minimum.
+    expect(sidebarAvailableWidth(1500, { graph: true, teamList: false })).toBe(720);
+    expect(
+      clampSidebarWidth(480, sidebarAvailableWidth(1500, { graph: true, teamList: false })),
+    ).toBe(SIDEBAR_MIN_WIDTH);
+    expect(sidebarAvailableWidth(2000, { graph: true, teamList: false })).toBe(1100);
+  });
+
+  it('subtracts the docked 460px Team list', () => {
+    expect(sidebarAvailableWidth(1440, { graph: false, teamList: true })).toBe(980);
+    expect(maxSidebarWidth(980)).toBe(460);
   });
 });
