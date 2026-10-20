@@ -2540,11 +2540,12 @@ button {
   animation: msgIn var(--t-standard) var(--ease-ui);
 }
 
-/* Run Card — one quiet header line over the answer (Codex-style): status word, stage, elapsed time
-   and a text-only stop control, separated from the answer by a hairline. No surface of its own. */
+/* Run Card — one status line over the answer, printed left to right as Codex does:
+   `思考中  方針を組み立て中 · 12s · 停止`. While the Turn runs there is no rule under it, so the answer
+   streams straight on from the status. Once the Turn settles a hairline runs from the end of the
+   label to the edge of the column, turning the line into the fold of a closed section. */
 .run-card {
-  margin-top: 12px;
-  border-bottom: 1px solid var(--hairline-strong);
+  margin-top: 6px;
   animation: msgIn var(--t-standard) var(--ease-ui);
   transition: opacity 160ms var(--ease-ui);
 }
@@ -2552,53 +2553,56 @@ button {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-height: 30px;
-  padding: 0 0 8px;
+  min-height: 28px;
+  padding: 0 0 6px;
 }
 .run-copy {
   display: flex;
-  flex: 1;
-  align-items: baseline;
+  flex: 0 1 auto;
+  align-items: center;
   gap: 8px;
   min-width: 0;
-}
-.run-meta {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  min-width: max-content;
+  white-space: nowrap;
 }
 .run-title {
-  font-size: 13px;
-  font-weight: 400;
+  font-size: 13.5px;
+  font-weight: 500;
   color: var(--text-secondary);
 }
-.run-elapsed {
+.run-elapsed,
+.run-stop {
+  flex: none;
   font-size: 12.5px;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
 }
-.run-stop {
-  font-size: 12.5px;
+.run-elapsed::before,
+.run-stop::before {
+  content: '·';
+  margin-right: 8px;
   color: var(--text-secondary);
-  padding: 2px 8px;
+}
+.run-stop {
+  padding: 2px 6px 2px 0;
   border-radius: var(--r-sm);
 }
 .run-stop:hover:not(:disabled) {
   color: var(--danger);
-  background: var(--danger-wash);
 }
 .run-stop:disabled {
   opacity: 0.55;
   cursor: default;
 }
-.run-stage-inline::before {
-  content: '· ';
+/* The fold rule of a settled Turn. */
+.run-rule {
+  flex: 1 1 auto;
+  min-width: 24px;
+  height: 1px;
+  background: var(--hairline-strong);
 }
 .run-card--node .run-head {
   min-height: 26px;
-  padding: 0 0 6px;
+  padding: 0 0 4px;
 }
 
 /* Command Card */
@@ -5868,8 +5872,9 @@ button.composer-permission-chip[aria-expanded='true'] {
    so the Canvas never depends on opening provider-authored text to explain what is happening. */
 .think-toggle {
   display: flex;
+  flex: none;
   align-items: center;
-  gap: 7px;
+  gap: 4px;
   max-width: 100%;
   min-width: 0;
   padding: 0;
@@ -5881,7 +5886,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   cursor: default;
 }
 .run-stage-inline {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--text-secondary);
   max-width: 100%;
   min-width: 0;
@@ -5921,10 +5926,20 @@ button.composer-permission-chip[aria-expanded='true'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* `›` when folded, `⌄` when open — the Codex fold glyph, drawn as one rotating stroke. */
 .think-chevron {
-  font-size: 11px;
-  color: var(--text-secondary);
   flex: none;
+  color: var(--text-secondary);
+  vertical-align: middle;
+  transform: rotate(-90deg);
+  transition: transform var(--t-quick) var(--ease-ui);
+}
+.think-toggle[aria-expanded='true'] .think-chevron {
+  transform: none;
+}
+.think-toggle:hover .run-title:not(.sheen),
+.think-toggle:hover .think-chevron {
+  color: var(--text-primary);
 }
 
 /* The "currently thinking" sweep: a grey label with a lighter band passing through it. `linear`,
@@ -5954,17 +5969,18 @@ button.composer-permission-chip[aria-expanded='true'] {
 }
 
 .run-reasoning {
-  padding: 0 0 12px;
+  padding: 2px 0 14px;
   animation: thinkParaIn 160ms var(--ease-ui);
 }
 
+/* Reasoning reads like Codex's: muted running prose directly under the status line, no box and no
+   rail. It stays one tone below the answer throughout, so the answer is always the brightest text. */
 .think-panel {
   margin-top: 0;
-  max-height: 208px;
+  max-height: 220px;
   overflow-y: auto;
-  border-left: 2px solid var(--hairline-strong);
-  padding: 2px 0 2px 12px;
-  font-size: 12.5px;
+  padding: 0;
+  font-size: 13px;
   line-height: 1.7;
   color: var(--text-secondary);
 }
@@ -5983,7 +5999,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   margin-bottom: 0;
 }
 .think-para.latest {
-  color: var(--text-primary);
+  color: var(--text-secondary);
   animation: thinkParaIn 160ms var(--ease-ui);
 }
 @keyframes thinkParaIn {
