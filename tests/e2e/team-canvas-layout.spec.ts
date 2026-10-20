@@ -285,13 +285,21 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       const afterDrag = await readWorkerPosition(page);
       expect(afterDrag).not.toEqual(before);
 
+      const glance = page.getByTestId('team-worker-glance');
+      await expect(glance).not.toBeVisible();
+
       // Zoom out to lod1 and assert the Worker body (message history + composer) is hidden while
-      // the head (role/status/objective) stays put — FR-CAN-04.
+      // the head (role/status/objective) stays put — FR-CAN-04. The body's space shows the glance
+      // instead (role, state in words, newest line), so the card never reads as an empty box.
       await setLod(page, '1');
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-lod', '1');
       await expect(page.getByTestId('team-worker').locator('.w-body')).not.toBeVisible();
       await expect(page.getByTestId('team-worker').locator('.role-name')).toBeVisible();
       await expect(page.getByTestId('team-worker').locator('.w-status')).toBeVisible();
+      await expect(glance).toBeVisible();
+      await expect(glance.locator('.w-glance-role')).toHaveText('実装');
+      await expect(glance.locator('.w-glance-state')).toHaveText('待機中');
+      await expect(glance.locator('.w-glance-line')).toHaveText('Leaderからの依頼を待っています');
 
       const cameraBeforeRestart = await readWorldTransform(page);
 
