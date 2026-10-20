@@ -164,6 +164,14 @@ test.describe('sidebar collapse', () => {
       await expect(page.getByTestId('sidebar-resizer')).toHaveCount(0);
       await page.keyboard.press(shortcut);
       await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+
+      // Inert while a modal is open: collapsing would hide a modal that lives in the sidebar and
+      // leave the window blocked behind it.
+      await page.getByTestId('sidebar-settings-button').click();
+      await expect(page.getByTestId('settings-dialog')).toBeVisible();
+      await page.keyboard.press(shortcut);
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(await sidebarWidth(page)).toBeGreaterThan(200);
     } finally {
       await closeApp(app);
       removeUserDataDir(dir);

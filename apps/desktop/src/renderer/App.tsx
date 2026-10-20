@@ -352,6 +352,10 @@ export default function App() {
       if (event.isComposing || event.altKey || event.shiftKey) return;
       if (event.key.toLowerCase() !== 'b') return;
       if (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) return;
+      // Never while a modal dialog is open: several (project editor, archive confirmation) live
+      // inside the sidebar, and collapsing it would hide a still-open modal and leave the window
+      // blocked behind it. The shortcut belongs to the workspace, not to whatever is on top.
+      if (document.querySelector(':modal') !== null) return;
       event.preventDefault();
       toggleSidebar();
     };
