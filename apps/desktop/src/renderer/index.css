@@ -5732,6 +5732,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   flex: none;
   max-height: 140px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   border-bottom: 1px solid var(--hairline);
   background: color-mix(in srgb, var(--warning) 4%, transparent);
 }
@@ -5778,6 +5779,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   z-index: 2;
   max-height: 300px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 8px 4px;
   border: 1px solid var(--hairline-strong);
   border-radius: var(--r-md);
