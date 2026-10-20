@@ -68,6 +68,9 @@ test.describe('Phase 5/6 Team flow: Leader hires and dispatches autonomously', (
       await expect(cards.nth(index).locator('.team-status')).toHaveText('done', {
         timeout: 20_000,
       });
+      // The card reads as a thread: between the request and the report sits the Worker's own
+      // work log, carried from Main in the summary's activityLog.
+      await expect(cards.nth(index).locator('.w-body .w-step').first()).toBeAttached();
     }
 
     // The Leader's own timeline carries the synthesized final answer (main/team-tools.ts's

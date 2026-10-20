@@ -654,9 +654,16 @@ export type WorkerSummary = {
   managerPolicy: ManagerPolicy | null;
   liveOutput: string;
   reasoningActive: boolean;
+  /** The newest steps of the Worker's work log (tool calls, file changes), oldest first. */
+  activityLog?: WorkerActivityEntry[];
   usage: TeamUsageTotals;
   createdAt: string;
   updatedAt: string;
+};
+export type WorkerActivityEntry = {
+  kind: 'activity' | 'fileChange';
+  label: string;
+  at: string;
 };
 export type TeamMessageSummary = {
   id: string;

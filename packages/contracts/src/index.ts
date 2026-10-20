@@ -472,6 +472,16 @@ export const teamBudgetStatusSchema = z
   .strict();
 export type TeamBudgetStatus = z.infer<typeof teamBudgetStatusSchema>;
 
+/** One step of a Worker's work log — a tool call or a file change, as the Worker reported it. */
+export const workerActivityEntrySchema = z
+  .object({
+    kind: z.enum(['activity', 'fileChange']),
+    label: z.string().max(500),
+    at: timestampSchema,
+  })
+  .strict();
+export type WorkerActivityEntry = z.infer<typeof workerActivityEntrySchema>;
+
 export const workerSummarySchema = z
   .object({
     id: idSchema,
@@ -494,6 +504,8 @@ export const workerSummarySchema = z
     managerPolicy: managerPolicySchema.nullable(),
     liveOutput: z.string().max(20_000),
     reasoningActive: z.boolean(),
+    /** The newest steps of the Worker's work log, oldest first. Optional for older producers. */
+    activityLog: z.array(workerActivityEntrySchema).max(40).optional(),
     usage: teamUsageTotalsSchema,
     createdAt: timestampSchema,
     updatedAt: timestampSchema,

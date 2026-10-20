@@ -18,6 +18,17 @@ describe('preservesNestedScroll', () => {
     },
   );
 
+  it('gives the wheel back to the camera when the scrollport has nothing to scroll', () => {
+    const scrollport = (scrollHeight: number) =>
+      ({ scrollHeight, clientHeight: 300 }) as unknown as Element;
+    expect(
+      preservesNestedScroll({ closest: () => scrollport(300) } as unknown as EventTarget),
+    ).toBe(false);
+    expect(
+      preservesNestedScroll({ closest: () => scrollport(900) } as unknown as EventTarget),
+    ).toBe(true);
+  });
+
   it('leaves wheel gestures on the canvas to camera controls', () => {
     expect(
       preservesNestedScroll({

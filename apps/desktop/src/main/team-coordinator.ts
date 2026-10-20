@@ -17,6 +17,7 @@ import {
   workerReportSchema,
   workerSummarySchema,
   type AccessPreset,
+  type WorkerActivityEntry,
   type TeamDetail,
   type TeamHireWorkerInput,
   type TeamMessageSummary,
@@ -97,6 +98,7 @@ import {
 import { workspaceMutationBinding } from './path-guard';
 import { MANAGED_LOCAL_CONNECTION_ID } from './managed-local-provider-runtime';
 import type { ApprovalWaitObserver } from './tool-broker';
+import { WORKER_ACTIVITY_LOG_LIMIT, workerActivityEntry } from './worker-activity-log';
 import {
   allCriteriaDone,
   confirmWorkerReport,
@@ -516,6 +518,9 @@ export class TeamCoordinator {
     string,
     { liveOutput: string; reasoningActive: boolean }
   >();
+  /** Per Worker: the newest work-log steps, loaded from persistence once and then kept current as
+   * steps are recorded, so a summary never queries the log on every progress publish. */
+  private readonly workerActivityLogs = new Map<string, WorkerActivityEntry[]>();
   /** Per Team: when it was last published, and the pending progress publish, if any (#863). */
   private readonly progressPublishes = new Map<
     string,
@@ -712,6 +717,12 @@ export class TeamCoordinator {
       payload: event,
       now,
     });
+    const logEntry = workerActivityEntry(event.type, event, now);
+    const cachedLog = this.workerActivityLogs.get(workerId);
+    if (logEntry !== null && cachedLog !== undefined) {
+      cachedLog.push(logEntry);
+      if (cachedLog.length > WORKER_ACTIVITY_LOG_LIMIT) cachedLog.shift();
+    }
     // A finished, failed or canceled Worker is a state change and goes out at once; the rest is
     // progress (issue #863).
     if (terminal) this.emit(taskId, teamId);
@@ -7103,6 +7114,15 @@ export class TeamCoordinator {
     });
   }
 
+  private workerActivityLog(agentId: string): WorkerActivityEntry[] {
+    let log = this.workerActivityLogs.get(agentId);
+    if (log === undefined) {
+      log = this.persistence.listRecentWorkerActivity(agentId, WORKER_ACTIVITY_LOG_LIMIT);
+      this.workerActivityLogs.set(agentId, log);
+    }
+    return log;
+  }
+
   private workerSummary(agent: AgentRecord): WorkerSummary {
     return workerSummarySchema.parse({
       id: agent.id,
@@ -7125,6 +7145,7 @@ export class TeamCoordinator {
       managerPolicy: agent.managerPolicy,
       liveOutput: this.transientWorkerActivity.get(agent.id)?.liveOutput ?? '',
       reasoningActive: this.transientWorkerActivity.get(agent.id)?.reasoningActive ?? false,
+      ...(agent.kind === 'worker' ? { activityLog: [...this.workerActivityLog(agent.id)] } : {}),
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       usage:
