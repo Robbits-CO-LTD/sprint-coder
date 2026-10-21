@@ -277,6 +277,7 @@
   var filmEnd = 0; // 最後の章の下端（その下はダウンロード欄・フッター）
   var maxY = 0; // いちばん下までスクロールしたときの位置
   function measure() {
+    checkFit();
     vh = window.innerHeight;
     tops = scenes.map(function (s) {
       return s.getBoundingClientRect().top + window.scrollY;
@@ -295,12 +296,38 @@
     return cur;
   }
 
-  // 低い画面では章を縦に並べて全部見せる（styles.css の max-height: 560px）。そのときは拍で動画を切り替えない
+  // 舞台（画面の高さ）に章の中身が収まらないとき（低い画面・縦長で内容が多い・文字の拡大）は、
+  // .fit-off を付けて章を普通の縦並びに戻し、全部見せる。そのときは拍で動画を切り替えない
   var lowMQ = window.matchMedia('(max-height: 560px)');
+  function fitOff() {
+    return root.classList.contains('fit-off');
+  }
+  function checkFit() {
+    root.classList.remove('fit-off');
+    if (lowMQ.matches) {
+      root.classList.add('fit-off');
+      return;
+    }
+    var over = scenes.some(function (sc) {
+      var stage = sc.querySelector('.stage');
+      if (!stage) return false;
+      var cs = getComputedStyle(stage);
+      var limit = stage.clientHeight - parseFloat(cs.paddingBottom) + 8;
+      return all(':scope > .beat', stage).some(function (b) {
+        return b.offsetTop + b.offsetHeight > limit || b.offsetTop < 0;
+      });
+    });
+    if (over) root.classList.add('fit-off');
+  }
   function playScene(m) {
     m.videos.forEach(function (v) {
-      var gate = lowMQ.matches ? null : v.closest('[data-show]');
-      var shown = !lowMQ.matches || v.getClientRects().length > 0;
+      var gate = fitOff() ? null : v.closest('[data-show]');
+      var shown = true;
+      if (fitOff()) {
+        // 縦並びでは章が長いので、動画そのものが画面に入っているときだけ再生する
+        var r = v.getBoundingClientRect();
+        shown = r.height > 0 && r.bottom > 0 && r.top < vh;
+      }
       setPlaying(v, m.visible && shown && (!gate || gate.classList.contains('on')));
     });
   }

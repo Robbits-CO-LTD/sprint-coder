@@ -1893,71 +1893,73 @@ td {
   }
 }
 
-/* 低い画面（横向きのスマホなど）: 固定の舞台に収まらないので、章を普通の縦並びに戻して全部見せる */
-@media (max-height: 560px) {
-  .js .scene {
-    height: auto;
-  }
-  .js .stage {
-    position: relative;
-    height: auto;
-    min-height: 0;
-    padding-top: calc(var(--header) + 24px);
-    padding-bottom: 48px;
-  }
-  .js .stage > .beat {
-    grid-area: auto;
-  }
-  .js .stage > .beat + .beat {
-    margin-top: 40px;
-  }
-  .js [data-show],
-  .js .fx-up[data-show],
-  .js .fx-slam[data-show],
-  .js .fx-left[data-show] {
-    opacity: 1;
-    transform: none;
-    filter: none;
-    pointer-events: auto;
-  }
-  .js .flow li[data-show] {
-    opacity: 1;
-  }
-  .js .screen-stack {
-    aspect-ratio: auto;
-  }
-  .js .screen-stack > .screen {
-    position: relative;
-  }
-  .js .screen-stack > * + * {
-    margin-top: 16px;
-  }
-  .js .colorfield {
-    display: none;
-  }
-  .js .on-lime {
-    padding: 28px;
-    border-radius: 20px;
-    background: var(--lime);
-  }
-  .js .footage-layer[data-show]:not(:first-of-type) {
-    display: none;
-  }
-  .scene .footage-layer video {
-    filter: brightness(0.3) saturate(0.7);
-  }
-  .player {
-    bottom: 8px;
-    height: 44px;
-  }
+/* 舞台に収まらないとき（低い画面・縦長で内容が多い・文字の拡大）: film.js が .fit-off を付け、
+ * 章を普通の縦並びに戻して全部見せる */
+.js.fit-off .scene {
+  height: auto;
+}
+.js.fit-off .stage {
+  position: relative;
+  height: auto;
+  min-height: 0;
+  padding-top: calc(var(--header) + 24px);
+  padding-bottom: 48px;
+}
+.js.fit-off .stage > .beat {
+  grid-area: auto;
+}
+.js.fit-off .stage > .beat + .beat {
+  margin-top: 40px;
+}
+.js.fit-off [data-show],
+.js.fit-off .fx-up[data-show],
+.js.fit-off .fx-slam[data-show],
+.js.fit-off .fx-left[data-show] {
+  opacity: 1;
+  transform: none;
+  filter: none;
+  pointer-events: auto;
+}
+.js.fit-off .flow li[data-show] {
+  opacity: 1;
+}
+.js.fit-off .screen-stack {
+  aspect-ratio: auto;
+}
+.js.fit-off .screen-stack > .screen {
+  position: relative;
+}
+.js.fit-off .screen-stack > * + * {
+  margin-top: 16px;
+}
+.js.fit-off .colorfield {
+  display: none;
+}
+.js.fit-off .on-lime {
+  padding: 28px;
+  border-radius: 20px;
+  background: var(--lime);
+}
+.js.fit-off .footage-layer[data-show]:not(:first-of-type) {
+  display: none;
+}
+.fit-off .scene .footage-layer video {
+  filter: brightness(0.3) saturate(0.7);
+}
+.fit-off .player {
+  bottom: 8px;
+  height: 44px;
 }
 
-/* フル版のモーダルは画面の高さに収める（操作部と閉じるボタンが切れないように） */
+/* フル版のモーダルは画面の高さに収める（操作部と閉じるボタンが切れないように）。
+ * 動画の高さ = 画面 − 余白 24px − 下の帯（閉じるボタン 38px＋上下 20px＋線）≒ 64px */
 .modal {
+  max-height: calc(100vh - 24px);
   max-height: calc(100dvh - 24px);
   overflow-y: auto;
 }
 .modal video {
+  max-height: calc(100vh - 24px - 64px);
   max-height: calc(100dvh - 24px - 64px);
   object-fit: contain;
 }
