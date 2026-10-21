@@ -403,6 +403,11 @@ a {
     0 60px 160px -20px rgba(0, 0, 0, 0.9),
     0 0 120px -30px var(--lime-glow);
 }
+.hero-screen .rec {
+  /* 画面は右へはみ出して置くので、ラベルは内側に寄せて倍率まで読めるようにする */
+  right: auto;
+  left: 30%;
+}
 .hero-screen .screen::after {
   content: '';
   position: absolute;
@@ -1735,6 +1740,11 @@ td {
   }
   .hero-screen video {
     opacity: 0.55;
+  }
+  /* 画面は右へはみ出すので、録画ラベルは左上に置いて倍率まで読めるようにする */
+  .hero-screen .rec {
+    right: auto;
+    left: 12px;
   }
   .js .hero .stage {
     align-content: end;
