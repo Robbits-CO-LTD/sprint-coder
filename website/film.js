@@ -274,6 +274,7 @@
   var vh = window.innerHeight;
   var tops = [];
   var lens = [];
+  var filmEnd = 0; // 最後の章の下端（その下はダウンロード欄・フッター）
   function measure() {
     vh = window.innerHeight;
     tops = scenes.map(function (s) {
@@ -282,6 +283,8 @@
     lens = scenes.map(function (s) {
       return Math.max(1, s.offsetHeight - vh);
     });
+    var last = scenes[scenes.length - 1];
+    filmEnd = last.getBoundingClientRect().bottom + window.scrollY;
     placeTicks();
   }
   function chapterAt(y, slack) {
@@ -545,9 +548,10 @@
 
   /* ---------------------------------------------------------- ループ */
   var ticking = false;
+  var frameY = 0; // 最後に描いたときの位置（リサイズでブラウザが位置を詰める前の値）
   function frame() {
     ticking = false;
-    var y = window.scrollY;
+    var y = (frameY = window.scrollY);
     for (var i = 0; i < model.length; i++) sceneUpdate(model[i], i, y);
     updatePlayer(y);
     updateHeader();
@@ -560,28 +564,38 @@
   }
   // 大きさが変わると章の高さ（vh）も変わる。同じ章の同じ進み具合へ戻す
   var rzPending = false;
-  function remeasureKeepingPlace() {
-    var y = window.scrollY;
+  function remeasureKeepingPlace(prevY) {
+    var y = typeof prevY === 'number' ? prevY : window.scrollY;
+    // 章の外（最後の章より下: ダウンロード欄・フッター）は、フィルムの終わりからの距離を保つ
+    var after = tops.length && y >= filmEnd ? y - filmEnd : -1;
     var i = chapterAt(y, 0);
     var p = tops.length ? clamp((y - tops[i]) / lens[i], 0, 1) : 0;
+    var before = tops.length && y < tops[0];
     measure();
     model.forEach(function (m) {
       m.step = -1;
     });
-    if (y > 0 && tops.length) jump(tops[i] + p * lens[i]);
+    if (after >= 0) jump(filmEnd + after);
+    else if (y > 0 && tops.length && !before) jump(tops[i] + p * lens[i]);
     onScroll();
   }
   window.addEventListener('scroll', onScroll, { passive: true });
   window.addEventListener('resize', function () {
     if (rzPending) return;
     rzPending = true;
+    var prevY = frameY;
     requestAnimationFrame(function () {
       rzPending = false;
-      remeasureKeepingPlace();
+      remeasureKeepingPlace(prevY);
     });
   });
-  window.addEventListener('load', remeasureKeepingPlace);
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(remeasureKeepingPlace);
+  window.addEventListener('load', function () {
+    remeasureKeepingPlace();
+  });
+  if (document.fonts && document.fonts.ready)
+    document.fonts.ready.then(function () {
+      remeasureKeepingPlace();
+    });
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       stopAuto();
