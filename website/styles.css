@@ -1892,3 +1892,72 @@ td {
     display: none;
   }
 }
+
+/* 低い画面（横向きのスマホなど）: 固定の舞台に収まらないので、章を普通の縦並びに戻して全部見せる */
+@media (max-height: 560px) {
+  .js .scene {
+    height: auto;
+  }
+  .js .stage {
+    position: relative;
+    height: auto;
+    min-height: 0;
+    padding-top: calc(var(--header) + 24px);
+    padding-bottom: 48px;
+  }
+  .js .stage > .beat {
+    grid-area: auto;
+  }
+  .js .stage > .beat + .beat {
+    margin-top: 40px;
+  }
+  .js [data-show],
+  .js .fx-up[data-show],
+  .js .fx-slam[data-show],
+  .js .fx-left[data-show] {
+    opacity: 1;
+    transform: none;
+    filter: none;
+    pointer-events: auto;
+  }
+  .js .flow li[data-show] {
+    opacity: 1;
+  }
+  .js .screen-stack {
+    aspect-ratio: auto;
+  }
+  .js .screen-stack > .screen {
+    position: relative;
+  }
+  .js .screen-stack > * + * {
+    margin-top: 16px;
+  }
+  .js .colorfield {
+    display: none;
+  }
+  .js .on-lime {
+    padding: 28px;
+    border-radius: 20px;
+    background: var(--lime);
+  }
+  .js .footage-layer[data-show]:not(:first-of-type) {
+    display: none;
+  }
+  .scene .footage-layer video {
+    filter: brightness(0.3) saturate(0.7);
+  }
+  .player {
+    bottom: 8px;
+    height: 44px;
+  }
+}
+
+/* フル版のモーダルは画面の高さに収める（操作部と閉じるボタンが切れないように） */
+.modal {
+  max-height: calc(100dvh - 24px);
+  overflow-y: auto;
+}
+.modal video {
+  max-height: calc(100dvh - 24px - 64px);
+  object-fit: contain;
+}

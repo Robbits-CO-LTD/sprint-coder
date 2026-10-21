@@ -295,10 +295,13 @@
     return cur;
   }
 
+  // 低い画面では章を縦に並べて全部見せる（styles.css の max-height: 560px）。そのときは拍で動画を切り替えない
+  var lowMQ = window.matchMedia('(max-height: 560px)');
   function playScene(m) {
     m.videos.forEach(function (v) {
-      var gate = v.closest('[data-show]');
-      setPlaying(v, m.visible && (!gate || gate.classList.contains('on')));
+      var gate = lowMQ.matches ? null : v.closest('[data-show]');
+      var shown = !lowMQ.matches || v.getClientRects().length > 0;
+      setPlaying(v, m.visible && shown && (!gate || gate.classList.contains('on')));
     });
   }
   refreshScenes = function () {
