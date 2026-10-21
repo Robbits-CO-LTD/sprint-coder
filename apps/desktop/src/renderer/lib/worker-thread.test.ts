@@ -151,6 +151,7 @@ describe('workerGlance', () => {
     expect(lineOf('`__init__.py` と `a_b` を直す')).toBe('__init__.py と a_b を直す');
     expect(lineOf('**太字** と *斜体* と _下線_ と __強調__')).toBe('太字 と 斜体 と 下線 と 強調');
     expect(lineOf('- 箇条書きの snake_case')).toBe('箇条書きの snake_case');
+    expect(lineOf('```ts\nconst a_b = 1;\n```')).toBe('const a_b = 1;');
   });
 
   it('unwraps a structured report and leaves other content as written', () => {

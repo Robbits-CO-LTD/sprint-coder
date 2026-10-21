@@ -139,7 +139,8 @@ function firstMarkdownLine(text: string): string {
     text
       .split('\n')
       .map((line) => line.trim())
-      .find((line) => line !== '') ?? '';
+      // A code fence's marker line (```ts) is markup, not a line of the message.
+      .find((line) => line !== '' && !/^(?:`{3,}|~{3,})/.test(line)) ?? '';
   return glanceLine(
     picked
       .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')
