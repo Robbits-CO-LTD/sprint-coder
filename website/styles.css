@@ -404,9 +404,13 @@ a {
     0 0 120px -30px var(--lime-glow);
 }
 .hero-screen .rec {
-  /* 画面は右へはみ出して置くので、ラベルは内側に寄せて倍率まで読めるようにする */
+  /* 画面は右へはみ出して置くので、ラベルは内側に寄せて倍率まで読めるようにする。
+     文言が長くなっても本文側へ伸びないよう、幅に上限を付けて折り返す */
   right: auto;
   left: 30%;
+  max-width: 50%;
+  flex-wrap: wrap;
+  white-space: normal;
 }
 .hero-screen .screen::after {
   content: '';
@@ -1747,6 +1751,9 @@ td {
     bottom: 10px;
     left: auto;
     right: calc(14vw + 10px);
+    max-width: 46vw;
+    font-size: 10px;
+    padding: 5px 8px;
   }
   .js .hero .stage {
     align-content: end;
