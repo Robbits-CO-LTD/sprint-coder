@@ -59,6 +59,39 @@ async function readWorldTransform(page: Page): Promise<{ x: number; y: number; s
   return { x: Number(match[1]), y: Number(match[2]), s: Number(match[3]) };
 }
 
+// Waits until the camera move has finished and no Worker card is still playing its spawn
+// animation. A fixed wait is not enough where frames run slowly (the hidden Linux CI window): a
+// Fit view still in flight moves the card between measuring its head and pressing on it, so the
+// press lands on the canvas and pans instead of dragging. The camera is saved when a move
+// settles, so the saved camera matching the live transform is the end of the move.
+async function waitForCanvasToSettle(page: Page): Promise<void> {
+  const taskId = await currentTaskId(page);
+  await expect
+    .poll(
+      async () => {
+        const saved = await page.evaluate(
+          (id) => window.sprintCoder!.teams.getCanvasView(id),
+          taskId,
+        );
+        const current = await readWorldTransform(page);
+        const animating = await page.evaluate(() =>
+          [...document.querySelectorAll('.worker')].some((card) =>
+            card.getAnimations().some((animation) => animation.playState === 'running'),
+          ),
+        );
+        return (
+          !animating &&
+          saved !== null &&
+          Math.abs(saved.camera.scale - current.s) < 0.0001 &&
+          Math.abs(saved.camera.x - current.x) < 1 &&
+          Math.abs(saved.camera.y - current.y) < 1
+        );
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
 // Nudges the camera's zoom level (wheel over the canvas center) until `.team-canvas`'s data-lod
 // attribute reaches `target`, correcting for overshoot past lod2 when aiming for lod1.
 async function setLod(page: Page, target: '1' | '2'): Promise<void> {
@@ -267,7 +300,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
-      await page.waitForTimeout(700); // let the fit settle before reading a baseline position
+      await waitForCanvasToSettle(page); // let the fit settle before reading a baseline position
 
       const before = await readWorkerPosition(page);
 
@@ -282,8 +315,8 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await page.mouse.move(startX + 170, startY + 95, { steps: 12 });
       await page.mouse.up();
 
-      // The drag moves the card through React state set from native pointer listeners, so the new
-      // position is rendered a task after pointerup — read it once it has landed, not right away.
+      // The card is re-rendered from React state set in native pointer listeners; read the new
+      // position once that render has landed.
       await expect.poll(() => readWorkerPosition(page)).not.toEqual(before);
 
       const glance = page.getByTestId('team-worker-glance');
@@ -443,7 +476,7 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
-      await page.waitForTimeout(700);
+      await waitForCanvasToSettle(page);
 
       // Drag the first Worker directly onto the SECOND Worker's default slot (WORKER_SLOTS[1] in
       // TeamCanvas.tsx: {x:1000, y:420}), so hiring a second Worker next would collide with it if
