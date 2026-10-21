@@ -275,6 +275,7 @@
   var tops = [];
   var lens = [];
   var filmEnd = 0; // 最後の章の下端（その下はダウンロード欄・フッター）
+  var maxY = 0; // いちばん下までスクロールしたときの位置
   function measure() {
     vh = window.innerHeight;
     tops = scenes.map(function (s) {
@@ -285,6 +286,7 @@
     });
     var last = scenes[scenes.length - 1];
     filmEnd = last.getBoundingClientRect().bottom + window.scrollY;
+    maxY = document.documentElement.scrollHeight - vh;
     placeTicks();
   }
   function chapterAt(y, slack) {
@@ -568,6 +570,7 @@
     var y = typeof prevY === 'number' ? prevY : window.scrollY;
     // 章の外（最後の章より下: ダウンロード欄・フッター）は、フィルムの終わりからの距離を保つ
     var after = tops.length && y >= filmEnd ? y - filmEnd : -1;
+    var atBottom = tops.length && y >= maxY - 2;
     var i = chapterAt(y, 0);
     var p = tops.length ? clamp((y - tops[i]) / lens[i], 0, 1) : 0;
     var before = tops.length && y < tops[0];
@@ -575,7 +578,8 @@
     model.forEach(function (m) {
       m.step = -1;
     });
-    if (after >= 0) jump(filmEnd + after);
+    if (atBottom) jump(maxY);
+    else if (after >= 0) jump(Math.min(filmEnd + after, maxY));
     else if (y > 0 && tops.length && !before) jump(tops[i] + p * lens[i]);
     onScroll();
   }
