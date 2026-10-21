@@ -134,6 +134,21 @@ describe('workerGlance', () => {
     ).toBe(`${'x'.repeat(160)}…`);
   });
 
+  it('removes only paired emphasis, so identifiers and operators read as written', () => {
+    const lineOf = (content: string) =>
+      workerGlance(
+        idle,
+        workerThread([{ ...message('m', '2026-10-20T10:00:00.000Z'), content }], []),
+      ).line;
+    expect(lineOf('Fixed test_utils.py and LIVE_OUTPUT_DISPLAY_CHARS')).toBe(
+      'Fixed test_utils.py and LIVE_OUTPUT_DISPLAY_CHARS',
+    );
+    expect(lineOf('a * b * c を計算')).toBe('a * b * c を計算');
+    expect(lineOf('`__init__.py` と `a_b` を直す')).toBe('__init__.py と a_b を直す');
+    expect(lineOf('**太字** と *斜体* と _下線_ と __強調__')).toBe('太字 と 斜体 と 下線 と 強調');
+    expect(lineOf('- 箇条書きの snake_case')).toBe('箇条書きの snake_case');
+  });
+
   it('unwraps a structured report and leaves other content as written', () => {
     expect(workerReportText(JSON.stringify({ summary: '完了しました' }))).toBe('完了しました');
     expect(workerReportText('{"other":1}')).toBe('{"other":1}');

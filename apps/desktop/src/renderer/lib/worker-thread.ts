@@ -106,14 +106,27 @@ type GlanceWorker = Pick<
 
 const GLANCE_LINE_CHARS = 160;
 
+/** Unwraps paired emphasis the way Markdown renders it, and nothing else: `test_utils.py`,
+ * `snake_case` and `a * b` are not emphasis, so their characters stay. */
+function withoutEmphasis(text: string): string {
+  return text
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
+    .replace(/(^|\W)__(?=\S)(.+?)(?<=\S)__(?!\w)/g, '$1$2')
+    .replace(/(^|[^*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?!\*)/g, '$1$2')
+    .replace(/(^|\W)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)/g, '$1$2');
+}
+
 /** One line of Markdown or streamed text as plain prose: the first (or last) non-empty line,
- * without block markers or inline emphasis, cut to a length a zoomed-out card can show. */
+ * without block markers, code-span backticks or emphasis, cut to a length a zoomed-out card can
+ * show. A code span's contents are kept verbatim. */
 function plainLine(text: string, from: 'first' | 'last'): string {
   const lines = text.split('\n').map((line) => line.trim());
   const picked = (from === 'first' ? lines : lines.reverse()).find((line) => line !== '') ?? '';
   const plain = picked
     .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')
-    .replace(/[*_`]+/g, '')
+    .split(/(`[^`]+`)/)
+    .map((part, index) => (index % 2 === 1 ? part.slice(1, -1) : withoutEmphasis(part)))
+    .join('')
     .trim();
   return plain.length > GLANCE_LINE_CHARS ? `${plain.slice(0, GLANCE_LINE_CHARS)}…` : plain;
 }
