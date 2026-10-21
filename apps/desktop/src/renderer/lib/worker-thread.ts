@@ -116,19 +116,38 @@ function withoutEmphasis(text: string): string {
     .replace(/(^|\W)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)/g, '$1$2');
 }
 
-/** One line of Markdown or streamed text as plain prose: the first (or last) non-empty line,
- * without block markers, code-span backticks or emphasis, cut to a length a zoomed-out card can
- * show. A code span's contents are kept verbatim. */
-function plainLine(text: string, from: 'first' | 'last'): string {
-  const lines = text.split('\n').map((line) => line.trim());
-  const picked = (from === 'first' ? lines : lines.reverse()).find((line) => line !== '') ?? '';
-  const plain = picked
-    .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')
-    .split(/(`[^`]+`)/)
-    .map((part, index) => (index % 2 === 1 ? part.slice(1, -1) : withoutEmphasis(part)))
-    .join('')
-    .trim();
-  return plain.length > GLANCE_LINE_CHARS ? `${plain.slice(0, GLANCE_LINE_CHARS)}…` : plain;
+function glanceLine(line: string): string {
+  return line.length > GLANCE_LINE_CHARS ? `${line.slice(0, GLANCE_LINE_CHARS)}…` : line;
+}
+
+/** The last non-empty line of the Worker's streaming text, as written: the card shows that text
+ * raw (`.w-stream`), not as Markdown, so nothing in it is markup to remove. */
+function lastStreamLine(text: string): string {
+  return glanceLine(
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .reverse()
+      .find((line) => line !== '') ?? '',
+  );
+}
+
+/** The first non-empty line of a Markdown message as plain prose: without block markers,
+ * code-span backticks or emphasis. A code span's contents are kept verbatim. */
+function firstMarkdownLine(text: string): string {
+  const picked =
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line !== '') ?? '';
+  return glanceLine(
+    picked
+      .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')
+      .split(/(`[^`]+`)/)
+      .map((part, index) => (index % 2 === 1 ? part.slice(1, -1) : withoutEmphasis(part)))
+      .join('')
+      .trim(),
+  );
 }
 
 function glanceState(worker: GlanceWorker): string {
@@ -165,14 +184,14 @@ export function workerGlance(
   if (busy && worker.currentActivity !== null)
     return { state, line: workStepLabel(worker.currentActivity) };
   if (busy && worker.liveOutput.trim() !== '')
-    return { state, line: plainLine(worker.liveOutput, 'last') };
+    return { state, line: lastStreamLine(worker.liveOutput) };
   const newest = thread.at(-1);
   if (newest?.kind === 'step') return { state, line: workStepLabel(newest.step.label) };
   if (newest?.kind === 'message') {
     const { content, sourceAgentId } = newest.message;
     return {
       state,
-      line: plainLine(sourceAgentId === worker.id ? workerReportText(content) : content, 'first'),
+      line: firstMarkdownLine(sourceAgentId === worker.id ? workerReportText(content) : content),
     };
   }
   return {

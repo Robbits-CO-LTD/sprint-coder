@@ -110,6 +110,10 @@ describe('workerGlance', () => {
     expect(
       workerGlance({ ...busy, reasoningActive: true, liveOutput: '一行目\n\n二行目\n' }, thread),
     ).toEqual({ state: '思考中', line: '二行目' });
+    // The card shows streaming text raw, so the glance keeps it as written too.
+    expect(
+      workerGlance({ ...busy, liveOutput: 'from __init__.py import *x*\n' }, thread).line,
+    ).toBe('from __init__.py import *x*');
     expect(workerGlance(busy, thread).line).toBe('依頼の本文');
   });
 
