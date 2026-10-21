@@ -148,6 +148,7 @@
     });
   } else {
     all('[data-motion]').forEach(function (b) {
+      b.hidden = false;
       b.addEventListener('click', function () {
         setMotion(!userStop);
       });

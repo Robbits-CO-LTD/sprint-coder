@@ -15,29 +15,31 @@ $ErrorActionPreference = 'Stop'
 $Out = Join-Path $PSScriptRoot '..\media'
 New-Item -ItemType Directory -Force $Out | Out-Null
 
-# name, 録画, 開始秒, 使う長さ(秒・録画の時間), 速さ(1 = 等速)
+# name, 録画, 開始秒, 使う長さ(秒・録画の時間), 速さ(1 = 等速), 下端を切る割合（任意）
+# 下端を切るのは、アプリの通知（「Runtime Hostから無効なイベント」）が出る帯を外すため。中身は元の録画のまま
 $Clips = @(
-  @('hero',      'v2_runB',      1360, 32, 4),  # 全員のカードを引きで見渡して寄る（早送り ×4）
+  @('hero',      'v2_runB',      722, 32, 4),   # 全員のカードを引きで見渡して寄る（早送り ×4）
   @('setup',     'v2_setup',     0.3, 12, 1),   # 最初の設定
   @('request',   'v2_runA',      8,   8,  1),   # 依頼を入力して送信
-  @('hires',     'v2_hires',     0.5, 9,  1),   # リーダーが部長 3 人を採用（実演の直後に記録を開いて収録）
+  @('hires',     'v2_hires',     0.5, 9,  1, 0.06),   # リーダーが部長 3 人を採用（実演の直後に記録を開いて収録）
   @('assemble',  'v2_runA',      85,  90, 10),  # 部長と担当がそろっていく（早送り ×10）
   @('together',  'v2_runB',      903, 8,  1),   # やり直しの間も別々のAIが同時に作業
   @('settings',  'v2_settings2', 2.4, 10, 1),   # 部署ごとのAIの選び方を書く設定
-  @('answers',   'v2_answers',   0.5, 10, 1),   # このPCのAIが考えたテストの案（実演の直後）
+  @('answers',   'v2_answers',   0.5, 10, 1, 0.06),   # このPCのAIが考えたテストの案（実演の直後）
   @('code',      'v2_runB',      225, 8,  1),   # 作る担当がコードを直す
   @('review',    'v2_runB',      762, 8,  1),   # チェック役のAIが確認
   @('redo',      'v2_runB',      1524, 6, 1),   # 1 回だけやり直し
-  @('recheck',   'v2_answers',   33.3, 10, 1),  # 弱点をもう一度さがす（実演の直後）
-  @('final',     'v2_final',     0,   14, 1)    # リーダーの最終報告（実演の直後）
+  @('recheck',   'v2_answers',   33.3, 10, 1, 0.06),  # 弱点をもう一度さがす（実演の直後）
+  @('final',     'v2_final',     0,   14, 1, 0.06)    # リーダーの最終報告（実演の直後）
 )
 
 foreach ($c in $Clips) {
-  $name, $src, $ss, $dur, $speed = $c
+  $name, $src, $ss, $dur, $speed, $cut = $c
   $in = Join-Path $Rec "$src.mp4"
   $mp4 = Join-Path $Out "$name.mp4"
   $jpg = Join-Path $Out "$name.jpg"
-  $vf = "setpts=PTS/$speed,fps=30,scale=1600:-2:flags=lanczos"
+  $crop = if ($cut) { "crop=iw:ih*$(1 - $cut):0:0," } else { '' }
+  $vf = "$($crop)setpts=PTS/$speed,fps=30,scale=1600:-2:flags=lanczos"
   ffmpeg -v error -y -ss $ss -t $dur -i $in -an -vf $vf -c:v libx264 -preset slow -crf 27 `
     -pix_fmt yuv420p -profile:v high -movflags +faststart $mp4
   # ポスターは再生が始まるコマと同じ（読み込み後に絵が飛ばないように）

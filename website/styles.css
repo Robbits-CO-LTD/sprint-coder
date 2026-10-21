@@ -1741,10 +1741,12 @@ td {
   .hero-screen video {
     opacity: 0.55;
   }
-  /* 画面は右へはみ出すので、録画ラベルは左上に置いて倍率まで読めるようにする */
+  /* 画面は右へはみ出し、上半分には見出しが重なる。録画ラベルは見えている右下（文字のない所）に置く */
   .hero-screen .rec {
-    right: auto;
-    left: 12px;
+    top: auto;
+    bottom: 10px;
+    left: auto;
+    right: calc(14vw + 10px);
   }
   .js .hero .stage {
     align-content: end;

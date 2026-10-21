@@ -33,9 +33,12 @@ video in a `<dialog>`.
 Subpages use the same design system (`.page-hero` with a looping clip, cards,
 `.reel` blocks with clips, a `.details` section with the technical text).
 
-With `prefers-reduced-motion: reduce`, scenes render as normal stacked sections
-and videos get native controls instead of autoplay. Without JavaScript all text
-is still in the HTML.
+With `prefers-reduced-motion: reduce`, scenes render as normal stacked sections,
+nothing autoplays and every clip shows its poster frame (the full video is still
+playable in the dialog). When a chapter does not fit the pinned stage (short
+screens, zoomed text), `film.js` adds `.fit-off` and the chapters stack the same
+way. Every page also has a 「動きを止める」 button that pauses all clips. Without
+JavaScript all text is still in the HTML.
 
 ## Production constraints (CSP)
 
