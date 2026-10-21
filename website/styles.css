@@ -1908,6 +1908,16 @@ td {
 .js.fit-off .stage > .beat {
   grid-area: auto;
 }
+/* 録画ラベルは本文の流れに入れ、見出しの上に置く（長いラベルが見出しに重ならないように） */
+.js.fit-off .stage > .rec {
+  position: relative;
+  top: auto;
+  right: auto;
+  justify-self: start;
+  width: fit-content;
+  max-width: var(--shell);
+  margin: 0 0 16px max(16px, calc((100vw - var(--shell)) / 2));
+}
 .js.fit-off .stage > .beat + .beat {
   margin-top: 40px;
 }
