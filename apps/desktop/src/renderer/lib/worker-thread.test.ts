@@ -155,6 +155,24 @@ describe('workerGlance', () => {
     expect(lineOf('~~~\n__init__ **x**\n~~~')).toBe('__init__ **x**');
   });
 
+  it('reads only the start of a huge line, so a long message cannot stall the render', () => {
+    const huge = `${'**x '.repeat(250_000)}\n二行目`;
+    const started = performance.now();
+    const line = workerGlance(
+      idle,
+      workerThread([{ ...message('m', '2026-10-20T10:00:00.000Z'), content: huge }], []),
+    ).line;
+    expect(performance.now() - started).toBeLessThan(200);
+    expect(line.endsWith('…')).toBe(true);
+    expect(line.length).toBe(161);
+    expect(
+      workerGlance(
+        { ...idle, state: 'busy', liveOutput: `${'_a '.repeat(250_000)}\n最後の行\n\n` },
+        [],
+      ).line,
+    ).toBe('最後の行');
+  });
+
   it('unwraps a structured report and leaves other content as written', () => {
     expect(workerReportText(JSON.stringify({ summary: '完了しました' }))).toBe('完了しました');
     expect(workerReportText('{"other":1}')).toBe('{"other":1}');

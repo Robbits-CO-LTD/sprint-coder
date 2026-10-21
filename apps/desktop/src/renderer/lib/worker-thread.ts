@@ -120,26 +120,48 @@ function glanceLine(line: string): string {
   return line.length > GLANCE_LINE_CHARS ? `${line.slice(0, GLANCE_LINE_CHARS)}…` : line;
 }
 
+/** How much of one line the glance reads. It runs on every render of every card and messages have
+ * no length limit, so a line is cut to this before anything scans it — the emphasis patterns in
+ * particular can take time quadratic in the length of what they are given. */
+const GLANCE_SCAN_CHARS = GLANCE_LINE_CHARS * 2;
+
+/** One line of `text` from `start` up to `end`, cut to the scan limit and trimmed. */
+function scannedLine(text: string, start: number, end: number): string {
+  return text.slice(start, Math.min(end, start + GLANCE_SCAN_CHARS)).trim();
+}
+
+/** The first `count` non-empty lines, reading only as far into `text` as they reach. */
+function leadingLines(text: string, count: number): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  while (lines.length < count) {
+    const newline = text.indexOf('\n', start);
+    const line = scannedLine(text, start, newline === -1 ? text.length : newline);
+    if (line !== '') lines.push(line);
+    if (newline === -1) break;
+    start = newline + 1;
+  }
+  return lines;
+}
+
 /** The last non-empty line of the Worker's streaming text, as written: the card shows that text
- * raw (`.w-stream`), not as Markdown, so nothing in it is markup to remove. */
+ * raw (`.w-stream`), not as Markdown, so nothing in it is markup to remove. Read from the end. */
 function lastStreamLine(text: string): string {
-  return glanceLine(
-    text
-      .split('\n')
-      .map((line) => line.trim())
-      .reverse()
-      .find((line) => line !== '') ?? '',
-  );
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf('\n', end - 1) + 1;
+    const line = scannedLine(text, start, end);
+    if (line !== '') return glanceLine(line);
+    end = start - 1;
+  }
+  return '';
 }
 
 /** The first non-empty line of a Markdown message as plain prose: without block markers,
  * code-span backticks or emphasis. A code span's contents are kept verbatim, and so is a message
  * that opens with a code fence: its first line is code, shown as written. */
 function firstMarkdownLine(text: string): string {
-  const lines = text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line !== '');
+  const lines = leadingLines(text, 2);
   const picked = lines[0] ?? '';
   const fence = /^(?:`{3,}|~{3,})/;
   if (fence.test(picked)) {
