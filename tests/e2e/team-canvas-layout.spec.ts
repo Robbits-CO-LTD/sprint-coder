@@ -277,10 +277,58 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       if (!headBox) throw new Error('worker head not found');
       const startX = headBox.x + headBox.width / 2;
       const startY = headBox.y + headBox.height / 2;
+      // TEMP-DIAG (PR #900): remove before merge.
+      const diag = async (label: string) =>
+        console.log(
+          `[diag] ${label}`,
+          JSON.stringify(
+            await page.evaluate(
+              ({ x, y }) => {
+                const hit = document.elementFromPoint(x, y);
+                const card = document.querySelector<HTMLElement>('[data-testid="team-worker"]');
+                return {
+                  inner: `${innerWidth}x${innerHeight}`,
+                  dpr: devicePixelRatio,
+                  visibility: document.visibilityState,
+                  transform: document.querySelector<HTMLElement>('.team-world')?.style.transform,
+                  lod: document.querySelector('.team-canvas')?.getAttribute('data-lod'),
+                  card: card ? `${card.style.left},${card.style.top} ${card.className}` : null,
+                  head: JSON.stringify(card?.querySelector('.w-head')?.getBoundingClientRect()),
+                  hit: hit ? `${hit.tagName}.${hit.className}` : null,
+                };
+              },
+              { x: startX, y: startY },
+            ),
+          ),
+        );
+      await page.evaluate(() => {
+        const w = window as unknown as { __diag: string[] };
+        w.__diag = [];
+        for (const type of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel'])
+          window.addEventListener(
+            type,
+            (e) => {
+              const p = e as PointerEvent;
+              if (w.__diag.length < 40)
+                w.__diag.push(
+                  `${type}@${p.clientX},${p.clientY}>${(p.target as Element)?.className}`,
+                );
+            },
+            true,
+          );
+      });
+      await diag('before-drag');
       await page.mouse.move(startX, startY);
       await page.mouse.down();
       await page.mouse.move(startX + 170, startY + 95, { steps: 12 });
       await page.mouse.up();
+      await diag('after-drag');
+      console.log(
+        '[diag] events',
+        JSON.stringify(
+          await page.evaluate(() => (window as unknown as { __diag: string[] }).__diag),
+        ),
+      );
 
       const afterDrag = await readWorkerPosition(page);
       expect(afterDrag).not.toEqual(before);
