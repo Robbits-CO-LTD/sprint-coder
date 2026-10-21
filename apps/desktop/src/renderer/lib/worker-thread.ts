@@ -133,14 +133,19 @@ function lastStreamLine(text: string): string {
 }
 
 /** The first non-empty line of a Markdown message as plain prose: without block markers,
- * code-span backticks or emphasis. A code span's contents are kept verbatim. */
+ * code-span backticks or emphasis. A code span's contents are kept verbatim, and so is a message
+ * that opens with a code fence: its first line is code, shown as written. */
 function firstMarkdownLine(text: string): string {
-  const picked =
-    text
-      .split('\n')
-      .map((line) => line.trim())
-      // A code fence's marker line (```ts) is markup, not a line of the message.
-      .find((line) => line !== '' && !/^(?:`{3,}|~{3,})/.test(line)) ?? '';
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  const picked = lines[0] ?? '';
+  const fence = /^(?:`{3,}|~{3,})/;
+  if (fence.test(picked)) {
+    const code = lines[1] ?? '';
+    return fence.test(code) ? '' : glanceLine(code);
+  }
   return glanceLine(
     picked
       .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')

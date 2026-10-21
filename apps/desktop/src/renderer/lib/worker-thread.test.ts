@@ -152,6 +152,7 @@ describe('workerGlance', () => {
     expect(lineOf('**太字** と *斜体* と _下線_ と __強調__')).toBe('太字 と 斜体 と 下線 と 強調');
     expect(lineOf('- 箇条書きの snake_case')).toBe('箇条書きの snake_case');
     expect(lineOf('```ts\nconst a_b = 1;\n```')).toBe('const a_b = 1;');
+    expect(lineOf('~~~\n__init__ **x**\n~~~')).toBe('__init__ **x**');
   });
 
   it('unwraps a structured report and leaves other content as written', () => {
