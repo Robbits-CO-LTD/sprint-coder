@@ -102,6 +102,11 @@ a {
   top: 12px;
 }
 
+/* hidden 属性は .btn などの display 指定より強くする（JS なし・動きを減らす設定で使わないボタンを隠す） */
+[hidden] {
+  display: none !important;
+}
+
 .visually-hidden {
   position: absolute !important;
   width: 1px;

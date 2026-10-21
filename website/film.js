@@ -554,7 +554,7 @@
 
   /* 音（既定は消音。押したときだけ鳴らす） */
   var soundOn = false;
-  setSound = function (on, silent) {
+  setSound = function (on) {
     soundOn = on;
     if (player) player.classList.toggle('is-sound', on);
     if (soundBtn) {
@@ -572,7 +572,6 @@
     } else {
       bgm.pause();
     }
-    if (!silent) store('sc-sound', on ? '1' : '0');
   };
   if (soundBtn)
     soundBtn.addEventListener('click', function () {
