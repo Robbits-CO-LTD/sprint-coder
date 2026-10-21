@@ -71,6 +71,11 @@ come only from the demo's run log and the leader's own test run.
 
 `assets/sprint-coder-og.jpg` (1200×630) is rendered from a real frame.
 
+After changing the hero's recording label or layout, run
+`node website/tools/check-hero-label.cjs http://127.0.0.1:4174/` (with the local
+preview running). It checks 56 viewport sizes at the start and end of the
+opening chapter and fails if the label overlaps the copy or leaves the screen.
+
 ## Public routes
 
 - `/` — Homepage (the film)
