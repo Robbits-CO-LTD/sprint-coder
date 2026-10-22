@@ -51,6 +51,9 @@ ssh yusei 'bash /tmp/sprintcoder-site-deploy/install.sh'
 
 ## 運用
 
+サーバーにログインして実行する。手元から `ssh yusei '…'` で直接実行するときは、先頭に
+`export XDG_RUNTIME_DIR=/run/user/$(id -u);` を付ける（非対話の ssh では設定されず、`systemctl --user` が失敗する）。
+
 ```bash
 systemctl --user start sprintcoder-site-deploy        # すぐ反映する
 journalctl --user -u sprintcoder-site-deploy -n 50    # 結果を見る

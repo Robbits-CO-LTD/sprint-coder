@@ -18,6 +18,8 @@ SITE_HOME=${SITE_HOME:-$HOME/sprintcoder.yuseilab.com}
 LIB=${LIB:-$HOME/.local/lib/sprintcoder-site}
 UNITS=${UNITS:-$HOME/.config/systemd/user}
 log() { printf '[sprintcoder-install] %s\n' "$*"; }
+# ssh yusei '…' のような非対話の接続では設定されないので補う（無いと systemctl --user が失敗する）
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 
 mkdir -p "$SITE_HOME/releases" "$SITE_HOME/legacy-assets" "$LIB" "$UNITS"
 cd "$SITE_HOME"
