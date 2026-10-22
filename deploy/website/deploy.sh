@@ -67,6 +67,8 @@ recover_pending() {
   if [ -L public ] && [ "$(basename "$(readlink public)")" = "$p_id" ] && [ -n "$p_prev" ] && [ -d "releases/$p_prev" ]; then
     switch_to "$p_prev"
     log "確認の済んでいない $p_id から $p_prev に戻した"
+  elif [ -z "$p_prev" ]; then
+    log "注意: 最初の公開で戻す先の版が無いので、確認の済んでいない $p_id を公開したままにする"
   fi
   if [ -n "$p_id" ] && [ "$(basename "$(readlink public 2>/dev/null)")" != "$p_id" ]; then
     rm -rf "releases/$p_id" "releases/$p_id.meta"
@@ -182,8 +184,9 @@ if [ "$ok" != 1 ]; then
   recover_pending # 前の版へ戻し、失敗した版は消して保留にする
   die "公開後の確認に失敗（${commit:0:8}）"
 fi
+rm -f .pending # 先に消す（trap を外す前に止められても、確認済みの版を戻さないように）
 trap - TERM INT HUP
-rm -f .pending .hold
+rm -f .hold
 log "確認OK: $HEALTH_BASE_URL"
 
 # ---------------------------------------------------------------- 古い版の整理（公開中と直前の版は必ず残す）
