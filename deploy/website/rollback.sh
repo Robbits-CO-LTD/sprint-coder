@@ -37,12 +37,13 @@ if [ -z "$target" ] || [ ! -d "releases/$target" ]; then
   exit 1
 fi
 
+# 保留は切り替えの前に記録する（切り替えた直後に止まっても、取り下げた版をタイマーが再公開しないように）
 held_tree=$(meta "$current" tree)
-ln -sfn "releases/$target" public.next
-mv -Tf public.next public
 if [ -z "$held_tree" ]; then
   log "注意: $current の記録（.meta）が無いので保留にできない。main が同じ中身ならタイマーが再公開する"
 elif ! grep -qxF "tree=$held_tree" .hold 2>/dev/null; then
   printf 'tree=%s\n' "$held_tree" >>.hold
 fi
+ln -sfn "releases/$target" public.next
+mv -Tf public.next public
 log "戻した: $current → $target"
