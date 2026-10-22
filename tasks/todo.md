@@ -1,3 +1,15 @@
+## 公式サイトの自動デプロイ — Issue #904（2026-10-22）
+
+main の website/ が変わったら本番（サーバー yusei の nginx）へ自動で反映する。GitHub からは LAN 内のサーバーへ入れないので、サーバー側の systemd ユーザータイマーで main を取りに行く pull 型にした。ブランチ `feat/website-autodeploy-904`。
+
+- [x] deploy.sh / rollback.sh / install.sh / service / timer / README を deploy/website/ に作る
+- [x] 試験 test-deploy.sh（一時フォルダのみ）29 件 PASS、実際の main の website/ も検査を通る、shellcheck 警告 0
+- [ ] PR → ReviewBOT → 承認後 squash merge
+- [ ] サーバーへ導入（install.sh）→ 初回の反映で #902 の新サイトを公開 → 本番を撮影して確認
+- [ ] website/ の小さな変更で自動反映を確かめる、rollback.sh で戻せることを確かめる
+
+---
+
 ## 公式サイト全面刷新 — 実画面で進む「見るプロモ」型（2026-10-21）
 
 目的は、静止画と文字中心の公式サイトを、プロモ v2 で収録した最新版アプリの実画面録画を使い、スクロールが再生になる体験型サイトへ全 8 ページ作り替えること。URL は維持。文言はプロモと同じ（専門用語なし・短く硬い見出し・見出しに「。」なし）、技術の詳細は下層の本文に残す。ブランチ `feat/website-cinematic`（worktree `F:\scg-website`）。
