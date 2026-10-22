@@ -20,8 +20,9 @@ GitHub Actions から LAN 内のサーバーへは入れない。そこでサー
    すべてあること、25 MiB 以上のファイルがないこと
 4. `public` のシンボリックリンクを一瞬で差し替える
 5. 公開後の確認: サーバー自身の nginx からトップと新しい `film.js?v=`・`styles.css` が取れること。
-   失敗したら前の版へ戻す
-6. 古い版は 5 つまで残す
+   失敗したら前の版へ戻す。切り替えてから確認が終わるまでは `.pending` に記録しておき、途中で止められた
+   ときもその場で前の版へ戻す。強制終了で戻せなかったときは、次の実行の最初に戻す
+6. 古い版は 5 つまで残す（記録の `.meta` は小さいので残し、`rollback.sh` がたどれるようにする）
 
 検査や確認に失敗した版は `.hold` に記録され、同じ中身では再試行しない。直したコミットが `main` に
 入れば、その版は自動で公開される。
@@ -32,7 +33,8 @@ GitHub Actions から LAN 内のサーバーへは入れない。そこでサー
   releases/<版>/  releases/<版>.meta
   repo.git/                         main の浅い取得
   legacy-assets/                    使われなくなったが外部から参照されうる画像（各版の assets/ に補う）
-  .hold                             公開しない tree（失敗・rollback）
+  .hold                             公開しない tree の一覧（失敗・rollback）
+  .pending                          切り替えてから確認が終わるまでの記録
 ~/.local/lib/sprintcoder-site/      deploy.sh, rollback.sh
 ~/.config/systemd/user/             sprintcoder-site-deploy.service / .timer
 ```
@@ -40,13 +42,11 @@ GitHub Actions から LAN 内のサーバーへは入れない。そこでサー
 ## 導入・更新（サーバーで 1 回。再実行しても安全）
 
 ```bash
-ssh yusei 'rm -rf /tmp/sprintcoder-site-deploy'
-scp -r deploy/website yusei:/tmp/sprintcoder-site-deploy
-ssh yusei 'bash /tmp/sprintcoder-site-deploy/install.sh'
+ssh yusei 'rm -rf /tmp/sprintcoder-site-deploy' && scp -r deploy/website yusei:/tmp/sprintcoder-site-deploy && ssh yusei 'bash /tmp/sprintcoder-site-deploy/install.sh'
 ```
 
 最初に送り先を消すこと。残っていると `scp -r` が中に `website/` を作ってしまい、古いスクリプトのまま導入される。
-PowerShell からも同じ 3 行で動く（`tar … | ssh` は PowerShell ではバイナリが壊れるので使わない）。
+PowerShell 7 からも同じ 1 行で動く（`tar … | ssh` は PowerShell ではバイナリが壊れるので使わない）。
 
 今の `public` ディレクトリを最初の版として取り込み、`public` をリンクに置き換える。この時点では
 表示は変わらない。最初のタイマー実行で `main` の内容が公開される。

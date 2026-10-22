@@ -181,6 +181,39 @@ check "rollback: 続けて戻しても main の版を再公開しない" grep -q
 check "rollback: 取り下げた版は .hold に残る" test "$(grep -c '^tree=' "$SITE_HOME/.hold")" -ge 2
 [ -n "$b$c" ]
 
+# ---------------------------------------------------------------- 10. 確認の途中で止められたら、前の版へ戻す
+check "prune: 版の記録（.meta）は残す" test "$(find "$SITE_HOME/releases" -maxdepth 1 -name '*.meta' | wc -l)" -gt "$(find "$SITE_HOME/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+FORCE=1 bash "$LIB/deploy.sh" >/dev/null # 保留を外して main を公開し直す
+rm -f "$SITE_HOME/.hold"
+before=$(basename "$(readlink "$SITE_HOME/public")")
+HANG=$((PORT + 1))
+python3 -c "import socket,time;s=socket.socket();s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1);s.bind(('127.0.0.1',$HANG));s.listen(16);time.sleep(300)" &
+hang_pid=$!
+sleep 0.5
+run_hanging() { # 応答しない確認先で deploy.sh を動かし、確認の途中で <シグナル> を送る（systemd と同じくプロセスグループごと）
+  local sig=$1 i pid
+  sed -i "s#<title>v[0-9]*#<title>v$2#" "$T/work/website/index.html"
+  commit_site "site v$2"
+  sleep 1
+  HEALTH_BASE_URL=http://127.0.0.1:$HANG setsid bash "$LIB/deploy.sh" >/dev/null 2>&1 &
+  pid=$!
+  for i in $(seq 100); do [ -f "$SITE_HOME/.pending" ] && break || sleep 0.1; done
+  sleep 1
+  kill "-$sig" -- "-$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+}
+run_hanging TERM 12
+check "interrupt: 止められたら前の版へ戻す" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$before"
+check "interrupt: .pending を残さない" test ! -e "$SITE_HOME/.pending"
+check "interrupt: 止められた版は保留" test -s "$SITE_HOME/.hold"
+rm -f "$SITE_HOME/.hold"
+run_hanging KILL 13 # 後片付けもできずに止まった
+check "crash: 強制終了では .pending が残る" test -f "$SITE_HOME/.pending"
+out=$(bash "$LIB/deploy.sh" 2>&1 || true)
+check "crash: 次の実行で前の版へ戻す" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$before"
+check "crash: 次の実行で保留にして再公開しない" grep -q 止めてある <<<"$out"
+kill "$hang_pid" 2>/dev/null || true
+
 exec 8>"$SITE_HOME/.deploy.lock"
 flock 8
 out=$(bash "$LIB/deploy.sh")

@@ -25,7 +25,12 @@ target=${1:-}
 if [ -z "$target" ]; then
   # 直前に公開していた版をたどる（整理で消えていれば、さらにその前へ）
   target=$(meta "$current" previous)
-  while [ -n "$target" ] && [ ! -d "releases/$target" ]; do target=$(meta "$target" previous); done
+  steps=0
+  while [ -n "$target" ] && [ ! -d "releases/$target" ]; do
+    steps=$((steps + 1))
+    [ "$steps" -gt 100 ] && target="" && break # 記録が循環していても止まるように
+    target=$(meta "$target" previous)
+  done
 fi
 if [ -z "$target" ] || [ ! -d "releases/$target" ]; then
   log "戻す先がない（公開中: $current）。残っている版: $(find releases -mindepth 1 -maxdepth 1 -type d ! -name '.tmp-*' -printf '%f ' | sort)"
@@ -35,7 +40,9 @@ fi
 held_tree=$(meta "$current" tree)
 ln -sfn "releases/$target" public.next
 mv -Tf public.next public
-if [ -n "$held_tree" ] && ! grep -qx "tree=$held_tree" .hold 2>/dev/null; then
+if [ -z "$held_tree" ]; then
+  log "注意: $current の記録（.meta）が無いので保留にできない。main が同じ中身ならタイマーが再公開する"
+elif ! grep -qxF "tree=$held_tree" .hold 2>/dev/null; then
   printf 'tree=%s\n' "$held_tree" >>.hold
 fi
 log "戻した: $current → $target"

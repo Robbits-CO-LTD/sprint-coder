@@ -47,6 +47,38 @@ if [ -e public ] && [ ! -L public ]; then
   die "public がシンボリックリンクではない。先に install.sh を実行すること"
 fi
 
+switch_to() {
+  ln -sfn "releases/$1" public.next
+  mv -Tf public.next public
+}
+hold_tree() { # hold_tree <tree> <理由>  公開しない一覧（.hold）に加える
+  [ -n "$1" ] || return 0
+  grep -qxF "tree=$1" .hold 2>/dev/null || printf 'tree=%s\n' "$1" >>.hold
+  log "保留に追加: ${1:0:12}（$2）"
+}
+# 切り替えてから確認が終わるまでの間は .pending に記録しておく。確認に失敗したとき・途中で止められたとき・
+# 前回がその途中で止まっていたときは、ここで前の版へ戻し、その版を保留にする
+recover_pending() {
+  [ -f .pending ] || return 0
+  local p_id p_prev p_tree
+  p_id=$(sed -n 's/^id=//p' .pending)
+  p_prev=$(sed -n 's/^previous=//p' .pending)
+  p_tree=$(sed -n 's/^tree=//p' .pending)
+  if [ -L public ] && [ "$(basename "$(readlink public)")" = "$p_id" ] && [ -n "$p_prev" ] && [ -d "releases/$p_prev" ]; then
+    switch_to "$p_prev"
+    log "確認の済んでいない $p_id から $p_prev に戻した"
+  fi
+  if [ -n "$p_id" ] && [ "$(basename "$(readlink public 2>/dev/null)")" != "$p_id" ]; then
+    rm -rf "releases/$p_id" "releases/$p_id.meta"
+  fi
+  hold_tree "$p_tree" "公開後の確認が済まなかった"
+  rm -f .pending
+}
+if [ -f .pending ]; then
+  log "前回は公開後の確認の途中で止まっていた"
+  recover_pending
+fi
+
 # ---------------------------------------------------------------- 取得と変化の判定
 if [ ! -d repo.git ]; then
   git init --quiet --bare repo.git
@@ -70,11 +102,7 @@ if [ "$tree" = "$current_tree" ]; then
   log "変化なし（${commit:0:8} の $SITE_DIR は公開中の $current_id と同じ）"
   exit 0
 fi
-hold() { # hold <理由>  この tree を公開しない一覧（.hold）に加える
-  grep -qx "tree=$tree" .hold 2>/dev/null || printf 'tree=%s\n' "$tree" >>.hold
-  log "保留に追加: ${tree:0:12}（$1）"
-}
-if [ "$FORCE" != 1 ] && grep -qx "tree=$tree" .hold 2>/dev/null; then
+if [ "$FORCE" != 1 ] && grep -qxF "tree=$tree" .hold 2>/dev/null; then
   log "この版（${commit:0:8}）は止めてある（.hold）。直したコミットを待つか FORCE=1 で実行"
   exit 0
 fi
@@ -117,7 +145,7 @@ while IFS= read -r big; do
 done < <(find "$tmp" -type f -size "+$((MAX_FILE_BYTES - 1))c")
 if [ "${#problems[@]}" -gt 0 ]; then
   for p in "${problems[@]}"; do log "検査NG: $p"; done
-  hold "公開前の検査に失敗"
+  hold_tree "$tree" "公開前の検査に失敗"
   die "公開前の検査に失敗したので公開しない（${commit:0:8}）"
 fi
 
@@ -126,10 +154,8 @@ trap - EXIT
 printf 'tree=%s\ncommit=%s\nprevious=%s\ndeployed_at=%s\n' "$tree" "$commit" "$current_id" "$(date -u +%FT%TZ)" >"releases/$id.meta"
 
 # ---------------------------------------------------------------- 差し替え
-switch_to() {
-  ln -sfn "releases/$1" public.next
-  mv -Tf public.next public
-}
+printf 'id=%s\nprevious=%s\ntree=%s\n' "$id" "$current_id" "$tree" >.pending
+trap 'log "確認の途中で止められた"; recover_pending; exit 143' TERM INT HUP
 switch_to "$id"
 log "公開: $id（${commit:0:8}）。前の版: ${current_id:-なし}"
 
@@ -152,18 +178,12 @@ for _ in 1 2 3; do
   sleep 3
 done
 if [ "$ok" != 1 ]; then
-  if [ -n "$current_id" ] && [ -d "releases/$current_id" ]; then
-    switch_to "$current_id"
-    log "公開後の確認に失敗したので $current_id に戻した"
-  fi
-  # 公開に失敗した版は残さない（rollback.sh の「1 つ前」に紛れ込まないように）
-  if [ "$(basename "$(readlink public)")" != "$id" ]; then
-    rm -rf "releases/$id" "releases/$id.meta"
-  fi
-  hold "公開後の確認に失敗"
+  log "公開後の確認に失敗"
+  recover_pending # 前の版へ戻し、失敗した版は消して保留にする
   die "公開後の確認に失敗（${commit:0:8}）"
 fi
-rm -f .hold
+trap - TERM INT HUP
+rm -f .pending .hold
 log "確認OK: $HEALTH_BASE_URL"
 
 # ---------------------------------------------------------------- 古い版の整理（公開中と直前の版は必ず残す）
@@ -172,7 +192,7 @@ excess=$((${#all[@]} - KEEP))
 for old in "${all[@]}"; do
   [ "$excess" -le 0 ] && break
   [ "$old" = "$id" ] || [ "$old" = "$current_id" ] && continue
-  rm -rf "releases/$old" "releases/$old.meta"
+  rm -rf "releases/$old" # .meta は小さいので残す（rollback.sh が previous= をたどれるように）
   log "古い版を削除: $old"
   excess=$((excess - 1))
 done
