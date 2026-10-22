@@ -107,6 +107,15 @@ check "deploy: 参照切れでは公開しない" test "$(basename "$(readlink "
 out=$(bash "$LIB/deploy.sh")
 check "deploy: 同じ壊れた版は再試行しない（.hold）" grep -q 止めてある <<<"$out"
 
+# ---------------------------------------------------------------- 4b. シンボリックリンクは公開しない
+sed -i 's#/assets/missing.png#/assets/icon.png#' "$T/work/website/index.html"
+ln -s / "$T/work/website/server-root"
+commit_site "symlink"
+check "deploy: リンクを含む版は失敗で終わる" bash -c '! bash "$0/deploy.sh" >/dev/null 2>&1' "$LIB"
+check "deploy: リンクを含む版は公開しない" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$first"
+check "deploy: リンク先のファイルは読めない" bash -c '! curl -fs -o /dev/null "$0/server-root/etc/hostname"' "$HEALTH_BASE_URL"
+rm "$T/work/website/server-root"
+
 # ---------------------------------------------------------------- 5. 直したコミット → 公開
 sed -i 's#/assets/missing.png#/assets/icon.png#; s#<title>new#<title>v2#; s#v=1#v=2#g' "$T/work/website/index.html"
 commit_site "site v2"
@@ -150,6 +159,28 @@ count=$(find "$SITE_HOME/releases" -mindepth 1 -maxdepth 1 -type d | wc -l)
 check "prune: 版は KEEP(5) 個まで" test "$count" -le 5
 check "prune: 公開中の版は残る" test -d "$SITE_HOME/releases/$current"
 check "prune: .tmp を残さない" bash -c '! ls -A "$0/releases" | grep -q "^.tmp-"' "$SITE_HOME"
+# ---------------------------------------------------------------- 9. rollback は「直前に公開していた版」へ。続けて戻しても保留は残る
+next_site() {
+  sed -i "s#<title>v[0-9]*#<title>v$1#" "$T/work/website/index.html"
+  commit_site "site v$1"
+  sleep 1
+  bash "$LIB/deploy.sh" >/dev/null
+  basename "$(readlink "$SITE_HOME/public")"
+}
+a=$(basename "$(readlink "$SITE_HOME/public")")
+b=$(next_site 10)
+bash "$LIB/rollback.sh" >/dev/null # b を取り下げて a へ
+check "rollback: 直前の版へ" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$a"
+c=$(next_site 11) # 直した版。直前に公開していたのは a
+bash "$LIB/rollback.sh" >/dev/null
+check "rollback: 取り下げた版ではなく、直前に公開していた版へ" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$a"
+bash "$LIB/rollback.sh" >/dev/null # さらにその前へ
+check "rollback: 続けて戻せる" test "$(basename "$(readlink "$SITE_HOME/public")")" != "$a"
+out=$(bash "$LIB/deploy.sh")
+check "rollback: 続けて戻しても main の版を再公開しない" grep -q 止めてある <<<"$out"
+check "rollback: 取り下げた版は .hold に残る" test "$(grep -c '^tree=' "$SITE_HOME/.hold")" -ge 2
+[ -n "$b$c" ]
+
 exec 8>"$SITE_HOME/.deploy.lock"
 flock 8
 out=$(bash "$LIB/deploy.sh")

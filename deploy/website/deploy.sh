@@ -9,10 +9,11 @@
 # 配置（SITE_HOME）:
 #   repo.git/          main を浅く取得する bare リポジトリ
 #   releases/<id>/     公開する中身（website/ から tools/ と README.md を除いたもの）
-#   releases/<id>.meta tree=… commit=… の記録（公開ディレクトリの外）
+#   releases/<id>.meta tree=… commit=… previous=…（直前に公開していた版）の記録（公開ディレクトリの外）
 #   public -> releases/<id>   nginx の root。シンボリックリンク
 #   legacy-assets/     もう使っていないが外部から参照されうる画像。各版の assets/ に補う
-#   .hold              この tree は公開しない（公開後の確認に失敗・rollback.sh で戻した）
+#   .hold              公開しない tree の一覧（tree=… を 1 行ずつ。検査や確認に失敗、rollback.sh で戻した）。
+#                      新しい版の公開に成功すると空にする
 set -euo pipefail
 
 SITE_HOME=${SITE_HOME:-$HOME/sprintcoder.yuseilab.com}
@@ -69,8 +70,12 @@ if [ "$tree" = "$current_tree" ]; then
   log "変化なし（${commit:0:8} の $SITE_DIR は公開中の $current_id と同じ）"
   exit 0
 fi
-if [ "$FORCE" != 1 ] && [ -f .hold ] && [ "$(sed -n 's/^tree=//p' .hold)" = "$tree" ]; then
-  log "この版は止めてある（.hold: $(sed -n 's/^reason=//p' .hold)）。直したコミットを待つか FORCE=1 で実行"
+hold() { # hold <理由>  この tree を公開しない一覧（.hold）に加える
+  grep -qx "tree=$tree" .hold 2>/dev/null || printf 'tree=%s\n' "$tree" >>.hold
+  log "保留に追加: ${tree:0:12}（$1）"
+}
+if [ "$FORCE" != 1 ] && grep -qx "tree=$tree" .hold 2>/dev/null; then
+  log "この版（${commit:0:8}）は止めてある（.hold）。直したコミットを待つか FORCE=1 で実行"
   exit 0
 fi
 
@@ -91,6 +96,10 @@ fi
 
 # ---------------------------------------------------------------- 公開前の検査
 problems=()
+# シンボリックリンクや特殊ファイルは公開しない（例: website/x -> / だとサーバーのファイルが外から読めてしまう）
+while IFS= read -r odd; do
+  problems+=("${odd#"$tmp"} は通常のファイルでもディレクトリでもない（リンクなど）")
+done < <(find "$tmp" ! -type f ! -type d)
 for f in index.html styles.css film.js; do
   [ -f "$tmp/$f" ] || problems+=("$f がない")
 done
@@ -108,13 +117,13 @@ while IFS= read -r big; do
 done < <(find "$tmp" -type f -size "+$((MAX_FILE_BYTES - 1))c")
 if [ "${#problems[@]}" -gt 0 ]; then
   for p in "${problems[@]}"; do log "検査NG: $p"; done
-  printf 'tree=%s\ncommit=%s\nreason=公開前の検査に失敗\n' "$tree" "$commit" >.hold
+  hold "公開前の検査に失敗"
   die "公開前の検査に失敗したので公開しない（${commit:0:8}）"
 fi
 
 mv "$tmp" "releases/$id"
 trap - EXIT
-printf 'tree=%s\ncommit=%s\ndeployed_at=%s\n' "$tree" "$commit" "$(date -u +%FT%TZ)" >"releases/$id.meta"
+printf 'tree=%s\ncommit=%s\nprevious=%s\ndeployed_at=%s\n' "$tree" "$commit" "$current_id" "$(date -u +%FT%TZ)" >"releases/$id.meta"
 
 # ---------------------------------------------------------------- 差し替え
 switch_to() {
@@ -151,7 +160,7 @@ if [ "$ok" != 1 ]; then
   if [ "$(basename "$(readlink public)")" != "$id" ]; then
     rm -rf "releases/$id" "releases/$id.meta"
   fi
-  printf 'tree=%s\ncommit=%s\nreason=公開後の確認に失敗\n' "$tree" "$commit" >.hold
+  hold "公開後の確認に失敗"
   die "公開後の確認に失敗（${commit:0:8}）"
 fi
 rm -f .hold

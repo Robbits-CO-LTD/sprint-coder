@@ -5,7 +5,8 @@ main の website/ が変わったら本番（サーバー yusei の nginx）へ�
 - [x] deploy.sh / rollback.sh / install.sh / service / timer / README を deploy/website/ に作る
 - [x] 試験 test-deploy.sh（一時フォルダのみ）29 件 PASS、実際の main の website/ も検査を通る、shellcheck 警告 0
 - [ ] PR → ReviewBOT → 承認後 squash merge
-- [ ] サーバーへ導入（install.sh）→ 初回の反映で #902 の新サイトを公開 → 本番を撮影して確認
+- [x] サーバーへ導入（install.sh）→ 初回の反映で #902 の新サイトを公開 → 本番を撮影して確認（2026-10-22、エラー 0）
+- [ ] ReviewBOT 指摘（リンク公開・連続 rollback・手順・直前の版）の修正をマージ後に install.sh を再実行
 - [ ] website/ の小さな変更で自動反映を確かめる、rollback.sh で戻せることを確かめる
 
 ---

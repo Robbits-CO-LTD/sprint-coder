@@ -15,7 +15,8 @@ GitHub Actions から LAN 内のサーバーへは入れない。そこでサー
 1. `main` を浅く取得し、`website/` の git tree ハッシュが公開中の版と同じなら何もしない
    （`website/` 以外の変更では反映しない）
 2. 変わっていれば `releases/<日時>-<コミット>/` に `website/` を展開する（`tools/` と `README.md` は除く）
-3. 公開前の検査: `index.html`・`styles.css`・`film.js` があること、ページが参照するローカルのファイルが
+3. 公開前の検査: シンボリックリンクや特殊ファイルがないこと（`website/x -> /` のようなリンクでサーバーの
+   ファイルが外から読めてしまうため）、`index.html`・`styles.css`・`film.js` があること、ページが参照するローカルのファイルが
    すべてあること、25 MiB 以上のファイルがないこと
 4. `public` のシンボリックリンクを一瞬で差し替える
 5. 公開後の確認: サーバー自身の nginx からトップと新しい `film.js?v=`・`styles.css` が取れること。
@@ -39,9 +40,13 @@ GitHub Actions から LAN 内のサーバーへは入れない。そこでサー
 ## 導入・更新（サーバーで 1 回。再実行しても安全）
 
 ```bash
+ssh yusei 'rm -rf /tmp/sprintcoder-site-deploy'
 scp -r deploy/website yusei:/tmp/sprintcoder-site-deploy
 ssh yusei 'bash /tmp/sprintcoder-site-deploy/install.sh'
 ```
+
+最初に送り先を消すこと。残っていると `scp -r` が中に `website/` を作ってしまい、古いスクリプトのまま導入される。
+PowerShell からも同じ 3 行で動く（`tar … | ssh` は PowerShell ではバイナリが壊れるので使わない）。
 
 今の `public` ディレクトリを最初の版として取り込み、`public` をリンクに置き換える。この時点では
 表示は変わらない。最初のタイマー実行で `main` の内容が公開される。
@@ -58,13 +63,15 @@ ssh yusei 'bash /tmp/sprintcoder-site-deploy/install.sh'
 systemctl --user start sprintcoder-site-deploy        # すぐ反映する
 journalctl --user -u sprintcoder-site-deploy -n 50    # 結果を見る
 systemctl --user list-timers sprintcoder-site-deploy  # 次の実行時刻
-~/.local/lib/sprintcoder-site/rollback.sh             # 1 つ前の版へ戻す
+~/.local/lib/sprintcoder-site/rollback.sh             # 直前に公開していた版へ戻す
 ~/.local/lib/sprintcoder-site/rollback.sh <版の名前>   # 指定した版へ戻す
 FORCE=1 ~/.local/lib/sprintcoder-site/deploy.sh       # .hold を無視して今の main を公開する
 systemctl --user disable --now sprintcoder-site-deploy.timer   # 自動反映を止める
 ```
 
-`rollback.sh` で戻すと、戻した版は `.hold` に入る。タイマーが元の版へすぐ戻すことはない。
+`rollback.sh` は、各版の記録（`previous=`）から「直前に公開していた版」を選ぶ。名前順ではないので、
+以前に取り下げた版を選ぶことはない。戻した版は `.hold` に加わり、何回続けて戻しても、取り下げた版を
+タイマーが再び公開することはない。新しい版の公開に成功すると `.hold` は空になる。
 
 ## 試験
 
