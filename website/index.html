@@ -3,58 +3,54 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sprint Coder | AIチーム型オープンソース・コーディングデスクトップ</title>
+    <title>Sprint Coder | AIの会社が動く — たくさんのAIをチームで動かすアプリ</title>
     <meta
       name="description"
-      content="Sprint Coderは、Codex CLI、Claude Code、Gemini、クラウドAPI、ローカルLLMを一つのTaskで扱い、会話を複数AIのTeamへ展開できるlocal-firstなオープンソース・コーディングデスクトップです。"
-    />
-    <meta
-      name="keywords"
-      content="Sprint Coder,スプリントコーダー,AIコーディング,AIエージェント,マルチエージェント,Codex CLI,Claude Code,Gemini,local-first"
+      content="Sprint Coderは、たくさんのAIを会社のようにチームで動かすオープンソースのデスクトップアプリ。ひとつのお願いで、リーダー・部長・担当のAIが同時に動き、作って確かめて完成まで届けます。実際の画面と実際のAIの動きで紹介します。"
     />
     <meta name="author" content="Robbits Inc." />
-    <meta
-      name="robots"
-      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
-    />
-    <meta name="theme-color" content="#060806" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="theme-color" content="#050605" />
     <link rel="canonical" href="https://sprintcoder.yuseilab.com/" />
-    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
-    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <link rel="icon" href="/assets/sprint-coder-icon-64.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon-180.png" />
 
     <meta property="og:type" content="website" />
     <meta property="og:locale" content="ja_JP" />
     <meta property="og:site_name" content="Sprint Coder" />
-    <meta property="og:title" content="Sprint Coder | 一人のAIから、動くAI Teamへ。" />
+    <meta property="og:title" content="Sprint Coder | AIの会社が動く" />
     <meta
       property="og:description"
-      content="Chat、コーディング、複数AIへの仕事の分担を、ひとつのTaskに。Robbitsが開発・所有・運営するlocal-firstなオープンソースAIコーディングデスクトップ。"
+      content="ひとつのお願いで、リーダー・部長・担当のAIが同時に動く。実際の画面と実際のAIの動きで見る、Sprint Coder。"
     />
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/" />
-    <meta
-      property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
-    />
-    <meta property="og:image:width" content="1600" />
-    <meta property="og:image:height" content="1000" />
-    <meta property="og:image:alt" content="Sprint Coder — 一人のAIから、動くAI Teamへ。" />
+    <meta property="og:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Sprint Coderの実際の画面。たくさんのAIのカードが並んで同時に動いている" />
+    <meta property="og:video" content="https://sprintcoder.yuseilab.com/media/promo-720.mp4" />
+    <meta property="og:video:type" content="video/mp4" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Sprint Coder | 一人のAIから、動くAI Teamへ。" />
-    <meta
-      name="twitter:description"
-      content="Codex、Claude Code、Gemini、ローカルLLMを一つのTaskへ。必要なときだけChatをAI Teamへ。"
-    />
-    <meta
-      name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
-    />
-
-    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
+    <meta name="twitter:title" content="Sprint Coder | AIの会社が動く" />
+    <meta name="twitter:description" content="ひとつのお願いで、たくさんのAIが会社のように動く。実際の画面で見る、Sprint Coder。" />
+    <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261022" />
+    <link rel="preload" as="image" href="/media/hero.jpg" />
     <script>
+      // 演出は JS が動くときだけ。読み込みに失敗したら 3 秒で普通の表示に戻す
       if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         document.documentElement.classList.add('js');
+        setTimeout(function () {
+          if (!window.__filmReady) {
+            document.documentElement.classList.remove('js');
+            window.__filmFallback = true;
+          }
+        }, 3000);
       }
     </script>
+    <link rel="preload" as="script" href="/film.js?v=20261022" />
+    <script src="/film.js?v=20261022" defer></script>
 
     <script type="application/ld+json">
       {
@@ -83,23 +79,29 @@
             "name": "Sprint Coder",
             "alternateName": "スプリントコーダー",
             "url": "https://sprintcoder.yuseilab.com/",
-            "downloadUrl": "https://github.com/Robbits-CO-LTD/sprint-coder/releases",
-            "softwareVersion": "0.3.0",
-            "operatingSystem": "macOS, Windows, Linux",
+            "downloadUrl": "https://github.com/Robbits-CO-LTD/sprint-coder/releases/tag/v0.5.0",
+            "softwareVersion": "0.5.0",
+            "operatingSystem": "Windows, macOS, Linux",
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "AI coding assistant",
-            "description": "Codex CLI、Claude Code、Gemini、クラウドAPI、ローカルLLMと複数AI Workerを一つのTaskで扱えるlocal-firstなオープンソースAIコーディングデスクトップ。",
-            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png",
+            "description": "たくさんのAIを会社のようにチームで動かす、オープンソースのAIコーディング・デスクトップアプリ。",
+            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg",
             "license": "https://opensource.org/license/mit",
             "isAccessibleForFree": true,
-            "offers": {
-              "@type": "Offer",
-              "price": "0",
-              "priceCurrency": "JPY"
-            },
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "JPY" },
             "author": { "@id": "https://robbits.co.jp/#organization" },
             "publisher": { "@id": "https://robbits.co.jp/#organization" },
             "sameAs": ["https://github.com/Robbits-CO-LTD/sprint-coder"]
+          },
+          {
+            "@type": "VideoObject",
+            "name": "Sprint Coder「AIの会社が動く」実演",
+            "description": "ひとつのお願いで、リーダー・部長・担当のAIが同時に動き、作って確かめて完成まで届ける様子を、実際のアプリと実際のAIの実行で見せる動画。",
+            "thumbnailUrl": "https://sprintcoder.yuseilab.com/media/promo.jpg",
+            "uploadDate": "2026-10-21",
+            "duration": "PT4M2S",
+            "contentUrl": "https://sprintcoder.yuseilab.com/media/promo-720.mp4",
+            "publisher": { "@id": "https://robbits.co.jp/#organization" }
           }
         ]
       }
@@ -111,717 +113,510 @@
 
     <header class="site-header">
       <div class="shell header-inner">
-        <a class="brand" href="#top" aria-label="Sprint Coder トップ">
-          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
-          <span class="brand-copy">
-            <strong>Sprint Coder</strong>
-            <small>A product of Robbits</small>
-          </span>
+        <a class="brand" href="/" aria-label="Sprint Coder トップ">
+          <img src="/assets/sprint-coder-icon-64.png" alt="" width="32" height="32" />
+          <strong>Sprint Coder</strong>
         </a>
-
-        <nav aria-label="メインナビゲーション">
-          <a href="/ai-team/">AI Team</a>
-          <a href="/managed-harness/">Control</a>
-          <a href="/providers/">Providers</a>
-          <a href="#faq">FAQ</a>
+        <nav class="site-nav" aria-label="メインナビゲーション">
+          <a href="/about/">製品</a>
+          <a href="/ai-team/">AIチーム</a>
+          <a href="/providers/">AIの選び方</a>
+          <a href="/local-first-security/">安全</a>
+          <a href="/getting-started/">はじめ方</a>
         </nav>
-
-        <a
-          class="button button-header"
-          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-        >
-          ダウンロード
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" />
-          </svg>
-        </a>
+        <button class="btn btn-sm motion-btn" type="button" data-motion aria-pressed="false" hidden>動きを止める</button>
+        <a class="btn btn-primary btn-sm" href="#start">ダウンロード</a>
       </div>
     </header>
 
-    <main id="main">
-      <!-- SCENE 1 · Hero story: one AI → a moving AI Team -->
-      <section class="scene scene-story" id="top" data-scene="story">
-        <div class="scene-stage">
-          <div class="hero-grid" aria-hidden="true"></div>
-          <div class="hero-glow" aria-hidden="true"></div>
+    <!-- 再生バー（JS が動くときだけ表示） -->
+    <div class="player" role="region" aria-label="ページの再生">
+      <button class="p-btn p-play" type="button" aria-label="自動で再生">
+        <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z" /></svg>
+        <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
+      </button>
+      <div class="p-chapter" aria-live="polite"><small>00</small>序章</div>
+      <div class="p-track" role="slider" tabindex="0" aria-label="章の位置（左右キーで章を移動）" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="p-fill"></div>
+      </div>
+      <span class="p-time">00:00 / 00:00</span>
+      <button class="p-btn p-sound" type="button" aria-pressed="false" aria-label="音を出す">
+        <svg class="i-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M16 9l5 6M21 9l-5 6" stroke="currentColor" stroke-width="2" fill="none" /></svg>
+        <svg class="i-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9h4l5-4v14l-5-4H4z" /><path d="M16 8.5a5 5 0 010 7M18.5 6a8.5 8.5 0 010 12" stroke="currentColor" stroke-width="2" fill="none" /></svg>
+      </button>
+      <button class="btn btn-sm p-full" type="button" data-open-promo>フル版 4:02</button>
+    </div>
 
-          <div class="shell story-hero" data-on="rise">
-            <div class="eyebrow">
-              <span class="live-dot"></span>
-              OPEN SOURCE · EARLY BETA
+    <main id="main" class="film">
+      <!-- ============================================================ 00 序章 -->
+      <section class="scene hero" id="top" data-style="--len: 190vh" data-no="00" data-title="序章" aria-label="序章">
+        <div class="stage">
+          <div class="footage-layer haze" data-style="--fx: 40%; --fy: 40%; --zoom: 0.18">
+            <img src="/media/hero.jpg" alt="" />
+          </div>
+          <div class="scrim"></div>
+          <div class="hero-screen">
+            <div class="screen">
+              <video muted playsinline loop preload="none" poster="/media/hero.jpg" data-src="/media/hero.mp4" aria-hidden="true" data-style="--fx: 35%; --fy: 40%; --sz: 1.25"></video>
+              <span class="rec">実際の画面 <b>▶▶ 早送り ×4</b></span>
             </div>
-            <h1>一人のAIから、<br /><em>動くAI Team</em>へ。</h1>
-            <p class="hero-lead">
-              Chat、コーディング、複数AIへの仕事の分担を、ひとつのTaskで。local-firstなオープンソース・コーディングデスクトップ。
+          </div>
+          <div class="scanlines"></div>
+
+          <div class="beat">
+            <p class="hero-words" aria-hidden="true"><span>リーダー</span><span>部長</span><span>担当</span></p>
+            <h1 class="display">AIの会社が<br /><span class="em">動く</span></h1>
+            <div class="hero-after">
+              <p class="definition"><b>Sprint Coder</b>＝たくさんのAIを、会社のようにチームで動かすアプリ</p>
+              <div class="hero-actions">
+                <a class="btn btn-primary" href="#ch-problem" data-autoplay>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z" fill="currentColor" stroke="none" /></svg>
+                  自動で再生する
+                </a>
+                <a class="btn" href="#start">無料でダウンロード</a>
+              </div>
+              <p class="scroll-cue"><i></i>スクロールで再生</p>
+            </div>
+          </div>
+
+          <div class="hud" role="group" aria-label="チームの状態">
+            <div class="hud-title">AI TEAM MODE</div>
+            <div>リーダー：準備OK</div>
+            <div>部署：開発・セキュリティ・チェック</div>
+            <div>ネットのAI：つながった</div>
+            <div>このパソコンの中のAI：つながった</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 01 課題 -->
+      <section class="scene" id="ch-problem" data-style="--len: 240vh" data-no="01" data-title="課題" data-steps="0.12,0.45,0.7" aria-labelledby="h-problem">
+        <div class="stage">
+          <div class="colorfield" data-show="2" aria-hidden="true"></div>
+          <div class="ghost-word" aria-hidden="true">ONE AI</div>
+
+          <div class="beat" data-show="0-1">
+            <p class="chapter-tag"><b>01</b>課題 PROBLEM</p>
+            <h2 class="headline" id="h-problem">AIは<br />一度に ひとつ</h2>
+            <p class="lead fx-up" data-show="1" data-style="margin-top: 24px; max-width: 640px">
+              調べる、作る、確かめる。ひとりのAIに頼むと、仕事は順番待ちになる。結果を集めて確かめるのも、人の仕事のまま。
             </p>
-            <div class="hero-actions">
-              <a
-                class="button button-primary"
-                href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-              >
-                最新版をダウンロード
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" />
-                </svg>
-              </a>
-              <a
-                class="button button-secondary"
-                href="https://github.com/Robbits-CO-LTD/sprint-coder"
-              >
-                GitHubで見る
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M7 5h8v8M15 5l-9 9" />
-                </svg>
-              </a>
-            </div>
-            <ul class="hero-meta" aria-label="Sprint Coderの基本情報">
-              <li>MIT License</li>
-              <li>macOS / Windows / Linux</li>
-              <li>Local-first</li>
-            </ul>
           </div>
 
-          <div class="shell story-layout">
-            <div class="story-captions">
-              <div class="story-caption" data-range="0.10,0.43">
-                <small>01 · CHAT</small>
-                <h2>いつも通り、<br />一人のAIに頼む。</h2>
-                <p>相談も実装依頼も、まずは自然な会話から。</p>
-              </div>
-              <div class="story-caption" data-range="0.43,0.60">
-                <small>02 · TEAM</small>
-                <h2>仕事が大きくなったら、<br />会話をそのままTeamへ。</h2>
-                <p>Leaderが目的と履歴を引き継ぎ、調査・実装・レビューをWorkerへ分担します。</p>
-              </div>
-              <div class="story-caption" data-range="0.60,1.01">
-                <small>03 · CONTROL</small>
-                <h2>「完了しました」<br />だけでは、終わらせない。</h2>
-                <p>差分、Command、承認、Workerの活動を、同じ画面で確認できます。</p>
-              </div>
-            </div>
-
-            <div class="story-window" aria-hidden="true">
-              <div class="sw-bar">
-                <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
-                <span>新しいタスク · sprint-coder</span>
-                <b class="sw-mode swap" data-on="leader"><span>Chat</span><span>Team</span></b>
-              </div>
-
-              <div class="sw-body">
-                <aside class="sw-side" aria-hidden="true">
-                  <div class="sw-new">＋ 新規タスク</div>
-                  <div class="sw-search">Project・Taskを検索...</div>
-                  <small>SPRINT-CODER</small>
-                  <div class="sw-task is-current">セッション切れの修正<i></i></div>
-                  <div class="sw-task">Windows cwdの復旧</div>
-                  <div class="sw-task">設定ページの分離</div>
-                </aside>
-
-                <div class="sw-main">
-                  <div class="sw-empty" aria-hidden="true">
-                    <img src="/assets/sprint-coder-icon.png" alt="" width="36" height="36" />
-                    <small>SPRINT CODER · AI CODING WORKSPACE</small>
-                    <strong>なんでも相談してください</strong>
-                    <span
-                      >相談だけでも大丈夫です。Workspaceでの実行が必要になったときは、事前に確認します。</span
-                    >
-                  </div>
-                  <div class="sw-thread">
-                    <div class="msg msg-user">
-                      ログイン後にセッションが切れるバグを直して。原因の調査、修正、レビューまでお願い。
-                    </div>
-
-                    <div class="msg msg-ai">
-                      <small>LEADER · Claude Code</small>
-                      調査・修正・レビューを分けたほうが確実です。この会話のままAI
-                      Teamへ展開します。
-                    </div>
-
-                    <div class="log" data-log="hire1">
-                      <time>19:45</time>leaderが「調査」を雇いました<span
-                        >選定理由 親Agentのmodel selectionを継承</span
-                      >
-                    </div>
-                    <div class="log" data-log="hire2">
-                      <time>19:45</time>leaderが「実装」を雇いました<span
-                        >選定理由 親Agentのmodel selectionを継承</span
-                      >
-                    </div>
-                    <div class="log" data-log="hire3">
-                      <time>19:45</time>leaderが「レビュー」を雇いました<span
-                        >選定理由 差分の独立確認</span
-                      >
-                    </div>
-
-                    <div class="diff">
-                      <div class="diff-head"><span>src/auth/session.ts</span><b>+2 −1</b></div>
-                      <div class="diff-line diff-del" data-i="0">
-                        <i>−</i>const expiresAt = session.expiresAt;
-                      </div>
-                      <div class="diff-line diff-add" data-i="1">
-                        <i>+</i>const expiresAt = Date.now() + SESSION_TTL_MS;
-                      </div>
-                      <div class="diff-line diff-add" data-i="2">
-                        <i>+</i>await store.touch(session.id, expiresAt);
-                      </div>
-                    </div>
-
-                    <div class="approval">
-                      <svg viewBox="0 0 24 24" aria-hidden="true">
-                        <path d="M12 3 5 6v5c0 4.4 3 8.3 7 9.5 4-1.2 7-5.1 7-9.5V6l-7-3Z" />
-                      </svg>
-                      <div>
-                        <small>COMMAND · 承認待ち</small>
-                        <code>npm test -- auth</code>
-                      </div>
-                      <b class="approval-state swap" data-on="ok"
-                        ><span>許可する</span><span>許可済み</span></b
-                      >
-                    </div>
-
-                    <div class="msg msg-ai msg-done">
-                      <small>LEADER · 完了</small>
-                      2 files changed · 12 tests passed · レビュー:
-                      問題なし。差分と承認の履歴はこのTaskに残っています。
-                    </div>
-                  </div>
-
-                  <div class="sw-composer">
-                    <div class="sw-composer-top"><span>sprint-coder</span><em>context 3%</em></div>
-                    <div class="sw-input">
-                      <span
-                        class="sw-typed"
-                        data-typed="ログイン後にセッションが切れるバグを直して。原因の調査、修正、レビューまでお願い。"
-                        data-phase="type"
-                      ></span
-                      ><i class="sw-caret" data-on="send"></i>
-                      <span class="sw-placeholder">メッセージを送信</span>
-                    </div>
-                    <div class="sw-composer-bottom">
-                      <span>確認する</span>
-                      <b class="sw-send">
-                        <svg viewBox="0 0 20 20" aria-hidden="true">
-                          <path d="M10 15V5m0 0-4 4m4-4 4 4" />
-                        </svg>
-                      </b>
-                    </div>
-                  </div>
-                </div>
-
-                <aside class="sw-team">
-                  <div class="sw-team-head">
-                    <b class="swap" data-on="done"
-                      ><span>active · Worker 3人</span><span>completed · Worker 3人</span></b
-                    >
-                  </div>
-
-                  <div class="worker" data-state-phase="w1">
-                    <div class="wk-top">
-                      <strong>調査</strong
-                      ><em class="wk-status"
-                        ><i></i><span>ready</span><span>running</span><span>done</span></em
-                      >
-                    </div>
-                    <p class="wk-now">
-                      <span>要件と既存実装を調査する</span><span>session.ts を読んでいます</span
-                      ><span>原因: TTLが更新されない</span>
-                    </p>
-                    <div class="wk-bar"><b></b></div>
-                    <dl>
-                      <div>
-                        <dt>TOKENS</dt>
-                        <dd data-count="4812" data-phase="w1">4,812</dd>
-                      </div>
-                      <div>
-                        <dt>時間</dt>
-                        <dd data-count="38" data-phase="w1" data-suffix="s">38s</dd>
-                      </div>
-                      <div>
-                        <dt>TOOLS</dt>
-                        <dd data-count="7" data-phase="w1">7</dd>
-                      </div>
-                    </dl>
-                  </div>
-
-                  <div class="worker" data-state-phase="w2">
-                    <div class="wk-top">
-                      <strong>実装</strong
-                      ><em class="wk-status"
-                        ><i></i><span>ready</span><span>running</span><span>done</span></em
-                      >
-                    </div>
-                    <p class="wk-now">
-                      <span>変更を実装してテストする</span><span>src/auth/session.ts を編集</span
-                      ><span>2 files · 12 tests passed</span>
-                    </p>
-                    <div class="wk-bar"><b></b></div>
-                    <dl>
-                      <div>
-                        <dt>TOKENS</dt>
-                        <dd data-count="12304" data-phase="w2">12,304</dd>
-                      </div>
-                      <div>
-                        <dt>時間</dt>
-                        <dd data-count="74" data-phase="w2" data-suffix="s">74s</dd>
-                      </div>
-                      <div>
-                        <dt>TOOLS</dt>
-                        <dd data-count="19" data-phase="w2">19</dd>
-                      </div>
-                    </dl>
-                  </div>
-
-                  <div class="worker" data-state-phase="w3">
-                    <div class="wk-top">
-                      <strong>レビュー</strong
-                      ><em class="wk-status"
-                        ><i></i><span>ready</span><span>running</span><span>done</span></em
-                      >
-                    </div>
-                    <p class="wk-now">
-                      <span>差分とリスクをレビューする</span><span>差分を確認中</span
-                      ><span>問題なし · 提案 1件</span>
-                    </p>
-                    <div class="wk-bar"><b></b></div>
-                    <dl>
-                      <div>
-                        <dt>TOKENS</dt>
-                        <dd data-count="3177" data-phase="w3">3,177</dd>
-                      </div>
-                      <div>
-                        <dt>時間</dt>
-                        <dd data-count="21" data-phase="w3" data-suffix="s">21s</dd>
-                      </div>
-                      <div>
-                        <dt>TOOLS</dt>
-                        <dd data-count="4" data-phase="w3">4</dd>
-                      </div>
-                    </dl>
-                  </div>
-                </aside>
-              </div>
-            </div>
-          </div>
-
-          <div class="scene-hint" aria-hidden="true"><span>SCROLL</span><i></i></div>
-          <div class="scene-progress" aria-hidden="true"><b></b></div>
-        </div>
-      </section>
-
-      <!-- SCENE 2 · Visible control -->
-      <section class="scene scene-control" id="control" data-scene="control">
-        <div class="scene-stage">
-          <div class="shell control-layout">
-            <div class="control-copy">
-              <p class="section-label">VISIBLE CONTROL</p>
-              <h2>AIが端末に触れる前に、<br />あなたが決める。</h2>
-              <p class="section-lead">
-                ファイル変更もCommandも、共通の実行境界を通ります。Taskごとに「確認する・自動・フルアクセス」を選べます。
-              </p>
-              <ol class="control-steps">
-                <li data-range="0,0.32">
-                  <strong>差分を見る</strong><span>変更はファイル単位でTaskに残ります</span>
-                </li>
-                <li data-range="0.32,0.62">
-                  <strong>Commandを承認する</strong><span>実行前に、何が走るかを確認できます</span>
-                </li>
-                <li data-range="0.62,1.01">
-                  <strong>結果を残す</strong><span>出力と承認の履歴は端末内に保存されます</span>
-                </li>
-              </ol>
-              <a class="text-link" href="/local-first-security/">
-                Local-firstとSecurityを詳しく見る
-                <svg viewBox="0 0 20 20" aria-hidden="true">
-                  <path d="M5 10h10m0 0-4-4m4 4-4 4" />
-                </svg>
-              </a>
-            </div>
-
-            <div class="control-panel" aria-hidden="true">
-              <div class="cp-bar">
-                <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
-                <span>LIVE WORKSPACE · Task / local</span>
-                <b><i></i>Brokered</b>
-              </div>
-              <div class="cp-body">
-                <div class="cp-files" aria-hidden="true">
-                  <small>CHANGES</small>
-                  <div class="cp-file is-active"><i>M</i>src/auth/session.ts</div>
-                  <div class="cp-file"><i>M</i>src/auth/session.test.ts</div>
-                  <div class="cp-file cp-file-muted"><i></i>src/auth/store.ts</div>
-                  <div class="cp-file cp-file-muted"><i></i>src/main.ts</div>
-                </div>
-                <div class="cp-main">
-                  <div class="cp-diff">
-                    <div class="diff-head"><span>src/auth/session.ts</span><b>+4 −2</b></div>
-                    <div class="diff-line" data-i="0">
-                      <i> </i>export async function refresh(session) {
-                    </div>
-                    <div class="diff-line diff-del" data-i="1">
-                      <i>−</i> const expiresAt = session.expiresAt;
-                    </div>
-                    <div class="diff-line diff-del" data-i="2">
-                      <i>−</i> return { ...session, expiresAt };
-                    </div>
-                    <div class="diff-line diff-add" data-i="3">
-                      <i>+</i> const expiresAt = Date.now() + SESSION_TTL_MS;
-                    </div>
-                    <div class="diff-line diff-add" data-i="4">
-                      <i>+</i> await store.touch(session.id, expiresAt);
-                    </div>
-                    <div class="diff-line diff-add" data-i="5">
-                      <i>+</i> audit.record('session.refresh', session.id);
-                    </div>
-                    <div class="diff-line diff-add" data-i="6">
-                      <i>+</i> return { ...session, expiresAt };
-                    </div>
-                    <div class="diff-line" data-i="7"><i> </i>}</div>
-                  </div>
-
-                  <div class="cp-command">
-                    <div class="cp-cmd-head">
-                      <small>COMMAND REQUEST</small>
-                      <code>npm test -- auth</code>
-                    </div>
-                    <div class="cp-policy" data-on="policy">
-                      <small>ACCESS</small>
-                      <span class="is-picked">確認する</span><span>自動</span><span>フル</span>
-                    </div>
-                    <div class="cp-approve" data-on="ok">
-                      <span class="cp-btn">許可して実行</span>
-                      <b><i></i>許可済み · 19:47</b>
-                    </div>
-                    <pre class="cp-out"><span data-i="0">$ npm test -- auth</span>
-<span data-i="1">✓ refresh extends expiresAt by SESSION_TTL_MS</span>
-<span data-i="2">✓ refresh persists the new expiry</span>
-<span data-i="3">✓ refresh records an audit entry</span>
-<span data-i="4">✓ expired session is rejected</span>
-<span data-i="5" class="cp-ok">Tests 12 passed · 0 failed · 1.8s</span></pre>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="scene-progress" aria-hidden="true"><b></b></div>
-        </div>
-      </section>
-
-      <!-- SCENE 3 · Model freedom -->
-      <section class="scene scene-providers" id="providers" data-scene="providers">
-        <div class="scene-stage">
-          <div class="shell providers-layout">
-            <div class="providers-copy">
-              <p class="section-label">MODEL FREEDOM</p>
-              <h2>モデルではなく、<br />仕事に合わせて選ぶ。</h2>
-              <p class="section-lead">
-                CLI、公式API、OpenAI互換API、ローカルLLMを一つのmodel
-                pickerへ。Taskごとに使い分けられます。
-              </p>
-              <div class="provider-kinds">
-                <div class="provider-kind" data-kind="cli">
-                  <small>BUILT-IN CLI</small>
-                  <h3>既存のCLI認証を使う</h3>
-                  <p>端末にインストール済みのCodex CLI、Claude Code CLIを同じTaskへ接続。</p>
-                </div>
-                <div class="provider-kind" data-kind="cloud">
-                  <small>CLOUD API</small>
-                  <h3>Providerを直接選ぶ</h3>
-                  <p>OpenAI、Anthropic、Gemini、xAIなどの公式・互換APIを登録。</p>
-                </div>
-                <div class="provider-kind" data-kind="local">
-                  <small>LOCAL LLM</small>
-                  <h3>ローカル構成を選ぶ</h3>
-                  <p>Ollama、LM Studio、LocalAIで、クラウドに依存しないTurnも実行。</p>
-                </div>
-              </div>
-            </div>
-
-            <div class="picker" role="group" aria-label="対応する主なProviderとRuntime">
-              <div class="picker-bar"><small>MODEL</small><span>Taskごとに選択</span></div>
-              <div class="picker-viewport">
-                <ul class="picker-list" role="list">
-                  <li data-kind="cli"><strong>Codex CLI</strong><span>Built-in CLI</span></li>
-                  <li data-kind="cli"><strong>Claude Code</strong><span>Built-in CLI</span></li>
-                  <li data-kind="cloud"><strong>OpenAI</strong><span>Cloud API</span></li>
-                  <li data-kind="cloud"><strong>Anthropic</strong><span>Cloud API</span></li>
-                  <li data-kind="cloud"><strong>Google Gemini</strong><span>Cloud API</span></li>
-                  <li data-kind="cloud"><strong>xAI</strong><span>Cloud API</span></li>
-                  <li data-kind="cloud"><strong>OpenRouter</strong><span>Compatible API</span></li>
-                  <li data-kind="cloud"><strong>OrcaRouter</strong><span>Compatible API</span></li>
-                  <li data-kind="local"><strong>Ollama</strong><span>Local LLM</span></li>
-                  <li data-kind="local"><strong>LM Studio</strong><span>Local LLM</span></li>
-                  <li data-kind="local"><strong>LocalAI</strong><span>Local LLM</span></li>
-                </ul>
-                <div class="picker-cursor" aria-hidden="true"></div>
-              </div>
-              <div class="picker-foot">
-                <span>Effort</span><b>High</b><span>Access</span><b>確認する</b>
-              </div>
-            </div>
-          </div>
-          <div class="scene-progress" aria-hidden="true"><b></b></div>
-        </div>
-      </section>
-
-      <section class="local-section">
-        <div class="shell local-grid">
-          <div class="local-graphic" aria-hidden="true" data-reveal>
-            <div class="orbit orbit-one"></div>
-            <div class="orbit orbit-two"></div>
-            <div class="local-core">
-              <svg viewBox="0 0 32 32">
-                <path d="M16 3 6 7v7c0 6.7 4.2 12.5 10 14 5.8-1.5 10-7.3 10-14V7L16 3Z" />
-                <path d="m11.5 15.5 3 3 6-7" />
-              </svg>
-            </div>
-          </div>
-
-          <div class="local-copy">
-            <p class="section-label" data-reveal>LOCAL-FIRST</p>
-            <h2 data-reveal data-i="1">境界を選べるから、<br />仕事に集中できる。</h2>
-            <p class="section-lead" data-reveal data-i="2">
-              Task履歴、設定、実行状態は端末内へ。クラウドProviderを選んだTurnだけ、生成に必要な情報を選択先へ送ります。
+          <div class="beat on-lime" data-show="2">
+            <p class="chapter-tag" data-style="color: var(--lime-ink)"><b data-style="color: var(--lime-ink)">01</b>答え ANSWER</p>
+            <p class="display fx-slam" data-show="2">AIチームは<br />同時に動く</p>
+            <p class="lead fx-up" data-show="3" data-style="margin-top: 24px; color: #2b3315; max-width: 680px">
+              リーダーのAIが仕事を分け、部長と担当のAIが手分けして進める。ひとつのアプリの、ひとつの画面で。
             </p>
-            <dl data-reveal data-i="3">
-              <div>
-                <dt>HISTORY</dt>
-                <dd>端末内に保存</dd>
-              </div>
-              <div>
-                <dt>PROVIDER</dt>
-                <dd>Taskごとに選択</dd>
-              </div>
-              <div>
-                <dt>WORKSPACE</dt>
-                <dd>Accessで制御</dd>
-              </div>
-            </dl>
           </div>
         </div>
       </section>
 
-      <section class="quickstart-section" id="start">
-        <div class="shell quickstart-card" data-reveal>
-          <div class="quickstart-copy">
-            <p class="section-label">QUICK START</p>
-            <h2>3分で、最初のTaskへ。</h2>
-            <p>
-              Provider未設定でもMock
-              Runtimeで基本操作を確認できます。実AIを使う場合は、認証済みCLIまたはAPI
-              keyを接続してください。
-            </p>
-            <div class="quickstart-actions">
-              <a
-                class="button button-primary"
-                href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-              >
-                配布物を見る
-                <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M7 5h8v8M15 5l-9 9" /></svg>
+      <!-- ============================================================ 02 依頼 -->
+      <section class="scene" id="ch-request" data-style="--len: 300vh" data-no="02" data-title="依頼" data-steps="0.1,0.42,0.62" data-dim="2" aria-labelledby="h-request">
+        <div class="stage">
+          <div class="footage-layer" data-style="--fx: 62%; --fy: 78%; --zoom: 0.35">
+            <video muted playsinline loop preload="none" data-poster="/media/request.jpg" data-src="/media/request.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="scrim"></div>
+          <span class="rec">実際の画面 <b>等速</b></span>
+
+          <div class="beat" data-show="0-1">
+            <p class="chapter-tag"><b>02</b>依頼 REQUEST</p>
+            <h2 class="headline" id="h-request">お願いは<br />ひとつだけ</h2>
+            <p class="lead fx-up" data-show="1" data-style="margin-top: 20px; max-width: 520px">実際に送ったお願いを、そのまま入力して送信する。</p>
+          </div>
+
+          <div class="beat" data-show="2">
+            <div class="kcard">
+              <p class="label">実際のお願い（要点）</p>
+              <blockquote>
+                アップロードされたファイルが、<span>決められたフォルダの外に保存されない</span>ようにしたい。AIチームを<span>会社のように組織して</span>進めて
+              </blockquote>
+              <p class="fx-up" data-show="3">部署の分け方も、部署ごとにどのAIを使うかも、ふつうの文章で頼める。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 03 組織 -->
+      <section class="scene" id="ch-org" data-style="--len: 380vh" data-no="03" data-title="組織" data-steps="0.08,0.32,0.5,0.82" aria-labelledby="h-org">
+        <div class="stage top-screen">
+          <div class="beat split rev">
+            <div class="screen-stack">
+              <div class="screen" data-show="0-1">
+                <video muted playsinline loop preload="none" data-poster="/media/hires.jpg" data-src="/media/hires.mp4" aria-hidden="true" data-style="--fx: 30%; --fy: 25%; --sz: 1.5"></video>
+                <span class="rec">実際の画面 <b>等速</b></span>
+                <span class="rec after">実演の直後に収録</span>
+              </div>
+              <div class="org" data-show="2-3" data-range="0.32,0.62" role="img" aria-label="組織図。リーダー（GPT-6.1-Sol・ネット）の下に、開発部 部長（GPT-6-Astra・ネット）、セキュリティ部 部長（GPT-5.6-Terra・ネット）、チェック部 部長（Claude Opus 5.5・ネット）。担当は、作る担当（Claude Sonnet 5・ネット）、テスト案の担当・弱点さがし担当・見落とし確認（Gemma 4 12B・このパソコン）、チェック担当・別の目で確認（Claude Opus 5.5・ネット）。実演で実際に採用された組織とAI（記録から）">
+                <svg viewBox="0 0 900 470" aria-hidden="true">
+                  <g>
+                    <path class="wire" pathLength="1" d="M450 74 C450 130 150 120 150 176" />
+                    <path class="wire" pathLength="1" d="M450 74 L450 176" />
+                    <path class="wire" pathLength="1" d="M450 74 C450 130 750 120 750 176" />
+                    <path class="wire" pathLength="1" d="M150 246 C150 290 82 280 82 330" />
+                    <path class="wire" pathLength="1" d="M150 246 C150 290 220 280 220 330" />
+                    <path class="wire" pathLength="1" d="M450 246 C450 290 382 280 382 330" />
+                    <path class="wire" pathLength="1" d="M450 246 C450 290 520 280 520 330" />
+                    <path class="wire" pathLength="1" d="M750 246 C750 290 682 280 682 330" />
+                    <path class="wire" pathLength="1" d="M750 246 C750 290 820 280 820 330" />
+                  </g>
+                  <g class="node lead">
+                    <rect x="330" y="8" width="240" height="66" rx="12" />
+                    <text x="450" y="40" text-anchor="middle" font-size="22">リーダー</text>
+                    <text class="tag" x="450" y="60" text-anchor="middle">GPT-6.1-Sol · <tspan class="where-cloud">ネット</tspan></text>
+                  </g>
+                  <g class="node">
+                    <rect x="40" y="176" width="220" height="70" rx="12" />
+                    <text x="150" y="208" text-anchor="middle" font-size="19">開発部 部長</text>
+                    <text class="tag" x="150" y="230" text-anchor="middle">GPT-6-Astra · <tspan class="where-cloud">ネット</tspan></text>
+                  </g>
+                  <g class="node">
+                    <rect x="340" y="176" width="220" height="70" rx="12" />
+                    <text x="450" y="208" text-anchor="middle" font-size="19">セキュリティ部 部長</text>
+                    <text class="tag" x="450" y="230" text-anchor="middle">GPT-5.6-Terra · <tspan class="where-cloud">ネット</tspan></text>
+                  </g>
+                  <g class="node">
+                    <rect x="640" y="176" width="220" height="70" rx="12" />
+                    <text x="750" y="208" text-anchor="middle" font-size="19">チェック部 部長</text>
+                    <text class="tag" x="750" y="230" text-anchor="middle">Claude Opus 5.5 · <tspan class="where-cloud">ネット</tspan></text>
+                  </g>
+                  <g class="node">
+                    <rect x="16" y="330" width="132" height="76" rx="10" />
+                    <text x="82" y="360" text-anchor="middle" font-size="15">作る担当</text>
+                    <text class="tag" x="82" y="380" text-anchor="middle">Claude Sonnet 5</text>
+                    <text class="tag where-cloud" x="82" y="396" text-anchor="middle">ネット</text>
+                  </g>
+                  <g class="node">
+                    <rect x="154" y="330" width="132" height="76" rx="10" />
+                    <text x="220" y="360" text-anchor="middle" font-size="15">テスト案の担当</text>
+                    <text class="tag" x="220" y="380" text-anchor="middle">Gemma 4 12B</text>
+                    <text class="tag where-local" x="220" y="396" text-anchor="middle">このパソコン</text>
+                  </g>
+                  <g class="node">
+                    <rect x="316" y="330" width="132" height="76" rx="10" />
+                    <text x="382" y="360" text-anchor="middle" font-size="15">弱点さがし担当</text>
+                    <text class="tag" x="382" y="380" text-anchor="middle">Gemma 4 12B</text>
+                    <text class="tag where-local" x="382" y="396" text-anchor="middle">このパソコン</text>
+                  </g>
+                  <g class="node">
+                    <rect x="454" y="330" width="132" height="76" rx="10" />
+                    <text x="520" y="360" text-anchor="middle" font-size="15">見落とし確認</text>
+                    <text class="tag" x="520" y="380" text-anchor="middle">Gemma 4 12B</text>
+                    <text class="tag where-local" x="520" y="396" text-anchor="middle">このパソコン</text>
+                  </g>
+                  <g class="node">
+                    <rect x="616" y="330" width="132" height="76" rx="10" />
+                    <text x="682" y="360" text-anchor="middle" font-size="15">チェック担当</text>
+                    <text class="tag" x="682" y="380" text-anchor="middle">Claude Opus 5.5</text>
+                    <text class="tag where-cloud" x="682" y="396" text-anchor="middle">ネット</text>
+                  </g>
+                  <g class="node">
+                    <rect x="754" y="330" width="132" height="76" rx="10" />
+                    <text x="820" y="360" text-anchor="middle" font-size="15">別の目で確認</text>
+                    <text class="tag" x="820" y="380" text-anchor="middle">Claude Opus 5.5</text>
+                    <text class="tag where-cloud" x="820" y="396" text-anchor="middle">ネット</text>
+                  </g>
+                  <text x="450" y="452" text-anchor="middle" font-size="12" fill="#8a938a" font-family="JetBrains Mono, monospace">実演で実際に採用された組織とAI（記録から）</text>
+                </svg>
+              </div>
+              <div class="screen" data-show="4">
+                <video muted playsinline loop preload="none" data-poster="/media/assemble.jpg" data-src="/media/assemble.mp4" aria-hidden="true" data-style="--fx: 20%; --fy: 30%; --sz: 1.35"></video>
+                <span class="rec">実際の画面 <b>▶▶ 早送り ×10</b></span>
+              </div>
+            </div>
+
+            <div class="copy">
+              <p class="chapter-tag"><b>03</b>組織 ORGANIZATION</p>
+              <h2 class="headline" id="h-org">リーダー<br /><span class="sky">部長</span><br /><span class="em">担当</span></h2>
+              <p class="lead fx-up" data-show="1">リーダーのAIが、部署ごとに部長を採用。部長がさらに、手を動かす担当を採用する。</p>
+              <p class="lead fx-up" data-show="3">採用するたびに、どのAIをなぜ選んだかが画面に残る。</p>
+              <p class="lead fx-up" data-show="4">カードが並び、線でつながり、それぞれが動き出す。</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 04 同時 -->
+      <section class="scene" id="ch-together" data-style="--len: 400vh" data-no="04" data-title="同時" data-steps="0.1,0.36,0.56" data-dim="1" aria-labelledby="h-together">
+        <div class="stage">
+          <div class="footage-layer" data-style="--fx: 30%; --fy: 55%; --zoom: 0.3">
+            <video muted playsinline loop preload="none" data-poster="/media/together.jpg" data-src="/media/together.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="scrim"></div>
+          <span class="rec">実際の画面 <b>等速</b></span>
+
+          <div class="beat" data-show="0-0">
+            <p class="chapter-tag"><b>04</b>同時 TOGETHER</p>
+            <p class="title" data-style="max-width: 520px">やり直しの最中も、別々のAIが同時に作業している</p>
+          </div>
+
+          <div class="beat" data-show="1-2">
+            <h2 class="visually-hidden" id="h-together">同時に6人</h2>
+            <p class="bignum fx-slam" data-show="1" aria-hidden="true"><b>6</b><span>人が同時に</span></p>
+            <p class="lead fx-up" data-show="2" data-style="margin-top: 16px; max-width: 560px">記録から1秒ずつ数えた、同時に動いたAIの最大の数。</p>
+          </div>
+
+          <div class="beat" data-show="3">
+            <div class="gantt" data-range="0.56,0.9">
+              <div class="gantt-head"><span>最初の採用から最後の確認まで · 約31分</span><span>AIの仕事 15件</span></div>
+              <div class="gantt-rows" role="list" aria-label="AIごとの作業時間の帯">
+                <div class="g-peak" aria-hidden="true"></div>
+                <div class="g-row" role="listitem"><span>開発部 部長</span><div class="g-track"><i class="g-bar" data-style="--a: 0%; --w: 8.58%"></i></div></div>
+                <div class="g-row" role="listitem"><span>セキュリティ部 部長</span><div class="g-track"><i class="g-bar" data-style="--a: 0%; --w: 6.28%"></i></div></div>
+                <div class="g-row" role="listitem"><span>チェック部 部長</span><div class="g-track"><i class="g-bar" data-style="--a: 0%; --w: 6.31%"></i></div></div>
+                <div class="g-row" role="listitem"><span>チェック担当</span><div class="g-track"><i class="g-bar" data-style="--a: 1.28%; --w: 2.87%"></i></div></div>
+                <div class="g-row" role="listitem"><span>テスト案の担当</span><div class="g-track"><i class="g-bar local" data-style="--a: 2.9%; --w: 2.17%"></i></div></div>
+                <div class="g-row" role="listitem"><span>弱点さがし担当</span><div class="g-track"><i class="g-bar local" data-style="--a: 2.97%; --w: 1.14%"></i></div></div>
+                <div class="g-row" role="listitem"><span>開発部 部長（作る工程）</span><div class="g-track"><i class="g-bar" data-style="--a: 13.98%; --w: 31.58%"></i></div></div>
+                <div class="g-row" role="listitem"><span>作る担当</span><div class="g-track"><i class="g-bar" data-style="--a: 15.78%; --w: 18.2%"></i></div></div>
+                <div class="g-row" role="listitem"><span>チェック部 部長（まとめた後）</span><div class="g-track"><i class="g-bar" data-style="--a: 45.58%; --w: 7.53%"></i></div></div>
+                <div class="g-row" role="listitem"><span>別の目で確認</span><div class="g-track"><i class="g-bar" data-style="--a: 47.79%; --w: 3.57%"></i></div></div>
+                <div class="g-row" role="listitem"><span>セキュリティ部 部長（まとめた後）<span class="visually-hidden">：途中で止まり、別の部長がやり直し</span></span><div class="g-track"><i class="g-bar failed" data-style="--a: 53.11%; --w: 16.04%"></i></div></div>
+                <div class="g-row" role="listitem"><span>開発部 部長（やり直し）</span><div class="g-track"><i class="g-bar" data-style="--a: 56.93%; --w: 29.07%"></i></div></div>
+                <div class="g-row" role="listitem"><span>作る担当（やり直し）</span><div class="g-track"><i class="g-bar" data-style="--a: 59.68%; --w: 23.17%"></i></div></div>
+                <div class="g-row" role="listitem"><span>セキュリティ部 部長（再確認）</span><div class="g-track"><i class="g-bar" data-style="--a: 87.11%; --w: 12.89%"></i></div></div>
+                <div class="g-row" role="listitem"><span>見落とし確認</span><div class="g-track"><i class="g-bar local" data-style="--a: 95.81%; --w: 1.83%"></i></div></div>
+              </div>
+              <div class="legend">
+                <span><i></i>ネットのAI</span><span><i class="local"></i>このパソコンの中のAI</span><span><i class="failed"></i>途中で止まり、別の部長がやり直し</span>
+              </div>
+              <p class="note" data-style="margin: 10px 0 0">
+                実演の記録（アプリに残る開始・終了の時刻）から作図。帯は仕事を受けてから終えるまで。このパソコンの中のAIは2人が同時に仕事を受け、中では1人ずつ順番に処理した。ネットのAIとこのパソコンの中のAIが同時に動いた時間は合計74秒。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 05 使い分け -->
+      <section class="scene" id="ch-mix" data-style="--len: 300vh" data-no="05" data-title="使い分け" data-steps="0.1,0.48" aria-labelledby="h-mix">
+        <div class="stage top-screen">
+          <div class="beat split" data-show="0-1">
+            <div class="copy">
+              <p class="chapter-tag"><b>05</b>使い分け MIX</p>
+              <h2 class="headline" id="h-mix">仕事に合う<br />AIを選ぶ</h2>
+              <p class="lead fx-up" data-show="1">部署ごとにどのAIを使うか、設定に文章で書いておくだけ。リーダーはそれを読んで採用する。</p>
+            </div>
+            <div class="screen">
+              <video muted playsinline loop preload="none" data-poster="/media/settings.jpg" data-src="/media/settings.mp4" aria-hidden="true" data-style="--fx: 55%; --fy: 50%; --sz: 1.35"></video>
+              <span class="rec">実際の画面 <b>等速</b></span>
+              <span class="rec after">実演の直後に収録</span>
+            </div>
+          </div>
+
+          <div class="beat" data-show="2">
+            <p class="chapter-tag"><b>05</b>使い分け MIX</p>
+            <p class="headline" data-style="margin-bottom: 28px">ネットのAIと<br /><span class="em">このパソコンの中のAI</span></p>
+            <div class="mix">
+              <div class="mix-col cloud fx-left" data-show="2">
+                <h3>ネットのAI</h3>
+                <p>インターネット経由で使うAI。今回はリーダー、部長、作る担当、チェック担当、別の目で確認する担当に。</p>
+                <div class="chips"><span class="chip">GPT-6.1-Sol</span><span class="chip">GPT-6-Astra</span><span class="chip">GPT-5.6-Terra</span><span class="chip">Claude Sonnet 5</span><span class="chip">Claude Opus 5.5</span></div>
+              </div>
+              <div class="mix-col local fx-up" data-show="2">
+                <h3>このパソコンの中のAI</h3>
+                <p>このパソコンの中だけで動くAI。今回はテストの案づくり、弱点さがし、見落とし確認に。</p>
+                <div class="chips"><span class="chip">Gemma 4 12B</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 06 確認 -->
+      <section class="scene" id="ch-check" data-style="--len: 440vh" data-no="06" data-title="確認" data-steps="0.06,0.3,0.52,0.74" aria-labelledby="h-check">
+        <div class="stage">
+          <div class="footage-layer dim" data-show="0-1" data-style="--fx: 30%; --fy: 50%; --zoom: 0.25">
+            <video muted playsinline loop preload="none" data-poster="/media/code.jpg" data-src="/media/code.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="footage-layer dim" data-show="2-2" data-style="--fx: 30%; --fy: 50%; --zoom: 0.25">
+            <video muted playsinline loop preload="none" data-poster="/media/review.jpg" data-src="/media/review.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="footage-layer dim" data-show="3-3" data-style="--fx: 30%; --fy: 50%; --zoom: 0.25">
+            <video muted playsinline loop preload="none" data-poster="/media/redo.jpg" data-src="/media/redo.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="footage-layer dim" data-show="4" data-style="--fx: 75%; --fy: 40%; --zoom: 0.25">
+            <video muted playsinline loop preload="none" data-poster="/media/recheck.jpg" data-src="/media/recheck.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="scrim"></div>
+          <span class="rec" data-show="0-3">実際の画面 <b>等速</b></span>
+          <span class="rec" data-show="4">実際の画面 <b>実演の直後に収録</b></span>
+
+          <div class="beat">
+            <p class="chapter-tag"><b>06</b>確認 CHECK</p>
+            <h2 class="headline" id="h-check" data-style="margin-bottom: 32px">作る 確かめる<br /><span class="em">やり直す</span></h2>
+            <ol class="flow">
+              <li data-show="1-1"><b>作る</b><small>作る担当のAIが、保存のしかたを直す</small></li>
+              <li data-show="2-2"><b>チェック</b><small>チェック部のAIが、別の目で確かめる</small></li>
+              <li class="redo" data-show="3-3"><b>やり直しを頼む</b><small>足りないテストを足すよう、リーダーが1回だけ頼む</small></li>
+              <li data-show="4"><b>もう一度確かめる</b><small>セキュリティ部が、直した後をあらためて調べる</small></li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 07 完成 -->
+      <section class="scene" id="ch-done" data-style="--len: 360vh" data-no="07" data-title="完成" data-steps="0.08,0.32,0.56" data-dim="1" aria-labelledby="h-done">
+        <div class="stage">
+          <div class="footage-layer" data-style="--fx: 45%; --fy: 45%; --zoom: 0.2">
+            <video muted playsinline loop preload="none" data-poster="/media/final.jpg" data-src="/media/final.mp4" aria-hidden="true"></video>
+          </div>
+          <div class="scrim"></div>
+          <span class="rec">リーダーの最終報告 · <b>実演の直後に収録</b></span>
+
+          <div class="beat" data-show="0-0">
+            <p class="chapter-tag"><b>07</b>完成 RESULT</p>
+            <p class="title" data-style="max-width: 560px">最後にリーダーが、誰が何をしたかをまとめて報告する</p>
+          </div>
+
+          <div class="beat" data-show="1">
+            <p class="chapter-tag"><b>07</b>完成 RESULT</p>
+            <h2 class="display fx-slam" data-show="1" id="h-done">完成</h2>
+            <p class="lead" data-style="margin-top: 12px">お願いを送ってから最終報告まで <b data-style="color: var(--ink)">36分32秒</b></p>
+
+            <div class="fx-up" data-show="2" data-style="margin-top: 32px">
+              <p class="title" data-style="font-size: clamp(20px, 2.2vw, 28px); margin-bottom: 14px">テスト <span class="em">9件</span> すべて成功</p>
+              <div class="checks" aria-hidden="true">
+                <span class="check" data-show="2" data-style="transition-delay: 0.05s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.12s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.19s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.26s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.33s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.4s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.47s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.54s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+                <span class="check" data-show="2" data-style="transition-delay: 0.61s"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg></span>
+              </div>
+            </div>
+
+            <div class="stats fx-up" data-show="3" data-style="margin-top: 28px">
+              <div class="stat"><b>3<small>部署</small></b><span>開発・セキュリティ・チェック</span></div>
+              <div class="stat"><b>6<small>人</small></b><span>同時に動いたAIの最大</span></div>
+              <div class="stat"><b>15<small>件</small></b><span>AIが受け持った仕事（1件は途中で止まり、やり直し）</span></div>
+              <div class="stat"><b>1<small>回</small></b><span>やり直しを頼んだ回数</span></div>
+            </div>
+            <p class="note fx-up" data-show="3" data-style="margin-top: 10px">数字はすべて、実演の記録とリーダーの実行結果から。速さや費用の比較ではありません。</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 08 安心 -->
+      <section class="scene" id="ch-safe" data-style="--len: 200vh" data-no="08" data-title="安心" data-steps="0.12" aria-labelledby="h-safe">
+        <div class="stage">
+          <div class="footage-layer haze" data-style="--fx: 60%; --fy: 50%; --zoom: 0.12">
+            <img src="/media/hero.jpg" alt="" loading="lazy" />
+          </div>
+          <div class="scrim"></div>
+
+          <div class="beat">
+            <p class="chapter-tag"><b>08</b>安心 CONTROL</p>
+            <h2 class="headline" id="h-safe" data-style="margin-bottom: 32px">任せても<br /><span class="em">決めるのは人</span></h2>
+            <div class="cards">
+              <a class="card fx-up" data-show="1" href="/local-first-security/">
+                <span class="num">01</span>
+                <h3>記録はこのパソコンに</h3>
+                <p>やりとりや進み具合は、このパソコンの中に保存。ネットのAIへ送るのは、その回の仕事に必要な内容だけ。</p>
+                <span class="more">保存と送信のくわしい話 →</span>
               </a>
-              <a class="button button-secondary" href="/getting-started/"> セットアップ手順 </a>
+              <a class="card fx-up" data-show="1" href="/managed-harness/" data-style="transition-delay: 0.08s">
+                <span class="num">02</span>
+                <h3>大事な操作は先に確認</h3>
+                <p>ファイルの書き換えやコマンドの実行を、確認してから進める設定にできる。何をしたかは画面に残る。</p>
+                <span class="more">確認と記録のしくみ →</span>
+              </a>
+              <a class="card fx-up" data-show="1" href="/providers/" data-style="transition-delay: 0.16s">
+                <span class="num">03</span>
+                <h3>AIは選べる 混ぜられる</h3>
+                <p>ネットのAIも、このパソコンの中のAIも。仕事ごと、部署ごとに使い分けられる。</p>
+                <span class="more">使えるAIの一覧 →</span>
+              </a>
+              <a class="card fx-up" data-show="1" href="https://github.com/Robbits-CO-LTD/sprint-coder" data-style="transition-delay: 0.24s">
+                <span class="num">04</span>
+                <h3>中身はすべて公開</h3>
+                <p>無料で使え、作りもすべて公開（オープンソース・MITライセンス）。株式会社Robbitsが開発・運営。</p>
+                <span class="more">GitHubで見る →</span>
+              </a>
             </div>
-          </div>
-
-          <div class="terminal" aria-label="Sprint Coderをソースから起動するコマンド">
-            <div class="terminal-bar">
-              <span><i></i><i></i><i></i></span>
-              <b>Terminal</b>
-            </div>
-            <pre><code><span class="tl" data-i="0"><span>$</span> git clone https://github.com/Robbits-CO-LTD/sprint-coder.git</span>
-<span class="tl" data-i="1"><span>$</span> cd sprint-coder</span>
-<span class="tl" data-i="2"><span>$</span> nvm use</span>
-<span class="tl" data-i="3"><span>$</span> npm ci</span>
-<span class="tl" data-i="4"><span>$</span> npm start</span></code></pre>
-          </div>
-        </div>
-      </section>
-
-      <section class="content-hub-section" aria-labelledby="content-hub-title">
-        <div class="shell content-hub-heading">
-          <div data-reveal>
-            <p class="section-label">EXPLORE SPRINT CODER</p>
-            <h2 id="content-hub-title">仕組みと使い方を、<br />深く知る。</h2>
-          </div>
-          <p data-reveal data-i="1">
-            製品の考え方、AI
-            Team、対応Provider、Security、実行制御、導入、正式Releaseを公式情報として整理しました。
-          </p>
-        </div>
-        <div class="shell content-hub-grid">
-          <a class="content-hub-card" href="/about/" data-reveal data-i="0">
-            <small>PRODUCT</small>
-            <h3>Sprint Coderとは</h3>
-            <p>何を解決し、どんな仕事に向くのか。</p>
-            <span
-              >製品概要を読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/ai-team/" data-reveal data-i="1">
-            <small>AI TEAM</small>
-            <h3>ChatからAI Teamへ</h3>
-            <p>LeaderとWorkerが役割分担する実行モデル。</p>
-            <span
-              >仕組みを読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/providers/" data-reveal data-i="2">
-            <small>PROVIDERS</small>
-            <h3>対応AI・モデル</h3>
-            <p>CLI、公式API、互換API、ローカルLLM。</p>
-            <span
-              >対応先を読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/local-first-security/" data-reveal data-i="3">
-            <small>SECURITY</small>
-            <h3>Local-firstと安全性</h3>
-            <p>保存場所、外部送信、Accessの境界。</p>
-            <span
-              >境界を読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/managed-harness/" data-reveal data-i="4">
-            <small>HARNESS</small>
-            <h3>Managed Harness</h3>
-            <p>ファイル、Command、承認、監査の共通経路。</p>
-            <span
-              >設計を読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/getting-started/" data-reveal data-i="5">
-            <small>GUIDE</small>
-            <h3>最初のTaskを始める</h3>
-            <p>インストールからProvider接続、AI Teamまで。</p>
-            <span
-              >手順を読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-          <a class="content-hub-card" href="/releases/" data-reveal data-i="6">
-            <small>RELEASES</small>
-            <h3>正式版をダウンロード</h3>
-            <p>現在のRelease、OS別artifact、検証方法。</p>
-            <span
-              >Releaseを読む<svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" /></svg
-            ></span>
-          </a>
-        </div>
-      </section>
-
-      <section class="faq-section" id="faq">
-        <div class="shell faq-grid">
-          <div class="faq-intro" data-reveal>
-            <p class="section-label">FAQ</p>
-            <h2>導入前に、<br />知っておきたいこと。</h2>
-            <p>仕様・設計の詳細はGitHubで公開しています。</p>
-            <a class="text-link" href="https://github.com/Robbits-CO-LTD/sprint-coder">
-              GitHub Repository
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M5 10h10m0 0-4-4m4 4-4 4" />
-              </svg>
-            </a>
-          </div>
-
-          <div class="faq-list">
-            <details open data-reveal data-i="0">
-              <summary>Sprint Coderとは何ですか？</summary>
-              <p>
-                AIとのChat、ローカルWorkspaceでのコーディング、複数AI
-                Workerへの役割分担を一つのTaskで扱える、オープンソースのデスクトップアプリです。
-              </p>
-            </details>
-            <details data-reveal data-i="1">
-              <summary>Codex CLIやClaude Codeとの違いは？</summary>
-              <p>
-                置き換えるものではありません。既存のCLI認証を利用しつつ、クラウドAPIやローカルLLMも共通の画面、Access設定、Task履歴、AI
-                Teamへ接続します。
-              </p>
-            </details>
-            <details data-reveal data-i="2">
-              <summary>無料で使えますか？</summary>
-              <p>
-                Sprint CoderはMIT
-                Licenseで公開されています。接続するクラウドProviderやモデルによっては、別途API利用料金が発生します。
-              </p>
-            </details>
-            <details data-reveal data-i="3">
-              <summary>コードや会話はどこに保存されますか？</summary>
-              <p>
-                Task履歴、設定、実行状態は端末内に保存します。クラウドProviderを使うTurnでは、生成に必要なpromptやcontextが選択先へ送信されます。
-              </p>
-            </details>
-          </div>
-        </div>
-      </section>
-
-      <section class="final-cta">
-        <div class="shell final-card" data-reveal>
-          <div class="final-grid" aria-hidden="true"></div>
-          <img src="/assets/sprint-coder-icon.png" alt="" width="72" height="72" />
-          <p class="section-label">ONE TASK. ONE TEAM.</p>
-          <h2>AIを使うから、<br />AIチームを動かすへ。</h2>
-          <p>オープンソース。ローカルファースト。モデルを選べる。</p>
-          <div class="hero-actions">
-            <a
-              class="button button-primary"
-              href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-            >
-              最新版をダウンロード
-              <svg viewBox="0 0 20 20" aria-hidden="true">
-                <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" />
-              </svg>
-            </a>
-            <a
-              class="button button-secondary"
-              href="https://github.com/Robbits-CO-LTD/sprint-coder"
-            >
-              GitHubで見る
-            </a>
           </div>
         </div>
       </section>
     </main>
 
-    <footer>
+    <!-- ============================================================ 始動 -->
+    <section class="finale" id="start" aria-labelledby="h-start">
+      <div class="footage-layer">
+        <video muted playsinline loop preload="none" data-poster="/media/hero.jpg" data-src="/media/hero.mp4" aria-hidden="true"></video>
+      </div>
+      <div class="scrim"></div>
+      <div class="shell finale-inner">
+        <p class="chapter-tag"><b>09</b>始動 GET STARTED</p>
+        <h2 class="display" id="h-start">今すぐ<br /><span class="em">動かす</span></h2>
+        <p class="lead" data-style="max-width: 640px">無料のデスクトップアプリ。下のボタンから正式版 0.5.0 を入手できます。ネットのAIを使うと、その会社の利用料がかかる場合があります。</p>
+
+        <div class="dl" role="group" aria-label="正式版 0.5.0 のダウンロード">
+          <a data-os="win" href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-Installer.exe">
+            <b>Windows</b><span>インストーラー（x64）· 0.5.0</span>
+          </a>
+          <a data-os="mac" href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-0.5.0-arm64.dmg">
+            <b>macOS</b><span>Apple シリコン用 · 0.5.0</span>
+          </a>
+          <a data-os="linux" href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-linux-x64-0.5.0.zip">
+            <b>Linux</b><span>ZIP（x64）· 0.5.0</span>
+          </a>
+        </div>
+        <p class="note" data-style="max-width: 760px; margin: -8px 0 0">
+          Windows版は署名がないため、初回に警告が出ることがあります。配布元（GitHub の Robbits-CO-LTD）を確かめてから実行してください。このページの映像は、開発中の最新版（2026年10月20日時点）で収録したもので、正式版 0.5.0 とは画面が異なる場合があります。最新の機能は<a href="/releases/">試作版</a>で試せます。
+        </p>
+
+        <div class="hero-actions" data-style="margin-top: 0">
+          <a class="btn" href="/getting-started/">はじめ方を見る</a>
+          <a class="btn" href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHubで見る</a>
+          <a class="btn" href="/releases/">ほかの形式・試作版</a>
+        </div>
+
+        <a class="watch" href="/media/promo-720.mp4" data-open-promo>
+          <span class="thumb"><img src="/media/promo.jpg" alt="" loading="lazy" width="1600" height="900" /></span>
+          <span><b>フル版を見る 4:02</b><span>お願いから完成までの実演を、1本の動画で。音が出ます。</span></span>
+        </a>
+      </div>
+    </section>
+
+    <footer class="site-footer">
       <div class="shell footer-grid">
         <div class="footer-brand">
-          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
-          <div>
-            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
-          </div>
+          <img src="/assets/sprint-coder-icon-64.png" alt="" width="40" height="40" loading="lazy" />
+          <div><strong>Sprint Coder</strong>開発・所有・運営 <a href="https://robbits.co.jp/">株式会社Robbits</a></div>
         </div>
-
-        <div class="footer-owner">
-          <span>Developed, owned and managed by</span>
-          <a href="https://robbits.co.jp/">株式会社Robbits</a>
-        </div>
-
-        <nav class="footer-links" aria-label="フッターナビゲーション">
+        <nav class="footer-nav" aria-label="フッターナビゲーション">
+          <a href="/about/">製品について</a>
+          <a href="/ai-team/">AIチームのしくみ</a>
+          <a href="/providers/">AIの選び方</a>
+          <a href="/local-first-security/">保存と安全</a>
+          <a href="/managed-harness/">確認と記録のしくみ</a>
+          <a href="/getting-started/">はじめ方</a>
+          <a href="/releases/">ダウンロード</a>
           <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a>
-          <a href="/releases/">Releases</a>
-          <a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE">MIT License</a>
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE">MITライセンス</a>
         </nav>
       </div>
-      <nav class="shell content-footer-links" aria-label="公式情報ページ">
-        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
-        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
-        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
-        ><a href="/releases/">Releases</a>
-      </nav>
-      <div class="shell copyright">
-        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
-      </div>
+      <div class="shell copyright">© 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc. sprintcoder.yuseilab.com はホスティング用のドメインです。</div>
     </footer>
 
-    <script
-      src="/story.js?v=20260912-2"
-      onerror="document.documentElement.classList.remove('js')"
-    ></script>
+    <audio id="bgm" src="/media/bgm.m4a" loop preload="none"></audio>
+
+    <dialog class="modal" id="promo-modal" aria-label="Sprint Coder 実演動画 フル版">
+      <video controls playsinline preload="none" data-poster="/media/promo.jpg">
+        <source src="/media/promo-720.mp4" type="video/mp4" media="(max-width: 900px)" />
+        <source src="/media/promo-1080.webm" type="video/webm" />
+        <source src="/media/promo-720.mp4" type="video/mp4" />
+      </video>
+      <div class="modal-bar">
+        <span>実際のアプリと実際のAIの実行を収録。早送りの場面は画面に倍率を表示しています。</span>
+        <button class="btn btn-sm" type="button" data-close>閉じる</button>
+      </div>
+    </dialog>
   </body>
 </html>
