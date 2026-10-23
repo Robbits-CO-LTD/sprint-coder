@@ -21,7 +21,12 @@ import Database from 'better-sqlite3';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
-import { SqlitePersistenceClient, type ApprovalRequestInput } from './persistence';
+import {
+  SqlitePersistenceClient,
+  type ApprovalRequestInput,
+  type TeamExecutionIsolationRecord,
+} from './persistence';
+import { RetiredManagedLocalError } from './retired-managed-local';
 import { ApprovalCoordinator } from './approval-coordinator';
 import { ToolBroker } from './tool-broker';
 import { nextGraphDocument } from './graph-document';
@@ -355,6 +360,167 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
+async function retiredWorkspaceFixture(mode: 'graph' | 'sequential') {
+  const f = fixture(undefined, true);
+  const workerId = f.workers[0]!.id;
+  f.persistence.createProviderConnection({
+    ...localProviderTestConnection(),
+    id: 'managed-local:runtime',
+    providerId: 'sprint-managed-local',
+  });
+  // A pre-upgrade Worker and its thread already carry this selection; no retired runtime is started.
+  const raw = new Database(f.path);
+  for (const table of ['agents', 'agent_threads'])
+    raw
+      .prepare(
+        `UPDATE ${table} SET connection_id = 'managed-local:runtime', requested_provider = 'sprint-managed-local', requested_model = ? WHERE id = ?`,
+      )
+      .run('a'.repeat(64), table === 'agents' ? workerId : f.workers[0]!.threadId);
+  raw.close();
+  const workspace = join(dirname(f.path), 'workspace');
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, 'shared.ts'), 'base\n');
+  for (const args of [
+    ['init', '-q', workspace],
+    ['-C', workspace, 'add', 'shared.ts'],
+    [
+      '-C',
+      workspace,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-qm',
+      'base',
+    ],
+  ])
+    expect(spawnSync('git', args).status).toBe(0);
+  const binding = await workspaceMutationBinding(workspace);
+  f.persistence.setWorkspaceBinding(f.task.id, {
+    path: binding.canonicalPath,
+    workspaceKey: binding.workspaceKey,
+    rootIdentityDigest: binding.rootIdentityDigest,
+  });
+  const graphWrite = mode === 'graph' ? await writeMission(f, workspace) : null;
+  const mission =
+    graphWrite?.mission ??
+    f.persistence.createTeamMission({
+      teamId: f.team.id,
+      createdByAgentId: f.team.leaderAgentId,
+      objective: 'saved write',
+      doneCriteria: ['saved'],
+      steps: [
+        { workerId, objective: 'write', doneCriteria: ['saved'], access: 'workspace-write' },
+        {
+          workerId: f.workers[1]!.id,
+          objective: 'read',
+          doneCriteria: ['read'],
+          access: 'read-only',
+        },
+      ],
+      now,
+    });
+  const executionId = mission.steps[0]!.executionId;
+  let previousAttemptId: string;
+  if (graphWrite !== null)
+    previousAttemptId = begin(f, mission.id, 'a', graphWrite.acquisition.writeFootprints).attempt
+      .id;
+  else {
+    f.persistence.transitionTeamMission(mission.id, 'running', now);
+    f.persistence.transitionTeamExecution({
+      executionId,
+      to: 'queued',
+      queueReason: 'recovery',
+      now,
+    });
+    f.persistence.transitionTeamExecution({ executionId, to: 'running', now });
+    previousAttemptId = f.persistence.createTeamAttempt(executionId, now, 'initial').id;
+    f.persistence.transitionTeamAttempt({ attemptId: previousAttemptId, to: 'running', now });
+    f.persistence.transitionTeamTask(
+      f.persistence.getTeamExecutionDispatch(executionId).teamTaskId,
+      'running',
+      now,
+    );
+  }
+  const runtime = new DeterministicTeamWorkerRuntime();
+  const execute = vi.spyOn(runtime, 'execute').mockRejectedValue(new RetiredManagedLocalError());
+  const scheduler = new TeamExecutionScheduler(1);
+  const manager = new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') });
+  const coordinator = new TeamCoordinator(
+    f.persistence,
+    runtime,
+    undefined,
+    undefined,
+    undefined,
+    scheduler,
+    undefined,
+    undefined,
+    manager,
+  );
+  const prepare = Reflect.get(TeamCoordinator.prototype, 'prepareExecutionIsolation') as (
+    this: TeamCoordinator,
+    taskId: string,
+    executionId: string,
+    agentId: string,
+  ) => Promise<TeamExecutionIsolationRecord>;
+  const isolation = await prepare.call(coordinator, f.task.id, executionId, workerId);
+  const preservedFile = join(isolation.roots[0]!.isolatedPath, 'shared.ts');
+  writeFileSync(preservedFile, 'saved user changes\n');
+  if (mode === 'graph') {
+    const owner = f.persistence
+      .listGraphResourceReservations(mission.id)
+      .find(({ executionId: id }) => id === executionId)!;
+    f.persistence.interruptGraphStep({
+      missionId: mission.id,
+      stepKey: 'a',
+      generation: 1,
+      reservationId: owner.id,
+      attemptId: previousAttemptId,
+      outcome: 'failed',
+      reason: 'saved before upgrade',
+      confirmation: { kind: 'attempt-stopped', attemptId: previousAttemptId },
+      now,
+    });
+  } else {
+    f.persistence.transitionTeamAttempt({
+      attemptId: previousAttemptId,
+      to: 'failed',
+      terminalReason: 'runtime_failure',
+      now,
+    });
+    f.persistence.transitionTeamExecution({ executionId, to: 'waiting_resume', now });
+    f.persistence.transitionTeamMission(mission.id, 'waiting_resume', now);
+  }
+  f.persistence.updateTeamExecutionIsolation({
+    executionId,
+    phase: 'quarantined',
+    resumeKind: null,
+    reason: 'saved before upgrade',
+    repositories: isolation.repositories.map((repository) => ({
+      ...repository,
+      state: 'quarantined',
+    })),
+    now,
+  });
+  await installNativeGraphObserver(f.persistence, dirname(f.path));
+  return {
+    f,
+    mission,
+    graphWrite,
+    executionId,
+    workerId,
+    coordinator,
+    scheduler,
+    execute,
+    preservedFile,
+    before: f.persistence.getTeamExecutionIsolation(executionId),
+    create: vi.spyOn(manager, 'create'),
+    cleanup: vi.spyOn(manager, 'cleanup'),
+    seal: vi.spyOn(f.persistence, 'sealTeamExecutionContext'),
+  };
+}
+
 async function retainedWriteFixture(independent = false) {
   const f = fixture(undefined, true);
   if (independent) {
@@ -554,6 +720,170 @@ async function unconfirmedExitGraph(limitedConnection = false) {
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each(['manual', 'admission', 're-agreement'] as const)(
+      'preserves retired Managed Local graph workspace before %s admission',
+      async (route) => {
+        const run = await retiredWorkspaceFixture('graph');
+        const { f, coordinator, executionId, mission } = run;
+        try {
+          const reviewed = await coordinator.reviewGraphPreservedWorkspace(
+            f.task.id,
+            mission.id,
+            'a',
+          );
+          expect(reviewed.files).toEqual([{ repository: 1, path: 'shared.ts' }]);
+          let failure: unknown;
+          if (route === 'manual') {
+            failure = await coordinator
+              .resumeGraphStep(f.task.id, mission.id, 'a', reviewed.digest)
+              .catch((error: unknown) => error);
+          } else if (route === 'admission') {
+            const owner = reserve(
+              f,
+              mission.id,
+              'a',
+              1,
+              run.graphWrite!.acquisition.writeFootprints,
+            );
+            const dispatch = Reflect.get(TeamCoordinator.prototype, 'runGraphExecution') as (
+              this: TeamCoordinator,
+              graph: NonNullable<ReturnType<SqlitePersistenceClient['getGraphTeamMission']>>,
+              stepKey: string,
+              reservation: typeof owner,
+              reason: 'manual_resume',
+            ) => Promise<void>;
+            await dispatch.call(
+              coordinator,
+              f.persistence.getGraphTeamMission(mission.id)!,
+              'a',
+              owner,
+              'manual_resume',
+            );
+          } else {
+            const current = f.persistence.getGraphDocument(f.task.id)!;
+            const plan = structuredClone(current.missionPlan!);
+            plan.steps[0]!.writeClaims.push({
+              ...plan.steps[0]!.writeClaims[0]!,
+              path: 'added.ts',
+            });
+            const proposed = nextGraphDocument(f.task.id, f.diagram, current, [], [], plan);
+            f.persistence.saveGraphDocument(proposed, current.renderRevision);
+            const input = {
+              taskId: f.task.id,
+              missionId: mission.id,
+              instanceId: randomUUID(),
+              renderRevision: proposed.renderRevision,
+              expectedSemanticRevision: current.semanticRevision,
+            };
+            const review = await coordinator.requestGraphConstraintUpdate(
+              input,
+              randomUUID(),
+              () => undefined,
+            );
+            failure = await coordinator
+              .agreeGraphConstraintUpdate(
+                { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+                randomUUID(),
+                () => undefined,
+              )
+              .catch((error: unknown) => error);
+          }
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          expect(run.create).not.toHaveBeenCalled();
+          expect(run.cleanup).not.toHaveBeenCalled();
+          expect(run.seal).not.toHaveBeenCalled();
+          expect(run.execute).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
+          expect(f.persistence.getTeamExecutionIsolation(executionId)).toEqual(run.before);
+          expect(f.persistence.listTeamAttempts(executionId)).toHaveLength(1);
+          expect(readFileSync(run.preservedFile, 'utf8')).toBe('saved user changes\n');
+          expect(
+            (await coordinator.reviewGraphPreservedWorkspace(f.task.id, mission.id, 'a')).files,
+          ).toEqual(reviewed.files);
+          expect((await coordinator.listRetainedWorktrees(f.task.id)).total).toBe(1);
+          const activity = f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(({ id }) => id === run.workerId)?.currentActivity;
+          expect([failure instanceof Error ? failure.message : '', activity].join(' ')).toContain(
+            new RetiredManagedLocalError().message,
+          );
+        } finally {
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          f.persistence.close();
+        }
+      },
+      gitScenarioTimeout,
+    );
+
+    it.each(['manual', 'scheduled'] as const)(
+      'preserves retired Managed Local sequential workspace before %s admission',
+      async (route) => {
+        const run = await retiredWorkspaceFixture('sequential');
+        const { f, coordinator, executionId, mission } = run;
+        try {
+          const originalDispatch = f.persistence.getTeamExecutionDispatch(executionId);
+          let failure: unknown;
+          if (route === 'manual')
+            failure = await coordinator
+              .resumeMission(f.task.id, mission.id)
+              .catch((error: unknown) => error);
+          else {
+            f.persistence.prepareTeamMissionResume({ missionId: mission.id, executionId, now });
+            const dispatch = f.persistence.getTeamExecutionDispatch(executionId);
+            const execute = Reflect.get(TeamCoordinator.prototype, 'runScheduledExecution') as (
+              this: TeamCoordinator,
+              input: {
+                taskId: string;
+                teamId: string;
+                leaderId: string;
+                workerId: string;
+                messageId: string;
+                messageSeq: number;
+                teamTaskId: string;
+                executionId: string;
+                doneCriteria: readonly string[];
+              },
+            ) => Promise<void>;
+            failure = await execute
+              .call(coordinator, {
+                taskId: f.task.id,
+                teamId: f.team.id,
+                leaderId: f.team.leaderAgentId,
+                workerId: run.workerId,
+                executionId,
+                ...dispatch,
+              })
+              .catch((error: unknown) => error);
+          }
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          expect(run.create).not.toHaveBeenCalled();
+          expect(failure).toBeInstanceOf(RetiredManagedLocalError);
+          expect(run.cleanup).not.toHaveBeenCalled();
+          expect(run.seal).not.toHaveBeenCalled();
+          expect(run.execute).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
+          expect(f.persistence.getTeamExecutionIsolation(executionId)).toEqual(run.before);
+          expect(f.persistence.listTeamAttempts(executionId)).toHaveLength(1);
+          expect(readFileSync(run.preservedFile, 'utf8')).toBe('saved user changes\n');
+          expect((await coordinator.listRetainedWorktrees(f.task.id)).total).toBe(1);
+          if (route === 'manual')
+            expect(f.persistence.getTeamExecutionDispatch(executionId)).toEqual(originalDispatch);
+        } finally {
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          f.persistence.close();
+        }
+      },
+      gitScenarioTimeout,
+    );
+
     it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
       const f = fixture();
       const connection = localProviderTestConnection();

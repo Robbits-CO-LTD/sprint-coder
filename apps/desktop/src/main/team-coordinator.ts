@@ -1,3 +1,4 @@
+import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import { previewGraphSource } from './graph-source-preview';
 import { reviewGraphWorkspace } from './graph-workspace-review';
 import { assertGraphWriteCoverage, assertGraphWritePathCoverage } from './graph-write-coverage';
@@ -1401,6 +1402,10 @@ export class TeamCoordinator {
           throw error;
         }
       }
+      assertNotRetiredManagedLocal(
+        execution.modelSelection.connectionId,
+        execution.modelSelection.requestedProvider,
+      );
       this.persistence.prepareTeamMissionResume({
         missionId: mission.id,
         executionId: execution.id,
@@ -1616,6 +1621,10 @@ export class TeamCoordinator {
       );
       if (!leader || !storedWorker || !['ready', 'waiting'].includes(storedWorker.state))
         throw new Error('Graph Worker is not ready');
+      assertNotRetiredManagedLocal(
+        worker.modelSelection.connectionId,
+        worker.modelSelection.requestedProvider,
+      );
       await this.verifyWorkspace?.(graph.taskId);
       const reviewedWorkspace = this.graphWorkspaceResumeDigests.get(execution.id);
       if (reviewedWorkspace !== undefined) {
@@ -1996,6 +2005,10 @@ export class TeamCoordinator {
       const execution = this.persistence.getTeamExecution(step.executionId);
       if (execution.state !== 'waiting_resume' || this.graphScheduledExecutions.has(execution.id))
         throw new Error('Graph step is not waiting for manual resume');
+      assertNotRetiredManagedLocal(
+        execution.modelSelection.connectionId,
+        execution.modelSelection.requestedProvider,
+      );
       if (execution.modelSelection.connectionId !== null) {
         const connection = this.persistence.getProviderConnection(
           execution.modelSelection.connectionId,
@@ -2365,6 +2378,11 @@ export class TeamCoordinator {
       for (const key of review.affectedKeys) {
         const executionId = graph.steps.find((step) => step.key === key)!.executionId;
         try {
+          const execution = this.persistence.getTeamExecution(executionId);
+          assertNotRetiredManagedLocal(
+            execution.modelSelection.connectionId,
+            execution.modelSelection.requestedProvider,
+          );
           const preserved = Boolean(
             this.persistence.getTeamMissionWorktree(executionId) ||
             this.persistence.getTeamExecutionIsolation(executionId),
@@ -3782,6 +3800,10 @@ export class TeamCoordinator {
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
     let executionIsolation: TeamExecutionIsolationRecord | null = null;
     try {
+      assertNotRetiredManagedLocal(
+        worker.modelSelection.connectionId,
+        worker.modelSelection.requestedProvider,
+      );
       this.persistence.sealTeamExecutionContext({
         taskId: input.taskId,
         executionId: input.executionId,

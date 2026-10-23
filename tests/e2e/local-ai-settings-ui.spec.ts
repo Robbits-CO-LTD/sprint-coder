@@ -56,6 +56,10 @@ for (const workspace of [true, false]) {
           await page.keyboard.press('Enter');
 
           await expect(dialog).toBeVisible();
+          await expect(dialog.locator('.settings-connection-card')).toHaveCount(
+            initialConnections.length,
+          );
+          await expect(dialog.locator('.settings-providers')).toHaveAttribute('aria-busy', 'false');
           await expect(addConnection).toBeFocused();
           await expect(addConnection).toBeInViewport();
           await expect(page.getByTestId('settings-nav-local-ai')).toHaveCount(0);

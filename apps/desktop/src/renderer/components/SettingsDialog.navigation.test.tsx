@@ -12,6 +12,7 @@ let container: HTMLDivElement;
 let opener: HTMLButtonElement;
 let root: Root;
 let listConnections: ReturnType<typeof vi.fn>;
+let scrollIntoView: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true);
@@ -29,6 +30,11 @@ beforeEach(() => {
     },
   });
   listConnections = vi.fn().mockResolvedValue([]);
+  scrollIntoView = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: scrollIntoView,
+  });
   Object.defineProperty(window, 'sprintCoder', {
     configurable: true,
     value: {
@@ -54,6 +60,7 @@ afterEach(async () => {
   Reflect.deleteProperty(window, 'sprintCoder');
   Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal');
   Reflect.deleteProperty(HTMLDialogElement.prototype, 'close');
+  Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView');
   delete document.documentElement.dataset.theme;
   useAppStore.setState(initial, true);
   vi.unstubAllGlobals();
@@ -103,3 +110,25 @@ it('keeps the Provider destination usable when the existing connection list fail
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(LIST_ERROR);
   expect(add.disabled).toBe(false);
 });
+
+it.each([true, false])(
+  'keeps the destination visible after loading only while it still has focus ($0)',
+  async (keepFocus) => {
+    let finish!: (connections: []) => void;
+    listConnections.mockReturnValue(new Promise<[]>((resolve) => (finish = resolve)));
+    await act(async () => root.render(<SettingsDialog open focusProviders onClose={() => {}} />));
+    const add = container.querySelector<HTMLButtonElement>(`#${ADD_TOGGLE_ID}`)!;
+    expect(document.activeElement).toBe(add);
+    if (!keepFocus) container.querySelector<HTMLButtonElement>('button')!.focus();
+    const focused = document.activeElement;
+    scrollIntoView.mockClear();
+
+    await act(async () => finish([]));
+
+    expect(document.activeElement).toBe(focused);
+    if (keepFocus) {
+      expect(scrollIntoView).toHaveBeenCalledExactlyOnceWith({ block: 'nearest' });
+      expect(scrollIntoView.mock.contexts[0]).toBe(add);
+    } else expect(scrollIntoView).not.toHaveBeenCalled();
+  },
+);

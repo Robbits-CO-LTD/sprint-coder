@@ -104,6 +104,14 @@ test('preserves retired local models and history while refusing execution withou
     writeFileSync(installedPath, installedBytes);
     writeFileSync(partialPath, partialBytes);
     const before = legacyDatabase(userDataDir, taskId, true);
+    expect(before).toMatchObject({
+      migrations: [
+        { version: 75, checksum: 'managed-local-download-store-secure-v75' },
+        { version: 76, checksum: 'managed-local-verification-v76' },
+        { version: 77, checksum: 'managed-local-mmproj-artifact-role-v77' },
+        { version: 83, checksum: 'managed-local-v83-model-purpose' },
+      ],
+    });
 
     app = await launchApp(userDataDir);
     page = await firstWindow(app);
