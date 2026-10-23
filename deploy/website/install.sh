@@ -50,4 +50,12 @@ log "スクリプトと unit を配置した: $LIB, $UNITS"
 if [ "${NO_ENABLE:-0}" != 1 ] && [ "${NO_SYSTEMD:-0}" != 1 ]; then
   systemctl --user enable --now sprintcoder-site-deploy.timer
   log "タイマーを有効にした（5 分おき）。すぐ反映するには: systemctl --user start sprintcoder-site-deploy"
+  # ユーザーのタイマーは、linger が無効だとログアウト中は止まる（その間の main の更新は公開されない）
+  if [ "$(loginctl show-user "$(id -un)" -p Linger --value 2>/dev/null)" != yes ]; then
+    if loginctl enable-linger "$(id -un)" 2>/dev/null; then
+      log "ログアウト中も動くよう linger を有効にした"
+    else
+      log "注意: linger が無効。ログアウト中はタイマーが止まる。管理者が sudo loginctl enable-linger $(id -un) を実行すること"
+    fi
+  fi
 fi

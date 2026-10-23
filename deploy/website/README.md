@@ -50,6 +50,10 @@ ssh yusei 'rm -rf /tmp/sprintcoder-site-deploy' && scp -r deploy/website yusei:/
 最初に送り先を消すこと。残っていると `scp -r` が中に `website/` を作ってしまい、古いスクリプトのまま導入される。
 PowerShell 7 からも同じ 1 行で動く（`tar … | ssh` は PowerShell ではバイナリが壊れるので使わない）。
 
+前提: そのユーザーの linger が有効であること（無効だとログアウト中はユーザーのタイマーが止まり、`main` の更新が
+次のログインまで公開されない）。`install.sh` が `loginctl enable-linger` を試し、できなければ警告を出す。その場合は
+管理者が `sudo loginctl enable-linger yusei` を実行する。確認は `loginctl show-user yusei -p Linger`（`Linger=yes`）。
+
 今の `public` ディレクトリを最初の版として取り込み、`public` をリンクに置き換える。この時点では
 表示は変わらない。最初のタイマー実行で `main` の内容が公開される。
 

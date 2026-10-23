@@ -149,6 +149,8 @@ describe.runIf(LIVE && !ELECTRON_LIVE)(
               SPRINT_CODER_ELECTRON_MANAGED_LOCAL_CODING_LIVE: '1',
             },
             timeout: 11 * 60_000,
+            // execFile の既定（1 MiB）を超える出力で、成功した実行が失敗扱いにならないように
+            maxBuffer: 64 * 1024 * 1024,
           },
         );
       },
