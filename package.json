@@ -52,5 +52,16 @@
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.65.0",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "@electron/rebuild@3.7.2": {
+      "tar": "7.5.22"
+    },
+    "@electron/node-gyp@10.2.0-electron.1": {
+      "tar": "7.5.22"
+    },
+    "cacache@16.1.3": {
+      "tar": "7.5.22"
+    }
   }
 }
