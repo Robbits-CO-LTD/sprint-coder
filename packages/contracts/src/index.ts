@@ -7561,33 +7561,6 @@ export interface SprintCoderApi {
       input: ProviderConnectionModelReleaseUpdateInput,
     ): Promise<ProviderConnection>;
   };
-  localAI: {
-    hardware(): Promise<LocalHardwareSnapshot>;
-    runtime(): Promise<ManagedLocalRuntimeSnapshot>;
-    launchSettings(modelId: string): Promise<ManagedLocalLaunchSettingsView>;
-    speculativeSettings(modelId: string): Promise<ManagedLocalSpeculativeSettingsView>;
-    setSpeculativeSettings(
-      input: ManagedLocalSpeculativeSettingsSetInput,
-    ): Promise<ManagedLocalSpeculativeSettingsView>;
-    setLaunchSettings(
-      input: ManagedLocalLaunchSettingsSetInput,
-    ): Promise<ManagedLocalLaunchSettingsView>;
-    inferenceSettings(modelId: string): Promise<ManagedLocalInferenceSettingsView>;
-    setInferenceSettings(
-      input: ManagedLocalInferenceSettingsSetInput,
-    ): Promise<ManagedLocalInferenceSettingsView>;
-    query(input: PublicModelCatalogQuery): Promise<PublicModelCatalogPage>;
-    detail(input: PublicModelCatalogDetailInput): Promise<PublicModelCatalogDetail>;
-    listJobs(): Promise<LocalDownloadJob[]>;
-    listInstalled(): Promise<InstalledLocalModel[]>;
-    install(input: LocalModelInstallInput): Promise<LocalDownloadJob>;
-    fit(input: LocalModelFitInput): Promise<LocalFitAssessment>;
-    pause(jobId: string): Promise<LocalDownloadJob>;
-    resume(jobId: string): Promise<LocalDownloadJob>;
-    cancel(jobId: string, confirmed: true): Promise<LocalDownloadJob>;
-    verify(modelId: string): Promise<LocalFitAssessment>;
-    delete(modelId: string): Promise<void>;
-  };
   permissions: {
     get(taskId: string): Promise<PermissionSettings>;
     set(
@@ -7782,25 +7755,6 @@ export const IPC_CHANNELS = {
   providersVerifyConnection: 'sprint-coder:providers:verify-connection',
   providersLowerRateLimits: 'sprint-coder:providers:lower-rate-limits',
   providersSetAutomaticModelRelease: 'sprint-coder:providers:set-automatic-model-release',
-  localAIHardware: 'sprint-coder:local-ai:hardware',
-  localAIRuntime: 'sprint-coder:local-ai:runtime',
-  localAILaunchSettings: 'sprint-coder:local-ai:launch-settings',
-  localAISpeculativeSettings: 'sprint-coder:local-ai:speculative-settings',
-  localAISetSpeculativeSettings: 'sprint-coder:local-ai:set-speculative-settings',
-  localAISetLaunchSettings: 'sprint-coder:local-ai:set-launch-settings',
-  localAIInferenceSettings: 'sprint-coder:local-ai:inference-settings',
-  localAISetInferenceSettings: 'sprint-coder:local-ai:set-inference-settings',
-  localAICatalogQuery: 'sprint-coder:local-ai:catalog-query',
-  localAICatalogDetail: 'sprint-coder:local-ai:catalog-detail',
-  localAIListJobs: 'sprint-coder:local-ai:list-jobs',
-  localAIListInstalled: 'sprint-coder:local-ai:list-installed',
-  localAIInstall: 'sprint-coder:local-ai:install',
-  localAIFit: 'sprint-coder:local-ai:fit',
-  localAIPause: 'sprint-coder:local-ai:pause',
-  localAIResume: 'sprint-coder:local-ai:resume',
-  localAICancel: 'sprint-coder:local-ai:cancel',
-  localAIVerify: 'sprint-coder:local-ai:verify',
-  localAIDelete: 'sprint-coder:local-ai:delete',
   permissionsGet: 'sprint-coder:permissions:get',
   permissionsSet: 'sprint-coder:permissions:set',
   approvalsListPending: 'sprint-coder:approvals:list-pending',

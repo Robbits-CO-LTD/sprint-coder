@@ -11,7 +11,7 @@ import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
 import { SettingsDialog } from './components/SettingsDialog';
-import { OPEN_LOCAL_AI_SETTINGS_EVENT } from './lib/settings-navigation';
+import { OPEN_PROVIDER_SETTINGS_EVENT } from './lib/settings-navigation';
 import { TaskBoundaryProvider } from './components/TaskBoundary';
 import { AppTitlebar } from './components/AppTitlebar';
 import { SidebarResizer } from './components/SidebarResizer';
@@ -105,6 +105,7 @@ export default function App() {
     readStoredTeamViewPreference,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [focusProviderSettings, setFocusProviderSettings] = useState(false);
   const graphOpenRequest = useAppStore((s) => s.graphOpenRequest);
   // The graph panel has no button. It opens when a graph is rendered for the selected Task (Main's
   // `graphsUpdated` push) or when the inline card in the transcript asks for it again, and closing
@@ -126,13 +127,20 @@ export default function App() {
   const [setupComplete] = useState(readSetupComplete);
   const [setupReveal, setSetupReveal] = useState(false);
   const setupWasVisibleRef = useRef(false);
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    setFocusProviderSettings(false);
+    setSettingsOpen(true);
+  }, []);
+  const openProviderSettings = useCallback(() => {
+    setFocusProviderSettings(true);
+    setSettingsOpen(true);
+  }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   useEffect(() => {
-    window.addEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
-    return () => window.removeEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
-  }, [openSettings]);
+    window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openProviderSettings);
+    return () => window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openProviderSettings);
+  }, [openProviderSettings]);
 
   const selectTaskFromUi = useCallback(
     async (taskId: string): Promise<boolean> => {
@@ -519,7 +527,11 @@ export default function App() {
           {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
           layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
           across the Chat<->Team morph. */}
-          <SettingsDialog open={settingsOpen} onClose={closeSettings} />
+          <SettingsDialog
+            open={settingsOpen}
+            onClose={closeSettings}
+            focusProviders={focusProviderSettings}
+          />
           {selectedTask && (
             <SurfaceLayer
               task={selectedTask}

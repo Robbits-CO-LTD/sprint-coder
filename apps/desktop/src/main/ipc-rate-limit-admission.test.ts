@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
 import { IpcRouter } from './ipc';
-import { managedLocalConnection } from './managed-local-provider-runtime';
+import { localProviderTestConnection } from './provider-connection-test-fixture';
 vi.mock('electron', () => ({
   app: {},
   clipboard: {},
@@ -13,7 +13,7 @@ vi.mock('electron', () => ({
 describe('connection rate-limit mutation', () => {
   it('refreshes Team admission only after a successful IPC rate-limit mutation', () => {
     const router = Object.create(IpcRouter.prototype) as Record<string, unknown>;
-    const connection = managedLocalConnection();
+    const connection = localProviderTestConnection();
     const lower = vi.fn(() => connection);
     const refresh = vi.fn();
     let failAfterAction = false;

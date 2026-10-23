@@ -986,64 +986,6 @@ describe('openAICompatibleChatCompletionRequest', () => {
     );
   });
 
-  it('maps a required Managed Local tool choice without changing Cloud sampling', () => {
-    const request = {
-      executionId: 'execution-managed-local-tools',
-      connectionId: 'managed-local:runtime',
-      modelId: 'managed-model',
-      messages: [{ role: 'user' as const, content: 'create the file' }],
-      tools: [
-        { name: 'create_file', description: 'Create a file', inputSchema: { type: 'object' } },
-      ],
-      toolChoice: { name: 'create_file' },
-    };
-
-    expect(openAICompatibleChatCompletionRequest(request, 'sprint-managed-local')).toMatchObject({
-      max_tokens: 512,
-      reasoning_effort: 'none',
-      chat_template_kwargs: { enable_thinking: false },
-      tool_choice: { type: 'function', function: { name: 'create_file' } },
-    });
-    expect(openAICompatibleChatCompletionRequest(request, 'openai')).not.toHaveProperty(
-      'temperature',
-    );
-  });
-
-  it('maps Managed Local thinking and output limits to the request fields it supports', () => {
-    const request = {
-      executionId: 'execution-managed-local-inference-settings',
-      connectionId: 'managed-local:runtime',
-      modelId: 'managed-model',
-      messages: [{ role: 'user' as const, content: 'reason carefully' }],
-    };
-
-    expect(
-      openAICompatibleChatCompletionRequest(request, 'sprint-managed-local', {
-        maxOutputTokens: 4_096,
-        thinking: true,
-      }),
-    ).toMatchObject({
-      max_tokens: 4_096,
-      chat_template_kwargs: { enable_thinking: true },
-    });
-    expect(
-      openAICompatibleChatCompletionRequest(request, 'sprint-managed-local', {
-        maxOutputTokens: 1_024,
-        thinking: true,
-      }),
-    ).not.toHaveProperty('reasoning_effort');
-    expect(
-      openAICompatibleChatCompletionRequest(request, 'sprint-managed-local', {
-        maxOutputTokens: 2_048,
-        thinking: false,
-      }),
-    ).toMatchObject({
-      max_tokens: 2_048,
-      reasoning_effort: 'none',
-      chat_template_kwargs: { enable_thinking: false },
-    });
-  });
-
   it('preserves assistant tool calls and their results across provider rounds', () => {
     expect(
       openAICompatibleChatCompletionRequest({

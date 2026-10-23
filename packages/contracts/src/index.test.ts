@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import * as contracts from './index';
 import {
   claudeEffortSchema,
@@ -2343,6 +2343,43 @@ describe('Managed Local runtime contracts', () => {
         batchSize: 512,
       }),
     ).toThrow();
+  });
+});
+
+describe('retired Managed Local surface', () => {
+  it('exposes neither an installation API nor local-ai IPC channels', () => {
+    expectTypeOf<
+      'localAI' extends keyof contracts.SprintCoderApi ? true : false
+    >().toEqualTypeOf<false>();
+    expect(
+      Object.values(contracts.IPC_CHANNELS).filter((channel) => channel.includes(':local-ai:')),
+    ).toEqual([]);
+  });
+
+  it.each(['localai', 'lm-studio', 'ollama'])(
+    'preserves external %s model selections and the local filter',
+    (provider) => {
+      const selection = {
+        connectionId: `${provider}:external`,
+        requestedProvider: provider,
+        requestedModel: 'local-model',
+      };
+      expect(modelSelectionSchema.parse(selection)).toEqual(selection);
+      expect(contracts.providerComputeLocationSchema.parse('local')).toBe('local');
+      expect(
+        modelCatalogQueryInputSchema.parse({ taskId: 'task-local', accessTypes: ['local'] })
+          .accessTypes,
+      ).toEqual(['local']);
+    },
+  );
+
+  it('keeps stored Managed Local selection identities readable for history and explicit retirement errors', () => {
+    const selection = {
+      connectionId: 'managed-local:runtime',
+      requestedProvider: 'sprint-managed-local',
+      requestedModel: 'a'.repeat(64),
+    };
+    expect(modelSelectionSchema.parse(selection)).toEqual(selection);
   });
 });
 

@@ -1,10 +1,19 @@
 # ADR-008: Managed Local v1の実行境界
 
-- Status: Accepted
+- Status: Retired by [Issue #903](https://github.com/Robbits-CO-LTD/sprint-coder/issues/903)
 - Date: 2026-08-23
 - Related: Issue #122、ADR-003、ADR-005、ADR-006
 
-## Decision
+## Retirement
+
+アプリ内のモデル取得・インストール・推論runtimeとsidecar同梱を廃止する。
+外部のOllama、LocalAI、LM Studio接続と、その推論場所・利用形態の分類は維持する。
+既存のモデルファイル・partial download・DB migration履歴・保存済みTask選択は保持し、
+廃止したruntimeを選択した実行には別のProviderを選ぶよう案内する。別Providerへ自動転送しない。
+
+以下は廃止前の設計記録であり、現在のインストール・実行機能を規定しない。
+
+## Historical decision
 
 Managed Local v1は、pin済みの`llama.cpp` sidecarとGGUFモデルを使う。
 sidecarの配布物はSprint Coderのreleaseへ同梱する。
