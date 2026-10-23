@@ -1,6 +1,6 @@
 import { readdir } from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep, win32 } from 'node:path';
 import {
   SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
   type EffectiveWorkspaceSet,
@@ -69,7 +69,7 @@ import {
   registerTeamTools,
   type ExecuteTeamToolOptions,
 } from './team-tools';
-import type { TeamCoordinator } from './team-coordinator';
+import type { TeamCoordinator, TeamResultReadSource } from './team-coordinator';
 import { canonicalizeProviderToolImage } from './image-attachment-store';
 import { parseProjectMemoryCandidate } from './project-memory-guidance';
 
@@ -173,6 +173,7 @@ export const READ_FILE_TOOL = createToolDefinition({
     properties: {
       rootId: { type: 'string' },
       path: { type: 'string' },
+      teamResultExecutionId: { type: 'string', minLength: 1 },
       lineStart: { type: 'integer', minimum: 1 },
       lineEnd: { type: 'integer', minimum: 1 },
       byteStart: { type: 'integer', minimum: 0 },
@@ -338,7 +339,7 @@ const descriptions = new Map([
   ],
   [
     READ_FILE_TOOL.providerName,
-    'Read one UTF-8 text file inside the selected workspace and return a revision token for later edits.',
+    'Read one UTF-8 text file inside the selected workspace and return a revision token for later edits. A Manager may pass teamResultExecutionId for a completed descendant and a relative path to read its integrated files from the central workspace. This reads current central contents, not historical commit contents; the result revision cannot edit the Manager isolation.',
   ],
   [
     SEARCH_WORKSPACE_TOOL.providerName,
@@ -392,6 +393,13 @@ const descriptions = new Map([
   ),
 ]);
 
+export type ManagedTeamResultReadRequest = Readonly<{
+  context: ToolExecutionContext;
+  callId: string;
+  executionId: string;
+  rootId?: string;
+}>;
+
 type WorkspaceToolDeps = Readonly<{
   workspaceFor(taskId: string, turnId: string, callId?: string): EffectiveWorkspaceSet | null;
   rootIdentityFor(turnId: string, rootId: string, callId?: string): string | undefined;
@@ -401,6 +409,10 @@ type WorkspaceToolDeps = Readonly<{
     callId?: string,
   ): Readonly<{ workspaceKey: string; rootIdentityDigest: string }> | undefined;
   providerFor?(turnId: string, callId: string): string | undefined;
+  readTeamResult?<T>(
+    request: ManagedTeamResultReadRequest,
+    read: (source: TeamResultReadSource) => Promise<T>,
+  ): Promise<T>;
   policyEpochFor(taskId: string): number;
   authorizer: ToolAuthorizer;
   graphs?: GraphToolBoundary;
@@ -486,6 +498,12 @@ type PreparedWorkspaceInput = Readonly<{
   workspace: EffectiveWorkspaceSet;
   mutationBinding?: Readonly<{ workspaceKey: string; rootIdentityDigest: string }>;
   expectedRootIdentityDigest?: string;
+  teamResult?: Readonly<{
+    source: TeamResultReadSource;
+    taskId: string;
+    turnId: string;
+    callId: string;
+  }>;
 }>;
 
 const issuedPreparedInputs = new WeakSet<object>();
@@ -599,7 +617,8 @@ export class ManagedCodingHarness {
       implementationKind: 'built-in',
       prepare: (input, context, control) => this.prepare('read', input, context, control.callId),
       resourceClaims: (input) => workspaceClaims(input as PreparedWorkspaceInput, 'read'),
-      execute: async (input, context) => this.read(input as PreparedWorkspaceInput, context),
+      execute: async (input, context, control) =>
+        this.read(input as PreparedWorkspaceInput, context, control),
     });
     this.broker.registerImplementation({
       toolId: SEARCH_WORKSPACE_TOOL.toolId,
@@ -894,15 +913,44 @@ export class ManagedCodingHarness {
     callId: string,
   ): Promise<PreparedWorkspaceInput> {
     const request = parseWorkspaceInput(input, kind === 'read' || kind === 'view-image');
-    const workspaceValue = this.deps.workspaceFor(context.taskId, context.turnId, callId);
+    if (kind === 'read' && request.teamResultExecutionId !== undefined) {
+      if (this.deps.readTeamResult === undefined)
+        throw new Error('Team result read requires a live Manager binding');
+      if (isAbsolute(request.path) || win32.isAbsolute(request.path))
+        throw new Error('Team result read requires a relative path');
+      return this.deps.readTeamResult(
+        {
+          context,
+          callId,
+          executionId: request.teamResultExecutionId,
+          ...(request.rootId === undefined ? {} : { rootId: request.rootId }),
+        },
+        (source) => this.prepareWorkspaceRead(kind, request, context, callId, source),
+      );
+    }
+    return this.prepareWorkspaceRead(kind, request, context, callId);
+  }
+
+  private async prepareWorkspaceRead(
+    kind: PreparedWorkspaceInput['kind'],
+    request: ReturnType<typeof parseWorkspaceInput>,
+    context: ToolExecutionContext,
+    callId: string,
+    teamResultSource?: TeamResultReadSource,
+  ): Promise<PreparedWorkspaceInput> {
+    const workspaceValue =
+      teamResultSource?.workspace ?? this.deps.workspaceFor(context.taskId, context.turnId, callId);
     if (workspaceValue === null) throw new Error('Workspace snapshot is unavailable for this Turn');
     const workspace = sealWorkspace(workspaceValue);
-    const root = resolveWorkspaceToolRoot(workspace, request.rootId, [request.path]);
+    const root = resolveWorkspaceToolRoot(workspace, teamResultSource?.rootId ?? request.rootId, [
+      request.path,
+    ]);
     if (root === null) throw new Error('Workspace rootId is not present in this Turn');
     const expectedRootIdentityDigest =
-      workspace.source === 'project'
+      teamResultSource?.rootIdentityDigest ??
+      (workspace.source === 'project'
         ? this.deps.rootIdentityFor(context.turnId, root.rootId, callId)
-        : undefined;
+        : undefined);
     if (workspace.source === 'project' && expectedRootIdentityDigest === undefined)
       throw new Error('Workspace root identity is incomplete');
     const guard = await createPathGuard({
@@ -912,6 +960,8 @@ export class ManagedCodingHarness {
       targetPath: request.path,
       operation: 'read',
     });
+    if (teamResultSource !== undefined)
+      assertTeamResultPath(teamResultSource, root.path, request.path, guard);
     const disclosure =
       kind === 'read'
         ? disclosureFacts(
@@ -940,6 +990,16 @@ export class ManagedCodingHarness {
       workspace,
       ...(kind === 'read' ? { raw: Object.freeze({ ...request }) } : {}),
       ...(disclosure === undefined ? {} : { disclosure }),
+      ...(teamResultSource === undefined
+        ? {}
+        : {
+            teamResult: Object.freeze({
+              source: teamResultSource,
+              taskId: context.taskId,
+              turnId: context.turnId,
+              callId,
+            }),
+          }),
     });
     issuedPreparedInputs.add(prepared);
     return prepared;
@@ -948,7 +1008,37 @@ export class ManagedCodingHarness {
   private async read(
     input: PreparedWorkspaceInput,
     context: ToolExecutionContext,
+    control: Readonly<{ callId: string; signal?: AbortSignal }>,
+  ) {
+    assertPreparedWorkspaceInput(input, 'read');
+    if (input.teamResult === undefined) return this.readPrepared(input, context);
+    const facts = teamResultReadAuthorizationFacts(input, context, control.callId);
+    if (facts === undefined || this.deps.readTeamResult === undefined)
+      throw new Error('Team result read binding is unavailable');
+    control.signal?.throwIfAborted();
+    return this.deps.readTeamResult(
+      { context, callId: control.callId, executionId: facts.executionId, rootId: facts.rootId },
+      async (source) => {
+        control.signal?.throwIfAborted();
+        if (JSON.stringify(source) !== JSON.stringify(facts))
+          throw new Error('Team result source changed after authorization');
+        const result = await this.readPrepared(input, context);
+        control.signal?.throwIfAborted();
+        return result;
+      },
+    );
+  }
+
+  private async readPrepared(
+    input: PreparedWorkspaceInput,
+    context: ToolExecutionContext,
   ): Promise<{
+    source?: Readonly<{
+      kind: 'team-result';
+      executionId: string;
+      integratedHead: string;
+      contents: 'current-workspace';
+    }>;
     rootId: string;
     rootLabel: string;
     path: string;
@@ -987,7 +1077,7 @@ export class ManagedCodingHarness {
       assessed.redactedContent,
       input.raw as ReturnType<typeof parseWorkspaceInput>,
     );
-    if (this.deps.graphs)
+    if (this.deps.graphs && input.teamResult === undefined)
       this.graphReads.record({
         context,
         workspaceDigest: input.workspace.digest,
@@ -1007,6 +1097,16 @@ export class ManagedCodingHarness {
       rootLabel: input.rootLabel,
       path: input.relativePath,
       content: ranged.content,
+      ...(input.teamResult === undefined
+        ? {}
+        : {
+            source: Object.freeze({
+              kind: 'team-result' as const,
+              executionId: input.teamResult.source.executionId,
+              integratedHead: input.teamResult.source.integratedHead,
+              contents: 'current-workspace' as const,
+            }),
+          }),
       revision: read.reference,
       encoding: 'utf-8',
       byteLength: Buffer.byteLength(assessed.redactedContent, 'utf8'),
@@ -1370,6 +1470,37 @@ export function providerToolsFromSnapshot(snapshot: ToolCatalogSnapshot): readon
   );
 }
 
+/** Only this call's Main-issued prepared read can change the authorization workspace. */
+export function teamResultReadAuthorizationFacts(
+  input: unknown,
+  context: Pick<ToolExecutionContext, 'taskId' | 'turnId'>,
+  callId: string,
+): TeamResultReadSource | undefined {
+  if (typeof input !== 'object' || input === null || !issuedPreparedInputs.has(input))
+    return undefined;
+  const prepared = input as PreparedWorkspaceInput;
+  const result = prepared.teamResult;
+  return prepared.kind === 'read' &&
+    result?.callId === callId &&
+    result.taskId === context.taskId &&
+    result.turnId === context.turnId
+    ? result.source
+    : undefined;
+}
+
+function assertTeamResultPath(
+  source: TeamResultReadSource,
+  rootPath: string,
+  path: string,
+  guard: PathGuard,
+): void {
+  const allowed = new Set(source.changedFiles);
+  const lexical = relative(source.repositoryPath, resolve(rootPath, path)).split(sep).join('/');
+  const canonical = relative(source.repositoryPath, guard.resolvedPath).split(sep).join('/');
+  if (!allowed.has(lexical) || !allowed.has(canonical))
+    throw new Error('Team result path is not a Main-sealed changed file');
+}
+
 export function workspaceToolAuthorizationGuard(
   input: unknown,
   operation?: 'read' | 'write',
@@ -1644,6 +1775,7 @@ function parseWorkspaceInput(
 ): {
   rootId?: string;
   path: string;
+  teamResultExecutionId?: string;
   lineStart?: number;
   lineEnd?: number;
   byteStart?: number;
@@ -1691,6 +1823,9 @@ function parseWorkspaceInput(
   return {
     ...(typeof record['rootId'] === 'string' ? { rootId: record['rootId'] } : {}),
     path: typeof record['path'] === 'string' ? record['path'] : '.',
+    ...(typeof record['teamResultExecutionId'] === 'string'
+      ? { teamResultExecutionId: record['teamResultExecutionId'] }
+      : {}),
     ...(typeof record['lineStart'] === 'number' ? { lineStart: record['lineStart'] } : {}),
     ...(typeof record['lineEnd'] === 'number' ? { lineEnd: record['lineEnd'] } : {}),
     ...(typeof record['byteStart'] === 'number' ? { byteStart: record['byteStart'] } : {}),
