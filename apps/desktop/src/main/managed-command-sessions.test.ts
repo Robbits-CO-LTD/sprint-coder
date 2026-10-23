@@ -115,53 +115,51 @@ describe('Task permission cleanup confirmation', () => {
   );
 });
 
-it.each([false, true])(
-  'confirms only captured sessions after late ownership release (before error=%s)',
-  async (releaseBeforeError) => {
-    const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-late-stop-'));
-    roots.push(workspace);
-    const spec = await prepareExecutionSpec({
-      workspacePath: workspace,
-      executable: process.execPath,
-      argv: ['-e', ''],
-    });
-    const runner = new CommandRunner();
-    let release = (): void => undefined;
-    const run = vi.spyOn(runner, 'run').mockImplementationOnce(async (_spec, options) => {
-      release = () => options?.onOwnershipReleased?.();
-      if (releaseBeforeError) release();
-      throw new CommandRunnerError('PROCESS_TREE_TERMINATION_FAILED', 'unconfirmed');
-    });
-    const sessions = new ManagedCommandSessions(runner);
-    await expect(sessions.start(spec, { taskId: 'task-1', turnId: 'old' })).rejects.toThrow(
-      'unconfirmed',
+it('keeps captured unconfirmed sessions without canceling later commands', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'sprint-coder-retained-stop-'));
+  roots.push(workspace);
+  const spec = await prepareExecutionSpec({
+    workspacePath: workspace,
+    executable: process.execPath,
+    argv: ['-e', ''],
+  });
+  const runner = new CommandRunner();
+  const run = vi
+    .spyOn(runner, 'run')
+    .mockRejectedValueOnce(
+      new CommandRunnerError('PROCESS_TREE_TERMINATION_FAILED', 'unconfirmed'),
     );
-    const confirm = sessions.beginTaskTermination('task-1');
-    let finishNew = (): void => undefined;
-    let newSignal: AbortSignal | undefined;
-    run.mockImplementationOnce(
-      (_spec, options) =>
-        new Promise((_resolve, reject) => {
-          newSignal = options?.signal;
-          finishNew = () => reject(new CommandRunnerError('SPAWN_FAILED', 'settled test'));
-        }),
-    );
-    const newStart = expect(
-      sessions.start(spec, { taskId: 'task-1', turnId: 'new' }),
-    ).rejects.toThrow('settled test');
-    try {
-      if (!releaseBeforeError) await expect(confirm()).rejects.toThrow('could not be confirmed');
-      release();
-      await expect(confirm()).resolves.toBeUndefined();
-      expect(newSignal?.aborted).toBe(false);
-    } finally {
-      finishNew();
-      await newStart;
-      await sessions.dispose();
-      run.mockRestore();
-    }
-  },
-);
+  const sessions = new ManagedCommandSessions(runner);
+  await expect(sessions.start(spec, { taskId: 'task-1', turnId: 'old' })).rejects.toThrow(
+    'unconfirmed',
+  );
+  const confirm = sessions.beginTaskTermination('task-1');
+  let finishNew = (): void => undefined;
+  let newSignal: AbortSignal | undefined;
+  run.mockImplementationOnce(
+    (_spec, options) =>
+      new Promise((_resolve, reject) => {
+        newSignal = options?.signal;
+        finishNew = () => reject(new CommandRunnerError('SPAWN_FAILED', 'settled test'));
+      }),
+  );
+  const newStart = expect(
+    sessions.start(spec, { taskId: 'task-1', turnId: 'new' }),
+  ).rejects.toThrow('settled test');
+  try {
+    await expect(confirm()).rejects.toThrow('could not be confirmed');
+    await expect(confirm()).rejects.toThrow('could not be confirmed');
+    expect(newSignal?.aborted).toBe(false);
+    expect(
+      sessions.hasActiveWorkspaceSessions([{ path: workspace, rootIdentityDigest: undefined }]),
+    ).toBe(true);
+  } finally {
+    finishNew();
+    await newStart;
+    await sessions.dispose();
+    run.mockRestore();
+  }
+});
 
 describe.runIf(process.platform === 'darwin' || process.platform === 'linux')(
   'ManagedCommandSessions',

@@ -87,14 +87,9 @@ export class ManagedCommandSessions {
     const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
     hooks.signal?.addEventListener('abort', abortFromCaller, { once: true });
     if (hooks.signal?.aborted) abortFromCaller();
-    let ownershipReleased = false;
     session.completion = this.runner
       .run(spec, {
         signal: session.controller.signal,
-        onOwnershipReleased: () => {
-          ownershipReleased = true;
-          session.terminationUnconfirmed = false;
-        },
         ...(hooks.beforeSpawn === undefined ? {} : { beforeSpawn: hooks.beforeSpawn }),
         onStarted: (startedProcess) => {
           const { executionId } = startedProcess;
@@ -120,9 +115,7 @@ export class ManagedCommandSessions {
       .catch((error: unknown) => {
         session.state = 'failed';
         session.terminationUnconfirmed =
-          !ownershipReleased &&
-          error instanceof CommandRunnerError &&
-          error.code === 'PROCESS_TREE_TERMINATION_FAILED';
+          error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
       .finally(() => {

@@ -669,8 +669,6 @@ type RunnerOptions = Readonly<{
 }>;
 
 export type RunOptions = Readonly<{
-  /** Internal ownership settlement, including a process tree that exits after run() rejected. */
-  onOwnershipReleased?: () => void;
   signal?: AbortSignal;
   beforeSpawn?: () => void;
   onChunk?: (chunk: CommandOutputChunk) => void | Promise<void>;
@@ -933,7 +931,6 @@ export class CommandRunner {
         ...(process.platform === 'win32' ? { windowsJobId: executionId } : {}),
       };
       this.active.set(executionId, active);
-      void active.settled.then(() => options.onOwnershipReleased?.());
       const bufferedOutput: { stream: 'stdout' | 'stderr'; data: Buffer }[] = [];
       let bufferedOutputBytes = 0;
       let outputConsumer = (stream: 'stdout' | 'stderr', data: Buffer): void => {
