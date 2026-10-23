@@ -64,14 +64,14 @@ export function checkWebsite(directory = join(repository, 'website')) {
   const references = [];
   const anchors = new Map();
   const modules = new Set();
-  function visit(relative = '') {
+  function visit(relative = '', publish = true) {
     for (const entry of readdirSync(join(root, relative), { withFileTypes: true })) {
       const file = relative ? `${relative}/${entry.name}` : entry.name;
-      if (file === 'tools' || file === 'README.md') continue;
+      const published = publish && file !== 'tools' && file !== 'README.md';
       const stat = lstatSync(join(root, file));
-      if (stat.isDirectory()) visit(file);
+      if (stat.isDirectory()) visit(file, published);
       else if (!stat.isFile()) errors.push(`${file}: not a regular file (links are not published)`);
-      else {
+      else if (published) {
         files.add(file);
         if (stat.size >= maxFileBytes) errors.push(`${file}: reaches the 25 MiB publishing limit`);
       }

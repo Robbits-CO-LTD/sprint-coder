@@ -152,6 +152,16 @@ describe('website publication validation', () => {
     expect(() => checkWebsite(root)).toThrow('loop: not a regular file');
   });
 
+  it('matches deployment rejection of links even inside excluded tooling', () => {
+    const { root, write } = fixture();
+    write('tools/readme.txt', 'not published');
+    symlinkSync(root, join(root, 'tools/loop'), 'junction');
+    expect(() => checkWebsite(root)).toThrow('tools/loop: not a regular file');
+    rmSync(join(root, 'tools'), { recursive: true });
+    symlinkSync(root, join(root, 'tools'), 'junction');
+    expect(() => checkWebsite(root)).toThrow('tools: not a regular file');
+  });
+
   it('rejects files at the same 25 MiB boundary as the deploy script', () => {
     const { root, write } = fixture();
     write('large.mp4', '');
