@@ -1015,18 +1015,32 @@ export class ManagedCodingHarness {
     const facts = teamResultReadAuthorizationFacts(input, context, control.callId);
     if (facts === undefined || this.deps.readTeamResult === undefined)
       throw new Error('Team result read binding is unavailable');
-    control.signal?.throwIfAborted();
-    return this.deps.readTeamResult(
+    this.assertTeamResultReadActive(context, control);
+    const result = await this.deps.readTeamResult(
       { context, callId: control.callId, executionId: facts.executionId, rootId: facts.rootId },
       async (source) => {
-        control.signal?.throwIfAborted();
+        this.assertTeamResultReadActive(context, control);
         if (JSON.stringify(source) !== JSON.stringify(facts))
           throw new Error('Team result source changed after authorization');
         const result = await this.readPrepared(input, context);
-        control.signal?.throwIfAborted();
+        this.assertTeamResultReadActive(context, control);
         return result;
       },
     );
+    this.assertTeamResultReadActive(context, control);
+    return result;
+  }
+
+  private assertTeamResultReadActive(
+    context: ToolExecutionContext,
+    control: Readonly<{ signal?: AbortSignal }>,
+  ): void {
+    control.signal?.throwIfAborted();
+    if (
+      this.deps.policyEpochFor(context.taskId) !== context.policyEpoch ||
+      this.broker.getTurnSnapshot(context.taskId, context.turnId) === undefined
+    )
+      throw new Error('Team result read authority expired');
   }
 
   private async readPrepared(

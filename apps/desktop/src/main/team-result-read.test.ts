@@ -78,7 +78,13 @@ async function fixture(
     executionId: 'child-completed',
     integratedHead: 'b'.repeat(40),
   });
-  const state = { epoch: 1, source, reads: 0, beforeRead: async (_ordinal: number) => {} };
+  const state = {
+    epoch: 1,
+    source,
+    reads: 0,
+    beforeRead: async (_ordinal: number) => {},
+    afterRead: async (_ordinal: number) => {},
+  };
   const context = {
     taskId: 'task-1',
     turnId: 'turn-1',
@@ -102,8 +108,11 @@ async function fixture(
             read: (source: TeamResultReadSource) => Promise<T>,
           ) => {
             if (request.executionId !== source.executionId) throw new Error('Unknown result');
-            await state.beforeRead(++state.reads);
-            return read(state.source);
+            const ordinal = ++state.reads;
+            await state.beforeRead(ordinal);
+            const result = await read(state.source);
+            await state.afterRead(ordinal);
+            return result;
           },
         }),
     workspaceEdit: {
@@ -312,6 +321,23 @@ describe('Manager integrated result read boundary', () => {
       await expect(f.dispatch()).rejects.toThrow();
     },
   );
+
+  it.each([
+    ['fence', 'epoch'],
+    ['return', 'epoch'],
+    ['fence', 'turn-end'],
+    ['return', 'turn-end'],
+  ] as const)('rejects %s-time %s invalidation inside the result fence', async (timing, kind) => {
+    const f = await fixture();
+    const invalidate = async (ordinal: number) => {
+      if (ordinal !== 2) return;
+      if (kind === 'epoch') f.state.epoch++;
+      else f.tools.finishTurn(f.context.taskId, f.context.turnId);
+    };
+    if (timing === 'fence') f.state.beforeRead = invalidate;
+    else f.state.afterRead = invalidate;
+    await expect(f.dispatch()).rejects.toThrow();
+  });
 
   it('returns no bytes when canceled after execute has begun', async () => {
     const f = await fixture();
