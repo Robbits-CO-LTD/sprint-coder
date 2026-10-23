@@ -18,8 +18,11 @@ async function clickGraphFocusClear(page: Page): Promise<void> {
   const button = page.frameLocator('[data-testid="graph-frame"]').locator('#btn-focus-clear');
   // Opening the inspector resizes the iframe. Wait for actual pointer routing into its
   // resized surface before pressing; DOM actionability alone can precede that routing.
-  await button.hover();
-  await expect.poll(() => button.evaluate((element) => element.matches(':hover'))).toBe(true);
+  // Reacquire the pointer target if a native surface resize moves it after the first hover.
+  await expect(async () => {
+    await button.hover({ timeout: 1000 });
+    expect(await button.evaluate((element) => element.matches(':hover'))).toBe(true);
+  }).toPass({ timeout: 15000 });
   await button.click();
   await test.info().attach('graph-focus-clear-input', {
     body: JSON.stringify(
