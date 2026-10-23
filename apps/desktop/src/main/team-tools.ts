@@ -1393,7 +1393,7 @@ function joinHiringContinuationLines(input: string): string {
       // continuations such as 「と伝えました」 attached instead of manufacturing a request.
       if (
         /(?:ください|お願いします|(?:ますか|ませんか|でしょうか)[?？]?)$/.test(line) &&
-        !/^[ぁ-ん]/.test(nextLine)
+        (!/^[ぁ-ん]/.test(nextLine) || /^(?:よろしくお願いします[。.!！]*$|あと、)/.test(nextLine))
       )
         return `${line}。`;
       // Japanese verb suffixes may wrap between 「して」 and 「ください」. Only ASCII words
