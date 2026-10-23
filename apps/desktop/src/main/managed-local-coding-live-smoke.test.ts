@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { SqlitePersistenceClient } from './persistence';
 import { ManagedLocalController } from './managed-local-controller';
@@ -130,8 +131,8 @@ describe.runIf(LIVE && !ELECTRON_LIVE)(
   () => {
     it(
       'runs the live coding smoke under the bundled Electron Node ABI',
-      () => {
-        const result = spawnSync(
+      async () => {
+        await promisify(execFile)(
           electronTestExecutablePath(),
           [
             join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -150,7 +151,6 @@ describe.runIf(LIVE && !ELECTRON_LIVE)(
             timeout: 11 * 60_000,
           },
         );
-        expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
       },
       11 * 60_000 + 5_000,
     );
