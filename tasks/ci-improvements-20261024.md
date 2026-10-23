@@ -27,7 +27,7 @@
 | Electron install→Forge download  | 共通既定cacheと限定retry                      | fixtureでretry/非retry/上限/終了code、各workflow使用、実CI |
 | Windows package→Archify          | 同run artifact共有                            | SHA/実行ファイル/manifest確認、独立installer、実worker試験 |
 
-実CIでinstallerまでproducerへ依存させると待ち時間が増えたため、installerは独立jobのForge makeと既存native/Managed Local smokeを維持する。E2E間だけを共有し、パッケージ生成を3回から2回へ減らす。releaseへCI生成packageを流用しない。artifact名はproducerのrun/attempt/SHAに束縛し、consumerはproducer outputを使うため失敗jobのみ再実行にも対応する。
+実CIでinstallerまでproducerへ依存させると待ち時間が増えたため、installerは独立jobのForge makeと既存native検証を維持する。mainのPR #920/#922で廃止されたManaged Localのbuild・smokeは復活させない。E2E間だけを共有し、パッケージ生成を3回から2回へ減らす。releaseへCI生成packageを流用しない。artifact名はproducerのrun/attempt/SHAに束縛し、consumerはproducer outputを使うため失敗jobのみ再実行にも対応する。
 
 初回CIで追加ブラウザの導入が長時間停止したため、サイト検証は[GitHub hosted Ubuntu同梱のChrome](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)を利用する。実行時に版を記録し、同じ18項目を実行する。ローカルはPlaywrightのChromiumを既定とし、`WEBSITE_BROWSER_CHANNEL=chrome`でCIと同じ経路を検証できる。
 

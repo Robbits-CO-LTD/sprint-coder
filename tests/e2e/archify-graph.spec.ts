@@ -18,8 +18,11 @@ async function clickGraphFocusClear(page: Page): Promise<void> {
   const button = page.frameLocator('[data-testid="graph-frame"]').locator('#btn-focus-clear');
   // Opening the inspector resizes the iframe. Wait for actual pointer routing into its
   // resized surface before pressing; DOM actionability alone can precede that routing.
-  await button.hover();
-  await expect.poll(() => button.evaluate((element) => element.matches(':hover'))).toBe(true);
+  // Reacquire the pointer target if a native surface resize moves it after the first hover.
+  await expect(async () => {
+    await button.hover({ timeout: 1000 });
+    expect(await button.evaluate((element) => element.matches(':hover'))).toBe(true);
+  }).toPass({ timeout: 15000 });
   await button.click();
   await test.info().attach('graph-focus-clear-input', {
     body: JSON.stringify(
@@ -1008,9 +1011,10 @@ test('resumes one interrupted graph step by hand after a relaunch', async ({}, t
     expect(parked.mission).not.toBe('completed');
     await restarted.getByTestId('inline-graph-open').last().click();
     await expect(restarted.getByTestId('graph-mission-plan')).toHaveAttribute('open', '');
-    // The step states why it stopped beside 「再開待ち」 (issue #842).
+    // Restart recovery may retain resources until the manual resume confirms the old execution
+    // stopped. Both recovery states still show why the step stopped (issue #842).
     await expect(restarted.getByTestId('graph-step-state').nth(2)).toHaveText(
-      /^再開待ち · 理由: .+/u,
+      /^再開待ち(?: · 資源を保持して停止確認待ち)? · 理由: .+/u,
     );
     const resumeStep = restarted.getByRole('button', { name: 'この工程を再開', exact: true });
     await expect(resumeStep).toHaveCount(1);
