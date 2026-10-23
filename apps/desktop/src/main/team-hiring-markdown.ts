@@ -12,6 +12,8 @@ type MarkdownNode = {
 
 type SourceRange = { start: number; end: number };
 
+const PRESENTATION_HTML_TAG = /^<\/?(?:a|b|em|i|mark|span|strong|u)(?:\s[^<>]*)?>$/i;
+
 const HTML_LITERAL_ELEMENTS = new Set([
   'code',
   'pre',
@@ -50,14 +52,63 @@ function maskSourceRanges(input: string, ranges: SourceRange[]): string {
   return fragments.join('');
 }
 
+function projectFormattingSpans(
+  input: string,
+  spaceRanges: readonly SourceRange[],
+  presentationTags: readonly SourceRange[] = [],
+): string {
+  if (spaceRanges.length === 0 && presentationTags.length === 0) return input;
+  const characters = input.split('');
+  const replace = ({ start, end }: SourceRange, replacement: string) => {
+    for (let index = start; index < end; index += 1) {
+      // Only AST-issued formatting spans change. Earlier literal masks and line
+      // boundaries stay intact, including code inside a link label or inline HTML.
+      const character = characters[index];
+      if (
+        character !== undefined &&
+        character !== '\uFFFC' &&
+        character !== '\r' &&
+        character !== '\n'
+      )
+        characters[index] = replacement;
+    }
+  };
+  for (const range of spaceRanges) replace(range, ' ');
+  // Presentation tags stay barriers inside a hiring phrase, but cannot be confused with a
+  // new quoted example whose following particle belongs to that example rather than the Turn.
+  for (const range of presentationTags) replace(range, '\uFFFB');
+  return characters.join('');
+}
+
 /** Keep source offsets and line boundaries while excluding quoted examples from hiring intent. */
 export function maskTeamHiringMarkdown(input: string): string {
   const nodes: MarkdownNode[] = [markdownParser.parse(input)];
   const markdownRanges: SourceRange[] = [];
   const htmlRanges: SourceRange[] = [];
+  const presentationTags: SourceRange[] = [];
+  const emphasisMarkers: SourceRange[] = [];
+  const linkSyntax: SourceRange[] = [];
   while (nodes.length > 0) {
     const node = nodes.pop();
     if (node === undefined) break;
+    if (node.type === 'link' || node.type === 'linkReference' || node.type === 'definition') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      if (start !== undefined && end !== undefined) {
+        const labelStart = node.children?.at(0)?.position?.start.offset;
+        const labelEnd = node.children?.at(-1)?.position?.end.offset;
+        if (labelStart === undefined || labelEnd === undefined) linkSyntax.push({ start, end });
+        else linkSyntax.push({ start, end: labelStart }, { start: labelEnd, end });
+      }
+    }
+    if (node.type === 'emphasis' || node.type === 'strong') {
+      const start = node.position?.start.offset;
+      const end = node.position?.end.offset;
+      const width = node.type === 'strong' ? 2 : 1;
+      if (start !== undefined && end !== undefined) {
+        emphasisMarkers.push({ start, end: start + width }, { start: end - width, end });
+      }
+    }
     if (
       node.type === 'blockquote' ||
       node.type === 'code' ||
@@ -67,7 +118,10 @@ export function maskTeamHiringMarkdown(input: string): string {
       const start = node.position?.start.offset;
       const end = node.position?.end.offset;
       if (start !== undefined && end !== undefined) {
-        (node.type === 'html' ? htmlRanges : markdownRanges).push({ start, end });
+        if (node.type !== 'html') markdownRanges.push({ start, end });
+        else if (PRESENTATION_HTML_TAG.test(input.slice(start, end)))
+          presentationTags.push({ start, end });
+        else htmlRanges.push({ start, end });
       }
       continue;
     }
@@ -80,12 +134,19 @@ export function maskTeamHiringMarkdown(input: string): string {
     }
   }
 
-  if (htmlRanges.length === 0) return maskSourceRanges(input, markdownRanges);
+  if (htmlRanges.length === 0 && presentationTags.length === 0)
+    return projectFormattingSpans(maskSourceRanges(input, markdownRanges), [
+      ...emphasisMarkers,
+      ...linkSyntax,
+    ]);
 
   // Markdown exposes inline HTML tags separately from their text. Parse whole elements, but
-  // hide Markdown examples first so an unclosed tag in a code fence cannot consume real prose.
+  // hide Markdown examples and link metadata first so an unclosed tag in either cannot consume
+  // real prose. Same-length projection preserves parse5's offsets into the original source.
   const htmlNodes: DefaultTreeAdapterMap['node'][] = [
-    parseFragment(maskSourceRanges(input, markdownRanges), { sourceCodeLocationInfo: true }),
+    parseFragment(projectFormattingSpans(maskSourceRanges(input, markdownRanges), linkSyntax), {
+      sourceCodeLocationInfo: true,
+    }),
   ];
   while (htmlNodes.length > 0) {
     const node = htmlNodes.pop();
@@ -99,5 +160,9 @@ export function maskTeamHiringMarkdown(input: string): string {
     }
     if ('childNodes' in node) htmlNodes.push(...node.childNodes);
   }
-  return maskSourceRanges(input, [...markdownRanges, ...htmlRanges]);
+  return projectFormattingSpans(
+    maskSourceRanges(input, [...markdownRanges, ...htmlRanges]),
+    [...emphasisMarkers, ...linkSyntax],
+    presentationTags,
+  );
 }

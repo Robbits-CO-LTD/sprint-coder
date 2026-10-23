@@ -63,7 +63,8 @@ export function composerSubmitShortcut(input: {
 }
 
 export function composerMessageText(raw: string, imageRequested: boolean): string {
-  return imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
+  // A blank line preserves an indented Markdown block at the start of the original request.
+  return imageRequested ? `${IMAGEGEN_PREFIX}\n\n${raw}` : raw;
 }
 
 export function imageRequestFailureRecovery(input: {

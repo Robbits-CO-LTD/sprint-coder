@@ -5138,7 +5138,12 @@ export const taskGoalInputSchema = z.object({ taskId: idSchema, goal: taskTextSc
 export const goalStartInputSchema = z
   .object({
     taskId: idSchema,
-    objective: z.string().trim().min(1).max(4000),
+    objective: z
+      .string()
+      .max(4000)
+      .refine((text) => text.trim() !== '', {
+        message: 'Goal objective must not be blank',
+      }),
     skills: turnSkillSelectionsSchema.default([]),
   })
   .strict();

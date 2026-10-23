@@ -3998,7 +3998,7 @@ export class IpcRouter {
               input.taskId,
               skills,
               shouldSealBuiltinTeamSkill(
-                goalText === null ? '' : `Goalを続けてください: ${goalText}`,
+                goalText === null ? '' : `Goalを続けてください:\n\n${goalText}`,
                 skills,
               ),
             );

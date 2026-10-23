@@ -21,7 +21,12 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { turnQueueInputSchema, turnStartInputSchema } from '@sprint-coder/contracts';
+import {
+  goalStartInputSchema,
+  turnQueueInputSchema,
+  turnStartInputSchema,
+} from '@sprint-coder/contracts';
+import { requiresTeamWorkersInput } from './team-tools';
 import {
   ToolRegistry,
   createExecutionSpec,
@@ -1499,6 +1504,90 @@ if (runsWithElectronAbi)
       });
       expect(reopened.startNextQueued(task.id)?.started.text).toBe('resume me');
       reopened.close();
+    });
+
+    it.each([
+      ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['担当を雇ってください。', true],
+    ] as const)(
+      'preserves Goal Markdown across start, storage and resumed Turn acceptance',
+      (objective, hiring) => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask('Goal input boundary');
+        try {
+          const input = goalStartInputSchema.parse({ taskId: task.id, objective });
+          const first = persistence.startGoalTurn(task.id, input.objective);
+          expect(first.task.goal).toBe(objective);
+          expect(first.started.text).toBe(objective);
+          expect(first.started.teamTurn).toBe(hiring);
+          expect(requiresTeamWorkersInput(first.started.text)).toBe(hiring);
+          persistence.pauseGoalAndCancelTurn(task.id, first.started.turnId);
+        } finally {
+          persistence.close();
+        }
+        const reopened = new SqlitePersistenceClient(path);
+        try {
+          expect(reopened.getTask(task.id).goal).toBe(objective);
+          const resumed = reopened.resumeGoalTurn(task.id);
+          expect(resumed.started.text).toBe(`Goalを続けてください:\n\n${objective}`);
+          expect(resumed.started.teamTurn).toBe(hiring);
+          expect(requiresTeamWorkersInput(resumed.started.text)).toBe(hiring);
+          expect(
+            reopened
+              .prepareContext(task.id, resumed.started.turnId)
+              .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+          ).toHaveLength(hiring ? 1 : 0);
+        } finally {
+          reopened.close();
+        }
+      },
+    );
+
+    it('enforces the untrimmed Goal length bound and rejects blank-only objectives', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Goal length boundary');
+      try {
+        expect(() => persistence.startGoal(task.id, ' \t\r\n　')).toThrow();
+        expect(() => persistence.startGoal(task.id, ` ${'x'.repeat(4000)}`)).toThrow();
+        const objective = ` ${'x'.repeat(3999)}`;
+        expect(persistence.startGoal(task.id, objective).goal).toBe(objective);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('preserves Goal usage and epoch only for the identical raw objective', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Goal raw identity');
+      const objective = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
+      try {
+        const first = persistence.startGoalTurn(task.id, objective);
+        persistence.recordTurnProviderUsage(task.id, first.started.turnId, {
+          inputTokens: 12,
+          outputTokens: 8,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          providerCost: null,
+          source: 'provider_api',
+        });
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, first.started.turnId, stage);
+        persistence.completeTurnAndFinishGoal(task.id, first.started.turnId, 'completed');
+        const epochs = persistence.getBackgroundEpochs(task.id);
+        expect(persistence.startGoal(task.id, objective).goalState).toMatchObject({
+          objective,
+          tokensUsed: 20,
+        });
+        expect(persistence.getBackgroundEpochs(task.id)).toEqual(epochs);
+        expect(persistence.startGoal(task.id, objective.trim()).goalState).toMatchObject({
+          objective: objective.trim(),
+          tokensUsed: 0,
+        });
+        expect(persistence.getBackgroundEpochs(task.id).contextEpoch).toBe(epochs.contextEpoch + 1);
+      } finally {
+        persistence.close();
+      }
     });
 
     it('binds Goal lifecycle controls to its Turn and records terminal usage', () => {

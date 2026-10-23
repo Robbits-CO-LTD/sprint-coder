@@ -1343,7 +1343,7 @@ const TEAM_HIRING_QUOTED_TEXT =
 const TEAM_HIRING_IMMEDIATE_NEGATION = /^(?:は|も(?!ら)|ない|なく|ません|ほしく|欲しく)/;
 const TEAM_HIRING_DIRECT_REQUEST =
   /^(?:ください|ほしい|欲しい|いただくようお願いします|(?:もらえ|いただけ|くれ)(?:(?:ますか|ませんか|ませんでしょうか|ないでしょうか)[?？]?|ない[?？]))$/;
-const TEAM_HIRING_OBJECT_WORD = '[a-zA-Z0-9Ａ-Ｚａ-ｚ０-９一-龠々ァ-ヶー_/#+@\uFFFC-]+';
+const TEAM_HIRING_OBJECT_WORD = '[a-zA-Z0-9Ａ-Ｚａ-ｚ０-９一-龠々ァ-ヶー_/#+@\uFFFB\uFFFC-]+';
 const TEAM_HIRING_OBJECT_NOUN = `${TEAM_HIRING_OBJECT_WORD}(?:\\(${TEAM_HIRING_OBJECT_WORD}\\)|（${TEAM_HIRING_OBJECT_WORD}）)?`;
 const TEAM_HIRING_OBJECT_QUANTITY =
   /[0-9０-９一二三四五六七八九十百千]+[ \u3000]*(?:人|名|件|枚|個|本|つ)(?:ずつ)?[ \u3000]*/gy;
@@ -1358,8 +1358,11 @@ const TEAM_HIRING_CAUSATIVE_ACTION =
 const TEAM_HIRING_FOLLOWUP_REQUEST = /^(?:教えて|説明して|報告して)(?:ください|ほしい)?$/;
 const TEAM_HIRING_SENTENCES = /[^。.!！?？\r\n]+[。.!！?？]*/g;
 // Unlike these quotation particles, an ambiguous adverb such as なんか can start an independent thought.
-const TEAM_HIRING_QUOTED_CONTINUATION = /^[、,\s]*(?:と|って|なんて|など|みたい|のよう)/;
-const TEAM_HIRING_INDEPENDENT_COURTESY = /^[、,\s]*とても助かります[。.!！?？\s]*$/;
+// Presentation tags and up to three unparsed emphasis closers keep a quotation attached.
+// Literal-example barriers and whitespace after a list marker start an independent segment.
+const TEAM_HIRING_QUOTED_CONTINUATION =
+  /^[、,\s\uFFFB]*(?:[*_]{1,3}(?![\s*_])[、,\s\uFFFB]*)?(?:と|って|なんて|など|みたい|のよう)/;
+const TEAM_HIRING_INDEPENDENT_COURTESY = /^[、,\s\uFFFB]*とても助かります[。.!！?？\s\uFFFB]*$/;
 
 function splitHiringSentences(input: string): readonly string[] {
   const sentences: string[] = [];

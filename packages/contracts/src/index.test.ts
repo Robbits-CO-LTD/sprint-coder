@@ -339,6 +339,25 @@ describe('public contracts', () => {
     },
   );
 
+  it('preserves Goal Markdown while enforcing raw length and nonblank input', () => {
+    const input = {
+      taskId: 'task-1',
+      objective: '    担当を雇ってください。\n\nこの例文を添削してください。\n',
+    };
+    expect(contracts.goalStartInputSchema.parse(input).objective).toBe(input.objective);
+    expect(
+      contracts.goalStartInputSchema.safeParse({ ...input, objective: ' \t\r\n　' }).success,
+    ).toBe(false);
+    expect(
+      contracts.goalStartInputSchema.parse({ ...input, objective: ` ${'x'.repeat(3999)}` })
+        .objective,
+    ).toHaveLength(4000);
+    expect(
+      contracts.goalStartInputSchema.safeParse({ ...input, objective: ` ${'x'.repeat(4000)}` })
+        .success,
+    ).toBe(false);
+  });
+
   it('keeps image IDs exclusive to direct Turn start and defaults old message outputs', () => {
     expect(
       contracts.turnStartInputSchema.parse({
