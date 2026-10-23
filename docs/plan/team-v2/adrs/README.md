@@ -9,7 +9,7 @@
 | [ADR-005](ADR-005-capability-catalog-picker.md)         | Accepted | source付きcatalogとPicker境界                                       |
 | [ADR-006](ADR-006-profiles-verification-secrets.md)     | Accepted | Profile、TTL、Secret Storage                                        |
 | [ADR-007](ADR-007-legacy-identity-migration.md)         | Accepted | pre-v35 legacy backfillとdual-read                                  |
-| [ADR-008](ADR-008-managed-local-runtime-boundary.md)    | Accepted | Managed Local v1の実行境界と分類契約                                |
+| [ADR-008](ADR-008-managed-local-runtime-boundary.md)    | Retired  | #903で内蔵モデルruntimeを廃止。外部接続と履歴データは保持           |
 | [P0 backlog](ADR-P0-BACKLOG.md)                         | Accepted | P0判断のtraceability index                                          |
 
 ADRは対象となる過去ADR／指示節を明示した場合だけsupersedeできる。

@@ -361,12 +361,13 @@ type AppState = {
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
   installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
   discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  /** Failure text for this request, or null when no separate error alert is needed. */
   startTurn(
     taskId: string,
     text: string,
     skills?: readonly TurnSkillSelection[],
     attachmentIds?: readonly string[],
-  ): Promise<void>;
+  ): Promise<string | null>;
   queueMessage(
     taskId: string,
     text: string,
@@ -2686,7 +2687,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
       const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder) return;
+      if (!trimmed || !window.sprintCoder) return null;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const selectedAttachmentIds = [...attachmentIds];
       const draftsById = new Map(
@@ -2700,7 +2701,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return attachment === undefined ? [] : [attachment];
       });
       const turn = get().turnByTask[taskId];
-      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
+      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return null;
 
       const optimisticId = `pending-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const optimisticMessage: ChatMessage = {
@@ -2758,6 +2759,7 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       } catch (err) {
         const code = errorCode(err);
+        const message = code === 'TURN_ACTIVE' ? null : describeError(err);
         let restoredDraft = false;
         set((state) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
@@ -2775,7 +2777,7 @@ export const useAppStore = create<AppState>((set, get) => {
               ...state.skillSelectionByTask,
               [taskId]: selectedSkills,
             },
-            error: code === 'TURN_ACTIVE' ? null : describeError(err),
+            error: message,
           };
         });
         if (restoredDraft) persistDraftDebounced(taskId, trimmed);
@@ -2784,7 +2786,9 @@ export const useAppStore = create<AppState>((set, get) => {
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
+        return message;
       }
+      return null;
     },
 
     async queueMessage(taskId: string, text: string, skills) {

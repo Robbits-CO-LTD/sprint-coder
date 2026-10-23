@@ -53,12 +53,10 @@ import {
 import { authorizationTurnIsActive, workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
-import { managedLocalConnection } from './managed-local-provider-runtime';
 import {
-  MANAGED_LOCAL_FIXTURE_SELECTION,
-  managedLocalTeamWorkerRuntime,
-} from './managed-local-team-worker-fixture';
-import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+  LOCAL_PROVIDER_TEST_SELECTION,
+  localProviderTestConnection,
+} from './provider-connection-test-fixture';
 import {
   createGraphBridgeProgressTracker,
   GRAPH_BRIDGE_PROGRESS_MAX_BYTES,
@@ -448,7 +446,7 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
 async function unconfirmedExitGraph(limitedConnection = false) {
   const f = fixture();
   const plan = structuredClone(f.plan);
-  const connection = limitedConnection ? managedLocalConnection() : null;
+  const connection = limitedConnection ? localProviderTestConnection() : null;
   if (connection !== null) {
     connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
     f.persistence.createProviderConnection(connection);
@@ -459,7 +457,7 @@ async function unconfirmedExitGraph(limitedConnection = false) {
       contextInheritancePolicy: 'summary',
       parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
       writeCapable: false,
-      modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
     });
     f.persistence.transitionWorkerState(worker.id, 'spawning');
     f.persistence.transitionWorkerState(worker.id, 'ready');
@@ -558,7 +556,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
     it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
       const f = fixture();
-      const connection = managedLocalConnection();
+      const connection = localProviderTestConnection();
       connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 19_999 };
       f.persistence.createProviderConnection(connection);
       const plan = structuredClone(f.plan);
@@ -570,7 +568,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           contextInheritancePolicy: 'summary',
           parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
           writeCapable: false,
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+          modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
         });
         f.persistence.transitionWorkerState(worker.id, 'spawning');
         f.persistence.transitionWorkerState(worker.id, 'ready');
@@ -1174,167 +1172,6 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         );
         expect(readFileSync(join(run.workspace, 'a.ts'), 'utf8')).toBe('written by the Manager\n');
         expect(readFileSync(join(run.workspace, 'b.ts'), 'utf8')).toBe('before\n');
-        f.persistence.close();
-      },
-      gitScenarioTimeout,
-    );
-    it.each([false, true])(
-      'runs a task-Workspace WRITE step of a Managed Local Worker in a durable isolation and integrates it, resume=%s (issue #570)',
-      async (resume) => {
-        const f = fixture(undefined, true);
-        f.persistence.createProviderConnection(managedLocalConnection());
-        const workspace = join(dirname(f.path), 'workspace');
-        mkdirSync(workspace);
-        writeFileSync(join(workspace, 'a.ts'), 'before\n');
-        for (const args of [
-          ['init', '-q', workspace],
-          ['-C', workspace, 'add', 'a.ts'],
-          [
-            '-C',
-            workspace,
-            '-c',
-            'user.name=Test',
-            '-c',
-            'user.email=test@example.com',
-            'commit',
-            '-qm',
-            'base',
-          ],
-        ])
-          expect(spawnSync('git', args).status).toBe(0);
-        const binding = await workspaceMutationBinding(workspace);
-        f.persistence.setWorkspaceBinding(f.task.id, {
-          path: binding.canonicalPath,
-          workspaceKey: binding.workspaceKey,
-          rootIdentityDigest: binding.rootIdentityDigest,
-        });
-        if (resume) await installNativeGraphObserver(f.persistence, dirname(f.path));
-        const writer = f.persistence.registerTeamWorker({
-          teamId: f.team.id,
-          role: 'managed-local',
-          objective: 'managed-local',
-          contextInheritancePolicy: 'summary',
-          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-          writeCapable: true,
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-        });
-        f.persistence.transitionWorkerState(writer.id, 'spawning');
-        f.persistence.transitionWorkerState(writer.id, 'ready');
-        const plan = structuredClone(f.plan);
-        plan.steps[0]!.workerId = writer.id;
-        const context = graphMissionContextFor(f.persistence, f.task.id);
-        plan.steps[0]!.access = 'workspace-write';
-        plan.steps[0]!.writeClaims = [
-          { rootId: context.workspace.primaryRootId!, path: 'managed.ts', semanticKeys: [] },
-        ];
-        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
-        f.persistence.saveGraphDocument(initial, 1);
-        // Step b is read-only and has no Connection, so it runs on the fallback.
-        const managedLocal = managedLocalTeamWorkerRuntime({
-          fallback: new DeterministicTeamWorkerRuntime(),
-          writePath: 'managed.ts',
-        });
-        let firstWorkspaceSet: RuntimeWorkspaceSet | undefined;
-        if (resume) {
-          const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-          vi.spyOn(managedLocal.runtime, 'execute')
-            .mockImplementationOnce(async (input) => {
-              firstWorkspaceSet = input.workspaceSet;
-              throw new Error('Controlled failure after Graph isolation preparation');
-            })
-            .mockImplementation((input) => execute(input));
-        }
-        const scheduler = new TeamExecutionScheduler(1);
-        const coordinator = new TeamCoordinator(
-          f.persistence,
-          managedLocal.runtime,
-          undefined,
-          undefined,
-          undefined,
-          scheduler,
-          undefined,
-          undefined,
-          new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') }),
-        );
-        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
-          ...f.input,
-          renderRevision: initial.renderRevision,
-          semanticRevision: initial.semanticRevision,
-          semanticDigest: initial.semanticDigest,
-          workspaceDigest: context.workspace.digest,
-          policyEpoch: context.policyEpoch,
-          contextDigest: graphMissionContextDigest(
-            context,
-            new Set(plan.steps.map(({ workerId }) => workerId)),
-          ),
-        }));
-        const executionId = mission.steps[0]!.executionId;
-        if (resume) {
-          await vi.waitFor(
-            () => expect(f.persistence.getTeamExecution(executionId).state).toBe('waiting_resume'),
-            { timeout: gitCheckpointTimeout },
-          );
-          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
-          const preserved = f.persistence.getTeamExecutionIsolation(executionId)!;
-          expect(preserved.phase).toBe('quarantined');
-          expect(firstWorkspaceSet?.roots[0]?.path).toBe(preserved.roots[0]!.isolatedPath);
-          expect(existsSync(join(workspace, 'managed.ts'))).toBe(false);
-          const review = await coordinator.reviewGraphPreservedWorkspace(
-            f.task.id,
-            mission.id,
-            'a',
-          );
-          await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
-          expect(f.persistence.getTeamExecutionIsolation(executionId)?.roots).toEqual(
-            preserved.roots,
-          );
-        }
-        await vi.waitFor(
-          () =>
-            expect(f.persistence.listTeamAttempts(executionId).map(({ state }) => state)).toEqual(
-              resume ? ['failed', 'completed'] : ['completed'],
-            ),
-          { timeout: gitCheckpointTimeout },
-        );
-        expect(
-          f.persistence.listTeamAttempts(executionId).map(({ state }) => state),
-          JSON.stringify(
-            f.persistence.getTeamSnapshot(f.team.id).agents.find(({ id }) => id === writer.id)
-              ?.currentActivity,
-          ),
-        ).toEqual(resume ? ['failed', 'completed'] : ['completed']);
-        await vi.waitFor(
-          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
-          { timeout: gitCheckpointTimeout },
-        );
-        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
-
-        // The step received its durable isolated root with the Managed Local writing tool.
-        const isolation = f.persistence.getTeamExecutionIsolation(executionId)!;
-        expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
-        expect(managedLocal.sessions).toHaveLength(1);
-        const [session] = managedLocal.sessions;
-        expect(session).toMatchObject({
-          workerId: writer.id,
-          writeCapable: true,
-          tools: ['read_file', 'create_file'],
-        });
-        const [root] = session!.workspaceSet.roots;
-        expect(session!.workspaceSet.roots).toHaveLength(1);
-        expect(root).toMatchObject({ role: 'primary', rootId: context.workspace.primaryRootId });
-        expect(root!.path).toBe(isolation.roots[0]!.isolatedPath);
-        if (resume) expect(session!.workspaceSet).toEqual(firstWorkspaceSet);
-        expect(managedLocal.toolCalls).toEqual([
-          { workerId: writer.id, name: 'create_file', file: join(root!.path, 'managed.ts') },
-        ]);
-        // The write reached the Workspace through integration only.
-        expect(isolation.repositories[0]).toMatchObject({ changedFiles: ['managed.ts'] });
-        expect(readFileSync(join(workspace, 'managed.ts'), 'utf8')).toBe(
-          'written by the Managed Local Worker\n',
-        );
-        expect(
-          spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-        ).toBe('');
         f.persistence.close();
       },
       gitScenarioTimeout,

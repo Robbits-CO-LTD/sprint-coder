@@ -296,6 +296,12 @@ export function Composer({ taskId }: { taskId: string }) {
   >(null);
   const turnActionPendingRef = useRef<'queue' | 'interrupt' | 'cancel' | null>(null);
   const [turnActionError, setTurnActionError] = useState<string | null>(null);
+  const [turnStartError, setTurnStartError] = useState<{ taskId: string; message: string } | null>(
+    null,
+  );
+  const turnStartRequestRef = useRef(0);
+  const operationError =
+    turnActionError ?? (turnStartError?.taskId === taskId ? turnStartError.message : null);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -545,7 +551,15 @@ export function Composer({ taskId }: { taskId: string }) {
     const text = composerMessageText(raw, imageRequested);
     updateImageRequested(false);
     if (!turnActive) {
-      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments));
+      const request = ++turnStartRequestRef.current;
+      setTurnStartError(null);
+      setTurnActionError(null);
+      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments)).then(
+        (message) => {
+          if (turnStartRequestRef.current === request && message !== null)
+            setTurnStartError({ taskId, message });
+        },
+      );
       return;
     }
     if (actionPolicy.primary.kind === 'queue') {
@@ -562,6 +576,7 @@ export function Composer({ taskId }: { taskId: string }) {
     if (turnActionPendingRef.current !== null) return;
     turnActionPendingRef.current = action;
     setTurnActionError(null);
+    setTurnStartError(null);
     setTurnActionPending(action);
     void operation()
       .then((completed) => {
@@ -829,9 +844,9 @@ export function Composer({ taskId }: { taskId: string }) {
                 {attachmentError}
               </div>
             )}
-            {turnActionError && (
+            {operationError && (
               <div className="composer-operation-error" role="alert">
-                {turnActionError}
+                {operationError}
               </div>
             )}
             <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">

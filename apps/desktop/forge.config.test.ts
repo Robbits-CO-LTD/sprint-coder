@@ -32,9 +32,7 @@ import config, {
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
-  isManagedLocalPackagedPath,
   isComputerUseNativeArtifactPath,
-  MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT,
   COMPUTER_USE_NATIVE_MANIFEST_PATH,
   COMPUTER_USE_NATIVE_RESOURCE_ROOT,
   resolveWindowsSignOptions,
@@ -46,11 +44,10 @@ import config, {
   verifyPackagedComputerUseNativeBundle,
   verifyBundledNodeResources,
 } from './forge.config';
-import {
+import viteMainConfig, {
   macAutoUpdateEligibleForIdentity,
   computerUseAcceptanceBuildForBuild,
   computerUseNativePinForBuild,
-  managedLocalSidecarPinsForBuild,
 } from './vite.main.config';
 import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
 import { planWindowsWizardInstaller, SQUIRREL_SETUP_EXE } from './windows-wizard-installer';
@@ -109,21 +106,13 @@ describe('native package target', () => {
     );
   });
 
-  it('prepares and packages only the native Managed Local resource tree', () => {
-    expect(config.packagerConfig?.extraResource).toContain(MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT);
+  it('excludes the retired model runtime while retaining native packaging hooks', () => {
+    expect(config.packagerConfig?.extraResource).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('managed-local')]),
+    );
+    expect(shouldIgnoreFromPackage('/managed-local/build/legacy-runtime')).toBe(true);
     expect(typeof config.hooks?.generateAssets).toBe('function');
     expect(typeof config.hooks?.postPackage).toBe('function');
-    expect(
-      isManagedLocalPackagedPath(
-        '/Applications/Sprint Coder.app/Contents/Resources/managed-local/darwin-arm64/bin/llama-server',
-      ),
-    ).toBe(true);
-    expect(
-      isManagedLocalPackagedPath(
-        'C:\\Sprint Coder\\resources\\managed-local\\win32-x64\\bin\\llama-server.exe',
-      ),
-    ).toBe(true);
-    expect(isManagedLocalPackagedPath('C:\\Sprint Coder\\Sprint Coder.exe')).toBe(false);
     expect(
       isComputerUseNativeArtifactPath(
         'C:\\Sprint Coder\\resources\\sprint-coder-computer-use-host.exe',
@@ -334,25 +323,9 @@ describe('Computer Use native Vite provenance pin', () => {
   });
 });
 
-describe('Managed Local Vite pin injection', () => {
-  it('defaults to no supported target and reads only the generated build pin', () => {
-    expect(managedLocalSidecarPinsForBuild('/definitely/missing/pins.json')).toEqual({});
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-managed-local-pins-'));
-    try {
-      const path = resolve(root, 'pins.json');
-      const pin = {
-        'darwin-arm64': {
-          target: 'darwin-arm64',
-          runtimeVersion: 'b10516',
-          upstreamRevision: 'a'.repeat(40),
-          manifestSha256: 'b'.repeat(64),
-        },
-      };
-      writeFileSync(path, JSON.stringify(pin));
-      expect(managedLocalSidecarPinsForBuild(path)).toEqual(pin);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+describe('retired model runtime package boundary', () => {
+  it('does not compile a sidecar pin into Main', () => {
+    expect(viteMainConfig.define).not.toHaveProperty('__SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__');
   });
 });
 
@@ -529,10 +502,8 @@ describe('release artifacts', () => {
     expect(requiredJob).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
     expect(requiredJob).toContain('run: node ci-scope.mjs gate');
     expect(ciWorkflow).toContain('Select checks from the complete pull request');
-    expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(2);
-    expect(macPackageJob).toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
-    expect(macPackageJob).toContain('src/main/managed-local-runtime-supervisor.test.ts');
-    expect(ciWorkflow.match(/SPRINT_CODER_MANAGED_LOCAL_LIVE/gu)).toHaveLength(3);
+    expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE');
+    expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_CODING_LIVE');
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
     expect(unsignedVerifier).toContain('Sprint-Coder-Installer-$version.exe');
     expect(unsignedVerifier).toContain('Sprint-Coder-Setup.exe');

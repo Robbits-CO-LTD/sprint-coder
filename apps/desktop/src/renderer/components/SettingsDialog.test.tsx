@@ -68,6 +68,18 @@ afterEach(() => {
 });
 
 describe('which body the flag selects', () => {
+  it('keeps Provider connections in both layouts without the retired model installer', () => {
+    stubBridge();
+    expect(SETTINGS_SECTIONS.map(({ id }) => id)).toEqual(['models', 'team', 'skills', 'advanced']);
+    for (const html of [workspace(), legacy()]) {
+      expect(html).toContain('プロバイダー接続');
+      expect(html).not.toContain('settings-local-ai');
+      expect(html).not.toContain('settings-nav-local-ai');
+      expect(html).not.toContain('Local AI Selector');
+      expect(html).not.toContain('端末内のモデル・実行状態');
+    }
+  });
+
   it('renders the workspace, with one nav row per section, when the flag is on', () => {
     stubBridge();
     // The store's initial `settingsWorkspaceV2` is true, so the dialog itself is the flag-on case.

@@ -1,3 +1,4 @@
+import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import {
   providerExecutionRequestSchema,
   type CanonicalProviderEvent,
@@ -107,6 +108,7 @@ export class MainProviderRegistry implements ProviderRegistry {
   }
 
   resolve(connection: ProviderConnection): ProviderRuntime {
+    assertNotRetiredManagedLocal(connection.id, connection.providerId);
     const exact = this.registrations.get(
       registrationKey(connection.runtimeKind, connection.providerId),
     );

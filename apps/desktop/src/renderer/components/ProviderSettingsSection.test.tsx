@@ -626,21 +626,29 @@ describe('createConnection for a Provider Profile', () => {
     });
   });
 
-  it('omits an optional API key instead of sending an empty or dummy value', async () => {
-    const api = fakeApi();
-    const local = profile({
-      id: 'ollama',
-      displayName: 'Ollama',
-      baseUrl: 'http://localhost:11434/v1',
-      baseUrlConfigurable: true,
-      requiredCredentialFields: [],
-    });
-    await createConnection(api, profileForm(local, { apiKey: '' }), [local]);
-    expect(api.createProfileConnection).toHaveBeenCalledWith({
-      profileId: 'ollama',
-      displayName: '本番',
-    });
-  });
+  it.each([
+    ['ollama', 'Ollama', 'http://localhost:11434/v1'],
+    ['localai', 'LocalAI', 'http://localhost:8080/v1'],
+    ['lm-studio', 'LM Studio', 'http://localhost:1234/v1'],
+  ])(
+    'keeps external %s creation without an empty or dummy API key',
+    async (id, displayName, baseUrl) => {
+      const api = fakeApi();
+      const local = profile({
+        id,
+        displayName,
+        baseUrl,
+        computeLocation: 'local',
+        baseUrlConfigurable: true,
+        requiredCredentialFields: [],
+      });
+      await createConnection(api, profileForm(local, { apiKey: '' }), [local]);
+      expect(api.createProfileConnection).toHaveBeenCalledWith({
+        profileId: id,
+        displayName: '本番',
+      });
+    },
+  );
 });
 
 describe('upsertConnection', () => {

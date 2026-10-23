@@ -9,6 +9,7 @@ import type {
 } from '@sprint-coder/contracts';
 import { ModelPickerV2 } from './ModelPickerV2';
 import { useAppStore } from '../store/appStore';
+import { OPEN_PROVIDER_SETTINGS_EVENT } from '../lib/settings-navigation';
 
 const initial = useAppStore.getInitialState();
 const SONNET_SELECTION: ModelSelection = {
@@ -102,6 +103,19 @@ afterEach(async () => {
 });
 
 describe('ModelPickerV2 trigger name after a remount', () => {
+  it('preserves a retired local selection when its catalog row is absent', async () => {
+    const selection: ModelSelection = {
+      connectionId: 'managed-local:runtime',
+      requestedProvider: 'sprint-managed-local',
+      requestedModel: 'retired-local-model',
+    };
+    showSelection(selection);
+    query.mockResolvedValue(catalogResult([], selection));
+    await renderPicker('retired-local');
+    expect(triggerText()).toBe('retired-local-model');
+    expect(useAppStore.getState().modelPicker.selection).toEqual(selection);
+  });
+
   it('shows the catalog display name on mount and again after a remount', async () => {
     query.mockResolvedValue(
       catalogResult([
@@ -192,5 +206,52 @@ describe('ModelPickerV2 trigger name after a remount', () => {
     await renderPicker('none');
     expect(query).not.toHaveBeenCalled();
     expect(triggerText()).toBe('自動');
+  });
+});
+
+describe('local catalog Provider-settings destination', () => {
+  async function showLocalCatalog() {
+    const trigger = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-trigger"]',
+    )!;
+    await act(async () => trigger.click());
+    await flush();
+    const local = container.querySelector<HTMLButtonElement>(
+      '[data-testid="model-picker-v2-access-local"]',
+    )!;
+    await act(async () => local.click());
+    await flush();
+    return trigger;
+  }
+
+  it('offers the Provider destination and restores the durable opener before navigation', async () => {
+    query.mockResolvedValue(catalogResult([]));
+    await renderPicker('local-empty');
+    const trigger = await showLocalCatalog();
+    const requested = vi.fn();
+    window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, requested);
+    try {
+      const add = [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+        (button) => button.textContent === 'プロバイダー接続を追加',
+      )!;
+      expect(add).toBeDefined();
+      expect(container.textContent).not.toContain('Local AI Selector');
+      add.focus();
+      await act(async () => add.click());
+      expect(requested).toHaveBeenCalledOnce();
+      expect(document.activeElement).toBe(trigger);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      expect(query).toHaveBeenCalledWith(expect.objectContaining({ accessTypes: ['local'] }));
+    } finally {
+      window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, requested);
+    }
+  });
+
+  it('keeps a failed local listing distinct from an empty local catalog', async () => {
+    query.mockRejectedValue(new Error('fixture unavailable'));
+    await renderPicker('local-error');
+    await showLocalCatalog();
+    expect(container.textContent).toContain('モデル一覧を取得できませんでした');
+    expect(container.textContent).not.toContain('プロバイダー接続を追加');
   });
 });
