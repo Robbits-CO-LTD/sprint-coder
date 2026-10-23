@@ -197,7 +197,7 @@ powershell -ExecutionPolicy Bypass -File apps/desktop/scripts/ensure-inno-setup.
 npm run make:windows
 ```
 
-ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe`、portable ZIPは`apps/desktop/out/make/zip/win32/x64/`へ出力されます。手元のbuildは未署名のため、Windowsから警告が表示される場合があります。正式配布の署名要件は[release workflow](.github/workflows/release-beta.yml)と[設計資料](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)を確認してください。
+ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer-<version>.exe`、portable ZIPは`apps/desktop/out/make/zip/win32/x64/`へ出力されます。手元のbuildは未署名のため、Windowsから警告が表示される場合があります。正式配布の署名要件は[release workflow](.github/workflows/release-beta.yml)と[設計資料](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)を確認してください。
 
 </details>
 

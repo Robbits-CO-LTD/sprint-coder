@@ -120,10 +120,24 @@ describe('release signing and notarization', () => {
     expect(workflow).toContain('os: windows-2022');
     expect(workflow).toContain("SPRINT_CODER_ALLOW_UNSIGNED_WINDOWS: '1'");
     expect(workflow).toContain('./scripts/verify-unsigned-windows-release.ps1 -RenamePortableZip');
-    expect(workflow).toContain('Sprint-Coder-Installer.exe');
+    expect(workflow).toContain('Sprint-Coder-Installer-*.exe');
     expect(workflow).toContain('*-full.nupkg');
     expect(workflow).toContain("-name 'RELEASES'");
     expect(workflow).toContain('Windows版はコード署名されていません');
+  });
+
+  it('keeps the installer version in signed and unsigned release paths and download links', () => {
+    expect(unsignedWindowsVerifier).toContain('Sprint-Coder-Installer-$version.exe');
+    expect(signedWindowsRelease).toContain(
+      '$installerName = "Sprint-Coder-Installer-$version.exe"',
+    );
+    expect(signedWindowsRelease).toContain('Join-Path $stagingDirectory $installerName');
+    expect(signedWindowsRelease).toContain(']($baseUrl/$installerName)');
+    expect(workflow).toContain('*/Sprint-Coder-Installer-"${RELEASE_VERSION}".exe)');
+    expect(workflow).toContain('-name "Sprint-Coder-Installer-${RELEASE_VERSION}.exe" -o');
+    expect(workflow).toContain('](${base_url}/Sprint-Coder-Installer-${RELEASE_VERSION}.exe)');
+    for (const source of [workflow, unsignedWindowsVerifier, signedWindowsRelease])
+      expect(source).not.toContain('Sprint-Coder-Installer.exe');
   });
 
   it('uses the Squirrel-normalized NuGet version for stable and beta Windows update packages', () => {

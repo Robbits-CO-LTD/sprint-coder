@@ -99,6 +99,6 @@ jobs:
           name: computer-use-acceptance-windows-x64
           path: |
             apps/desktop/out/make/zip/win32/x64/*.zip
-            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe
+            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer-*.exe
           if-no-files-found: error
           retention-days: 3

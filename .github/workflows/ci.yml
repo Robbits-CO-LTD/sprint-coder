@@ -1093,7 +1093,8 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CI_E2E_SPECS: ${{ toJSON(matrix.specs) }}
-          SPRINT_CODER_E2E_HIDDEN: '1'
+          # Xvfb isolates the desktop; focus and screenshots still require a mapped window.
+          SPRINT_CODER_E2E_HIDDEN: '0'
         run: xvfb-run -a node ci-renderer-tests.mjs e2e
       - name: Run selected UI cases on macOS
         if: runner.os == 'macOS'
