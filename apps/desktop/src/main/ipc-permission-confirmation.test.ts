@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MessageBoxOptions, MessageBoxReturnValue } from 'electron';
 import type { z } from 'zod';
-import { IPC_CHANNELS, type CommandResult, type PermissionSettings } from '@sprint-coder/contracts';
+import {
+  IPC_CHANNELS,
+  type CommandResult,
+  type PermissionSettings,
+  type TaskSummary,
+} from '@sprint-coder/contracts';
 import { IpcRouter, TaskMailbox } from './ipc';
 import {
   FullAccessConfirmation,
@@ -38,7 +43,7 @@ const newWork = [
   [IPC_CHANNELS.goalsResume, { skills: [] }],
 ] as const;
 
-function fixture(acknowledged = false) {
+function fixture(acknowledged = false, objective = '既存の目標') {
   const policies = new Map<string, PermissionSettings>();
   const operations = new Map<string, { hash: string; value: unknown }>();
   const confirmations: Array<{ signal: AbortSignal; respond: (response: number) => void }> = [];
@@ -63,6 +68,35 @@ function fixture(acknowledged = false) {
     },
   );
   const startTurn = vi.fn(() => ({ turnId: randomUUID() }));
+  const taskWithGoal = (goal: string): TaskSummary => ({
+    id: 'task-1',
+    projectId: null,
+    title: 'Goal',
+    pinned: false,
+    archived: false,
+    goal,
+    goalState: {
+      objective: goal,
+      status: 'active',
+      tokenBudget: null,
+      tokensUsed: 0,
+      timeUsedSeconds: 0,
+      startedAt: '2026-10-24T00:00:00.000Z',
+      updatedAt: '2026-10-24T00:00:00.000Z',
+    },
+    workspacePath: null,
+    localOnly: false,
+    createdAt: '2026-10-24T00:00:00.000Z',
+    updatedAt: '2026-10-24T00:00:00.000Z',
+  });
+  const startGoalTurn = vi.fn((_taskId: string, goal: string) => ({
+    task: taskWithGoal(goal),
+    started: { turnId: randomUUID() },
+  }));
+  const resumeGoalTurn = vi.fn(() => ({
+    task: taskWithGoal(objective),
+    started: { turnId: randomUUID() },
+  }));
   const drain = vi.fn<() => Promise<void>>().mockResolvedValue(undefined);
   const pending = new Set<string>();
   const confirmation = new FullAccessConfirmation();
@@ -126,6 +160,9 @@ function fixture(acknowledged = false) {
       getRuntime: () => 'mock',
       setAccessPreset,
       startTurn,
+      startGoalTurn,
+      resumeGoalTurn,
+      getTask: () => taskWithGoal(objective),
     },
     permissionBroker: { getPolicy, drainPolicyEpochOutbox: drain },
     skillSettings: { resolveSelections: vi.fn().mockResolvedValue([]) },
@@ -157,6 +194,8 @@ function fixture(acknowledged = false) {
     confirmations,
     confirmation,
     startTurn,
+    startGoalTurn,
+    resumeGoalTurn,
     setAccessPreset,
     drain,
     invoke,
@@ -174,6 +213,61 @@ function fixture(acknowledged = false) {
 async function flush() {
   for (let index = 0; index < 15; index += 1) await Promise.resolve();
 }
+
+describe('Turn text through the registered IPC handler', () => {
+  it.each([
+    ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+    ['担当を雇ってください。', true],
+  ] as const)(
+    'preserves text and seals only actual hiring instructions',
+    async (text, teamTurn) => {
+      const f = fixture();
+      const result = await f.invoke(IPC_CHANNELS.turnsStart, {
+        taskId: 'task-1',
+        text,
+        skills: [],
+        attachmentIds: [],
+        attachmentSelectionIdentity: null,
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(f.startTurn).toHaveBeenCalledWith(
+        'task-1',
+        text,
+        [],
+        teamTurn,
+        [],
+        expect.any(Function),
+      );
+    },
+  );
+});
+
+describe.each(['start', 'resume'] as const)(
+  'Goal %s through the registered IPC handler',
+  (operation) => {
+    it.each([
+      ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['担当を雇ってください。', true],
+    ] as const)(
+      'seals Team only for actual Goal hiring instructions',
+      async (objective, hiring) => {
+        const f = fixture(false, objective);
+        const result = await f.invoke(
+          operation === 'start' ? IPC_CHANNELS.goalsStart : IPC_CHANNELS.goalsResume,
+          {
+            taskId: 'task-1',
+            skills: [],
+            ...(operation === 'start' ? { objective } : {}),
+          },
+        );
+        expect(result).toMatchObject({ ok: true });
+        if (operation === 'start')
+          expect(f.startGoalTurn).toHaveBeenCalledWith('task-1', objective, [], hiring);
+        else expect(f.resumeGoalTurn).toHaveBeenCalledWith('task-1', [], hiring);
+      },
+    );
+  },
+);
 
 beforeEach(() => {
   electron.handlers.clear();

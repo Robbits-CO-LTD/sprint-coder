@@ -14248,11 +14248,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
   startGoal(taskId: string, objective: string): TaskSummary {
     return this.db.transaction(() => {
       const current = this.getTaskRow(taskId);
-      const parsedObjective = objective.trim();
-      if (parsedObjective.length === 0 || parsedObjective.length > 4000)
+      if (objective.trim().length === 0 || objective.length > 4000)
         throw new Error('Goal must be between 1 and 4000 characters');
       const now = new Date().toISOString();
-      const preservingUsage = current.goal === parsedObjective && current.goal_status !== null;
+      const preservingUsage = current.goal === objective && current.goal_status !== null;
       const activeSeconds =
         preservingUsage && current.goal_status === 'active' && current.goal_updated_at !== null
           ? Math.max(
@@ -14272,13 +14271,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
            WHERE id = ?`,
         )
         .run(
-          parsedObjective,
+          objective,
           null,
           preservingUsage ? current.goal_tokens_used : 0,
           preservingUsage ? current.goal_time_used_seconds + activeSeconds : 0,
           preservingUsage ? current.goal_started_at : now,
           now,
-          current.goal === parsedObjective ? 0 : 1,
+          current.goal === objective ? 0 : 1,
           now,
           taskId,
         );
@@ -14349,7 +14348,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (current.goal === null || current.goal_status === null)
         throw new Error('Task does not have a Goal');
       this.transitionGoal(taskId, 'active');
-      const text = `Goalを続けてください: ${current.goal}`;
+      // Keep the stored Goal's first Markdown block separate from the continuation directive.
+      const text = `Goalを続けてください:\n\n${current.goal}`;
       const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { task: this.getTask(taskId), started };
     })();
