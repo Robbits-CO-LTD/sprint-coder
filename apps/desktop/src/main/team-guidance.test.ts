@@ -408,6 +408,32 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput(input)).toBe(expected);
   });
 
+  it.each([
+    ['担当を雇ってもらえますか？なんて聞かれました。', false],
+    ['担当を雇ってください！みたいな依頼が来ました。', false],
+    ['担当を雇ってください。などと書かれていました。', false],
+    ['担当を雇ってもらえますか？\nなんて言われました。', false],
+    ['担当を雇ってください！のような文を添削して。', false],
+    ['担当を雇ってもらえますか？とても助かります！って言われました。', false],
+    ['担当を雇ってください。とても助かります。なんて聞かれました。', false],
+    ['”担当を雇ってください。”を訳して。', false],
+    ['＂担当を雇ってください。＂を訳して。', false],
+    ['〝担当を雇ってください。〟という文を添削して。', false],
+    ['〝担当を雇ってください。〞という文を添削して。', false],
+    ['担当を雇っていただいて！本当に助かりました。', false],
+    ['担当を雇っていただいて、資料を作成してください。', true],
+    ['担当を雇ってもらえますか？とても助かります。', true],
+    ['担当を雇ってください。とても助かります！とても助かります。', true],
+    ['”担当を雇ってはいけません。”は例です。担当を雇ってください。', true],
+    ['Don’t change dependencies. 担当を雇ってください。', true],
+    ['担当を雇って、担当を雇って、資料を作成してください。', true],
+    ['担当を雇ってメンバーを雇ってください。', true],
+    ['担当を雇ってメンバーを雇ってはいけません。', false],
+  ])('keeps quotation syntax and trailing courtesy distinct from hiring: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
   it('keeps bounded punctuation runs and grouped quotation segments inert', () => {
     const prefix = '担当を雇ってもらえますか';
     const suffix = 'と聞かれました。';
@@ -418,6 +444,18 @@ describe('builtin Team skill', () => {
       prefix + '？' + 'と補足します。'.repeat(10_000),
     ];
     for (const input of inputs) {
+      expect(isTeamScenarioInput(input)).toBe(false);
+      expect(requiresTeamWorkersInput(input)).toBe(false);
+    }
+  });
+
+  it('does not infer work from many hiring matches before an unknown continuation', () => {
+    for (const input of [
+      '担当を雇って、'.repeat(14_000) + '結果を見ました。',
+      '担当を雇って\n'.repeat(14_000) + 'あ',
+      '担当を雇って'.repeat(14_000) + 'あ',
+    ]) {
+      expect(input.length).toBeLessThanOrEqual(100_000);
       expect(isTeamScenarioInput(input)).toBe(false);
       expect(requiresTeamWorkersInput(input)).toBe(false);
     }
