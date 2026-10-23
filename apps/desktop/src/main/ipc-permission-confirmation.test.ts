@@ -175,6 +175,34 @@ async function flush() {
   for (let index = 0; index < 15; index += 1) await Promise.resolve();
 }
 
+describe('Turn text through the registered IPC handler', () => {
+  it.each([
+    ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+    ['担当を雇ってください。', true],
+  ] as const)(
+    'preserves text and seals only actual hiring instructions',
+    async (text, teamTurn) => {
+      const f = fixture();
+      const result = await f.invoke(IPC_CHANNELS.turnsStart, {
+        taskId: 'task-1',
+        text,
+        skills: [],
+        attachmentIds: [],
+        attachmentSelectionIdentity: null,
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(f.startTurn).toHaveBeenCalledWith(
+        'task-1',
+        text,
+        [],
+        teamTurn,
+        [],
+        expect.any(Function),
+      );
+    },
+  );
+});
+
 beforeEach(() => {
   electron.handlers.clear();
   electron.showMessageBox.mockReset();

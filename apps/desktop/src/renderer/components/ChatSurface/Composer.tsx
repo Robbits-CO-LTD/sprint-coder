@@ -511,8 +511,9 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleSend() {
-    const raw = draft.trim();
-    if (!raw || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel') return;
+    const raw = draft;
+    if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
+      return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
     // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
     // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
@@ -591,8 +592,8 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleInterrupt(): void {
-    const raw = draft.trim();
-    if (!raw || actionPolicy.interrupt.disabled) return;
+    const raw = draft;
+    if (!raw.trim() || actionPolicy.interrupt.disabled) return;
     const text = composerMessageText(raw, imageRequested);
     const restoreImageRequest = imageRequested;
     updateImageRequested(false);

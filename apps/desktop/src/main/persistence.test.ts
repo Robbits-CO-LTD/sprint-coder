@@ -21,6 +21,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { turnQueueInputSchema, turnStartInputSchema } from '@sprint-coder/contracts';
 import {
   ToolRegistry,
   createExecutionSpec,
@@ -2013,6 +2014,7 @@ if (runsWithElectronAbi)
       ['「担当を雇ってください」という文を添削して。', false],
       ['> 引用文です。\n担当を雇ってください。', false],
       ['    担当を雇ってください。', false],
+      ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
       ['> 引用文です。\n\n担当を雇ってください。', true],
       ['担当を雇って進める方法を教えて。', false],
     ] as const)(
@@ -2021,9 +2023,19 @@ if (runsWithElectronAbi)
         const { persistence } = createPersistence();
         try {
           const task = persistence.createTask('member hiring classification');
-          const started = persistence.startTurn(task.id, input);
+          const parsed = turnStartInputSchema.parse({
+            taskId: task.id,
+            text: input,
+            attachmentIds: [],
+            attachmentSelectionIdentity: null,
+          });
+          const started = persistence.startTurn(task.id, parsed.text);
+          expect(started.text).toBe(input);
+          expect(started.event).toMatchObject({ userMessage: { content: input } });
+          expect(persistence.listMessages(task.id)[0]?.content).toBe(input);
           expect(started.teamTurn).toBe(teamTurn);
           const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(prepared.fragments.some(({ content }) => content === input)).toBe(true);
           expect(
             prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
           ).toHaveLength(teamTurn ? 1 : 0);
@@ -2033,6 +2045,34 @@ if (runsWithElectronAbi)
         }
       },
     );
+
+    it('keeps indented queued input intact through IPC parsing, restart and acceptance', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('queued example');
+      const text = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
+      const parsed = turnQueueInputSchema.parse({ taskId: task.id, text });
+      persistence.queueInput(task.id, parsed.text, 'queued-example');
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        expect(reopened.snapshot(task.id).queued).toEqual([{ ordinal: 1, text }]);
+        const started = reopened.startNextQueued(task.id)?.started;
+        expect(started).toMatchObject({
+          text,
+          teamTurn: false,
+          event: { userMessage: { content: text } },
+        });
+        if (started === undefined) throw new Error('Queued turn was not accepted');
+        const prepared = reopened.prepareContext(task.id, started.turnId);
+        expect(prepared.fragments.some(({ content }) => content === text)).toBe(true);
+        expect(
+          prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+        ).toHaveLength(0);
+        expect(reopened.listMessages(task.id)[0]?.content).toBe(text);
+      } finally {
+        reopened.close();
+      }
+    });
 
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();

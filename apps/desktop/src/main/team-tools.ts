@@ -1357,7 +1357,8 @@ const TEAM_HIRING_CAUSATIVE_ACTION =
   /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
 const TEAM_HIRING_FOLLOWUP_REQUEST = /^(?:教えて|説明して|報告して)(?:ください|ほしい)?$/;
 const TEAM_HIRING_SENTENCES = /[^。.!！?？\r\n]+[。.!！?？]*/g;
-const TEAM_HIRING_QUOTED_CONTINUATION = /^[、,\s]*(?:と|って|なんて|など|みたいな|のような)/;
+// Unlike these quotation particles, an ambiguous adverb such as なんか can start an independent thought.
+const TEAM_HIRING_QUOTED_CONTINUATION = /^[、,\s]*(?:と|って|なんて|など|みたい|のよう)/;
 const TEAM_HIRING_INDEPENDENT_COURTESY = /^[、,\s]*とても助かります[。.!！?？\s]*$/;
 
 function splitHiringSentences(input: string): readonly string[] {

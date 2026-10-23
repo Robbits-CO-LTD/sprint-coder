@@ -38,6 +38,7 @@ describe('attachment draft store state', () => {
   });
 
   it('passes ordered IDs and metadata optimistically, then preserves a concurrent draft on acceptance', async () => {
+    const text = '  画像を確認して  ';
     const start = vi.fn().mockResolvedValue({ turnId: 'turn-1' });
     vi.stubGlobal('window', { sprintCoder: { tasks: {}, turns: { start } } });
     useAppStore.setState({
@@ -52,17 +53,18 @@ describe('attachment draft store state', () => {
       turnByTask: {},
     });
 
-    await useAppStore.getState().startTurn(taskId, '  画像を確認して  ', undefined, [second.id]);
+    await useAppStore.getState().startTurn(taskId, text, undefined, [second.id]);
     // Acceptance can happen while this Task has no event subscription.
     expect(useAppStore.getState().sendingByTask[taskId]).toBe(false);
     expect(start).toHaveBeenCalledWith({
       taskId,
-      text: '画像を確認して',
+      text,
       skills: [],
       attachmentIds: [second.id],
       attachmentSelectionIdentity: 'selection-1',
     });
     expect(useAppStore.getState().messagesByTask[taskId]?.[0]?.attachments).toEqual([second]);
+    expect(useAppStore.getState().messagesByTask[taskId]?.[0]?.content).toBe(text);
 
     const concurrent = { ...first, id: 'attachment-3', fileName: 'three.png' };
     useAppStore.setState((state) => ({
@@ -83,7 +85,7 @@ describe('attachment draft store state', () => {
           taskId,
           turnId: 'turn-1',
           author: 'user',
-          content: '画像を確認して',
+          content: text,
           attachments: [second],
           createdAt: '2026-08-05T00:00:02.000Z',
         },

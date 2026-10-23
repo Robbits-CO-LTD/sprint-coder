@@ -315,6 +315,30 @@ describe('public contracts', () => {
     ).toThrow();
   });
 
+  it.each([
+    [
+      'start',
+      contracts.turnStartInputSchema,
+      { attachmentIds: [], attachmentSelectionIdentity: null },
+    ],
+    ['queue', contracts.turnQueueInputSchema, {}],
+    ['steer', contracts.turnSteerInputSchema, { expectedTurnId: 'turn-1' }],
+    ['stop-and-send', contracts.turnStopAndSendInputSchema, {}],
+  ] as const)(
+    'preserves %s text while rejecting blank or oversized input',
+    (_kind, schema, extra) => {
+      const input = {
+        taskId: 'task-1',
+        text: '    担当を雇ってください。\n\nこの例文を添削してください。\n',
+        ...extra,
+      };
+      expect(schema.parse(input).text).toBe(input.text);
+      expect(schema.safeParse({ ...input, text: ' \t\r\n　' }).success).toBe(false);
+      expect(schema.parse({ ...input, text: ` ${'x'.repeat(99_999)}` }).text).toHaveLength(100_000);
+      expect(schema.safeParse({ ...input, text: ` ${'x'.repeat(100_000)}` }).success).toBe(false);
+    },
+  );
+
   it('keeps image IDs exclusive to direct Turn start and defaults old message outputs', () => {
     expect(
       contracts.turnStartInputSchema.parse({

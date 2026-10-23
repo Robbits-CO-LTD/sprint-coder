@@ -5148,9 +5148,13 @@ export const goalResumeInputSchema = z
   .strict();
 export const goalRunResultSchema = z.object({ task: taskSummarySchema, turnId: idSchema }).strict();
 export const taskDraftInputSchema = z.object({ taskId: idSchema, draft: taskTextSchema }).strict();
+// Indentation is meaningful in Markdown/code; check for blank input without rewriting it.
+const turnTextInputSchema = taskTextSchema.refine((text) => text.trim() !== '', {
+  message: 'Turn text must not be blank',
+});
 const turnTextAndSkillsInputShape = {
   taskId: idSchema,
-  text: z.string().trim().min(1).max(100_000),
+  text: turnTextInputSchema,
   skills: turnSkillSelectionsSchema.default([]),
 } as const;
 export const turnStartInputSchema = z
@@ -5172,7 +5176,7 @@ export const turnQueueResultSchema = z.object({ ordinal: z.number().int().positi
 export const turnSteerInputSchema = z
   .object({
     taskId: idSchema,
-    text: z.string().trim().min(1).max(100_000),
+    text: turnTextInputSchema,
     expectedTurnId: idSchema,
   })
   .strict();
