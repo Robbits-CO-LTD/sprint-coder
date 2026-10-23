@@ -1355,7 +1355,7 @@ const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION
 const TEAM_HIRING_CAUSATIVE_ACTION =
   /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
 const TEAM_HIRING_REPORTED_REQUEST =
-  /(?:と|って)[ \u3000]*(?:伝え|言(?:い|っ)|書(?:き|い)|頼(?:み|ん)|送っ|入力し|指示し|依頼し)(?:ました|た|だ)/;
+  /(?:と|って)[ \u3000]*(?:伝え(?:られ)?|言(?:い|っ|われ)|書(?:き|い)|頼(?:み|ん|まれ)|送っ|入力し|指示(?:し|され)|依頼(?:し|され))(?:ました|た|だ)/;
 const TEAM_HIRING_SENTENCES = new RegExp(
   `(?:[^。.!！?？\\r\\n]|[?？!！](?=[、, \\u3000]*${TEAM_HIRING_REPORTED_REQUEST.source}))+[。.!！?？]*`,
   'g',
