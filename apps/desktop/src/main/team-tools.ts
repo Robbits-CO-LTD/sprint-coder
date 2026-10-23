@@ -1345,11 +1345,11 @@ const TEAM_HIRING_DIRECT_REQUEST =
 const TEAM_HIRING_OBJECT_WORD = '[a-zA-Z0-9Ａ-Ｚａ-ｚ０-９一-龠々ァ-ヶー_/#+@\uFFFC-]+';
 const TEAM_HIRING_OBJECT_NOUN = `${TEAM_HIRING_OBJECT_WORD}(?:\\(${TEAM_HIRING_OBJECT_WORD}\\)|（${TEAM_HIRING_OBJECT_WORD}）)?`;
 const TEAM_HIRING_OBJECT_QUANTITY =
-  '(?:[0-9０-９一二三四五六七八九十百千]+[ \\u3000]*(?:人|名|件|枚|個|本|つ)(?:ずつ)?[ \\u3000]*)+';
+  /[0-9０-９一二三四五六七八九十百千]+[ \u3000]*(?:人|名|件|枚|個|本|つ)(?:ずつ)?[ \u3000]*/gy;
 // Only quantities, joined nouns and a directory destination may precede the complete action.
 // In particular these terms cannot consume verbal clauses such as 「させないで自分で」.
 const TEAM_HIRING_FOLLOWING_OBJECT = new RegExp(
-  `^(?:${TEAM_HIRING_OBJECT_QUANTITY})?${TEAM_HIRING_OBJECT_NOUN}(?:[ \\u3000]*(?:と|や|の|及び|および|・)[ \\u3000]*${TEAM_HIRING_OBJECT_NOUN})*[ \\u3000]*を[ \\u3000]*(?:(?:[a-zA-Z0-9０-９一-龠々ァ-ヶー_-]+[/\\\\])+[ \\u3000]*に[ \\u3000]*)?`,
+  `^${TEAM_HIRING_OBJECT_NOUN}(?:[ \\u3000]*(?:と|や|の|及び|および|・)[ \\u3000]*${TEAM_HIRING_OBJECT_NOUN})*[ \\u3000]*を[ \\u3000]*(?:(?:[a-zA-Z0-9０-９一-龠々ァ-ヶー_-]+[/\\\\])+[ \\u3000]*に[ \\u3000]*)?`,
 );
 const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION.source}`, 'i');
 const TEAM_HIRING_CAUSATIVE_ACTION =
@@ -1360,6 +1360,25 @@ const TEAM_HIRING_SENTENCES = new RegExp(
   `(?:[^。.!！?？\\r\\n]|[?？!！](?=[、, \\u3000]*${TEAM_HIRING_REPORTED_REQUEST.source}))+[。.!！?？]*`,
   'g',
 );
+
+function hiringActionAfterObject(clause: string): string {
+  let quantityEnd = 0;
+  let lastQuantityStart = 0;
+  // Sticky matching scans only the quantity prefix. Keeping it outside the noun expression
+  // prevents retrying the whole noun suffix at every quantity when a long input has no object.
+  for (const quantity of clause.matchAll(TEAM_HIRING_OBJECT_QUANTITY)) {
+    lastQuantityStart = quantity.index;
+    quantityEnd = quantity.index + quantity[0].length;
+  }
+  // The final quantity may itself be the noun: 「1人ずつ2件を調査して」. Two candidates suffice;
+  // earlier quantity tokens never need to be restored and re-scanned.
+  for (const start of quantityEnd === 0 ? [0] : [quantityEnd, lastQuantityStart]) {
+    const remaining = clause.slice(start);
+    const object = TEAM_HIRING_FOLLOWING_OBJECT.exec(remaining);
+    if (object !== null) return remaining.slice(object[0].length);
+  }
+  return clause;
+}
 
 function isExplicitMemberHiringInput(input: string): boolean {
   // Mask before splitting sentences so punctuation inside quotes cannot expose an instruction.
@@ -1383,7 +1402,7 @@ function isExplicitMemberHiringInput(input: string): boolean {
       return (
         clause === '' ||
         TEAM_HIRING_DIRECT_REQUEST.test(clause) ||
-        [clause, clause.replace(TEAM_HIRING_FOLLOWING_OBJECT, '')].some(
+        [clause, hiringActionAfterObject(clause)].some(
           (action) =>
             TEAM_HIRING_FOLLOWING_ACTION.test(action) || TEAM_HIRING_CAUSATIVE_ACTION.test(action),
         )

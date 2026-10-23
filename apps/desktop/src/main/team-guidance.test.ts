@@ -215,6 +215,10 @@ describe('builtin Team skill', () => {
     '担当を雇って1人1件ずつ資料（TXT）と説明を docs/ に書かせます。',
     '担当を雇って資料を docs/ に書かせます。',
     '担当を雇って1人1件ずつ資料を作成してください。',
+    '担当を雇って1人ずつ2件を調査して。',
+    '担当を雇って2名ずつ3枚（PNG）を作成させます。',
+    '担当を雇って3人ずつ4件と報告を outputs/ に書かせます。',
+    '担当を雇って2件を調査して。',
     'ワーカーを雇って２人三枚ずつ画像（SVG）と報告を outputs/ に作成させます。',
     '担当を雇って3名2本ずつ図（PNG）や報告を artifacts/images/ に書かせます。',
     '担当を雇って資料(CSV)と概要をreports/に書かせます。',
@@ -305,6 +309,7 @@ describe('builtin Team skill', () => {
     '担当を雇って「資料」を書かせないで自分で実装して。',
     '担当を雇って`x`と作業させないで自分で実装してください。',
     '担当を雇って資料を自分で実装して。',
+    '担当を雇って1人ずつ2件を調査しないでください。',
     '担当を雇ってほしいのではなく自分で実装してください。',
     '担当を雇って進めるのはやめて自分で実装して。',
     '担当を雇っている理由を調査して。',
@@ -345,6 +350,12 @@ describe('builtin Team skill', () => {
       expect(isTeamScenarioInput(input)).toBe(false);
       expect(requiresTeamWorkersInput(input)).toBe(false);
     }
+  });
+
+  it('does not infer hiring work from a long quantity prefix without an object or action', () => {
+    const input = '担当を雇って' + '1人'.repeat(10_000) + 'あ';
+    expect(isTeamScenarioInput(input)).toBe(false);
+    expect(requiresTeamWorkersInput(input)).toBe(false);
   });
 
   it('routes Team diagnostics without requiring a Worker', () => {
