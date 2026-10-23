@@ -1103,6 +1103,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
   const [formOpen, setFormOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loadFailed, setLoadFailed] = useState(false);
+  const addToggleRef = useRef<HTMLButtonElement>(null);
   const generation = useRef(0);
   const mounted = useRef(true);
 
@@ -1128,6 +1129,14 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
     if (!active || connections !== null || loading || loadFailed || !supported) return;
     void refresh();
   }, [active, connections, loadFailed, loading, supported]);
+
+  useEffect(() => {
+    const button = addToggleRef.current;
+    // Loading connections can push the deep-link destination below the viewport after focus.
+    // Preserve its visibility only while the user has not moved to another control.
+    if (active && !loading && button !== null && document.activeElement === button)
+      button.scrollIntoView({ block: 'nearest' });
+  }, [active, connections, loading]);
 
   /** `redetectCli` only for the explicit reload button: detection starts CLI processes, so opening
    * the section or adding a Connection does not repeat it. */
@@ -1389,6 +1398,7 @@ export function ProviderSettingsSection({ active }: { active: boolean }) {
             {/* One disclosure, in place, inside the settings dialog that is already open. The
                 single accent on this screen: everything else here is data or a quiet control. */}
             <button
+              ref={addToggleRef}
               type="button"
               id={ADD_TOGGLE_ID}
               data-testid="settings-provider-add-toggle"

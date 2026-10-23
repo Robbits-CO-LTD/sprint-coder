@@ -7,6 +7,7 @@ apps/desktop/computer-use-native/build/
 apps/desktop/computer-use-native/generated/
 apps/desktop/sandbox-runner/build/
 apps/desktop/sandbox-runner/target/
+# Keep historical build caches ignored after the bundled model runtime was retired.
 apps/desktop/managed-local/cache/
 apps/desktop/managed-local/build/
 apps/desktop/.vite-user-data/

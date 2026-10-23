@@ -1,8 +1,6 @@
 import {
-  MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
   providerExecutionRequestSchema,
   type CanonicalProviderEvent,
-  type ManagedLocalInferenceSettings,
   type NormalizedProviderError,
   type ProviderConnection,
   type ProviderExecutionRequest,
@@ -680,12 +678,7 @@ function isCompatibleModelList(value: unknown): value is CompatibleModelList {
 export function openAICompatibleChatCompletionRequest(
   request: ProviderExecutionRequest,
   providerId?: string,
-  managedLocalSettings?: ManagedLocalInferenceSettings,
 ): Record<string, unknown> {
-  const localSettings = managedLocalSettings ?? {
-    maxOutputTokens: MANAGED_LOCAL_DEFAULT_MAX_OUTPUT_TOKENS,
-    thinking: false,
-  };
   return {
     model: request.modelId,
     stream: true,
@@ -720,13 +713,6 @@ export function openAICompatibleChatCompletionRequest(
           }
         : {}),
     })),
-    ...(providerId === 'sprint-managed-local'
-      ? {
-          max_tokens: localSettings.maxOutputTokens,
-          ...(localSettings.thinking ? {} : { reasoning_effort: 'none' }),
-          chat_template_kwargs: { enable_thinking: localSettings.thinking },
-        }
-      : {}),
     ...(request.tools === undefined
       ? {}
       : {

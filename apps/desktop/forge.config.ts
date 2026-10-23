@@ -23,12 +23,6 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createWindowsWizardInstaller } from './windows-wizard-installer';
 import { verifyWindowsSandboxArtifacts } from './windows-sandbox-artifacts';
 import {
-  managedLocalTargetKey,
-  verifyManagedLocalSidecarBundle,
-  type ManagedLocalSidecarPin,
-  type ManagedLocalTargetKey,
-} from './src/main/managed-local-sidecar-bundle';
-import {
   COMPUTER_USE_ACCEPTANCE_BUILD_ENV,
   COMPUTER_USE_ACCEPTANCE_BUILD_MARKER,
   COMPUTER_USE_ACCEPTANCE_BUILD_RECEIPT_NAME,
@@ -166,22 +160,6 @@ function computerUseNativeResources(): string[] {
   return [];
 }
 
-export const MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT = resolve(
-  __dirname,
-  'managed-local',
-  'build',
-  'managed-local',
-);
-
-function managedLocalSidecarResources(): string[] {
-  return [MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT];
-}
-
-export function isManagedLocalPackagedPath(path: string): boolean {
-  const normalized = path.replaceAll('\\', '/').toLowerCase();
-  return normalized.includes('/resources/managed-local/');
-}
-
 export function isComputerUseNativeArtifactPath(path: string): boolean {
   const normalized = path.replaceAll('\\', '/').toLowerCase();
   return (
@@ -191,31 +169,7 @@ export function isComputerUseNativeArtifactPath(path: string): boolean {
 }
 
 function shouldSkipPackagerCodeSign(path: string): boolean {
-  return isManagedLocalPackagedPath(path) || isComputerUseNativeArtifactPath(path);
-}
-
-function managedLocalPackageTarget(
-  platform: ForgePlatform,
-  architecture: string,
-): ManagedLocalTargetKey | null {
-  if (!['darwin', 'linux', 'win32'].includes(platform)) return null;
-  return managedLocalTargetKey(platform as NodeJS.Platform, architecture);
-}
-
-function buildManagedLocalSidecar(platform: ForgePlatform, architecture: string): void {
-  assertNativePackagingHost(platform);
-  const target = managedLocalPackageTarget(platform, architecture);
-  if (target === null)
-    throw new Error(`Unsupported Managed Local package target: ${platform}-${architecture}`);
-  execFileSync(
-    process.execPath,
-    [resolve(__dirname, '..', '..', 'build-managed-local-sidecar.mjs'), target],
-    {
-      cwd: resolve(__dirname, '..', '..'),
-      stdio: 'inherit',
-      windowsHide: true,
-    },
-  );
+  return isComputerUseNativeArtifactPath(path);
 }
 
 function buildComputerUseNative(platform: ForgePlatform, architecture: string): void {
@@ -271,43 +225,6 @@ async function prepareComputerUseNativeForViteBuild(
     refreshComputerUseNativeMacModuleSignerDigest(COMPUTER_USE_NATIVE_RESOURCE_ROOT);
   }
   verifyComputerUseNativeBuild(platform, architecture);
-}
-
-function generatedManagedLocalPin(target: ManagedLocalTargetKey): ManagedLocalSidecarPin {
-  const path = resolve(__dirname, 'managed-local', 'build', 'managed-local-sidecar-pins.json');
-  const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-  const pin = value[target] as ManagedLocalSidecarPin | undefined;
-  if (pin === undefined || pin.target !== target)
-    throw new Error('Generated Managed Local sidecar pin is unavailable');
-  return pin;
-}
-
-export async function verifyPackagedManagedLocalSidecar(
-  outputPath: string,
-  platform: ForgePlatform,
-  architecture: string,
-): Promise<void> {
-  const target = managedLocalPackageTarget(platform, architecture);
-  if (target === null) throw new Error('Packaged Managed Local target is unsupported');
-  let resources: string;
-  if (platform === 'darwin') {
-    const appBundles = readdirSync(outputPath, { withFileTypes: true }).filter(
-      (entry) => entry.isDirectory() && entry.name.endsWith('.app'),
-    );
-    if (appBundles.length !== 1)
-      throw new Error(`Expected one packaged macOS app, found ${appBundles.length}`);
-    resources = join(outputPath, appBundles[0]!.name, 'Contents', 'Resources');
-  } else {
-    resources = join(outputPath, 'resources');
-  }
-  const pin = generatedManagedLocalPin(target);
-  await verifyManagedLocalSidecarBundle(join(resources, 'managed-local', target), pin);
-  const packagedMain = extractAsarFile(
-    join(resources, 'app.asar'),
-    join('.vite', 'build', 'index.js'),
-  ).toString('utf8');
-  if (!packagedMain.includes(pin.manifestSha256) || !packagedMain.includes(pin.upstreamRevision))
-    throw new Error('Packaged Main does not contain the Managed Local compile-time pin');
 }
 
 export function verifyComputerUseNativeBuild(platform: ForgePlatform, architecture: string): void {
@@ -816,7 +733,6 @@ const config: ForgeConfig = {
       ...bundledNodeResources(),
       ...sandboxRunnerResources(),
       ...computerUseNativeResources(),
-      ...managedLocalSidecarResources(),
     ],
     extendInfo: {
       NSScreenCaptureUsageDescription:
@@ -849,7 +765,6 @@ const config: ForgeConfig = {
   hooks: {
     generateAssets: async (_forgeConfig, platform, architecture) => {
       buildComputerUseNative(platform, architecture);
-      buildManagedLocalSidecar(platform, architecture);
     },
     prePackage: async (_forgeConfig, platform, architecture) => {
       assertNativePackagingHost(platform);
@@ -882,12 +797,6 @@ const config: ForgeConfig = {
             packageResult.arch,
           );
         }
-        for (const outputPath of packageResult.outputPaths)
-          await verifyPackagedManagedLocalSidecar(
-            outputPath,
-            packageResult.platform,
-            packageResult.arch,
-          );
         return;
       }
       if ((releasePackage || ciPackage) && macCodeSignIdentity === '-' && !allowAdhocCodeSign)
@@ -920,11 +829,6 @@ const config: ForgeConfig = {
           { stdio: 'inherit' },
         );
         verifyPackagedComputerUseNativeBundle(
-          outputPath,
-          packageResult.platform,
-          packageResult.arch,
-        );
-        await verifyPackagedManagedLocalSidecar(
           outputPath,
           packageResult.platform,
           packageResult.arch,
