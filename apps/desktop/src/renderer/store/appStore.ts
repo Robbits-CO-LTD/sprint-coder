@@ -210,6 +210,7 @@ type AppState = {
   >;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
+  permissionChangeByTask: Record<string, AccessPreset | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
   approvalHistoryByTask: Record<string, ApprovalSummary[]>;
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
@@ -401,6 +402,15 @@ let taskSwitchGeneration = 0;
 let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export const PERMISSION_CHANGE_PENDING_MESSAGE =
+  '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。';
+
+function notifyPendingPermissionChange(state: AppState, taskId: string): boolean {
+  if (state.permissionChangeByTask[taskId] === undefined) return false;
+  state.showToast(PERMISSION_CHANGE_PENDING_MESSAGE);
+  return true;
+}
 
 function persistDraftDebounced(taskId: string, text: string) {
   if (!window.sprintCoder || typeof window.sprintCoder.tasks.setDraft !== 'function') return;
@@ -1246,6 +1256,7 @@ export const useAppStore = create<AppState>((set, get) => {
     activatedSkillsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
+    permissionChangeByTask: {},
     approvalsByTask: {},
     approvalHistoryByTask: {},
     autoDecisionsByTask: {},
@@ -1629,13 +1640,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async setAccessPreset(taskId: string, preset: AccessPreset) {
       if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
+      if (get().permissionChangeByTask[taskId] !== undefined) return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
       if (previous.preset === preset) return;
       set((state) => ({
-        permissionByTask: {
-          ...state.permissionByTask,
-          [taskId]: { ...previous, preset },
-        },
+        permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: preset },
       }));
       try {
         const permission = await window.sprintCoder.permissions.set(
@@ -1643,11 +1652,11 @@ export const useAppStore = create<AppState>((set, get) => {
           preset,
           previous.policyEpoch,
         );
-        rememberAccessPreset(preset);
+        if ((get().permissionByTask[taskId]?.policyEpoch ?? 0) > permission.policyEpoch) return;
+        rememberAccessPreset(permission.preset);
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= permission.policyEpoch
               ? { ...state.permissionByTask, [taskId]: permission }
               : state.permissionByTask,
         }));
@@ -1661,11 +1670,14 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= restored.policyEpoch
               ? { ...state.permissionByTask, [taskId]: restored }
               : state.permissionByTask,
           ...(userCanceled ? {} : { error: describeError(err) }),
+        }));
+      } finally {
+        set((state) => ({
+          permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: undefined },
         }));
       }
     },
@@ -2171,6 +2183,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.start({
@@ -2204,6 +2217,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async resumeGoal(taskId: string) {
       if (!window.sprintCoder?.goals) return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.resume(taskId, selectedSkills);
@@ -2687,6 +2701,7 @@ export const useAppStore = create<AppState>((set, get) => {
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder) return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const selectedAttachmentIds = [...attachmentIds];
       const draftsById = new Map(
@@ -2791,6 +2806,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
         return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       let selectionRevision = 0;
       let draftRevision = 0;
@@ -2849,6 +2865,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const trimmed = text.trim();
       if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.steer !== 'function')
         return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
@@ -2886,6 +2903,8 @@ export const useAppStore = create<AppState>((set, get) => {
         !window.sprintCoder ||
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
+        return { completed: false, draftRestored: false };
+      if (notifyPendingPermissionChange(get(), taskId))
         return { completed: false, draftRestored: false };
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const activeTurn = get().turnByTask[taskId];
