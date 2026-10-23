@@ -337,7 +337,8 @@ describe('Manager integrated result read boundary', () => {
     };
     if (timing === 'fence') f.state.beforeRead = invalidate;
     else f.state.afterRead = invalidate;
-    await expect(f.dispatch()).rejects.toThrow();
+    await expect(f.dispatch()).rejects.toThrow('Team result read authority expired');
+    expect(f.state.reads).toBe(2);
   });
 
   it('returns no bytes when canceled after execute has begun', async () => {
