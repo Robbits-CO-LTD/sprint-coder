@@ -787,9 +787,13 @@ export class ManagedCodingHarness {
   }
 
   async policyEpochChanged(taskId: string): Promise<void> {
+    await this.beginPolicyEpochChange(taskId)();
+  }
+
+  beginPolicyEpochChange(taskId: string): () => Promise<void> {
     this.broker.refreshTaskPolicyEpoch(taskId);
     this.deps.graphs?.policyEpochChanged?.(taskId);
-    await this.commandSessions?.terminateTask(taskId);
+    return this.commandSessions?.beginTaskTermination(taskId) ?? (() => Promise.resolve());
   }
 
   async cancelTurn(taskId: string, turnId: string): Promise<void> {

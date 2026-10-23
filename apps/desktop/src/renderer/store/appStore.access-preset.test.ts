@@ -48,4 +48,23 @@ describe('access preset errors', () => {
     expect(useAppStore.getState().permissionByTask[taskId]).toEqual(askPermission);
     expect(useAppStore.getState().error).toBe('この操作は許可されていません。');
   });
+  it('keeps the committed restriction and displays a cleanup failure', async () => {
+    useAppStore.setState({ permissionByTask: { [taskId]: { preset: 'full', policyEpoch: 2 } } });
+    const committed = { preset: 'ask', policyEpoch: 3 };
+    vi.stubGlobal('window', {
+      sprintCoder: {
+        permissions: {
+          set: vi
+            .fn()
+            .mockRejectedValue(
+              new Error('権限の変更は保存されましたが、実行中コマンドの停止を確認できません。'),
+            ),
+          get: vi.fn().mockResolvedValue(committed),
+        },
+      },
+    });
+    await useAppStore.getState().setAccessPreset(taskId, 'ask');
+    expect(useAppStore.getState().permissionByTask[taskId]).toEqual(committed);
+    expect(useAppStore.getState().error).toContain('停止を確認できません');
+  });
 });
