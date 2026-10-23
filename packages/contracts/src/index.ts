@@ -7616,7 +7616,7 @@ export interface SprintCoderApi {
       text: string;
       skills?: TurnSkillSelection[];
     }): Promise<void>;
-    cancel(input: { taskId: string; turnId: string }): Promise<void>;
+    cancel(input: z.infer<typeof turnCancelInputSchema>): Promise<void>;
     snapshot(taskId: string): Promise<TurnSnapshot>;
     subscribe(
       taskId: string,
