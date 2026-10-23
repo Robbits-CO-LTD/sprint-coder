@@ -8,6 +8,8 @@ const project = (overrides: Partial<ProjectSummary> = {}): ProjectSummary => ({
   archived: false,
   revision: 0,
   taskCount: 0,
+  folderCount: 0,
+  primaryFolder: null,
   lastActivityAt: '2026-01-01T00:00:00.000Z',
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',

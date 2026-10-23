@@ -112,6 +112,14 @@ describe('<TurnDiffCard />', () => {
     expect(html).toContain('title="src/b.ts"');
   });
 
+  it('labels directory creation from the shared Turn diff contract', () => {
+    const html = renderToStaticMarkup(
+      <TurnDiffCard diff={diffOf([entry({ kind: 'mkdir', path: 'src/new-directory' })])} />,
+    );
+    expect(html).toContain('フォルダー作成');
+    expect(html).toContain('turn-diff-kind--mkdir');
+  });
+
   it('warns about external drift on the card, not only on a row still collapsed away', () => {
     const entries = manyEntries(5);
     entries[4] = entry({ ordinal: 5, path: 'src/f4.ts', status: 'external_drift' });
