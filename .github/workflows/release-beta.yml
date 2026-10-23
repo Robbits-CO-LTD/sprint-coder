@@ -515,7 +515,7 @@ jobs:
           path: |
             apps/desktop/out/make/**/*.dmg
             apps/desktop/out/make/**/*.zip
-            apps/desktop/out/make/**/Sprint-Coder-Installer.exe
+            apps/desktop/out/make/**/Sprint-Coder-Installer-*.exe
             apps/desktop/out/make/**/*-full.nupkg
             apps/desktop/out/make/**/RELEASES
           if-no-files-found: error
@@ -613,7 +613,7 @@ jobs:
           $desktopRoot = (Resolve-Path 'apps/desktop').Path
           $version = [string](Get-Content -Raw -LiteralPath (Join-Path $desktopRoot 'package.json') | ConvertFrom-Json).version
           $makeRoot = Join-Path $desktopRoot 'out\make'
-          $installer = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Installer.exe'
+          $installer = Join-Path $makeRoot "squirrel.windows\x64\Sprint-Coder-Installer-$version.exe"
           $portableSource = Join-Path $makeRoot "zip\win32\x64\Sprint Coder-win32-x64-$version.zip"
           $portable = Join-Path $makeRoot "zip\win32\x64\Sprint-Coder-win32-x64-$version.zip"
           $appRoot = Join-Path $desktopRoot 'out\Sprint Coder-win32-x64'
@@ -661,7 +661,7 @@ jobs:
           name: computer-use-signed-windows-x64
           path: |
             apps/desktop/out/make/zip/win32/x64/Sprint-Coder-win32-x64-*.zip
-            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe
+            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer-*.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -710,7 +710,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -d '' portable < <(find "${PACKAGE_ROOT}/windows" -type f -name 'Sprint-Coder-win32-x64-*.zip' -print0)
-          mapfile -d '' installer < <(find "${PACKAGE_ROOT}/windows" -type f -name 'Sprint-Coder-Installer.exe' -print0)
+          mapfile -d '' installer < <(find "${PACKAGE_ROOT}/windows" -type f -name 'Sprint-Coder-Installer-*.exe' -print0)
           mapfile -d '' dmg < <(find "${PACKAGE_ROOT}/macos" -type f -name '*.dmg' -print0)
           (( ${#portable[@]} == 1 && ${#installer[@]} == 1 && ${#dmg[@]} == 1 )) || {
             echo '::error::Attestation requires exactly one signed portable ZIP, installer, and notarized DMG.'
@@ -796,7 +796,7 @@ jobs:
               *-darwin-*.zip) mac_zip="${asset}"; ((mac_zip_count += 1)) ;;
               *-linux-*.zip) linux_zip="${asset}"; ((linux_zip_count += 1)) ;;
               *-win32-x64-*.zip) windows_zip="${asset}"; ((windows_zip_count += 1)) ;;
-              */Sprint-Coder-Installer.exe) ((windows_installer_count += 1)) ;;
+              */Sprint-Coder-Installer-"${RELEASE_VERSION}".exe) ((windows_installer_count += 1)) ;;
               *-full.nupkg) ((windows_nupkg_count += 1)) ;;
               */RELEASES) ((windows_releases_count += 1)) ;;
             esac
@@ -804,7 +804,7 @@ jobs:
             find release-assets -type f \( \
               -name '*.dmg' -o \
               -name '*.zip' -o \
-              -name 'Sprint-Coder-Installer.exe' -o \
+              -name "Sprint-Coder-Installer-${RELEASE_VERSION}.exe" -o \
               -name '*-full.nupkg' -o \
               -name 'RELEASES' \
             \) -print0
@@ -951,7 +951,7 @@ jobs:
 
           ### Windows
 
-          [Windows（x64版・未署名インストーラー）](${base_url}/Sprint-Coder-Installer.exe)
+          [Windows（x64版・未署名インストーラー）](${base_url}/Sprint-Coder-Installer-${RELEASE_VERSION}.exe)
 
           > [!WARNING]
           > Windows版はコード署名されていません。初回ダウンロード・実行時にMicrosoft Defender SmartScreenの警告が表示される場合があります。配布元とファイルを確認してから実行してください。

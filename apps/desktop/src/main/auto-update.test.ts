@@ -45,6 +45,29 @@ describe('selectUpdateRelease', () => {
     });
   });
 
+  it.each(['Sprint-Coder-Installer.exe', 'Sprint-Coder-Installer-0.7.0-beta.15.exe'])(
+    'accepts Windows update assets with the installer named %s',
+    (installerName) => {
+      expect(
+        selectUpdateRelease(
+          [
+            release('v0.7.0-beta.15', [
+              { name: 'RELEASES' },
+              { name: 'SprintCoder-0.7.0-beta15-full.nupkg' },
+              { name: installerName },
+            ]),
+          ],
+          '0.7.0-beta.14',
+          'win32',
+          'x64',
+        ),
+      ).toMatchObject({
+        version: '0.7.0-beta.15',
+        feedUrl: 'https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.7.0-beta.15',
+      });
+    },
+  );
+
   it('uses the architecture-specific macOS ZIP and manifest', () => {
     expect(
       selectUpdateRelease([release('v0.0.1-beta.5', macAssets)], '0.0.1-beta.4', 'darwin', 'arm64'),
