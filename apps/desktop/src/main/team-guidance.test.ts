@@ -393,6 +393,37 @@ describe('builtin Team skill', () => {
   });
 
   it.each([
+    ['担当を雇ってもらえますか？と聞かれました。返答文を考えてください。', false],
+    ['担当を雇ってもらえますか？ と尋ねられました。', false],
+    ['担当を雇ってください！って聞かれました。', false],
+    ['担当を雇ってください。という文を添削してください。', false],
+    ['担当を雇ってください？！。　と尋ねられました。', false],
+    ['担当を雇ってもらえますか!? と聞かれました。', false],
+    ['担当を雇ってください。 、 と聞かれました。', false],
+    ['担当を雇ってもらえますか？とても助かります。', true],
+    ['担当を雇ってください！　とても助かります。', true],
+    ['担当を雇ってください。という例です。ワーカーを雇ってください。', true],
+  ])('keeps quoted continuations attached across punctuation runs: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it('keeps bounded punctuation runs and grouped quotation segments inert', () => {
+    const prefix = '担当を雇ってもらえますか';
+    const suffix = 'と聞かれました。';
+    const inputs = [
+      '？'.repeat(100_000),
+      prefix + '？！。'.repeat(Math.floor((100_000 - prefix.length - suffix.length) / 3)) + suffix,
+      (prefix + '？' + suffix).repeat(4_000),
+      prefix + '？' + 'と補足します。'.repeat(10_000),
+    ];
+    for (const input of inputs) {
+      expect(isTeamScenarioInput(input)).toBe(false);
+      expect(requiresTeamWorkersInput(input)).toBe(false);
+    }
+  });
+
+  it.each([
     ['次の引用文を添削してください。\n> 担当を雇ってください。', false],
     ['> 引用文です。\n担当を雇ってください。', false],
     ['> > 担当を雇ってください。', false],

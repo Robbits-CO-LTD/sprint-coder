@@ -1356,12 +1356,28 @@ const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION
 const TEAM_HIRING_CAUSATIVE_ACTION =
   /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
 const TEAM_HIRING_FOLLOWUP_REQUEST = /^(?:教えて|説明して|報告して)(?:ください|ほしい)?$/;
-const TEAM_HIRING_REPORTED_REQUEST =
-  /(?:と|って)[ \u3000]*(?:伝え(?:られ)?|言(?:い|っ|われ)|書(?:き|い)|頼(?:み|ん|まれ)|送っ|入力し|指示(?:し|され)|依頼(?:し|され))(?:ました|た|だ)/;
-const TEAM_HIRING_SENTENCES = new RegExp(
-  `(?:[^。.!！?？\\r\\n]|[?？!！](?=[、, \\u3000]*${TEAM_HIRING_REPORTED_REQUEST.source}))+[。.!！?？]*`,
-  'g',
-);
+const TEAM_HIRING_SENTENCES = /[^。.!！?？\r\n]+[。.!！?？]*/g;
+const TEAM_HIRING_QUOTED_CONTINUATION = /^[、,\s]*(?:と|って)/;
+const TEAM_HIRING_INDEPENDENT_COURTESY = /^[、,\s]*とても助かります[。.!！?？\s]*$/;
+
+function splitHiringSentences(input: string): readonly string[] {
+  const sentences: string[] = [];
+  let chunks: string[] = [];
+  for (const [segment] of input.matchAll(TEAM_HIRING_SENTENCES)) {
+    // Consume punctuation runs once. A quotation particle keeps its unknown reporting suffix
+    // attached so the affirmative check cannot mistake the quoted request for an instruction.
+    if (
+      !TEAM_HIRING_QUOTED_CONTINUATION.test(segment) ||
+      TEAM_HIRING_INDEPENDENT_COURTESY.test(segment)
+    ) {
+      if (chunks.length > 0) sentences.push(chunks.join(''));
+      chunks = [];
+    }
+    chunks.push(segment);
+  }
+  if (chunks.length > 0) sentences.push(chunks.join(''));
+  return sentences;
+}
 
 function hiringActionAfterObject(clause: string): string {
   let quantityEnd = 0;
@@ -1413,12 +1429,10 @@ function isExplicitMemberHiringInput(input: string): boolean {
   const unquoted = joinHiringContinuationLines(
     maskTeamHiringMarkdown(input).replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC'),
   );
-  // Keep a quoted question's reporting suffix attached (「…ますか？と伝えました」).
-  const sentences = unquoted.match(TEAM_HIRING_SENTENCES) ?? [];
+  const sentences = splitHiringSentences(unquoted);
   return sentences.some((sentence) =>
     [...sentence.matchAll(TEAM_EXPLICIT_MEMBER_HIRING)].some((match) => {
       const following = sentence.slice(match.index + match[0].length).trim();
-      if (TEAM_HIRING_REPORTED_REQUEST.test(following)) return false;
       const clauses = following
         .replace(/[。.!！]+$/, '')
         .split(/[、,]/)
