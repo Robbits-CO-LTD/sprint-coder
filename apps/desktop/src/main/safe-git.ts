@@ -18,6 +18,16 @@ const FILTER_CONFIG_KEY = /^filter\.(.+)\.(?:clean|smudge|process|required)$/iu;
 const MERGE_DRIVER_CONFIG_KEY = /^merge\.(.+)\.driver$/iu;
 const SAFE_CONFIG_SUBSECTION = /^[a-zA-Z0-9._-]+$/u;
 const CONFIG_LIST_ARGS = ['config', '--no-includes', '--name-only', '--list'] as const;
+const AUTOCRLF_CONFIG_ARGS = [
+  'config',
+  '--no-includes',
+  '--null',
+  '--type=bool-or-str',
+  '--default=false',
+  '--get',
+  'core.autocrlf',
+] as const;
+const AUTOCRLF_CONFIG_ERROR = 'Unable to read Git line-ending configuration';
 const ALLOWED_COMMANDS = new Set([
   'add',
   'branch',
@@ -133,7 +143,17 @@ export async function safeGitExec(
 ): Promise<SafeGitResult> {
   const env = safeGitEnvironment(options.env);
   const config = await exec('git', configProbeArgs(cwd), { env, timeout: options.timeout });
-  return exec('git', safeGitInvocationArgs(cwd, command, config.stdout), {
+  const args = safeGitInvocationArgs(cwd, command, config.stdout);
+  const autocrlf = await exec(
+    'git',
+    configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS),
+    autocrlfProbeOptions(options),
+  ).then(
+    ({ stdout }) => autocrlfConfigArgs(stdout),
+    () => null,
+  );
+  if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  return exec('git', [...autocrlf, ...args], {
     env,
     timeout: options.timeout,
     // Only a caller that reads a long listing widens the default buffer.
@@ -155,7 +175,22 @@ export function safeGitExecFileSync(
     env,
   };
   const config = execFileSync('git', configProbeArgs(cwd), common);
-  return execFileSync('git', safeGitInvocationArgs(cwd, command, config), common);
+  const args = safeGitInvocationArgs(cwd, command, config);
+  let autocrlf: string[] | null;
+  try {
+    autocrlf = autocrlfConfigArgs(
+      execFileSync('git', configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS), {
+        encoding: 'utf8',
+        stdio: 'pipe',
+        windowsHide: true,
+        ...autocrlfProbeOptions(options),
+      }),
+    );
+  } catch {
+    throw new Error(AUTOCRLF_CONFIG_ERROR);
+  }
+  if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  return execFileSync('git', [...autocrlf, ...args], common);
 }
 
 export function safeGitSpawnSync(
@@ -173,7 +208,16 @@ export function safeGitSpawnSync(
   };
   const config = spawnSync('git', configProbeArgs(cwd), common);
   if (config.error !== undefined || config.status !== 0) return null;
-  return spawnSync('git', safeGitInvocationArgs(cwd, command, config.stdout), common);
+  const args = safeGitInvocationArgs(cwd, command, config.stdout);
+  const policy = spawnSync('git', configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS), {
+    encoding: 'utf8',
+    windowsHide: true,
+    ...autocrlfProbeOptions(options),
+  });
+  if (policy.error !== undefined || policy.status !== 0) return null;
+  const autocrlf = autocrlfConfigArgs(policy.stdout);
+  if (autocrlf === null) return null;
+  return spawnSync('git', [...autocrlf, ...args], common);
 }
 
 export function safeGitExecFile(
@@ -189,7 +233,7 @@ export function safeGitExecFile(
         {
           env: invocationOptions.env,
           timeout: invocationOptions.timeout,
-          maxBuffer: options.maxBuffer,
+          maxBuffer: invocationOptions.maxBuffer,
           windowsHide: true,
         },
         (error, stdout, stderr) => {
@@ -204,7 +248,27 @@ export function safeGitExecFile(
   );
 }
 
-function configProbeArgs(cwd: string): string[] {
+// Read only the conversion policy from host configuration. Actual Git commands still use
+// the isolated environment; hooks, filters and other host settings never cross this boundary.
+function autocrlfProbeOptions(options: SafeGitOptions) {
+  const source = options.env ?? process.env;
+  const env = safeGitEnvironment(source);
+  delete env['GIT_CONFIG_GLOBAL'];
+  delete env['GIT_CONFIG_SYSTEM'];
+  // Git for Windows derives HOME from these when HOME is absent. XDG may name a user config
+  // elsewhere on any OS. Preserve locations only, never environment-injected Git config.
+  for (const key of ['XDG_CONFIG_HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'])
+    if (source[key] !== undefined) env[key] = source[key];
+  return { env, timeout: options.timeout, maxBuffer: 1_024 };
+}
+
+function autocrlfConfigArgs(output: string): string[] | null {
+  const normalized = output.toLowerCase();
+  if (normalized !== 'true\0' && normalized !== 'false\0' && normalized !== 'input\0') return null;
+  return ['-c', `core.autocrlf=${normalized.slice(0, -1)}`];
+}
+
+function configProbeArgs(cwd: string, query: readonly string[] = CONFIG_LIST_ARGS): string[] {
   return [
     '--no-pager',
     '-c',
@@ -217,7 +281,7 @@ function configProbeArgs(cwd: string): string[] {
     'core.attributesFile=',
     '-C',
     cwd,
-    ...CONFIG_LIST_ARGS,
+    ...query,
   ];
 }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFile, spawnSync } from 'node:child_process';
 import {
   chmod,
@@ -15,10 +15,12 @@ import {
   writeFile,
   rename,
   symlink,
+  utimes,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
+import { safeGitEnvironment, safeGitInvocationArgs } from './safe-git';
 import {
   WorkerWorktreeManager,
   removeTreeWithoutFollowingLinks,
@@ -84,7 +86,16 @@ function interceptWorktreeRemove(beforeRemove: () => void): ExecFileImpl {
 describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
   const cleanupRoots: string[] = [];
 
+  beforeEach(async () => {
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-git-home-'));
+    cleanupRoots.push(home);
+    await writeFile(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+  });
+
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(
       cleanupRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
     );
@@ -98,6 +109,68 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     expect(result.baseHead).toBe(head);
     expect((await stat(result.path)).isDirectory()).toBe(true);
   });
+
+  it('starts and integrates a clean CRLF checkout using the host autocrlf policy (issue #908)', async () => {
+    const { repoPath, head, manager, hostGit } = await crlfFixture();
+    expect(await hostGit(['status', '--porcelain'])).toBe('');
+    const isolated = await execFileAsync(
+      'git',
+      safeGitInvocationArgs(repoPath, ['status', '--porcelain'], ''),
+      { env: safeGitEnvironment() },
+    );
+    expect(isolated.stdout).toContain('README.md');
+
+    await expect(manager.requireCleanBase(repoPath)).resolves.toEqual({ head });
+    await expect(manager.requireCleanRepositorySet([repoPath])).resolves.toHaveLength(1);
+    const worktree = await manager.create({ agentId: 'crlf', repoPath });
+    expect(await readFile(join(worktree.path, 'README.md'), 'utf8')).toBe('hello\r\n');
+    await writeFile(join(worktree.path, 'README.md'), 'worker change\r\n');
+    const sealed = await manager.finalizeChanges({
+      agentId: 'crlf',
+      repoPath,
+      baseHead: head,
+      commitMessage: 'CRLF worker change',
+    });
+    expect(sealed.changedFiles).toEqual(['README.md']);
+    const integrated = await manager.integrate({
+      repoPath,
+      baseHead: head,
+      workerHead: sealed.workerHead,
+    });
+    expect(integrated.outcome).toBe('integrated');
+    await expect(
+      manager.revalidateIntegration({
+        repoPath,
+        baseHead: head,
+        workerHead: sealed.workerHead,
+        integratedHead: integrated.integratedHead,
+      }),
+    ).resolves.toMatchObject({ outcome: 'already_integrated' });
+    expect(await readFile(join(repoPath, 'README.md'), 'utf8')).toBe('worker change\r\n');
+    expect(await hostGit(['show', `${integrated.integratedHead}:README.md`])).toBe(
+      'worker change\n',
+    );
+    expect(await hostGit(['status', '--porcelain'])).toBe('');
+  });
+
+  it.each(['text', 'binary', 'literal', 'staged', 'untracked'] as const)(
+    'still refuses %s changes in a CRLF checkout (issue #908)',
+    async (change) => {
+      const { repoPath, manager, hostGit } = await crlfFixture();
+      if (change === 'binary')
+        await writeFile(join(repoPath, 'binary.bin'), Buffer.from([0, 65, 10, 66, 10]));
+      else if (change === 'literal') await writeFile(join(repoPath, 'literal.txt'), 'literal\r\n');
+      else if (change === 'untracked') await writeFile(join(repoPath, 'new.txt'), 'new\r\n');
+      else {
+        await writeFile(join(repoPath, 'README.md'), 'user change\r\n');
+        if (change === 'staged') await hostGit(['add', 'README.md']);
+      }
+      expect(await hostGit(['status', '--porcelain'])).not.toBe('');
+      await expect(manager.requireCleanRepositorySet([repoPath])).rejects.toMatchObject({
+        code: 'base_changed',
+      });
+    },
+  );
 
   it('recognizes its registered retained checkout using the host path spelling', async () => {
     const { repoPath, head, manager } = await fixture();
@@ -275,8 +348,8 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       execFileImpl: async (file, args, options) => {
         const directory = args.indexOf('-C');
-        // The config probe runs before each command; count the commands themselves.
-        if (!args.includes('--list')) commands.push(args[directory + 2] ?? '');
+        // Configuration probes run before each command; count the commands themselves.
+        if (args[directory + 2] !== 'config') commands.push(args[directory + 2] ?? '');
         const result = await execFileAsync(file, [...args], {
           env: options.env,
           timeout: options.timeout,
@@ -2149,6 +2222,29 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
     const worktreesRoot = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-root-'));
     cleanupRoots.push(repoPath, worktreesRoot);
     return { repoPath, head, worktreesRoot, manager: new WorkerWorktreeManager({ worktreesRoot }) };
+  }
+
+  async function crlfFixture() {
+    const source = await fixture();
+    await writeFile(join(source.repoPath, '.gitattributes'), 'literal.txt -text\n');
+    await writeFile(join(source.repoPath, 'literal.txt'), 'literal\n');
+    await writeFile(join(source.repoPath, 'binary.bin'), Buffer.from([0, 65, 13, 10, 66, 10]));
+    await git(['-C', source.repoPath, '-c', 'core.autocrlf=false', 'add', '.']);
+    await git(['-C', source.repoPath, ...TEST_IDENTITY, 'commit', '-qm', 'EOL fixture']);
+    const home = await mkdtemp(join(tmpdir(), 'sprint-coder-crlf-home-'));
+    cleanupRoots.push(home);
+    await writeFile(join(home, '.gitconfig'), '[core]\n autocrlf = true\n');
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+    const env = { ...safeGitEnvironment(), GIT_CONFIG_GLOBAL: join(home, '.gitconfig') };
+    const repoPath = join(home, 'clone');
+    await execFileAsync('git', ['clone', '-q', source.repoPath, repoPath], { env });
+    // Force content comparison; a matching checkout stat must not make the control pass.
+    await utimes(join(repoPath, 'README.md'), new Date(0), new Date(0));
+    const hostGit = async (args: string[]) =>
+      (await execFileAsync('git', ['-C', repoPath, ...args], { env })).stdout;
+    const head = (await hostGit(['rev-parse', 'HEAD'])).trim();
+    return { repoPath, head, hostGit, manager: source.manager };
   }
 
   /** A separate local repository with one commit, to add as a submodule. */
