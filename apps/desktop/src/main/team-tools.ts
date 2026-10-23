@@ -1342,7 +1342,15 @@ const TEAM_HIRING_QUOTED_TEXT =
 const TEAM_HIRING_IMMEDIATE_NEGATION = /^(?:は|も(?!ら)|ない|なく|ません|ほしく|欲しく)/;
 const TEAM_HIRING_DIRECT_REQUEST =
   /^(?:ください|ほしい|欲しい|いただいて|いただくようお願いします|(?:もらえ|いただけ|くれ)(?:(?:ますか|ませんか|ませんでしょうか|ないでしょうか)[?？]?|ない[?？]))$/;
-const TEAM_HIRING_FOLLOWING_OBJECT = /^[^\sぁ-ん、,]+を[ \u3000]*/;
+const TEAM_HIRING_OBJECT_WORD = '[a-zA-Z0-9Ａ-Ｚａ-ｚ０-９一-龠々ァ-ヶー_/#+@\uFFFC-]+';
+const TEAM_HIRING_OBJECT_NOUN = `${TEAM_HIRING_OBJECT_WORD}(?:\\(${TEAM_HIRING_OBJECT_WORD}\\)|（${TEAM_HIRING_OBJECT_WORD}）)?`;
+const TEAM_HIRING_OBJECT_QUANTITY =
+  '(?:[0-9０-９一二三四五六七八九十百千]+[ \\u3000]*(?:人|名|件|枚|個|本|つ)(?:ずつ)?[ \\u3000]*)+';
+// Only quantities, joined nouns and a directory destination may precede the complete action.
+// In particular these terms cannot consume verbal clauses such as 「させないで自分で」.
+const TEAM_HIRING_FOLLOWING_OBJECT = new RegExp(
+  `^(?:${TEAM_HIRING_OBJECT_QUANTITY})?${TEAM_HIRING_OBJECT_NOUN}(?:[ \\u3000]*(?:と|や|の|及び|および|・)[ \\u3000]*${TEAM_HIRING_OBJECT_NOUN})*[ \\u3000]*を[ \\u3000]*(?:(?:[a-zA-Z0-9０-９一-龠々ァ-ヶー_-]+[/\\\\])+[ \\u3000]*に[ \\u3000]*)?`,
+);
 const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION.source}`, 'i');
 const TEAM_HIRING_CAUSATIVE_ACTION =
   /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
