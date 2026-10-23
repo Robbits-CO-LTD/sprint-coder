@@ -1,8 +1,5 @@
 import { create } from 'zustand';
-import {
-  applyTeamDetailPatch,
-  type TeamDetail as ContractTeamDetail,
-} from '@sprint-coder/contracts';
+import { applyTeamDetailPatch } from '@sprint-coder/contracts';
 import type {
   GraphView,
   ModelSelection,
@@ -1186,12 +1183,7 @@ export const useAppStore = create<AppState>((set, get) => {
           try {
             // Unchanged Workers, messages and executions keep their identity, so only what
             // changed re-renders.
-            // The Renderer types mirror the contracts by hand (Preload hands the contracts payload
-            // over as is), so the shared patch function is called across that mirror.
-            detail = applyTeamDetailPatch(
-              streamDetail as unknown as ContractTeamDetail,
-              event.patch,
-            ) as unknown as TeamDetail;
+            detail = applyTeamDetailPatch(streamDetail, event.patch);
           } catch {
             resynchronize();
             return;
