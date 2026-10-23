@@ -180,14 +180,17 @@ describe('Composer action policy', () => {
   it.each([
     ['    担当を雇ってください。\n\nこの例文を画像にしてください。', false],
     ['担当を雇ってください。', true],
-  ] as const)('keeps image-mode examples distinct from hiring instructions', (raw, hiring) => {
-    const text = composerMessageText(raw, true);
-    expect(isTeamScenarioInput(text)).toBe(hiring);
-    expect(requiresTeamWorkersInput(text)).toBe(hiring);
-    expect(isImageGenerationTurn(text)).toBe(true);
-    expect(text.startsWith(IMAGEGEN_PREFIX)).toBe(true);
-    expect(text.endsWith(raw)).toBe(true);
-  });
+  ] as const)(
+    'keeps image-mode examples distinct from hiring instructions (case %#)',
+    (raw, hiring) => {
+      const text = composerMessageText(raw, true);
+      expect(isTeamScenarioInput(text)).toBe(hiring);
+      expect(requiresTeamWorkersInput(text)).toBe(hiring);
+      expect(isImageGenerationTurn(text)).toBe(true);
+      expect(text.startsWith(IMAGEGEN_PREFIX)).toBe(true);
+      expect(text.endsWith(raw)).toBe(true);
+    },
+  );
 
   it('restores a raw image draft without double-prefixing a retry', () => {
     const sentText = composerMessageText('画像を作る', true);
