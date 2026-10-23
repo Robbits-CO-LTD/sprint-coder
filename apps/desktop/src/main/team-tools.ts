@@ -27,6 +27,7 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import { maskTeamHiringMarkdown } from './team-hiring-markdown';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
 import {
@@ -1326,6 +1327,176 @@ const TEAM_WORKER_EXECUTION_ACTION =
   /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|コードを書いて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
 const TEAM_EXECUTION_MARKER =
   /^\s*\/team(?=\s+\S)|チーム(?:で|を|に|内で|(?:内の|の)?(?:メンバー|担当|リーダー)(?:で|に))|(?:^|[^a-zA-Z])team(?:(?:で|を)|[ \u3000]+(?=[でを][ぁ-んァ-ヶ一-龠々ー]))|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)(?:\s*を使って|で)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \u3000]*(?:り|名|人)|(?:worker|agent|ワーカー|担当|メンバー|リーダー)[^。.!！?？\r\n]{0,40}(?:雇って|雇用して|採用して)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \u3000]*(?:名|人)(?:(?:体制|構成)?で|を?雇)/i;
+// This new entry path requires a member as the direct object of hiring. The broader legacy
+// execution marker also accepts 採用して (including adopting a proposal/library), so cannot be
+// promoted to initial Team intent.
+const TEAM_HIRING_COUNT =
+  '(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \\u3000]*(?:人|名)';
+const TEAM_EXPLICIT_MEMBER_HIRING = new RegExp(
+  `(?:\\b(?:worker|agent)\\b|ワーカー|担当(?:者)?|メンバー|リーダー)[ \\u3000]*(?:${TEAM_HIRING_COUNT}[ \\u3000]*)?を[ \\u3000]*(?:${TEAM_HIRING_COUNT}[ \\u3000]*)?(?:雇って|雇用して)`,
+  'gi',
+);
+// A trailing escape still ends an unclosed quote; otherwise each escaped quote can trigger
+// another failed scan of the remainder of a long pasted example.
+const TEAM_HIRING_QUOTED_TEXT =
+  /(?<ticks>`+)[\s\S]*?(?:\k<ticks>|$)|(?<fence>~{3,})[\s\S]*?(?:\k<fence>|$)|「[^」]*(?:」|$)|『[^』]*(?:』|$)|“[^”]*(?:”|$)|”[^”]*(?:”|$)|＂[^＂]*(?:＂|$)|〝[^〟〞]*(?:[〟〞]|$)|‘[^’]*(?:’|$)|"(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|(?<![a-zA-Z])'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)/g;
+const TEAM_HIRING_IMMEDIATE_NEGATION = /^(?:は|も(?!ら)|ない|なく|ません|ほしく|欲しく)/;
+const TEAM_HIRING_DIRECT_REQUEST =
+  /^(?:ください|ほしい|欲しい|いただくようお願いします|(?:もらえ|いただけ|くれ)(?:(?:ますか|ませんか|ませんでしょうか|ないでしょうか)[?？]?|ない[?？]))$/;
+const TEAM_HIRING_OBJECT_WORD = '[a-zA-Z0-9Ａ-Ｚａ-ｚ０-９一-龠々ァ-ヶー_/#+@\uFFFB\uFFFC-]+';
+const TEAM_HIRING_OBJECT_NOUN = `${TEAM_HIRING_OBJECT_WORD}(?:\\(${TEAM_HIRING_OBJECT_WORD}\\)|（${TEAM_HIRING_OBJECT_WORD}）)?`;
+const TEAM_HIRING_OBJECT_QUANTITY =
+  /[0-9０-９一二三四五六七八九十百千]+[ \u3000]*(?:人|名|件|枚|個|本|つ)(?:ずつ)?[ \u3000]*/gy;
+// Only quantities, joined nouns and a directory destination may precede the complete action.
+// In particular these terms cannot consume verbal clauses such as 「させないで自分で」.
+const TEAM_HIRING_FOLLOWING_OBJECT = new RegExp(
+  `^${TEAM_HIRING_OBJECT_NOUN}(?:[ \\u3000]*(?:と|や|の|及び|および|・)[ \\u3000]*${TEAM_HIRING_OBJECT_NOUN})*[ \\u3000]*を[ \\u3000]*(?:(?:[a-zA-Z0-9０-９一-龠々ァ-ヶー_-]+[/\\\\])+[ \\u3000]*に[ \\u3000]*)?`,
+);
+const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION.source}`, 'i');
+const TEAM_HIRING_CAUSATIVE_ACTION =
+  /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
+const TEAM_HIRING_FOLLOWUP_REQUEST = /^(?:教えて|説明して|報告して)(?:ください|ほしい)?$/;
+const TEAM_HIRING_SENTENCES = /[^。.!！?？\r\n]+[。.!！?？]*/g;
+// Unlike these quotation particles, an ambiguous adverb such as なんか can start an independent thought.
+// Presentation tags and up to three unparsed emphasis closers keep a quotation attached.
+// Literal-example barriers and whitespace after a list marker start an independent segment.
+const TEAM_HIRING_QUOTED_CONTINUATION =
+  /^[、,\s\uFFFB]*(?:[*_]{1,3}(?![\s*_])[、,\s\uFFFB]*)?(?:と|って|なんて|など|みたい|のよう)/;
+const TEAM_HIRING_INDEPENDENT_COURTESY = /^[、,\s\uFFFB]*とても助かります[。.!！?？\s\uFFFB]*$/;
+
+function splitHiringSentences(input: string): readonly string[] {
+  const sentences: string[] = [];
+  let chunks: string[] = [];
+  const finish = () => {
+    // Courtesy remains in the group until its end: a later quotation particle can still make
+    // both the request and the courtesy reported speech.
+    for (;;) {
+      const last = chunks.at(-1);
+      if (last === undefined || !TEAM_HIRING_INDEPENDENT_COURTESY.test(last)) break;
+      chunks.pop();
+    }
+    if (chunks.length > 0) sentences.push(chunks.join(''));
+    chunks = [];
+  };
+  for (const [segment] of input.matchAll(TEAM_HIRING_SENTENCES)) {
+    // Consume punctuation runs once. A quotation particle keeps its unknown reporting suffix
+    // attached so the affirmative check cannot mistake the quoted request for an instruction.
+    if (!TEAM_HIRING_QUOTED_CONTINUATION.test(segment)) finish();
+    chunks.push(segment);
+  }
+  finish();
+  return sentences;
+}
+
+function hiringActionAfterObject(clause: string): string {
+  let quantityEnd = 0;
+  let lastQuantityStart = 0;
+  // Sticky matching scans only the quantity prefix. Keeping it outside the noun expression
+  // prevents retrying the whole noun suffix at every quantity when a long input has no object.
+  for (const quantity of clause.matchAll(TEAM_HIRING_OBJECT_QUANTITY)) {
+    lastQuantityStart = quantity.index;
+    quantityEnd = quantity.index + quantity[0].length;
+  }
+  // The final quantity may itself be the noun: 「1人ずつ2件を調査して」. Two candidates suffice;
+  // earlier quantity tokens never need to be restored and re-scanned.
+  for (const start of quantityEnd === 0 ? [0] : [quantityEnd, lastQuantityStart]) {
+    const remaining = clause.slice(start);
+    const object = TEAM_HIRING_FOLLOWING_OBJECT.exec(remaining);
+    if (object !== null) return remaining.slice(object[0].length);
+  }
+  return clause;
+}
+
+function joinHiringContinuationLines(input: string): string {
+  const lines = input
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  return lines
+    .map((line, index) => {
+      const nextLine = lines[index + 1];
+      if (nextLine === undefined) return line;
+      // A completed polite request may introduce a list on the next line. Keep reporting
+      // continuations such as 「と伝えました」 attached instead of manufacturing a request.
+      if (
+        /(?:ください|お願いします|(?:ますか|ませんか|でしょうか)[?？]?)$/.test(line) &&
+        (!/^[ぁ-ん]/.test(nextLine) || /^(?:よろしくお願いします[。.!！]*$|あと、)/.test(nextLine))
+      )
+        return `${line}。`;
+      // Japanese verb suffixes may wrap between 「して」 and 「ください」. Only ASCII words
+      // need a separating space to avoid creating or removing a role's word boundary.
+      return /[a-zA-Z0-9_]$/.test(line) && /^[a-zA-Z0-9_]/.test(nextLine) ? `${line} ` : line;
+    })
+    .join('');
+}
+
+function isAffirmativeHiringClause(clause: string, first: boolean, hasFollowing: boolean): boolean {
+  if (TEAM_HIRING_IMMEDIATE_NEGATION.test(clause)) return false;
+  if (first && TEAM_HIRING_DIRECT_REQUEST.test(clause)) return true;
+  if (clause === 'いただいて') return first && hasFollowing;
+  const actionAfterObject = hiringActionAfterObject(clause);
+  return (
+    [clause, actionAfterObject].some(
+      (action) =>
+        TEAM_HIRING_FOLLOWING_ACTION.test(action) || TEAM_HIRING_CAUSATIVE_ACTION.test(action),
+    ) ||
+    (!first && actionAfterObject !== clause && TEAM_HIRING_FOLLOWUP_REQUEST.test(actionAfterObject))
+  );
+}
+
+function sentenceHasExplicitMemberHiring(sentence: string): boolean {
+  let end = sentence.length;
+  while (end > 0 && '。.!！'.includes(sentence.charAt(end - 1))) end -= 1;
+  const clauses = sentence
+    .slice(0, end)
+    .split(/[、,]/)
+    .map((clause) => clause.trim())
+    .filter((clause) => clause !== '');
+  const firstAffirmative = clauses.map((clause, index) =>
+    isAffirmativeHiringClause(clause, true, index + 1 < clauses.length),
+  );
+  const affirmativeSuffix = Array<boolean>(clauses.length + 1).fill(true);
+  for (let index = clauses.length - 1; index >= 0; index -= 1) {
+    const clause = clauses[index];
+    if (clause === undefined) continue;
+    affirmativeSuffix[index] =
+      isAffirmativeHiringClause(clause, false, index + 1 < clauses.length) &&
+      affirmativeSuffix[index + 1] === true;
+  }
+  return clauses.some((clause, index) => {
+    const tailIsAffirmative = affirmativeSuffix[index + 1] === true;
+    const bareHiringIsAffirmative =
+      index + 1 === clauses.length ||
+      (firstAffirmative[index + 1] === true && affirmativeSuffix[index + 2] === true);
+    if (!tailIsAffirmative && !bareHiringIsAffirmative) return false;
+    // Each match inspects only its own comma clause. The remaining clauses are evaluated once
+    // above, so repeated hiring phrases cannot trigger quadratic suffix splitting or checks.
+    for (const match of clause.matchAll(TEAM_EXPLICIT_MEMBER_HIRING)) {
+      const following = clause.slice(match.index + match[0].length).trimStart();
+      if (following === '') {
+        if (bareHiringIsAffirmative) return true;
+      } else if (
+        tailIsAffirmative &&
+        isAffirmativeHiringClause(following, true, index + 1 < clauses.length)
+      )
+        return true;
+    }
+    return false;
+  });
+}
+
+function isExplicitMemberHiringInput(input: string): boolean {
+  if (!input.includes('雇')) return false;
+  // Mask before splitting sentences so punctuation inside quotes cannot expose an instruction.
+  // A non-whitespace barrier also prevents joining a role and verb across a quoted fragment.
+  // A line break alone does not complete a request: its prohibition or reporting suffix may
+  // continue on the next line. Preserve that continuation for the affirmative-only classifier.
+  const unquoted = joinHiringContinuationLines(
+    maskTeamHiringMarkdown(input).replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC'),
+  );
+  const sentences = splitHiringSentences(unquoted);
+  return sentences.some(sentenceHasExplicitMemberHiring);
+}
 const TEAM_ROLE_ASSIGNMENT_EXECUTION_ACTION =
   /(?:雇って|雇用して|採用して|作成して|構築して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|分担して|進めて)(?:ください|ほしい)?[。.!！?？]*$/i;
 const TEAM_ROLE_ASSIGNMENT_NEGATION =
@@ -1370,7 +1541,8 @@ export function isTeamScenarioInput(input: string): boolean {
     TEAM_INTENT.test(input) ||
     TEAM_COMPOUND_EXECUTION_INTENT.test(input) ||
     TEAM_RELATION_INTENT.test(input) ||
-    isExplicitTeamRoleAssignmentInput(input)
+    isExplicitTeamRoleAssignmentInput(input) ||
+    isExplicitMemberHiringInput(input)
   );
 }
 
@@ -1405,7 +1577,9 @@ function isExplicitTeamRoleAssignmentInput(input: string): boolean {
 /** Team相談にもSkill/MCPは提供するが、Worker不在を失敗にするのは明示的な実行依頼だけ。 */
 export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
-  if (!isTeamScenarioInput(trimmed)) return false;
+  // Preserve leading indentation until Markdown examples have been excluded.
+  if (isExplicitMemberHiringInput(input)) return true;
+  if (!isTeamScenarioInput(input)) return false;
   if (isExplicitTeamRoleAssignmentInput(trimmed)) return true;
   if (TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed)) return true;
   const hasExplicitExecutionClause = trimmed

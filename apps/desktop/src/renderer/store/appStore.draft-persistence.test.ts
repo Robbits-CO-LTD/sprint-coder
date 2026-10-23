@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAppStore } from './appStore';
 
 const taskId = 'task-draft-persistence';
-const originalDraft = '送信に失敗しても残す指示';
+const originalDraft = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
 
 type SendKind = 'startTurn' | 'queueMessage' | 'steerMessage' | 'stopAndSend';
 
@@ -14,17 +14,17 @@ function deferredFailure() {
   return { promise, reject };
 }
 
-function invokeSend(kind: SendKind) {
+function invokeSend(kind: SendKind, text = originalDraft) {
   const store = useAppStore.getState();
   switch (kind) {
     case 'startTurn':
-      return store.startTurn(taskId, originalDraft);
+      return store.startTurn(taskId, text);
     case 'queueMessage':
-      return store.queueMessage(taskId, originalDraft);
+      return store.queueMessage(taskId, text);
     case 'steerMessage':
-      return store.steerMessage(taskId, originalDraft, 'turn-active');
+      return store.steerMessage(taskId, text, 'turn-active');
     case 'stopAndSend':
-      return store.stopAndSend(taskId, originalDraft);
+      return store.stopAndSend(taskId, text);
   }
 }
 
@@ -104,10 +104,17 @@ describe.each<SendKind>(['startTurn', 'queueMessage', 'steerMessage', 'stopAndSe
       request.mockResolvedValueOnce(undefined);
 
       await invokeSend(kind);
+      expect(request).toHaveBeenCalledWith(expect.objectContaining({ text: originalDraft }));
       await vi.advanceTimersByTimeAsync(400);
 
       expect(useAppStore.getState().draftByTask[taskId]).toBe('');
       expect(setDraft).toHaveBeenLastCalledWith(taskId, '');
+    });
+
+    it('rejects whitespace-only input without clearing the current draft', async () => {
+      await invokeSend(kind, ' \t\r\n　');
+      expect(request).not.toHaveBeenCalled();
+      expect(useAppStore.getState().draftByTask[taskId]).toBe(originalDraft);
     });
   },
 );
