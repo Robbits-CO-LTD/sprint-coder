@@ -158,6 +158,7 @@ export async function safeGitExec(
   );
   if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
   const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
   try {
     return await exec('git', args, {
       env: isolated.env,
@@ -200,6 +201,7 @@ export function safeGitExecFileSync(
   }
   if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
   const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
   try {
     return execFileSync('git', args, { ...common, env: isolated.env });
   } finally {
@@ -232,6 +234,7 @@ export function safeGitSpawnSync(
   const autocrlf = hostAutocrlfConfig(policy.stdout);
   if (autocrlf === null) return null;
   const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) return null;
   try {
     return spawnSync('git', args, { ...common, env: isolated.env });
   } finally {
@@ -299,18 +302,27 @@ function hostAutocrlfConfig(output: string): Autocrlf | null {
 }
 
 function createAutocrlfEnvironment(env: NodeJS.ProcessEnv, policy: Autocrlf) {
-  const directory = mkdtempSync(join(tmpdir(), 'sprint-coder-git-config-'));
-  const config = join(directory, 'config');
-  const dispose = () => rmSync(directory, { recursive: true, force: true });
+  let directory: string | undefined;
+  const dispose = () => {
+    if (directory === undefined) return;
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // This private file holds only an enum. Cleanup must not replace the result of a
+      // completed commit or other mutating command with a transient filesystem error.
+    }
+  };
   try {
+    directory = mkdtempSync(join(tmpdir(), 'sprint-coder-git-config-'));
+    const config = join(directory, 'config');
     // A low-priority host fallback lets every repository, including submodules, apply its
     // own local/worktree policy. Only this enum crosses from host configuration.
     writeFileSync(config, `[core]\n autocrlf = ${policy}\n`, { flag: 'wx', mode: 0o600 });
+    return { env: { ...env, GIT_CONFIG_GLOBAL: config }, dispose };
   } catch {
     dispose();
-    throw new Error(AUTOCRLF_CONFIG_ERROR);
+    return null;
   }
-  return { env: { ...env, GIT_CONFIG_GLOBAL: config }, dispose };
 }
 
 function configProbeArgs(cwd: string, query: readonly string[] = CONFIG_LIST_ARGS): string[] {

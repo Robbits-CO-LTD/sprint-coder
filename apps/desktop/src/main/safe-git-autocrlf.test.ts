@@ -1,4 +1,5 @@
 import { execFile, spawnSync } from 'node:child_process';
+import type * as NodeFs from 'node:fs';
 import {
   existsSync,
   mkdirSync,
@@ -13,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WorkerWorktreeManager } from './worker-worktree';
 import {
   safeGitEnvironment,
   safeGitExec,
@@ -28,8 +30,38 @@ const cleanup: string[] = [];
 const modes = ['async', 'sync', 'spawn'] as const;
 type Mode = (typeof modes)[number];
 const configError = 'Unable to read Git line-ending configuration';
+const configFault = vi.hoisted(() => ({
+  failCleanup: false,
+  failWrite: false,
+  failedCleanupPath: '',
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    rmSync: (...args: Parameters<typeof actual.rmSync>) => {
+      if (configFault.failCleanup && String(args[0]).includes('sprint-coder-git-config-')) {
+        configFault.failCleanup = false;
+        configFault.failedCleanupPath = String(args[0]);
+        throw Object.assign(new Error('injected cleanup lock'), { code: 'EBUSY' });
+      }
+      return actual.rmSync(...args);
+    },
+    writeFileSync: (...args: Parameters<typeof actual.writeFileSync>) => {
+      if (configFault.failWrite && String(args[0]).includes('sprint-coder-git-config-')) {
+        configFault.failWrite = false;
+        throw Object.assign(new Error('injected setup write failure'), { code: 'EACCES' });
+      }
+      return actual.writeFileSync(...args);
+    },
+  };
+});
 
 afterEach(async () => {
+  configFault.failCleanup = false;
+  configFault.failWrite = false;
+  configFault.failedCleanupPath = '';
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   const { rm } = await import('node:fs/promises');
@@ -42,7 +74,8 @@ describe.each(modes)('safe Git autocrlf (%s)', (mode) => {
     async () => {
       const { repo, env, home } = fixture();
       const { HOME: _home, ...withoutHome } = env;
-      const source = { ...withoutHome, USERPROFILE: home };
+      // Windows spawn restores omitted home-pair keys; empty values preserve this fallback case.
+      const source = { ...withoutHome, USERPROFILE: home, HOMEDRIVE: '', HOMEPATH: '' };
       // Flip both ways so the system's policy alone cannot make this fallback test pass.
       writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
       expect(await run(mode, repo, ['diff', '--', 'tracked.txt'], source)).toContain('+first\r');
@@ -210,9 +243,87 @@ describe.each(modes)('safe Git autocrlf (%s)', (mode) => {
       expect(readFileSync(join(home, '.gitconfig'), 'utf8')).toBe(originalGlobal);
     },
   );
+
+  it('preserves a successful real commit when temporary config cleanup is busy', async () => {
+    const { repo, env, home } = fixture();
+    const temporary = join(home, 'temporary');
+    mkdirSync(temporary);
+    for (const key of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(key, temporary);
+    const before = rawGit(repo, ['rev-parse', 'HEAD'], env);
+    configFault.failCleanup = true;
+    const result = await run(
+      mode,
+      repo,
+      [
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.invalid',
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'cleanup-result',
+      ],
+      env,
+    ).then(
+      (stdout) => ({ succeeded: true, stdout }),
+      (error: unknown) => ({ succeeded: false, error }),
+    );
+    expect(rawGit(repo, ['rev-parse', 'HEAD'], env)).not.toBe(before);
+    expect(rawGit(repo, ['log', '-1', '--format=%s'], env).trim()).toBe('cleanup-result');
+    expect(configFault.failedCleanupPath).not.toBe('');
+    expect(readFileSync(join(configFault.failedCleanupPath, 'config'), 'utf8')).toBe(
+      '[core]\n autocrlf = true\n',
+    );
+    // The fixture owns the deliberately retained enum-only directory and removes it in afterEach.
+    expect(result).toMatchObject({ succeeded: true });
+  });
+
+  it.each(['missing-temp', 'write-file'] as const)(
+    'reports temporary config setup %s failure before staging',
+    async (failure) => {
+      const { repo, env, home } = fixture();
+      const temporary = join(home, 'temporary');
+      if (failure === 'write-file') mkdirSync(temporary);
+      for (const key of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(key, temporary);
+      writeFileSync(join(repo, 'tracked.txt'), 'unstaged change\r\n');
+      expect(rawGit(repo, ['rev-parse', 'HEAD'], env).trim()).toMatch(/^[0-9a-f]{40,64}$/u);
+      configFault.failWrite = failure === 'write-file';
+      if (mode === 'spawn')
+        await expect(run(mode, repo, ['add', 'tracked.txt'], env)).resolves.toBeNull();
+      else
+        await expect(run(mode, repo, ['add', 'tracked.txt'], env)).rejects.toEqual(
+          new Error(configError),
+        );
+      expect(rawGit(repo, ['diff', '--cached', '--name-only'], env)).toBe('');
+      if (failure === 'write-file') expect(readdirSync(temporary)).toEqual([]);
+      else expect(existsSync(temporary)).toBe(false);
+    },
+  );
 });
 
 describe('autocrlf probe contract', () => {
+  it('does not misclassify a missing temporary directory as Git being unavailable', async () => {
+    const { repo, home } = fixture();
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+    for (const key of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(key, join(home, 'missing'));
+    const calls: string[][] = [];
+    const manager = new WorkerWorktreeManager({
+      worktreesRoot: join(home, 'worktrees'),
+      execFileImpl: async (file, args, options) => {
+        calls.push([...args]);
+        return execFileAsync(file, [...args], options);
+      },
+    });
+    await expect(manager.requireCleanBase(repo)).rejects.toMatchObject({
+      code: 'create_failed',
+      message: configError,
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.every((args) => args.includes('config'))).toBe(true);
+  });
+
   it.each([
     ['command\0false\0', 'false'],
     ['system\0true\0command\0false\0', 'true'],
