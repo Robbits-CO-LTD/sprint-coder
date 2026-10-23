@@ -68,6 +68,7 @@ it('broadcasts terminal activity to the window even without a Task event port', 
 it('finishes resource disposal after the BrowserWindow has been destroyed', async () => {
   const router = Object.create(IpcRouter.prototype) as IpcRouter;
   const dispose = vi.fn();
+  const policyCleanups = new Map([['task-1', { epoch: 3, confirm: vi.fn() }]]);
   const disposeGraphSources = vi.fn();
   const state: Record<string, unknown> = {
     window: {
@@ -76,6 +77,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
         throw new Error('Object has been destroyed');
       },
     },
+    policyCleanupsByTask: policyCleanups,
     taskTitleProviderAborts: { abortAll: vi.fn() },
     closeAllPorts: vi.fn(),
     graphSourceMonitor: { dispose: disposeGraphSources },
@@ -117,6 +119,7 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
   await expect(router.dispose()).resolves.toBeUndefined();
   expect(dispose).toHaveBeenCalledTimes(14);
   expect(disposeGraphSources).toHaveBeenCalledTimes(1);
+  expect(policyCleanups.size).toBe(0);
 });
 
 it('reports invalid handler output as an internal failure without exposing schema contents', async () => {
