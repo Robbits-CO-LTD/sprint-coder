@@ -344,6 +344,29 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput(input)).toBe(false);
   });
 
+  it.each([
+    ['担当を雇って\nはいけません。自分で実装してください。', false],
+    ['ワーカーを雇用して\r\nはなりません。', false],
+    ['担当を雇って\rいました。', false],
+    ['担当を雇って\nほしいわけではありません。', false],
+    ['担当を雇ってください\nと伝えました。', false],
+    ['担当を雇ってもらえますか？\nと伝えました。', false],
+    ['担当を雇って\n資料を作成してください。', true],
+    ['担当を雇って\r\nください。', true],
+    ['担当を雇って資料を\n作成してください。', true],
+    ['担当を雇ってください。\n依存関係は変更しないでください。', true],
+    ['担当を雇ってください\n- 調査\n- 実装', true],
+    ['担当を雇ってください\nREADMEを更新して', true],
+    ['担当を雇って資料を作成して\nください。', true],
+    ['担当を雇ってください\nとは言っていません。', false],
+    ['担当を雇ってほしい\n訳ではありません。', false],
+    ['Web\nWorkerを雇ってください。', true],
+    ['Work\nerを雇ってください。', false],
+  ])('keeps a hiring clause connected across line breaks: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
   it('masks an unclosed escaped quotation through a trailing backslash', () => {
     for (const quote of ['"', "'"]) {
       const input = quote + `\\${quote}`.repeat(4_000) + '担当を雇ってください\\';

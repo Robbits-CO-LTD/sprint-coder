@@ -1380,10 +1380,35 @@ function hiringActionAfterObject(clause: string): string {
   return clause;
 }
 
+function joinHiringContinuationLines(input: string): string {
+  const lines = input
+    .split(/[\r\n]+/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  return lines
+    .map((line, index) => {
+      const nextLine = lines[index + 1];
+      if (nextLine === undefined) return line;
+      // A completed polite request may introduce a list on the next line. Keep reporting
+      // continuations such as 「と伝えました」 attached instead of manufacturing a request.
+      if (
+        /(?:ください|お願いします|(?:ますか|ませんか|でしょうか)[?？]?)$/.test(line) &&
+        !/^[ぁ-ん]/.test(nextLine)
+      )
+        return `${line}。`;
+      // Japanese verb suffixes may wrap between 「して」 and 「ください」. Only ASCII words
+      // need a separating space to avoid creating or removing a role's word boundary.
+      return /[a-zA-Z0-9_]$/.test(line) && /^[a-zA-Z0-9_]/.test(nextLine) ? `${line} ` : line;
+    })
+    .join('');
+}
+
 function isExplicitMemberHiringInput(input: string): boolean {
   // Mask before splitting sentences so punctuation inside quotes cannot expose an instruction.
   // A non-whitespace barrier also prevents joining a role and verb across a quoted fragment.
-  const unquoted = input.replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC');
+  // A line break alone does not complete a request: its prohibition or reporting suffix may
+  // continue on the next line. Preserve that continuation for the affirmative-only classifier.
+  const unquoted = joinHiringContinuationLines(input.replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC'));
   // Keep a quoted question's reporting suffix attached (「…ますか？と伝えました」).
   const sentences = unquoted.match(TEAM_HIRING_SENTENCES) ?? [];
   return sentences.some((sentence) =>
