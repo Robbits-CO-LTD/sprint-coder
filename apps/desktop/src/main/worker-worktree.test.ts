@@ -32,10 +32,8 @@ const execFileAsync = promisify(execFile);
 const gitAvailable = isGitAvailable();
 const TEST_IDENTITY = ['-c', 'user.name=Test', '-c', 'user.email=test@example.com'];
 /**
- * Clones a local submodule: Git refuses the file protocol unless it is allowed, and the clone keeps
- * the committed bytes. A host `core.autocrlf` would otherwise leave the submodule looking modified to
- * the manager's own Git (which reads no host configuration), and a status showing that change would
- * keep the worktree whether or not submodules are checked.
+ * These submodule-cleanup fixtures keep LF bytes independently of the host checkout policy;
+ * the dedicated CRLF tests below exercise conversion. Local clones also require the file protocol.
  */
 const SUBMODULE_CLONE = ['-c', 'protocol.file.allow=always', '-c', 'core.autocrlf=false'];
 /** A Windows junction needs no privilege; elsewhere a directory symlink is the same kind of link. */
@@ -166,6 +164,54 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         if (change === 'staged') await hostGit(['add', 'README.md']);
       }
       expect(await hostGit(['status', '--porcelain'])).not.toBe('');
+      await expect(manager.requireCleanRepositorySet([repoPath])).rejects.toMatchObject({
+        code: 'base_changed',
+      });
+    },
+  );
+
+  it.each(['local', 'host'] as const)(
+    'accepts a clean submodule using its %s CRLF policy and still rejects a child edit (issue #908)',
+    async (policy) => {
+      const { repoPath, manager } = await fixture();
+      const source = await submoduleSource();
+      const home = process.env['HOME']!;
+      await writeFile(join(home, '.gitconfig'), '[core]\n autocrlf = true\n');
+      await git(['-C', repoPath, 'config', 'core.autocrlf', 'false']);
+      await git([
+        '-C',
+        repoPath,
+        '-c',
+        'protocol.file.allow=always',
+        'submodule',
+        'add',
+        '-q',
+        source,
+        'sub',
+      ]);
+      const sub = join(repoPath, 'sub');
+      if (policy === 'local') {
+        await git(['-C', sub, 'config', 'core.autocrlf', 'true']);
+        await writeFile(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+      }
+      await git(['-C', repoPath, ...TEST_IDENTITY, 'commit', '-qm', 'submodule']);
+      const tracked = join(sub, 'README.md');
+      expect(await readFile(tracked, 'utf8')).toBe('hello\r\n');
+      await utimes(tracked, new Date(0), new Date(0));
+      expect(await git(['-C', repoPath, 'status', '--porcelain', '--ignore-submodules=none'])).toBe(
+        '',
+      );
+      // The ordinary status may refresh the child's stat cache. Force the guarded status
+      // to compare bytes too, so a clean stat entry cannot hide the inherited-policy bug.
+      await utimes(tracked, new Date(1_000), new Date(1_000));
+      const head = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+      await expect(manager.requireCleanBase(repoPath)).resolves.toEqual({ head });
+      await expect(manager.requireCleanRepositorySet([repoPath])).resolves.toHaveLength(1);
+
+      await writeFile(tracked, 'user change\r\n');
+      await expect(manager.requireCleanBase(repoPath)).rejects.toMatchObject({
+        code: 'base_changed',
+      });
       await expect(manager.requireCleanRepositorySet([repoPath])).rejects.toMatchObject({
         code: 'base_changed',
       });

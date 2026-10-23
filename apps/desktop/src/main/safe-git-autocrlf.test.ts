@@ -4,11 +4,13 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -28,6 +30,8 @@ type Mode = (typeof modes)[number];
 const configError = 'Unable to read Git line-ending configuration';
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   const { rm } = await import('node:fs/promises');
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
@@ -66,6 +70,52 @@ describe.each(modes)('safe Git autocrlf (%s)', (mode) => {
     rawGit(repo, ['config', '--worktree', 'core.autocrlf', 'true'], env);
     expect(await run(mode, repo, ['diff', '--', 'tracked.txt'], env)).toBe('');
   });
+
+  it.each(['local', 'host'] as const)(
+    'preserves a submodule CRLF policy from its %s config when its parent uses false',
+    async (policy) => {
+      const { repo, env, home } = fixture();
+      const parent = join(home, 'parent');
+      rawGit(home, ['init', '-q', parent], env);
+      rawGit(parent, ['config', 'core.autocrlf', 'false'], env);
+      rawGit(
+        parent,
+        ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', repo, 'sub'],
+        env,
+      );
+      const child = join(parent, 'sub');
+      if (policy === 'local') {
+        rawGit(child, ['config', 'core.autocrlf', 'true'], env);
+        writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+      }
+      rawGit(parent, ['add', '.'], env);
+      rawGit(
+        parent,
+        [
+          '-c',
+          'user.name=Test',
+          '-c',
+          'user.email=test@example.invalid',
+          'commit',
+          '-qm',
+          'submodule',
+        ],
+        env,
+      );
+      const tracked = join(child, 'tracked.txt');
+      expect(readFileSync(tracked, 'utf8')).toBe('first\r\nsecond\r\n');
+      utimesSync(tracked, new Date(0), new Date(0));
+      expect(rawGit(parent, ['status', '--porcelain', '--ignore-submodules=none'], env)).toBe('');
+      expect(
+        await run(mode, parent, ['status', '--porcelain', '--ignore-submodules=none'], env),
+      ).toBe('');
+
+      writeFileSync(tracked, 'changed\r\n');
+      expect(
+        await run(mode, parent, ['status', '--porcelain', '--ignore-submodules=none'], env),
+      ).toContain('sub');
+    },
+  );
 
   it('reads XDG configuration and Git boolean/input spellings without following included values', async () => {
     const { repo, env, home } = fixture();
@@ -138,9 +188,50 @@ describe.each(modes)('safe Git autocrlf (%s)', (mode) => {
     );
     expect(existsSync(marker)).toBe(false);
   });
+
+  it.each([false, true])(
+    'removes its owned temporary config after command failure=%s',
+    async (fail) => {
+      const { repo, env, home } = fixture();
+      const originalGlobal = readFileSync(join(home, '.gitconfig'), 'utf8');
+      const temporary = join(home, 'temporary');
+      mkdirSync(temporary);
+      for (const key of ['TMPDIR', 'TMP', 'TEMP']) vi.stubEnv(key, temporary);
+      expect(tmpdir()).toBe(temporary);
+      const result = run(
+        mode,
+        repo,
+        fail ? ['rev-parse', '--verify', 'refs/heads/missing'] : ['status', '--porcelain'],
+        env,
+      );
+      if (fail) await expect(result).rejects.toThrow();
+      else await expect(result).resolves.toBe('');
+      expect(readdirSync(temporary)).toEqual([]);
+      expect(readFileSync(join(home, '.gitconfig'), 'utf8')).toBe(originalGlobal);
+    },
+  );
 });
 
 describe('autocrlf probe contract', () => {
+  it.each([
+    ['command\0false\0', 'false'],
+    ['system\0true\0command\0false\0', 'true'],
+    ['local\0true\0worktree\0input\0command\0false\0', 'false'],
+  ])('uses only the host fallback from %j', async (stdout, expected) => {
+    const exec = vi
+      .fn<SafeGitExec>()
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout, stderr: '' })
+      .mockImplementationOnce(async (_file, _args, options) => {
+        expect(readFileSync(options.env['GIT_CONFIG_GLOBAL']!, 'utf8')).toBe(
+          `[core]\n autocrlf = ${expected}\n`,
+        );
+        return { stdout: '', stderr: '' };
+      });
+    await safeGitExec(exec, '/repo', ['status'], { timeout: 1_000 });
+    expect(exec).toHaveBeenCalledTimes(3);
+  });
+
   it('copies only configuration locations into the bounded probe and isolates the actual command', async () => {
     const source = {
       PATH: '/bin',
@@ -161,8 +252,20 @@ describe('autocrlf probe contract', () => {
     const exec = vi
       .fn<SafeGitExec>()
       .mockResolvedValueOnce({ stdout: 'filter.local.clean', stderr: '' })
-      .mockResolvedValueOnce({ stdout: 'INPUT\0', stderr: '' })
-      .mockResolvedValueOnce({ stdout: '', stderr: '' });
+      .mockResolvedValueOnce({
+        stdout:
+          'system\0true\0global\0false\0global\0INPUT\0local\0false\0worktree\0false\0command\0false\0',
+        stderr: '',
+      })
+      .mockImplementationOnce(async (_file, _args, options) => {
+        const config = options.env['GIT_CONFIG_GLOBAL']!;
+        expect(readFileSync(config, 'utf8')).toBe('[core]\n autocrlf = input\n');
+        if (process.platform !== 'win32') {
+          expect(statSync(config).mode & 0o777).toBe(0o600);
+          expect(statSync(dirname(config)).mode & 0o777).toBe(0o700);
+        }
+        return { stdout: '', stderr: '' };
+      });
     await safeGitExec(exec, '/repo', ['status', '--porcelain'], {
       env: source,
       timeout: 123,
@@ -171,7 +274,13 @@ describe('autocrlf probe contract', () => {
     expect(exec).toHaveBeenCalledTimes(3);
     const probe = exec.mock.calls[1]!;
     expect(probe[1]).toEqual(
-      expect.arrayContaining(['--no-includes', '--null', '--default=false']),
+      expect.arrayContaining([
+        '--no-includes',
+        '--null',
+        '--show-scope',
+        '--get-all',
+        'core.autocrlf=false',
+      ]),
     );
     expect(probe[2]).toEqual({
       env: expect.objectContaining({
@@ -188,33 +297,39 @@ describe('autocrlf probe contract', () => {
       expect(probe[2].env[key]).toBeUndefined();
     const command = exec.mock.calls[2]!;
     expect(command[1]).toEqual(
-      expect.arrayContaining([
-        'core.autocrlf=input',
-        'filter.local.clean=',
-        'core.fsmonitor=false',
-      ]),
+      expect.arrayContaining(['filter.local.clean=', 'core.fsmonitor=false']),
     );
+    expect(command[1].some((argument) => argument.startsWith('core.autocrlf='))).toBe(false);
+    const configPath = command[2].env['GIT_CONFIG_GLOBAL']!;
     expect(command[2]).toEqual({
-      env: safeGitEnvironment(source),
+      env: { ...safeGitEnvironment(source), GIT_CONFIG_GLOBAL: configPath },
       timeout: 123,
       maxBuffer: 32_768,
     });
+    expect(configPath).not.toBe('/dev/null');
+    expect(existsSync(dirname(configPath))).toBe(false);
     expect(probe[2]).not.toHaveProperty('input');
   });
 
-  it.each(['', 'true', 'true\n', 'true\0\n', 'true\0false\0', ' input\0', 'private-value\0'])(
-    'refuses malformed probe output %j before the actual command',
-    async (stdout) => {
-      const exec = vi
-        .fn<SafeGitExec>()
-        .mockResolvedValueOnce({ stdout: '', stderr: '' })
-        .mockResolvedValueOnce({ stdout, stderr: 'private diagnostic' });
-      await expect(safeGitExec(exec, '/repo', ['status'], { timeout: 1_000 })).rejects.toThrow(
-        configError,
-      );
-      expect(exec).toHaveBeenCalledTimes(2);
-    },
-  );
+  it.each([
+    '',
+    'true',
+    'global\0true',
+    'global\0true\0',
+    'global\0true\0command\0false\0\n',
+    'global\0 input\0command\0false\0',
+    'global\0private-value\0command\0false\0',
+    'unknown\0true\0command\0false\0',
+  ])('refuses malformed probe output %j before the actual command', async (stdout) => {
+    const exec = vi
+      .fn<SafeGitExec>()
+      .mockResolvedValueOnce({ stdout: '', stderr: '' })
+      .mockResolvedValueOnce({ stdout, stderr: 'private diagnostic' });
+    await expect(safeGitExec(exec, '/repo', ['status'], { timeout: 1_000 })).rejects.toThrow(
+      configError,
+    );
+    expect(exec).toHaveBeenCalledTimes(2);
+  });
 
   it.each([1, 128, 'ENOENT', 'ETIMEDOUT', 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'])(
     'stops on probe failure %s without returning private diagnostics',
