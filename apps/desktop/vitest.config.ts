@@ -14,6 +14,7 @@ const windowsSeconds: Readonly<Record<string, number>> = {
   'src/main/graph-mission-whole-root.test.ts': 38,
   'src/main/graph-workspace-review.test.ts': 7,
   'src/main/grok-persistence.test.ts': 6,
+  'src/main/local-model-download-manager.test.ts': 25,
   'src/main/native-safe-fs.test.ts': 15,
   'src/main/persistence-recovery.test.ts': 22,
   'src/main/persistence.test.ts': 93,
@@ -41,6 +42,7 @@ const macSeconds: Readonly<Record<string, number>> = {
   'src/main/persistence-recovery.test.ts': 28,
   'src/main/computer-use-privacy-deflate.test.ts': 26,
   'src/main/team-tools.test.ts': 20,
+  'src/main/local-model-download-manager.test.ts': 19,
   'src/main/computer-use-macos-cancel-seam.test.ts': 16,
   'src/main/command-runner.test.ts': 14,
   'src/main/team-scenario.test.ts': 12,
@@ -55,6 +57,7 @@ const macSeconds: Readonly<Record<string, number>> = {
   'src/main/team-tools-execute.test.ts': 7,
   'src/main/project-persistence.test.ts': 6,
   'src/main/team-coordinator-persistence.test.ts': 6,
+  'src/main/public-model-catalog.test.ts': 5,
   'src/main/computer-use-windows-input-seam.test.ts': 5,
   'src/main/team-worker-runtime.test.ts': 5,
 };

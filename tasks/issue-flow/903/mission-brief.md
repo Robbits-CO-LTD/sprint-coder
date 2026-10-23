@@ -14,7 +14,7 @@ Sprint Coder内でモデルを検索・インストール・実行するManaged 
 | ------------------ | ------------------------------------------------------------------ | --------------------------------------------------------- |
 | 起動・終了         | controller、download recovery、sidecar、メモリ監視を削除           | Main entry/配布検証、旧データfixtureでreopen              |
 | 設定・モデルpicker | 内蔵install画面と専用APIを削除                                     | 設定/外部Provider UI test、focused E2E                    |
-| IPC/契約           | localAI API/schema/channelを削除                                   | contracts/desktop typecheck、IPC登録test                  |
+| IPC/契約           | localAI API/channelを削除。未接続backend用schemaは後続PRで削除     | contracts/desktop typecheck、IPC登録test                  |
 | Chat/queued turn   | 旧selectionを保持しdispatch前に理由付き拒否                        | catalog欠落・旧selection・再dispatchで他Provider/CLI呼出0 |
 | Team worker        | 旧selectionをCLI fallback前に拒否                                  | start/executeともfallback/verification呼出0               |
 | Registry           | 旧connection/providerをgeneric compatible解決前に拒否              | reserved identityと通常external connectionの回帰          |
@@ -30,3 +30,5 @@ Computer UseのIssue、汎用Managed Harness/Workspace/権限/egressの仕様、
 ## 検証と完了条件
 
 Main/contract/UIの直接testとtypecheckから進め、retirement/既存DB/外部Provider境界、Forge、focused packaged E2Eを確認する。親が統合差分のClaude Opus 5.5 highレビューと最新headの必要CI/ReviewBOTを確認する。実装中の検証、merge、release配布、実Provider応答は別の証拠として報告する。#901/#903のcloseは親のmerge後closeoutで行う。
+
+レビュー取得上限のため、この段階はアプリ入口の撤去を先行する。未接続backendと対応test・schemaは後続PRで同時に削除し、#901/#903はその完了までopenに保つ。

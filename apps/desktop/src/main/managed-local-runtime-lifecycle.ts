@@ -1,0 +1,644 @@
+import { totalmem } from 'node:os';
+import {
+  managedLocalRuntimeSnapshotSchema,
+  type LocalFitAssessment,
+  type LocalHardwareSnapshot,
+  type ManagedLocalRuntimeSnapshot,
+} from '@sprint-coder/contracts';
+import { estimateLocalModelFit, type LocalFitEstimateInput } from './local-fit-estimator';
+import {
+  collectLocalAvailableMemoryBytes,
+  collectLocalHardwareSnapshot,
+} from './local-hardware-inventory';
+import {
+  ManagedLocalRuntimeSupervisor,
+  type ManagedLocalRuntimeSession,
+  type ManagedLocalDraftModel,
+  managedLocalDraftBinding,
+} from './managed-local-runtime-supervisor';
+import type {
+  ManagedLocalBackend,
+  VerifiedManagedLocalSidecarBundle,
+} from './managed-local-sidecar-bundle';
+
+const DEFAULT_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_IDLE_RELEASE_MS = 60_000;
+const CRITICAL_MEMORY_FLOOR_BYTES = 512 * 1024 * 1024;
+const CRITICAL_MEMORY_RATIO = 0.05;
+
+export type ManagedLocalModelDescriptor = Readonly<{
+  id: string;
+  modelRoot: string;
+  modelPath: string;
+  modelsRoot?: string;
+  baseModelId?: string | null;
+  artifactHashes?: readonly string[];
+  draft?: ManagedLocalDraftModel | null;
+  /** Optional for mixed-version callers; Main supplies this only for image-capable bundles. */
+  mmprojPath?: string | null;
+  scratchRoot: string;
+  backend: ManagedLocalBackend;
+  gpuLayers: number;
+  contextTokens: number;
+  batchSize: number;
+  fit: Omit<LocalFitEstimateInput, 'acceleratorBackend' | 'cpuBackend'>;
+}>;
+
+export type ManagedLocalModelLease = Readonly<{
+  modelId: string;
+  session: ManagedLocalRuntimeSession;
+  prepare(signal: AbortSignal): Promise<void>;
+  release(): Promise<void>;
+}>;
+
+export class ManagedLocalLifecycleError extends Error {
+  constructor(
+    readonly code:
+      | 'model_busy'
+      | 'memory_unknown'
+      | 'memory_insufficient'
+      | 'backend_unavailable'
+      | 'startup_failed'
+      | 'disposed',
+    readonly fit: LocalFitAssessment | null,
+    readonly recovery: ManagedLocalRuntimeSnapshot['recovery'],
+    message: string,
+  ) {
+    super(message);
+    this.name = 'ManagedLocalLifecycleError';
+  }
+}
+
+type CurrentModel = {
+  descriptor: ManagedLocalModelDescriptor;
+  session: ManagedLocalRuntimeSession;
+  fit: LocalFitAssessment;
+  leases: Map<symbol, boolean>;
+  pendingStop: boolean;
+};
+
+type LifecycleDependencies = Readonly<{
+  bundle: VerifiedManagedLocalSidecarBundle;
+  supervisor?: ManagedLocalRuntimeSupervisor;
+  collectHardware?: () => Promise<LocalHardwareSnapshot>;
+  now?: () => Date;
+  nowMs?: () => number;
+  drainTimeoutMs?: number;
+  idleReleaseMs?: number;
+  onDrainRequested?: (
+    modelId: string,
+    activeLeases: number,
+    reason: 'switch' | 'memory_pressure' | 'dispose',
+  ) => void | Promise<void>;
+  memory?: () =>
+    | Readonly<{ availableBytes: number; totalBytes: number }>
+    | Promise<Readonly<{ availableBytes: number; totalBytes: number }>>;
+}>;
+
+export class ManagedLocalRuntimeLifecycle {
+  private readonly bundle: VerifiedManagedLocalSidecarBundle;
+  private readonly supervisor: ManagedLocalRuntimeSupervisor;
+  private readonly collectHardware: () => Promise<LocalHardwareSnapshot>;
+  private readonly now: () => Date;
+  private readonly nowMs: () => number;
+  private readonly drainTimeoutMs: number;
+  private readonly idleReleaseMs: number;
+  private readonly onDrainRequested: NonNullable<LifecycleDependencies['onDrainRequested']>;
+  private readonly memory: () =>
+    | Readonly<{ availableBytes: number; totalBytes: number }>
+    | Promise<Readonly<{ availableBytes: number; totalBytes: number }>>;
+  private current: CurrentModel | null = null;
+  private phase: 'open' | 'draining' | 'disposed' = 'open';
+  private disposeRequested = false;
+  private tail: Promise<void> = Promise.resolve();
+  private readonly changed = new Set<() => void>();
+  private idleReleaseGeneration = 0;
+  private lastFailure: Readonly<{
+    code: Exclude<ManagedLocalRuntimeSnapshot['failureCode'], null>;
+    fit: LocalFitAssessment | null;
+    recovery: NonNullable<ManagedLocalRuntimeSnapshot['recovery']>;
+  }> | null = null;
+
+  constructor(dependencies: LifecycleDependencies) {
+    this.bundle = dependencies.bundle;
+    this.supervisor =
+      dependencies.supervisor ??
+      new ManagedLocalRuntimeSupervisor({ loadBundle: async () => dependencies.bundle });
+    const backends = dependencies.bundle.manifest.candidateBackends.map((kind) => ({
+      kind,
+      status: 'available' as const,
+    }));
+    this.collectHardware =
+      dependencies.collectHardware ??
+      (() => collectLocalHardwareSnapshot({ backends: async () => backends }));
+    this.now = dependencies.now ?? (() => new Date());
+    this.nowMs = dependencies.nowMs ?? Date.now;
+    this.drainTimeoutMs = boundedTimeout(dependencies.drainTimeoutMs ?? DEFAULT_DRAIN_TIMEOUT_MS);
+    this.idleReleaseMs = boundedIdleRelease(dependencies.idleReleaseMs ?? DEFAULT_IDLE_RELEASE_MS);
+    this.onDrainRequested = dependencies.onDrainRequested ?? (() => undefined);
+    this.memory =
+      dependencies.memory ??
+      (async () => ({
+        availableBytes: await collectLocalAvailableMemoryBytes(),
+        totalBytes: totalmem(),
+      }));
+  }
+
+  snapshot(): ManagedLocalRuntimeSnapshot {
+    const current = this.current;
+    if (current === null) return this.emptySnapshot();
+    const runtime = current.session.snapshot();
+    const crashed = runtime.state === 'crashed';
+    const failure = crashed
+      ? {
+          code: 'crashed' as const,
+          recovery: recovery(
+            current.descriptor,
+            'Managed Localが異常終了しました。再起動してください。',
+          ),
+        }
+      : null;
+    return managedLocalRuntimeSnapshotSchema.parse({
+      state: crashed ? 'crashed' : this.phase === 'draining' ? 'stopping' : runtime.state,
+      target: this.bundle.target,
+      runtimeVersion: runtime.runtimeVersion,
+      modelId: current.descriptor.id,
+      speculative:
+        current.descriptor.draft == null
+          ? null
+          : managedLocalDraftBinding(current.descriptor.draft),
+      backend: runtime.backend,
+      gpuLayers: runtime.gpuLayers,
+      contextTokens: runtime.contextTokens,
+      batchSize: runtime.batchSize,
+      activeLeaseCount: current.leases.size,
+      fit: current.fit,
+      failureCode: failure?.code ?? null,
+      recovery: failure?.recovery ?? null,
+      observedAt: this.now().toISOString(),
+    });
+  }
+
+  async acquire(
+    descriptor: ManagedLocalModelDescriptor,
+    automaticRelease: boolean,
+    signal: AbortSignal = new AbortController().signal,
+    verifyBeforeStart?: () => Promise<void>,
+  ): Promise<ManagedLocalModelLease> {
+    validateDescriptor(descriptor, this.bundle.manifest.candidateBackends);
+    for (;;) {
+      if (signal.aborted) throw canceled();
+      const result = await this.exclusive(async () => {
+        if (this.phase === 'disposed') throw disposedError();
+        if (this.phase === 'draining') return null;
+        this.reconcileCrash();
+        if (
+          this.current !== null &&
+          managedLocalDescriptorsMatch(this.current.descriptor, descriptor)
+        )
+          return this.createLease(this.current, automaticRelease);
+        if (this.current !== null && this.current.leases.size > 0) {
+          void this.onDrainRequested(
+            this.current.descriptor.id,
+            this.current.leases.size,
+            'switch',
+          );
+          return null;
+        }
+        await this.stopCurrent();
+        const hardware = await this.collectHardware();
+        const fit = this.assess(descriptor, hardware);
+        this.assertStartable(descriptor, fit);
+        await verifyBeforeStart?.();
+        if (signal.aborted) throw canceled();
+        let session: ManagedLocalRuntimeSession;
+        try {
+          session = await this.supervisor.start(
+            {
+              kind: 'model',
+              modelRoot: descriptor.modelRoot,
+              modelPath: descriptor.modelPath,
+              ...(descriptor.modelsRoot === undefined ? {} : { modelsRoot: descriptor.modelsRoot }),
+              ...(descriptor.baseModelId === undefined
+                ? {}
+                : { baseModelId: descriptor.baseModelId }),
+              ...(descriptor.draft == null ? {} : { draft: descriptor.draft }),
+              ...(descriptor.mmprojPath === undefined || descriptor.mmprojPath === null
+                ? {}
+                : { mmprojPath: descriptor.mmprojPath }),
+              modelAlias: descriptor.id,
+              scratchRoot: descriptor.scratchRoot,
+              backend: descriptor.backend,
+              contextTokens: descriptor.contextTokens,
+              batchSize: descriptor.batchSize,
+              gpuLayers: descriptor.gpuLayers,
+            },
+            signal,
+          );
+          if (signal.aborted) {
+            await session.stop();
+            throw canceled();
+          }
+        } catch {
+          if (signal.aborted) throw canceled();
+          const guidance = recovery(
+            descriptor,
+            'Managed Localを起動できませんでした。診断を確認して再試行してください。',
+          );
+          this.lastFailure = { code: 'startup_failed', fit, recovery: guidance };
+          throw new ManagedLocalLifecycleError(
+            'startup_failed',
+            fit,
+            guidance,
+            'Managed Local startup failed',
+          );
+        }
+        const current: CurrentModel = {
+          descriptor,
+          session,
+          fit,
+          leases: new Map(),
+          pendingStop: false,
+        };
+        this.current = current;
+        this.lastFailure = null;
+        this.notifyChanged();
+        return this.createLease(current, automaticRelease);
+      });
+      if (result !== null) return result;
+      await this.waitForChange(signal);
+    }
+  }
+
+  activeLeaseCount(modelId?: string): number {
+    if (this.current === null || (modelId !== undefined && this.current.descriptor.id !== modelId))
+      return 0;
+    return this.current.leases.size;
+  }
+
+  assertDeletable(modelId: string): void {
+    if (
+      this.current !== null &&
+      (this.current.descriptor.id === modelId || this.current.descriptor.draft?.id === modelId)
+    )
+      throw new ManagedLocalLifecycleError(
+        'model_busy',
+        this.current.fit,
+        recovery(
+          this.current.descriptor,
+          '実行中のTurnを完了し、モデルを停止してから削除してください。',
+        ),
+        'Managed Local model is active',
+      );
+  }
+
+  async stopModel(modelId: string): Promise<void> {
+    await this.exclusive(async () => {
+      if (
+        this.current === null ||
+        (this.current.descriptor.id !== modelId && this.current.descriptor.draft?.id !== modelId)
+      )
+        return;
+      if (this.current.leases.size > 0)
+        throw new ManagedLocalLifecycleError(
+          'model_busy',
+          this.current.fit,
+          recovery(this.current.descriptor, '実行中のTurnを完了してからモデルを停止してください。'),
+          'Managed Local model has active leases',
+        );
+      await this.stopCurrent();
+    });
+  }
+
+  async pollMemoryPressure(): Promise<boolean> {
+    if (this.phase !== 'open' || this.current === null) return false;
+    const memory = await this.memory();
+    if (
+      !Number.isSafeInteger(memory.availableBytes) ||
+      !Number.isSafeInteger(memory.totalBytes) ||
+      memory.availableBytes < 0 ||
+      memory.totalBytes <= 0
+    )
+      return false;
+    const critical = Math.max(
+      CRITICAL_MEMORY_FLOOR_BYTES,
+      Math.floor(memory.totalBytes * CRITICAL_MEMORY_RATIO),
+    );
+    if (memory.availableBytes >= critical) return false;
+    const descriptor = this.current.descriptor;
+    this.lastFailure = {
+      code: 'memory_insufficient',
+      fit: this.current.fit,
+      recovery: recovery(
+        descriptor,
+        '空きメモリがcritical水準まで低下したため、モデルを安全に停止しました。',
+      ),
+    };
+    await this.drainAndStop('memory_pressure');
+    return true;
+  }
+
+  async dispose(): Promise<void> {
+    if (this.phase === 'disposed') return;
+    this.disposeRequested = true;
+    await this.drainAndStop('dispose');
+    this.phase = 'disposed';
+    this.notifyChanged();
+  }
+
+  killNow(): void {
+    this.supervisor.killNow();
+  }
+
+  private assess(
+    descriptor: ManagedLocalModelDescriptor,
+    hardware: LocalHardwareSnapshot,
+  ): LocalFitAssessment {
+    const status = (kind: ManagedLocalBackend): 'available' | 'unavailable' | 'unknown' =>
+      hardware.backends.find((backend) => backend.kind === kind)?.status ?? 'unknown';
+    return estimateLocalModelFit(
+      {
+        ...descriptor.fit,
+        acceleratorBackend:
+          descriptor.backend === 'cpu' ? 'unavailable' : status(descriptor.backend),
+        cpuBackend: status('cpu'),
+      },
+      hardware,
+    );
+  }
+
+  private assertStartable(descriptor: ManagedLocalModelDescriptor, fit: LocalFitAssessment): void {
+    let code: ManagedLocalLifecycleError['code'] | null = null;
+    let detail = '';
+    if (fit.state === 'unknown') {
+      code = 'memory_unknown';
+      detail = '空きメモリまたはモデルmetadataを確認できないため、安全に起動できません。';
+    } else if (fit.state === 'unsupported') {
+      code = 'backend_unavailable';
+      detail = '選択したbackendではこのモデルを起動できません。';
+    } else if (fit.state === 'estimated_insufficient') {
+      code = 'memory_insufficient';
+      detail = '推定必要メモリが現在の空き容量を超えています。';
+    } else if (fit.state === 'estimated_cpu' && descriptor.backend !== 'cpu') {
+      code = 'memory_insufficient';
+      detail = 'GPU条件を満たしません。CPU実行へ変更してください。';
+    }
+    if (code === null) return;
+    const guidance = recovery(descriptor, detail);
+    this.lastFailure = { code, fit, recovery: guidance };
+    throw new ManagedLocalLifecycleError(code, fit, guidance, detail);
+  }
+
+  private createLease(current: CurrentModel, automaticRelease: boolean): ManagedLocalModelLease {
+    this.cancelIdleRelease();
+    if (current.leases.size === 0) current.pendingStop = false;
+    const id = Symbol(current.descriptor.id);
+    current.leases.set(id, automaticRelease);
+    this.notifyChanged();
+    let released = false;
+    return Object.freeze({
+      modelId: current.descriptor.id,
+      session: current.session,
+      prepare: async (signal: AbortSignal) => {
+        if (released || signal.aborted) throw canceled();
+        if (this.current !== current || current.session.snapshot().state !== 'running')
+          throw new ManagedLocalLifecycleError(
+            'model_busy',
+            current.fit,
+            recovery(current.descriptor, 'モデルを再起動してから再試行してください。'),
+            'Managed Local lease is no longer prepared',
+          );
+      },
+      release: async () => {
+        if (released) return;
+        released = true;
+        await this.exclusive(async () => {
+          if (this.current !== current || !current.leases.has(id)) return;
+          current.pendingStop ||= current.leases.get(id) === true;
+          current.leases.delete(id);
+          this.notifyChanged();
+          if (current.leases.size === 0 && current.pendingStop && this.phase === 'open') {
+            if (this.idleReleaseMs === 0) await this.stopCurrent();
+            else this.scheduleIdleRelease(current);
+          }
+        });
+      },
+    });
+  }
+
+  private async drainAndStop(reason: 'memory_pressure' | 'dispose'): Promise<void> {
+    if (this.phase === 'disposed') return;
+    this.phase = 'draining';
+    try {
+      const current = this.current;
+      if (current !== null && current.leases.size > 0)
+        await this.onDrainRequested(current.descriptor.id, current.leases.size, reason);
+      const deadline = this.nowMs() + this.drainTimeoutMs;
+      while (this.current !== null && this.current.leases.size > 0 && this.nowMs() < deadline)
+        await this.waitForChange(undefined, Math.max(1, deadline - this.nowMs()));
+      await this.exclusive(() => this.stopCurrent());
+    } finally {
+      this.phase = this.disposeRequested ? 'disposed' : 'open';
+      this.notifyChanged();
+    }
+  }
+
+  private async stopCurrent(): Promise<void> {
+    this.cancelIdleRelease();
+    const current = this.current;
+    if (current === null) {
+      await this.supervisor.stop();
+      return;
+    }
+    await current.session.stop();
+    this.current = null;
+    this.notifyChanged();
+  }
+
+  private reconcileCrash(): void {
+    if (this.current?.session.snapshot().state !== 'crashed') return;
+    this.cancelIdleRelease();
+    this.current = null;
+    this.notifyChanged();
+  }
+
+  private emptySnapshot(): ManagedLocalRuntimeSnapshot {
+    return managedLocalRuntimeSnapshotSchema.parse({
+      state: this.phase === 'draining' ? 'stopping' : 'stopped',
+      target: this.bundle.target,
+      runtimeVersion: this.bundle.manifest.runtimeVersion,
+      modelId: null,
+      backend: null,
+      gpuLayers: null,
+      contextTokens: null,
+      batchSize: null,
+      activeLeaseCount: 0,
+      fit: this.lastFailure?.fit ?? null,
+      failureCode: this.lastFailure?.code ?? null,
+      recovery: this.lastFailure?.recovery ?? null,
+      observedAt: this.now().toISOString(),
+    });
+  }
+
+  private exclusive<T>(operation: () => Promise<T> | T): Promise<T> {
+    const run = this.tail.then(operation, operation);
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private waitForChange(signal?: AbortSignal, timeoutMs?: number): Promise<void> {
+    if (signal?.aborted) return Promise.reject(canceled());
+    return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const done = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        signal?.removeEventListener('abort', aborted);
+        this.changed.delete(done);
+        resolve();
+      };
+      const aborted = (): void => {
+        if (timer !== undefined) clearTimeout(timer);
+        this.changed.delete(done);
+        reject(canceled());
+      };
+      this.changed.add(done);
+      signal?.addEventListener('abort', aborted, { once: true });
+      if (timeoutMs !== undefined) timer = setTimeout(done, timeoutMs);
+    });
+  }
+
+  private notifyChanged(): void {
+    for (const changed of [...this.changed]) changed();
+  }
+
+  private scheduleIdleRelease(current: CurrentModel): void {
+    const generation = ++this.idleReleaseGeneration;
+    const timer = setTimeout(() => {
+      void this.exclusive(async () => {
+        if (
+          generation !== this.idleReleaseGeneration ||
+          this.current !== current ||
+          current.leases.size !== 0 ||
+          !current.pendingStop ||
+          this.phase !== 'open'
+        )
+          return;
+        await this.stopCurrent();
+      }).catch(() => undefined);
+    }, this.idleReleaseMs);
+    timer.unref();
+  }
+
+  private cancelIdleRelease(): void {
+    this.idleReleaseGeneration += 1;
+  }
+}
+
+function validateDescriptor(
+  descriptor: ManagedLocalModelDescriptor,
+  candidateBackends: readonly ManagedLocalBackend[],
+): void {
+  if (descriptor.draft != null) managedLocalDraftBinding(descriptor.draft);
+  if (
+    !/^[a-f0-9]{64}$/u.test(descriptor.id) ||
+    !candidateBackends.includes(descriptor.backend) ||
+    !Number.isInteger(descriptor.gpuLayers) ||
+    descriptor.gpuLayers < 0 ||
+    descriptor.gpuLayers > 4_096 ||
+    !Number.isInteger(descriptor.contextTokens) ||
+    descriptor.contextTokens < 256 ||
+    descriptor.contextTokens > 1_048_576 ||
+    !Number.isInteger(descriptor.batchSize) ||
+    descriptor.batchSize < 1 ||
+    descriptor.batchSize > 4_096 ||
+    descriptor.batchSize > descriptor.contextTokens ||
+    descriptor.fit.contextTokens !== descriptor.contextTokens ||
+    (descriptor.draft != null) !== (descriptor.fit.draft !== undefined) ||
+    (descriptor.draft != null &&
+      (descriptor.draft.id === descriptor.id ||
+        descriptor.baseModelId == null ||
+        descriptor.draft.baseModelId !== descriptor.baseModelId)) ||
+    (descriptor.backend === 'cpu' &&
+      (descriptor.gpuLayers !== 0 ||
+        descriptor.fit.gpuOffloadRatio !== 0 ||
+        (descriptor.fit.draft?.gpuOffloadRatio ?? 0) !== 0)) ||
+    (descriptor.backend !== 'cpu' && descriptor.gpuLayers === 0)
+  )
+    throw new ManagedLocalLifecycleError(
+      'backend_unavailable',
+      null,
+      recovery(descriptor, 'モデル実行設定を確認してください。'),
+      'Invalid Managed Local descriptor',
+    );
+}
+
+export function managedLocalDescriptorsMatch(
+  a: ManagedLocalModelDescriptor,
+  b: ManagedLocalModelDescriptor,
+): boolean {
+  return (
+    a.id === b.id &&
+    a.modelRoot === b.modelRoot &&
+    a.modelPath === b.modelPath &&
+    a.modelsRoot === b.modelsRoot &&
+    a.baseModelId === b.baseModelId &&
+    (a.mmprojPath ?? null) === (b.mmprojPath ?? null) &&
+    a.backend === b.backend &&
+    a.gpuLayers === b.gpuLayers &&
+    a.contextTokens === b.contextTokens &&
+    a.batchSize === b.batchSize &&
+    JSON.stringify(a.artifactHashes ?? []) === JSON.stringify(b.artifactHashes ?? []) &&
+    JSON.stringify(a.draft == null ? null : managedLocalDraftBinding(a.draft)) ===
+      JSON.stringify(b.draft == null ? null : managedLocalDraftBinding(b.draft)) &&
+    (a.draft?.modelRoot ?? null) === (b.draft?.modelRoot ?? null) &&
+    (a.draft?.modelPath ?? null) === (b.draft?.modelPath ?? null) &&
+    (a.draft?.baseModelId ?? null) === (b.draft?.baseModelId ?? null)
+  );
+}
+
+function recovery(
+  descriptor: Pick<ManagedLocalModelDescriptor, 'contextTokens' | 'backend'>,
+  detail: string,
+): NonNullable<ManagedLocalRuntimeSnapshot['recovery']> {
+  const lower =
+    descriptor.contextTokens > 256 ? Math.max(256, Math.floor(descriptor.contextTokens / 2)) : null;
+  return {
+    lowerContextTokens: lower,
+    useCpuOnly: descriptor.backend !== 'cpu',
+    detail,
+  };
+}
+
+function boundedTimeout(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 60_000)
+    throw new RangeError('Managed Local drain timeout is invalid');
+  return value;
+}
+
+function boundedIdleRelease(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 10 * 60_000)
+    throw new RangeError('Managed Local idle release timeout is invalid');
+  return value;
+}
+
+function canceled(): Error {
+  const error = new Error('Managed Local lease was canceled');
+  error.name = 'AbortError';
+  return error;
+}
+
+function disposedError(): ManagedLocalLifecycleError {
+  return new ManagedLocalLifecycleError(
+    'disposed',
+    null,
+    {
+      lowerContextTokens: null,
+      useCpuOnly: false,
+      detail: 'アプリを再起動してください。',
+    },
+    'Managed Local lifecycle is disposed',
+  );
+}

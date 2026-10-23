@@ -1,0 +1,723 @@
+import { EventEmitter, once } from 'node:events';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { PassThrough } from 'node:stream';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  ManagedLocalRuntimeError,
+  ManagedLocalRuntimeSupervisor,
+  managedLocalEnvironment,
+  type ManagedLocalRuntimeStartInput,
+} from './managed-local-runtime-supervisor';
+import {
+  managedLocalTargetKey,
+  verifyManagedLocalSidecarBundle,
+  type ManagedLocalSidecarPin,
+  type VerifiedManagedLocalSidecarBundle,
+} from './managed-local-sidecar-bundle';
+
+const roots: string[] = [];
+const TOKEN = 'managed_local_test_token_0123456789abcdef';
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+async function directories(): Promise<{ modelRoot: string; scratchRoot: string }> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'sprint-coder-local-supervisor-')));
+  roots.push(root);
+  const modelRoot = join(root, 'models');
+  const scratchRoot = join(root, 'scratch');
+  await mkdir(modelRoot);
+  await mkdir(scratchRoot);
+  return { modelRoot, scratchRoot };
+}
+
+function bundle(): VerifiedManagedLocalSidecarBundle {
+  return {
+    target: 'darwin-arm64',
+    rootPath: '/fixture/managed-local',
+    manifest: {
+      schemaVersion: 1,
+      runtime: 'llama.cpp',
+      runtimeVersion: 'b10516',
+      upstreamRepository: 'https://github.com/ggml-org/llama.cpp',
+      upstreamRevision: 'a'.repeat(40),
+      platform: 'darwin',
+      architecture: 'arm64',
+      candidateBackends: ['cpu'],
+      artifacts: [],
+    },
+    manifestSha256: 'b'.repeat(64),
+    serverPath: '/fixture/managed-local/bin/llama-server',
+    licensePath: '/fixture/managed-local/licenses/LICENSE',
+    artifactPaths: {},
+  };
+}
+
+class FakeChild extends EventEmitter {
+  readonly stdout = new PassThrough();
+  readonly stderr = new PassThrough();
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
+  readonly kills: NodeJS.Signals[] = [];
+
+  constructor(private readonly ignoreTerm = false) {
+    super();
+  }
+
+  kill(signal: NodeJS.Signals = 'SIGTERM'): boolean {
+    this.kills.push(signal);
+    if (this.signalCode !== null) return false;
+    if (signal === 'SIGTERM' && this.ignoreTerm) return true;
+    if (this.exitCode === null) {
+      this.exitCode = 0;
+      this.signalCode = signal;
+      this.emit('exit', this.exitCode, signal);
+    }
+    return true;
+  }
+
+  crash(code = 1): void {
+    this.exitCode = code;
+    this.emit('exit', code, null);
+  }
+}
+
+function harness(
+  input: {
+    emitListening?: boolean;
+    fetch?: typeof globalThis.fetch;
+    startupTimeoutMs?: number;
+    ignoreTerm?: boolean;
+    speculativeDflash?: boolean;
+    candidateBackends?: VerifiedManagedLocalSidecarBundle['manifest']['candidateBackends'];
+  } = {},
+) {
+  const child = new FakeChild(input.ignoreTerm);
+  let spawnArgs: readonly string[] = [];
+  let spawnOptions: SpawnOptions | null = null;
+  const requests: { url: string; authorization: string | null }[] = [];
+  const fetcher: typeof globalThis.fetch =
+    input.fetch ??
+    (async (url, init) => {
+      const headers = new Headers(init?.headers);
+      const authorization = headers.get('authorization');
+      requests.push({ url: String(url), authorization });
+      if (String(url).endsWith('/props'))
+        return new Response('{}', { status: authorization === null ? 401 : 200 });
+      if (String(url).endsWith('/v1/models')) return new Response('{}', { status: 200 });
+      if (String(url).endsWith('/health')) return new Response('{"status":"ok"}', { status: 200 });
+      return new Response('{}', { status: 404 });
+    });
+  const supervisor = new ManagedLocalRuntimeSupervisor({
+    loadBundle: async () => ({
+      ...bundle(),
+      manifest: {
+        ...bundle().manifest,
+        speculativeDflash: input.speculativeDflash,
+        candidateBackends: input.candidateBackends ?? bundle().manifest.candidateBackends,
+      },
+    }),
+    spawnProcess: (_command, args, options) => {
+      spawnArgs = [...args];
+      spawnOptions = options;
+      if (input.emitListening !== false)
+        queueMicrotask(() => child.stdout.write('listening on http://127.0.0.1:43210\n'));
+      return child as unknown as ChildProcess;
+    },
+    fetch: fetcher,
+    randomToken: () => TOKEN,
+    delay: async () => new Promise((resolve) => setTimeout(resolve, 1)),
+    startupTimeoutMs: input.startupTimeoutMs ?? 100,
+    requestTimeoutMs: 100,
+    stopTimeoutMs: 100,
+  });
+  return {
+    child,
+    supervisor,
+    requests,
+    spawnArgs: () => spawnArgs,
+    spawnOptions: () => spawnOptions,
+  };
+}
+
+describe('ManagedLocalRuntimeSupervisor', () => {
+  it('pins the DFlash draft to CPU when the bundle also supports Metal', async () => {
+    const input = await dflashInput();
+    const env = harness({ speculativeDflash: true, candidateBackends: ['cpu', 'metal'] });
+    const session = await env.supervisor.start(input);
+    try {
+      expect(session.snapshot()).toMatchObject({ backend: 'cpu', gpuLayers: 0 });
+      const args = env.spawnArgs();
+      expect(
+        args.slice(args.indexOf('--spec-draft-device'), args.indexOf('--spec-draft-device') + 2),
+      ).toEqual(['--spec-draft-device', 'none']);
+      expect(
+        args.slice(args.indexOf('--spec-draft-ngl'), args.indexOf('--spec-draft-ngl') + 2),
+      ).toEqual(['--spec-draft-ngl', '0']);
+    } finally {
+      await session.stop();
+    }
+  });
+  it('keeps GPU DFlash argv and CPU speculative-off argv free of draft CPU placement flags', async () => {
+    const base = await dflashInput();
+    for (const input of [
+      { ...base, backend: 'metal' as const, gpuLayers: 1 },
+      { ...base, draft: null },
+    ]) {
+      const env = harness({ speculativeDflash: true, candidateBackends: ['cpu', 'metal'] });
+      const session = await env.supervisor.start(input);
+      try {
+        expect(env.spawnArgs()).not.toContain('--spec-draft-device');
+        expect(env.spawnArgs()).not.toContain('--spec-draft-ngl');
+        if (input.draft !== null)
+          expect(env.spawnArgs().slice(-6)).toEqual([
+            '-md',
+            base.draft!.modelPath,
+            '--spec-type',
+            'draft-dflash',
+            '--spec-draft-n-max',
+            '3',
+          ]);
+        else expect(env.spawnArgs()).not.toContain('-md');
+      } finally {
+        await session.stop();
+      }
+    }
+  });
+  it('starts DFlash only from separate identity-bound bundles and redacts both paths', async () => {
+    const input = await dflashInput();
+    const env = harness({ speculativeDflash: true });
+    const session = await env.supervisor.start(input);
+    expect(env.spawnArgs().slice(-6)).toEqual([
+      '-md',
+      input.draft!.modelPath,
+      '--spec-type',
+      'draft-dflash',
+      '--spec-draft-n-max',
+      '3',
+    ]);
+    env.child.stderr.write(`${input.modelPath} ${input.draft!.modelPath}`);
+    expect(session.diagnostics()).not.toContain(input.modelPath);
+    expect(session.diagnostics()).not.toContain(input.draft!.modelPath);
+    await session.stop();
+  });
+
+  it('rejects unsupported, incompatible and escaped DFlash input before spawning', async () => {
+    const input = await dflashInput();
+    const unsupported = harness();
+    await expect(unsupported.supervisor.start(input)).rejects.toThrow('support DFlash');
+    expect(unsupported.spawnArgs()).toEqual([]);
+    const draft = input.draft!;
+    for (const invalid of [
+      { ...input, modelsRoot: '' },
+      { ...input, baseModelId: 'other/base' },
+      { ...input, mmprojPath: input.modelPath },
+      { ...input, contextTokens: 65536 },
+      { ...input, draft: { ...draft, draftTokensMax: 65 } },
+      { ...input, draft: { ...draft, id: input.modelAlias } },
+      { ...input, draft: { ...draft, modelRoot: input.modelRoot } },
+      { ...input, draft: { ...draft, modelPath: input.modelPath } },
+    ]) {
+      const env = harness({ speculativeDflash: true });
+      await expect(env.supervisor.start(invalid)).rejects.toThrow();
+      expect(env.spawnArgs()).toEqual([]);
+    }
+  });
+  it('terminates its real owned child synchronously during fatal-exit cleanup', async () => {
+    let child: ChildProcess | undefined;
+    const supervisor = new ManagedLocalRuntimeSupervisor({
+      loadBundle: async () => bundle(),
+      spawnProcess: (_command, _args, options) => {
+        child = spawn(
+          process.execPath,
+          ['-e', "console.log('listening on http://127.0.0.1:43210');setInterval(() => {}, 1000)"],
+          { ...options, cwd: process.cwd() },
+        );
+        return child;
+      },
+      fetch: async (_url, init) =>
+        new Response('{}', { status: new Headers(init?.headers).has('Authorization') ? 200 : 401 }),
+      startupTimeoutMs: 1000,
+      stopTimeoutMs: 100,
+    });
+    try {
+      await supervisor.start({ kind: 'router_probe', ...(await directories()) });
+      if (child === undefined) throw new Error('Child was not started');
+      const exited = once(child, 'exit');
+      supervisor.killNow();
+      await exited;
+      expect(child.signalCode).toBe('SIGKILL');
+    } finally {
+      supervisor.killNow();
+    }
+  });
+  it('does not launch another child after a stop timed out while its child is alive', async () => {
+    const env = harness();
+    const paths = await directories();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+    vi.spyOn(env.child, 'kill').mockReturnValue(true);
+    await expect(session.stop()).rejects.toMatchObject({ code: 'runtime_stopped' });
+    await expect(env.supervisor.start({ kind: 'router_probe', ...paths })).rejects.toMatchObject({
+      code: 'already_running',
+    });
+    env.child.crash(1);
+    await expect(session.stop()).resolves.toMatchObject({ state: 'crashed' });
+  });
+  it('cancels startup before a cold model begins listening', async () => {
+    const controller = new AbortController();
+    const env = harness({ emitListening: false, startupTimeoutMs: 500 });
+    const start = env.supervisor.start(
+      { kind: 'router_probe', ...(await directories()) },
+      controller.signal,
+    );
+    const outcome = expect(start).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.waitFor(() => expect(env.spawnArgs().length).toBeGreaterThan(0));
+    controller.abort();
+    await outcome;
+    expect(env.child.kills).toEqual(['SIGTERM']);
+  });
+  it('does not wait or send signals to an already signal-terminated child', async () => {
+    const env = harness();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...(await directories()) });
+    env.child.signalCode = 'SIGSEGV';
+    env.child.emit('exit', null, 'SIGSEGV');
+    await expect(session.stop()).resolves.toMatchObject({ state: 'crashed', signal: 'SIGSEGV' });
+    expect(env.child.kills).toEqual([]);
+  });
+  it('uses OS-assigned loopback, keeps the token out of argv, verifies auth, and redacts diagnostics', async () => {
+    const paths = await directories();
+    const env = harness();
+
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+
+    expect(session.baseUrl).toBe('http://127.0.0.1:43210/v1');
+    expect(env.spawnArgs()).toEqual(
+      expect.arrayContaining(['--host', '127.0.0.1', '--port', '0', '--no-webui', '--models-dir']),
+    );
+    expect(env.spawnArgs()).not.toContain(TOKEN);
+    expect(env.spawnOptions()?.shell).toBe(false);
+    expect(env.spawnOptions()?.env).toMatchObject({
+      LLAMA_API_KEY: TOKEN,
+      LLAMA_CACHE: paths.scratchRoot,
+      TMP: paths.scratchRoot,
+      TEMP: paths.scratchRoot,
+      TMPDIR: paths.scratchRoot,
+    });
+    expect(env.spawnOptions()?.env?.PATH).toBeUndefined();
+    expect(env.requests.slice(0, 3)).toEqual([
+      { url: 'http://127.0.0.1:43210/props', authorization: null },
+      { url: 'http://127.0.0.1:43210/props', authorization: `Bearer ${TOKEN}` },
+      { url: 'http://127.0.0.1:43210/health', authorization: `Bearer ${TOKEN}` },
+    ]);
+    env.child.stderr.write(`secret=${TOKEN} model=${paths.modelRoot}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(session.diagnostics()).toContain('secret=[REDACTED] model=[REDACTED]');
+    expect(session.diagnostics()).not.toContain(TOKEN);
+    expect(session.diagnostics()).not.toContain(paths.modelRoot);
+
+    const response = await session.authenticatedFetch('/v1/models');
+    expect(response.status).toBe(200);
+    expect(env.requests.at(-1)?.authorization).toBe(`Bearer ${TOKEN}`);
+    await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+    expect(env.child.kills).toEqual(['SIGTERM']);
+  });
+
+  it('binds validated model settings to llama.cpp argv and the secret-free runtime snapshot', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4096,
+      batchSize: 1024,
+      gpuLayers: 0,
+    });
+
+    expect(env.spawnArgs()).toEqual(
+      expect.arrayContaining([
+        '--model',
+        modelPath,
+        '--ctx-size',
+        '4096',
+        '--batch-size',
+        '1024',
+        '--ubatch-size',
+        '512',
+        '--n-gpu-layers',
+        '0',
+        '--jinja',
+      ]),
+    );
+    expect(session.snapshot()).toMatchObject({
+      state: 'running',
+      runtimeVersion: 'b10516',
+      backend: 'cpu',
+      gpuLayers: 0,
+      contextTokens: 4096,
+      batchSize: 1024,
+    });
+    await session.stop();
+  });
+
+  it.each([
+    { batchSize: 511, microBatchSize: '511' },
+    { batchSize: 512, microBatchSize: '512' },
+    { batchSize: 1_024, microBatchSize: '512' },
+  ])('derives --ubatch-size from batch $batchSize', async ({ batchSize, microBatchSize }) => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    const session = await env.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      modelAlias: 'b'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4_096,
+      batchSize,
+      gpuLayers: 0,
+    });
+
+    const args = env.spawnArgs();
+    expect(args[args.indexOf('--ubatch-size') + 1]).toBe(microBatchSize);
+    await session.stop();
+  });
+
+  it('rejects a model backend that is not declared by the verified sidecar', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+
+    await expect(
+      env.supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        modelAlias: 'a'.repeat(64),
+        backend: 'metal',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 99,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
+  it('rejects out-of-range and inconsistent model settings before spawning', async () => {
+    const paths = await directories();
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    await writeFile(modelPath, 'fixture');
+    const env = harness();
+    const base = {
+      kind: 'model' as const,
+      ...paths,
+      modelPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu' as const,
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    };
+
+    for (const invalid of [
+      { contextTokens: 255 },
+      { batchSize: 0 },
+      { batchSize: 4_097 },
+      { contextTokens: 256, batchSize: 512 },
+      { gpuLayers: 1 },
+    ]) {
+      await expect(env.supervisor.start({ ...base, ...invalid })).rejects.toMatchObject({
+        code: 'invalid_input',
+      });
+    }
+    expect(env.spawnArgs()).toEqual([]);
+  });
+
+  it('rejects a server that does not enforce authentication and owns cleanup', async () => {
+    const paths = await directories();
+    const env = harness({
+      fetch: async () => new Response('{}', { status: 200 }),
+    });
+
+    await expect(env.supervisor.start({ kind: 'router_probe', ...paths })).rejects.toMatchObject({
+      code: 'authentication_failed',
+    });
+    expect(env.child.kills).toEqual(['SIGTERM']);
+  });
+
+  it('times out a process that never reports its OS-assigned port', async () => {
+    const paths = await directories();
+    const env = harness({ emitListening: false, startupTimeoutMs: 5 });
+
+    await expect(env.supervisor.start({ kind: 'router_probe', ...paths })).rejects.toMatchObject({
+      code: 'startup_timeout',
+    });
+    expect(env.child.kills).toEqual(['SIGTERM']);
+  });
+
+  it('prevents concurrent runtimes and records an unexpected exit as crashed', async () => {
+    const paths = await directories();
+    const env = harness();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+
+    await expect(env.supervisor.start({ kind: 'router_probe', ...paths })).rejects.toMatchObject({
+      code: 'already_running',
+    });
+    env.child.crash(17);
+    expect(session.snapshot()).toMatchObject({ state: 'crashed', exitCode: 17 });
+    await expect(session.authenticatedFetch('/v1/models')).rejects.toMatchObject({
+      code: 'runtime_stopped',
+    });
+  });
+
+  it('escalates only its owned child when graceful stop exceeds the deadline', async () => {
+    const paths = await directories();
+    const env = harness({ ignoreTerm: true });
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+
+    await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+    expect(env.child.kills).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('accepts only a single-link GGUF inside the model root with disjoint scratch', async () => {
+    const paths = await directories();
+    const outside = join(dirname(paths.modelRoot), 'outside.gguf');
+    await writeFile(outside, 'not a model');
+    const env = harness();
+
+    await expect(
+      env.supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath: outside,
+        modelAlias: 'a'.repeat(64),
+        backend: 'cpu',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+
+    const modelPath = join(paths.modelRoot, 'model.gguf');
+    const mmprojPath = join(paths.modelRoot, 'mmproj-model-f16.gguf');
+    await writeFile(modelPath, 'model');
+    await writeFile(mmprojPath, 'projector');
+    const imageEnv = harness();
+    const imageSession = await imageEnv.supervisor.start({
+      kind: 'model',
+      ...paths,
+      modelPath,
+      mmprojPath,
+      modelAlias: 'a'.repeat(64),
+      backend: 'cpu',
+      contextTokens: 4096,
+      batchSize: 512,
+      gpuLayers: 0,
+    });
+    expect(imageEnv.spawnArgs()).toEqual(
+      expect.arrayContaining(['--model', modelPath, '--mmproj', mmprojPath]),
+    );
+    imageEnv.child.stderr.write(`projector=${mmprojPath}\n`);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(imageSession.diagnostics()).not.toContain(mmprojPath);
+    await imageSession.stop();
+
+    const outsideProjector = join(dirname(paths.modelRoot), 'outside-mmproj.gguf');
+    await writeFile(outsideProjector, 'outside projector');
+    await expect(
+      harness().supervisor.start({
+        kind: 'model',
+        ...paths,
+        modelPath,
+        mmprojPath: outsideProjector,
+        modelAlias: 'a'.repeat(64),
+        backend: 'cpu',
+        contextTokens: 4096,
+        batchSize: 512,
+        gpuLayers: 0,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+
+    await expect(
+      env.supervisor.start({
+        kind: 'router_probe',
+        modelRoot: paths.modelRoot,
+        scratchRoot: paths.modelRoot,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_input' });
+  });
+
+  it('builds a minimal child environment without loader injection or inherited secrets', () => {
+    const environment = managedLocalEnvironment(
+      {
+        LANG: 'ja_JP.UTF-8',
+        PATH: '/untrusted',
+        LD_PRELOAD: '/attack.so',
+        DYLD_INSERT_LIBRARIES: '/attack.dylib',
+        SECRET_VALUE: 'secret',
+        SYSTEMROOT: 'C:\\Windows',
+      },
+      TOKEN,
+      '/private/scratch',
+    );
+
+    expect(environment).toEqual({
+      LANG: 'ja_JP.UTF-8',
+      SYSTEMROOT: 'C:\\Windows',
+      LLAMA_API_KEY: TOKEN,
+      LLAMA_CACHE: '/private/scratch',
+      TMP: '/private/scratch',
+      TEMP: '/private/scratch',
+      TMPDIR: '/private/scratch',
+    });
+  });
+
+  it('rejects escaped request paths without touching fetch', async () => {
+    const paths = await directories();
+    const env = harness();
+    const session = await env.supervisor.start({ kind: 'router_probe', ...paths });
+    const count = env.requests.length;
+
+    for (const path of ['https://example.com', '//example.com/path', '/../escape'])
+      await expect(session.authenticatedFetch(path)).rejects.toBeInstanceOf(
+        ManagedLocalRuntimeError,
+      );
+    expect(env.requests).toHaveLength(count);
+    await session.stop();
+  });
+
+  it.runIf(process.env['SPRINT_CODER_MANAGED_LOCAL_LIVE'] === '1')(
+    'starts the pinned real sidecar on an OS-assigned port and enforces the internal token',
+    async () => {
+      const target = managedLocalTargetKey();
+      if (target === null) throw new Error('Unsupported live Managed Local target');
+      const buildRoot = resolve(process.cwd(), 'managed-local', 'build');
+      const pins = JSON.parse(
+        await readFile(join(buildRoot, 'managed-local-sidecar-pins.json'), 'utf8'),
+      ) as Record<string, ManagedLocalSidecarPin>;
+      const pin = pins[target];
+      if (pin === undefined) throw new Error('Live Managed Local pin is unavailable');
+      const liveBundle = await verifyManagedLocalSidecarBundle(
+        join(buildRoot, 'managed-local', target),
+        pin,
+      );
+      const paths = await directories();
+      const startedAt = Date.now();
+      const observations: { phase: string; elapsedMs: number; status?: number }[] = [];
+      const observe = (phase: string, status?: number) => {
+        if (observations.length < 64)
+          observations.push({
+            phase,
+            elapsedMs: Date.now() - startedAt,
+            ...(status === undefined ? {} : { status }),
+          });
+      };
+      const supervisor = new ManagedLocalRuntimeSupervisor({
+        loadBundle: async () => liveBundle,
+        startupTimeoutMs: 60_000,
+        fetch: async (url, init) => {
+          const path = new URL(String(url)).pathname;
+          const phase = ['/props', '/health', '/v1/models'].includes(path) ? path : 'other';
+          observe(`${phase}:request`);
+          const response = await fetch(url, init);
+          observe(`${phase}:response`, response.status);
+          return response;
+        },
+      });
+      try {
+        observe('start');
+        const session = await supervisor.start(
+          { kind: 'router_probe', ...paths },
+          AbortSignal.timeout(60_000),
+        );
+        observe('running');
+        expect(session.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/v1$/u);
+        await expect(session.authenticatedFetch('/v1/models')).resolves.toMatchObject({
+          status: 200,
+        });
+        await expect(session.stop()).resolves.toMatchObject({ state: 'stopped' });
+        observe('stopped');
+      } finally {
+        supervisor.killNow();
+        console.info(
+          'Managed Local native probe',
+          JSON.stringify({ target, state: supervisor.snapshot()?.state, observations }),
+        );
+      }
+    },
+    90_000,
+  );
+});
+
+async function dflashInput(): Promise<Extract<ManagedLocalRuntimeStartInput, { kind: 'model' }>> {
+  const paths = await directories();
+  const modelsRoot = paths.modelRoot;
+  const targetId = 'a'.repeat(64);
+  const draftId = 'b'.repeat(64);
+  const modelRoot = join(modelsRoot, targetId);
+  const draftRoot = join(modelsRoot, draftId);
+  await mkdir(modelRoot);
+  await mkdir(draftRoot);
+  const modelPath = join(modelRoot, '001.gguf');
+  const draftPath = join(draftRoot, '001.gguf');
+  const u32 = (n: number) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32LE(n);
+    return b;
+  };
+  const u64 = (n: number) => {
+    const b = Buffer.alloc(8);
+    b.writeBigUInt64LE(BigInt(n));
+    return b;
+  };
+  const str = (s: string) => Buffer.concat([u64(Buffer.byteLength(s)), Buffer.from(s)]);
+  const metadata = (architecture: string) =>
+    Buffer.concat([
+      Buffer.from('GGUF'),
+      u32(3),
+      u64(0),
+      u64(2),
+      str('general.architecture'),
+      u32(8),
+      str(architecture),
+      str(`${architecture}.context_length`),
+      u32(4),
+      u32(32768),
+    ]);
+  await writeFile(modelPath, metadata('llama'));
+  await writeFile(draftPath, metadata('dflash'));
+  return {
+    kind: 'model',
+    modelsRoot,
+    modelRoot,
+    modelPath,
+    modelAlias: targetId,
+    baseModelId: 'owner/base',
+    scratchRoot: paths.scratchRoot,
+    backend: 'cpu',
+    gpuLayers: 0,
+    contextTokens: 1024,
+    batchSize: 512,
+    draft: {
+      id: draftId,
+      modelRoot: draftRoot,
+      modelPath: draftPath,
+      baseModelId: 'owner/base',
+      artifactHashes: ['c'.repeat(64)],
+      draftTokensMax: 3,
+    },
+  };
+}
