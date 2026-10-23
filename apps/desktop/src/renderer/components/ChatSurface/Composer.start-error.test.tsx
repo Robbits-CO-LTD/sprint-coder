@@ -46,6 +46,8 @@ async function send() {
 }
 
 it('shows the rejected start reason, preserves the draft, and clears the alert on retry', async () => {
+  const raw = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
+  useAppStore.setState({ draftByTask: { 'task-a': raw } });
   start
     .mockRejectedValueOnce(new Error(retiredMessage))
     .mockResolvedValueOnce({ turnId: 'turn-retry' });
@@ -53,11 +55,13 @@ it('shows the rejected start reason, preserves the draft, and clears the alert o
   expect(container.querySelector('[role="alert"]')).toBeNull();
   await send();
   expect(start).toHaveBeenCalledOnce();
+  expect(start).toHaveBeenNthCalledWith(1, expect.objectContaining({ text: raw }));
   expect(container.querySelector('[role="alert"]')?.textContent).toBe(retiredMessage);
-  expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe('保持する依頼');
+  expect(container.querySelector<HTMLTextAreaElement>('textarea')?.value).toBe(raw);
   expect(useAppStore.getState().messagesByTask['task-a']).toEqual([]);
   await send();
   expect(start).toHaveBeenCalledTimes(2);
+  expect(start).toHaveBeenNthCalledWith(2, expect.objectContaining({ text: raw }));
   expect(container.querySelector('[role="alert"]')).toBeNull();
 });
 
