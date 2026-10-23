@@ -375,6 +375,24 @@ describe('builtin Team skill', () => {
   });
 
   it.each([
+    ['担当を雇ってほしい、というわけではありません。自分で実装してください。', false],
+    ['担当を雇って欲しい,という意味ではありません。', false],
+    ['担当を雇ってください、というのは例文です。', false],
+    ['担当を雇って絵を描かせ、という話を読んだだけです。', false],
+    ['担当を雇って資料を作成して、結果を教えて、という意味ではありません。', false],
+    ['担当を雇ってほしい、まだ決めていません。', false],
+    ['担当を雇って、方法を教えて。', false],
+    ['担当を雇って絵を描かせ、結果を教えて。', true],
+    ['担当を雇って資料を作成して、実装方法を教えて。', true],
+    ['担当を雇っていただいて、資料を作成してください。', true],
+    ['担当を雇っていただいて、資料を作成してください、結果を教えて。', true],
+    ['担当を雇って、資料を作成してください、結果を報告してください。', true],
+  ])('requires affirmative continuations after every hiring comma: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it.each([
     ['次の引用文を添削してください。\n> 担当を雇ってください。', false],
     ['> 引用文です。\n担当を雇ってください。', false],
     ['> > 担当を雇ってください。', false],

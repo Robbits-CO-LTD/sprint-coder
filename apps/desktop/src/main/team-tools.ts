@@ -1355,6 +1355,7 @@ const TEAM_HIRING_FOLLOWING_OBJECT = new RegExp(
 const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION.source}`, 'i');
 const TEAM_HIRING_CAUSATIVE_ACTION =
   /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
+const TEAM_HIRING_FOLLOWUP_REQUEST = /^(?:教えて|説明して|報告して)(?:ください|ほしい)?$/;
 const TEAM_HIRING_REPORTED_REQUEST =
   /(?:と|って)[ \u3000]*(?:伝え(?:られ)?|言(?:い|っ|われ)|書(?:き|い)|頼(?:み|ん|まれ)|送っ|入力し|指示(?:し|され)|依頼(?:し|され))(?:ました|た|だ)/;
 const TEAM_HIRING_SENTENCES = new RegExp(
@@ -1418,23 +1419,28 @@ function isExplicitMemberHiringInput(input: string): boolean {
     [...sentence.matchAll(TEAM_EXPLICIT_MEMBER_HIRING)].some((match) => {
       const following = sentence.slice(match.index + match[0].length).trim();
       if (TEAM_HIRING_REPORTED_REQUEST.test(following)) return false;
-      const clause = (
-        following
-          .split(/[、,]/)
-          .find((part) => part.trim() !== '')
-          ?.trim() ?? ''
-      ).replace(/[。.!！]+$/, '');
-      if (TEAM_HIRING_IMMEDIATE_NEGATION.test(clause)) return false;
-      // Only affirmative request endings extend initial Team routing. Unknown continuations,
-      // descriptions and ability questions do not become execution by default.
-      return (
-        clause === '' ||
-        TEAM_HIRING_DIRECT_REQUEST.test(clause) ||
-        [clause, hiringActionAfterObject(clause)].some(
-          (action) =>
-            TEAM_HIRING_FOLLOWING_ACTION.test(action) || TEAM_HIRING_CAUSATIVE_ACTION.test(action),
-        )
-      );
+      const clauses = following
+        .replace(/[。.!！]+$/, '')
+        .split(/[、,]/)
+        .map((part) => part.trim())
+        .filter((part) => part !== '');
+      // A comma does not complete a request. Every continuation must itself be affirmative;
+      // otherwise 「ほしい、というわけではありません」 would be truncated into an instruction.
+      return clauses.every((clause, index) => {
+        if (TEAM_HIRING_IMMEDIATE_NEGATION.test(clause)) return false;
+        if (index === 0 && TEAM_HIRING_DIRECT_REQUEST.test(clause)) return true;
+        const actionAfterObject = hiringActionAfterObject(clause);
+        return (
+          [clause, actionAfterObject].some(
+            (action) =>
+              TEAM_HIRING_FOLLOWING_ACTION.test(action) ||
+              TEAM_HIRING_CAUSATIVE_ACTION.test(action),
+          ) ||
+          (index > 0 &&
+            actionAfterObject !== clause &&
+            TEAM_HIRING_FOLLOWUP_REQUEST.test(actionAfterObject))
+        );
+      });
     }),
   );
 }
