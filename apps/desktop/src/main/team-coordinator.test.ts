@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import {
   assertShardReport,
@@ -101,6 +101,14 @@ function removeTemporaryDirectory(
     throw error;
   }
 }
+
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'sprint-coder-team-git-home-'));
+  cleanup.push(home);
+  writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -4608,8 +4616,8 @@ if (runsWithElectronAbi)
       const manager = new WorkerWorktreeManager({
         worktreesRoot,
         execFileImpl: async (file, args, options) => {
-          // The config probe that runs before each command is not counted.
-          if (counting && !args.includes('--list'))
+          // Configuration probes that run before each command are not counted.
+          if (counting && args[args.indexOf('-C') + 2] !== 'config')
             commands.push(args[args.indexOf('-C') + 2] ?? '');
           const result = await promisify(execFile)(file, [...args], {
             env: options.env,

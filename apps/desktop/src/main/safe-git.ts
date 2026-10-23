@@ -1,4 +1,7 @@
 import { execFile, execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export type SafeGitResult = Readonly<{ stdout: string; stderr: string }>;
 
@@ -18,6 +21,17 @@ const FILTER_CONFIG_KEY = /^filter\.(.+)\.(?:clean|smudge|process|required)$/iu;
 const MERGE_DRIVER_CONFIG_KEY = /^merge\.(.+)\.driver$/iu;
 const SAFE_CONFIG_SUBSECTION = /^[a-zA-Z0-9._-]+$/u;
 const CONFIG_LIST_ARGS = ['config', '--no-includes', '--name-only', '--list'] as const;
+const AUTOCRLF_CONFIG_ARGS = [
+  'config',
+  '--no-includes',
+  '--show-scope',
+  '--null',
+  '--type=bool-or-str',
+  '--get-all',
+  'core.autocrlf',
+] as const;
+type Autocrlf = 'true' | 'false' | 'input';
+const AUTOCRLF_CONFIG_ERROR = 'Unable to read Git line-ending configuration';
 const ALLOWED_COMMANDS = new Set([
   'add',
   'branch',
@@ -133,12 +147,28 @@ export async function safeGitExec(
 ): Promise<SafeGitResult> {
   const env = safeGitEnvironment(options.env);
   const config = await exec('git', configProbeArgs(cwd), { env, timeout: options.timeout });
-  return exec('git', safeGitInvocationArgs(cwd, command, config.stdout), {
-    env,
-    timeout: options.timeout,
-    // Only a caller that reads a long listing widens the default buffer.
-    ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
-  });
+  const args = safeGitInvocationArgs(cwd, command, config.stdout);
+  const autocrlf = await exec(
+    'git',
+    configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS),
+    autocrlfProbeOptions(options),
+  ).then(
+    ({ stdout }) => hostAutocrlfConfig(stdout),
+    () => null,
+  );
+  if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  try {
+    return await exec('git', args, {
+      env: isolated.env,
+      timeout: options.timeout,
+      // Only a caller that reads a long listing widens the default buffer.
+      ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+    });
+  } finally {
+    isolated.dispose();
+  }
 }
 
 export function safeGitExecFileSync(
@@ -155,7 +185,28 @@ export function safeGitExecFileSync(
     env,
   };
   const config = execFileSync('git', configProbeArgs(cwd), common);
-  return execFileSync('git', safeGitInvocationArgs(cwd, command, config), common);
+  const args = safeGitInvocationArgs(cwd, command, config);
+  let autocrlf: Autocrlf | null;
+  try {
+    autocrlf = hostAutocrlfConfig(
+      execFileSync('git', configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS), {
+        encoding: 'utf8',
+        stdio: 'pipe',
+        windowsHide: true,
+        ...autocrlfProbeOptions(options),
+      }),
+    );
+  } catch {
+    throw new Error(AUTOCRLF_CONFIG_ERROR);
+  }
+  if (autocrlf === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
+  try {
+    return execFileSync('git', args, { ...common, env: isolated.env });
+  } finally {
+    isolated.dispose();
+  }
 }
 
 export function safeGitSpawnSync(
@@ -173,7 +224,22 @@ export function safeGitSpawnSync(
   };
   const config = spawnSync('git', configProbeArgs(cwd), common);
   if (config.error !== undefined || config.status !== 0) return null;
-  return spawnSync('git', safeGitInvocationArgs(cwd, command, config.stdout), common);
+  const args = safeGitInvocationArgs(cwd, command, config.stdout);
+  const policy = spawnSync('git', configProbeArgs(cwd, AUTOCRLF_CONFIG_ARGS), {
+    encoding: 'utf8',
+    windowsHide: true,
+    ...autocrlfProbeOptions(options),
+  });
+  if (policy.error !== undefined || policy.status !== 0) return null;
+  const autocrlf = hostAutocrlfConfig(policy.stdout);
+  if (autocrlf === null) return null;
+  const isolated = createAutocrlfEnvironment(env, autocrlf);
+  if (isolated === null) return null;
+  try {
+    return spawnSync('git', args, { ...common, env: isolated.env });
+  } finally {
+    isolated.dispose();
+  }
 }
 
 export function safeGitExecFile(
@@ -189,7 +255,7 @@ export function safeGitExecFile(
         {
           env: invocationOptions.env,
           timeout: invocationOptions.timeout,
-          maxBuffer: options.maxBuffer,
+          maxBuffer: invocationOptions.maxBuffer,
           windowsHide: true,
         },
         (error, stdout, stderr) => {
@@ -204,7 +270,62 @@ export function safeGitExecFile(
   );
 }
 
-function configProbeArgs(cwd: string): string[] {
+// Read only the conversion policy from host configuration. Actual Git commands still use
+// the isolated environment; hooks, filters and other host settings never cross this boundary.
+function autocrlfProbeOptions(options: SafeGitOptions) {
+  const source = options.env ?? process.env;
+  const env = safeGitEnvironment(source);
+  delete env['GIT_CONFIG_GLOBAL'];
+  delete env['GIT_CONFIG_SYSTEM'];
+  // Git for Windows derives HOME from these when HOME is absent. XDG may name a user config
+  // elsewhere on any OS. Preserve locations only, never environment-injected Git config.
+  for (const key of ['XDG_CONFIG_HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH'])
+    if (source[key] !== undefined) env[key] = source[key];
+  return { env, timeout: options.timeout, maxBuffer: 1_024 };
+}
+
+function hostAutocrlfConfig(output: string): Autocrlf | null {
+  const fields = output.toLowerCase().split('\0');
+  if (fields.pop() !== '' || fields.length % 2 !== 0) return null;
+  // --get-all has no --default. A probe-only command value guarantees a result, but must
+  // never become the host policy or reach a child Git as an inherited command override.
+  if (fields.at(-2) !== 'command' || fields.at(-1) !== 'false') return null;
+  let policy: Autocrlf = 'false';
+  for (let index = 0; index < fields.length; index += 2) {
+    const scope = fields[index];
+    const value = fields[index + 1];
+    if (value !== 'true' && value !== 'false' && value !== 'input') return null;
+    if (scope === 'system' || scope === 'global') policy = value;
+    else if (scope !== 'local' && scope !== 'worktree' && scope !== 'command') return null;
+  }
+  return policy;
+}
+
+function createAutocrlfEnvironment(env: NodeJS.ProcessEnv, policy: Autocrlf) {
+  let directory: string | undefined;
+  const dispose = () => {
+    if (directory === undefined) return;
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // This private file holds only an enum. Cleanup must not replace the result of a
+      // completed commit or other mutating command with a transient filesystem error.
+    }
+  };
+  try {
+    directory = mkdtempSync(join(tmpdir(), 'sprint-coder-git-config-'));
+    const config = join(directory, 'config');
+    // A low-priority host fallback lets every repository, including submodules, apply its
+    // own local/worktree policy. Only this enum crosses from host configuration.
+    writeFileSync(config, `[core]\n autocrlf = ${policy}\n`, { flag: 'wx', mode: 0o600 });
+    return { env: { ...env, GIT_CONFIG_GLOBAL: config }, dispose };
+  } catch {
+    dispose();
+    return null;
+  }
+}
+
+function configProbeArgs(cwd: string, query: readonly string[] = CONFIG_LIST_ARGS): string[] {
   return [
     '--no-pager',
     '-c',
@@ -215,9 +336,10 @@ function configProbeArgs(cwd: string): string[] {
     'core.pager=cat',
     '-c',
     'core.attributesFile=',
+    ...(query === AUTOCRLF_CONFIG_ARGS ? ['-c', 'core.autocrlf=false'] : []),
     '-C',
     cwd,
-    ...CONFIG_LIST_ARGS,
+    ...query,
   ];
 }
 

@@ -121,6 +121,15 @@ const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 60_000;
 // exact wall first and answered it with 180 s for every platform; a suite of the same measured
 // cost gets the same allowance. Windows keeps its own larger measured budget.
 const graphBridgeTimeout = process.platform === 'win32' ? 300_000 : 180_000;
+// These Graph persistence fixtures assert LF bytes after checkout and integration. Give each
+// repository (including secondary Project roots) that policy without changing the host config.
+function initLfRepository(workspace: string): void {
+  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  expect(
+    spawnSync('git', ['-C', workspace, 'config', '--local', 'core.autocrlf', 'false']).status,
+  ).toBe(0);
+}
+
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
@@ -380,8 +389,8 @@ async function retiredWorkspaceFixture(mode: 'graph' | 'sequential') {
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
   writeFileSync(join(workspace, 'shared.ts'), 'base\n');
+  initLfRepository(workspace);
   for (const args of [
-    ['init', '-q', workspace],
     ['-C', workspace, 'add', 'shared.ts'],
     [
       '-C',
@@ -529,7 +538,7 @@ async function retainedWriteFixture(independent = false) {
   }
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
-  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  initLfRepository(workspace);
   writeFileSync(join(workspace, 'shared.ts'), 'base\n');
   expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
   expect(
@@ -1030,8 +1039,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         const workspace = join(dirname(f.path), 'workspace');
         mkdirSync(workspace);
         writeFileSync(join(workspace, 'a.ts'), 'before\n');
+        initLfRepository(workspace);
         for (const args of [
-          ['init', '-q', workspace],
           ['-C', workspace, 'add', 'a.ts'],
           [
             '-C',
@@ -1250,8 +1259,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       mkdirSync(workspace);
       writeFileSync(join(workspace, 'a.ts'), 'before\n');
       writeFileSync(join(workspace, 'b.ts'), 'before\n');
+      initLfRepository(workspace);
       for (const args of [
-        ['init', '-q', workspace],
         ['-C', workspace, 'add', 'a.ts', 'b.ts'],
         [
           '-C',
@@ -1513,8 +1522,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         const workspace = join(dirname(f.path), 'workspace');
         mkdirSync(workspace);
         writeFileSync(join(workspace, 'b.ts'), 'before\n');
+        initLfRepository(workspace);
         for (const args of [
-          ['init', '-q', workspace],
           ['-C', workspace, 'add', 'b.ts'],
           [
             '-C',
@@ -3633,7 +3642,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         mkdirSync(join(workspace, 'allowed'), { recursive: true });
         writeFileSync(join(workspace, 'outside.ts'), 'outside\n');
         writeFileSync(join(workspace, 'allowed/original.ts'), 'inside\n');
-        expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+        initLfRepository(workspace);
         expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
         expect(
           spawnSync('git', [
@@ -3733,7 +3742,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           mkdirSync(join(root, 'allowed'), { recursive: true });
           writeFileSync(join(root, 'allowed/file.ts'), 'base\n');
           writeFileSync(join(root, 'outside.ts'), 'outside\n');
-          expect(spawnSync('git', ['init', '-q', root]).status).toBe(0);
+          initLfRepository(root);
           expect(spawnSync('git', ['-C', root, 'add', '.']).status).toBe(0);
           expect(
             spawnSync('git', [
@@ -4128,7 +4137,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       const f = fixture(undefined, true);
       const workspace = join(dirname(f.path), 'workspace');
       mkdirSync(workspace);
-      expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+      initLfRepository(workspace);
       writeFileSync(join(workspace, 'shared.ts'), 'base\n');
       expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
       expect(
