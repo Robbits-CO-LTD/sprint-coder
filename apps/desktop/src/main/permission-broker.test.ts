@@ -1,7 +1,7 @@
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   expandAccessPreset,
   type CapabilityCeiling,
@@ -75,7 +75,10 @@ afterAll(async () => {
   await rm(testRoot, { recursive: true, force: true });
 });
 
-function fixture(notify?: () => void, revokedCapabilities: Capability[] = []) {
+function fixture(
+  notify?: (taskId: string, epoch: number) => void | Promise<void>,
+  revokedCapabilities: Capability[] = [],
+) {
   const events: string[] = [];
   let policy: PermissionPolicyRecord = {
     preset: 'auto',
@@ -170,8 +173,8 @@ function fixture(notify?: () => void, revokedCapabilities: Capability[] = []) {
     },
   };
   const broker = new PermissionBroker(persistence, {
-    policyEpochChanged: () => {
-      notify?.();
+    policyEpochChanged: async (taskId, epoch) => {
+      await notify?.(taskId, epoch);
       events.push('subjects-stopped');
     },
   });
@@ -745,6 +748,84 @@ describe('Main PermissionBroker', () => {
       expect(result).toMatchObject({ decision: 'deny', reason: 'capability_revoked' });
     },
   );
+
+  it('keeps a committed permission change pending until command cleanup is confirmed', async () => {
+    let confirm = (): void => undefined;
+    const cleanup = new Promise<void>((resolve) => {
+      confirm = resolve;
+    });
+    const { broker, pending, events } = fixture(() => cleanup);
+    let returned = false;
+    const change = broker.setAccessPreset('task-1', 'ask', 2).then(() => {
+      returned = true;
+    });
+    await Promise.resolve();
+    expect(broker.getPolicy('task-1')).toMatchObject({ preset: 'ask', policyEpoch: 3 });
+    expect(pending).toHaveLength(1);
+    expect(events).toEqual(['committed']);
+    expect(returned).toBe(false);
+    confirm();
+    await change;
+    expect(pending).toHaveLength(0);
+    expect(events).toEqual(['committed', 'subjects-stopped']);
+  });
+
+  it('drains an epoch committed while a previous cleanup is still running', async () => {
+    let confirmFirst = (): void => undefined;
+    let confirmSecond = (): void => undefined;
+    const firstCleanup = new Promise<void>((resolve) => {
+      confirmFirst = resolve;
+    });
+    const secondCleanup = new Promise<void>((resolve) => {
+      confirmSecond = resolve;
+    });
+    const notify = vi
+      .fn()
+      .mockImplementationOnce(() => firstCleanup)
+      .mockImplementationOnce(() => secondCleanup);
+    const { broker, pending } = fixture(notify);
+    const first = broker.setAccessPreset('task-1', 'ask', 2);
+    let secondReturned = false;
+    const second = broker.setAccessPreset('task-1', 'auto', 3).then(() => {
+      secondReturned = true;
+    });
+    expect(pending).toHaveLength(2);
+    confirmFirst();
+    await first;
+    await vi.waitFor(() => expect(notify).toHaveBeenCalledTimes(2));
+    expect(secondReturned).toBe(false);
+    expect(pending).toHaveLength(1);
+    confirmSecond();
+    await second;
+    expect(pending).toHaveLength(0);
+  });
+
+  it('delivers other Tasks after one Task fails and scopes retries to the caller', async () => {
+    const notify = vi.fn(async (taskId: string) => {
+      if (taskId === 'failed-task') throw new Error('unconfirmed');
+    });
+    const { broker, pending } = fixture(notify);
+    pending.push(
+      { id: 'failed', taskId: 'failed-task', policyEpoch: 1 },
+      { id: 'good', taskId: 'good-task', policyEpoch: 2 },
+    );
+    await expect(broker.drainPolicyEpochOutbox()).rejects.toThrow('Permission cleanup incomplete');
+    expect(pending.map((entry) => entry.id)).toEqual(['failed']);
+    expect(notify).toHaveBeenCalledWith('good-task', 2);
+    notify.mockClear();
+    await expect(broker.drainPolicyEpochOutbox('good-task')).resolves.toBeUndefined();
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it('coalesces old pending rows at the current policy epoch', async () => {
+    const notify = vi.fn();
+    const { broker, pending } = fixture(notify);
+    pending.push({ id: 'old', taskId: 'task-1', policyEpoch: 1 });
+    await broker.setAccessPreset('task-1', 'ask', 2);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify).toHaveBeenCalledWith('task-1', 3);
+    expect(pending).toHaveLength(0);
+  });
 
   it('keeps an epoch notification durable when delivery fails and retries it later', async () => {
     let fail = true;

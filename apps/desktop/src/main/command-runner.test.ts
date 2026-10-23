@@ -1061,11 +1061,13 @@ describe('CommandRunner', () => {
         cwd: '.',
       });
       const runner = new CommandRunner({ cancelGraceMs: 30 });
+      const ownershipReleased = vi.fn();
       let descendantPid: number | undefined;
       let processGroupId: number | undefined;
 
       try {
         const result = await runner.run(spec, {
+          onOwnershipReleased: ownershipReleased,
           onStarted: ({ pid }) => {
             processGroupId = pid;
           },
@@ -1080,6 +1082,7 @@ describe('CommandRunner', () => {
         await expectProcessDead(descendantPid);
         await expectProcessGroupDead(processGroupId);
         expect(runner.activeCount).toBe(0);
+        expect(ownershipReleased).toHaveBeenCalledOnce();
         await expect(runner.dispose()).resolves.toBeUndefined();
       } finally {
         if (descendantPid !== undefined) killProcessIfAlive(descendantPid);

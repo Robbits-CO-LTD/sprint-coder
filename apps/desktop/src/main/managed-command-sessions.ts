@@ -87,9 +87,14 @@ export class ManagedCommandSessions {
     const abortFromCaller = (): void => session.controller.abort(hooks.signal?.reason);
     hooks.signal?.addEventListener('abort', abortFromCaller, { once: true });
     if (hooks.signal?.aborted) abortFromCaller();
+    let ownershipReleased = false;
     session.completion = this.runner
       .run(spec, {
         signal: session.controller.signal,
+        onOwnershipReleased: () => {
+          ownershipReleased = true;
+          session.terminationUnconfirmed = false;
+        },
         ...(hooks.beforeSpawn === undefined ? {} : { beforeSpawn: hooks.beforeSpawn }),
         onStarted: (startedProcess) => {
           const { executionId } = startedProcess;
@@ -115,7 +120,9 @@ export class ManagedCommandSessions {
       .catch((error: unknown) => {
         session.state = 'failed';
         session.terminationUnconfirmed =
-          error instanceof CommandRunnerError && error.code === 'PROCESS_TREE_TERMINATION_FAILED';
+          !ownershipReleased &&
+          error instanceof CommandRunnerError &&
+          error.code === 'PROCESS_TREE_TERMINATION_FAILED';
         session.error = error instanceof Error ? error.message : 'Command failed';
       })
       .finally(() => {
@@ -262,13 +269,25 @@ export class ManagedCommandSessions {
   }
 
   async terminateTask(taskId: string): Promise<void> {
+    await this.beginTaskTermination(taskId)();
+  }
+
+  beginTaskTermination(taskId: string): () => Promise<void> {
     const owned = [...this.sessions.values()].filter(
       (session) =>
-        session.taskId === taskId && (session.state === 'starting' || session.state === 'running'),
+        session.taskId === taskId &&
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
     );
     for (const session of owned)
-      session.controller.abort(new Error('Managed command permission epoch changed'));
-    await Promise.allSettled(owned.map(({ completion }) => completion));
+      if (session.state === 'starting' || session.state === 'running')
+        session.controller.abort(new Error('Managed command permission epoch changed'));
+    return async () => {
+      await Promise.allSettled(owned.map(({ completion }) => completion));
+      if (owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed))
+        throw new Error('Managed command Task cancellation could not be confirmed');
+    };
   }
 
   private snapshot(session: Session, afterSeq: number): ManagedCommandSnapshot {
