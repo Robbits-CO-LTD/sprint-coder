@@ -523,9 +523,7 @@ describe('release artifacts', () => {
       /release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u,
     );
     expect(ciWorkflow).toContain('npx electron-forge package --platform=win32 --arch=x64');
-    expect(ciWorkflow).toContain(
-      'npx electron-forge make --skip-package --platform=win32 --arch=x64',
-    );
+    expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
     expect(macPackageJob).toContain("if: needs.classify.outputs.full_matrix == 'true'");
     expect(requiredJob).toContain('package-macos,');

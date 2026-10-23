@@ -385,7 +385,7 @@ describe('CI scope wiring', () => {
         (step) => step.run === 'npx electron-forge package --platform=win32 --arch=x64',
       ),
     ).toBe(true);
-    for (const id of ['package-windows', 'archify-packaged']) {
+    for (const id of ['archify-packaged']) {
       const job = workflow.jobs[id];
       expect(job.needs).toEqual(['classify', 'package-windows-build']);
       const download = job.steps.find((step) =>
@@ -399,10 +399,13 @@ describe('CI scope wiring', () => {
       );
     }
     const installer = workflow.jobs['package-windows'].steps;
-    expect(installer.some((step) => step.run?.includes('make --skip-package'))).toBe(true);
+    expect(workflow.jobs['package-windows'].needs).toBe('classify');
     expect(
-      installer.some((step) => step.run === 'npm run build:managed-local-sidecar -- win32-x64'),
+      installer.some((step) => step.run === 'npx electron-forge make --platform=win32 --arch=x64'),
     ).toBe(true);
+    expect(installer.some((step) => step.uses?.startsWith('actions/download-artifact@'))).toBe(
+      false,
+    );
     expect(
       workflow.jobs['archify-packaged'].steps.some((step) => step.run?.includes('electron-forge')),
     ).toBe(false);
