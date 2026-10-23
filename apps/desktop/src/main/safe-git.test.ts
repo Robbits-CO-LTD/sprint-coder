@@ -2,12 +2,21 @@ import { spawnSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { safeGitEnvironment, safeGitExecFileSync, safeGitInvocationArgs } from './safe-git';
 
 const cleanup: string[] = [];
 
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'sprint-coder-safe-git-home-'));
+  cleanup.push(home);
+  writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+});
+
 afterEach(async () => {
+  vi.unstubAllEnvs();
   const { rm } = await import('node:fs/promises');
   await Promise.all(cleanup.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });

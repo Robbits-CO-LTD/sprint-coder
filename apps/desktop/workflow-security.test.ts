@@ -8,6 +8,7 @@ const workflowFiles = [
   '.github/workflows/computer-use-evidence-harness.yml',
   '.github/workflows/ci.yml',
   '.github/actions/install-deps/action.yml',
+  '.github/actions/install-electron/action.yml',
   '.github/actions/prepare-sandbox/action.yml',
   '.github/workflows/release-beta.yml',
   '.github/workflows/computer-use-acceptance-build.yml',

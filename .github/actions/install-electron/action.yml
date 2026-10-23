@@ -1,0 +1,19 @@
+name: Install verified Electron binary
+description: Reuse Electron download archives and retry only transient download failures.
+runs:
+  using: composite
+  steps:
+    - name: Resolve Electron download cache
+      id: electron
+      shell: bash
+      run: node ci-install-electron.mjs cache >> "$GITHUB_OUTPUT"
+    - name: Restore Electron download archive
+      uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
+      with:
+        path: ${{ steps.electron.outputs.path }}
+        key: ${{ steps.electron.outputs.key }}
+    - name: Install Electron with bounded download retries
+      shell: bash
+      env:
+        electron_config_cache: ${{ steps.electron.outputs.path }}
+      run: node ci-install-electron.mjs

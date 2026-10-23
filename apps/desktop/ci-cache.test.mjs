@@ -304,6 +304,7 @@ describe('CI scope wiring', () => {
 
   it.each([
     ['README.md', ['classify', 'required']],
+    ['website/index.html', ['classify', 'website', 'required']],
     [
       'apps/desktop/src/renderer/lib/format.ts',
       ['classify', 'quality', 'renderer-tests', 'required'],
@@ -317,6 +318,7 @@ describe('CI scope wiring', () => {
     const outputs = {
       mode: scope.mode,
       full_matrix: String(scope.fullMatrix),
+      website_required: String(scope.websiteRequired),
       e2e_specs: JSON.stringify(scope.e2eSpecs),
     };
     const selected = Object.entries(workflow.jobs)
@@ -336,6 +338,50 @@ describe('CI scope wiring', () => {
       workflow.jobs.required.needs.map((id) => [id, selected.includes(id) ? 'success' : 'skipped']),
     );
     expect(() => verifyRequiredJobs(scope, results)).not.toThrow();
+  });
+
+  it('waits for every job and rejects failures of required package and website checks', () => {
+    expect([...workflow.jobs.required.needs].sort()).toEqual(
+      Object.keys(workflow.jobs)
+        .filter((id) => id !== 'required')
+        .sort(),
+    );
+    const scope = classifyChanges([], { eventName: 'workflow_dispatch' });
+    const results = Object.fromEntries(workflow.jobs.required.needs.map((id) => [id, 'success']));
+    for (const job of ['package-windows-build', 'website']) {
+      for (const value of ['failure', 'cancelled', 'skipped', undefined])
+        expect(() => verifyRequiredJobs(scope, { ...results, [job]: value })).toThrow(job);
+    }
+    const producer = workflow.jobs['package-windows-build'];
+    expect(
+      producer.steps.some(
+        (step) => step.run === 'npx electron-forge package --platform=win32 --arch=x64',
+      ),
+    ).toBe(true);
+    for (const id of ['archify-packaged']) {
+      const job = workflow.jobs[id];
+      expect(job.needs).toEqual(['classify', 'package-windows-build']);
+      const download = job.steps.find((step) =>
+        step.uses?.startsWith('actions/download-artifact@'),
+      );
+      expect(download.with.name).toBe('${{ needs.package-windows-build.outputs.artifact }}');
+      expect(download.with['run-id']).toBeUndefined();
+      const restore = job.steps.find((step) => step.run === 'node ci-windows-package.mjs restore');
+      expect(restore.env.CI_WINDOWS_PACKAGE_SHA256).toBe(
+        '${{ needs.package-windows-build.outputs.archive_sha256 }}',
+      );
+    }
+    const installer = workflow.jobs['package-windows'].steps;
+    expect(workflow.jobs['package-windows'].needs).toBe('classify');
+    expect(
+      installer.some((step) => step.run === 'npx electron-forge make --platform=win32 --arch=x64'),
+    ).toBe(true);
+    expect(installer.some((step) => step.uses?.startsWith('actions/download-artifact@'))).toBe(
+      false,
+    );
+    expect(
+      workflow.jobs['archify-packaged'].steps.some((step) => step.run?.includes('electron-forge')),
+    ).toBe(false);
   });
 });
 
