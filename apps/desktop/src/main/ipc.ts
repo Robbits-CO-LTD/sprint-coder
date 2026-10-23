@@ -1250,6 +1250,10 @@ export class IpcRouter {
   // generated-image-collector.ts for why).
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly policyCleanupsByTask = new Map<
+    string,
+    { epoch: number; confirm: () => Promise<void> }
+  >();
   private readonly graphSourceMonitor: GraphSourceMonitor;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly managedCodingHarness: ManagedCodingHarness;
@@ -1804,16 +1808,7 @@ export class IpcRouter {
       },
     });
     this.permissionBroker = new PermissionBroker(persistence, {
-      policyEpochChanged: (taskId, policyEpoch) => {
-        this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
-        this.computerUseController.policyEpochChanged(taskId);
-        void this.managedCodingHarness.policyEpochChanged(taskId);
-        this.persistence.quarantineBackgroundForPolicyEpoch(
-          taskId,
-          policyEpoch,
-          new Date().toISOString(),
-        );
-      },
+      policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
     });
     this.managedCodingHarness = new ManagedCodingHarness({
       workspaceFor: (taskId, turnId, callId) =>
@@ -3772,7 +3767,10 @@ export class IpcRouter {
           preset: AccessPreset;
           policyEpoch: number;
         }>(principal, input.taskId, IPC_CHANNELS.permissionsSet, envelope.operationId, hash);
-        if (cached.found) return cached.value!;
+        if (cached.found) {
+          await this.confirmPermissionCleanup(input.taskId);
+          return cached.value!;
+        }
         const current = this.permissionBroker.getPolicy(input.taskId);
         if (current.policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
@@ -3808,8 +3806,8 @@ export class IpcRouter {
             return { preset: policy.preset, policyEpoch: policy.policyEpoch };
           },
         );
-        await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
         this.graphSourceMonitor.invalidate(input.taskId);
+        await this.confirmPermissionCleanup(input.taskId);
         return value;
       },
     );
@@ -4917,6 +4915,35 @@ export class IpcRouter {
     });
   }
 
+  private async policyEpochChanged(taskId: string, policyEpoch: number): Promise<void> {
+    let cleanup = this.policyCleanupsByTask.get(taskId);
+    if (cleanup === undefined || cleanup.epoch < policyEpoch) {
+      this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+      this.computerUseController.policyEpochChanged(taskId);
+      this.persistence.quarantineBackgroundForPolicyEpoch(
+        taskId,
+        policyEpoch,
+        new Date().toISOString(),
+      );
+      cleanup = {
+        epoch: policyEpoch,
+        confirm: this.managedCodingHarness.beginPolicyEpochChange(taskId),
+      };
+      this.policyCleanupsByTask.set(taskId, cleanup);
+    }
+    await cleanup.confirm();
+    // Keep the epoch marker without retaining completed command sessions and their output.
+    cleanup.confirm = () => Promise.resolve();
+  }
+
+  private async confirmPermissionCleanup(taskId: string): Promise<void> {
+    try {
+      await this.permissionBroker.drainPolicyEpochOutbox(taskId);
+    } catch {
+      throw new PermissionCleanupIncompleteError();
+    }
+  }
+
   async initialize(): Promise<void> {
     this.teamCoordinator.recoverOnStartup();
     try {
@@ -5290,6 +5317,7 @@ export class IpcRouter {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamDetailStream.clear();
+    this.policyCleanupsByTask.clear();
     this.approvalCoordinator.dispose();
     await this.managedCodingHarness.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
@@ -10353,6 +10381,7 @@ class InvalidEffortError extends Error {
   }
 }
 class StalePermissionPolicyError extends Error {}
+class PermissionCleanupIncompleteError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
 class SteerUnsupportedError extends Error {}
 
@@ -11096,6 +11125,13 @@ export function toPublicError(error: unknown): PublicError {
       code: 'INVALID_REQUEST',
       userMessage: `選択したEffortは${error.modelDisplayName}では利用できません。`,
       retryable: false,
+    };
+  if (error instanceof PermissionCleanupIncompleteError)
+    return {
+      code: 'OPERATION_IN_PROGRESS',
+      userMessage:
+        '権限の変更は保存されましたが、保留中のコマンドの停止を確認できません。実行状態を確認してください。',
+      retryable: true,
     };
   if (error instanceof StalePermissionPolicyError)
     return {
