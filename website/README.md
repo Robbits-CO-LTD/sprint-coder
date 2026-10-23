@@ -16,6 +16,13 @@ python3 -m http.server 4174 --directory website
 
 Open <http://127.0.0.1:4174/>. There is no build step and no dependency.
 
+## Deploy
+
+Merging a change under `website/` into `main` publishes it automatically within
+about five minutes: a timer on the web server pulls `main`, checks the files and
+switches the site (see `deploy/website/README.md`). There is nothing to upload
+by hand.
+
 ## How the homepage works
 
 The homepage is a scroll-driven "film" built from **real recordings of the app**.
