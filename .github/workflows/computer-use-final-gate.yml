@@ -234,7 +234,7 @@ jobs:
           })
           if ($links.Count -ne 0) { throw 'Windows package artifact must not contain reparse points.' }
           $portable = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-win32-x64-*.zip')
-          $installer = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-Installer.exe')
+          $installer = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-Installer-*.exe')
           if ($portable.Count -ne 1) { throw "Expected one signed portable ZIP, found $($portable.Count)." }
           if ($installer.Count -ne 1) { throw "Expected one signed installer, found $($installer.Count)." }
           foreach ($path in @($portable[0].FullName, $installer[0].FullName)) {
@@ -300,7 +300,7 @@ jobs:
           if ($links.Count -ne 0) { throw 'Windows package artifact must not contain reparse points.' }
 
           $portable = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-win32-x64-*.zip')
-          $installer = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-Installer.exe')
+          $installer = @(Get-ChildItem -LiteralPath $env:INPUT_ROOT -Recurse -File -Filter 'Sprint-Coder-Installer-*.exe')
           if ($portable.Count -ne 1) { throw "Expected one signed portable ZIP, found $($portable.Count)." }
           if ($installer.Count -ne 1) { throw "Expected one signed installer, found $($installer.Count)." }
 

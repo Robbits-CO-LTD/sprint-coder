@@ -117,8 +117,9 @@ try {
     throw "Could not resolve the Squirrel package version for $version."
   }
   $nupkgName = "SprintCoder-$($nugetVersion.Trim())-full.nupkg"
+  $installerName = "Sprint-Coder-Installer-$version.exe"
   $makeRoot = Join-Path $repositoryRoot 'apps\desktop\out\make'
-  $installer = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Installer.exe'
+  $installer = Join-Path $makeRoot "squirrel.windows\x64\$installerName"
   $releasesFile = Join-Path $makeRoot 'squirrel.windows\x64\RELEASES'
   $nupkg = Join-Path $makeRoot "squirrel.windows\x64\$nupkgName"
   $portableZip = Join-Path $makeRoot "zip\win32\x64\Sprint Coder-win32-x64-$version.zip"
@@ -143,7 +144,7 @@ try {
   $stagingDirectory = Join-Path ([IO.Path]::GetTempPath()) "sprint-coder-release-$version-$([guid]::NewGuid().ToString('N'))"
   New-Item -ItemType Directory -Path $stagingDirectory | Out-Null
   try {
-    $stagedInstaller = Join-Path $stagingDirectory 'Sprint-Coder-Installer.exe'
+    $stagedInstaller = Join-Path $stagingDirectory $installerName
     $stagedReleases = Join-Path $stagingDirectory 'RELEASES'
     $stagedNupkg = Join-Path $stagingDirectory $nupkgName
     $stagedPortableZip = Join-Path $stagingDirectory "Sprint-Coder-win32-x64-$version.zip"
@@ -159,7 +160,7 @@ try {
     $release = $releaseJson | ConvertFrom-Json
     Assert-ReleaseState $release $headCommit
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
+    foreach ($expected in @($installerName, "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
       if ($assetNames -contains $expected) {
         throw "Release asset already exists and will not be overwritten: $expected"
       }
@@ -177,7 +178,7 @@ try {
     $release = $releaseJson | ConvertFrom-Json
     Assert-ReleaseState $release $headCommit
     $assetNames = @($release.assets | ForEach-Object { [string]$_.name })
-    foreach ($expected in @('Sprint-Coder-Installer.exe', "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
+    foreach ($expected in @($installerName, "Sprint-Coder-win32-x64-$version.zip", $nupkgName, 'RELEASES')) {
       if ($assetNames -notcontains $expected) { throw "Uploaded asset was not found on GitHub: $expected" }
     }
 
@@ -194,7 +195,7 @@ try {
 
 Windows
 
-[Windows（x64版・コード署名済みインストーラー）]($baseUrl/Sprint-Coder-Installer.exe)
+[Windows（x64版・コード署名済みインストーラー）]($baseUrl/$installerName)
 
 macOS
 
