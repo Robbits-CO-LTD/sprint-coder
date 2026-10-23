@@ -2011,6 +2011,9 @@ if (runsWithElectronAbi)
       ['担当を雇ってください。', true],
       ['担当を雇ってはいけません。', false],
       ['「担当を雇ってください」という文を添削して。', false],
+      ['> 引用文です。\n担当を雇ってください。', false],
+      ['    担当を雇ってください。', false],
+      ['> 引用文です。\n\n担当を雇ってください。', true],
       ['担当を雇って進める方法を教えて。', false],
     ] as const)(
       'seals Team guidance only for an actual member hiring request: %s',

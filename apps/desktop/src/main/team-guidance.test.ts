@@ -374,6 +374,28 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput(input)).toBe(expected);
   });
 
+  it.each([
+    ['次の引用文を添削してください。\n> 担当を雇ってください。', false],
+    ['> 引用文です。\n担当を雇ってください。', false],
+    ['> > 担当を雇ってください。', false],
+    ['- > 担当を雇ってください。', false],
+    ['例を説明してください。\n\n    担当を雇ってください。', false],
+    ['\t担当を雇ってください。', false],
+    ['- 例:\n\n      担当を雇ってください。', false],
+    ['```text\n担当を雇ってください。\n```', false],
+    ['~~~text\n担当を雇ってください。\n~~~', false],
+    ['> 引用文です。\n\n担当を雇ってください。', true],
+    ['> 担当を雇ってはいけません。\n\n担当を雇ってください。', true],
+    ['    担当を雇ってはいけません。\n\n担当を雇ってください。', true],
+    ['```text\n担当を雇ってはいけません。\n```\n担当を雇ってください。', true],
+    ['前置きです。\n    担当を雇ってください。', true],
+    ['   担当を雇ってください。', true],
+    ['🌊 例です。\n\n> 担当を雇ってください。', false],
+  ])('distinguishes Markdown examples from member hiring instructions: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
   it('masks an unclosed escaped quotation through a trailing backslash', () => {
     for (const quote of ['"', "'"]) {
       const input = quote + `\\${quote}`.repeat(4_000) + '担当を雇ってください\\';

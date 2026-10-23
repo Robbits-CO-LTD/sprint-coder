@@ -27,6 +27,7 @@ import { digestCanonical } from './context-compiler';
 import type { ToolTranscriptItem } from './context-compiler';
 import type { ModelSampler, ModelToolCall } from './intelligence-loop';
 import { BUILTIN_TEAM_SKILL_CONTENT } from './team-skill';
+import { maskTeamHiringMarkdown } from './team-hiring-markdown';
 import { leaderWriteLimitNote } from './workspace-write-limits';
 import { writeScopeNote } from './write-scope';
 import {
@@ -1408,7 +1409,9 @@ function isExplicitMemberHiringInput(input: string): boolean {
   // A non-whitespace barrier also prevents joining a role and verb across a quoted fragment.
   // A line break alone does not complete a request: its prohibition or reporting suffix may
   // continue on the next line. Preserve that continuation for the affirmative-only classifier.
-  const unquoted = joinHiringContinuationLines(input.replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC'));
+  const unquoted = joinHiringContinuationLines(
+    maskTeamHiringMarkdown(input).replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC'),
+  );
   // Keep a quoted question's reporting suffix attached (「…ますか？と伝えました」).
   const sentences = unquoted.match(TEAM_HIRING_SENTENCES) ?? [];
   return sentences.some((sentence) =>
@@ -1515,8 +1518,9 @@ function isExplicitTeamRoleAssignmentInput(input: string): boolean {
 /** Team相談にもSkill/MCPは提供するが、Worker不在を失敗にするのは明示的な実行依頼だけ。 */
 export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
-  if (isExplicitMemberHiringInput(trimmed)) return true;
-  if (!isTeamScenarioInput(trimmed)) return false;
+  // Preserve leading indentation until Markdown examples have been excluded.
+  if (isExplicitMemberHiringInput(input)) return true;
+  if (!isTeamScenarioInput(input)) return false;
   if (isExplicitTeamRoleAssignmentInput(trimmed)) return true;
   if (TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed)) return true;
   const hasExplicitExecutionClause = trimmed
