@@ -9,7 +9,8 @@
 // persistence.test.ts) this file re-spawns itself once under the bundled Electron
 // binary with ELECTRON_RUN_AS_NODE=1 unless it is already running that way.
 import { createHash } from 'node:crypto';
-import { spawn, spawnSync } from 'node:child_process';
+import { execFile, spawn, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   chmod,
   lstat,
@@ -2056,8 +2057,8 @@ if (runsWithElectronAbi) {
   });
 } else {
   describe('EditSagaExecutor native integration Electron ABI bridge', () => {
-    it('runs the full-stack Edit Saga integration suite with the bundled Electron Node ABI', () => {
-      const result = spawnSync(
+    it('runs the full-stack Edit Saga integration suite with the bundled Electron Node ABI', async () => {
+      await promisify(execFile)(
         electronTestExecutablePath(),
         [
           join(process.cwd(), '../../node_modules/vitest/vitest.mjs'),
@@ -2071,7 +2072,6 @@ if (runsWithElectronAbi) {
           timeout: 60_000,
         },
       );
-      expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     }, 65_000);
   });
 }
