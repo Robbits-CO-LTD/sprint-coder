@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
-import { useAppStore } from '../../store/appStore';
+import { PERMISSION_CHANGE_PENDING_MESSAGE, useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
 import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X } from '../icons';
@@ -246,6 +246,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const goal = currentTask?.goalState ?? null;
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
+  const permissionChanging = useAppStore((s) => s.permissionChangeByTask[taskId]) !== undefined;
   const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
@@ -471,6 +472,7 @@ export function Composer({ taskId }: { taskId: string }) {
     canCancel,
     actionPending: sending || turnActionPending !== null,
     sendBlocked:
+      permissionChanging ||
       goalControlPending ||
       projectSwitching ||
       attachmentPolicy.sendBlocked ||
@@ -767,6 +769,11 @@ export function Composer({ taskId }: { taskId: string }) {
             shadow rather than stacking two framed boxes on top of each other. */}
         <div className="composer-panel">
           <ContextBar taskId={taskId} />
+          {permissionChanging && (
+            <div className="composer-permission-pending" role="status">
+              {PERMISSION_CHANGE_PENDING_MESSAGE}
+            </div>
+          )}
           <div className="composer">
             {slashOpen && (
               <SlashCommandMenu

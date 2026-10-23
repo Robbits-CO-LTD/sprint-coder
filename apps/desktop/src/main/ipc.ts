@@ -1,4 +1,5 @@
 import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
+import { FullAccessConfirmation } from './full-access-confirmation';
 import {
   graphStartActivationIntent,
   graphUpdateActivationIntent,
@@ -1065,6 +1066,8 @@ export class IpcRouter {
   private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
+  private readonly pendingPermissionChanges = new Set<string>();
+  private readonly fullAccessConfirmation = new FullAccessConfirmation();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
   private readonly cliTeamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
@@ -3561,19 +3564,22 @@ export class IpcRouter {
         if (current.policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
         if (input.preset === 'full') {
-          await confirmFullAccessOnce(this.persistence, async () => {
-            const confirmation = await dialog.showMessageBox(this.window, {
-              type: 'warning',
-              title: 'フルアクセスを有効にしますか？',
-              message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
-              detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
-              buttons: ['キャンセル', 'フルアクセスを有効化'],
-              defaultId: 0,
-              cancelId: 0,
-              noLink: true,
-            });
-            return confirmation.response === 1;
-          });
+          await confirmFullAccessOnce(this.persistence, () =>
+            this.fullAccessConfirmation.confirm(async (signal) => {
+              const confirmation = await dialog.showMessageBox(this.window, {
+                signal,
+                type: 'warning',
+                title: 'フルアクセスを有効にしますか？',
+                message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
+                detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
+                buttons: ['キャンセル', 'フルアクセスを有効化'],
+                defaultId: 0,
+                cancelId: 0,
+                noLink: true,
+              });
+              return confirmation.response === 1;
+            }),
+          );
         }
         if (this.permissionBroker.getPolicy(input.taskId).policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
@@ -5077,6 +5083,7 @@ export class IpcRouter {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
     await this.computerUseController.dispose();
@@ -5245,11 +5252,30 @@ export class IpcRouter {
       envelope: CommandEnvelope<TInput>,
     ) => TOutput | Promise<TOutput>,
   ): void {
-    this.handle(channel, inputSchema, outputSchema, (input, event, envelope) =>
-      this.mailbox.run(envelope.taskId ?? '__global__', () =>
-        this.updateInstallMutationGate.run(() => handler(input, event, envelope)),
-      ),
-    );
+    this.handle(channel, inputSchema, outputSchema, async (input, event, envelope) => {
+      const taskId = envelope.taskId ?? '__global__';
+      const permissionChange = channel === IPC_CHANNELS.permissionsSet;
+      const submitsWork = [
+        IPC_CHANNELS.turnsStart,
+        IPC_CHANNELS.turnsQueue,
+        IPC_CHANNELS.turnsSteer,
+        IPC_CHANNELS.turnsStopAndSend,
+        IPC_CHANNELS.goalsStart,
+        IPC_CHANNELS.goalsResume,
+      ].some((candidate) => candidate === channel);
+      if ((permissionChange || submitsWork) && this.pendingPermissionChanges.has(taskId))
+        throw new PermissionChangePendingError();
+      // Mark before the mailbox's first await so an immediately following send cannot queue
+      // behind an unanswered native confirmation. Existing accepted work keeps its order.
+      if (permissionChange) this.pendingPermissionChanges.add(taskId);
+      try {
+        return await this.mailbox.run(taskId, () =>
+          this.updateInstallMutationGate.run(() => handler(input, event, envelope)),
+        );
+      } finally {
+        if (permissionChange) this.pendingPermissionChanges.delete(taskId);
+      }
+    });
   }
 
   private runMutation<TInput, TOutput>(
@@ -10125,6 +10151,7 @@ class InvalidEffortError extends Error {
 class StalePermissionPolicyError extends Error {}
 class PermissionCleanupIncompleteError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
+class PermissionChangePendingError extends Error {}
 class SteerUnsupportedError extends Error {}
 
 export async function confirmFullAccessOnce(
@@ -10822,6 +10849,13 @@ export function toPublicError(error: unknown): PublicError {
       code: 'USER_CANCELED',
       userMessage: 'フルアクセスへの変更をキャンセルしました。',
       retryable: false,
+    };
+  if (error instanceof PermissionChangePendingError)
+    return {
+      code: 'OPERATION_IN_PROGRESS',
+      userMessage:
+        '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。',
+      retryable: true,
     };
   if (error instanceof OperationConflictError)
     return {
