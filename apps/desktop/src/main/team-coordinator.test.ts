@@ -10381,6 +10381,10 @@ if (runsWithElectronAbi)
             },
           });
           await Promise.resolve();
+          expect(scheduler.snapshot().queuedExecutionIds).toContain('after-read');
+          expect(
+            scheduler.snapshot().activeExecutionIds.some((id) => id.startsWith('exclusive:')),
+          ).toBe(true);
           expect(followingIntegration).toBe(false);
           releaseRead();
           await heldRead;

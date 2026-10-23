@@ -250,16 +250,17 @@ describe('Manager integrated result read boundary', () => {
   it('refuses a selector without a host binding and on every other workspace tool', async () => {
     const f = await fixture({ bound: false });
     await expect(f.dispatch()).rejects.toThrow('live Manager binding');
-    for (const name of [
-      'list_workspace',
-      'search_workspace',
-      'view_image',
-      'create_file',
-      'apply_patch',
-    ])
-      await expect(
-        f.dispatch({ query: 'x', content: 'x', edits: [] }, undefined, name),
-      ).rejects.toMatchObject({ code: 'INVALID_TOOL_INPUT' });
+    for (const [name, input] of [
+      ['list_workspace', {}],
+      ['search_workspace', { query: 'x' }],
+      ['view_image', {}],
+      ['create_file', { content: 'x' }],
+      ['apply_patch', { edits: [{ oldText: 'x', newText: 'y' }] }],
+    ] as const)
+      await expect(f.dispatch(input, undefined, name)).rejects.toMatchObject({
+        code: 'INVALID_TOOL_INPUT',
+        hint: expect.stringContaining('unexpected key "teamResultExecutionId"'),
+      });
   });
 
   it('refuses same-root symlink allowlist escapes and hardlinks before authorization', async () => {
