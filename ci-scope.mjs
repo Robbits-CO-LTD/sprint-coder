@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** @typedef {{path: string, status: string}} Change Git name-status entries; only A/M may be narrowed. */
-/** @typedef {{mode: 'docs' | 'renderer' | 'full', fullMatrix: boolean, e2eSpecs: string[], reason: string}} Scope */
+/** @typedef {{mode: 'docs' | 'renderer' | 'website' | 'full', fullMatrix: boolean, websiteRequired: boolean, e2eSpecs: string[], reason: string}} Scope */
 
 const RENDERER = 'apps/desktop/src/renderer/';
 const E2E = 'tests/e2e/';
@@ -33,13 +33,14 @@ const FULL_JOBS = [
   'platform-tests',
   'electron-bridges',
   'package-linux',
+  'package-windows-build',
   'package-windows',
   'e2e-windows',
   'archify-packaged',
   'package-macos',
   'renderer-tests',
 ];
-const KNOWN_JOBS = new Set(['classify', ...FULL_JOBS, 'renderer-e2e']);
+const KNOWN_JOBS = new Set(['classify', ...FULL_JOBS, 'renderer-e2e', 'website']);
 const OPT_IN_SPECS = new Set([
   'cli-workspace-egress.spec.ts',
   'leader-mcp-smoke.spec.ts',
@@ -87,6 +88,26 @@ function rendererPath(path) {
   if (DISPLAY_COMPONENTS.has(component)) return true;
   const test = /^([A-Za-z0-9_-]+)(?:\.[A-Za-z0-9_-]+)*\.test\.tsx?$/u.exec(component);
   return test !== null && DISPLAY_COMPONENTS.has(`${test[1]}.tsx`);
+}
+
+function websiteCheckPath(path) {
+  return (
+    path.startsWith('website/') ||
+    path.startsWith('deploy/website/') ||
+    path.startsWith('tests/website/') ||
+    path.startsWith('.github/actions/install-deps/') ||
+    [
+      'ci-website.mjs',
+      'playwright.website.config.ts',
+      'apps/desktop/ci-website.test.mjs',
+      'ci-scope.mjs',
+      'ci-cache.mjs',
+      '.github/workflows/ci.yml',
+      'package-lock.json',
+      'package.json',
+      'apps/desktop/package.json',
+    ].includes(path)
+  );
 }
 
 function displaySpecs(path) {
@@ -153,7 +174,9 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
   const changedSpecs = new Set();
   const rendererSpecs = new Set();
   let hasRenderer = false;
+  let hasWebsite = false;
   let full = eventName !== 'pull_request' || changes.length === 0;
+  let websiteRequired = full;
   let reason =
     eventName !== 'pull_request'
       ? 'Only pull_request events may narrow CI'
@@ -161,6 +184,7 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
         ? 'An empty diff does not justify skipping validation'
         : 'Documentation-only changes';
   for (const { path, status } of changes) {
+    if (websiteCheckPath(path)) websiteRequired = true;
     if (status !== 'D' && !status.startsWith('R') && isSpec(path) && !optInSpec(path))
       changedSpecs.add(path);
     if (!['A', 'M'].includes(status)) {
@@ -168,6 +192,8 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
       reason = 'Deletion, rename, or an unfamiliar Git status requires full validation';
     } else if (docsPath(path)) {
       continue;
+    } else if (path.startsWith('website/')) {
+      hasWebsite = true;
     } else if (rendererPath(path)) {
       hasRenderer = true;
       for (const spec of displaySpecs(path)) rendererSpecs.add(spec);
@@ -176,22 +202,36 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
       reason = 'Changes cross the reviewed documentation and display-only boundaries';
     }
   }
-  const mode = full ? 'full' : hasRenderer ? 'renderer' : 'docs';
+  if (hasWebsite && hasRenderer) {
+    full = true;
+    reason = 'Website and desktop changes require full validation';
+  }
+  const mode = full ? 'full' : hasWebsite ? 'website' : hasRenderer ? 'renderer' : 'docs';
   if (mode === 'renderer') reason = 'Reviewed renderer display paths';
+  if (mode === 'website') reason = 'Standalone website changes';
   const e2eSpecs = new Set([...rendererSpecs, ...changedSpecs]);
-  return { mode, fullMatrix: mode === 'full', e2eSpecs: [...e2eSpecs].sort(), reason };
+  return {
+    mode,
+    fullMatrix: mode === 'full',
+    websiteRequired,
+    e2eSpecs: [...e2eSpecs].sort(),
+    reason,
+  };
 }
 
 function validateScope(scope) {
   if (
     scope === null ||
     typeof scope !== 'object' ||
-    !['docs', 'renderer', 'full'].includes(scope.mode) ||
+    !['docs', 'renderer', 'website', 'full'].includes(scope.mode) ||
     scope.fullMatrix !== (scope.mode === 'full') ||
+    typeof scope.websiteRequired !== 'boolean' ||
+    (scope.mode === 'website' && scope.websiteRequired !== true) ||
+    (['docs', 'renderer'].includes(scope.mode) && scope.websiteRequired !== false) ||
     typeof scope.reason !== 'string' ||
     !Array.isArray(scope.e2eSpecs) ||
     scope.e2eSpecs.some((spec) => !safePath(spec) || !isSpec(spec) || optInSpec(spec)) ||
-    (scope.mode === 'docs' && scope.e2eSpecs.length !== 0)
+    (['docs', 'website'].includes(scope.mode) && scope.e2eSpecs.length !== 0)
   )
     throw new Error('Invalid CI scope');
 }
@@ -212,6 +252,7 @@ export function verifyRequiredJobs(scope, results) {
     required.add('renderer-tests');
   }
   if (scope.e2eSpecs.length > 0) required.add('renderer-e2e');
+  if (scope.websiteRequired) required.add('website');
   const failures = [];
   for (const job of required) {
     if (!Object.hasOwn(results, job) || results[job] !== 'success')
@@ -292,6 +333,7 @@ function main() {
     const output = {
       mode: scope.mode,
       full_matrix: String(scope.fullMatrix),
+      website_required: String(scope.websiteRequired),
       e2e_specs: JSON.stringify(scope.e2eSpecs),
       e2e_matrix: JSON.stringify(focusedE2eMatrix(scope.e2eSpecs)),
       scope_json: JSON.stringify(scope),
