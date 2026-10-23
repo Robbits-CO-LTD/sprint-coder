@@ -91,7 +91,12 @@ app.whenReady().then(async () => {
         });
         console.info('Native dialog abort evidence', report);
       } finally {
-        await rm(directory, { recursive: true, force: true });
+        await rm(directory, {
+          recursive: true,
+          force: true,
+          maxRetries: process.platform === 'win32' ? 5 : 0,
+          retryDelay: 100,
+        });
       }
     }, 20_000);
   },
