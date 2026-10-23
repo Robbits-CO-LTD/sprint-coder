@@ -2,6 +2,9 @@ import { defineConfig } from '@playwright/test';
 
 const port = process.env.WEBSITE_TEST_PORT ?? '4175';
 const baseURL = `http://127.0.0.1:${port}`;
+const channel = process.env.WEBSITE_BROWSER_CHANNEL;
+if (channel !== undefined && channel !== 'chrome')
+  throw new Error('Unknown website browser channel');
 
 export default defineConfig({
   testDir: './tests/website',
@@ -15,6 +18,7 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: 'chromium',
+    channel,
     contextOptions: { reducedMotion: 'reduce' },
     serviceWorkers: 'block',
     trace: 'retain-on-failure',

@@ -29,6 +29,8 @@
 
 Windows installerのManaged Local smokeはsource側のbuildを読むため、consumerの既存native準備とsidecar buildを維持する。releaseへCI生成packageを流用しない。artifact名はproducerのrun/attempt/SHAに束縛し、consumerはproducer outputを使うため失敗jobのみ再実行にも対応する。
 
+初回CIで追加ブラウザの導入が長時間停止したため、サイト検証は[GitHub hosted Ubuntu同梱のChrome](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md)を利用する。実行時に版を記録し、同じ18項目を実行する。ローカルはPlaywrightのChromiumを既定とし、`WEBSITE_BROWSER_CHANNEL=chrome`でCIと同じ経路を検証できる。
+
 ## レビューと完了条件
 
 設計はmacOS、website、Electron、Windows、required gate、artifact/OS境界の6担当で独立確認した。実装後に統合差分を独立レビューする。

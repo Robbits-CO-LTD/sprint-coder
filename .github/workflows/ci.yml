@@ -1185,14 +1185,12 @@ jobs:
         run: node ci-website.mjs check
       - name: Check website validator regressions
         run: npm run test --workspace @sprint-coder/desktop -- ci-website.test.mjs
-      - name: Restore website Chromium
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: ~/.cache/ms-playwright
-          key: website-chromium-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium --only-shell
+      # Hosted Ubuntu includes Chrome and its system libraries; avoid downloading a second browser.
+      - name: Verify the runner browser
+        run: google-chrome --version
       - name: Check desktop and mobile pages
+        env:
+          WEBSITE_BROWSER_CHANNEL: chrome
         run: npx playwright test --config playwright.website.config.ts
       - name: Upload website failure evidence
         if: failure()
