@@ -17,7 +17,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($nugetVersion)) {
 }
 $nupkgName = "SprintCoder-$($nugetVersion.Trim())-full.nupkg"
 $makeRoot = Join-Path $desktopRoot 'out\make'
-$installer = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Installer.exe'
+$installer = Join-Path $makeRoot "squirrel.windows\x64\Sprint-Coder-Installer-$version.exe"
 $rawSetup = Join-Path $makeRoot 'squirrel.windows\x64\Sprint-Coder-Setup.exe'
 $releasesFile = Join-Path $makeRoot 'squirrel.windows\x64\RELEASES'
 $nupkg = Join-Path $makeRoot "squirrel.windows\x64\$nupkgName"

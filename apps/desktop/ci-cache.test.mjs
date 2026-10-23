@@ -318,6 +318,8 @@ describe('CI scope wiring', () => {
     const exercise = job.steps.findIndex((step) => step.name === 'Run selected UI cases on Linux');
     expect(setup).toBeGreaterThanOrEqual(0);
     expect(exercise).toBeGreaterThan(setup);
+    expect(job.steps[exercise].run).toContain('xvfb-run');
+    expect(job.steps[exercise].env.SPRINT_CODER_E2E_HIDDEN).not.toBe('1');
     expect(job.steps[setup].if).toBe("runner.os == 'Linux'");
     expect(job.steps[setup].run).toContain('sudo chown root:root');
     expect(job.steps[setup].run).toContain('sudo chmod 4755');

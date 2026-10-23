@@ -53,11 +53,7 @@ import {
   managedLocalSidecarPinsForBuild,
 } from './vite.main.config';
 import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
-import {
-  planWindowsWizardInstaller,
-  SQUIRREL_SETUP_EXE,
-  WINDOWS_WIZARD_INSTALLER_EXE,
-} from './windows-wizard-installer';
+import { planWindowsWizardInstaller, SQUIRREL_SETUP_EXE } from './windows-wizard-installer';
 import {
   probeSandboxRunner,
   sandboxRunnerPath,
@@ -538,7 +534,7 @@ describe('release artifacts', () => {
     expect(macPackageJob).toContain('src/main/managed-local-runtime-supervisor.test.ts');
     expect(ciWorkflow.match(/SPRINT_CODER_MANAGED_LOCAL_LIVE/gu)).toHaveLength(3);
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
-    expect(unsignedVerifier).toContain('Sprint-Coder-Installer.exe');
+    expect(unsignedVerifier).toContain('Sprint-Coder-Installer-$version.exe');
     expect(unsignedVerifier).toContain('Sprint-Coder-Setup.exe');
     expect(unsignedVerifier).toContain("$installerSignature.Status -ne 'NotSigned'");
     expect(unsignedVerifier).toContain("$appSignature.Status -ne 'NotSigned'");
@@ -550,40 +546,47 @@ describe('release artifacts', () => {
     );
   });
 
-  it('wraps the Squirrel bootstrapper in a localized Windows setup wizard', () => {
-    const script = readFileSync(resolve(__dirname, 'installer/windows-wizard.iss'), 'utf8');
-    const sourceSetupPath = resolve('out/make/squirrel.windows/x64', SQUIRREL_SETUP_EXE);
-    const plan = planWindowsWizardInstaller([
-      {
-        platform: 'win32',
-        arch: 'x64',
-        packageJSON: { version: '0.0.1-beta.5' },
-        artifacts: [sourceSetupPath, resolve('out/make/squirrel.windows/x64/RELEASES')],
-      },
-    ]);
+  it.each(['0.7.0', '0.7.0-beta.15'])(
+    'wraps the Squirrel bootstrapper in a versioned Windows setup wizard for %s',
+    (version) => {
+      const script = readFileSync(resolve(__dirname, 'installer/windows-wizard.iss'), 'utf8');
+      const sourceSetupPath = resolve('out/make/squirrel.windows/x64', SQUIRREL_SETUP_EXE);
+      const plan = planWindowsWizardInstaller([
+        {
+          platform: 'win32',
+          arch: 'x64',
+          packageJSON: { version },
+          artifacts: [sourceSetupPath, resolve('out/make/squirrel.windows/x64/RELEASES')],
+        },
+      ]);
 
-    expect(plan).toMatchObject({
-      sourceSetupPath,
-      outputPath: resolve('out/make/squirrel.windows/x64', WINDOWS_WIZARD_INSTALLER_EXE),
-      version: '0.0.1-beta.5',
-    });
-    expect(script).toContain('WizardStyle=modern');
-    expect(script).toContain('DisableWelcomePage=no');
-    expect(script).toContain('DisableReadyPage=no');
-    expect(script).toContain('DisableFinishedPage=no');
-    expect(script).toContain('compiler:Languages\\Japanese.isl');
-    expect(script).toContain('#if VER >= EncodeVer(6,3,0)');
-    expect(script).toContain('ArchitecturesAllowed=x64compatible');
-    expect(script).toContain('#else\nArchitecturesAllowed=x64');
-    expect(script).toContain('AfterInstall: InstallSprintCoder');
-    expect(script).toContain(
-      "Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)",
-    );
-    expect(script).toContain('if ResultCode <> 0 then');
-    expect(script).toContain('RaiseException');
-    expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
-    expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
-  });
+      expect(plan).toMatchObject({
+        sourceSetupPath,
+        outputPath: resolve(
+          'out/make/squirrel.windows/x64',
+          `Sprint-Coder-Installer-${version}.exe`,
+        ),
+        version,
+      });
+      expect(script).toContain('OutputBaseFilename=Sprint-Coder-Installer-{#AppVersion}');
+      expect(script).toContain('WizardStyle=modern');
+      expect(script).toContain('DisableWelcomePage=no');
+      expect(script).toContain('DisableReadyPage=no');
+      expect(script).toContain('DisableFinishedPage=no');
+      expect(script).toContain('compiler:Languages\\Japanese.isl');
+      expect(script).toContain('#if VER >= EncodeVer(6,3,0)');
+      expect(script).toContain('ArchitecturesAllowed=x64compatible');
+      expect(script).toContain('#else\nArchitecturesAllowed=x64');
+      expect(script).toContain('AfterInstall: InstallSprintCoder');
+      expect(script).toContain(
+        "Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)",
+      );
+      expect(script).toContain('if ResultCode <> 0 then');
+      expect(script).toContain('RaiseException');
+      expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
+      expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
+    },
+  );
 
   it('generates a Squirrel.Mac manifest that targets the release ZIP', () => {
     const directory = mkdtempSync(resolve(tmpdir(), 'sprint-coder-update-'));

@@ -1,7 +1,8 @@
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 
 // A LIVE seam for the Windows target facts (S5-c-3, #500 PR-2). The `windows target facts` block of
@@ -1068,13 +1069,15 @@ describe('Windows package identity source (#500 S5-c-3 PR-4)', () => {
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows target facts, live (#500 S5-c-3 PR-2)',
   () => {
-    it('measures cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage and a rename swap', () => {
+    it('measures cmd, conhost, a renamed cmd, mstsc, the fixture, its own child, lineage and a rename swap', async () => {
       expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
       const scratch = mkdtempSync(join(tmpdir(), 'computer-use-target-facts-'));
       try {
+        // The two builds and the live seam can exceed Vitest's 60s RPC deadline together.
+        // Yield while each child runs so the worker can receive reporting acknowledgements.
         const run = (args: string[]) => {
           const command = build!.wrap(args);
-          return spawnSync(command.file, command.args, {
+          return promisify(execFile)(command.file, command.args, {
             encoding: 'utf8',
             windowsVerbatimArguments: command.verbatim,
             timeout: 400_000,
@@ -1082,7 +1085,7 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           });
         };
         const fixtureExecutable = join(scratch, 'sprint-coder-computer-use-fixture.exe');
-        const fixtureBuild = run([
+        await run([
           '/nologo',
           '/std:c++20',
           '/EHsc',
@@ -1110,14 +1113,11 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           'comdlg32.lib',
           'shell32.lib',
         ]);
-        expect(fixtureBuild.status, `fixture\n${fixtureBuild.stdout}\n${fixtureBuild.stderr}`).toBe(
-          0,
-        );
 
         const seamSource = join(scratch, 'seam.cc');
         const binary = join(scratch, 'seam.exe');
         writeFileSync(seamSource, source);
-        const built = run([
+        await run([
           '/nologo',
           '/std:c++20',
           '/EHsc',
@@ -1143,13 +1143,15 @@ describe.skipIf(!onWindows || (build === null && !ci))(
           'windowsapp.lib',
           'wintrust.lib',
         ]);
-        expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
-        const executed = spawnSync(binary, [ci ? 'ci' : 'local', scratch, fixtureExecutable], {
-          encoding: 'utf8',
-          timeout: 180_000,
-        });
+        const executed = await promisify(execFile)(
+          binary,
+          [ci ? 'ci' : 'local', scratch, fixtureExecutable],
+          {
+            encoding: 'utf8',
+            timeout: 180_000,
+          },
+        );
         console.log(executed.stdout);
-        expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
         expect(executed.stdout).toContain('OK');
       } finally {
         rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });

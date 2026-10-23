@@ -14,6 +14,21 @@ import {
 } from './helpers';
 import { clickWithSidebarVector } from './feature-setup';
 
+async function clickGraphFocusClear(page: Page): Promise<void> {
+  const button = page.frameLocator('[data-testid="graph-frame"]').locator('#btn-focus-clear');
+  // Opening the inspector resizes the iframe. Wait for actual pointer routing into its
+  // resized surface before pressing; DOM actionability alone can precede that routing.
+  await button.hover();
+  await expect.poll(() => button.evaluate((element) => element.matches(':hover'))).toBe(true);
+  await button.click();
+  await test.info().attach('graph-focus-clear-input', {
+    body: JSON.stringify(
+      await button.evaluate(() => Reflect.get(window, '__sprintGraphInputProbe') ?? []),
+    ),
+    contentType: 'application/json',
+  });
+}
+
 async function assertGraphSelectionWithEvidence(
   page: Page,
   kind: 'node' | 'edge',
@@ -475,17 +490,17 @@ test('the model tool path proposes and reads back a draft through the real Main 
     await frame.locator('[data-node-id="api"]').first().click();
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('推定');
     await expect(page.getByTestId('graph-sources')).toContainText('APIの役割は推定です。');
-    await frame.locator('#btn-focus-clear').click();
+    await clickGraphFocusClear(page);
     await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="store"]').first().click();
     await assertGraphSelectionWithEvidence(page, 'node', 'store', () =>
       expect(page.getByTestId('graph-evidence-kind')).toHaveText('追加案'),
     );
-    await frame.locator('#btn-focus-clear').click();
+    await clickGraphFocusClear(page);
     await expect(frame.locator('#focus-chip')).toBeHidden();
     await frame.locator('[data-node-id="client"]').first().click();
     await expect(page.getByTestId('graph-evidence-kind')).toHaveText('未確認');
-    await frame.locator('#btn-focus-clear').click();
+    await clickGraphFocusClear(page);
     await expect(frame.locator('#focus-chip')).toBeHidden();
     // Use the viewer's keyboard navigation for its horizontal SVG relationship targets.
     await frame.locator('.relationship-hit-target[data-relationship-id="request"]').press('End');

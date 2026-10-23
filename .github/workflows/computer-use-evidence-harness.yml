@@ -193,7 +193,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -d '' portable < <(find "${WINDOWS_ROOT}" -type f -name 'Sprint-Coder-win32-x64-*.zip' -print0)
-          mapfile -d '' installer < <(find "${WINDOWS_ROOT}" -type f -name 'Sprint-Coder-Installer.exe' -print0)
+          mapfile -d '' installer < <(find "${WINDOWS_ROOT}" -type f -name 'Sprint-Coder-Installer-*.exe' -print0)
           mapfile -d '' dmg < <(find "${MACOS_ROOT}" -type f -name '*.dmg' -print0)
           (( ${#portable[@]} == 1 && ${#installer[@]} == 1 && ${#dmg[@]} == 1 )) || { echo '::error::Expected exactly one portable ZIP, installer, and DMG.'; exit 1; }
           portable_sha256="$(sha256sum "${portable[0]}" | awk '{print $1}')"
