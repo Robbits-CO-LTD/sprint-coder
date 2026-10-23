@@ -2005,6 +2005,31 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it.each([
+      ['部長が担当を雇って絵を描かせます。', true],
+      ['担当を雇ってください。', true],
+      ['担当を雇ってはいけません。', false],
+      ['「担当を雇ってください」という文を添削して。', false],
+      ['担当を雇って進める方法を教えて。', false],
+    ] as const)(
+      'seals Team guidance only for an actual member hiring request: %s',
+      (input, teamTurn) => {
+        const { persistence } = createPersistence();
+        try {
+          const task = persistence.createTask('member hiring classification');
+          const started = persistence.startTurn(task.id, input);
+          expect(started.teamTurn).toBe(teamTurn);
+          const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(
+            prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+          ).toHaveLength(teamTurn ? 1 : 0);
+          expect(persistence.prepareContext(task.id, started.turnId)).toEqual(prepared);
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
       const { persistence } = createPersistence();
       const task = persistence.createTask('team retry');

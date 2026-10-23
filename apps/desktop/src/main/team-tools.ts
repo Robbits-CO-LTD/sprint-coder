@@ -1326,6 +1326,63 @@ const TEAM_WORKER_EXECUTION_ACTION =
   /(?:(?:雇って|雇用して|採用して|作成して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|挨拶して|会話させて|分担して|進めて|コードを書いて)(?:ください|ほしい)?|(?:編集|実装|実行|作業|調査|検証|監査|レビュー|採用|雇用)?(?:を)?お願い(?:します)?)$/i;
 const TEAM_EXECUTION_MARKER =
   /^\s*\/team(?=\s+\S)|チーム(?:で|を|に|内で|(?:内の|の)?(?:メンバー|担当|リーダー)(?:で|に))|(?:^|[^a-zA-Z])team(?:(?:で|を)|[ \u3000]+(?=[でを][ぁ-んァ-ヶ一-龠々ー]))|(?:^|[^a-zA-Z])team\s+(?:skill|mcp)(?:\s*を使って|で)|(?:^|[^a-zA-Z])team\s*(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \u3000]*(?:り|名|人)|(?:worker|agent|ワーカー|担当|メンバー|リーダー)[^。.!！?？\r\n]{0,40}(?:雇って|雇用して|採用して)|(?:^|[^0-9０-９一二三四五六七八九十百])(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \u3000]*(?:名|人)(?:(?:体制|構成)?で|を?雇)/i;
+// This new entry path requires a member as the direct object of hiring. The broader legacy
+// execution marker also accepts 採用して (including adopting a proposal/library), so cannot be
+// promoted to initial Team intent.
+const TEAM_HIRING_COUNT =
+  '(?:[1-9][0-9]*|[１-９][０-９]*|[一二三四五六七八九十百]+)[ \\u3000]*(?:人|名)';
+const TEAM_EXPLICIT_MEMBER_HIRING = new RegExp(
+  `(?:\\b(?:worker|agent)\\b|ワーカー|担当(?:者)?|メンバー|リーダー)[ \\u3000]*(?:${TEAM_HIRING_COUNT}[ \\u3000]*)?を[ \\u3000]*(?:${TEAM_HIRING_COUNT}[ \\u3000]*)?(?:雇って|雇用して)`,
+  'gi',
+);
+// A trailing escape still ends an unclosed quote; otherwise each escaped quote can trigger
+// another failed scan of the remainder of a long pasted example.
+const TEAM_HIRING_QUOTED_TEXT =
+  /(?<ticks>`+)[\s\S]*?(?:\k<ticks>|$)|(?<fence>~{3,})[\s\S]*?(?:\k<fence>|$)|「[^」]*(?:」|$)|『[^』]*(?:』|$)|“[^”]*(?:”|$)|‘[^’]*(?:’|$)|"(?:\\[\s\S]|[^"\\])*(?:"|\\?$)|(?<![a-zA-Z])'(?:\\[\s\S]|[^'\\])*(?:'|\\?$)/g;
+const TEAM_HIRING_IMMEDIATE_NEGATION = /^(?:は|も(?!ら)|ない|なく|ません|ほしく|欲しく)/;
+const TEAM_HIRING_DIRECT_REQUEST =
+  /^(?:ください|ほしい|欲しい|いただいて|いただくようお願いします|(?:もらえ|いただけ|くれ)(?:(?:ますか|ませんか|ませんでしょうか|ないでしょうか)[?？]?|ない[?？]))$/;
+const TEAM_HIRING_FOLLOWING_OBJECT = /^[^\sぁ-ん、,]+を[ \u3000]*/;
+const TEAM_HIRING_FOLLOWING_ACTION = new RegExp(`^${TEAM_WORKER_EXECUTION_ACTION.source}`, 'i');
+const TEAM_HIRING_CAUSATIVE_ACTION =
+  /^[一-龠々ァ-ヶー]+[かがさたなばまらわ]せ(?:ます|て(?:ください|ほしい)?)?$/;
+const TEAM_HIRING_REPORTED_REQUEST =
+  /(?:と|って)[ \u3000]*(?:伝え|言(?:い|っ)|書(?:き|い)|頼(?:み|ん)|送っ|入力し|指示し|依頼し)(?:ました|た|だ)/;
+const TEAM_HIRING_SENTENCES = new RegExp(
+  `(?:[^。.!！?？\\r\\n]|[?？!！](?=[、, \\u3000]*${TEAM_HIRING_REPORTED_REQUEST.source}))+[。.!！?？]*`,
+  'g',
+);
+
+function isExplicitMemberHiringInput(input: string): boolean {
+  // Mask before splitting sentences so punctuation inside quotes cannot expose an instruction.
+  // A non-whitespace barrier also prevents joining a role and verb across a quoted fragment.
+  const unquoted = input.replace(TEAM_HIRING_QUOTED_TEXT, '\uFFFC');
+  // Keep a quoted question's reporting suffix attached (「…ますか？と伝えました」).
+  const sentences = unquoted.match(TEAM_HIRING_SENTENCES) ?? [];
+  return sentences.some((sentence) =>
+    [...sentence.matchAll(TEAM_EXPLICIT_MEMBER_HIRING)].some((match) => {
+      const following = sentence.slice(match.index + match[0].length).trim();
+      if (TEAM_HIRING_REPORTED_REQUEST.test(following)) return false;
+      const clause = (
+        following
+          .split(/[、,]/)
+          .find((part) => part.trim() !== '')
+          ?.trim() ?? ''
+      ).replace(/[。.!！]+$/, '');
+      if (TEAM_HIRING_IMMEDIATE_NEGATION.test(clause)) return false;
+      // Only affirmative request endings extend initial Team routing. Unknown continuations,
+      // descriptions and ability questions do not become execution by default.
+      return (
+        clause === '' ||
+        TEAM_HIRING_DIRECT_REQUEST.test(clause) ||
+        [clause, clause.replace(TEAM_HIRING_FOLLOWING_OBJECT, '')].some(
+          (action) =>
+            TEAM_HIRING_FOLLOWING_ACTION.test(action) || TEAM_HIRING_CAUSATIVE_ACTION.test(action),
+        )
+      );
+    }),
+  );
+}
 const TEAM_ROLE_ASSIGNMENT_EXECUTION_ACTION =
   /(?:雇って|雇用して|採用して|作成して|構築して|編集して|実装して|実行して|作業して|調査して|検証して|監査して|レビューして|分担して|進めて)(?:ください|ほしい)?[。.!！?？]*$/i;
 const TEAM_ROLE_ASSIGNMENT_NEGATION =
@@ -1370,7 +1427,8 @@ export function isTeamScenarioInput(input: string): boolean {
     TEAM_INTENT.test(input) ||
     TEAM_COMPOUND_EXECUTION_INTENT.test(input) ||
     TEAM_RELATION_INTENT.test(input) ||
-    isExplicitTeamRoleAssignmentInput(input)
+    isExplicitTeamRoleAssignmentInput(input) ||
+    isExplicitMemberHiringInput(input)
   );
 }
 
@@ -1405,6 +1463,7 @@ function isExplicitTeamRoleAssignmentInput(input: string): boolean {
 /** Team相談にもSkill/MCPは提供するが、Worker不在を失敗にするのは明示的な実行依頼だけ。 */
 export function requiresTeamWorkersInput(input: string): boolean {
   const trimmed = input.trim();
+  if (isExplicitMemberHiringInput(trimmed)) return true;
   if (!isTeamScenarioInput(trimmed)) return false;
   if (isExplicitTeamRoleAssignmentInput(trimmed)) return true;
   if (TEAM_COMPOUND_EXECUTION_INTENT.test(trimmed)) return true;
