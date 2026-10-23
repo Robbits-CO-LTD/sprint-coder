@@ -7,7 +7,7 @@ import type {
   ModelSelection,
   ProviderModel,
 } from '@sprint-coder/contracts';
-import { requestOpenLocalAiSettings } from '../lib/settings-navigation';
+import { requestOpenProviderSettings } from '../lib/settings-navigation';
 import { useAppStore } from '../store/appStore';
 import {
   chosenFromCatalog,
@@ -776,11 +776,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                   type="button"
                   className="settings-secondary-button"
                   onClick={() => {
-                    close(false);
-                    requestOpenLocalAiSettings();
+                    close(true);
+                    requestOpenProviderSettings();
                   }}
                 >
-                  Local AI Selectorでモデルを追加
+                  プロバイダー接続を追加
                 </button>
               ) : (
                 '一致するモデルがありません'

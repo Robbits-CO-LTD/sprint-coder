@@ -21,7 +21,6 @@
     "generate:computer-use-final-gate-evidence": "node generate-computer-use-final-gate-evidence.mjs",
     "verify:computer-use-final-gate": "node verify-computer-use-final-gate.mjs",
     "build:sandbox-runner": "node build-sandbox-runner.mjs",
-    "build:managed-local-sidecar": "node build-managed-local-sidecar.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:provider-smoke": "vitest run apps/desktop/src/main/provider-release-smoke.test.ts",

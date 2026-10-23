@@ -126,7 +126,6 @@ function createHarness() {
     claudeRuntime: claude,
     grokRuntime: grok,
     providerConnections: { list: () => [] },
-    managedLocalProviderRuntime: null,
     teamRuntimeAvailability: { isAvailable: () => true },
     modelCatalog: new ModelCatalogService(),
     canceledRuntimeTurns: new Set(),
