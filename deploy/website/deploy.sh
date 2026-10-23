@@ -116,6 +116,11 @@ rm -rf "$tmp"
 mkdir -p "$tmp"
 trap 'rm -rf "$SITE_HOME/$tmp"' EXIT
 git -C repo.git archive "$commit" "$SITE_DIR" | tar -x -C "$tmp" --strip-components=1
+# 補完コピーや除外処理より先に拒否する。assets がリンクだと公開前でも外部へ書き込んでしまう。
+if [ -n "$(find "$tmp" ! -type f ! -type d -print -quit)" ]; then
+  hold_tree "$tree" "展開内容にリンクまたは特殊ファイルがある"
+  die "リンクまたは特殊ファイルを含むので公開しない（${commit:0:8}）"
+fi
 rm -rf "$tmp/tools" "$tmp/README.md"
 if [ -d legacy-assets ] && [ -n "$(ls -A legacy-assets 2>/dev/null)" ]; then
   mkdir -p "$tmp/assets"

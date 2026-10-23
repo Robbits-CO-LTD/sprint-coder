@@ -116,6 +116,17 @@ check "deploy: リンクを含む版は公開しない" test "$(basename "$(read
 check "deploy: リンク先のファイルは読めない" bash -c '! curl -fs -o /dev/null "$0/server-root/etc/hostname"' "$HEALTH_BASE_URL"
 rm "$T/work/website/server-root"
 
+# 旧画像の補完が、展開された assets リンクを経由して公開先の外へ書かないこと。
+mv "$T/work/website/assets" "$T/saved-assets"
+mkdir "$T/outside-assets"
+ln -s "$T/outside-assets" "$T/work/website/assets"
+commit_site "assets symlink"
+check "deploy: assets リンクを含む版は拒否" bash -c '! bash "$0/deploy.sh" >/dev/null 2>&1' "$LIB"
+check "deploy: 旧画像をリンク先へ書かない" test ! -e "$T/outside-assets/sprint-coder-og.png"
+check "deploy: assets リンクの拒否後も公開先を維持" test "$(basename "$(readlink "$SITE_HOME/public")")" = "$first"
+rm "$T/work/website/assets"
+mv "$T/saved-assets" "$T/work/website/assets"
+
 # ---------------------------------------------------------------- 5. 直したコミット → 公開
 sed -i 's#/assets/missing.png#/assets/icon.png#; s#<title>new#<title>v2#; s#v=1#v=2#g' "$T/work/website/index.html"
 commit_site "site v2"
