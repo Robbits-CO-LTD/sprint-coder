@@ -9,6 +9,7 @@ import {
   toPublicError,
 } from './ipc';
 import { createEmptyToolCatalogSnapshot, MANAGED_EXEC_COMMAND_TOOL } from './default-tools';
+import * as editBaseline from './edit-baseline';
 import { ModelCatalogService } from './model-catalog-service';
 import type { StartedTurn } from './persistence';
 import type { RuntimeHostClient } from './runtime-host';
@@ -248,6 +249,62 @@ describe('Grok CLI Main routing', () => {
     expect(startProviderTurn).toHaveBeenCalledTimes(1);
     expect(startWorkspaceWatch).not.toHaveBeenCalled();
     expect(resources.size).toBe(1);
+  });
+
+  it('owns the writing CLI lease before workspace watching and runtime dispatch', async () => {
+    const { router, resources, grok, persistence, handleRuntimeFailure } = createHarness();
+    const writing: StartedTurn = {
+      ...started,
+      workspaceSet: {
+        source: 'task',
+        projectId: null,
+        primaryRootId: 'root-writing',
+        digest: 'writing',
+        roots: [
+          {
+            rootId: 'root-writing',
+            role: 'primary',
+            label: 'Workspace',
+            path: process.cwd(),
+            status: 'available',
+          },
+        ],
+      },
+    };
+    const order: string[] = [];
+    let leaseAtWatch: ReturnType<TurnStreamingResources['get']>;
+    const startWorkspaceWatch = vi.fn((taskId: string, turnId: string) => {
+      leaseAtWatch = resources.get(taskId, turnId);
+      expect(leaseAtWatch).toBeDefined();
+      order.push('watch');
+    });
+    const baseline = vi.spyOn(editBaseline, 'createEditBaselines').mockReturnValue({
+      note: vi.fn(),
+      get: async () => null,
+    });
+    vi.spyOn(persistence, 'getPermissionPolicy').mockReturnValue({
+      preset: 'auto',
+      policyEpoch: 1,
+    });
+    Object.assign(router, { startWorkspaceWatch, baselinesByTurn: new Map() });
+    grok.start.mockImplementation(() => {
+      expect(resources.get('task-grok', started.turnId)).toBe(leaseAtWatch);
+      expect(leaseAtWatch).toBeDefined();
+      order.push('start');
+    });
+    try {
+      await router.startSelectedRuntime(writing);
+      expect(handleRuntimeFailure).not.toHaveBeenCalled();
+      expect(startWorkspaceWatch).toHaveBeenCalledExactlyOnceWith(
+        'task-grok',
+        started.turnId,
+        writing.workspaceSet,
+      );
+      expect(grok.start).toHaveBeenCalledTimes(1);
+      expect(order).toEqual(['watch', 'start']);
+    } finally {
+      baseline.mockRestore();
+    }
   });
 
   it('does not begin or dispatch once streaming resource disposal starts', async () => {
