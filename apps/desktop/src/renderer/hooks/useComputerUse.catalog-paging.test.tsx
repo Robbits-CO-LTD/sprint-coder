@@ -191,8 +191,8 @@ async function settle(): Promise<void> {
     });
 }
 
-/** Opens the onboarding and presses 次へ, so the destination step is on screen. */
-async function openDestinationStep(): Promise<HTMLElement> {
+/** Mounts the real hook and opens its onboarding. */
+async function openOnboarding(): Promise<HTMLElement> {
   const container = document.createElement('div');
   document.body.append(container);
   const root = createRoot(container);
@@ -204,10 +204,21 @@ async function openDestinationStep(): Promise<HTMLElement> {
   expect(feature!.enabled).toBe(true);
   await act(async () => feature!.open());
   await settle();
-  const next = [...container.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].find(
+  return container;
+}
+
+function nextButton(container: HTMLElement): HTMLButtonElement | undefined {
+  return [...container.querySelectorAll<HTMLButtonElement>('button[type="submit"]')].find(
     (button) => button.textContent === '次へ',
   );
+}
+
+/** Opens the onboarding and presses 次へ, so the destination step is on screen. */
+async function openDestinationStep(): Promise<HTMLElement> {
+  const container = await openOnboarding();
+  const next = nextButton(container);
   expect(next, 'the 次へ button of the onboarding').toBeDefined();
+  expect(next!.disabled).toBe(false);
   await act(async () => next!.click());
   await settle();
   return container;
@@ -308,20 +319,21 @@ describe('#906: Computer Use lists image models from every catalog page', () => 
       if (call === 1) throw new Error('モデル一覧の2ページ目を読めませんでした');
     });
 
-    const container = document.createElement('div');
-    document.body.append(container);
-    const root = createRoot(container);
-    let feature: ComputerUseFeature | null = null;
-    await act(async () => {
-      root.render(<Probe onFeature={(value) => (feature = value)} />);
-    });
-    await settle();
-    await act(async () => feature!.open());
-    await settle();
-
+    const container = await openOnboarding();
+    // The way to the destination list is the 次へ button. Whatever state it is in, pressing it must
+    // not reveal page 1 as if it were the whole catalog.
+    const next = nextButton(container);
+    if (next !== undefined && !next.disabled) {
+      await act(async () => next.click());
+      await settle();
+    }
+    expect(offered(container)).toEqual([]);
+    expect(container.textContent).not.toContain('Vision 1');
+    expect(next === undefined || next.disabled, '次へ is not available after the failure').toBe(
+      true,
+    );
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'モデル一覧の2ページ目を読めませんでした',
     );
-    expect(offered(container)).toEqual([]);
   });
 });

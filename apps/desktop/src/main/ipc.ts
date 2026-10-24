@@ -3045,7 +3045,12 @@ export class IpcRouter {
       modelCatalogQueryInputSchema,
       modelCatalogQueryResultSchema,
       async (input) => {
-        await this.refreshModelCatalog();
+        // A cursor continues a listing of the catalog the first page was answered from. Rebuilding
+        // here would re-probe every Provider per page, and a Provider that flickers between
+        // success and failure would move the revision under the cursor on every page (#906).
+        // Revision 0 means no catalog has been built yet in this process, so it is built once.
+        if (input.cursor === null || this.modelCatalog.revision === 0)
+          await this.refreshModelCatalog();
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
         const selection =
