@@ -1190,7 +1190,10 @@ int RunDriver(bool ci) {
   // ---- the focused element: the hung window has to be the foreground one, with the focus in its edit
   bool focus_classification = false;
   bool focus_signature = false;
-  for (int attempt = 0; attempt < 3 && !focus_classification; ++attempt) {
+  constexpr int kFocusDiagnosticAttempts = 8;
+  int focus_measurements = 0;
+  int focus_valid_samples = 0;
+  for (int attempt = 0; attempt < kFocusDiagnosticAttempts; ++attempt) {
     if (!BringToForeground(hang)) continue;
     PostMessageW(hang, WM_APP + 3, 0, 0);
     Sleep(300);
@@ -1201,13 +1204,19 @@ int RunDriver(bool ci) {
       risk = ClassifyWindowsFocusedElement(static_cast<std::uint32_t>(pid));
       sc820_timing::End();
     });
+    ++focus_measurements;
     PrintFocusTiming(attempt, ms);
     std::string reason;
     if (ms >= kHeldUp) {
       focus_classification = true;
-      cases.push_back({"ClassifyWindowsFocusedElement", ms, RejectWindowsRisk(risk, &reason), true});
+      ++focus_valid_samples;
+      cases.push_back({"ClassifyWindowsFocusedElement@focus-attempt-" + std::to_string(attempt),
+                       ms, RejectWindowsRisk(risk, &reason), true});
     }
   }
+  std::cout << "focus_repeat attempts=" << kFocusDiagnosticAttempts
+            << " measured=" << focus_measurements << " valid=" << focus_valid_samples << std::endl;
+  if (ci) SeamCheck(focus_valid_samples > 0, "focused_diagnostic_collected_a_stalled_sample");
   for (int attempt = 0; attempt < 3 && !focus_signature; ++attempt) {
     if (!BringToForeground(hang)) continue;
     PostMessageW(hang, WM_APP + 3, 0, 0);
@@ -1504,8 +1513,8 @@ describe('V1 lane UI Automation against windows that do not answer, live, across
     console.log(result.stdout);
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(result.stdout).toContain('OK');
-    // The six V1 paths all ran (the focus ones only when the window could be made the foreground one:
-    // always required in CI, where the program itself fails without them).
+    // The repeated focus classification must have a stalled sample in CI; the separate focus
+    // signature may still be unavailable when the owned window cannot acquire focus.
     const ran = new Set(
       [...result.stdout.matchAll(/^ran (\w+)(?:@[\w-]+)? /gmu)].map((match) => match[1]),
     );
