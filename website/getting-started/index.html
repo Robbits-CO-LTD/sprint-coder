@@ -6,7 +6,7 @@
     <title>Sprint Coderのはじめ方 | ダウンロードから最初の仕事まで</title>
     <meta
       name="description"
-      content="Sprint Coderのはじめ方。v0.5.0のダウンロード、ソースからの起動、作業フォルダの選び方、最初のお願い、Codex・Claude Code・APIの接続、AIチームへの広げ方を説明します。"
+      content="Sprint Coderのはじめ方。v0.6.0のダウンロード、ソースからの起動、作業フォルダの選び方、最初のお願い、Codex・Claude Code・APIの接続、AIチームへの広げ方を説明します。"
     />
     <meta name="author" content="Robbits Inc." />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
@@ -30,8 +30,8 @@
     <meta name="twitter:description" content="ダウンロードして、作業フォルダを選び、お願いを送るまで。" />
     <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
 
-    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/styles.css?v=20261022" />
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261024" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261024" />
     <script src="/film.js?v=20261022" defer></script>
 
     <script type="application/ld+json">
@@ -44,10 +44,10 @@
             "url": "https://sprintcoder.yuseilab.com/getting-started/",
             "name": "Sprint Coderのはじめ方",
             "headline": "Sprint Coderのはじめ方",
-            "description": "v0.5.0のダウンロードまたはソースからの起動、最初のお願い、Codex・Claude Code・APIの接続、AIチームへの広げ方を説明します。",
+            "description": "v0.6.0のダウンロードまたはソースからの起動、最初のお願い、Codex・Claude Code・APIの接続、AIチームへの広げ方を説明します。",
             "inLanguage": "ja",
             "datePublished": "2026-08-20",
-            "dateModified": "2026-10-21",
+            "dateModified": "2026-10-24",
             "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg",
             "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
             "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
@@ -183,7 +183,7 @@
             配布物をダウンロードするか、Node.js 22でソースから起動できます。Providerをまだ設定していなくても、Mock RuntimeでTask、Workspace、基本操作を確認できます。
           </p>
           <p>
-            最初は小さな検証用Projectを選び、Accessを「確認する」にして操作の流れを把握するのがおすすめです。early betaのため、重要なWorkspaceでは差分と承認内容を確認してください。
+            最初は小さな検証用Projectを選び、Accessを「確認する」にして操作の流れを把握するのがおすすめです。重要なWorkspaceでは差分と承認内容を確認してください。
           </p>
 
           <h2>必要なもの</h2>
@@ -199,7 +199,7 @@
 
           <h2>インストールする</h2>
           <h3>GitHub Releasesから取得</h3>
-          <p>最新の正式版はv0.5.0（2026-08-22公開）です。OSに合うartifactを選びます。</p>
+          <p>最新の正式版はv0.6.0（2026-10-24公開）です。OSに合うartifactを選びます。</p>
           <div class="table-wrap" role="region" tabindex="0" aria-label="GitHubReleasesから取得の表">
             <table>
               <thead>
@@ -208,29 +208,29 @@
               <tbody>
                 <tr>
                   <th scope="row">Windows（installer）</th>
-                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-Installer.exe">Sprint-Coder-Installer.exe</a></td>
+                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.6.0/Sprint-Coder-Installer-0.6.0.exe">Sprint-Coder-Installer-0.6.0.exe</a></td>
                   <td>未署名のため、SmartScreenの警告が表示される場合があります</td>
                 </tr>
                 <tr>
                   <th scope="row">Windows（portable）</th>
-                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-win32-x64-0.5.0.zip">Sprint-Coder-win32-x64-0.5.0.zip</a></td>
+                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.6.0/Sprint-Coder-win32-x64-0.6.0.zip">Sprint-Coder-win32-x64-0.6.0.zip</a></td>
                   <td>zip</td>
                 </tr>
                 <tr>
                   <th scope="row">macOS（Apple Silicon）</th>
-                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-0.5.0-arm64.dmg">Sprint-Coder-0.5.0-arm64.dmg</a></td>
+                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.6.0/Sprint-Coder-0.6.0-arm64.dmg">Sprint-Coder-0.6.0-arm64.dmg</a></td>
                   <td>署名・公証済み</td>
                 </tr>
                 <tr>
                   <th scope="row">Linux（x64）</th>
-                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.5.0/Sprint-Coder-linux-x64-0.5.0.zip">Sprint-Coder-linux-x64-0.5.0.zip</a></td>
+                  <td><a href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.6.0/Sprint-Coder-linux-x64-0.6.0.zip">Sprint-Coder-linux-x64-0.6.0.zip</a></td>
                   <td>zip</td>
                 </tr>
               </tbody>
             </table>
           </div>
           <p>
-            early betaではOSの保護機能が警告を表示する場合があるため、release notesと配布状態を確認してください。対応OSや検証方法は<a href="/releases/">リリース・ダウンロード</a>にまとめています。
+            OSの保護機能が警告を表示する場合があるため、release notesと配布状態を確認してください。対応OSや検証方法は<a href="/releases/">リリース・ダウンロード</a>にまとめています。
           </p>
 
           <h3>ソースから起動</h3>
