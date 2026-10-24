@@ -10244,12 +10244,40 @@ if (runsWithElectronAbi)
           } finally {
             spy.mockRestore();
           }
-          // The integration still exists in Git, but a replacement root has no authority to expose it.
+          // Windows may keep the live workspace unrenamable; either outcome must preserve authority.
           const renamed = `${workspace}-saved`;
-          await rename(workspace, renamed);
+          const originalBinding = await workspaceMutationBinding(workspace);
+          const originalHead = (
+            await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])
+          ).stdout.trim();
+          read.mockClear();
+          try {
+            await rename(workspace, renamed);
+          } catch (error) {
+            if (
+              process.platform !== 'win32' ||
+              !(error instanceof Error) ||
+              !('code' in error) ||
+              error.code !== 'EBUSY'
+            )
+              throw error;
+            expect(await workspaceMutationBinding(workspace)).toEqual(originalBinding);
+            expect(existsSync(renamed)).toBe(false);
+            expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+              'written by the Worker\n',
+            );
+            expect(
+              (await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])).stdout.trim(),
+            ).toBe(originalHead);
+            await expect(coordinator.readTeamResult(request, read)).resolves.toBe('read');
+            expect(read).toHaveBeenCalledTimes(1);
+            return;
+          }
+          // The integration still exists in Git, but a replacement root has no authority to expose it.
           mkdirSync(workspace);
           try {
             await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+            expect(read).not.toHaveBeenCalled();
           } finally {
             rmSync(workspace, { recursive: true });
             await rename(renamed, workspace);

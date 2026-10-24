@@ -34,7 +34,9 @@ async function fixture(
     appPrivate?: boolean;
   } = {},
 ) {
-  const directory = await mkdtemp(join(tmpdir(), 'team-result-read-'));
+  // Windows temp is under protected AppData; use the same neutral base as path-guard.test.
+  const fixtureBase = process.platform === 'win32' ? process.cwd() : tmpdir();
+  const directory = await mkdtemp(join(fixtureBase, 'team-result-read-'));
   directories.push(directory);
   const repositoryPath = options.appPrivate
     ? join(directory, 'AppData', 'central')
