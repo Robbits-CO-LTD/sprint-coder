@@ -10,7 +10,7 @@ import type { TaskSummary } from '../../types/sprint-coder';
 // Dev-only mount counter (ADR-002 / Phase 6 Slice 6.2 acceptance: "mount count=1" across a
 // chat→team→chat→team cycle). SurfaceLayer moves this component's DOM subtree between the main
 // and Leader anchors via a single persistent portal host — it must never actually remount. Read
-// via `window.__sprintCoderChatSurfaceMounts` from tests/e2e/team-morph.spec.ts.
+// via `window.__sprintCoderChatSurfaceMounts` during Computer Use diagnostics.
 //
 // Note: this app renders under <StrictMode> (main.tsx), which deliberately double-invokes
 // mount effects in dev to surface non-idempotent effects — so the *baseline* value right after

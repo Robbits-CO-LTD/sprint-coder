@@ -95,46 +95,6 @@ function sandbox(root, platform = process.platform, content = 'fixture-binary') 
   return executable;
 }
 
-function macExerciseFixture() {
-  const root = fixture();
-  write(join(root, 'apps/desktop/out/test/Sprint.app/Contents/MacOS/Sprint'), 'fixture', 0o755);
-  write(
-    join(root, 'bin/npx'),
-    `#!${process.execPath}\n` +
-      String.raw`
-const { appendFileSync, realpathSync } = require('node:fs');
-const { join } = require('node:path');
-const root = process.env.RUNNER_TEMP;
-const trace = join(root, 'trace');
-if (process.argv[2] !== 'playwright' || process.argv[3] !== 'test') process.exit(99);
-if (realpathSync(process.env.SPRINT_CODER_E2E_EXECUTABLE_PATH) !==
-    realpathSync(join(root, 'apps/desktop/out/test/Sprint.app/Contents/MacOS/Sprint'))) process.exit(99);
-appendFileSync(trace, 'archify:done\n');
-process.exit(Number(process.env.CI_FIXTURE_ARCHIFY_RESULT));
-`,
-    0o755,
-  );
-  const step = workflow.jobs['package-macos'].steps.find(
-    (entry) => entry.name === 'Exercise bundled Archify using the production package',
-  );
-  return {
-    root,
-    invoke: (env) =>
-      spawnSync('bash', ['-e', '-c', step.run], {
-        cwd: root,
-        env: {
-          ...process.env,
-          ...step.env,
-          RUNNER_TEMP: root,
-          PATH: `${root}/bin:${process.env.PATH}`,
-          ...env,
-        },
-        encoding: 'utf8',
-        timeout: 3_000,
-      }),
-  };
-}
-
 describe('CI cache reuse and fallback', () => {
   it('installs/builds on miss or invalid exact hit and skips only verified exact hits', () => {
     const install = depsAction.runs.steps.find((step) =>
@@ -283,25 +243,6 @@ describe('CI cache reuse and fallback', () => {
 });
 
 describe('CI scope wiring', () => {
-  it('configures the Linux sandbox helper before starting the focused dev app', () => {
-    const job = workflow.jobs['renderer-e2e'];
-    const setup = job.steps.findIndex(
-      (step) => step.name === 'Configure Linux Chromium sandbox helper',
-    );
-    const exercise = job.steps.findIndex((step) => step.name === 'Run selected UI cases on Linux');
-    expect(setup).toBeGreaterThanOrEqual(0);
-    expect(exercise).toBeGreaterThan(setup);
-    expect(job.steps[exercise].run).toContain('xvfb-run');
-    expect(job.steps[exercise].env.SPRINT_CODER_E2E_HIDDEN).not.toBe('1');
-    expect(job.steps[setup].if).toBe("runner.os == 'Linux'");
-    expect(job.steps[setup].run).toContain('sudo chown root:root');
-    expect(job.steps[setup].run).toContain('sudo chmod 4755');
-    expect(job.steps[setup].run).toContain('s.uid !== 0 || s.gid !== 0');
-    expect(job.steps[setup].run).toContain('s.isSymbolicLink()');
-    expect(JSON.stringify(job)).not.toContain('--no-sandbox');
-    expect(JSON.stringify(job)).not.toContain('ELECTRON_DISABLE_SANDBOX');
-  });
-
   it.each([
     ['README.md', ['classify', 'required']],
     ['website/index.html', ['classify', 'website', 'required']],
@@ -311,7 +252,7 @@ describe('CI scope wiring', () => {
     ],
     [
       'apps/desktop/src/renderer/components/RunCard.tsx',
-      ['classify', 'quality', 'renderer-tests', 'renderer-e2e', 'required'],
+      ['classify', 'quality', 'renderer-tests', 'required'],
     ],
   ])('selects only the planned workflow jobs for %s', (path, expected) => {
     const scope = classifyChanges([{ path, status: 'M' }]);
@@ -319,7 +260,6 @@ describe('CI scope wiring', () => {
       mode: scope.mode,
       full_matrix: String(scope.fullMatrix),
       website_required: String(scope.websiteRequired),
-      e2e_specs: JSON.stringify(scope.e2eSpecs),
     };
     const selected = Object.entries(workflow.jobs)
       .filter(([, job]) => {
@@ -358,19 +298,6 @@ describe('CI scope wiring', () => {
         (step) => step.run === 'npx electron-forge package --platform=win32 --arch=x64',
       ),
     ).toBe(true);
-    for (const id of ['archify-packaged']) {
-      const job = workflow.jobs[id];
-      expect(job.needs).toEqual(['classify', 'package-windows-build']);
-      const download = job.steps.find((step) =>
-        step.uses?.startsWith('actions/download-artifact@'),
-      );
-      expect(download.with.name).toBe('${{ needs.package-windows-build.outputs.artifact }}');
-      expect(download.with['run-id']).toBeUndefined();
-      const restore = job.steps.find((step) => step.run === 'node ci-windows-package.mjs restore');
-      expect(restore.env.CI_WINDOWS_PACKAGE_SHA256).toBe(
-        '${{ needs.package-windows-build.outputs.archive_sha256 }}',
-      );
-    }
     const installer = workflow.jobs['package-windows'].steps;
     expect(workflow.jobs['package-windows'].needs).toBe('classify');
     expect(
@@ -379,25 +306,41 @@ describe('CI scope wiring', () => {
     expect(installer.some((step) => step.uses?.startsWith('actions/download-artifact@'))).toBe(
       false,
     );
-    expect(
-      workflow.jobs['archify-packaged'].steps.some((step) => step.run?.includes('electron-forge')),
-    ).toBe(false);
   });
 });
 
 describe('full CI partition contract', () => {
   it.skipIf(process.platform === 'win32')(
-    'runs the packaged Mac viewer and propagates its failure',
+    'builds the Linux and Mac production packages explicitly and propagates failures',
     () => {
-      for (const archify of [0, 7]) {
-        const fixture = macExerciseFixture();
-        const result = fixture.invoke({
-          CI_FIXTURE_ARCHIFY_RESULT: String(archify),
-        });
-        expect(result.error).toBeUndefined();
-        expect(result.status).toBe(archify);
-        const trace = readFileSync(join(fixture.root, 'trace'), 'utf8');
-        expect(trace).toBe('archify:done\n');
+      for (const job of ['package-linux', 'package-macos']) {
+        const step = workflow.jobs[job].steps.find(
+          (entry) => entry.name === 'Production package smoke',
+        );
+        expect(step['working-directory']).toBe('apps/desktop');
+        expect(step['continue-on-error']).toBeUndefined();
+        const root = fixture();
+        mkdirSync(join(root, 'apps/desktop'), { recursive: true });
+        write(
+          join(root, 'bin/npx'),
+          '#!/bin/sh\n[ "$1" = "electron-forge" ] && [ "$2" = "package" ] || exit 99\nexit "$CI_FIXTURE_PACKAGE_RESULT"\n',
+          0o755,
+        );
+        for (const exitCode of [0, 7]) {
+          const result = spawnSync('bash', ['-e', '-c', step.run], {
+            cwd: join(root, step['working-directory']),
+            env: {
+              ...process.env,
+              ...step.env,
+              PATH: `${root}/bin:${process.env.PATH}`,
+              CI_FIXTURE_PACKAGE_RESULT: String(exitCode),
+            },
+            encoding: 'utf8',
+            timeout: 3_000,
+          });
+          expect(result.error).toBeUndefined();
+          expect(result.status).toBe(exitCode);
+        }
       }
     },
   );
@@ -540,31 +483,15 @@ describe('full CI partition contract', () => {
       expect(step.run).not.toContain('--exclude');
       expect(step['continue-on-error']).toBeUndefined();
     }
-    const archify = workflow.jobs['archify-packaged'];
-    expect(archify.strategy.matrix.shard).toEqual([1, 2]);
-    expect(archify.strategy.matrix.os).toEqual(['windows-2022']);
-    const macPackage = workflow.jobs['package-macos'];
-    expect(macPackage.needs).toBe('classify');
-    const packageIndex = macPackage.steps.findIndex(
-      (step) => step.name === 'Production package smoke',
-    );
-    const exerciseIndex = macPackage.steps.findIndex(
-      (step) => step.name === 'Exercise bundled Archify using the production package',
-    );
-    expect(packageIndex).toBeGreaterThanOrEqual(0);
-    expect(exerciseIndex).toBeGreaterThan(packageIndex);
-    const exerciseMac = macPackage.steps[exerciseIndex];
-    expect(exerciseMac.env.SPRINT_CODER_E2E_MODE).toBe('packaged');
-    expect(exerciseMac.run).toContain('SPRINT_CODER_E2E_EXECUTABLE_PATH=');
-    expect(exerciseMac.run).toContain('--workers=1');
-    expect(exerciseMac.run).not.toContain('--shard=');
-    expect(exerciseMac['continue-on-error']).toBeUndefined();
-    expect(macPackage.steps.some((step) => step.env?.SPRINT_CODER_MANAGED_LOCAL_LIVE)).toBe(false);
-    expect(exerciseMac.run).not.toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
-    expect(exerciseMac.run).not.toContain('src/main/managed-local-runtime-supervisor.test.ts');
-    expect(macPackage.steps.some((step) => step.run?.includes('build:managed-local-sidecar'))).toBe(
-      false,
-    );
+    for (const id of ['package-linux', 'package-macos']) {
+      const job = workflow.jobs[id];
+      expect(job.needs).toBe('classify');
+      expect(job.steps.some((step) => step.run === 'npx electron-forge package')).toBe(true);
+      expect(job.steps.some((step) => step.env?.SPRINT_CODER_MANAGED_LOCAL_LIVE)).toBe(false);
+      expect(job.steps.some((step) => step.run?.includes('build:managed-local-sidecar'))).toBe(
+        false,
+      );
+    }
     const required = workflow.jobs.required;
     expect(required.needs).toContain('computer-use-native-gate');
     expect(required.needs).toContain('computer-use-windows-v2-harness');
@@ -582,15 +509,6 @@ describe('full CI partition contract', () => {
       for (const status of ['failure', 'cancelled', 'skipped', ''])
         expect(() => verifyRequiredJobs(scope, { ...successful, [dependency]: status })).toThrow();
     }
-
-    const runArchify = archify.steps.find((step) =>
-      step.name?.startsWith('Exercise the real bundled'),
-    );
-    expect(runArchify.run).toContain('--fully-parallel --workers=1 --shard=${{ matrix.shard }}/2');
-    const evidence = archify.steps.find((step) =>
-      step.uses?.startsWith('actions/upload-artifact@'),
-    );
-    expect(evidence.with.name).toContain('${{ matrix.shard }}');
 
     const macTest = workflow.jobs['test-macos'].steps.find((step) =>
       step.name.startsWith('Test desktop'),

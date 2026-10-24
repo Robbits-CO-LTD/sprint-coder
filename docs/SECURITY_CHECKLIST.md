@@ -1,5 +1,7 @@
 # Electron Security Checklist — Sprint Coder
 
+> This is the historical Phase 7 audit. Its test paths and results refer to that revision. Current UI verification uses the [Computer Use checklist](testing/computer-use/README.md); a prior E2E result or a current build alone is not proof of current UI or security behavior.
+
 Phase 7 hardening evidence (IMPLEMENTATION_PLAN §10.4, PRODUCT_AND_TECHNICAL_DESIGN NFR-SEC-01..08).
 Every item below was verified against the code at the time of writing (branch
 `codex/rename-sprint-coder`); citations are `file:line`. Status legend:

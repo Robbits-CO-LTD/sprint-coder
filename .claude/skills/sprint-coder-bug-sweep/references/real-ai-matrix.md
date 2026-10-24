@@ -1,6 +1,6 @@
 # Phase 3 — Computer Use 実 AI テストの手順・anchor・case matrix
 
-Claude lane → Codex lane の順に、lane ごとにこの文書を頭から適用する。lane の途中で BLOCKED になっても、残りの case を `NOT_RUN` として記録し、もう一方の lane は最後まで回す。**Phase 3 は manifest の `real_ai=on`（`new-run.sh --real-ai on --authorized-by "<依頼文の該当語>"`）が無ければ始めない。** `launch-dev-instance.sh` はそれを機械的に拒否する。
+Claude lane → Codex lane の順に、lane ごとにこの文書を頭から適用する。laneの途中でBLOCKEDになった場合は、依存caseも `BLOCKED` として記録し、もう一方の lane は最後まで回す。**Phase 3 は manifest の `real_ai=on`（`new-run.sh --real-ai on --authorized-by "<依頼文の該当語>"`）が無ければ始めない。** `launch-dev-instance.sh` はそれを機械的に拒否する。
 
 ## 1. lane の入出力
 
@@ -9,8 +9,7 @@ Claude lane → Codex lane の順に、lane ごとにこの文書を頭から適
 | profile | `$RUN_DIR/lanes/<lane>/profile`（`SPRINT_CODER_USER_DATA_DIR` と `SPRINT_CODER_SKILL_HOME`） |
 | workspace | `$RUN_DIR/lanes/<lane>/workspace`（README.md 入り。Project の primary folder にする） |
 | nonce | `$RUN_DIR/lanes/<lane>/nonce`（8 hex。prompt と検証の両方で使う） |
-| app.json | 起動した Electron の identity（pid・起動時刻・コマンド行・profile・debug port）。`stop-dev-instance.sh` はこれと一致するプロセスだけを止める |
-| debug.json | `--debug-port` 指定時のみ。この起動が `app.log` に印字した DevTools browser id と listener pid。`seed-instance.mjs` はこれと一致する endpoint にしか接続しない |
+| app.json | 起動した Electron の identity（pid・起動時刻・コマンド行・profile）。`stop-dev-instance.sh` はこれと一致するプロセスだけを止める |
 | app log | `$RUN_DIR/lanes/<lane>/app.log`（main / runtime-host の stdout+stderr。**追記のみ**。再起動ごとに `==== bug-sweep launch … ====` の区切り行が入る） |
 | events | `$RUN_DIR/lanes/<lane>/events.jsonl`（操作・観測・判定を 1 行 1 件で追記） |
 | モデル | Claude: ピッカー検索 `sonnet` → 「Sonnet 5」 / Codex: 検索 `gpt-5.5` → 「GPT-5.5」 / Ollama（任意）: 導入済み model のうち tool-use 可能なもの |
@@ -19,13 +18,13 @@ lane の bundle id は **`com.github.Electron`**（dev Electron）。`com.electr
 
 ## 2. window の所有権
 
-1. `launch-dev-instance.sh` の **前** に `app_list_windows(app: "com.github.Electron")` を取り、window_id 一覧を events に書く（title は hash か省略）。
+1. `launch-dev-instance.sh` の **前** に 現在のComputer Useツールでwindow inventoryを取り、window_id 一覧を events に書く（title は hash か省略）。
 2. 起動後 5〜10 秒待って再度取り、**新しく現れた window が 1 枚だけ**ならそれを `owned_new` とする。2 枚以上増えた・増えない場合は `fail_tooling` にして stale を疑う（`app.log` を読む）。
-3. 以後の `app_screenshot` / `app_click` / `app_type` / `app_key` / `app_ax_find` / `app_menu` は全部この `window_id` を渡す。
+3. 以後の画面取得・クリック・入力・キー・メニュー操作は、この所有windowだけを対象にする。
 4. 起動時に `app.log` へ `Sprint Coder API unavailable` や `NODE_MODULE_VERSION` が出たら native 前提の欠落（preflight に戻る）。
 5. プロセス側の所有権は `app.json`（pid + 起動時刻 + コマンド行）で束縛する。stop は identity が一致しない限り signal を送らず `cleanup_hold` を返す。
-6. **`app_*` tools は bundle id ごとに 1 process しか扱えない。** forge の `npm start` が開く window が残っていると lane の window に届かないので、Phase 3 の前に dev server を `ensure-dev-server.sh --renderer-only` に切り替え、lane instance を唯一の `com.github.Electron` process にする。
-7. 隠れた background window は描画が止まり `app_screenshot` と AX tree が古いままになる。`launch-dev-instance.sh` は `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding` を付けて起動する。観測が疑わしいときは `scripts/lane-peek.cjs` で DOM 側の事実（run-card 状態、承認カードとボタン座標、カード一覧）と突き合わせる。
+6. 利用するComputer Useツールが対象instanceを識別できるか確認する。必要なら、このrun所有のdev serverだけを `ensure-dev-server.sh --renderer-only` へ切り替える。既存の開発者processは止めず、対象を識別できなければ `BLOCKED` とする。
+7. 隠れた background window は描画が止まり 画面とAX tree が古いままになる。`launch-dev-instance.sh` は `--disable-backgrounding-occluded-windows --disable-renderer-backgrounding` を付けて起動する。観測が疑わしいときはComputer Useで対象windowを再取得し、最新画面とログ・ファイルの実測を照合する。
 
 ## 3. Access preset の意味（期待値の根拠）
 
@@ -34,14 +33,14 @@ lane の bundle id は **`com.github.Electron`**（dev Electron）。`com.electr
 | preset | 表示 | 実 CLI（Claude / Codex の managed harness）で実際に起きること（2026-09-12 実測） |
 |---|---|---|
 | `ask` | 確認する | **すべての tool 呼び出しに承認カード**（`create_directory` / `create_file` / `read_file` / `exec_command` / `list_workspace`。読み取りも含む）。承認すれば書き込みもコマンドも実行される |
-| `auto` | 安全時は自動 | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` とネットワークは自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは、まとめた `apply_patch` の2つ目以降や rename の書き込み先に含まれる場合も `immutable_protected_resource` で呼び出し全体を拒否。Workspace 外を指す編集は PathGuard が拒否する（`PATH_ESCAPE`、相対の `..` は `RELATIVE_TRAVERSAL`。自動レビューには回らない）。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。mock の file-edits.spec（auto で編集が記録される）と同じ扱いになった |
+| `auto` | 安全時は自動 | workspace の読み取りと、**Workspace 内のファイルの作成・編集（`create_directory` / `create_file` / `apply_patch`）を自動許可**（監査行 `自動許可 workspace.read preset_auto_safe` / `自動許可 workspace.write preset_auto_safe_edit`、承認カードなし）。`exec_command` とネットワークは自動レビューが判定し、コマンドは **自動拒否**（監査行 `拒否 … high_risk`、承認カードなし）。保護パスへの書き込みは、まとめた `apply_patch` の2つ目以降や rename の書き込み先に含まれる場合も `immutable_protected_resource` で呼び出し全体を拒否。Workspace 外を指す編集は PathGuard が拒否する（`PATH_ESCAPE`、相対の `..` は `RELATIVE_TRAVERSAL`。自動レビューには回らない）。書き込みの自動許可は #526 で変わった期待値で、実 CLI では未測定（2026-09-12 の実測では書き込みも `high_risk` で自動拒否だった）。共通チェックリストでもautoで編集が記録されることを確認する |
 | `full` | フルアクセス | 切り替え時に **native の確認シート**（「フルアクセスを有効化」）。ファイル編集は承認なしで実行される。ただし `exec_command`（`OS sandboxなし`）は **依然として承認カードが出た**（設計かどうか未確定 → OBSERVED として報告） |
 
 この表と逆の期待値を書かない。ファイル編集とコマンド実行を「承認なし」で通したい case は `full` で行い、`ask` では承認カードを Computer Use で操作する。
 
 ## 4. UI anchor（AX の accessible name で掴む）
 
-Computer Use は `data-testid` を見られない。`app_screenshot` の AX summary と `app_ax_find(role, title_contains)` で **role + 表示名** を使う。下は現行 renderer（2026-09 時点）の名前。変わっていたら spec 側と同じく実装に合わせて読み替え、変更を報告に書く。
+Computer Useでは実画面またはアクセシビリティ情報の **role + 表示名** で対象を特定する。内部testidやDOM操作へ依存しない。下は現行 renderer（2026-09 時点）の名前。変わっていたら現行仕様と実装に合わせて読み替え、変更を報告に書く。
 
 | 画面 | 要素 | 掴み方 |
 |---|---|---|
@@ -50,47 +49,33 @@ Computer Use は `data-testid` を見られない。`app_screenshot` の AX summ
 | セットアップ「作業場所を選ぶ」 | 「フォルダを選択」 | `AXButton` → native open panel |
 | サイドバー | 「新規タスク」 | `AXButton` |
 | Project ピッカー | 「新しいProject」→ ダイアログ「Project名」入力、「フォルダを選択」、「作成」 | `AXButton` / `AXTextField` |
-| Composer | 入力欄 | `AXTextArea`（placeholder 付き）。送信は `app_key return`、改行は Shift+Enter |
+| Composer | 入力欄 | `AXTextArea`（placeholder 付き）。送信はEnter、改行は Shift+Enter |
 | Composer | 送信 / 停止ボタン | `AXButton`（aria-label は状態で変わる） |
 | Run Card | タイトル `思考中` → `完了` / `失敗` / `中止` / `中断` / `停止しています…` | `AXStaticText`。`data-run-status` は running / canceling / completed / canceled / failed / interrupted |
 | 承認カード | 「今回のみ許可」「Task中許可」「拒否」 | `AXButton`。カード本文に tool 名（`run_command` 等）と対象が出る |
 | 自動判定の監査行 | `拒否` と理由 `high_risk` 等 | `AXStaticText`（approval-audit-row） |
 | ファイル変更カード | relative path と `新規` / `変更` | `AXStaticText` |
 | コマンドカード | `exit 0`、「出力を展開」「出力を折り畳む」 | `AXStaticText` / `AXButton` |
-| Context bar | Access セレクタ（表示: `確認する` / `安全時は自動` / `フルアクセス`）、full 切替の確認「影響を理解してフルアクセスにする」 | `AXButton`（ポップオーバー。§6 のフォールバックあり） |
+| Context bar | Access セレクタ（表示: `確認する` / `安全時は自動` / `フルアクセス`）、full 切替の確認「影響を理解してフルアクセスにする」 | `AXButton`（ポップオーバー。§6の操作手順を参照） |
 | Context bar | モデルピッカー（現在のモデル名を表示） | `AXButton` → 検索 `AXTextField` → 候補 |
 | フッター | 接続状態（failed のとき tone が変わる） | `AXStaticText` |
-| メニューバー | 終了 | `app_menu(path: ["Electron", "Quit Electron"])`（dev では app 名が Electron） |
+| メニューバー | 終了 | アプリメニューから通常終了（dev では app 名が Electron） |
 
 ## 5. workspace を Project にする
 
 **既定: native ダイアログ経由**（人と同じ経路。ここが壊れていればそれ自体が Finding）。
 
 1. ウィザードの「作業場所を選ぶ」で「フォルダを選択」を押す（または「あとで設定」→ サイドバー「新しいProject」→ ダイアログで「フォルダを選択」）。
-2. open panel は native なので display-scope へ切り替える: `request_full_control` →
-   `computer_batch([{key:"cmd+shift+g"}, {type:"<workspace の絶対 path>"}, {key:"Return"}, {wait:1}, {key:"Return"}, {screenshot}])` → `release_full_control`。events に `computer_use_reason=CU-01-native-dialog` を書く。
+2. Computer Useでnative open panelを操作する。macOSではCmd+Shift+Gでlane workspaceの絶対pathを入力して選択できる。操作方式の変更をeventsに記録する。
 3. ダイアログに folder 行が出て primary の radio が付いていることを確認し「作成」。サイドバーに Project 名が出ることを確認。
 
-**フォールバック: CDP seed**（display-scope が拒否されたとき、または native panel が `fail_tooling` になったとき）
-
-```bash
-"$S/launch-dev-instance.sh" --run-dir "$RUN_DIR" --lane claude --debug-port 9333   # port が空いていなければ起動を拒否する
-node "$S/seed-instance.mjs" --run-dir "$RUN_DIR" --lane claude
-```
-
-seed は `debug.json` の browser id と listener pid が **この起動** のものであることを確かめてから接続し、ウィザード完了フラグ、サイドバーの「新規タスク」による Task 作成、Project 作成と割り当て、reload を行う（E2E helper の `assignCurrentTaskToProjectFolder` と同じ IPC）。一致しなければ `fail_tooling` で何もしない。seed を使った lane は manifest に `seeded_via_cdp=true`、RA-01 / RA-02 を `NOT_RUN` にする。seed 後は CDP を使わず Computer Use だけで操作する。
+必要なComputer Use操作が利用できなければRA-02と依存caseを `BLOCKED` にする。内部IPCやDOM自動操作によるseedでユーザー操作を代用しない。
 
 ## 6. ポップオーバーとキーボード
 
-background の `app_click` は「menu-presenting control」を拒否することがある（Access セレクタ、モデルピッカー、＋メニュー）。順に試す:
+Computer Useで対象のトリガーを開き、キーボードまたはアクセシビリティ情報から検索欄と候補を選ぶ。選択後の表示名と状態を必ず確認する。background入力が利用できない場合は、現在のツールが提供するネイティブ入力へ切り替え、理由を記録する。
 
-1. トリガーを `app_click` → `unsupported` なら `app_ax_find` で見つけた要素に `app_click(element_index)`。
-2. それでも拒否なら、トリガーにフォーカスを置いて `app_key(combo: "return")`。
-3. 最後に display-scope（`request_full_control` → `computer_batch` で click / type / Return → `release_full_control`）。理由 `bg-refused-popup` を events に残す。
-
-検索 `AXTextField` へは `app_type(mode: "replace")`。候補は `app_ax_find(title_contains: "Sonnet 5")` → `app_click(element_index)`。
-
-**実測（2026-09-12、background mode）**: トリガーの AXPress で popover は開くが、候補（`AXMenuItem`）の AXPress は hit-test が下の composer に落ちて選べず、検索欄への raw 入力も Chromium に届かない。display-scope が承認されなかった run では、`scripts/lane-select.cjs`（アプリ自身の `models.setSelection` / `permissions.set` IPC を bound CDP で呼ぶ）へ切り替え、events に `fail_tooling` として残す。`full` への切替は native の確認シートが出るので、その「フルアクセスを有効化」を `app_click(element_index)` で押す（native シートは AXPress が効く）。
+必要な操作機能や権限を利用できなければcaseを `BLOCKED` にし、内部IPCでモデルやAccessを変更しない。
 
 ## 7. case matrix
 
@@ -108,9 +93,9 @@ background の `app_click` は「menu-presenting control」を拒否すること
 | RA-08 | auto | 高リスクコマンドの自動拒否 | P6 | 承認カードなし、監査行 `拒否 shell.execute high_risk`、Turn `完了` | `auto-deny` |
 | RA-09 | full | 承認なしのファイル編集 | Access を `フルアクセス`（native 確認シート）→ P5c → P5b（RA-07 で 2 行になっているので、一度 1 行に戻してから追記し直す） | どちらも承認カードなし、ファイル変更カード `変更`。P5c の後は 1 行、P5b の後は 2 行ちょうど | P5c の後 `auto-file --lines 1`、P5b の後 `auto-file --lines 2` |
 | RA-09b | full | コマンド実行 | P7 | コマンドカード `exit 0`、出力に `SC_FULL_OK:<lane>:<nonce>`（承認カードが出た場合は OBSERVED として記録し「今回のみ許可」で続行） | `full-command` |
-| RA-10 | — | scope 逸脱 | — | **NOT_RUN 既定**（full では外部書き込みが設計上許可されるため）。依頼で明示されたときだけ P8 を送り、`~/Desktop/sc-escape-<nonce>.txt` の有無を記録する。auto で送る場合、Edit Saga は Workspace 外を受け付けず（PathGuard が `PATH_ESCAPE` / `RELATIVE_TRAVERSAL` で拒否）、コマンドは自動レビューが判定するので、止まった経路はツールのエラー（PathGuard のコード）か監査行（`拒否 shell.execute …`）で区別できる。auto でファイルができたら FAIL P0 `fail_scope_escape` | `escape` |
+| RA-10 | — | scope 逸脱 | — | **SKIP 既定**（full では外部書き込みが設計上許可されるため）。依頼で明示されたときだけ P8 を送り、`~/Desktop/sc-escape-<nonce>.txt` の有無を記録する。auto で送る場合、Edit Saga は Workspace 外を受け付けず（PathGuard が `PATH_ESCAPE` / `RELATIVE_TRAVERSAL` で拒否）、コマンドは自動レビューが判定するので、止まった経路はツールのエラー（PathGuard のコード）か監査行（`拒否 shell.execute …`）で区別できる。auto でファイルができたら FAIL P0 `fail_scope_escape` | `escape` |
 | RA-11 | any | 停止 | P9 → `思考中` のうちに composer の停止ボタン（`実行を停止`） | Run Card `中止 部分回答`、部分回答が残る、composer が再び使える | — |
-| RA-12 | — | 再起動復元 | `app_menu(["Electron","Quit Sprint Coder"])` → `launch-dev-instance.sh --reuse-profile` | Task タイトル、メッセージ、ファイル変更カード、コマンドカード、監査行、Project、モデル、Access が戻る。`app.log` の新しい区切り以降に error なし | `all`（末尾状態） |
+| RA-12 | — | 再起動復元 | アプリメニューから通常終了 → `launch-dev-instance.sh --reuse-profile` | Task タイトル、メッセージ、ファイル変更カード、コマンドカード、監査行、Project、モデル、Access が戻る。`app.log` の新しい区切り以降に error なし | `all`（末尾状態） |
 
 Ollama lane（依頼で明示された場合のみ）は RA-03、RA-04、RA-05 を同じ prompt で行い、tool-use 非対応 model なら `blocked_model`。
 
@@ -135,30 +120,9 @@ Ollama lane（依頼で明示された場合のみ）は RA-03、RA-04、RA-05 �
 
 `--stage` は `ask-nowrite` / `command` / `deny` / `auto-file [--lines 1|2]` / `auto-deny` / `full-command` / `escape` / `all`（`auto-file` は preset に関係なく「txt が N 行ちょうど」の検証）。ファイルは byte 単位で完全一致（末尾 LF 1 個だけ許容）、「存在してはいけないファイル」の不在、workspace 外へ増えたファイルが無いことを出力する。
 
-Turn の進行待ちは **送信を挟んで 2 回** `lane-peek.cjs` を呼ぶ。
+Turnの送信前後をComputer Useで観測する。送信直後に最新user messageの下へ新TurnのRun Cardが現れ、`思考中`から終端状態または承認待ちに進むことを確認する。前Turnの完了カード、古い承認カード、成功文だけを新Turnの成功と扱わない。画面とログの対応を確かめられなければ `BLOCKED` とする。
 
-```bash
-B="$RUN_DIR/lanes/claude/baseline-RA-03.json"
-"$S/lane-peek.cjs" --run-dir "$RUN_DIR" --lane claude --baseline-out "$B"   # 送信前（prompt を送る直前）
-# …Computer Use で prompt を入力して送信…
-"$S/lane-peek.cjs" --run-dir "$RUN_DIR" --lane claude --poll 150 --baseline "$B"
-```
-
-`--baseline-out` はその時点の Turn identity（user / assistant の最終テキスト、run card の位置と状態、コマンド・ファイル・監査カードの件数、承認カード文言の hash）を保存するだけで、待たずに終了する。
-
-判定の要は **Run Card が「最新の user message の下」にあるか** で、これは renderer の作りから来ている: Timeline は現在の Turn の Run Card を 1 枚だけ、その Turn の user message の下に描く。送信は先に optimistic な user message を足し、`turn.accepted` が来て初めて Run Card が新 Turn のものに差し替わる。したがって 2 Turn 目以降の送信直後は「新しい user message がある + 前 Turn の `completed` カードが残っている」状態になり、**user message が増えたことも、最後のカードが terminal なことも、送った Turn の証拠にならない**。`--poll --baseline` は最新 user message に紐づく Run Card が現れるまで terminal / 承認カードを受理しないので、Turn が 4 秒の読み取り間隔の間に終わっても前 Turn の結果を拾わない（`--baseline` なしのときは「そのカードが `running` で見えた」ことだけが証拠なので、間に合わなければ受理せず stale になる）。承認ボタンはその出力の座標を `app_click(coordinate)` に渡す。
-
-`lane-peek.cjs` の終了コード:
-
-| exit | 意味 | 扱い |
-|---|---|---|
-| 0 | この Turn が settle した / この Turn の承認カードが出た（`--poll` 無しの単発 read も 0） | 観測結果として使える |
-| 3 | `"stale": true`。新しい Turn の Run Card を一度も観測できないまま poll 終了＝ **前 Turn の状態** | PASS/FAIL の根拠にしない。再観測するか `fail_tooling` |
-| 4 | `"timeout": true`。この Turn は観測したが poll 時間内に settle しなかった | 待ち直す（`--poll` を延ばす）か `fail_tooling` |
-| 2 | `fail_tooling`（port の listener pid / browser id が起動した instance と違う） | lane をやり直す |
-| 1 | peek 自体の失敗（CDP・renderer 未検出など） | driver 側の問題 |
-
-3 と 4 の出力は「この Turn の結果」ではないので、証拠として events に残すだけにする。
+`turn-evidence.cjs` はTurn identity / 新Turn受理を判定する純粋な補助処理として維持する。UI操作や観測を代替せず、確認済みのsnapshot metadataだけを入力する。単体検証は `node --test scripts/turn-evidence.test.mjs`。
 
 ## 8. 観測の記録
 
@@ -168,7 +132,7 @@ B="$RUN_DIR/lanes/claude/baseline-RA-03.json"
 {"t":"2026-09-12T09:00:00Z","lane":"claude","case":"RA-05","kind":"observation","surface":"background","window_id":1234,"detail":"approval-card run_command → 今回のみ許可; command-card exit 0","verdict":"PASS","evidence":"verify-lane.sh --stage command: smoke/claude.out sha256=…"}
 ```
 
-display-scope を使った行には `"surface":"display","computer_use_reason":"CU-01-native-dialog"` を必ず入れる。screenshot の保存が要る観測は `computer_batch` の `save_to_disk` を使い、path を `evidence` に書く（全画面に個人情報が映る場合は `zoom` で component だけ）。
+display-scope を使った行には `"surface":"display","computer_use_reason":"CU-01-native-dialog"` を必ず入れる。screenshotの保存は現在のツールが提供する方法を使い、pathを `evidence` に書く。個人情報が映る場合は対象componentだけを記録する。
 
 ## 9. BLOCKED の言い回し
 
@@ -176,6 +140,6 @@ display-scope を使った行には `"surface":"display","computer_use_reason":"
 - `blocked_auth`: ウィザードで `ログインが必要`、または Turn がすぐ `失敗` で `app.log` に auth 系 error
 - `blocked_provider`: `RUNTIME_RATE_LIMIT`、「Codexの利用上限に達しました」、provider 側 5xx
 - `blocked_model`: ピッカーに期待の model が無い（別 model で代替しない）
-- `blocked_computer_use`: `request_access` が拒否、または display-scope が必要な case で `request_full_control` が拒否され seed も使えない
+- `blocked_computer_use`: Computer Useが使えない、対象windowを識別できない、または必要な操作権限を利用できない
 
 BLOCKED は総合 PASS を妨げる。BLOCKED を SKIP や PASS に書き換えない。

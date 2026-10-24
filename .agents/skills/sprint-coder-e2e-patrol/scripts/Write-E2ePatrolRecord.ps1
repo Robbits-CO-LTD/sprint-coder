@@ -7,9 +7,9 @@ param(
     [Parameter(Mandatory = $true)][string]$CaseId,
     [string]$SessionId = '',
     [Parameter(Mandatory = $true)]
-    [ValidateSet('browser-use', 'computer-use')]
+    [ValidateSet('computer-use')]
     [string]$PrimarySurface,
-    [ValidateSet('', 'CU-01-native-dialog', 'CU-02-os-shell', 'CU-03-non-dom-app', 'CU-04-ime-clipboard', 'CU-05-window-layout', 'CU-06-browser-unavailable')]
+    [ValidateSet('', 'CU-00-standard', 'CU-01-native-dialog', 'CU-02-os-shell', 'CU-03-non-dom-app', 'CU-04-ime-clipboard', 'CU-05-window-layout')]
     [string]$ComputerUseReason = '',
     [string]$Classification = '',
     [Parameter(Mandatory = $true)][string]$Message,
@@ -27,9 +27,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $RunPath 'manifest.json') -PathType 
 }
 if ($PrimarySurface -eq 'computer-use' -and [string]::IsNullOrWhiteSpace($ComputerUseReason)) {
     throw 'ComputerUseReason is required for Computer Use records.'
-}
-if ($PrimarySurface -eq 'browser-use' -and -not [string]::IsNullOrWhiteSpace($ComputerUseReason)) {
-    throw 'ComputerUseReason must be empty for Browser Use records.'
 }
 foreach ($name in $EvidenceNames) {
     if ([System.IO.Path]::IsPathRooted($name) -or $name.Contains('..')) {

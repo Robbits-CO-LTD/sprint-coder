@@ -1,176 +1,29 @@
 ---
 name: sprint-coder-e2e-windows
-description: Windows（PowerShell / cmd）環境で sprint-coder の Playwright Electron E2E（tests/e2e/）を実行し、結果を pass / 既知flake / 意図的skip / 本物の失敗 に判定するための手順。Windows 上で「E2E を流して」「動作確認して」「回帰していないか見て」「golden path を確認して」と言われたとき、および renderer / main / runtime-host / preload を変更したあとに動作を確かめるときは必ずこのスキルを読むこと。PowerShell での環境変数の渡し方、dev server を先に手動起動しなければならない理由、packaged / dev モードの選択、ポートとプロセスの確認・掃除（taskkill）、変更箇所から実行対象 spec を選ぶ方法、失敗の切り分けと報告フォーマットを含む。macOS / Linux 向けの手順（`VAR=value command` 形式や lsof / pkill）をそのまま貼ると Windows では動かないので、実行前に必ず参照する。
+description: WindowsでSprint CoderのUI・E2EをComputer Useで実操作し、証拠とPASS / FAIL / SKIP / BLOCKEDを記録する。動作確認・回帰確認・golden path確認に使う。
 ---
 
-# sprint-coder E2E の実行と判定（Windows 版）
+# Sprint CoderのComputer Use検証（Windows）
 
-このリポジトリの E2E は Playwright の **Electron** ドライバで実アプリを起動する。ブラウザテストではないので web の常識（`page.goto`、`--headed`、trace viewer、リトライで緑にする）はほぼ当てはまらない。そして Windows では、失敗の大半が**アプリのバグではなく起動の段取り**に由来する。走らせる前に段取りを確定させる。
+UI・E2E・ユーザー操作は開発エージェントのComputer Useで実アプリを操作する。製品自身のComputer Use機能とは別であり、Playwrightのテストコードや実行手順を追加しない。単体・結合テストはVitestを使う。
 
-> **この文書の検証状況**: Windows 固有の記述は [tests/e2e/helpers.ts](../../../tests/e2e/helpers.ts) / [tests/e2e/global-setup.ts](../../../tests/e2e/global-setup.ts) / [playwright.config.ts](../../../playwright.config.ts) の実装（`process.platform === 'win32'` 分岐を含む）とWindows CIのdev-mode smokeから導いている。実際に走らせて食い違いがあれば、推測を残さずこのファイルを直すこと。
+正本は [Computer Use検証チェックリスト](../../../docs/testing/computer-use/README.md)。対象ケースの前提、操作、期待結果、対象OS、必要な証拠を読み、変更範囲に応じて選ぶ。全件が必要な場合は全ケースを列挙し、未実行分も記録する。
 
-## 1. 実行前に確定させる 3 つのこと
+## 実行と判定
 
-### (a) 環境変数は PowerShell の書き方で渡す
+1. 対象checkoutのSHAと差分、build、起動process、所有するprofile・workspaceを記録する。開発者の既存アプリやdev serverは停止しない。
+2. Node.js 22と依存関係を用意する。必要なら `npm run prepare:desktop --workspace @sprint-coder/desktop` でnative依存を準備し、`npm start` または対象OSのpackageを起動する。Node ABIとElectron ABIの不一致は環境障害として切り分ける。
+3. 現在利用可能なComputer Useツールのドキュメントを読み、アプリ・windowとsource/buildの対応を確認する。ツールが使えない、対象windowを識別できない場合は `BLOCKED` にする。
+4. Computer Useで実画面を操作する。shellは起動、fixture準備、ログ・ファイル照合に使用できる。DOM自動操作や内部IPCでUI操作を迂回しない。
+5. 期待結果を画面と必要な実測証拠で照合する。性能の数値基準とaxe監査は専用計測・監査結果が必要であり、目視で代用しない。
+6. 同じ所有profileで再起動するケースではprofileを作り直さない。異常を発見した場合は環境・成果物・操作ツールの障害と製品不具合を切り分け、必要なら初期状態を戻した別sessionで再現する。
+7. 各ケースの `PASS` / `FAIL` / `SKIP` / `BLOCKED`、build、OS、前提、操作、期待値・実測、証拠の所在を記録する。CIやbuildの成功だけで画面検証をPASSにしない。
+8. 自分のrunが所有するwindow・processだけを通常終了し、証拠を保持する。秘密やprompt・response全文を公開しない。
 
-macOS / Linux の `SPRINT_CODER_E2E_MODE=dev npx playwright test ...` という書き方は **PowerShell では動かない**（`SPRINT_CODER_E2E_MODE=dev` がコマンド名として解釈される）。
+実Providerへの送信、実CLIの課金、Teamの実Worker検証は現在の依頼で明示されたときだけ行う。認証がない場合に勝手なログインやモデルdownloadを行わない。実Providerを使わないケースと混ぜて報告しない。
 
-```powershell
-# PowerShell（このセッションの間ずっと有効になる点に注意）
-$env:SPRINT_CODER_E2E_MODE = 'dev'
-npx playwright test tests/e2e/golden-path-2-cancel.spec.ts
-```
+## Windowsの前提
 
-```bat
-:: cmd.exe
-set SPRINT_CODER_E2E_MODE=dev
-npx playwright test tests/e2e/golden-path-2-cancel.spec.ts
-```
+PowerShellを使い、Node.js 22、Python 3、Visual Studio Build Toolsを確認する。installer検証ではInno Setupも必要。環境変数はPowerShellの `$env:NAME = 'value'` 形式で設定する。新しいケースは正本の対象OSと照合し、macOS専用window lifecycleをWindowsの合格に数えない。
 
-`$env:` はそのシェルセッションに残り続けるので、あとで packaged モードを試すときは `$env:SPRINT_CODER_E2E_MODE = 'packaged'` と明示的に上書きするか、`Remove-Item Env:SPRINT_CODER_E2E_MODE` で消す。**前のテストの残り値のまま走らせて結果を誤読するのが一番ありがちな事故。**
-
-### (b) dev serverはglobalSetupに所有させる
-
-globalSetupは5173に何かlistenしていればそれを再利用し、無ければ`npm.cmd start`を自動起動する。自動起動したプロセスはテスト後に、その正確なPIDを`taskkill /PID <pid> /T /F`へ渡して子プロセスごと停止する。
-
-通常は1つのPowerShellからそのまま実行する:
-
-```powershell
-$env:SPRINT_CODER_E2E_MODE = 'dev'
-npx playwright test tests/e2e/live-file-edit.spec.ts
-```
-
-開発者が先に`npm start`している場合は既存serverを再利用し、globalSetupは停止しない。自分で起動していないプロセスへ触れない設計は維持される。
-
-### (c) テスト同士・開発中インスタンスとの衝突は既に解決済み
-
-各 spec は `createUserDataDir()` で隔離した `SPRINT_CODER_USER_DATA_DIR`（`%TEMP%` 配下）を使うので、SQLite も single-instance lock も独立している。「別のアプリが起動中だから落ちた」という仮説を立てる前に、他の原因を潰すこと。
-
-## 2. dev と packaged のどちらで走らせるか
-
-| | dev | packaged |
-|---|---|---|
-| 起動対象 | `node_modules/electron` の Electron が `apps/desktop` を直接ロード（renderer は Vite dev server） | `apps/desktop/out/<name>-win32-x64/*.exe` |
-| 事前準備 | 不要。globalSetupが`npm.cmd start`を自動実行 | 不要。ソースが新しければ globalSetup が `electron-forge package` を自動実行（数分〜10分） |
-| `a11y-axe.spec.ts` | 通る | 通る。axe sourceはPlaywright automation経由で評価し、production CSPは緩めない |
-| 使いどころ | 日常の開発・回帰確認 | リリース前に「配布物そのもの」を検証したいとき |
-
-macOS 側の手順書は「packaged は使うな」と言い切っているが、あれは **その環境固有**の話（`@electron/packager` の zip 展開が `electron.icns` で決定論的にハングする）。Windows でも同じ症状が出るとは限らないので、packaged を試すこと自体は妥当。ただし:
-
-- `apps/desktop/out/` に**古いビルドが残っていると、モード無指定のとき黙ってそれが起動する**（`resolveE2EMode()` は out/ の中身の有無だけを見て packaged を選び、`findPackagedExecutable()` はディレクトリ名に `win32` を含むものを拾う）。globalSetup がソース mtime と `.e2e-package-stamp` を比較して stale なら再パッケージするが、モードを明示しない限りそもそもどちらで走ったのか読み手に伝わらない。**常にモードを明示する。**
-- packagedの`a11y-axe`も通常の回帰として判定する。CSPを理由にskipしない。
-
-## 3. 実行コマンド
-
-```powershell
-$env:SPRINT_CODER_E2E_MODE = 'dev'
-
-# 単一 spec（最頻。まずこれ）
-npx playwright test tests/e2e/live-file-edit.spec.ts
-
-# テスト名で絞る
-npx playwright test tests/e2e/inspector-panel.spec.ts -g "五段階"
-
-# 複数 spec
-npx playwright test tests/e2e/team-cables.spec.ts tests/e2e/team-morph.spec.ts
-
-# 全 29 ファイル / 78 テスト（workers:1 の直列実行なので数分〜十数分）
-npm run e2e
-
-# 何が定義されているかだけ見る（アプリを起動しないので速い）
-npx playwright test --list
-```
-
-パス区切りはスラッシュのままでよい（Playwright が解釈する）。全件は長いので、ログをファイルに落として終了後に末尾を読むのが確実:
-
-```powershell
-npm run e2e *> $env:TEMP\e2e.log
-Get-Content $env:TEMP\e2e.log -Tail 40
-```
-
-設定は `workers: 1` / `fullyParallel: false` / `retries: 0` / test timeout 90s / expect timeout 15s。**リトライが 0 なのは意図的**で、1 回落ちたら落ちたと判断する設計。緑にするために `--retries` を足すのは判定そのものを壊す行為なのでやらない。
-
-## 4. どの spec を走らせるか
-
-変更が触れた領域から選ぶ。対応表は [references/spec-map.md](references/spec-map.md)（spec → 何を守っているか → どんな変更のとき走らせるか）。迷ったら:
-
-- UI コンポーネント 1 つの変更 → 対応する spec + `keyboard-smoke` + `a11y-axe`
-- main / IPC / 永続化の変更 → `golden-path-1`（再起動復元）と該当機能の spec
-- runtime-host / normalizer の変更 → `golden-path-1/2/3` + `reasoning-pill` + `live-file-edit`
-- 広い or 自信がない変更 → 全件
-
-全件を避けたときは、**何を走らせなかったかを報告に書く**。「E2E 通りました」とだけ言うと、走らせていない 60 テストまで緑だったように読まれる。
-
-## 5. 結果の判定
-
-`list` reporter の最終行が一次情報。`N passed` 以外（`failed` / `timed out` / `interrupted`）は全部 fail 扱いにしたうえで、中身を次の 4 つに切り分ける。切り分けないまま「E2E が落ちています」と報告するのは、判定を放棄して相手に丸投げしているのと同じ。
-
-### (1) 環境起因（アプリは無罪）
-
-| 症状 | 原因 | 対処 |
-|---|---|---|
-| `Dev server / main build did not become ready within 240000ms` | `npm.cmd start`が終了した、時間内に終わらなかった、または5173を起動できない | エラーに続く exit code / signal / spawn error と、`Startup phase: ...`（止まった段階）・`Progress: ...`（各条件が整った秒数）・ログ末尾を確認する（全文は出力フォルダの `dev-server.log`）。`npm start`単体でも再現するか切り分ける |
-| `firstWindow: ...` のあとに `diagnosis: main-init` / `renderer-load` / `missed-event` | 1つのspecだけがウィンドウの読み込み待ちで落ちた | `main-init` はmainの初期化、`renderer-load` は画面の文書かスクリプトの配信、`missed-event` はPlaywright側の取りこぼし。mainの出力つきの全文はそのテストの結果フォルダの `first-window-diagnostics.txt` |
-| `Get-NetTCPConnection -LocalPort 5173` が何も返さない | dev server が落ちている | `npm start` を起動し直す |
-| 覚えのない `electron-forge package` が走り出す / 起動が異様に遅い | packaged モードで走っている（環境変数の消し忘れ・未指定） | モードを明示して再実行 |
-| `npm run format:check` が全ファイル未整形と言う | `core.autocrlf=true` で CRLF に変換された | `.gitattributes` が `eol=lf` を指定しているので、clone/checkout し直すか改行を LF に戻す（E2E とは別問題だが Windows で必ず踏む） |
-| 起動直後に全 spec が同じ形で即死 | ビルド壊れ | `npm run typecheck` を先に通す |
-
-### (2) 意図的な skip
-
-`leader-mcp-smoke.spec.ts` の 2 テストは `$env:SPRINT_CODER_LEADER_MCP = '1'` が無いと skip される。実 Claude CLI を叩いて**実際に課金される** opt-in smoke なので、緑を増やすために勝手に有効化しない。skip は失敗ではない。
-
-### (3) 既知の flake
-
-`command-runner-flow.spec.ts` の focus 系アサーションは以前から不安定で、変更のないコミットでも落ちる（macOS の dev モードで確認済み。Windows でも同種のフォーカス依存は不安定になりやすい）。ここが落ちたときは自分の変更のせいと決めつける前に、変更前の状態（`git stash` するか元コミットを checkout）で同じ spec を走らせて、同じように落ちるか確かめる。**この比較をやらずに「既知の flake です」と書くのは、推測を事実として報告することになる。**
-
-### (4) 本物の失敗
-
-上のどれでもないもの。次の 3 点をログから拾う（これが揃わないと相手は判断できない）:
-
-- 落ちたテストのフルタイトル（`spec.ts:行 › describe › test`）
-- expect の期待値と実測値（`Expected: ... Received: ...`）と、どの locator / testid を見ていたか
-- 変更前でも落ちるかどうか（回帰なのか元からなのか）
-
-E2E は実 DOM を testid とアクセシブルネームで掴んでいる（`composer-textarea`、`run-card`、`data-run-status` 属性、`役割/目的/依頼` ラベル、`{state} · Worker N/3` の完全一致テキストなど）。**UI の文言や testid を変えたなら、落ちているのはテストの側が古いのであって、アプリの不具合ではない**ことが多い。その場合は spec を実装に合わせて直すのが正しく、逆にアサーションを緩めて（`toHaveText` → `toContainText`、タイムアウト延長、`expect` 削除）通すのは、そのテストが守っていた保証を黙って捨てる行為なので、必要だと判断したら理由を添えて明示的に相談する。
-
-`perf-budgets.spec.ts` は `console.info` で実測値（startup / composer p95 / fps）を出す。アサーションは CI 安全な緩い上限なので、**通っていても実測値をログから拾って報告する**と性能劣化に気づける。なお Windows の実測値は macOS の記録（起動 396ms、composer p95 14.2ms、10 Worker pan 60fps）とは別物なので、比較するなら同じ OS 同士で。
-
-## 6. プロセスとポートの確認・掃除
-
-```powershell
-# 5173 を掴んでいるプロセス
-Get-NetTCPConnection -LocalPort 5173 -State Listen | Select-Object OwningProcess
-Get-Process -Id (Get-NetTCPConnection -LocalPort 5173 -State Listen).OwningProcess
-
-# 取り残された Electron（テストが異常終了した後など）
-Get-Process electron -ErrorAction SilentlyContinue | Format-Table Id, StartTime, Path
-
-# どうしても残ったものだけを、PID を指定して落とす（子プロセスごと）
-taskkill /PID <pid> /T /F
-```
-
-`Stop-Process -Name electron` や `taskkill /IM electron.exe /F` のような**名前一括指定は使わない**。同じ Electron ランタイムで動いている他のアプリ（VS Code、Slack、Discord など）や、開発者がターミナル1 で回している `npm start` まで巻き込んで落とす。落とすなら必ず PID を確認してから。
-
-## 7. 報告フォーマット
-
-```
-実行: ($env:SPRINT_CODER_E2E_MODE = 'dev') npx playwright test <対象>   / OS: Windows
-結果: N passed / M failed / K skipped （所要 X 秒）
-
-[失敗があれば]
-- <spec.ts:行 › テスト名>
-  期待: ... / 実測: ...
-  切り分け: 環境起因 / 既知flake（変更前でも再現: yes|no）/ 本物の失敗
-  推定原因: ...
-
-未実行: <走らせなかった範囲と理由>
-```
-
-## 8. やらないこと
-
-- `Stop-Process -Name electron` / `taskkill /IM electron.exe` などの名前一括 kill（無関係なアプリと開発者の dev server を巻き込む）
-- `--retries` を足す、`test.skip` で落ちるテストを黙らせる、アサーションを緩める
-- モードを明示せずに走らせる（out/ の残骸で packaged が黙って選ばれ、古いビルドを検証してしまう）
-- `$env:SPRINT_CODER_LEADER_MCP = '1'` を勝手に付ける（実 CLI・実コスト）
-- 一部だけ走らせて「E2E 通りました」と書く（範囲を必ず添える）
+Windows CIのpackage / installer / native検証は維持されるが、Computer Useの実操作を自動実行するものではない。IME、フォルダ選択、window focus、再起動復元はWindows実機で確認する。OS固有ケースをmacOSの結果で代替しない。

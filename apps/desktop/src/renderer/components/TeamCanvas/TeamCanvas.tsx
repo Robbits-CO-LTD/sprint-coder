@@ -961,9 +961,6 @@ export function TeamCanvas({
     ],
   );
 
-  // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
-  // getByText() is a substring match, so an aria-live region carrying the *exact same* string
-  // would make `getByText('<state> · Worker N人')` resolve to two elements (chip + live region).
   // No denominator on either side (Team v2 B1b): a Team's Worker count is dynamic, so any fixed
   // "/N" would be wrong — and the Team Policy's execution cap of 8 is a concurrency limit, not a
   // Worker headcount limit, so it must not stand in as one either.

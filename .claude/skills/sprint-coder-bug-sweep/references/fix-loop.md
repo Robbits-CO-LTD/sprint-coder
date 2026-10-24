@@ -5,7 +5,7 @@
 ## 0. 前提
 
 - 司令塔は Fable のまま。実装は `Agent(subagent_type: "general-purpose", model: "opus", isolation: "worktree")` に委譲する（memory: fable-commander-opus-workers）。
-- worker には Issue 番号、root-cause gate の結論、触ってよいファイル範囲、追加する回帰テスト、**触ってはいけないもの**（E2E の assertion 緩和、`--retries`、`test.skip`、security allowlist の拡張）を渡す。
+- worker には Issue 番号、root-cause gate の結論、触ってよいファイル範囲、追加する回帰テスト、**触ってはいけないもの**（Computer Useの期待値緩和、未実施caseの合格扱い、security allowlist の拡張）を渡す。
 - worker の報告は信用せず、司令塔が worktree で検証コマンドを自分で流す。
 
 ## 1. root-cause gate（司令塔）
@@ -14,7 +14,7 @@
 
 - 症状の再現（Phase 1 / 3 の証拠）
 - 入力から観測点までの経路と `file:line + symbol`
-- コード読解以外を含む 2 種類以上の独立証拠（vitest の最小失敗、app.log、DB / ファイルの前後差、E2E の trace）
+- コード読解以外を含む 2 種類以上の独立証拠（vitest の最小失敗、app.log、DB / ファイルの前後差、Computer Useの画面操作記録）
 - 有力な代替原因を 1 つ実測で除外
 - 修正後に同じ観測点で何が変わるか
 
@@ -38,12 +38,12 @@ E2E を流す前に **その worktree を対象に** preflight を通す（`REPO
 REPO_ROOT="$HOME/sprint-coder-fix-<n>" .claude/skills/sprint-coder-bug-sweep/scripts/preflight.sh
 ```
 
-worker が worktree で `npm install` / `npm rebuild` を叩くと `better-sqlite3` が **Node ABI** で組み直され、main プロセスの初期化が `NODE_MODULE_VERSION` 不一致で落ちて全 spec が `firstWindow: Timeout` になる（2026-09-13 に #464 の検証で発生）。preflight の `better-sqlite3 target=… but Electron=…` BLOCK がそれで、直すのは `npm run prepare:desktop --workspace @sprint-coder/desktop`（または main checkout の Electron ABI 版 `.node` をコピー）。
+worker が worktree で `npm install` / `npm rebuild` を叩くと `better-sqlite3` が **Node ABI** で組み直され、main プロセスの初期化が `NODE_MODULE_VERSION` 不一致で落ちてアプリの起動・画面表示ができなくなる（2026-09-13 に #464 の検証で発生）。preflight の `better-sqlite3 target=… but Electron=…` BLOCK がそれで、直すのは `npm run prepare:desktop --workspace @sprint-coder/desktop`（または main checkout の Electron ABI 版 `.node` をコピー）。
 
 ## 3. 実装（Opus worker）
 
-- 最小修正 + 原因に隣接する回帰テスト（vitest。E2E で守るべきものなら該当 spec の追加/修正）。
-- `[test]` Issue（spec 陳腐化）は spec を実装に合わせる。assertion を緩めて通すのは禁止（`toHaveText` → `toContainText`、timeout 延長、expect 削除）。
+- 最小修正 + 原因に隣接する回帰テスト（vitest。E2E で守るべきものなら共通チェックリストの該当caseを追加/修正）。
+- `[test]` Issue（手順陳腐化）は期待値の根拠を確認してチェックリストを更新する。必要な証拠や期待結果を弱めて合格させない。
 - commit message は日本語の Conventional 形式（例: `fix: 承認後のコマンド結果をカードへ反映する`）。末尾に `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`。
 
 ## 4. 検証（司令塔、worktree 内で自分で流す）
@@ -52,11 +52,12 @@ worker が worktree で `npm install` / `npm rebuild` を叩くと `better-sqlit
 npm run typecheck
 npm run lint
 npm run test --workspace @sprint-coder/desktop -- src/main/<近接ファイル>.test.ts   # SQLite/Electron bridge 系は -t を使わず file 単位（memory: sprint-coder-vitest-electron-bridge）
-SPRINT_CODER_E2E_MODE=dev npx playwright test tests/e2e/<spec-map で選んだ spec> tests/e2e/keyboard-smoke.spec.ts tests/e2e/a11y-axe.spec.ts
 ```
 
-- 実 AI 由来の Issue は、その worktree で `ensure-dev-server.sh` / `launch-dev-instance.sh --repo-root <worktree>` を使って該当 lane の case を 1 回だけ再実行し、FAIL が PASS になることを Computer Use で確認する（port 5173 は 1 つの checkout しか使えないので、開発者の dev server が別 checkout で動いていれば `blocked_artifact`。その場合は E2E の再現 spec を追加して代替し、report にその旨を書く）。
+- 実 AI 由来の Issue は、その worktree で `ensure-dev-server.sh` / `launch-dev-instance.sh --repo-root <worktree>` を使って該当 lane の case を 1 回だけ再実行し、FAIL が PASS になることを Computer Use で確認する（port 5173 は 1 つの checkout しか使えないので、開発者の dev server が別 checkout で動いていれば `blocked_artifact`。その場合はComputer UseケースをBLOCKEDとしてreportに不足証拠を残す）。
 - Team / Graph / worker runtime / managed harness を触った修正は、memory `sprint-coder-real-worker-e2e-gap` の opt-in（`SPRINT_CODER_LEADER_MCP=1` 等）を **ユーザーに確認してから** 流す。
+
+共通チェックリストの該当caseとkeyboard / accessibilityケースをComputer Useで実行し、証拠と判定を残す。axe監査には監査結果が必要であり、画面の目視では代用しない。
 
 ## 5. PR
 

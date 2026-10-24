@@ -4955,7 +4955,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   inset: 0;
   isolation: isolate;
   /* `clip` (not `hidden`): focusing an offscreen descendant (e.g. tabbing/focusing a Worker's
-     依頼 textarea, or Playwright's focus-before-fill) makes the browser programmatically scroll
+     依頼 textarea) makes the browser programmatically scroll
      the nearest scrollable ancestor into view. `hidden` is still scrollable via scrollTop/Left,
      which would shift the whole world AND the header/controls overlays; `clip` forbids
      programmatic scrolling entirely while still clipping overflow the same way. */

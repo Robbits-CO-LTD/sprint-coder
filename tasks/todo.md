@@ -1,3 +1,20 @@
+## Computer Useへの画面テスト移行（2026-10-24）
+
+承認済み方針: Playwrightのテスト・設定・依存・CI実行を撤去し、UI検証を開発エージェントのComputer Useへ統一する。Vitest、native、各OSのpackage/installer、サイト静的検証は維持する。元checkoutの未コミット変更は保持する。
+
+- [x] 最新main `384ecd51` から独立worktree/branchを作成
+- [x] Playwrightコード・依存撤去と再利用可能な観測処理の保持
+- [x] CIの整合と失敗・欠落を拒否するgateの確認
+- [x] 両ガイド・関連Skillと元ケース対応チェックリストの整備
+- [x] 型検査・lint・関連VitestとComputer Use代表操作の検証
+- [x] 独立差分レビューと検証結果の記録（test-results/computer-use/plan.json）
+
+公開API、IPC、DB契約、実Providerの課金検証、Computer Use自動CI基盤の新設は対象外。元ケースと移行後の対応は `docs/testing/computer-use/README.md` を正本とする。未計測の性能基準やaxe監査を目視でPASS扱いにしない。
+
+
+提出後のCI・ReviewBOTはPRの最新headで確認する。全ケース・実Provider・他OS GUI・数値性能/axe再監査・PowerShell self-testは今回のローカル実施結果には含めない。
+---
+
 ## 公式サイトの自動デプロイ — Issue #904（2026-10-22）
 
 main の website/ が変わったら本番（サーバー yusei の nginx）へ自動で反映する。GitHub からは LAN 内のサーバーへ入れないので、サーバー側の systemd ユーザータイマーで main を取りに行く pull 型にした。ブランチ `feat/website-autodeploy-904`。

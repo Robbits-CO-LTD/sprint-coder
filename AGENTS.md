@@ -11,7 +11,7 @@ Sprint Coderは、Electron、React、TypeScriptで構成されたlocal-firstのA
 - `apps/desktop/`: Electron Main、Preload、React Renderer、Runtime Host
 - `packages/contracts/`: IPC、永続化、Provider間で共有するschemaと型
 - `packages/domain/`: 権限、Tool、Turnなどのpure domain logic
-- `tests/e2e/`: packaged appを対象にしたPlaywright E2E
+- `docs/testing/computer-use/`: UI・E2EのComputer Use検証チェックリスト
 - `docs/`: プロダクト、設計、セキュリティ、検証資料
 - `tasks/`: 複雑な実装の計画、ADR、レビュー記録
 - `.github/workflows/`: CI、provider smoke、release workflow
@@ -68,7 +68,6 @@ npm run typecheck
 npm run lint
 npm run format:check
 npm test
-npm run e2e
 ```
 
 対象を絞る場合:
@@ -85,11 +84,20 @@ npm run test --workspace @sprint-coder/desktop -- path/to/target.test.ts
 - 通常はルートの `npx vitest run` ではなく、対象workspaceまたは対象testを指定する。
 - Electronのnative依存が必要な作業では `npm run prepare:desktop --workspace @sprint-coder/desktop` を使用する。
 - `better-sqlite3` はNode ABIとElectron ABIを混同しない。native artifactの存在と、実際に対象runtimeからloadできることを分けて確認する。
-- `npm run e2e` はproduction package作成とnative module検証を含む高コストな検証である。対象境界を変更した場合か、最終gateでのみ実行する。
+- packaged appの検証前には対象OS向けのpackageを作成し、native moduleを検証する。build成功とComputer Useによる操作の合格は別々に記録する。
 - 実Provider smokeは課金、credential、networkを伴うopt-in検証である。明示された場合のみ `npm run test:provider-smoke` を使う。
 - Windowsで作業する場合はPowerShellを使い、Node.js 22、Python 3、Visual Studio Build Tools、Inno Setupなど対象workflowの前提を確認する。
 
 ## 検証方針
+
+UI・E2E・ユーザー操作の動作確認は、Computer Useで実アプリを操作して実施する。Playwrightのテストコードや実行手順は追加しない。単体・結合テストにはVitestを使用する。
+
+- Computer Useは、開発エージェントが対象アプリ・ブラウザを操作するために使う。Sprint Coder自身が提供するComputer Use機能とは区別する。
+- [Computer Use検証チェックリスト](docs/testing/computer-use/README.md)から変更に関係するケースを選び、前提、操作、期待結果、対象OS、必要な証拠を確認する。
+- shellはアプリの起動、fixture準備、ログ・ファイル照合に使える。UI操作をスクリプト、内部IPC、DOM操作で置き換えて合格扱いにしない。
+- 対象build、環境、操作、証拠と各ケースの `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録する。Computer Useが利用できない場合は `BLOCKED` とし、CI成功で代用しない。
+- 実Providerの課金を伴う検証は、現在の依頼で明示された場合だけ実施する。
+- 性能の数値基準とaxe監査は元の受入要件を維持する。計測や監査をしていない状態を目視だけでPASSにしない。
 
 変更を証明できる最小十分な検証から始め、影響範囲が広がる根拠がある場合だけ段階を上げる。
 
@@ -102,7 +110,7 @@ npm run test --workspace @sprint-coder/desktop -- path/to/target.test.ts
 
 失敗後は最小の失敗対象だけを再実行し、greenになってから広いcheckpointへ戻る。同じ入力の高コスト検証を理由なく繰り返さない。各コマンドのexit codeを確認し、出力の一部だけで成功と判断しない。
 
-E2E前には、目的、操作対象、期待結果、合格条件を短く明文化する。E2E結果には各項目の `PASS` / `FAIL` / `SKIP`、使用環境、artifact、未確認事項を残す。build成功やモデルの成功文だけを、ユーザー操作の証明として扱わない。
+E2E前には、目的、操作対象、期待結果、合格条件を短く明文化する。E2E結果には各項目の `PASS` / `FAIL` / `SKIP` / `BLOCKED`、使用環境、artifact、未確認事項を残す。build成功やモデルの成功文だけを、ユーザー操作の証明として扱わない。
 
 ## Git・Issue・PRワークフロー
 
