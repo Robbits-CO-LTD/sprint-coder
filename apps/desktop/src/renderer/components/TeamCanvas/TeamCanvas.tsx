@@ -933,7 +933,7 @@ export function TeamCanvas({
       }
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
-        claimSystemOwnership(); // explicit command: executes, hands ownership back to system
+        claimUserOwnership(); // preserve this overview while new Workers arrive
         void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
         return;
       }
@@ -955,6 +955,7 @@ export function TeamCanvas({
       collectRects,
       isReduced,
       leaderAgentId,
+      claimUserOwnership,
       claimSystemOwnership,
     ],
   );
@@ -1067,7 +1068,7 @@ export function TeamCanvas({
 
           <CanvasControlsOverlay
             onFit={() => {
-              claimSystemOwnership(); // explicit command
+              claimUserOwnership(); // preserve this overview while new Workers arrive
               void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
             }}
             onFocusLeader={() => {

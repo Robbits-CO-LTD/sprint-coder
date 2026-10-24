@@ -1308,6 +1308,10 @@ team_assign_taskで直下Agentへ正式taskを割り当ててください。requ
 再委譲するManagerを雇う場合だけagentKind: "manager"とmanagerPolicyを指定します。
 managerPolicy.maxDelegationLevelsはその子Managerの直下から許す追加段数で、直属Workerだけなら1です。
 雇用可否はTeam Policyと自分のManager Policyで判断してください。
+配下のexecutionがcompletedになり中央workspaceへ統合されたファイルは、自分の隔離worktreeには現れません。
+read_fileが利用できる場合は、確認にread_file({path: "rootからの相対path", teamResultExecutionId: "配下の完了executionId"})を使ってください。
+別rootはrootIdも指定します。読めるのはそのexecutionの統合済み変更pathの現在内容です。
+この中央readは自分の編集のread-backにはならず、そのrevisionを隔離worktreeの編集へ使うこともできません。
 権限はMCP tokenへ固定されています。
 `;
 export const WORKER_MCP_SYSTEM_PROMPT = `あなたはTeamのWorkerです。

@@ -2260,10 +2260,11 @@ describe('Main image attachment dispatch boundary', () => {
       decision: 'deny',
       reason: 'permission_denied',
     });
-    const dispatch = vi
-      .fn()
-      .mockRejectedValueOnce(denied)
-      .mockRejectedValueOnce(new Error('patch did not apply'));
+    const observedBindings: unknown[] = [];
+    const dispatch = vi.fn(async () => {
+      observedBindings.push([...managedWorkerCall.values()][0]?.executionBinding);
+      throw observedBindings.length === 1 ? denied : new Error('patch did not apply');
+    });
     const cliTeamWorkerRuntime = {
       recordManagedToolDenied: vi.fn(),
       recordManagedToolResult: vi.fn(),
@@ -2277,6 +2278,7 @@ describe('Main image attachment dispatch boundary', () => {
           {
             taskId: 'task-worker',
             parentTurnId: 'mission-turn',
+            executionBinding: { executionId: 'host-execution', agentId: 'host-worker' },
             snapshot: {
               digest: 'd'.repeat(64),
               providerId: 'grok',
@@ -2323,6 +2325,10 @@ describe('Main image attachment dispatch boundary', () => {
     ]);
     expect(cliTeamWorkerRuntime.recordManagedToolResult).not.toHaveBeenCalled();
     expect(managedWorkerCall.size).toBe(0);
+    expect(observedBindings).toEqual([
+      { executionId: 'host-execution', agentId: 'host-worker' },
+      { executionId: 'host-execution', agentId: 'host-worker' },
+    ]);
   });
 
   it('contains hostile broker thenable failures inside the provider image bridge', async () => {
@@ -2921,7 +2927,9 @@ describe('Main image attachment dispatch boundary', () => {
           ensureGraphMissionSessionTurn: () => missionTurnId,
           ensureSequentialMissionSessionTurn: () => missionTurnId,
           readTurnWorkspaceSetForTask: () => ({ digest: 'w'.repeat(64) }),
-          getTeamByTask: () => null,
+          getTeamByTask: () => ({ id: 'team-1' }),
+          getTeamExecution: (id: string) => ({ id, teamId: 'team-1', assigneeAgentId: 'worker-1' }),
+          getTeamSnapshot: () => ({ agents: [] }),
           getEffectiveWorkspaceSet: () => ({ source: 'none', roots: [], digest: 'w'.repeat(64) }),
           getEffectiveWorkspaceRootIdentities: () => [],
           getPermissionPolicy: () => ({ policyEpoch: 9 }),
@@ -3029,6 +3037,8 @@ describe('Main image attachment dispatch boundary', () => {
         },
         persistence: {
           getActiveTurnId: () => null,
+          getTeamByTask: () => ({ id: 'team-1' }),
+          getTeamExecution: (id: string) => ({ id, teamId: 'team-1', assigneeAgentId: 'worker-1' }),
           getTeamMissionForExecution: () => mission,
           ensureSequentialMissionSessionTurn: () => missionTurnId,
           readTurnWorkspaceSetForTask: () => ({ digest: 'w'.repeat(64) }),
@@ -3467,6 +3477,8 @@ describe('Main image attachment dispatch boundary', () => {
         },
         persistence: {
           getActiveTurnId: () => 'turn-parent',
+          getTeamByTask: () => ({ id: 'team-1' }),
+          getTeamExecution: (id: string) => ({ id, teamId: 'team-1', assigneeAgentId: 'worker-1' }),
           getTeamMissionForExecution: () => null,
           readTurnWorkspaceSetForTask: () => null,
           getPermissionPolicy: () => ({ policyEpoch: 9 }),
@@ -7174,6 +7186,12 @@ describe('Provider workspace tool capability fallback', () => {
     } as const;
 
     expect(isCompleteProviderWorkspaceRead(complete)).toBe(true);
+    expect(
+      isCompleteProviderWorkspaceRead({
+        ...complete,
+        source: { kind: 'team-result', executionId: 'child' },
+      }),
+    ).toBe(false);
     expect(isCompleteProviderWorkspaceRead({ ...complete, truncated: true })).toBe(false);
     expect(isCompleteProviderWorkspaceRead({ ...complete, content: undefined })).toBe(false);
   });

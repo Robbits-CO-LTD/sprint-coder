@@ -30,6 +30,7 @@ import { secureLogger } from './secure-logger';
 import {
   projectMemoryAuthorizationFacts,
   providerDisclosureAuthorizationFacts,
+  teamResultReadAuthorizationFacts,
   workspaceToolAuthorizationGuard,
   workspaceToolAuthorizationGuards,
   workspaceToolPermissionGuard,
@@ -997,10 +998,25 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
   // the byte count and digest always identify exactly what was approved (Issue #473).
   const stdin = managedStdinAuthorizationFacts(request.input);
   if (stdin !== undefined) return stableStringify(managedStdinApprovalExecution(stdin));
+  const resultSource = teamResultReadAuthorizationFacts(
+    request.input,
+    request.context,
+    request.callId,
+  );
+  const source =
+    resultSource === undefined
+      ? undefined
+      : {
+          kind: 'team-result',
+          executionId: resultSource.executionId,
+          integratedHead: resultSource.integratedHead,
+          contents: 'current-workspace',
+        };
   const disclosure = providerDisclosureAuthorizationFacts(request.input);
   if (disclosure !== undefined)
     return stableStringify({
       tool: request.entry.providerName,
+      ...(source === undefined ? {} : { source }),
       providerId: disclosure.providerId,
       path: disclosure.canonicalPath,
       classification: disclosure.classification,
@@ -1024,6 +1040,7 @@ function safeApprovalExecution(request: ToolAuthorizationRequest): string {
     const operations = Array.isArray(raw['operations']) ? raw['operations'] : undefined;
     return stableStringify({
       tool: request.entry.providerName,
+      ...(source === undefined ? {} : { source }),
       rootId: workspaceGuard.rootId,
       path: workspaceGuard.originalTargetPath,
       ...(content === undefined

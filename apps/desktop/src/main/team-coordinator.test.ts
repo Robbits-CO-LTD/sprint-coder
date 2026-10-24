@@ -9,7 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { chmod, lstat, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
+import { chmod, lstat, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -47,6 +47,8 @@ import {
   runtimeStopConfirmed,
   teamRepositoryMutationKey,
   type TeamDiagnosticEvent,
+  type TeamResultReadRequest,
+  type TeamResultReadSource,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
@@ -69,6 +71,8 @@ import {
   type TreeRemovalFs,
 } from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
+import { ManagedCodingHarness } from './provider-workspace-tools';
+import { workspaceMutationBinding } from './path-guard';
 import {
   LOCAL_PROVIDER_TEST_SELECTION,
   localProviderTestConnection,
@@ -449,6 +453,11 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
   childWrites = true;
   readonly delegations: Array<'read-only' | 'workspace-write' | null> = [];
   readonly childExecutionIds: string[] = [];
+  afterDelegation?: (input: {
+    executionId: string;
+    workspacePath: string;
+    childExecutionId: string;
+  }) => Promise<void>;
 
   override async execute(input: {
     worker: AgentRecord;
@@ -480,6 +489,11 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
             ),
           15_000,
         );
+        await this.afterDelegation?.({
+          executionId: input.executionId!,
+          workspacePath: input.workspacePath!,
+          childExecutionId: child.executionId,
+        });
       }
     } else if (input.worker.writeCapable && this.childWrites) {
       if (input.workspacePath === undefined || input.workspacePath === null)
@@ -491,12 +505,12 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
 }
 
 /** A write-capable Manager with one write-capable Worker under it, run by a DelegatingManagerRuntime. */
-async function delegatingManagerTeam(title: string) {
+async function delegatingManagerTeam(title: string, scheduler?: TeamIntegrationScheduler) {
   const persistence = createPersistence();
   const task = persistence.createTask(title);
   const { workspace, manager: worktrees } = configureGitWorkspace(persistence, task.id);
   const runtime = new DelegatingManagerRuntime();
-  const coordinator = coordinatorWithWorktrees(persistence, runtime, worktrees);
+  const coordinator = coordinatorWithWorktrees(persistence, runtime, worktrees, scheduler);
   const team = persistence.promoteTaskToTeam(task.id);
   const manager = await coordinator.hireWorkerAs(
     {
@@ -521,6 +535,63 @@ async function delegatingManagerTeam(title: string) {
   );
   Object.assign(runtime, { coordinator, persistence, taskId: task.id, childId: worker.id });
   return { persistence, task, workspace, runtime, coordinator, manager };
+}
+
+async function withIntegratedManagerResult(
+  check: (
+    fixture: Awaited<ReturnType<typeof delegatingManagerTeam>> & {
+      request: TeamResultReadRequest;
+      workspacePath: string;
+    },
+  ) => Promise<void>,
+  scheduler?: TeamIntegrationScheduler,
+): Promise<void> {
+  const fixture = await delegatingManagerTeam('Manager result authority', scheduler);
+  const { persistence, task, workspace, runtime, coordinator, manager } = fixture;
+  const binding = await workspaceMutationBinding(workspace);
+  persistence.setWorkspaceBinding(task.id, { path: binding.canonicalPath, ...binding });
+  const turn = persistence.startTurn(task.id, 'Verify a delegated result');
+  let checked = false;
+  let failure: unknown;
+  runtime.delegations.push('workspace-write');
+  runtime.afterDelegation = async ({ executionId, childExecutionId, workspacePath }) => {
+    try {
+      await check({
+        ...fixture,
+        workspacePath,
+        request: {
+          taskId: task.id,
+          parentTurnId: turn.turnId,
+          callerExecutionId: executionId,
+          callerAgentId: manager.id,
+          targetExecutionId: childExecutionId,
+        },
+      });
+      checked = true;
+    } catch (error) {
+      failure = error;
+    }
+  };
+  try {
+    const submission = await coordinator.assignTask({
+      taskId: task.id,
+      targetAgentId: manager.id,
+      content: 'Delegate and check',
+      doneCriteria: ['result checked'],
+      accessMode: 'workspace-write',
+    });
+    await waitFor(
+      () =>
+        ['completed', 'failed'].includes(
+          persistence.getTeamExecution(submission.executionId).state,
+        ),
+      30_000,
+    );
+    expect(failure).toBeUndefined();
+    expect(checked).toBe(true);
+  } finally {
+    persistence.close();
+  }
 }
 
 class MultiRootWritingRuntime extends TestWorkerRuntime {
@@ -10047,6 +10118,493 @@ if (runsWithElectronAbi)
       );
       persistence.close();
     });
+
+    it('limits integrated result authority to a live Manager and its completed subtree', async () => {
+      await withIntegratedManagerResult(async ({ persistence, coordinator, request, manager }) => {
+        const read = vi.fn(async (source: TeamResultReadSource) => source.executionId);
+        await expect(coordinator.readTeamResult(request, read)).resolves.toBe(
+          request.targetExecutionId,
+        );
+        read.mockClear();
+        await expect(
+          coordinator.readTeamResult(
+            { ...request, targetExecutionId: request.callerExecutionId },
+            read,
+          ),
+        ).rejects.toThrow();
+        await expect(
+          coordinator.readTeamResult({ ...request, callerAgentId: 'spoofed' }, read),
+        ).rejects.toThrow();
+        await expect(
+          coordinator.readTeamResult({ ...request, rootId: 'foreign-root' }, read),
+        ).rejects.toThrow();
+        const getExecution = persistence.getTeamExecution.bind(persistence);
+        for (const replacement of [
+          { ...getExecution(request.targetExecutionId), state: 'running' as const },
+          { ...getExecution(request.targetExecutionId), teamId: 'another-team' },
+          { ...getExecution(request.callerExecutionId), state: 'completed' as const },
+        ]) {
+          const spy = vi
+            .spyOn(persistence, 'getTeamExecution')
+            .mockImplementation((id) => (id === replacement.id ? replacement : getExecution(id)));
+          try {
+            await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+          } finally {
+            spy.mockRestore();
+          }
+        }
+        const team = persistence.getTeamSnapshot(manager.teamId!);
+        const child = getExecution(request.targetExecutionId).assigneeAgentId;
+        const snapshot = vi.spyOn(persistence, 'getTeamSnapshot');
+        try {
+          snapshot.mockReturnValue({
+            ...team,
+            agents: team.agents.map((agent) =>
+              agent.id === child ? { ...agent, parentAgentId: team.team.leaderAgentId } : agent,
+            ),
+          });
+          await expect(coordinator.readTeamResult(request, read)).rejects.toThrow('subtree');
+          snapshot.mockReturnValue({
+            ...team,
+            agents: team.agents.map((agent) =>
+              agent.id === manager.id ? { ...agent, canDelegate: false } : agent,
+            ),
+          });
+          await expect(coordinator.readTeamResult(request, read)).rejects.toThrow(
+            'running Manager',
+          );
+          expect(read).not.toHaveBeenCalled();
+          // A grandchild is in the same authority subtree; an intermediate Manager does not cut it off.
+          snapshot.mockReturnValue({
+            ...team,
+            agents: [
+              ...team.agents.map((agent) =>
+                agent.id === child ? { ...agent, parentAgentId: 'nested-manager' } : agent,
+              ),
+              {
+                ...team.agents.find((agent) => agent.id === manager.id)!,
+                id: 'nested-manager',
+                parentAgentId: manager.id,
+              },
+            ],
+          });
+          await expect(coordinator.readTeamResult(request, read)).resolves.toBe(
+            request.targetExecutionId,
+          );
+        } finally {
+          snapshot.mockRestore();
+        }
+      });
+    }, 60_000);
+
+    it('requires sealed integration heads and roots while permitting cleanup quarantine', async () => {
+      await withIntegratedManagerResult(
+        async ({ persistence, coordinator, request, workspace }) => {
+          const getIsolation = persistence.getTeamExecutionIsolation.bind(persistence);
+          const isolation = getIsolation(request.targetExecutionId)!;
+          const repository = isolation.repositories[0]!;
+          const read = vi.fn(async () => 'read');
+          const spy = vi.spyOn(persistence, 'getTeamExecutionIsolation');
+          try {
+            for (const replacement of [
+              { ...isolation, repositories: [{ ...repository, integratedHead: null }] },
+              { ...isolation, repositories: [{ ...repository, integratedHead: 'f'.repeat(40) }] },
+              {
+                ...isolation,
+                roots: isolation.roots.map((root) => ({ ...root, identity: 'f'.repeat(64) })),
+              },
+              {
+                ...isolation,
+                roots: isolation.roots.map((root) => ({
+                  ...root,
+                  sourcePath: `${root.sourcePath}-other`,
+                })),
+              },
+            ]) {
+              spy.mockImplementation((id) =>
+                id === request.targetExecutionId ? replacement : getIsolation(id),
+              );
+              await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+            }
+            expect(read).not.toHaveBeenCalled();
+            spy.mockImplementation((id) =>
+              id === request.targetExecutionId
+                ? {
+                    ...isolation,
+                    phase: 'quarantined',
+                    repositories: [{ ...repository, state: 'quarantined' }],
+                  }
+                : getIsolation(id),
+            );
+            await expect(coordinator.readTeamResult(request, read)).resolves.toBe('read');
+          } finally {
+            spy.mockRestore();
+          }
+          // Windows may keep the live workspace unrenamable; either outcome must preserve authority.
+          const renamed = `${workspace}-saved`;
+          const originalBinding = await workspaceMutationBinding(workspace);
+          const originalHead = (
+            await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])
+          ).stdout.trim();
+          read.mockClear();
+          try {
+            await rename(workspace, renamed);
+          } catch (error) {
+            if (
+              process.platform !== 'win32' ||
+              !(error instanceof Error) ||
+              !('code' in error) ||
+              error.code !== 'EBUSY'
+            )
+              throw error;
+            expect(await workspaceMutationBinding(workspace)).toEqual(originalBinding);
+            expect(existsSync(renamed)).toBe(false);
+            expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+              'written by the Worker\n',
+            );
+            expect(
+              (await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])).stdout.trim(),
+            ).toBe(originalHead);
+            await expect(coordinator.readTeamResult(request, read)).resolves.toBe('read');
+            expect(read).toHaveBeenCalledTimes(1);
+            return;
+          }
+          // The integration still exists in Git, but a replacement root has no authority to expose it.
+          mkdirSync(workspace);
+          try {
+            await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+            expect(read).not.toHaveBeenCalled();
+          } finally {
+            rmSync(workspace, { recursive: true });
+            await rename(renamed, workspace);
+          }
+        },
+      );
+    }, 60_000);
+
+    it('reads legacy Mission results only from an existing matching sealed snapshot', async () => {
+      await withIntegratedManagerResult(async ({ persistence, coordinator, request, manager }) => {
+        const getIsolation = persistence.getTeamExecutionIsolation.bind(persistence);
+        const isolation = getIsolation(request.targetExecutionId)!;
+        const repository = isolation.repositories[0]!;
+        const readWorkspace = persistence.readTurnWorkspaceSetForTask.bind(persistence);
+        const identities = persistence.getTurnWorkspaceRootIdentities.bind(persistence);
+        const isolationSpy = vi
+          .spyOn(persistence, 'getTeamExecutionIsolation')
+          .mockImplementation((id) => (id === request.targetExecutionId ? null : getIsolation(id)));
+        const legacySpy = vi.spyOn(persistence, 'getTeamMissionWorktree').mockReturnValue({
+          executionId: request.targetExecutionId,
+          agentId: persistence.getTeamExecution(request.targetExecutionId).assigneeAgentId,
+          repoPath: repository.repoPath,
+          path: repository.worktreePath,
+          baseHead: repository.baseHead,
+          workerHead: repository.workerHead,
+          integratedHead: repository.integratedHead,
+          changedFiles: repository.changedFiles,
+          state: 'cleaned',
+          reason: null,
+          createdAt: isolation.createdAt,
+          updatedAt: isolation.updatedAt,
+        });
+        const missionSpy = vi.spyOn(persistence, 'getTeamMissionForExecution').mockReturnValue({
+          mode: 'sequential',
+          id: 'legacy',
+          teamId: manager.teamId!,
+          createdByAgentId: manager.id,
+          state: 'completed',
+          objective: 'legacy',
+          doneCriteria: [],
+          currentStepOrdinal: 1,
+          steps: [],
+          revision: 1,
+          createdAt: isolation.createdAt,
+          updatedAt: isolation.updatedAt,
+          completedAt: isolation.updatedAt,
+        });
+        const snapshotSpy = vi
+          .spyOn(persistence, 'readTurnWorkspaceSetForTask')
+          .mockImplementation((taskId, turnId) =>
+            turnId === 'team-mission:legacy' ? null : readWorkspace(taskId, turnId),
+          );
+        const identitySpy = vi
+          .spyOn(persistence, 'getTurnWorkspaceRootIdentities')
+          .mockImplementation((turnId) =>
+            identities(turnId === 'team-mission:legacy' ? request.parentTurnId : turnId),
+          );
+        const ensure = vi.spyOn(persistence, 'ensureSequentialMissionSessionTurn');
+        try {
+          await expect(coordinator.readTeamResult(request, async () => 'read')).rejects.toThrow(
+            'sealed root',
+          );
+          snapshotSpy.mockImplementation((taskId, turnId) =>
+            readWorkspace(taskId, turnId === 'team-mission:legacy' ? request.parentTurnId : turnId),
+          );
+          await expect(coordinator.readTeamResult(request, async () => 'read')).resolves.toBe(
+            'read',
+          );
+          expect(ensure).not.toHaveBeenCalled();
+        } finally {
+          for (const spy of [isolationSpy, legacySpy, missionSpy, snapshotSpy, identitySpy, ensure])
+            spy.mockRestore();
+        }
+      });
+    }, 60_000);
+
+    it('fences each result read against integration and releases the fence during approval', async () => {
+      const scheduler = new TeamIntegrationScheduler();
+      await withIntegratedManagerResult(
+        async ({ persistence, coordinator, request, workspacePath }) => {
+          const isolation = persistence.getTeamExecutionIsolation(request.targetExecutionId)!;
+          const keys = [
+            isolation.roots[0]!.mutationKey,
+            teamRepositoryMutationKey(isolation.repositories[0]!.repoPath),
+          ];
+          let releaseIntegration!: () => void;
+          let integrationStarted!: () => void;
+          const started = new Promise<void>((resolve) => {
+            integrationStarted = resolve;
+          });
+          const integration = scheduler.submit({
+            executionId: 'synthetic-integration',
+            mutationKeys: keys,
+            run: async () => {
+              integrationStarted();
+              await new Promise<void>((resolve) => {
+                releaseIntegration = resolve;
+              });
+            },
+          });
+          await started;
+          const read = vi.fn(async () => 'read');
+          const controller = new AbortController();
+          const canceled = coordinator.readTeamResult(
+            { ...request, signal: controller.signal },
+            read,
+          );
+          const rejected = expect(canceled).rejects.toThrow();
+          await waitFor(() =>
+            scheduler.snapshot().queuedExecutionIds.some((id) => id.startsWith('exclusive:')),
+          );
+          expect(read).not.toHaveBeenCalled();
+          controller.abort();
+          releaseIntegration();
+          await integration;
+          await rejected;
+          expect(read).not.toHaveBeenCalled();
+
+          let releaseRead!: () => void;
+          let readStarted!: () => void;
+          const reading = new Promise<void>((resolve) => {
+            readStarted = resolve;
+          });
+          const heldRead = coordinator.readTeamResult(request, async () => {
+            readStarted();
+            await new Promise<void>((resolve) => {
+              releaseRead = resolve;
+            });
+          });
+          await reading;
+          let followingIntegration = false;
+          const following = scheduler.submit({
+            executionId: 'after-read',
+            mutationKeys: keys,
+            run: async () => {
+              followingIntegration = true;
+            },
+          });
+          await Promise.resolve();
+          expect(scheduler.snapshot().queuedExecutionIds).toContain('after-read');
+          expect(
+            scheduler.snapshot().activeExecutionIds.some((id) => id.startsWith('exclusive:')),
+          ).toBe(true);
+          expect(followingIntegration).toBe(false);
+          releaseRead();
+          await heldRead;
+          await following;
+          expect(followingIntegration).toBe(true);
+          const midReadStop = new AbortController();
+          await expect(
+            coordinator.readTeamResult({ ...request, signal: midReadStop.signal }, async () => {
+              midReadStop.abort();
+              return 'must not return';
+            }),
+          ).rejects.toThrow();
+
+          const lateStop = new AbortController();
+          const worktrees = Reflect.get(coordinator, 'worktreeManager') as WorkerWorktreeManager;
+          const resolveRepository = worktrees.resolveRepositoryPath.bind(worktrees);
+          let returnedBytes = false;
+          const late = vi
+            .spyOn(worktrees, 'resolveRepositoryPath')
+            .mockImplementation(async (path) => {
+              const result = await resolveRepository(path);
+              if (returnedBytes) lateStop.abort();
+              return result;
+            });
+          try {
+            await expect(
+              coordinator.readTeamResult({ ...request, signal: lateStop.signal }, async () => {
+                returnedBytes = true;
+                return 'must not return';
+              }),
+            ).rejects.toThrow();
+          } finally {
+            late.mockRestore();
+          }
+
+          let allow!: () => void;
+          let awaiting!: () => void;
+          const awaitingApproval = new Promise<void>((resolve) => {
+            awaiting = resolve;
+          });
+          const workspace = persistence.readTurnWorkspaceSetForTask(
+            request.taskId,
+            request.parentTurnId,
+          )!;
+          const harness = new ManagedCodingHarness({
+            workspaceFor: () => ({
+              ...workspace,
+              roots: workspace.roots.map((root) => ({ ...root, path: workspacePath })),
+            }),
+            rootIdentityFor: () => undefined,
+            policyEpochFor: () => 1,
+            readTeamResult: (selection, run) =>
+              coordinator.readTeamResult(
+                { ...request, targetExecutionId: selection.executionId },
+                run,
+              ),
+            authorizer: async () => {
+              awaiting();
+              await new Promise<void>((resolve) => {
+                allow = resolve;
+              });
+              return { decision: 'allow', reason: 'test' };
+            },
+          });
+          harness.startTurn(
+            {
+              taskId: request.taskId,
+              turnId: request.parentTurnId,
+              workspaceId: workspace.digest,
+              policyEpoch: 1,
+            },
+            'codex',
+          );
+          const pending = harness.broker.dispatch({
+            taskId: request.taskId,
+            turnId: request.parentTurnId,
+            callId: 'approval',
+            providerName: 'read_file',
+            input: { path: 'worker-output.txt', teamResultExecutionId: request.targetExecutionId },
+          });
+          await awaitingApproval;
+          expect(scheduler.snapshot().activeExecutionIds).toEqual([]);
+          let integrated = false;
+          await scheduler.submit({
+            executionId: 'during-approval',
+            mutationKeys: keys,
+            run: async () => {
+              integrated = true;
+            },
+          });
+          expect(integrated).toBe(true);
+          allow();
+          try {
+            await expect(pending).resolves.toMatchObject({ content: 'written by the Worker\n' });
+          } finally {
+            await harness.dispose();
+          }
+        },
+        scheduler,
+      );
+    }, 60_000);
+
+    it('reads a completed descendant result from the central workspace while the Manager stays isolated', async () => {
+      const { persistence, task, workspace, runtime, coordinator, manager } =
+        await delegatingManagerTeam('Manager result read');
+      const binding = await workspaceMutationBinding(workspace);
+      persistence.setWorkspaceBinding(task.id, { path: binding.canonicalPath, ...binding });
+      const turn = persistence.startTurn(task.id, 'Read the delegated result');
+      const central = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)!;
+      let observed: unknown;
+      let readFailure: unknown;
+      runtime.delegations.push('workspace-write');
+      runtime.afterDelegation = async ({ executionId, workspacePath, childExecutionId }) => {
+        expect(existsSync(join(workspacePath, 'worker-output.txt'))).toBe(false);
+        const isolated = {
+          ...central,
+          roots: central.roots.map((root) => ({ ...root, path: workspacePath })),
+        };
+        const harness = new ManagedCodingHarness({
+          workspaceFor: () => isolated,
+          rootIdentityFor: () => undefined,
+          policyEpochFor: () => 1,
+          authorizer: () => ({ decision: 'allow', reason: 'test' }),
+          readTeamResult: (request, read) =>
+            coordinator.readTeamResult(
+              {
+                taskId: task.id,
+                parentTurnId: turn.turnId,
+                callerExecutionId: executionId,
+                callerAgentId: manager.id,
+                targetExecutionId: request.executionId,
+                ...(request.rootId === undefined ? {} : { rootId: request.rootId }),
+              },
+              read,
+            ),
+        });
+        harness.startTurn(
+          { taskId: task.id, turnId: turn.turnId, workspaceId: central.digest, policyEpoch: 1 },
+          'codex',
+        );
+        try {
+          await expect(
+            harness.broker.dispatch({
+              taskId: task.id,
+              turnId: turn.turnId,
+              callId: 'normal',
+              providerName: 'read_file',
+              input: { path: 'worker-output.txt' },
+            }),
+          ).rejects.toThrow();
+          observed = await harness.broker.dispatch({
+            taskId: task.id,
+            turnId: turn.turnId,
+            callId: 'result',
+            providerName: 'read_file',
+            input: { path: 'worker-output.txt', teamResultExecutionId: childExecutionId },
+          });
+        } catch (error) {
+          readFailure = error;
+        } finally {
+          await harness.dispose();
+        }
+        expect(existsSync(join(workspacePath, 'worker-output.txt'))).toBe(false);
+      };
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: manager.id,
+        content: 'write and verify the result',
+        doneCriteria: ['read the delegated output'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () =>
+          ['completed', 'failed'].includes(
+            persistence.getTeamExecution(submission.executionId).state,
+          ),
+        30_000,
+      );
+      expect(readFailure).toBeUndefined();
+      expect(observed).toMatchObject({
+        content: 'written by the Worker\n',
+        source: { kind: 'team-result', executionId: runtime.childExecutionIds[0] },
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+        'written by the Worker\n',
+      );
+      persistence.close();
+    }, 60_000);
 
     it('lets a Manager meet a write request through the write its Worker completed, without writing itself', async () => {
       const { persistence, task, workspace, runtime, coordinator, manager } =
