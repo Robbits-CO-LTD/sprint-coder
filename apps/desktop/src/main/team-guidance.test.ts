@@ -9,7 +9,9 @@ import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
+  MANAGER_MCP_SYSTEM_PROMPT,
   LEADER_PROVIDER_TOOLS,
+  MANAGER_PROVIDER_TOOLS,
   TEAM_HIRE_WORKER_TOOL,
 } from './team-tools';
 import { teamGuidance } from './ipc';
@@ -77,6 +79,27 @@ describe('builtin Team skill', () => {
     expect(guidance).toContain('<team-model-selection-guidance>');
     expect(guidance).toContain('APIを使う前にユーザーへ確認する');
     expect(guidance).toContain('必ず従ってください');
+  });
+
+  it('explains both Manager write conditions on the skill, tool catalogs and Manager prompt', () => {
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('子に編集を委譲するManager');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('Manager自身への割当も');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('調査だけのManager');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('自身の変更なしでも');
+    expect(MANAGER_MCP_SYSTEM_PROMPT).toContain('現在の実行からは昇格できません');
+    expect(MANAGER_MCP_SYSTEM_PROMPT).toContain('親Agentへ報告');
+    for (const catalog of [LEADER_PROVIDER_TOOLS, MANAGER_PROVIDER_TOOLS]) {
+      for (const name of [
+        'team_hire_worker',
+        'team_assign_task',
+        'team_assign_tasks',
+        'team_assign_mission',
+      ]) {
+        const description = catalog.find((tool) => tool.name === name)?.description;
+        expect(description).toContain('writeCapable: true');
+        expect(description).toContain('workspace-write');
+      }
+    }
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
