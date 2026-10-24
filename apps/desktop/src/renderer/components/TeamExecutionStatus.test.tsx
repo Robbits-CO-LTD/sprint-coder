@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { executionNeedsAttention } from '../lib/worker-thread';
 import { retainedWorktreeStateLabel } from './TeamRetainedWorktrees';
 import {
   EXECUTION_STATE_LABELS,
@@ -134,6 +135,7 @@ describe('describeExecution', () => {
     expect(describeExecution(resumed).stateLabel).toBe('再開待ち');
     expect(describeExecution(resumed).waitReasonLabel).toBe('既存変更を確認してから再開');
     expect(executionWorkPhase(resumed)).toBeNull();
+    expect(executionNeedsAttention(resumed)).toBe(true);
     expect(resumed.state).toBe('waiting_resume');
     expect(executionWorkPhase(execution({ state: 'completed', isolation }))).toBeNull();
     expect(workerWorkPhase({ state: 'stopped' }, execution({ isolation }))).toBeNull();
@@ -152,6 +154,14 @@ describe('describeExecution', () => {
     });
     expect(describeExecution(active).stateLabel).toBe('統合中');
     expect(describeExecution(active).waitReasonLabel).toBeNull();
+    expect(executionNeedsAttention(active)).toBe(false);
+    expect(
+      executionNeedsAttention({
+        ...active,
+        isolation: { ...active.isolation!, reason: 'integration_conflict' },
+      }),
+    ).toBe(true);
+    expect(executionNeedsAttention({ ...active, state: 'failed' })).toBe(true);
     for (const missionId of [null, 'mission-resume']) {
       const html = renderToStaticMarkup(
         <TeamExecutionStatus

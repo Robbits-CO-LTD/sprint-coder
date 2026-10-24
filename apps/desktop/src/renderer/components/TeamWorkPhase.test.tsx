@@ -175,6 +175,9 @@ describe.each(['canvas', 'list'] as const)('%s work phase projection', (view) =>
       expect(card.querySelector('.w-glance-state')?.textContent).toBe('統合中');
     expect(card.querySelector('[data-testid="team-integration-resume"]')).toBeNull();
     expect(card.querySelector('[data-testid="team-worker-resume"]')).toBeNull();
+    expect(
+      card.querySelector(view === 'canvas' ? '.w-attention' : ':scope > .team-exec'),
+    ).toBeNull();
     expect(container.querySelector('[data-testid="team-work-counts"]')?.textContent).toBe(
       '作業中 0人 · 統合待ち 0人 · 統合中 1人',
     );

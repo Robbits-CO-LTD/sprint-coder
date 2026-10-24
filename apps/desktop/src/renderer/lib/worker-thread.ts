@@ -5,6 +5,7 @@ import type {
   WorkerSummary,
 } from '../types/sprint-coder';
 import {
+  executionWorkPhase,
   isWaitingExecutionState,
   workerStatusLabel,
   workerWorkPhase,
@@ -81,7 +82,7 @@ export function executionNeedsAttention(execution: TeamExecutionSummary | null):
     if (isolation.phase === 'waiting_integration' || isolation.phase === 'quarantined') return true;
   }
   return (
-    execution.state === 'waiting_resume' ||
+    (execution.state === 'waiting_resume' && executionWorkPhase(execution) !== 'integrating') ||
     execution.state === 'waiting_rate_limit' ||
     execution.state === 'waiting_verification' ||
     execution.state === 'queued' ||

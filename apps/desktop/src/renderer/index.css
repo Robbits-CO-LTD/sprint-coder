@@ -5282,6 +5282,10 @@ button.composer-permission-chip[aria-expanded='true'] {
   line-height: 1.4;
   font-variant-numeric: tabular-nums;
 }
+.team-work-count {
+  display: inline-block;
+  white-space: nowrap;
+}
 .team-stop-all-btn {
   margin-left: auto;
   font-size: 12px;

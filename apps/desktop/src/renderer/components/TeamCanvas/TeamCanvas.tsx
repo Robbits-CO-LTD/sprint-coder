@@ -1165,7 +1165,11 @@ function TeamHeaderOverlay({
         {`${detail.team.state} · Worker ${workerCount}人`}
         {phaseSummary !== null && (
           <span className="team-work-counts" data-testid="team-work-counts">
-            {phaseSummary}
+            {phaseSummary.split(' · ').map((part, index) => (
+              <span className="team-work-count" key={index}>
+                {index === 0 ? part : ` · ${part}`}
+              </span>
+            ))}
           </span>
         )}
       </span>
