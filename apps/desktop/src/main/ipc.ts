@@ -712,6 +712,7 @@ import {
   decodeTeamModelCursor,
   encodeTeamModelCursor,
   executeTeamTool,
+  teamModelListingDigest,
   teamToolError,
   type ExecuteTeamToolOptions,
 } from './team-tools';
@@ -8026,19 +8027,24 @@ export class IpcRouter {
     // every Provider (#939, same as #906). The cursor carries that catalog's identity and
     // revision, so a continuation after any other first page (the model picker, a Team hire, a
     // Manager in the same Task) or a restart rebuilt it is refused instead of being sliced from
-    // a different catalog at the old offset. The Leader does not compare revisions itself.
+    // a different catalog at the old offset. The Leader does not compare revisions itself. The
+    // search conditions and the Team model restriction decide which rows the offset counts, so a
+    // change to either (a restriction is saved without a new revision) refuses the cursor too.
     let catalogCursor: string | null = null;
     if (input.cursor === null) await this.refreshModelCatalog();
-    else {
+    const allowedModelKeys = this.teamModelAllowedKeys();
+    const conditionDigest = teamModelListingDigest(input, allowedModelKeys);
+    if (input.cursor !== null) {
       const decoded = decodeTeamModelCursor(input.cursor);
       if (
         decoded === null ||
         decoded.catalogId !== this.modelCatalog.instanceId ||
-        decoded.revision !== this.modelCatalog.revision
+        decoded.revision !== this.modelCatalog.revision ||
+        decoded.conditionDigest !== conditionDigest
       )
         return teamToolError(
           new Error(
-            'This team_list_models cursor is no longer valid: the model catalog changed or the cursor is malformed. Call team_list_models again without cursor.',
+            'This team_list_models cursor is no longer valid: the model catalog, the Team model restriction, or the search conditions changed, or the cursor is malformed. Call team_list_models again without cursor.',
           ),
         );
       catalogCursor = decoded.cursor;
@@ -8055,13 +8061,12 @@ export class IpcRouter {
         cursor: catalogCursor,
         limit: input.limit,
       },
-      this.teamModelAllowedKeys(),
+      allowedModelKeys,
     );
     const result = {
       ...page,
       nextCursor: encodeTeamModelCursor(
-        this.modelCatalog.instanceId,
-        page.revision,
+        { catalogId: this.modelCatalog.instanceId, revision: page.revision, conditionDigest },
         page.nextCursor,
       ),
     };

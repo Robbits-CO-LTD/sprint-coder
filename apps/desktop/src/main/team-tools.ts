@@ -6,6 +6,7 @@
 //
 // The same provider-neutral definitions feed the mock ToolBroker, the real CLI MCP bridge, and
 // official API tool loops. TeamCoordinator remains the only authority-bearing implementation.
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   contextInheritancePolicySchema,
@@ -339,24 +340,64 @@ export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
   ).map(providerToolDefinition),
 );
 
-const TEAM_MODEL_CURSOR_PATTERN = /^team:([0-9a-f]{8}):([0-9]+):(cursor:[0-9]+)$/;
+const TEAM_MODEL_CURSOR_PATTERN = /^team:([0-9a-f]{8}):([0-9]+):([0-9a-f]{16}):(cursor:[0-9]+)$/;
 
-/** team_list_models cursor: the catalog cursor plus the catalog identity and revision the
- * listing's first page was answered from (#939). */
+/** What a team_list_models listing was answered from: the catalog instance and revision, and a
+ * digest of the conditions that decide which rows the offset counts (#939). */
+export type TeamModelListingKey = Readonly<{
+  catalogId: string;
+  revision: number;
+  conditionDigest: string;
+}>;
+
+/** Digest of everything that filters the rows a cursor offset counts: the search conditions
+ * (normalized as ModelCatalogService applies them) and the Team model restriction. The page size
+ * is left out, since a continuation may ask for a different limit. */
+export function teamModelListingDigest(
+  conditions: Readonly<{
+    text: string;
+    connectionIds: readonly string[];
+    providerIds: readonly string[];
+    capabilities: readonly string[];
+  }>,
+  allowedModelKeys: ReadonlySet<string> | undefined,
+): string {
+  const normalized = (values: Iterable<string>) => [...new Set(values)].sort();
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        conditions.text.trim().toLocaleLowerCase(),
+        normalized(conditions.connectionIds),
+        normalized(conditions.providerIds),
+        normalized(conditions.capabilities),
+        allowedModelKeys === undefined ? null : normalized(allowedModelKeys),
+      ]),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/** team_list_models cursor: the catalog cursor plus the listing it continues. */
 export function encodeTeamModelCursor(
-  catalogId: string,
-  revision: number,
+  listing: TeamModelListingKey,
   cursor: string | null,
 ): string | null {
-  return cursor === null ? null : `team:${catalogId}:${revision}:${cursor}`;
+  return cursor === null
+    ? null
+    : `team:${listing.catalogId}:${listing.revision}:${listing.conditionDigest}:${cursor}`;
 }
 
 export function decodeTeamModelCursor(
   cursor: string,
-): { catalogId: string; revision: number; cursor: string } | null {
+): (TeamModelListingKey & { cursor: string }) | null {
   const match = TEAM_MODEL_CURSOR_PATTERN.exec(cursor);
   if (match === null) return null;
-  return { catalogId: match[1]!, revision: Number(match[2]), cursor: match[3]! };
+  return {
+    catalogId: match[1]!,
+    revision: Number(match[2]),
+    conditionDigest: match[3]!,
+    cursor: match[4]!,
+  };
 }
 
 export function teamToolError(error: unknown): {
