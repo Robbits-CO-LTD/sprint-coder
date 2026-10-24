@@ -51,7 +51,13 @@ test.describe('timeline scroll follow', () => {
     // A completed turn leaves the reader following, so no jump affordance is offered.
     await expect(page.getByTestId('timeline-jump-latest')).toHaveCount(0);
 
-    // Second turn: scroll up while it streams.
+    // Second turn: scroll up while it streams. The mock holds this reply after its first delta, so
+    // the reader parks while the turn is really streaming and the rest arrives only afterwards —
+    // otherwise a fast host finishes the whole reply before the view is parked, and the content
+    // has nothing left to grow by.
+    await app.evaluate(() => {
+      process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '1';
+    });
     await textarea.fill('2通目です (timeline-scroll-follow)');
     await textarea.press('Enter');
     await expect(page.getByTestId('streaming-assistant-message')).toBeVisible({ timeout: 30_000 });
@@ -75,6 +81,9 @@ test.describe('timeline scroll follow', () => {
 
     // Tokens keep arriving; the reader must stay exactly where they parked.
     const parkedDistance = await distanceFromBottom(scroll);
+    await app.evaluate(() => {
+      process.env['SPRINT_CODER_E2E_HOLD_MOCK_STREAM_AFTER_FIRST_DELTA'] = '0';
+    });
     for (let sample = 0; sample < 4; sample += 1) {
       await page.waitForTimeout(250);
       expect(await scroll.evaluate((el) => el.scrollTop)).toBe(0);

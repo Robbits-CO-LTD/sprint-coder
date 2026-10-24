@@ -5843,6 +5843,67 @@ button.composer-permission-chip[aria-expanded='true'] {
     opacity var(--t-quick) var(--ease-ui),
     max-height var(--t-quick) var(--ease-ui);
 }
+/* The body leaves the card, but the card keeps its size (placement, Fit view and cables all work
+   from the fixed 480x420 box), so the freed space shows WorkerNode's glance instead — the state
+   in words and the newest line, in type large enough to read at that scale. Without it a zoomed-out
+   Team read as a grid of empty dark cards. */
+.w-glance {
+  display: none;
+}
+.team-canvas[data-lod='1'] .worker .w-glance,
+.team-canvas[data-lod='2'] .worker .w-glance {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  min-height: 0;
+  padding: 20px 28px;
+  overflow: hidden;
+}
+.w-glance-role {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 34px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.w-glance-state {
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-secondary);
+}
+.w-glance-state.busy {
+  color: var(--accent);
+}
+.w-glance-state.ready,
+.w-glance-state.done {
+  color: var(--success);
+}
+.w-glance-line {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 22px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+.team-canvas[data-lod='2'] .worker .w-glance-role {
+  font-size: 48px;
+}
+.team-canvas[data-lod='2'] .worker .w-glance-state {
+  font-size: 36px;
+}
+.team-canvas[data-lod='2'] .worker .w-glance-line {
+  font-size: 30px;
+  -webkit-line-clamp: 3;
+}
 .team-canvas[data-lod='2'] .worker .role-sub {
   opacity: 0;
   max-height: 0;

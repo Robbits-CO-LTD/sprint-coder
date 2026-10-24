@@ -13,7 +13,13 @@ import {
 } from '../../lib/team-activity-display';
 import { describeHierarchy } from './placement';
 import { WorkStep } from '../WorkStep';
-import { executionNeedsAttention, workerThread, workStepLabel } from '../../lib/worker-thread';
+import {
+  executionNeedsAttention,
+  workerGlance,
+  workerReportText,
+  workerThread,
+  workStepLabel,
+} from '../../lib/worker-thread';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
@@ -22,17 +28,6 @@ function statusDotClass(state: WorkerSummary['state']): string {
   if (state === 'busy' || state === 'spawning' || state === 'invited') return 'busy';
   if (state === 'done') return 'done';
   return '';
-}
-
-// Worker report messages are structured envelopes; unwrap `{summary}` when present (see
-// demo/index.html's `results` map) and fall back to the raw content otherwise.
-function summarize(content: string): string {
-  try {
-    const parsed = JSON.parse(content) as { summary?: unknown };
-    return typeof parsed.summary === 'string' ? parsed.summary : content;
-  } catch {
-    return content;
-  }
 }
 
 // The card shows the end of a Worker's live output only (issue #863): rendering the whole
@@ -120,6 +115,7 @@ function WorkerNodeCard({
 
   const thread = workerThread(messages, worker.activityLog ?? []);
   const attention = executionNeedsAttention(execution);
+  const glance = workerGlance(worker, thread);
   const newestStep = worker.activityLog?.at(-1);
   const newestStepAt = newestStep?.at;
   const newestStepLabel = newestStep?.label;
@@ -210,6 +206,14 @@ function WorkerNodeCard({
           />
         </div>
       )}
+      {/* Zoomed out (LOD 1/2) the thread is too small to read, so CSS swaps it for this: the role,
+          its state in words and the newest line, set large enough to read at that scale. Hidden at
+          LOD 0, and hidden from assistive tech always, since it repeats the head and the thread. */}
+      <div className="w-glance" aria-hidden="true" data-testid="team-worker-glance">
+        <span className="w-glance-role">{worker.role}</span>
+        <span className={`w-glance-state ${dotClass}`}>{glance.state}</span>
+        {glance.line !== '' && <p className="w-glance-line">{glance.line}</p>}
+      </div>
       <div
         className="w-body"
         ref={historyRef}
@@ -235,7 +239,7 @@ function WorkerNodeCard({
           return (
             <div key={m.id} className={`w-line${incoming ? ' msg-in' : ' msg-out'}`}>
               <span className={`tag${incoming ? '' : ' out'}`}>{peer.tagLabel}</span>
-              <TeamMessageMarkdown text={incoming ? m.content : summarize(m.content)} />
+              <TeamMessageMarkdown text={incoming ? m.content : workerReportText(m.content)} />
             </div>
           );
         })}
