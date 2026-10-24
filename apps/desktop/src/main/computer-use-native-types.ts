@@ -29,6 +29,8 @@ export type ComputerUseNativeAddon = Readonly<{
   handshake?(input: unknown): unknown;
   pickApplication?(input: unknown): unknown;
   listWindows?(input: unknown): unknown;
+  /** Windows v2 discovery evidence; absent on older helpers and never a public tool result. */
+  listTargets?(input: unknown): unknown;
   startSession?(input: unknown): unknown;
   observe?(input: unknown): unknown;
   /** macOS native only (N2a). Absent on older native builds and on Windows. */
