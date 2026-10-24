@@ -8019,7 +8019,7 @@ export class IpcRouter {
   private async listTeamModelCandidates(
     input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
   ): Promise<unknown> {
-    await this.refreshModelCatalog();
+    if (input.cursor === null || this.modelCatalog.revision === 0) await this.refreshModelCatalog();
     const result = this.modelCatalog.query(
       {
         taskId: input.taskId,

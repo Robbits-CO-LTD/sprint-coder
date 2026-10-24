@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
   type ModelCatalogQueryInput,
   type ModelCatalogQueryResult,
   type ProviderConnection,
   type ProviderModel,
+  type TeamModelRestriction,
 } from '@sprint-coder/contracts';
 import { IpcRouter } from './ipc';
 import { ModelCatalogService } from './model-catalog-service';
@@ -12,6 +13,8 @@ import { MainProviderProfileRegistry } from './provider-profile';
 import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { localProviderTestConnection } from './provider-connection-test-fixture';
 import { queryAllModelCatalogPages } from '../renderer/lib/model-catalog-pages';
+import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
+import { TeamCoordinator } from './team-coordinator';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -65,8 +68,17 @@ function models(connection: ProviderConnection, count: number): ProviderModel[] 
   }));
 }
 
-function makeRouter() {
-  const router = Object.create(IpcRouter.prototype) as { register(): void };
+function makeRouter({
+  stableConnection = stable,
+  flakyConnection = flaky,
+  stableCount = 250,
+  flakyCount = 3,
+  flakyInitiallyAvailable = true,
+} = {}) {
+  const router = Object.create(IpcRouter.prototype) as {
+    register(): void;
+    listTeamModelCandidates: NonNullable<ExecuteTeamToolOptions['listModelCandidates']>;
+  };
   const handlers = new Map<string, Handler>();
   const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
     handlers.set(channel, handler);
@@ -75,12 +87,17 @@ function makeRouter() {
   const probe = vi.fn(async () => ({ available: false, readiness: 'missing', models: [] }));
   let flakyCalls = 0;
   const listModels = vi.fn(async (connection: ProviderConnection) => {
-    if (connection.id === stable.id) return models(stable, 250);
+    if (connection.id === stableConnection.id) return models(stableConnection, stableCount);
     flakyCalls += 1;
-    if (flakyCalls % 2 === 0) throw new Error('flaky provider is down');
-    return models(flaky, 3);
+    if ((flakyCalls % 2 === 1) !== flakyInitiallyAvailable)
+      throw new Error('flaky provider is down');
+    return models(flakyConnection, flakyCount);
   });
   const catalog = new ModelCatalogService();
+  const getTeamModelRestriction = vi.fn((): TeamModelRestriction => ({
+    mode: 'all',
+    allowedModels: [],
+  }));
   Object.assign(router, {
     handle: register,
     handleMutation: register,
@@ -90,10 +107,11 @@ function makeRouter() {
     grokRuntime: { probe },
     reconcileBuiltinCapability: vi.fn(),
     teamRuntimeAvailability: { isAvailable: () => true },
-    providerConnections: { list: () => [stable, flaky] },
+    providerConnections: { list: () => [stableConnection, flakyConnection] },
     providerProfiles: profiles,
     providerVerification: {
-      requireVerifiedForExecution: async (id: string) => (id === stable.id ? stable : flaky),
+      requireVerifiedForExecution: async (id: string) =>
+        id === stableConnection.id ? stableConnection : flakyConnection,
     },
     providerRegistry: { resolve: () => ({ listModels }) },
     ensureProviderEndpointConsent: async (connection: ProviderConnection) => connection,
@@ -102,12 +120,19 @@ function makeRouter() {
       getTaskModelSelection: () => null,
       getRuntime: () => 'codex',
       getModel: () => 'auto',
+      getTeamModelRestriction,
     },
   });
   router.register();
   const query = async (input: ModelCatalogQueryInput) =>
     (await handlers.get(IPC_CHANNELS.modelsCatalogQuery)!(input)) as ModelCatalogQueryResult;
-  return { query, probe, listModels };
+  // Listing does not use the coordinator; the real tool still validates and routes the call.
+  const coordinator = Object.create(TeamCoordinator.prototype) as TeamCoordinator;
+  const teamQuery = async (args: { cursor?: string | null; limit?: number }) =>
+    (await executeTeamTool(coordinator, 'task-1', 'team_list_models', args, {
+      listModelCandidates: (input) => router.listTeamModelCandidates(input),
+    })) as ModelCatalogQueryResult;
+  return { query, teamQuery, probe, listModels, getTeamModelRestriction };
 }
 
 const listing = {
@@ -163,5 +188,89 @@ describe('#906: models catalog query rebuilds the catalog only for a first page'
     expect(
       listModels.mock.calls.filter(([connection]) => connection.id === stable.id),
     ).toHaveLength(2);
+  });
+});
+
+describe('#939: Team model listing keeps continuation pages in the existing catalog', () => {
+  const teamFlaky: ProviderConnection = { ...flaky, id: 'localai:flaky', providerId: 'localai' };
+  const teamStable: ProviderConnection = { ...stable, id: 'ollama:stable', providerId: 'ollama' };
+  const options = {
+    stableConnection: teamStable,
+    flakyConnection: teamFlaky,
+    stableCount: 150,
+    flakyCount: 100,
+  };
+  const identity = ({ connectionId, providerId, modelId }: ProviderModel) => ({
+    connectionId,
+    providerId,
+    modelId,
+  });
+
+  beforeEach(() => vi.stubEnv('SPRINT_CODER_TEAM_CODEX_ONLY', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([true, false])(
+    'returns every initial candidate exactly once when the flaky Provider initially answers=%s',
+    async (flakyInitiallyAvailable) => {
+      const { teamQuery, probe, listModels } = makeRouter({ ...options, flakyInitiallyAvailable });
+      const first = await teamQuery({ limit: 100 });
+      const items = [...first.items];
+      let cursor = first.nextCursor;
+      for (let pages = 1; cursor !== null && pages < 5; pages += 1) {
+        const page = await teamQuery({ cursor, limit: 100 });
+        items.push(...page.items);
+        cursor = page.nextCursor;
+      }
+
+      expect(cursor).toBeNull();
+      expect(items.map(identity)).toEqual(
+        [
+          ...(flakyInitiallyAvailable ? models(teamFlaky, 100) : []),
+          ...models(teamStable, 150),
+        ].map(identity),
+      );
+      expect(probe).toHaveBeenCalledTimes(3);
+      expect(listModels).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not probe on a continuation, but refreshes when a new listing starts', async () => {
+    const { teamQuery, probe, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+    const second = await teamQuery({ cursor: first.nextCursor, limit: 100 });
+
+    expect(second.revision).toBe(first.revision);
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    const refreshed = await teamQuery({ cursor: null, limit: 100 });
+    expect(refreshed.total).toBe(150);
+    expect(refreshed.revision).toBeGreaterThan(first.revision);
+    expect(probe).toHaveBeenCalledTimes(6);
+    expect(listModels).toHaveBeenCalledTimes(4);
+  });
+
+  it('builds the catalog if a cursor arrives before any listing', async () => {
+    const { teamQuery, probe, listModels } = makeRouter(options);
+    const page = await teamQuery({ cursor: 'cursor:100', limit: 100 });
+
+    expect(page.items.map(identity)).toEqual(models(teamStable, 100).map(identity));
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('applies current Team restrictions even on a continuation', async () => {
+    const { teamQuery, getTeamModelRestriction, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 1 });
+    getTeamModelRestriction.mockReturnValue({
+      mode: 'selected',
+      allowedModels: models(teamStable, 3).map(identity),
+    });
+
+    const page = await teamQuery({ cursor: first.nextCursor, limit: 100 });
+
+    expect(page.total).toBe(3);
+    expect(page.items.map(identity)).toEqual(models(teamStable, 3).slice(1).map(identity));
+    expect(listModels).toHaveBeenCalledTimes(2);
   });
 });
