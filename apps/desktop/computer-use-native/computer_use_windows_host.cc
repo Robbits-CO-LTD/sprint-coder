@@ -8921,12 +8921,17 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           // A new Close must stop discovery even when its epoch equals the current input epoch.
           control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
           control.context_candidate.reset();
-          std::uint64_t current =
-              cancellation_epoch.load(std::memory_order_acquire);
-          while (requested_epoch > current &&
-                 !cancellation_epoch.compare_exchange_weak(
-                     current, requested_epoch, std::memory_order_acq_rel,
-                     std::memory_order_acquire)) {
+          // Close invalidates discovery here, but only its consumer owns session epochs. A retry
+          // for an already-closed session must not cancel another session or raise the input epoch
+          // beyond last_closed_cancel_epoch and prevent a fresh epoch-zero start.
+          if (type == MessageType::kCancel) {
+            std::uint64_t current =
+                cancellation_epoch.load(std::memory_order_acquire);
+            while (requested_epoch > current &&
+                   !cancellation_epoch.compare_exchange_weak(
+                       current, requested_epoch, std::memory_order_acq_rel,
+                       std::memory_order_acquire)) {
+            }
           }
         }
       }
