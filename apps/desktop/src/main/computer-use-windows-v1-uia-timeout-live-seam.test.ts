@@ -303,14 +303,19 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     expect(c).toContain(
       'WindowsV1UiaLane *lane = windows_v1_uia_lane; if (lane == nullptr) return false;',
     );
-    expect(c).toContain('if (windows_v1_uia_lane != nullptr) return;');
-    expect(c).toContain('~WindowsV1UiaPath() { if (owner_) windows_v1_uia_lane = nullptr; }');
+    const pathStart = c.indexOf('class WindowsV1UiaPath {');
+    const pathEnd = c.indexOf('};', pathStart);
+    expect(pathStart).toBeGreaterThanOrEqual(0);
+    expect(pathEnd).toBeGreaterThan(pathStart);
+    const path = c.slice(pathStart, pathEnd);
+    expect(path).toContain('if (windows_v1_uia_lane != nullptr) return;');
+    expect(path).toContain('~WindowsV1UiaPath() { if (owner_) windows_v1_uia_lane = nullptr; }');
     // An inner path stays a non-owner. Only the budget constructor and the worker's value-snapshot
     // constructor can own a lane; neither replaces an existing thread-local path.
-    expect(c.split('bool owner_ = false;')).toHaveLength(2);
-    expect(c.split('owner_ = true;')).toHaveLength(3);
-    expect(c.indexOf('owner_ = true;')).toBeGreaterThan(
-      c.indexOf('if (windows_v1_uia_lane != nullptr) return;'),
+    expect(path.split('bool owner_ = false;')).toHaveLength(2);
+    expect(path.split('owner_ = true;')).toHaveLength(3);
+    expect(path.indexOf('owner_ = true;')).toBeGreaterThan(
+      path.indexOf('if (windows_v1_uia_lane != nullptr) return;'),
     );
     // Every input of a semantic action is sent only while the path is alive: when it is not, nothing
     // is sent, the attempt is not counted and the action is not accepted (so it cannot become
