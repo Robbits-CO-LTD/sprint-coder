@@ -12,6 +12,7 @@ import type {
   ComputerUseSessionStatus,
   ComputerUseStartInput,
   ComputerUseWindowCandidate,
+  ProviderModel,
 } from '@sprint-coder/contracts';
 import {
   ComputerUseAcceptanceBuildNotice,
@@ -246,17 +247,41 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
       refreshProfiles(),
       permissions.get(taskId),
       providersApi.listConnections(),
-      modelsApi.query({
-        taskId,
-        text: '',
-        connectionIds: [],
-        providerIds: [],
-        accessTypes: [],
-        capabilities: [],
-        availableOnly: true,
-        cursor: null,
-        limit: 100,
-      }),
+      (async () => {
+        const items: ProviderModel[] = [];
+        let cursor: string | null = null;
+        let revision: number | null = null;
+        let restarted = false;
+        for (;;) {
+          const page = await modelsApi.query({
+            taskId,
+            text: '',
+            connectionIds: [],
+            providerIds: [],
+            accessTypes: [],
+            // Unknown image support stays selectable for the start-time preflight.
+            capabilities: [],
+            availableOnly: true,
+            cursor,
+            limit: 100,
+          });
+          // Cursors are offsets, so a changed catalog invalidates every page already collected.
+          if (revision !== null && page.revision !== revision) {
+            if (restarted)
+              throw new Error('モデル一覧が更新されました。Computer Useを開き直してください。');
+            items.length = 0;
+            cursor = null;
+            revision = null;
+            restarted = true;
+            continue;
+          }
+          revision = page.revision;
+          items.push(...page.items);
+          cursor = page.nextCursor;
+          if (!cursor) break;
+        }
+        return items;
+      })(),
     ]);
     setPolicyEpoch(policy.policyEpoch);
     const compatibleConnections = new Map(
@@ -269,7 +294,7 @@ export function useComputerUse(taskId: string | null): ComputerUseFeature {
         )
         .map((connection) => [connection.id, connection]),
     );
-    const catalogOptions = catalog.items.flatMap((model) => {
+    const catalogOptions = catalog.flatMap((model) => {
       const connection = compatibleConnections.get(model.connectionId);
       if (connection === undefined || model.multimodalInput.value === false) return [];
       return [

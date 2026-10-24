@@ -17,7 +17,10 @@ import {
   computerUseWindowCandidateSchema,
   type ComputerAppProfile,
   type ComputerUseSessionStatus,
+  type ModelCatalogQueryInput,
+  type ProviderModel,
 } from '@sprint-coder/contracts';
+import { ModelCatalogService } from '../../main/model-catalog-service';
 import { useComputerUse, type ComputerUseFeature } from './useComputerUse';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -129,7 +132,12 @@ afterEach(() => {
 
 type Listener = (value: ComputerUseSessionStatus) => void;
 
-function installFakePreload() {
+function installFakePreload(
+  query?: (input: ModelCatalogQueryInput) => Promise<{
+    items: readonly ProviderModel[];
+    nextCursor: string | null;
+  }>,
+) {
   const listeners = new Set<Listener>();
   // Every argument the hook hands to the preload API, as text, so a leak anywhere is found.
   const sent: string[] = [];
@@ -183,16 +191,19 @@ function installFakePreload() {
       ],
     },
     models: {
-      query: async () => ({
-        items: [
-          {
-            connectionId: 'connection-1',
-            modelId: 'vision-1',
-            displayName: 'Vision 1',
-            multimodalInput: { value: true },
-          },
-        ],
-      }),
+      query:
+        query ??
+        (async () => ({
+          items: [
+            {
+              connectionId: 'connection-1',
+              modelId: 'vision-1',
+              displayName: 'Vision 1',
+              multimodalInput: { value: true },
+            },
+          ],
+          nextCursor: null,
+        })),
     },
   };
   return {
@@ -218,6 +229,111 @@ async function settle(): Promise<void> {
       await Promise.resolve();
     });
 }
+
+function catalogModel(modelId: string, vision: boolean | null = true): ProviderModel {
+  const unknown = { value: null, source: 'unknown' as const };
+  return {
+    connectionId: 'connection-1',
+    providerId: 'openai',
+    modelId,
+    displayName: modelId,
+    available: true,
+    availabilityCheckedAt: '2026-10-24T00:00:00.000Z',
+    contextWindow: unknown,
+    maxOutputTokens: unknown,
+    toolCalling: unknown,
+    structuredOutput: unknown,
+    multimodalInput: { value: vision, source: vision === null ? 'unknown' : 'provider_api' },
+    reasoning: unknown,
+  };
+}
+
+describe('Computer Use onboarding catalog pagination (#906)', () => {
+  it.each([
+    { name: 'vision only after 100 text models', textCount: 100, visionCount: 1, changes: 0 },
+    { name: 'vision options across three pages', textCount: 0, visionCount: 205, changes: 0 },
+    { name: 'a catalog update between pages', textCount: 0, visionCount: 101, changes: 1 },
+    { name: 'repeated catalog updates fail visibly', textCount: 0, visionCount: 101, changes: 2 },
+  ])('loads onboarding safely: $name', async ({ textCount, visionCount, changes }) => {
+    const service = new ModelCatalogService();
+    const visionModels = Array.from({ length: visionCount }, (_, index) =>
+      catalogModel(`vision-${String(index).padStart(3, '0')}`),
+    );
+    const models = [
+      ...Array.from({ length: textCount }, (_, index) =>
+        catalogModel(`text-${String(index).padStart(3, '0')}`, false),
+      ),
+      ...visionModels,
+      catalogModel('zz-unknown', null),
+      { ...catalogModel('zz-unavailable'), available: false },
+      { ...catalogModel('zz-other-connection'), connectionId: 'connection-other' },
+    ];
+    service.replaceCatalog(models);
+    let remainingChanges = changes;
+    const query = vi.fn(async (input: ModelCatalogQueryInput) => {
+      if (input.cursor !== null && remainingChanges > 0) {
+        models.push(catalogModel(`aaa-new-vision-${remainingChanges}`));
+        service.replaceCatalog(models);
+        remainingChanges -= 1;
+      }
+      return service.query(input);
+    });
+    installFakePreload(query);
+    const container = document.createElement('div');
+    document.body.append(container);
+    const root = createRoot(container);
+    let feature: ComputerUseFeature | null = null;
+    try {
+      await act(async () => {
+        root.render(
+          <Probe
+            taskId="task-1"
+            onFeature={(value) => {
+              feature = value;
+            }}
+          />,
+        );
+      });
+      await act(async () => feature!.open());
+      await settle();
+      if (changes === 2) {
+        expect(container.textContent).toContain(
+          'モデル一覧が更新されました。Computer Useを開き直してください。',
+        );
+        expect(query).toHaveBeenCalledTimes(4);
+        expect(container.textContent).not.toContain('確認中…');
+        return;
+      }
+      const next = Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === '次へ',
+      );
+      expect(next?.disabled).toBe(false);
+      await act(async () => next!.click());
+      await settle();
+      const providerField = Array.from(container.querySelectorAll('label')).find((label) =>
+        label.textContent?.startsWith('画像と画面情報の送信先'),
+      );
+      const options = Array.from(providerField?.querySelectorAll('option') ?? []).map(
+        (option) => option.textContent,
+      );
+      expect(options).toEqual([
+        ...(changes === 1 ? ['OpenAI — aaa-new-vision-1'] : []),
+        ...visionModels.map((model) => `OpenAI — ${model.displayName}`),
+        'OpenAI — zz-unknown',
+      ]);
+      expect(container.textContent).not.toContain('画像対応のProvider / Modelがありません');
+      expect(query.mock.calls.map(([input]) => input.cursor)).toEqual(
+        changes === 1
+          ? [null, 'cursor:100', null, 'cursor:100']
+          : textCount === 100
+            ? [null, 'cursor:100']
+            : [null, 'cursor:100', 'cursor:200'],
+      );
+    } finally {
+      await act(async () => root.unmount());
+    }
+  });
+});
 
 function storedText(): string {
   return [localStorage, sessionStorage]
