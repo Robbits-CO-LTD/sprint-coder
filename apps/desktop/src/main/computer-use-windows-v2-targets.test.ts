@@ -365,6 +365,13 @@ std::string Metadata(std::uint64_t ruleset, std::uint64_t generation) {
 
 int wmain(int argc, wchar_t **argv) {
   const std::wstring fixture = argc > 1 ? argv[1] : L"";
+  const bool on_ci = argc > 2 && std::wstring(argv[2]) == L"ci";
+  // What this program was compiled as, from the definition itself and from the build's flag.
+  std::cout << "compiled: SPRINT_CODER_ELIGIBILITY_V2=" << SPRINT_CODER_ELIGIBILITY_V2
+            << " kNativeEligibilityIsV2=" << (sprint_coder::computer_use::kNativeEligibilityIsV2 ? 1 : 0)
+            << "\n";
+  Check(sprint_coder::computer_use::kNativeEligibilityIsV2 == (SPRINT_CODER_ELIGIBILITY_V2 == 1),
+        "compiled_eligibility_matches_the_definition");
   using namespace sprint_coder::computer_use;
   g_job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -386,6 +393,7 @@ int wmain(int argc, wchar_t **argv) {
 
 #if SPRINT_CODER_ELIGIBILITY_V2 == 0
   (void)fixture;
+  (void)on_ci;
   // A v1 build: list_targets reads nothing and says it is not supported.
   std::string response = "untouched";
   std::string reason;
@@ -567,6 +575,13 @@ int wmain(int argc, wchar_t **argv) {
     Check(FinishWindowsV2ListResponse(control_response, 41, &fitting, &no_reason) &&
               fitting == control_response && no_reason.empty() && windows_v2_list_generation == 41,
           "v2_list_response_within_one_frame_is_answered");
+    // A restarted helper starts its generations at a random point, so a token kept from an earlier
+    // helper's list does not name this helper's latest list and its start is refused.
+    const std::uint64_t first = InitialWindowsV2ListGeneration();
+    const std::uint64_t second = InitialWindowsV2ListGeneration();
+    Check(first >= 1 && first < (std::uint64_t{1} << 52) && second >= 1 &&
+              second < (std::uint64_t{1} << 52) && first != second,
+          "v2_list_generation_starts_at_random_per_helper");
   }
 
   // A general application: the acceptance fixture, copied under %LOCALAPPDATA%\Programs (decision A)
@@ -651,6 +666,17 @@ int wmain(int argc, wchar_t **argv) {
               !admit(Metadata(0, 7), true, identity, executable, &mode) &&
               !admit("{\"targetGeneration\":7}", true, identity, executable, &mode),
           "v2_start_refuses_another_ruleset_version");
+    {
+      // The list a token came from was given by an earlier helper (generation 7); this helper
+      // started again at its own random generation and has sent no list yet.
+      const std::uint64_t before = windows_v2_list_generation;
+      windows_v2_list_generation = InitialWindowsV2ListGeneration();
+      const bool restarted_refuses =
+          windows_v2_list_generation != 7 &&
+          !admit(Metadata(version, 7), true, identity, executable, &mode);
+      windows_v2_list_generation = before;
+      Check(restarted_refuses, "v2_start_after_a_restart_refuses_the_old_generation");
+    }
     Check(!admit(Metadata(version, 6), true, identity, executable, &mode) &&
               !admit("{\"denyRulesetVersion\":" + std::to_string(version) + "}", true, identity,
                      executable, &mode),
@@ -742,12 +768,18 @@ int wmain(int argc, wchar_t **argv) {
   UINT32 name_buffer = 0;
   const LONG looked_up = GetPackagesByPackageFamily(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe",
                                                     &store_packages, nullptr, &name_buffer, nullptr);
-  const bool store_notepad =
-      (looked_up == ERROR_SUCCESS || looked_up == ERROR_INSUFFICIENT_BUFFER) && store_packages > 0;
+  // Installed: ERROR_INSUFFICIENT_BUFFER with a count (the names did not fit the null buffer). Not
+  // installed: ERROR_SUCCESS with no package. Any other answer says neither, and fails the check.
+  const bool store_notepad = looked_up == ERROR_INSUFFICIENT_BUFFER && store_packages > 0;
+  const bool no_store_notepad = looked_up == ERROR_SUCCESS && store_packages == 0;
   std::cout << "notepad: Store package lookup=" << looked_up << " packages=" << store_packages << "\n";
+  Check(store_notepad || no_store_notepad, "v2_notepad_package_lookup_answered");
+  bool notepad_skipped = true;
   if (store_notepad) {
     std::cout << "notepad: skipped: the Store Notepad is installed, so System32's notepad.exe would "
                  "start it outside this program's job; nothing was started\n";
+  } else if (!no_store_notepad) {
+    std::cout << "notepad: skipped: the package lookup did not answer; nothing was started\n";
   } else {
     const std::wstring system_notepad = system32 + L"\\notepad.exe";
     PROCESS_INFORMATION notepad = Start(L"\"" + system_notepad + L"\"", CREATE_SUSPENDED);
@@ -779,6 +811,7 @@ int wmain(int argc, wchar_t **argv) {
                 << " mode=" << note.verdict.maximum_mode
                 << " root=" << (facts.image_root.has_value() ? *facts.image_root : std::string("-"))
                 << "\n";
+      notepad_skipped = false;
       Check(note.Selectable() && note.verdict.maximum_mode == "full_access_app" &&
                 !note.package.has_value() &&
                 note.app_identity == note.executable.identity.identity_digest &&
@@ -788,6 +821,10 @@ int wmain(int argc, wchar_t **argv) {
     if (notepad.hThread != nullptr) CloseHandle(notepad.hThread);
     if (notepad.hProcess != nullptr) CloseHandle(notepad.hProcess);
   }
+  // In CI (windows-2022, no Store Notepad) the System32 check must run: a skip there is a failure,
+  // so the check cannot fall away unseen.
+  if (on_ci && notepad_skipped) std::cout << "POSITIVE_CHECKS_NOT_RUN: notepad\n";
+  Check(!(on_ci && notepad_skipped), "v2_system_notepad_checked_in_ci");
 #endif
   TerminateJobObject(g_job, 0);
   CloseHandle(g_job);
@@ -804,9 +841,12 @@ const onWindows = process.platform === 'win32';
 describe.skipIf(!onWindows || (build === null && !ci))(
   'Windows v2 targets, live (#500 S5-c-3 PR-5)',
   () => {
-    it.each([0, 1])(
-      'judges processes it starts itself (eligibility v%i)',
-      (v2) => {
+    it.each([
+      { v2: 0, built: 'v1' },
+      { v2: 1, built: 'v2' },
+    ])(
+      'judges processes it starts itself (built as $built)',
+      ({ v2 }) => {
         expect(build, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
         const scratch = mkdtempSync(join(tmpdir(), 'computer-use-v2-targets-'));
         // The general application root of decision A, under this user's own profile; removed below.
@@ -909,7 +949,7 @@ ${fixtureBuild.stdout}`,
             env: { ...process.env, VSLANG: '1033' },
           });
           expect(built.status, `${built.stdout}\n${built.stderr}`).toBe(0);
-          const executed = spawnSync(binary, [fixtureExecutable], {
+          const executed = spawnSync(binary, [fixtureExecutable, ci ? 'ci' : 'local'], {
             encoding: 'utf8',
             timeout: 180_000,
           });
