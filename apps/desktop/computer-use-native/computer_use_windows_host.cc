@@ -4048,8 +4048,9 @@ bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
   }
   *response = std::move(built);
   // Taken here, after the size check, as the answer is handed to the dispatcher. If its WriteFrame
-  // then fails, the pipe is lost and Main restarts the helper (a new helper starts from generation
-  // 0 and no session); on this helper, a new session named from the list before this one is
+  // then fails, the pipe is lost and Main restarts the helper (a new helper starts from a fresh
+  // random generation and no session, so no token from this helper names one of its lists); on
+  // this helper, a new session named from the list before this one is
   // refused as stale (targetGeneration), and Main must list again. A resume does not read it.
   windows_v2_list_generation = generation;
   return true;
