@@ -711,6 +711,8 @@ export async function executeTeamTool(
         cursor: request.cursor ?? null,
         limit: request.limit ?? 50,
       });
+      if (typeof result === 'object' && result !== null && 'ok' in result && result.ok === false)
+        return result;
       options.modelCatalogAudit?.markQueried();
       return result;
     }
