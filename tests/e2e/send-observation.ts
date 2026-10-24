@@ -63,12 +63,12 @@ export function installSendObservationInPage(): void {
       cameraScale: camera ? number(Number(camera[3])) : null,
     };
   };
-  const record = (event: Event, afterClick = false): void => {
+  const record = (event: Event): void => {
     if (stopped) return;
     try {
       events.push({
         ...dom(),
-        type: afterClick ? 'click-microtask' : event.type,
+        type: event.type,
         trusted: event.isTrusted,
         target: category(event.target),
         atMs: number(performance.now()),
@@ -76,12 +76,6 @@ export function installSendObservationInPage(): void {
         clientY: event instanceof MouseEvent ? number(event.clientY) : null,
       });
       if (events.length > 24) events.shift();
-      if (
-        !afterClick &&
-        event.type === 'click' &&
-        category(event.target) === 'composer-send-button'
-      )
-        queueMicrotask(() => record(event, true));
     } catch {
       // An optional observer must not affect the application's input dispatch.
     }

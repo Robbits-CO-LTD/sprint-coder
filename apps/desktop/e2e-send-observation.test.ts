@@ -50,7 +50,7 @@ describe('E2E send observation privacy and lifetime', () => {
     expect(await readSendTurnMetadata('task-1')).toEqual({ status: 'unavailable' });
   });
 
-  it('caps passive input evidence, samples after dispatch, and detaches without changing input', async () => {
+  it('caps passive input evidence and detaches without changing input', () => {
     class TestElement {
       constructor(readonly testId: string) {}
       closest(selector: string) {
@@ -95,7 +95,6 @@ describe('E2E send observation privacy and lifetime', () => {
     Object.defineProperty(click, 'target', { value: send });
     document.dispatchEvent(click);
     draft.value = '';
-    await Promise.resolve();
     const probe = window.__sprintSendObservation!;
     const captured = probe.read();
     expect(click.defaultPrevented).toBe(false);
@@ -103,11 +102,11 @@ describe('E2E send observation privacy and lifetime', () => {
     expect(matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
     expect(captured.dom.prefersReducedMotion).toBe(true);
     expect(captured.events.every((event) => event.prefersReducedMotion === true)).toBe(true);
-    expect(captured.events.at(-2)).toMatchObject({
+    expect(captured.events.at(-1)).toMatchObject({
       type: 'click',
       draftLength: privateDraft.length,
     });
-    expect(captured.events.at(-1)).toMatchObject({ type: 'click-microtask', draftLength: 0 });
+    expect(captured.dom.draftLength).toBe(0);
     expect(JSON.stringify(captured)).not.toContain(privateDraft);
     matchMedia.mockReturnValue({ matches: false });
     expect(probe.read().dom.prefersReducedMotion).toBe(false);
