@@ -281,3 +281,90 @@ describe('automatic and explicit focus controls', () => {
     expect(world.style.transform).toBe(panned);
   });
 });
+
+describe.each([false, true])('node input with reduced motion=%s', (reduced) => {
+  it.each(['leader', 'worker'])(
+    'keeps the %s input target still when pending follow and fit timers fire',
+    async (node) => {
+      const media = matchMedia('(prefers-reduced-motion: reduce)');
+      vi.mocked(matchMedia).mockReturnValue({ ...media, matches: reduced });
+      await mount();
+      await advance(1700);
+      hire();
+      await advance(60);
+      const button = document.createElement('button');
+      if (node === 'leader') {
+        const leader = document.createElement('div');
+        leader.className = 'surface--node';
+        leader.append(button);
+        container.querySelector('.leader-anchor')!.append(leader);
+      } else container.querySelector('.worker .w-body')!.append(button);
+      const capture = vi.fn();
+      canvas.setPointerCapture = capture;
+      const down = new MouseEvent('pointerdown', { bubbles: true, cancelable: true });
+      act(() => button.dispatchEvent(down));
+      const held = world.style.transform;
+      expect(capture).not.toHaveBeenCalled();
+      expect(down.defaultPrevented).toBe(false);
+
+      for (const ms of [60, 480, 360, 600]) {
+        await advance(ms);
+        expect(world.style.transform).toBe(held);
+      }
+      expect(canvas.dataset.cameraOwner).toBe('user');
+      const clicked = vi.fn();
+      button.addEventListener('click', clicked);
+      act(() => {
+        button.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+        button.click();
+      });
+      expect(clicked).toHaveBeenCalledOnce();
+    },
+  );
+});
+
+describe('interrupted exit choreography', () => {
+  it.each(['node input', 'resettle'] as const)(
+    'settles the exit without a stale fade after %s interrupts it',
+    async (interruption) => {
+      const media = matchMedia('(prefers-reduced-motion: reduce)');
+      vi.mocked(matchMedia).mockReturnValue({ ...media, matches: false });
+      await mount();
+      await advance(1700);
+      let exited = false;
+      void handle.current!.playExitAnimation().then(() => {
+        exited = true;
+      });
+      await advance(80);
+      if (interruption === 'resettle') act(() => handle.current!.resettle());
+      else {
+        const leader = document.createElement('div');
+        leader.className = 'surface--node';
+        const button = document.createElement('button');
+        leader.append(button);
+        container.querySelector('.leader-anchor')!.append(leader);
+        act(() => button.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+      }
+      await advance(1000);
+      expect(exited).toBe(true);
+      expect(canvas.classList.contains('exiting')).toBe(false);
+    },
+  );
+
+  it.each([false, true])(
+    'still completes an uninterrupted exit with reduced motion=%s',
+    async (reduced) => {
+      const media = matchMedia('(prefers-reduced-motion: reduce)');
+      vi.mocked(matchMedia).mockReturnValue({ ...media, matches: reduced });
+      await mount();
+      await advance(1700);
+      let exited = false;
+      void handle.current!.playExitAnimation().then(() => {
+        exited = true;
+      });
+      await advance(800);
+      expect(exited).toBe(true);
+      expect(canvas.classList.contains('exiting')).toBe(true);
+    },
+  );
+});

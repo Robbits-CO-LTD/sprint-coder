@@ -39,28 +39,57 @@ describe('preservesNestedScroll', () => {
   });
 });
 
-function CameraCanvas({ capture }: { capture?: (camera: ReturnType<typeof useCamera>) => void }) {
-  const camera = useCamera();
+function CameraCanvas({
+  capture,
+  onSettle,
+}: {
+  capture?: (camera: ReturnType<typeof useCamera>) => void;
+  onSettle?: () => void;
+}) {
+  const camera = useCamera(onSettle);
   const { canvasRef, worldRef } = camera;
   useEffect(() => capture?.(camera), [capture, camera]);
   return createElement(
     'section',
     { ref: canvasRef, 'data-testid': 'camera-canvas' },
-    createElement('div', { ref: worldRef, 'data-testid': 'camera-world' }),
+    createElement(
+      'div',
+      { ref: worldRef, 'data-testid': 'camera-world' },
+      ...['surface--node', 'worker'].map((className) =>
+        createElement(
+          'div',
+          { className, key: className },
+          createElement('button', { 'data-testid': `${className}-input` }, 'Node action'),
+        ),
+      ),
+    ),
     createElement(
       'div',
       { className: 'team-canvas-notice' },
       createElement('button', { type: 'button', 'data-testid': 'team-back' }, 'Chatに戻る'),
       createElement('button', { type: 'button', 'data-testid': 'team-view-toggle' }, 'List表示'),
     ),
+    ...['team-header-overlay', 'team-canvas-controls', 'team-policy-dialog'].map((className) =>
+      createElement(
+        'div',
+        { className, key: className },
+        createElement('button', { 'data-testid': className }, 'Overlay action'),
+      ),
+    ),
   );
 }
 
 function pointerDown(target: HTMLElement) {
   // jsdom supplies MouseEvent but not PointerEvent; these are the pointer fields read by the hook.
-  const event = new MouseEvent('pointerdown', { bubbles: true, clientX: 30, clientY: 40 });
+  const event = new MouseEvent('pointerdown', {
+    bubbles: true,
+    cancelable: true,
+    clientX: 30,
+    clientY: 40,
+  });
   Object.defineProperty(event, 'pointerId', { value: 7 });
   target.dispatchEvent(event);
+  return event;
 }
 
 describe('camera pointer capture', () => {
@@ -100,17 +129,62 @@ describe('camera pointer capture', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  it.each(['team-back', 'team-view-toggle'])(
-    'does not capture a pointerdown bubbling from the %s recovery button',
-    (testId) => {
-      const button = container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!;
-      pointerDown(button);
+  it.each([
+    'team-back',
+    'team-view-toggle',
+    'team-header-overlay',
+    'team-canvas-controls',
+    'team-policy-dialog',
+  ])('does not capture a pointerdown bubbling from the %s recovery button', (testId) => {
+    const button = container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`)!;
+    pointerDown(button);
 
+    expect(capture).not.toHaveBeenCalled();
+    expect(canvas.dataset.cameraOwner).toBe('system');
+  });
+
+  it.each(['surface--node', 'worker'])(
+    'freezes in-flight camera motion for a %s button without capturing or panning its input',
+    (nodeClass) => {
+      const frames = new Map<number, FrameRequestCallback>();
+      let frameId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+        frames.set(++frameId, callback);
+        return frameId;
+      });
+      const cancel = vi.fn((id: number) => frames.delete(id));
+      vi.stubGlobal('cancelAnimationFrame', cancel);
+      vi.spyOn(performance, 'now').mockReturnValue(0);
+      void camera.animateCamTo({ x: 500, y: 300, s: 0.6 }, 480);
+      const firstFrame = frames.get(frameId)!;
+      frames.delete(frameId);
+      firstFrame(80);
+      const movingFrame = frameId;
+      const held = { ...camera.camRef.current };
+      expect(held.x).toBeGreaterThan(0);
+      expect(held.x).toBeLessThan(500);
+      const button = container.querySelector<HTMLButtonElement>(
+        `[data-testid="${nodeClass}-input"]`,
+      )!;
+      const click = vi.fn();
+      button.addEventListener('click', click);
+      const down = pointerDown(button);
+
+      expect(cancel).toHaveBeenCalledWith(movingFrame);
+      expect(frames.size).toBe(0);
+      expect(canvas.dataset.cameraOwner).toBe('user');
       expect(capture).not.toHaveBeenCalled();
-      expect(canvas.dataset.cameraOwner).toBe('system');
+      expect(down.defaultPrevented).toBe(false);
+      canvas.dispatchEvent(new MouseEvent('pointermove', { clientX: 100, clientY: 120 }));
+      button.dispatchEvent(new MouseEvent('pointerup', { bubbles: true }));
+      button.click();
+      expect(camera.camRef.current).toEqual(held);
+      expect(camera.draggingRef.current).toBe(false);
+      expect(click).toHaveBeenCalledOnce();
     },
   );
 
@@ -125,6 +199,60 @@ describe('camera pointer capture', () => {
     expect(
       container.querySelector<HTMLElement>('[data-testid="camera-world"]')!.style.transform,
     ).toBe('translate(50px, 50px) scale(1)');
+  });
+
+  it('settles canceled and superseded animation promises exactly once with false', async () => {
+    vi.stubGlobal('requestAnimationFrame', vi.fn().mockReturnValue(7));
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    const first = vi.fn();
+    const second = vi.fn();
+    void camera.animateCamTo({ x: 10, y: 20, s: 0.8 }).then(first);
+    void camera.animateCamTo({ x: 30, y: 40, s: 0.6 }).then(second);
+    await Promise.resolve();
+    expect(first).toHaveBeenCalledExactlyOnceWith(false);
+    expect(second).not.toHaveBeenCalled();
+    camera.claimUserOwnership();
+    camera.cancelCamAnim();
+    await Promise.resolve();
+    expect(first).toHaveBeenCalledOnce();
+    expect(second).toHaveBeenCalledExactlyOnceWith(false);
+  });
+
+  it('reports natural completion even when onSettle reenters cancellation', async () => {
+    const request = vi.fn<(callback: FrameRequestCallback) => number>().mockReturnValue(1);
+    vi.stubGlobal('requestAnimationFrame', request);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    vi.spyOn(performance, 'now').mockReturnValue(0);
+    act(() =>
+      root.render(
+        createElement(CameraCanvas, {
+          capture: (value) => {
+            camera = value;
+          },
+          onSettle: () => camera.cancelCamAnim(),
+        }),
+      ),
+    );
+    const completed = camera.animateCamTo({ x: 10, y: 20, s: 0.8 }, 100);
+    request.mock.calls[0]![0](100);
+    await expect(completed).resolves.toBe(true);
+  });
+
+  it('reports immediate reduced-motion completion with true', async () => {
+    act(() => root.unmount());
+    const media = matchMedia('(prefers-reduced-motion: reduce)');
+    vi.mocked(matchMedia).mockReturnValue({ ...media, matches: true });
+    root = createRoot(container);
+    act(() =>
+      root.render(
+        createElement(CameraCanvas, {
+          capture: (value) => {
+            camera = value;
+          },
+        }),
+      ),
+    );
+    await expect(camera.animateCamTo({ x: 10, y: 20, s: 0.8 })).resolves.toBe(true);
   });
 
   it('keeps a large Team fit inside the scale accepted by canvas persistence', () => {
