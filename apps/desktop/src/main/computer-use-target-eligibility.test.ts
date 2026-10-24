@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, expectTypeOf, it } from 'vitest';
+import { computerWindowsTargetFactsSchema } from '@sprint-coder/contracts';
 import {
   DENY_RULESET_PATHS,
   denyRulesetCanonicalText as generatorCanonicalText,
@@ -49,6 +50,29 @@ const RULESET_LEDGER: Readonly<Record<string, Readonly<Record<number, string>>>>
 };
 
 describe('target eligibility core golden vectors', () => {
+  it('keeps the private native wire facts aligned with every generated Windows signal', () => {
+    const signals = DENY_RULESET.signals.filter((signal) => signal.platforms.includes('win32'));
+    expect(Object.keys(computerWindowsTargetFactsSchema.shape).sort()).toEqual(
+      ['platform', ...signals.map((signal) => signal.name)].sort(),
+    );
+    const unknown = Object.fromEntries(signals.map((signal) => [signal.name, null]));
+    const facts = { ...unknown, platform: 'win32' };
+    expect(computerWindowsTargetFactsSchema.safeParse(facts).success).toBe(true);
+    for (const signal of signals) {
+      const values =
+        signal.type === 'boolean'
+          ? [true, false]
+          : signal.type === 'enum'
+            ? signal.values
+            : ['', 'native fixture'];
+      for (const value of values)
+        expect(
+          computerWindowsTargetFactsSchema.safeParse({ ...facts, [signal.name]: value }).success,
+          signal.name,
+        ).toBe(true);
+    }
+  });
+
   it.each(golden.map((entry) => [entry.name, entry] as const))('%s', (_name, entry) => {
     const facts = entry.facts as unknown as TargetFacts;
     const explained = classifyTargetExplained(facts);
