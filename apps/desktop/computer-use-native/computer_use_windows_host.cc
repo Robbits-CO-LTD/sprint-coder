@@ -3750,9 +3750,9 @@ inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
 
 // Main's pid (the lineage root for W8), set by ServeMain before the first request.
 std::uint32_t windows_v2_main_pid = 0;
-// The first list generation of this helper: random in [1, 2^52), so a restarted helper does not
-// repeat a generation an earlier helper gave out (a token kept from that list would then name a list
-// this helper never sent, and be taken as the latest). 2^52 keeps the value exact as a JSON number
+// The first list generation of this helper: random in [1, 2^52), reducing the chance a restarted
+// helper repeats an earlier generation. Main must still discard tokens on restart; randomness is
+// not a guarantee against reuse. 2^52 keeps the value exact as a JSON number
 // in Main. 0 (no list yet) when the system cannot give random bytes: then the first list is 1, as
 // before, and an earlier helper's token is refused only by Main's discarding it on a restart.
 std::uint64_t InitialWindowsV2ListGeneration() {
