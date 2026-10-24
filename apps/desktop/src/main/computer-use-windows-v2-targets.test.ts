@@ -232,10 +232,13 @@ const program = String.raw`
 #undef wmain
 
 #include <winsafer.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <initializer_list>
+#include <atomic>
 #include <iostream>
+#include <thread>
 
 namespace {
 
@@ -394,18 +397,65 @@ int wmain(int argc, wchar_t **argv) {
 #else
   // Main stands for the lineage root (W8): a suspended process that is not the targets' parent.
   const PROCESS_INFORMATION root_process = Start(L"\"" + system32 + L"\\cmd.exe\"", CREATE_SUSPENDED);
-  // Without Main's pid the context is empty (every target unresolvable) and is not kept: the real
-  // one is measured once the pid is known.
+  // A pipe client that is not the verified parent is never served, and Main's pid is never taken
+  // from it (run, not read: ServeMain on a thread, this program as the client while its parent is
+  // the one named).
+  {
+    DWORD parent = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    if (snapshot != INVALID_HANDLE_VALUE && Process32FirstW(snapshot, &entry)) {
+      do {
+        if (entry.th32ProcessID == GetCurrentProcessId()) parent = entry.th32ParentProcessID;
+      } while (Process32NextW(snapshot, &entry));
+    }
+    if (snapshot != INVALID_HANDLE_VALUE) CloseHandle(snapshot);
+    const std::wstring pipe_name =
+        L"\\\\.\\pipe\\sprint-coder-computer-use-seam-" + std::to_wstring(GetCurrentProcessId());
+    std::atomic<int> served{-1};
+    std::thread server([&] { served.store(ServeMain(pipe_name, parent)); });
+    HANDLE client = INVALID_HANDLE_VALUE;
+    for (int attempt = 0; attempt < 200 && client == INVALID_HANDLE_VALUE; ++attempt) {
+      client = CreateFileW(pipe_name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                           0, nullptr);
+      if (client == INVALID_HANDLE_VALUE) Sleep(25);
+    }
+    std::uint8_t byte = 0;
+    DWORD read = 0;
+    const bool answered =
+        client != INVALID_HANDLE_VALUE && ReadFile(client, &byte, 1, &read, nullptr) == TRUE && read > 0;
+    if (client != INVALID_HANDLE_VALUE) CloseHandle(client);
+    server.join();
+    std::cout << "peer test: parent=" << parent << " connected=" << (client != INVALID_HANDLE_VALUE ? "yes" : "no")
+              << " served=" << served.load() << "\n";
+    Check(parent != 0 && client != INVALID_HANDLE_VALUE && !answered && served.load() == 0 &&
+              windows_v2_main_pid == 0,
+          "v2_a_peer_that_is_not_the_parent_is_not_served");
+  }
+  // Without Main's pid the context is empty (every target unresolvable) and is not kept, and
+  // list_targets measures nothing.
   windows_v2_main_pid = 0;
   {
     const WindowsTargetFactsContext &no_root = WindowsV2FactsContext();
     Check(no_root.lineage_root_pid == 0 && !no_root.roots.has_value() &&
               !no_root.rename_probe.has_value(),
           "v2_context_without_main_is_empty");
+    std::string response = "untouched";
+    std::string reason;
+    Check(!ListWindowsTargets(&response, &reason) && reason == "list_targets_unavailable" &&
+              response == "untouched",
+          "v2_list_targets_without_main_is_refused");
   }
   windows_v2_main_pid = root_process.dwProcessId;
   const WindowsTargetFactsContext &context = WindowsV2FactsContext();
   Check(context.lineage_root_pid == root_process.dwProcessId, "v2_context_lineage_root_is_main");
+  // Measured once, then fixed: a later pid does not replace it.
+  windows_v2_main_pid = root_process.dwProcessId + 4;
+  Check(&WindowsV2FactsContext() == &context &&
+            WindowsV2FactsContext().lineage_root_pid == root_process.dwProcessId,
+        "v2_context_is_fixed_once_measured");
+  windows_v2_main_pid = root_process.dwProcessId;
 
   // cmd: W-SYS, refused, and its row is its kind only. It has no window of its own (its console is
   // conhost's), so it is judged again with an empty window class. It runs (a suspended process has
@@ -610,52 +660,93 @@ int wmain(int argc, wchar_t **argv) {
     Check(!admit(Metadata(version, 7), true, std::string(64, 'a'), executable, &mode) &&
               !admit(Metadata(version, 7), true, identity, std::string(64, 'b'), &mode),
           "v2_start_refuses_another_identity");
+    // A v2 session's judgements refuse without Main's pid: the start, the resume and every input.
+    WindowsSession session;
+    session.pid = app.dwProcessId;
+    session.window = app_window;
+    session.maximum_mode = "observe_only";
+    session.app_identity = identity;
+    session.process_start = judged.process_start;
+    session.executable_file = locked.file;
+    session.eligibility_basis = EligibilityBasis::kV2Denylist;
+    std::optional<bool> not_web;
+    std::string why;
+    const bool rejudged = RejudgeWindowsV2Session(session, &not_web, &why);
+    const bool input = JudgeWindowsV2Input(session, &why);
+    windows_v2_main_pid = 0;
+    std::string why_rejudge;
+    std::string why_input;
+    const bool rejudged_without = RejudgeWindowsV2Session(session, &not_web, &why_rejudge);
+    const bool input_without = JudgeWindowsV2Input(session, &why_input);
+    const bool admitted_without = admit(Metadata(version, 7), true, identity, executable, &mode);
+    const bool resumed_without = admit(Metadata(version, 7), false, identity, executable, &mode);
+    windows_v2_main_pid = root_process.dwProcessId;
+    session.executable_file = INVALID_HANDLE_VALUE;
+    Check(rejudged && input && !rejudged_without && !input_without && !admitted_without &&
+              !resumed_without && why_rejudge == "session_identity_changed" &&
+              why_input == "session_identity_changed",
+          "v2_judgements_without_main_are_refused");
     CloseLockedWindowsExecutable(&locked);
   }
 
-  // Notepad. It is started suspended first: where System32's notepad.exe runs the Store Notepad
-  // (Windows 11), the kernel's image name of the suspended process is the package's, and the process
-  // is ended before it runs a single instruction, so no activation starts a Notepad outside this
-  // program's job (and no window is left on the desktop). Only System32's classic image is run on.
-  // The started file is %SystemRoot%\System32\notepad.exe by its absolute path. The process's image
-  // (the kernel's name of it) is compared with that file by what the volume says, the volume serial
-  // and the file id, which no spelling (case, 8.3 name, \\?\ prefix) changes.
-  const std::wstring system_notepad = system32 + L"\\notepad.exe";
-  const PROCESS_INFORMATION probe = Start(L"\"" + system_notepad + L"\"", CREATE_SUSPENDED);
-  std::wstring probe_image;
-  const bool probe_read = probe.hProcess != nullptr && ReadProcessPath(probe.hProcess, &probe_image);
-  const std::optional<WindowsPathIdentity> probe_file =
-      probe_read ? WindowsTargetOpenPathIdentity(probe_image) : std::nullopt;
-  const std::optional<WindowsPathIdentity> system_file = WindowsTargetOpenPathIdentity(system_notepad);
-  const bool classic = probe_file.has_value() && system_file.has_value() &&
-                       SameWindowsFileIdentity(probe_file->identity, system_file->identity);
-  if (probe.hProcess != nullptr) {
-    TerminateProcess(probe.hProcess, 0);
-    WaitForSingleObject(probe.hProcess, 5000);
-    CloseHandle(probe.hThread);
-    CloseHandle(probe.hProcess);
-  }
-  Check(probe_read, "v2_notepad_image_read");
-  if (!classic) {
-    std::cout << "notepad: System32's notepad.exe runs another image here (" << Utf8FromWide(probe_image)
-              << "); skipped: it was ended before it ran, and is not started\n";
+  // Notepad. Before anything is started: where the Store Notepad (Microsoft.WindowsNotepad) is
+  // installed for this user, System32's notepad.exe hands its start to the package's activation,
+  // whose process is not this program's and not in its job, and whose window would be left on the
+  // desktop. So the package is looked up first (GetPackagesByPackageFamily: a read of the package
+  // repository, nothing is started), and when it is there nothing is started and the check is skipped,
+  // with the reason in the log. Otherwise System32's notepad.exe is started by its absolute path,
+  // suspended and in the job before it is resumed, its running image is compared with that file by
+  // volume serial and file id, and a process that does not come up with its own window is ended and
+  // the check skipped too.
+  UINT32 store_packages = 0;
+  UINT32 name_buffer = 0;
+  const LONG looked_up = GetPackagesByPackageFamily(L"Microsoft.WindowsNotepad_8wekyb3d8bbwe",
+                                                    &store_packages, nullptr, &name_buffer, nullptr);
+  const bool store_notepad =
+      (looked_up == ERROR_SUCCESS || looked_up == ERROR_INSUFFICIENT_BUFFER) && store_packages > 0;
+  std::cout << "notepad: Store package lookup=" << looked_up << " packages=" << store_packages << "\n";
+  if (store_notepad) {
+    std::cout << "notepad: skipped: the Store Notepad is installed, so System32's notepad.exe would "
+                 "start it outside this program's job; nothing was started\n";
   } else {
-    const PROCESS_INFORMATION notepad = Start(L"\"" + system32 + L"\\notepad.exe\"", 0);
-    WaitForInputIdle(notepad.hProcess, 10000);
-    const HWND window = TopWindowOf(notepad.dwProcessId);
-    Check(window != nullptr, "v2_notepad_window");
-    WindowsV2Judgement note;
-    JudgeWindowsV2Target(notepad.dwProcessId, window, context, &note);
-    const TargetFacts &facts = note.measured.facts;
-    std::cout << "notepad: verdict=" << TargetVerdictKindName(note.verdict.kind)
-              << " mode=" << note.verdict.maximum_mode
-              << " root=" << (facts.image_root.has_value() ? *facts.image_root : std::string("-"))
-              << "\n";
-    Check(note.Selectable() && note.verdict.maximum_mode == "full_access_app" &&
-              !note.package.has_value() &&
-              note.app_identity == note.executable.identity.identity_digest &&
-              WindowsTargetIsNotWebByTable(facts, note.held_key, note.table_key, std::nullopt, false),
-          "v2_system_notepad_is_selectable_and_in_the_not_web_table");
+    const std::wstring system_notepad = system32 + L"\\notepad.exe";
+    PROCESS_INFORMATION notepad = Start(L"\"" + system_notepad + L"\"", CREATE_SUSPENDED);
+    std::wstring image;
+    const bool image_read = notepad.hProcess != nullptr && ReadProcessPath(notepad.hProcess, &image);
+    const std::optional<WindowsPathIdentity> image_file =
+        image_read ? WindowsTargetOpenPathIdentity(image) : std::nullopt;
+    const std::optional<WindowsPathIdentity> system_file = WindowsTargetOpenPathIdentity(system_notepad);
+    const bool classic = image_file.has_value() && system_file.has_value() &&
+                         SameWindowsFileIdentity(image_file->identity, system_file->identity);
+    HWND window = nullptr;
+    if (classic) {
+      ResumeThread(notepad.hThread);
+      WaitForInputIdle(notepad.hProcess, 10000);
+      window = TopWindowOf(notepad.dwProcessId);
+    }
+    if (!classic || window == nullptr) {
+      if (notepad.hProcess != nullptr) {
+        TerminateProcess(notepad.hProcess, 0);
+        WaitForSingleObject(notepad.hProcess, 5000);
+      }
+      std::cout << "notepad: skipped: " << (classic ? "no window of its own came up" : "another image runs")
+                << "; the process was ended\n";
+    } else {
+      WindowsV2Judgement note;
+      JudgeWindowsV2Target(notepad.dwProcessId, window, context, &note);
+      const TargetFacts &facts = note.measured.facts;
+      std::cout << "notepad: verdict=" << TargetVerdictKindName(note.verdict.kind)
+                << " mode=" << note.verdict.maximum_mode
+                << " root=" << (facts.image_root.has_value() ? *facts.image_root : std::string("-"))
+                << "\n";
+      Check(note.Selectable() && note.verdict.maximum_mode == "full_access_app" &&
+                !note.package.has_value() &&
+                note.app_identity == note.executable.identity.identity_digest &&
+                WindowsTargetIsNotWebByTable(facts, note.held_key, note.table_key, std::nullopt, false),
+            "v2_system_notepad_is_selectable_and_in_the_not_web_table");
+    }
+    if (notepad.hThread != nullptr) CloseHandle(notepad.hThread);
+    if (notepad.hProcess != nullptr) CloseHandle(notepad.hProcess);
   }
 #endif
   TerminateJobObject(g_job, 0);
