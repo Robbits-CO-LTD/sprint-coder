@@ -709,6 +709,8 @@ import {
   MANAGER_MCP_SYSTEM_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
   WORKER_PROVIDER_TOOLS,
+  decodeTeamModelCursor,
+  encodeTeamModelCursor,
   executeTeamTool,
   teamToolError,
   type ExecuteTeamToolOptions,
@@ -1247,9 +1249,6 @@ export class IpcRouter {
   private readonly teamMcpBridge: TeamMcpBridge;
   private readonly skillSettings: SkillSettingsService;
   private readonly modelCatalog = new ModelCatalogService();
-  /** Catalog revision each Task's latest Team model listing (`team_list_models` first page) was
-   * answered from, so a continuation page sliced from a different revision is refused (#939). */
-  private readonly teamModelListingRevisions = new Map<string, number>();
   private readonly teamRuntimeAvailability = new TeamRuntimeAvailabilityTracker();
   private readonly providerRegistry = new MainProviderRegistry();
   private readonly providerProfiles = new MainProviderProfileRegistry();
@@ -3049,7 +3048,12 @@ export class IpcRouter {
       modelCatalogQueryInputSchema,
       modelCatalogQueryResultSchema,
       async (input) => {
-        await this.refreshModelCatalogForPage(input.cursor);
+        // A cursor continues a listing of the catalog the first page was answered from. Rebuilding
+        // here would re-probe every Provider per page, and a Provider that flickers between
+        // success and failure would move the revision under the cursor on every page (#906).
+        // Revision 0 means no catalog has been built yet in this process, so it is built once.
+        if (input.cursor === null || this.modelCatalog.revision === 0)
+          await this.refreshModelCatalog();
         const result = this.modelCatalog.query(input);
         const runtimeKind = this.persistence.getRuntime();
         const selection =
@@ -7850,14 +7854,6 @@ export class IpcRouter {
     }
   }
 
-  /** A cursor continues a listing of the catalog the first page was answered from. Rebuilding
-   * there would re-probe every Provider per page, and a Provider that flickers between success
-   * and failure would move the revision under the cursor on every page (#906, #939). Revision 0
-   * means no catalog has been built yet in this process, so it is built once. */
-  private async refreshModelCatalogForPage(cursor: string | null): Promise<void> {
-    if (cursor === null || this.modelCatalog.revision === 0) await this.refreshModelCatalog();
-  }
-
   private async refreshModelCatalog(): Promise<void> {
     const [codexCapability, claudeCapability, grokCapability] = await Promise.all([
       this.codexRuntime.probe(),
@@ -8026,22 +8022,28 @@ export class IpcRouter {
   private async listTeamModelCandidates(
     input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
   ): Promise<unknown> {
-    await this.refreshModelCatalogForPage(input.cursor);
-    const listingRevision = this.teamModelListingRevisions.get(input.taskId);
-    // Another first page (the model picker, a Team hire, another Task's Leader) may have rebuilt
-    // the catalog since this listing began. The Leader does not compare revisions, so slicing the
-    // new catalog at the old offset would silently skip or repeat candidates.
-    if (
-      input.cursor !== null &&
-      listingRevision !== undefined &&
-      listingRevision !== this.modelCatalog.revision
-    )
-      return teamToolError(
-        new Error(
-          'The model catalog changed since the first page of this listing. Call team_list_models again with cursor null.',
-        ),
-      );
-    const result = this.modelCatalog.query(
+    // A continuation page is answered from the catalog the first page was, without re-probing
+    // every Provider (#939, same as #906). The cursor carries that catalog's identity and
+    // revision, so a continuation after any other first page (the model picker, a Team hire, a
+    // Manager in the same Task) or a restart rebuilt it is refused instead of being sliced from
+    // a different catalog at the old offset. The Leader does not compare revisions itself.
+    let catalogCursor: string | null = null;
+    if (input.cursor === null) await this.refreshModelCatalog();
+    else {
+      const decoded = decodeTeamModelCursor(input.cursor);
+      if (
+        decoded === null ||
+        decoded.catalogId !== this.modelCatalog.instanceId ||
+        decoded.revision !== this.modelCatalog.revision
+      )
+        return teamToolError(
+          new Error(
+            'This team_list_models cursor is no longer valid: the model catalog changed or the cursor is malformed. Call team_list_models again with cursor null.',
+          ),
+        );
+      catalogCursor = decoded.cursor;
+    }
+    const page = this.modelCatalog.query(
       {
         taskId: input.taskId,
         text: input.text,
@@ -8050,12 +8052,19 @@ export class IpcRouter {
         accessTypes: [],
         capabilities: [...input.capabilities],
         availableOnly: true,
-        cursor: input.cursor,
+        cursor: catalogCursor,
         limit: input.limit,
       },
       this.teamModelAllowedKeys(),
     );
-    if (input.cursor === null) this.teamModelListingRevisions.set(input.taskId, result.revision);
+    const result = {
+      ...page,
+      nextCursor: encodeTeamModelCursor(
+        this.modelCatalog.instanceId,
+        page.revision,
+        page.nextCursor,
+      ),
+    };
     return process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1'
       ? {
           ...result,

@@ -116,7 +116,6 @@ function makeRouter({
     providerRegistry: { resolve: () => ({ listModels }) },
     ensureProviderEndpointConsent: async (connection: ProviderConnection) => connection,
     modelCatalog: catalog,
-    teamModelListingRevisions: new Map<string, number>(),
     persistence: {
       getTaskModelSelection: () => null,
       getRuntime: () => 'codex',
@@ -254,13 +253,62 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     expect(listModels).toHaveBeenCalledTimes(4);
   });
 
-  it('builds the catalog if a cursor arrives before any listing', async () => {
-    const { teamQuery, probe, listModels } = makeRouter(options);
-    const page = await teamQuery({ cursor: 'cursor:100', limit: 100 });
+  const expectRefused = (page: unknown) =>
+    expect(page).toMatchObject({ ok: false, message: expect.stringContaining('cursor null') });
 
-    expect(page.items.map(identity)).toEqual(models(teamStable, 100).map(identity));
+  it('returns a Team cursor that names the catalog and revision of the first page', async () => {
+    const { teamQuery } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+
+    expect(first.nextCursor).toMatch(new RegExp(`^team:[0-9a-f]{8}:${first.revision}:cursor:100$`));
+  });
+
+  it('refuses a malformed or bare catalog cursor without probing Providers', async () => {
+    const { teamQuery, probe, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+    const valid = String(first.nextCursor);
+
+    for (const cursor of [
+      'cursor:100',
+      'garbage',
+      valid.replace(/:cursor:100$/, ':cursor:x'),
+      valid.replace(/^team:[0-9a-f]{8}:/, 'team:zz:'),
+      `${valid}0:extra`,
+    ])
+      expectRefused(await teamQuery({ cursor, limit: 100 }));
     expect(probe).toHaveBeenCalledTimes(3);
     expect(listModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a cursor from before a restart, even when the new catalog reaches the same revision', async () => {
+    const before = makeRouter(options);
+    const first = await before.teamQuery({ limit: 100 });
+
+    // Restarted process: no catalog yet (revision 0).
+    const restarted = makeRouter(options);
+    expectRefused(await restarted.teamQuery({ cursor: first.nextCursor, limit: 100 }));
+    expect(restarted.probe).not.toHaveBeenCalled();
+    expect(restarted.listModels).not.toHaveBeenCalled();
+
+    // After its own first page the new catalog is at the old cursor's revision.
+    const own = await restarted.teamQuery({ limit: 100 });
+    expect(own.revision).toBe(first.revision);
+    expectRefused(await restarted.teamQuery({ cursor: first.nextCursor, limit: 100 }));
+  });
+
+  it('keeps the Leader and a Manager of the same Task on their own listings', async () => {
+    const { teamQuery } = makeRouter(options);
+    const leader = await teamQuery({ limit: 100 });
+    // A Manager in the same Task starts its own listing; the refresh drops the flaky rows.
+    const manager = await teamQuery({ limit: 100 });
+    expect(manager.revision).not.toBe(leader.revision);
+
+    expectRefused(await teamQuery({ cursor: leader.nextCursor, limit: 100 }));
+    const managerNext = await teamQuery({ cursor: manager.nextCursor, limit: 100 });
+    expect(managerNext.revision).toBe(manager.revision);
+    expect(managerNext.items.map(identity)).toEqual(
+      models(teamStable, 150).slice(100).map(identity),
+    );
   });
 
   it('applies current Team restrictions even on a continuation', async () => {

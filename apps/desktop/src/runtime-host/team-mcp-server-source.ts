@@ -58,7 +58,7 @@ const TOOLS = [
   {
     name: 'team_list_models',
     description:
-      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names.',
+      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names. Pass nextCursor unchanged as cursor for the next page; if a cursor is refused, start again with cursor null.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -73,7 +73,7 @@ const TOOLS = [
           },
           maxItems: 4,
         },
-        cursor: { type: ['string', 'null'], pattern: '^cursor:[0-9]+$' },
+        cursor: { type: ['string', 'null'], maxLength: 128 },
         limit: { type: 'integer', minimum: 1, maximum: 100 },
       },
       additionalProperties: false,

@@ -273,7 +273,7 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
 
 export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
-    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
+    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。続きはnextCursorをそのままcursorに渡します。cursorのエラーが返ったら、cursorをnullにして先頭からやり直します。',
   team_hire_worker: `自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_task: `自分の直下Workerへtaskを割り当て、execution IDを返します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、原因を解消してから失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。${MANAGER_WRITE_REQUIREMENTS}`,
@@ -338,6 +338,26 @@ export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
       tool.providerName === 'team_read_messages',
   ).map(providerToolDefinition),
 );
+
+const TEAM_MODEL_CURSOR_PATTERN = /^team:([0-9a-f]{8}):([0-9]+):(cursor:[0-9]+)$/;
+
+/** team_list_models cursor: the catalog cursor plus the catalog identity and revision the
+ * listing's first page was answered from (#939). */
+export function encodeTeamModelCursor(
+  catalogId: string,
+  revision: number,
+  cursor: string | null,
+): string | null {
+  return cursor === null ? null : `team:${catalogId}:${revision}:${cursor}`;
+}
+
+export function decodeTeamModelCursor(
+  cursor: string,
+): { catalogId: string; revision: number; cursor: string } | null {
+  const match = TEAM_MODEL_CURSOR_PATTERN.exec(cursor);
+  if (match === null) return null;
+  return { catalogId: match[1]!, revision: Number(match[2]), cursor: match[3]! };
+}
 
 export function teamToolError(error: unknown): {
   ok: false;
@@ -474,11 +494,8 @@ const listModelsArgsSchema = z
       .array(z.enum(['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning']))
       .max(4)
       .optional(),
-    cursor: z
-      .string()
-      .regex(/^cursor:[0-9]+$/)
-      .nullable()
-      .optional(),
+    // Opaque Team cursor; a malformed one is answered with the restart error, not a parse failure.
+    cursor: z.string().max(128).nullable().optional(),
     limit: z.number().int().min(1).max(100).optional(),
   })
   .strict();
