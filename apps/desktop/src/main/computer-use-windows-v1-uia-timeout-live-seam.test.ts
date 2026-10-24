@@ -15,9 +15,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 // ConnectionTimeout (a first contact, measured 505-514 ms in CI) or by the TransactionTimeout (a call on
 // a connected element, 310-320 ms), or by both in ONE call: the 800 ms (Connection + Transaction) that the
 // ADR counts against the 1 s Cancel acknowledgment does happen (CI of PR #822, 2026-10-17: a
-// ClassifyWindowsFocusedElement case took 844 ms, about 156 ms short of the 1 s). The bound is therefore
-// that counted worst case of one call and a 150 ms margin (950 ms), strictly under the 1 s; a case that
-// made a second slow call would exceed it.
+// ClassifyWindowsFocusedElement case took 844 ms, about 156 ms short of the 1 s). The acceptance bound
+// remains that configured sum and a 150 ms margin (950 ms). Windows11 later exposed a single
+// ElementFromHandle call taking 1028 ms despite the settings; the observation worker now enforces
+// its existing contact rejection threshold outside that call. The other V1 paths remain measured.
 //
 // The live seam compiles the real host (computer_use_windows_host.cc, with its entry point renamed) into a
 // test program. The program starts ITSELF as a second process that owns the windows (so every UI
@@ -177,7 +178,7 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
   });
 
-  it('keeps the worst cases inside what the lane is given, from the constants themselves', () => {
+  it('checks configured budgets and the measured acceptance margin', () => {
     const connection = hostNumber('kWindowsV1UiaConnectionTimeoutMs');
     const transaction = hostNumber('kWindowsV1UiaTransactionTimeoutMs');
     const observeBudget = hostNumber('kWindowsV1UiaObserveBudget');
@@ -193,9 +194,8 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     expect(cancelAck).toBe(1000);
     expect(observeTimeout).toBe(30_000);
-    // One call: the first contact waits for the connection and then for the transaction, so its worst
-    // case is counted as the SUM of the two (the safe side), and a Cancel waits for at most that one
-    // call (the epoch is asked before every call): it is inside the acknowledgment.
+    // These configuration values leave room inside the acknowledgment budget. They are not proof
+    // that an OS call returns within their sum: the real Windows11 regression exceeded it.
     expect(connection + transaction).toBeLessThan(cancelAck);
     // The live seam's bound on each case is that worst case of one call and a margin, from the same
     // constants, and it stays strictly inside the acknowledgment (the chain was observed on CI at 844 ms).
@@ -280,17 +280,23 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     // The scopes: every path has its own (which watches the cancellation epoch as it was when the path
     // began), and only the observe has a budget, with the session's epoch.
-    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(7);
+    expect([...c.matchAll(/const WindowsV1UiaPath path;/gu)]).toHaveLength(8);
     expect(c).toContain(
-      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch);',
+      'const WindowsV1UiaPath uia_path(kWindowsV1UiaObserveBudget, session.cancel_epoch, queued_stop_serial.value_or(WindowsTargetListControl().stop_serial.load(std::memory_order_acquire)));',
     );
     expect(c).toContain(
       'WindowsV1UiaPath() : WindowsV1UiaPath(std::chrono::milliseconds::zero(), cancellation_epoch.load(std::memory_order_acquire)) {}',
     );
     // A Cancel ends the path before a spent budget is looked at, and the check is the first thing
     // every call goes through.
-    expect(c).toContain(
-      'if (cancellation_epoch.load(std::memory_order_acquire) != lane->epoch) lane->stop = WindowsV1UiaStop::kCanceled; else if (lane->has_deadline',
+    const mayCall = c.slice(
+      c.indexOf('bool WindowsV1UiaMayCall()'),
+      c.indexOf('constexpr HRESULT kWindowsV1UiaTimeoutResult'),
+    );
+    expect(mayCall).toContain('cancellation_epoch.load(std::memory_order_acquire) != lane->epoch');
+    expect(mayCall).toContain('lane->stop_serial.has_value()');
+    expect(mayCall.indexOf('lane->stop = WindowsV1UiaStop::kCanceled;')).toBeLessThan(
+      mayCall.indexOf('else if (lane->has_deadline'),
     );
     // Outside any path a call is refused (fail closed), not made unwatched; only the owner (the
     // outermost path) clears the lane, so an inner path that ends leaves the outer one's state.
@@ -299,10 +305,10 @@ describe('V1 lane UI Automation is created in one place, with its call timeouts 
     );
     expect(c).toContain('if (windows_v1_uia_lane != nullptr) return;');
     expect(c).toContain('~WindowsV1UiaPath() { if (owner_) windows_v1_uia_lane = nullptr; }');
-    // An inner path stays a non-owner: owner_ starts false and is set in one place only (the end of
-    // the constructor, after the early return of an inner path).
+    // An inner path stays a non-owner. Only the budget constructor and the worker's value-snapshot
+    // constructor can own a lane; neither replaces an existing thread-local path.
     expect(c.split('bool owner_ = false;')).toHaveLength(2);
-    expect(c.split('owner_ = true;')).toHaveLength(2);
+    expect(c.split('owner_ = true;')).toHaveLength(3);
     expect(c.indexOf('owner_ = true;')).toBeGreaterThan(
       c.indexOf('if (windows_v1_uia_lane != nullptr) return;'),
     );
@@ -756,7 +762,7 @@ LRESULT CALLBACK ProviderProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   return DefWindowProcW(window, message, w, l);
 }
 
-// A window of a deep tree that answers, slowly: every request of UI Automation to it takes 15 ms.
+// Each accessibility/text window message takes 15 ms; one UIA call can send several messages.
 LRESULT CALLBACK DeepProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_GETOBJECT || message == WM_GETTEXT || message == WM_GETTEXTLENGTH) Sleep(15);
   if (message == WM_DESTROY && GetParent(window) == nullptr) {
@@ -1277,6 +1283,18 @@ int RunDriver(bool ci) {
     SeamCheck(!rejected, "a_deep_tree_that_answers_is_not_rejected");
     SeamCheck(risk.metadata_complete && risk.classified, "a_deep_tree_that_answers_is_classified");
   }
+  {
+    const WindowsV1UiaPath path(kWindowsV1UiaObserveBudget, cancellation_epoch.load());
+    std::string tree;
+    std::size_t nodes = 0;
+    const auto start = std::chrono::steady_clock::now();
+    const bool read = ReadUiaObservation(static_cast<std::uint32_t>(pid), GetAncestor(deepest, GA_ROOT), &tree, &nodes);
+    const long long ms = Millis(start);
+    std::cout << "deep_observation ms=" << ms << " read=" << read << " nodes=" << nodes << std::endl;
+    SeamCheck(read && nodes >= 5 && !tree.empty(), "a_slow_live_observation_is_preserved");
+    SeamCheck(ms > 500, "slow_observation_exercises_more_than_a_short_whole_tree_budget");
+    SeamCheck(path.Stop() == WindowsV1UiaStop::kNone, "slow_observation_has_no_spurious_stop");
+  }
 
   // ---- a native provider that answers a few requests and then stops: the call that is held up is not
   // the first one, so the calls after it are the ones that must not be made
@@ -1295,14 +1313,27 @@ int RunDriver(bool ci) {
     const bool held = ms >= kHeldUp;
     provider_held_up = provider_held_up || held;
     cases.push_back({"ClassifyWindowsPoint@provider-answers-" + std::to_string(answers), ms, held ? RejectWindowsRisk(risk, &reason) : true, false});
-    g_provider_stall_after.store(-1);
   }
   {
     std::string baseline_tree;
     std::size_t baseline_nodes = 0;
-    g_provider_stall_after.store(-1);
+    DWORD owner = 0;
+    DWORD_PTR reset_result = 0;
+    // The provider lives in the child. Resetting the driver's own atomic does not disarm it.
+    const bool reset = GetWindowThreadProcessId(provider, &owner) != 0 && owner == pid &&
+        SendMessageTimeoutW(provider, WM_APP + 2, static_cast<WPARAM>(-1), 0,
+                            SMTO_ABORTIFHUNG, 5000, &reset_result) != 0;
+    SeamCheck(reset, "owned_provider_reset_acknowledged");
+    if (!reset) {
+      TerminateProcess(child.hProcess, 0);
+      CloseHandle(child.hProcess);
+      CloseHandle(child.hThread);
+      CloseHandle(job);
+      return 1;
+    }
     const bool baseline = ReadUiaObservation(static_cast<std::uint32_t>(pid), provider, &baseline_tree, &baseline_nodes);
     std::cout << "provider_baseline_observation=" << baseline << " nodes=" << baseline_nodes << std::endl;
+    SeamCheck(baseline && baseline_nodes > 0, "disarmed_provider_observation_is_readable");
   }
   for (int answers : {0, 2, 6}) {
     std::string out;
