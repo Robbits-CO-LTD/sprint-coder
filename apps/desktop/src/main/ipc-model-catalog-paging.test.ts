@@ -130,7 +130,12 @@ function makeRouter({
   // Listing does not use the coordinator; the real tool still validates and routes the call.
   const coordinator = Object.create(TeamCoordinator.prototype) as TeamCoordinator;
   const markQueried = vi.fn();
-  const teamQuery = async (args: { cursor?: string | null; limit?: number }) =>
+  const teamQuery = async (args: {
+    cursor?: string | null;
+    limit?: number;
+    text?: string;
+    connectionIds?: string[];
+  }) =>
     (await executeTeamTool(coordinator, 'task-1', 'team_list_models', args, {
       listModelCandidates: (input) => router.listTeamModelCandidates(input),
       modelCatalogAudit: { wasQueried: () => markQueried.mock.calls.length > 0, markQueried },
@@ -199,7 +204,9 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     const schema = TEAM_LIST_MODELS_TOOL.inputSchema;
     expect(toolValueMatchesSchema(schema, {})).toBe(true);
     expect(toolValueMatchesSchema(schema, { cursor: null })).toBe(true);
-    expect(toolValueMatchesSchema(schema, { cursor: 'team:12345678:1:cursor:100' })).toBe(true);
+    expect(
+      toolValueMatchesSchema(schema, { cursor: 'team:12345678:1:0123456789abcdef:cursor:100' }),
+    ).toBe(true);
     expect(toolValueMatchesSchema(schema, { cursor: 100 })).toBe(false);
     // String bounds are Provider metadata in ToolBroker; the tool's Zod schema enforces them.
     await expect(makeRouter().teamQuery({ cursor: 'x'.repeat(129) })).rejects.toThrow();
@@ -270,7 +277,9 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     const { teamQuery } = makeRouter(options);
     const first = await teamQuery({ limit: 100 });
 
-    expect(first.nextCursor).toMatch(new RegExp(`^team:[0-9a-f]{8}:${first.revision}:cursor:100$`));
+    expect(first.nextCursor).toMatch(
+      new RegExp(`^team:[0-9a-f]{8}:${first.revision}:[0-9a-f]{16}:cursor:100$`),
+    );
   });
 
   it('refuses a malformed or bare catalog cursor without probing Providers', async () => {
@@ -321,19 +330,51 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     );
   });
 
-  it('applies current Team restrictions even on a continuation', async () => {
+  it('refuses a continuation after the Team model restriction changed, then lists every allowed model', async () => {
     const { teamQuery, getTeamModelRestriction, listModels } = makeRouter(options);
     const first = await teamQuery({ limit: 1 });
+    // Saving a restriction moves neither the catalog revision nor its identity.
     getTeamModelRestriction.mockReturnValue({
       mode: 'selected',
       allowedModels: models(teamStable, 3).map(identity),
     });
 
-    const page = await teamQuery({ cursor: first.nextCursor, limit: 100 });
-
-    expect(page.total).toBe(3);
-    expect(page.items.map(identity)).toEqual(models(teamStable, 3).slice(1).map(identity));
+    expectRefused(await teamQuery({ cursor: first.nextCursor, limit: 100 }));
     expect(listModels).toHaveBeenCalledTimes(2);
+
+    const restarted = await teamQuery({ cursor: null, limit: 1 });
+    const items = [...restarted.items];
+    let cursor = restarted.nextCursor;
+    for (let pages = 1; cursor !== null && pages < 5; pages += 1) {
+      const page = await teamQuery({ cursor, limit: 1 });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(items.map(identity)).toEqual(models(teamStable, 3).map(identity));
+  });
+
+  it('refuses a continuation whose search conditions differ from its first page', async () => {
+    const { teamQuery } = makeRouter(options);
+    const first = await teamQuery({ connectionIds: [teamStable.id], limit: 100 });
+    expect(first.total).toBe(150);
+
+    expectRefused(await teamQuery({ cursor: first.nextCursor, limit: 100 }));
+    expectRefused(
+      await teamQuery({
+        connectionIds: [teamStable.id],
+        text: 'model 1',
+        cursor: first.nextCursor,
+        limit: 100,
+      }),
+    );
+    // The page size is not part of the listing.
+    const next = await teamQuery({
+      connectionIds: [teamStable.id],
+      cursor: first.nextCursor,
+      limit: 25,
+    });
+    expect(next.items.map(identity)).toEqual(models(teamStable, 125).slice(100).map(identity));
   });
   it('rejects a page from a changed catalog without recording a successful query, then restarts', async () => {
     const { teamQuery, query, markQueried } = makeRouter(options);
