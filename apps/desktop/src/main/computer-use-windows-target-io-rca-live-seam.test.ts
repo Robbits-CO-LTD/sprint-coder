@@ -115,6 +115,31 @@ function instrumentedHost(): string {
       'Sc940StartForeground(input.window);',
     ) +
     source.slice(startTo);
+  const resumeFrom = source.indexOf('bool StartWindowsSession(');
+  const resumeTo = source.indexOf('bool CloseWindowsSession(', resumeFrom);
+  if (resumeFrom < 0 || resumeTo < 0) throw new Error('Resume consumer boundary changed');
+  let resume = replaceOnce(
+    source.slice(resumeFrom, resumeTo),
+    'OpenLockedProcessExecutable(target_process.value,\n                                   &process_executable)',
+    'Sc940ResumeOpen(target_process.value, &process_executable)',
+  );
+  resume = replaceOnce(resume, 'ResolveWindowsExplicitResumeTarget(', 'Sc940ResumeResolve(');
+  resume = replaceOnce(
+    resume,
+    'ShowWindow(window, SW_RESTORE);',
+    'Sc940ResumeShow(window, SW_RESTORE);',
+  );
+  resume = replaceOnce(
+    resume,
+    'ShowWindow(refocus_window, SW_RESTORE);',
+    'Sc940ResumeShow(refocus_window, SW_RESTORE);',
+  );
+  resume = replaceOnce(
+    resume,
+    'SetForegroundWindow(refocus_window);',
+    'Sc940ResumeForeground(refocus_window);',
+  );
+  source = source.slice(0, resumeFrom) + resume + source.slice(resumeTo);
   const readFrom = source.indexOf('bool ReadUiaObservationOnWorker(');
   const readTo = source.indexOf('bool ReadUiaObservation(', readFrom);
   if (readFrom < 0 || readTo < 0) throw new Error('Observation worker boundary changed');
@@ -138,7 +163,16 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     '    if (operation == "read_node_value") {',
-    `    if (operation == "sc940_rejudge_probe") {
+    `    if (operation == "sc940_resume_baseline") {
+      WindowsSession *session = FindWindowsSession(request);
+      if (session == nullptr) return Respond(pipe, request, MessageType::kError, ErrorPayload("session_missing"));
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult, Sc940ResumeBaseline(*session, metadata));
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_resume_baseline_failed"));
+      }
+    }
+    if (operation == "sc940_rejudge_probe") {
       try {
         return Respond(pipe, request, MessageType::kProbeResult, Sc940RejudgeProbe(metadata));
       } catch (...) {
@@ -283,6 +317,7 @@ const program = String.raw`
 #include <string>
 namespace {
 struct LockedWindowsExecutable;
+struct WindowsSession;
 struct WindowsValidationWork;
 struct WindowsFileIdentity;
 struct WindowsV2RejudgeWork;
@@ -298,6 +333,11 @@ void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id);
 void Sc940ValidationRetired(std::uint64_t job_id);
 std::string Sc940ValidationProbe(const std::string &metadata);
 bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
+bool Sc940ResumeOpen(HANDLE process, LockedWindowsExecutable *output);
+bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason);
+BOOL Sc940ResumeShow(HWND window, int command);
+BOOL Sc940ResumeForeground(HWND window);
+std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string &metadata);
 void Sc940StartReadyGate();
 void Sc940StartAdoptGate();
 void Sc940StartEpilogueGate();
@@ -356,6 +396,8 @@ std::atomic<unsigned> start_worker_attempts{0};
 std::atomic<unsigned> start_open_successes{0};
 std::atomic<unsigned> start_focus_calls{0};
 std::atomic<bool> hold_start_epilogue{false};
+std::atomic<bool> resume_diagnostic_active{false};
+std::atomic<unsigned> resume_resolve_attempts{0}, resume_focus_attempts{0};
 std::atomic<bool> validation_case_active{false};
 std::atomic<unsigned> validation_file_reads{0}, validation_file_successes{0}, validation_workers{0};
 std::atomic<unsigned> validation_cancel_attempts{0}, validation_retired_jobs{0};
@@ -567,6 +609,41 @@ bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output) {
   const bool opened = OpenLockedProcessExecutable(process, output);
   if (opened) start_open_successes.fetch_add(1);
   return opened;
+}
+bool Sc940ResumeOpen(HANDLE process, LockedWindowsExecutable *output) {
+  return resume_diagnostic_active.load() ? Sc940StartOpen(process, output) : OpenLockedProcessExecutable(process, output);
+}
+bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason) {
+  if (!resume_diagnostic_active.load()) return ResolveWindowsExplicitResumeTarget(session, window, reason);
+  resume_resolve_attempts.fetch_add(1);
+  *reason = "diagnostic_resume_resolve_forbidden";
+  return false;
+}
+BOOL Sc940ResumeShow(HWND window, int command) {
+  if (!resume_diagnostic_active.load()) return ShowWindow(window, command);
+  resume_focus_attempts.fetch_add(1);
+  return FALSE;
+}
+BOOL Sc940ResumeForeground(HWND window) {
+  if (!resume_diagnostic_active.load()) return SetForegroundWindow(window);
+  resume_focus_attempts.fetch_add(1);
+  return FALSE;
+}
+std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string &metadata) {
+  Require(resume_diagnostic_active.load() && session.pid == fixture_pids[0] &&
+              GetCurrentThreadId() == rca_consumer_thread_id.load(), "resume_baseline_owned_consumer");
+  LockedWindowsExecutable current;
+  std::string mode;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> not_web;
+  const bool identity = OpenLockedProcessExecutable(session.process_handle, &current) &&
+      SameWindowsPath(current.identity.path, session.canonical_path) &&
+      WindowsSessionProcessMatches(session) && WindowsSessionExecutableMatches(session, current);
+  const bool admitted = identity && AdmitWindowsV2Start(session.pid, session.window, current, metadata,
+      /*new_session=*/false, session.app_identity, session.executable_digest, session.signer_digest, &mode, &not_web) &&
+      mode == session.maximum_mode && not_web == session.not_web_file;
+  return "{\"componentOnly\":true,\"identityMatches\":" + std::string(identity ? "true" : "false") +
+      ",\"admissionMatches\":" + (admitted ? "true" : "false") + ",\"inputAttemptCount\":" +
+      std::to_string(session.input_api_attempts->load()) + "}";
 }
 void Sc940StartReadyGate() { Sc940Gate(HoldPoint::kStartReady); }
 void Sc940StartWorkerAttempt() { start_worker_attempts.fetch_add(1); }
@@ -1702,6 +1779,108 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
   }
 }
 
+// Positive reproduction of the remaining synchronous resume fault. This seeded binding is not
+// evidence that public Start, a grant, foreground acquisition, or a successful resume was accepted.
+int DiagnoseResume(DWORD pid, HWND window, const std::string &created, const std::wstring &fixture_path) {
+  RcaRun run;
+  ULONGLONG reader_ms = 0, absent_ms = 0, recovery_ms = 0;
+  try {
+    run.AttachOwnedSibling(pid, window, created, fixture_path);
+    run.StartPipe(false, false);
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "resume_handshake");
+    const ListedStart listed = ReadListedStart(run, 10);
+    Require(WindowsV2FactsContextCache().has_value() &&
+                WindowsV2FactsContextCache()->lineage_root_pid == GetCurrentProcessId() &&
+                windows_v2_main_pid == GetCurrentProcessId(), "resume_real_context_ready");
+    const auto inserted = sessions.try_emplace(FrameIdKey(Id(7)));
+    Require(inserted.second, "resume_single_diagnostic_session");
+    auto &session = inserted.first->second;
+    SeedOwnedValidationIdentity(&session);
+    session.session_id = "sc940-new";
+    session.cancel_epoch = 1;
+    session.maximum_mode = listed.mode;
+    Require(session.pid == listed.pid && session.app_identity == listed.app &&
+                session.window_identity == listed.window_identity && session.process_start == created &&
+                session.executable_digest == listed.executable && session.signer_digest.empty() &&
+                session.maximum_mode == "observe_only" && !session.not_web_file.has_value() &&
+                !session.has_observation && cancellation_epoch.load() == 1 && ticket_states.empty(),
+            "resume_seed_is_real_row_and_handles");
+    const auto attempts = session.input_api_attempts;
+    resume_diagnostic_active.store(true);
+    run.Send(MessageType::kProbe, 20, "{\"operation\":\"sc940_resume_baseline\",\"denyRulesetVersion\":" +
+        std::to_string(listed.ruleset) + "}");
+    std::string baseline;
+    bool component = false, identity = false, admission = false;
+    std::uint64_t baseline_attempts = 1;
+    Require(run.Wait(20, 15'000) && run.ProbeBody(20, &baseline) && baseline.size() < 512 &&
+                ReadOptionalJsonBoolean(baseline, "componentOnly", &component) && component &&
+                ReadOptionalJsonBoolean(baseline, "identityMatches", &identity) && identity &&
+                ReadOptionalJsonBoolean(baseline, "admissionMatches", &admission) && admission &&
+                ReadJsonUint64(baseline, "inputAttemptCount", &baseline_attempts) && baseline_attempts == 0,
+            "resume_identity_and_admit_baseline_without_foreground");
+    std::string metadata = listed.Metadata(1);
+    Require(!metadata.empty() && metadata.back() == '}', "resume_metadata_object");
+    metadata.pop_back();
+    metadata += ",\"resume\":true}";
+    hold_point.store(HoldPoint::kStartOpen);
+    run.Send(MessageType::kProbe, 2, metadata);
+    Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0 &&
+                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                start_open_calls.load() == 1 && start_open_successes.load() == 0 &&
+                start_worker_attempts.load() == 0 && !WindowsTargetListWorkerRunning().load(),
+            "resume_actual_consumer_open_held");
+    const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
+    const ULONGLONG sent = GetTickCount64();
+    run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+    Require(WaitStopSerial(serial, 1000), "resume_cancel_reader_progress");
+    {
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      Require(cancellation_epoch.load() == 2, "resume_cancel_epoch_published");
+    }
+    reader_ms = GetTickCount64() - sent;
+    Require(!run.Wait(3, 1000) && !run.Wait(2, 0) &&
+                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT &&
+                start_open_successes.load() == 0, "resume_receipt_still_blocked_after_one_second");
+    absent_ms = GetTickCount64() - sent;
+    Require(reader_ms < 1000 && absent_ms >= 1000, "resume_reader_and_consumer_are_distinct");
+    const ULONGLONG released = GetTickCount64();
+    SetEvent(run.release.value);
+    Require(run.Wait(2, 15'000) && run.Error(2, "session_start_canceled") &&
+                run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2, 7, "sc940-new"),
+            "resume_real_open_then_cancel_rejection_and_receipt");
+    recovery_ms = GetTickCount64() - released;
+    Require(start_open_successes.load() == 1 && run.ReplyCount(2) == 1 && attempts->load() == 0 &&
+                resume_resolve_attempts.load() == 0 && resume_focus_attempts.load() == 0 &&
+                start_focus_calls.load() == 0 && start_worker_attempts.load() == 0 &&
+                sessions.size() == 1 && session.maximum_mode == listed.mode &&
+                session.dialog_set_revision == 0 && !session.has_observation && ticket_states.empty(),
+            "resume_canceled_before_resolve_or_focus");
+    run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+    Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kProbeResult, "closed", 3, 7, "sc940-new") &&
+                sessions.empty() && ticket_states.empty() && attempts->load() == 0,
+            "resume_diagnostic_session_closed");
+    Require(!wrong_measurement.load() && !gate_timed_out.load(), "resume_only_owned_real_io");
+    run.Cleanup();
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "resume_owned_cleanup");
+    std::cout << "{\"case\":\"resume-prefocus-rca\",\"componentIntegrationOnly\":true,\"reproducedConsumerBlock\":true"
+              << ",\"realListMode\":\"observe_only\",\"realIdentityAdmissionBaseline\":true,\"realOpenSucceeded\":true"
+              << ",\"readerMs\":" << reader_ms << ",\"receiptAbsentMs\":" << absent_ms << ",\"recoveryMs\":" << recovery_ms
+              << ",\"sameSessionCancelReceipt\":true,\"resumeRejectedByCancel\":true,\"resolveResumeAttempts\":0"
+              << ",\"focusApiAttempts\":0,\"inputAttempts\":0,\"foregroundRequired\":false,\"healthyResumeVerified\":false"
+              << ",\"publicStartOrGrantVerified\":false,\"seedIsDiagnostic\":true,\"tripwireTriggered\":false"
+              << ",\"childExited\":true,\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  } catch (const std::exception &error) {
+    run.Cleanup();
+    std::cout << "{\"case\":\"resume-prefocus-rca\",\"failure\":\"" << error.what()
+              << "\",\"resolveResumeAttempts\":" << resume_resolve_attempts.load()
+              << ",\"focusApiAttempts\":" << resume_focus_attempts.load() << "}\n";
+    return 1;
+  }
+}
+
 // The GUI target and real pipe client are siblings. W8 therefore measures their true relationship,
 // rather than accepting a forged lineage root or a special acceptance-mode/signature exemption.
 int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path) {
@@ -1735,7 +1914,8 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = scenario.starts_with(L"rejudge-") ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
+    startup.wShowWindow = scenario.starts_with(L"rejudge-") || scenario == L"resume-prefocus-rca"
+        ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
     PROCESS_INFORMATION fixture{};
     std::wstring command = L"\"" + fixture_path + L"\"";
     const BOOL created = child_token.value != nullptr
@@ -1823,6 +2003,7 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     run.Cleanup();
     Require(run.child_exited && !run.watchdog_fired.load() &&
                 (output.starts_with("{\"case\":\"start-") || output.starts_with("{\"case\":\"rejudge-") ||
+                 output.starts_with("{\"case\":\"resume-prefocus-rca\"") ||
                  output.starts_with("{\"failure\":\"")),
             "start_coordinator_cleanup");
     std::cout << output;
@@ -2383,6 +2564,10 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
+    if (std::wstring_view(argv[2]) == L"resume-prefocus-rca")
+      return DiagnoseResume(static_cast<DWORD>(std::stoul(argv[3])),
+          reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
+          std::string(started.begin(), started.end()), argv[6]);
     if (std::wstring_view(argv[2]).starts_with(L"rejudge-"))
       return DiagnoseRejudge(argv[2], static_cast<DWORD>(std::stoul(argv[3])),
           reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
@@ -2411,6 +2596,15 @@ describe('Windows target I/O RCA seam source', () => {
       generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
+    expect(
+      generated.split('!Sc940ResumeOpen(target_process.value, &process_executable)'),
+    ).toHaveLength(2);
+    expect(generated.split('!Sc940ResumeResolve(')).toHaveLength(2);
+    expect(generated.split('Sc940ResumeShow(')).toHaveLength(3);
+    expect(generated.split('Sc940ResumeForeground(refocus_window);')).toHaveLength(2);
+    expect(generated.split('operation == "sc940_resume_baseline"')).toHaveLength(2);
+    expect(program).toContain('!run.Wait(3, 1000) && !run.Wait(2, 0)');
+    expect(program).toContain('run.Error(2, "session_start_canceled")');
     expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
     expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
     expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);
@@ -2596,11 +2790,46 @@ describe.skipIf(
       for (const scenario of scenarios) {
         const result = await run(
           binary,
-          scenario.startsWith('start-') || scenario.startsWith('rejudge-')
+          scenario.startsWith('start-') ||
+            scenario.startsWith('rejudge-') ||
+            scenario === 'resume-prefocus-rca'
             ? ['start-coordinator', scenario, fixtureExecutable]
             : [scenario],
           70_000,
         );
+        if (scenario === 'resume-prefocus-rca') {
+          expect(result.timedOut, 'Resume RCA outer watchdog').toBe(false);
+          const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
+          expect(result.status, failure ?? 'Resume component RCA assertions').toBe(0);
+          const metadata: unknown = JSON.parse(result.stdout.trim());
+          expect(metadata).toMatchObject({
+            case: scenario,
+            componentIntegrationOnly: true,
+            reproducedConsumerBlock: true,
+            realListMode: 'observe_only',
+            realIdentityAdmissionBaseline: true,
+            realOpenSucceeded: true,
+            readerMs: expect.any(Number),
+            receiptAbsentMs: expect.any(Number),
+            recoveryMs: expect.any(Number),
+            sameSessionCancelReceipt: true,
+            resumeRejectedByCancel: true,
+            resolveResumeAttempts: 0,
+            focusApiAttempts: 0,
+            inputAttempts: 0,
+            foregroundRequired: false,
+            healthyResumeVerified: false,
+            publicStartOrGrantVerified: false,
+            seedIsDiagnostic: true,
+            tripwireTriggered: false,
+            childExited: true,
+            threadsJoined: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('rejudge-')) {
           const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
           if (result.timedOut || result.status !== 0) {
@@ -2844,5 +3073,9 @@ describe.skipIf(
       'rejudge-repeat',
       'rejudge-cold-context-close',
     ]);
+  }, 700_000);
+
+  it('diagnoses the resume prefocus I/O stall with a real same-session Cancel and no input', async () => {
+    await runScenarios(['resume-prefocus-rca']);
   }, 700_000);
 });
