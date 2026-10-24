@@ -4031,6 +4031,10 @@ bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
     return false;
   }
   *response = std::move(built);
+  // Taken here, after the size check, as the answer is handed to the dispatcher. If its WriteFrame
+  // then fails, the pipe is lost and Main restarts the helper (a new helper starts from generation
+  // 0 and no session); on this helper, a new session named from the list before this one is
+  // refused as stale (targetGeneration), and Main must list again. A resume does not read it.
   windows_v2_list_generation = generation;
   return true;
 }
@@ -4045,12 +4049,17 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
     return false;
   } else {
     using namespace sprint_coder::computer_use;
+    // Without Main's pid there is no lineage root: nothing is enumerated or measured.
+    const WindowsTargetFactsContext &context = WindowsV2FactsContext();
+    if (context.lineage_root_pid == 0) {
+      *reason = "list_targets_unavailable";
+      return false;
+    }
     std::vector<HWND> windows;
     if (EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows)) != TRUE) {
       *reason = "process_enumeration_unavailable";
       return false;
     }
-    const WindowsTargetFactsContext &context = WindowsV2FactsContext();
     const ULONGLONG deadline = GetTickCount64() + kWindowsListTargetsBudgetMs;
     // The generation this list would be; it is taken only when the answer is sent.
     const std::uint64_t generation = windows_v2_list_generation + 1;
@@ -4146,6 +4155,11 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
 // judgement: the session's recorded System32 notepad file, still the very file it was.
 bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> *not_web,
                              std::string *reason) {
+  // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
+  if (WindowsV2FactsContext().lineage_root_pid == 0) {
+    *reason = "session_identity_changed";
+    return false;
+  }
   WindowsV2Judgement judged;
   JudgeWindowsV2Target(session.pid, session.window, WindowsV2FactsContext(), &judged);
   WindowsFileIdentity held{};
@@ -4191,6 +4205,9 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
                          std::string_view signer_digest, std::string *maximum_mode,
                          std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file) {
   using namespace sprint_coder::computer_use;
+  // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
+  if (WindowsV2FactsContext().lineage_root_pid == 0)
+    return false;
   std::uint64_t ruleset_version = 0;
   std::uint64_t generation = 0;
   if (!ReadJsonUint64(metadata, "denyRulesetVersion", &ruleset_version) ||
