@@ -1,3 +1,4 @@
+import { TurnStreamingResources } from './turn-streaming-resources';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { IPC_CHANNELS, type PublicError, type RuntimeKind } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
@@ -60,7 +61,11 @@ type RouterProbe = {
   ): void;
 };
 
+const streamingResources: TurnStreamingResources[] = [];
+
 function createHarness() {
+  const resources = new TurnStreamingResources(vi.fn());
+  streamingResources.push(resources);
   const router = Object.create(IpcRouter.prototype) as RouterProbe;
   const handlers = new Map<string, Handler>();
   const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
@@ -111,6 +116,7 @@ function createHarness() {
   const handleRuntimeFailure = vi.fn();
   const diagnosticContexts = new Map();
   Object.assign(router, {
+    turnStreamingResources: resources,
     handle: register,
     handleMutation: register,
     window: { webContents: { once: vi.fn() } },
@@ -162,6 +168,7 @@ function createHarness() {
     registerManagedMcp,
     handleRuntimeFailure,
     diagnosticContexts,
+    resources,
   };
 }
 
@@ -197,11 +204,60 @@ const started: StartedTurn = {
 };
 
 afterEach(() => {
+  for (const resources of streamingResources.splice(0)) resources.dispose();
   vi.clearAllMocks();
   vi.unstubAllEnvs();
 });
 
 describe('Grok CLI Main routing', () => {
+  it('allocates no streaming lease or runtime after cancellation during workspace verification', async () => {
+    const { router, grok, resources } = createHarness();
+    let verified!: () => void;
+    const canceled = new Set<string>();
+    Object.assign(router, {
+      canceledRuntimeTurns: canceled,
+      assertTurnWorkspaceHealthy: () =>
+        new Promise<void>((resolve) => {
+          verified = resolve;
+        }),
+    });
+    const pending = router.startSelectedRuntime(started);
+    expect(resources.size).toBe(0);
+    canceled.add(started.turnId);
+    verified();
+    await pending;
+    expect(resources.size).toBe(0);
+    expect(grok.start).not.toHaveBeenCalled();
+  });
+
+  it('begins an external Provider lease before dispatch without starting workspace watchers', async () => {
+    const { router, resources } = createHarness();
+    const startWorkspaceWatch = vi.fn();
+    const startProviderTurn = vi.fn(() => {
+      expect(resources.get('task-grok', started.turnId)).toBeDefined();
+    });
+    Object.assign(router, { startProviderTurn, startWorkspaceWatch });
+    await router.startSelectedRuntime({
+      ...started,
+      modelSelection: {
+        connectionId: 'profile:provider',
+        requestedProvider: 'openai',
+        requestedModel: 'fixture',
+      },
+    });
+    expect(startProviderTurn).toHaveBeenCalledTimes(1);
+    expect(startWorkspaceWatch).not.toHaveBeenCalled();
+    expect(resources.size).toBe(1);
+  });
+
+  it('does not begin or dispatch once streaming resource disposal starts', async () => {
+    const { router, resources, grok } = createHarness();
+    resources.dispose();
+    await router.startSelectedRuntime(started);
+    expect(resources.size).toBe(0);
+    expect(grok.start).not.toHaveBeenCalled();
+  });
+
   it.each(['active', 'canceled', 'late'] as const)(
     'quarantines Grok before %s failure guards and blocks queued and other Task turns',
     async (phase) => {
