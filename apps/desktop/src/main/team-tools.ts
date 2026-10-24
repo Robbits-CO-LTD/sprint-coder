@@ -117,10 +117,7 @@ export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(
     connectionIds: { type: 'array', items: { type: 'string' } },
     providerIds: { type: 'array', items: { type: 'string' } },
     capabilities: { type: 'array', items: { type: 'string' } },
-    cursor: {
-      if: { not: { type: 'null' } },
-      then: { type: 'string', maxLength: 128 },
-    },
+    cursor: { type: 'string' },
     limit: { type: 'integer' },
   },
   [],
@@ -276,7 +273,7 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
 
 export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
-    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。続きはnextCursorをそのままcursorに渡します。cursorのエラーが返ったら、cursorをnullにして先頭からやり直します。',
+    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。続きはnextCursorをそのままcursorに渡します。cursorのエラーが返ったら、cursorを省略して先頭からやり直します。',
   team_hire_worker: `自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_task: `自分の直下Workerへtaskを割り当て、execution IDを返します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、原因を解消してから失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。${MANAGER_WRITE_REQUIREMENTS}`,

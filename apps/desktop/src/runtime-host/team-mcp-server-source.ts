@@ -58,7 +58,7 @@ const TOOLS = [
   {
     name: 'team_list_models',
     description:
-      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names. Pass nextCursor unchanged as cursor for the next page; if a cursor is refused, start again with cursor null.',
+      'Search available Provider Connections and models before hiring. Capability values include their source; unknown must not be treated as false or inferred from names. Pass nextCursor unchanged as cursor for the next page; if a cursor is refused, start again without cursor.',
     inputSchema: {
       type: 'object',
       properties: {

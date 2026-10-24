@@ -8038,7 +8038,7 @@ export class IpcRouter {
       )
         return teamToolError(
           new Error(
-            'This team_list_models cursor is no longer valid: the model catalog changed or the cursor is malformed. Call team_list_models again with cursor null.',
+            'This team_list_models cursor is no longer valid: the model catalog changed or the cursor is malformed. Call team_list_models again without cursor.',
           ),
         );
       catalogCursor = decoded.cursor;

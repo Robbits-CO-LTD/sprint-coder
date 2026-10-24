@@ -14,7 +14,8 @@ import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { localProviderTestConnection } from './provider-connection-test-fixture';
 import { queryAllModelCatalogPages } from '../renderer/lib/model-catalog-pages';
 import { executeTeamTool, TEAM_LIST_MODELS_TOOL, type ExecuteTeamToolOptions } from './team-tools';
-import { toolValueMatchesSchema } from '@sprint-coder/domain';
+import { ToolRegistry, toolValueMatchesSchema } from '@sprint-coder/domain';
+import { ToolBroker } from './tool-broker';
 import { TeamCoordinator } from './team-coordinator';
 
 vi.mock('electron', () => ({
@@ -130,12 +131,34 @@ function makeRouter({
   // Listing does not use the coordinator; the real tool still validates and routes the call.
   const coordinator = Object.create(TeamCoordinator.prototype) as TeamCoordinator;
   const markQueried = vi.fn();
-  const teamQuery = async (args: { cursor?: string | null; limit?: number }) =>
+  const teamQuery = async (args: unknown) =>
     (await executeTeamTool(coordinator, 'task-1', 'team_list_models', args, {
       listModelCandidates: (input) => router.listTeamModelCandidates(input),
       modelCatalogAudit: { wasQueried: () => markQueried.mock.calls.length > 0, markQueried },
     })) as ModelCatalogQueryResult;
-  return { query, teamQuery, probe, listModels, getTeamModelRestriction, markQueried };
+  const registry = new ToolRegistry();
+  registry.register(TEAM_LIST_MODELS_TOOL);
+  const broker = new ToolBroker(
+    registry,
+    () => 0,
+    () => ({ decision: 'allow', reason: 'fixture' }),
+  );
+  broker.registerImplementation({
+    toolId: TEAM_LIST_MODELS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: teamQuery,
+  });
+  const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+  broker.startTurn(context, 'google');
+  let calls = 0;
+  const brokerQuery = async (input: unknown) =>
+    (await broker.dispatch({
+      ...context,
+      callId: `catalog-${++calls}`,
+      providerName: 'team_list_models',
+      input,
+    })) as ModelCatalogQueryResult;
+  return { query, teamQuery, brokerQuery, probe, listModels, getTeamModelRestriction, markQueried };
 }
 
 const listing = {
@@ -198,7 +221,7 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
   it('accepts the advertised restart and opaque cursor at the ToolBroker input boundary', async () => {
     const schema = TEAM_LIST_MODELS_TOOL.inputSchema;
     expect(toolValueMatchesSchema(schema, {})).toBe(true);
-    expect(toolValueMatchesSchema(schema, { cursor: null })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: null })).toBe(false);
     expect(toolValueMatchesSchema(schema, { cursor: 'team:12345678:1:cursor:100' })).toBe(true);
     expect(toolValueMatchesSchema(schema, { cursor: 100 })).toBe(false);
     // String bounds are Provider metadata in ToolBroker; the tool's Zod schema enforces them.
@@ -264,7 +287,7 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
   });
 
   const expectRefused = (page: unknown) =>
-    expect(page).toMatchObject({ ok: false, message: expect.stringContaining('cursor null') });
+    expect(page).toMatchObject({ ok: false, message: expect.stringContaining('without cursor') });
 
   it('returns a Team cursor that names the catalog and revision of the first page', async () => {
     const { teamQuery } = makeRouter(options);
@@ -335,8 +358,8 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     expect(page.items.map(identity)).toEqual(models(teamStable, 3).slice(1).map(identity));
     expect(listModels).toHaveBeenCalledTimes(2);
   });
-  it('rejects a page from a changed catalog without recording a successful query, then restarts', async () => {
-    const { teamQuery, query, markQueried } = makeRouter(options);
+  it('restarts through the real ToolBroker after a stale page without recording a failed query', async () => {
+    const { brokerQuery: teamQuery, query, markQueried } = makeRouter(options);
     const first = await teamQuery({ limit: 100 });
     expect(first.total).toBe(250);
     expect(markQueried).toHaveBeenCalledTimes(1);
@@ -346,10 +369,10 @@ describe('#939: Team model listing keeps continuation pages in the existing cata
     // A later Turn's audit starts empty even though the Task has an older listing.
     markQueried.mockClear();
     const stale = await teamQuery({ cursor: first.nextCursor, limit: 100 });
-    expect(stale).toMatchObject({ ok: false, message: expect.stringContaining('cursor null') });
+    expect(stale).toMatchObject({ ok: false, message: expect.stringContaining('without cursor') });
     expect(markQueried).not.toHaveBeenCalled();
 
-    const restarted = await teamQuery({ cursor: null, limit: 100 });
+    const restarted = await teamQuery({ limit: 100 });
     const second = await teamQuery({ cursor: restarted.nextCursor, limit: 100 });
     const third = await teamQuery({ cursor: second.nextCursor, limit: 100 });
     expect(third.nextCursor).toBeNull();
