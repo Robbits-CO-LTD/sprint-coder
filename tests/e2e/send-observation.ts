@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import type { Page, TestInfo } from '@playwright/test';
 
 type Primitive = string | number | boolean | null;
@@ -180,8 +181,10 @@ export async function attachSendObservation(
         timer = setTimeout(() => resolve({ status: 'timeout' }), 3000);
       }),
     ]);
+    const outputPath = testInfo.outputPath('send-observation.json');
+    await writeFile(outputPath, JSON.stringify({ expectedTaskId: taskId, afterClick, final }));
     await testInfo.attach('send-observation', {
-      body: JSON.stringify({ expectedTaskId: taskId, afterClick, final }),
+      path: outputPath,
       contentType: 'application/json',
     });
   } catch {

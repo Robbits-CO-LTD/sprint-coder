@@ -706,9 +706,9 @@ for (const starts of [false, true])
     try {
       const page = await firstWindow(app);
       failurePage = page;
-      await installSendObservation(page);
       await page.getByTestId('sidebar-new-task-button').click();
       await assignCurrentTaskToProjectFolder(page, 'Mission review', workspace);
+      await installSendObservation(page);
       const taskId = await page.evaluate(
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
       );
