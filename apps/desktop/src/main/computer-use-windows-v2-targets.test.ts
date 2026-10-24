@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { computerWindowsTargetFactsSchema } from '@sprint-coder/contracts';
 
 // S5-c-3 PR-5 (#500): the v2 target judgement wired into the Windows helper (list_targets, and the
 // v2 start, resume and per-input judgement). The source contracts below hold the v1 build to what it
@@ -80,9 +81,10 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     // the app allocated, a window already gone) decides nothing for the others (the review of #881).
     expect(list).toContain('MeasureWindowsV2Process(owner, context, judgement.get());');
     expect(list).not.toContain('JudgeWindowsV2Target(');
-    expect(list).toContain(
-      'WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner));',
+    expect(list).toMatch(
+      /WindowsV2VerdictForWindowClass\(&judgement, WindowsTargetWindowClass\(window, owner\),\s+&window_facts\);/u,
     );
+    expect(list).toContain('WindowsV2TargetFactsJson(window_facts)');
     // Each row carries its own window's mode; no row is refused for another window's mode.
     expect(list).not.toContain('judgement.verdict');
     expect(list).toContain('WindowsV2IdentityJson(judgement, verdict.maximum_mode)');
@@ -536,9 +538,17 @@ int wmain(int argc, wchar_t **argv) {
     // counted as escaped, so the answer still fits one frame.
     const std::string controls(256, '\x01');
     const std::string escaped = JsonEscape(controls);
+    TargetFacts wire_facts;
+    wire_facts.platform = TargetPlatform::kWin32;
+    wire_facts.image_leaf = "fixture\"\\\n\t";
+    wire_facts.token_elevated = false;
+    wire_facts.running_image_matches = true;
+    std::cout << "private-facts\t" << WindowsV2TargetFactsJson(wire_facts) << "\n";
+    wire_facts.image_leaf = std::string(1024, '\x01');
     WindowsV2ListRows control_rows(kWindowsListTargetsRowBytes);
     const std::string control_row = "{\"kind\":\"upper\",\"title\":\"" + escaped + "\",\"identity\":{\"executablePath\":\"" +
-                                    JsonEscape(std::string(4096, '\x1f')) + "\"}}";
+                                    JsonEscape(std::string(4096, '\x1f')) + "\"},\"facts\":" +
+                                    WindowsV2TargetFactsJson(wire_facts) + "}";
     for (int index = 0; index < 64; ++index) control_rows.push_back(control_row);
     const std::string control_response =
         WindowsV2ListResponse(~std::uint64_t{0}, 0xffffffffu, true, control_rows);
@@ -637,6 +647,10 @@ int wmain(int argc, wchar_t **argv) {
     const auto at = [&](const std::optional<std::string> &which) {
       return WindowsV2VerdictForWindowClass(&process, which).kind;
     };
+    TargetFacts emitted;
+    WindowsV2VerdictForWindowClass(&process, real, &emitted);
+    Check(emitted.window_class == real && !process.measured.facts.window_class.has_value(),
+          "v2_wire_facts_have_this_windows_class_without_changing_the_process_cache");
     Check(real.has_value() && first == second && second == third &&
               at(console) == TargetVerdictKind::kDenied && at(gone) == TargetVerdictKind::kUnresolvable &&
               at(real) == TargetVerdictKind::kUpper &&
@@ -956,6 +970,18 @@ ${fixtureBuild.stdout}`,
           console.log(executed.stdout);
           expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
           expect(executed.stdout).toContain('OK');
+          if (v2 === 1) {
+            const encoded = executed.stdout
+              .split(/\r?\n/u)
+              .find((line) => line.startsWith('private-facts\t'));
+            expect(encoded).toBeDefined();
+            const value: unknown = JSON.parse(encoded!.slice('private-facts\t'.length));
+            const facts = computerWindowsTargetFactsSchema.parse(value);
+            expect(facts.imageLeaf).toBe('fixture"\\\n\t');
+            expect(facts.tokenElevated).toBe(false);
+            expect(facts.runningImageMatches).toBe(true);
+            expect(facts.windowClass).toBeNull();
+          }
         } finally {
           rmSync(scratch, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
           rmSync(installed, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
