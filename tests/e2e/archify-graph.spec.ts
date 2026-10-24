@@ -13,6 +13,11 @@ import {
   assignCurrentTaskToProjectFolder,
 } from './helpers';
 import { clickWithSidebarVector } from './feature-setup';
+import {
+  attachSendObservation,
+  freezeSendObservation,
+  installSendObservation,
+} from './send-observation';
 
 async function clickGraphFocusClear(page: Page): Promise<void> {
   const button = page.frameLocator('[data-testid="graph-frame"]').locator('#btn-focus-clear');
@@ -696,11 +701,14 @@ for (const starts of [false, true])
     });
     let failurePage: Page | null = null;
     let failureTaskId: string | null = null;
+    let sendObservation: unknown = { status: 'not_reached' };
+    let sendObservationAttached = false;
     try {
       const page = await firstWindow(app);
       failurePage = page;
       await page.getByTestId('sidebar-new-task-button').click();
       await assignCurrentTaskToProjectFolder(page, 'Mission review', workspace);
+      await installSendObservation(page);
       const taskId = await page.evaluate(
         async () => (await window.sprintCoder!.tasks.list())[0]!.id,
       );
@@ -717,6 +725,7 @@ for (const starts of [false, true])
       }, taskId);
       await page.getByTestId('composer-textarea').fill('[fixture:graph-bound-mission-proposal]');
       await page.getByTestId('composer-send-button').click();
+      sendObservation = await freezeSendObservation(page);
       await page.getByRole('button', { name: '今回のみ許可', exact: true }).click();
       await expect(page.getByTestId('assistant-message')).toContainText('GRAPH_TOOL_FLOW_OK', {
         timeout: 30000,
@@ -806,6 +815,8 @@ for (const starts of [false, true])
         await page.screenshot({ path: test.info().outputPath('mission-review-stale.png') });
       }
     } catch (error) {
+      await attachSendObservation(failurePage, failureTaskId, sendObservation, test.info());
+      sendObservationAttached = true;
       // Preserve bounded state before cleanup removes the isolated profile. Never copy Worker
       // output, instructions, model/connection names, paths or free-form failure messages.
       if (failurePage && !failurePage.isClosed() && failureTaskId) {
@@ -860,6 +871,8 @@ for (const starts of [false, true])
       }
       throw error;
     } finally {
+      if (!sendObservationAttached)
+        await attachSendObservation(failurePage, failureTaskId, sendObservation, test.info());
       await closeApp(app);
       removeUserDataDir(profile);
       await rm(workspace, { recursive: true, force: true });
