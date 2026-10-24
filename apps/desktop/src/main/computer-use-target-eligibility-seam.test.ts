@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { computerWindowsTargetFactsSchema } from '@sprint-coder/contracts';
 import {
   cppFactsStatements,
   loadDenyRuleset,
@@ -30,6 +31,13 @@ import {
 // a compiler the test is skipped, except in CI or when that row asks for v2.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
+const windowsHost = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
+function nativeFunction(start: string, end: string): string {
+  const from = windowsHost.indexOf(start);
+  const to = windowsHost.indexOf(end, from);
+  if (from < 0 || to < 0) throw new Error('Native facts wire seam markers changed');
+  return windowsHost.slice(from, to);
+}
 const vswhere = 'C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe';
 const expectV2 = process.env['COMPUTER_USE_SEAM_ELIGIBILITY_V2'] === '1';
 
@@ -126,6 +134,7 @@ const model = loadDenyRuleset();
 function seamCases(): TargetFacts[] {
   const cases = materializeGoldenCases(model).map((entry) => entry.facts as unknown as TargetFacts);
   const admitted = cases.filter((facts) => classifyTargetExplained(facts).route !== null);
+  cases.push({ ...admitted[0]!, imageLeaf: 'fixture"\\\n\t\u0001日本語' });
   const random = seededRandom(0x5eed);
   for (let index = 0; index < 150; index++) cases.push(randomTargetFacts(random));
   for (let index = 0; index < 150; index++)
@@ -151,10 +160,14 @@ function driver(cases: readonly TargetFacts[]): string {
     '#include "computer_use_target_eligibility.h"',
     '#include <cstdio>',
     '#include <string>',
+    nativeFunction('std::string JsonEscape(', 'bool ReadJsonString('),
+    nativeFunction('std::string WindowsV2TargetFactsJson(', '// The identity JSON of a v2 row:'),
     '',
     'using namespace sprint_coder::computer_use;',
     '',
     'static void Emit(const TargetFacts &facts) {',
+    '  if (facts.platform == TargetPlatform::kWin32)',
+    '    std::printf("facts\\t%s\\n", WindowsV2TargetFactsJson(facts).c_str());',
     '  const TargetClassification c = ClassifyTargetExplained(facts);',
     '  std::printf("case\\t%s\\t%.*s\\t%.*s\\t%.*s\\n", std::string(TargetVerdictKindName(c.verdict.kind)).c_str(),',
     '              static_cast<int>(c.deny_class.size()), c.deny_class.data(),',
@@ -269,6 +282,20 @@ describe.skipIf(compiler === null && process.env['CI'] === undefined && !expectV
           .map((facts, index) => ({ index, ts: line(facts), native: native[index] }))
           .filter((entry) => entry.ts !== entry.native);
         expect(disagreements.slice(0, 5)).toEqual([]);
+        const windowsCases = cases.filter((facts) => facts.platform === 'win32');
+        const wireFacts = lines
+          .filter((entry) => entry.startsWith('facts\t'))
+          .map((entry) => {
+            const value: unknown = JSON.parse(entry.slice(6));
+            return value;
+          });
+        expect(wireFacts).toEqual(windowsCases);
+        for (const [index, facts] of wireFacts.entries()) {
+          // Invalid-enum fuzz cases remain invalid rather than being normalized into permissions.
+          expect(computerWindowsTargetFactsSchema.safeParse(facts).success).toBe(
+            computerWindowsTargetFactsSchema.safeParse(windowsCases[index]).success,
+          );
+        }
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

@@ -4615,6 +4615,138 @@ const computerUseBoundsSchema = z
   })
   .strict();
 
+const computerNativeTargetFactStringSchema = z
+  .string()
+  .max(1_024)
+  .refine((value) => new TextEncoder().encode(value).byteLength <= 1_024);
+
+/** Private native -> Main evidence, never a Renderer input or an agent-tool result. */
+export const computerWindowsTargetFactsSchema = z
+  .object({
+    platform: z.literal('win32'),
+    imageRoot: z
+      .enum([
+        'windows_directory',
+        'program_files',
+        'local_programs',
+        'windows_apps',
+        'self_install',
+        'temp',
+        'downloads',
+        'other',
+      ])
+      .nullable(),
+    imageRelativePath: computerNativeTargetFactStringSchema.nullable(),
+    imageLeaf: computerNativeTargetFactStringSchema.nullable(),
+    imageVolume: z.enum(['fixed', 'network', 'removable']).nullable(),
+    runningImageMatches: z.boolean().nullable(),
+    signature: z.enum(['valid', 'unsigned', 'invalid']).nullable(),
+    signerOrganization: computerNativeTargetFactStringSchema.nullable(),
+    signerMicrosoftRoot: z.boolean().nullable(),
+    signerIsSelf: z.boolean().nullable(),
+    acceptanceFixture: z.boolean().nullable(),
+    peSubsystem: z.enum(['gui', 'console', 'other']).nullable(),
+    originalFilename: computerNativeTargetFactStringSchema.nullable(),
+    requiresAdministrator: z.boolean().nullable(),
+    tokenElevated: z.boolean().nullable(),
+    tokenOtherUser: z.boolean().nullable(),
+    tokenOtherSession: z.boolean().nullable(),
+    tokenProtected: z.boolean().nullable(),
+    tokenUiAccess: z.boolean().nullable(),
+    tokenIntegrityAboveSelf: z.boolean().nullable(),
+    tokenAppContainer: z.boolean().nullable(),
+    packaged: z.boolean().nullable(),
+    packageFamily: computerNativeTargetFactStringSchema.nullable(),
+    packageSignatureKind: z.enum(['none', 'store', 'system', 'developer', 'enterprise']).nullable(),
+    packageDevelopmentMode: z.boolean().nullable(),
+    ownDescendant: z.boolean().nullable(),
+    descendantShell: z.boolean().nullable(),
+    descendantPseudoConsole: z.boolean().nullable(),
+    windowClass: computerNativeTargetFactStringSchema.nullable(),
+  })
+  .strict();
+export type ComputerWindowsTargetFacts = z.infer<typeof computerWindowsTargetFactsSchema>;
+
+const computerWindowsTargetIdentitySchema = computerWindowsAppIdentitySchema
+  .extend({
+    policyLanguage: computerUsePolicyLanguageSchema,
+    maximumMode: computerUseModeSchema,
+    packagePublisherId: z
+      .string()
+      .regex(/^[0-9a-z]{13}$/u)
+      .optional(),
+    packageRelativePath: z.string().min(1).max(4_096).optional(),
+  })
+  .refine((identity) => {
+    const publisher = identity.packagePublisherId;
+    const relative = identity.packageRelativePath;
+    if (identity.packageFamilyName === null)
+      return publisher === undefined && relative === undefined;
+    if (publisher === undefined || relative === undefined || identity.signerDigest !== null)
+      return false;
+    const asciiLower = (value: string): string =>
+      value.replace(/[A-Z]/gu, (letter) => letter.toLowerCase());
+    return (
+      /^[A-Za-z0-9.-]{3,50}_[0-9a-z]{13}$/u.test(identity.packageFamilyName) &&
+      identity.packageFamilyName.endsWith('_' + publisher) &&
+      !relative.startsWith('\\') &&
+      !relative.startsWith('/') &&
+      // eslint-disable-next-line no-control-regex
+      !/[\u0000-\u001f\u007f]/u.test(relative) &&
+      relative === asciiLower(relative) &&
+      asciiLower(identity.executablePath).endsWith('\\' + relative)
+    );
+  }, 'Incomplete or inconsistent native package identity');
+
+const computerWindowsNativeTargetSchema = z
+  .object({
+    kind: z.enum(['eligible', 'upper']),
+    windowId: z
+      .string()
+      .regex(/^[1-9][0-9]{0,19}$/u)
+      .refine((value) => /^[0-9]{1,20}$/u.test(value) && BigInt(value) <= 0xffffffffffffffffn),
+    pid: z.number().int().positive().max(0xffffffff),
+    appIdentityDigest: computerUseDigestSchema,
+    windowIdentityDigest: computerUseDigestSchema,
+    executableDigest: computerUseDigestSchema,
+    title: computerUseLabelSchema,
+    bounds: computerUseBoundsSchema,
+    screenBounds: computerUseBoundsSchema,
+    boundsUnit: z.literal('physical_px'),
+    maximumMode: z.enum(['full_access_app', 'observe_only']),
+    identity: computerWindowsTargetIdentitySchema,
+    facts: computerWindowsTargetFactsSchema,
+  })
+  .strict()
+  .refine(
+    (target) =>
+      target.maximumMode === (target.kind === 'eligible' ? 'full_access_app' : 'observe_only') &&
+      target.identity.maximumMode === target.maximumMode &&
+      target.appIdentityDigest === target.identity.identityDigest &&
+      target.executableDigest === target.identity.executableDigest,
+    'Native target identity or mode binding changed',
+  );
+
+/** A closed private wire shape. Denied rows deliberately carry no identity, label, or facts. */
+export const computerWindowsNativeTargetListSchema = z
+  .object({
+    generation: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+    rulesetVersion: z.number().int().positive().max(0xffffffff),
+    truncated: z.boolean(),
+    targets: z
+      .array(
+        z.union([
+          z.object({ kind: z.literal('denied') }).strict(),
+          z.object({ kind: z.literal('unresolvable') }).strict(),
+          computerWindowsNativeTargetSchema,
+        ]),
+      )
+      .max(64),
+  })
+  .strict()
+  .refine((value) => new TextEncoder().encode(JSON.stringify(value)).byteLength <= 64 * 1_024);
+export type ComputerWindowsNativeTargetList = z.infer<typeof computerWindowsNativeTargetListSchema>;
+
 export const computerUseWindowCandidateSchema = z
   .object({
     windowId: computerUseIdSchema,

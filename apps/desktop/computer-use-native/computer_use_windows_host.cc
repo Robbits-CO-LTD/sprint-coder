@@ -3885,10 +3885,13 @@ bool EnsureWindowsV2Identity(WindowsV2Judgement *out) {
 // changes its answer. A class that cannot be read leaves the facts incomplete: unresolvable.
 sprint_coder::computer_use::TargetVerdict
 WindowsV2VerdictForWindowClass(WindowsV2Judgement *process,
-                               const std::optional<std::string> &window_class) {
+                               const std::optional<std::string> &window_class,
+                               sprint_coder::computer_use::TargetFacts *measured_facts = nullptr) {
   using namespace sprint_coder::computer_use;
   WindowsTargetFactsMeasurement for_window = process->measured;
   for_window.facts.window_class = window_class;
+  if (measured_facts != nullptr)
+    *measured_facts = for_window.facts;
   TargetVerdict verdict = WindowsV2VerdictFor(for_window);
   if ((verdict.kind == TargetVerdictKind::kEligible || verdict.kind == TargetVerdictKind::kUpper) &&
       !EnsureWindowsV2Identity(process))
@@ -3903,6 +3906,26 @@ void JudgeWindowsV2Target(std::uint32_t pid, HWND window, const WindowsTargetFac
   const std::optional<std::string> window_class = WindowsTargetWindowClass(window, pid);
   out->verdict = WindowsV2VerdictForWindowClass(out, window_class);
   out->measured.facts.window_class = window_class;
+}
+
+// Private evidence for Main's independent classification. The generated signal table is the field
+// list; unmeasured values remain null, and labels/titles are not facts.
+std::string WindowsV2TargetFactsJson(const sprint_coder::computer_use::TargetFacts &facts) {
+  using namespace sprint_coder::computer_use;
+  std::string json = "{\"platform\":\"" + std::string(TargetPlatformName(facts.platform)) + "\"";
+  for (const TargetSignalSpec &signal : kTargetSignals) {
+    if ((signal.platforms & TargetPlatformBit(facts.platform)) == 0)
+      continue;
+    json += ",\"" + JsonEscape(std::string(signal.name)) + "\":";
+    if (signal.type == TargetSignalType::kBoolean) {
+      const auto *value = TargetBooleanFact(facts, signal.signal);
+      json += value != nullptr && value->has_value() ? (**value ? "true" : "false") : "null";
+    } else {
+      const auto *value = TargetStringFact(facts, signal.signal);
+      json += value != nullptr && value->has_value() ? "\"" + JsonEscape(**value) + "\"" : "null";
+    }
+  }
+  return json + "}";
 }
 
 // The identity JSON of a v2 row: the V1 fields with the mode of the window the row is for, or the
@@ -4064,8 +4087,10 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
       WindowsV2Judgement &judgement = **found->second;
       // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
       // after it was listed) is unresolvable on its own; it does not touch its process's others.
+      TargetFacts window_facts;
       const TargetVerdict verdict =
-          WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner));
+          WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner),
+                                         &window_facts);
       RECT client{};
       RECT screen{};
       if (!(verdict.kind == TargetVerdictKind::kEligible ||
@@ -4105,6 +4130,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
           "},\"screenBounds\":" + RectJson(screen) +
           ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
           std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
+          ",\"facts\":" + WindowsV2TargetFactsJson(window_facts) +
           "}");
     }
     return FinishWindowsV2ListResponse(
