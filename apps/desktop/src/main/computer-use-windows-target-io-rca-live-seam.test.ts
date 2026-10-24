@@ -603,6 +603,9 @@ void SeedOwnedValidationIdentity(WindowsSession *session) {
   Require(process.value != nullptr && OpenLockedProcessExecutable(process.value, &image) &&
               ReadProcessStartIdentity(process.value, &started) &&
               WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT, "validation_owned_identity");
+  std::wstring process_path;
+  Require(ReadProcessPath(process.value, &process_path) && SameWindowsPath(process_path, image.identity.path),
+          "validation_fixture_process_path_matches_held");
   session->pid = fixture_pids[0];
   session->window = session->active_window = fixture_windows[0];
   session->app_identity = image.identity.identity_digest;
@@ -664,6 +667,7 @@ struct RcaRun {
   bool cleaned = false;
   bool child_exited = false;
   bool worker_idle = false;
+  bool fixture_launch_path_canonicalized = false;
 
   RcaRun() {
     Require(entered.value && release.value && adopting.value && finished.value && epilogue_entered.value &&
@@ -697,7 +701,7 @@ struct RcaRun {
     });
   }
 
-  void StartFixture() {
+  void StartFixture(bool canonical_executable = false) {
     Require(fixture_count < fixture_pids.size(), "fixture_limit");
     const unsigned index = fixture_count;
     ScopedKernelHandle &child = children[index];
@@ -712,7 +716,16 @@ struct RcaRun {
     std::vector<wchar_t> executable(32768, L'\0');
     const DWORD length = GetModuleFileNameW(nullptr, executable.data(), static_cast<DWORD>(executable.size()));
     Require(length > 0 && length < executable.size(), "own_executable");
-    std::wstring command = L"\"" + std::wstring(executable.data(), length) + L"\" fixture \"" +
+    std::wstring fixture_executable(executable.data(), length);
+    if (canonical_executable) {
+      // TEMP may use an 8.3 alias. Identity tests need the same path spelling that a native
+      // session records; a path mismatch would reject before the intended FileId fault gate.
+      LockedWindowsExecutable image;
+      Require(OpenLockedWindowsExecutable(fixture_executable, &image), "validation_fixture_executable");
+      fixture_launch_path_canonicalized = !SameWindowsPath(fixture_executable, image.identity.path);
+      fixture_executable = image.identity.path;
+    }
+    std::wstring command = L"\"" + fixture_executable + L"\" fixture \"" +
                            mapping_name + L"\" \"" + event_name + L"\"";
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
@@ -1492,7 +1505,7 @@ int DiagnoseValidation(std::wstring_view scenario) {
   std::uint64_t first_job = 0, next_job = 0;
   try {
     validation_case_active.store(true);
-    run.StartFixture();
+    run.StartFixture(true);
     run.PrepareValidationProbe();
     run.StartPipe(false, !repeat, !repeat);
     run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
@@ -1645,6 +1658,8 @@ int DiagnoseValidation(std::wstring_view scenario) {
               << ",\"validationWorkerThreads\":" << validation_workers.load()
               << ",\"validationRetiredJobs\":" << validation_retired_jobs.load()
               << ",\"instrumentedPrimitiveTiming\":true"
+              << ",\"fixtureLaunchPathCanonicalized\":" << (run.fixture_launch_path_canonicalized ? "true" : "false")
+              << ",\"fixtureProcessPathMatchesHeld\":true"
               << ",\"cancelAttempts\":" << validation_cancel_attempts.load() << ",\"firstJobId\":" << first_job
               << ",\"reusedJobId\":" << next_job << ",\"validationJobDrained\":true,\"duplicateCleanupObserved\":true"
               << ",\"validationWorkerJoined\":false,\"joinedThreads\":\"pipe-reader-watchdog\",\"inputAttempts\":0"
@@ -2234,6 +2249,7 @@ describe.skipIf(
               primitiveCostOnly: true,
               stopPath: scenario === 'validation-repeat' ? 'none' : 'preflight_validate',
               inputLatencyMeasured: false,
+              fixtureProcessPathMatchesHeld: true,
               validationWorkerThreads: 1,
               validationRetiredJobs:
                 scenario === 'validation-cancel'
