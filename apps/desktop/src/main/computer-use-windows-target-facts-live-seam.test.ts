@@ -96,6 +96,7 @@ const includes = String.raw`
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <iostream>
 #include <optional>
 #include <span>
@@ -1233,14 +1234,30 @@ describe.skipIf(!onWindows || (build === null && !ci))(
       try {
         // The two builds and the live seam can exceed Vitest's 60s RPC deadline together.
         // Yield while each child runs so the worker can receive reporting acknowledgements.
-        const run = (args: string[]) => {
+        const run = async (args: string[]) => {
           const command = build!.wrap(args);
-          return promisify(execFile)(command.file, command.args, {
-            encoding: 'utf8',
-            windowsVerbatimArguments: command.verbatim,
-            timeout: 400_000,
-            env: { ...process.env, VSLANG: '1033' },
-          });
+          try {
+            return await promisify(execFile)(command.file, command.args, {
+              encoding: 'utf8',
+              windowsVerbatimArguments: command.verbatim,
+              timeout: 400_000,
+              env: { ...process.env, VSLANG: '1033' },
+            });
+          } catch (error) {
+            const output =
+              error instanceof Error && 'stdout' in error && typeof error.stdout === 'string'
+                ? error.stdout
+                : '';
+            const diagnostics = output
+              .split(/\r?\n/u)
+              .filter((line) => /\berror (?:C|LNK)\d+:/u.test(line))
+              .map((line) =>
+                line.replaceAll(scratch, '<fixture>').replaceAll(nativeDirectory, '<native>'),
+              )
+              .join('\n')
+              .slice(0, 8000);
+            throw new Error(`Target facts seam compilation failed\n${diagnostics}`, { cause: error });
+          }
         };
         const fixtureExecutable = join(scratch, 'sprint-coder-computer-use-fixture.exe');
         await run([
