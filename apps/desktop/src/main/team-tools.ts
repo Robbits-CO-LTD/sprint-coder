@@ -117,7 +117,10 @@ export const TEAM_LIST_MODELS_TOOL = teamToolDefinition(
     connectionIds: { type: 'array', items: { type: 'string' } },
     providerIds: { type: 'array', items: { type: 'string' } },
     capabilities: { type: 'array', items: { type: 'string' } },
-    cursor: { type: 'string' },
+    cursor: {
+      if: { not: { type: 'null' } },
+      then: { type: 'string', maxLength: 128 },
+    },
     limit: { type: 'integer' },
   },
   [],

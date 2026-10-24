@@ -13,7 +13,8 @@ import { MainProviderProfileRegistry } from './provider-profile';
 import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { localProviderTestConnection } from './provider-connection-test-fixture';
 import { queryAllModelCatalogPages } from '../renderer/lib/model-catalog-pages';
-import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
+import { executeTeamTool, TEAM_LIST_MODELS_TOOL, type ExecuteTeamToolOptions } from './team-tools';
+import { toolValueMatchesSchema } from '@sprint-coder/domain';
 import { TeamCoordinator } from './team-coordinator';
 
 vi.mock('electron', () => ({
@@ -194,6 +195,15 @@ describe('#906: models catalog query rebuilds the catalog only for a first page'
 });
 
 describe('#939: Team model listing keeps continuation pages in the existing catalog', () => {
+  it('accepts the advertised restart and opaque cursor at the ToolBroker input boundary', async () => {
+    const schema = TEAM_LIST_MODELS_TOOL.inputSchema;
+    expect(toolValueMatchesSchema(schema, {})).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: null })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: 'team:12345678:1:cursor:100' })).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: 100 })).toBe(false);
+    // String bounds are Provider metadata in ToolBroker; the tool's Zod schema enforces them.
+    await expect(makeRouter().teamQuery({ cursor: 'x'.repeat(129) })).rejects.toThrow();
+  });
   const teamFlaky: ProviderConnection = { ...flaky, id: 'localai:flaky', providerId: 'localai' };
   const teamStable: ProviderConnection = { ...stable, id: 'ollama:stable', providerId: 'ollama' };
   const options = {
