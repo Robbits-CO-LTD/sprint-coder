@@ -409,9 +409,19 @@ describe('Windows native helper compile boundary', () => {
       source.indexOf('bool RevalidateWindowsTarget('),
       source.indexOf('WORD VirtualKeyForName('),
     );
+    const startGate = source.indexOf('const auto start_not_canceled');
     const startSource = source.slice(
-      source.indexOf('const auto start_not_canceled'),
-      source.indexOf('RECT physical_client{}'),
+      startGate,
+      source.indexOf('RECT physical_client{}', startGate),
+    );
+    const newStart = source.slice(
+      source.indexOf('bool StartWindowsV2NewSession('),
+      source.indexOf('// END windows v2 targets'),
+    );
+    const newStartConsumer = newStart.slice(0, newStart.indexOf('WindowsV2StartLease lease'));
+    const newStartWorker = newStart.slice(
+      newStart.indexOf('const auto still_valid'),
+      newStart.indexOf('struct Apartment'),
     );
 
     expect(watcherSource.indexOf('parent_process_dead.store')).toBeGreaterThanOrEqual(0);
@@ -428,6 +438,8 @@ describe('Windows native helper compile boundary', () => {
       'RevalidateWindowsTarget(session, expected, expected_epoch)',
     );
     expect(startSource).toContain('parent_process_dead.load(std::memory_order_acquire)');
+    expect(newStartConsumer).toContain('parent_process_dead.load(std::memory_order_acquire)');
+    expect(newStartWorker).toContain('parent_process_dead.load(std::memory_order_acquire)');
     expect(source.match(/\bSendInput\(/gu)).toHaveLength(1);
     expect(source.match(/SendInputForBoundTarget\(/gu)?.length).toBeGreaterThanOrEqual(7);
   });
