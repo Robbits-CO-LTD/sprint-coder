@@ -3944,6 +3944,24 @@ std::string WindowsV2TargetFactsJson(const sprint_coder::computer_use::TargetFac
   return json + "}";
 }
 
+// Whether every fact string a row would carry is within what Main's schema takes (contracts'
+// COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES, the core's kTargetFactMaxBytes: UTF-8 bytes, as the strings
+// are held). The core already answers unresolvable for a longer fact, so a selectable verdict
+// implies this; it is checked again where the row is written, so a row Main would reject (and with
+// it the whole list) is never sent. A value over the bound is never cut: the row is unresolvable.
+bool WindowsV2FactsWithinContract(const sprint_coder::computer_use::TargetFacts &facts) {
+  using namespace sprint_coder::computer_use;
+  for (const TargetSignalSpec &signal : kTargetSignals) {
+    if ((signal.platforms & TargetPlatformBit(facts.platform)) == 0 ||
+        signal.type == TargetSignalType::kBoolean)
+      continue;
+    const std::optional<std::string> *value = TargetStringFact(facts, signal.signal);
+    if (value != nullptr && value->has_value() && (*value)->size() > kTargetFactMaxBytes)
+      return false;
+  }
+  return true;
+}
+
 // The identity JSON of a v2 row: the V1 fields with the mode of the window the row is for, or the
 // package's.
 std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_view window_mode) {
@@ -4124,6 +4142,12 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
         rows.push_back(WindowsV2RefusedRow(verdict.kind == TargetVerdictKind::kUnresolvable
                                                ? TargetVerdictKind::kUnresolvable
                                                : TargetVerdictKind::kDenied));
+        continue;
+      }
+      // A fact longer than Main's schema takes: this window alone is unresolvable (no facts, no
+      // identity), and the rest of the list stands.
+      if (!WindowsV2FactsWithinContract(window_facts)) {
+        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
         continue;
       }
       if (IsWindowEnabled(window) != TRUE || !ClientBoundsPhysical(window, &client) ||

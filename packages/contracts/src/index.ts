@@ -4615,10 +4615,19 @@ const computerUseBoundsSchema = z
   })
   .strict();
 
+/**
+ * The UTF-8 byte bound of one native target fact string. The same as the target eligibility core's
+ * (kTargetFactMaxBytes in C++, TARGET_FACT_MAX_BYTES in TS), pinned by a test in apps/desktop; the
+ * Windows helper sends a longer fact's window as unresolvable instead (never cut).
+ */
+export const COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES = 1_024;
+
 const computerNativeTargetFactStringSchema = z
   .string()
-  .max(1_024)
-  .refine((value) => new TextEncoder().encode(value).byteLength <= 1_024);
+  .max(COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES)
+  .refine(
+    (value) => new TextEncoder().encode(value).byteLength <= COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES,
+  );
 
 /** Private native -> Main evidence, never a Renderer input or an agent-tool result. */
 export const computerWindowsTargetFactsSchema = z
