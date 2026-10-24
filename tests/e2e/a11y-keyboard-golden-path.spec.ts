@@ -119,7 +119,9 @@ test.describe('Keyboard-only golden path: Task -> message -> Team -> Canvas nav 
     const workerCards = page.getByTestId('team-worker');
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await expect(workerCards.nth(i).locator('.team-status')).toHaveText('done', { timeout: 20_000 });
+      await expect(workerCards.nth(i).locator('.team-status')).toHaveText('done', {
+        timeout: 20_000,
+      });
     }
     await assertFocusIsSensible(page, 'after the Leader hires/dispatches/reports (チームテスト)');
 
