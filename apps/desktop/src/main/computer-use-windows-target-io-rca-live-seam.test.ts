@@ -88,33 +88,92 @@ function instrumentedHost(): string {
       'Sc940StartOpen(target_process->value, process_executable)',
     ) +
     source.slice(measureTo);
-  source = replaceOnce(source, startReady, `${startReady}\n    Sc940StartReadyGate();`);
-  source = replaceOnce(source, startAdopt, `  Sc940StartAdoptGate();\n${startAdopt}`);
-  source = replaceOnce(
-    source,
+  const startFrom = source.indexOf('bool StartWindowsV2NewSession(');
+  const startTo = source.indexOf('// BEGIN windows v2 existing start', startFrom);
+  if (startFrom < 0 || startTo < 0) throw new Error('Start consumer boundary changed');
+  let newStart = source.slice(startFrom, startTo);
+  newStart = replaceOnce(newStart, startReady, `${startReady}\n    Sc940StartReadyGate();`);
+  newStart = replaceOnce(newStart, startAdopt, `  Sc940StartAdoptGate();\n${startAdopt}`);
+  newStart = replaceOnce(
+    newStart,
     startEpilogue,
     `        Sc940StartEpilogueGate();\n${startEpilogue}`,
   );
-  source = replaceOnce(
-    source,
+  newStart = replaceOnce(
+    newStart,
     '    std::thread([pending, input] {',
     '    Sc940StartWorkerAttempt();\n    std::thread([pending, input] {',
   );
-  const startFrom = source.indexOf('bool StartWindowsV2NewSession(');
-  const startTo = source.indexOf('// END windows v2 targets', startFrom);
-  if (startFrom < 0 || startTo < 0) throw new Error('Start consumer boundary changed');
-  source =
-    source.slice(0, startFrom) +
-    replaceOnce(
-      replaceOnce(
-        source.slice(startFrom, startTo),
-        'ShowWindow(input.window, SW_RESTORE);',
-        'Sc940StartShow(input.window, SW_RESTORE);',
-      ),
-      'SetForegroundWindow(input.window);',
-      'Sc940StartForeground(input.window);',
-    ) +
-    source.slice(startTo);
+  newStart = replaceOnce(
+    newStart,
+    'ShowWindow(input.window, SW_RESTORE);',
+    'Sc940StartShow(input.window, SW_RESTORE);',
+  );
+  newStart = replaceOnce(
+    newStart,
+    'SetForegroundWindow(input.window);',
+    'Sc940StartForeground(input.window);',
+  );
+  source = source.slice(0, startFrom) + newStart + source.slice(startTo);
+  const resumeFrom = source.indexOf('// BEGIN windows v2 existing start');
+  const resumeTo = source.indexOf('// END windows v2 existing start', resumeFrom);
+  if (resumeFrom < 0 || resumeTo < 0) throw new Error('Resume consumer boundary changed');
+  let resume = replaceOnce(
+    source.slice(resumeFrom, resumeTo),
+    'OpenLockedProcessExecutable(target_process.value, &current_executable)',
+    'Sc940ResumeOpen(work, target_process.value, &current_executable)',
+  );
+  const heldRead = 'ReadWindowsFileIdentity(work.executable.value, &held)';
+  if (resume.split(heldRead).length !== 3)
+    throw new Error('Both resume identity reads must remain');
+  resume = resume.replaceAll(heldRead, 'Sc940ResumeFileIdentity(work, &held)');
+  resume = replaceOnce(
+    resume,
+    '    context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
+    '    Sc940ResumeContextGate(work);\n    context = CurrentWindowsTargetFactsContext(input.main_pid, std::move(signer),',
+  );
+  resume = replaceOnce(
+    resume,
+    '  // Existing V2 start worker entry; this job owns its thread and source duplicates.',
+    '  // Existing V2 start worker entry; this job owns its thread and source duplicates.\n  Sc940ResumeWorkerStarted(*work);',
+  );
+  resume = replaceOnce(
+    resume,
+    '  if (pending->thread.value != nullptr) CancelSynchronousIo(pending->thread.value);',
+    '  if (pending->thread.value != nullptr) { Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value); }',
+  );
+  const ticketInvalidation = 'InvalidateWindowsTicket(input.session_key);';
+  if (resume.split(ticketInvalidation).length !== 3)
+    throw new Error('Resume ticket boundaries changed');
+  resume = resume.replaceAll(ticketInvalidation, 'Sc940ResumeInvalidateTicket(input.session_key);');
+  resume = replaceOnce(
+    resume,
+    '  // Existing V2 start before consumer focus preparation.',
+    '  // Existing V2 start before consumer focus preparation.\n  if (!Sc940ResumeSourcePin(session, before)) { *reason = "diagnostic_source_pin"; return false; }',
+  );
+  resume = replaceOnce(
+    resume,
+    '  const auto begin_focus = [&] {',
+    '  Sc940ResumePrepareFocus(input.window);\n  const auto begin_focus = [&] {',
+  );
+  resume = replaceOnce(resume, 'ResolveWindowsExplicitResumeTarget(', 'Sc940ResumeResolve(');
+  resume = replaceOnce(resume, 'ResolveWindowsSessionRefocusTarget(', 'Sc940ResumeRefocus(');
+  resume = replaceOnce(
+    resume,
+    'ShowWindow(input.window, SW_RESTORE);',
+    'Sc940ResumeShow(input.window, SW_RESTORE);',
+  );
+  resume = replaceOnce(
+    resume,
+    'ShowWindow(refocus_window, SW_RESTORE);',
+    'Sc940ResumeShow(refocus_window, SW_RESTORE);',
+  );
+  resume = replaceOnce(
+    resume,
+    'SetForegroundWindow(refocus_window);',
+    'Sc940ResumeForeground(refocus_window);',
+  );
+  source = source.slice(0, resumeFrom) + resume + source.slice(resumeTo);
   const readFrom = source.indexOf('bool ReadUiaObservationOnWorker(');
   const readTo = source.indexOf('bool ReadUiaObservation(', readFrom);
   if (readFrom < 0 || readTo < 0) throw new Error('Observation worker boundary changed');
@@ -138,7 +197,25 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     '    if (operation == "read_node_value") {',
-    `    if (operation == "sc940_rejudge_probe") {
+    `    if (operation == "sc940_resume_component") {
+      WindowsSession *session = FindWindowsSession(request);
+      if (session == nullptr) return Respond(pipe, request, MessageType::kError, ErrorPayload("session_missing"));
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult, Sc940ResumeComponent(*session, metadata, FrameIdKey(request.header.session_id)));
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_resume_component_failed"));
+      }
+    }
+    if (operation == "sc940_resume_baseline") {
+      WindowsSession *session = FindWindowsSession(request);
+      if (session == nullptr) return Respond(pipe, request, MessageType::kError, ErrorPayload("session_missing"));
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult, Sc940ResumeBaseline(*session, metadata));
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_resume_baseline_failed"));
+      }
+    }
+    if (operation == "sc940_rejudge_probe") {
       try {
         return Respond(pipe, request, MessageType::kProbeResult, Sc940RejudgeProbe(metadata));
       } catch (...) {
@@ -283,6 +360,7 @@ const program = String.raw`
 #include <string>
 namespace {
 struct LockedWindowsExecutable;
+struct WindowsSession;
 struct WindowsValidationWork;
 struct WindowsFileIdentity;
 struct WindowsV2RejudgeWork;
@@ -298,6 +376,23 @@ void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id);
 void Sc940ValidationRetired(std::uint64_t job_id);
 std::string Sc940ValidationProbe(const std::string &metadata);
 bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
+struct WindowsV2ExistingStartWork;
+struct WindowsV2ExistingStartPending;
+struct WindowsV2ExistingStartMeasurement;
+bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsV2ExistingStartMeasurement &before);
+bool Sc940ResumeOpen(const WindowsV2ExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output);
+bool Sc940ResumeFileIdentity(const WindowsV2ExistingStartWork &work, WindowsFileIdentity *identity);
+void Sc940ResumeContextGate(const WindowsV2ExistingStartWork &work);
+void Sc940ResumeWorkerStarted(const WindowsV2ExistingStartWork &work);
+void Sc940ResumeCancelAttempt();
+void Sc940ResumeInvalidateTicket(const std::string &session_key);
+bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason);
+bool Sc940ResumeRefocus(const WindowsSession &session, HWND *window, std::string *reason);
+void Sc940ResumePrepareFocus(HWND window);
+BOOL Sc940ResumeShow(HWND window, int command);
+BOOL Sc940ResumeForeground(HWND window);
+std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string &metadata);
+std::string Sc940ResumeComponent(const WindowsSession &session, const std::string &metadata, const std::string &session_key);
 void Sc940StartReadyGate();
 void Sc940StartAdoptGate();
 void Sc940StartEpilogueGate();
@@ -356,6 +451,22 @@ std::atomic<unsigned> start_worker_attempts{0};
 std::atomic<unsigned> start_open_successes{0};
 std::atomic<unsigned> start_focus_calls{0};
 std::atomic<bool> hold_start_epilogue{false};
+std::atomic<bool> resume_diagnostic_active{false};
+std::atomic<unsigned> resume_resolve_attempts{0}, resume_focus_attempts{0};
+std::atomic<bool> resume_no_focus{true}, resume_hold_focus_unit{false};
+std::atomic<bool> resume_focus_setup_minimized{false}, resume_minimized_client_bounds{false};
+std::atomic<bool> resume_hold_before{false}, resume_hold_after{false}, resume_hold_context{false};
+std::atomic<bool> resume_fail_after_read{false};
+std::atomic<unsigned> resume_before_calls{0}, resume_before_successes{0};
+std::atomic<unsigned> resume_after_reads{0}, resume_after_successes{0}, resume_context_calls{0};
+std::atomic<unsigned> resume_workers{0}, resume_cancel_attempts{0}, resume_ticket_invalidations{0};
+std::atomic<unsigned> resume_before_jobs{0}, resume_after_jobs{0}, resume_before_file_reads{0};
+std::atomic<HANDLE> resume_source_process{nullptr}, resume_source_file{INVALID_HANDLE_VALUE};
+std::mutex resume_threads_mutex;
+std::vector<std::pair<std::shared_ptr<WindowsV2ExistingStartPending>, HANDLE>> resume_threads;
+std::shared_ptr<WindowsV2ExistingStartPending> resume_held_pending;
+std::atomic<unsigned> resume_pin_checks{0};
+HANDLE resume_other_file = INVALID_HANDLE_VALUE;
 std::atomic<bool> validation_case_active{false};
 std::atomic<unsigned> validation_file_reads{0}, validation_file_successes{0}, validation_workers{0};
 std::atomic<unsigned> validation_cancel_attempts{0}, validation_retired_jobs{0};
@@ -568,6 +679,232 @@ bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output) {
   if (opened) start_open_successes.fetch_add(1);
   return opened;
 }
+void Sc940ResumeWorkerStarted(const WindowsV2ExistingStartWork &work) {
+  if (!resume_diagnostic_active.load()) return;
+  resume_workers.fetch_add(1);
+  if (work.phase == WindowsV2ExistingStartPhase::BeforeFocus) resume_before_jobs.fetch_add(1);
+  else resume_after_jobs.fetch_add(1);
+  HANDLE thread = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &thread,
+                       SYNCHRONIZE | THREAD_QUERY_LIMITED_INFORMATION, FALSE, 0)) {
+    wrong_measurement.store(true);
+    return;
+  }
+  try {
+    std::lock_guard lock(resume_threads_mutex);
+    resume_threads.emplace_back(work.pending, thread);
+  } catch (...) {
+    CloseHandle(thread);
+    wrong_measurement.store(true);
+  }
+}
+void Sc940ResumeInvalidateTicket(const std::string &session_key) {
+  if (resume_diagnostic_active.load()) resume_ticket_invalidations.fetch_add(1);
+  InvalidateWindowsTicket(session_key);
+}
+void Sc940ResumeCancelAttempt() {
+  if (resume_diagnostic_active.load()) resume_cancel_attempts.fetch_add(1);
+}
+void Sc940ResumeHold(const WindowsV2ExistingStartWork &work) {
+  {
+    std::lock_guard lock(resume_threads_mutex);
+    resume_held_pending = work.pending;
+  }
+  SetEvent(gate_entered);
+  if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
+}
+bool Sc940ResumeOpen(const WindowsV2ExistingStartWork &work, HANDLE process, LockedWindowsExecutable *output) {
+  if (!resume_diagnostic_active.load()) return OpenLockedProcessExecutable(process, output);
+  if (GetProcessId(process) != fixture_pids[0] || work.process.value == resume_source_process.load() ||
+      work.executable.value == resume_source_file.load()) {
+    wrong_measurement.store(true);
+    return false;
+  }
+  resume_before_calls.fetch_add(1);
+  if (resume_hold_before.load()) Sc940ResumeHold(work);
+  const bool opened = OpenLockedProcessExecutable(process, output);
+  if (opened) resume_before_successes.fetch_add(1);
+  return opened;
+}
+bool Sc940ResumeFileIdentity(const WindowsV2ExistingStartWork &work, WindowsFileIdentity *identity) {
+  if (!resume_diagnostic_active.load()) return ReadWindowsFileIdentity(work.executable.value, identity);
+  const bool after = work.phase == WindowsV2ExistingStartPhase::AfterFocus;
+  if (after) resume_after_reads.fetch_add(1);
+  else resume_before_file_reads.fetch_add(1);
+  if (work.executable.value == resume_source_file.load()) wrong_measurement.store(true);
+  if (after && resume_hold_after.load()) Sc940ResumeHold(work);
+  const bool read = ReadWindowsFileIdentity(after && resume_fail_after_read.load() ? gate_entered : work.executable.value, identity);
+  if (after && read) resume_after_successes.fetch_add(1);
+  return read;
+}
+void Sc940ResumeContextGate(const WindowsV2ExistingStartWork &work) {
+  if (!resume_diagnostic_active.load()) return;
+  resume_context_calls.fetch_add(1);
+  if (resume_hold_context.load()) Sc940ResumeHold(work);
+}
+std::shared_ptr<WindowsV2ExistingStartPending> ResumeHeldPending() {
+  std::lock_guard lock(resume_threads_mutex);
+  return resume_held_pending;
+}
+bool WaitResumeThread(const std::shared_ptr<WindowsV2ExistingStartPending> &pending, DWORD budget = 5000) {
+  HANDLE thread = nullptr;
+  {
+    std::lock_guard lock(resume_threads_mutex);
+    for (const auto &entry : resume_threads) if (entry.first == pending) thread = entry.second;
+  }
+  return thread != nullptr && WaitForSingleObject(thread, budget) == WAIT_OBJECT_0;
+}
+bool WaitAllResumeThreads() {
+  std::vector<HANDLE> threads;
+  {
+    std::lock_guard lock(resume_threads_mutex);
+    for (const auto &entry : resume_threads) threads.push_back(entry.second);
+  }
+  const ULONGLONG deadline = GetTickCount64() + 5000;
+  for (HANDLE thread : threads) {
+    const ULONGLONG now = GetTickCount64();
+    if (WaitForSingleObject(thread, now >= deadline ? 0 : static_cast<DWORD>(deadline - now)) != WAIT_OBJECT_0)
+      return false;
+  }
+  return threads.size() == resume_workers.load();
+}
+bool CloseResumeThreadEvidence() {
+  std::lock_guard lock(resume_threads_mutex);
+  bool closed = true;
+  for (const auto &entry : resume_threads) closed = CloseHandle(entry.second) != FALSE && closed;
+  resume_threads.clear();
+  resume_held_pending.reset();
+  return closed;
+}
+bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason) {
+  if (!resume_diagnostic_active.load()) return ResolveWindowsExplicitResumeTarget(session, window, reason);
+  resume_resolve_attempts.fetch_add(1);
+  if (!resume_no_focus.load()) return ResolveWindowsExplicitResumeTarget(session, window, reason);
+  *reason = "diagnostic_resume_resolve_forbidden";
+  return false;
+}
+bool Sc940ResumeRefocus(const WindowsSession &session, HWND *window, std::string *reason) {
+  if (!resume_diagnostic_active.load()) return ResolveWindowsSessionRefocusTarget(session, window, reason);
+  resume_resolve_attempts.fetch_add(1);
+  if (!resume_no_focus.load()) return ResolveWindowsSessionRefocusTarget(session, window, reason);
+  *reason = "diagnostic_resume_resolve_forbidden";
+  return false;
+}
+void Sc940ResumePrepareFocus(HWND window) {
+  if (!resume_diagnostic_active.load() || !resume_hold_focus_unit.load()) return;
+  RECT before{};
+  Require(!resume_no_focus.load() && window == fixture_windows[0] && !IsIconic(window) &&
+              GetForegroundWindow() != window && ClientBoundsPhysical(window, &before),
+          "resume_owned_focus_setup_after_validation");
+  // List and the real pre-focus geometry/resolver checks need normal client bounds. Model an
+  // owned target minimizing after those checks, so the real restore and foreground units both apply.
+  ShowWindow(window, SW_MINIMIZE);
+  Require(IsIconic(window) && GetForegroundWindow() != window, "resume_owned_target_minimized");
+  RECT minimized{};
+  resume_minimized_client_bounds.store(ClientBoundsPhysical(window, &minimized));
+  resume_focus_setup_minimized.store(true);
+}
+BOOL Sc940ResumeShow(HWND window, int command) {
+  if (!resume_diagnostic_active.load()) return ShowWindow(window, command);
+  resume_focus_attempts.fetch_add(1);
+  if (resume_no_focus.load()) return FALSE;
+  const BOOL result = ShowWindow(window, command);
+  if (resume_hold_focus_unit.load()) {
+    SetEvent(gate_entered);
+    if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
+  }
+  return result;
+}
+BOOL Sc940ResumeForeground(HWND window) {
+  if (!resume_diagnostic_active.load()) return SetForegroundWindow(window);
+  resume_focus_attempts.fetch_add(1);
+  return resume_no_focus.load() ? FALSE : SetForegroundWindow(window);
+}
+std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string &metadata) {
+  Require(resume_diagnostic_active.load() && session.pid == fixture_pids[0] &&
+              GetCurrentThreadId() == rca_consumer_thread_id.load(), "resume_baseline_owned_consumer");
+  LockedWindowsExecutable current;
+  std::string mode;
+  std::optional<sprint_coder::computer_use::WindowsFileKey> not_web;
+  const bool identity = OpenLockedProcessExecutable(session.process_handle, &current) &&
+      SameWindowsPath(current.identity.path, session.canonical_path) &&
+      WindowsSessionProcessMatches(session) && WindowsSessionExecutableMatches(session, current);
+  const bool admitted = identity && AdmitWindowsV2Start(session.pid, session.window, current, metadata,
+      /*new_session=*/false, session.app_identity, session.executable_digest, session.signer_digest, &mode, &not_web) &&
+      mode == session.maximum_mode && not_web == session.not_web_file;
+  return "{\"componentOnly\":true,\"identityMatches\":" + std::string(identity ? "true" : "false") +
+      ",\"admissionMatches\":" + (admitted ? "true" : "false") + ",\"inputAttemptCount\":" +
+      std::to_string(session.input_api_attempts->load()) + "}";
+}
+bool Sc940ResumeSourcePin(const WindowsSession &session, const WindowsV2ExistingStartMeasurement &before) {
+  if (!resume_diagnostic_active.load()) return true;
+  WindowsFileIdentity original;
+  const bool matched = GetCurrentThreadId() == rca_consumer_thread_id.load() &&
+              session.executable_file == resume_source_file.load() && session.process_handle == resume_source_process.load() &&
+              ReadWindowsFileIdentity(session.executable_file, &original) &&
+              SameWindowsFileIdentity(original, before.executable.file_identity) &&
+              GetProcessId(session.process_handle) == session.pid &&
+              WaitForSingleObject(session.process_handle, 0) == WAIT_TIMEOUT;
+  if (!matched) { wrong_measurement.store(true); return false; }
+  resume_pin_checks.fetch_add(1);
+  return true;
+}
+std::string Sc940ResumeComponent(const WindowsSession &session, const std::string &metadata,
+                                 const std::string &session_key) {
+  Require(resume_diagnostic_active.load() && GetCurrentThreadId() == rca_consumer_thread_id.load(),
+          "resume_component_consumer");
+  const WindowsSession &source = session;
+  resume_fail_after_read.store(false);
+  WindowsV2StartInput input;
+  input.pid = source.pid;
+  input.window = source.window;
+  input.window_value = reinterpret_cast<UINT_PTR>(source.window);
+  input.session_key = session_key;
+  input.session_id = source.session_id;
+  input.app_identity = source.app_identity;
+  input.expected_window_identity = source.window_identity;
+  input.canonical_path = source.canonical_path;
+  input.executable_digest = source.executable_digest;
+  input.signer_digest = source.signer_digest;
+  input.cancel_epoch = source.cancel_epoch;
+  input.stop_serial = WindowsValidationFrameStopSerial();
+  input.main_pid = windows_v2_main_pid;
+  Require(ReadJsonUint64(metadata, "denyRulesetVersion", &input.ruleset_version), "resume_component_ruleset");
+  std::string mode;
+  ReadJsonString(metadata, "mode", &mode);
+  if (mode == "before_app") input.app_identity = std::string(64, '0');
+  if (mode == "before_window") input.expected_window_identity = std::string(64, '0');
+  if (mode == "before_ruleset") input.ruleset_version = 0;
+  const unsigned count = mode == "repeat" ? 3 : 1;
+  unsigned completed = 0;
+  bool before_ok = false, after_ok = false;
+  for (unsigned index = 0; index < count; ++index) {
+    WindowsV2ExistingStartMeasurement before, after;
+    std::string reason;
+    before_ok = RunWindowsV2ExistingStartMeasurement(input, source, WindowsV2ExistingStartPhase::BeforeFocus,
+                                                     nullptr, &before, &reason);
+    if (!before_ok) break;
+    // Before's temporary handles have been closed. The original Session still pins the same file
+    // across the consumer/focus interval; this diagnostic does not perform that focus interval.
+    Require(Sc940ResumeSourcePin(source, before), "resume_source_pin_survives_before");
+    if (mode == "after_digest") before.executable.executable_digest = std::string(64, '0');
+    if (mode == "after_signer") before.executable.signer_digest = std::string(64, '0');
+    if (mode == "after_language") before.executable.policy_language = "different";
+    if (mode == "after_file") {
+      WindowsFileIdentity other;
+      Require(ReadWindowsFileIdentity(resume_other_file, &other), "resume_real_other_file");
+      before.executable.file_identity = other;
+    }
+    resume_fail_after_read.store(mode == "after_read_failure");
+    after_ok = RunWindowsV2ExistingStartMeasurement(input, source, WindowsV2ExistingStartPhase::AfterFocus,
+                                                    &before, &after, &reason);
+    resume_fail_after_read.store(false);
+    if (!after_ok) break;
+    ++completed;
+  }
+  return "{\"componentOnly\":true,\"beforeOk\":" + std::string(before_ok ? "true" : "false") +
+      ",\"afterOk\":" + (after_ok ? "true" : "false") + ",\"completed\":" + std::to_string(completed) + "}";
+}
 void Sc940StartReadyGate() { Sc940Gate(HoldPoint::kStartReady); }
 void Sc940StartWorkerAttempt() { start_worker_attempts.fetch_add(1); }
 void Sc940StartAdoptGate() { Sc940Gate(HoldPoint::kStartAdopt); }
@@ -779,6 +1116,7 @@ struct RcaRun {
   WindowsSession validation_probe_session;
   WindowsSession rejudge_probe_session;
   ScopedKernelHandle rejudge_comparison_file;
+  ScopedKernelHandle resume_comparison_file;
   ScopedKernelHandle job;
   std::array<ScopedKernelHandle, 3> children;
   ScopedKernelHandle server{INVALID_HANDLE_VALUE};
@@ -1002,7 +1340,8 @@ struct RcaRun {
   }
 
   bool Receipt(unsigned id, MessageType type, std::string_view expected, std::uint64_t epoch,
-               std::uint8_t session_byte = 7, std::string_view session_name = "sc940-control") {
+               std::uint8_t session_byte = 7, std::string_view session_name = "sc940-control",
+               std::uint64_t expected_attempts = 0) {
     std::lock_guard<std::mutex> lock(replies_mutex);
     const auto found = replies.find(id);
     if (found == replies.end()) return false;
@@ -1017,7 +1356,7 @@ struct RcaRun {
            ReadJsonString(body, "result", &result) && result == expected &&
            ReadJsonString(body, "sessionId", &session) && session == session_name &&
            ReadJsonUint64(body, "cancelEpoch", &actual_epoch) && actual_epoch == epoch &&
-           ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0 &&
+           ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == expected_attempts &&
            ReadOptionalJsonBoolean(body, "drained", &drained) && drained;
   }
 
@@ -1175,12 +1514,23 @@ struct RcaRun {
     // The detached production worker must release its slot/resources before our fixture is killed.
     worker_idle = WaitWorkerIdle(15'000) && !capture_failed;
     worker_idle = WaitUiaWorkerIdle(15'000) && worker_idle;
+    if (resume_diagnostic_active.load()) {
+      if (!worker_idle || !WaitAllResumeThreads()) {
+        watchdog_fired.store(true);
+        if (job.value != nullptr) TerminateJobObject(job.value, 90);
+        TerminateProcess(GetCurrentProcess(), 90);
+        std::terminate();
+      }
+      worker_idle = CloseResumeThreadEvidence() && worker_idle;
+    }
     ReleaseWindowsSessionResources(&validation_probe_session);
     validation_probe_source = nullptr;
     rejudge_probe_source.store(nullptr, std::memory_order_release);
     ReleaseWindowsSessionResources(&rejudge_probe_session);
     if (rejudge_comparison_file.value != nullptr) CloseHandle(rejudge_comparison_file.release());
     rejudge_other_file = INVALID_HANDLE_VALUE;
+    if (resume_comparison_file.value != nullptr) CloseHandle(resume_comparison_file.release());
+    resume_other_file = INVALID_HANDLE_VALUE;
     validation_case_active.store(false);
     if (job.value != nullptr) TerminateJobObject(job.value, 0);
     child_exited = true;
@@ -1702,6 +2052,319 @@ int DiagnoseRejudge(std::wstring_view scenario, DWORD pid, HWND window, const st
   }
 }
 
+std::string ResumeMetadata(const ListedStart &listed, std::uint64_t epoch, bool explicit_resume = true,
+                           bool omit_generation = false, bool stale_generation = false) {
+  std::string metadata = listed.Metadata(epoch);
+  const auto begin = metadata.find(",\"targetGeneration\":");
+  const auto end = metadata.find(',', begin + 1);
+  Require(begin != std::string::npos && end != std::string::npos, "resume_generation_field");
+  if (omit_generation) metadata.erase(begin, end - begin);
+  else if (stale_generation) metadata.replace(begin, end - begin, ",\"targetGeneration\":0");
+  metadata.pop_back();
+  if (explicit_resume) metadata += ",\"resume\":true";
+  metadata += '}';
+  return metadata;
+}
+void SeedResumeSession(const ListedStart &listed, const std::string &created) {
+  const auto inserted = sessions.try_emplace(FrameIdKey(Id(7)));
+  Require(inserted.second, "resume_single_diagnostic_session");
+  auto &session = inserted.first->second;
+  SeedOwnedValidationIdentity(&session);
+  session.session_id = "sc940-new";
+  // This is an explicit fresh diagnostic binding, never a successful public restart or grant.
+  session.cancel_epoch = cancellation_epoch.load();
+  session.maximum_mode = listed.mode;
+  Require(session.pid == listed.pid && session.app_identity == listed.app &&
+              session.window_identity == listed.window_identity && session.process_start == created &&
+              session.executable_digest == listed.executable && session.signer_digest.empty() &&
+              session.maximum_mode == "observe_only" && !session.not_web_file.has_value() &&
+              !session.has_observation && ticket_states.empty(), "resume_seed_is_real_row_and_handles");
+  resume_source_process.store(session.process_handle);
+  resume_source_file.store(session.executable_file);
+}
+void SendResumeComponent(RcaRun &run, const ListedStart &listed, std::uint8_t request,
+                         std::string_view mode = "normal") {
+  run.Send(MessageType::kProbe, request, "{\"operation\":\"sc940_resume_component\",\"mode\":\"" +
+      std::string(mode) + "\",\"denyRulesetVersion\":" + std::to_string(listed.ruleset) + "}");
+}
+bool ResumeComponentReply(RcaRun &run, unsigned request, bool before, bool after, unsigned completed) {
+  std::string body;
+  bool component = false, actual_before = false, actual_after = false;
+  std::uint64_t actual_completed = 0;
+  return run.ProbeBody(request, &body) && body.size() < 512 &&
+      ReadOptionalJsonBoolean(body, "componentOnly", &component) && component &&
+      ReadOptionalJsonBoolean(body, "beforeOk", &actual_before) && actual_before == before &&
+      ReadOptionalJsonBoolean(body, "afterOk", &actual_after) && actual_after == after &&
+      ReadJsonUint64(body, "completed", &actual_completed) && actual_completed == completed;
+}
+bool ResumeSucceeded(RcaRun &run, unsigned request, const ListedStart &listed) {
+  std::string body, id, app, mode;
+  std::uint64_t epoch = 0, attempts = 1;
+  return run.ProbeBody(request, &body) && ReadJsonString(body, "sessionId", &id) && id == "sc940-new" &&
+      ReadJsonString(body, "appIdentityDigest", &app) && app == listed.app &&
+      ReadJsonString(body, "maximumMode", &mode) && mode == listed.mode &&
+      ReadJsonUint64(body, "cancelEpoch", &epoch) && epoch == cancellation_epoch.load() &&
+      ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0 &&
+      !WindowsTargetListWorkerRunning().load();
+}
+
+// All sessions here are diagnostic bindings from actual owned rows/handles. Only resume-live-*
+// traverses the real foreground/resolver path; neither family establishes public Start or grants.
+int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std::string &created,
+                   const std::wstring &fixture_path, bool focus_control_ready) {
+  const bool live = scenario.starts_with(L"resume-live-");
+  const bool normal = scenario == L"resume-live-normal";
+  const bool focus_stop = scenario == L"resume-live-focus-stop";
+  const bool component_after = scenario.starts_with(L"resume-after-component-");
+  const bool after = component_after || scenario.starts_with(L"resume-live-after-");
+  const bool cancel = scenario.ends_with(L"-cancel") || focus_stop;
+  const bool queued = scenario == L"resume-prequeued-close";
+  const bool cold = scenario == L"resume-cold-context-close";
+  const bool repeat = scenario == L"resume-components";
+  const std::string label(scenario.begin(), scenario.end());
+  RcaRun run;
+  ULONGLONG stop_ms = 0, close_ms = 0;
+  unsigned expected_input_attempts = focus_stop ? 1 : 0;
+  bool late_rejected = false;
+  try {
+    run.AttachOwnedSibling(pid, window, created, fixture_path);
+    if (live) Require(focus_stop ? (focus_control_ready && !IsIconic(window) && GetForegroundWindow() != window)
+                                : GetForegroundWindow() == window, "resume_environment_foreground_required");
+    run.StartPipe(false, false);
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "resume_handshake");
+    const ListedStart listed = ReadListedStart(run, 10);
+    Require(WindowsV2FactsContextCache().has_value() &&
+                WindowsV2FactsContextCache()->lineage_root_pid == GetCurrentProcessId(), "resume_real_context_ready");
+    SeedResumeSession(listed, created);
+    resume_diagnostic_active.store(true);
+    resume_no_focus.store(!live);
+    LockedWindowsExecutable other;
+    Require(OpenLockedProcessExecutable(GetCurrentProcess(), &other) &&
+                !SameWindowsFileIdentity(other.identity.file_identity,
+                    {sessions.at(FrameIdKey(Id(7))).executable_volume_serial,
+                     sessions.at(FrameIdKey(Id(7))).executable_file_id}), "resume_real_other_image");
+    run.resume_comparison_file.value = other.file;
+    other.file = INVALID_HANDLE_VALUE;
+    resume_other_file = run.resume_comparison_file.value;
+    run.Send(MessageType::kProbe, 20, "{\"operation\":\"sc940_resume_baseline\",\"denyRulesetVersion\":" +
+        std::to_string(listed.ruleset) + "}");
+    std::string baseline;
+    bool component = false, identity = false, admission = false;
+    Require(run.Wait(20, 15'000) && run.ProbeBody(20, &baseline) &&
+                ReadOptionalJsonBoolean(baseline, "componentOnly", &component) && component &&
+                ReadOptionalJsonBoolean(baseline, "identityMatches", &identity) && identity &&
+                ReadOptionalJsonBoolean(baseline, "admissionMatches", &admission) && admission,
+            "resume_real_identity_admission_baseline");
+    if (normal) {
+      run.Send(MessageType::kProbe, 21, ResumeMetadata(listed, 1, true, true));
+      Require(run.Wait(21, 15'000) && ResumeSucceeded(run, 21, listed) && WaitAllResumeThreads() &&
+                  resume_before_jobs.load() == 1 && resume_after_jobs.load() == 1 && resume_after_reads.load() == 1,
+              "resume_live_success_without_generation");
+      run.Send(MessageType::kProbe, 22, ResumeMetadata(listed, 1, false, false, true));
+      Require(run.Wait(22, 15'000) && ResumeSucceeded(run, 22, listed) && WaitAllResumeThreads() &&
+                  resume_before_jobs.load() == 2 && resume_after_jobs.load() == 2 && resume_after_reads.load() == 2 &&
+                  resume_ticket_invalidations.load() == 4, "refocus_live_success_with_stale_generation");
+      std::string mismatch = ResumeMetadata(listed, 1);
+      const auto id = mismatch.find("\"sessionId\":\"sc940-new\"");
+      Require(id != std::string::npos, "resume_binding_negative_field");
+      mismatch.replace(id, std::string("\"sessionId\":\"sc940-new\"").size(), "\"sessionId\":\"different\"");
+      run.Send(MessageType::kProbe, 23, mismatch);
+      Require(run.Wait(23, 15'000) && run.Error(23, "session_refocus_stale") && WaitAllResumeThreads() &&
+                  resume_ticket_invalidations.load() == 5 && resume_after_jobs.load() == 2,
+              "resume_identified_refusal_still_invalidates_ticket");
+      mismatch = ResumeMetadata(listed, 1);
+      const auto digest = mismatch.find(listed.app);
+      Require(digest != std::string::npos, "resume_app_negative_field");
+      mismatch.replace(digest, listed.app.size(), std::string(64, '0'));
+      run.Send(MessageType::kProbe, 24, mismatch);
+      Require(run.Wait(24, 15'000) && run.Error(24, "session_target_rejected") && WaitAllResumeThreads() &&
+                  resume_ticket_invalidations.load() == 6 && resume_after_jobs.load() == 2,
+              "resume_refused_attempt_also_invalidates_ticket");
+    } else if (repeat) {
+      SendResumeComponent(run, listed, 21, "repeat");
+      Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 3) && WaitAllResumeThreads() &&
+                  resume_before_jobs.load() == 3 && resume_before_calls.load() == 3 &&
+                  resume_before_file_reads.load() == 3 && resume_after_jobs.load() == 3 &&
+                  resume_after_reads.load() == 3 && resume_after_successes.load() == 3 &&
+                  resume_pin_checks.load() == 3, "resume_both_phases_remeasure_with_continuous_source_pin");
+      std::uint8_t request = 30;
+      for (const char *mode : {"before_app", "before_window", "before_ruleset", "after_digest", "after_signer",
+                               "after_language", "after_file", "after_read_failure"}) {
+        const bool before_failure = std::string_view(mode).starts_with("before_");
+        const unsigned reads = resume_after_reads.load();
+        const unsigned successes = resume_after_successes.load();
+        SendResumeComponent(run, listed, request, mode);
+        Require(run.Wait(request, 15'000) && ResumeComponentReply(run, request, !before_failure, false, 0) &&
+                    WaitAllResumeThreads(), "resume_binding_or_real_read_failure_refused");
+        Require(resume_after_reads.load() == reads + (before_failure ? 0u : 1u) &&
+                    resume_after_successes.load() == successes + (before_failure || std::string_view(mode) == "after_read_failure" ? 0u : 1u),
+                "resume_negative_keeps_actual_second_phase_read");
+        ++request;
+      }
+      SendResumeComponent(run, listed, 40);
+      Require(run.Wait(40, 15'000) && ResumeComponentReply(run, 40, true, true, 1) && WaitAllResumeThreads(),
+              "resume_negative_result_not_cached");
+      // Ticket lifecycle unit fixture only: no preflight, dispatch, grant, or input is performed.
+      // Keep the exact same binding and clock for the post-rejection Consume, so neither epoch nor
+      // expiry can explain why the old ticket becomes unusable.
+      const std::string key = FrameIdKey(Id(7));
+      const auto epoch = cancellation_epoch.load();
+      const unsigned workers = resume_workers.load();
+      auto &owner = sessions.at(key);
+      const auto binding = WindowsTicketBinding(owner, "resume-ticket-unit", std::string(64, 'a'),
+                                                std::string(64, 'b'), epoch, 1);
+      const std::string token(64, 'c');
+      constexpr std::uint64_t now = 100;
+      sprint_coder::computer_use::NativeOrdinaryTicketSlot positive;
+      Require(positive.Issue(token, binding, now, sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs) &&
+                  positive.Consume(token, binding, now), "resume_ticket_unit_positive_control");
+      auto &ticket = ticket_states[key];
+      ticket.generation = 1;
+      Require(ticket.slot.Issue(token, binding, now, sprint_coder::computer_use::kNativeOrdinaryTicketTtlNs) &&
+                  ticket.slot.occupied(), "resume_ticket_unit_seeded");
+      run.Send(MessageType::kProbe, 41, ResumeMetadata(listed, epoch + 1));
+      Require(run.Wait(41, 1000) && run.Error(41, "session_start_canceled") &&
+                  cancellation_epoch.load() == epoch && owner.cancel_epoch == epoch &&
+                  resume_workers.load() == workers && !ticket.slot.occupied() && ticket.generation == 2 &&
+                  !ticket.slot.Consume(token, binding, now), "resume_future_epoch_refusal_burns_old_ticket");
+      ForgetWindowsTicket(key);
+    } else {
+      if (cold) {
+        std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+        WindowsV2FactsContextCache().reset();
+        resume_hold_context.store(true);
+      } else if (queued) hold_point.store(HoldPoint::kConsumer);
+      else if (after) resume_hold_after.store(true);
+      else if (focus_stop) resume_hold_focus_unit.store(true);
+      else resume_hold_before.store(true);
+      if (component_after) SendResumeComponent(run, listed, 2);
+      else run.Send(MessageType::kProbe, 2, ResumeMetadata(listed, 1));
+      Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0 &&
+                  WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "resume_fault_gate_entered");
+      const auto pending = ResumeHeldPending();
+      const auto attempts = sessions.at(FrameIdKey(Id(7))).input_api_attempts;
+      const unsigned workers = resume_workers.load();
+      if (queued) Require(workers == 0 && !WindowsTargetListWorkerRunning().load(), "resume_prequeued_no_job");
+      else if (focus_stop) Require(workers == 1 && resume_focus_attempts.load() == 1 && attempts->load() == 1,
+                                  "resume_first_real_focus_unit_complete");
+      else Require(pending != nullptr && WindowsTargetListWorkerRunning().load() &&
+                       workers == (after ? 2u : 1u), "resume_actual_phase_worker_held");
+      const auto response_refused = [&] {
+        return component_after ? ResumeComponentReply(run, 2, true, false, 0) : run.Error(2, "session_start_canceled");
+      };
+      if (cancel) {
+        const auto serial = WindowsTargetListControl().stop_serial.load();
+        const ULONGLONG sent = GetTickCount64();
+        run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+        Require(WaitStopSerial(serial, 1000), "resume_cancel_reader_progress");
+        if (focus_stop) { resume_hold_focus_unit.store(false); SetEvent(run.release.value); }
+        Require(run.Wait(2, 1000) && response_refused() && run.Wait(3, 1000) &&
+                    run.Receipt(3, MessageType::kDispatchResult, "canceled", 2, 7, "sc940-new", expected_input_attempts),
+                "resume_cancel_alone_drains_before_close");
+        stop_ms = GetTickCount64() - sent;
+        Require(stop_ms < 1000, "resume_cancel_receipt_budget");
+        if (!after && !focus_stop) {
+          SendResumeComponent(run, listed, 6);
+          Require(run.Wait(6, 1000) && ResumeComponentReply(run, 6, false, false, 0) &&
+                      resume_workers.load() == workers && WindowsTargetListWorkerRunning().load(), "resume_busy_starts_no_extra_job");
+        }
+      }
+      const auto serial = WindowsTargetListControl().stop_serial.load();
+      const ULONGLONG sent = GetTickCount64();
+      run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(cancel ? 3 : 2) + "}");
+      Require(WaitStopSerial(serial, 1000), "resume_close_reader_progress");
+      if (queued) {
+        Require(cancellation_epoch.load() == 1 && resume_workers.load() == 0, "resume_prequeued_close_uses_enqueue_serial");
+        hold_point.store(HoldPoint::kNone);
+        SetEvent(run.release.value);
+      }
+      Require(run.Wait(2, 1000) && response_refused() && run.Wait(4, 1000) &&
+                  run.Receipt(4, MessageType::kProbeResult, "closed", cancel ? 3 : 2, 7, "sc940-new", expected_input_attempts),
+              "resume_close_receipt");
+      close_ms = GetTickCount64() - sent;
+      Require(close_ms < 1000 && sessions.empty() && ticket_states.empty() && attempts->load() == expected_input_attempts,
+              "resume_original_session_closed");
+      if (!queued && !focus_stop) {
+        Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT && WindowsTargetListWorkerRunning().load(),
+                "resume_receipts_precede_worker_release");
+        const unsigned reads = resume_after_successes.load();
+        if (cold) Require(!WindowsV2FactsContextCache().has_value(), "resume_cold_context_not_adopted");
+        resume_hold_before.store(false); resume_hold_after.store(false); resume_hold_context.store(false);
+        SetEvent(run.release.value);
+        Require(WaitResumeThread(pending) && WaitAllResumeThreads() && run.WaitWorkerIdle(1000), "resume_worker_actually_exited_after_close");
+        {
+          std::lock_guard lock(pending->mutex);
+          Require(pending->done && pending->abandoned.load() && pending->thread.value == nullptr &&
+                      !pending->result.succeeded && !pending->result.context.has_value(), "resume_late_result_discarded");
+        }
+        if (after) Require(resume_after_successes.load() == reads + 1, "resume_dup_real_read_after_original_close");
+        else Require(resume_before_successes.load() == 1, "resume_real_open_completed_after_close");
+        if (cold) Require(!WindowsV2FactsContextCache().has_value() && resume_context_calls.load() == 1,
+                          "resume_late_cold_context_discarded");
+        late_rejected = true;
+      } else Require(WaitAllResumeThreads() && (!focus_stop || resume_after_jobs.load() == 0), "resume_consumer_gate_cleanup");
+      if (!live) {
+        SeedResumeSession(listed, created);
+        if (cancel && !after) {
+          ResetEvent(run.entered.value); ResetEvent(run.release.value);
+          resume_hold_before.store(true);
+          SendResumeComponent(run, listed, 21);
+          Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "resume_retry_worker_held");
+          const auto next = ResumeHeldPending();
+          const unsigned cancels = resume_cancel_attempts.load();
+          Require(next != nullptr && next != pending && WaitResumeThread(pending, 0), "resume_old_thread_really_finished");
+          CancelWindowsV2ExistingStartJob(pending);
+          Require(resume_cancel_attempts.load() == cancels && WindowsTargetListWorkerRunning().load() &&
+                      WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "resume_old_pending_cannot_cancel_new_job");
+          resume_hold_before.store(false); SetEvent(run.release.value);
+        } else SendResumeComponent(run, listed, 21);
+        Require(run.Wait(21, 15'000) && ResumeComponentReply(run, 21, true, true, 1) && WaitAllResumeThreads(),
+                "resume_explicit_fresh_component_retry");
+        if (cold) Require(WindowsV2FactsContextCache().has_value() && resume_context_calls.load() == 2,
+                          "resume_only_fresh_retry_adopts_context");
+      }
+      Require(run.ReplyCount(2) == 1, "resume_late_phase_never_replies_success");
+    }
+    if (sessions.contains(FrameIdKey(Id(7)))) {
+      const auto epoch = cancellation_epoch.load() + 1;
+      run.Send(MessageType::kProbe, 50, "{\"operation\":\"close_session\",\"cancelEpoch\":" + std::to_string(epoch) + "}");
+      Require(run.Wait(50, 1000) && run.Receipt(50, MessageType::kProbeResult, "closed", epoch, 7, "sc940-new"), "resume_final_diagnostic_close");
+    }
+    Require(WaitAllResumeThreads() && run.WaitWorkerIdle(1000) && sessions.empty() && ticket_states.empty() &&
+                resume_before_calls.load() == resume_before_jobs.load() && resume_after_reads.load() == resume_after_jobs.load() &&
+                resume_workers.load() == resume_before_jobs.load() + resume_after_jobs.load() &&
+                (!live ? resume_resolve_attempts.load() == 0 && resume_focus_attempts.load() == 0 : true) &&
+                (!focus_stop || (resume_focus_attempts.load() == 1 && resume_focus_setup_minimized.load())) && !wrong_measurement.load() && !gate_timed_out.load(),
+            "resume_phases_threads_and_no_unexpected_input");
+    const unsigned workers = resume_workers.load();
+    run.Cleanup();
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "resume_owned_cleanup");
+    std::cout << "{\"case\":\"" << label << "\",\"componentIntegrationOnly\":" << (live ? "false" : "true")
+              << ",\"realIdentityAdmissionBaseline\":true,\"realListMode\":\"observe_only\",\"stopMs\":" << stop_ms
+              << ",\"closeMs\":" << close_ms << ",\"beforeJobs\":" << resume_before_jobs.load() << ",\"afterJobs\":" << resume_after_jobs.load()
+              << ",\"beforeFileReads\":" << resume_before_file_reads.load() << ",\"afterFileReads\":" << resume_after_reads.load()
+              << ",\"workerThreads\":" << workers << ",\"workerThreadsExited\":true,\"threadHandlesClosed\":true"
+              << ",\"workerThreadsJoined\":false,\"joinedThreads\":\"pipe-reader-watchdog\""
+              << ",\"sourcePinChecks\":" << resume_pin_checks.load() << ",\"lateResultRejected\":" << (late_rejected ? "true" : "false")
+              << ",\"resolveAttempts\":" << resume_resolve_attempts.load() << ",\"focusApiAttempts\":" << resume_focus_attempts.load()
+              << ",\"inputAttempts\":" << expected_input_attempts << ",\"foregroundRequired\":" << (live ? "true" : "false")
+              << ",\"healthyResumeRefocusVerified\":" << (normal ? "true" : "false")
+              << ",\"focusSetupMinimizedAfterValidation\":" << (resume_focus_setup_minimized.load() ? "true" : "false")
+              << ",\"minimizedClientBoundsAvailable\":" << (resume_minimized_client_bounds.load() ? "true" : "false")
+              << ",\"publicStartOrGrantVerified\":false,\"ticketLifecycleUnitFixture\":" << (repeat ? "true" : "false")
+              << ",\"preflightOrDispatchVerified\":false,\"seedIsDiagnostic\":true,\"childExited\":true"
+              << ",\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  } catch (const std::exception &error) {
+    run.Cleanup();
+    std::cout << "{\"case\":\"" << label << "\",\"failure\":\"" << error.what()
+              << "\",\"resolveAttempts\":" << resume_resolve_attempts.load()
+              << ",\"focusApiAttempts\":" << resume_focus_attempts.load() << "}\n";
+    return 1;
+  }
+}
+
 // The GUI target and real pipe client are siblings. W8 therefore measures their true relationship,
 // rather than accepting a forged lineage root or a special acceptance-mode/signature exemption.
 int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path) {
@@ -1735,7 +2398,9 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = scenario.starts_with(L"rejudge-") ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
+    startup.wShowWindow = scenario.starts_with(L"rejudge-") ||
+        (scenario.starts_with(L"resume-") && !scenario.starts_with(L"resume-live-"))
+        ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
     PROCESS_INFORMATION fixture{};
     std::wstring command = L"\"" + fixture_path + L"\"";
     const BOOL created = child_token.value != nullptr
@@ -1762,7 +2427,7 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     }
     Require(search.found != nullptr && !IsProcessElevated(fixture.dwProcessId), "start_gui_fixture_window");
     bool focus_control_ready = true;
-    if (scenario == L"start-ready-close") {
+    if (scenario == L"start-ready-close" || scenario == L"resume-live-focus-stop") {
       // A second owned GUI window gives begin_focus real work to refuse; no synthetic key is sent.
       PROCESS_INFORMATION foreground{};
       command = L"\"" + fixture_path + L"\"";
@@ -1823,6 +2488,7 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     run.Cleanup();
     Require(run.child_exited && !run.watchdog_fired.load() &&
                 (output.starts_with("{\"case\":\"start-") || output.starts_with("{\"case\":\"rejudge-") ||
+                 output.starts_with("{\"case\":\"resume-") ||
                  output.starts_with("{\"failure\":\"")),
             "start_coordinator_cleanup");
     std::cout << output;
@@ -2383,6 +3049,10 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
+    if (std::wstring_view(argv[2]).starts_with(L"resume-"))
+      return DiagnoseResume(argv[2], static_cast<DWORD>(std::stoul(argv[3])),
+          reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
+          std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
     if (std::wstring_view(argv[2]).starts_with(L"rejudge-"))
       return DiagnoseRejudge(argv[2], static_cast<DWORD>(std::stoul(argv[3])),
           reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
@@ -2411,6 +3081,24 @@ describe('Windows target I/O RCA seam source', () => {
       generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
+    expect(
+      generated.split('!Sc940ResumeOpen(work, target_process.value, &current_executable)'),
+    ).toHaveLength(2);
+    expect(generated.split('!Sc940ResumeResolve(')).toHaveLength(2);
+    expect(generated.split('Sc940ResumePrepareFocus(input.window);')).toHaveLength(2);
+    expect(generated.split('Sc940ResumeShow(')).toHaveLength(3);
+    expect(generated.split('Sc940ResumeForeground(refocus_window);')).toHaveLength(2);
+    expect(generated.split('operation == "sc940_resume_baseline"')).toHaveLength(2);
+    expect(generated.split('!Sc940ResumeFileIdentity(work, &held)')).toHaveLength(3);
+    expect(generated.split('  Sc940ResumeWorkerStarted(*work);')).toHaveLength(2);
+    expect(generated.split('    Sc940ResumeContextGate(work);')).toHaveLength(2);
+    expect(generated.split('Sc940ResumeInvalidateTicket(input.session_key);')).toHaveLength(3);
+    expect(
+      generated.split('Sc940ResumeCancelAttempt(); CancelSynchronousIo(pending->thread.value);'),
+    ).toHaveLength(2);
+    expect(program).toContain('WaitForSingleObject(thread, budget) == WAIT_OBJECT_0');
+    expect(program).toContain('run.Error(2, "session_start_canceled")');
+    expect(program).toContain('CancelWindowsV2ExistingStartJob(pending);');
     expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
     expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
     expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);
@@ -2593,14 +3281,63 @@ describe.skipIf(
       const startFailures: string[] = [];
       const validationFailures: string[] = [];
       const rejudgeFailures: string[] = [];
+      const resumeFailures: string[] = [];
       for (const scenario of scenarios) {
         const result = await run(
           binary,
-          scenario.startsWith('start-') || scenario.startsWith('rejudge-')
+          scenario.startsWith('start-') ||
+            scenario.startsWith('rejudge-') ||
+            scenario.startsWith('resume-')
             ? ['start-coordinator', scenario, fixtureExecutable]
             : [scenario],
           70_000,
         );
+        if (scenario.startsWith('resume-')) {
+          const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
+          if (result.timedOut || result.status !== 0) {
+            resumeFailures.push(
+              `${scenario}: ${result.timedOut ? 'outer_watchdog' : (failure ?? 'native_assertion')}`,
+            );
+            continue;
+          }
+          try {
+            const metadata: unknown = JSON.parse(result.stdout.trim());
+            expect(metadata).toMatchObject({
+              case: scenario,
+              componentIntegrationOnly: !scenario.startsWith('resume-live-'),
+              realIdentityAdmissionBaseline: true,
+              realListMode: 'observe_only',
+              stopMs: expect.any(Number),
+              closeMs: expect.any(Number),
+              beforeJobs: expect.any(Number),
+              afterJobs: expect.any(Number),
+              workerThreadsExited: true,
+              threadHandlesClosed: true,
+              workerThreadsJoined: false,
+              joinedThreads: 'pipe-reader-watchdog',
+              inputAttempts: scenario === 'resume-live-focus-stop' ? 1 : 0,
+              foregroundRequired: scenario.startsWith('resume-live-'),
+              healthyResumeRefocusVerified: scenario === 'resume-live-normal',
+              focusSetupMinimizedAfterValidation: scenario === 'resume-live-focus-stop',
+              minimizedClientBoundsAvailable: expect.any(Boolean),
+              publicStartOrGrantVerified: false,
+              ticketLifecycleUnitFixture: scenario === 'resume-components',
+              preflightOrDispatchVerified: false,
+              seedIsDiagnostic: true,
+              childExited: true,
+              threadsJoined: true,
+              workerIdle: true,
+              watchdogFired: false,
+            });
+            console.log(JSON.stringify(metadata));
+            console.log(
+              JSON.stringify({ case: scenario, kind: 'helper_exit', helperProcessExited: true }),
+            );
+          } catch {
+            resumeFailures.push(`${scenario}: metadata_assertion`);
+          }
+          continue;
+        }
         if (scenario.startsWith('rejudge-')) {
           const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
           if (result.timedOut || result.status !== 0) {
@@ -2795,8 +3532,8 @@ describe.skipIf(
         console.log(JSON.stringify(metadata));
       }
       expect(
-        [...startFailures, ...validationFailures, ...rejudgeFailures],
-        'Every start, validation, and Rejudge case must pass, including foreground prerequisites',
+        [...startFailures, ...validationFailures, ...rejudgeFailures, ...resumeFailures],
+        'Every native case must pass, including foreground prerequisites',
       ).toEqual([]);
     } finally {
       if (installed)
@@ -2843,6 +3580,27 @@ describe.skipIf(
       'rejudge-prequeued-close',
       'rejudge-repeat',
       'rejudge-cold-context-close',
+    ]);
+  }, 700_000);
+
+  it('keeps resume measurement Stop responsive and both phases fresh without foreground', async () => {
+    await runScenarios([
+      'resume-before-cancel',
+      'resume-before-close',
+      'resume-prequeued-close',
+      'resume-after-component-cancel',
+      'resume-after-component-close',
+      'resume-components',
+      'resume-cold-context-close',
+    ]);
+  }, 700_000);
+
+  it('runs real resume and refocus with foreground, post-focus Stop, and focus-unit ordering', async () => {
+    await runScenarios([
+      'resume-live-normal',
+      'resume-live-after-cancel',
+      'resume-live-after-close',
+      'resume-live-focus-stop',
     ]);
   }, 700_000);
 });
