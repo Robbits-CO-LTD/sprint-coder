@@ -37,6 +37,22 @@ describe('release signing and notarization', () => {
     expect(makeJob).not.toContain('actions/cache');
   });
 
+  it('prepares the Linux sandbox before desktop validation tests probe command execution', () => {
+    const desktopValidation = workflow.slice(
+      workflow.indexOf('\n  validate-desktop-tests:'),
+      workflow.indexOf('\n  release-validation:'),
+    );
+    const dependency = desktopValidation.indexOf(
+      'sudo apt-get update && sudo apt-get install -y bubblewrap',
+    );
+    const sandbox = desktopValidation.indexOf('uses: ./.github/actions/prepare-sandbox');
+    const tests = desktopValidation.indexOf('run: npx vitest run --shard=${{ matrix.shard }}');
+
+    expect(dependency).toBeGreaterThan(-1);
+    expect(sandbox).toBeGreaterThan(dependency);
+    expect(tests).toBeGreaterThan(sandbox);
+  });
+
   it('accepts stable and beta tags while keeping releases as drafts', () => {
     expect(workflow).toContain("- 'v*.*.*'");
     expect(workflow).toContain("prerelease='false'");
