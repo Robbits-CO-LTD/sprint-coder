@@ -34,7 +34,8 @@ chars = {c for c in chars if not c.isspace() or c == " "}
 font = TTFont(SRC)
 opts = subset.Options()
 opts.flavor = "woff2"
-opts.layout_features = ["ccmp", "locl", "kern", "palt", "liga"]  # palt は styles.css で使う
+# palt は styles.css で使う。元の書体に tnum はないが、数字はもともと同じ幅（521）なので数え上げの幅は揺れない
+opts.layout_features = ["ccmp", "locl", "kern", "palt", "liga"]
 opts.name_IDs = ["*"]
 opts.notdef_outline = True
 opts.hinting = False
