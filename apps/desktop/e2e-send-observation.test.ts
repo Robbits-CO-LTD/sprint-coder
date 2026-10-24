@@ -82,7 +82,8 @@ describe('E2E send observation privacy and lifetime', () => {
     const add = vi.spyOn(document, 'addEventListener');
     const remove = vi.spyOn(document, 'removeEventListener');
     vi.stubGlobal('document', document);
-    vi.stubGlobal('window', {});
+    const matchMedia = vi.fn(() => ({ matches: true }));
+    vi.stubGlobal('window', { matchMedia });
     vi.stubGlobal('Element', TestElement);
     vi.stubGlobal('MouseEvent', TestMouseEvent);
     installSendObservationInPage();
@@ -99,12 +100,17 @@ describe('E2E send observation privacy and lifetime', () => {
     const captured = probe.read();
     expect(click.defaultPrevented).toBe(false);
     expect(captured.events).toHaveLength(24);
+    expect(matchMedia).toHaveBeenCalledWith('(prefers-reduced-motion: reduce)');
+    expect(captured.dom.prefersReducedMotion).toBe(true);
+    expect(captured.events.every((event) => event.prefersReducedMotion === true)).toBe(true);
     expect(captured.events.at(-2)).toMatchObject({
       type: 'click',
       draftLength: privateDraft.length,
     });
     expect(captured.events.at(-1)).toMatchObject({ type: 'click-microtask', draftLength: 0 });
     expect(JSON.stringify(captured)).not.toContain(privateDraft);
+    matchMedia.mockReturnValue({ matches: false });
+    expect(probe.read().dom.prefersReducedMotion).toBe(false);
     probe.stop();
     expect(remove.mock.calls).toHaveLength(3);
     document.dispatchEvent(new TestMouseEvent('pointerdown'));

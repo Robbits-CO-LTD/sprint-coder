@@ -41,6 +41,7 @@ export function installSendObservationInPage(): void {
     return {
       activeTaskId: selected && /^[0-9a-f-]{36}$/iu.test(selected) ? selected : null,
       focused: document.hasFocus(),
+      prefersReducedMotion: window.matchMedia('(prefers-reduced-motion: reduce)').matches,
       focusTarget: category(document.activeElement),
       sendPresent: send !== null,
       sendDisabled: send?.disabled ?? null,
