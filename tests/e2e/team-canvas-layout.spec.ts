@@ -59,6 +59,39 @@ async function readWorldTransform(page: Page): Promise<{ x: number; y: number; s
   return { x: Number(match[1]), y: Number(match[2]), s: Number(match[3]) };
 }
 
+// Waits until the camera move has finished and no Worker card is still playing its spawn
+// animation. A fixed wait is not enough where frames run slowly (the hidden Linux CI window): a
+// Fit view still in flight moves the card between measuring its head and pressing on it, so the
+// press lands on the canvas and pans instead of dragging. The camera is saved when a move
+// settles, so the saved camera matching the live transform is the end of the move.
+async function waitForCanvasToSettle(page: Page): Promise<void> {
+  const taskId = await currentTaskId(page);
+  await expect
+    .poll(
+      async () => {
+        const saved = await page.evaluate(
+          (id) => window.sprintCoder!.teams.getCanvasView(id),
+          taskId,
+        );
+        const current = await readWorldTransform(page);
+        const animating = await page.evaluate(() =>
+          [...document.querySelectorAll('.worker')].some((card) =>
+            card.getAnimations().some((animation) => animation.playState === 'running'),
+          ),
+        );
+        return (
+          !animating &&
+          saved !== null &&
+          Math.abs(saved.camera.scale - current.s) < 0.0001 &&
+          Math.abs(saved.camera.x - current.x) < 1 &&
+          Math.abs(saved.camera.y - current.y) < 1
+        );
+      },
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
 // Nudges the camera's zoom level (wheel over the canvas center) until `.team-canvas`'s data-lod
 // attribute reaches `target`, correcting for overshoot past lod2 when aiming for lod1.
 async function setLod(page: Page, target: '1' | '2'): Promise<void> {
@@ -267,7 +300,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
-      await page.waitForTimeout(700); // let the fit settle before reading a baseline position
+      await waitForCanvasToSettle(page); // let the fit settle before reading a baseline position
 
       const before = await readWorkerPosition(page);
 
@@ -282,16 +315,25 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
       await page.mouse.move(startX + 170, startY + 95, { steps: 12 });
       await page.mouse.up();
 
-      const afterDrag = await readWorkerPosition(page);
-      expect(afterDrag).not.toEqual(before);
+      // The card is re-rendered from React state set in native pointer listeners; read the new
+      // position once that render has landed.
+      await expect.poll(() => readWorkerPosition(page)).not.toEqual(before);
+
+      const glance = page.getByTestId('team-worker-glance');
+      await expect(glance).not.toBeVisible();
 
       // Zoom out to lod1 and assert the Worker body (message history + composer) is hidden while
-      // the head (role/status/objective) stays put — FR-CAN-04.
+      // the head (role/status/objective) stays put — FR-CAN-04. The body's space shows the glance
+      // instead (role, state in words, newest line), so the card never reads as an empty box.
       await setLod(page, '1');
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-lod', '1');
       await expect(page.getByTestId('team-worker').locator('.w-body')).not.toBeVisible();
       await expect(page.getByTestId('team-worker').locator('.role-name')).toBeVisible();
       await expect(page.getByTestId('team-worker').locator('.w-status')).toBeVisible();
+      await expect(glance).toBeVisible();
+      await expect(glance.locator('.w-glance-role')).toHaveText('実装');
+      await expect(glance.locator('.w-glance-state')).toHaveText('待機中');
+      await expect(glance.locator('.w-glance-line')).toHaveText('Leaderからの依頼を待っています');
 
       const cameraBeforeRestart = await readWorldTransform(page);
 
@@ -434,7 +476,7 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await hireWorker(page, '実装', '機能を実装する');
       await expect(page.getByTestId('team-worker')).toHaveCount(1);
       await page.getByTestId('team-canvas-fit').click();
-      await page.waitForTimeout(700);
+      await waitForCanvasToSettle(page);
 
       // Drag the first Worker directly onto the SECOND Worker's default slot (WORKER_SLOTS[1] in
       // TeamCanvas.tsx: {x:1000, y:420}), so hiring a second Worker next would collide with it if
@@ -457,14 +499,21 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await page.mouse.move(startX + worldDx * cam.s, startY + worldDy * cam.s, { steps: 12 });
       await page.mouse.up();
 
-      const afterDrag = await readWorkerPosition(page);
       // Sanity check the drag actually landed near the intended world position — otherwise the
-      // rest of this test wouldn't be exercising the intended collision scenario at all. Pointer
+      // rest of this test wouldn't be exercising the intended collision scenario at all. The card
+      // is re-rendered from React state a task after pointerup, so wait for that render. Pointer
       // coordinates are integer screen pixels and are converted back through a fitted fractional
       // camera scale, so hosted renderers can land a few dozen world pixels apart; 64px still
       // places a 480x260 Worker deeply inside the target slot.
-      expect(Math.abs(parseFloat(afterDrag.left) - targetWorldPos.x)).toBeLessThan(64);
-      expect(Math.abs(parseFloat(afterDrag.top) - targetWorldPos.y)).toBeLessThan(64);
+      const distanceFromTarget = async () => {
+        const position = await readWorkerPosition(page);
+        return Math.max(
+          Math.abs(parseFloat(position.left) - targetWorldPos.x),
+          Math.abs(parseFloat(position.top) - targetWorldPos.y),
+        );
+      };
+      await expect.poll(distanceFromTarget).toBeLessThan(64);
+      const afterDrag = await readWorkerPosition(page);
 
       // Re-fit: the drag itself only moves the Worker in world space, and the camera view that
       // was fit for the pre-drag layout may no longer include everything — bring it back into

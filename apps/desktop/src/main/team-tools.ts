@@ -71,6 +71,9 @@ const teamToolDefinition = (
     providerCompatibility: ['*'],
   });
 
+const MANAGER_WRITE_REQUIREMENTS =
+  '子に編集を委譲するManagerは、雇用時writeCapable: trueとManager自身への割当access: workspace-writeの両方が必要です。調査だけのManagerはread-onlyを使います。';
+
 export const TEAM_HIRE_WORKER_TOOL = teamToolDefinition(
   'team_hire_worker',
   'hire-worker',
@@ -271,12 +274,10 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
 export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
     '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
-  team_hire_worker:
-    '自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。',
-  team_assign_task: '自分の直下Workerへtaskを割り当て、execution IDを返します。',
-  team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。`,
-  team_assign_mission:
-    '10〜30分単位の2〜12工程を順番に実行する永続Missionを作成します。長時間のコーディングに使います。',
+  team_hire_worker: `自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。${MANAGER_WRITE_REQUIREMENTS}`,
+  team_assign_task: `自分の直下Workerへtaskを割り当て、execution IDを返します。${MANAGER_WRITE_REQUIREMENTS}`,
+  team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、原因を解消してから失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。${MANAGER_WRITE_REQUIREMENTS}`,
+  team_assign_mission: `10〜30分単位の2〜12工程を順番に実行する永続Missionを作成します。長時間のコーディングに使います。${MANAGER_WRITE_REQUIREMENTS}`,
   team_resume_mission:
     '再開待ちのMissionを、既存の部分変更を検査する新しいAttemptとして再開します。',
   team_steer_execution: '自分の配下で実行中または待機中のexecutionへ修正指示を送ります。',
@@ -351,6 +352,20 @@ function teamToolError(error: unknown): {
     message: error instanceof Error ? error.message : String(error),
     ...(error instanceof TeamDelegationError ? { code: error.code, details: error.details } : {}),
   };
+}
+
+function readOnlyDelegationError(): TeamDelegationError {
+  return new TeamDelegationError(
+    'execution_access_ceiling',
+    `read-only execution cannot delegate workspace-write access. ${MANAGER_WRITE_REQUIREMENTS} 現在の実行からは昇格できません。必要な設定を親Agentへ報告してください。`,
+    {
+      accessCeiling: 'read-only',
+      requestedAccess: 'workspace-write',
+      requiredManagerWriteCapable: true,
+      requiredManagerAccess: 'workspace-write',
+      recovery: 'notify_parent',
+    },
+  );
 }
 
 // Hiring cadence: a burst of instantaneous hires reads as fake ("the leader isn't actually
@@ -791,6 +806,7 @@ export async function executeTeamTool(
           parentAgentId: worker.parentAgentId,
           depth: worker.depth,
           canDelegate: worker.canDelegate,
+          writeCapable: worker.writeCapable,
           remainingDelegationLevels:
             worker.managerPolicy == null
               ? 0
@@ -877,7 +893,7 @@ export async function executeTeamTool(
           (options.accessCeiling ?? 'read-only') === 'read-only' &&
           request.access === 'workspace-write'
         )
-          throw new Error('read-only execution cannot delegate workspace-write access');
+          throw readOnlyDelegationError();
         const assignInput = {
           taskId,
           targetAgentId: request.workerId,
@@ -932,8 +948,6 @@ export async function executeTeamTool(
       const readOnlyCeiling =
         options.requesterAgentId !== undefined &&
         (options.accessCeiling ?? 'read-only') === 'read-only';
-      const refused = (): Error =>
-        new Error('read-only execution cannot delegate workspace-write access');
       const admissible = request.assignments
         .map((assignment, index) => ({ assignment, index }))
         .filter(({ assignment }) => !(readOnlyCeiling && assignment.access === 'workspace-write'));
@@ -959,7 +973,7 @@ export async function executeTeamTool(
       const results = request.assignments.map((assignment, index) => {
         const outcome = outcomeByIndex.get(index);
         const base = { index, workerId: assignment.workerId, writeScope: assignment.access };
-        if (outcome === undefined) return { ...base, ...teamToolError(refused()) };
+        if (outcome === undefined) return { ...base, ...teamToolError(readOnlyDelegationError()) };
         if (!outcome.ok) return { ...base, ...teamToolError(outcome.error) };
         return {
           ...base,
@@ -994,7 +1008,7 @@ export async function executeTeamTool(
           (options.accessCeiling ?? 'read-only') === 'read-only' &&
           request.steps.some(({ access }) => access === 'workspace-write')
         )
-          throw new Error('read-only execution cannot delegate workspace-write access');
+          throw readOnlyDelegationError();
         const missionInput = {
           taskId,
           objective: request.objective,
@@ -1282,7 +1296,10 @@ export function registerTeamTools(
 export const LEADER_MCP_SYSTEM_PROMPT = BUILTIN_TEAM_SKILL_CONTENT;
 export const MANAGER_MCP_SYSTEM_PROMPT = `${BUILTIN_TEAM_SKILL_CONTENT}
 
-あなたはTeamのManagerです。team_hire_workerで自分の直下Agentだけを雇用し、
+あなたはTeamのManagerです。team_hire_workerで自分の直下Agentだけを雇用してください。
+子のworkspace-writeを委譲できる上限は、親から割り当てられた現在の実行のaccessです。
+writeCapable: trueだけでは足りず、Manager自身への割当access: workspace-writeも必要です。
+read-onlyの現在の実行からは昇格できません。不足する設定を親Agentへ報告し、同じ設定で再試行しないでください。
 team_assign_taskで直下Agentへ正式taskを割り当ててください。requester identityを引数へ
 追加しないでください。作業開始時、配下の待機中、最終報告前にteam_read_messagesを確認し、
 必要な情報はteam_send_messageで同じTeamのAgentへ共有してください。配下Agentの終端reportを

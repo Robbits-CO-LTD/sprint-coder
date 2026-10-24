@@ -2,6 +2,7 @@ import type {
   TeamExecutionSummary,
   TeamMessageSummary,
   WorkerActivityEntry,
+  WorkerSummary,
 } from '../types/sprint-coder';
 
 // A Worker card reads as a read-only conversation, in the manner of a T3 Code / Codex thread: the
@@ -81,4 +82,151 @@ export function executionNeedsAttention(execution: TeamExecutionSummary | null):
     execution.state === 'queued' ||
     execution.state === 'failed'
   );
+}
+
+/**
+ * Worker report messages are structured envelopes; unwrap `{summary}` when present (see
+ * demo/index.html's `results` map) and fall back to the raw content otherwise.
+ */
+export function workerReportText(content: string): string {
+  try {
+    const parsed = JSON.parse(content) as { summary?: unknown };
+    return typeof parsed.summary === 'string' ? parsed.summary : content;
+  } catch {
+    return content;
+  }
+}
+
+export type WorkerGlance = { state: string; line: string };
+
+type GlanceWorker = Pick<
+  WorkerSummary,
+  'id' | 'state' | 'reasoningActive' | 'currentActivity' | 'liveOutput'
+>;
+
+const GLANCE_LINE_CHARS = 160;
+
+/** Unwraps paired emphasis the way Markdown renders it, and nothing else: `test_utils.py`,
+ * `snake_case` and `a * b` are not emphasis, so their characters stay. */
+function withoutEmphasis(text: string): string {
+  return text
+    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1')
+    .replace(/(^|\W)__(?=\S)(.+?)(?<=\S)__(?!\w)/g, '$1$2')
+    .replace(/(^|[^*])\*(?=[^\s*])(.+?)(?<=[^\s*])\*(?!\*)/g, '$1$2')
+    .replace(/(^|\W)_(?=[^\s_])(.+?)(?<=[^\s_])_(?!\w)/g, '$1$2');
+}
+
+function glanceLine(line: string): string {
+  return line.length > GLANCE_LINE_CHARS ? `${line.slice(0, GLANCE_LINE_CHARS)}…` : line;
+}
+
+/** How much of one line the glance reads. It runs on every render of every card and messages have
+ * no length limit, so a line is cut to this before anything scans it — the emphasis patterns in
+ * particular can take time quadratic in the length of what they are given. */
+const GLANCE_SCAN_CHARS = GLANCE_LINE_CHARS * 2;
+
+/** One line of `text` from `start` up to `end`, cut to the scan limit and trimmed. */
+function scannedLine(text: string, start: number, end: number): string {
+  return text.slice(start, Math.min(end, start + GLANCE_SCAN_CHARS)).trim();
+}
+
+/** The first `count` non-empty lines, reading only as far into `text` as they reach. */
+function leadingLines(text: string, count: number): string[] {
+  const lines: string[] = [];
+  let start = 0;
+  while (lines.length < count) {
+    const newline = text.indexOf('\n', start);
+    const line = scannedLine(text, start, newline === -1 ? text.length : newline);
+    if (line !== '') lines.push(line);
+    if (newline === -1) break;
+    start = newline + 1;
+  }
+  return lines;
+}
+
+/** The last non-empty line of the Worker's streaming text, as written: the card shows that text
+ * raw (`.w-stream`), not as Markdown, so nothing in it is markup to remove. Read from the end. */
+function lastStreamLine(text: string): string {
+  let end = text.length;
+  while (end > 0) {
+    const start = text.lastIndexOf('\n', end - 1) + 1;
+    const line = scannedLine(text, start, end);
+    if (line !== '') return glanceLine(line);
+    end = start - 1;
+  }
+  return '';
+}
+
+/** The first non-empty line of a Markdown message as plain prose: without block markers,
+ * code-span backticks or emphasis. A code span's contents are kept verbatim, and so is a message
+ * that opens with a code fence: its first line is code, shown as written. */
+function firstMarkdownLine(text: string): string {
+  const lines = leadingLines(text, 2);
+  const picked = lines[0] ?? '';
+  const fence = /^(?:`{3,}|~{3,})/;
+  if (fence.test(picked)) {
+    const code = lines[1] ?? '';
+    return fence.test(code) ? '' : glanceLine(code);
+  }
+  return glanceLine(
+    picked
+      .replace(/^(?:#{1,6}\s+|>\s*|[-*+]\s+|\d+[.)]\s+)/, '')
+      .split(/(`[^`]+`)/)
+      .map((part, index) => (index % 2 === 1 ? part.slice(1, -1) : withoutEmphasis(part)))
+      .join('')
+      .trim(),
+  );
+}
+
+function glanceState(worker: GlanceWorker): string {
+  switch (worker.state) {
+    case 'busy':
+      return worker.reasoningActive ? '思考中' : '作業中';
+    case 'invited':
+    case 'spawning':
+      return '準備中';
+    case 'ready':
+    case 'waiting':
+      return '待機中';
+    case 'done':
+      return '完了';
+    case 'failed':
+      return '失敗';
+    case 'stopped':
+      return '停止済み';
+  }
+}
+
+/**
+ * What a zoomed-out Worker card shows in place of its thread (FR-CAN-04): the state in words and
+ * the newest thing the Worker did or said, so a far view of the Team reads as who is doing what
+ * rather than as a grid of empty cards. A busy Worker's current step or streaming text wins over
+ * the thread, since that is what it is doing now.
+ */
+export function workerGlance(
+  worker: GlanceWorker,
+  thread: readonly WorkerThreadItem[],
+): WorkerGlance {
+  const state = glanceState(worker);
+  const busy = worker.state === 'busy';
+  if (busy && worker.currentActivity !== null)
+    return { state, line: workStepLabel(worker.currentActivity) };
+  if (busy && worker.liveOutput.trim() !== '')
+    return { state, line: lastStreamLine(worker.liveOutput) };
+  const newest = thread.at(-1);
+  if (newest?.kind === 'step') return { state, line: workStepLabel(newest.step.label) };
+  if (newest?.kind === 'message') {
+    const { content, sourceAgentId } = newest.message;
+    return {
+      state,
+      line: firstMarkdownLine(sourceAgentId === worker.id ? workerReportText(content) : content),
+    };
+  }
+  return {
+    state,
+    line:
+      worker.state === 'ready' || worker.state === 'waiting'
+        ? 'Leaderからの依頼を待っています'
+        : '',
+  };
 }
