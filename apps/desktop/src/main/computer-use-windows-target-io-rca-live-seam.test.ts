@@ -48,6 +48,17 @@ function instrumentedHost(): string {
     consumer,
     `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
   );
+  const rejudgeFrom = source.indexOf('bool RejudgeWindowsV2Session(');
+  const rejudgeTo = source.indexOf('bool JudgeWindowsV2Input(', rejudgeFrom);
+  if (rejudgeFrom < 0 || rejudgeTo < 0) throw new Error('Rejudge boundary changed');
+  source =
+    source.slice(0, rejudgeFrom) +
+    replaceOnce(
+      source.slice(rejudgeFrom, rejudgeTo),
+      'ReadWindowsFileIdentity(session.executable_file, &held)',
+      'Sc940RejudgeFileIdentity(session.executable_file, &held)',
+    ) +
+    source.slice(rejudgeTo);
   const measureFrom = source.indexOf('bool MeasureWindowsV2NewStart(');
   const measureTo = source.indexOf('struct WindowsV2StartLease', measureFrom);
   if (measureFrom < 0 || measureTo < 0) throw new Error('Start measurement boundary changed');
@@ -109,7 +120,14 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     '    if (operation == "read_node_value") {',
-    `    if (operation == "sc940_validation_probe") {
+    `    if (operation == "sc940_rejudge_probe") {
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult, Sc940RejudgeProbe());
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc940_rejudge_probe_failed"));
+      }
+    }
+    if (operation == "sc940_validation_probe") {
       try {
         return Respond(pipe, request, MessageType::kProbeResult, Sc940ValidationProbe(metadata));
       } catch (...) {
@@ -249,6 +267,8 @@ namespace {
 struct LockedWindowsExecutable;
 struct WindowsValidationWork;
 struct WindowsFileIdentity;
+bool Sc940RejudgeFileIdentity(HANDLE file, WindowsFileIdentity *identity);
+std::string Sc940RejudgeProbe();
 bool Sc940ValidationFileIdentity(const WindowsValidationWork &work, WindowsFileIdentity *identity);
 void Sc940ValidationWorkerStarted();
 void Sc940ValidationCancelAttempt(std::uint64_t job_id, DWORD thread_id);
@@ -323,6 +343,9 @@ std::atomic<std::uint64_t> validation_last_cancel_id{0}, validation_last_retired
 std::mutex validation_pending_mutex;
 std::shared_ptr<WindowsValidationPending> validation_first_pending, validation_last_pending;
 const WindowsSession *validation_probe_source = nullptr;
+std::atomic<const WindowsSession *> rejudge_probe_source{nullptr};
+std::atomic<DWORD> rca_consumer_thread_id{0};
+std::atomic<unsigned> rejudge_file_reads{0}, rejudge_file_successes{0}, rejudge_hold_call{0};
 
 void Require(bool condition, const char *reason) {
   if (!condition) throw std::runtime_error(reason);
@@ -360,6 +383,42 @@ void Sc940ConsumerGate(std::uint8_t request) {
   if (request == 2) Sc940Gate(HoldPoint::kConsumer);
 }
 void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
+
+bool Sc940RejudgeFileIdentity(HANDLE file, WindowsFileIdentity *identity) {
+  const WindowsSession *source = rejudge_probe_source.load(std::memory_order_acquire);
+  if (source == nullptr) return ReadWindowsFileIdentity(file, identity);
+  if (file != source->executable_file || source->pid != fixture_pids[0] ||
+      GetCurrentThreadId() != rca_consumer_thread_id.load()) {
+    wrong_measurement.store(true);
+    return false;
+  }
+  const unsigned ordinal = rejudge_file_reads.fetch_add(1) + 1;
+  if (ordinal == rejudge_hold_call.load()) {
+    SetEvent(gate_entered);
+    if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0) gate_timed_out.store(true);
+  }
+  const bool read = ReadWindowsFileIdentity(file, identity);
+  if (read) {
+    rejudge_file_successes.fetch_add(1);
+    if (identity->volume_serial != source->executable_volume_serial ||
+        std::memcmp(identity->file_id.Identifier, source->executable_file_id.Identifier,
+                    sizeof(identity->file_id.Identifier)) != 0)
+      wrong_measurement.store(true);
+  }
+  return read;
+}
+
+std::string Sc940RejudgeProbe() {
+  const WindowsSession *source = rejudge_probe_source.load(std::memory_order_acquire);
+  Require(source != nullptr && GetCurrentThreadId() == rca_consumer_thread_id.load(), "rejudge_component_source");
+  std::optional<bool> not_web;
+  std::string reason;
+  const bool judged = RejudgeWindowsV2Session(*source, &not_web, &reason);
+  // Local component outputs only: no global session, ticket, mode, or input capability is updated.
+  return "{\"componentOnly\":true,\"rejudgeOk\":" + std::string(judged ? "true" : "false") +
+      ",\"notWeb\":" + (not_web.has_value() ? (*not_web ? "true" : "false") : "null") +
+      ",\"inputAttemptCount\":" + std::to_string(source->input_api_attempts->load()) + "}";
+}
 
 void Sc940ValidationWorkerStarted() {
   if (!validation_case_active.load()) return;
@@ -651,6 +710,7 @@ struct RcaRun {
   ScopedKernelHandle epilogue_release{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   ScopedKernelHandle epilogue_thread;
   WindowsSession validation_probe_session;
+  WindowsSession rejudge_probe_session;
   ScopedKernelHandle job;
   std::array<ScopedKernelHandle, 3> children;
   ScopedKernelHandle server{INVALID_HANDLE_VALUE};
@@ -835,6 +895,7 @@ struct RcaRun {
     cancellation_epoch.store(same_epoch_close ? 2 : 1);
     windows_v2_main_pid = GetCurrentProcessId();
     serving = std::thread([this] {
+      rca_consumer_thread_id.store(GetCurrentThreadId());
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
       if (SUCCEEDED(apartment)) {
         // Match ServeMain's client-side warmup before accepting any target operation.
@@ -1048,6 +1109,8 @@ struct RcaRun {
     worker_idle = WaitUiaWorkerIdle(15'000) && worker_idle;
     ReleaseWindowsSessionResources(&validation_probe_session);
     validation_probe_source = nullptr;
+    rejudge_probe_source.store(nullptr, std::memory_order_release);
+    ReleaseWindowsSessionResources(&rejudge_probe_session);
     validation_case_active.store(false);
     if (job.value != nullptr) TerminateJobObject(job.value, 0);
     child_exited = true;
@@ -1104,7 +1167,7 @@ bool HasContextCandidate() {
 
 struct ListedStart {
   std::uint64_t generation = 0, ruleset = 0, pid = 0;
-  std::string window, app, window_identity, executable, path, signer;
+  std::string window, app, window_identity, executable, path, signer, mode;
   double x = 0, y = 0, width = 0, height = 0;
   std::string Metadata(std::uint64_t epoch) const {
     return "{\"operation\":\"start_session\",\"eligibilityBasis\":\"v2-denylist\",\"sessionId\":\"sc940-new\","
@@ -1121,13 +1184,13 @@ struct ListedStart {
 ListedStart ReadListedStart(RcaRun &run, std::uint8_t request) {
   run.Send(MessageType::kProbe, request, "{\"operation\":\"list_targets\"}");
   ListedStart result;
-  std::string rows, envelope, kind, mode;
+  std::string rows, envelope, kind;
   bool truncated = true;
   Require(run.Wait(request, 7000) && run.ListTargets(request, &result.generation, &rows, &truncated) &&
               run.ProbeBody(request, &envelope) && !truncated && run.WaitWorkerIdle(1000), "start_real_list_reply");
   Require(ReadJsonUint64(envelope, "rulesetVersion", &result.ruleset) &&
               ReadJsonString(rows, "kind", &kind) && kind == "upper" &&
-              ReadJsonString(rows, "maximumMode", &mode) && mode == "observe_only" &&
+              ReadJsonString(rows, "maximumMode", &result.mode) && result.mode == "observe_only" &&
               ReadJsonUint64(rows, "pid", &result.pid) && result.pid == fixture_pids[0] &&
               ReadJsonString(rows, "windowId", &result.window) &&
               result.window == std::to_string(reinterpret_cast<UINT_PTR>(fixture_windows[0])) &&
@@ -1325,6 +1388,106 @@ int DiagnoseStart(std::wstring_view scenario, DWORD pid, HWND window, const std:
   }
 }
 
+// RCA only: the component receives measured identity, not an admitted/observed control session.
+// Its local result is never a grant, a ticket, a start result, or an input operation.
+int DiagnoseRejudge(DWORD pid, HWND window, const std::string &created,
+                    const std::wstring &fixture_path) {
+  RcaRun run;
+  ULONGLONG reader_ms = 0, absent_ms = 0, recovery_ms = 0;
+  try {
+    run.AttachOwnedSibling(pid, window, created, fixture_path);
+    // This unrelated zero-input control seed exists only to obtain a real Cancel/Close receipt.
+    // It does not authorize the sibling target or claim that native Start/Observe succeeded.
+    run.StartPipe(false);
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "rejudge_handshake");
+    const ListedStart listed = ReadListedStart(run, 10);
+    Require(WindowsV2FactsContextCache().has_value() &&
+                WindowsV2FactsContextCache()->lineage_root_pid == GetCurrentProcessId() &&
+                windows_v2_main_pid == GetCurrentProcessId() && !WindowsTargetListWorkerRunning().load(),
+            "rejudge_real_context_ready");
+    SeedOwnedValidationIdentity(&run.rejudge_probe_session);
+    auto &snapshot = run.rejudge_probe_session;
+    snapshot.session_id = "sc940-rejudge-component";
+    snapshot.maximum_mode = listed.mode;
+    Require(snapshot.pid == listed.pid && snapshot.app_identity == listed.app &&
+                snapshot.window_identity == listed.window_identity && snapshot.process_start == created &&
+                snapshot.executable_digest == listed.executable && snapshot.signer_digest.empty() &&
+                snapshot.maximum_mode == "observe_only" && !snapshot.not_web_file.has_value(),
+            "rejudge_snapshot_from_real_upper_row");
+    rejudge_probe_source.store(&snapshot, std::memory_order_release);
+    const auto component_reply = [&](unsigned id) {
+      std::string body;
+      bool component = false, judged = false;
+      std::uint64_t attempts = 1;
+      return run.ProbeBody(id, &body) && body.size() < 512 &&
+          ReadOptionalJsonBoolean(body, "componentOnly", &component) && component &&
+          ReadOptionalJsonBoolean(body, "rejudgeOk", &judged) && judged &&
+          body.find("\"notWeb\":false") != std::string::npos &&
+          ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0;
+    };
+    run.Send(MessageType::kProbe, 20, "{\"operation\":\"sc940_rejudge_probe\"}");
+    Require(run.Wait(20, 15'000) && component_reply(20) && rejudge_file_reads.load() == 1 &&
+                rejudge_file_successes.load() == 1, "rejudge_real_baseline_passes_without_foreground");
+
+    rejudge_hold_call.store(2);
+    run.Send(MessageType::kProbe, 2, "{\"operation\":\"sc940_rejudge_probe\"}");
+    Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0 &&
+                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT &&
+                rejudge_file_reads.load() == 2 && rejudge_file_successes.load() == 1 &&
+                !WindowsTargetListWorkerRunning().load(), "rejudge_real_consumer_read_held");
+    const std::uint64_t serial = WindowsTargetListControl().stop_serial.load();
+    const ULONGLONG sent = GetTickCount64();
+    run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+    Require(WaitStopSerial(serial, 1000), "rejudge_stop_reader_progress");
+    reader_ms = GetTickCount64() - sent;
+    // This is a positive reproduction of the unfixed fault, not a passing responsiveness test.
+    Require(!run.Wait(3, 1000) && !run.Wait(2, 0) &&
+                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT &&
+                rejudge_file_successes.load() == 1, "rejudge_stop_receipt_still_blocked_after_one_second");
+    absent_ms = GetTickCount64() - sent;
+    Require(reader_ms < 1000 && absent_ms >= 1000, "rejudge_reader_and_consumer_are_distinct");
+    const ULONGLONG released = GetTickCount64();
+    SetEvent(run.release.value);
+    Require(run.Wait(2, 15'000) && component_reply(2) &&
+                run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
+            "rejudge_real_read_and_cancel_recover_after_release");
+    recovery_ms = GetTickCount64() - released;
+    Require(rejudge_file_reads.load() == 2 && rejudge_file_successes.load() == 2 &&
+                snapshot.input_api_attempts->load() == 0 && run.ReplyCount(2) == 1 &&
+                snapshot.maximum_mode == listed.mode && !snapshot.v2_input_not_web.has_value() &&
+                start_worker_attempts.load() == 0 && start_focus_calls.load() == 0 &&
+                synchronous_session_probes.load() == 0 && ticket_states.empty() &&
+                sessions.size() == 1 && sessions.contains(FrameIdKey(Id(7))) &&
+                sessions.at(FrameIdKey(Id(7))).session_id == "sc940-control",
+            "rejudge_component_never_admits_or_inputs");
+    run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+    Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kProbeResult, "closed", 3) && sessions.empty(),
+            "rejudge_control_close_recovers");
+    run.Send(MessageType::kProbe, 5, "{\"operation\":\"close_session\",\"cancelEpoch\":4}", 9);
+    Require(run.Wait(5, 1000) && run.Error(5, "native_close_unconfirmed", 9), "rejudge_unknown_close_is_not_success");
+    Require(!wrong_measurement.load() && !gate_timed_out.load(), "rejudge_only_owned_real_io");
+    run.Cleanup();
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load() &&
+                run.rejudge_probe_session.process_handle == nullptr &&
+                run.rejudge_probe_session.executable_file == INVALID_HANDLE_VALUE,
+            "rejudge_owned_cleanup");
+    std::cout << "{\"case\":\"rejudge-held-file\",\"componentIntegrationOnly\":true,\"reproducedConsumerBlock\":true"
+              << ",\"realListMode\":\"observe_only\",\"realBaselineJudgement\":true,\"realHeldFileRead\":true"
+              << ",\"readerMs\":" << reader_ms << ",\"receiptAbsentMs\":" << absent_ms << ",\"recoveryMs\":" << recovery_ms
+              << ",\"lateComponentResultObserved\":true,\"lateResultAppliedToSession\":false,\"cancelCloseRecovered\":true"
+              << ",\"unknownCloseRejected\":true,\"inputAttempts\":0,\"foregroundRequired\":false,\"healthyStartVerified\":false"
+              << ",\"controlSeedIsDiagnostic\":true,\"childExited\":true,\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  } catch (const std::exception &error) {
+    run.Cleanup();
+    std::cout << "{\"failure\":\"" << error.what() << "\"}\n";
+    return 1;
+  }
+}
+
 // The GUI target and real pipe client are siblings. W8 therefore measures their true relationship,
 // rather than accepting a forged lineage root or a special acceptance-mode/signature exemption.
 int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path) {
@@ -1358,7 +1521,7 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     STARTUPINFOW startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_SHOWNORMAL;
+    startup.wShowWindow = scenario == L"rejudge-held-file" ? SW_SHOWNOACTIVATE : SW_SHOWNORMAL;
     PROCESS_INFORMATION fixture{};
     std::wstring command = L"\"" + fixture_path + L"\"";
     const BOOL created = child_token.value != nullptr
@@ -1445,7 +1608,8 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     }
     run.Cleanup();
     Require(run.child_exited && !run.watchdog_fired.load() &&
-                (output.starts_with("{\"case\":\"start-") || output.starts_with("{\"failure\":\"")),
+                (output.starts_with("{\"case\":\"start-") || output.starts_with("{\"case\":\"rejudge-held-file\"") ||
+                 output.starts_with("{\"failure\":\"")),
             "start_coordinator_cleanup");
     std::cout << output;
     return code == 0 ? 0 : 1;
@@ -2005,6 +2169,10 @@ int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"start-coordinator") return CoordinateStart(argv[2], argv[3]);
   if (argc == 8 && std::wstring_view(argv[1]) == L"start-client") {
     const std::wstring started(argv[5]);
+    if (std::wstring_view(argv[2]) == L"rejudge-held-file")
+      return DiagnoseRejudge(static_cast<DWORD>(std::stoul(argv[3])),
+          reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
+          std::string(started.begin(), started.end()), argv[6]);
     return DiagnoseStart(argv[2], static_cast<DWORD>(std::stoul(argv[3])),
         reinterpret_cast<HWND>(static_cast<UINT_PTR>(std::stoull(argv[4]))),
         std::string(started.begin(), started.end()), argv[6], std::wstring_view(argv[7]) == L"1");
@@ -2032,6 +2200,15 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
     expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
     expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);
+    expect(
+      generated.split('Sc940RejudgeFileIdentity(session.executable_file, &held)'),
+    ).toHaveLength(2);
+    expect(generated.split('operation == "sc940_rejudge_probe"')).toHaveLength(2);
+    expect(program).toContain('const bool read = ReadWindowsFileIdentity(file, identity);');
+    expect(program).toContain(
+      'const bool judged = RejudgeWindowsV2Session(*source, &not_web, &reason);',
+    );
+    expect(program).toContain('!run.Wait(3, 1000) && !run.Wait(2, 0)');
     expect(generated).toContain(
       'const HRESULT result = automation->ElementFromHandle(window, &root);',
     );
@@ -2067,7 +2244,7 @@ const build = compiler();
 describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
 )('Windows target I/O live seam (#940 and #820, bounded readers)', () => {
-  it('bounds list and UIA reads, Stop receipts, inherited budgets, and late cleanup on owned fixtures', async () => {
+  async function runScenarios(scenarios: readonly string[]) {
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     let installed: string | undefined;
@@ -2190,41 +2367,45 @@ describe.skipIf(
       expect(compiled.status, `RCA seam must compile with MSVC\n${compileErrors}`).toBe(0);
       const startFailures: string[] = [];
       const validationFailures: string[] = [];
-      for (const scenario of [
-        'healthy',
-        'measure-cancel',
-        'measure-close',
-        'measure-same-epoch-close',
-        'context-cancel',
-        'deadline',
-        'cold-context-deadline',
-        'deadline-stop-race',
-        'queued-stop',
-        'completion-race',
-        'uia-contact-timeout',
-        'uia-cancel',
-        'uia-close',
-        'uia-prequeued-close',
-        'uia-two-reads',
-        'uia-shared-deadline',
-        'start-open-close',
-        'start-prequeued-close',
-        'start-open-cancel',
-        'start-healthy',
-        'start-ready-close',
-        'start-adopt-close',
-        'validation-cancel',
-        'validation-close',
-        'validation-prequeued-close',
-        'validation-repeat',
-      ]) {
+      for (const scenario of scenarios) {
         const result = await run(
           binary,
-          scenario.startsWith('start-')
+          scenario.startsWith('start-') || scenario === 'rejudge-held-file'
             ? ['start-coordinator', scenario, fixtureExecutable]
             : [scenario],
           70_000,
         );
+        if (scenario === 'rejudge-held-file') {
+          expect(result.timedOut, 'Rejudge RCA outer watchdog').toBe(false);
+          const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
+          expect(result.status, failure ?? 'Rejudge component RCA assertions').toBe(0);
+          const metadata: unknown = JSON.parse(result.stdout.trim());
+          expect(metadata).toMatchObject({
+            case: scenario,
+            componentIntegrationOnly: true,
+            reproducedConsumerBlock: true,
+            realListMode: 'observe_only',
+            realBaselineJudgement: true,
+            realHeldFileRead: true,
+            readerMs: expect.any(Number),
+            receiptAbsentMs: expect.any(Number),
+            recoveryMs: expect.any(Number),
+            lateComponentResultObserved: true,
+            lateResultAppliedToSession: false,
+            cancelCloseRecovered: true,
+            unknownCloseRejected: true,
+            inputAttempts: 0,
+            foregroundRequired: false,
+            healthyStartVerified: false,
+            controlSeedIsDiagnostic: true,
+            childExited: true,
+            threadsJoined: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         if (scenario.startsWith('validation-')) {
           const failure = /"failure":"([a-z_]+)"/u.exec(result.stdout)?.[1];
           if (result.timedOut) {
@@ -2371,5 +2552,41 @@ describe.skipIf(
         rmSync(installed, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
       rmSync(root, { recursive: true, force: true, maxRetries: 50, retryDelay: 200 });
     }
+  }
+
+  it('bounds list and UIA reads, Stop receipts, inherited budgets, and late cleanup on owned fixtures', async () => {
+    await runScenarios([
+      'healthy',
+      'measure-cancel',
+      'measure-close',
+      'measure-same-epoch-close',
+      'context-cancel',
+      'deadline',
+      'cold-context-deadline',
+      'deadline-stop-race',
+      'queued-stop',
+      'completion-race',
+      'uia-contact-timeout',
+      'uia-cancel',
+      'uia-close',
+      'uia-prequeued-close',
+      'uia-two-reads',
+      'uia-shared-deadline',
+      'start-open-close',
+      'start-prequeued-close',
+      'start-open-cancel',
+      'start-healthy',
+      'start-ready-close',
+      'start-adopt-close',
+      'validation-cancel',
+      'validation-close',
+      'validation-prequeued-close',
+      'validation-repeat',
+    ]);
+  }, 700_000);
+
+  // Diagnostic branch only: this reproduces the remaining synchronous fault. It is not a responsiveness acceptance test.
+  it('diagnoses the Rejudge held-file consumer stall without foreground or input', async () => {
+    await runScenarios(['rejudge-held-file']);
   }, 700_000);
 });
