@@ -38,12 +38,13 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
       [
         '    } else if (operation == "list_targets") {',
         '      // S5-c-3 PR-5: unsupported_operation in a v1 build.',
-        '      succeeded = ListWindowsTargets(&response, &reason);',
+        '      succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);',
       ].join('\n'),
     );
     expect(v2Block).toContain(
       [
-        'bool ListWindowsTargets(std::string *response, std::string *reason) {',
+        'bool ListWindowsTargets(std::string *response, std::string *reason,',
+        '                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {',
         '  if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {',
         '    (void)response;',
         '    *reason = "unsupported_operation";',
@@ -78,10 +79,7 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
   });
 
   it('measures a process without a window and judges every window by its own class', () => {
-    const list = cut(
-      'bool ListWindowsTargets(std::string *response, std::string *reason) {',
-      'bool RejudgeWindowsV2Session(',
-    );
+    const list = cut('bool MeasureWindowsV2TargetList(', 'bool RejudgeWindowsV2Session(');
     // The cached per-process facts are measured with no window, so the first window listed (a console
     // the app allocated, a window already gone) decides nothing for the others (the review of #881).
     expect(list).toContain('MeasureWindowsV2Process(owner, context, judgement.get());');
@@ -168,10 +166,11 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(host.match(/^\s+windows_v2_main_pid = /gmu) ?? []).toHaveLength(1);
     // The facts context is measured once Main's pid is known; with no pid it is empty and not kept.
     const context = cut(
-      'const WindowsTargetFactsContext &WindowsV2FactsContext() {',
+      'const WindowsTargetFactsContext &WindowsV2FactsContext(',
       '// The file %SystemRoot%',
     );
-    expect(context).toContain('if (windows_v2_main_pid == 0)\n    return unknown_root;');
+    expect(context).toContain('if (windows_v2_main_pid == 0)');
+    expect(context).toContain('return *unknown;');
     expect(context).toContain('context = CurrentWindowsTargetFactsContext(windows_v2_main_pid,');
     // A list takes its generation only when its answer is sent.
     expect(v2Block).not.toContain('++windows_v2_list_generation');

@@ -186,17 +186,21 @@ describe('click rule (#500 S5-c-2 PR-2): the Windows host', () => {
     expect(squashed).toContain(
       'info.click_tracked = click_tracked; info.click_opens = click_opens;',
     );
-    const lane = squashed.indexOf('const bool click_opens = click_tracked && WindowsClickOpens();');
-    expect(lane).toBeLessThan(squashed.indexOf('std::thread([pending'));
-    expect(lane).toBeLessThan(squashed.indexOf('running.exchange(true)'));
-    const worker = squashed.slice(
-      squashed.indexOf('std::thread([pending'),
-      squashed.indexOf('}).detach();'),
+    const entry = squashed.slice(
+      squashed.indexOf('EvaluateWindowsInterlockOnLane('),
+      squashed.indexOf('// Windows has no approval path'),
+    );
+    const lane = entry.indexOf('const bool click_opens = click_tracked && WindowsClickOpens();');
+    expect(lane).toBeGreaterThan(0);
+    expect(lane).toBeLessThan(entry.indexOf('std::thread([pending'));
+    expect(lane).toBeLessThan(entry.indexOf('running.exchange(true)'));
+    const worker = entry.slice(
+      entry.indexOf('std::thread([pending'),
+      entry.indexOf('}).detach();'),
     );
     expect(worker).not.toContain('WindowsClickOpens(');
     // The synchronous entry leaves before it uses the point when a click has none.
     const guard = 'if ((kind == "click" || kind == "scroll") && !point_known) return unavailable;';
-    const entry = squashed.slice(squashed.indexOf('EvaluateWindowsInterlockOnLane('));
     expect(entry).toContain(guard);
     expect(entry.indexOf(guard)).toBeLessThan(entry.indexOf('WindowsClickOpens()'));
     expect(squash(scheduler)).toContain('info.click_opens = job.click_opens;');

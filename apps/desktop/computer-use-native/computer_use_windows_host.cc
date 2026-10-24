@@ -71,6 +71,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -144,6 +145,8 @@ struct ScopedKernelHandle {
 
 std::atomic<std::uint64_t> cancellation_epoch{0};
 std::atomic<bool> parent_process_dead{false};
+
+std::atomic<bool> &WindowsTargetListWorkerRunning();
 
 struct CachedResponse {
   MessageType type = MessageType::kError;
@@ -859,7 +862,7 @@ bool ReadAuthenticodeSignerDigest(HANDLE file, const std::wstring &path,
 }
 
 std::string CurrentHelperSignerDigest() {
-  static const std::string digest = []() {
+  static const auto *digest = new std::string([]() {
     std::vector<wchar_t> path(32'768, L'\0');
     const DWORD length = GetModuleFileNameW(
         nullptr, path.data(), static_cast<DWORD>(path.size()));
@@ -877,8 +880,8 @@ std::string CurrentHelperSignerDigest() {
         ReadAuthenticodeSignerDigest(file, image_path, &signer);
     CloseHandle(file);
     return verified ? signer : std::string{};
-  }();
-  return digest;
+  }());
+  return *digest;
 }
 
 std::string PolicyLanguageForWindowsExecutable(const std::wstring &path) {
@@ -1455,7 +1458,10 @@ std::optional<WindowsPathIdentity> WindowsTargetOpenPathIdentity(const std::wstr
 // files are deleted. std::nullopt when the probe could not run (copy, launch, rename or move
 // failed, or the temp file system is unknown or remote), which the caller treats as fail closed.
 // The probe runs on the temp volume, so its result speaks only for that volume's file system.
-std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
+std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows(
+    const std::function<bool()> &still_valid = {}) {
+  const auto active = [&] { return !still_valid || still_valid(); };
+  if (!active()) return std::nullopt;
   std::vector<wchar_t> module(32'768, L'\0');
   const DWORD module_length =
       GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
@@ -1473,9 +1479,9 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
   const std::wstring first = stem + L"-a.exe";
   const std::wstring second = stem + L"-b.exe";
   const std::wstring third = subdirectory + L"\\c.exe";
-  if (CopyFileW(std::wstring(module.data(), module_length).c_str(), first.c_str(), TRUE) != TRUE)
+  if (!active() || CopyFileW(std::wstring(module.data(), module_length).c_str(), first.c_str(), TRUE) != TRUE)
     return std::nullopt;
-  CreateDirectoryW(subdirectory.c_str(), nullptr);
+  if (active()) CreateDirectoryW(subdirectory.c_str(), nullptr);
   ScopedKernelHandle job(CreateJobObjectW(nullptr, nullptr));
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -1484,9 +1490,9 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
   std::wstring command = L"\"" + first + L"\"";
-  if (job.value != nullptr &&
+  if (active() && job.value != nullptr &&
       SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits,
-                              sizeof(limits)) &&
+                              sizeof(limits)) && active() &&
       CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
                      CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr, nullptr, &startup,
                      &process)) {
@@ -1494,7 +1500,7 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
     // The probe volume and the copied file's identity, read from the copied file itself.
     std::optional<WindowsTargetVolume> probe_volume;
     std::optional<WindowsFileIdentity> probe_id;
-    {
+    if (active()) {
       ScopedKernelHandle probe_handle(CreateFileW(first.c_str(), FILE_READ_ATTRIBUTES,
                                                   FILE_SHARE_READ | FILE_SHARE_WRITE |
                                                       FILE_SHARE_DELETE,
@@ -1509,8 +1515,9 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
     }
     // A freshly copied exe can be held briefly by another reader (an anti-virus scan, say), which
     // fails the move with a sharing violation; retry for up to about a second before giving up.
-    const auto move = [](const std::wstring &from, const std::wstring &to) {
+    const auto move = [&](const std::wstring &from, const std::wstring &to) {
       for (int attempt = 0; attempt < 20; ++attempt) {
+        if (!active()) return false;
         if (MoveFileExW(from.c_str(), to.c_str(), 0) == TRUE)
           return true;
         const DWORD error = GetLastError();
@@ -1523,10 +1530,12 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
     // The kernel image name, opened and normalized the same way as the expected location, names the
     // same file (so a TEMP reached through a junction, SUBST or an 8.3 short name still matches).
     const auto names_the_file = [&](const std::wstring &expected) {
+      if (!active()) return false;
       std::wstring reported;
-      if (!ReadProcessPath(process.hProcess, &reported)) return false;
+      if (!ReadProcessPath(process.hProcess, &reported) || !active()) return false;
       const std::optional<WindowsPathIdentity> from_kernel =
           WindowsTargetOpenPathIdentity(reported);
+      if (!active()) return false;
       const std::optional<WindowsPathIdentity> from_expected =
           WindowsTargetOpenPathIdentity(expected);
       return from_kernel.has_value() && from_expected.has_value() && probe_id.has_value() &&
@@ -1534,14 +1543,14 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
              SameWindowsFileIdentity(from_kernel->identity, *probe_id) &&
              SameWindowsFileIdentity(from_expected->identity, *probe_id);
     };
-    if (probe_volume.has_value() && probe_id.has_value()) {
+    if (active() && probe_volume.has_value() && probe_id.has_value()) {
       const bool at_first = names_the_file(first);
       const bool at_second = move(first, second) && names_the_file(second);
       const bool at_third = at_second && move(second, third) && names_the_file(third);
       WindowsTargetRenameProbe probe;
       probe.follows = at_first && at_second && at_third;
       probe.volume = *probe_volume;
-      result = probe;
+      if (active()) result = probe;
     }
     // Terminate on every path (success, failure, the lambdas above throwing): the job also kills it
     // on close, so the child cannot outlive this function.
@@ -1570,9 +1579,12 @@ std::optional<WindowsTargetRenameProbe> WindowsTargetRenameFollows() {
 // unset, so the target is unresolvable rather than wrongly not-own).
 WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pid,
                                                            std::string self_signer_thumbprint,
-                                                           bool acceptance_mode) {
+                                                           bool acceptance_mode,
+                                                           const std::function<bool()> &still_valid = {}) {
   WindowsTargetFactsContext context;
+  if (still_valid && !still_valid()) return context;
   context.roots = CurrentWindowsTargetRoots(WindowsTargetSelfInstallRoot());
+  if (still_valid && !still_valid()) return WindowsTargetFactsContext{};
   ScopedKernelHandle main(
       OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, main_pid));
   const std::optional<std::uint64_t> creation =
@@ -1584,7 +1596,8 @@ WindowsTargetFactsContext CurrentWindowsTargetFactsContext(std::uint32_t main_pi
   }
   context.self_signer_thumbprint = std::move(self_signer_thumbprint);
   context.acceptance_mode = acceptance_mode;
-  context.rename_probe = WindowsTargetRenameFollows();
+  if (still_valid && !still_valid()) return WindowsTargetFactsContext{};
+  context.rename_probe = WindowsTargetRenameFollows(still_valid);
   return context;
 }
 
@@ -2939,6 +2952,10 @@ std::string WindowsIdentityJson(const WindowsExecutableIdentity &identity,
 }
 
 bool PickWindowsExecutable(std::string *response, std::string *reason) {
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+    *reason = "picker_unavailable";
+    return false;
+  }
   IFileOpenDialog *dialog = nullptr;
   if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr,
                               CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog))) ||
@@ -3800,11 +3817,34 @@ std::string WindowsV2SelfSignerThumbprint() {
 // Without Main's pid nothing can say what is Sprint Coder's own (W8): an empty context, whose facts
 // are unmeasured (unresolvable), and nothing is cached, so the real context is measured once the pid
 // is known (fail closed).
+struct WindowsTargetListState {
+  std::mutex stop_mutex;
+  std::atomic<std::uint64_t> stop_serial{0};
+  std::atomic<bool> running{false};
+  std::shared_ptr<const WindowsTargetFactsContext> context_candidate;
+  std::uint64_t context_stop_serial = 0;
+};
+
+WindowsTargetListState &WindowsTargetListControl() {
+  // An uninterruptible driver may outlive ServePipe and static destruction.
+  static auto *state = new WindowsTargetListState;
+  return *state;
+}
+
+std::atomic<bool> &WindowsTargetListWorkerRunning() {
+  return WindowsTargetListControl().running;
+}
+
+std::optional<WindowsTargetFactsContext> &WindowsV2FactsContextCache() {
+  static auto *context = new std::optional<WindowsTargetFactsContext>;
+  return *context;
+}
+
 const WindowsTargetFactsContext &WindowsV2FactsContext() {
-  static const WindowsTargetFactsContext unknown_root;
-  static std::optional<WindowsTargetFactsContext> context;
+  static const auto *unknown = new WindowsTargetFactsContext;
   if (windows_v2_main_pid == 0)
-    return unknown_root;
+    return *unknown;
+  auto &context = WindowsV2FactsContextCache();
   if (!context.has_value())
     context = CurrentWindowsTargetFactsContext(windows_v2_main_pid, WindowsV2SelfSignerThumbprint(),
                                                /*acceptance_mode=*/false);
@@ -4187,100 +4227,265 @@ bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
 // list_targets (ADR v2 section 5.2): every top-level application window, judged per process, at most
 // kWindowsListTargetsRowLimit rows and kWindowsListTargetsRowBytes bytes of rows, within
 // kWindowsListTargetsBudgetMs.
-bool ListWindowsTargets(std::string *response, std::string *reason) {
+struct WindowsTargetListPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::atomic<bool> abandoned{false};
+  ScopedKernelHandle thread;
+  bool done = false;
+  bool succeeded = false;
+  bool context_ready = false;
+  bool enumerated = false;
+  std::size_t remaining = 0;
+  WindowsV2ListRows progress{kWindowsListTargetsRowBytes};
+  std::string response;
+  std::string reason = "list_targets_unavailable";
+};
+
+// Called only by the consumer, with stop_mutex held. A context that finished after an earlier
+// response deadline is a candidate, not an active cache: only this new explicit request adopts it.
+void AdoptWindowsV2ContextCandidate(std::uint64_t expected_stop) {
+  auto &control = WindowsTargetListControl();
+  if (control.running.load(std::memory_order_acquire) || !control.context_candidate)
+    return;
+  if (control.context_stop_serial == expected_stop &&
+      control.stop_serial.load(std::memory_order_acquire) == expected_stop &&
+      !parent_process_dead.load(std::memory_order_acquire) &&
+      control.context_candidate->lineage_root_pid == windows_v2_main_pid &&
+      !WindowsV2FactsContextCache().has_value())
+    WindowsV2FactsContextCache() = *control.context_candidate;
+  control.context_candidate.reset();
+}
+
+bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected_stop,
+                                const std::function<bool()> &still_valid,
+                                const std::function<bool()> &context_valid,
+                                WindowsTargetListPending *pending,
+                                std::string *response, std::string *reason) {
+  using namespace sprint_coder::computer_use;
+  // Without Main's pid there is no lineage root: nothing is enumerated or measured.
+  if (windows_v2_main_pid == 0 || !context_valid()) return false;
+  const auto &cached = WindowsV2FactsContextCache();
+  const bool had_cached_context = cached.has_value();
+  WindowsTargetFactsContext context = had_cached_context ? *cached : CurrentWindowsTargetFactsContext(
+      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), /*acceptance_mode=*/false, context_valid);
+  if (context.lineage_root_pid == 0) {
+    *reason = "list_targets_unavailable";
+    return false;
+  }
+  if (!had_cached_context) {
+    auto candidate = std::make_shared<const WindowsTargetFactsContext>(context);
+    auto &control = WindowsTargetListControl();
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!context_valid()) return false;
+    control.context_candidate = std::move(candidate);
+    control.context_stop_serial = expected_stop;
+  }
+  {
+    std::lock_guard lock(pending->mutex);
+    pending->context_ready = true;
+  }
+  if (!still_valid()) return false;
+  std::vector<HWND> windows;
+  if (EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows)) != TRUE) {
+    *reason = "process_enumeration_unavailable";
+    return false;
+  }
+  // One judgement per process; a measurement that missed the budget has no selectable row.
+  std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
+  WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
+  bool truncated = false;
+  std::size_t remaining = windows.size();
+  const auto publish = [&] {
+    std::lock_guard lock(pending->mutex);
+    if (pending->abandoned.load(std::memory_order_acquire)) return;
+    pending->progress = rows;
+    pending->remaining = remaining;
+    pending->enumerated = true;
+  };
+  for (std::size_t index = 0; index < windows.size(); ++index) {
+    remaining = windows.size() - index;
+    publish();
+    if (!still_valid()) return false;
+    const HWND window = windows[index];
+    if (rows.Full()) {
+      truncated = true;
+      break;
+    }
+    DWORD owner = 0;
+    if (GetWindowThreadProcessId(window, &owner) == 0 || owner == 0 ||
+        owner == GetCurrentProcessId())
+      continue;
+    // The process's facts are measured once, without a window (the first window listed decides
+    // nothing about the others); each window is then judged with its own class.
+    auto found = judged.find(owner);
+    if (found == judged.end()) {
+      std::optional<std::shared_ptr<WindowsV2Judgement>> entry;
+      if (still_valid()) {
+        auto judgement = std::make_shared<WindowsV2Judgement>();
+        MeasureWindowsV2Process(owner, context, judgement.get());
+        if (still_valid())
+          entry = std::move(judgement);
+      }
+      found = judged.emplace(owner, std::move(entry)).first;
+    }
+    if (!found->second.has_value()) {
+      rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
+      continue;
+    }
+    if (!still_valid()) return false;
+    WindowsV2Judgement &judgement = **found->second;
+    // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
+    // after it was listed) is unresolvable on its own; it does not touch its process's others.
+    TargetFacts window_facts;
+    const TargetVerdict verdict =
+        WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner),
+                                       &window_facts);
+    if (!still_valid()) return false;
+    RECT client{};
+    RECT screen{};
+    if (!(verdict.kind == TargetVerdictKind::kEligible ||
+          verdict.kind == TargetVerdictKind::kUpper)) {
+      rows.push_back(WindowsV2RefusedRow(verdict.kind == TargetVerdictKind::kUnresolvable
+                                             ? TargetVerdictKind::kUnresolvable
+                                             : TargetVerdictKind::kDenied));
+      continue;
+    }
+    if (IsWindowEnabled(window) != TRUE || !ClientBoundsPhysical(window, &client) ||
+        !ScreenBoundsPhysicalForWindow(window, &screen)) {
+      rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
+      continue;
+    }
+    std::vector<wchar_t> title(513, L'\0');
+    const int title_length = GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
+    std::string title_utf8 = BoundedUtf8(
+        title_length > 0 ? Utf8FromWide(std::wstring_view(title.data(), title_length))
+                         : "Application window",
+        256);
+    if (title_utf8.empty())
+      title_utf8 = "Application window";
+    // The row: built by WindowsV2SelectableRow, which sends this window alone as unresolvable when a
+    // fact or an identity string is outside what Main takes; the rest of the list stands.
+    WindowsV2RowWindow row_window;
+    row_window.handle = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window));
+    row_window.pid = owner;
+    row_window.title = std::move(title_utf8);
+    row_window.client = client;
+    row_window.screen = screen;
+    if (!still_valid()) return false;
+    rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));
+  }
+  if (!truncated) remaining = 0;
+  publish();
+  if (!still_valid()) return false;
+  *response = WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
+                                    truncated || rows.Truncated(), rows);
+  return true;
+}
+
+bool ListWindowsTargets(std::string *response, std::string *reason,
+                        std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
   if constexpr (!sprint_coder::computer_use::kNativeEligibilityIsV2) {
     (void)response;
     *reason = "unsupported_operation";
     return false;
   } else {
-    using namespace sprint_coder::computer_use;
-    // Without Main's pid there is no lineage root: nothing is enumerated or measured.
-    const WindowsTargetFactsContext &context = WindowsV2FactsContext();
-    if (context.lineage_root_pid == 0) {
-      *reason = "list_targets_unavailable";
-      return false;
-    }
-    std::vector<HWND> windows;
-    if (EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows)) != TRUE) {
-      *reason = "process_enumeration_unavailable";
-      return false;
+    *reason = "list_targets_unavailable";
+    auto &control = WindowsTargetListControl();
+    const std::uint64_t expected_stop = queued_stop_serial.value_or(
+        control.stop_serial.load(std::memory_order_acquire));
+    {
+      std::lock_guard stop_lock(control.stop_mutex);
+      AdoptWindowsV2ContextCandidate(expected_stop);
     }
     const ULONGLONG deadline = GetTickCount64() + kWindowsListTargetsBudgetMs;
-    // The generation this list would be; it is taken only when the answer is sent.
     const std::uint64_t generation = windows_v2_list_generation + 1;
-    // One judgement per process; std::nullopt for a process whose measurement ran past the budget.
-    std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
-    WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
-    bool truncated = false;
-    for (const HWND window : windows) {
-      if (rows.Full()) {
-        truncated = true;
-        break;
-      }
-      DWORD owner = 0;
-      if (GetWindowThreadProcessId(window, &owner) == 0 || owner == 0 ||
-          owner == GetCurrentProcessId())
-        continue;
-      // The process's facts are measured once, without a window (the first window listed decides
-      // nothing about the others); each window is then judged with its own class.
-      auto found = judged.find(owner);
-      if (found == judged.end()) {
-        std::optional<std::shared_ptr<WindowsV2Judgement>> entry;
-        if (GetTickCount64() <= deadline) {
-          auto judgement = std::make_shared<WindowsV2Judgement>();
-          MeasureWindowsV2Process(owner, context, judgement.get());
-          if (GetTickCount64() <= deadline)
-            entry = std::move(judgement);
+    auto pending = std::make_shared<WindowsTargetListPending>();
+    const auto context_valid = [expected_stop] {
+      return !parent_process_dead.load(std::memory_order_acquire) &&
+             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == expected_stop;
+    };
+    const auto still_valid = [pending, context_valid, deadline] {
+      return !pending->abandoned.load(std::memory_order_acquire) && context_valid() &&
+             GetTickCount64() < deadline;
+    };
+    if (!still_valid() || control.running.exchange(true, std::memory_order_acq_rel))
+      return false;
+    try {
+      std::thread([pending, still_valid, context_valid, expected_stop, generation] {
+        bool succeeded = false;
+        std::string built;
+        std::string failure = "list_targets_unavailable";
+        try {
+          struct Apartment {
+            HRESULT result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); }
+          } apartment;
+          HANDLE self = nullptr;
+          if (SUCCEEDED(apartment.result) &&
+              DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &self,
+                              0, FALSE, DUPLICATE_SAME_ACCESS)) {
+            {
+              std::lock_guard lock(pending->mutex);
+              pending->thread.value = self;
+            }
+            if (context_valid())
+              succeeded = MeasureWindowsV2TargetList(generation, expected_stop, still_valid, context_valid,
+                                                    pending.get(), &built, &failure);
+          }
+        } catch (...) {
+          succeeded = false;
         }
-        found = judged.emplace(owner, std::move(entry)).first;
-      }
-      if (!found->second.has_value()) {
-        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
-        continue;
-      }
-      WindowsV2Judgement &judgement = **found->second;
-      // This window's own verdict and mode. A window whose class cannot be read (it was destroyed
-      // after it was listed) is unresolvable on its own; it does not touch its process's others.
-      TargetFacts window_facts;
-      const TargetVerdict verdict =
-          WindowsV2VerdictForWindowClass(&judgement, WindowsTargetWindowClass(window, owner),
-                                         &window_facts);
-      RECT client{};
-      RECT screen{};
-      if (!(verdict.kind == TargetVerdictKind::kEligible ||
-            verdict.kind == TargetVerdictKind::kUpper)) {
-        rows.push_back(WindowsV2RefusedRow(verdict.kind == TargetVerdictKind::kUnresolvable
-                                               ? TargetVerdictKind::kUnresolvable
-                                               : TargetVerdictKind::kDenied));
-        continue;
-      }
-      if (IsWindowEnabled(window) != TRUE || !ClientBoundsPhysical(window, &client) ||
-          !ScreenBoundsPhysicalForWindow(window, &screen)) {
-        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
-        continue;
-      }
-      std::vector<wchar_t> title(513, L'\0');
-      const int title_length = GetWindowTextW(window, title.data(), static_cast<int>(title.size()));
-      std::string title_utf8 = BoundedUtf8(
-          title_length > 0 ? Utf8FromWide(std::wstring_view(title.data(), title_length))
-                           : "Application window",
-          256);
-      if (title_utf8.empty())
-        title_utf8 = "Application window";
-      // The row: built by WindowsV2SelectableRow, which sends this window alone as unresolvable when a
-      // fact or an identity string is outside what Main takes; the rest of the list stands.
-      WindowsV2RowWindow row_window;
-      row_window.handle = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window));
-      row_window.pid = owner;
-      row_window.title = std::move(title_utf8);
-      row_window.client = client;
-      row_window.screen = screen;
-      rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));
+        // All measured handles and COM objects are gone before the slot becomes available.
+        {
+          std::lock_guard lock(pending->mutex);
+          if (still_valid()) {
+            pending->succeeded = succeeded;
+            pending->response = std::move(built);
+            pending->reason = std::move(failure);
+          }
+          pending->done = true;
+          WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
+        }
+        pending->ready.notify_one();
+      }).detach();
+    } catch (...) {
+      control.running.store(false, std::memory_order_release);
+      return false;
     }
-    return FinishWindowsV2ListResponse(
-        WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
-                              truncated || rows.Truncated(), rows),
-        generation, response, reason);
+    std::unique_lock lock(pending->mutex);
+    while (!pending->done && still_valid())
+      pending->ready.wait_for(lock, std::chrono::milliseconds(20));
+    // Stop and adoption share this lock; a late result cannot advance the generation.
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!still_valid()) {
+      pending->abandoned.store(true, std::memory_order_release);
+      // A response deadline does not cancel cold context initialization. It may finish off-lane
+      // and supply one pure candidate to the next explicit request. Stop always cancels it.
+      if (pending->thread.value != nullptr && (!context_valid() || pending->context_ready))
+        CancelSynchronousIo(pending->thread.value);
+      if (!context_valid() || !pending->enumerated)
+        return false;
+      // Keep complete rows. The unfinished windows reveal only their anonymous refusal kind.
+      WindowsV2ListRows partial = pending->progress;
+      for (std::size_t index = 0; index < pending->remaining && !partial.Full(); ++index)
+        partial.push_back(WindowsV2RefusedRow(sprint_coder::computer_use::TargetVerdictKind::kUnresolvable));
+      if (!FinishWindowsV2ListResponse(
+          WindowsV2ListResponse(generation,
+              sprint_coder::computer_use::DenyRulesetVersion(sprint_coder::computer_use::TargetPlatform::kWin32),
+              /*truncated=*/true, partial), generation, response, reason))
+        return false;
+      AdoptWindowsV2ContextCandidate(expected_stop);
+      return true;
+    }
+    if (!pending->succeeded) {
+      *reason = pending->reason;
+      return false;
+    }
+    if (!FinishWindowsV2ListResponse(std::move(pending->response), generation, response, reason))
+      return false;
+    AdoptWindowsV2ContextCandidate(expected_stop);
+    return true;
   }
 }
 
@@ -4291,7 +4496,8 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
 bool RejudgeWindowsV2Session(const WindowsSession &session, std::optional<bool> *not_web,
                              std::string *reason) {
   // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
-  if (WindowsV2FactsContext().lineage_root_pid == 0) {
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ||
+      WindowsV2FactsContext().lineage_root_pid == 0) {
     *reason = "session_identity_changed";
     return false;
   }
@@ -4341,7 +4547,8 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
                          std::optional<sprint_coder::computer_use::WindowsFileKey> *not_web_file) {
   using namespace sprint_coder::computer_use;
   // Without Main's pid the target cannot be judged (W8): refused, before anything is measured.
-  if (WindowsV2FactsContext().lineage_root_pid == 0)
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) ||
+      WindowsV2FactsContext().lineage_root_pid == 0)
     return false;
   std::uint64_t ruleset_version = 0;
   std::uint64_t generation = 0;
@@ -4376,6 +4583,10 @@ bool AdmitWindowsV2Start(std::uint32_t pid, HWND window, const LockedWindowsExec
 
 bool ListWindowsForIdentity(const std::string &metadata, std::string *response,
                             std::string *reason) {
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+    *reason = "profile_identity_invalid";
+    return false;
+  }
   std::string canonical_path_utf8;
   std::string expected_identity;
   std::string expected_executable_digest;
@@ -4490,6 +4701,10 @@ std::string FrameIdKey(const sprint_coder::computer_use::FrameId &id) {
 
 bool StartWindowsSession(const Frame &request, const std::string &metadata,
                          std::string *response, std::string *reason) {
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+    *reason = "session_target_rejected";
+    return false;
+  }
   std::uint64_t pid_value = 0;
   std::uint64_t window_value = 0;
   std::uint64_t cancel_epoch = 0;
@@ -4861,6 +5076,10 @@ bool CloseWindowsSession(const Frame &request, const std::string& metadata, std:
 bool ValidateWindowsSession(
     const WindowsSession &session, RECT *bounds, std::string *reason,
     WindowsDialogSetSnapshot *dialog_snapshot = nullptr) {
+  if (WindowsTargetListWorkerRunning().load(std::memory_order_acquire)) {
+    *reason = "session_identity_changed";
+    return false;
+  }
   std::string current_start;
   std::wstring current_path;
   WindowsFileIdentity held_file_identity;
@@ -8470,7 +8689,8 @@ bool ReadWindowsNodeValueOnLane(const WindowsSession &session, const std::string
 // END artifact read
 
 bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
-                       const Frame &request, bool *handshaken) {
+                       const Frame &request, bool *handshaken,
+                       std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
   const auto type = static_cast<MessageType>(request.header.message_type);
   if (!IsBoundedUtf8(request.metadata) || !request.binary.empty())
     return false;
@@ -8532,7 +8752,7 @@ bool HandlePipeRequest(HANDLE pipe, const BackendProbe &probe,
       succeeded = ListWindowsForIdentity(metadata, &response, &reason);
     } else if (operation == "list_targets") {
       // S5-c-3 PR-5: unsupported_operation in a v1 build.
-      succeeded = ListWindowsTargets(&response, &reason);
+      succeeded = ListWindowsTargets(&response, &reason, queued_stop_serial);
     } else if (operation == "start_session") {
       succeeded = StartWindowsSession(request, metadata, &response, &reason);
     } else if (operation == "close_session") {
@@ -8661,7 +8881,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
   constexpr std::size_t kMaximumQueuedFrames = 64;
   std::mutex queue_mutex;
   std::condition_variable queue_ready;
-  std::deque<Frame> queue;
+  std::deque<std::pair<Frame, std::uint64_t>> queue;
   bool reader_finished = false;
   bool reader_valid = true;
   std::thread reader([&]() {
@@ -8673,8 +8893,13 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
         reader_valid = false;
         break;
       }
-      if (static_cast<MessageType>(request.header.message_type) ==
-          MessageType::kCancel) {
+      const std::string metadata(reinterpret_cast<const char *>(request.metadata.data()),
+                                 request.metadata.size());
+      std::string operation;
+      const auto type = static_cast<MessageType>(request.header.message_type);
+      const bool close = type == MessageType::kProbe &&
+                         ReadJsonString(metadata, "operation", &operation) && operation == "close_session";
+      if (type == MessageType::kCancel || close) {
         const std::string request_key = ResponseCacheKey(request);
         const std::string request_digest = RequestPayloadDigest(request);
         const auto prior = cancel_request_digests.find(request_key);
@@ -8688,18 +8913,25 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           cancel_request_order.push_back(request_key);
           cancel_request_digests.emplace(request_key, request_digest);
         }
-        const std::string metadata(
-            reinterpret_cast<const char *>(request.metadata.data()),
-            request.metadata.size());
         std::uint64_t requested_epoch = 0;
         if (new_cancel &&
             ReadJsonUint64(metadata, "cancelEpoch", &requested_epoch)) {
-          std::uint64_t current =
-              cancellation_epoch.load(std::memory_order_acquire);
-          while (requested_epoch > current &&
-                 !cancellation_epoch.compare_exchange_weak(
-                     current, requested_epoch, std::memory_order_acq_rel,
-                     std::memory_order_acquire)) {
+          auto &control = WindowsTargetListControl();
+          std::lock_guard stop_lock(control.stop_mutex);
+          // A new Close must stop discovery even when its epoch equals the current input epoch.
+          control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
+          control.context_candidate.reset();
+          // Close invalidates discovery here, but only its consumer owns session epochs. A retry
+          // for an already-closed session must not cancel another session or raise the input epoch
+          // beyond last_closed_cancel_epoch and prevent a fresh epoch-zero start.
+          if (type == MessageType::kCancel) {
+            std::uint64_t current =
+                cancellation_epoch.load(std::memory_order_acquire);
+            while (requested_epoch > current &&
+                   !cancellation_epoch.compare_exchange_weak(
+                       current, requested_epoch, std::memory_order_acq_rel,
+                       std::memory_order_acquire)) {
+            }
           }
         }
       }
@@ -8709,7 +8941,8 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           reader_valid = false;
           break;
         }
-        queue.push_back(std::move(request));
+        queue.emplace_back(std::move(request),
+                         WindowsTargetListControl().stop_serial.load(std::memory_order_acquire));
       }
       queue_ready.notify_one();
       request = {};
@@ -8725,16 +8958,18 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
   bool served = true;
   for (;;) {
     Frame request;
+    std::uint64_t queued_stop_serial = 0;
     {
       std::unique_lock lock(queue_mutex);
       queue_ready.wait(lock,
                        [&]() { return reader_finished || !queue.empty(); });
       if (queue.empty())
         break;
-      request = std::move(queue.front());
+      request = std::move(queue.front().first);
+      queued_stop_serial = queue.front().second;
       queue.pop_front();
     }
-    if (!HandlePipeRequest(pipe, probe, request, &handshaken)) {
+    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {
       served = false;
       CancelIoEx(pipe, nullptr);
       break;
