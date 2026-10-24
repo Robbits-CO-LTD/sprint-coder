@@ -6,7 +6,7 @@
 
 次を **全部** 満たすものだけ起票する。
 
-- 独立した 2 session で同じ正規化症状が出た（E2E: spec 単独再実行 / 実 AI: fresh profile で同 case）
+- 独立した 2 session で同じ正規化症状が出た（E2E: 同じComputer Useケースを別sessionで再実行 / 実 AI: fresh profile で同 case）
 - 期待値の出典がある（spec の expect、設計書 §、受入条件、明白な安全契約: workspace 外へ書かない・承認なしに実行しない・データを失わない）
 - 環境起因（native 未 build、dev server 不一致、CLI 未認証、quota）と driver 起因（Computer Use の `unsupported`、stale window）を除外した
 - open / closed Issue と open PR の **意味的** 重複を自分で読んで確認した
@@ -36,7 +36,7 @@ severity は並び順に使うだけで、証拠不足を補わない。
 
 ## 再現手順
 
-（E2E 由来: 実行コマンド、spec:行 › タイトル、独立再現の回数。実 AI 由来: lane、Access 設定、case ID、prompt の要旨 1 行、承認操作）
+（E2E由来: case ID、build / OS、操作、独立再現の回数。実 AI 由来: lane、Access 設定、case ID、prompt の要旨 1 行、承認操作）
 
 ## 期待した結果と根拠
 
@@ -64,7 +64,7 @@ severity は並び順に使うだけで、証拠不足を補わない。
 ## 完了条件
 
 - [ ] 同じ手順・同じ観測点で症状が消える
-- [ ] 原因に隣接する回帰テスト（vitest または E2E spec）が通る
+- [ ] 原因に隣接する回帰テスト（VitestまたはComputer Useケース）が通る
 - [ ] <この Finding 固有の観測可能な条件>
 
 ## Bug Sweep context
@@ -74,7 +74,7 @@ severity は並び順に使うだけで、証拠不足を補わない。
 - Evidence: <run ディレクトリ内の相対名。絶対 path は書かない>
 ```
 
-fingerprint は `sha256(repo | phase | spec or case | 安定した要素名 | 失敗クラス | 正規化した期待差分)`。timestamp、nonce、run ID、port、path、件数を含めない。`triage-e2e.mjs` が E2E 分を出す。実 AI 分は `printf '%s' 'Robbits-CO-LTD/sprint-coder|phase3|RA-05|command-card|wrong-value|exit code missing' | shasum -a 256` で作る。
+fingerprint は `sha256(repo | phase | case ID | 安定した要素名 | 失敗クラス | 正規化した期待差分)`。timestamp、nonce、run ID、port、path、件数を含めない。E2E分も実AI分もcase IDと正規化症状から生成する。例: `printf '%s' 'Robbits-CO-LTD/sprint-coder|phase3|RA-05|command-card|wrong-value|exit code missing' | shasum -a 256` で作る。
 
 ## label
 

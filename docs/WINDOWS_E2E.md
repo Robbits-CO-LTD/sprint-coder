@@ -1,47 +1,19 @@
-# Windows主要E2E
+# WindowsのComputer Use検証
 
-GitHub Actionsの `Windows major E2E` は、全検証に分類されたPR、mainへのpush、手動実行で起動します。文書と確認済みのRenderer表示変更は対象を絞ったcheckへ回し、Windows固有のパス、入力、Electron起動に関わる変更は全検証で確認します。分類できない変更も全検証へ戻します。
+WindowsのUI・E2Eは、開発エージェントがComputer Useで実アプリを操作して確認します。[検証チェックリスト](testing/computer-use/README.md)がケースの正本です。Sprint Coder自身のComputer Use機能とは区別します。
 
-## 対象
+## 対象と準備
 
-対象は `playwright.windows.config.ts` で明示します。
+セットアップ、Composer / IME / keyboard、設定、Project / file、承認、Team / Graph、window focusと再起動復元から変更に関係するケースを選びます。macOS専用ケースはWindowsの対象外です。実Provider、実CLIへの課金を伴う送信は現在の依頼で明示された場合だけ実施します。
 
-| 領域             | spec                                                          |
-| ---------------- | ------------------------------------------------------------- |
-| 初回セットアップ | `setup-wizard.spec.ts`                                        |
-| Composer         | `composer-input-boundaries.spec.ts`、`keyboard-smoke.spec.ts` |
-| Settings         | `settings-dialog.spec.ts`                                     |
-| Project / file   | `project-sidebar.spec.ts`、`file-edits.spec.ts`               |
-| Approval         | `approval-flow.spec.ts`                                       |
-| Team UI          | `team-flow.spec.ts`                                           |
+Node.js 22、Python 3、Visual Studio Build Toolsを用意し、PowerShellで `npm ci` と `npm run prepare:desktop --workspace @sprint-coder/desktop` を実行してから `npm start` で開発buildを起動します。installerを検証する場合はInno Setupも用意し、対象buildのinstallerを使います。既存の開発者のprocessやprofileは保持し、run所有のprofileとworkspaceを使います。
 
-各specは専用のprofileを使い、Mock RuntimeとCLI fixtureを固定します。実Provider API、課金、外部通信は使いません。実行順は直列で、失敗時の再試行はしません。
+## 実施と証拠
 
-## 除外
+- source SHA / 差分、build、OS、process、所有profileを記録し、対象windowがそのbuildであることを照合します。
+- Computer Useでチェックリストの操作を行い、実画面と期待結果を確認します。shellは起動、fixture準備、ログ・ファイル照合に使えます。
+- 各ケースの `PASS` / `FAIL` / `SKIP` / `BLOCKED` と証拠を記録します。Computer Useを利用できない場合は `BLOCKED` です。失敗を環境、成果物、操作ツール、製品のどこで起きたか切り分けます。
+- 起動しない場合は起動ログ、Main / Preloadのbuild、renderer配信、native ABIを確認します。停止処理は自分のrunが起動したprocessだけに限定します。
+- Windows CIの型・単体・native・package / installer検証と、Computer Useの画面検証は別の証拠です。CI成功をUIのPASSに読み替えません。性能の数値基準やaxe監査にも別途計測・監査結果が必要です。
 
-- `macos-window-lifecycle.spec.ts`: macOS専用のwindow lifecycleを扱うため。
-- `leader-mcp-smoke.spec.ts`、`leader-mcp-codex-smoke.spec.ts`: 実CLIとcredentialを必要とするopt-inテストのため。
-- コード署名、実Provider、実課金を必要とするテスト: このCIの対象外。
-
-新しいspecを追加するときは、Windowsで外部credentialなしに決定的に動作することを確認し、設定の明示リストとこの表を同時に更新します。暗黙のskipやファイル名の広いglobだけで対象を増やしません。
-
-## ローカル実行
-
-Node.js 22と依存関係を用意し、Windows PowerShellから実行します。
-
-```powershell
-npm ci
-$env:SPRINT_CODER_E2E_MODE = 'dev'
-npx playwright test --config playwright.windows.config.ts
-```
-
-CIは開発モードで起動します。Archifyとその他の主要画面操作を2つのjobへ分け、各jobは1 workerで実行します。両方の成功を必須とします。失敗時は `test-results`、`playwright-report`、`windows-e2e.log` を `windows-e2e-<group>-<run>-<attempt>` artifactへ保存します。artifactのアップロードだけはテスト失敗後も動きますが、テストの終了コードは保持され、`CI required` は失敗します。
-
-## 起動待ちの記録と切り分け
-
-- globalSetupが起動した `npm start` の出力は `test-results/windows-major-e2e/dev-server.log` に残ります。起動待ちの上限は240秒です（`tests/e2e/helpers.ts` の `DEV_SERVER_READY_TIMEOUT_MS`）。上限が切れたときは、次の3つがエラーに出ます。
-  - `Startup phase: ...`: どの段階で止まっていたか
-  - `Progress: ...`: renderer の開発サーバーと main / preload のビルドが、それぞれ何秒で整ったか
-  - ログの末尾
-- 通ったときも、同じ内訳が `Started our own npm start` の行に出ます。Forge は `generateAssets` で Computer Use のヘルパーを毎回コンパイルするので、遅い runner では Vite より前の段階が長くなります。標準入力が端末でないと `electron-forge start` は工程の表示を止めるため、ログには Forge の工程名が出ません。
-- `firstWindow` で落ちたときは、エラーの `diagnosis:` が原因を分けます。`main-init` はmainが画面の読み込みを始めていない、`renderer-load` は画面の文書かスクリプトが届いていない、`missed-event` は読み込みは済んでいるのにPlaywrightが気づいていない、を表します。mainの出力を含む全文は、そのテストの結果フォルダの `first-window-diagnostics.txt` にあります。
+詳細な操作規約は [Windows用Skill](../.claude/skills/sprint-coder-e2e-windows/SKILL.md)を参照してください。

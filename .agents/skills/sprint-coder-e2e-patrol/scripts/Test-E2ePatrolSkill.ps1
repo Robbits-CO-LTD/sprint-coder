@@ -39,7 +39,7 @@ try {
     $skillText = [System.IO.File]::ReadAllText((Join-Path $skillRoot 'SKILL.md'))
     $e2eContractText = [System.IO.File]::ReadAllText((Join-Path $skillRoot 'references\e2e-contract.md'))
     Assert-True $skillText.Contains('response channel') 'Skill must classify auxiliary capture channel loss as tooling failure.'
-    Assert-True $e2eContractText.Contains('two target-bound markers') 'CDP sessions must be bound with two target markers.'
+    Assert-True $e2eContractText.Contains('two target-bound markers') 'Computer Use windows must be bound with two target markers.'
     Assert-True $e2eContractText.Contains('two or more points inside the expected duration') 'Short animations must be sampled while visible.'
     Assert-True $e2eContractText.Contains('reuse the exact owned browser') 'Restart persistence must reuse the same owned profile.'
     Assert-True $e2eContractText.Contains('A user request does not override') 'Production side effects must remain prohibited.'
@@ -79,8 +79,8 @@ try {
     [void](New-Item -ItemType Directory -Path $runRoot -Force)
     [System.IO.File]::WriteAllText((Join-Path $runRoot 'manifest.json'), '{}', (New-Object System.Text.UTF8Encoding($false)))
     $recordScript = Join-Path $scriptRoot 'Write-E2ePatrolRecord.ps1'
-    $browserRecord = & $recordScript -RunPath $runRoot -RecordType observation -CaseId WEB-01 -SessionId a -PrimarySurface browser-use -Message 'Expected Saved; observed Not saved.' -EvidenceNames @('session-a/after-save.png')
-    Assert-True $browserRecord.recorded 'Browser record must be appended.'
+    $standardRecord = & $recordScript -RunPath $runRoot -RecordType observation -CaseId WEB-01 -SessionId a -PrimarySurface computer-use -ComputerUseReason CU-00-standard -Message 'Expected Saved; observed Not saved.' -EvidenceNames @('session-a/after-save.png')
+    Assert-True $standardRecord.recorded 'Standard Computer Use record must be appended.'
     $computerRecord = & $recordScript -RunPath $runRoot -RecordType surface -CaseId WIN-01 -PrimarySurface computer-use -ComputerUseReason CU-03-non-dom-app -Message 'Native Notepad surface selected.'
     Assert-True ($computerRecord.computer_use_reason -eq 'CU-03-non-dom-app') 'Computer Use reason must be recorded.'
     Assert-Throws {
@@ -88,7 +88,7 @@ try {
     } 'Computer Use without a reason must fail.'
     Assert-Throws {
         & $recordScript -RunPath $runRoot -RecordType surface -CaseId WEB-02 -PrimarySurface browser-use -ComputerUseReason CU-03-non-dom-app -Message 'Wrong routing.' | Out-Null
-    } 'DOM Browser Use must not carry a Computer Use reason.'
+    } 'Non-Computer Use drivers must be rejected.'
 
     $cleanupPlanner = Join-Path $scriptRoot 'Get-ComputerUseCleanupPlan.ps1'
     $beforeNew = '[{"id":1,"app":"existing.exe"}]'
@@ -128,7 +128,7 @@ try {
         -SourceSha ('a' * 40) `
         -RunId 'test-run' `
         -FailureClass 'data-not-persisted' `
-        -Driver browser-use `
+        -Driver computer-use `
         -EvidenceNames @('session-a.txt', 'session-b.txt') `
         -OutputPath $bodyPath
     Assert-True (Test-Path -LiteralPath $bodyResult.body_path) 'Issue body must be written.'

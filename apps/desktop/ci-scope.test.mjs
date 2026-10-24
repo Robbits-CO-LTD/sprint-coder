@@ -4,16 +4,10 @@ import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import {
-  classifyChanges,
-  focusedE2eMatrix,
-  parseNameStatus,
-  verifyRequiredJobs,
-} from '../../ci-scope.mjs';
+import { classifyChanges, parseNameStatus, verifyRequiredJobs } from '../../ci-scope.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const renderer = 'apps/desktop/src/renderer/';
-const spec = (name) => `tests/e2e/${name}.spec.ts`;
 const changes = (...paths) => paths.map((path) => ({ path, status: 'M' }));
 const cleanup = [];
 afterEach(() => {
@@ -27,18 +21,14 @@ describe('CI change boundaries', () => {
         mode: 'website',
         fullMatrix: false,
         websiteRequired: true,
-        e2eSpecs: [],
       });
     for (const extra of ['package-lock.json', `${renderer}components/RunCard.tsx`, 'unknown']) {
       const scope = classifyChanges(changes('website/index.html', extra));
       expect(scope).toMatchObject({ mode: 'full', websiteRequired: true });
-      if (extra.includes('RunCard')) expect(scope.e2eSpecs).toContain(spec('keyboard-smoke'));
     }
     for (const path of [
       'deploy/website/deploy.sh',
       'ci-website.mjs',
-      'playwright.website.config.ts',
-      'tests/website/site.spec.ts',
       'apps/desktop/ci-website.test.mjs',
       'ci-scope.mjs',
       '.github/workflows/ci.yml',
@@ -65,7 +55,7 @@ describe('CI change boundaries', () => {
       { path: 'docs/maintenance.md', status: 'A' },
       { path: 'tasks/ci-plan.md', status: 'M' },
     ]);
-    expect(scope).toMatchObject({ mode: 'docs', fullMatrix: false, e2eSpecs: [] });
+    expect(scope).toMatchObject({ mode: 'docs', fullMatrix: false });
   });
 
   it.each([
@@ -124,42 +114,19 @@ describe('CI change boundaries', () => {
     ).toBe('full');
   });
 
-  it('maps the reviewed small display libraries to the renderer path', () => {
-    expect(classifyChanges(changes(`${renderer}lib/format.ts`)).mode).toBe('renderer');
-    expect(classifyChanges(changes(`${renderer}lib/worker-thread.ts`)).e2eSpecs).toContain(
-      spec('team-activity-history'),
-    );
-  });
-
-  it('uses unit tests without E2E for pure display libraries and renderer-test-only diffs', () => {
-    for (const paths of [
-      [`${renderer}lib/format.ts`, `${renderer}lib/stages.ts`, `${renderer}lib/turn-progress.ts`],
-      [`${renderer}components/RunCard.test.tsx`, `${renderer}lib/worker-thread.test.ts`],
-    ]) {
-      expect(classifyChanges(changes(...paths))).toMatchObject({ mode: 'renderer', e2eSpecs: [] });
-    }
-    expect(classifyChanges(changes(`${renderer}lib/sidebar-preference.ts`)).e2eSpecs).toContain(
-      spec('sidebar-collapse'),
-    );
-  });
-
-  it('keeps reviewed RunCard display changes on renderer CI with cancel coverage', () => {
-    const scope = classifyChanges(changes(`${renderer}components/RunCard.tsx`));
-    expect(scope.mode).toBe('renderer');
-    expect(scope.e2eSpecs).toEqual(
-      expect.arrayContaining([spec('keyboard-smoke'), spec('golden-path-2-cancel')]),
-    );
-  });
-
-  it('maps global CSS to input, sidebar, and Team interaction coverage', () => {
-    expect(classifyChanges(changes(`${renderer}index.css`)).e2eSpecs).toEqual(
-      [
-        spec('keyboard-smoke'),
-        spec('composer-input-boundaries'),
-        spec('sidebar-collapse'),
-        spec('team-flow'),
-      ].sort(),
-    );
+  it('keeps reviewed display libraries, components, CSS, and their tests on renderer CI', () => {
+    for (const path of [
+      `${renderer}lib/format.ts`,
+      `${renderer}lib/worker-thread.ts`,
+      `${renderer}lib/sidebar-preference.ts`,
+      `${renderer}components/RunCard.tsx`,
+      `${renderer}components/RunCard.test.tsx`,
+      `${renderer}index.css`,
+    ])
+      expect(classifyChanges(changes(path))).toMatchObject({
+        mode: 'renderer',
+        fullMatrix: false,
+      });
   });
 
   it('keeps control components outside the initial reviewed display allowlist', () => {
@@ -167,7 +134,7 @@ describe('CI change boundaries', () => {
       `${renderer}components/ChatSurface/Composer.tsx`,
       `${renderer}components/TeamCanvas/WorkerNode.tsx`,
     ])
-      expect(classifyChanges(changes(path))).toMatchObject({ mode: 'full', e2eSpecs: [] });
+      expect(classifyChanges(changes(path))).toMatchObject({ mode: 'full' });
   });
 
   it('narrows the PR 896 RunCard, global CSS, and elapsed-format display change', () => {
@@ -180,78 +147,6 @@ describe('CI change boundaries', () => {
         ),
       ),
     ).toMatchObject({ mode: 'renderer', fullMatrix: false });
-  });
-
-  it('executes changed free specs even on a full or E2E-only diff (PR 897/898 shape)', () => {
-    for (const paths of [
-      [spec('golden-path-3-queue')],
-      ['apps/desktop/src/main/team-coordinator.ts', spec('team-task-switch')],
-      ['apps/desktop/src/main/ipc.ts', spec('new-same-task-regression')],
-    ]) {
-      const scope = classifyChanges(changes(...paths));
-      expect(scope.mode).toBe('full');
-      expect(scope.e2eSpecs).toContain(paths.at(-1));
-    }
-  });
-
-  it('keeps display coverage when another changed path widens the scope to full', () => {
-    const display = `${renderer}components/RunCard.tsx`;
-    const narrow = classifyChanges(changes(display));
-    for (const extra of ['package.json', 'apps/desktop/src/main/ipc.ts']) {
-      const wide = classifyChanges(changes(display, extra));
-      expect(wide.mode).toBe('full');
-      expect(wide.e2eSpecs).toEqual(narrow.e2eSpecs);
-    }
-    const mixed = classifyChanges(changes(display, 'package.json', spec('sidebar-collapse')));
-    expect(new Set(mixed.e2eSpecs)).toEqual(
-      new Set([...narrow.e2eSpecs, spec('sidebar-collapse')]),
-    );
-  });
-
-  it('retains explicitly changed specs for integration-sensitive UI paths', () => {
-    const scope = classifyChanges(
-      changes(
-        `${renderer}components/Sidebar.tsx`,
-        spec('sidebar-collapse'),
-        spec('sidebar-collapse'),
-      ),
-    );
-    expect(scope.mode).toBe('full');
-    expect(scope.e2eSpecs).toEqual([spec('sidebar-collapse')]);
-    expect(
-      classifyChanges(changes(`${renderer}components/Sidebar.tsx`, 'apps/desktop/src/main/ipc.ts'))
-        .e2eSpecs,
-    ).toEqual([]);
-  });
-
-  it.each([
-    'real-ai-workspace',
-    'real-ai-team-scale',
-    'cli-workspace-egress',
-    'leader-mcp-smoke',
-    'leader-mcp-codex-smoke',
-  ])('does not activate opt-in real-provider spec %s', (name) => {
-    expect(classifyChanges(changes(spec(name)))).toMatchObject({ mode: 'full', e2eSpecs: [] });
-  });
-
-  it('does not attempt to execute a deleted spec', () => {
-    expect(classifyChanges([{ path: spec('sidebar-collapse'), status: 'D' }])).toMatchObject({
-      mode: 'full',
-      e2eSpecs: [],
-    });
-  });
-
-  it('routes macOS-only changed coverage onto a macOS runner', () => {
-    const scope = classifyChanges(
-      changes(spec('macos-window-lifecycle'), spec('team-task-switch')),
-    );
-    expect(focusedE2eMatrix(scope.e2eSpecs)).toEqual({
-      include: [
-        { os: 'ubuntu-latest', specs: [spec('team-task-switch')] },
-        { os: 'macos-latest', specs: [spec('macos-window-lifecycle')] },
-      ],
-    });
-    expect(focusedE2eMatrix([])).toEqual({ include: [] });
   });
 
   it.each([
@@ -277,11 +172,8 @@ describe('required CI result aggregation', () => {
     'package-linux',
     'package-windows-build',
     'package-windows',
-    'e2e-windows',
-    'archify-packaged',
     'package-macos',
     'renderer-tests',
-    'renderer-e2e',
     'website',
   ];
   const results = (value) => Object.fromEntries(allJobs.map((job) => [job, value]));
@@ -305,13 +197,6 @@ describe('required CI result aggregation', () => {
       ).toThrow('package-windows-build');
   });
 
-  it('requires focused display checks when a mixed change also requires the full scope', () => {
-    const scope = classifyChanges(changes(`${renderer}components/RunCard.tsx`, 'package.json'));
-    expect(() =>
-      verifyRequiredJobs(scope, { ...results('success'), 'renderer-e2e': 'skipped' }),
-    ).toThrow('renderer-e2e: skipped');
-  });
-
   it('accepts docs only when classification itself succeeded', () => {
     const scope = classifyChanges(changes('README.md'));
     expect(
@@ -320,21 +205,9 @@ describe('required CI result aggregation', () => {
     expect(() => verifyRequiredJobs(scope, {})).toThrow('classify: missing');
   });
 
-  it('requires focused E2E for renderer and full diffs whenever specs were selected', () => {
-    for (const scope of [
-      classifyChanges(changes(`${renderer}components/RunCard.tsx`)),
-      classifyChanges(changes(spec('team-task-switch'))),
-    ]) {
-      expect(() =>
-        verifyRequiredJobs(scope, { ...results('success'), 'renderer-e2e': 'skipped' }),
-      ).toThrow('renderer-e2e: skipped');
-    }
-  });
-
   it('requires every full-matrix job, including the renderer runner contracts', () => {
     const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
-    expect(verifyRequiredJobs(scope, results('success')).required).not.toContain('renderer-e2e');
-    for (const job of allJobs.filter((name) => !['renderer-e2e', 'website'].includes(name))) {
+    for (const job of allJobs.filter((name) => name !== 'website')) {
       const missing = results('success');
       delete missing[job];
       expect(() => verifyRequiredJobs(scope, missing), job).toThrow(`${job}: missing`);
@@ -364,10 +237,12 @@ describe('required CI result aggregation', () => {
 
   it.each([
     null,
-    { mode: 'typo', fullMatrix: false, e2eSpecs: [], reason: '' },
-    { mode: 'full', fullMatrix: false, e2eSpecs: [], reason: '' },
-    { mode: 'docs', fullMatrix: false, e2eSpecs: [spec('team-flow')], reason: '' },
-    { mode: 'full', fullMatrix: true, e2eSpecs: [spec('real-ai-workspace')], reason: '' },
+    { mode: 'typo', fullMatrix: false, reason: '' },
+    { mode: 'full', fullMatrix: false, reason: '' },
+    { mode: 'docs', fullMatrix: false, websiteRequired: true, reason: '' },
+    { mode: 'renderer', fullMatrix: false, websiteRequired: true, reason: '' },
+    { mode: 'website', fullMatrix: false, websiteRequired: false, reason: '' },
+    { mode: 'full', fullMatrix: true, websiteRequired: true, reason: null },
   ])('rejects an absent or inconsistent scope: %j', (scope) => {
     expect(() => verifyRequiredJobs(scope, results('success'))).toThrow('Invalid CI scope');
   });
@@ -385,7 +260,7 @@ describe('GitHub classification entrypoint', () => {
 
   // The fake git executable uses a POSIX shebang; the classifier itself runs on the Linux CI job.
   it.skipIf(process.platform === 'win32')(
-    'uses the event base/head merge-base diff and writes the entire scope and E2E matrix',
+    'uses the event base/head merge-base diff and writes the entire scope',
     () => {
       const directory = mkdtempSync(join(tmpdir(), 'ci-scope-'));
       cleanup.push(directory);
@@ -404,7 +279,7 @@ describe('GitHub classification entrypoint', () => {
         git,
         `#!${process.execPath}\nimport fs from 'node:fs';\n` +
           `fs.appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2))+'\\n');\n` +
-          `process.stdout.write(process.argv[2]==='merge-base'?${JSON.stringify(`${ancestor}\n`)}:${JSON.stringify(`M\0${spec('macos-window-lifecycle')}\0`)});\n`,
+          `process.stdout.write(process.argv[2]==='merge-base'?${JSON.stringify(`${ancestor}\n`)}:${JSON.stringify(`M\0apps/desktop/src/main/ipc.ts\0`)});\n`,
       );
       chmodSync(git, 0o700);
       const result = spawnSync(process.execPath, [join(root, 'ci-scope.mjs'), 'classify'], {
@@ -443,10 +318,18 @@ describe('GitHub classification entrypoint', () => {
           }),
       );
       expect(entries.mode).toBe('full');
-      expect(JSON.parse(entries.scope_json).e2eSpecs).toEqual([spec('macos-window-lifecycle')]);
-      expect(JSON.parse(entries.e2e_matrix)).toEqual({
-        include: [{ os: 'macos-latest', specs: [spec('macos-window-lifecycle')] }],
+      expect(JSON.parse(entries.scope_json)).toMatchObject({
+        mode: 'full',
+        fullMatrix: true,
+        websiteRequired: false,
       });
+      expect(Object.keys(entries).sort()).toEqual([
+        'full_matrix',
+        'mode',
+        'reason',
+        'scope_json',
+        'website_required',
+      ]);
       const summary = readFileSync(join(directory, 'summary'), 'utf8');
       expect(summary).toContain(`Tested SHA: ${'d'.repeat(40)}`);
       expect(summary).toContain(`PR base: ${base}`);

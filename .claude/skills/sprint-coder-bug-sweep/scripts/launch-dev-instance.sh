@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Launch an isolated Sprint Coder dev instance for one real-AI lane and print its handle as JSON.
-#   --run-dir DIR --lane claude|codex|ollama [--reuse-profile] [--debug-port N] [--repo-root DIR]
+#   --run-dir DIR --lane claude|codex|ollama [--reuse-profile] [--repo-root DIR]
 # Requires manifest.json real_ai=on (raised by new-run.sh --real-ai on --authorized-by ...): a lane
 # sends prompts to a real, billed CLI. The instance uses the repo's own Electron binary against
 # apps/desktop, this checkout's :5173 dev server, an isolated SPRINT_CODER_USER_DATA_DIR, real CLIs
@@ -8,17 +8,15 @@
 # focus). Chromium's occlusion/renderer backgrounding is disabled so Computer Use screenshots and the
 # accessibility tree stay live while the window sits behind the user's other windows.
 # Identity (pid + start time + command) is written to lanes/<lane>/app.json for
-# stop-dev-instance.sh. With --debug-port the port must be free beforehand, and the DevTools browser
-# id printed by THIS launch is bound to the listening pid in lanes/<lane>/debug.json for seed-instance.mjs.
+# stop-dev-instance.sh. UI interaction is performed only through Computer Use.
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-RUN_DIR=""; LANE=""; REUSE=0; DEBUG_PORT=""
+RUN_DIR=""; LANE=""; REUSE=0
 while [ $# -gt 0 ]; do case "$1" in
   --run-dir) RUN_DIR="$2"; shift 2;;
   --lane) LANE="$2"; shift 2;;
   --reuse-profile) REUSE=1; shift;;
-  --debug-port) DEBUG_PORT="$2"; shift 2;;
   --repo-root) REPO_ROOT="$2"; shift 2;;
   *) echo "unknown arg: $1" >&2; exit 64;; esac; done
 [ -n "$RUN_DIR" ] && [ -n "$LANE" ] || { echo "--run-dir and --lane are required" >&2; exit 64; }
@@ -45,10 +43,6 @@ fi
 if [ -d "$PROFILE" ] && [ -n "$(ls -A "$PROFILE" 2>/dev/null)" ] && [ "$REUSE" != "1" ]; then
   echo "profile $PROFILE already exists; pass --reuse-profile to relaunch the same profile (restart-persistence case)" >&2; exit 4
 fi
-if [ -n "$DEBUG_PORT" ]; then
-  busy="$(lsof -nP -iTCP:"$DEBUG_PORT" -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1)"
-  [ -z "$busy" ] || { echo "debug port $DEBUG_PORT is already in use by pid $busy — refusing (a seed would bind to a foreign instance)" >&2; exit 7; }
-fi
 mkdir -p "$PROFILE" "$WS/smoke" "$LANE_DIR"
 [ -f "$LANE_DIR/nonce" ] || openssl rand -hex 4 > "$LANE_DIR/nonce"
 nonce="$(cat "$LANE_DIR/nonce")"
@@ -73,7 +67,7 @@ printf '%s\n' "$marker" >> "$LANE_DIR/app.log"     # append: earlier turns' stde
       -u SPRINT_CODER_E2E_HIDDEN -u SPRINT_CODER_E2E_MODE -u SPRINT_CODER_LEADER_MCP -u SPRINT_CODER_REAL_WORKERS \
       SPRINT_CODER_USER_DATA_DIR="$PROFILE" SPRINT_CODER_SKILL_HOME="$PROFILE" SPRINT_CODER_E2E_BACKGROUND=1 \
       nohup "$BIN" --disable-backgrounding-occluded-windows --disable-renderer-backgrounding \
-        ${DEBUG_PORT:+--remote-debugging-port=$DEBUG_PORT} "$DESKTOP_ROOT" >> "$LANE_DIR/app.log" 2>&1 < /dev/null
+        "$DESKTOP_ROOT" >> "$LANE_DIR/app.log" 2>&1 < /dev/null
 ) &
 apid=$!
 sleep 6
@@ -82,26 +76,12 @@ if ! kill -0 "$apid" 2>/dev/null; then
 fi
 identity="$(ps -p "$apid" -o lstart=,command= 2>/dev/null || true)"
 node -e '
-  const [out, pid, identity, profile, ws, debug, launched, repo, reuse] = process.argv.slice(1);
+  const [out, pid, identity, profile, ws, launched, repo, reuse] = process.argv.slice(1);
   const lstart = identity.slice(0, 24).trim(); const command = identity.slice(24).trim();
   require("fs").writeFileSync(out, JSON.stringify({ pid: Number(pid), lstart, command, profile, workspace: ws,
-    debug_port: debug ? Number(debug) : null, launched_at: launched, repo_root: repo, reused_profile: reuse === "1",
+    launched_at: launched, repo_root: repo, reused_profile: reuse === "1",
     bundle_id: "com.github.Electron" }, null, 2) + "\n");
-' "$LANE_DIR/app.json" "$apid" "$identity" "$PROFILE" "$WS" "$DEBUG_PORT" "$launched_at" "$REPO_ROOT" "$REUSE"
+' "$LANE_DIR/app.json" "$apid" "$identity" "$PROFILE" "$WS" "$launched_at" "$REPO_ROOT" "$REUSE"
 
-browser_id=null
-if [ -n "$DEBUG_PORT" ]; then
-  for _ in $(seq 1 20); do
-    bid="$(awk -v m="$marker" '$0==m{f=1;next} f' "$LANE_DIR/app.log" | grep -o "DevTools listening on ws://127.0.0.1:$DEBUG_PORT/devtools/browser/[0-9a-f-]*" | tail -1 | sed 's#.*/browser/##')"
-    [ -n "$bid" ] && break; sleep 1
-  done
-  lpid="$(lsof -nP -iTCP:"$DEBUG_PORT" -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1)"
-  if [ -z "$bid" ] || [ "$lpid" != "$apid" ]; then
-    echo "debug endpoint could not be bound to this launch (browser_id='$bid', listener pid='$lpid', app pid=$apid); stopping the instance" >&2
-    kill -TERM "$apid" 2>/dev/null; exit 8
-  fi
-  printf '{"port":%s,"browser_id":"%s","pid":%s,"launched_at":"%s"}\n' "$DEBUG_PORT" "$bid" "$apid" "$launched_at" > "$LANE_DIR/debug.json"
-  browser_id="\"$bid\""
-fi
-printf '{"lane":"%s","pid":%s,"profile":"%s","workspace":"%s","nonce":"%s","debug_port":%s,"browser_id":%s,"app_log":"%s","bundle_id":"com.github.Electron","reused_profile":%s}\n' \
-  "$LANE" "$apid" "$PROFILE" "$WS" "$nonce" "${DEBUG_PORT:-null}" "$browser_id" "$LANE_DIR/app.log" "$([ "$REUSE" = 1 ] && echo true || echo false)"
+printf '{"lane":"%s","pid":%s,"profile":"%s","workspace":"%s","nonce":"%s","app_log":"%s","bundle_id":"com.github.Electron","reused_profile":%s}\n' \
+  "$LANE" "$apid" "$PROFILE" "$WS" "$nonce" "$LANE_DIR/app.log" "$([ "$REUSE" = 1 ] && echo true || echo false)"

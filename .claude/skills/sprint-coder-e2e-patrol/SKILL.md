@@ -1,6 +1,6 @@
 ---
 name: sprint-coder-e2e-patrol
-description: sprint-coder の開発 build を Browser Use / Computer Use で実際に操作する可視 E2E を回し、独立2回再現・期待値確認・環境と成果物と操作系の健全性・秘匿・Issue/PR 重複確認をすべて通過した不具合だけを Finding として整理する巡回手順。「不具合を巡回して」「スモークテストして」「一通り触って回帰していないか見て」「E2E で見つけた問題を Issue にして」と言われたときに読むこと。Playwright の spec を実行する sprint-coder-e2e / sprint-coder-e2e-windows とは目的が違い、こちらは spec 化されていない画面を人と同じように操作して未知の不具合を探す。GitHub Issue の起票は今回の依頼に「起票して」「Issue 化して」と明示がある場合だけ行い、それ以外は report-only で止まる。実装・修正・commit・PR 作成・Issue の close / reopen は行わない。正典は .agents/skills/sprint-coder-e2e-patrol/ にあり、このファイルはその Claude Code 側の入口。
+description: Sprint Coderの開発buildを開発エージェントのComputer Useで実操作し、独立2回再現・期待値・環境・秘匿・重複確認を通過した不具合だけを整理する。起票は明示された場合のみ。正典は .agents/skills/sprint-coder-e2e-patrol/。
 ---
 
 # Sprint Coder E2E Patrol（Claude Code 入口）
@@ -11,10 +11,10 @@ description: sprint-coder の開発 build を Browser Use / Computer Use で実�
 
 | やりたいこと | 読むスキル |
 |---|---|
-| `tests/e2e/` の spec を実行して pass / flake / skip / 本物の失敗を判定する | [sprint-coder-e2e](../sprint-coder-e2e/SKILL.md)（macOS）/ [sprint-coder-e2e-windows](../sprint-coder-e2e-windows/SKILL.md)（Windows） |
-| spec になっていない画面を実際に操作して未知の不具合を探し、Finding にまとめる | このスキル（正典を読む） |
+| 共通チェックリストのケースをComputer Useで実行し判定する | [sprint-coder-e2e](../sprint-coder-e2e/SKILL.md)（macOS）/ [sprint-coder-e2e-windows](../sprint-coder-e2e-windows/SKILL.md)（Windows） |
+| チェックリストに加えて画面を巡回し、未知の不具合をFindingにまとめる | このスキル（正典を読む） |
 
-巡回の途中で spec を走らせる場合も、**実行と判定の作法は OS 別の sprint-coder-e2e 側が正典**。`SPRINT_CODER_E2E_MODE=dev` の指定や「開発者の `npm start` を止めない」といった前提はそちらに書いてある。
+ケースの正本は [Computer Use検証チェックリスト](../../../docs/testing/computer-use/README.md)。開発者の既存processは保持し、対象buildとwindowを照合する。
 
 ## 2. 実行前に必ず読む
 
@@ -25,7 +25,7 @@ description: sprint-coder の開発 build を Browser Use / Computer Use で実�
 5. [実行状態スキーマ](../../../.agents/skills/sprint-coder-e2e-patrol/references/state-schema.md)
 6. [Computer Use cleanup 契約](../../../.agents/skills/sprint-coder-e2e-patrol/references/computer-use-cleanup.md)
 
-そのうえで、OS に応じた `sprint-coder-e2e` / `sprint-coder-e2e-windows` と、実際に使う Browser Use スキルを読む。Computer Use へ切り替えるときだけ、そのランタイムの `guidance` と `confirmations` を先に読む。
+そのうえで、OSに応じた `sprint-coder-e2e` / `sprint-coder-e2e-windows` と、現在のComputer Useツールのドキュメントを読む。製品自身のComputer Use機能とは区別し、利用不能は `BLOCKED`、実Providerの課金は明示opt-inとする。
 
 ## 3. ここだけは入口でも落とさない境界
 

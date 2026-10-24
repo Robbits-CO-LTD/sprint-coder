@@ -4,11 +4,9 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 /** @typedef {{path: string, status: string}} Change Git name-status entries; only A/M may be narrowed. */
-/** @typedef {{mode: 'docs' | 'renderer' | 'website' | 'full', fullMatrix: boolean, websiteRequired: boolean, e2eSpecs: string[], reason: string}} Scope */
+/** @typedef {{mode: 'docs' | 'renderer' | 'website' | 'full', fullMatrix: boolean, websiteRequired: boolean, reason: string}} Scope */
 
 const RENDERER = 'apps/desktop/src/renderer/';
-const E2E = 'tests/e2e/';
-const KEYBOARD = `${E2E}keyboard-smoke.spec.ts`;
 const DISPLAY_LIBS = new Set([
   'format',
   'stages',
@@ -35,18 +33,10 @@ const FULL_JOBS = [
   'package-linux',
   'package-windows-build',
   'package-windows',
-  'e2e-windows',
-  'archify-packaged',
   'package-macos',
   'renderer-tests',
 ];
-const KNOWN_JOBS = new Set(['classify', ...FULL_JOBS, 'renderer-e2e', 'website']);
-const OPT_IN_SPECS = new Set([
-  'cli-workspace-egress.spec.ts',
-  'leader-mcp-smoke.spec.ts',
-  'leader-mcp-codex-smoke.spec.ts',
-]);
-
+const KNOWN_JOBS = new Set(['classify', ...FULL_JOBS, 'website']);
 function safePath(path) {
   return (
     typeof path === 'string' &&
@@ -55,15 +45,6 @@ function safePath(path) {
     !path.startsWith('/') &&
     !path.split('/').some((part) => part === '' || part === '.' || part === '..')
   );
-}
-
-function optInSpec(path) {
-  const name = path.slice(E2E.length);
-  return name.startsWith('real-ai-') || OPT_IN_SPECS.has(name);
-}
-
-function isSpec(path) {
-  return safePath(path) && path.startsWith(E2E) && path.endsWith('.spec.ts');
 }
 
 function docsPath(path) {
@@ -94,11 +75,9 @@ function websiteCheckPath(path) {
   return (
     path.startsWith('website/') ||
     path.startsWith('deploy/website/') ||
-    path.startsWith('tests/website/') ||
     path.startsWith('.github/actions/install-deps/') ||
     [
       'ci-website.mjs',
-      'playwright.website.config.ts',
       'apps/desktop/ci-website.test.mjs',
       'ci-scope.mjs',
       'ci-cache.mjs',
@@ -110,51 +89,9 @@ function websiteCheckPath(path) {
   );
 }
 
-function displaySpecs(path) {
-  if (/\.test\.tsx?$/u.test(path)) return new Set();
-  if (path.startsWith(`${RENDERER}lib/`) && !/sidebar-preference|worker-thread/u.test(path))
-    return new Set();
-  const specs = new Set([KEYBOARD]);
-  if (path === `${RENDERER}index.css`) {
-    for (const name of ['sidebar-collapse', 'composer-input-boundaries', 'team-flow'])
-      specs.add(`${E2E}${name}.spec.ts`);
-  }
-  if (/Sidebar|ProjectPicker|sidebar-preference/u.test(path)) {
-    specs.add(`${E2E}sidebar-collapse.spec.ts`);
-    specs.add(`${E2E}project-sidebar.spec.ts`);
-  }
-  if (/Composer|SlashCommand|skill-picker|slash-commands/u.test(path)) {
-    for (const name of [
-      'composer-input-boundaries',
-      'composer-plus-menu',
-      'composer-slash-commands',
-    ])
-      specs.add(`${E2E}${name}.spec.ts`);
-  }
-  if (
-    /Timeline|MessageBubble|Markdown|Reasoning|RunCard|TurnDiff|WorkStep|worker-thread/u.test(path)
-  ) {
-    specs.add(`${E2E}timeline-scroll-follow.spec.ts`);
-    specs.add(`${E2E}golden-path-2-cancel.spec.ts`);
-  }
-  if (/Team|Worker|worker-thread/u.test(path)) {
-    for (const name of ['team-flow', 'team-task-switch', 'team-activity-history'])
-      specs.add(`${E2E}${name}.spec.ts`);
-  }
-  if (/Graph|Mermaid/u.test(path)) {
-    specs.add(`${E2E}archify-graph.spec.ts`);
-    specs.add(`${E2E}graph-view-preference.spec.ts`);
-  }
-  if (/Approval/u.test(path)) specs.add(`${E2E}approval-flow.spec.ts`);
-  if (/AppTitlebar/u.test(path)) specs.add(`${E2E}window-titlebar.spec.ts`);
-  if (/Setup/u.test(path)) specs.add(`${E2E}setup-wizard.spec.ts`);
-  if (/SurfaceFooter/u.test(path)) specs.add(`${E2E}surface-footer.spec.ts`);
-  return specs;
-}
-
 /**
  * Classifies the complete PR diff, never only its latest commit. Unknown paths and statuses widen
- * the scope. Changed free E2E specs survive widening so the focused job actually executes them.
+ * the scope; UI acceptance is performed separately with Computer Use.
  * @param {Change[]} changes
  * @param {{eventName?: string}} [options]
  * @returns {Scope}
@@ -171,8 +108,6 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
     )
       throw new Error('Each change requires a safe repository path and a Git status');
   }
-  const changedSpecs = new Set();
-  const rendererSpecs = new Set();
   let hasRenderer = false;
   let hasWebsite = false;
   let full = eventName !== 'pull_request' || changes.length === 0;
@@ -185,8 +120,6 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
         : 'Documentation-only changes';
   for (const { path, status } of changes) {
     if (websiteCheckPath(path)) websiteRequired = true;
-    if (status !== 'D' && !status.startsWith('R') && isSpec(path) && !optInSpec(path))
-      changedSpecs.add(path);
     if (!['A', 'M'].includes(status)) {
       full = true;
       reason = 'Deletion, rename, or an unfamiliar Git status requires full validation';
@@ -196,7 +129,6 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
       hasWebsite = true;
     } else if (rendererPath(path)) {
       hasRenderer = true;
-      for (const spec of displaySpecs(path)) rendererSpecs.add(spec);
     } else {
       full = true;
       reason = 'Changes cross the reviewed documentation and display-only boundaries';
@@ -209,12 +141,10 @@ export function classifyChanges(changes, { eventName = 'pull_request' } = {}) {
   const mode = full ? 'full' : hasWebsite ? 'website' : hasRenderer ? 'renderer' : 'docs';
   if (mode === 'renderer') reason = 'Reviewed renderer display paths';
   if (mode === 'website') reason = 'Standalone website changes';
-  const e2eSpecs = new Set([...rendererSpecs, ...changedSpecs]);
   return {
     mode,
     fullMatrix: mode === 'full',
     websiteRequired,
-    e2eSpecs: [...e2eSpecs].sort(),
     reason,
   };
 }
@@ -228,10 +158,7 @@ function validateScope(scope) {
     typeof scope.websiteRequired !== 'boolean' ||
     (scope.mode === 'website' && scope.websiteRequired !== true) ||
     (['docs', 'renderer'].includes(scope.mode) && scope.websiteRequired !== false) ||
-    typeof scope.reason !== 'string' ||
-    !Array.isArray(scope.e2eSpecs) ||
-    scope.e2eSpecs.some((spec) => !safePath(spec) || !isSpec(spec) || optInSpec(spec)) ||
-    (['docs', 'website'].includes(scope.mode) && scope.e2eSpecs.length !== 0)
+    typeof scope.reason !== 'string'
   )
     throw new Error('Invalid CI scope');
 }
@@ -251,7 +178,6 @@ export function verifyRequiredJobs(scope, results) {
     required.add('quality');
     required.add('renderer-tests');
   }
-  if (scope.e2eSpecs.length > 0) required.add('renderer-e2e');
   if (scope.websiteRequired) required.add('website');
   const failures = [];
   for (const job of required) {
@@ -265,18 +191,6 @@ export function verifyRequiredJobs(scope, results) {
   }
   if (failures.length > 0) throw new Error(`Required CI validation failed: ${failures.join(', ')}`);
   return { required: [...required] };
-}
-
-/** The one current macOS-only free spec must run on macOS instead of silently skipping on Linux. */
-export function focusedE2eMatrix(specs) {
-  const mac = specs.filter((spec) => spec === `${E2E}macos-window-lifecycle.spec.ts`);
-  const linux = specs.filter((spec) => spec !== `${E2E}macos-window-lifecycle.spec.ts`);
-  return {
-    include: [
-      ...(linux.length > 0 ? [{ os: 'ubuntu-latest', specs: linux }] : []),
-      ...(mac.length > 0 ? [{ os: 'macos-latest', specs: mac }] : []),
-    ],
-  };
 }
 
 /** Parse git diff --name-status -z --no-renames; malformed output must never become docs-only. */
@@ -334,8 +248,6 @@ function main() {
       mode: scope.mode,
       full_matrix: String(scope.fullMatrix),
       website_required: String(scope.websiteRequired),
-      e2e_specs: JSON.stringify(scope.e2eSpecs),
-      e2e_matrix: JSON.stringify(focusedE2eMatrix(scope.e2eSpecs)),
       scope_json: JSON.stringify(scope),
       reason: scope.reason,
     };
@@ -352,8 +264,7 @@ function main() {
         `CI scope: **${scope.mode}**\n\n${scope.reason}\n\n` +
           `Tested SHA: ${/^[a-f0-9]{40,64}$/u.test(process.env.GITHUB_SHA ?? '') ? process.env.GITHUB_SHA : 'not provided'}\n\n` +
           `PR base: ${input.base ?? 'not applicable'}\n\n` +
-          `PR head: ${input.head ?? 'not applicable'}\n\n` +
-          `Focused E2E: ${scope.e2eSpecs.join(', ') || 'none'}\n`,
+          `PR head: ${input.head ?? 'not applicable'}\n`,
       );
     process.stdout.write(`${JSON.stringify(scope)}\n`);
   } else if (process.argv[2] === 'gate') {

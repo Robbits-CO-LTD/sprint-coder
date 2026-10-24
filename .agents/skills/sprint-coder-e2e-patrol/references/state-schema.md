@@ -62,8 +62,8 @@ Each Finding stores:
   "expectation_source": "acceptance",
   "promotion": "promotable",
   "dedup_result": "unique",
-  "primary_surface": "browser-use",
-  "computer_use_reason": null,
+  "primary_surface": "computer-use",
+  "computer_use_reason": "CU-00-standard",
   "issue_draft": "issues/sha256.md",
   "issue_url": null
 }

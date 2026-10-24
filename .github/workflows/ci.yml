@@ -26,8 +26,6 @@ jobs:
       mode: ${{ steps.scope.outputs.mode }}
       full_matrix: ${{ steps.scope.outputs.full_matrix }}
       website_required: ${{ steps.scope.outputs.website_required }}
-      e2e_specs: ${{ steps.scope.outputs.e2e_specs }}
-      e2e_matrix: ${{ steps.scope.outputs.e2e_matrix }}
       scope_json: ${{ steps.scope.outputs.scope_json }}
     steps:
       - name: Checkout complete comparison history
@@ -402,7 +400,7 @@ jobs:
           done
 
   package-macos:
-    # Full CI proves the production Forge boundary and packaged desktop behavior.
+    # Full CI proves the production Forge boundary; UI acceptance uses Computer Use.
     name: macOS production package smoke
     needs: classify
     if: needs.classify.outputs.full_matrix == 'true'
@@ -460,26 +458,6 @@ jobs:
         env:
           SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
 
-      - name: Exercise bundled Archify using the production package
-        shell: bash
-        run: |
-          set -euo pipefail
-          executables=(apps/desktop/out/*/*.app/Contents/MacOS/*)
-          test "${#executables[@]}" -eq 1
-          test -x "${executables[0]}"
-          SPRINT_CODER_E2E_EXECUTABLE_PATH="${PWD}/${executables[0]}" \
-            npx playwright test tests/e2e/archify-graph.spec.ts --workers=1
-        env:
-          SPRINT_CODER_E2E_MODE: packaged
-          SPRINT_CODER_E2E_HIDDEN: '0'
-          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-      - name: Upload macOS packaged Archify evidence
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: archify-packaged-macos
-          path: test-results
-          if-no-files-found: ignore
   platform-tests:
     name: ${{ matrix.label }} test shard ${{ matrix.shard }}
     needs: classify
@@ -701,7 +679,7 @@ jobs:
           SPRINT_CODER_ELECTRON_BRIDGE_SHARD: ${{ matrix.shard }}
 
   package-linux:
-    name: Linux packaged startup smoke
+    name: Linux production package smoke
     needs: classify
     if: needs.classify.outputs.full_matrix == 'true'
     runs-on: ubuntu-latest
@@ -744,10 +722,9 @@ jobs:
       - name: Build NativeSafeFs for Electron ABI
         if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
         run: npm run build:native-safe-fs
-      - name: Packaged startup smoke
-        run: xvfb-run -a npx playwright test tests/e2e/keyboard-smoke.spec.ts
-        env:
-          SPRINT_CODER_E2E_MODE: packaged
+      - name: Production package smoke
+        working-directory: apps/desktop
+        run: npx electron-forge package
 
   package-windows-build:
     name: Windows production package
@@ -869,128 +846,6 @@ jobs:
         shell: pwsh
         run: ./apps/desktop/scripts/verify-unsigned-windows-release.ps1
 
-  e2e-windows:
-    name: Windows major E2E (${{ matrix.group }})
-    needs: classify
-    if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: windows-2022
-    timeout-minutes: 40
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        group: [core, archify]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install Electron binary
-        uses: ./.github/actions/install-electron
-      - name: Initialize MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
-        with:
-          arch: x64
-      - name: Build managed sandbox runner
-        uses: ./.github/actions/prepare-sandbox
-      - name: Restore better-sqlite3 Electron ABI binary
-        id: better-sqlite-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
-          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
-      - name: Rebuild better-sqlite3 for Electron ABI
-        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
-        working-directory: apps/desktop
-        run: node ../../build-better-sqlite3.mjs
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-      - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
-        run: npm run build:native-safe-fs
-      - name: Run Windows major E2E
-        shell: pwsh
-        run: |
-          $logPath = Join-Path $env:RUNNER_TEMP 'windows-e2e.log'
-          & npx.cmd playwright test --config playwright.windows.config.ts 2>&1 |
-            Tee-Object -FilePath $logPath
-          $testExitCode = $LASTEXITCODE
-          if ($testExitCode -ne 0) {
-            exit $testExitCode
-          }
-        env:
-          SPRINT_CODER_E2E_MODE: dev
-          SPRINT_CODER_WINDOWS_E2E_GROUP: ${{ matrix.group }}
-      - name: Upload Windows E2E evidence
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: windows-e2e-${{ matrix.group }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            test-results
-            playwright-report
-            ${{ runner.temp }}/windows-e2e.log
-          if-no-files-found: warn
-          retention-days: 14
-
-  archify-packaged:
-    name: Archify packaged (${{ matrix.os }}, ${{ matrix.shard }}/2)
-    needs: [classify, package-windows-build]
-    if: needs.classify.outputs.full_matrix == 'true'
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-2022]
-        shard: [1, 2]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Download this run's Windows production package
-        uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
-        with:
-          name: ${{ needs.package-windows-build.outputs.artifact }}
-          path: ${{ runner.temp }}/ci-windows-package/
-      - name: Verify and restore the Windows production package
-        env:
-          CI_WINDOWS_PACKAGE_SHA256: ${{ needs.package-windows-build.outputs.archive_sha256 }}
-        run: node ci-windows-package.mjs restore
-      - name: Exercise the real bundled Archify worker and sandboxed viewer
-        env:
-          SPRINT_CODER_E2E_MODE: packaged
-          # A dedicated runner exercises normal window presentation. Hidden CI windows
-          # can pass DOM hit tests while dropping native mouse delivery into the iframe.
-          # Local E2E retains its independently configured hidden/non-focus mode.
-          SPRINT_CODER_E2E_HIDDEN: '0'
-          SPRINT_CODER_ALLOW_ADHOC_CODESIGN: '1'
-        run: npm run e2e -- tests/e2e/archify-graph.spec.ts --fully-parallel --workers=1 --shard=${{ matrix.shard }}/2
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        if: always()
-        with:
-          name: archify-packaged-${{ matrix.os }}-${{ matrix.shard }}
-          path: test-results
-          if-no-files-found: ignore
-
   renderer-tests:
     name: Renderer unit tests
     needs: classify
@@ -1011,7 +866,7 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
       - name: Verify CI selection and test execution contracts
-        run: npm test --workspace @sprint-coder/desktop -- ci-scope.test.mjs ci-renderer-tests.test.mjs ci-cache.test.mjs ci-test-sequencer.test.ts workflow-security.test.ts windows-e2e-workflow.test.ts forge.config.test.ts
+        run: npm test --workspace @sprint-coder/desktop -- ci-scope.test.mjs ci-renderer-tests.test.mjs ci-cache.test.mjs ci-test-sequencer.test.ts workflow-security.test.ts forge.config.test.ts
       - name: Run Renderer tests and verify executed cases
         run: node ci-renderer-tests.mjs unit
       - name: Upload Renderer test evidence
@@ -1019,94 +874,6 @@ jobs:
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: renderer-unit-${{ github.run_id }}-${{ github.run_attempt }}
-          path: test-results/ci-renderer
-          if-no-files-found: warn
-
-  renderer-e2e:
-    name: Focused UI E2E (${{ matrix.os }})
-    needs: classify
-    if: needs.classify.outputs.e2e_specs != '[]' && needs.classify.outputs.e2e_specs != ''
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.classify.outputs.e2e_matrix) }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install dependencies
-        uses: ./.github/actions/install-deps
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Install Electron binary
-        uses: ./.github/actions/install-electron
-
-      - name: Install Linux sandbox dependency
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y bubblewrap
-
-      - name: Build managed sandbox runner
-        uses: ./.github/actions/prepare-sandbox
-
-      - name: Restore better-sqlite3 Electron ABI binary
-        id: better-sqlite-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: node_modules/better-sqlite3/build/Release/better_sqlite3.node
-          key: electron-better-sqlite3-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'apps/desktop/package.json', 'build-better-sqlite3.mjs') }}
-
-      - name: Rebuild better-sqlite3 for Electron ABI
-        if: steps.better-sqlite-cache.outputs.cache-hit != 'true'
-        working-directory: apps/desktop
-        run: node ../../build-better-sqlite3.mjs
-
-      - name: Restore NativeSafeFs Electron ABI binary
-        id: native-safe-fs-cache
-        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
-        with:
-          path: apps/desktop/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node
-          key: electron-native-safe-fs-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json', 'build-native-safe-fs.mjs', 'apps/desktop/native-safe-fs/binding.gyp', 'apps/desktop/native-safe-fs/*.cc', 'apps/desktop/native-safe-fs/*.h') }}
-
-      - name: Build NativeSafeFs for Electron ABI
-        if: steps.native-safe-fs-cache.outputs.cache-hit != 'true'
-        run: npm run build:native-safe-fs
-
-      - name: Configure Linux Chromium sandbox helper
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (!s.isFile() || s.isSymbolicLink()) process.exit(1);"
-          sudo chown root:root node_modules/electron/dist/chrome-sandbox
-          sudo chmod 4755 node_modules/electron/dist/chrome-sandbox
-          node -e "const s = require('node:fs').lstatSync('node_modules/electron/dist/chrome-sandbox'); if (s.uid !== 0 || s.gid !== 0 || (s.mode & 0o7777) !== 0o4755) process.exit(1);"
-
-      - name: Run selected UI cases on Linux
-        if: runner.os == 'Linux'
-        env:
-          CI_E2E_SPECS: ${{ toJSON(matrix.specs) }}
-          # Xvfb isolates the desktop; focus and screenshots still require a mapped window.
-          SPRINT_CODER_E2E_HIDDEN: '0'
-        run: xvfb-run -a node ci-renderer-tests.mjs e2e
-      - name: Run selected UI cases on macOS
-        if: runner.os == 'macOS'
-        env:
-          CI_E2E_SPECS: ${{ toJSON(matrix.specs) }}
-          SPRINT_CODER_E2E_HIDDEN: '0'
-        run: node ci-renderer-tests.mjs e2e
-      - name: Upload focused UI evidence
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: renderer-e2e-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/ci-renderer
           if-no-files-found: warn
 
@@ -1133,21 +900,6 @@ jobs:
         run: node ci-website.mjs check
       - name: Check website validator regressions
         run: npm run test --workspace @sprint-coder/desktop -- ci-website.test.mjs
-      # Hosted Ubuntu includes Chrome and its system libraries; avoid downloading a second browser.
-      - name: Verify the runner browser
-        run: google-chrome --version
-      - name: Check desktop and mobile pages
-        env:
-          WEBSITE_BROWSER_CHANNEL: chrome
-        run: npx playwright test --config playwright.website.config.ts
-      - name: Upload website failure evidence
-        if: failure()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: website-${{ github.run_id }}-${{ github.run_attempt }}
-          path: test-results/website/
-          if-no-files-found: warn
-
   required:
     name: CI required
     if: always()
@@ -1156,7 +908,6 @@ jobs:
         classify,
         quality,
         renderer-tests,
-        renderer-e2e,
         package-tests,
         computer-use-native-gate,
         computer-use-windows-v2-harness,
@@ -1167,8 +918,6 @@ jobs:
         package-linux,
         package-windows-build,
         package-windows,
-        e2e-windows,
-        archify-packaged,
         website,
       ]
     runs-on: ubuntu-latest

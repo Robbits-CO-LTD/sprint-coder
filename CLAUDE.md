@@ -7,3 +7,14 @@
 3. PR作成後、レビューBOTのレビュー結果を確認する。
 4. レビューBOTから問題を指摘された場合は修正し、同じPRのブランチへcommitして再レビューを受ける。
 5. 指摘が解消され、レビューで承認されたことを確認してから、PRをsquash mergeする。
+
+## UI・E2Eの検証方針
+
+UI・E2E・ユーザー操作の動作確認は、Computer Useで実アプリを操作して実施する。Playwrightのテストコードや実行手順は追加しない。単体・結合テストにはVitestを使用する。
+
+- Computer Useは、開発エージェントが対象アプリ・ブラウザを操作するために使う。Sprint Coder自身が提供するComputer Use機能とは区別する。
+- [Computer Use検証チェックリスト](docs/testing/computer-use/README.md)から変更に関係するケースを選び、前提、操作、期待結果、対象OS、必要な証拠を確認する。
+- shellはアプリの起動、fixture準備、ログ・ファイル照合に使える。UI操作をスクリプト、内部IPC、DOM操作で置き換えて合格扱いにしない。
+- 対象build、環境、操作、証拠と各ケースの `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録する。Computer Useが利用できない場合は `BLOCKED` とし、CI成功で代用しない。
+- 実Providerの課金を伴う検証は、現在の依頼で明示された場合だけ実施する。
+- 性能の数値基準とaxe監査は元の受入要件を維持する。計測や監査をしていない状態を目視だけでPASSにしない。
