@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 // #940-1: the real ServePipe reader/consumer and real named-pipe framing. Held workers must not
 // delay Stop/Close, publish stale results, or admit another synchronous target operation.
 // Gates are injected only into generated test source; only our own fixture windows are enumerated.
+// The two session RCA cases deliberately assert the remaining synchronous stop delay, not a fix.
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
 const measurement = '  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);';
@@ -42,15 +43,30 @@ function instrumentedHost(): string {
     consumer,
     `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
   );
+  const startFrom = source.indexOf('bool StartWindowsSession(');
+  const startTo = source.indexOf('bool CloseWindowsSession(', startFrom);
+  if (startFrom < 0 || startTo < 0) throw new Error('Session start boundary changed');
+  source =
+    source.slice(0, startFrom) +
+    replaceOnce(
+      source.slice(startFrom, startTo),
+      'OpenLockedProcessExecutable(target_process.value,',
+      'Sc940StartOpen(target_process.value,',
+    ) +
+    source.slice(startTo);
   const from = source.indexOf('bool ValidateWindowsSession(\n');
   const to = source.indexOf('bool ReadExact(', from);
   if (from < 0 || to < 0) throw new Error('Session validation boundary changed');
   return (
     source.slice(0, from) +
     replaceOnce(
-      source.slice(from, to),
-      '  std::string current_start;',
-      '  Sc940SyncSessionProbe();\n  std::string current_start;',
+      replaceOnce(
+        source.slice(from, to),
+        '  std::string current_start;',
+        '  Sc940SyncSessionProbe();\n  std::string current_start;',
+      ),
+      'ReadWindowsFileIdentity(session.executable_file,',
+      'Sc940HeldFileIdentity(session.executable_file,',
     ) +
     source.slice(to)
   );
@@ -134,6 +150,10 @@ const program = String.raw`
 #include <windows.h>
 #include <cstdint>
 namespace {
+struct LockedWindowsExecutable;
+struct WindowsFileIdentity;
+bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output);
+bool Sc940HeldFileIdentity(HANDLE file, WindowsFileIdentity *output);
 void Sc940MeasureGate(std::uint32_t pid);
 void Sc940ContextGate();
 void Sc940CompletionGate();
@@ -156,7 +176,7 @@ std::array<HWND, 2> fixture_windows{};
 unsigned fixture_count = 0;
 unsigned enumeration_count = 0;
 DWORD held_measure_pid = 0;
-enum class HoldPoint { kNone, kMeasure, kContext, kCompletion, kConsumer };
+enum class HoldPoint { kNone, kMeasure, kContext, kCompletion, kConsumer, kStartOpen, kHeldFile };
 std::atomic<HoldPoint> hold_point{HoldPoint::kNone};
 std::atomic<bool> hold_deadline_adoption{false};
 std::atomic<bool> gate_timed_out{false};
@@ -164,6 +184,11 @@ std::atomic<bool> wrong_measurement{false};
 std::atomic<unsigned> measurement_calls{0};
 std::atomic<unsigned> context_factory_calls{0};
 std::atomic<unsigned> synchronous_session_probes{0};
+std::atomic<unsigned> start_open_calls{0};
+std::atomic<unsigned> start_open_successes{0};
+std::atomic<unsigned> held_file_calls{0};
+std::atomic<unsigned> held_file_successes{0};
+HANDLE owned_held_file = INVALID_HANDLE_VALUE;
 
 void Require(bool condition, const char *reason) {
   if (!condition) throw std::runtime_error(reason);
@@ -201,6 +226,30 @@ void Sc940ConsumerGate(std::uint8_t request) {
   if (request == 2) Sc940Gate(HoldPoint::kConsumer);
 }
 void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
+
+bool Sc940StartOpen(HANDLE process, LockedWindowsExecutable *output) {
+  const bool recording = hold_point.load() == HoldPoint::kStartOpen;
+  if (recording) {
+    Require(GetProcessId(process) == fixture_pids[0], "start_opens_owned_process");
+    start_open_calls.fetch_add(1);
+    Sc940Gate(HoldPoint::kStartOpen);
+  }
+  const bool opened = OpenLockedProcessExecutable(process, output);
+  if (recording && opened) start_open_successes.fetch_add(1);
+  return opened;
+}
+
+bool Sc940HeldFileIdentity(HANDLE file, WindowsFileIdentity *output) {
+  const bool recording = hold_point.load() == HoldPoint::kHeldFile;
+  if (recording) {
+    Require(file != INVALID_HANDLE_VALUE && file == owned_held_file, "validation_reads_owned_handle");
+    held_file_calls.fetch_add(1);
+    Sc940Gate(HoldPoint::kHeldFile);
+  }
+  const bool read = ReadWindowsFileIdentity(file, output);
+  if (recording && read) held_file_successes.fetch_add(1);
+  return read;
+}
 
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
   if (enumeration_count == 0 || enumeration_count > fixture_count) return FALSE;
@@ -248,6 +297,58 @@ sprint_coder::computer_use::FrameId Id(std::uint8_t byte) {
   sprint_coder::computer_use::FrameId id;
   id.bytes.fill(byte);
   return id;
+}
+
+void SeedOwnedSessionIdentity(WindowsSession *session) {
+  ScopedKernelHandle process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+                                          FALSE, fixture_pids[0]));
+  LockedWindowsExecutable image;
+  std::string started;
+  Require(process.value != nullptr && OpenLockedProcessExecutable(process.value, &image) &&
+              ReadProcessStartIdentity(process.value, &started) &&
+              WaitForSingleObject(process.value, 0) == WAIT_TIMEOUT, "owned_session_identity");
+  session->pid = fixture_pids[0];
+  session->window = fixture_windows[0];
+  session->active_window = fixture_windows[0];
+  session->app_identity = image.identity.identity_digest;
+  session->process_start = started;
+  session->canonical_path = image.identity.path;
+  session->window_identity = Sha256String("computer-window-identity-v1\n" + session->app_identity + "\n" +
+      started + "\n" + std::to_string(reinterpret_cast<UINT_PTR>(session->window)));
+  session->active_window_identity = session->window_identity;
+  session->executable_volume_serial = image.identity.file_identity.volume_serial;
+  session->executable_file_id = image.identity.file_identity.file_id;
+  session->executable_digest = image.identity.executable_digest;
+  session->signer_digest = image.identity.signer_digest;
+  session->policy_language = image.identity.policy_language;
+  session->eligibility_basis = sprint_coder::computer_use::EligibilityBasis::kV2Denylist;
+  session->process_handle = process.release();
+  session->executable_file = image.file;
+  image.file = INVALID_HANDLE_VALUE;
+  owned_held_file = session->executable_file;
+}
+
+std::string NewStartMetadata() {
+  LockedWindowsExecutable image;
+  std::string started;
+  RECT bounds{};
+  Require(OpenLockedProcessExecutable(fixture_pids[0], &image) &&
+              ReadProcessStartIdentity(fixture_pids[0], &started) &&
+              ClientBoundsPhysical(fixture_windows[0], &bounds), "new_start_fixture_metadata");
+  const std::string window = std::to_string(reinterpret_cast<UINT_PTR>(fixture_windows[0]));
+  const std::string identity = Sha256String("computer-window-identity-v1\n" +
+      image.identity.identity_digest + "\n" + started + "\n" + window);
+  return "{\"operation\":\"start_session\",\"sessionId\":\"sc940-new\",\"cancelEpoch\":1," +
+      std::string("\"eligibilityBasis\":\"v2-denylist\",\"pid\":") + std::to_string(fixture_pids[0]) +
+      ",\"windowId\":\"" + window + "\",\"canonicalPath\":\"" + JsonEscape(image.identity.path_utf8) +
+      "\",\"appIdentityDigest\":\"" + image.identity.identity_digest + "\",\"windowIdentityDigest\":\"" + identity +
+      "\",\"executableDigest\":\"" + image.identity.executable_digest + "\",\"signerDigest\":\"" + image.identity.signer_digest +
+      "\",\"expectedBoundsX\":" + std::to_string(bounds.left) + ",\"expectedBoundsY\":" + std::to_string(bounds.top) +
+      ",\"expectedBoundsWidth\":" + std::to_string(bounds.right - bounds.left) +
+      ",\"expectedBoundsHeight\":" + std::to_string(bounds.bottom - bounds.top) +
+      ",\"denyRulesetVersion\":" + std::to_string(sprint_coder::computer_use::DenyRulesetVersion(
+          sprint_coder::computer_use::TargetPlatform::kWin32)) +
+      ",\"targetGeneration\":" + std::to_string(windows_v2_list_generation) + "}";
 }
 
 struct RcaRun {
@@ -333,7 +434,7 @@ struct RcaRun {
     Require(WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT, "fixture_stays_alive");
   }
 
-  void StartPipe(bool same_epoch_close) {
+  void StartPipe(bool same_epoch_close, bool seed_owned_handles = false) {
     SECURITY_ATTRIBUTES security{};
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     Require(BuildCurrentUserPipeSecurity(&security, &descriptor), "pipe_security");
@@ -383,7 +484,9 @@ struct RcaRun {
     session.cancel_epoch = 1;
     session.has_observation = true;
     session.observation_revision = 1;
-    sessions.emplace(FrameIdKey(Id(7)), std::move(session));
+    const auto inserted = sessions.emplace(FrameIdKey(Id(7)), std::move(session));
+    Require(inserted.second, "control_session_seed");
+    if (seed_owned_handles) SeedOwnedSessionIdentity(&inserted.first->second);
     // The close-only same-epoch case proves max(cancelEpoch) is not an invalidation serial.
     cancellation_epoch.store(same_epoch_close ? 2 : 1);
     windows_v2_main_pid = GetCurrentProcessId();
@@ -408,11 +511,11 @@ struct RcaRun {
     });
   }
 
-  void Send(MessageType type, std::uint8_t id, std::string_view metadata) {
+  void Send(MessageType type, std::uint8_t id, std::string_view metadata, std::uint8_t session_byte = 7) {
     FrameHeader header;
     header.message_type = static_cast<std::uint16_t>(type);
     header.request_id = Id(id);
-    header.session_id = Id(7);
+    header.session_id = Id(session_byte);
     if (type == MessageType::kCancel) header.cancel_id = Id(9);
     Require(WriteFrame(client.value, header, metadata), "frame_write");
   }
@@ -449,7 +552,7 @@ struct RcaRun {
            found->second.header.session_id.bytes == Id(7).bytes && found->second.binary.empty();
   }
 
-  bool Error(unsigned id, std::string_view code) {
+  bool Error(unsigned id, std::string_view code, std::uint8_t session_byte = 7) {
     std::lock_guard<std::mutex> lock(replies_mutex);
     const auto found = replies.find(id);
     if (found == replies.end()) return false;
@@ -459,8 +562,8 @@ struct RcaRun {
     bool accepted = true;
     return frame.header.message_type == static_cast<std::uint16_t>(MessageType::kError) &&
            frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
-           frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() &&
-           ReadJsonString(body, "code", &actual) && actual == code &&
+           frame.header.session_id.bytes == Id(session_byte).bytes && frame.binary.empty() &&
+           ReadJsonString(body, "code", &actual) && !actual.empty() && (code.empty() || actual == code) &&
            ReadOptionalJsonBoolean(body, "accepted", &accepted) && !accepted;
   }
 
@@ -483,7 +586,7 @@ struct RcaRun {
     return true;
   }
 
-  bool PreflightDenied(unsigned id) {
+  bool PreflightDenied(unsigned id, std::string_view expected_reason = "native_session_identity_changed") {
     std::lock_guard<std::mutex> lock(replies_mutex);
     const auto found = replies.find(id);
     if (found == replies.end()) return false;
@@ -495,7 +598,8 @@ struct RcaRun {
            frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
            frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() &&
            ReadJsonString(body, "decision", &decision) && decision == "denied" &&
-           ReadJsonString(body, "reasonCode", &reason) && reason == "native_session_identity_changed" &&
+           ReadJsonString(body, "reasonCode", &reason) && !reason.empty() &&
+           (expected_reason.empty() || reason == expected_reason) &&
            ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0 &&
            body.find("\"ticket\":null") != std::string::npos;
   }
@@ -568,6 +672,82 @@ bool HasContextCandidate() {
   auto &control = WindowsTargetListControl();
   std::lock_guard lock(control.stop_mutex);
   return control.context_candidate != nullptr;
+}
+
+int DiagnoseSessionRca(std::wstring_view scenario) {
+  const bool held_file = scenario == L"rca-held-file";
+  const char *label = held_file ? "rca-held-file" : "rca-start-open";
+  RcaRun run;
+  try {
+    run.StartFixture();
+    run.StartPipe(false, held_file);
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "rca_handshake");
+    const std::uint64_t generation_before = windows_v2_list_generation;
+    const std::string metadata = held_file
+        ? "{\"requestId\":\"held-file-rca\",\"actionDigest\":\"" + std::string(64, 'a') +
+              "\",\"cancelEpoch\":1,\"observationRevision\":1,\"type\":\"invoke\",\"targetId\":\"fixture\"}"
+        : NewStartMetadata();
+    // The new start uses a different frame session ID; the seeded session only verifies receipts.
+    // Neither this seed nor reaching the open establishes admission, a grant, or input acceptance.
+    Require(!sessions.contains(FrameIdKey(Id(8))), "rca_new_session_absent");
+    hold_point.store(held_file ? HoldPoint::kHeldFile : HoldPoint::kStartOpen);
+    run.Send(held_file ? MessageType::kPreflight : MessageType::kProbe, 2, metadata, held_file ? 7 : 8);
+    Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "rca_session_gate_entered");
+    Require(!WindowsTargetListWorkerRunning().load() &&
+                WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "rca_sync_consumer_held");
+    Require(held_file ? held_file_calls.load() == 1 : start_open_calls.load() == 1,
+            "rca_exact_fault_boundary_reached");
+    const std::uint64_t before_cancel = WindowsTargetListControl().stop_serial.load();
+    const ULONGLONG stop_started = GetTickCount64();
+    run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+    Require(WaitStopSerial(before_cancel, 1000), "rca_cancel_reader_progress");
+    {
+      // The serial update precedes the epoch CAS, under this same reader lock.
+      std::lock_guard lock(WindowsTargetListControl().stop_mutex);
+      Require(cancellation_epoch.load() >= 2, "rca_cancel_epoch_progress");
+    }
+    const ULONGLONG reader_ms = GetTickCount64() - stop_started;
+    const std::uint64_t before_close = WindowsTargetListControl().stop_serial.load();
+    run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+    Require(WaitStopSerial(before_close, 1000), "rca_close_reader_progress");
+    const ULONGLONG receipt_wait_started = GetTickCount64();
+    Require(!run.Wait(3, 1000) && !run.Wait(2, 0) && !run.Wait(4, 0), "rca_receipts_blocked_at_one_second");
+    const ULONGLONG blocked_ms = GetTickCount64() - receipt_wait_started;
+    Require(blocked_ms >= 1000 && WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT,
+            "rca_gate_and_child_still_held");
+    hold_point.store(HoldPoint::kNone);
+    SetEvent(run.release.value);
+    Require(run.Wait(2, 15'000), "rca_operation_recovers_after_release");
+    if (held_file) {
+      Require(held_file_successes.load() == 1 && run.PreflightDenied(2, ""),
+              "rca_real_held_read_then_no_ticket");
+    } else {
+      Require(start_open_successes.load() == 1 && run.Error(2, "", 8),
+              "rca_real_start_open_then_refusal");
+    }
+    Require(run.Wait(3, 5000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2) &&
+                run.Wait(4, 5000) && run.Receipt(4, MessageType::kProbeResult, "closed", 3),
+            "rca_stop_receipts_recovered");
+    run.Send(MessageType::kProbe, 5, "{\"operation\":\"probe\"}");
+    Require(run.Wait(5, 5000) && run.ProbeReply(5, MessageType::kProbeResult), "rca_consumer_recovered");
+    Require(!sessions.contains(FrameIdKey(Id(7))) && !sessions.contains(FrameIdKey(Id(8))) &&
+                windows_v2_list_generation == generation_before, "rca_no_session_or_list_adopted");
+    Require(!gate_timed_out.load() && !wrong_measurement.load(), "rca_owned_fault_only");
+    run.Cleanup();
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "rca_cleanup_completed");
+    std::cout << "{\"case\":\"" << label << "\",\"rcaOnly\":true,\"readerMs\":" << reader_ms
+              << ",\"blockedMs\":" << blocked_ms
+              << ",\"receiptsBlockedAtOneSecond\":true,\"realReadRecovered\":true,\"recovered\":true"
+              << ",\"startAccepted\":false,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
+              << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  } catch (const std::exception &error) {
+    run.Cleanup();
+    std::cout << "{\"failure\":\"" << error.what() << "\"}\n";
+    return 1;
+  }
 }
 
 int Diagnose(std::wstring_view scenario) {
@@ -760,6 +940,8 @@ int Diagnose(std::wstring_view scenario) {
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]) == L"rca-start-open" || std::wstring_view(argv[1]) == L"rca-held-file")
+    return DiagnoseSessionRca(argv[1]);
   return Diagnose(argv[1]);
 }
 `;
@@ -777,6 +959,10 @@ describe('Windows target I/O RCA seam source', () => {
       generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
+    expect(generated.split('!Sc940StartOpen(target_process.value,')).toHaveLength(2);
+    expect(generated.split('!Sc940HeldFileIdentity(session.executable_file,')).toHaveLength(2);
+    expect(program).toContain('const bool opened = OpenLockedProcessExecutable(process, output);');
+    expect(program).toContain('const bool read = ReadWindowsFileIdentity(file, output);');
     expect(program).toContain('ServePipe(server.value, BackendProbe{})');
     expect(program).not.toMatch(/#define\s+(?:CreateFileW|ReadFile|WriteFile|EnumWindows)\b/u);
   });
@@ -786,7 +972,7 @@ const build = compiler();
 describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
 )('Windows target I/O live seam (#940-1, bounded list worker)', () => {
-  it('bounds Stop and list responses while preserving usable work across ten owned scenarios', async () => {
+  it('checks ten bounded list scenarios and records two remaining session I/O delays', async () => {
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     try {
@@ -859,12 +1045,31 @@ describe.skipIf(
         'deadline-stop-race',
         'queued-stop',
         'completion-race',
+        'rca-start-open',
+        'rca-held-file',
       ]) {
         const result = await run(binary, [scenario], 70_000);
         expect(result.timedOut, `${scenario}: outer watchdog`).toBe(false);
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('rca-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            rcaOnly: true,
+            receiptsBlockedAtOneSecond: true,
+            realReadRecovered: true,
+            recovered: true,
+            startAccepted: false,
+            inputAttempts: 0,
+            childExited: true,
+            threadsJoined: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         expect(metadata).toMatchObject({
           case: scenario,
           stopSerialAdvanced: true,
