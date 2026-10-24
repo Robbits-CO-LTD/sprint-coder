@@ -18,6 +18,8 @@ const adoption =
   '    // Stop and adoption share this lock; a late result cannot advance the generation.';
 const consumer =
   '    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {';
+const uiaContact =
+  'WindowsV1UiaContact(root, [&] { return automation->ElementFromHandle(window, &root); });';
 
 function replaceOnce(source: string, before: string, after: string): string {
   if (source.split(before).length !== 2) throw new Error('RCA seam source boundary changed');
@@ -41,6 +43,39 @@ function instrumentedHost(): string {
     source,
     consumer,
     `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
+  );
+  const readFrom = source.indexOf('bool ReadUiaObservationOnWorker(');
+  const readTo = source.indexOf('bool ReadUiaObservation(', readFrom);
+  if (readFrom < 0 || readTo < 0) throw new Error('Observation worker boundary changed');
+  source =
+    source.slice(0, readFrom) +
+    replaceOnce(
+      replaceOnce(
+        source.slice(readFrom, readTo),
+        uiaContact,
+        `WindowsV1UiaContact(root, [&] {
+        if (!Sc820ContactGate(window)) return E_ABORT;
+        const HRESULT result = automation->ElementFromHandle(window, &root);
+        Sc820ContactResult(SUCCEEDED(result), root != nullptr);
+        return result;
+      });`,
+      ),
+      'if (root != nullptr) root->Release();',
+      'if (root != nullptr) { root->Release(); Sc820RootReleased(); }',
+    ) +
+    source.slice(readTo);
+  source = replaceOnce(
+    source,
+    '    if (operation == "read_node_value") {',
+    `    if (operation == "sc820_read_probe") {
+      try {
+        return Respond(pipe, request, MessageType::kProbeResult,
+                       Sc820ReadProbe(metadata, queued_stop_serial));
+      } catch (...) {
+        return Respond(pipe, request, MessageType::kError, ErrorPayload("sc820_probe_failed"));
+      }
+    }
+    if (operation == "read_node_value") {`,
   );
   const from = source.indexOf('bool ValidateWindowsSession(\n');
   const to = source.indexOf('bool ReadExact(', from);
@@ -133,7 +168,13 @@ function run(file: string, args: string[], timeout: number, verbatim = false) {
 const program = String.raw`
 #include <windows.h>
 #include <cstdint>
+#include <optional>
+#include <string>
 namespace {
+bool Sc820ContactGate(HWND window);
+void Sc820ContactResult(bool succeeded, bool nonnull);
+void Sc820RootReleased();
+std::string Sc820ReadProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial);
 void Sc940MeasureGate(std::uint32_t pid);
 void Sc940ContextGate();
 void Sc940CompletionGate();
@@ -164,6 +205,13 @@ std::atomic<bool> wrong_measurement{false};
 std::atomic<unsigned> measurement_calls{0};
 std::atomic<unsigned> context_factory_calls{0};
 std::atomic<unsigned> synchronous_session_probes{0};
+std::atomic<unsigned> uia_contacts{0};
+std::atomic<unsigned> uia_completed_contacts{0};
+std::atomic<unsigned> uia_successful_contacts{0};
+std::atomic<unsigned> uia_nonnull_roots{0};
+std::atomic<unsigned> uia_released_roots{0};
+std::atomic<unsigned> uia_hold_contact{0};
+std::atomic<ULONGLONG> uia_held_since{0};
 
 void Require(bool condition, const char *reason) {
   if (!condition) throw std::runtime_error(reason);
@@ -201,6 +249,78 @@ void Sc940ConsumerGate(std::uint8_t request) {
   if (request == 2) Sc940Gate(HoldPoint::kConsumer);
 }
 void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
+
+bool Sc820ContactGate(HWND window) {
+  if (fixture_count != 1 || window != fixture_windows[0] || windows_uia_observation_pending == nullptr) {
+    wrong_measurement.store(true);
+    return false;
+  }
+  {
+    std::lock_guard lock(windows_uia_observation_pending->mutex);
+    if (!windows_uia_observation_pending->contact_active) {
+      wrong_measurement.store(true);
+      return false;
+    }
+  }
+  const unsigned index = uia_contacts.fetch_add(1) + 1;
+  if (index != uia_hold_contact.load()) return true;
+  uia_held_since.store(GetTickCount64());
+  SetEvent(gate_entered);
+  if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0)
+    gate_timed_out.store(true);
+  return true;
+}
+void Sc820ContactResult(bool succeeded, bool nonnull) {
+  uia_completed_contacts.fetch_add(1);
+  if (succeeded) uia_successful_contacts.fetch_add(1);
+  if (nonnull) uia_nonnull_roots.fetch_add(1);
+}
+void Sc820RootReleased() { uia_released_roots.fetch_add(1); }
+
+const char *Sc820StopName(WindowsV1UiaStop stop) {
+  switch (stop) {
+  case WindowsV1UiaStop::kNone: return "none";
+  case WindowsV1UiaStop::kTimeout: return "timeout";
+  case WindowsV1UiaStop::kBudget: return "budget";
+  case WindowsV1UiaStop::kCanceled: return "canceled";
+  }
+  return "invalid";
+}
+
+std::string Sc820ReadProbe(const std::string &metadata, std::optional<std::uint64_t> stop_serial) {
+  std::string mode;
+  ReadJsonString(metadata, "mode", &mode);
+  const bool twice = mode == "twice" || mode == "deadline";
+  const auto budget = mode == "deadline" ? std::chrono::milliseconds(1500) : kWindowsV1UiaObserveBudget;
+  const auto started = std::chrono::steady_clock::now();
+  // The seeded control session's epoch, as an actual observe would use, not a refreshed epoch.
+  const WindowsV1UiaPath path(budget, 1, stop_serial);
+  // Existing diagnostic work in the outer scope; this is not a node limit.
+  const std::size_t initial_nodes = twice ? 17 : 0;
+  for (std::size_t index = 0; index < initial_nodes; ++index) WindowsV1UiaCountNode();
+  std::string tree;
+  std::size_t first_nodes = 0, second_nodes = 0;
+  const bool first = ReadUiaObservation(fixture_pids[0], fixture_windows[0], &tree, &first_nodes);
+  const bool first_empty = tree.empty();
+  ScrubString(&tree);
+  bool second = false;
+  if (twice && first && path.Stop() == WindowsV1UiaStop::kNone) {
+    if (mode == "deadline") {
+      // Leave about 150 ms of the SAME outer deadline for the second real contact.
+      Require(std::chrono::steady_clock::now() - started < std::chrono::milliseconds(1200),
+              "uia_first_read_within_test_budget");
+      std::this_thread::sleep_until(started + std::chrono::milliseconds(1350));
+    }
+    second = ReadUiaObservation(fixture_pids[0], fixture_windows[0], &tree, &second_nodes);
+  }
+  const bool empty = twice ? tree.empty() : first_empty;
+  ScrubString(&tree);
+  return "{\"firstOk\":" + std::string(first ? "true" : "false") +
+      ",\"secondOk\":" + (second ? "true" : "false") +
+      ",\"firstNodes\":" + std::to_string(first_nodes) + ",\"secondNodes\":" + std::to_string(second_nodes) +
+      ",\"initialNodes\":" + std::to_string(initial_nodes) + ",\"outerNodes\":" + std::to_string(path.Nodes()) +
+      ",\"stop\":\"" + Sc820StopName(path.Stop()) + "\",\"treeEmpty\":" + (empty ? "true" : "false") + "}";
+}
 
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
   if (enumeration_count == 0 || enumeration_count > fixture_count) return FALSE;
@@ -250,6 +370,17 @@ sprint_coder::computer_use::FrameId Id(std::uint8_t byte) {
   return id;
 }
 
+struct UiaReadResult {
+  bool first = false;
+  bool second = false;
+  bool empty = false;
+  std::uint64_t first_nodes = 0;
+  std::uint64_t second_nodes = 0;
+  std::uint64_t initial_nodes = 0;
+  std::uint64_t outer_nodes = 0;
+  std::string stop;
+};
+
 struct RcaRun {
   ScopedKernelHandle entered{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   ScopedKernelHandle release{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
@@ -265,6 +396,7 @@ struct RcaRun {
   std::mutex replies_mutex;
   std::condition_variable replies_ready;
   std::unordered_map<unsigned, Frame> replies;
+  std::unordered_map<unsigned, unsigned> reply_counts;
   std::atomic<bool> watchdog_fired{false};
   std::atomic<bool> serve_ok{false};
   bool cleaned = false;
@@ -390,6 +522,8 @@ struct RcaRun {
     serving = std::thread([this] {
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
       if (SUCCEEDED(apartment)) {
+        // Match ServeMain's client-side warmup before accepting any target operation.
+        WarmWindowsV1Automation();
         // No capture/input capability is needed for this protocol and measurement-only seam.
         serve_ok.store(ServePipe(server.value, BackendProbe{}));
         CoUninitialize();
@@ -400,6 +534,7 @@ struct RcaRun {
       while (ReadFrame(client.value, &frame)) {
         {
           std::lock_guard<std::mutex> lock(replies_mutex);
+          ++reply_counts[frame.header.request_id.bytes[0]];
           replies.emplace(frame.header.request_id.bytes[0], std::move(frame));
         }
         replies_ready.notify_all();
@@ -507,6 +642,37 @@ struct RcaRun {
     return !WindowsTargetListWorkerRunning().load(std::memory_order_acquire);
   }
 
+  bool WaitUiaWorkerIdle(DWORD milliseconds) {
+    const ULONGLONG deadline = GetTickCount64() + milliseconds;
+    while (WindowsUiaObservationWorkerRunning().load(std::memory_order_acquire) && GetTickCount64() < deadline)
+      Sleep(1);
+    return !WindowsUiaObservationWorkerRunning().load(std::memory_order_acquire);
+  }
+
+  unsigned ReplyCount(unsigned id) {
+    std::lock_guard lock(replies_mutex);
+    return reply_counts[id];
+  }
+
+  bool UiaReply(unsigned id, UiaReadResult *output) {
+    std::lock_guard lock(replies_mutex);
+    const auto found = replies.find(id);
+    if (found == replies.end()) return false;
+    const Frame &frame = found->second;
+    const std::string body(frame.metadata.begin(), frame.metadata.end());
+    return frame.header.message_type == static_cast<std::uint16_t>(MessageType::kProbeResult) &&
+           frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
+           frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() && body.size() < 512 &&
+           ReadOptionalJsonBoolean(body, "firstOk", &output->first) &&
+           ReadOptionalJsonBoolean(body, "secondOk", &output->second) &&
+           ReadOptionalJsonBoolean(body, "treeEmpty", &output->empty) &&
+           ReadJsonUint64(body, "firstNodes", &output->first_nodes) &&
+           ReadJsonUint64(body, "secondNodes", &output->second_nodes) &&
+           ReadJsonUint64(body, "initialNodes", &output->initial_nodes) &&
+           ReadJsonUint64(body, "outerNodes", &output->outer_nodes) &&
+           ReadJsonString(body, "stop", &output->stop);
+  }
+
   void Cleanup() {
     if (cleaned) return;
     cleaned = true;
@@ -517,6 +683,7 @@ struct RcaRun {
     if (receiving.joinable()) receiving.join();
     // The detached production worker must release its slot/resources before our fixture is killed.
     worker_idle = WaitWorkerIdle(15'000);
+    worker_idle = WaitUiaWorkerIdle(15'000) && worker_idle;
     if (job.value != nullptr) TerminateJobObject(job.value, 0);
     child_exited = true;
     for (auto &child : children)
@@ -568,6 +735,135 @@ bool HasContextCandidate() {
   auto &control = WindowsTargetListControl();
   std::lock_guard lock(control.stop_mutex);
   return control.context_candidate != nullptr;
+}
+
+int DiagnoseUia(std::wstring_view scenario) {
+  const bool timeout = scenario == L"uia-contact-timeout";
+  const bool cancel = scenario == L"uia-cancel";
+  const bool close = scenario == L"uia-close";
+  const bool queued = scenario == L"uia-prequeued-close";
+  const bool twice = scenario == L"uia-two-reads";
+  const bool deadline = scenario == L"uia-shared-deadline";
+  const char *label = timeout ? "uia-contact-timeout" : cancel ? "uia-cancel" : close ? "uia-close" :
+      queued ? "uia-prequeued-close" : twice ? "uia-two-reads" : "uia-shared-deadline";
+  RcaRun run;
+  ULONGLONG response_ms = 0, stop_ms = 0;
+  try {
+    run.StartFixture();
+    run.StartPipe(false);
+    run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
+    Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "uia_handshake");
+    uia_hold_contact.store(deadline ? 2 : timeout || cancel || close ? 1 : 0);
+    hold_point.store(queued ? HoldPoint::kConsumer : HoldPoint::kNone);
+    const std::string mode = twice ? "twice" : deadline ? "deadline" : "single";
+    const ULONGLONG started = GetTickCount64();
+    run.Send(MessageType::kProbe, 2, "{\"operation\":\"sc820_read_probe\",\"mode\":\"" + mode + "\"}");
+    bool stopped = false;
+    const auto stop_control = [&](bool cancel_first, bool release_consumer) {
+      const std::uint64_t before = WindowsTargetListControl().stop_serial.load();
+      const ULONGLONG sent = GetTickCount64();
+      if (cancel_first)
+        run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+      else
+        run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(before, 1000), "uia_stop_reader_progress");
+      if (release_consumer) {
+        Require(!WindowsUiaObservationWorkerRunning().load() && uia_contacts.load() == 0 &&
+                    cancellation_epoch.load() == 1,
+                "uia_prequeued_stop_before_worker");
+        hold_point.store(HoldPoint::kNone);
+        SetEvent(run.release.value);
+      }
+      if (cancel_first) {
+        Require(run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
+                "uia_cancel_receipt");
+        // Cancel alone must free the consumer; Close cannot mask a missed cancellation.
+        run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+      }
+      Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kProbeResult, "closed", cancel_first ? 3 : 2),
+              "uia_close_receipt");
+      stop_ms = GetTickCount64() - sent;
+      Require(stop_ms < 1000, "uia_stop_ack_budget");
+      stopped = true;
+    };
+    if (!twice) {
+      Require(WaitForSingleObject(run.entered.value, 5000) == WAIT_OBJECT_0, "uia_gate_entered");
+      Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "uia_gate_held");
+      Require(WindowsUiaObservationWorkerRunning().load() == !queued, "uia_worker_ownership");
+    }
+    if (cancel || close || queued) stop_control(cancel, queued);
+    UiaReadResult result;
+    Require(run.Wait(2, twice ? 7000 : 1000) && run.UiaReply(2, &result), "uia_read_response");
+    response_ms = GetTickCount64() - started;
+    if (twice) {
+      Require(result.first && result.second && result.stop == "none" && result.first_nodes > 0 &&
+                  result.second_nodes > 0 && result.initial_nodes == 17 &&
+                  result.outer_nodes == 17 + result.first_nodes + result.second_nodes,
+              "uia_outer_nodes_accumulate_once");
+    } else if (deadline) {
+      Require(result.first && !result.second && result.empty && result.stop == "budget" &&
+                  result.first_nodes > 0 && result.second_nodes == 0 &&
+                  result.outer_nodes == 17 + result.first_nodes && response_ms >= 1450 &&
+                  response_ms < 2200 && GetTickCount64() - uia_held_since.load() <
+                      static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()),
+              "uia_second_read_uses_remaining_outer_deadline");
+    } else {
+      Require(!result.first && result.empty && result.first_nodes == 0 && result.outer_nodes == 0 &&
+                  result.stop == (timeout ? "timeout" : "canceled"), "uia_outer_stop_propagated");
+      if (timeout)
+        Require(response_ms >= static_cast<ULONGLONG>(kWindowsV1UiaSlowContact.count()) &&
+                    GetTickCount64() - uia_held_since.load() < 1000, "uia_contact_deadline_bounded");
+    }
+    if (queued) {
+      Require(uia_contacts.load() == 0 && !WindowsUiaObservationWorkerRunning().load(),
+              "uia_prequeued_close_created_no_worker");
+    } else if (!twice) {
+      Require(WindowsUiaObservationWorkerRunning().load() &&
+                  WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT &&
+                  WaitForSingleObject(run.children[0].value, 0) == WAIT_TIMEOUT,
+              "uia_response_precedes_gate_release");
+      if (timeout) {
+        const unsigned before = uia_contacts.load();
+        run.Send(MessageType::kProbe, 6, "{\"operation\":\"sc820_read_probe\",\"mode\":\"single\"}");
+        UiaReadResult busy;
+        Require(run.Wait(6, 1000) && run.UiaReply(6, &busy) && !busy.first && busy.empty &&
+                    busy.first_nodes == 0 && uia_contacts.load() == before &&
+                    WindowsUiaObservationWorkerRunning().load(), "uia_busy_read_does_not_spawn");
+      }
+      uia_hold_contact.store(0);
+      SetEvent(run.release.value);
+    }
+    Require(run.WaitUiaWorkerIdle(15'000), "uia_late_worker_drained");
+    const unsigned completed = queued ? 0 : twice || deadline ? 2 : 1;
+    Require(uia_contacts.load() == completed && uia_completed_contacts.load() == completed &&
+                uia_successful_contacts.load() == completed && uia_nonnull_roots.load() == completed &&
+                uia_released_roots.load() == completed, "uia_real_contact_and_root_cleanup");
+    UiaReadResult after;
+    Require(run.ReplyCount(2) == 1 && run.UiaReply(2, &after) && after.first == result.first &&
+                after.second == result.second && after.outer_nodes == result.outer_nodes && after.stop == result.stop,
+            "uia_late_result_not_published");
+    if (timeout) {
+      run.Send(MessageType::kProbe, 20, "{\"operation\":\"sc820_read_probe\",\"mode\":\"single\"}");
+      UiaReadResult fresh;
+      Require(run.Wait(20, 7000) && run.UiaReply(20, &fresh) && fresh.first && !fresh.empty &&
+                  fresh.stop == "none" && fresh.first_nodes > 0 && fresh.outer_nodes == fresh.first_nodes &&
+                  run.WaitUiaWorkerIdle(1000) && uia_contacts.load() == completed + 1 &&
+                  uia_released_roots.load() == completed + 1, "uia_explicit_retry_recovers");
+    }
+    if (!stopped) stop_control(true, false);
+    Require(!wrong_measurement.load() && !gate_timed_out.load(), "uia_owned_contact_only");
+    run.Cleanup();
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "uia_cleanup_completed");
+    std::cout << "{\"case\":\"" << label << "\",\"responseMs\":" << response_ms << ",\"stopMs\":" << stop_ms
+              << ",\"outerStop\":\"" << result.stop << "\",\"outerNodes\":" << result.outer_nodes
+              << ",\"lateResultDiscarded\":true,\"realContactCleanup\":true,\"inputAttempts\":0"
+              << ",\"childExited\":true,\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
+    return 0;
+  } catch (const std::exception &error) {
+    run.Cleanup();
+    std::cout << "{\"failure\":\"" << error.what() << "\"}\n";
+    return 1;
+  }
 }
 
 int Diagnose(std::wstring_view scenario) {
@@ -772,6 +1068,7 @@ int Diagnose(std::wstring_view scenario) {
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
   if (argc != 2) return 2;
+  if (std::wstring_view(argv[1]).starts_with(L"uia-")) return DiagnoseUia(argv[1]);
   return Diagnose(argv[1]);
 }
 `;
@@ -789,6 +1086,12 @@ describe('Windows target I/O RCA seam source', () => {
       generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
     expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
+    expect(generated.split('if (!Sc820ContactGate(window)) return E_ABORT;')).toHaveLength(2);
+    expect(generated.split('root->Release(); Sc820RootReleased();')).toHaveLength(2);
+    expect(generated.split('operation == "sc820_read_probe"')).toHaveLength(2);
+    expect(generated).toContain(
+      'const HRESULT result = automation->ElementFromHandle(window, &root);',
+    );
     expect(program).toContain('ServePipe(server.value, BackendProbe{})');
     expect(program).not.toMatch(/#define\s+(?:CreateFileW|ReadFile|WriteFile|EnumWindows)\b/u);
   });
@@ -797,8 +1100,8 @@ describe('Windows target I/O RCA seam source', () => {
 const build = compiler();
 describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
-)('Windows target I/O live seam (#940-1, bounded list worker)', () => {
-  it('bounds Stop and list responses while preserving usable work across ten owned scenarios', async () => {
+)('Windows target I/O live seam (#940 and #820, bounded readers)', () => {
+  it('bounds list and UIA reads, Stop receipts, inherited budgets, and late cleanup on owned fixtures', async () => {
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     try {
@@ -871,12 +1174,40 @@ describe.skipIf(
         'deadline-stop-race',
         'queued-stop',
         'completion-race',
+        'uia-contact-timeout',
+        'uia-cancel',
+        'uia-close',
+        'uia-prequeued-close',
+        'uia-two-reads',
+        'uia-shared-deadline',
       ]) {
         const result = await run(binary, [scenario], 70_000);
         expect(result.timedOut, `${scenario}: outer watchdog`).toBe(false);
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
+        if (scenario.startsWith('uia-')) {
+          expect(metadata).toMatchObject({
+            case: scenario,
+            outerStop:
+              scenario === 'uia-contact-timeout'
+                ? 'timeout'
+                : scenario === 'uia-two-reads'
+                  ? 'none'
+                  : scenario === 'uia-shared-deadline'
+                    ? 'budget'
+                    : 'canceled',
+            lateResultDiscarded: true,
+            realContactCleanup: true,
+            inputAttempts: 0,
+            childExited: true,
+            threadsJoined: true,
+            workerIdle: true,
+            watchdogFired: false,
+          });
+          console.log(JSON.stringify(metadata));
+          continue;
+        }
         expect(metadata).toMatchObject({
           case: scenario,
           stopSerialAdvanced: true,
