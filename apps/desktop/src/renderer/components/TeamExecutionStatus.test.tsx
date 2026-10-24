@@ -122,25 +122,51 @@ describe('describeExecution', () => {
     expect(describeExecution(row).ariaSummary).toContain(label);
   });
 
-  it.each(['waiting_integration', 'integrating'] as const)(
-    'keeps a manual integration resume distinct from stale %s (issue #913)',
-    (phase) => {
-      const isolation: TeamExecutionIsolation = {
-        phase,
+  it('keeps a manual integration resume distinct from the ambiguous queue (issue #913)', () => {
+    const isolation: TeamExecutionIsolation = {
+      phase: 'waiting_integration',
+      resumeKind: null,
+      repositories: [],
+      roots: [],
+      reason: null,
+    };
+    const resumed = execution({ state: 'waiting_resume', isolation });
+    expect(describeExecution(resumed).stateLabel).toBe('再開待ち');
+    expect(describeExecution(resumed).waitReasonLabel).toBe('既存変更を確認してから再開');
+    expect(executionWorkPhase(resumed)).toBeNull();
+    expect(resumed.state).toBe('waiting_resume');
+    expect(executionWorkPhase(execution({ state: 'completed', isolation }))).toBeNull();
+    expect(workerWorkPhase({ state: 'stopped' }, execution({ isolation }))).toBeNull();
+  });
+
+  it('shows a resumed integration that is actively integrating without a manual-resume action', () => {
+    const active = execution({
+      state: 'waiting_resume',
+      isolation: {
+        phase: 'integrating',
         resumeKind: null,
         repositories: [],
         roots: [],
         reason: null,
-      };
-      const resumed = execution({ state: 'waiting_resume', isolation });
-      expect(describeExecution(resumed).stateLabel).toBe('再開待ち');
-      expect(describeExecution(resumed).waitReasonLabel).toBe('既存変更を確認してから再開');
-      expect(executionWorkPhase(resumed)).toBeNull();
-      expect(resumed.state).toBe('waiting_resume');
-      expect(executionWorkPhase(execution({ state: 'completed', isolation }))).toBeNull();
-      expect(workerWorkPhase({ state: 'stopped' }, execution({ isolation }))).toBeNull();
-    },
-  );
+      },
+    });
+    expect(describeExecution(active).stateLabel).toBe('統合中');
+    expect(describeExecution(active).waitReasonLabel).toBeNull();
+    for (const missionId of [null, 'mission-resume']) {
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={{ ...active, missionId }}
+          variant="canvas"
+          onResume={() => {}}
+          onResumeIntegration={() => {}}
+        />,
+      );
+      expect(html).not.toContain('data-testid="team-integration-resume"');
+      expect(html).not.toContain('data-testid="team-worker-resume"');
+    }
+    const queued = execution({ id: 'next', state: 'queued', updatedAt: '2026-07-29T00:00:00Z' });
+    expect(latestExecutionForWorker([active, queued], active.assigneeAgentId)?.id).toBe(active.id);
+  });
 
   it('counts a direct busy Worker after terminal execution history as work, without reviving a stopped Worker', () => {
     const history = execution({ state: 'completed' });

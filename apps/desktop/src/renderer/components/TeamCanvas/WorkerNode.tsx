@@ -109,7 +109,12 @@ function WorkerNodeCard({
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
   const phase = workerWorkPhase(worker, execution);
   const statusLabel = workerStatusLabel(worker, execution);
-  const dotClass = phase === 'waiting_integration' ? 'ready' : statusDotClass(worker.state);
+  const dotClass =
+    phase === 'waiting_integration'
+      ? 'ready'
+      : phase !== null
+        ? 'busy'
+        : statusDotClass(worker.state);
   const model = describeWorkerModel(worker);
   const runtime = workerRuntimeLabel(worker);
   const hierarchy = describeHierarchy(worker, parent);

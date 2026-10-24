@@ -141,6 +141,45 @@ afterEach(() => {
 });
 
 describe.each(['canvas', 'list'] as const)('%s work phase projection', (view) => {
+  it('shows live resumed integration ahead of a newer queued assignment', () => {
+    const row = execution('integrating');
+    row.state = 'waiting_resume';
+    const team = detail(row);
+    team.workers = [{ ...worker, state: 'waiting' }];
+    team.executions.push({
+      ...execution('running'),
+      id: 'queued-next',
+      state: 'queued',
+      updatedAt: '2026-10-25T00:00:00Z',
+    });
+    useAppStore.setState({ teamByTask: { [task.id]: team } });
+    act(() =>
+      root.render(
+        view === 'list' ? (
+          <TeamListView task={task} onBack={() => {}} onSwitchToCanvasView={() => {}} />
+        ) : (
+          <TeamCanvas
+            task={task}
+            leaderRef={createRef()}
+            leaderAnchorRef={createRef()}
+            onRequestExit={() => {}}
+            onSwitchToListView={() => {}}
+          />
+        ),
+      ),
+    );
+    const card = container.querySelector('[data-testid="team-worker"]')!;
+    expect(card.querySelector('.team-status')?.textContent).toBe('統合中');
+    expect(card.querySelector('.w-status')?.classList.contains('busy')).toBe(true);
+    if (view === 'canvas')
+      expect(card.querySelector('.w-glance-state')?.textContent).toBe('統合中');
+    expect(card.querySelector('[data-testid="team-integration-resume"]')).toBeNull();
+    expect(card.querySelector('[data-testid="team-worker-resume"]')).toBeNull();
+    expect(container.querySelector('[data-testid="team-work-counts"]')?.textContent).toBe(
+      '作業中 0人 · 統合待ち 0人 · 統合中 1人',
+    );
+    expect(row.state).toBe('waiting_resume');
+  });
   it('keeps direct work visible when the only persisted execution is terminal history', () => {
     const row = execution('completed');
     row.state = 'completed';
@@ -248,6 +287,7 @@ describe('Timeline phase parity', () => {
     ['running', 'running', '作業中'],
     ['waiting_integration', 'running', '統合待ち'],
     ['integrating', 'running', '統合中'],
+    ['integrating', 'waiting_resume', '統合中'],
     ['waiting_integration', 'waiting_resume', '再開待ち'],
   ] as const)(
     'describes %s / %s using the shared phase without losing resume attention',
@@ -318,9 +358,12 @@ it('does not show an outdated thinking indicator outside an active work phase', 
     ),
   );
   expect(container.querySelector('[data-testid="team-worker"] .w-run-title')).toBeNull();
-  expect(
-    container.querySelector('[data-testid="team-worker"] .w-glance-state')?.textContent,
-  ).not.toBe('思考中');
+  expect(container.querySelector('[data-testid="team-worker"] .w-glance-state')?.textContent).toBe(
+    '処理中',
+  );
+  expect(container.querySelector('[data-testid="team-worker"] .team-status')?.textContent).toBe(
+    '処理中',
+  );
   expect(container.querySelector('[data-testid="team-worker"] .w-glance-line')).toBeNull();
   expect(container.querySelector('[data-testid="team-work-counts"]')).toBeNull();
   expect(row.state).toBe('running');

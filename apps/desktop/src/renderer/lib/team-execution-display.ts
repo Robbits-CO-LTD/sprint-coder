@@ -152,9 +152,15 @@ export type WorkerWorkPhase = keyof typeof WORK_PHASE_LABELS;
 /** Presentation only: a running execution can have finished its AI work and be awaiting Git. */
 export function executionWorkPhase(execution: TeamExecutionSummary | null): WorkerWorkPhase | null {
   if (execution === null || isTerminalExecutionState(execution.state)) return null;
-  if (execution.state !== 'running') return null;
   const isolation = execution.isolation ?? null;
-  if (isolation?.phase === 'integrating') return 'integrating';
+  // Resume keeps waiting_resume until completion; startup rewrites interrupted integrating
+  // isolations to waiting_resume, so this phase still proves a live Git integration.
+  if (
+    isolation?.phase === 'integrating' &&
+    (execution.state === 'running' || execution.state === 'waiting_resume')
+  )
+    return 'integrating';
+  if (execution.state !== 'running') return null;
   if (isolation?.phase === 'waiting_integration') return 'waiting_integration';
   if (isolation === null && execution.worktree?.state === 'ready') return 'integration_unknown';
   if (
@@ -194,7 +200,9 @@ export function workerStatusLabel(
   return phase === null
     ? worker.state === 'stopped'
       ? '停止済み'
-      : worker.state
+      : worker.state === 'busy'
+        ? '処理中'
+        : worker.state
     : WORK_PHASE_LABELS[phase];
 }
 
@@ -241,7 +249,11 @@ export function latestExecutionForWorker(
   if (executions == null) return null;
   let latest: TeamExecutionSummary | null = null;
   const priority = (execution: TeamExecutionSummary) =>
-    execution.state === 'running' ? 2 : isTerminalExecutionState(execution.state) ? 0 : 1;
+    execution.state === 'running' || executionWorkPhase(execution) === 'integrating'
+      ? 2
+      : isTerminalExecutionState(execution.state)
+        ? 0
+        : 1;
   for (const execution of executions) {
     if (execution.assigneeAgentId !== workerId) continue;
     if (

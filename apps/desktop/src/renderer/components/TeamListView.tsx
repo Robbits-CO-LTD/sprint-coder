@@ -219,7 +219,7 @@ export function TeamListView({
                   <div>
                     <span className="role-name">{worker.role}</span>
                     <span
-                      className={`w-status team-status ${phase === 'waiting_integration' ? 'ready' : statusDotClass(worker.state)}`}
+                      className={`w-status team-status ${phase === 'waiting_integration' ? 'ready' : phase !== null ? 'busy' : statusDotClass(worker.state)}`}
                     >
                       <span className="dot" aria-hidden="true" />
                       {statusLabel}
