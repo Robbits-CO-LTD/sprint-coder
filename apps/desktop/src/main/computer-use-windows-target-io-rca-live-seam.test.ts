@@ -712,6 +712,17 @@ int Diagnose(std::wstring_view scenario) {
     Require(stop_ms < 1000, "stop_receipts_within_ack_budget");
     Require(cancellation_epoch.load() >= 2, "stop_reader_epoch_advanced");
     if (same_epoch_close) Require(cancellation_epoch.load() == 2, "same_epoch_close_used_stop_serial");
+    if (scenario == L"measure-close") {
+      const auto replay_serial = WindowsTargetListControl().stop_serial.load();
+      run.Send(MessageType::kProbe, 21, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+      Require(run.Wait(21, 1000) && run.Receipt(21, MessageType::kProbeResult, "closed", 3),
+              "close_resend_receipt");
+      const auto closed = closed_sessions.find(FrameIdKey(Id(7)));
+      Require(WindowsTargetListControl().stop_serial.load() > replay_serial &&
+                  cancellation_epoch.load() == 2 && last_closed_cancel_epoch == 2 &&
+                  closed != closed_sessions.end() && closed->second.cancel_epoch == 3,
+              "close_resend_preserves_fresh_epoch_zero_start_condition");
+    }
     if (!healthy && !cold_deadline) {
       if (!deadline)
         Require(run.Wait(2, 1000) && run.Error(2, "list_targets_unavailable"), "stopped_list_refused");
@@ -746,6 +757,7 @@ int Diagnose(std::wstring_view scenario) {
               << ",\"partialPreserved\":" << (partial_preserved ? "true" : "false")
               << ",\"coldContextReused\":" << (cold_context_reused ? "true" : "false")
               << ",\"fixtureCount\":" << fixture_count
+              << ",\"closeReplayChecked\":" << (scenario == L"measure-close" ? "true" : "false")
               << ",\"recovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
               << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
@@ -873,6 +885,7 @@ describe.skipIf(
           partialPreserved: scenario === 'deadline',
           coldContextReused: scenario === 'cold-context-deadline',
           fixtureCount: scenario === 'deadline' || scenario === 'deadline-stop-race' ? 2 : 1,
+          closeReplayChecked: scenario === 'measure-close',
           recovered: true,
           inputAttempts: 0,
           childExited: true,
