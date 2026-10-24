@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { computerWindowsTargetFactsSchema } from '@sprint-coder/contracts';
+import {
+  COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES,
+  computerWindowsTargetFactsSchema,
+} from '@sprint-coder/contracts';
+import { TARGET_FACT_MAX_BYTES } from './computer-use-target-eligibility';
 
 // S5-c-3 PR-5 (#500): the v2 target judgement wired into the Windows helper (list_targets, and the
 // v2 start, resume and per-input judgement). The source contracts below hold the v1 build to what it
@@ -172,6 +176,40 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(
       facts.match(/!WindowsTargetImageKnownLocal\(process\.value\) \|\|/gu) ?? [],
     ).toHaveLength(2);
+  });
+
+  it('bounds every fact string as Main takes it, with one constant on every side', () => {
+    // The contracts bound, the TS core and the C++ core are the same number.
+    expect(COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES).toBe(TARGET_FACT_MAX_BYTES);
+    const core = readFileSync(join(nativeDirectory, 'computer_use_target_eligibility.h'), 'utf8');
+    expect(core).toContain(
+      `inline constexpr std::size_t kTargetFactMaxBytes = ${TARGET_FACT_MAX_BYTES};`,
+    );
+    // A fact over it is checked where the row is written: that window is unresolvable, before its
+    // facts or identity are built.
+    const list = cut(
+      'bool ListWindowsTargets(std::string *response, std::string *reason) {',
+      'bool RejudgeWindowsV2Session(',
+    );
+    const checked = list.indexOf('if (!WindowsV2FactsWithinContract(window_facts)) {');
+    expect(checked).toBeGreaterThan(0);
+    expect(list.indexOf('WindowsV2TargetFactsJson(window_facts)')).toBeGreaterThan(checked);
+    const facts = {
+      ...Object.fromEntries(
+        Object.keys(computerWindowsTargetFactsSchema.shape).map((key) => [key, null]),
+      ),
+      platform: 'win32',
+    };
+    expect(
+      computerWindowsTargetFactsSchema.safeParse({
+        ...facts,
+        originalFilename: 'a'.repeat(TARGET_FACT_MAX_BYTES),
+      }).success,
+    ).toBe(true);
+    expect(
+      computerWindowsTargetFactsSchema.safeParse({ ...facts, originalFilename: 'あ'.repeat(342) })
+        .success,
+    ).toBe(false);
   });
 
   it('never reads an unmeasured value as the admitting one', () => {
@@ -621,6 +659,46 @@ int wmain(int argc, wchar_t **argv) {
   Check(!WindowsTargetIsNotWebByTable(judged.measured.facts, judged.held_key, judged.table_key,
                                       std::nullopt, false),
         "v2_fixture_is_not_in_the_not_web_table");
+  {
+    // A fact string over Main's bound (UTF-8 bytes) makes that window's row unresolvable, never cut;
+    // the rows around it stand.
+    const TargetFacts &facts = judged.measured.facts;
+    const auto with = [&](auto change) {
+      TargetFacts changed = facts;
+      change(changed);
+      return changed;
+    };
+    const TargetFacts at_bound =
+        with([](TargetFacts &f) { f.original_filename = std::string(kTargetFactMaxBytes, 'a'); });
+    const TargetFacts over_bound =
+        with([](TargetFacts &f) { f.original_filename = std::string(kTargetFactMaxBytes + 1, 'a'); });
+    std::string wide;
+    for (int index = 0; index < 342; ++index) wide += "\xe3\x81\x82";  // 342 x 3 = 1026 bytes
+    const TargetFacts over_in_utf8 = with([&](TargetFacts &f) { f.signer_organization = wide; });
+    const TargetFacts long_path =
+        with([](TargetFacts &f) { f.image_relative_path = std::string(4096, 'p'); });
+    Check(WindowsV2FactsWithinContract(facts) && WindowsV2FactsWithinContract(at_bound) &&
+              !WindowsV2FactsWithinContract(over_bound) &&
+              !WindowsV2FactsWithinContract(over_in_utf8) && !WindowsV2FactsWithinContract(long_path),
+          "v2_fact_strings_are_bounded_as_main_takes_them");
+    // The core says the same: a longer fact is not measured, so such a window is never selectable.
+    Check(ClassifyTarget(over_bound).kind == TargetVerdictKind::kUnresolvable &&
+              ClassifyTarget(over_in_utf8).kind == TargetVerdictKind::kUnresolvable,
+          "v2_fact_over_the_bound_is_unresolvable_in_the_core");
+    WindowsV2ListRows around(kWindowsListTargetsRowBytes);
+    for (const TargetFacts *row_facts : {&facts, &over_in_utf8, &facts})
+      around.push_back(WindowsV2FactsWithinContract(*row_facts)
+                           ? "{\"kind\":\"upper\",\"facts\":" + WindowsV2TargetFactsJson(*row_facts) + "}"
+                           : WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
+    const std::string kept = "{\"kind\":\"upper\",\"facts\":" + WindowsV2TargetFactsJson(facts) + "}";
+    Check(around.size() == 3 && around.Joined() == kept + ",{\"kind\":\"unresolvable\"}," + kept,
+          "v2_only_the_window_over_the_bound_is_unresolvable");
+    // The size of a facts row, measured on the fixture (for the ADR's count of rows per list).
+    const std::string facts_json = WindowsV2TargetFactsJson(facts);
+    const std::string identity_json = WindowsV2IdentityJson(judged, judged.verdict.maximum_mode);
+    std::cout << "row parts: facts=" << facts_json.size() << " identity=" << identity_json.size()
+              << " path=" << judged.executable.identity.path_utf8.size() << "\n";
+  }
   {
     // Each window is judged with its own class, from the process's facts measured without a window:
     // a console window the process allocated (W4) or a window gone before its class was read
