@@ -610,6 +610,54 @@ int wmain(int argc, wchar_t **argv) {
     Check(!admit(Metadata(version, 7), true, std::string(64, 'a'), executable, &mode) &&
               !admit(Metadata(version, 7), true, identity, std::string(64, 'b'), &mode),
           "v2_start_refuses_another_identity");
+    WindowsSession session;
+    session.pid = app.dwProcessId;
+    session.window = app_window;
+    session.app_identity = identity;
+    session.process_start = judged.process_start;
+    session.maximum_mode = "observe_only";
+    // Borrowed until the lock below is closed; WindowsSession does not own this handle.
+    session.executable_file = locked.file;
+    session.eligibility_basis = EligibilityBasis::kV2Denylist;
+    std::string input_reason;
+    Check(JudgeWindowsV2Input(session, &input_reason) && input_reason.empty() &&
+              session.v2_input_not_web == std::optional<bool>(false),
+          "v2_input_rejudges_the_same_live_target");
+    const auto refuses_changed_session = [&](WindowsSession changed, const char *label) {
+      changed.v2_input_not_web = true;
+      std::string reason;
+      Check(!JudgeWindowsV2Input(changed, &reason) && reason == "session_identity_changed" &&
+                !changed.v2_input_not_web.has_value(),
+            label);
+    };
+    WindowsSession changed = session;
+    changed.maximum_mode = "full_access_app";
+    refuses_changed_session(changed, "v2_input_refuses_changed_mode");
+    changed = session;
+    changed.app_identity = std::string(64, '0');
+    refuses_changed_session(changed, "v2_input_refuses_changed_app_identity");
+    changed = session;
+    changed.process_start += "-changed";
+    refuses_changed_session(changed, "v2_input_refuses_changed_process_start");
+    changed = session;
+    changed.executable_file = INVALID_HANDLE_VALUE;
+    refuses_changed_session(changed, "v2_input_refuses_unreadable_held_file");
+    LockedWindowsExecutable different;
+    Check(OpenLockedWindowsExecutable(system32 + L"\\cmd.exe", &different),
+          "v2_input_other_file_locked");
+    changed = session;
+    changed.executable_file = different.file;
+    refuses_changed_session(changed, "v2_input_refuses_different_held_file");
+    // The V1 bypass must also discard a cached answer without querying an invalid target.
+    changed = session;
+    changed.eligibility_basis = EligibilityBasis::kV1Allowlist;
+    changed.pid = 0;
+    changed.window = nullptr;
+    changed.v2_input_not_web = true;
+    input_reason.clear();
+    Check(JudgeWindowsV2Input(changed, &input_reason) && input_reason.empty() &&
+              !changed.v2_input_not_web.has_value(),
+          "v1_input_does_not_run_the_v2_rejudgement");
     CloseLockedWindowsExecutable(&locked);
   }
 
