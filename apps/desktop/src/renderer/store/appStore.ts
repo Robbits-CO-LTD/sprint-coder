@@ -37,10 +37,8 @@ import type {
   TeamDetail,
   TurnDiff,
   TurnEvent,
-  TurnStage,
 } from '../types/sprint-coder';
 import { STAGE_LABEL } from '../lib/stages';
-import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
@@ -56,27 +54,15 @@ import {
 } from './command-projection';
 import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
 import { playSoundForEvent } from '../lib/ui-sound';
+import {
+  applyTaskTurnEvent,
+  hydrateTaskTurn,
+  type TaskTurnEvent,
+  type TurnRuntimeState,
+  type TurnStatus,
+} from './task-turn-projection';
 
-export type TurnStatus =
-  'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
-
-export type TurnRuntimeState = {
-  turnId: string;
-  stage: TurnStage;
-  /** Transient only: true after Main accepts the Turn and before the Runtime emits its first stage. */
-  runtimeStarting: boolean;
-  /** Highest stage index reached, clamped so it never decreases (issue #16). `stage` alone is not
-   * enough: `waiting_approval` sits between `executing` and `synthesizing` in STAGE_ORDER, so a turn
-   * that returns to `executing` for a later tool would make a stage-derived gauge walk backwards. */
-  reachedStageIndex: number;
-  status: TurnStatus;
-  startedAt: number;
-  /** Set when the terminal event arrives so completed-work duration freezes truthfully. Historical
-   * snapshots do not currently carry this timestamp; restored turns omit it instead of guessing. */
-  finishedAt?: number;
-  streamingMessageId: string | null;
-  streamingContent: string;
-};
+export type { TurnStatus, TurnRuntimeState } from './task-turn-projection';
 
 export type StopAndSendResult = Readonly<{
   completed: boolean;
@@ -758,6 +744,24 @@ function queueAutoDecision(
     pendingAutoDecisionFrame = requestAnimationFrame(flushAutoDecisions);
 }
 
+function taskTurnEventUpdate(
+  state: AppState,
+  taskId: string,
+  event: TaskTurnEvent,
+  receivedAt: number,
+): Pick<AppState, 'turnByTask' | 'queuedByTask'> {
+  const current = { turn: state.turnByTask[taskId], queued: state.queuedByTask[taskId] ?? [] };
+  const next = applyTaskTurnEvent(current, event, receivedAt);
+  return {
+    turnByTask:
+      next.turn === current.turn ? state.turnByTask : { ...state.turnByTask, [taskId]: next.turn },
+    queuedByTask:
+      next.queued === current.queued
+        ? state.queuedByTask
+        : { ...state.queuedByTask, [taskId]: next.queued },
+  };
+}
+
 export function handleTurnEvent(
   taskId: string,
   ev: TurnEvent,
@@ -790,19 +794,7 @@ export function handleTurnEvent(
               ev.userMessage.attachments,
             ),
           },
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              turnId: ev.turnId,
-              stage: 'understanding',
-              runtimeStarting: true,
-              reachedStageIndex: 0,
-              status: 'running',
-              startedAt: Date.now(),
-              streamingMessageId: null,
-              streamingContent: '',
-            },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           stageAnnouncement: 'Runtime起動待ち',
         };
       });
@@ -813,15 +805,7 @@ export function handleTurnEvent(
         const turn = state.turnByTask[taskId];
         if (!turn || turn.turnId !== ev.turnId) return {};
         return {
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              ...turn,
-              stage: ev.stage,
-              runtimeStarting: false,
-              reachedStageIndex: advanceStageIndex(turn.reachedStageIndex, ev.stage),
-            },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           stageAnnouncement: STAGE_LABEL[ev.stage],
         };
       });
@@ -836,12 +820,7 @@ export function handleTurnEvent(
             ev.approval,
           ],
         },
-        turnByTask: state.turnByTask[taskId]
-          ? {
-              ...state.turnByTask,
-              [taskId]: { ...state.turnByTask[taskId]!, stage: 'waiting_approval' },
-            }
-          : state.turnByTask,
+        ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
         stageAnnouncement: STAGE_LABEL.waiting_approval,
       }));
       break;
@@ -912,20 +891,7 @@ export function handleTurnEvent(
       break;
     }
     case 'message.delta': {
-      apply((state) => {
-        const turn = state.turnByTask[taskId];
-        if (!turn || turn.turnId !== ev.turnId) return {};
-        return {
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              ...turn,
-              streamingMessageId: turn.streamingMessageId ?? ev.messageId,
-              streamingContent: turn.streamingContent + ev.delta,
-            },
-          },
-        };
-      });
+      apply((state) => taskTurnEventUpdate(state, taskId, ev, Date.now()));
       break;
     }
     case 'skill.draft.created': {
@@ -985,10 +951,7 @@ export function handleTurnEvent(
         }
         return {
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: { ...turn, status: ev.state, finishedAt: Date.now() },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           turnDiffByTask: {
             ...state.turnDiffByTask,
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
@@ -1017,9 +980,7 @@ export function handleTurnEvent(
       break;
     }
     case 'queue.changed': {
-      apply((state) => ({
-        queuedByTask: { ...state.queuedByTask, [taskId]: ev.queued },
-      }));
+      apply((state) => taskTurnEventUpdate(state, taskId, ev, Date.now()));
       break;
     }
     case 'context.usage': {
@@ -1892,26 +1853,10 @@ export const useAppStore = create<AppState>((set, get) => {
       let afterSeq: number | undefined;
       if (snapshot) {
         afterSeq = snapshot.lastSeq;
-        const activeTurn = snapshot.activeTurn;
+        const projection = hydrateTaskTurn(snapshot);
         apply((state) => ({
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: activeTurn
-              ? {
-                  turnId: activeTurn.turnId,
-                  stage: activeTurn.stage,
-                  runtimeStarting: false,
-                  // Restored from the snapshot's stage, which is the furthest this turn is known to
-                  // have reached — earlier stage events are not replayed for a resumed turn.
-                  reachedStageIndex: advanceStageIndex(0, activeTurn.stage),
-                  status: 'running',
-                  startedAt: activeTurn.startedAtEpochMs,
-                  streamingMessageId: activeTurn.messageId,
-                  streamingContent: activeTurn.streamedText,
-                }
-              : undefined,
-          },
-          queuedByTask: { ...state.queuedByTask, [taskId]: snapshot.queued },
+          turnByTask: { ...state.turnByTask, [taskId]: projection.turn },
+          queuedByTask: { ...state.queuedByTask, [taskId]: projection.queued },
           lastSeqByTask: { ...state.lastSeqByTask, [taskId]: snapshot.lastSeq },
           contextUsageByTask: snapshot.contextUsage
             ? { ...state.contextUsageByTask, [taskId]: snapshot.contextUsage }
