@@ -291,6 +291,7 @@ describe('Grok CLI Main routing', () => {
       expect(resources.get('task-grok', started.turnId)).toBe(leaseAtWatch);
       expect(leaseAtWatch).toBeDefined();
       order.push('start');
+      return true;
     });
     try {
       await router.startSelectedRuntime(writing);
