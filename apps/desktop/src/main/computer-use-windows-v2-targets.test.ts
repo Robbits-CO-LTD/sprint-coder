@@ -143,12 +143,25 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(authenticated).toBeGreaterThan(0);
     expect(assigned).toBeGreaterThan(authenticated);
     expect(served).toBeGreaterThan(assigned);
+    // A peer that is not the verified parent is never served: the pid and ServePipe are both inside
+    // the one branch that the authentication opens.
+    const branch = serve.indexOf('  if (authenticated_client) {');
+    expect(branch).toBeGreaterThan(authenticated);
+    expect(branch).toBeLessThan(assigned);
+    expect(serve).toContain('std::atomic<bool> serving{authenticated_client};');
+    expect(serve.match(/ServePipe\(/gu) ?? []).toHaveLength(1);
     // Assigned in one place only (the declaration aside).
     expect(host.match(/^\s+windows_v2_main_pid = /gmu) ?? []).toHaveLength(1);
-    // The facts context reads it once, on the first v2 request.
-    expect(v2Block).toContain(
-      'static const WindowsTargetFactsContext context = CurrentWindowsTargetFactsContext(\n      windows_v2_main_pid,',
+    // The facts context is measured once Main's pid is known; with no pid it is empty and not kept.
+    const context = cut(
+      'const WindowsTargetFactsContext &WindowsV2FactsContext() {',
+      '// The file %SystemRoot%',
     );
+    expect(context).toContain('if (windows_v2_main_pid == 0)\n    return unknown_root;');
+    expect(context).toContain('context = CurrentWindowsTargetFactsContext(windows_v2_main_pid,');
+    // A list takes its generation only when its answer is sent.
+    expect(v2Block).not.toContain('++windows_v2_list_generation');
+    expect(host.match(/^\s+windows_v2_list_generation = generation;/gmu) ?? []).toHaveLength(1);
   });
 
   it('never opens a running image a network redirector holds', () => {
@@ -381,6 +394,15 @@ int wmain(int argc, wchar_t **argv) {
 #else
   // Main stands for the lineage root (W8): a suspended process that is not the targets' parent.
   const PROCESS_INFORMATION root_process = Start(L"\"" + system32 + L"\\cmd.exe\"", CREATE_SUSPENDED);
+  // Without Main's pid the context is empty (every target unresolvable) and is not kept: the real
+  // one is measured once the pid is known.
+  windows_v2_main_pid = 0;
+  {
+    const WindowsTargetFactsContext &no_root = WindowsV2FactsContext();
+    Check(no_root.lineage_root_pid == 0 && !no_root.roots.has_value() &&
+              !no_root.rename_probe.has_value(),
+          "v2_context_without_main_is_empty");
+  }
   windows_v2_main_pid = root_process.dwProcessId;
   const WindowsTargetFactsContext &context = WindowsV2FactsContext();
   Check(context.lineage_root_pid == root_process.dwProcessId, "v2_context_lineage_root_is_main");
@@ -469,18 +491,31 @@ int wmain(int argc, wchar_t **argv) {
               << " bytes, response " << control_response.size() << " bytes\n";
     // The belt: an answer over one frame is not handed on; the request is answered with the small
     // error frame instead, so the pipe and its sessions stay up.
+    // One row exactly at the byte limit is sent; one byte less and it is not.
+    WindowsV2ListRows exact(row.size());
+    exact.push_back(row);
+    WindowsV2ListRows short_by_one(row.size() - 1);
+    short_by_one.push_back(row);
+    Check(exact.size() == 1 && !exact.Truncated() && exact.Joined() == row &&
+              short_by_one.size() == 0 && short_by_one.Truncated(),
+          "v2_list_rows_one_row_at_the_limit");
     std::string answer = "stale";
     std::string reason;
-    const bool oversized =
-        FinishWindowsV2ListResponse(std::string(kMaxMetadataBytes + 1, 'x'), &answer, &reason);
+    windows_v2_list_generation = 40;
+    const bool oversized = FinishWindowsV2ListResponse(std::string(kMaxMetadataBytes + 1, 'x'), 41,
+                                                       &answer, &reason);
     const std::string error = ErrorPayload(reason);
     Check(!oversized && answer.empty() && reason == "list_targets_unavailable" && !error.empty() &&
               error.size() <= kMaxMetadataBytes && error.find("list_targets_unavailable") != std::string::npos,
           "v2_list_response_over_one_frame_is_an_error_frame");
+    // A refused list does not take a generation: the previous list stays the latest.
+    Check(windows_v2_list_generation == 40, "v2_list_refused_keeps_the_generation");
+    // The next request is answered as before (the refusal changed nothing it reads), and only then
+    // does the generation move.
     std::string fitting;
     std::string no_reason;
-    Check(FinishWindowsV2ListResponse(control_response, &fitting, &no_reason) &&
-              fitting == control_response && no_reason.empty(),
+    Check(FinishWindowsV2ListResponse(control_response, 41, &fitting, &no_reason) &&
+              fitting == control_response && no_reason.empty() && windows_v2_list_generation == 41,
           "v2_list_response_within_one_frame_is_answered");
   }
 
@@ -582,18 +617,28 @@ int wmain(int argc, wchar_t **argv) {
   // (Windows 11), the kernel's image name of the suspended process is the package's, and the process
   // is ended before it runs a single instruction, so no activation starts a Notepad outside this
   // program's job (and no window is left on the desktop). Only System32's classic image is run on.
-  const PROCESS_INFORMATION probe = Start(L"\"" + system32 + L"\\notepad.exe\"", CREATE_SUSPENDED);
+  // The started file is %SystemRoot%\System32\notepad.exe by its absolute path. The process's image
+  // (the kernel's name of it) is compared with that file by what the volume says, the volume serial
+  // and the file id, which no spelling (case, 8.3 name, \\?\ prefix) changes.
+  const std::wstring system_notepad = system32 + L"\\notepad.exe";
+  const PROCESS_INFORMATION probe = Start(L"\"" + system_notepad + L"\"", CREATE_SUSPENDED);
   std::wstring probe_image;
   const bool probe_read = probe.hProcess != nullptr && ReadProcessPath(probe.hProcess, &probe_image);
-  const bool classic = probe_read && SameWindowsPath(probe_image, system32 + L"\\notepad.exe");
+  const std::optional<WindowsPathIdentity> probe_file =
+      probe_read ? WindowsTargetOpenPathIdentity(probe_image) : std::nullopt;
+  const std::optional<WindowsPathIdentity> system_file = WindowsTargetOpenPathIdentity(system_notepad);
+  const bool classic = probe_file.has_value() && system_file.has_value() &&
+                       SameWindowsFileIdentity(probe_file->identity, system_file->identity);
   if (probe.hProcess != nullptr) {
     TerminateProcess(probe.hProcess, 0);
     WaitForSingleObject(probe.hProcess, 5000);
+    CloseHandle(probe.hThread);
+    CloseHandle(probe.hProcess);
   }
   Check(probe_read, "v2_notepad_image_read");
   if (!classic) {
     std::cout << "notepad: System32's notepad.exe runs another image here (" << Utf8FromWide(probe_image)
-              << "); not started\n";
+              << "); skipped: it was ended before it ran, and is not started\n";
   } else {
     const PROCESS_INFORMATION notepad = Start(L"\"" + system32 + L"\\notepad.exe\"", 0);
     WaitForInputIdle(notepad.hProcess, 10000);

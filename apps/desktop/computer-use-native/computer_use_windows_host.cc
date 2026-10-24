@@ -3737,7 +3737,14 @@ bool LaunchVerifiedExecutable(const LockedWindowsExecutable &locked,
 
 inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;
 // The time one list_targets may spend measuring. A process whose measurement starts after it, or
-// ends after it, is listed as unresolvable.
+// ends after it, is listed as unresolvable. The budget is judged after the fact: it does not stop a
+// call already in progress. Two known limits (ADR section 10, residual risk):
+//   * an image on a network redirector is told from the kernel's name and never opened
+//     (WindowsTargetImageKnownLocal), but that list of redirectors is not exhaustive (a virtual
+//     machine's shared folder or a cloud sync placeholder can be served by another driver);
+//   * a local device that stops answering (a failing disk, a hung filter driver) can still hold a
+//     CreateFileW or a read of the image, and with it the helper's one request lane: no measurement
+//     runs on a thread of its own with a deadline yet.
 inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
 
 // Main's pid (the lineage root for W8), set by ServeMain before the first request.
@@ -3774,10 +3781,18 @@ std::string WindowsV2SelfSignerThumbprint() {
 
 // Measured once per helper: the roots, the lineage root and the rename-follow probe (which starts a
 // suspended copy of this helper, so it is not repeated per request).
+// Without Main's pid nothing can say what is Sprint Coder's own (W8): an empty context, whose facts
+// are unmeasured (unresolvable), and nothing is cached, so the real context is measured once the pid
+// is known (fail closed).
 const WindowsTargetFactsContext &WindowsV2FactsContext() {
-  static const WindowsTargetFactsContext context = CurrentWindowsTargetFactsContext(
-      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), /*acceptance_mode=*/false);
-  return context;
+  static const WindowsTargetFactsContext unknown_root;
+  static std::optional<WindowsTargetFactsContext> context;
+  if (windows_v2_main_pid == 0)
+    return unknown_root;
+  if (!context.has_value())
+    context = CurrentWindowsTargetFactsContext(windows_v2_main_pid, WindowsV2SelfSignerThumbprint(),
+                                               /*acceptance_mode=*/false);
+  return *context;
 }
 
 // The file %SystemRoot%\System32\notepad.exe names now (the explicit "not web" table), or nothing.
@@ -3925,6 +3940,8 @@ BOOL CALLBACK CollectWindowsV2TopLevel(HWND window, LPARAM parameter) {
   return TRUE;
 }
 
+// Each row is counted whole, as it is sent: its key names, quotes, commas, numbers, the escaped
+// title and every field of its identity.
 // The bytes the list_targets envelope around its rows takes ({"generation":N,"rulesetVersion":N,
 // "truncated":false,"targets":[ and ]}), with room to spare: the rows get the rest of one frame's
 // metadata. A response over kMaxMetadataBytes could not be framed (EncodeFrame answers nothing), the
@@ -3981,13 +3998,17 @@ std::string WindowsV2ListResponse(std::uint64_t generation, std::uint32_t rulese
 // The last check of a list_targets answer (the rows are bounded above; this is the belt). An answer
 // that could not be framed is never handed on: false, with a reason, so HandlePipeRequest answers with
 // its small error frame (ErrorPayload) and the pipe and every session on it stay up.
-bool FinishWindowsV2ListResponse(std::string built, std::string *response, std::string *reason) {
+// The generation advances only with an answer that is sent: a refused list leaves the previous one
+// the latest, so a token minted from it can still start. The reason is a fixed short code.
+bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
+                                 std::string *response, std::string *reason) {
   if (built.empty() || built.size() > kMaxMetadataBytes) {
     response->clear();
     *reason = "list_targets_unavailable";
     return false;
   }
   *response = std::move(built);
+  windows_v2_list_generation = generation;
   return true;
 }
 
@@ -4008,7 +4029,8 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
     }
     const WindowsTargetFactsContext &context = WindowsV2FactsContext();
     const ULONGLONG deadline = GetTickCount64() + kWindowsListTargetsBudgetMs;
-    const std::uint64_t generation = ++windows_v2_list_generation;
+    // The generation this list would be; it is taken only when the answer is sent.
+    const std::uint64_t generation = windows_v2_list_generation + 1;
     // One judgement per process; std::nullopt for a process whose measurement ran past the budget.
     std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
     WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
@@ -4088,7 +4110,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
     return FinishWindowsV2ListResponse(
         WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
                               truncated || rows.Truncated(), rows),
-        response, reason);
+        generation, response, reason);
   }
 }
 
