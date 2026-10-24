@@ -120,6 +120,7 @@ import {
   computerUseActionRoute,
 } from './computer-use-action';
 import { COMPUTER_USE_NATIVE_CLOSE_ATTEMPT_LIMIT } from './computer-use-native-host';
+import type { ComputerUseNativeTargetList } from './computer-use-native-targets';
 import { isComputerUseBrowserApplication } from './computer-use-browser-identity';
 import {
   ComputerUseArtifactStore,
@@ -272,6 +273,8 @@ export type ComputerUseNativeApprovalApproveResult =
 
 /** Native host contract. It has no model, policy, provider, or persistence authority. */
 export interface ComputerUseNativeHost {
+  /** Private discovery seam; Controller exposure and token binding are a separate step. */
+  listTargets?(): Promise<ComputerUseNativeTargetList>;
   availability(): ComputerUseAvailability;
   pickApplication(
     input: Readonly<{
