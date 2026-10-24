@@ -691,7 +691,7 @@ import {
   type GraphMissionReviewContext,
 } from './graph-mission-review';
 import { collectThreadImages } from './generated-image-collector';
-import { TeamCoordinator } from './team-coordinator';
+import { TeamCoordinator, type TeamResultReadSource } from './team-coordinator';
 import { RetainedWorktreeError } from './team-retained-worktrees';
 import { WorkerWorktreeManager } from './worker-worktree';
 import {
@@ -765,6 +765,8 @@ import {
   providerWorkspaceGuidance,
   ManagedCodingHarness,
   providerDisclosureAuthorizationFacts,
+  teamResultReadAuthorizationFacts,
+  type ManagedTeamResultReadRequest,
   providerToolsFromSnapshot,
   workspaceToolPermissionGuard,
 } from './provider-workspace-tools';
@@ -1116,6 +1118,7 @@ export class IpcRouter {
     Readonly<{
       taskId: string;
       parentTurnId: string;
+      executionBinding?: Readonly<{ executionId: string; agentId: string }>;
       snapshot: ToolCatalogSnapshot;
       workspace: EffectiveWorkspaceSet;
       mutationBindings: ReadonlyMap<
@@ -1139,6 +1142,8 @@ export class IpcRouter {
     string,
     Readonly<{
       providerId: string;
+      executionBinding?: Readonly<{ executionId: string; agentId: string }>;
+      signal: AbortSignal;
       workspace: EffectiveWorkspaceSet;
       mutationBindings: ReadonlyMap<
         string,
@@ -1741,6 +1746,7 @@ export class IpcRouter {
               ?.mutationBindings.get(rootId),
       providerFor: (turnId, callId) =>
         this.managedWorkerCall.get(JSON.stringify([turnId, callId]))?.providerId,
+      readTeamResult: (request, read) => this.readManagedTeamResult(request, read),
       policyEpochFor: (taskId) => this.persistence.getPermissionPolicy(taskId).policyEpoch,
       authorizer: this.approvalCoordinator.authorizeTool.bind(this.approvalCoordinator),
       ...(this.graphs === null
@@ -5368,6 +5374,30 @@ export class IpcRouter {
     return this.dispatchManagedRuntimeTool(taskId, turnId, request, signal);
   }
 
+  private readManagedTeamResult<T>(
+    request: ManagedTeamResultReadRequest,
+    read: (source: TeamResultReadSource) => Promise<T>,
+  ): Promise<T> {
+    const worker = this.managedWorkerCall.get(
+      JSON.stringify([request.context.turnId, request.callId]),
+    );
+    if (worker?.executionBinding === undefined)
+      throw new Error('Team result read requires a live Manager binding');
+    worker.signal.throwIfAborted();
+    return this.teamCoordinator.readTeamResult(
+      {
+        taskId: request.context.taskId,
+        parentTurnId: request.context.turnId,
+        callerExecutionId: worker.executionBinding.executionId,
+        callerAgentId: worker.executionBinding.agentId,
+        targetExecutionId: request.executionId,
+        ...(request.rootId === undefined ? {} : { rootId: request.rootId }),
+        signal: worker.signal,
+      },
+      read,
+    );
+  }
+
   private async dispatchManagedRuntimeTool(
     taskId: string,
     turnId: string,
@@ -5407,9 +5437,17 @@ export class IpcRouter {
             128,
           );
     const workerCallKey = JSON.stringify([ownerTurnId, brokerCallId]);
+    const callSignal =
+      worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]);
+    if (worker !== undefined && this.managedWorkerCall.has(workerCallKey))
+      throw new Error('Managed Worker call is already active');
     if (worker !== undefined)
       this.managedWorkerCall.set(workerCallKey, {
         providerId: worker.snapshot.providerId,
+        ...(worker.executionBinding === undefined
+          ? {}
+          : { executionBinding: worker.executionBinding }),
+        signal: callSignal,
         workspace: worker.workspace,
         mutationBindings: worker.mutationBindings,
       });
@@ -5460,7 +5498,7 @@ export class IpcRouter {
         // A Worker call also ends with its Worker Turn (issue #525). The Team MCP signal aborts only
         // when the bridge registration ends (issue #753), and a write can wait on an Approval Card
         // past the Worker's end, so the Worker's own release must cancel it too.
-        signal: worker === undefined ? signal : AbortSignal.any([signal, worker.released.signal]),
+        signal: callSignal,
         // Main's own binding for the Turn, never anything in the call's input (issue #573).
         ...(worker?.onApprovalWait === undefined ? {} : { onApprovalWait: worker.onApprovalWait }),
       });
@@ -6132,13 +6170,19 @@ export class IpcRouter {
         return this.evaluateComputerTargetAccessPermission(request, capability);
       return this.evaluateComputerUsePermission(request, capability);
     }
+    const teamResult =
+      request.entry.providerName === 'read_file'
+        ? teamResultReadAuthorizationFacts(request.input, request.context, request.callId)
+        : undefined;
     const managedWorkerWorkspace = this.managedWorkerCall.get(
       JSON.stringify([request.context.turnId, request.callId]),
     )?.workspace;
     // A managed Worker's Workspace sits inside the app's own private directory, so its files only
     // classify as Workspace files relative to that sealed root.
     const workspaceAuthority =
-      managedWorkerWorkspace === undefined ? undefined : ('sealed-team-isolation' as const);
+      managedWorkerWorkspace === undefined || teamResult !== undefined
+        ? undefined
+        : ('sealed-team-isolation' as const);
     const { facts, pathGuard } = toolPermissionFacts(request, capability, workspaceAuthority);
     const disclosure = providerDisclosureAuthorizationFacts(request.input);
     // Provider-issued process authority covers both starting a command and feeding one that is
@@ -6194,12 +6238,14 @@ export class IpcRouter {
         sandbox: { feasible: true, profile: sandboxProfile },
       },
       now: new Date().toISOString(),
-      ...(managedWorkerWorkspace === undefined
-        ? {}
-        : {
-            workspace: managedWorkerWorkspace,
-            workspaceAuthority: 'sealed-team-isolation' as const,
-          }),
+      ...(teamResult !== undefined
+        ? { workspace: teamResult.workspace }
+        : managedWorkerWorkspace === undefined
+          ? {}
+          : {
+              workspace: managedWorkerWorkspace,
+              workspaceAuthority: 'sealed-team-isolation' as const,
+            }),
     };
     const evaluate = (reviewerDecision?: Awaited<ReturnType<AutoReviewer['review']>>) => {
       const input = {
@@ -7546,6 +7592,10 @@ export class IpcRouter {
     executionId?: string,
     onApprovalWait?: ApprovalWaitObserver,
   ): Promise<ToolCatalogSnapshot> {
+    const execution =
+      executionId === undefined ? undefined : this.persistence.getTeamExecution(executionId);
+    if (execution !== undefined && execution.teamId !== this.persistence.getTeamByTask(taskId)?.id)
+      throw new Error('Managed Worker execution is outside its Task');
     const owner = workerManagedCatalogOwner(
       this.persistence,
       (id) => graphMissionContextFor(this.persistence, id),
@@ -7632,6 +7682,14 @@ export class IpcRouter {
     this.managedWorkerTurn.set(runtimeTurnId, {
       taskId,
       parentTurnId,
+      ...(execution === undefined
+        ? {}
+        : {
+            executionBinding: Object.freeze({
+              executionId: execution.id,
+              agentId: execution.assigneeAgentId,
+            }),
+          }),
       snapshot,
       workspace,
       mutationBindings,
@@ -10459,6 +10517,7 @@ export function isCompleteProviderWorkspaceRead(result: unknown): result is Read
   if (typeof result !== 'object' || result === null) return false;
   const record = result as Record<string, unknown>;
   return (
+    record['source'] === undefined &&
     typeof record['rootId'] === 'string' &&
     typeof record['path'] === 'string' &&
     typeof record['content'] === 'string' &&

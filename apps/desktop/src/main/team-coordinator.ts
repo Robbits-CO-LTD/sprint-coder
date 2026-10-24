@@ -18,6 +18,7 @@ import {
   workerReportSchema,
   workerSummarySchema,
   type AccessPreset,
+  type EffectiveWorkspaceSet,
   type WorkerActivityEntry,
   type TeamDetail,
   type TeamHireWorkerInput,
@@ -98,6 +99,28 @@ import {
 } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 import type { ApprovalWaitObserver } from './tool-broker';
+
+/** Host binding and model-selected result, kept separate from the runtime's write workspace. */
+export type TeamResultReadRequest = Readonly<{
+  taskId: string;
+  parentTurnId: string;
+  callerExecutionId: string;
+  callerAgentId: string;
+  targetExecutionId: string;
+  rootId?: string;
+  signal?: AbortSignal;
+}>;
+
+export type TeamResultReadSource = Readonly<{
+  workspace: EffectiveWorkspaceSet;
+  rootId: string;
+  rootIdentityDigest: string;
+  mutationKey: string;
+  repositoryPath: string;
+  changedFiles: readonly string[];
+  executionId: string;
+  integratedHead: string;
+}>;
 import { WORKER_ACTIVITY_LOG_LIMIT, workerActivityEntry } from './worker-activity-log';
 import {
   allCriteriaDone,
@@ -764,6 +787,197 @@ export class TeamCoordinator {
     } catch {
       return undefined;
     }
+  }
+
+  /** Each guarded read holds the integration fence only while it reads, never during approval. */
+  async readTeamResult<T>(
+    request: TeamResultReadRequest,
+    read: (source: TeamResultReadSource) => Promise<T>,
+  ): Promise<T> {
+    request.signal?.throwIfAborted();
+    const initial = await this.teamResultReadSource(request);
+    return this.integrationScheduler.runExclusive(
+      [initial.mutationKey, teamRepositoryMutationKey(initial.repositoryPath)],
+      async () => {
+        request.signal?.throwIfAborted();
+        const source = await this.teamResultReadSource(request);
+        if (JSON.stringify(source) !== JSON.stringify(initial))
+          throw new Error('Team result source changed while waiting for integration');
+        const root = source.workspace.roots.find(({ rootId }) => rootId === source.rootId)!;
+        const binding = await workspaceMutationBinding(root.path);
+        if (
+          binding.canonicalPath !== root.path ||
+          binding.rootIdentityDigest !== source.rootIdentityDigest ||
+          binding.workspaceKey !== source.mutationKey ||
+          (await fsRealpath(source.repositoryPath)) !== source.repositoryPath ||
+          (await this.worktreeManager?.headContains(
+            source.repositoryPath,
+            source.integratedHead,
+          )) !== true
+        )
+          throw new Error('Team result root or integrated HEAD is no longer available');
+        request.signal?.throwIfAborted();
+        this.teamResultReadAuthority(request);
+        const result = await read(source);
+        request.signal?.throwIfAborted();
+        if (JSON.stringify(await this.teamResultReadSource(request)) !== JSON.stringify(source))
+          throw new Error('Team result authority changed during the read');
+        this.teamResultReadAuthority(request);
+        request.signal?.throwIfAborted();
+        return result;
+      },
+    );
+  }
+
+  private teamResultReadAuthority(request: TeamResultReadRequest) {
+    const team = this.persistence.getTeamByTask(request.taskId);
+    if (team === null || team.state !== 'active')
+      throw new Error('Team result requires an active Team');
+    const caller = this.persistence.getTeamExecution(request.callerExecutionId);
+    const target = this.persistence.getTeamExecution(request.targetExecutionId);
+    const agents = this.persistence.getTeamSnapshot(team.id).agents;
+    const manager = agents.find(({ id }) => id === request.callerAgentId);
+    if (
+      caller.teamId !== team.id ||
+      caller.assigneeAgentId !== request.callerAgentId ||
+      caller.state !== 'running' ||
+      this.executionScheduler.isCancellationRequested(caller.id) ||
+      manager?.taskId !== request.taskId ||
+      manager.kind !== 'worker' ||
+      !manager.canDelegate ||
+      ['stopped', 'done', 'failed'].includes(manager.state) ||
+      target.teamId !== team.id ||
+      target.state !== 'completed' ||
+      target.id === caller.id ||
+      target.assigneeAgentId === manager.id
+    )
+      throw new Error('Team result requires a running Manager and a completed descendant');
+    let ancestor = agents.find(({ id }) => id === target.assigneeAgentId);
+    const seen = new Set<string>();
+    while (
+      ancestor !== undefined &&
+      ancestor.parentAgentId !== manager.id &&
+      !seen.has(ancestor.id)
+    ) {
+      seen.add(ancestor.id);
+      ancestor = agents.find(({ id }) => id === ancestor?.parentAgentId);
+    }
+    if (ancestor?.parentAgentId !== manager.id)
+      throw new Error('Team result is outside the Manager subtree');
+
+    return { team, caller, target };
+  }
+
+  private async teamResultReadSource(
+    request: TeamResultReadRequest,
+  ): Promise<TeamResultReadSource> {
+    const { team, caller, target } = this.teamResultReadAuthority(request);
+    const workspace = this.persistence.readTurnWorkspaceSetForTask(
+      request.taskId,
+      request.parentTurnId,
+    );
+    const rootId = request.rootId ?? workspace?.primaryRootId;
+    const root = workspace?.roots.find((candidate) => candidate.rootId === rootId);
+    const binding = this.persistence
+      .getTurnWorkspaceMutationBindings(request.parentTurnId)
+      .get(rootId ?? '');
+    const current = this.persistence.getEffectiveWorkspaceSet(request.taskId);
+    const currentBinding = this.persistence
+      .getEffectiveWorkspaceMutationBindings(request.taskId)
+      .get(rootId ?? '');
+    if (
+      workspace === null ||
+      root === undefined ||
+      binding === undefined ||
+      !current.roots.some(
+        (candidate) => candidate.rootId === root.rootId && candidate.path === root.path,
+      ) ||
+      currentBinding?.rootIdentityDigest !== binding.rootIdentityDigest ||
+      currentBinding.workspaceKey !== binding.workspaceKey
+    )
+      throw new Error('Team result requires the sealed central workspace root');
+
+    const canonicalRoot = await fsRealpath(root.path);
+    const callerIsolation = this.persistence.getTeamExecutionIsolation(caller.id);
+    if (
+      callerIsolation !== null &&
+      !callerIsolation.roots.some(
+        (candidate) =>
+          candidate.rootId === root.rootId &&
+          candidate.sourcePath === canonicalRoot &&
+          candidate.identity === binding.rootIdentityDigest &&
+          candidate.mutationKey === binding.workspaceKey,
+      )
+    )
+      throw new Error('Manager central workspace ceiling changed');
+
+    const isolation = this.persistence.getTeamExecutionIsolation(target.id);
+    let repository:
+      | {
+          repoPath: string;
+          workerHead: string | null;
+          integratedHead: string | null;
+          changedFiles: readonly string[];
+        }
+      | undefined;
+    if (isolation !== null) {
+      const targetRoot = isolation.roots.find((candidate) => candidate.rootId === root.rootId);
+      if (
+        targetRoot?.sourcePath !== canonicalRoot ||
+        targetRoot.identity !== binding.rootIdentityDigest ||
+        targetRoot.mutationKey !== binding.workspaceKey
+      )
+        throw new Error('Team result root is outside the sealed workspace');
+      repository = isolation.repositories.find(
+        ({ ordinal }) => ordinal === targetRoot.repositoryOrdinal,
+      );
+    } else {
+      const legacy = this.persistence.getTeamMissionWorktree(target.id);
+      const mission = this.persistence.getTeamMissionForExecution(target.id);
+      if (
+        legacy === null ||
+        mission === null ||
+        mission.teamId !== team.id ||
+        legacy.agentId !== target.assigneeAgentId
+      )
+        throw new Error('Team result has no sealed integration');
+      // Old Missions may lack a snapshot. Reading must never create one from today's roots.
+      const missionTurn = `${mission.mode === 'graph' ? 'graph-mission' : 'team-mission'}:${mission.id}`;
+      const sealed = this.persistence.readTurnWorkspaceSetForTask(request.taskId, missionTurn);
+      if (
+        !sealed?.roots.some(
+          (candidate) => candidate.rootId === root.rootId && candidate.path === root.path,
+        ) ||
+        this.persistence.getTurnWorkspaceRootIdentities(missionTurn).get(root.rootId) !==
+          binding.rootIdentityDigest
+      )
+        throw new Error('Legacy Team result has no matching sealed root');
+      repository = legacy;
+    }
+    if (repository?.workerHead == null || repository.integratedHead === null)
+      throw new Error('Team result has not been integrated');
+    // Legacy records may name a workspace subdirectory; integration serializes on the Git root.
+    const repositoryPath = await this.worktreeManager?.resolveRepositoryPath(repository.repoPath);
+    if (
+      repositoryPath === undefined ||
+      !isPathInsideOrSame(repositoryPath, canonicalRoot) ||
+      (isolation !== null && repositoryPath !== repository.repoPath)
+    )
+      throw new Error('Team result repository binding changed');
+    const roots = workspace.roots.map((value) =>
+      Object.freeze({ ...value, ...(value.rootId === root.rootId ? { path: canonicalRoot } : {}) }),
+    );
+    Object.freeze(roots);
+    return Object.freeze({
+      workspace: Object.freeze({ ...workspace, roots }),
+      rootId: root.rootId,
+      rootIdentityDigest: binding.rootIdentityDigest,
+      mutationKey: binding.workspaceKey,
+      repositoryPath,
+      changedFiles: Object.freeze([...repository.changedFiles]),
+      executionId: target.id,
+      integratedHead: repository.integratedHead,
+    });
   }
 
   /** Authority-scoped status for Manager/Worker runtimes. A caller may inspect itself, its
