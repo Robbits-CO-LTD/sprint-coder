@@ -5,6 +5,14 @@
  *   しきい値を越えた数を「拍」として数える。
  * - [data-show="2"] / [data-show="1-3"] … その拍の間だけ .on が付く（"2" は 2 以降ずっと）。
  * - [data-range="0.2,0.8"] … 章の位置をその区間で 0..1 にして --r に入れる（線を引く・帯を伸ばす）。
+ *   区間を終えた（--r が 1 の）要素には .is-full が付く。縦並び（.fit-off）では最後の状態（1）で見せる。
+ * - [data-count="100"][data-from="1"][data-pad="3"] … 数字の表示。いちばん近い [data-range] の
+ *   --r に合わせて from → count を数える（pad は桁をそろえる 0 埋め）。HTML には最後の値を書く。
+ * - [data-count-intro="100"] … 序章の数え上げ（000 → 100）。読み込みが遅れたとき・動きを止める設定では
+ *   数えず、HTML の値のまま見せる。
+ * - .scene.is-live … 章が画面に入っている間だけ付く（群れのまたたきは、これがある間だけ動く）。
+ * - .scene[data-real] … 実演の章。いる間は再生バーに「実演」の札を出す（.player.is-real）。
+ *   data-real-from="3" を付けると、その拍から出す（03 の図の拍では出さない）。
  * - video[data-src][data-poster] … 近づいたらポスターと動画を読み込み、見えている間だけ再生。
  *   章の中では、包む [data-show] が .on の間だけ再生する。
  * - [data-motion] … 動画と点滅を止めるボタン（全ページ）。選んだ状態は覚えておく。
@@ -230,6 +238,19 @@
   root.classList.add('js');
   window.__filmReady = true;
 
+  // 序章の数え上げ（000 → 100）。遅れて読み込まれたときは数えない（100 → 000 と後から飛ばないように）
+  var intro = document.querySelector('[data-count-intro]');
+  if (intro && !userStop && performance.now() < 1500) {
+    var goal = +intro.dataset.countIntro;
+    intro.textContent = '000';
+    requestAnimationFrame(function tick(ts) {
+      var k = clamp((ts - 700) / 1000, 0, 1);
+      var v = k >= 1 ? goal : Math.round(goal * (1 - Math.pow(2, -10 * k)));
+      intro.textContent = String(v).padStart(3, '0');
+      if (k < 1) requestAnimationFrame(tick);
+    });
+  }
+
   var model = scenes.map(function (el) {
     var steps = (el.dataset.steps || '')
       .split(',')
@@ -248,6 +269,10 @@
       steps: steps,
       shows: shows,
       ranges: ranges,
+      counts: all('[data-count]', el).map(function (n) {
+        return { el: n, to: +n.dataset.count, from: +(n.dataset.from || 0), pad: +(n.dataset.pad || 0), host: n.closest('[data-range]'), last: null };
+      }),
+      live: false,
       videos: all('video[data-src]', el),
       step: -1,
       visible: false,
@@ -339,6 +364,10 @@
   function sceneUpdate(m, i, y) {
     var h = lens[i] + vh;
     m.visible = y + vh > tops[i] && y < tops[i] + h;
+    if (m.visible !== m.live) {
+      m.live = m.visible;
+      m.el.classList.toggle('is-live', m.visible);
+    }
     if (!m.visible && m.step !== -1 && (y + vh * 2 < tops[i] || y > tops[i] + h + vh)) {
       // 遠く離れた章は、離れるときに一度だけ止めればよい
       if (m.wasVisible) playScene(m);
@@ -357,8 +386,20 @@
       });
       m.el.classList.toggle('s-dim', m.dim > 0 && step >= m.dim);
     }
+    var full = fitOff(); // 縦並びでは、線・帯・群れ・数字を最後の状態で見せる
     m.ranges.forEach(function (r) {
-      r.el.style.setProperty('--r', clamp((p - r.a) / (r.b - r.a), 0, 1).toFixed(4));
+      var rv = full ? 1 : clamp((p - r.a) / (r.b - r.a), 0, 1);
+      r.el.style.setProperty('--r', rv.toFixed(4));
+      r.el._r = rv;
+      r.el.classList.toggle('is-full', rv >= 1);
+    });
+    m.counts.forEach(function (c) {
+      var r = c.host && c.host._r !== undefined ? c.host._r : 1;
+      var v = Math.round(c.from + (c.to - c.from) * r);
+      if (v !== c.last) {
+        c.last = v;
+        c.el.textContent = c.pad ? String(v).padStart(c.pad, '0') : String(v);
+      }
     });
     m.wasVisible = m.visible;
     playScene(m);
@@ -415,6 +456,7 @@
 
   var lastCur = -1;
   var lastHidden = null;
+  var lastReal = null;
   function updatePlayer(y) {
     if (!player) return;
     var t = clamp((y - filmTop) / filmLen, 0, 1);
@@ -431,6 +473,12 @@
       });
       track.setAttribute('aria-valuenow', String(cur));
       track.setAttribute('aria-valuetext', m.no + '章 ' + m.title);
+    }
+    // 実演の札は拍の単位で出す（data-real-from="3" なら拍3から。図の拍では出さない）
+    var real = m.el.hasAttribute('data-real') && m.step >= Number(m.el.dataset.realFrom || 0);
+    if (real !== lastReal) {
+      lastReal = real;
+      player.classList.toggle('is-real', real);
     }
     var total = filmLen / (vh * SPEED);
     timeEl.textContent = fmt(t * total) + ' / ' + fmt(total);

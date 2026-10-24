@@ -8,7 +8,7 @@
 
 @font-face {
   font-family: 'Noto Sans JP Sub';
-  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261024') format('woff2');
+  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261025') format('woff2');
   font-weight: 100 900;
   font-display: swap;
 }
@@ -226,7 +226,6 @@ a {
 /* ------------------------------------------------------------ type */
 .eyebrow,
 .chapter-tag,
-.hud,
 .rec {
   font-family: var(--mono);
   letter-spacing: 0.14em;
@@ -389,52 +388,6 @@ a {
   filter: brightness(0.3) blur(6px) saturate(0.7);
 }
 
-/* 序章: 傾いた大きな実画面 */
-.hero-screen {
-  position: absolute;
-  z-index: 2;
-  top: 50%;
-  right: -6vw;
-  width: min(62vw, 1100px);
-  perspective: 1600px;
-  transform: translateY(calc(-50% - var(--p) * 8vh));
-}
-.hero-screen .screen {
-  transform: rotateY(-22deg) rotateX(6deg) scale(calc(1 + var(--p) * 0.12));
-  transform-origin: right center;
-  border-color: rgba(206, 255, 82, 0.35);
-  box-shadow:
-    0 0 0 1px rgba(206, 255, 82, 0.15),
-    0 60px 160px -20px rgba(0, 0, 0, 0.9),
-    0 0 120px -30px var(--lime-glow);
-}
-.hero-screen .rec {
-  /* 画面は右へはみ出して置くので、ラベルは内側に寄せて倍率まで読めるようにする。
-     文言が長くなっても本文側へ伸びないよう、幅に上限を付けて折り返す。
-     文言や位置を変えたら Computer Use のサイト検証で重なりを確認すること
-     （今の倍ほどの文言だと、幅 600px 前後でボタンと重なる） */
-  right: auto;
-  left: 30%;
-  max-width: 50%;
-  flex-wrap: wrap;
-  white-space: normal;
-}
-.hero-screen .screen::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(100deg, rgba(5, 6, 5, 0.85) 0%, transparent 40%);
-  pointer-events: none;
-}
-.js:not(.rm) .hero-screen {
-  opacity: 0;
-  animation: fadeIn 1.2s var(--ease) 0.2s forwards;
-}
-@keyframes fadeIn {
-  to {
-    opacity: var(--hs-op, 1);
-  }
-}
 .scene.s-dim .footage-layer video,
 html:not(.js) .scene[data-dim] .footage-layer video {
   filter: brightness(0.22) saturate(0.6) blur(2px);
@@ -570,36 +523,6 @@ html:not(.js) .scene[data-dim] .footage-layer video {
   opacity: 0.5;
 }
 
-/* HUD */
-.hud {
-  display: grid;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--ink-2);
-  letter-spacing: 0.06em;
-  text-transform: none;
-}
-.hud div {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-.hud div::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  background: var(--lime);
-  box-shadow: 0 0 8px var(--lime);
-}
-.hud-title {
-  color: var(--lime);
-  letter-spacing: 0.2em;
-  margin-bottom: 4px;
-}
-.hud-title::before {
-  display: none !important;
-}
-
 /* 要点カード */
 .kcard {
   max-width: 760px;
@@ -689,40 +612,6 @@ html:not(.js) .on-lime {
 .hero .display {
   text-shadow: 0 10px 60px rgba(0, 0, 0, 0.6);
 }
-.hero-words {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 0.4em;
-  font: 900 clamp(22px, 3.2vw, 44px) / 1.2 var(--sans);
-  color: var(--ink-2);
-  margin-bottom: 18px;
-}
-.hero-words span:nth-child(2) {
-  color: var(--sky);
-}
-.hero-words span:nth-child(3) {
-  color: var(--lime);
-}
-.js:not(.rm) .hero-words span {
-  opacity: 0;
-  animation: slamIn 0.5s var(--slam) forwards;
-}
-.js:not(.rm) .hero-words span:nth-child(1) {
-  animation-delay: 0.1s;
-}
-.js:not(.rm) .hero-words span:nth-child(2) {
-  animation-delay: 0.25s;
-}
-.js:not(.rm) .hero-words span:nth-child(3) {
-  animation-delay: 0.4s;
-}
-.js:not(.rm) .hero .display {
-  animation: slamInHero 0.7s var(--slam) 0.15s both;
-}
-.js:not(.rm) .hero .hero-after {
-  opacity: 0;
-  animation: fadeUp 0.6s var(--ease) 0.7s forwards;
-}
 @keyframes slamInHero {
   from {
     transform: scale(1.5);
@@ -768,12 +657,6 @@ html:not(.js) .on-lime {
   flex-wrap: wrap;
   gap: 12px;
   margin-top: 32px;
-}
-.hero .hud {
-  position: absolute;
-  z-index: 3;
-  right: max(24px, calc((100vw - 1200px) / 2));
-  bottom: calc(var(--player) + 48px);
 }
 .scroll-cue {
   margin-top: 40px;
@@ -917,7 +800,7 @@ html:not(.js) .on-lime {
   box-shadow: 0 0 12px var(--ink);
 }
 .g-peak::after {
-  content: '6人が同時';
+  content: '6体が同時';
   position: absolute;
   top: -20px;
   left: 6px;
@@ -1018,6 +901,8 @@ html:not(.js) .on-lime {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 10px;
+  padding: 0;
+  margin-inline: 0;
   counter-reset: flow;
 }
 .flow li {
@@ -1026,10 +911,11 @@ html:not(.js) .on-lime {
   padding: 16px 16px 14px;
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: rgba(10, 12, 10, 0.94);
+  background: #0a0c0a;
   transition:
     border-color 0.4s,
     background 0.4s,
+    color 0.4s,
     transform 0.4s var(--ease);
 }
 .flow li::before {
@@ -1068,11 +954,13 @@ html:not(.js) .on-lime {
 .flow li.redo.on::before {
   color: var(--amber);
 }
+/* 出ていない拍の札は、不透明のまま文字だけ薄くする（後ろの実画面が透けて文字と重ならないように） */
 .js .flow li[data-show] {
-  opacity: 0.7;
+  opacity: 1;
+  color: var(--ink-3);
 }
 .js .flow li[data-show].on {
-  opacity: 1;
+  color: var(--ink);
 }
 
 /* ------------------------------------------------------------ 完成 */
@@ -1630,6 +1518,9 @@ td {
 th {
   background: var(--panel);
   font-weight: 700;
+}
+/* 列の見出しだけ折り返さない（行の見出しは折り返して、ほかの列の幅を残す） */
+thead th {
   white-space: nowrap;
 }
 tr:last-child td {
@@ -1739,29 +1630,6 @@ td {
   .footer-grid {
     grid-template-columns: 1fr;
   }
-  .hero .hud {
-    display: none;
-  }
-  .hero-screen {
-    top: calc(var(--header) + 12px);
-    right: -14vw;
-    width: 96vw;
-    transform: none;
-    --hs-op: 1;
-  }
-  .hero-screen video {
-    opacity: 0.55;
-  }
-  /* 画面は右へはみ出し、上半分には見出しが重なる。録画ラベルは見えている右下（文字のない所）に置く */
-  .hero-screen .rec {
-    top: auto;
-    bottom: 10px;
-    left: auto;
-    right: calc(14vw + 10px);
-    max-width: 46vw;
-    font-size: 10px;
-    padding: 5px 8px;
-  }
   .js .hero .stage {
     align-content: end;
   }
@@ -1769,7 +1637,8 @@ td {
 
 @media (max-width: 640px) {
   :root {
-    --shell: calc(100vw - 32px);
+    /* 100vw はスクロールバーの幅を含むので、親の幅（100%）から余白を引く */
+    --shell: calc(100% - 32px);
     --header: 56px;
   }
   .brand small {
@@ -1935,7 +1804,8 @@ td {
   grid-area: auto;
 }
 /* 録画ラベルは本文の流れに入れ、見出しの上に置く（長いラベルが見出しに重ならないように） */
-.js.fit-off .stage > .rec {
+.js.fit-off .stage > .rec,
+.js.fit-off .stage > .tag-fig {
   position: relative;
   top: auto;
   right: auto;
@@ -1998,4 +1868,1023 @@ td {
   max-height: calc(100vh - 24px - 64px);
   max-height: calc(100dvh - 24px - 64px);
   object-fit: contain;
+}
+
+/* ============================================================ 100体の群れ（トップ）
+ * 図は tools/make-swarm.py が作る（手で書かない）。値は data-style ではなくここに書く。
+ * 100 の図には必ず .tag-fig「図 · 映像ではありません」を同じ画面に置く（README の honesty rules） */
+
+/* 図の札: .rec と同じ大きさ・位置。点は灰色で点滅させず、枠は破線 */
+.tag-fig {
+  position: absolute;
+  z-index: 4;
+  top: 12px;
+  right: 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px dashed rgba(255, 255, 255, 0.22);
+  font: 11px/1.5 var(--mono);
+  letter-spacing: 0.14em;
+  color: var(--ink);
+}
+.tag-fig::before {
+  content: '';
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ink-3);
+}
+.stage > .tag-fig {
+  top: calc(var(--header) + 12px);
+  right: max(24px, calc((100vw - 1200px) / 2));
+}
+.tag-fig.ink {
+  color: var(--lime-ink);
+  background: transparent;
+  border-color: rgba(15, 19, 9, 0.35);
+}
+.tag-fig.ink::before {
+  background: var(--lime-ink);
+}
+html:not(.js) .tag-fig.ink,
+.js.fit-off .tag-fig.ink {
+  display: none;
+}
+
+/* 実演の札 */
+.real-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border: 1px solid rgba(206, 255, 82, 0.55);
+  border-radius: 4px;
+  color: var(--lime);
+  font-size: 10px;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+}
+
+/* 群れの図 */
+.swarm-wrap {
+  margin: 0;
+}
+.swarm {
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+.swarm .ld,
+.swarm .ld-ring {
+  fill: var(--lime);
+}
+.swarm .ld-ring {
+  fill: none;
+  stroke: var(--lime);
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.swarm .mg {
+  fill: var(--sky);
+}
+.swarm .n {
+  fill: var(--lime);
+}
+.swarm .lit {
+  stroke: var(--ink);
+  stroke-width: 2.5;
+}
+.swarm .wire,
+.swarm .colline {
+  fill: none;
+  stroke: rgba(206, 255, 82, 0.28);
+  stroke-width: 1.5;
+}
+/* 番号（JS に頼らない）: 列10ルール＋行10ルール */
+.swarm .col:nth-child(1) { --c: 0; }
+.swarm .col:nth-child(2) { --c: 1; }
+.swarm .col:nth-child(3) { --c: 2; }
+.swarm .col:nth-child(4) { --c: 3; }
+.swarm .col:nth-child(5) { --c: 4; }
+.swarm .col:nth-child(6) { --c: 5; }
+.swarm .col:nth-child(7) { --c: 6; }
+.swarm .col:nth-child(8) { --c: 7; }
+.swarm .col:nth-child(9) { --c: 8; }
+.swarm .col:nth-child(10) { --c: 9; }
+.swarm .col > .u:nth-child(1) { --row: 0; }
+.swarm .col > .u:nth-child(2) { --row: 1; }
+.swarm .col > .u:nth-child(3) { --row: 2; }
+.swarm .col > .u:nth-child(4) { --row: 3; }
+.swarm .col > .u:nth-child(5) { --row: 4; }
+.swarm .col > .u:nth-child(6) { --row: 5; }
+.swarm .col > .u:nth-child(7) { --row: 6; }
+.swarm .col > .u:nth-child(8) { --row: 7; }
+.swarm .col > .u:nth-child(9) { --row: 8; }
+.swarm .col > .u:nth-child(10) { --row: 9; }
+.swarm .u {
+  --i: calc(var(--row) * 10 + var(--c));
+  transform-box: fill-box;
+  transform-origin: center;
+}
+/* 序章の弾け（1回だけ） */
+.js:not(.rm):not(.motion-off) .hero .swarm .u {
+  animation: pop 0.35s var(--slam) calc(0.6s + var(--i) * 10ms) both;
+}
+.js:not(.rm):not(.motion-off) .hero .swarm .wire {
+  stroke-dasharray: 1;
+  animation: draw 0.4s var(--ease) 0.3s both;
+}
+.js:not(.rm):not(.motion-off) .hero .swarm .ld-ring {
+  animation: ring 0.6s var(--ease) both;
+}
+/* 02: スクロールで1個ずつ灯る（既定値1を先に書き、古いブラウザでは全点灯） */
+.js .swarm.fill .u {
+  opacity: 1;
+  opacity: clamp(0.1, calc(var(--r, 1) * 100 - var(--i)), 1);
+  transform: scale(clamp(0.5, calc(var(--r, 1) * 100 - var(--i)), 1));
+}
+.js .swarm.fill .wire {
+  stroke-dasharray: 1;
+  stroke-dashoffset: calc(1 - clamp(0, var(--r, 1) * 10, 1));
+}
+.js .swarm.fill .colline {
+  stroke-dasharray: 1;
+  stroke-dashoffset: calc(1 - clamp(0, var(--r, 1) * 1.111 - 0.111, 1));
+}
+/* 03: 図が出て0.5秒後に94個が輪郭だけに沈み、.lit の6個が残る */
+.swarm.real .u:not(.lit) {
+  transition:
+    fill 0.6s 0.5s,
+    stroke 0.6s 0.5s,
+    opacity 0.6s 0.5s;
+}
+.js .real-fig.on .swarm.real .u:not(.lit),
+html:not(.js) .swarm.real .u:not(.lit),
+.js.fit-off .swarm.real .u:not(.lit) {
+  fill: transparent;
+  stroke: var(--ink-3);
+  stroke-width: 1.5;
+  opacity: 0.5;
+}
+/* 仕事中のまたたき: 動かすのは列の g 10個だけ。画面の外では is-live が外れて止まる */
+.js:not(.motion-off) .scene.is-live .swarm .col {
+  animation: twinkle 2.6s ease-in-out calc(var(--c) * -0.26s) infinite;
+}
+.js:not(.motion-off) .hero.is-live .swarm .col {
+  animation-delay: calc(2.4s + var(--c) * 0.12s);
+}
+.motion-off .swarm,
+.motion-off .swarm *,
+.motion-off .flash {
+  animation: none !important;
+}
+@keyframes pop {
+  from {
+    opacity: 0;
+    transform: scale(0);
+  }
+}
+@keyframes draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+}
+@keyframes ring {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(3);
+  }
+}
+@keyframes twinkle {
+  50% {
+    opacity: 0.55;
+  }
+}
+@keyframes flash {
+  0%,
+  100% {
+    opacity: 0;
+  }
+  40% {
+    opacity: 0.12;
+  }
+}
+@keyframes pulse {
+  50% {
+    transform: scale(1.06);
+  }
+}
+.flash {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+}
+.js:not(.rm):not(.motion-off) .flash {
+  animation: flash 0.08s linear 1.6s 1 both;
+}
+
+/* 横に置く群れ（00・02）: 右の列。左の列の文字とは重ねない */
+.side-swarm {
+  position: absolute;
+  z-index: 2;
+  right: max(24px, calc((100vw - 1200px) / 2));
+  top: 50%;
+  transform: translateY(-50%);
+  height: min(64svh, 600px);
+  aspect-ratio: 600 / 640;
+  pointer-events: none;
+}
+.side-swarm::before {
+  content: '';
+  position: absolute;
+  inset: -12%;
+  z-index: -1;
+  background: radial-gradient(closest-side, rgba(206, 255, 82, 0.16), transparent);
+}
+.swarm-cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 6px);
+  font: 11px/1.5 var(--mono);
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+  text-align: center;
+}
+.side-copy > * {
+  max-width: min(620px, 52%);
+}
+.side-copy > .kcard {
+  max-width: min(640px, 54%);
+}
+
+/* ------------------------------------------------------------ 00 序章 */
+.hero-title {
+  font-size: clamp(40px, min(8.6vw, 11svh), 132px);
+}
+.hero-title > span {
+  display: block;
+}
+.h-kick {
+  font-size: clamp(22px, min(3.2vw, 4.6svh), 44px);
+  font-weight: 900;
+  line-height: 1.1;
+  color: var(--ink-2);
+}
+.hero-title > .h-num {
+  display: flex;
+  align-items: baseline;
+  gap: 0.05em;
+  color: var(--ink);
+}
+.hero-title .count {
+  font-size: clamp(120px, min(26vw, 25svh), 360px);
+  color: var(--lime);
+  line-height: 0.82;
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 0 60px var(--lime-glow);
+}
+.h-line {
+  color: var(--ink);
+}
+.js:not(.rm):not(.motion-off) .hero .h-num {
+  animation: slamInHero 0.7s var(--slam) 1.7s;
+}
+.js:not(.rm):not(.motion-off) .hero .h-line {
+  animation: slamIn 0.5s var(--slam) 1.7s both;
+}
+.js:not(.rm):not(.motion-off) .hero .hero-after {
+  animation: fadeUp 0.6s var(--ease) 2.2s both;
+}
+.hero .definition {
+  margin-top: 12px;
+}
+.hero .hero-actions {
+  margin-top: 16px;
+}
+.hero-note {
+  margin: 12px 0 0;
+}
+.hero .scroll-cue {
+  margin-top: 18px;
+}
+
+/* 比較の札（実演 6体 → 上限 100体） */
+.proof-pair {
+  display: flex;
+  align-items: stretch;
+  gap: 10px;
+  margin-top: 16px;
+}
+.pp {
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 14px 11px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 10, 0.72);
+  color: var(--ink);
+  text-decoration: none;
+}
+.pp small {
+  font: 700 11px/1.3 var(--mono);
+  letter-spacing: 0.14em;
+  color: var(--ink-3);
+}
+.pp b {
+  font-size: clamp(26px, min(3.2vw, 4.4svh), 42px);
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.pp b span {
+  font-size: 0.5em;
+  margin-left: 2px;
+}
+.pp em {
+  font-style: normal;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.pp-real {
+  border-color: rgba(206, 255, 82, 0.7);
+  transition:
+    border-color 0.2s,
+    transform 0.2s var(--ease);
+}
+.pp-real:hover {
+  border-color: var(--lime);
+  transform: translateY(-1px);
+}
+.pp-real b,
+.pp-real small {
+  color: var(--lime);
+}
+.pp-cap {
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.22);
+}
+.pp-arrow {
+  align-self: center;
+  color: var(--ink-3);
+  font-size: 20px;
+}
+
+/* ------------------------------------------------------------ 01 一斉 */
+.ghost-word:has(> span) {
+  display: grid;
+}
+.ghost-word > span {
+  grid-area: 1 / 1;
+  transition: opacity 0.4s var(--ease);
+}
+.ghost-word .gw-b {
+  opacity: 0;
+}
+.scene:is([data-step='2'], [data-step='3']) .gw-a {
+  opacity: 0;
+}
+.scene:is([data-step='2'], [data-step='3']) .gw-b {
+  opacity: 1;
+}
+.scene:is([data-step='2'], [data-step='3']) .ghost-word {
+  -webkit-text-stroke-color: rgba(15, 19, 9, 0.2);
+}
+.queue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 14px 18px;
+  margin-top: 28px;
+}
+.q-ai {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--lime);
+}
+.q-cards {
+  display: flex;
+  gap: 6px;
+}
+.q-cards i {
+  width: 18px;
+  height: 26px;
+  border-radius: 4px;
+  border: 1px solid rgba(206, 255, 82, 0.45);
+  background: rgba(206, 255, 82, 0.08);
+  opacity: clamp(0, calc(var(--i) + 1 - var(--r, 1) * 4), 1);
+}
+/* 番号は CSS で付ける（JS なしでも r=1 で「残り8件」と、カード8枚がそろう） */
+.q-cards i:nth-child(1) { --i: 0; }
+.q-cards i:nth-child(2) { --i: 1; }
+.q-cards i:nth-child(3) { --i: 2; }
+.q-cards i:nth-child(4) { --i: 3; }
+.q-cards i:nth-child(5) { --i: 4; }
+.q-cards i:nth-child(6) { --i: 5; }
+.q-cards i:nth-child(7) { --i: 6; }
+.q-cards i:nth-child(8) { --i: 7; }
+.q-cards i:nth-child(9) { --i: 8; }
+.q-cards i:nth-child(10) { --i: 9; }
+.q-cards i:nth-child(11) { --i: 10; }
+.q-cards i:nth-child(12) { --i: 11; }
+.q-left {
+  margin: 0;
+  font-size: clamp(16px, 1.6vw, 20px);
+  font-weight: 800;
+  color: var(--ink-2);
+}
+.q-left b {
+  font-size: 1.6em;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.queue + .lead {
+  margin-top: 20px;
+  max-width: 640px;
+}
+.on-lime .chapter-tag,
+.on-lime .chapter-tag b {
+  color: var(--lime-ink);
+}
+.on-lime .lead {
+  margin-top: 20px;
+  color: #2b3315;
+}
+.bars {
+  height: clamp(120px, 22vh, 220px);
+  width: min(100%, 680px);
+  margin-top: 24px;
+  background: repeating-linear-gradient(90deg, var(--lime-ink) 0 calc(var(--r, 1) * 8.4%), rgba(15, 19, 9, 0.14) 0 8.4%, transparent 0 10%);
+  -webkit-mask: repeating-linear-gradient(180deg, #000 0 6.5%, transparent 0 10%);
+  mask: repeating-linear-gradient(180deg, #000 0 6.5%, transparent 0 10%);
+}
+
+/* ------------------------------------------------------------ 02 規模 */
+.count-big {
+  display: flex;
+  align-items: baseline;
+  gap: 0.08em;
+  margin: 16px 0 0;
+  font-weight: 900;
+  line-height: 0.85;
+}
+.count-big .count {
+  display: inline-block;
+  font-size: clamp(110px, min(18vw, 22svh), 260px);
+  color: var(--lime);
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+  transform-origin: left bottom;
+}
+.count-big > span:not(.visually-hidden) {
+  font-size: clamp(28px, 4vw, 56px);
+}
+.js:not(.motion-off) .is-full .count-big .count {
+  animation: pulse 0.5s var(--ease) 1;
+}
+.count-label {
+  margin: 8px 0 0;
+  font: 700 12px/1.4 var(--mono);
+  letter-spacing: 0.14em;
+  color: var(--ink-3);
+}
+.tiers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  max-width: 560px;
+  margin: 16px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.tiers li {
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(10, 12, 10, 0.72);
+  opacity: 1;
+  opacity: clamp(0.28, calc((var(--r, 1) - var(--at, 0)) * 60 + 1), 1);
+}
+.tiers b {
+  display: block;
+  font-size: clamp(20px, 2.2vw, 28px);
+  font-weight: 900;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.tiers b small {
+  font-size: 0.5em;
+  margin-left: 2px;
+}
+.tiers span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+.tiers .t-real b,
+.tiers .t-cap b {
+  color: var(--lime);
+}
+.badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font: 700 10px/1.5 var(--sans);
+  font-style: normal;
+  white-space: nowrap;
+  opacity: 1;
+  opacity: clamp(0, calc((var(--r, 1) - var(--at, 0)) * 60 + 1), 1);
+}
+.badge.real {
+  border: 1px solid var(--lime);
+  color: var(--lime);
+}
+.badge.cap {
+  border: 1px dashed rgba(255, 255, 255, 0.45);
+  color: var(--ink-2);
+}
+/* 同じ場所で入れ替わる一行（縦並びのときは順に並べる） */
+.lead-swap {
+  display: grid;
+  margin-top: 18px;
+}
+.js:not(.fit-off) .lead-swap > * {
+  grid-area: 1 / 1;
+}
+html:not(.js) .lead-swap > * + *,
+.js.fit-off .lead-swap > * + * {
+  margin-top: 12px;
+}
+.split .copy > .lead-swap {
+  margin-top: 20px;
+}
+#ch-scale .headline + .lead {
+  margin-top: 20px;
+}
+.limit-bar {
+  position: relative;
+  max-width: 520px;
+  height: 56px;
+  margin-top: 28px;
+}
+.lb-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 10px;
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(206, 255, 82, 0.25), var(--lime));
+}
+.lb-knob {
+  position: absolute;
+  top: 3px;
+  right: -9px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--lime);
+  box-shadow: 0 0 18px var(--lime-glow);
+}
+.lb-knob::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid var(--lime);
+  opacity: 0;
+}
+.js:not(.motion-off) .on .limit-bar .lb-knob::after {
+  animation: ring 0.6s var(--ease) 0.3s 1;
+}
+.limit-bar span {
+  position: absolute;
+  top: 28px;
+  font: 700 12px/1.4 var(--mono);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.limit-bar .lb-min {
+  left: 0;
+}
+.limit-bar .lb-mid {
+  left: 49.49%;
+  transform: translateX(-50%);
+}
+.limit-bar .lb-max {
+  right: 0;
+  color: var(--lime);
+}
+.limit-bar + .note {
+  margin: 10px 0 0;
+}
+.kcard .title {
+  margin: 0;
+  color: var(--ink);
+}
+.kcard.trust {
+  border-color: rgba(206, 255, 82, 0.4);
+}
+.kcard.trust .hero-actions {
+  margin-top: 22px;
+}
+
+/* ------------------------------------------------------------ 03 実演 */
+.colorfield.sky {
+  background: var(--sky);
+}
+.on-sky,
+.on-sky .chapter-tag,
+.on-sky .chapter-tag b,
+.on-sky .lead {
+  color: #06121c;
+}
+.on-sky .real-tag {
+  color: #06121c;
+  border-color: rgba(6, 18, 28, 0.5);
+}
+.on-sky .lead {
+  margin-top: 20px;
+}
+html:not(.js) .on-sky,
+.js.fit-off .on-sky {
+  padding: clamp(24px, 4vw, 48px);
+  border-radius: 20px;
+  background: var(--sky);
+}
+/* 実画面（お願いの映像）は拍3から。縦並びのときは図と同じ画面に重なるので出さない */
+html:not(.js) #ch-real .footage-layer,
+html:not(.js) #ch-real .scrim,
+html:not(.js) #ch-real .stage > .rec,
+.js.fit-off #ch-real .footage-layer,
+.js.fit-off #ch-real .scrim,
+.js.fit-off #ch-real .stage > .rec {
+  display: none;
+}
+.real-split .copy > * + * {
+  margin-top: 16px;
+}
+.real-fig .swarm {
+  max-height: min(54svh, 520px);
+}
+.fig-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px 18px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+.fig-legend i {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  border-radius: 50%;
+  border: 1.5px solid var(--ink-3);
+  vertical-align: -1px;
+}
+.fig-legend .is-real {
+  color: var(--ink);
+}
+.fig-legend .is-real i {
+  background: var(--lime);
+  border-color: var(--ink);
+}
+
+/* ------------------------------------------------------------ 04 チーム */
+.mix-mini {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.mix-mini .mix-col {
+  padding: 14px 16px;
+}
+.mix-mini h3 {
+  font-size: clamp(16px, 1.6vw, 20px);
+  margin-bottom: 10px;
+}
+#ch-team[data-step='3'] .org .node:has(.where-local) rect {
+  stroke: var(--sky);
+  stroke-width: 2.5;
+}
+
+/* ------------------------------------------------------------ 始動 */
+/* 群れの図は、ダウンロードの塊（.finale-main）の右の空きにだけ置く。
+ * 文字・ダウンロードの札（最大 880px）と、下の実演動画のサムネ（.watch）には重ねない */
+.finale-main {
+  position: relative;
+  display: grid;
+  gap: 28px;
+  justify-items: start;
+  width: 100%;
+}
+.finale-swarm {
+  position: absolute;
+  z-index: -1;
+  top: 40px;
+  right: 0;
+  width: min(300px, calc(100% - 900px));
+  height: auto;
+  opacity: 0.28;
+  pointer-events: none;
+}
+.finale-main > .tag-fig {
+  top: 0;
+  right: 0;
+  padding: 4px 8px;
+  font-size: 10px;
+}
+/* 右に空きがない幅では、図と札を出さない */
+@media (max-width: 1239px) {
+  .finale-swarm,
+  .finale-main > .tag-fig {
+    display: none;
+  }
+}
+.finale > .ghost-word {
+  transform: none;
+}
+.watch .rec {
+  top: 8px;
+  right: 8px;
+  font-size: 10px;
+  color: var(--ink);
+}
+
+/* ------------------------------------------------------------ 再生バーの実演の札 */
+.p-real {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(206, 255, 82, 0.5);
+  color: var(--lime);
+  font: 700 11px/1.3 var(--sans);
+  white-space: nowrap;
+}
+.p-real::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--red);
+}
+.player:not(.is-real) .p-real,
+.p-real-short {
+  display: none;
+}
+/* 章の目印を押せる幅を残す。足りないときは札のほうを縮める */
+.player .p-track {
+  min-width: 160px;
+}
+.p-real {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.p-real-full {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 1100px 以下は短い札（「実演 10/20」） */
+@media (max-width: 1100px) {
+  .p-real-full {
+    display: none;
+  }
+  .player.is-real .p-real-short {
+    display: inline;
+  }
+}
+
+/* ------------------------------------------------------------ 縦並び（JS なし・動きを減らす・収まらない） */
+html:not(.js) .side-swarm,
+.js.fit-off .side-swarm {
+  position: relative;
+  top: auto;
+  right: auto;
+  left: auto;
+  transform: none;
+  width: min(420px, 80vw);
+  height: auto;
+  opacity: 1;
+  margin: 0 0 40px max(16px, calc((100vw - var(--shell)) / 2));
+}
+html:not(.js) .side-copy > *,
+.js.fit-off .side-copy > * {
+  max-width: 760px;
+}
+html:not(.js) .finale-swarm,
+.js.fit-off .finale-swarm {
+  opacity: 0.16;
+}
+
+@media (max-width: 960px) {
+  .side-swarm {
+    top: calc(var(--header) + 8px);
+    right: auto;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(88vw, 41.4svh);
+    height: auto;
+    opacity: 0.55;
+  }
+  .side-swarm .swarm-cap {
+    display: none;
+  }
+  .side-copy > *,
+  .side-copy > .kcard {
+    max-width: none;
+  }
+  .js #ch-scale .stage {
+    align-content: end;
+  }
+  .real-fig .swarm {
+    max-height: 34svh;
+  }
+}
+@media (max-width: 640px) {
+  .proof-pair {
+    gap: 6px;
+  }
+  .pp {
+    padding: 8px 10px;
+  }
+  .pp b {
+    font-size: 28px;
+  }
+  .pp em {
+    font-size: 11px;
+  }
+  .hero .hero-actions {
+    gap: 8px;
+    flex-wrap: nowrap;
+  }
+  .hero .hero-actions .btn {
+    min-height: 38px;
+    padding: 0 14px;
+    font-size: 13px;
+  }
+  .hero-note {
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .hero .scroll-cue {
+    display: none;
+  }
+  .tiers {
+    gap: 6px;
+  }
+  .tiers li {
+    padding: 8px;
+  }
+  .badge {
+    white-space: normal;
+  }
+  .mix-mini {
+    grid-template-columns: 1fr;
+  }
+  .mix-mini .mix-col {
+    padding: 10px 12px;
+  }
+  .mix-mini h3 {
+    margin-bottom: 6px;
+    font-size: 15px;
+  }
+  .mix-mini .chips {
+    gap: 6px;
+  }
+  .mix-mini .chip {
+    padding: 3px 8px;
+    font-size: 11px;
+  }
+}
+/* 低い画面では、序章の「スクロールで再生」を省いて見出しと札を収める */
+@media (max-height: 900px) {
+  .hero .scroll-cue {
+    display: none;
+  }
+}
+
+/* ------------------------------------------------------------ 下層ページの群れの図（静止画、ai-team #scale） */
+.fig {
+  position: relative;
+  margin: 0;
+  padding: 52px clamp(16px, 3vw, 36px) clamp(16px, 3vw, 28px);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(10, 12, 10, 0.6);
+}
+.fig img {
+  display: block;
+  width: 100%;
+  max-width: 400px;
+  height: auto;
+  margin: 0 auto;
+}
+.reel .stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+/* ------------------------------------------------------------ 読みやすさの手直し */
+/* 日本語の見出し・札は語のまとまりで折り返す（1文字だけ次の行に落ちないように。対応ブラウザのみ） */
+h1,
+h2,
+h3,
+.title,
+.flow li b,
+.stat span {
+  word-break: auto-phrase;
+}
+/* 4枚のカードは、タブレットの幅では 3＋1 ではなく 2×2 にする */
+@media (min-width: 641px) and (max-width: 960px) {
+  .cards:has(> :nth-child(4):last-child) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+/* 色の面（lime）の上の注記 */
+.on-lime .note {
+  margin-top: 12px;
+  color: #2b3315;
+}
+/* 見出しの拍では、後ろの実画面を暗くして文字と重ならないようにする */
+#ch-real[data-step='3'] .footage-layer video,
+#ch-together[data-step='0'] .footage-layer video,
+#ch-done[data-step='0'] .footage-layer video {
+  filter: brightness(0.3) saturate(0.6);
+}
+#ch-real .beat .headline,
+#ch-together .beat .headline,
+#ch-done .beat .headline,
+#ch-check .beat .headline {
+  text-shadow: 0 2px 24px rgba(5, 6, 5, 0.95), 0 0 2px rgba(5, 6, 5, 0.9);
+}
+#ch-check[data-step='4'] .footage-layer.dim video {
+  filter: brightness(0.26) saturate(0.6);
+}
+.stage > .rec {
+  background: rgba(0, 0, 0, 0.78);
+}
+/* スマホでは 02 の群れを小さくし、図の札の下から始める（図の札・章の札・見出しに重ねない） */
+@media (max-width: 640px) {
+  /* 02 は文字が多く、章の札が画面の上から3割ほどの所に来るので、群れはその上の空きに収める */
+  #ch-scale .side-swarm {
+    top: calc(var(--header) + 44px);
+    width: min(88vw, 16svh);
+  }
+}
+/* film.js が読み込めなかったとき（.js も .rm もない）: ヘッダーに背景を付け、実画面はポスターを背景で見せる */
+html:not(.js):not(.rm) body:not(.no-film) .site-header {
+  background: rgba(5, 6, 5, 0.92);
+  border-bottom-color: var(--line-soft);
+}
+html:not(.js):not(.rm) .film .footage-layer,
+html:not(.js):not(.rm) #ch-team .screen {
+  background: #000 center / cover no-repeat;
+}
+html:not(.js):not(.rm) #ch-together .footage-layer {
+  background-image: linear-gradient(rgba(5, 6, 5, 0.6), rgba(5, 6, 5, 0.6)), url('/media/together.jpg');
+}
+html:not(.js):not(.rm) #ch-check .footage-layer:first-child {
+  background-image: linear-gradient(rgba(5, 6, 5, 0.7), rgba(5, 6, 5, 0.7)), url('/media/code.jpg');
+}
+html:not(.js):not(.rm) #ch-check .footage-layer + .footage-layer {
+  display: none;
+}
+html:not(.js):not(.rm) #ch-done .footage-layer {
+  background-image: linear-gradient(rgba(5, 6, 5, 0.7), rgba(5, 6, 5, 0.7)), url('/media/final.jpg');
+}
+html:not(.js):not(.rm) #ch-team .screen:first-child {
+  background-image: url('/media/hires.jpg');
+}
+html:not(.js):not(.rm) #ch-team .screen:last-child {
+  background-image: url('/media/assemble.jpg');
 }

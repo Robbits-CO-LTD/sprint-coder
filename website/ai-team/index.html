@@ -6,7 +6,7 @@
     <title>AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める</title>
     <meta
       name="description"
-      content="Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分け、同時に進めた結果をひとつにまとめて返す流れを、実際の画面で紹介します。"
+      content="Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分けて最大100体まで同時に進め、結果をひとつにまとめて返す流れを紹介します。映像は6体が同時に動いた実演のものです。"
     />
     <meta name="author" content="Robbits Inc." />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
@@ -19,7 +19,7 @@
     <meta property="og:locale" content="ja_JP" />
     <meta property="og:site_name" content="Sprint Coder" />
     <meta property="og:title" content="AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める" />
-    <meta property="og:description" content="リーダーのAIが分け、担当のAIが同時に進め、結果はひとつにまとまって戻る。Sprint CoderのAIチームを実際の画面で。" />
+    <meta property="og:description" content="リーダーのAIが分け、部長と担当のAIが最大100体まで同時に進め、結果はひとつにまとまって戻る。Sprint CoderのAIチームを、6体が同時に動いた実演の画面で。" />
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/ai-team/" />
     <meta property="og:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
     <meta property="og:image:width" content="1200" />
@@ -27,11 +27,11 @@
     <meta property="og:image:alt" content="Sprint Coderの実際の画面。たくさんのAIのカードが並んで同時に動いている" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める" />
-    <meta name="twitter:description" content="リーダーのAIが分け、担当のAIが同時に進め、結果はひとつにまとまって戻る。" />
+    <meta name="twitter:description" content="リーダーのAIが分け、部長と担当のAIが最大100体まで同時に進め、結果はひとつにまとまって戻る。実演は6体。" />
     <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
-    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261024" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/styles.css?v=20261024" />
-    <script src="/film.js?v=20261022" defer></script>
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261025" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261025" />
+    <script src="/film.js?v=20261025" defer></script>
 
     <script type="application/ld+json">
       {
@@ -43,10 +43,10 @@
             "url": "https://sprintcoder.yuseilab.com/ai-team/",
             "name": "AIチームのしくみ",
             "headline": "AIチームのしくみ",
-            "description": "Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分け、同時に進めた結果をひとつにまとめて返す流れを、実際の画面で紹介します。",
+            "description": "Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分けて最大100体まで同時に進め、結果をひとつにまとめて返す流れを紹介します。映像は6体が同時に動いた実演のものです。",
             "inLanguage": "ja",
             "datePublished": "2026-08-20",
-            "dateModified": "2026-10-21",
+            "dateModified": "2026-10-24",
             "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg",
             "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
             "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
@@ -100,8 +100,9 @@
           <p class="breadcrumb"><a href="/">SPRINT CODER</a> / AI TEAM</p>
           <h1 class="display" id="h-page">AIチームの<br /><span class="em">しくみ</span></h1>
           <p class="lead" data-style="max-width: 680px">
-            AIを横に並べるだけではありません。リーダーのAIがお願いを受け取り、部長と担当のAIへ分け、進み具合と結果をひとつの仕事へ戻します。
+            AIを横に並べるだけではありません。リーダーのAIがお願いを受け取り、部長と担当のAIへ分け、最大100体まで同時に動かして、結果をひとつの仕事へ戻します。
           </p>
+          <p class="note">100は同時に動かせる上限です（設定で上限を100にした場合。標準は50）。映像は6体が同時に動いた実演のものです。</p>
         </div>
       </section>
 
@@ -120,8 +121,8 @@
             </div>
             <div class="card">
               <span class="num">02 HIRE</span>
-              <h3>リーダーが人を集める</h3>
-              <p>調べる・作る・チェックする。リーダーが部署ごとに部長を置き、部長が同時に動く担当のAIを集める。</p>
+              <h3>リーダーがAIを集める</h3>
+              <p>調べる・作る・チェックする。リーダーが部署ごとに部長を置き、部長が同時に動く担当のAIを集める。同時に動くのは最大100体まで（設定で上限を100にした場合。標準は50）。</p>
             </div>
             <div class="card">
               <span class="num">03 VISIBLE</span>
@@ -136,11 +137,39 @@
           </div>
 
           <ol class="flow" data-style="margin-top: 48px" aria-label="AIチームの流れ">
-            <li><b>お願いを伝える</b><small>ひとりのAIとの会話から</small></li>
+            <li><b>お願いを伝える</b><small>1体のAIとの会話から</small></li>
             <li><b>リーダーが分ける</b><small>部署ごとに部長を置き、部長が担当を集める</small></li>
             <li><b>担当が同時に進める</b><small>状態と結果はリーダーとあなたへ</small></li>
             <li><b>リーダーがまとめる</b><small>ひとつの結果として仕事へ戻す</small></li>
           </ol>
+        </div>
+      </section>
+
+      <!-- 規模: 上限100の図（静止画）。100の図には .tag-fig を必ず付ける -->
+      <section class="section" id="scale" aria-labelledby="h-scale">
+        <div class="shell">
+          <div class="section-head">
+            <p class="eyebrow">SCALE</p>
+            <h2 class="headline" id="h-scale">同時に<br /><span class="em">最大100体</span></h2>
+          </div>
+          <div class="reel">
+            <div class="fig">
+              <img src="/assets/swarm-v1-real.svg" alt="図：100個の点のうち6個だけが光っている。6個は実演で同時に動いた数、残り94個は上限までの数" width="600" height="640" loading="lazy" />
+              <span class="tag-fig">図 · 映像ではありません</span>
+              <ul class="fig-legend"><li class="is-real"><i></i>6体 実演で同時に動いた数</li><li><i></i>残り94体 上限まで · 映像なし</li></ul>
+            </div>
+            <div class="copy">
+              <div class="stats">
+                <div class="stat"><b>100<small>体</small></b><span>同時に動かせる上限</span></div>
+                <div class="stat"><b>50<small>体</small></b><span>標準の設定</span></div>
+                <div class="stat"><b>1〜100</b><span>自分で選べる</span></div>
+                <div class="stat"><b class="em">6<small>体</small></b><span>実演で同時に動いた最大（実際のAI）</span></div>
+              </div>
+            </div>
+          </div>
+          <p class="note" data-style="margin-top: 16px">
+            上限を100にした設定は、試験用の仮のAIを使った自動のテストで確かめています（101件の仕事を割り当て、100件が終わり、101件目は断られずに順番を待つことを確認。101件目が待つのは、1分あたりに始められる数の決まりによるものです）。本物のAIで100体を動かした実演はまだありません。このページの映像と、「実演の記録から」の数字は、同時に最大6体が動いた実演のものです。設定で上限を100にした場合（標準は50）。
+          </p>
         </div>
       </section>
 
@@ -170,8 +199,8 @@
               <span class="rec">実際の画面 <b>等速</b></span>
             </div>
             <div class="copy">
-              <h3 class="title">何人ものAIが同時に動く</h3>
-              <p class="lead">順番待ちではなく、いくつもの担当が同じ時間に手を動かす。やり直しの最中も、全員の状態が一目でわかる。</p>
+              <h3 class="title">実演では 6体が同時に</h3>
+              <p class="lead">順番待ちではなく、いくつもの担当が同じ時間に手を動かす。この映像は実演で、同時に動いたのは最大6体。</p>
             </div>
           </div>
 
@@ -192,8 +221,8 @@
             <h3 class="title">ひとつのお願いで動いた数字</h3>
           </div>
           <div class="stats">
-            <div class="stat"><b>3<small>部署</small></b><span>リーダーが採用した部長の数</span></div>
-            <div class="stat"><b>6<small>人</small></b><span>同時に動いたAIの最大数</span></div>
+            <div class="stat"><b>3<small>部署</small></b><span>開発・セキュリティ・チェック</span></div>
+            <div class="stat"><b>6<small>体</small></b><span>同時に動いたAIの最大数</span></div>
             <div class="stat"><b>15<small>件</small></b><span>AIが受け持った仕事の数</span></div>
             <div class="stat"><b>36<small>分</small>32<small>秒</small></b><span>お願いから最終報告まで</span></div>
           </div>
@@ -209,7 +238,7 @@
           <p class="details-label">詳しい話</p>
           <h2 id="h-details">ChatからAI Teamへ</h2>
           <p>
-            一人のAIへ何でも順番に頼むと、調査・実装・確認が直列になり、長いTaskほどcontextと進行管理が難しくなります。AI Teamは、同じ目的を共有したまま役割を分け、成果をLeaderへ戻すための仕組みです。複数のAIを横に並べるだけの画面ではなく、Leaderが目的を受け取り、Workerへ役割を渡し、進行と成果を同じTaskへ戻す実行モデルです。
+            1体のAIへ何でも順番に頼むと、調査・実装・確認が直列になり、長いTaskほどcontextと進行管理が難しくなります。AI Teamは、同じ目的を共有したまま役割を分け、成果をLeaderへ戻すための仕組みです。複数のAIを横に並べるだけの画面ではなく、Leaderが目的を受け取り、Workerへ役割を渡し、進行と成果を同じTaskへ戻す実行モデルです。
           </p>
 
           <h2>AI Teamの基本モデル</h2>
@@ -230,12 +259,26 @@
 
           <h2>Chatから成果統合までの流れ</h2>
           <ol>
-            <li><strong>一人のAIとのChatから始める。</strong>最初からTeam構成を考える必要はありません。目的や制約を通常の会話で伝えます。</li>
+            <li><strong>1体のAIとのChatから始める。</strong>最初からTeam構成を考える必要はありません。目的や制約を通常の会話で伝えます。</li>
             <li><strong>同じTaskをTeamへ展開する。</strong>会話、Workspace、選択modelなどの仕事の前提を保ったままTeamへ移ります。</li>
             <li><strong>LeaderがWorkerへ依頼する。</strong>調査、実装、レビューなど、並行化する意味がある役割へ分けて指示します。</li>
             <li><strong>Workerが進行と成果を報告する。</strong>各Workerの状態と成果がLeaderへ戻り、ユーザーも同じ画面から確認できます。</li>
             <li><strong>Leaderが最終結果を統合する。</strong>分散した回答を並べるだけでなく、目的に対する一つの成果へまとめます。</li>
           </ol>
+
+          <h2>同時に動く数の上限</h2>
+          <p>
+            Workerの同時実行数は、設定 &gt; Team の『アプリ全体で同時に動かせるWorkerの数』（既定50、1〜100）と、TeamごとのPolicy <code>maxConcurrentExecutions</code>（1〜100）で決まります。Managerも雇われたWorkerとして数え、Leaderは含みません。
+          </p>
+          <p>
+            上限を超えた割り当ては拒否されず、枠が空くまで queued で待ちます。同時に動かせる上限（最大100体）とは別に、新しく始められる仕事は1分あたり100件までです。
+          </p>
+          <p>
+            上限100の設定は、mock runtime を使った unit test で検証しています。上限を100にした設定で101件の仕事を割り当て、100件が完了し、101件目は拒否されずに queued で待つことを確かめています。ただし、この待ちは1分あたり100件という開始のペースによるもので、100件が同時に実行中であること（同時実行数100）そのものはまだテストしていません。同時実行数の上限で待つことは、50と8の設定でテストしています。実際のproviderで100体を同時に動かす検証もまだで、2026-10-20 の実演での同時実行のピークは6です。
+          </p>
+          <p>
+            ネットのAIは、接続ごとの同時リクエスト数の設定と、提供元の rate limit・利用料の影響を受けます。このパソコンの中のAIは、パソコンの性能に左右されます。実演では、このパソコンの中のAIの2体が同時に仕事を受け、中では1体ずつ順番に処理しました。ネットのAIとこのパソコンの中のAIが同時に動いた時間は合計74秒です。
+          </p>
 
           <h2>進行をブラックボックスにしない</h2>
           <p>
@@ -265,7 +308,7 @@
 
           <h2>このページの映像と数字</h2>
           <p>
-            映像はすべて実際のSprint Coderの画面を2026-10-20に収録したもので、早送りしている映像には倍率を表示しています。数字は同じ実演の記録から取りました。実演では、Leaderが3つの部署の部長（Manager）を採用し、同時に最大6人のAIが動きました。AIの仕事は15件（うち1件は途中で止まり、別の部長がやり直し）、Leaderからのやり直し依頼は1回、テストは9件すべて成功、依頼から最終報告までは36分32秒でした。
+            映像はすべて実際のSprint Coderの画面を2026-10-20に収録したもので、早送りしている映像には倍率を表示しています。数字は同じ実演の記録から取りました。実演では、Leaderが3つの部署の部長（Manager）を採用し、同時に最大6体のAIが動きました。AIの仕事は15件（うち1件は途中で止まり、別の部長がやり直し）、Leaderからのやり直し依頼は1回、テストは9件すべて成功、依頼から最終報告までは36分32秒でした。100は上限の値で、映像は同時に最大6体の実演のものです。
           </p>
           <p>
             Sprint CoderはMIT Licenseで<a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHubに公開</a>されています。配布物またはソースから試せます。
@@ -282,7 +325,7 @@
           </div>
           <div class="cards">
             <a class="card" href="/managed-harness/"><span class="num">CONTROL</span><h3>確認と記録のしくみ</h3><p>ファイルの書き換えや操作を、同じ道筋で確かめて記録に残す。</p><span class="more">読む →</span></a>
-            <a class="card" href="/about/"><span class="num">PRODUCT</span><h3>Sprint Coderとは</h3><p>ひとりのAIで始めて、必要なときだけチームへ広げる考え方。</p><span class="more">読む →</span></a>
+            <a class="card" href="/about/"><span class="num">PRODUCT</span><h3>Sprint Coderとは</h3><p>1体のAIで始めて、必要なときだけチームへ広げる考え方。</p><span class="more">読む →</span></a>
             <a class="card" href="/providers/"><span class="num">CHOOSE AI</span><h3>AIの選び方</h3><p>ネットのAIと、このパソコンの中のAI。使えるAIの一覧。</p><span class="more">読む →</span></a>
           </div>
           <div class="next" data-style="margin-top: 48px">
