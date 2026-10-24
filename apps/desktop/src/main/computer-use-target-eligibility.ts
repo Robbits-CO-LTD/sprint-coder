@@ -6,8 +6,7 @@ import {
 
 // Target eligibility core shared by both platforms (S5-c-3, #500 PR-1). It mirrors
 // computer_use_target_eligibility.h rule for rule; the golden vectors and the seam hold the two
-// together. Main will judge each native answer with it on its own (ADR v2 INV-1); nothing calls it
-// yet.
+// together. Private Main discovery judges each native answer independently (ADR v2 INV-1).
 //
 //   * a platform with no ruleset, or any fact of that platform that was not measured (or is not a
 //     value the ruleset knows), is unresolvable: the default is not eligible;

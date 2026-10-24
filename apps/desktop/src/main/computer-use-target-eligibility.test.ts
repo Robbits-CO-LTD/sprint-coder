@@ -29,7 +29,7 @@ import {
   seededRandom,
 } from './computer-use-target-eligibility-fixture';
 
-// S5-c-3 (#500) PR-1: the shared target eligibility core. Nothing calls it yet.
+// S5-c-3 (#500): the shared core, used by native v2 and private Main discovery.
 
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const readNative = (name: string): string => readFileSync(join(nativeDirectory, name), 'utf8');
@@ -372,12 +372,14 @@ describe('target facts source contract', () => {
     for (const source of [tsCore, cppCore]) expect(source).not.toMatch(/displayName|display_name/u);
   });
 
-  it('is called only from the Windows host v2 targets block', () => {
+  it('is used only by private Main discovery and the Windows host v2 targets block', () => {
     const mainDirectory = __dirname;
     const allowed = new Set([
       'computer-use-target-eligibility.ts',
       'computer-use-target-eligibility-fixture.ts',
       'computer-use-deny-ruleset.generated.ts',
+      'computer-use-native-targets.ts',
+      'computer-use-native-host.ts',
     ]);
     for (const name of readdirSync(mainDirectory)) {
       if (!/\.(ts|tsx)$/u.test(name) || /\.test\.tsx?$/u.test(name) || allowed.has(name)) continue;
@@ -386,9 +388,13 @@ describe('target facts source contract', () => {
         /computer-use-target-eligibility|computer-use-deny-ruleset/u,
       );
     }
-    // PR-2 (#500): the Windows target facts fill TargetFacts, so their portable header reads the
-    // core's tables and the Windows host includes that header. The host still judges nothing: no
-    // native source but the core's own files and the harness names the core's entry points.
+    // PR-5b-2: only the private decoder classifies Main's facts. The host checks the version and
+    // its discovery gate; Controller/tool/IPC code still must not call the core directly.
+    const mainTargets = readFileSync(join(mainDirectory, 'computer-use-native-targets.ts'), 'utf8');
+    expect(mainTargets).toContain('classifyTarget(native.facts)');
+    const mainHost = readFileSync(join(mainDirectory, 'computer-use-native-host.ts'), 'utf8');
+    expect(mainHost).not.toMatch(/\bclassifyTarget(?:Explained)?\(/u);
+    // The Windows facts header reads the core's tables, and only the host's v2 block judges with it.
     const factsReaders = new Set([
       'computer_use_windows_target_facts.h',
       'computer_use_windows_host.cc',
