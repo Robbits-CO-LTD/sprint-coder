@@ -339,7 +339,7 @@ export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
   ).map(providerToolDefinition),
 );
 
-function teamToolError(error: unknown): {
+export function teamToolError(error: unknown): {
   ok: false;
   error: string;
   message: string;

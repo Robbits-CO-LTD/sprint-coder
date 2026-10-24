@@ -12,6 +12,8 @@ import { MainProviderProfileRegistry } from './provider-profile';
 import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { localProviderTestConnection } from './provider-connection-test-fixture';
 import { queryAllModelCatalogPages } from '../renderer/lib/model-catalog-pages';
+import { executeTeamTool, type ExecuteTeamToolOptions } from './team-tools';
+import type { TeamCoordinator } from './team-coordinator';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -65,7 +67,7 @@ function models(connection: ProviderConnection, count: number): ProviderModel[] 
   }));
 }
 
-function makeRouter() {
+function makeRouter(flakyConnection: ProviderConnection = flaky) {
   const router = Object.create(IpcRouter.prototype) as { register(): void };
   const handlers = new Map<string, Handler>();
   const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
@@ -78,7 +80,7 @@ function makeRouter() {
     if (connection.id === stable.id) return models(stable, 250);
     flakyCalls += 1;
     if (flakyCalls % 2 === 0) throw new Error('flaky provider is down');
-    return models(flaky, 3);
+    return models(flakyConnection, 3);
   });
   const catalog = new ModelCatalogService();
   Object.assign(router, {
@@ -90,24 +92,59 @@ function makeRouter() {
     grokRuntime: { probe },
     reconcileBuiltinCapability: vi.fn(),
     teamRuntimeAvailability: { isAvailable: () => true },
-    providerConnections: { list: () => [stable, flaky] },
+    providerConnections: { list: () => [stable, flakyConnection] },
     providerProfiles: profiles,
     providerVerification: {
-      requireVerifiedForExecution: async (id: string) => (id === stable.id ? stable : flaky),
+      requireVerifiedForExecution: async (id: string) =>
+        id === stable.id ? stable : flakyConnection,
     },
     providerRegistry: { resolve: () => ({ listModels }) },
     ensureProviderEndpointConsent: async (connection: ProviderConnection) => connection,
     modelCatalog: catalog,
+    teamModelListingRevisions: new Map<string, number>(),
     persistence: {
       getTaskModelSelection: () => null,
       getRuntime: () => 'codex',
       getModel: () => 'auto',
+      getTeamModelRestriction: () => ({ mode: 'all', allowedModels: [] }),
     },
   });
   router.register();
   const query = async (input: ModelCatalogQueryInput) =>
     (await handlers.get(IPC_CHANNELS.modelsCatalogQuery)!(input)) as ModelCatalogQueryResult;
-  return { query, probe, listModels };
+  const teamRouter = router as unknown as {
+    listTeamModelCandidates: NonNullable<ExecuteTeamToolOptions['listModelCandidates']>;
+  };
+  // The Leader's path: the same executeTeamTool entry the MCP bridge and ToolBroker call.
+  const listTeamModels = async (args: Record<string, unknown>) =>
+    (await executeTeamTool({} as TeamCoordinator, 'task-1', 'team_list_models', args, {
+      listModelCandidates: (input) => teamRouter.listTeamModelCandidates(input),
+    })) as Record<string, unknown>;
+  return { query, listTeamModels, probe, listModels };
+}
+
+type TeamPage = {
+  revision: number;
+  total: number;
+  items: ProviderModel[];
+  nextCursor: string | null;
+};
+
+/** Reads every page the way a Leader does: follow nextCursor until it is null. */
+async function listAllTeamModels(
+  listTeamModels: ReturnType<typeof makeRouter>['listTeamModels'],
+  args: Record<string, unknown>,
+): Promise<{ pages: TeamPage[]; items: ProviderModel[] }> {
+  const pages: TeamPage[] = [];
+  let cursor: string | null = null;
+  do {
+    const page = (await listTeamModels({ ...args, cursor })) as unknown as TeamPage;
+    if (!Array.isArray(page.items) || pages.length >= 10)
+      throw new Error(`listing did not complete: ${JSON.stringify(page).slice(0, 300)}`);
+    pages.push(page);
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return { pages, items: pages.flatMap((page) => page.items) };
 }
 
 const listing = {
@@ -163,5 +200,81 @@ describe('#906: models catalog query rebuilds the catalog only for a first page'
     expect(
       listModels.mock.calls.filter(([connection]) => connection.id === stable.id),
     ).toHaveLength(2);
+  });
+});
+
+// Sorts before the stable Connection, so its rows appearing or vanishing shifts every offset.
+const flakyFirst: ProviderConnection = { ...flaky, id: 'aaa:flaky' };
+const modelKey = ({ connectionId, modelId }: ProviderModel) => `${connectionId}/${modelId}`;
+const resultKeys = ['items', 'nextCursor', 'revision', 'total'];
+
+describe('#939: team_list_models rebuilds the catalog only for a first page', () => {
+  it('answers continuation pages without listModels or probe, keeping the result contract', async () => {
+    const { listTeamModels, probe, listModels } = makeRouter();
+
+    const first = await listTeamModels({ connectionIds: [stable.id], limit: 100 });
+    expect(Object.keys(first).sort()).toEqual(resultKeys);
+    expect(first).toMatchObject({ total: 250, nextCursor: 'cursor:100' });
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    const second = await listTeamModels({
+      connectionIds: [stable.id],
+      cursor: first['nextCursor'],
+      limit: 100,
+    });
+    const third = await listTeamModels({
+      connectionIds: [stable.id],
+      cursor: second['nextCursor'],
+      limit: 100,
+    });
+    expect(Object.keys(second).sort()).toEqual(resultKeys);
+    expect(second).toMatchObject({ revision: first['revision'], nextCursor: 'cursor:200' });
+    expect(third).toMatchObject({ revision: first['revision'], nextCursor: null });
+    expect((second['items'] as ProviderModel[])[0]?.modelId).toBe('model-100');
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    // A new first page still sees the current Providers.
+    await listTeamModels({ connectionIds: [stable.id], limit: 100 });
+    expect(probe).toHaveBeenCalledTimes(6);
+    expect(listModels).toHaveBeenCalledTimes(4);
+  });
+
+  it('lists every candidate exactly once while a Provider flickers between refreshes', async () => {
+    const { listTeamModels, listModels } = makeRouter(flakyFirst);
+    // The flaky Provider has answered once already, so the next refresh drops its rows.
+    await listTeamModels({ limit: 1 });
+
+    const { pages, items } = await listAllTeamModels(listTeamModels, { limit: 100 });
+
+    const keys = items.map(modelKey);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(keys).toEqual(models(stable, 250).map(modelKey));
+    expect(pages.map(({ total }) => total)).toEqual([250, 250, 250]);
+    // One refresh for the listing's first page, none for pages 2 and 3.
+    expect(
+      listModels.mock.calls.filter(([connection]) => connection.id === stable.id),
+    ).toHaveLength(2);
+  });
+
+  it('refuses a continuation after another first page changed the catalog, then completes from a new first page', async () => {
+    const { query, listTeamModels } = makeRouter(flakyFirst);
+    const first = await listTeamModels({ limit: 100 });
+    expect(first['total']).toBe(253);
+
+    // The model picker opens in the meantime; its refresh drops the flaky rows.
+    const picker = await query({ ...listing, connectionIds: [], cursor: null, limit: 100 });
+    expect(picker.revision).not.toBe(first['revision']);
+
+    const stale = await listTeamModels({ limit: 100, cursor: first['nextCursor'] });
+    expect(stale).toMatchObject({ ok: false });
+    expect(String(stale['message'])).toContain('cursor null');
+
+    // The new first page refreshes again (the flaky Provider is back); its pages agree with it.
+    const { items } = await listAllTeamModels(listTeamModels, { limit: 100 });
+    expect(items.map(modelKey)).toEqual(
+      [...models(flakyFirst, 3), ...models(stable, 250)].map(modelKey),
+    );
   });
 });
