@@ -33,7 +33,7 @@ explicitly, to **real recordings of the app** (chapters 03–07).
 |---|---|---|---|
 | 00 | `top` | 序章 | the 100-dot swarm (figure), the 実演 6体 → 上限 100体 cards |
 | 01 | `ch-solo` | 一斉 | one AI queues its work vs. up to 100 at once (figure) |
-| 02 | `ch-scale` | 規模 | the swarm fills 1 → 100 with the counter and the 1/6/50/100 tiers, the limit setting, the 「上限100体は 試験で確認」 trust card |
+| 02 | `ch-scale` | 規模 | the swarm fills 1 → 100 with the counter and the 1/6/50/100 tiers, the limit setting, the 「101件目は 順番を待つ」 trust card |
 | 03 | `ch-real` | 実演 | 「ここまでは イメージ図」→「ここから 本物」, 6 of 100 dots lit, the real request |
 | 04 | `ch-team` | チーム | hires, the org chart, cloud vs. on-device AI, assembly |
 | 05 | `ch-together` | 同時 | 6 at once, the timeline chart |
@@ -174,11 +174,18 @@ Honesty rules for 「最大100体」:
   (or its short form) on that screen — 00, 01 (lime beat), 02 (beats A, B and the
   trust card), 03 (the 6-of-100 beat), 始動, and on `/ai-team/` the hero, card 02
   and `#scale` — and every 100 figure carries `.tag-fig`.
-- The end of 02 states it plainly: 「上限100体は 試験で確認」 — an automated test
+- The end of 02 states it plainly: 「101件目は 順番を待つ」 — an automated test
   with mock AIs, worded exactly as far as the test goes (see the facts below:
   101 assignments, 100 finish, the 101st waits instead of failing, because of the
   per-minute start pace). Never 「100体が同時に動いた」 or 「確認済み」 for 100
-  concurrent runs; there is no video of 100 real AIs yet.
+  concurrent runs; the card says 100 running at once is not tested yet, and there
+  is no video of 100 real AIs yet. (Earlier title 「上限100体は 試験で確認」 was
+  dropped in review: it read as if the 100 cap itself had been tested.)
+- API-key connections are limited to 2 requests at a time per connection by
+  default (`provider-connection-service.ts` `maxConcurrentRequests: 2`; the
+  settings screen can only lower it, `persistence.ts`). Built-in CLIs (Codex,
+  Claude Code) and `bypass` skip that limit (`connection-admission.ts`). The hero
+  note, the 02 trust card and `/ai-team/` say so wherever 100 is the headline.
 - The timeline chart, the stats and the full-video copy never mix in 100.
 - **Real demo numbers (6, 15, 1, 9, 36:32) appear only in 03–07**, whose chapter
   tags carry `実演 REAL` and whose player label says 実演. 03 marks the border
@@ -218,8 +225,8 @@ Facts behind the copy (checked in this repository on 2026-10-24, branch
   concurrency limit (the test's own comment: the Team "may run all at once"), and
   no test asserts 100 executions active at the same time
   (`team-execution-scheduler.test.ts` asserts the concurrency cap only at 50 and
-  8: `activeCount` 50 / 8 with the rest queued). So the site says 「上限100体は
-  試験で確認」 with that exact description, never that 100 ran at once.
+  8: `activeCount` 50 / 8 with the rest queued). So the site says 「101件目は
+  順番を待つ」 with that exact description, never that 100 ran at once.
 - 「雇える数に上限なし」 is **not** claimed: hiring reserves spawn slots and
   budget, which can refuse a hire.
 - Re-checked for `/ai-team/` (same branch): `admitAssignment` still accepts only

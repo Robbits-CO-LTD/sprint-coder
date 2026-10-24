@@ -29,9 +29,9 @@
     <meta name="twitter:title" content="AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める" />
     <meta name="twitter:description" content="リーダーのAIが分け、部長と担当のAIが最大100体まで同時に進め、結果はひとつにまとまって戻る。実演は6体。" />
     <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
-    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261025" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/styles.css?v=20261025" />
-    <script src="/film.js?v=20261025" defer></script>
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261026" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261026" />
+    <script src="/film.js?v=20261026" defer></script>
 
     <script type="application/ld+json">
       {
@@ -277,7 +277,7 @@
             上限100の設定は、mock runtime を使った unit test で検証しています。上限を100にした設定で101件の仕事を割り当て、100件が完了し、101件目は拒否されずに queued で待つことを確かめています。ただし、この待ちは1分あたり100件という開始のペースによるもので、100件が同時に実行中であること（同時実行数100）そのものはまだテストしていません。同時実行数の上限で待つことは、50と8の設定でテストしています。実際のproviderで100体を同時に動かす検証もまだで、2026-10-20 の実演での同時実行のピークは6です。
           </p>
           <p>
-            ネットのAIは、接続ごとの同時リクエスト数の設定と、提供元の rate limit・利用料の影響を受けます。このパソコンの中のAIは、パソコンの性能に左右されます。実演では、このパソコンの中のAIの2体が同時に仕事を受け、中では1体ずつ順番に処理しました。ネットのAIとこのパソコンの中のAIが同時に動いた時間は合計74秒です。
+            ネットのAIは、接続ごとの同時リクエスト数の設定（APIキーで使う接続は1接続あたり同時2件が標準。Codex・Claude Code 経由のAIはこの制限を受けません）と、提供元の rate limit・利用料の影響を受けます。このパソコンの中のAIは、パソコンの性能に左右されます。実演では、このパソコンの中のAIの2体が同時に仕事を受け、中では1体ずつ順番に処理しました。ネットのAIとこのパソコンの中のAIが同時に動いた時間は合計74秒です。
           </p>
 
           <h2>進行をブラックボックスにしない</h2>

@@ -244,7 +244,7 @@
     var goal = +intro.dataset.countIntro;
     intro.textContent = '000';
     requestAnimationFrame(function tick(ts) {
-      var k = clamp((ts - 700) / 1000, 0, 1);
+      var k = userStop ? 1 : clamp((ts - 700) / 1000, 0, 1);
       var v = k >= 1 ? goal : Math.round(goal * (1 - Math.pow(2, -10 * k)));
       intro.textContent = String(v).padStart(3, '0');
       if (k < 1) requestAnimationFrame(tick);
