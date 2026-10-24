@@ -151,6 +151,11 @@ function instrumentedHost(): string {
     '  // Existing V2 start before consumer focus preparation.',
     '  // Existing V2 start before consumer focus preparation.\n  if (!Sc940ResumeSourcePin(session, before)) { *reason = "diagnostic_source_pin"; return false; }',
   );
+  resume = replaceOnce(
+    resume,
+    '  const auto begin_focus = [&] {',
+    '  Sc940ResumePrepareFocus(input.window);\n  const auto begin_focus = [&] {',
+  );
   resume = replaceOnce(resume, 'ResolveWindowsExplicitResumeTarget(', 'Sc940ResumeResolve(');
   resume = replaceOnce(resume, 'ResolveWindowsSessionRefocusTarget(', 'Sc940ResumeRefocus(');
   resume = replaceOnce(
@@ -383,6 +388,7 @@ void Sc940ResumeCancelAttempt();
 void Sc940ResumeInvalidateTicket(const std::string &session_key);
 bool Sc940ResumeResolve(WindowsSession *session, HWND *window, std::string *reason);
 bool Sc940ResumeRefocus(const WindowsSession &session, HWND *window, std::string *reason);
+void Sc940ResumePrepareFocus(HWND window);
 BOOL Sc940ResumeShow(HWND window, int command);
 BOOL Sc940ResumeForeground(HWND window);
 std::string Sc940ResumeBaseline(const WindowsSession &session, const std::string &metadata);
@@ -448,6 +454,7 @@ std::atomic<bool> hold_start_epilogue{false};
 std::atomic<bool> resume_diagnostic_active{false};
 std::atomic<unsigned> resume_resolve_attempts{0}, resume_focus_attempts{0};
 std::atomic<bool> resume_no_focus{true}, resume_hold_focus_unit{false};
+std::atomic<bool> resume_focus_setup_minimized{false}, resume_minimized_client_bounds{false};
 std::atomic<bool> resume_hold_before{false}, resume_hold_after{false}, resume_hold_context{false};
 std::atomic<bool> resume_fail_after_read{false};
 std::atomic<unsigned> resume_before_calls{0}, resume_before_successes{0};
@@ -782,6 +789,20 @@ bool Sc940ResumeRefocus(const WindowsSession &session, HWND *window, std::string
   if (!resume_no_focus.load()) return ResolveWindowsSessionRefocusTarget(session, window, reason);
   *reason = "diagnostic_resume_resolve_forbidden";
   return false;
+}
+void Sc940ResumePrepareFocus(HWND window) {
+  if (!resume_diagnostic_active.load() || !resume_hold_focus_unit.load()) return;
+  RECT before{};
+  Require(!resume_no_focus.load() && window == fixture_windows[0] && !IsIconic(window) &&
+              GetForegroundWindow() != window && ClientBoundsPhysical(window, &before),
+          "resume_owned_focus_setup_after_validation");
+  // List and the real pre-focus geometry/resolver checks need normal client bounds. Model an
+  // owned target minimizing after those checks, so the real restore and foreground units both apply.
+  ShowWindow(window, SW_MINIMIZE);
+  Require(IsIconic(window) && GetForegroundWindow() != window, "resume_owned_target_minimized");
+  RECT minimized{};
+  resume_minimized_client_bounds.store(ClientBoundsPhysical(window, &minimized));
+  resume_focus_setup_minimized.store(true);
 }
 BOOL Sc940ResumeShow(HWND window, int command) {
   if (!resume_diagnostic_active.load()) return ShowWindow(window, command);
@@ -2107,7 +2128,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
   bool late_rejected = false;
   try {
     run.AttachOwnedSibling(pid, window, created, fixture_path);
-    if (live) Require(focus_stop ? (focus_control_ready && IsIconic(window) && GetForegroundWindow() != window)
+    if (live) Require(focus_stop ? (focus_control_ready && !IsIconic(window) && GetForegroundWindow() != window)
                                 : GetForegroundWindow() == window, "resume_environment_foreground_required");
     run.StartPipe(false, false);
     run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
@@ -2314,7 +2335,7 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
                 resume_before_calls.load() == resume_before_jobs.load() && resume_after_reads.load() == resume_after_jobs.load() &&
                 resume_workers.load() == resume_before_jobs.load() + resume_after_jobs.load() &&
                 (!live ? resume_resolve_attempts.load() == 0 && resume_focus_attempts.load() == 0 : true) &&
-                (!focus_stop || resume_focus_attempts.load() == 1) && !wrong_measurement.load() && !gate_timed_out.load(),
+                (!focus_stop || (resume_focus_attempts.load() == 1 && resume_focus_setup_minimized.load())) && !wrong_measurement.load() && !gate_timed_out.load(),
             "resume_phases_threads_and_no_unexpected_input");
     const unsigned workers = resume_workers.load();
     run.Cleanup();
@@ -2329,6 +2350,8 @@ int DiagnoseResume(std::wstring_view scenario, DWORD pid, HWND window, const std
               << ",\"resolveAttempts\":" << resume_resolve_attempts.load() << ",\"focusApiAttempts\":" << resume_focus_attempts.load()
               << ",\"inputAttempts\":" << expected_input_attempts << ",\"foregroundRequired\":" << (live ? "true" : "false")
               << ",\"healthyResumeRefocusVerified\":" << (normal ? "true" : "false")
+              << ",\"focusSetupMinimizedAfterValidation\":" << (resume_focus_setup_minimized.load() ? "true" : "false")
+              << ",\"minimizedClientBoundsAvailable\":" << (resume_minimized_client_bounds.load() ? "true" : "false")
               << ",\"publicStartOrGrantVerified\":false,\"ticketLifecycleUnitFixture\":" << (repeat ? "true" : "false")
               << ",\"preflightOrDispatchVerified\":false,\"seedIsDiagnostic\":true,\"childExited\":true"
               << ",\"threadsJoined\":true,\"workerIdle\":true,\"watchdogFired\":false}\n";
@@ -2405,10 +2428,6 @@ int CoordinateStart(std::wstring_view scenario, const std::wstring &fixture_path
     Require(search.found != nullptr && !IsProcessElevated(fixture.dwProcessId), "start_gui_fixture_window");
     bool focus_control_ready = true;
     if (scenario == L"start-ready-close" || scenario == L"resume-live-focus-stop") {
-      if (scenario == L"resume-live-focus-stop") {
-        ShowWindow(search.found, SW_MINIMIZE);
-        Require(IsIconic(search.found), "resume_owned_target_minimized");
-      }
       // A second owned GUI window gives begin_focus real work to refuse; no synthetic key is sent.
       PROCESS_INFORMATION foreground{};
       command = L"\"" + fixture_path + L"\"";
@@ -3066,6 +3085,7 @@ describe('Windows target I/O RCA seam source', () => {
       generated.split('!Sc940ResumeOpen(work, target_process.value, &current_executable)'),
     ).toHaveLength(2);
     expect(generated.split('!Sc940ResumeResolve(')).toHaveLength(2);
+    expect(generated.split('Sc940ResumePrepareFocus(input.window);')).toHaveLength(2);
     expect(generated.split('Sc940ResumeShow(')).toHaveLength(3);
     expect(generated.split('Sc940ResumeForeground(refocus_window);')).toHaveLength(2);
     expect(generated.split('operation == "sc940_resume_baseline"')).toHaveLength(2);
@@ -3298,6 +3318,8 @@ describe.skipIf(
               inputAttempts: scenario === 'resume-live-focus-stop' ? 1 : 0,
               foregroundRequired: scenario.startsWith('resume-live-'),
               healthyResumeRefocusVerified: scenario === 'resume-live-normal',
+              focusSetupMinimizedAfterValidation: scenario === 'resume-live-focus-stop',
+              minimizedClientBoundsAvailable: expect.any(Boolean),
               publicStartOrGrantVerified: false,
               ticketLifecycleUnitFixture: scenario === 'resume-components',
               preflightOrDispatchVerified: false,
