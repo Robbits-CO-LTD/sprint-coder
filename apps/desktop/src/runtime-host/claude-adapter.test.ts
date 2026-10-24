@@ -58,6 +58,7 @@ const temporaryRoots: string[] = [];
 
 afterEach(async () => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
   vi.unstubAllEnvs();
   await Promise.all(
     temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -71,27 +72,56 @@ describe('Claude runtime probe', () => {
       const root = await mkdtemp(join(tmpdir(), 'claude-managed-wait-'));
       temporaryRoots.push(root);
       const script = join(root, 'claude');
+      const releaseTool = join(root, 'release-tool');
       await writeFile(
         script,
         [
           `#!${process.execPath}`,
+          "const { existsSync } = require('node:fs');",
           "const send = value => process.stdout.write(JSON.stringify(value) + '\\n');",
+          'const lifetime = setTimeout(() => process.exit(2), 15_000);',
           'process.stdin.resume();',
           "process.stdin.on('end', () => {",
           "send({type: 'system', subtype: 'init', tools: ['mcp__team__exec_command'], mcp_servers: [{name: 'team', status: 'connected'}]});",
           "send({type: 'assistant', message: {content: [{type: 'tool_use', id: 'call-1', name: 'mcp__team__exec_command'}]}});",
-          'setTimeout(() => {',
+          'const finishWhenReleased = () => {',
+          `if (!existsSync(${JSON.stringify(releaseTool)})) return setTimeout(finishWhenReleased, 5);`,
           "send({type: 'user', message: {content: [{type: 'tool_result', tool_use_id: 'call-1', content: 'ok'}]}});",
           "send({type: 'result', is_error: false});",
-          '}, 120);',
+          'clearTimeout(lifetime);',
+          '};',
+          'setTimeout(finishWhenReleased, 120);',
           '});',
         ].join('\n'),
         { mode: 0o700 },
       );
       const realSetTimeout = globalThis.setTimeout;
-      vi.spyOn(globalThis, 'setTimeout').mockImplementation((callback, ms, ...args) =>
-        realSetTimeout(callback, ms === 90_000 ? 50 : ms, ...args),
-      );
+      const realClearTimeout = globalThis.clearTimeout;
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      const clockSetTimeout = globalThis.setTimeout;
+      const clockClearTimeout = globalThis.clearTimeout;
+      const idleTimers = new Set<unknown>();
+      // Only the adapter's idle deadline is virtual; real process-stop polling must keep running.
+      const schedule = vi
+        .spyOn(globalThis, 'setTimeout')
+        .mockImplementation((callback, ms, ...args) => {
+          if (ms !== 90_000) return realSetTimeout(callback, ms, ...args);
+          const timer = clockSetTimeout(callback, 50, ...args);
+          idleTimers.add(timer);
+          return timer;
+        });
+      const clear = vi.spyOn(globalThis, 'clearTimeout').mockImplementation((timer) => {
+        if (idleTimers.delete(timer)) clockClearTimeout(timer);
+        else realClearTimeout(timer);
+      });
+      let clockRestored = false;
+      const restoreClock = () => {
+        if (clockRestored) return;
+        clockRestored = true;
+        schedule.mockRestore();
+        clear.mockRestore();
+        vi.useRealTimers();
+      };
       const adapter = new ClaudeRuntimeAdapter(2_000);
       adapter.setCliResolution({
         source: 'explicit',
@@ -102,7 +132,11 @@ describe('Claude runtime probe', () => {
       });
       const failures: unknown[] = [];
       const events: unknown[] = [];
-      await new Promise<void>((resolve) =>
+      let toolStarted: () => void = () => undefined;
+      const managedWait = new Promise<void>((resolve) => {
+        toolStarted = resolve;
+      });
+      const exited = new Promise<void>((resolve) =>
         adapter.start(
           'quiet-tool',
           'request',
@@ -110,7 +144,10 @@ describe('Claude runtime probe', () => {
           () => undefined,
           root,
           'auto',
-          (event) => events.push(event),
+          (event) => {
+            events.push(event);
+            if (event.type === 'operation' && event.phase === 'tool_call_start') toolStarted();
+          },
           (error) => failures.push(error),
           () => resolve(),
           {
@@ -124,8 +161,27 @@ describe('Claude runtime probe', () => {
           },
         ),
       );
-      expect(failures).toEqual([]);
-      expect(events).toContainEqual({ type: 'completed' });
+      try {
+        await Promise.race([
+          managedWait,
+          exited.then(() => {
+            throw new Error('Fixture exited before its managed tool wait');
+          }),
+        ]);
+        // The result is gated so even a delayed parent observes the full quiet-wait interval.
+        vi.advanceTimersByTime(120);
+        expect(failures).toEqual([]);
+        expect(events).not.toContainEqual({ type: 'completed' });
+        restoreClock();
+        await writeFile(releaseTool, 'release');
+        await exited;
+        expect(failures).toEqual([]);
+        expect(events).toContainEqual({ type: 'completed' });
+      } finally {
+        restoreClock();
+        await adapter.cancel('quiet-tool');
+        await exited.catch(() => undefined);
+      }
     },
   );
 

@@ -3962,10 +3962,69 @@ bool WindowsV2FactsWithinContract(const sprint_coder::computer_use::TargetFacts 
   return true;
 }
 
+// A label with the white space JavaScript's String.prototype.trim removes taken off both ends:
+// WhiteSpace (U+0009, U+000B, U+000C, U+0020, U+00A0, U+FEFF and every Zs: U+1680, U+2000-U+200A,
+// U+202F, U+205F, U+3000) and LineTerminator (U+000A, U+000D, U+2028, U+2029). Main's label schema
+// trims the same set before it asks for a non-empty value. Bytes that are not well-formed UTF-8 end
+// the trimming where they are (they are not white space).
+std::string WindowsV2LabelTrimmed(std::string_view text) {
+  const auto is_space = [](std::uint32_t code) {
+    return code == 0x09 || code == 0x0a || code == 0x0b || code == 0x0c || code == 0x0d ||
+           code == 0x20 || code == 0xa0 || code == 0x1680 || (code >= 0x2000 && code <= 0x200a) ||
+           code == 0x2028 || code == 0x2029 || code == 0x202f || code == 0x205f ||
+           code == 0x3000 || code == 0xfeff;
+  };
+  // The code point at "at" and its length, or length 0 when it is not well formed.
+  const auto decode = [&text](std::size_t at, std::size_t *length) -> std::uint32_t {
+    const auto byte = [&text](std::size_t index) {
+      return static_cast<std::uint8_t>(text[index]);
+    };
+    const std::uint8_t first = byte(at);
+    std::size_t width = first < 0x80 ? 1 : (first & 0xe0) == 0xc0 ? 2 : (first & 0xf0) == 0xe0 ? 3
+                                                                    : (first & 0xf8) == 0xf0 ? 4 : 0;
+    *length = 0;
+    if (width == 0 || at + width > text.size()) return 0;
+    std::uint32_t code = width == 1 ? first : first & (0xff >> (width + 1));
+    for (std::size_t index = 1; index < width; ++index) {
+      if ((byte(at + index) & 0xc0) != 0x80) return 0;
+      code = (code << 6) | (byte(at + index) & 0x3f);
+    }
+    *length = width;
+    return code;
+  };
+  std::size_t begin = 0;
+  while (begin < text.size()) {
+    std::size_t length = 0;
+    const std::uint32_t code = decode(begin, &length);
+    if (length == 0 || !is_space(code)) break;
+    begin += length;
+  }
+  std::size_t end = text.size();
+  while (end > begin) {
+    // The start of the last code point before "end".
+    std::size_t start = end - 1;
+    while (start > begin && (static_cast<std::uint8_t>(text[start]) & 0xc0) == 0x80) --start;
+    std::size_t length = 0;
+    const std::uint32_t code = decode(start, &length);
+    if (length == 0 || start + length != end || !is_space(code)) break;
+    end = start;
+  }
+  return std::string(text.substr(begin, end - begin));
+}
+
+// The display name a v2 row carries: the V1 one trimmed as Main trims it, "Application" when nothing
+// is left (an executable named "<U+3000>.exe" or " .exe"). Only the v2 row; the V1 identity JSON is
+// unchanged.
+std::string WindowsV2DisplayName(std::string_view display_name) {
+  std::string trimmed = WindowsV2LabelTrimmed(display_name);
+  return trimmed.empty() ? std::string("Application") : trimmed;
+}
+
 // The identity JSON of a v2 row: the V1 fields with the mode of the window the row is for, or the
 // package's.
 std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_view window_mode) {
-  const WindowsExecutableIdentity &identity = judged.executable.identity;
+  WindowsExecutableIdentity identity = judged.executable.identity;
+  identity.display_name = WindowsV2DisplayName(identity.display_name);
   const std::string mode(window_mode);
   if (judged.package.has_value())
     return WindowsPackageIdentityJson(identity, *judged.package, mode);
@@ -3976,6 +4035,57 @@ std::string WindowsV2IdentityJson(const WindowsV2Judgement &judged, std::string_
          ",\"packageFamilyName\":null,\"appUserModelId\":null,\"displayName\":\"" +
          JsonEscape(identity.display_name) + "\",\"policyLanguage\":\"" +
          identity.policy_language + "\",\"maximumMode\":\"" + JsonEscape(mode) + "\"}";
+}
+
+// The window half of a selectable row: what ListWindowsTargets read of the window itself.
+struct WindowsV2RowWindow {
+  std::uint64_t handle = 0;
+  std::uint32_t pid = 0;
+  std::string title;  // UTF-8, at most 256 bytes, not empty
+  RECT client{};
+  RECT screen{};
+};
+
+// Whether the identity strings a row carries are what Main's schema takes: the executable path of 1
+// to 4096 characters and, for a package, its relative path within the same bound. (The display name
+// is trimmed and never empty, the digests are fixed-width hex, the family is checked when it is made.)
+bool WindowsV2IdentityWithinContract(const WindowsV2Judgement &judged) {
+  const std::string &path = judged.executable.identity.path_utf8;
+  if (path.empty() || path.size() > 4'096) return false;
+  return !judged.package.has_value() ||
+         (!judged.package->relative_path.empty() && judged.package->relative_path.size() <= 4'096);
+}
+
+std::string WindowsV2RefusedRow(sprint_coder::computer_use::TargetVerdictKind kind);
+
+// One selectable row, as ListWindowsTargets writes it, or the unresolvable row when anything in it
+// is outside what Main's schema takes (a fact string or an identity string): that window alone,
+// never cut, and never with facts or identity.
+std::string WindowsV2SelectableRow(const WindowsV2Judgement &judgement,
+                                   const sprint_coder::computer_use::TargetVerdict &verdict,
+                                   const sprint_coder::computer_use::TargetFacts &facts,
+                                   const WindowsV2RowWindow &window) {
+  using namespace sprint_coder::computer_use;
+  if (!WindowsV2FactsWithinContract(facts) || !WindowsV2IdentityWithinContract(judgement) ||
+      window.title.empty() || window.title.size() > 256)
+    return WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable);
+  const std::string window_identity =
+      Sha256String("computer-window-identity-v1\n" + judgement.app_identity + "\n" +
+                   judgement.process_start + "\n" + std::to_string(window.handle));
+  return "{\"kind\":\"" + std::string(TargetVerdictKindName(verdict.kind)) +
+         "\",\"windowId\":\"" + std::to_string(window.handle) + "\",\"pid\":" +
+         std::to_string(window.pid) + ",\"appIdentityDigest\":\"" + judgement.app_identity +
+         "\",\"windowIdentityDigest\":\"" + window_identity + "\",\"executableDigest\":\"" +
+         judgement.executable.identity.executable_digest + "\",\"title\":\"" +
+         JsonEscape(window.title) + "\",\"bounds\":{\"x\":" + std::to_string(window.client.left) +
+         ",\"y\":" + std::to_string(window.client.top) +
+         ",\"width\":" + std::to_string(window.client.right - window.client.left) +
+         ",\"height\":" + std::to_string(window.client.bottom - window.client.top) +
+         "},\"screenBounds\":" + RectJson(window.screen) +
+         ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
+         std::string(verdict.maximum_mode) + "\",\"identity\":" +
+         WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
+         ",\"facts\":" + WindowsV2TargetFactsJson(facts) + "}";
 }
 
 // The refused rows: the kind only.
@@ -4144,12 +4254,6 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
                                                : TargetVerdictKind::kDenied));
         continue;
       }
-      // A fact longer than Main's schema takes: this window alone is unresolvable (no facts, no
-      // identity), and the rest of the list stands.
-      if (!WindowsV2FactsWithinContract(window_facts)) {
-        rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
-        continue;
-      }
       if (IsWindowEnabled(window) != TRUE || !ClientBoundsPhysical(window, &client) ||
           !ScreenBoundsPhysicalForWindow(window, &screen)) {
         rows.push_back(WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
@@ -4163,25 +4267,15 @@ bool ListWindowsTargets(std::string *response, std::string *reason) {
           256);
       if (title_utf8.empty())
         title_utf8 = "Application window";
-      const auto handle_value = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window));
-      const std::string window_identity =
-          Sha256String("computer-window-identity-v1\n" + judgement.app_identity + "\n" +
-                       judgement.process_start + "\n" + std::to_string(handle_value));
-      rows.push_back(
-          "{\"kind\":\"" + std::string(TargetVerdictKindName(verdict.kind)) +
-          "\",\"windowId\":\"" + std::to_string(handle_value) + "\",\"pid\":" +
-          std::to_string(owner) + ",\"appIdentityDigest\":\"" + judgement.app_identity +
-          "\",\"windowIdentityDigest\":\"" + window_identity + "\",\"executableDigest\":\"" +
-          judgement.executable.identity.executable_digest + "\",\"title\":\"" +
-          JsonEscape(title_utf8) + "\",\"bounds\":{\"x\":" + std::to_string(client.left) +
-          ",\"y\":" + std::to_string(client.top) +
-          ",\"width\":" + std::to_string(client.right - client.left) +
-          ",\"height\":" + std::to_string(client.bottom - client.top) +
-          "},\"screenBounds\":" + RectJson(screen) +
-          ",\"boundsUnit\":\"physical_px\",\"maximumMode\":\"" +
-          std::string(verdict.maximum_mode) + "\",\"identity\":" + WindowsV2IdentityJson(judgement, verdict.maximum_mode) +
-          ",\"facts\":" + WindowsV2TargetFactsJson(window_facts) +
-          "}");
+      // The row: built by WindowsV2SelectableRow, which sends this window alone as unresolvable when a
+      // fact or an identity string is outside what Main takes; the rest of the list stands.
+      WindowsV2RowWindow row_window;
+      row_window.handle = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(window));
+      row_window.pid = owner;
+      row_window.title = std::move(title_utf8);
+      row_window.client = client;
+      row_window.screen = screen;
+      rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));
     }
     return FinishWindowsV2ListResponse(
         WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
