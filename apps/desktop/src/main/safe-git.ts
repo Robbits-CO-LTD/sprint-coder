@@ -8,14 +8,25 @@ export type SafeGitResult = Readonly<{ stdout: string; stderr: string }>;
 export type SafeGitExec = (
   file: string,
   args: readonly string[],
-  options: Readonly<{ env: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }>,
+  options: Readonly<{
+    env: NodeJS.ProcessEnv;
+    timeout?: number;
+    maxBuffer?: number;
+    input?: string;
+  }>,
 ) => Promise<SafeGitResult>;
 
 type SafeGitOptions = Readonly<{
   timeout: number;
   maxBuffer?: number;
   env?: NodeJS.ProcessEnv;
+  input?: string;
 }>;
+
+export const MAX_SAFE_GIT_INPUT_BYTES = 1_048_576;
+const INPUT_LIMIT_ERROR = 'Git input exceeds the maximum byte length';
+const boundedInput = (input: string | undefined) =>
+  input === undefined || Buffer.byteLength(input, 'utf8') <= MAX_SAFE_GIT_INPUT_BYTES;
 
 const FILTER_CONFIG_KEY = /^filter\.(.+)\.(?:clean|smudge|process|required)$/iu;
 const MERGE_DRIVER_CONFIG_KEY = /^merge\.(.+)\.driver$/iu;
@@ -145,6 +156,7 @@ export async function safeGitExec(
   command: readonly string[],
   options: SafeGitOptions,
 ): Promise<SafeGitResult> {
+  if (!boundedInput(options.input)) throw new Error(INPUT_LIMIT_ERROR);
   const env = safeGitEnvironment(options.env);
   const config = await exec('git', configProbeArgs(cwd), { env, timeout: options.timeout });
   const args = safeGitInvocationArgs(cwd, command, config.stdout);
@@ -165,6 +177,7 @@ export async function safeGitExec(
       timeout: options.timeout,
       // Only a caller that reads a long listing widens the default buffer.
       ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
+      ...(options.input === undefined ? {} : { input: options.input }),
     });
   } finally {
     isolated.dispose();
@@ -176,6 +189,7 @@ export function safeGitExecFileSync(
   command: readonly string[],
   options: SafeGitOptions,
 ): string {
+  if (!boundedInput(options.input)) throw new Error(INPUT_LIMIT_ERROR);
   const env = safeGitEnvironment(options.env);
   const common = {
     encoding: 'utf8' as const,
@@ -203,7 +217,7 @@ export function safeGitExecFileSync(
   const isolated = createAutocrlfEnvironment(env, autocrlf);
   if (isolated === null) throw new Error(AUTOCRLF_CONFIG_ERROR);
   try {
-    return execFileSync('git', args, { ...common, env: isolated.env });
+    return execFileSync('git', args, { ...common, env: isolated.env, input: options.input });
   } finally {
     isolated.dispose();
   }
@@ -214,6 +228,7 @@ export function safeGitSpawnSync(
   command: readonly string[],
   options: SafeGitOptions,
 ): SpawnSyncReturns<string> | null {
+  if (!boundedInput(options.input)) return null;
   const env = safeGitEnvironment(options.env);
   const common = {
     encoding: 'utf8' as const,
@@ -236,35 +251,75 @@ export function safeGitSpawnSync(
   const isolated = createAutocrlfEnvironment(env, autocrlf);
   if (isolated === null) return null;
   try {
-    return spawnSync('git', args, { ...common, env: isolated.env });
+    return spawnSync('git', args, { ...common, env: isolated.env, input: options.input });
   } finally {
     isolated.dispose();
   }
 }
+
+/** Process adapter for already guarded invocations; both async callers share stdin ownership. */
+export const gitExecFile: SafeGitExec = (file, args, invocationOptions) =>
+  new Promise((resolve, reject) => {
+    let inputError: Error | null = null;
+    let inputFinished = invocationOptions.input === undefined;
+    let completed: { error: Error | null; stdout: string; stderr: string } | undefined;
+    let settled = false;
+    const finish = () => {
+      if (settled || !inputFinished || completed === undefined) return;
+      settled = true;
+      const error = completed.error ?? inputError;
+      if (error !== null) reject(error);
+      else resolve({ stdout: completed.stdout, stderr: completed.stderr });
+    };
+    const child = execFile(
+      file,
+      args as string[],
+      {
+        env: invocationOptions.env,
+        timeout: invocationOptions.timeout,
+        ...(invocationOptions.maxBuffer === undefined
+          ? {}
+          : { maxBuffer: invocationOptions.maxBuffer }),
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        completed = { error, stdout: stdout.toString(), stderr: stderr.toString() };
+        finish();
+      },
+    );
+    if (invocationOptions.input !== undefined) {
+      const failInput = (error: Error) => {
+        inputError ??= error;
+        inputFinished = true;
+        if (!child.killed) child.kill();
+        // The execFile callback owns process completion. Do not dispose the temporary
+        // config or start fallback while the child is still using its input/config.
+        finish();
+      };
+      if (child.stdin === null) failInput(new Error('Unable to send Git input'));
+      else {
+        child.stdin.on('error', failInput);
+        try {
+          child.stdin.end(invocationOptions.input, (error?: Error | null) => {
+            if (error) failInput(error);
+            else {
+              inputFinished = true;
+              finish();
+            }
+          });
+        } catch (error) {
+          failInput(error instanceof Error ? error : new Error('Unable to send Git input'));
+        }
+      }
+    }
+  });
 
 export function safeGitExecFile(
   cwd: string,
   command: readonly string[],
   options: SafeGitOptions,
 ): Promise<string | null> {
-  const exec: SafeGitExec = (file, args, invocationOptions) =>
-    new Promise((resolve, reject) => {
-      execFile(
-        file,
-        args as string[],
-        {
-          env: invocationOptions.env,
-          timeout: invocationOptions.timeout,
-          maxBuffer: invocationOptions.maxBuffer,
-          windowsHide: true,
-        },
-        (error, stdout, stderr) => {
-          if (error !== null) reject(error);
-          else resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
-        },
-      );
-    });
-  return safeGitExec(exec, cwd, command, options).then(
+  return safeGitExec(gitExecFile, cwd, command, options).then(
     ({ stdout }) => stdout,
     () => null,
   );
