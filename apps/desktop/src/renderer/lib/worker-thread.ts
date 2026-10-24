@@ -4,6 +4,12 @@ import type {
   WorkerActivityEntry,
   WorkerSummary,
 } from '../types/sprint-coder';
+import {
+  executionWorkPhase,
+  isWaitingExecutionState,
+  workerStatusLabel,
+  workerWorkPhase,
+} from './team-execution-display';
 
 // A Worker card reads as a read-only conversation, in the manner of a T3 Code / Codex thread: the
 // Leader's request, then the Worker's steps (tool calls, file edits), then its report back. These
@@ -76,7 +82,7 @@ export function executionNeedsAttention(execution: TeamExecutionSummary | null):
     if (isolation.phase === 'waiting_integration' || isolation.phase === 'quarantined') return true;
   }
   return (
-    execution.state === 'waiting_resume' ||
+    (execution.state === 'waiting_resume' && executionWorkPhase(execution) !== 'integrating') ||
     execution.state === 'waiting_rate_limit' ||
     execution.state === 'waiting_verification' ||
     execution.state === 'queued' ||
@@ -206,7 +212,17 @@ function glanceState(worker: GlanceWorker): string {
 export function workerGlance(
   worker: GlanceWorker,
   thread: readonly WorkerThreadItem[],
+  execution: TeamExecutionSummary | null = null,
 ): WorkerGlance {
+  const phase = workerWorkPhase(worker, execution);
+  if (
+    execution !== null &&
+    !['done', 'failed', 'stopped'].includes(worker.state) &&
+    phase !== 'working' &&
+    (phase !== null || worker.state === 'busy' || isWaitingExecutionState(execution.state))
+  ) {
+    return { state: workerStatusLabel(worker, execution), line: '' };
+  }
   const state = glanceState(worker);
   const busy = worker.state === 'busy';
   if (busy && worker.currentActivity !== null)

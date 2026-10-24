@@ -16,6 +16,7 @@ import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import { gitExecFile } from './safe-git';
 import {
   assertShardReport,
   electronBridgeShardIndices,
@@ -4690,12 +4691,7 @@ if (runsWithElectronAbi)
           // Configuration probes that run before each command are not counted.
           if (counting && args[args.indexOf('-C') + 2] !== 'config')
             commands.push(args[args.indexOf('-C') + 2] ?? '');
-          const result = await promisify(execFile)(file, [...args], {
-            env: options.env,
-            timeout: options.timeout,
-            windowsHide: true,
-          });
-          return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+          return gitExecFile(file, args, options);
         },
       });
       // One execution runs and the others stay queued, so only the assignments call Git.

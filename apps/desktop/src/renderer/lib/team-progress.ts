@@ -1,8 +1,37 @@
 import type { TeamDetail } from '../types/sprint-coder';
+import {
+  latestExecutionForWorker,
+  workerWorkPhase,
+  WORK_PHASE_LABELS,
+  type WorkerWorkPhase,
+} from './team-execution-display';
 
 export function currentTeamWorkerCount(detail: TeamDetail): number {
   return detail.workers.filter(({ kind, state }) => kind === 'worker' && state !== 'stopped')
     .length;
+}
+
+export function teamWorkPhaseCounts(detail: TeamDetail): Record<WorkerWorkPhase, number> {
+  const counts = { working: 0, waiting_integration: 0, integrating: 0, integration_unknown: 0 };
+  const seen = new Set<string>();
+  for (const worker of detail.workers) {
+    if (worker.kind !== 'worker' || worker.state === 'stopped' || seen.has(worker.id)) continue;
+    seen.add(worker.id);
+    const phase = workerWorkPhase(worker, latestExecutionForWorker(detail.executions, worker.id));
+    if (phase !== null) counts[phase] += 1;
+  }
+  return counts;
+}
+
+export function teamWorkPhaseSummary(detail: TeamDetail): string | null {
+  return formatWorkPhaseCounts(teamWorkPhaseCounts(detail));
+}
+
+function formatWorkPhaseCounts(counts: Record<WorkerWorkPhase, number>): string | null {
+  if (Object.values(counts).every((count) => count === 0)) return null;
+  const phases: WorkerWorkPhase[] = ['working', 'waiting_integration', 'integrating'];
+  if (counts.integration_unknown > 0) phases.push('integration_unknown');
+  return phases.map((phase) => `${WORK_PHASE_LABELS[phase]} ${counts[phase]}人`).join(' · ');
 }
 
 export type TeamRunProgress = {
@@ -25,7 +54,14 @@ export function teamRunProgress(detail: TeamDetail | null | undefined): TeamRunP
     };
   }
 
-  const busy = workers.find(({ state }) => state === 'busy');
+  const phases = teamWorkPhaseCounts(detail);
+  if (phases.waiting_integration + phases.integrating + phases.integration_unknown > 0) {
+    return { label: 'Team実行中', detail: formatWorkPhaseCounts(phases)! };
+  }
+  const busy = workers.find(
+    (worker) =>
+      workerWorkPhase(worker, latestExecutionForWorker(detail.executions, worker.id)) === 'working',
+  );
   if (busy !== undefined) {
     return {
       label: 'Team実行中',

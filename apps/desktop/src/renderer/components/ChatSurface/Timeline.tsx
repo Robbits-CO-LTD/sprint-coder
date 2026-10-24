@@ -16,6 +16,9 @@ import {
   executionStateLabel,
   latestExecutionForWorker,
   stoppedExecutionReason,
+  workerWorkPhase,
+  workerStatusLabel,
+  WORK_PHASE_LABELS,
 } from '../../lib/team-execution-display';
 import { TeamActivityCard, TeamActivityGroup } from '../TeamActivityCard';
 import { ArrowDown, ArrowUp } from '../icons';
@@ -657,8 +660,12 @@ function workerBreakdownStatus(
   team: Pick<TeamDetail, 'executions' | 'missions'> | null | undefined,
 ): string {
   const execution = latestExecutionForWorker(team?.executions, worker.id);
+  const phase = workerWorkPhase(worker, execution);
+  if (phase !== null) return WORK_PHASE_LABELS[phase];
   if (execution === null || execution.state !== 'waiting_resume')
-    return workerStateLabel(worker.state);
+    return worker.state === 'busy'
+      ? workerStatusLabel(worker, execution)
+      : workerStateLabel(worker.state);
   // A graph step resumed by hand stays waiting_resume, with its old failure, until the scheduler
   // admits it; the old reason would read as the step still being stopped.
   const resumePending = (team?.missions ?? []).some((mission) =>
