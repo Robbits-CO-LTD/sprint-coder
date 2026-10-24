@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import {
   assertShardReport,
@@ -68,15 +68,10 @@ import {
   type TreeRemovalFs,
 } from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
-import { managedLocalConnection } from './managed-local-provider-runtime';
-import { ProviderWorkspaceTools } from './provider-workspace-tools';
-import { stageEditSagaRequest, type EditSagaSnapshot } from './edit-saga';
-import { FileRevisionRegistry } from './file-revision';
-import { workspaceMutationBinding } from './path-guard';
 import {
-  MANAGED_LOCAL_FIXTURE_SELECTION,
-  managedLocalTeamWorkerRuntime,
-} from './managed-local-team-worker-fixture';
+  LOCAL_PROVIDER_TEST_SELECTION,
+  localProviderTestConnection,
+} from './provider-connection-test-fixture';
 import {
   runtimeWorkspaceSetFromLegacyPath,
   type RuntimeFailureDiagnostic,
@@ -106,6 +101,14 @@ function removeTemporaryDirectory(
     throw error;
   }
 }
+
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'sprint-coder-team-git-home-'));
+  cleanup.push(home);
+  writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -2383,7 +2386,7 @@ if (runsWithElectronAbi)
       async (mode) => {
         const live = mode !== 'initial';
         const persistence = createPersistence();
-        const connection = managedLocalConnection();
+        const connection = localProviderTestConnection();
         connection.rateLimit = {
           ...connection.rateLimit,
           mode: 'auto',
@@ -2419,7 +2422,7 @@ if (runsWithElectronAbi)
           role: 'reader',
           objective: 'read',
           contextInheritancePolicy: 'none',
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+          modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
           writeCapable: false,
         });
         const submission = await coordinator.assignTask({
@@ -2457,7 +2460,7 @@ if (runsWithElectronAbi)
 
     it('parks an automatic retry on capacity lowering without changing its retained Attempt', async () => {
       const persistence = createPersistence();
-      const connection = managedLocalConnection();
+      const connection = localProviderTestConnection();
       connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
       persistence.createProviderConnection(connection);
       const task = persistence.createTask('Retry token capacity');
@@ -2480,7 +2483,7 @@ if (runsWithElectronAbi)
         objective: 'read',
         contextInheritancePolicy: 'none',
         writeCapable: false,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
       });
       const submission = await coordinator.assignTask({
         taskId: task.id,
@@ -2506,22 +2509,13 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('runs a direct message to a write-capable Managed Local or CLI Worker read-only over the Task Workspace (issue #570)', async () => {
+    it('runs a direct message to a write-capable CLI Worker read-only over the Task Workspace (issue #570)', async () => {
       const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local direct message');
+      persistence.createProviderConnection(localProviderTestConnection());
+      const task = persistence.createTask('CLI direct message');
       const { workspace } = configureGitWorkspace(persistence, task.id);
       const cli = new HandedWorkspaceRecordingRuntime();
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-      const coordinator = new TeamCoordinator(persistence, managedLocal.runtime);
-      const managedWorker = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local reader',
-        objective: 'read the Workspace',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
+      const coordinator = new TeamCoordinator(persistence, cli);
       const cliWorker = await coordinator.hireWorker({
         taskId: task.id,
         role: 'CLI reader',
@@ -2532,33 +2526,6 @@ if (runsWithElectronAbi)
       const taskRoots = persistence
         .getEffectiveWorkspaceSet(task.id)
         .roots.map(({ rootId, path, role }) => ({ rootId, path, role }));
-
-      const managedReply = await coordinator.sendToWorker({
-        taskId: task.id,
-        targetAgentId: managedWorker.id,
-        content: 'README.mdを読んで内容を報告してください',
-      });
-      // Main's catalog handed the Managed Local Worker the Task Workspace, reading tools only.
-      expect(managedLocal.sessions).toEqual([
-        expect.objectContaining({
-          workerId: managedWorker.id,
-          writeCapable: false,
-          workspaceSet: expect.objectContaining({
-            roots: taskRoots.map((root) => expect.objectContaining(root)),
-          }),
-          tools: ['read_file'],
-        }),
-      ]);
-      expect(managedLocal.toolCalls).toEqual([
-        {
-          workerId: managedWorker.id,
-          name: 'read_file',
-          file: join(taskRoots[0]!.path, 'README.md'),
-        },
-      ]);
-      expect(
-        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-      ).toBe('');
 
       const cliReply = await coordinator.sendToWorker({
         taskId: task.id,
@@ -2577,25 +2544,18 @@ if (runsWithElectronAbi)
           }),
         }),
       ]);
-      expect([managedReply.state, cliReply.state]).toEqual(['delivered', 'delivered']);
-      const snapshot = persistence.getTeamSnapshot(managedWorker.teamId);
+      expect(cliReply.state).toBe('delivered');
+      const snapshot = persistence.getTeamSnapshot(cliWorker.teamId);
       // Each Worker finished its read, and keeps the capability it was hired with.
-      for (const worker of [managedWorker, cliWorker])
+      for (const worker of [cliWorker])
         expect(snapshot.agents.find(({ id }) => id === worker.id)).toMatchObject({
           state: 'done',
           writeCapable: true,
         });
-      for (const reply of [managedReply, cliReply])
+      for (const reply of [cliReply])
         expect(snapshot.deliveries.find(({ messageId }) => messageId === reply.id)?.state).toBe(
           'acked',
         );
-      expect(
-        snapshot.messages.some(
-          ({ sourceAgentId, content }) =>
-            sourceAgentId === managedWorker.id &&
-            content.includes('Managed Localの作業を終えました'),
-        ),
-      ).toBe(true);
       expect(
         spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
       ).toBe('');
@@ -2983,371 +2943,11 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('admits the real managed create_file Saga from a Task Mission isolation (issue #570)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local durable write binding');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const turn = persistence.startTurn(task.id, 'Task Mission write');
-      const parentWorkspace = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
-      let prepared: EditSagaSnapshot | undefined;
-      let failure: unknown;
-      const managedLocal = managedLocalTeamWorkerRuntime({
-        fallback: new TestWorkerRuntime(),
-        executeTool: async ({ name, input, workspaceSet }) => {
-          const root = workspaceSet.roots[0]!;
-          const binding = await workspaceMutationBinding(root.path);
-          const workerWorkspace = {
-            ...parentWorkspace,
-            primaryRootId: workspaceSet.primaryRootId,
-            roots: workspaceSet.roots.map((entry) => ({ ...entry, status: 'available' as const })),
-            digest: workspaceSet.digest,
-          };
-          const tools = new ProviderWorkspaceTools({
-            workspaceFor: () => workerWorkspace,
-            rootIdentityFor: () => binding.rootIdentityDigest,
-            mutationBindingFor: () => binding,
-            policyEpochFor: () => 0,
-            authorizer: () => ({ decision: 'allow', reason: 'test approval' }),
-            workspaceEdit: {
-              turnWorkspaceSetFor: () => parentWorkspace,
-              turnRootMutationBindingsFor: () =>
-                persistence.getTurnWorkspaceMutationBindings(turn.turnId),
-              revisions: new FileRevisionRegistry(),
-              policyEpochFor: () => 0,
-              apply: async (request) => {
-                const staged = await stageEditSagaRequest(request);
-                // This test stops before file effects: it exercises the real admission and lease
-                // that the old fixture's direct write skipped, not native file publication.
-                prepared = persistence.prepareEditSaga(staged);
-                const lease = persistence.acquireMutationLease({
-                  rootId: prepared.rootId,
-                  workspaceKey: binding.workspaceKey,
-                  rootIdentityDigest: binding.rootIdentityDigest,
-                  holderInstanceId: 'task-mission-binding-test',
-                  taskId: task.id,
-                  turnId: turn.turnId,
-                  sagaId: prepared.id,
-                  purpose: 'forward',
-                  policyEpoch: 0,
-                  intentDigest: prepared.planDigest,
-                  now: staged.createdAt,
-                  expiresAt: new Date(Date.parse(staged.createdAt) + 60_000).toISOString(),
-                });
-                persistence.releaseMutationLease(lease, staged.createdAt);
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    rootId: 'unowned-root',
-                  }),
-                ).toThrow('not in the Turn Workspace snapshot');
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    rootIdentityDigest: 'f'.repeat(64),
-                  }),
-                ).toThrow('workspace binding changed');
-                const otherTask = persistence.createTask('Unrelated Task');
-                const otherTurn = persistence.startTurn(otherTask.id, 'Unrelated Turn');
-                persistence.sealTurnWorkspaceSet(otherTask.id, otherTurn.turnId);
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    taskId: otherTask.id,
-                    turnId: otherTurn.turnId,
-                  }),
-                ).toThrow('not in the Turn Workspace snapshot');
-                return prepared;
-              },
-            },
-          });
-          const context = {
-            taskId: task.id,
-            turnId: turn.turnId,
-            workspaceId: workerWorkspace.digest,
-            policyEpoch: 0,
-          };
-          tools.startTurn(context, 'provider');
-          try {
-            const args = input as { path: string; text: string };
-            return await tools.broker.dispatch({
-              ...context,
-              callId: randomUUID(),
-              providerName: name,
-              input: { path: args.path, content: args.text },
-            });
-          } catch (error) {
-            failure = error;
-            throw error;
-          } finally {
-            tools.finishTurn(task.id, turn.turnId);
-            await tools.dispose();
-          }
-        },
-      });
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const worker = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-      const mission = await coordinator.assignMission({
-        taskId: task.id,
-        objective: 'check durable write binding',
-        doneCriteria: ['write'],
-        steps: [
-          {
-            workerId: worker.id,
-            objective: 'create managed-output.txt',
-            doneCriteria: ['write'],
-            access: 'workspace-write',
-          },
-          {
-            workerId: worker.id,
-            objective: 'read README.md',
-            doneCriteria: ['read'],
-            access: 'read-only',
-          },
-        ],
-      });
-      await waitFor(
-        () =>
-          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
-            persistence.getTeamMission(mission.id).state,
-          ),
-        30_000,
-      );
-      try {
-        expect(failure).toBeUndefined();
-        expect(prepared).toMatchObject({
-          rootId: parentWorkspace.primaryRootId,
-          state: 'prepared',
-        });
-        expect(persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)).toEqual(
-          parentWorkspace,
-        );
-        expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
-      } finally {
-        persistence.close();
-      }
-    }, 45_000);
-
-    it('runs a legacy Mission write step of a Managed Local Worker in its worktree and integrates it, as it does a CLI Worker (issue #570)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local legacy Mission');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const cli = new HandedWorkspaceRecordingRuntime();
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const managedWriter = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-      const cliWriter = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'CLI writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-      });
-
-      const assigned = await coordinator.assignMission({
-        taskId: task.id,
-        objective: 'write through both runtimes',
-        doneCriteria: ['both outputs are integrated'],
-        steps: [
-          {
-            workerId: managedWriter.id,
-            objective: 'create managed-output.txt',
-            doneCriteria: ['managed-output.txt exists'],
-            access: 'workspace-write',
-          },
-          {
-            workerId: cliWriter.id,
-            objective: 'create worker-output.txt',
-            doneCriteria: ['worker-output.txt exists'],
-            access: 'workspace-write',
-          },
-        ],
-      });
-      // Two write steps, each through a real Git worktree and integration. A timeout falls through to
-      // the state dump below rather than hiding where the Mission stopped.
-      await waitFor(
-        () =>
-          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
-            persistence.getTeamMission(assigned.id).state,
-          ),
-        60_000,
-      ).catch(() => undefined);
-
-      const mission = persistence.getTeamMission(assigned.id);
-      const managedIsolation = persistence.getTeamExecutionIsolation(mission.steps[0]!.executionId);
-      const worktrees = mission.steps.map(({ executionId }) =>
-        persistence.getTeamMissionWorktree(executionId),
-      );
-      const state = {
-        missionState: mission.state,
-        executions: mission.steps.map(({ executionId }) =>
-          persistence.getTeamExecution(executionId),
-        ),
-        worktrees,
-        agents: persistence.getTeamSnapshot(managedWriter.teamId).agents,
-      };
-      expect(mission.state, JSON.stringify(state, null, 2)).toBe('completed');
-      // Managed Local needs a durable isolation that Main's Edit Saga can resolve. CLI keeps its
-      // legacy worktree contract; neither runtime writes to the original before integration.
-      expect(worktrees[0]).toBeNull();
-      expect(managedIsolation).not.toBeNull();
-      expect(managedLocal.sessions).toHaveLength(1);
-      const [session] = managedLocal.sessions;
-      expect(session).toMatchObject({
-        workerId: managedWriter.id,
-        writeCapable: true,
-        tools: ['read_file', 'create_file'],
-      });
-      const [root] = session!.workspaceSet.roots;
-      expect(session!.workspaceSet.roots).toHaveLength(1);
-      expect(root).toMatchObject({ role: 'primary', rootId: task.id });
-      expect(root!.path).toBe(managedIsolation!.roots[0]!.isolatedPath);
-      expect(managedLocal.toolCalls).toEqual([
-        {
-          workerId: managedWriter.id,
-          name: 'create_file',
-          file: join(root!.path, 'managed-output.txt'),
-        },
-      ]);
-      // The CLI Worker is still handed its worktree path, now with the very set it derives from it.
-      expect(cli.handed).toHaveLength(1);
-      expect(cli.handed[0]).toMatchObject({
-        workerId: cliWriter.id,
-        writeCapable: true,
-        accessMode: 'workspace-write',
-        workspacePath: worktrees[1]!.path,
-      });
-      expect(cli.handed[0]!.workspaceSet).toEqual(cli.handed[0]!.derivedFromPath);
-      // Both writes reached the Workspace only through integration.
-      expect(readFileSync(join(workspace, 'managed-output.txt'), 'utf8')).toBe(
-        'written by the Managed Local Worker\n',
-      );
-      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
-      expect(
-        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-      ).toBe('');
-      expect(
-        spawnSync('git', ['-C', workspace, 'log', '-2', '--pretty=%s'], { encoding: 'utf8' })
-          .stdout,
-      ).toBe(
-        `Sprint Coder Mission ${assigned.id} step 2\nSprint Coder Mission ${assigned.id} step 1 repository 1\n`,
-      );
-      // The last worktree is cleaned up after the Mission completes.
-      await waitFor(
-        () =>
-          persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)?.state === 'cleaned' &&
-          persistence
-            .getTeamExecutionIsolation(mission.steps[0]!.executionId)
-            ?.repositories.every(({ state }) => state === 'cleaned') === true,
-        15_000,
-      );
-      expect(managedIsolation!.repositories[0]).toMatchObject({
-        changedFiles: ['managed-output.txt'],
-      });
-      expect(persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)).toMatchObject({
-        changedFiles: ['worker-output.txt'],
-      });
-      persistence.close();
-    }, 120_000);
-
-    it('shows the file a Managed Local Worker committed on its card and keeps it in the report of a run that then failed (issue #575)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local failed write report');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: new TestWorkerRuntime() });
-      // The Worker writes through the real runtime and managed tool, then reports that it could not
-      // finish: only its completion is turned failed here.
-      const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-      vi.spyOn(managedLocal.runtime, 'execute').mockImplementation(async (input) => {
-        const result = await execute(input);
-        return {
-          ...result,
-          completion: {
-            ...(result.completion as Record<string, unknown>),
-            status: 'failed',
-            summary: 'managed-output.txtを書いた後で作業を終えられませんでした',
-          },
-        };
-      });
-      const activity = vi.spyOn(persistence, 'setWorkerCurrentActivity');
-      const complete = vi.spyOn(persistence, 'completeTeamTaskWithReport');
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const writer = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-
-      const submission = await coordinator.assignTask({
-        taskId: task.id,
-        targetAgentId: writer.id,
-        content: 'managed-output.txtを作ってください',
-        doneCriteria: ['managed-output.txt exists'],
-        accessMode: 'workspace-write',
-      });
-      await waitFor(
-        () =>
-          persistence.getTeamExecution(submission.executionId).state === 'failed' &&
-          persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'quarantined',
-        30_000,
-      );
-
-      expect(managedLocal.toolCalls).toEqual([
-        expect.objectContaining({ workerId: writer.id, name: 'create_file' }),
-      ]);
-      // The card shows the change right after the call's completed activity, as for a CLI Worker.
-      const labels = activity.mock.calls
-        .filter(([agentId]) => agentId === writer.id)
-        .map(([, label]) => label);
-      const completed = labels.indexOf('create_fileの実行完了');
-      expect(completed).toBeGreaterThanOrEqual(0);
-      expect(labels[completed + 1]).toBe('ファイル変更 1件');
-      // The failed run is quarantined, not integrated, and its report still lists the file.
-      const reports = complete.mock.calls
-        .map(([input]) => input)
-        .filter(({ agentId }) => agentId === writer.id);
-      expect(reports).toHaveLength(1);
-      expect(reports[0]!.report).toMatchObject({
-        status: 'failed',
-        changedFiles: ['managed-output.txt'],
-      });
-      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
-        { state: 'failed', terminalReason: 'worker_reported_failure' },
-      ]);
-      expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
-      persistence.close();
-    }, 60_000);
-
-    it.each(['Managed Local', 'CLI'] as const)(
+    it.each(['CLI'] as const)(
       'keeps the file a %s Worker committed in the report of a run whose runtime then threw (issue #575)',
       async (kind) => {
         const persistence = createPersistence();
-        persistence.createProviderConnection(managedLocalConnection());
+        persistence.createProviderConnection(localProviderTestConnection());
         const task = persistence.createTask(`${kind} write then runtime failure`);
         const { workspace, manager } = configureGitWorkspace(persistence, task.id);
         const runtimeFailure = new Error('the runtime failed after the write committed');
@@ -3365,23 +2965,14 @@ if (runsWithElectronAbi)
             throw runtimeFailure;
           }
         })();
-        const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-        // The Managed Local Worker writes through the real runtime and managed tool; only then
-        // does its runtime call fail. (The CLI fallback throws by itself.)
-        const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-        vi.spyOn(managedLocal.runtime, 'execute').mockImplementation(async (input) => {
-          await execute(input);
-          throw runtimeFailure;
-        });
         const complete = vi.spyOn(persistence, 'completeTeamTaskWithReport');
-        const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
+        const coordinator = coordinatorWithWorktrees(persistence, cli, manager);
         const writer = await coordinator.hireWorker({
           taskId: task.id,
           role: `${kind} writer`,
           objective: 'write in isolation',
           contextInheritancePolicy: 'none',
           writeCapable: true,
-          ...(kind === 'Managed Local' ? { modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION } : {}),
         });
 
         const submission = await coordinator.assignTask({
@@ -3398,7 +2989,6 @@ if (runsWithElectronAbi)
           30_000,
         );
 
-        expect(managedLocal.toolCalls).toHaveLength(kind === 'Managed Local' ? 1 : 0);
         // A write Worker's failed run is not requeued; its report lists the committed file.
         expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
           { state: 'failed', terminalReason: 'runtime_failure' },
@@ -5026,8 +4616,8 @@ if (runsWithElectronAbi)
       const manager = new WorkerWorktreeManager({
         worktreesRoot,
         execFileImpl: async (file, args, options) => {
-          // The config probe that runs before each command is not counted.
-          if (counting && !args.includes('--list'))
+          // Configuration probes that run before each command are not counted.
+          if (counting && args[args.indexOf('-C') + 2] !== 'config')
             commands.push(args[args.indexOf('-C') + 2] ?? '');
           const result = await promisify(execFile)(file, [...args], {
             env: options.env,

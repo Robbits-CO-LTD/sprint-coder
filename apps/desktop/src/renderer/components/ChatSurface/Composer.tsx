@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClipboardEvent, KeyboardEvent, RefObject } from 'react';
 import type { GoalSummary, SkillCatalogItem, TurnSkillSelection } from '@sprint-coder/contracts';
-import { useAppStore } from '../../store/appStore';
+import { PERMISSION_CHANGE_PENDING_MESSAGE, useAppStore } from '../../store/appStore';
 import type { RuntimeState } from '../../store/appStore';
 import { ContextBar, PermissionChip } from './ContextBar';
 import { ArrowUp, Paperclip, Pause, Pencil, Play, Plus, Square, Target, Trash, X } from '../icons';
@@ -63,7 +63,8 @@ export function composerSubmitShortcut(input: {
 }
 
 export function composerMessageText(raw: string, imageRequested: boolean): string {
-  return imageRequested ? `${IMAGEGEN_PREFIX} ${raw}` : raw;
+  // A blank line preserves an indented Markdown block at the start of the original request.
+  return imageRequested ? `${IMAGEGEN_PREFIX}\n\n${raw}` : raw;
 }
 
 export function imageRequestFailureRecovery(input: {
@@ -246,6 +247,7 @@ export function Composer({ taskId }: { taskId: string }) {
   const goal = currentTask?.goalState ?? null;
   const toggleTeamView = useAppStore((s) => s.toggleTeamView);
   const sending = useAppStore((s) => s.sendingByTask[taskId]) ?? false;
+  const permissionChanging = useAppStore((s) => s.permissionChangeByTask[taskId]) !== undefined;
   const projectSwitching = useAppStore((s) => s.projectSwitchingByTask[taskId]) ?? false;
   const turn = useAppStore((s) => s.turnByTask[taskId]);
   const queued = useAppStore((s) => s.queuedByTask[taskId]) ?? [];
@@ -296,6 +298,12 @@ export function Composer({ taskId }: { taskId: string }) {
   >(null);
   const turnActionPendingRef = useRef<'queue' | 'interrupt' | 'cancel' | null>(null);
   const [turnActionError, setTurnActionError] = useState<string | null>(null);
+  const [turnStartError, setTurnStartError] = useState<{ taskId: string; message: string } | null>(
+    null,
+  );
+  const turnStartRequestRef = useRef(0);
+  const operationError =
+    turnActionError ?? (turnStartError?.taskId === taskId ? turnStartError.message : null);
 
   const turnActive = turn ? turn.status === 'running' || turn.status === 'canceling' : false;
 
@@ -465,6 +473,7 @@ export function Composer({ taskId }: { taskId: string }) {
     canCancel,
     actionPending: sending || turnActionPending !== null,
     sendBlocked:
+      permissionChanging ||
       goalControlPending ||
       projectSwitching ||
       attachmentPolicy.sendBlocked ||
@@ -509,8 +518,9 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleSend() {
-    const raw = draft.trim();
-    if (!raw || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel') return;
+    const raw = draft;
+    if (!raw.trim() || actionPolicy.primary.disabled || actionPolicy.primary.kind === 'cancel')
+      return;
     // Enter while the slash picker is open already runs `/team` through runSlashCommand. Keep the
     // send button and `/team ` (with a trailing space) consistent: a standalone command opens the
     // Canvas, while `/team <request>` remains a message and Main routes it through Sprint Coder
@@ -545,7 +555,15 @@ export function Composer({ taskId }: { taskId: string }) {
     const text = composerMessageText(raw, imageRequested);
     updateImageRequested(false);
     if (!turnActive) {
-      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments));
+      const request = ++turnStartRequestRef.current;
+      setTurnStartError(null);
+      setTurnActionError(null);
+      void startTurn(taskId, text, undefined, directTurnAttachmentIds(draftAttachments)).then(
+        (message) => {
+          if (turnStartRequestRef.current === request && message !== null)
+            setTurnStartError({ taskId, message });
+        },
+      );
       return;
     }
     if (actionPolicy.primary.kind === 'queue') {
@@ -562,6 +580,7 @@ export function Composer({ taskId }: { taskId: string }) {
     if (turnActionPendingRef.current !== null) return;
     turnActionPendingRef.current = action;
     setTurnActionError(null);
+    setTurnStartError(null);
     setTurnActionPending(action);
     void operation()
       .then((completed) => {
@@ -589,8 +608,8 @@ export function Composer({ taskId }: { taskId: string }) {
   }
 
   function handleInterrupt(): void {
-    const raw = draft.trim();
-    if (!raw || actionPolicy.interrupt.disabled) return;
+    const raw = draft;
+    if (!raw.trim() || actionPolicy.interrupt.disabled) return;
     const text = composerMessageText(raw, imageRequested);
     const restoreImageRequest = imageRequested;
     updateImageRequested(false);
@@ -752,6 +771,11 @@ export function Composer({ taskId }: { taskId: string }) {
             shadow rather than stacking two framed boxes on top of each other. */}
         <div className="composer-panel">
           <ContextBar taskId={taskId} />
+          {permissionChanging && (
+            <div className="composer-permission-pending" role="status">
+              {PERMISSION_CHANGE_PENDING_MESSAGE}
+            </div>
+          )}
           <div className="composer">
             {slashOpen && (
               <SlashCommandMenu
@@ -829,9 +853,9 @@ export function Composer({ taskId }: { taskId: string }) {
                 {attachmentError}
               </div>
             )}
-            {turnActionError && (
+            {operationError && (
               <div className="composer-operation-error" role="alert">
-                {turnActionError}
+                {operationError}
               </div>
             )}
             <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">

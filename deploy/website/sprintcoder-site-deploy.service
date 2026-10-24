@@ -1,0 +1,10 @@
+[Unit]
+Description=Deploy the Sprint Coder website from GitHub main (website/)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/lib/sprintcoder-site/deploy.sh
+TimeoutStartSec=10min
+Nice=10

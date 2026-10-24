@@ -307,7 +307,7 @@ export class WorkerWorktreeManager {
 
   /**
    * A root's repository, HEAD, and in-progress operation markers from one `git rev-parse`
-   * (issue #864). Each Git call costs two processes (the config probe and the command), and the
+   * (issue #864). Each Git call costs config probes plus the command, and the
    * write-eligibility check runs for every workspace-write assignment and Worker start, so asking
    * for these one at a time made each assignment wait on about twenty processes.
    */

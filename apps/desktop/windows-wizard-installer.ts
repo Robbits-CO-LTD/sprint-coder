@@ -5,7 +5,6 @@ import { existsSync, rmSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 
 export const SQUIRREL_SETUP_EXE = 'Sprint-Coder-Setup.exe';
-export const WINDOWS_WIZARD_INSTALLER_EXE = 'Sprint-Coder-Installer.exe';
 
 type WizardInstallerOptions = Readonly<{
   scriptPath: string;
@@ -47,7 +46,7 @@ export function planWindowsWizardInstaller(
     resultIndex: candidate.resultIndex,
     sourceSetupPath: candidate.sourceSetupPath,
     outputDirectory,
-    outputPath: join(outputDirectory, WINDOWS_WIZARD_INSTALLER_EXE),
+    outputPath: join(outputDirectory, `Sprint-Coder-Installer-${version}.exe`),
     version,
   };
 }

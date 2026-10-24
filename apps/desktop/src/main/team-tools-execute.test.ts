@@ -29,7 +29,7 @@ import type { WorkspaceWriteLimits } from './workspace-write-limits';
 function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordinator {
   return {
     hireWorker: vi.fn(
-      async () =>
+      async (input: Parameters<TeamCoordinator['hireWorker']>[0]) =>
         ({
           id: 'worker-1',
           role: 'role',
@@ -37,11 +37,12 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
           parentAgentId: 'leader-1',
           depth: 1,
           canDelegate: false,
+          writeCapable: input.writeCapable,
           managerPolicy: null,
         }) as never,
     ),
     hireWorkerAs: vi.fn(
-      async () =>
+      async (input: Parameters<TeamCoordinator['hireWorkerAs']>[0]) =>
         ({
           id: 'worker-1',
           role: 'role',
@@ -49,6 +50,7 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
           parentAgentId: 'manager-1',
           depth: 2,
           canDelegate: false,
+          writeCapable: input.writeCapable,
           managerPolicy: null,
         }) as never,
     ),
@@ -57,6 +59,13 @@ function fakeCoordinator(overrides: Partial<TeamCoordinator> = {}): TeamCoordina
     ),
     assignTask: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
     assignTaskAs: vi.fn(async () => ({ executionId: 'execution-2', state: 'queued' }) as never),
+    assignTasks: vi.fn(
+      async (_taskId: string, assignments: readonly unknown[]) =>
+        assignments.map((_, index) => ({
+          ok: true,
+          submission: { executionId: `execution-${index}`, state: 'queued' },
+        })) as never,
+    ),
     assignMission: vi.fn(
       async () =>
         ({ id: 'mission-1', state: 'running', currentStepOrdinal: 0, steps: [] }) as never,
@@ -147,8 +156,51 @@ describe('executeTeamTool routing', () => {
       parentAgentId: 'leader-1',
       depth: 1,
       canDelegate: false,
+      writeCapable: false,
       remainingDelegationLevels: 0,
     });
+  });
+
+  it.each([undefined, false, true])(
+    'returns the saved Manager write capability without upgrading it (%s)',
+    async (writeCapable) => {
+      const coordinator = fakeCoordinator();
+      const result = await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+        agentKind: 'manager',
+        role: 'Manager',
+        objective: 'delegate',
+        managerPolicy: { maxDelegationLevels: 1, allowManagerChildren: false },
+        ...(writeCapable === undefined ? {} : { writeCapable }),
+      });
+      expect(coordinator.hireWorker).toHaveBeenCalledWith(
+        expect.objectContaining({ writeCapable: writeCapable ?? false }),
+        expect.any(Object),
+      );
+      expect(result).toMatchObject({ ok: true, writeCapable: writeCapable ?? false });
+    },
+  );
+
+  it('returns the persisted capability instead of echoing the hire request', async () => {
+    const saved = await fakeCoordinator().hireWorker({
+      taskId: 'task-1',
+      role: 'saved',
+      objective: 'read',
+      contextInheritancePolicy: 'summary',
+      writeCapable: false,
+    });
+    const coordinator = fakeCoordinator({ hireWorker: vi.fn(async () => saved) });
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+        agentKind: 'worker',
+        role: 'requested',
+        objective: 'edit',
+        writeCapable: true,
+      }),
+    ).toMatchObject({ ok: true, writeCapable: false });
+    expect(coordinator.hireWorker).toHaveBeenCalledWith(
+      expect.objectContaining({ writeCapable: true }),
+      null,
+    );
   });
 
   it('enforces the discriminated worker/manager hire contract and rejects the legacy field', async () => {
@@ -409,47 +461,128 @@ describe('executeTeamTool routing', () => {
     );
   });
 
-  it('prevents a read-only Manager execution from delegating workspace writes', async () => {
-    const coordinator = fakeCoordinator();
-    const options = { requesterAgentId: 'manager-1', accessCeiling: 'read-only' as const };
-    await expect(
-      executeTeamTool(
-        coordinator,
-        'task-1',
-        'team_assign_task',
-        {
-          workerId: 'worker-1',
-          objective: 'write',
-          doneCriteria: ['done'],
-          access: 'workspace-write',
+  it.each(['read-only', undefined] as const)(
+    'prevents a Manager execution ceiling %s from delegating workspace writes',
+    async (accessCeiling) => {
+      const coordinator = fakeCoordinator();
+      const options = {
+        requesterAgentId: 'manager-1',
+        ...(accessCeiling === undefined ? {} : { accessCeiling }),
+      };
+      const refusal = {
+        ok: false,
+        code: 'execution_access_ceiling',
+        details: {
+          accessCeiling: 'read-only',
+          requestedAccess: 'workspace-write',
+          requiredManagerWriteCapable: true,
+          requiredManagerAccess: 'workspace-write',
+          recovery: 'notify_parent',
         },
-        options,
-      ),
-    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
-    await expect(
-      executeTeamTool(
-        coordinator,
+        message: expect.stringContaining('親Agent'),
+      };
+      await expect(
+        executeTeamTool(
+          coordinator,
+          'task-1',
+          'team_assign_task',
+          {
+            workerId: 'worker-1',
+            objective: 'write',
+            doneCriteria: ['done'],
+            access: 'workspace-write',
+          },
+          options,
+        ),
+      ).resolves.toMatchObject(refusal);
+      await expect(
+        executeTeamTool(
+          coordinator,
+          'task-1',
+          'team_assign_mission',
+          {
+            objective: 'write mission',
+            doneCriteria: ['done'],
+            steps: [
+              {
+                workerId: 'worker-1',
+                objective: 'one',
+                doneCriteria: ['one'],
+                access: 'read-only',
+              },
+              {
+                workerId: 'worker-2',
+                objective: 'two',
+                doneCriteria: ['two'],
+                access: 'workspace-write',
+              },
+            ],
+          },
+          options,
+        ),
+      ).resolves.toMatchObject(refusal);
+      expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
+      expect(coordinator.assignMission).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['read-only', 'workspace-write'] as const)(
+    'allows all Manager assignment routes within the %s ceiling',
+    async (access) => {
+      const coordinator = fakeCoordinator();
+      const options = { requesterAgentId: 'manager-1', accessCeiling: access };
+      const assignment = {
+        workerId: 'worker-1',
+        objective: 'work',
+        doneCriteria: ['done'],
+        access,
+      };
+      expect(
+        await executeTeamTool(coordinator, 'task-1', 'team_assign_task', assignment, options),
+      ).toMatchObject({ ok: true });
+      expect(
+        await executeTeamTool(
+          coordinator,
+          'task-1',
+          'team_assign_tasks',
+          { assignments: [assignment] },
+          options,
+        ),
+      ).toMatchObject({
+        ok: true,
+        assigned: 1,
+        failed: 0,
+        results: [{ ok: true, writeScope: access }],
+      });
+      expect(
+        await executeTeamTool(
+          coordinator,
+          'task-1',
+          'team_assign_mission',
+          {
+            objective: 'mission',
+            doneCriteria: ['done'],
+            steps: [assignment, { ...assignment, workerId: 'worker-2' }],
+          },
+          options,
+        ),
+      ).toMatchObject({ ok: true });
+      expect(coordinator.assignTaskAs).toHaveBeenCalledWith(
+        expect.objectContaining({ accessMode: access }),
+        'manager-1',
+      );
+      expect(coordinator.assignTasks).toHaveBeenCalledWith(
         'task-1',
-        'team_assign_mission',
-        {
-          objective: 'write mission',
-          doneCriteria: ['done'],
-          steps: [
-            { workerId: 'worker-1', objective: 'one', doneCriteria: ['one'], access: 'read-only' },
-            {
-              workerId: 'worker-2',
-              objective: 'two',
-              doneCriteria: ['two'],
-              access: 'workspace-write',
-            },
-          ],
-        },
-        options,
-      ),
-    ).resolves.toMatchObject({ ok: false, message: expect.stringContaining('read-only') });
-    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
-    expect(coordinator.assignMission).not.toHaveBeenCalled();
-  });
+        [expect.objectContaining({ accessMode: access })],
+        'manager-1',
+        undefined,
+      );
+      expect(coordinator.assignMission).toHaveBeenCalledWith(
+        expect.objectContaining({ steps: [assignment, { ...assignment, workerId: 'worker-2' }] }),
+        'manager-1',
+      );
+    },
+  );
 
   it('allows a workspace-write Manager execution to delegate within the same ceiling', async () => {
     const coordinator = fakeCoordinator();
@@ -477,6 +610,34 @@ describe('executeTeamTool routing', () => {
       },
       'manager-1',
     );
+  });
+
+  it('does not turn a write-capable hire into a writable Manager execution', async () => {
+    const coordinator = fakeCoordinator();
+    expect(
+      await executeTeamTool(coordinator, 'task-1', 'team_hire_worker', {
+        agentKind: 'manager',
+        role: 'Manager',
+        objective: 'delegate edits',
+        writeCapable: true,
+        managerPolicy: { maxDelegationLevels: 1, allowManagerChildren: false },
+      }),
+    ).toMatchObject({ ok: true, workerId: 'worker-1', writeCapable: true });
+    expect(
+      await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_task',
+        {
+          workerId: 'child-1',
+          objective: 'edit',
+          doneCriteria: ['done'],
+          access: 'workspace-write',
+        },
+        { requesterAgentId: 'worker-1', accessCeiling: 'read-only' },
+      ),
+    ).toMatchObject({ ok: false, code: 'execution_access_ceiling' });
+    expect(coordinator.assignTaskAs).not.toHaveBeenCalled();
   });
 
   it('routes Manager tools with only the caller identity bound to the MCP registration', async () => {
@@ -733,33 +894,49 @@ describe('executeTeamTool team_assign_tasks (issue #864)', () => {
     expect(result['workspaceWriteLimit']).toBeUndefined();
   });
 
-  it('refuses only the write elements of a read-only Manager and still assigns the rest', async () => {
-    const assignTasks = vi.fn(async () => [
-      { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
-    ]);
-    const coordinator = fakeCoordinator({ assignTasks } as never);
-    const result = (await executeTeamTool(
-      coordinator,
-      'task-1',
-      'team_assign_tasks',
-      { assignments: [item('worker-w', 'workspace-write'), item('worker-r')] },
-      {
-        requesterAgentId: 'manager-1',
-        accessCeiling: 'read-only',
-        contextOwner: { type: 'team_execution', id: 'parent-1' },
-      },
-    )) as { results: Array<Record<string, unknown>> };
-    expect(assignTasks).toHaveBeenCalledWith(
-      'task-1',
-      [expect.objectContaining({ targetAgentId: 'worker-r' })],
-      'manager-1',
-      { type: 'team_execution', id: 'parent-1' },
-    );
-    expect(result.results).toMatchObject([
-      { index: 0, workerId: 'worker-w', ok: false, message: expect.stringContaining('read-only') },
-      { index: 1, workerId: 'worker-r', ok: true, executionId: 'execution-a' },
-    ]);
-  });
+  it.each(['read-only', undefined] as const)(
+    'refuses only write elements at Manager ceiling %s and still assigns the rest',
+    async (accessCeiling) => {
+      const assignTasks = vi.fn(async () => [
+        { ok: true, submission: { executionId: 'execution-a', state: 'queued' } },
+      ]);
+      const coordinator = fakeCoordinator({ assignTasks } as never);
+      const result = (await executeTeamTool(
+        coordinator,
+        'task-1',
+        'team_assign_tasks',
+        { assignments: [item('worker-w', 'workspace-write'), item('worker-r')] },
+        {
+          requesterAgentId: 'manager-1',
+          ...(accessCeiling === undefined ? {} : { accessCeiling }),
+          contextOwner: { type: 'team_execution', id: 'parent-1' },
+        },
+      )) as { results: Array<Record<string, unknown>> };
+      expect(assignTasks).toHaveBeenCalledWith(
+        'task-1',
+        [expect.objectContaining({ targetAgentId: 'worker-r' })],
+        'manager-1',
+        { type: 'team_execution', id: 'parent-1' },
+      );
+      expect(result.results).toMatchObject([
+        {
+          index: 0,
+          workerId: 'worker-w',
+          ok: false,
+          code: 'execution_access_ceiling',
+          details: {
+            accessCeiling: 'read-only',
+            requestedAccess: 'workspace-write',
+            requiredManagerWriteCapable: true,
+            requiredManagerAccess: 'workspace-write',
+            recovery: 'notify_parent',
+          },
+        },
+        { index: 1, workerId: 'worker-r', ok: true, executionId: 'execution-a' },
+      ]);
+      expect(result).toMatchObject({ ok: true, assigned: 1, failed: 1 });
+    },
+  );
 
   it('adds the write notes when a write element was assigned', async () => {
     const assignTasks = vi.fn(async () => [

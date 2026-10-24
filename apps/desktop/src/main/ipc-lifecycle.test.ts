@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { IpcRouter } from './ipc';
+import { FullAccessConfirmation } from './full-access-confirmation';
 import { secureLogger } from './secure-logger';
 import { IPC_CHANNELS } from '@sprint-coder/contracts';
 
@@ -68,7 +69,14 @@ it('broadcasts terminal activity to the window even without a Task event port', 
 it('finishes resource disposal after the BrowserWindow has been destroyed', async () => {
   const router = Object.create(IpcRouter.prototype) as IpcRouter;
   const dispose = vi.fn();
+  const policyCleanups = new Map([['task-1', { epoch: 3, confirm: vi.fn() }]]);
   const disposeGraphSources = vi.fn();
+  const fullAccessConfirmation = new FullAccessConfirmation();
+  let confirmationSignal: AbortSignal | undefined;
+  const pendingConfirmation = fullAccessConfirmation.confirm((signal) => {
+    confirmationSignal = signal;
+    return new Promise<boolean>(() => undefined);
+  });
   const state: Record<string, unknown> = {
     window: {
       isDestroyed: () => true,
@@ -76,7 +84,9 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
         throw new Error('Object has been destroyed');
       },
     },
+    policyCleanupsByTask: policyCleanups,
     taskTitleProviderAborts: { abortAll: vi.fn() },
+    fullAccessConfirmation,
     closeAllPorts: vi.fn(),
     graphSourceMonitor: { dispose: disposeGraphSources },
   };
@@ -115,8 +125,12 @@ it('finishes resource disposal after the BrowserWindow has been destroyed', asyn
     state[key] = { dispose };
   Object.assign(router, state);
   await expect(router.dispose()).resolves.toBeUndefined();
+  expect(confirmationSignal?.aborted).toBe(true);
+  await expect(pendingConfirmation).resolves.toBe(false);
+  await expect(fullAccessConfirmation.confirm(async () => true)).resolves.toBe(false);
   expect(dispose).toHaveBeenCalledTimes(14);
   expect(disposeGraphSources).toHaveBeenCalledTimes(1);
+  expect(policyCleanups.size).toBe(0);
 });
 
 it('reports invalid handler output as an internal failure without exposing schema contents', async () => {

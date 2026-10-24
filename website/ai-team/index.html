@@ -3,466 +3,318 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AI Team Coding | Chatから複数AIへ仕事を分担する</title>
+    <title>AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める</title>
     <meta
       name="description"
-      content="Sprint CoderのAI Team Codingを解説します。Leaderと複数Workerが同じTaskを共有し、調査・実装・レビューを分担して成果を統合する流れを紹介します。"
+      content="Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分け、同時に進めた結果をひとつにまとめて返す流れを、実際の画面で紹介します。"
     />
     <meta name="author" content="Robbits Inc." />
-    <meta
-      name="robots"
-      content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1"
-    />
-    <meta name="theme-color" content="#060806" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <meta name="theme-color" content="#050605" />
     <link rel="canonical" href="https://sprintcoder.yuseilab.com/ai-team/" />
-    <link rel="icon" href="/assets/sprint-coder-icon.png" type="image/png" />
-    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon.png" />
+    <link rel="icon" href="/assets/sprint-coder-icon-64.png" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/sprint-coder-icon-180.png" />
+
     <meta property="og:type" content="article" />
     <meta property="og:locale" content="ja_JP" />
     <meta property="og:site_name" content="Sprint Coder" />
-    <meta property="og:title" content="AI Team Coding | Chatから複数AIへ仕事を分担する" />
-    <meta
-      property="og:description"
-      content="Sprint CoderのAI Team Codingを解説します。Leaderと複数Workerが同じTaskを共有し、調査・実装・レビューを分担して成果を統合する流れを紹介します。"
-    />
+    <meta property="og:title" content="AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める" />
+    <meta property="og:description" content="リーダーのAIが分け、担当のAIが同時に進め、結果はひとつにまとまって戻る。Sprint CoderのAIチームを実際の画面で。" />
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/ai-team/" />
-    <meta
-      property="og:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
-    />
-    <meta property="og:image:width" content="1600" />
-    <meta property="og:image:height" content="1000" />
-    <meta property="og:image:alt" content="Sprint CoderのAI Team画面" />
+    <meta property="og:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Sprint Coderの実際の画面。たくさんのAIのカードが並んで同時に動いている" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="AI Team Coding | Chatから複数AIへ仕事を分担する" />
-    <meta
-      name="twitter:description"
-      content="Sprint CoderのAI Team Codingを解説します。Leaderと複数Workerが同じTaskを共有し、調査・実装・レビューを分担して成果を統合する流れを紹介します。"
-    />
-    <meta
-      name="twitter:image"
-      content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.png"
-    />
-    <link rel="stylesheet" href="/styles.css?v=20260912-2" />
-    <script>
-      if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-        document.documentElement.classList.add('js');
-      }
-    </script>
+    <meta name="twitter:title" content="AIチームのしくみ | ひとつの仕事を、AIのチームで分けて進める" />
+    <meta name="twitter:description" content="リーダーのAIが分け、担当のAIが同時に進め、結果はひとつにまとまって戻る。" />
+    <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261022" />
+    <script src="/film.js?v=20261022" defer></script>
+
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
         "@graph": [
           {
-            "@type": "WebSite",
-            "@id": "https://sprintcoder.yuseilab.com/#website",
-            "url": "https://sprintcoder.yuseilab.com/",
-            "name": "Sprint Coder",
-            "alternateName": "スプリントコーダー",
-            "inLanguage": "ja",
-            "publisher": { "@id": "https://robbits.co.jp/#organization" }
-          },
-          {
-            "@type": "Organization",
-            "@id": "https://robbits.co.jp/#organization",
-            "name": "株式会社Robbits",
-            "alternateName": "Robbits Inc.",
-            "url": "https://robbits.co.jp/",
-            "sameAs": ["https://github.com/Robbits-CO-LTD"]
-          },
-          {
             "@type": "TechArticle",
             "@id": "https://sprintcoder.yuseilab.com/ai-team/#page",
             "url": "https://sprintcoder.yuseilab.com/ai-team/",
-            "name": "AI Team Coding | Chatから複数AIへ仕事を分担する",
-            "description": "Sprint CoderのAI Team Codingを解説します。Leaderと複数Workerが同じTaskを共有し、調査・実装・レビューを分担して成果を統合する流れを紹介します。",
+            "name": "AIチームのしくみ",
+            "headline": "AIチームのしくみ",
+            "description": "Sprint CoderのAIチームのしくみ。リーダーのAIが仕事を受け取り、部長と担当のAIへ分け、同時に進めた結果をひとつにまとめて返す流れを、実際の画面で紹介します。",
             "inLanguage": "ja",
-            "dateModified": "2026-08-20",
+            "datePublished": "2026-08-20",
+            "dateModified": "2026-10-21",
+            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg",
             "isPartOf": { "@id": "https://sprintcoder.yuseilab.com/#website" },
             "about": { "@id": "https://sprintcoder.yuseilab.com/#software" },
-            "publisher": { "@id": "https://robbits.co.jp/#organization" },
-            "headline": "Chatから、動くAI Teamへ",
-            "datePublished": "2026-08-20",
-            "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-team.png",
             "author": { "@id": "https://robbits.co.jp/#organization" },
+            "publisher": { "@id": "https://robbits.co.jp/#organization" },
             "mainEntityOfPage": { "@id": "https://sprintcoder.yuseilab.com/ai-team/#page" }
           },
           {
             "@type": "BreadcrumbList",
             "@id": "https://sprintcoder.yuseilab.com/ai-team/#breadcrumb",
             "itemListElement": [
-              {
-                "@type": "ListItem",
-                "position": 1,
-                "name": "Sprint Coder",
-                "item": "https://sprintcoder.yuseilab.com/"
-              },
-              {
-                "@type": "ListItem",
-                "position": 2,
-                "name": "Chatから、動くAI Teamへ",
-                "item": "https://sprintcoder.yuseilab.com/ai-team/"
-              }
+              { "@type": "ListItem", "position": 1, "name": "Sprint Coder", "item": "https://sprintcoder.yuseilab.com/" },
+              { "@type": "ListItem", "position": 2, "name": "AIチームのしくみ", "item": "https://sprintcoder.yuseilab.com/ai-team/" }
             ]
           }
         ]
       }
     </script>
   </head>
-  <body class="content-page">
+
+  <body class="no-film">
     <a class="skip-link" href="#main">本文へ移動</a>
+
     <header class="site-header">
       <div class="shell header-inner">
         <a class="brand" href="/" aria-label="Sprint Coder トップ">
-          <img src="/assets/sprint-coder-icon.png" alt="" width="40" height="40" />
-          <span class="brand-copy"
-            ><strong>Sprint Coder</strong><small>A product of Robbits</small></span
-          >
+          <img src="/assets/sprint-coder-icon-64.png" alt="" width="32" height="32" />
+          <strong>Sprint Coder</strong>
         </a>
-        <nav aria-label="メインナビゲーション">
+        <nav class="site-nav" aria-label="メインナビゲーション">
           <a href="/about/">製品</a>
-          <a href="/ai-team/" aria-current="page">AI Team</a>
-          <a href="/providers/">Providers</a>
-          <a href="/local-first-security/">Security</a>
-          <a href="/getting-started/">はじめる</a>
+          <a href="/ai-team/" aria-current="page">AIチーム</a>
+          <a href="/providers/">AIの選び方</a>
+          <a href="/local-first-security/">安全</a>
+          <a href="/getting-started/">はじめ方</a>
         </nav>
-        <a
-          class="button button-header"
-          href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-          >ダウンロード<svg viewBox="0 0 20 20" aria-hidden="true">
-            <path d="M10 3v10m0 0 4-4m-4 4L6 9M4 16h12" /></svg
-        ></a>
+        <button class="btn btn-sm motion-btn" type="button" data-motion aria-pressed="false" hidden>動きを止める</button>
+        <a class="btn btn-primary btn-sm" href="/releases/">ダウンロード</a>
       </div>
     </header>
 
     <main id="main">
-      <section class="content-hero">
+      <!-- 見出し帯: チームが組み上がる実画面 -->
+      <section class="page-hero" aria-labelledby="h-page">
+        <div class="footage-layer dim" data-style="--fx: 30%; --fy: 35%">
+          <video muted playsinline loop autoplay preload="none" poster="/media/assemble.jpg" data-src="/media/assemble.mp4" aria-hidden="true"></video>
+        </div>
+        <div class="scrim"></div>
+        <span class="rec">実際の画面 <b>▶▶ 早送り ×10</b></span>
+        <div class="beat">
+          <p class="breadcrumb"><a href="/">SPRINT CODER</a> / AI TEAM</p>
+          <h1 class="display" id="h-page">AIチームの<br /><span class="em">しくみ</span></h1>
+          <p class="lead" data-style="max-width: 680px">
+            AIを横に並べるだけではありません。リーダーのAIがお願いを受け取り、部長と担当のAIへ分け、進み具合と結果をひとつの仕事へ戻します。
+          </p>
+        </div>
+      </section>
+
+      <!-- 要点 -->
+      <section class="section" aria-labelledby="h-points">
         <div class="shell">
-          <nav class="breadcrumb" aria-label="パンくず">
-            <ol>
-              <li><a href="/">Sprint Coder</a></li>
-              <li aria-current="page">Chatから、動くAI Teamへ</li>
-            </ol>
-          </nav>
-          <div class="content-hero-layout">
-            <div class="content-hero-copy">
-              <p class="section-label">MULTI-AGENT CODING</p>
-              <h1>Chatから、動くAI Teamへ</h1>
-              <p class="content-hero-lead">
-                Sprint CoderのAI
-                Teamは、複数のAIを横に並べるだけの画面ではありません。Leaderが目的を受け取り、Workerへ役割を渡し、進行と成果を同じTaskへ戻す実行モデルです。
-              </p>
-              <div class="content-meta">
-                <span>更新 2026-08-20</span><span>公式情報</span><span>株式会社Robbits</span>
-              </div>
-            </div>
-            <dl class="topic-signal">
-              <div>
-                <dt>START</dt>
-                <dd>Chat</dd>
-              </div>
-              <div>
-                <dt>ROLES</dt>
-                <dd>Leader / Worker</dd>
-              </div>
-              <div>
-                <dt>RESULT</dt>
-                <dd>Taskへ統合</dd>
-              </div>
-            </dl>
+          <div class="section-head">
+            <p class="eyebrow">POINTS</p>
+            <h2 class="headline" id="h-points">分けて進め<br /><span class="em">ひとつに戻す</span></h2>
           </div>
+          <div class="cards">
+            <div class="card">
+              <span class="num">01 REQUEST</span>
+              <h3>ふつうの文章で頼む</h3>
+              <p>チームの組み方を最初から考える必要はありません。やりたいことと条件を、会話で伝えるだけ。</p>
+            </div>
+            <div class="card">
+              <span class="num">02 HIRE</span>
+              <h3>リーダーが人を集める</h3>
+              <p>調べる・作る・チェックする。リーダーが部署ごとに部長を置き、部長が同時に動く担当のAIを集める。</p>
+            </div>
+            <div class="card">
+              <span class="num">03 VISIBLE</span>
+              <h3>誰が何をしているか見える</h3>
+              <p>担当ごとの状態、誰が誰に頼んだか、結果の戻り先が、ひとつの画面に並ぶ。</p>
+            </div>
+            <div class="card">
+              <span class="num">04 MERGE</span>
+              <h3>結果はひとつにまとまる</h3>
+              <p>ばらばらの答えを並べるのではなく、リーダーが目的に対するひとつの結果にまとめて返す。</p>
+            </div>
+          </div>
+
+          <ol class="flow" data-style="margin-top: 48px" aria-label="AIチームの流れ">
+            <li><b>お願いを伝える</b><small>ひとりのAIとの会話から</small></li>
+            <li><b>リーダーが分ける</b><small>部署ごとに部長を置き、部長が担当を集める</small></li>
+            <li><b>担当が同時に進める</b><small>状態と結果はリーダーとあなたへ</small></li>
+            <li><b>リーダーがまとめる</b><small>ひとつの結果として仕事へ戻す</small></li>
+          </ol>
         </div>
       </section>
 
-      <section class="scene scene-sub" data-scene="team" aria-label="LeaderがWorkerへ分担する流れ">
-        <div class="scene-stage">
-          <div class="shell control-layout">
-            <div class="control-copy">
-              <p class="section-label">HOW A TEAM RUNS</p>
-              <h2>Leaderが分け、<br />Workerが進め、<br />Taskへ戻る。</h2>
-              <ol class="control-steps">
-                <li data-range="0,0.2">
-                  <strong>Chatで目的を伝える</strong
-                  ><span>Team構成を最初から考える必要はありません</span>
-                </li>
-                <li data-range="0.2,0.45">
-                  <strong>LeaderがWorkerを雇う</strong
-                  ><span>並行化する意味がある役割だけを分けます</span>
-                </li>
-                <li data-range="0.45,0.72">
-                  <strong>Workerが進行を報告する</strong
-                  ><span>状態と成果はLeaderとあなたへ戻ります</span>
-                </li>
-                <li data-range="0.72,1.01">
-                  <strong>Leaderが統合する</strong><span>分散した回答を一つの成果としてTaskへ</span>
-                </li>
-              </ol>
-            </div>
+      <!-- 実画面と要点 -->
+      <section class="section" aria-labelledby="h-reel">
+        <div class="shell">
+          <div class="section-head">
+            <p class="eyebrow">ON SCREEN</p>
+            <h2 class="headline" id="h-reel">実演で見る<br /><span class="em">チームの動き</span></h2>
+          </div>
 
-            <div class="sub-panel" aria-hidden="true">
-              <div class="sub-bar">
-                <span>← Chatに戻る</span>
-                <b class="swap" data-on="merge"
-                  ><span>active · Worker 3人</span><span>completed · Worker 3人</span></b
-                >
-                <span>Canvas表示</span>
-              </div>
-              <div class="tc-board">
-                <svg
-                  class="tc-lines"
-                  viewBox="0 0 100 100"
-                  preserveAspectRatio="none"
-                  aria-hidden="true"
-                >
-                  <path
-                    class="tc-line"
-                    data-i="0"
-                    data-on="report"
-                    pathLength="1"
-                    d="M50 46 C50 54 20 50 20 60"
-                  />
-                  <path
-                    class="tc-line"
-                    data-i="1"
-                    data-on="report"
-                    pathLength="1"
-                    d="M50 46 L50 60"
-                  />
-                  <path
-                    class="tc-line"
-                    data-i="2"
-                    data-on="report"
-                    pathLength="1"
-                    d="M50 46 C50 54 80 50 80 60"
-                  />
-                </svg>
-                <div class="tc-brief">
-                  <small>USER</small
-                  >ログイン後にセッションが切れるバグを直して。調査・修正・レビューまで。
-                </div>
-                <div class="tc-node tc-leader">
-                  <small>LEADER</small><strong>Claude Code</strong>
-                  <em class="swap" data-on="merge"
-                    ><span>Workerを編成中（3人）</span><span>成果を統合しました</span></em
-                  >
-                </div>
-                <div class="tc-node tc-worker" data-i="0" data-state-phase="w1">
-                  <small>WORKER · 調査</small><strong>Codex CLI</strong>
-                  <em class="wk-status"
-                    ><i></i><span>ready</span><span>running</span><span>done</span></em
-                  >
-                  <div class="wk-bar"><b></b></div>
-                </div>
-                <div class="tc-node tc-worker" data-i="1" data-state-phase="w2">
-                  <small>WORKER · 実装</small><strong>Claude Code</strong>
-                  <em class="wk-status"
-                    ><i></i><span>ready</span><span>running</span><span>done</span></em
-                  >
-                  <div class="wk-bar"><b></b></div>
-                </div>
-                <div class="tc-node tc-worker" data-i="2" data-state-phase="w3">
-                  <small>WORKER · レビュー</small><strong>Gemini</strong>
-                  <em class="wk-status"
-                    ><i></i><span>ready</span><span>running</span><span>done</span></em
-                  >
-                  <div class="wk-bar"><b></b></div>
-                </div>
-                <div class="tc-result">
-                  <small>RESULT → TASK</small>2 files changed · 12 tests passed · レビュー: 問題なし
-                  · 提案 1件
-                </div>
-              </div>
+          <div class="reel">
+            <div class="screen">
+              <video muted playsinline loop autoplay preload="none" data-poster="/media/hires.jpg" data-src="/media/hires.mp4" aria-hidden="true" data-style="--fx: 40%; --fy: 40%; --sz: 1.2"></video>
+              <span class="rec">実際の画面 <b>等速</b></span>
+              <span class="rec after">実演の直後に収録</span>
+            </div>
+            <div class="copy">
+              <h3 class="title">リーダーが部長を採用する</h3>
+              <p class="lead">リーダーのAIが、仕事に合わせて部長のAIを選ぶ。どのAIを、なぜ選んだのかが記録に残る。</p>
             </div>
           </div>
-          <div class="scene-progress" aria-hidden="true"><b></b></div>
+
+          <div class="reel rev">
+            <div class="screen">
+              <video muted playsinline loop autoplay preload="none" data-poster="/media/together.jpg" data-src="/media/together.mp4" aria-hidden="true" data-style="--fx: 50%; --fy: 45%; --sz: 1.2"></video>
+              <span class="rec">実際の画面 <b>等速</b></span>
+            </div>
+            <div class="copy">
+              <h3 class="title">何人ものAIが同時に動く</h3>
+              <p class="lead">順番待ちではなく、いくつもの担当が同じ時間に手を動かす。やり直しの最中も、全員の状態が一目でわかる。</p>
+            </div>
+          </div>
+
+          <div class="reel">
+            <div class="screen">
+              <video muted playsinline loop autoplay preload="none" data-poster="/media/final.jpg" data-src="/media/final.mp4" aria-hidden="true" data-style="--fx: 50%; --fy: 40%; --sz: 1.2"></video>
+              <span class="rec">実際の画面 <b>等速</b></span>
+              <span class="rec after">実演の直後に収録</span>
+            </div>
+            <div class="copy">
+              <h3 class="title">最後はリーダーが報告する</h3>
+              <p class="lead">担当たちの結果を、リーダーがひとつの報告にまとめて返す。あなたは最後の報告から全体を確かめられる。</p>
+            </div>
+          </div>
+
+          <div class="section-head" data-style="margin-top: 64px">
+            <p class="eyebrow">実演の記録から</p>
+            <h3 class="title">ひとつのお願いで動いた数字</h3>
+          </div>
+          <div class="stats">
+            <div class="stat"><b>3<small>部署</small></b><span>リーダーが採用した部長の数</span></div>
+            <div class="stat"><b>6<small>人</small></b><span>同時に動いたAIの最大数</span></div>
+            <div class="stat"><b>15<small>件</small></b><span>AIが受け持った仕事の数</span></div>
+            <div class="stat"><b>36<small>分</small>32<small>秒</small></b><span>お願いから最終報告まで</span></div>
+          </div>
+          <p class="note" data-style="margin-top: 12px">
+            実演の記録から。15件のうち1件は途中で止まり、別の部長がやり直しました。リーダーがやり直しを頼んだのは1回。テストは9件すべて成功しています。
+          </p>
         </div>
       </section>
 
-      <section class="article-section">
-        <div class="shell article-layout">
-          <aside class="table-of-contents" aria-label="このページの目次">
-            <strong>ON THIS PAGE</strong>
-            <ol>
-              <li><a href="#model">AI Teamの基本モデル</a></li>
-              <li><a href="#flow">実行の流れ</a></li>
-              <li><a href="#visible">進行の可視化</a></li>
-              <li><a href="#when">Teamを使う判断</a></li>
-            </ol>
-          </aside>
-          <article class="prose">
-            <p class="article-lead">
-              一人のAIへ何でも順番に頼むと、調査・実装・確認が直列になり、長いTaskほどcontextと進行管理が難しくなります。AI
-              Teamは、同じ目的を共有したまま役割を分け、成果をLeaderへ戻すための仕組みです。
-            </p>
+      <!-- 詳しい話（技術の言葉はここで使う） -->
+      <section class="section details" aria-labelledby="h-details">
+        <div class="shell prose">
+          <p class="details-label">詳しい話</p>
+          <h2 id="h-details">ChatからAI Teamへ</h2>
+          <p>
+            一人のAIへ何でも順番に頼むと、調査・実装・確認が直列になり、長いTaskほどcontextと進行管理が難しくなります。AI Teamは、同じ目的を共有したまま役割を分け、成果をLeaderへ戻すための仕組みです。複数のAIを横に並べるだけの画面ではなく、Leaderが目的を受け取り、Workerへ役割を渡し、進行と成果を同じTaskへ戻す実行モデルです。
+          </p>
 
-            <h2 id="model">AI Teamの基本モデル</h2>
-            <p>
-              Teamには全体を調整するLeaderと、個別の依頼を担当するWorkerがあります。Leaderはユーザーの目的を理解し、必要な役割を決め、Workerへ依頼を送り、受け取った成果を統合します。Workerは独立したAgentとして担当範囲を進めます。
-            </p>
-            <div class="fact-grid">
-              <div class="fact-card">
-                <small>LEADER</small>
-                <h3>目的と統合を担当</h3>
-                <p>仕事を分け、Workerの進行を確認し、最終結果をTaskへまとめます。</p>
-              </div>
-              <div class="fact-card">
-                <small>WORKER</small>
-                <h3>境界のある役割を担当</h3>
-                <p>調査、実装、テスト、レビューなど、渡された依頼を進めます。</p>
-              </div>
+          <h2>AI Teamの基本モデル</h2>
+          <p>
+            Teamには全体を調整するLeaderと、個別の依頼を担当するWorkerがあります。Leaderはユーザーの目的を理解し、必要な役割を決め、Workerへ依頼を送り、受け取った成果を統合します。Workerは独立したAgentとして担当範囲を進めます。
+          </p>
+          <div class="table-wrap" role="region" tabindex="0" aria-label="AITeamの基本モデルの表">
+            <table>
+              <thead>
+                <tr><th scope="col">役割</th><th scope="col">担当</th><th scope="col">内容</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">Leader</th><td>目的と統合</td><td>仕事を分け、Workerの進行を確認し、最終結果をTaskへまとめる</td></tr>
+                <tr><th scope="row">Worker</th><td>境界のある役割</td><td>調査、実装、テスト、レビューなど、渡された依頼を進める</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h2>Chatから成果統合までの流れ</h2>
+          <ol>
+            <li><strong>一人のAIとのChatから始める。</strong>最初からTeam構成を考える必要はありません。目的や制約を通常の会話で伝えます。</li>
+            <li><strong>同じTaskをTeamへ展開する。</strong>会話、Workspace、選択modelなどの仕事の前提を保ったままTeamへ移ります。</li>
+            <li><strong>LeaderがWorkerへ依頼する。</strong>調査、実装、レビューなど、並行化する意味がある役割へ分けて指示します。</li>
+            <li><strong>Workerが進行と成果を報告する。</strong>各Workerの状態と成果がLeaderへ戻り、ユーザーも同じ画面から確認できます。</li>
+            <li><strong>Leaderが最終結果を統合する。</strong>分散した回答を並べるだけでなく、目的に対する一つの成果へまとめます。</li>
+          </ol>
+
+          <h2>進行をブラックボックスにしない</h2>
+          <p>
+            複数AIの価値は、数を増やすことではなく、誰が何を担当し、どこまで進み、何を返したかを把握できることです。Sprint CoderではWorkerの状態、依頼関係、成果の戻り先をTeam Canvasへ表示します。
+          </p>
+          <p>
+            さらに、Workspaceへ影響するファイル変更やCommandは、<a href="/managed-harness/">Managed Harness</a>とAccess設定を通じて扱います。Teamの見た目だけでなく、実行経路も共通の制御対象にします。Managed Harnessは、ファイル、Command、承認、監査を共通経路で扱う設計です。
+          </p>
+          <p>
+            Teamで使うAIは<a href="/providers/">AIの選び方</a>で紹介しています。Codex、Claude Code、Gemini、API、ローカルLLMから選べます。
+          </p>
+
+          <h2>Teamを使うべきとき、使わないとき</h2>
+          <div class="table-wrap" role="region" tabindex="0" aria-label="Teamを使うべきとき、使わないときの表">
+            <table>
+              <thead>
+                <tr><th scope="col">状況</th><th scope="col">推奨</th><th scope="col">理由</th></tr>
+              </thead>
+              <tbody>
+                <tr><th scope="row">短い質問や一箇所の明確な修正</th><td>通常Chat</td><td>分担コストの方が大きい</td></tr>
+                <tr><th scope="row">調査と実装を同時に進めたい</th><td>AI Team</td><td>担当境界を分けやすい</td></tr>
+                <tr><th scope="row">実装者と独立reviewerを分けたい</th><td>AI Team</td><td>異なる役割で反証できる</td></tr>
+                <tr><th scope="row">要件が曖昧で目的も未確定</th><td>まずChat</td><td>先に目的と制約を整理する</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h2>このページの映像と数字</h2>
+          <p>
+            映像はすべて実際のSprint Coderの画面を2026-10-20に収録したもので、早送りしている映像には倍率を表示しています。数字は同じ実演の記録から取りました。実演では、Leaderが3つの部署の部長（Manager）を採用し、同時に最大6人のAIが動きました。AIの仕事は15件（うち1件は途中で止まり、別の部長がやり直し）、Leaderからのやり直し依頼は1回、テストは9件すべて成功、依頼から最終報告までは36分32秒でした。
+          </p>
+          <p>
+            Sprint CoderはMIT Licenseで<a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHubに公開</a>されています。配布物またはソースから試せます。
+          </p>
+        </div>
+      </section>
+
+      <!-- 次へ -->
+      <section class="section" aria-labelledby="h-next">
+        <div class="shell">
+          <div class="section-head">
+            <p class="eyebrow">NEXT</p>
+            <h2 class="headline" id="h-next">次に読む</h2>
+          </div>
+          <div class="cards">
+            <a class="card" href="/managed-harness/"><span class="num">CONTROL</span><h3>確認と記録のしくみ</h3><p>ファイルの書き換えや操作を、同じ道筋で確かめて記録に残す。</p><span class="more">読む →</span></a>
+            <a class="card" href="/about/"><span class="num">PRODUCT</span><h3>Sprint Coderとは</h3><p>ひとりのAIで始めて、必要なときだけチームへ広げる考え方。</p><span class="more">読む →</span></a>
+            <a class="card" href="/providers/"><span class="num">CHOOSE AI</span><h3>AIの選び方</h3><p>ネットのAIと、このパソコンの中のAI。使えるAIの一覧。</p><span class="more">読む →</span></a>
+          </div>
+          <div class="next" data-style="margin-top: 48px">
+            <p class="title">最初の仕事を、チームで</p>
+            <div class="hero-actions" data-style="margin-top: 0">
+              <a class="btn btn-primary" href="/releases/">ダウンロード</a>
+              <a class="btn" href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHubでソースを見る</a>
             </div>
-
-            <figure class="article-image">
-              <img
-                src="/assets/sprint-coder-team.png"
-                alt="Sprint CoderのAI Team画面でLeaderと複数Workerが役割分担している様子"
-                width="1600"
-                height="1000"
-              />
-              <figcaption>
-                Leader、Worker、依頼、進行状態を同じAI Team画面で確認できます。
-              </figcaption>
-            </figure>
-
-            <h2 id="flow">Chatから成果統合までの流れ</h2>
-            <ol class="steps-list">
-              <li>
-                <h3>一人のAIとのChatから始める</h3>
-                <p>最初からTeam構成を考える必要はありません。目的や制約を通常の会話で伝えます。</p>
-              </li>
-              <li>
-                <h3>同じTaskをTeamへ展開する</h3>
-                <p>会話、Workspace、選択modelなどの仕事の前提を保ったままTeamへ移ります。</p>
-              </li>
-              <li>
-                <h3>LeaderがWorkerへ依頼する</h3>
-                <p>調査、実装、レビューなど、並行化する意味がある役割へ分けて指示します。</p>
-              </li>
-              <li>
-                <h3>Workerが進行と成果を報告する</h3>
-                <p>各Workerの状態と成果がLeaderへ戻り、ユーザーも同じ画面から確認できます。</p>
-              </li>
-              <li>
-                <h3>Leaderが最終結果を統合する</h3>
-                <p>分散した回答を並べるだけでなく、目的に対する一つの成果へまとめます。</p>
-              </li>
-            </ol>
-
-            <h2 id="visible">進行をブラックボックスにしない</h2>
-            <p>
-              複数AIの価値は、数を増やすことではなく、誰が何を担当し、どこまで進み、何を返したかを把握できることです。Sprint
-              CoderではWorkerの状態、依頼関係、成果の戻り先をTeam Canvasへ表示します。
-            </p>
-            <p>
-              さらに、Workspaceへ影響するファイル変更やCommandは、<a href="/managed-harness/"
-                >Managed Harness</a
-              >とAccess設定を通じて扱います。Teamの見た目だけでなく、実行経路も共通の制御対象にします。
-            </p>
-
-            <h2 id="when">Teamを使うべきとき、使わないとき</h2>
-            <div class="table-region" role="region" aria-label="AI Teamを使う判断" tabindex="0">
-              <table class="content-table">
-                <thead>
-                  <tr>
-                    <th>状況</th>
-                    <th>推奨</th>
-                    <th>理由</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr>
-                    <td>短い質問や一箇所の明確な修正</td>
-                    <td>通常Chat</td>
-                    <td>分担コストの方が大きい</td>
-                  </tr>
-                  <tr>
-                    <td>調査と実装を同時に進めたい</td>
-                    <td>AI Team</td>
-                    <td>担当境界を分けやすい</td>
-                  </tr>
-                  <tr>
-                    <td>実装者と独立reviewerを分けたい</td>
-                    <td>AI Team</td>
-                    <td>異なる役割で反証できる</td>
-                  </tr>
-                  <tr>
-                    <td>要件が曖昧で目的も未確定</td>
-                    <td>まずChat</td>
-                    <td>先に目的と制約を整理する</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <section class="related-section" aria-labelledby="related-title">
-              <h2 id="related-title">関連ページ</h2>
-              <div class="related-grid">
-                <a class="related-card" href="/managed-harness/"
-                  ><small>HARNESS</small><strong>Managed Harness</strong
-                  ><span>ファイル、Command、承認、監査を共通経路で扱う設計。</span></a
-                ><a class="related-card" href="/about/"
-                  ><small>PRODUCT</small><strong>Sprint Coderとは</strong
-                  ><span>製品の目的、対象ユーザー、ChatからAI Teamへ拡張する考え方。</span></a
-                ><a class="related-card" href="/providers/"
-                  ><small>PROVIDERS</small><strong>対応AI・モデル</strong
-                  ><span>Codex、Claude Code、Gemini、API、ローカルLLMの選び方。</span></a
-                >
-              </div>
-            </section>
-            <section class="content-cta" aria-labelledby="cta-title">
-              <h2 id="cta-title">最初のTaskを始める</h2>
-              <p>Sprint CoderはMIT Licenseで公開されています。配布物またはソースから試せます。</p>
-              <div class="hero-actions">
-                <a
-                  class="button button-primary"
-                  href="https://github.com/Robbits-CO-LTD/sprint-coder/releases"
-                  >最新版をダウンロード</a
-                >
-                <a
-                  class="button button-secondary"
-                  href="https://github.com/Robbits-CO-LTD/sprint-coder"
-                  >GitHubで見る</a
-                >
-              </div>
-            </section>
-          </article>
+          </div>
         </div>
       </section>
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <div class="shell footer-grid">
         <div class="footer-brand">
-          <img src="/assets/sprint-coder-icon.png" alt="" width="44" height="44" />
-          <div>
-            <strong>Sprint Coder</strong><span>One Task. One Team. Ship with control.</span>
-          </div>
+          <img src="/assets/sprint-coder-icon-64.png" alt="" width="40" height="40" loading="lazy" />
+          <div><strong>Sprint Coder</strong>開発・所有・運営 <a href="https://robbits.co.jp/">株式会社Robbits</a></div>
         </div>
-        <div class="footer-owner">
-          <span>Developed, owned and managed by</span
-          ><a href="https://robbits.co.jp/">株式会社Robbits</a>
-        </div>
-        <nav class="footer-links" aria-label="フッターナビゲーション">
-          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a
-          ><a href="/releases/">Releases</a
-          ><a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE"
-            >MIT License</a
-          >
+        <nav class="footer-nav" aria-label="フッターナビゲーション">
+          <a href="/about/">製品について</a>
+          <a href="/ai-team/">AIチームのしくみ</a>
+          <a href="/providers/">AIの選び方</a>
+          <a href="/local-first-security/">保存と安全</a>
+          <a href="/managed-harness/">確認と記録のしくみ</a>
+          <a href="/getting-started/">はじめ方</a>
+          <a href="/releases/">ダウンロード</a>
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHub</a>
+          <a href="https://github.com/Robbits-CO-LTD/sprint-coder/blob/main/LICENSE">MITライセンス</a>
         </nav>
       </div>
-      <nav class="shell content-footer-links" aria-label="公式情報ページ">
-        <a href="/about/">製品概要</a><a href="/ai-team/">AI Team</a
-        ><a href="/providers/">Providers</a><a href="/local-first-security/">Security</a
-        ><a href="/managed-harness/">Managed Harness</a><a href="/getting-started/">はじめ方</a
-        ><a href="/releases/">Releases</a>
-      </nav>
-      <div class="shell copyright">
-        © 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc.
-      </div>
+      <div class="shell copyright">© 2026 Robbits Inc. Sprint Coder is a product of Robbits Inc. sprintcoder.yuseilab.com はホスティング用のドメインです。</div>
     </footer>
-    <script
-      src="/story.js?v=20260912-2"
-      onerror="document.documentElement.classList.remove('js')"
-    ></script>
   </body>
 </html>

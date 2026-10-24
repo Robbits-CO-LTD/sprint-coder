@@ -36,6 +36,7 @@ export type TeamDelegationErrorCode =
   | 'direct_child_limit'
   | 'manager_child_forbidden'
   | 'team_depth_limit'
+  | 'execution_access_ceiling'
   | 'manager_delegation_limit';
 
 export class TeamDelegationError extends Error {

@@ -60,14 +60,6 @@ import {
   evaluateNativeMutationPlatformGate,
   type NativeMutationPackagedLoadEvidence,
 } from './native-mutation-platform-gate';
-import {
-  loadBundledManagedLocalSidecar,
-  ManagedLocalSidecarError,
-  type VerifiedManagedLocalSidecarBundle,
-} from './managed-local-sidecar-bundle';
-import { ManagedLocalRuntimeSupervisor } from './managed-local-runtime-supervisor';
-import { ManagedLocalRuntimeLifecycle } from './managed-local-runtime-lifecycle';
-import { ManagedLocalController } from './managed-local-controller';
 import { secureLogger, writeSecureLogEntry } from './secure-logger';
 import { combineLogSinks, createPersistentLog, resolveDiagnosticLogRoot } from './persistent-log';
 import {
@@ -98,10 +90,6 @@ let persistence: SqlitePersistenceClient | null = null;
 let nativeSafeFs: NativeSafeFs | null = null;
 let router: IpcRouter | null = null;
 let autoUpdateController: AutoUpdateController | null = null;
-let managedLocalLifecycle: ManagedLocalRuntimeLifecycle | null = null;
-process.once('exit', () => managedLocalLifecycle?.killNow());
-let managedLocalController: ManagedLocalController | null = null;
-let managedLocalMemoryTimer: ReturnType<typeof setInterval> | null = null;
 let shutdownCommitted = false;
 let shutdownInFlight = false;
 
@@ -170,8 +158,6 @@ if (squirrelStartup || !hasLock) {
       if (process.platform === 'darwin' && usesHiddenWindowPresentation())
         app.setActivationPolicy('prohibited');
       registerProductionProtocol();
-      const managedLocalBundle = await initializeManagedLocalSidecarCapability();
-      if (managedLocalBundle !== null) initializeManagedLocalLifecycle(managedLocalBundle);
       const nativeSafeFsLockDirectory = await prepareNativeSafeFsLockDirectory(
         app.getPath('userData'),
       );
@@ -254,12 +240,6 @@ if (squirrelStartup || !hasLock) {
         if (rootId === null) return null;
         return workspace.roots.find((root) => root.rootId === rootId) ?? null;
       });
-      managedLocalController = await ManagedLocalController.create({
-        databasePath,
-        storeRoot: join(app.getPath('userData'), 'local-models'),
-        lifecycle: managedLocalLifecycle,
-        bundle: managedLocalBundle,
-      });
       mainWindow = createWindow();
       const trustedOrigin =
         MAIN_WINDOW_VITE_DEV_SERVER_URL === undefined
@@ -270,7 +250,6 @@ if (squirrelStartup || !hasLock) {
         persistence,
         trustedOrigin,
         workspaceEdit,
-        managedLocalController,
         undefined,
         computerUseNativeHost,
         undefined,
@@ -349,56 +328,6 @@ if (squirrelStartup || !hasLock) {
     });
 }
 
-async function initializeManagedLocalSidecarCapability(): Promise<VerifiedManagedLocalSidecarBundle | null> {
-  try {
-    const bundle = await loadBundledManagedLocalSidecar();
-    secureLogger.info('Managed Local sidecar bundle verified', {
-      process: 'main',
-      target: bundle.target,
-      runtimeVersion: bundle.manifest.runtimeVersion,
-      candidateBackends: bundle.manifest.candidateBackends,
-    });
-    return bundle;
-  } catch (error) {
-    secureLogger.warn('Managed Local sidecar is unavailable', {
-      process: 'main',
-      code: error instanceof ManagedLocalSidecarError ? error.code : 'unknown',
-    });
-    return null;
-  }
-}
-
-function initializeManagedLocalLifecycle(bundle: VerifiedManagedLocalSidecarBundle): void {
-  const supervisor = new ManagedLocalRuntimeSupervisor({ loadBundle: async () => bundle });
-  managedLocalLifecycle = new ManagedLocalRuntimeLifecycle({
-    bundle,
-    supervisor,
-    onDrainRequested: (modelId, activeLeases, reason) => {
-      secureLogger.warn('Managed Local model drain requested', {
-        modelId,
-        activeLeases,
-        reason,
-      });
-    },
-  });
-  managedLocalMemoryTimer = setInterval(() => {
-    void managedLocalLifecycle
-      ?.pollMemoryPressure()
-      .then((stopped) => {
-        if (stopped)
-          secureLogger.warn('Managed Local stopped after critical memory pressure', {
-            category: 'managed_local_memory_pressure',
-          });
-      })
-      .catch(() => {
-        secureLogger.warn('Managed Local memory pressure check failed', {
-          category: 'managed_local_memory_pressure',
-        });
-      });
-  }, 5_000);
-  managedLocalMemoryTimer.unref();
-}
-
 function initializePersistentDiagnostics(): void {
   try {
     const persistentLog = createPersistentLog(
@@ -428,7 +357,6 @@ function initializePersistentDiagnostics(): void {
   }
 
   process.on('uncaughtException', (error) => {
-    managedLocalLifecycle?.killNow();
     secureLogger.error(
       'Uncaught exception in Main process',
       { process: 'main', error },
@@ -531,26 +459,10 @@ async function restartToInstallUpdate(): Promise<'started' | 'busy' | 'shutdown_
 
 async function disposeApplicationResources(): Promise<void> {
   autoUpdateController?.stop();
-  if (managedLocalMemoryTimer !== null) {
-    clearInterval(managedLocalMemoryTimer);
-    managedLocalMemoryTimer = null;
-  }
   try {
     await router?.dispose();
   } catch (error) {
     secureLogger.error('CommandRunner shutdown did not fully drain', error);
-  }
-  try {
-    await managedLocalController?.dispose();
-    managedLocalController = null;
-  } catch (error) {
-    secureLogger.error('Managed Local controller shutdown did not fully drain', error);
-  }
-  try {
-    await managedLocalLifecycle?.dispose();
-    managedLocalLifecycle = null;
-  } catch (error) {
-    secureLogger.error('Managed Local shutdown did not fully drain', error);
   }
   try {
     persistence?.close();

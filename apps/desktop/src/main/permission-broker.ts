@@ -76,7 +76,7 @@ type PermissionPersistence = Pick<
 >;
 
 export class PermissionBroker {
-  private drainInFlight: Promise<void> | undefined;
+  private readonly notificationsInFlight = new Map<string, Promise<void>>();
   constructor(
     private readonly persistence: PermissionPersistence,
     private readonly coordinator: PolicyRevocationCoordinator = new NoActivePolicySubjects(),
@@ -92,27 +92,46 @@ export class PermissionBroker {
     expectedPolicyEpoch: number,
   ): Promise<PermissionPolicyRecord> {
     const policy = this.persistence.setAccessPreset(taskId, preset, expectedPolicyEpoch);
-    await this.drainPolicyEpochOutbox().catch(() => undefined);
+    await this.drainPolicyEpochOutbox(taskId).catch(() => undefined);
     return policy;
   }
 
   async notifyPolicyEpochChanged(taskId: string, policyEpoch: number): Promise<void> {
-    await this.coordinator.policyEpochChanged(taskId, policyEpoch);
+    const key = JSON.stringify([taskId, policyEpoch]);
+    const existing = this.notificationsInFlight.get(key);
+    if (existing !== undefined) return existing;
+    const notification = Promise.resolve(this.coordinator.policyEpochChanged(taskId, policyEpoch));
+    this.notificationsInFlight.set(key, notification);
+    try {
+      await notification;
+    } finally {
+      if (this.notificationsInFlight.get(key) === notification)
+        this.notificationsInFlight.delete(key);
+    }
   }
 
-  async drainPolicyEpochOutbox(): Promise<void> {
-    if (this.drainInFlight !== undefined) return this.drainInFlight;
-    this.drainInFlight = (async () => {
-      for (const pending of this.persistence.listPendingPermissionPolicyEpochs()) {
-        await this.notifyPolicyEpochChanged(pending.taskId, pending.policyEpoch);
-        this.persistence.markPermissionPolicyEpochDelivered(pending.id, new Date().toISOString());
-      }
-    })();
-    try {
-      await this.drainInFlight;
-    } finally {
-      this.drainInFlight = undefined;
-    }
+  async drainPolicyEpochOutbox(taskId?: string): Promise<void> {
+    const pending = this.persistence
+      .listPendingPermissionPolicyEpochs()
+      .filter((entry) => taskId === undefined || entry.taskId === taskId);
+    const taskIds = [...new Set(pending.map((entry) => entry.taskId))];
+    const results = await Promise.allSettled(
+      taskIds.map(async (pendingTaskId) => {
+        // Older rows must never invalidate approvals or background work admitted at the current epoch.
+        const epoch = this.persistence.getPermissionPolicy(pendingTaskId).policyEpoch;
+        await this.notifyPolicyEpochChanged(pendingTaskId, epoch);
+        for (const entry of pending) {
+          if (entry.taskId === pendingTaskId && entry.policyEpoch <= epoch)
+            this.persistence.markPermissionPolicyEpochDelivered(entry.id, new Date().toISOString());
+        }
+      }),
+    );
+    const failures = results.filter((result) => result.status === 'rejected');
+    if (failures.length > 0)
+      throw new AggregateError(
+        failures.map((result) => result.reason),
+        'Permission cleanup incomplete',
+      );
   }
 
   async revokeCapability(
@@ -122,7 +141,7 @@ export class PermissionBroker {
   ): Promise<{ revokedGrants: number; policyEpoch: number }> {
     const revokedGrants = this.persistence.revokePermissionCapability(taskId, capability, now);
     const policyEpoch = this.persistence.getPermissionPolicy(taskId).policyEpoch;
-    await this.drainPolicyEpochOutbox().catch(() => undefined);
+    await this.drainPolicyEpochOutbox(taskId).catch(() => undefined);
     return { revokedGrants, policyEpoch };
   }
 

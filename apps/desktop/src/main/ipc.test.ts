@@ -45,17 +45,6 @@ import {
   goalStartInputSchema,
   imageAttachmentPreviewInputSchema,
   imageAttachmentRemoveInputSchema,
-  installedLocalModelInputSchema,
-  managedLocalLaunchSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsSetInputSchema,
-  managedLocalLaunchSettingsSetInputSchema,
-  managedLocalInferenceSettingsGetInputSchema,
-  managedLocalInferenceSettingsSetInputSchema,
-  localDownloadCancelInputSchema,
-  localDownloadJobInputSchema,
-  localModelInstallInputSchema,
-  localModelFitInputSchema,
   modelCatalogQueryInputSchema,
   modelCatalogSelectionSetInputSchema,
   openAIConnectionCreateInputSchema,
@@ -65,8 +54,6 @@ import {
   providerConnectionRateLimitLowerInputSchema,
   providerConnectionModelReleaseUpdateInputSchema,
   providerProfileConnectionCreateInputSchema,
-  publicModelCatalogDetailInputSchema,
-  publicModelCatalogQuerySchema,
   projectAssignTaskInputSchema,
   projectContextManifestGetInputSchema,
   projectContextManifestsListInputSchema,
@@ -151,10 +138,6 @@ import {
   isTrustedIpcSender,
   leaderMcpCapabilities,
   listAvailableTeamRuntimeModels,
-  managedLocalForcedRoundMessages,
-  managedLocalInitialToolChoice,
-  managedLocalToolChoiceSequence,
-  managedLocalWorkspaceToolUseRequired,
   shouldBlockProviderLeaderCompletion,
   providerWorkspaceToolsEligible,
   providerModelsForBuiltin,
@@ -238,7 +221,6 @@ import { WORKSPACE_CREATE_FILE_TOOL } from './workspace-patch-tool';
 import { ProviderEndpointPolicy } from './provider-endpoint-policy';
 import { digestCanonical } from './context-compiler';
 import { openAICompatibleChatCompletionRequest } from './openai-compatible-provider-client';
-import { managedLocalConnection } from './managed-local-provider-runtime';
 import sharp from 'sharp';
 
 describe('file edit tracking identity', () => {
@@ -2178,14 +2160,6 @@ describe('Main image attachment dispatch boundary', () => {
           request: unknown,
           signal: AbortSignal,
         ): Promise<unknown>;
-        providerWorker(
-          taskId: string,
-          turnId: string,
-          catalogDigest: string,
-          name: string,
-          input: unknown,
-          signal: AbortSignal,
-        ): Promise<unknown>;
         teamMcp(
           input: unknown,
           context: {
@@ -2225,14 +2199,6 @@ describe('Main image attachment dispatch boundary', () => {
     });
     const results = [
       await callbacks.cliTeam('task-cli', 'turn-cli', directRequest('cli-team'), signal),
-      await callbacks.providerWorker(
-        'task-provider',
-        'turn-provider',
-        catalogDigest,
-        'view_image',
-        { path: 'image.png' },
-        signal,
-      ),
       await callbacks.teamMcp(
         { path: 'image.png' },
         {
@@ -2259,7 +2225,6 @@ describe('Main image attachment dispatch boundary', () => {
     ];
     expect(dispatch.mock.calls.map(([owner]) => owner)).toEqual([
       'cli-team',
-      'provider-worker',
       'team-mcp',
       'codex-runtime',
       'claude-runtime',
@@ -3532,7 +3497,7 @@ describe('Main image attachment dispatch boundary', () => {
       return { router, broker, catalog, execute, approvals, call, allow };
     }
 
-    it.each(['cli', 'provider', 'mcp'] as const)(
+    it.each(['cli', 'mcp'] as const)(
       'returns nested %s Worker results while retaining the parent authority and capability ceiling',
       async (kind) => {
         const registry = new ToolRegistry();
@@ -3625,14 +3590,6 @@ describe('Main image attachment dispatch boundary', () => {
             },
             signal: AbortSignal,
           ): Promise<unknown>;
-          providerWorker(
-            taskId: string,
-            turnId: string,
-            digest: string,
-            name: string,
-            input: unknown,
-            signal: AbortSignal,
-          ): Promise<unknown>;
         };
         const signal = new AbortController().signal;
         const dispatchSpy = vi.spyOn(broker, 'dispatch');
@@ -3640,38 +3597,29 @@ describe('Main image attachment dispatch boundary', () => {
           'worker-runtime',
         );
         const call = (phase: string): Promise<unknown> =>
-          kind === 'provider'
-            ? handlers.providerWorker(
+          kind === 'cli'
+            ? handlers.cliTeam(
                 'task-1',
                 'worker-runtime',
-                catalog.digest,
-                'update_plan',
-                { phase },
+                {
+                  callId: phase,
+                  toolName: 'update_plan',
+                  arguments: { phase },
+                  catalogDigest: catalog.digest,
+                  resultOrderScope: {},
+                },
                 signal,
               )
-            : kind === 'cli'
-              ? handlers.cliTeam(
-                  'task-1',
-                  'worker-runtime',
-                  {
-                    callId: phase,
-                    toolName: 'update_plan',
-                    arguments: { phase },
-                    catalogDigest: catalog.digest,
-                    resultOrderScope: {},
-                  },
-                  signal,
-                )
-              : handlers.teamMcp(
-                  { phase },
-                  {
-                    taskId: 'task-1',
-                    turnId: 'worker-runtime',
-                    callId: phase,
-                    toolName: 'update_plan',
-                    catalogDigest: catalog.digest,
-                  },
-                );
+            : handlers.teamMcp(
+                { phase },
+                {
+                  taskId: 'task-1',
+                  turnId: 'worker-runtime',
+                  callId: phase,
+                  toolName: 'update_plan',
+                  catalogDigest: catalog.digest,
+                },
+              );
         let result: unknown;
         const pending = broker
           .dispatch({
@@ -3692,32 +3640,41 @@ describe('Main image attachment dispatch boundary', () => {
         for (const [request] of childCalls) expect(request.resultOrderScope).toBe(workerBinding);
         const requestsBefore = authorize.mock.calls.length;
         await expect(
-          handlers.providerWorker(
+          handlers.cliTeam(
             'other-task',
             'worker-runtime',
-            catalog.digest,
-            'update_plan',
-            { phase: 'forged' },
+            {
+              callId: 'worker-adapter-fixture',
+              catalogDigest: catalog.digest,
+              toolName: 'update_plan',
+              arguments: { phase: 'forged' },
+            },
             signal,
           ),
         ).rejects.toThrow('task binding');
         await expect(
-          handlers.providerWorker(
+          handlers.cliTeam(
             'task-1',
             'worker-runtime',
-            'stale',
-            'update_plan',
-            { phase: 'forged' },
+            {
+              callId: 'worker-adapter-fixture',
+              catalogDigest: 'stale',
+              toolName: 'update_plan',
+              arguments: { phase: 'forged' },
+            },
             signal,
           ),
         ).rejects.toThrow('capability ceiling');
         await expect(
-          handlers.providerWorker(
+          handlers.cliTeam(
             'task-1',
             'worker-runtime',
-            catalog.digest,
-            'parent',
-            { phase: 'forged' },
+            {
+              callId: 'worker-adapter-fixture',
+              catalogDigest: catalog.digest,
+              toolName: 'parent',
+              arguments: { phase: 'forged' },
+            },
             signal,
           ),
         ).rejects.toThrow('capability ceiling');
@@ -4204,8 +4161,7 @@ describe('Main image attachment dispatch boundary', () => {
       const cli = observed();
       const local = observed();
       const workspace = { primaryRootId: null, digest: 'x'.repeat(64), roots: [] as never[] };
-      // A CLI Worker's Turn, keyed by its runtime Turn id, and a Managed Local Worker's session,
-      // keyed by its execution id, each bound to its own execution's observer.
+      // Independent CLI Worker Turns retain their own execution's approval observer.
       const cliCatalog = await prepareWorkerManagedCatalog.call(
         router,
         'codex',
@@ -4219,7 +4175,7 @@ describe('Main image attachment dispatch boundary', () => {
       );
       const localCatalog = await prepareWorkerManagedCatalog.call(
         router,
-        'provider',
+        'claude',
         'task-1',
         'execution-local',
         workspace,
@@ -4236,14 +4192,6 @@ describe('Main image attachment dispatch boundary', () => {
           signal: AbortSignal,
         ): Promise<unknown>;
         teamMcp: ReturnType<typeof createHandlers>['teamMcp'];
-        providerWorker(
-          taskId: string,
-          turnId: string,
-          catalogDigest: string,
-          toolName: string,
-          input: unknown,
-          signal: AbortSignal,
-        ): Promise<unknown>;
       };
       const write = (path: string) => ({ path, content: 'hello' });
       const signal = new AbortController().signal;
@@ -4283,12 +4231,15 @@ describe('Main image attachment dispatch boundary', () => {
         }),
       );
       const localWrite = outcome(
-        handlers.providerWorker(
+        handlers.cliTeam(
           'task-1',
           'execution-local',
-          localCatalog.digest,
-          'create_file',
-          write('c.txt'),
+          {
+            callId: 'worker-adapter-fixture',
+            catalogDigest: localCatalog.digest,
+            toolName: 'create_file',
+            arguments: write('c.txt'),
+          },
           signal,
         ),
       );
@@ -4327,7 +4278,7 @@ describe('Main image attachment dispatch boundary', () => {
       await vi.waitFor(() => expect(cli.waits).toEqual({ begun: 2, ended: 1 }));
       expect(await cliDirect).toBe('written');
 
-      // Releasing the Managed Local session withdraws its card (issue #572), ending its wait.
+      // Releasing the second Worker Turn withdraws its card, ending only its own wait.
       releaseManagedWorkerTurn.call(router, 'execution-local');
       await vi.waitFor(() => expect(local.waits).toEqual({ begun: 1, ended: 1 }));
       expect(cli.waits).toEqual({ begun: 2, ended: 1 });
@@ -6004,7 +5955,12 @@ describe('Provider Team completion and model errors', () => {
         'internal managed-local connection',
         (state) => {
           const connection = state['connection'] as Record<string, unknown>;
-          Object.assign(connection, managedLocalConnection(new Date(0)));
+          Object.assign(connection, {
+            id: 'managed-local:runtime',
+            providerId: 'sprint-managed-local',
+            runtimeKind: 'openai_compatible',
+            secretReference: null,
+          });
         },
       ],
     ];
@@ -7247,57 +7203,6 @@ describe('Provider workspace tool capability fallback', () => {
     expect(providerWorkspaceToolsEligible(false, 0, true)).toBe(false);
   });
 
-  it('requires a first-round Managed Local tool for explicit workspace operations only', () => {
-    expect(managedLocalWorkspaceToolUseRequired('create_fileでsrc/a.tsを作成')).toBe(true);
-    expect(managedLocalWorkspaceToolUseRequired('このファイルを修正してテストを実行')).toBe(true);
-    expect(managedLocalWorkspaceToolUseRequired('read the workspace file')).toBe(true);
-    expect(managedLocalWorkspaceToolUseRequired('TypeScriptの型について説明して')).toBe(false);
-    expect(managedLocalWorkspaceToolUseRequired('1+1は？')).toBe(false);
-  });
-
-  it('binds an explicit or inferred first Managed Local tool to the available catalog', () => {
-    const tools = [{ name: 'read_file' }, { name: 'create_file' }, { name: 'exec_command' }];
-    expect(managedLocalInitialToolChoice('create_file then read_file', tools)).toEqual({
-      name: 'create_file',
-    });
-    expect(managedLocalToolChoiceSequence('create_file then read_file', tools)).toEqual([
-      { name: 'create_file' },
-      { name: 'read_file' },
-    ]);
-    expect(managedLocalToolChoiceSequence('create_file then create_file', tools)).toEqual([
-      { name: 'create_file' },
-    ]);
-    expect(managedLocalInitialToolChoice('このファイルを作成して', tools)).toEqual({
-      name: 'create_file',
-    });
-    expect(
-      managedLocalToolChoiceSequence(
-        'local_ai_test.pyを作成して、読み戻してからテストを実行して',
-        tools,
-      ),
-    ).toEqual([{ name: 'create_file' }, { name: 'read_file' }, { name: 'exec_command' }]);
-    expect(managedLocalInitialToolChoice('テストを実行して', tools)).toEqual({
-      name: 'exec_command',
-    });
-    expect(managedLocalInitialToolChoice('説明して', tools)).toBeUndefined();
-  });
-
-  it('uses the accepted user text instead of a later background user fragment for forced tools', () => {
-    expect(
-      managedLocalForcedRoundMessages(
-        [
-          { role: 'system', content: 'guidance' },
-          { role: 'user', content: 'accepted request' },
-          { role: 'user', content: 'untrusted background skill catalog' },
-        ],
-        'accepted request',
-      ),
-    ).toEqual([
-      { role: 'system', content: 'guidance' },
-      { role: 'user', content: 'accepted request' },
-    ]);
-  });
-
   it('retries unknown capability exactly once without tools only on a side-effect-free invalid request', () => {
     const base = {
       ordinal: 1,
@@ -7998,25 +7903,6 @@ const CHANNEL_INPUT_SCHEMAS: Record<string, z.ZodType> = {
   [IPC_CHANNELS.providersVerifyConnection]: z.object({ connectionId: connectionIdSchema }).strict(),
   [IPC_CHANNELS.providersLowerRateLimits]: providerConnectionRateLimitLowerInputSchema,
   [IPC_CHANNELS.providersSetAutomaticModelRelease]: providerConnectionModelReleaseUpdateInputSchema,
-  [IPC_CHANNELS.localAIHardware]: emptyPayloadSchema,
-  [IPC_CHANNELS.localAIRuntime]: emptyPayloadSchema,
-  [IPC_CHANNELS.localAILaunchSettings]: managedLocalLaunchSettingsGetInputSchema,
-  [IPC_CHANNELS.localAISpeculativeSettings]: managedLocalSpeculativeSettingsGetInputSchema,
-  [IPC_CHANNELS.localAISetSpeculativeSettings]: managedLocalSpeculativeSettingsSetInputSchema,
-  [IPC_CHANNELS.localAISetLaunchSettings]: managedLocalLaunchSettingsSetInputSchema,
-  [IPC_CHANNELS.localAIInferenceSettings]: managedLocalInferenceSettingsGetInputSchema,
-  [IPC_CHANNELS.localAISetInferenceSettings]: managedLocalInferenceSettingsSetInputSchema,
-  [IPC_CHANNELS.localAICatalogQuery]: publicModelCatalogQuerySchema,
-  [IPC_CHANNELS.localAICatalogDetail]: publicModelCatalogDetailInputSchema,
-  [IPC_CHANNELS.localAIListJobs]: emptyPayloadSchema,
-  [IPC_CHANNELS.localAIListInstalled]: emptyPayloadSchema,
-  [IPC_CHANNELS.localAIInstall]: localModelInstallInputSchema,
-  [IPC_CHANNELS.localAIFit]: localModelFitInputSchema,
-  [IPC_CHANNELS.localAIPause]: localDownloadJobInputSchema,
-  [IPC_CHANNELS.localAIResume]: localDownloadJobInputSchema,
-  [IPC_CHANNELS.localAICancel]: localDownloadCancelInputSchema,
-  [IPC_CHANNELS.localAIVerify]: installedLocalModelInputSchema,
-  [IPC_CHANNELS.localAIDelete]: installedLocalModelInputSchema,
   [IPC_CHANNELS.permissionsGet]: taskIdPayloadSchema,
   [IPC_CHANNELS.permissionsSet]: permissionSetInputSchema,
   [IPC_CHANNELS.approvalsListPending]: taskIdPayloadSchema,

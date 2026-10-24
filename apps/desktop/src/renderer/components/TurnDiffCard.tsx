@@ -18,6 +18,7 @@ const KIND_LABEL: Record<TurnDiffEntry['kind'], string> = {
   update: '更新',
   delete: '削除',
   rename: '名前変更',
+  mkdir: 'フォルダー作成',
 };
 
 /** `12秒` / `1分5秒` / `2時間3分`, or null for anything that cannot be stated truthfully. Not

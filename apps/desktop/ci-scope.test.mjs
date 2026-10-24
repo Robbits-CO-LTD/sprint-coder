@@ -21,6 +21,44 @@ afterEach(() => {
 });
 
 describe('CI change boundaries', () => {
+  it('checks standalone website changes without desktop jobs and retains checks on wider diffs', () => {
+    for (const paths of [['website/index.html'], ['website/film.js', 'tasks/todo.md']])
+      expect(classifyChanges(changes(...paths))).toMatchObject({
+        mode: 'website',
+        fullMatrix: false,
+        websiteRequired: true,
+        e2eSpecs: [],
+      });
+    for (const extra of ['package-lock.json', `${renderer}components/RunCard.tsx`, 'unknown']) {
+      const scope = classifyChanges(changes('website/index.html', extra));
+      expect(scope).toMatchObject({ mode: 'full', websiteRequired: true });
+      if (extra.includes('RunCard')) expect(scope.e2eSpecs).toContain(spec('keyboard-smoke'));
+    }
+    for (const path of [
+      'deploy/website/deploy.sh',
+      'ci-website.mjs',
+      'playwright.website.config.ts',
+      'tests/website/site.spec.ts',
+      'apps/desktop/ci-website.test.mjs',
+      'ci-scope.mjs',
+      '.github/workflows/ci.yml',
+      'package-lock.json',
+    ])
+      expect(classifyChanges(changes(path))).toMatchObject({ mode: 'full', websiteRequired: true });
+    for (const status of ['D', 'R100', 'T'])
+      expect(classifyChanges([{ path: 'website/index.html', status }])).toMatchObject({
+        mode: 'full',
+        websiteRequired: true,
+      });
+    for (const eventName of ['push', 'workflow_dispatch'])
+      expect(classifyChanges([], { eventName })).toMatchObject({
+        mode: 'full',
+        websiteRequired: true,
+      });
+    expect(classifyChanges(changes('README.md')).websiteRequired).toBe(false);
+    expect(classifyChanges([]).websiteRequired).toBe(true);
+  });
+
   it('narrows only prose paths, with additions handled like modifications', () => {
     const scope = classifyChanges([
       { path: 'README.md', status: 'M' },
@@ -237,14 +275,35 @@ describe('required CI result aggregation', () => {
     'platform-tests',
     'electron-bridges',
     'package-linux',
+    'package-windows-build',
     'package-windows',
     'e2e-windows',
     'archify-packaged',
     'package-macos',
     'renderer-tests',
     'renderer-e2e',
+    'website',
   ];
   const results = (value) => Object.fromEntries(allJobs.map((job) => [job, value]));
+
+  it('requires website success for both standalone and mixed changes', () => {
+    for (const paths of [['website/index.html'], ['website/index.html', 'package.json']]) {
+      const scope = classifyChanges(changes(...paths));
+      expect(verifyRequiredJobs(scope, results('success')).required).toContain('website');
+      for (const value of ['failure', 'cancelled', 'skipped', undefined])
+        expect(() =>
+          verifyRequiredJobs(scope, { ...results('success'), website: value }),
+        ).toThrow();
+    }
+  });
+
+  it('does not accept a missing or unsuccessful Windows package producer', () => {
+    const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
+    for (const value of ['failure', 'cancelled', 'skipped', undefined])
+      expect(() =>
+        verifyRequiredJobs(scope, { ...results('success'), 'package-windows-build': value }),
+      ).toThrow('package-windows-build');
+  });
 
   it('requires focused display checks when a mixed change also requires the full scope', () => {
     const scope = classifyChanges(changes(`${renderer}components/RunCard.tsx`, 'package.json'));
@@ -275,7 +334,7 @@ describe('required CI result aggregation', () => {
   it('requires every full-matrix job, including the renderer runner contracts', () => {
     const scope = classifyChanges(changes('apps/desktop/src/main/ipc.ts'));
     expect(verifyRequiredJobs(scope, results('success')).required).not.toContain('renderer-e2e');
-    for (const job of allJobs.filter((name) => name !== 'renderer-e2e')) {
+    for (const job of allJobs.filter((name) => !['renderer-e2e', 'website'].includes(name))) {
       const missing = results('success');
       delete missing[job];
       expect(() => verifyRequiredJobs(scope, missing), job).toThrow(`${job}: missing`);

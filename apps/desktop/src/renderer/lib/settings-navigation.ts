@@ -1,5 +1,5 @@
-export const OPEN_LOCAL_AI_SETTINGS_EVENT = 'sprint-coder:open-local-ai-settings';
+export const OPEN_PROVIDER_SETTINGS_EVENT = 'sprint-coder:open-provider-settings';
 
-export function requestOpenLocalAiSettings(): void {
-  window.dispatchEvent(new Event(OPEN_LOCAL_AI_SETTINGS_EVENT));
+export function requestOpenProviderSettings(): void {
+  window.dispatchEvent(new Event(OPEN_PROVIDER_SETTINGS_EVENT));
 }

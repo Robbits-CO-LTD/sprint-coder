@@ -12,6 +12,10 @@ import {
 
 const UUID = '14838862-f09e-4174-84e4-68cbb3cac903-1';
 
+function configProbeStdout(args: readonly string[]): string {
+  return args.includes('config') && args.includes('core.autocrlf') ? 'command\0false\0' : '';
+}
+
 describe('worker worktree path (issue #855)', () => {
   const roots: string[] = [];
   afterEach(async () => {
@@ -113,26 +117,33 @@ describe('worker worktree path (issue #855)', () => {
 
   it("turns Git's own too-long error into the clear message (no ENAMETOOLONG on Windows)", async () => {
     const worktreesRoot = join(await root(), 'g');
+    const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
       worktreesRoot,
       platform: 'win32',
       execFileImpl: async (_file: string, args: readonly string[]) => {
+        commands.push([...args]);
         if (args.includes('add'))
           throw Object.assign(new Error("fatal: '$GIT_DIR' too big"), {
             code: 128,
             stderr: "fatal: '$GIT_DIR' too big",
           });
-        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+        return {
+          stdout: args.includes('--git-common-dir') ? '.git' : configProbeStdout(args),
+          stderr: '',
+        };
       },
     });
     const error = await manager.create({ agentId: 'a4', repoPath: tmpdir() }).catch((e) => e);
     expect(error).toBeInstanceOf(WorktreeError);
     expect(error.message).toMatch(/長すぎる/);
+    expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(true);
   });
 
   it('runs every Git call with LC_ALL=C, so the stderr matched above is always English', async () => {
     const worktreesRoot = join(await root(), 'c');
     const envs: (NodeJS.ProcessEnv | undefined)[] = [];
+    const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
       worktreesRoot,
       execFileImpl: async (
@@ -141,16 +152,20 @@ describe('worker worktree path (issue #855)', () => {
         options?: { env?: NodeJS.ProcessEnv },
       ) => {
         envs.push(options?.env);
+        commands.push([...args]);
         return {
           stdout: args.includes('rev-parse')
             ? `${'c'.repeat(40)}
 `
-            : '',
+            : configProbeStdout(args),
           stderr: '',
         };
       },
     });
-    await manager.create({ agentId: 'a5', repoPath: tmpdir() }).catch(() => undefined);
+    await expect(manager.create({ agentId: 'a5', repoPath: tmpdir() })).resolves.toMatchObject({
+      baseHead: 'c'.repeat(40),
+    });
+    expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(true);
     expect(envs.length).toBeGreaterThan(0);
     for (const env of envs) expect(env?.['LC_ALL']).toBe('C');
   });
@@ -166,7 +181,10 @@ describe('worker worktree path (issue #855)', () => {
       platform: 'win32',
       execFileImpl: async (_file: string, args: readonly string[]) => {
         if (args.includes('add')) throw original;
-        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+        return {
+          stdout: args.includes('--git-common-dir') ? '.git' : configProbeStdout(args),
+          stderr: '',
+        };
       },
     });
     const error = await manager.create({ agentId: 'a6', repoPath: tmpdir() }).catch((e) => e);
@@ -174,25 +192,33 @@ describe('worker worktree path (issue #855)', () => {
     // The worktree path passed the check, so no (within-limit) length is quoted.
     expect(error.message).not.toMatch(/文字、上限/);
     expect(error.cause).toBeInstanceOf(WorktreeError);
+    expect(error.cause.cause).toBe(original);
   });
 
   it('does not call an unrelated worktree add failure too long', async () => {
     const worktreesRoot = join(await root(), 'u');
+    const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
       worktreesRoot,
       platform: 'win32',
       execFileImpl: async (_file: string, args: readonly string[]) => {
+        commands.push([...args]);
         if (args.includes('add'))
           throw Object.assign(new Error('fatal: invalid reference: HEAD'), {
             code: 128,
             stderr: 'fatal: invalid reference: HEAD',
           });
-        return { stdout: args.includes('--git-common-dir') ? '.git' : '', stderr: '' };
+        return {
+          stdout: args.includes('--git-common-dir') ? '.git' : configProbeStdout(args),
+          stderr: '',
+        };
       },
     });
     const error = await manager.create({ agentId: 'a7', repoPath: tmpdir() }).catch((e) => e);
     expect(error).toBeInstanceOf(WorktreeError);
     expect(error.message).not.toMatch(/長すぎる/);
+    expect(error.message).toContain('invalid reference: HEAD');
+    expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(true);
   });
 
   it("checks Git's administration path under the common Git directory of a linked worktree", async () => {
@@ -204,7 +230,10 @@ describe('worker worktree path (issue #855)', () => {
       platform: 'win32',
       execFileImpl: async (_file: string, args: readonly string[]) => {
         calls.push([...args]);
-        return { stdout: args.includes('--git-common-dir') ? deepCommon : '', stderr: '' };
+        return {
+          stdout: args.includes('--git-common-dir') ? deepCommon : configProbeStdout(args),
+          stderr: '',
+        };
       },
     });
     const error = await manager.create({ agentId: 'a2', repoPath: tmpdir() }).catch((e) => e);
@@ -219,18 +248,24 @@ describe('worker worktree path (issue #855)', () => {
     const legacy = join(worktreesRoot, `worktree-${UUID}`);
     await mkdir(legacy, { recursive: true });
     const head = 'a'.repeat(40);
+    const commands: string[][] = [];
     const manager = new WorkerWorktreeManager({
       worktreesRoot,
       platform: 'win32',
-      execFileImpl: async (_file: string, args: readonly string[]) => ({
-        stdout: args.includes('rev-parse') ? `${head}\n` : '',
-        stderr: '',
-      }),
+      execFileImpl: async (_file: string, args: readonly string[]) => {
+        commands.push([...args]);
+        return {
+          stdout: args.includes('rev-parse') ? `${head}\n` : configProbeStdout(args),
+          stderr: '',
+        };
+      },
     });
     await expect(manager.ensureCreated({ agentId: UUID, repoPath: tmpdir() })).resolves.toEqual({
       path: legacy,
       baseHead: head,
     });
+    expect(commands.some((args) => args.includes('rev-parse'))).toBe(true);
+    expect(commands.some((args) => args.includes('worktree') && args.includes('add'))).toBe(false);
   });
 
   it('recreates a recorded legacy path longer than the new-creation limit without the length check', async () => {
@@ -246,7 +281,7 @@ describe('worker worktree path (issue #855)', () => {
           stdout: args.includes('rev-parse')
             ? `${'b'.repeat(40)}
 `
-            : '',
+            : configProbeStdout(args),
           stderr: '',
         };
       },
@@ -352,14 +387,19 @@ describe('worker worktree path (issue #855)', () => {
 
     it('keeps the record (fails) when the registration list cannot be read', async () => {
       const { repoPath, legacy } = await setup();
+      const commands: string[][] = [];
       const manager = new WorkerWorktreeManager({
         worktreesRoot: dirname(legacy),
         execFileImpl: async (_file: string, args: readonly string[]) => {
+          commands.push([...args]);
           if (args.includes('list')) throw Object.assign(new Error('git list failed'), { code: 1 });
-          return { stdout: '', stderr: '' };
+          return { stdout: configProbeStdout(args), stderr: '' };
         },
       });
       await expect(manager.cleanup({ agentId: UUID, repoPath })).rejects.toBeInstanceOf(Error);
+      expect(commands.some((args) => args.includes('worktree') && args.includes('list'))).toBe(
+        true,
+      );
       expect(listed(repoPath)).toContain('worktree-');
     });
   });

@@ -1,5 +1,8 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it, vi } from 'vitest';
+import { isTeamScenarioInput, requiresTeamWorkersInput } from '../../../main/team-tools';
+import { isImageGenerationTurn } from '../../../main/imagegen-builtin';
+import { IMAGEGEN_PREFIX } from './imagegen';
 import {
   ComposerActionButtons,
   composerActionPolicy,
@@ -173,6 +176,21 @@ describe('Composer action policy', () => {
     expect(composerMessageText('画像を作る', true)).toContain('画像を作る');
     expect(composerMessageText('画像を作る', true)).not.toBe('画像を作る');
   });
+
+  it.each([
+    ['    担当を雇ってください。\n\nこの例文を画像にしてください。', false],
+    ['担当を雇ってください。', true],
+  ] as const)(
+    'keeps image-mode examples distinct from hiring instructions (case %#)',
+    (raw, hiring) => {
+      const text = composerMessageText(raw, true);
+      expect(isTeamScenarioInput(text)).toBe(hiring);
+      expect(requiresTeamWorkersInput(text)).toBe(hiring);
+      expect(isImageGenerationTurn(text)).toBe(true);
+      expect(text.startsWith(IMAGEGEN_PREFIX)).toBe(true);
+      expect(text.endsWith(raw)).toBe(true);
+    },
+  );
 
   it('restores a raw image draft without double-prefixing a retry', () => {
     const sentText = composerMessageText('画像を作る', true);

@@ -1,4 +1,5 @@
 import { computerUseEligibilityWiring } from './computer-use-eligibility-wiring';
+import { FullAccessConfirmation } from './full-access-confirmation';
 import {
   graphStartActivationIntent,
   graphUpdateActivationIntent,
@@ -129,29 +130,6 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
-  installedLocalModelInputSchema,
-  installedLocalModelSchema,
-  managedLocalLaunchSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsSetInputSchema,
-  managedLocalSpeculativeSettingsViewSchema,
-  managedLocalLaunchSettingsSetInputSchema,
-  managedLocalLaunchSettingsViewSchema,
-  managedLocalInferenceSettingsGetInputSchema,
-  managedLocalInferenceSettingsSetInputSchema,
-  managedLocalInferenceSettingsViewSchema,
-  localDownloadCancelInputSchema,
-  localDownloadJobInputSchema,
-  localDownloadJobSchema,
-  localFitAssessmentSchema,
-  localHardwareSnapshotSchema,
-  localModelInstallInputSchema,
-  localModelFitInputSchema,
-  managedLocalRuntimeSnapshotSchema,
-  publicModelCatalogDetailInputSchema,
-  publicModelCatalogDetailSchema,
-  publicModelCatalogPageSchema,
-  publicModelCatalogQuerySchema,
   type ModelSelection,
   type NormalizedProviderUsage,
   type NormalizedProviderError,
@@ -390,7 +368,6 @@ import {
   createComputerUsePermissionSettingsOpener,
   type ComputerUsePermissionSettingsOpener,
 } from './computer-use-permission-settings';
-import type { ManagedLocalController } from './managed-local-controller';
 import { RuntimeHostClient, toRuntimeContextFragment } from './runtime-host';
 import { PermissionBroker, protectedWorkspaceRootDenialReason } from './permission-broker';
 import {
@@ -475,7 +452,7 @@ type ProviderImageBridgeDispatchResult = Readonly<{
 }>;
 
 type GenericManagedRuntimeToolOwner =
-  'cli-team' | 'provider-worker' | 'team-mcp' | 'codex-runtime' | 'claude-runtime' | 'grok-runtime';
+  'cli-team' | 'team-mcp' | 'codex-runtime' | 'claude-runtime' | 'grok-runtime';
 
 type GenericManagedRuntimeToolRequest = Readonly<{
   callId: string;
@@ -493,14 +470,6 @@ type DirectGenericManagedRuntimeToolHandler = (
 
 type GenericManagedRuntimeToolHandlers = Readonly<{
   cliTeam: DirectGenericManagedRuntimeToolHandler;
-  providerWorker: (
-    taskId: string,
-    turnId: string,
-    catalogDigest: string,
-    toolName: string,
-    input: unknown,
-    signal: AbortSignal,
-  ) => Promise<unknown>;
   teamMcp: (
     input: unknown,
     context: {
@@ -887,11 +856,10 @@ import {
 } from './model-task-title';
 import { TaskTitleAbortRegistry, TaskTitleRuntimePool } from './task-title-runtime-pool';
 import {
-  MANAGED_LOCAL_CONNECTION_ID,
-  MANAGED_LOCAL_PROVIDER_ID,
-  ManagedLocalProviderRuntime,
-  managedLocalConnection,
-} from './managed-local-provider-runtime';
+  assertNotRetiredManagedLocal,
+  isRetiredManagedLocal,
+  RetiredManagedLocalError,
+} from './retired-managed-local';
 
 const MODEL_RESEARCH_GUIDANCE = `
 このTeamでは「Worker採用前にモデルをWeb調査」が有効です。各Workerを雇う前に必ず次の順序を守ってください。
@@ -1098,6 +1066,8 @@ export class IpcRouter {
   private graphGenerationUnsubscribe: (() => void) | null = null;
   private readonly ports = new Set<PortBinding>();
   private readonly mailbox = new TaskMailbox();
+  private readonly pendingPermissionChanges = new Set<string>();
+  private readonly fullAccessConfirmation = new FullAccessConfirmation();
   private readonly mockRuntime: MockRuntimeAdapter;
   private readonly codexRuntime: RuntimeHostClient;
   private readonly cliTeamWorkerRuntime: RuntimeHostTeamWorkerRuntime;
@@ -1250,6 +1220,10 @@ export class IpcRouter {
   // generated-image-collector.ts for why).
   private readonly codexThreadByTurn = new Map<string, string>();
   private readonly permissionBroker: PermissionBroker;
+  private readonly policyCleanupsByTask = new Map<
+    string,
+    { epoch: number; confirm: () => Promise<void> }
+  >();
   private readonly graphSourceMonitor: GraphSourceMonitor;
   private readonly approvalCoordinator: ApprovalCoordinator;
   private readonly managedCodingHarness: ManagedCodingHarness;
@@ -1276,7 +1250,6 @@ export class IpcRouter {
   private readonly providerEndpointChallenges: ProviderEndpointConsentChallenges;
   private readonly providerSecrets: ProviderSecretStorage;
   private readonly compatibleRuntime: OpenAICompatibleProviderClient;
-  private readonly managedLocalProviderRuntime: ManagedLocalProviderRuntime | null;
   private readonly providerEgressTrustForConnection: (
     connection: ProviderConnection,
   ) => 'trusted-local' | 'trusted-remote';
@@ -1307,7 +1280,6 @@ export class IpcRouter {
     private readonly persistence: PersistenceClient,
     private readonly trustedRendererOrigin: string,
     workspaceEdit?: WorkspacePatchDeps,
-    private readonly managedLocal: ManagedLocalController | null = null,
     providerEndpointPolicy: ProviderEndpointPolicy = new ProviderEndpointPolicy(),
     computerUseNative: ComputerUseNativeHost = createUnavailableComputerUseNativeHost(),
     computerUseActivationGate?: ComputerUseUserActivationGate,
@@ -1354,7 +1326,7 @@ export class IpcRouter {
       return parseOpenAICompatibleCredential(providerSecrets.get(connection.secretReference));
     };
     this.providerEgressTrustForConnection = (connection) => {
-      if (connection.id === MANAGED_LOCAL_CONNECTION_ID) return 'trusted-local';
+      assertNotRetiredManagedLocal(connection.id, connection.providerId);
       if (connection.runtimeKind !== 'openai_compatible') return 'trusted-remote';
       return resolvedProfileEndpointTrust(
         this.providerProfiles.get(connection.providerId),
@@ -1370,26 +1342,6 @@ export class IpcRouter {
       providerId: null,
       runtime: this.compatibleRuntime,
     });
-    if (this.managedLocal === null) this.managedLocalProviderRuntime = null;
-    else {
-      const existing = this.persistence
-        .listProviderConnections()
-        .find(({ id }) => id === MANAGED_LOCAL_CONNECTION_ID);
-      if (existing === undefined)
-        this.persistence.createProviderConnection(managedLocalConnection());
-      else if (
-        existing.providerId !== MANAGED_LOCAL_PROVIDER_ID ||
-        existing.runtimeKind !== 'openai_compatible' ||
-        existing.secretReference !== null
-      )
-        throw new Error('Managed Local virtual Connection identity changed');
-      this.managedLocalProviderRuntime = new ManagedLocalProviderRuntime(this.managedLocal);
-      this.providerRegistry.register({
-        runtimeKind: 'openai_compatible',
-        providerId: MANAGED_LOCAL_PROVIDER_ID,
-        runtime: this.managedLocalProviderRuntime,
-      });
-    }
     const openAI = new OpenAIProviderClient((connection) => {
       if (connection.secretReference === null)
         throw new Error('OpenAI Connection has no secret reference');
@@ -1642,7 +1594,6 @@ export class IpcRouter {
         executionId === undefined
           ? buildInheritedWorkerContext(worker, this.persistence.listMessages(worker.taskId))
           : this.persistence.prepareTeamExecutionContext(worker.taskId, executionId),
-      writeApprovalRequiredFor: workerWriteApprovalRequiredFor,
       managerGuidance: () =>
         teamGuidance(
           MANAGER_MCP_SYSTEM_PROMPT,
@@ -1652,43 +1603,6 @@ export class IpcRouter {
       managerTools: MANAGER_PROVIDER_TOOLS,
       workerGuidance: WORKER_MCP_SYSTEM_PROMPT,
       workerTools: WORKER_PROVIDER_TOOLS,
-      managedToolsConnectionId: MANAGED_LOCAL_CONNECTION_ID,
-      prepareManagedTools: async ({ worker, executionId, workspaceSet, onApprovalWait }) => {
-        const modelId = worker.modelSelection.requestedModel;
-        if (modelId === null || this.managedLocal === null)
-          throw new Error('Managed Local Worker model selection is incomplete');
-        const verifiedModel = (
-          await this.managedLocal.listProviderModels(
-            MANAGED_LOCAL_CONNECTION_ID,
-            MANAGED_LOCAL_PROVIDER_ID,
-          )
-        ).find((model) => model.modelId === modelId);
-        if (verifiedModel?.toolCalling.value !== true)
-          throw new Error('Managed Local Worker requires a matching tool self-test');
-        const snapshot = await this.prepareWorkerManagedCatalog(
-          'provider',
-          worker.taskId,
-          executionId,
-          workspaceSet,
-          worker.canDelegate,
-          worker.writeCapable ? 'workspace-write' : 'read-only',
-          executionId,
-          onApprovalWait,
-        );
-        return {
-          tools: providerToolsFromSnapshot(snapshot),
-          execute: (name: string, input: unknown, signal: AbortSignal) =>
-            genericManagedRuntimeTools.providerWorker(
-              worker.taskId,
-              executionId,
-              snapshot.digest,
-              name,
-              input,
-              signal,
-            ),
-          release: () => this.releaseManagedWorkerTurn(executionId),
-        };
-      },
       executeManagerTool: ({ worker, name, input, reportCursor, modelCatalogAudit, executionId }) =>
         executeTeamTool(this.teamCoordinator, worker.taskId, name, input, {
           requesterAgentId: worker.id,
@@ -1804,16 +1718,7 @@ export class IpcRouter {
       },
     });
     this.permissionBroker = new PermissionBroker(persistence, {
-      policyEpochChanged: (taskId, policyEpoch) => {
-        this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
-        this.computerUseController.policyEpochChanged(taskId);
-        void this.managedCodingHarness.policyEpochChanged(taskId);
-        this.persistence.quarantineBackgroundForPolicyEpoch(
-          taskId,
-          policyEpoch,
-          new Date().toISOString(),
-        );
-      },
+      policyEpochChanged: (taskId, policyEpoch) => this.policyEpochChanged(taskId, policyEpoch),
     });
     this.managedCodingHarness = new ManagedCodingHarness({
       workspaceFor: (taskId, turnId, callId) =>
@@ -3149,127 +3054,6 @@ export class IpcRouter {
         };
       },
     );
-    this.handle(IPC_CHANNELS.localAIHardware, emptyPayloadSchema, localHardwareSnapshotSchema, () =>
-      this.managedLocal!.hardware(),
-    );
-    this.handle(
-      IPC_CHANNELS.localAIRuntime,
-      emptyPayloadSchema,
-      managedLocalRuntimeSnapshotSchema,
-      () => this.managedLocal!.runtime(),
-    );
-    this.handle(
-      IPC_CHANNELS.localAILaunchSettings,
-      managedLocalLaunchSettingsGetInputSchema,
-      managedLocalLaunchSettingsViewSchema,
-      (input) => this.managedLocal!.getLaunchSettings(input.modelId),
-    );
-    this.handle(
-      IPC_CHANNELS.localAISpeculativeSettings,
-      managedLocalSpeculativeSettingsGetInputSchema,
-      managedLocalSpeculativeSettingsViewSchema,
-      (input) => this.managedLocal!.getSpeculativeSettings(input.modelId),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAISetSpeculativeSettings,
-      managedLocalSpeculativeSettingsSetInputSchema,
-      managedLocalSpeculativeSettingsViewSchema,
-      (input) => this.managedLocal!.setSpeculativeSettings(input.modelId, input.settings),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAISetLaunchSettings,
-      managedLocalLaunchSettingsSetInputSchema,
-      managedLocalLaunchSettingsViewSchema,
-      (input) =>
-        this.managedLocal!.setLaunchSettings(input.modelId, {
-          backend: input.backend,
-          gpuLayers: input.gpuLayers,
-          contextTokens: input.contextTokens,
-          batchSize: input.batchSize,
-        }),
-    );
-    this.handle(
-      IPC_CHANNELS.localAIInferenceSettings,
-      managedLocalInferenceSettingsGetInputSchema,
-      managedLocalInferenceSettingsViewSchema,
-      (input) => this.managedLocal!.getInferenceSettings(input.modelId),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAISetInferenceSettings,
-      managedLocalInferenceSettingsSetInputSchema,
-      managedLocalInferenceSettingsViewSchema,
-      (input) =>
-        this.managedLocal!.setInferenceSettings(input.modelId, {
-          maxOutputTokens: input.maxOutputTokens,
-          thinking: input.thinking,
-        }),
-    );
-    this.handle(
-      IPC_CHANNELS.localAICatalogQuery,
-      publicModelCatalogQuerySchema,
-      publicModelCatalogPageSchema,
-      (input) => this.managedLocal!.query(input),
-    );
-    this.handle(
-      IPC_CHANNELS.localAICatalogDetail,
-      publicModelCatalogDetailInputSchema,
-      publicModelCatalogDetailSchema,
-      (input) => this.managedLocal!.detail(input),
-    );
-    this.handle(
-      IPC_CHANNELS.localAIListJobs,
-      emptyPayloadSchema,
-      z.array(localDownloadJobSchema),
-      () => [...this.managedLocal!.listJobs()],
-    );
-    this.handle(
-      IPC_CHANNELS.localAIListInstalled,
-      emptyPayloadSchema,
-      z.array(installedLocalModelSchema),
-      () => [...this.managedLocal!.listInstalled()],
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAIInstall,
-      localModelInstallInputSchema,
-      localDownloadJobSchema,
-      (input) => this.managedLocal!.install(input),
-    );
-    this.handle(
-      IPC_CHANNELS.localAIFit,
-      localModelFitInputSchema,
-      localFitAssessmentSchema,
-      (input) => this.managedLocal!.fit(input),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAIPause,
-      localDownloadJobInputSchema,
-      localDownloadJobSchema,
-      (input) => this.managedLocal!.pause(input.jobId),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAIResume,
-      localDownloadJobInputSchema,
-      localDownloadJobSchema,
-      (input) => this.managedLocal!.resume(input.jobId),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAICancel,
-      localDownloadCancelInputSchema,
-      localDownloadJobSchema,
-      (input) => this.managedLocal!.cancel(input.jobId, input.confirmed),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAIVerify,
-      installedLocalModelInputSchema,
-      localFitAssessmentSchema,
-      (input) => this.managedLocal!.verify(input.modelId),
-    );
-    this.handleMutation(
-      IPC_CHANNELS.localAIDelete,
-      installedLocalModelInputSchema,
-      z.undefined(),
-      (input) => this.managedLocal!.delete(input.modelId),
-    );
     this.handle(
       IPC_CHANNELS.providersListConnections,
       emptyPayloadSchema,
@@ -3277,7 +3061,7 @@ export class IpcRouter {
       () =>
         this.providerConnections
           .list()
-          .filter(({ id }) => id !== MANAGED_LOCAL_CONNECTION_ID)
+          .filter(({ id, providerId }) => !isRetiredManagedLocal(id, providerId))
           .map((connection) => providerConnectionView(connection, this.providerProfiles)),
     );
     this.handle(
@@ -3772,24 +3556,30 @@ export class IpcRouter {
           preset: AccessPreset;
           policyEpoch: number;
         }>(principal, input.taskId, IPC_CHANNELS.permissionsSet, envelope.operationId, hash);
-        if (cached.found) return cached.value!;
+        if (cached.found) {
+          await this.confirmPermissionCleanup(input.taskId);
+          return cached.value!;
+        }
         const current = this.permissionBroker.getPolicy(input.taskId);
         if (current.policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
         if (input.preset === 'full') {
-          await confirmFullAccessOnce(this.persistence, async () => {
-            const confirmation = await dialog.showMessageBox(this.window, {
-              type: 'warning',
-              title: 'フルアクセスを有効にしますか？',
-              message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
-              detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
-              buttons: ['キャンセル', 'フルアクセスを有効化'],
-              defaultId: 0,
-              cancelId: 0,
-              noLink: true,
-            });
-            return confirmation.response === 1;
-          });
+          await confirmFullAccessOnce(this.persistence, () =>
+            this.fullAccessConfirmation.confirm(async (signal) => {
+              const confirmation = await dialog.showMessageBox(this.window, {
+                signal,
+                type: 'warning',
+                title: 'フルアクセスを有効にしますか？',
+                message: 'フルアクセスはTaskのWorkspace操作を拡張します。',
+                detail: '管理deny、秘密情報保護、provider egress、Renderer非特権は解除されません。',
+                buttons: ['キャンセル', 'フルアクセスを有効化'],
+                defaultId: 0,
+                cancelId: 0,
+                noLink: true,
+              });
+              return confirmation.response === 1;
+            }),
+          );
         }
         if (this.permissionBroker.getPolicy(input.taskId).policyEpoch !== input.expectedPolicyEpoch)
           throw new StalePermissionPolicyError();
@@ -3808,8 +3598,8 @@ export class IpcRouter {
             return { preset: policy.preset, policyEpoch: policy.policyEpoch };
           },
         );
-        await this.permissionBroker.drainPolicyEpochOutbox().catch(() => undefined);
         this.graphSourceMonitor.invalidate(input.taskId);
+        await this.confirmPermissionCleanup(input.taskId);
         return value;
       },
     );
@@ -3994,7 +3784,7 @@ export class IpcRouter {
               input.taskId,
               skills,
               shouldSealBuiltinTeamSkill(
-                goalText === null ? '' : `Goalを続けてください: ${goalText}`,
+                goalText === null ? '' : `Goalを続けてください:\n\n${goalText}`,
                 skills,
               ),
             );
@@ -4598,6 +4388,9 @@ export class IpcRouter {
       turnStartInputSchema,
       turnStartResultSchema,
       async (input, event, envelope) => {
+        const selection = this.persistence.getTaskModelSelection(input.taskId);
+        if (selection !== null)
+          assertNotRetiredManagedLocal(selection.connectionId, selection.requestedProvider);
         await this.reconcileTaskBuiltinModel(input.taskId);
         const skills = await this.resolveTurnSkills(input.taskId, input.text, input.skills).catch(
           (error) => Promise.reject(skillSettingsPublicError(error)),
@@ -4915,6 +4708,35 @@ export class IpcRouter {
       this.computerUseActivationGate.dispose();
       this.computerUseEmergencyStop.dispose();
     });
+  }
+
+  private async policyEpochChanged(taskId: string, policyEpoch: number): Promise<void> {
+    let cleanup = this.policyCleanupsByTask.get(taskId);
+    if (cleanup === undefined || cleanup.epoch < policyEpoch) {
+      this.approvalCoordinator.policyEpochChanged(taskId, policyEpoch);
+      this.computerUseController.policyEpochChanged(taskId);
+      this.persistence.quarantineBackgroundForPolicyEpoch(
+        taskId,
+        policyEpoch,
+        new Date().toISOString(),
+      );
+      cleanup = {
+        epoch: policyEpoch,
+        confirm: this.managedCodingHarness.beginPolicyEpochChange(taskId),
+      };
+      this.policyCleanupsByTask.set(taskId, cleanup);
+    }
+    await cleanup.confirm();
+    // Keep the epoch marker without retaining completed command sessions and their output.
+    cleanup.confirm = () => Promise.resolve();
+  }
+
+  private async confirmPermissionCleanup(taskId: string): Promise<void> {
+    try {
+      await this.permissionBroker.drainPolicyEpochOutbox(taskId);
+    } catch {
+      throw new PermissionCleanupIncompleteError();
+    }
   }
 
   async initialize(): Promise<void> {
@@ -5261,6 +5083,7 @@ export class IpcRouter {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
     await this.computerUseController.dispose();
@@ -5290,6 +5113,7 @@ export class IpcRouter {
     for (const channel of new Set(Object.values(IPC_CHANNELS))) ipcMain.removeHandler(channel);
     this.closeAllPorts();
     this.teamDetailStream.clear();
+    this.policyCleanupsByTask.clear();
     this.approvalCoordinator.dispose();
     await this.managedCodingHarness.dispose();
     // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
@@ -5311,7 +5135,6 @@ export class IpcRouter {
     this.codexRuntime.dispose();
     this.teamWorkerRuntime.dispose();
     await this.compatibleRuntime.dispose();
-    await this.managedLocalProviderRuntime?.dispose();
     this.claudeRuntime.dispose();
     this.grokRuntime.dispose();
     this.graphGenerationUnsubscribe?.();
@@ -5429,11 +5252,30 @@ export class IpcRouter {
       envelope: CommandEnvelope<TInput>,
     ) => TOutput | Promise<TOutput>,
   ): void {
-    this.handle(channel, inputSchema, outputSchema, (input, event, envelope) =>
-      this.mailbox.run(envelope.taskId ?? '__global__', () =>
-        this.updateInstallMutationGate.run(() => handler(input, event, envelope)),
-      ),
-    );
+    this.handle(channel, inputSchema, outputSchema, async (input, event, envelope) => {
+      const taskId = envelope.taskId ?? '__global__';
+      const permissionChange = channel === IPC_CHANNELS.permissionsSet;
+      const submitsWork = [
+        IPC_CHANNELS.turnsStart,
+        IPC_CHANNELS.turnsQueue,
+        IPC_CHANNELS.turnsSteer,
+        IPC_CHANNELS.turnsStopAndSend,
+        IPC_CHANNELS.goalsStart,
+        IPC_CHANNELS.goalsResume,
+      ].some((candidate) => candidate === channel);
+      if ((permissionChange || submitsWork) && this.pendingPermissionChanges.has(taskId))
+        throw new PermissionChangePendingError();
+      // Mark before the mailbox's first await so an immediately following send cannot queue
+      // behind an unanswered native confirmation. Existing accepted work keeps its order.
+      if (permissionChange) this.pendingPermissionChanges.add(taskId);
+      try {
+        return await this.mailbox.run(taskId, () =>
+          this.updateInstallMutationGate.run(() => handler(input, event, envelope)),
+        );
+      } finally {
+        if (permissionChange) this.pendingPermissionChanges.delete(taskId);
+      }
+    });
   }
 
   private runMutation<TInput, TOutput>(
@@ -5481,19 +5323,6 @@ export class IpcRouter {
         this.dispatchGenericManagedRuntimeTool(owner, taskId, turnId, request, signal);
     return Object.freeze({
       cliTeam: direct('cli-team'),
-      providerWorker: (taskId, turnId, catalogDigest, toolName, input, signal) =>
-        this.dispatchGenericManagedRuntimeTool(
-          'provider-worker',
-          taskId,
-          turnId,
-          {
-            callId: `managed-local:${randomUUID()}`,
-            toolName,
-            arguments: input,
-            catalogDigest,
-          },
-          signal,
-        ),
       teamMcp: (input, context) => {
         const worker = this.managedWorkerTurn.get(context.turnId);
         const snapshot =
@@ -6647,6 +6476,31 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    if (
+      isRetiredManagedLocal(
+        started.modelSelection.connectionId,
+        started.modelSelection.requestedProvider,
+      )
+    ) {
+      await this.mailbox.run(taskId, () => {
+        if (
+          this.canceledRuntimeTurns.has(started.turnId) ||
+          this.persistence.getActiveTurnId(taskId) !== started.turnId
+        )
+          return;
+        this.turnRuntimes.set(started.turnId, 'provider');
+        this.publish(
+          this.persistence.appendDelta(
+            taskId,
+            started.turnId,
+            randomUUID(),
+            new RetiredManagedLocalError().message,
+          ),
+        );
+        this.finishAndAdvance(taskId, started.turnId, 'failed');
+      });
+      return;
+    }
     if (
       this.quarantinedRuntimeTasks.has(taskId) ||
       ((started.runtimeKind === 'codex' ||
@@ -7891,7 +7745,7 @@ export class IpcRouter {
     connection: ProviderConnection,
     allowLocalPrompt = true,
   ): Promise<ProviderConnection> {
-    if (connection.id === MANAGED_LOCAL_CONNECTION_ID) return connection;
+    assertNotRetiredManagedLocal(connection.id, connection.providerId);
     if (connection.runtimeKind !== 'openai_compatible') return connection;
     if (connection.secretReference === null)
       throw new Error('Provider Profile Connection has no secret reference');
@@ -7948,18 +7802,7 @@ export class IpcRouter {
     this.reconcileBuiltinCapability('grok', grokCapability);
     const connections = this.providerConnections
       .list()
-      .filter(({ id }) => id !== MANAGED_LOCAL_CONNECTION_ID);
-    const managedConnection =
-      this.managedLocalProviderRuntime === null
-        ? null
-        : this.persistence.getProviderConnection(MANAGED_LOCAL_CONNECTION_ID);
-    const managedModels =
-      managedConnection === null
-        ? []
-        : await this.managedLocalProviderRuntime!.listModels(
-            managedConnection,
-            new AbortController().signal,
-          );
+      .filter(({ id, providerId }) => !isRetiredManagedLocal(id, providerId));
     const externalResults = await Promise.allSettled(
       connections
         .filter(
@@ -8020,13 +7863,11 @@ export class IpcRouter {
           checkedAt,
         ),
         ...externalModels,
-        ...managedModels,
       ],
       new Map([
         ['builtin:codex-cli', 'subscription'],
         ['builtin:claude-cli', 'subscription'],
         ['builtin:grok-cli', 'subscription'],
-        ...(managedConnection === null ? [] : ([[MANAGED_LOCAL_CONNECTION_ID, 'local']] as const)),
         ...connections.map(
           (connection) =>
             [
@@ -8848,12 +8689,6 @@ export class IpcRouter {
           ? []
           : providerToolsFromSnapshot(workspaceToolSnapshot)),
       ]);
-      const managedLocalToolSequence =
-        connection.providerId === MANAGED_LOCAL_PROVIDER_ID
-          ? managedLocalToolChoiceSequence(started.text, roundTools)
-          : Object.freeze([]);
-      let managedLocalToolSequenceIndex = 0;
-      let managedLocalToolFailureCount = 0;
       const seenProviderToolCallIds = new Set<string>();
       let aggregateUsage: NormalizedProviderUsage | undefined;
       let finished = false;
@@ -8861,18 +8696,8 @@ export class IpcRouter {
       for (let ordinal = 1; ordinal <= MAX_PROVIDER_LEADER_ROUNDS; ordinal += 1) {
         const executionId = providerTurnCallId(started.turnId, ordinal);
         this.providerExecutionIdByTurn.set(started.turnId, executionId);
-        const toolChoice = managedLocalToolSequence[managedLocalToolSequenceIndex];
-        const toolsForRound =
-          managedLocalToolSequence.length > 0 &&
-          managedLocalToolSequenceIndex >= managedLocalToolSequence.length
-            ? Object.freeze([])
-            : roundTools;
-        const roundMessages =
-          toolChoice === undefined
-            ? messages
-            : managedLocalForcedRoundMessages(messages, started.text);
         const toolImageDispatch = toolImageBridge.consumeForNextDispatch({
-          baseMessages: roundMessages,
+          baseMessages: messages,
           directImages: providerImageDispatch?.auditImages ?? [],
         });
         const toolImageBinding = toolImageDispatch.hasToolImage
@@ -8882,13 +8707,12 @@ export class IpcRouter {
         if (toolImageDispatch.hasToolImage && toolImageBinding === undefined)
           throw new ProviderImageAttachmentError();
         const initialMessages = toolImageDispatch.hasToolImage
-          ? roundMessages
+          ? messages
           : toolImageDispatch.messages;
         const initialPayloadBytes = Buffer.from(
           JSON.stringify({
             messages: initialMessages,
-            tools: toolsForRound,
-            ...(toolChoice === undefined ? {} : { toolChoice }),
+            tools: roundTools,
           }),
           'utf8',
         );
@@ -8896,14 +8720,10 @@ export class IpcRouter {
         let dispatchRound = JSON.parse(Buffer.from(initialPayloadBytes).toString('utf8')) as {
           messages: ProviderExecutionRequest['messages'];
           tools: ProviderExecutionRequest['tools'];
-          toolChoice?: ProviderExecutionRequest['toolChoice'];
         };
         const initialPolicyPayload = JSON.stringify({
           messages: providerMessagesForEgressPolicy(dispatchRound.messages),
           tools: dispatchRound.tools,
-          ...(dispatchRound.toolChoice === undefined
-            ? {}
-            : { toolChoice: dispatchRound.toolChoice }),
         });
         const initialEgress = authorizeOfficialApiProviderEgress(
           {
@@ -8979,15 +8799,13 @@ export class IpcRouter {
           const finalPayloadBytes = Buffer.from(
             JSON.stringify({
               messages: toolImageDispatch.messages,
-              tools: toolsForRound,
-              ...(toolChoice === undefined ? {} : { toolChoice }),
+              tools: roundTools,
             }),
             'utf8',
           );
           dispatchRound = JSON.parse(Buffer.from(finalPayloadBytes).toString('utf8')) as {
             messages: ProviderExecutionRequest['messages'];
             tools: ProviderExecutionRequest['tools'];
-            toolChoice?: ProviderExecutionRequest['toolChoice'];
           };
           const finalEgress = authorizeOfficialApiProviderEgress(
             {
@@ -8999,9 +8817,6 @@ export class IpcRouter {
               prompt: JSON.stringify({
                 messages: providerMessagesForEgressPolicy(dispatchRound.messages),
                 tools: dispatchRound.tools,
-                ...(dispatchRound.toolChoice === undefined
-                  ? {}
-                  : { toolChoice: dispatchRound.toolChoice }),
               }),
               context,
               now: new Date().toISOString(),
@@ -9036,9 +8851,6 @@ export class IpcRouter {
                 ...(dispatchRound.tools === undefined || dispatchRound.tools.length === 0
                   ? {}
                   : { tools: dispatchRound.tools }),
-                ...(dispatchRound.toolChoice === undefined
-                  ? {}
-                  : { toolChoice: dispatchRound.toolChoice }),
               },
               controller.signal,
               streamBudget,
@@ -9047,7 +8859,7 @@ export class IpcRouter {
               executionId,
               firstEventTimeoutMs: providerFirstEventTimeoutMs({
                 providerId: connection.providerId,
-                hasTools: toolsForRound.length > 0,
+                hasTools: roundTools.length > 0,
                 hasInlineImages: dispatchRound.messages.some(
                   (message) => (message.inlineImages?.length ?? 0) > 0,
                 ),
@@ -9110,7 +8922,7 @@ export class IpcRouter {
               error: roundError,
               ordinal,
               retries: emptyToolRoundRetries,
-              hasTools: toolsForRound.length > 0,
+              hasTools: roundTools.length > 0,
               hasImages: dispatchRound.messages.some(
                 (message) => (message.inlineImages?.length ?? 0) > 0,
               ),
@@ -9234,7 +9046,6 @@ export class IpcRouter {
           );
           if (!workspaceTool) throw new Error('Provider tool escaped the managed catalog');
           let content: string;
-          let succeeded = false;
           try {
             const imageBinding =
               toolCall.name === 'view_image'
@@ -9272,16 +9083,8 @@ export class IpcRouter {
                 result,
                 started.workspaceSet.roots.map((root) => root.path),
               );
-            succeeded = true;
           } catch (error) {
             if (controller.signal.aborted) throw error;
-            if (
-              managedLocalToolSequence[managedLocalToolSequenceIndex]?.name === toolCall.name &&
-              (managedLocalToolFailureCount += 1) >= 3
-            )
-              throw new Error(`Managed Local tool failed repeatedly: ${toolCall.name}`, {
-                cause: error,
-              });
             content = redactProviderCommandFailure(
               connection.providerId,
               toolCall.name,
@@ -9296,13 +9099,6 @@ export class IpcRouter {
             toolCallId: toolCall.callId,
             toolName: toolCall.name,
           });
-          if (
-            succeeded &&
-            managedLocalToolSequence[managedLocalToolSequenceIndex]?.name === toolCall.name
-          ) {
-            managedLocalToolSequenceIndex += 1;
-            managedLocalToolFailureCount = 0;
-          }
         }
       }
       if (!finished)
@@ -10353,7 +10149,9 @@ class InvalidEffortError extends Error {
   }
 }
 class StalePermissionPolicyError extends Error {}
+class PermissionCleanupIncompleteError extends Error {}
 class FullAccessConfirmationDeclinedError extends Error {}
+class PermissionChangePendingError extends Error {}
 class SteerUnsupportedError extends Error {}
 
 export async function confirmFullAccessOnce(
@@ -10498,72 +10296,6 @@ export function providerWorkspaceToolsEligible(
   return toolCalling !== false && (workspaceRootCount > 0 || teamTurn);
 }
 
-export function managedLocalWorkspaceToolUseRequired(text: string): boolean {
-  if (
-    /\b(?:create_file|create_directory|read_file|search_workspace|apply_patch|exec_command)\b/iu.test(
-      text,
-    )
-  )
-    return true;
-  const subject = /(?:files?|code|tests?|workspace|ファイル|コード|テスト|ワークスペース)/iu;
-  const action =
-    /(?:create|write|edit|modify|fix|read|inspect|search|run|execute|作成|書込|書き|編集|変更|修正|読込|読み|検索|実行)/iu;
-  return subject.test(text) && action.test(text);
-}
-
-export function managedLocalInitialToolChoice(
-  text: string,
-  tools: readonly { name: string }[],
-): ProviderExecutionRequest['toolChoice'] | undefined {
-  return managedLocalToolChoiceSequence(text, tools)[0];
-}
-
-export function managedLocalToolChoiceSequence(
-  text: string,
-  tools: readonly { name: string }[],
-): readonly Exclude<ProviderExecutionRequest['toolChoice'], string | undefined>[] {
-  if (!managedLocalWorkspaceToolUseRequired(text) || tools.length === 0) return Object.freeze([]);
-  const available = new Set(tools.map(({ name }) => name));
-  const explicit = [
-    ...text.matchAll(
-      /\b(create_file|create_directory|read_file|search_workspace|apply_patch|exec_command)\b/giu,
-    ),
-  ]
-    .map((match) => ({ name: match[1]!, index: match.index }))
-    .sort((left, right) => left.index - right.index)
-    .filter(({ name }) => available.has(name))
-    .filter(
-      ({ name }, index, all) => all.findIndex((candidate) => candidate.name === name) === index,
-    );
-  if (explicit.length > 0)
-    return Object.freeze(explicit.map(({ name }) => Object.freeze({ name })));
-  const candidates: readonly [RegExp, string][] = [
-    [/(?:\b(?:create|write)\b|作成|書込|書き)/iu, 'create_file'],
-    [/(?:\b(?:edit|modify|fix)\b|編集|変更|修正)/iu, 'apply_patch'],
-    [/(?:\b(?:read|inspect)\b|読込|読み)/iu, 'read_file'],
-    [/(?:\bsearch\b|検索)/iu, 'search_workspace'],
-    [/(?:\b(?:run|execute|test)\b|実行|テスト)/iu, 'exec_command'],
-  ];
-  const inferred = candidates
-    .map(([pattern, name]) => ({ name, index: text.search(pattern) }))
-    .filter(({ name, index }) => index >= 0 && available.has(name))
-    .sort((left, right) => left.index - right.index)
-    .filter(
-      ({ name }, index, all) => all.findIndex((candidate) => candidate.name === name) === index,
-    );
-  return Object.freeze(inferred.map(({ name }) => Object.freeze({ name })));
-}
-
-export function managedLocalForcedRoundMessages(
-  messages: ProviderExecutionRequest['messages'],
-  currentUserText: string,
-): ProviderExecutionRequest['messages'] {
-  return [
-    ...messages.filter(({ role }) => role === 'system'),
-    { role: 'user', content: currentUserText },
-  ];
-}
-
 /**
  * A Tool call's permission facts and the PathGuard they were taken from, for the Main Turn
  * (`workspaceAuthority` undefined) and for a managed Team Worker (`sealed-team-isolation`).
@@ -10697,7 +10429,7 @@ export function shouldRetryEmptyOllamaToolRound(input: {
 }
 
 // providerWorkspaceToolFailure and providerToolErrorContent moved to ./provider-tool-result
-// (issue #574), so the Managed Local Worker can share the same conversion without importing this
+// (issue #574), so callers can share the same conversion without importing this
 // module (which itself imports ProviderAwareTeamWorkerRuntime from provider-team-worker-runtime.ts).
 // Re-exported here so existing importers of './ipc' are unaffected.
 export { providerWorkspaceToolFailure };
@@ -10982,6 +10714,8 @@ async function projectFolderHealth(
 }
 
 export function toPublicError(error: unknown): PublicError {
+  if (error instanceof RetiredManagedLocalError)
+    return { code: 'RUNTIME_UNAVAILABLE', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentValidationError)
     return { code: 'INVALID_REQUEST', userMessage: error.message, retryable: false };
   if (error instanceof ImageAttachmentLimitError)
@@ -11097,6 +10831,13 @@ export function toPublicError(error: unknown): PublicError {
       userMessage: `選択したEffortは${error.modelDisplayName}では利用できません。`,
       retryable: false,
     };
+  if (error instanceof PermissionCleanupIncompleteError)
+    return {
+      code: 'OPERATION_IN_PROGRESS',
+      userMessage:
+        '権限の変更は保存されましたが、保留中のコマンドの停止を確認できません。実行状態を確認してください。',
+      retryable: true,
+    };
   if (error instanceof StalePermissionPolicyError)
     return {
       code: 'OPERATION_CONFLICT',
@@ -11108,6 +10849,13 @@ export function toPublicError(error: unknown): PublicError {
       code: 'USER_CANCELED',
       userMessage: 'フルアクセスへの変更をキャンセルしました。',
       retryable: false,
+    };
+  if (error instanceof PermissionChangePendingError)
+    return {
+      code: 'OPERATION_IN_PROGRESS',
+      userMessage:
+        '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。',
+      retryable: true,
     };
   if (error instanceof OperationConflictError)
     return {

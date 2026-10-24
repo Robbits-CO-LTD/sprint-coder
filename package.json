@@ -21,7 +21,6 @@
     "generate:computer-use-final-gate-evidence": "node generate-computer-use-final-gate-evidence.mjs",
     "verify:computer-use-final-gate": "node verify-computer-use-final-gate.mjs",
     "build:sandbox-runner": "node build-sandbox-runner.mjs",
-    "build:managed-local-sidecar": "node build-managed-local-sidecar.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:provider-smoke": "vitest run apps/desktop/src/main/provider-release-smoke.test.ts",
@@ -52,5 +51,16 @@
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.65.0",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "@electron/rebuild@3.7.2": {
+      "tar": "7.5.22"
+    },
+    "@electron/node-gyp@10.2.0-electron.1": {
+      "tar": "7.5.22"
+    },
+    "cacache@16.1.3": {
+      "tar": "7.5.22"
+    }
   }
 }

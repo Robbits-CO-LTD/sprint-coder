@@ -1,8 +1,5 @@
 import { create } from 'zustand';
-import {
-  applyTeamDetailPatch,
-  type TeamDetail as ContractTeamDetail,
-} from '@sprint-coder/contracts';
+import { applyTeamDetailPatch } from '@sprint-coder/contracts';
 import type {
   GraphView,
   ModelSelection,
@@ -213,6 +210,7 @@ type AppState = {
   >;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
+  permissionChangeByTask: Record<string, AccessPreset | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
   approvalHistoryByTask: Record<string, ApprovalSummary[]>;
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
@@ -364,12 +362,13 @@ type AppState = {
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
   installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
   discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  /** Failure text for this request, or null when no separate error alert is needed. */
   startTurn(
     taskId: string,
     text: string,
     skills?: readonly TurnSkillSelection[],
     attachmentIds?: readonly string[],
-  ): Promise<void>;
+  ): Promise<string | null>;
   queueMessage(
     taskId: string,
     text: string,
@@ -404,6 +403,15 @@ let taskSwitchGeneration = 0;
 let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export const PERMISSION_CHANGE_PENDING_MESSAGE =
+  '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。';
+
+function notifyPendingPermissionChange(state: AppState, taskId: string): boolean {
+  if (state.permissionChangeByTask[taskId] === undefined) return false;
+  state.showToast(PERMISSION_CHANGE_PENDING_MESSAGE);
+  return true;
+}
 
 function persistDraftDebounced(taskId: string, text: string) {
   if (!window.sprintCoder || typeof window.sprintCoder.tasks.setDraft !== 'function') return;
@@ -1176,12 +1184,7 @@ export const useAppStore = create<AppState>((set, get) => {
           try {
             // Unchanged Workers, messages and executions keep their identity, so only what
             // changed re-renders.
-            // The Renderer types mirror the contracts by hand (Preload hands the contracts payload
-            // over as is), so the shared patch function is called across that mirror.
-            detail = applyTeamDetailPatch(
-              streamDetail as unknown as ContractTeamDetail,
-              event.patch,
-            ) as unknown as TeamDetail;
+            detail = applyTeamDetailPatch(streamDetail, event.patch);
           } catch {
             resynchronize();
             return;
@@ -1254,6 +1257,7 @@ export const useAppStore = create<AppState>((set, get) => {
     activatedSkillsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
+    permissionChangeByTask: {},
     approvalsByTask: {},
     approvalHistoryByTask: {},
     autoDecisionsByTask: {},
@@ -1637,13 +1641,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async setAccessPreset(taskId: string, preset: AccessPreset) {
       if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
+      if (get().permissionChangeByTask[taskId] !== undefined) return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
       if (previous.preset === preset) return;
       set((state) => ({
-        permissionByTask: {
-          ...state.permissionByTask,
-          [taskId]: { ...previous, preset },
-        },
+        permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: preset },
       }));
       try {
         const permission = await window.sprintCoder.permissions.set(
@@ -1651,11 +1653,11 @@ export const useAppStore = create<AppState>((set, get) => {
           preset,
           previous.policyEpoch,
         );
-        rememberAccessPreset(preset);
+        if ((get().permissionByTask[taskId]?.policyEpoch ?? 0) > permission.policyEpoch) return;
+        rememberAccessPreset(permission.preset);
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= permission.policyEpoch
               ? { ...state.permissionByTask, [taskId]: permission }
               : state.permissionByTask,
         }));
@@ -1669,11 +1671,14 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= restored.policyEpoch
               ? { ...state.permissionByTask, [taskId]: restored }
               : state.permissionByTask,
           ...(userCanceled ? {} : { error: describeError(err) }),
+        }));
+      } finally {
+        set((state) => ({
+          permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: undefined },
         }));
       }
     },
@@ -2179,6 +2184,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.start({
@@ -2212,6 +2218,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async resumeGoal(taskId: string) {
       if (!window.sprintCoder?.goals) return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.resume(taskId, selectedSkills);
@@ -2693,8 +2700,8 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder) return;
+      if (!text.trim() || !window.sprintCoder) return null;
+      if (notifyPendingPermissionChange(get(), taskId)) return null;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const selectedAttachmentIds = [...attachmentIds];
       const draftsById = new Map(
@@ -2708,7 +2715,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return attachment === undefined ? [] : [attachment];
       });
       const turn = get().turnByTask[taskId];
-      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
+      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return null;
 
       const optimisticId = `pending-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const optimisticMessage: ChatMessage = {
@@ -2716,7 +2723,7 @@ export const useAppStore = create<AppState>((set, get) => {
         taskId,
         turnId: null,
         author: 'user',
-        content: trimmed,
+        content: text,
         attachments: selectedAttachments,
         createdAt: new Date().toISOString(),
       };
@@ -2736,7 +2743,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const result = await window.sprintCoder.turns.start({
           taskId,
-          text: trimmed,
+          text,
           skills: selectedSkills,
           attachmentIds: selectedAttachmentIds,
           attachmentSelectionIdentity:
@@ -2766,6 +2773,7 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       } catch (err) {
         const code = errorCode(err);
+        const message = code === 'TURN_ACTIVE' ? null : describeError(err);
         let restoredDraft = false;
         set((state) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
@@ -2777,28 +2785,34 @@ export const useAppStore = create<AppState>((set, get) => {
             pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
             sendingByTask: { ...state.sendingByTask, [taskId]: false },
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             skillSelectionByTask: {
               ...state.skillSelectionByTask,
               [taskId]: selectedSkills,
             },
-            error: code === 'TURN_ACTIVE' ? null : describeError(err),
+            error: message,
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         persistSkillDraftSelection(taskId, selectedSkills);
         if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
+        return message;
       }
+      return null;
     },
 
     async queueMessage(taskId: string, text: string, skills) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
+      if (
+        !text.trim() ||
+        !window.sprintCoder ||
+        typeof window.sprintCoder.turns.queue !== 'function'
+      )
         return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       let selectionRevision = 0;
       let draftRevision = 0;
@@ -2818,7 +2832,7 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
       persistSkillDraftSelection(taskId, []);
       try {
-        await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
+        await window.sprintCoder.turns.queue({ taskId, text, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
         return true;
       } catch (err) {
@@ -2829,7 +2843,7 @@ export const useAppStore = create<AppState>((set, get) => {
           restoredSkills = state.skillSelectionRevisionByTask[taskId] === selectionRevision;
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             draftRevisionByTask: restoredDraft
               ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
@@ -2847,20 +2861,24 @@ export const useAppStore = create<AppState>((set, get) => {
             error: describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
         return false;
       }
     },
 
     async steerMessage(taskId: string, text: string, expectedTurnId: string) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.steer !== 'function')
+      if (
+        !text.trim() ||
+        !window.sprintCoder ||
+        typeof window.sprintCoder.turns.steer !== 'function'
+      )
         return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
-        await window.sprintCoder.turns.steer({ taskId, text: trimmed, expectedTurnId });
+        await window.sprintCoder.turns.steer({ taskId, text, expectedTurnId });
       } catch (err) {
         const code = errorCode(err);
         let restoredDraft = false;
@@ -2868,7 +2886,7 @@ export const useAppStore = create<AppState>((set, get) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             error:
               code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED'
@@ -2876,7 +2894,7 @@ export const useAppStore = create<AppState>((set, get) => {
                 : describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (code === 'STEER_STALE') {
           get().showToast('Turnが切り替わったため送信し直してください');
         } else if (code === 'STEER_UNSUPPORTED') {
@@ -2888,12 +2906,13 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async stopAndSend(taskId: string, text: string, skills) {
-      const trimmed = text.trim();
       if (
-        !trimmed ||
+        !text.trim() ||
         !window.sprintCoder ||
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
+        return { completed: false, draftRestored: false };
+      if (notifyPendingPermissionChange(get(), taskId))
         return { completed: false, draftRestored: false };
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const activeTurn = get().turnByTask[taskId];
@@ -2924,7 +2943,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await window.sprintCoder.turns.stopAndSend({
           taskId,
-          text: trimmed,
+          text,
           skills: selectedSkills,
         });
         return { completed: true, draftRestored: false };
@@ -2941,7 +2960,7 @@ export const useAppStore = create<AppState>((set, get) => {
             currentTurn.status === 'canceling';
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             draftRevisionByTask: restoredDraft
               ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
@@ -2965,7 +2984,7 @@ export const useAppStore = create<AppState>((set, get) => {
             error: describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
         return { completed: false, draftRestored: restoredDraft };
       }

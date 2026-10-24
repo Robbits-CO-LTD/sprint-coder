@@ -11,8 +11,7 @@ import {
   runtimeReadinessHint,
 } from '../lib/runtime-labels';
 import type { DatabaseRecovery, RuntimeKind, RuntimeStatus } from '../types/sprint-coder';
-import { ProviderSettingsSection } from './ProviderSettingsSection';
-import { LocalAiSettingsSection } from './LocalAiSettingsSection';
+import { ADD_TOGGLE_ID, ProviderSettingsSection } from './ProviderSettingsSection';
 import { SkillSettingsSection } from './SkillSettingsSection';
 import { useTaskBoundary } from './TaskBoundary';
 import { announceComputerUseSettingChanged } from '../lib/computer-use-setting-event';
@@ -69,10 +68,9 @@ import {
 //
 // UI slice A adds a second body behind `settingsWorkspaceV2`: the same dialog element and the same
 // controls, laid out as a ~900px two-pane workspace with a section list on the left. The flag-off
-// body is the one that shipped and stays exactly as it was, so the flag is a real switch back and
-// not a one-way migration.
+// body keeps the established single-column layout, so the flag remains a usable fallback.
 
-type SettingsSection = 'models' | 'local-ai' | 'team' | 'skills' | 'advanced';
+type SettingsSection = 'models' | 'team' | 'skills' | 'advanced';
 type SkillCreationRequest = {
   prompt: string;
   builtinSkillId: 'skill-creator';
@@ -96,12 +94,6 @@ export const SETTINGS_SECTIONS: readonly {
     description: 'モデル・Effort・API',
     eyebrow: 'Models & Connections',
   },
-  {
-    id: 'local-ai',
-    label: 'ローカルAI',
-    description: '端末内のモデル・実行状態',
-    eyebrow: 'Local AI',
-  },
   { id: 'team', label: 'Team', description: '新しいTeamの既定値', eyebrow: 'Team' },
   { id: 'skills', label: 'Skill', description: '読み込みと有効化', eyebrow: 'Skills' },
   {
@@ -112,7 +104,15 @@ export const SETTINGS_SECTIONS: readonly {
   },
 ];
 
-export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function SettingsDialog({
+  open,
+  onClose,
+  focusProviders = false,
+}: {
+  open: boolean;
+  onClose: () => void;
+  focusProviders?: boolean;
+}) {
   const workspace = useAppStore((s) => s.settingsWorkspaceV2);
   const { createTask } = useTaskBoundary();
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -131,6 +131,11 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
       dialog.close();
     }
   }, [open]);
+
+  useEffect(() => {
+    if (open && focusProviders)
+      dialogRef.current?.querySelector<HTMLButtonElement>(`#${ADD_TOGGLE_ID}`)?.focus();
+  }, [open, focusProviders]);
 
   useEffect(() => {
     if (open) return;
@@ -204,7 +209,7 @@ export function SettingsDialog({ open, onClose }: { open: boolean; onClose: () =
   );
 }
 
-/** The flag-off body: one column, every group stacked, unchanged from what shipped. Kept as a
+/** The flag-off body: one column, every group stacked. Kept as a
  * working fallback rather than deleted — turning `settingsWorkspaceV2` off has to give a usable
  * settings screen, not an empty dialog. */
 export function LegacyBody({
@@ -242,7 +247,6 @@ export function LegacyBody({
           <TeamModelRestrictionSetting active={open} />
           <TeamModelSelectionGuidanceSetting active={open} />
           <TeamResearchSetting active={open} />
-          <LocalAiSettingsSection active={open} />
           {/* Unmounting clears the renderer-local plaintext credential state. */}
           {open && <ProviderSettingsSection active={open} />}
           <SkillSettingsSection
@@ -292,7 +296,7 @@ export function WorkspaceBody({
       <header className="settings-header">
         <div>
           <h2 id="settings-dialog-title">設定</h2>
-          <p>モデル、接続、ローカルAI、Team、Skill、CLIの診断を管理します。</p>
+          <p>モデル、接続、Team、Skill、CLIの診断を管理します。</p>
         </div>
         <CloseButton onClose={onClose} />
       </header>
@@ -334,10 +338,6 @@ export function WorkspaceBody({
               <AccessDefaultGroup />
               {/* Unmounting clears the renderer-local plaintext credential state. */}
               {open && <ProviderSettingsSection active={open} />}
-            </WorkspacePage>
-
-            <WorkspacePage {...page('local-ai')} active={current === 'local-ai'}>
-              <LocalAiSettingsSection active={open} />
             </WorkspacePage>
 
             <WorkspacePage {...page('team')} active={current === 'team'}>
