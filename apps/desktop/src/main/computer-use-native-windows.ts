@@ -70,6 +70,7 @@ export function createWindowsComputerUseNativeAddon(
     // The packaged `--probe-json` response is the synchronous ABI manifest handshake. Every
     // stateful method additionally performs the same handshake over its random named pipe.
     handshake: () => probe,
+    listTargets: () => client.call('probe', 'list_targets', {}, undefined, undefined),
     pickApplication: (input) =>
       client.call('probe', 'pick_application', record(input), undefined, undefined),
     listWindows: (input) => {
