@@ -56,6 +56,7 @@ export function useCamera(onSettle?: () => void) {
   const worldRef = useRef<HTMLDivElement>(null);
   const camRef = useRef<CamState>({ x: 0, y: 0, s: 1 });
   const animRef = useRef<number | null>(null);
+  const animationDoneRef = useRef<((completed: boolean) => void) | null>(null);
   const draggingRef = useRef(false);
   // Reduced-motion (a11y fix, Phase 7 / NFR-A11Y-04): computed synchronously as the ref's initial
   // value, NOT in a `useEffect` (as this previously was). TeamCanvas's own camera-seed choreography
@@ -129,6 +130,9 @@ export function useCamera(onSettle?: () => void) {
       cancelAnimationFrame(animRef.current);
       animRef.current = null;
     }
+    const done = animationDoneRef.current;
+    animationDoneRef.current = null;
+    done?.(false);
   }, []);
 
   // ANY manual input (pan start, wheel zoom, node drag start) claims 'user' ownership and cancels
@@ -153,17 +157,18 @@ export function useCamera(onSettle?: () => void) {
   const isSystemOwned = useCallback(() => shouldRunAutomaticMove(ownerRef.current), []);
 
   const animateCamTo = useCallback(
-    (target: CamState, dur = 560, opts?: { silent?: boolean }): Promise<void> => {
+    (target: CamState, dur = 560, opts?: { silent?: boolean }): Promise<boolean> => {
       cancelCamAnim();
       if (reducedRef.current) {
         camRef.current = { ...target };
         applyCam();
         if (!opts?.silent) onSettleRef.current?.();
-        return Promise.resolve();
+        return Promise.resolve(true);
       }
       const from = { ...camRef.current };
       const ease = (t: number) => 1 - Math.pow(1 - t, 3);
       return new Promise((resolve) => {
+        animationDoneRef.current = resolve;
         const t0 = performance.now();
         const step = (now: number) => {
           const t = Math.min(1, (now - t0) / dur);
@@ -178,8 +183,9 @@ export function useCamera(onSettle?: () => void) {
             animRef.current = requestAnimationFrame(step);
           } else {
             animRef.current = null;
+            animationDoneRef.current = null;
+            resolve(true);
             if (!opts?.silent) onSettleRef.current?.();
-            resolve();
           }
         };
         animRef.current = requestAnimationFrame(step);
@@ -235,21 +241,19 @@ export function useCamera(onSettle?: () => void) {
 
     function onPointerDown(e: PointerEvent) {
       const target = e.target as HTMLElement;
-      // Ignore drags that start on the Leader node, a worker/hire card, or the header/controls
-      // overlays — those need normal click/type interaction, not canvas panning (mock lines
-      // 802-807). In the mock, the header/controls overlays are DOM *siblings* of the pannable
-      // canvas layer, so they never reach this listener at all; here everything shares one
-      // `.team-canvas` root (so `data-testid="team-list"` can gate on a single element), so the
-      // overlays must be excluded explicitly instead.
+      // Screen-fixed overlays keep their own controls without starting a canvas gesture.
       if (
-        target.closest('.surface--node') ||
-        target.closest('.worker') ||
         target.closest('.team-header-overlay') ||
         target.closest('.team-canvas-controls') ||
         target.closest('.team-canvas-notice') ||
         target.closest('.team-policy-dialog')
       )
         return;
+      if (target.closest('.surface--node, .worker')) {
+        // Freeze moving input targets through release, including pending automatic follow/fit.
+        claimUserOwnership();
+        return;
+      }
       claimUserOwnership(); // manual input: cancels any in-flight system animation, keeps the view
       dragging = { x: e.clientX, y: e.clientY, cx: camRef.current.x, cy: camRef.current.y };
       draggingRef.current = true;

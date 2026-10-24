@@ -511,7 +511,8 @@ export function TeamCanvas({
         const reduced = isReduced();
         // Silent: this flies to the seed rect purely as a visual trick for the exit choreography —
         // persisting it as "the" canvas view would overwrite the user's real last-viewed camera.
-        await animateCamTo(seedCamState(), reduced ? 0 : 560, { silent: true });
+        const completed = await animateCamTo(seedCamState(), reduced ? 0 : 560, { silent: true });
+        if (!completed) return; // A replacement camera move must not inherit this exit's fade.
         setExitingFade(true);
         if (!reduced) await sleep(220); // matches `.team-canvas.exiting`'s teamCanvasOut duration
       },
