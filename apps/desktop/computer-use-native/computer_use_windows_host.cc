@@ -3744,13 +3744,29 @@ inline constexpr std::size_t kWindowsListTargetsRowLimit = 64;
 //     machine's shared folder or a cloud sync placeholder can be served by another driver);
 //   * a local device that stops answering (a failing disk, a hung filter driver) can still hold a
 //     CreateFileW or a read of the image, and with it the helper's one request lane: no measurement
-//     runs on a thread of its own with a deadline yet.
+//     runs on a thread of its own with a deadline yet (tracked by #940: a dedicated worker thread
+//     and CancelSynchronousIo).
 inline constexpr ULONGLONG kWindowsListTargetsBudgetMs = 6'000;
 
 // Main's pid (the lineage root for W8), set by ServeMain before the first request.
 std::uint32_t windows_v2_main_pid = 0;
-// Advanced by every list_targets: a new session must name the latest list it was offered from.
-std::uint64_t windows_v2_list_generation = 0;
+// The first list generation of this helper: random in [1, 2^52), so a restarted helper does not
+// repeat a generation an earlier helper gave out (a token kept from that list would then name a list
+// this helper never sent, and be taken as the latest). 2^52 keeps the value exact as a JSON number
+// in Main. 0 (no list yet) when the system cannot give random bytes: then the first list is 1, as
+// before, and an earlier helper's token is refused only by Main's discarding it on a restart.
+std::uint64_t InitialWindowsV2ListGeneration() {
+  std::uint64_t random = 0;
+  if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(&random), sizeof(random),
+                      BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    return 0;
+  constexpr std::uint64_t kRange = (std::uint64_t{1} << 52) - 2;
+  return 1 + random % kRange;
+}
+
+// Advanced by every list_targets that is answered: a new session must name the latest list it was
+// offered from.
+std::uint64_t windows_v2_list_generation = InitialWindowsV2ListGeneration();
 
 sprint_coder::computer_use::WindowsFileKey
 WindowsFileKeyOf(const WindowsFileIdentity &identity) {
