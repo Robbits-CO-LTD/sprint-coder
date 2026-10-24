@@ -8,7 +8,7 @@
 
 @font-face {
   font-family: 'Noto Sans JP Sub';
-  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261027') format('woff2');
+  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261028') format('woff2');
   font-weight: 100 900;
   font-display: swap;
 }
@@ -2791,6 +2791,20 @@ html:not(.js) .finale-swarm,
 @media (max-height: 900px) {
   .hero .scroll-cue {
     display: none;
+  }
+}
+/* 縦 860px 以下のノート（1366x768・1536x800 など）では、01 の帯と 02 の数字を詰めて舞台に収める（収まらないとページ全体が縦並びになる） */
+@media (max-height: 860px) and (min-width: 961px) {
+  .bars {
+    height: clamp(100px, 18vh, 180px);
+    margin-top: 18px;
+  }
+  .count-big .count {
+    font-size: clamp(96px, min(18vw, 16svh), 260px);
+  }
+  .count-big,
+  .tiers {
+    margin-top: 12px;
   }
 }
 
