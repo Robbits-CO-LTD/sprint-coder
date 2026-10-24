@@ -1,3 +1,29 @@
+## Issue #940 — V2対象再判定の同期I/O隔離（2026-10-25）
+
+成果: `RejudgeWindowsV2Session`の測定が止まっても、後続のCancel/Closeが1秒の応答予算内に返る。本人性・許可範囲の再判定は毎回行い、結果をキャッシュしない。baseはmain `e73e0314`、Windows実機検証はMSIPCのCodexへ依頼する。
+
+原因確認: 診断commit `11b680be`で、実owned sibling・実一覧のobserve_only判定・実保持HANDLEから正常Rejudgeを確認後、最終FileId読取りだけを保留。MSIPCではreaderが16msでStopを認識した一方、1,032ms後もreceiptは未着で、解除後に実readとCancel/Closeが回復した。componentの故障再現であり、正常Start/grant/foreground/実入力の受入ではない。
+
+変更と所有権:
+
+- Rejudge専用の再利用workerを1本持ち、一覧/start/本人性検証と既存のsingle-flight slotを共有する。同時の測定は1件だけ。新しい汎用executorは作らない。
+- workerへはPID/HWND、期待mode/app identity/process start/not-web file、session.cancel_epoch、frameのenqueue時stop serial、contextの値snapshotと所有するexe HANDLEの複製を渡す。Session参照、COM pointer、input counterは渡さない。
+- cold contextの初期化もworkerで行い、測定・core判定・mode/app/start/held FileId照合・not-web表を維持する。pure結果と新規context候補だけを返す。consumerはpending→stop mutexの順でlockし、Stop/epoch/親processの生存確認とnot-web/contextの採用を同じstop mutex区間で行う。
+- workerのCOMと一時/複製HANDLEを片付け、active job/cancel aliasを撤去してbusyを解除した後に結果を公開する。job IDの一致確認とCancelSynchronousIoを同じmutexで順序付け、古いjobが次jobを取消し・busy解除しないようにする。中断不能な測定がある間は追加workerを増やさず、新規測定を拒否する。放棄はpending→stateの順、workerはstate lockを解放してからpendingへ結果を公開し、readerはstop mutexだけを取る。
+- `JudgeWindowsV2Input`のnot-web出力はconsumerだけが更新する。preflight/dispatchの既存Validate・ticket・入力直前検証は維持する。helper内のidle workerとhelper終了時の消失は別々に確認する。
+
+最小の証明:
+
+- [x] 元の実Rejudge/実FileId故障箇所でconsumer停止を実機再現する。
+- [ ] 正常baselineを維持し、同じFileId gate保持中の有効Cancel単独、Close-only、prequeued Closeを1秒未満で確認する。取消し後の遅い成功は採用しない。
+- [ ] 元のsnapshot HANDLEを閉じた後もworkerの複製による実readが成立し、cleanup後の明示retry・同じworkerの再利用・旧job取消しの非伝播を確認する。
+- [ ] cold context取消し・fresh busy拒否・mode/app/process start/FileId不一致と実read失敗の拒否を確認する。毎回の実測を確認し、入力latencyを測ったとは扱わない。
+- [ ] 対象test/type/lint、native境界の既存test、独立レビュー、MSIPC、最新headのCI/ReviewBOT、merge後main CIを確認する。
+
+非対象: resume/refocus、V1 picker/list_windows、window/dialog/UIAの同期処理、Controllerの開始中Stop配送・完了、公開V2有効化、新期限・helper再起動・実Provider・OS設定変更。#940全体のcloseは残る境界の終了後に判断する。
+
+---
+
 ## Computer Useへの画面テスト移行（2026-10-24）
 
 承認済み方針: Playwrightのテスト・設定・依存・CI実行を撤去し、UI検証を開発エージェントのComputer Useへ統一する。Vitest、native、各OSのpackage/installer、サイト静的検証は維持する。元checkoutの未コミット変更は保持する。

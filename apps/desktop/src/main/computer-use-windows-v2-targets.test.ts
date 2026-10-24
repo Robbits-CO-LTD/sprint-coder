@@ -79,7 +79,7 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
   });
 
   it('measures a process without a window and judges every window by its own class', () => {
-    const list = cut('bool MeasureWindowsV2TargetList(', 'bool RejudgeWindowsV2Session(');
+    const list = cut('bool MeasureWindowsV2TargetList(', '// BEGIN windows v2 rejudge');
     // The cached per-process facts are measured with no window, so the first window listed (a console
     // the app allocated, a window already gone) decides nothing for the others (the review of #881).
     expect(list).toContain('MeasureWindowsV2Process(owner, context, judgement.get());');
