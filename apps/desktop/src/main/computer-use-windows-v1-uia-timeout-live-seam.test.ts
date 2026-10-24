@@ -90,6 +90,84 @@ const sixPaths = [
   'WindowsFocusedElementSignature',
 ] as const;
 
+// Timing lives only in the seam's temporary copy. Keep the real branches and calls, and fail if
+// their source changes instead of silently measuring a replacement implementation.
+function focusTimingHost(): string {
+  const start = host.indexOf('WindowsUiaRisk ClassifyWindowsFocusedElement(');
+  const end = host.indexOf('\nbool ComputeWindowsControlSignature(', start);
+  if (start < 0 || end < start) throw new Error('Focused UIA timing source markers changed');
+  let focused = host.slice(start, end);
+  const calls = [
+    ['CreateWindowsV1Automation(&automation)', 'create', 1],
+    ['automation->GetFocusedElement(&element)', 'focused', 1],
+    ['element->get_CurrentProcessId(&owner_pid)', 'owner', 1],
+    ['ClassifyWindowsUiaElement(element)', 'properties', 1],
+    ['automation->Release()', 'automation_release', 1],
+    ['element->Release()', 'element_release', 3],
+  ] as const;
+  for (const [call, stage, count] of calls) {
+    if (focused.split(call).length - 1 !== count)
+      throw new Error(`Focused UIA timing call changed: ${stage}`);
+    focused = focused.replaceAll(
+      call,
+      `sc820_timing::Measure(sc820_timing::Stage::${stage}, [&] { return ${call}; })`,
+    );
+  }
+  const release = '  sc820_timing::Measure(sc820_timing::Stage::automation_release';
+  focused = focused.replace(release, '  sc820_timing::RecordReportedResult(found);\n' + release);
+  return host.slice(0, start) + focused + host.slice(end);
+}
+const timedHost = focusTimingHost();
+
+const focusTimingSupport = String.raw`
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <type_traits>
+
+namespace sc820_timing {
+enum class Stage : std::size_t { create, focused, owner, properties, automation_release, element_release, count };
+struct StageResult {
+  std::uint32_t calls = 0;
+  std::int64_t microseconds = 0;
+  std::int64_t code = 0;
+};
+struct Capture {
+  bool active = false;
+  std::chrono::steady_clock::time_point started;
+  std::int64_t total_us = 0;
+  std::int64_t reported_focus_code = 0;
+  std::array<StageResult, static_cast<std::size_t>(Stage::count)> stages{};
+};
+thread_local Capture current;
+
+template <class Call> auto Measure(Stage stage, Call &&call) {
+  if (!current.active) return call();
+  const auto start = std::chrono::steady_clock::now();
+  auto value = call();
+  StageResult &result = current.stages[static_cast<std::size_t>(stage)];
+  ++result.calls;
+  result.microseconds += std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - start).count();
+  if constexpr (std::is_integral_v<decltype(value)>) result.code = static_cast<std::int64_t>(value);
+  return value;
+}
+void Begin() {
+  current = {};
+  current.started = std::chrono::steady_clock::now();
+  current.active = true;
+}
+void End() {
+  current.total_us = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - current.started).count();
+  current.active = false;
+}
+void RecordReportedResult(std::int64_t code) {
+  if (current.active) current.reported_focus_code = code;
+}
+} // namespace sc820_timing
+`;
+
 describe('V1 lane UI Automation is created in one place, with its call timeouts (#820)', () => {
   it('creates UI Automation only in CreateWindowsV1Automation (and CreateBoundedAutomation)', () => {
     // The host: no CLSID_CUIAutomation8 at all, and exactly one coclass creation: the fallback inside
@@ -640,6 +718,7 @@ function findBuild(path: string, output: string, provenance: string): Build | nu
 }
 
 const program = String.raw`
+${focusTimingSupport}
 // The real host, its entry point renamed so this program has its own.
 #define wmain computer_use_host_wmain
 #include "computer_use_windows_host.cc"
@@ -658,6 +737,22 @@ void SeamCheck(bool ok, const std::string &name) {
     ++failures;
     std::cout << "FAIL " << name << std::endl;
   }
+}
+
+// Emit only fixed stage names, counts, durations and result codes, after the timed call has returned.
+void PrintFocusTiming(int attempt, long long elapsed_ms) {
+  const char *names[] = {"create", "focused", "owner", "properties", "automation_release", "element_release"};
+  const auto &capture = sc820_timing::current;
+  std::cout << "focus_timing attempt=" << attempt << " elapsed_ms=" << elapsed_ms
+            << " total_us=" << capture.total_us << " reported_focus_code=" << capture.reported_focus_code;
+  for (std::size_t index = 0; index < capture.stages.size(); ++index) {
+    const auto &stage = capture.stages[index];
+    std::cout << " " << names[index] << "_calls=" << stage.calls
+              << " " << names[index] << "_us=" << stage.microseconds;
+    if (index != static_cast<std::size_t>(sc820_timing::Stage::properties))
+      std::cout << " " << names[index] << "_code=" << stage.code;
+  }
+  std::cout << std::endl;
 }
 
 // ---------------------------------------------------------------- the process that owns the windows
@@ -1101,7 +1196,12 @@ int RunDriver(bool ci) {
     Sleep(300);
     if (GetForegroundWindow() != hang) continue;
     WindowsUiaRisk risk;
-    const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] { risk = ClassifyWindowsFocusedElement(static_cast<std::uint32_t>(pid)); });
+    const long long ms = WhileStuck(hang, WM_APP + 1, 0, [&] {
+      sc820_timing::Begin();
+      risk = ClassifyWindowsFocusedElement(static_cast<std::uint32_t>(pid));
+      sc820_timing::End();
+    });
+    PrintFocusTiming(attempt, ms);
     std::string reason;
     if (ms >= kHeldUp) {
       focus_classification = true;
@@ -1390,6 +1490,7 @@ describe('V1 lane UI Automation against windows that do not answer, live, across
     expect(context, 'a Windows build context').not.toBeNull();
     const build = context!;
     expect(build.compiler, 'cl.exe (MSVC) is required on a Windows CI runner').not.toBeNull();
+    writeFileSync(join(build.scratch, 'computer_use_windows_host.cc'), timedHost);
     writeFileSync(build.source, program);
     const compiler = build.compiler!;
     const built = await run(compiler.file, compiler.args, {
