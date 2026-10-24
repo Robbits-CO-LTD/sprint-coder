@@ -4,14 +4,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-// #940 RCA only: the real ServePipe reader/consumer and real named-pipe framing, with one
-// measurement stopped by a manual event. No production file, input API, or desktop-wide
-// enumeration is changed. This records the CURRENT failure boundary; a later fix must replace
-// the held-case expectation with timely receipts while the measurement is still held.
+// #940-1: the real ServePipe reader/consumer and real named-pipe framing. Held workers must not
+// delay Stop/Close, publish stale results, or admit another synchronous target operation.
+// Gates are injected only into generated test source; the only enumerated window is our fixture.
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
 const measurement = '  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);';
 const enumeration = 'EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows))';
+const contextFactory =
+  '  WindowsTargetFactsContext context = cached.has_value() ? *cached : CurrentWindowsTargetFactsContext(';
+const completion = '        // All measured handles and COM objects are gone';
+const consumer =
+  '    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {';
 
 function replaceOnce(source: string, before: string, after: string): string {
   if (source.split(before).length !== 2) throw new Error('RCA seam source boundary changed');
@@ -19,10 +23,33 @@ function replaceOnce(source: string, before: string, after: string): string {
 }
 
 function instrumentedHost(): string {
-  return replaceOnce(
+  let source = replaceOnce(
     replaceOnce(host, measurement, `  Sc940MeasureGate(pid);\n${measurement}`),
     enumeration,
     'Sc940EnumerateOwnedWindow(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows))',
+  );
+  source = replaceOnce(
+    source,
+    contextFactory,
+    `  if (!cached.has_value()) Sc940ContextGate();\n${contextFactory}`,
+  );
+  source = replaceOnce(source, completion, `        Sc940CompletionGate();\n${completion}`);
+  source = replaceOnce(
+    source,
+    consumer,
+    `    Sc940ConsumerGate(request.header.request_id.bytes[0]);\n${consumer}`,
+  );
+  const from = source.indexOf('bool ValidateWindowsSession(\n');
+  const to = source.indexOf('bool ReadExact(', from);
+  if (from < 0 || to < 0) throw new Error('Session validation boundary changed');
+  return (
+    source.slice(0, from) +
+    replaceOnce(
+      source.slice(from, to),
+      '  std::string current_start;',
+      '  Sc940SyncSessionProbe();\n  std::string current_start;',
+    ) +
+    source.slice(to)
   );
 }
 
@@ -105,6 +132,10 @@ const program = String.raw`
 #include <cstdint>
 namespace {
 void Sc940MeasureGate(std::uint32_t pid);
+void Sc940ContextGate();
+void Sc940CompletionGate();
+void Sc940ConsumerGate(std::uint8_t request);
+void Sc940SyncSessionProbe();
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter);
 }
 #define wmain sc940_original_host_wmain
@@ -117,12 +148,22 @@ HANDLE gate_entered = nullptr;
 HANDLE gate_release = nullptr;
 DWORD fixture_pid = 0;
 HWND fixture_window = nullptr;
-bool hold_measurement = false;
+enum class HoldPoint { kNone, kMeasure, kContext, kCompletion, kConsumer };
+std::atomic<HoldPoint> hold_point{HoldPoint::kNone};
 std::atomic<bool> gate_timed_out{false};
 std::atomic<bool> wrong_measurement{false};
+std::atomic<unsigned> measurement_calls{0};
+std::atomic<unsigned> synchronous_session_probes{0};
 
 void Require(bool condition, const char *reason) {
   if (!condition) throw std::runtime_error(reason);
+}
+
+void Sc940Gate(HoldPoint point) {
+  if (hold_point.load() != point) return;
+  SetEvent(gate_entered);
+  if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0)
+    gate_timed_out.store(true);
 }
 
 void Sc940MeasureGate(std::uint32_t pid) {
@@ -130,10 +171,16 @@ void Sc940MeasureGate(std::uint32_t pid) {
     wrong_measurement.store(true);
     throw std::runtime_error("foreign_measurement");
   }
-  SetEvent(gate_entered);
-  if (hold_measurement && WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0)
-    gate_timed_out.store(true);
+  measurement_calls.fetch_add(1);
+  Sc940Gate(HoldPoint::kMeasure);
 }
+
+void Sc940ContextGate() { Sc940Gate(HoldPoint::kContext); }
+void Sc940CompletionGate() { Sc940Gate(HoldPoint::kCompletion); }
+void Sc940ConsumerGate(std::uint8_t request) {
+  if (request == 2) Sc940Gate(HoldPoint::kConsumer);
+}
+void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
 
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
   DWORD owner = 0;
@@ -197,6 +244,7 @@ struct RcaRun {
   std::atomic<bool> serve_ok{false};
   bool cleaned = false;
   bool child_exited = false;
+  bool worker_idle = false;
 
   RcaRun() {
     Require(entered.value && release.value && finished.value, "event_creation");
@@ -253,7 +301,7 @@ struct RcaRun {
     Require(WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT, "fixture_stays_alive");
   }
 
-  void StartPipe() {
+  void StartPipe(bool same_epoch_close) {
     SECURITY_ATTRIBUTES security{};
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     Require(BuildCurrentUserPipeSecurity(&security, &descriptor), "pipe_security");
@@ -301,8 +349,11 @@ struct RcaRun {
     WindowsSession session;
     session.session_id = "sc940-control";
     session.cancel_epoch = 1;
+    session.has_observation = true;
+    session.observation_revision = 1;
     sessions.emplace(FrameIdKey(Id(7)), std::move(session));
-    cancellation_epoch.store(1);
+    // The close-only same-epoch case proves max(cancelEpoch) is not an invalidation serial.
+    cancellation_epoch.store(same_epoch_close ? 2 : 1);
     windows_v2_main_pid = GetCurrentProcessId();
     serving = std::thread([this] {
       const HRESULT apartment = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -366,6 +417,45 @@ struct RcaRun {
            found->second.header.session_id.bytes == Id(7).bytes && found->second.binary.empty();
   }
 
+  bool Error(unsigned id, std::string_view code) {
+    std::lock_guard<std::mutex> lock(replies_mutex);
+    const auto found = replies.find(id);
+    if (found == replies.end()) return false;
+    const Frame &frame = found->second;
+    const std::string body(frame.metadata.begin(), frame.metadata.end());
+    std::string actual;
+    bool accepted = true;
+    return frame.header.message_type == static_cast<std::uint16_t>(MessageType::kError) &&
+           frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
+           frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() &&
+           ReadJsonString(body, "code", &actual) && actual == code &&
+           ReadOptionalJsonBoolean(body, "accepted", &accepted) && !accepted;
+  }
+
+  bool PreflightDenied(unsigned id) {
+    std::lock_guard<std::mutex> lock(replies_mutex);
+    const auto found = replies.find(id);
+    if (found == replies.end()) return false;
+    const Frame &frame = found->second;
+    const std::string body(frame.metadata.begin(), frame.metadata.end());
+    std::string decision, reason;
+    std::uint64_t attempts = 1;
+    return frame.header.message_type == static_cast<std::uint16_t>(MessageType::kPreflightResult) &&
+           frame.header.request_id.bytes == Id(static_cast<std::uint8_t>(id)).bytes &&
+           frame.header.session_id.bytes == Id(7).bytes && frame.binary.empty() &&
+           ReadJsonString(body, "decision", &decision) && decision == "denied" &&
+           ReadJsonString(body, "reasonCode", &reason) && reason == "native_session_identity_changed" &&
+           ReadJsonUint64(body, "inputAttemptCount", &attempts) && attempts == 0 &&
+           body.find("\"ticket\":null") != std::string::npos;
+  }
+
+  bool WaitWorkerIdle(DWORD milliseconds) {
+    const ULONGLONG deadline = GetTickCount64() + milliseconds;
+    while (WindowsTargetListWorkerRunning().load(std::memory_order_acquire) && GetTickCount64() < deadline)
+      Sleep(1);
+    return !WindowsTargetListWorkerRunning().load(std::memory_order_acquire);
+  }
+
   void Cleanup() {
     if (cleaned) return;
     cleaned = true;
@@ -374,6 +464,8 @@ struct RcaRun {
     if (server.value != INVALID_HANDLE_VALUE) { CancelIoEx(server.value, nullptr); DisconnectNamedPipe(server.value); }
     if (serving.joinable()) serving.join();
     if (receiving.joinable()) receiving.join();
+    // The detached production worker must release its slot/resources before our fixture is killed.
+    worker_idle = WaitWorkerIdle(15'000);
     if (job.value != nullptr) TerminateJobObject(job.value, 0);
     if (child.value != nullptr) {
       if (WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT) TerminateProcess(child.value, 0);
@@ -387,58 +479,143 @@ struct RcaRun {
   ~RcaRun() { Cleanup(); }
 };
 
-int Diagnose(bool held) {
+bool WaitStopSerial(std::uint64_t before, DWORD milliseconds) {
+  const ULONGLONG deadline = GetTickCount64() + milliseconds;
+  while (WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == before &&
+         GetTickCount64() < deadline)
+    Sleep(1);
+  return WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) != before;
+}
+
+void AssertBusyRefusals(RcaRun &run) {
+  const unsigned measured = measurement_calls.load();
+  run.Send(MessageType::kProbe, 5, "{\"operation\":\"list_targets\"}");
+  Require(run.Wait(5, 1000) && run.Error(5, "list_targets_unavailable"), "busy_list_refused");
+  run.Send(MessageType::kProbe, 6, "{\"operation\":\"start_session\"}");
+  Require(run.Wait(6, 1000) && run.Error(6, "session_target_rejected"), "busy_start_refused");
+  WindowsSession unmeasured;
+  RECT bounds{};
+  std::string reason;
+  Require(!ValidateWindowsSession(unmeasured, &bounds, &reason) && reason == "session_identity_changed",
+          "busy_validation_refused");
+  const std::string preflight = "{\"requestId\":\"busy-preflight\",\"actionDigest\":\"" +
+      std::string(64, 'a') + "\",\"cancelEpoch\":1,\"observationRevision\":1,\"type\":\"invoke\",\"targetId\":\"fixture\"}";
+  run.Send(MessageType::kPreflight, 8, preflight);
+  Require(run.Wait(8, 1000) && run.PreflightDenied(8), "busy_preflight_refused");
+  run.Send(MessageType::kProbe, 9, "{\"operation\":\"pick_application\"}");
+  Require(run.Wait(9, 1000) && run.Error(9, "picker_unavailable"), "busy_picker_refused");
+  run.Send(MessageType::kProbe, 10, "{\"operation\":\"list_windows\"}");
+  Require(run.Wait(10, 1000) && run.Error(10, "profile_identity_invalid"), "busy_windows_refused");
+  Require(measurement_calls.load() == measured && synchronous_session_probes.load() == 0,
+          "busy_paths_read_no_target");
+  Require(WindowsTargetListWorkerRunning().load(), "busy_worker_slot_retained");
+}
+
+int Diagnose(std::wstring_view scenario) {
+  const bool healthy = scenario == L"healthy";
+  const bool deadline = scenario == L"deadline";
+  const bool context = scenario == L"context-cancel";
+  const bool queued = scenario == L"queued-stop";
+  const bool completion_race = scenario == L"completion-race";
+  const bool same_epoch_close = scenario == L"measure-same-epoch-close";
+  const bool close_only = scenario == L"measure-close" || same_epoch_close;
+  const char *label = healthy ? "healthy" : deadline ? "deadline" : context ? "context-cancel" :
+      queued ? "queued-stop" : completion_race ? "completion-race" :
+      same_epoch_close ? "measure-same-epoch-close" : close_only ? "measure-close" : "measure-cancel";
   RcaRun run;
-  hold_measurement = held;
-  bool healthy_receipts = false, epoch_advanced = false, no_receipts_at_one_second = false;
-  bool list_recovered = false, cancel_recovered = false, close_recovered = false;
-  ULONGLONG epoch_ms = 0, receipt_wait_ms = 0;
+  hold_point.store(healthy ? HoldPoint::kNone : context ? HoldPoint::kContext :
+                   queued ? HoldPoint::kConsumer : completion_race ? HoldPoint::kCompletion : HoldPoint::kMeasure);
+  ULONGLONG stop_ms = 0, list_ms = 0;
+  bool busy_checked = false;
+  bool generation_unchanged = false;
   try {
     run.StartFixture();
-    run.StartPipe();
+    run.StartPipe(same_epoch_close);
     run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "handshake");
+    Require(!WindowsV2FactsContextCache().has_value(), "initial_context_empty");
+    const std::uint64_t generation_before = windows_v2_list_generation;
+    const ULONGLONG list_started = GetTickCount64();
     run.Send(MessageType::kProbe, 2, "{\"operation\":\"list_targets\"}");
-    Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "measure_entered");
-    if (!held) Require(run.Wait(2, 15'000) && run.ProbeReply(2, MessageType::kProbeResult), "healthy_list");
-    Require(WaitForSingleObject(run.child.value, 0) == WAIT_TIMEOUT, "fixture_alive_before_cancel");
-    const ULONGLONG sent = GetTickCount64();
-    run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
-    while (cancellation_epoch.load() < 2 && GetTickCount64() - sent < 1000) Sleep(1);
-    epoch_ms = GetTickCount64() - sent;
-    epoch_advanced = cancellation_epoch.load() >= 2;
-    Require(epoch_advanced, "reader_epoch_advanced");
-    run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
-    const ULONGLONG waiting = GetTickCount64();
-    if (held) {
-      const bool cancel_early = run.Wait(3, 1000);
-      no_receipts_at_one_second = !cancel_early && !run.Wait(4, 0) && !run.Wait(2, 0);
-      Require(no_receipts_at_one_second, "current_consumer_is_held");
-      Require(!gate_timed_out.load(), "gate_did_not_release_itself");
+    if (healthy) {
+      Require(run.Wait(2, 7000) && run.ProbeReply(2, MessageType::kProbeResult), "healthy_list");
+      Require(run.WaitWorkerIdle(1000), "healthy_worker_idle");
+      Require(measurement_calls.load() == 1 && WindowsV2FactsContextCache().has_value(), "healthy_context_committed");
+      Require(windows_v2_list_generation == generation_before + 1, "healthy_generation_committed");
     } else {
-      healthy_receipts = run.Wait(3, 1000) && run.Wait(4, 1000);
-      Require(healthy_receipts, "healthy_stop_receipts");
+      Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "fault_gate_entered");
+      Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "fault_gate_stays_closed");
+      Require(WindowsTargetListWorkerRunning().load() == !queued, "worker_ownership_at_gate");
     }
-    receipt_wait_ms = GetTickCount64() - waiting;
-    SetEvent(run.release.value);
-    list_recovered = run.Wait(2, 15'000) && run.ProbeReply(2, MessageType::kProbeResult);
-    cancel_recovered = run.Wait(3, 5000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2);
-    close_recovered = run.Wait(4, 5000) && run.Receipt(4, MessageType::kProbeResult, "closed", 3);
-    Require(list_recovered && cancel_recovered && close_recovered, "receipts_after_release");
+    if (deadline) {
+      Require(run.Wait(2, static_cast<DWORD>(kWindowsListTargetsBudgetMs + 1000)) &&
+                  run.Error(2, "list_targets_unavailable"), "deadline_list_refused");
+      list_ms = GetTickCount64() - list_started;
+      Require(list_ms >= kWindowsListTargetsBudgetMs && list_ms <= kWindowsListTargetsBudgetMs + 1500,
+              "deadline_bounded");
+      Require(WindowsTargetListWorkerRunning().load(), "deadline_keeps_the_worker_slot");
+      AssertBusyRefusals(run);
+      busy_checked = true;
+    }
+    Require(WaitForSingleObject(run.child.value, 0) == WAIT_TIMEOUT, "fixture_alive_before_stop");
+    const std::uint64_t serial_before = WindowsTargetListControl().stop_serial.load();
+    const ULONGLONG stop_started = GetTickCount64();
+    const std::uint64_t close_epoch = close_only ? 2 : 3;
+    if (close_only) {
+      run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":2}");
+      Require(WaitStopSerial(serial_before, 1000), "close_reader_invalidated");
+    } else {
+      run.Send(MessageType::kCancel, 3, "{\"cancelEpoch\":2}");
+      Require(WaitStopSerial(serial_before, 1000), "cancel_reader_invalidated");
+      run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
+    }
+    if (queued) {
+      // The reader consumed Stop while the consumer was held BEFORE entering the queued list.
+      Require(!WindowsTargetListWorkerRunning().load() && measurement_calls.load() == 0,
+              "queued_stop_has_no_worker");
+      hold_point.store(HoldPoint::kNone);
+      SetEvent(run.release.value);
+    }
+    if (!close_only)
+      Require(run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
+              "cancel_receipt_while_worker_held");
+    Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kProbeResult, "closed", close_epoch),
+            "close_receipt_while_worker_held");
+    stop_ms = GetTickCount64() - stop_started;
+    Require(stop_ms < 1000, "stop_receipts_within_ack_budget");
+    Require(cancellation_epoch.load() >= 2, "stop_reader_epoch_advanced");
+    if (same_epoch_close) Require(cancellation_epoch.load() == 2, "same_epoch_close_used_stop_serial");
+    if (!healthy) {
+      Require(run.Wait(2, 1000) && run.Error(2, "list_targets_unavailable"), "stopped_list_refused");
+      generation_unchanged = windows_v2_list_generation == generation_before;
+      Require(generation_unchanged && !WindowsV2FactsContextCache().has_value(), "canceled_candidate_not_adopted");
+      if (!queued) {
+        Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT && WindowsTargetListWorkerRunning().load(),
+                "receipts_precede_worker_release");
+      }
+      hold_point.store(HoldPoint::kNone);
+      SetEvent(run.release.value);
+      Require(run.WaitWorkerIdle(15'000), "abandoned_worker_drained");
+      Require(windows_v2_list_generation == generation_before && !WindowsV2FactsContextCache().has_value(),
+              "late_result_and_context_discarded");
+      if (queued || context) Require(measurement_calls.load() == 0, "stopped_before_measurement");
+      // Recovery is a new explicit request after the abandoned worker has completely exited.
+      run.Send(MessageType::kProbe, 20, "{\"operation\":\"list_targets\"}");
+      Require(run.Wait(20, 7000) && run.ProbeReply(20, MessageType::kProbeResult), "fresh_list_recovers");
+      Require(run.WaitWorkerIdle(1000) && WindowsV2FactsContextCache().has_value() &&
+                  windows_v2_list_generation == generation_before + 1, "fresh_candidate_committed_once");
+    }
     Require(!wrong_measurement.load() && !gate_timed_out.load(), "owned_measurement_only");
     run.Cleanup();
-    Require(run.child_exited && !run.watchdog_fired.load(), "cleanup_completed");
-    std::cout << "{\"case\":\"" << (held ? "measure-held" : "healthy")
-              << "\",\"gateEntered\":true,\"epochAdvanced\":true,\"epochMs\":" << epoch_ms
-              << ",\"receiptWaitMs\":" << receipt_wait_ms
-              << ",\"healthyReceipts\":" << (healthy_receipts ? "true" : "false")
-              << ",\"noReceiptsAtOneSecond\":" << (no_receipts_at_one_second ? "true" : "false")
-              << ",\"listRecovered\":true,\"cancelRecovered\":true,\"closeRecovered\":true"
-              << ",\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true,\"watchdogFired\":false}\n";
+    Require(run.child_exited && run.worker_idle && !run.watchdog_fired.load(), "cleanup_completed");
+    std::cout << "{\"case\":\"" << label << "\",\"stopSerialAdvanced\":true,\"stopMs\":" << stop_ms
+              << ",\"listMs\":" << list_ms << ",\"busyChecked\":" << (busy_checked ? "true" : "false")
+              << ",\"generationUnchangedOnRefusal\":" << (generation_unchanged ? "true" : "false")
+              << ",\"recovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
+              << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
   } catch (const std::exception &error) {
     run.Cleanup();
-    // Only fixed test assertion codes, never native error text, paths, titles, values or frames.
     std::cout << "{\"failure\":\"" << error.what() << "\"}\n";
     return 1;
   }
@@ -448,16 +625,22 @@ int Diagnose(bool held) {
 int wmain(int argc, wchar_t **argv) {
   if (argc == 4 && std::wstring_view(argv[1]) == L"fixture") return Fixture(argv[2], argv[3]);
   if (argc != 2) return 2;
-  return Diagnose(std::wstring_view(argv[1]) == L"held");
+  return Diagnose(argv[1]);
 }
 `;
 
 describe('Windows target I/O RCA seam source', () => {
-  it('injects only one measure gate and enumerates only its own fixture', () => {
+  it('injects bounded phase gates and enumerates only its own fixture', () => {
     const generated = instrumentedHost();
     expect(generated.split('  Sc940MeasureGate(pid);')).toHaveLength(2);
     expect(generated).not.toContain(enumeration);
     expect(generated).toContain(measurement);
+    expect(generated.split('  if (!cached.has_value()) Sc940ContextGate();')).toHaveLength(2);
+    expect(generated.split('        Sc940CompletionGate();')).toHaveLength(2);
+    expect(
+      generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
+    ).toHaveLength(2);
+    expect(generated.split('  Sc940SyncSessionProbe();')).toHaveLength(2);
     expect(program).toContain('ServePipe(server.value, BackendProbe{})');
     expect(program).not.toMatch(/#define\s+(?:CreateFileW|ReadFile|WriteFile|EnumWindows)\b/u);
   });
@@ -466,8 +649,8 @@ describe('Windows target I/O RCA seam source', () => {
 const build = compiler();
 describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
-)('Windows target I/O RCA live seam (#940, current unfixed boundary)', () => {
-  it('separates a progressing Cancel reader from receipts queued behind measurement', async () => {
+)('Windows target I/O live seam (#940-1, bounded list worker)', () => {
+  it('keeps Stop responsive and rejects stale worker results across eight owned scenarios', async () => {
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     try {
@@ -529,24 +712,31 @@ describe.skipIf(
         .join('\n')
         .slice(0, 8_000);
       expect(compiled.status, `RCA seam must compile with MSVC\n${compileErrors}`).toBe(0);
-      for (const scenario of ['healthy', 'held']) {
+      for (const scenario of [
+        'healthy',
+        'measure-cancel',
+        'measure-close',
+        'measure-same-epoch-close',
+        'context-cancel',
+        'deadline',
+        'queued-stop',
+        'completion-race',
+      ]) {
         const result = await run(binary, [scenario], 70_000);
         expect(result.timedOut, `${scenario}: outer watchdog`).toBe(false);
         const failure = /^\{"failure":"([a-z_]+)"\}$/u.exec(result.stdout.trim())?.[1];
         expect(result.status, `${scenario}: ${failure ?? 'native RCA assertions'}`).toBe(0);
         const metadata: unknown = JSON.parse(result.stdout.trim());
         expect(metadata).toMatchObject({
-          case: scenario === 'held' ? 'measure-held' : 'healthy',
-          gateEntered: true,
-          epochAdvanced: true,
-          healthyReceipts: scenario === 'healthy',
-          noReceiptsAtOneSecond: scenario === 'held',
-          listRecovered: true,
-          cancelRecovered: true,
-          closeRecovered: true,
+          case: scenario,
+          stopSerialAdvanced: true,
+          busyChecked: scenario === 'deadline',
+          generationUnchangedOnRefusal: scenario !== 'healthy',
+          recovered: true,
           inputAttempts: 0,
           childExited: true,
           threadsJoined: true,
+          workerIdle: true,
           watchdogFired: false,
         });
         console.log(JSON.stringify(metadata));
