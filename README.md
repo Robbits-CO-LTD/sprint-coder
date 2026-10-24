@@ -27,7 +27,7 @@ Sprint Coder（スプリントコーダー）は、**AIコーディングアシ�
 Sprint Coder is an open-source, local-first desktop AI coding workspace that brings Codex CLI, Claude Code, Gemini, cloud APIs, local LLMs, and multi-agent software development into one Task.
 
 > [!WARNING]
-> 現在はearly betaです。機能、データ形式、配布方法は今後変更される可能性があります。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
+> 最新の正式版は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest)から入手できます。機能ごとの対応状況と既知の制約はReleaseの説明をご確認ください。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
 
 ## なぜSprint Coderなのか
 
