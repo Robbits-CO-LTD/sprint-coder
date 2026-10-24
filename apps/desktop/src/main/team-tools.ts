@@ -6,6 +6,7 @@
 //
 // The same provider-neutral definitions feed the mock ToolBroker, the real CLI MCP bridge, and
 // official API tool loops. TeamCoordinator remains the only authority-bearing implementation.
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   contextInheritancePolicySchema,
@@ -273,7 +274,7 @@ export const TEAM_TOOLS: readonly ToolDefinition[] = Object.freeze([
 
 export const TEAM_TOOL_DESCRIPTIONS: Readonly<Record<string, string>> = Object.freeze({
   team_list_models:
-    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。',
+    '利用可能なConnectionとモデルをsource付き能力情報で検索します。Worker雇用前の選定に使います。続きはnextCursorをそのままcursorに渡します。cursorのエラーが返ったら、cursorを省略して先頭からやり直します。',
   team_hire_worker: `自分の直下にWorkerまたはManagerを雇用します。leafはagentKind=workerかつmanagerPolicyなし、ManagerはagentKind=managerかつmaxDelegationLevelsを自分より下へ許可する相対段数で指定します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_task: `自分の直下Workerへtaskを割り当て、execution IDを返します。${MANAGER_WRITE_REQUIREMENTS}`,
   team_assign_tasks: `複数の直下Workerへtaskを1回でまとめて割り当てます（1〜${TEAM_ASSIGN_TASKS_MAX}件）。複数のWorkerへ割り当てるときはteam_assign_taskを繰り返さずこれを使うと、全員が同時に動き始めます。各要素はteam_assign_taskと同じ検証を受けて個別に成否が決まるので、results[].okを確認し、原因を解消してから失敗した要素だけを出し直します。長い指示が多くて1回に収まらないときは、件数を減らして数回に分けます。${MANAGER_WRITE_REQUIREMENTS}`,
@@ -339,7 +340,67 @@ export const WORKER_PROVIDER_TOOLS: readonly ProviderTool[] = Object.freeze(
   ).map(providerToolDefinition),
 );
 
-function teamToolError(error: unknown): {
+const TEAM_MODEL_CURSOR_PATTERN = /^team:([0-9a-f]{8}):([0-9]+):([0-9a-f]{16}):(cursor:[0-9]+)$/;
+
+/** What a team_list_models listing was answered from: the catalog instance and revision, and a
+ * digest of the conditions that decide which rows the offset counts (#939). */
+export type TeamModelListingKey = Readonly<{
+  catalogId: string;
+  revision: number;
+  conditionDigest: string;
+}>;
+
+/** Digest of everything that filters the rows a cursor offset counts: the search conditions
+ * (normalized as ModelCatalogService applies them) and the Team model restriction. The page size
+ * is left out, since a continuation may ask for a different limit. */
+export function teamModelListingDigest(
+  conditions: Readonly<{
+    text: string;
+    connectionIds: readonly string[];
+    providerIds: readonly string[];
+    capabilities: readonly string[];
+  }>,
+  allowedModelKeys: ReadonlySet<string> | undefined,
+): string {
+  const normalized = (values: Iterable<string>) => [...new Set(values)].sort();
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        conditions.text.trim().toLocaleLowerCase(),
+        normalized(conditions.connectionIds),
+        normalized(conditions.providerIds),
+        normalized(conditions.capabilities),
+        allowedModelKeys === undefined ? null : normalized(allowedModelKeys),
+      ]),
+    )
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/** team_list_models cursor: the catalog cursor plus the listing it continues. */
+export function encodeTeamModelCursor(
+  listing: TeamModelListingKey,
+  cursor: string | null,
+): string | null {
+  return cursor === null
+    ? null
+    : `team:${listing.catalogId}:${listing.revision}:${listing.conditionDigest}:${cursor}`;
+}
+
+export function decodeTeamModelCursor(
+  cursor: string,
+): (TeamModelListingKey & { cursor: string }) | null {
+  const match = TEAM_MODEL_CURSOR_PATTERN.exec(cursor);
+  if (match === null) return null;
+  return {
+    catalogId: match[1]!,
+    revision: Number(match[2]),
+    conditionDigest: match[3]!,
+    cursor: match[4]!,
+  };
+}
+
+export function teamToolError(error: unknown): {
   ok: false;
   error: string;
   message: string;
@@ -474,11 +535,8 @@ const listModelsArgsSchema = z
       .array(z.enum(['toolCalling', 'structuredOutput', 'multimodalInput', 'reasoning']))
       .max(4)
       .optional(),
-    cursor: z
-      .string()
-      .regex(/^cursor:[0-9]+$/)
-      .nullable()
-      .optional(),
+    // Opaque Team cursor; a malformed one is answered with the restart error, not a parse failure.
+    cursor: z.string().max(128).nullable().optional(),
     limit: z.number().int().min(1).max(100).optional(),
   })
   .strict();
@@ -711,6 +769,8 @@ export async function executeTeamTool(
         cursor: request.cursor ?? null,
         limit: request.limit ?? 50,
       });
+      if (typeof result === 'object' && result !== null && 'ok' in result && result.ok === false)
+        return result;
       options.modelCatalogAudit?.markQueried();
       return result;
     }

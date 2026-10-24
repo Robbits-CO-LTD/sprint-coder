@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import {
   modelCatalogQueryInputSchema,
   providerModelSchema,
@@ -13,6 +14,9 @@ type IndexedModel = Readonly<{
 }>;
 
 export class ModelCatalogService {
+  /** Distinguishes this catalog from one built by an earlier process, whose revisions restart at
+   * 0 and can coincide with this one's. */
+  readonly instanceId = randomBytes(4).toString('hex');
   private revisionValue = 0;
   private fingerprint = '';
   private indexed: readonly IndexedModel[] = [];

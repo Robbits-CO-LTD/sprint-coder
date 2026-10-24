@@ -1,10 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   IPC_CHANNELS,
   type ModelCatalogQueryInput,
   type ModelCatalogQueryResult,
   type ProviderConnection,
   type ProviderModel,
+  type TeamModelRestriction,
 } from '@sprint-coder/contracts';
 import { IpcRouter } from './ipc';
 import { ModelCatalogService } from './model-catalog-service';
@@ -12,6 +13,10 @@ import { MainProviderProfileRegistry } from './provider-profile';
 import { LOCAL_PROVIDER_PROFILES } from './bundled-provider-profiles';
 import { localProviderTestConnection } from './provider-connection-test-fixture';
 import { queryAllModelCatalogPages } from '../renderer/lib/model-catalog-pages';
+import { executeTeamTool, TEAM_LIST_MODELS_TOOL, type ExecuteTeamToolOptions } from './team-tools';
+import { ToolRegistry, toolValueMatchesSchema } from '@sprint-coder/domain';
+import { ToolBroker } from './tool-broker';
+import { TeamCoordinator } from './team-coordinator';
 
 vi.mock('electron', () => ({
   app: { isPackaged: false },
@@ -65,8 +70,17 @@ function models(connection: ProviderConnection, count: number): ProviderModel[] 
   }));
 }
 
-function makeRouter() {
-  const router = Object.create(IpcRouter.prototype) as { register(): void };
+function makeRouter({
+  stableConnection = stable,
+  flakyConnection = flaky,
+  stableCount = 250,
+  flakyCount = 3,
+  flakyInitiallyAvailable = true,
+} = {}) {
+  const router = Object.create(IpcRouter.prototype) as {
+    register(): void;
+    listTeamModelCandidates: NonNullable<ExecuteTeamToolOptions['listModelCandidates']>;
+  };
   const handlers = new Map<string, Handler>();
   const register = (channel: string, _input: unknown, _output: unknown, handler: Handler) =>
     handlers.set(channel, handler);
@@ -75,12 +89,17 @@ function makeRouter() {
   const probe = vi.fn(async () => ({ available: false, readiness: 'missing', models: [] }));
   let flakyCalls = 0;
   const listModels = vi.fn(async (connection: ProviderConnection) => {
-    if (connection.id === stable.id) return models(stable, 250);
+    if (connection.id === stableConnection.id) return models(stableConnection, stableCount);
     flakyCalls += 1;
-    if (flakyCalls % 2 === 0) throw new Error('flaky provider is down');
-    return models(flaky, 3);
+    if ((flakyCalls % 2 === 1) !== flakyInitiallyAvailable)
+      throw new Error('flaky provider is down');
+    return models(flakyConnection, flakyCount);
   });
   const catalog = new ModelCatalogService();
+  const getTeamModelRestriction = vi.fn((): TeamModelRestriction => ({
+    mode: 'all',
+    allowedModels: [],
+  }));
   Object.assign(router, {
     handle: register,
     handleMutation: register,
@@ -90,10 +109,11 @@ function makeRouter() {
     grokRuntime: { probe },
     reconcileBuiltinCapability: vi.fn(),
     teamRuntimeAvailability: { isAvailable: () => true },
-    providerConnections: { list: () => [stable, flaky] },
+    providerConnections: { list: () => [stableConnection, flakyConnection] },
     providerProfiles: profiles,
     providerVerification: {
-      requireVerifiedForExecution: async (id: string) => (id === stable.id ? stable : flaky),
+      requireVerifiedForExecution: async (id: string) =>
+        id === stableConnection.id ? stableConnection : flakyConnection,
     },
     providerRegistry: { resolve: () => ({ listModels }) },
     ensureProviderEndpointConsent: async (connection: ProviderConnection) => connection,
@@ -102,12 +122,43 @@ function makeRouter() {
       getTaskModelSelection: () => null,
       getRuntime: () => 'codex',
       getModel: () => 'auto',
+      getTeamModelRestriction,
     },
   });
   router.register();
   const query = async (input: ModelCatalogQueryInput) =>
     (await handlers.get(IPC_CHANNELS.modelsCatalogQuery)!(input)) as ModelCatalogQueryResult;
-  return { query, probe, listModels };
+  // Listing does not use the coordinator; the real tool still validates and routes the call.
+  const coordinator = Object.create(TeamCoordinator.prototype) as TeamCoordinator;
+  const markQueried = vi.fn();
+  const teamQuery = async (args: unknown) =>
+    (await executeTeamTool(coordinator, 'task-1', 'team_list_models', args, {
+      listModelCandidates: (input) => router.listTeamModelCandidates(input),
+      modelCatalogAudit: { wasQueried: () => markQueried.mock.calls.length > 0, markQueried },
+    })) as ModelCatalogQueryResult;
+  const registry = new ToolRegistry();
+  registry.register(TEAM_LIST_MODELS_TOOL);
+  const broker = new ToolBroker(
+    registry,
+    () => 0,
+    () => ({ decision: 'allow', reason: 'fixture' }),
+  );
+  broker.registerImplementation({
+    toolId: TEAM_LIST_MODELS_TOOL.toolId,
+    implementationKind: 'built-in',
+    execute: teamQuery,
+  });
+  const context = { taskId: 'task-1', turnId: 'turn-1', workspaceId: null, policyEpoch: 0 };
+  broker.startTurn(context, 'google');
+  let calls = 0;
+  const brokerQuery = async (input: unknown) =>
+    (await broker.dispatch({
+      ...context,
+      callId: `catalog-${++calls}`,
+      providerName: 'team_list_models',
+      input,
+    })) as ModelCatalogQueryResult;
+  return { query, teamQuery, brokerQuery, probe, listModels, getTeamModelRestriction, markQueried };
 }
 
 const listing = {
@@ -163,5 +214,207 @@ describe('#906: models catalog query rebuilds the catalog only for a first page'
     expect(
       listModels.mock.calls.filter(([connection]) => connection.id === stable.id),
     ).toHaveLength(2);
+  });
+});
+
+describe('#939: Team model listing keeps continuation pages in the existing catalog', () => {
+  it('accepts the advertised restart and opaque cursor at the ToolBroker input boundary', async () => {
+    const schema = TEAM_LIST_MODELS_TOOL.inputSchema;
+    expect(toolValueMatchesSchema(schema, {})).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: null })).toBe(false);
+    expect(
+      toolValueMatchesSchema(schema, { cursor: 'team:12345678:1:0123456789abcdef:cursor:100' }),
+    ).toBe(true);
+    expect(toolValueMatchesSchema(schema, { cursor: 100 })).toBe(false);
+    // String bounds are Provider metadata in ToolBroker; the tool's Zod schema enforces them.
+    await expect(makeRouter().teamQuery({ cursor: 'x'.repeat(129) })).rejects.toThrow();
+  });
+  const teamFlaky: ProviderConnection = { ...flaky, id: 'localai:flaky', providerId: 'localai' };
+  const teamStable: ProviderConnection = { ...stable, id: 'ollama:stable', providerId: 'ollama' };
+  const options = {
+    stableConnection: teamStable,
+    flakyConnection: teamFlaky,
+    stableCount: 150,
+    flakyCount: 100,
+  };
+  const identity = ({ connectionId, providerId, modelId }: ProviderModel) => ({
+    connectionId,
+    providerId,
+    modelId,
+  });
+
+  beforeEach(() => vi.stubEnv('SPRINT_CODER_TEAM_CODEX_ONLY', '0'));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([true, false])(
+    'returns every initial candidate exactly once when the flaky Provider initially answers=%s',
+    async (flakyInitiallyAvailable) => {
+      const { teamQuery, probe, listModels } = makeRouter({ ...options, flakyInitiallyAvailable });
+      const first = await teamQuery({ limit: 100 });
+      expect(Object.keys(first).sort()).toEqual(['items', 'nextCursor', 'revision', 'total']);
+      const items = [...first.items];
+      let cursor = first.nextCursor;
+      for (let pages = 1; cursor !== null && pages < 5; pages += 1) {
+        const page = await teamQuery({ cursor, limit: 100 });
+        items.push(...page.items);
+        cursor = page.nextCursor;
+      }
+
+      expect(cursor).toBeNull();
+      expect(items.map(identity)).toEqual(
+        [
+          ...(flakyInitiallyAvailable ? models(teamFlaky, 100) : []),
+          ...models(teamStable, 150),
+        ].map(identity),
+      );
+      expect(probe).toHaveBeenCalledTimes(3);
+      expect(listModels).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('does not probe on a continuation, but refreshes when a new listing starts', async () => {
+    const { teamQuery, probe, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+    const second = await teamQuery({ cursor: first.nextCursor, limit: 100 });
+
+    expect(second.revision).toBe(first.revision);
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    const refreshed = await teamQuery({ cursor: null, limit: 100 });
+    expect(refreshed.total).toBe(150);
+    expect(refreshed.revision).toBeGreaterThan(first.revision);
+    expect(probe).toHaveBeenCalledTimes(6);
+    expect(listModels).toHaveBeenCalledTimes(4);
+  });
+
+  const expectRefused = (page: unknown) =>
+    expect(page).toMatchObject({ ok: false, message: expect.stringContaining('without cursor') });
+
+  it('returns a Team cursor that names the catalog and revision of the first page', async () => {
+    const { teamQuery } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+
+    expect(first.nextCursor).toMatch(
+      new RegExp(`^team:[0-9a-f]{8}:${first.revision}:[0-9a-f]{16}:cursor:100$`),
+    );
+  });
+
+  it('refuses a malformed or bare catalog cursor without probing Providers', async () => {
+    const { teamQuery, probe, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+    const valid = String(first.nextCursor);
+
+    for (const cursor of [
+      'cursor:100',
+      'garbage',
+      valid.replace(/:cursor:100$/, ':cursor:x'),
+      valid.replace(/^team:[0-9a-f]{8}:/, 'team:zz:'),
+      `${valid}0:extra`,
+    ])
+      expectRefused(await teamQuery({ cursor, limit: 100 }));
+    expect(probe).toHaveBeenCalledTimes(3);
+    expect(listModels).toHaveBeenCalledTimes(2);
+  });
+
+  it('refuses a cursor from before a restart, even when the new catalog reaches the same revision', async () => {
+    const before = makeRouter(options);
+    const first = await before.teamQuery({ limit: 100 });
+
+    // Restarted process: no catalog yet (revision 0).
+    const restarted = makeRouter(options);
+    expectRefused(await restarted.teamQuery({ cursor: first.nextCursor, limit: 100 }));
+    expect(restarted.probe).not.toHaveBeenCalled();
+    expect(restarted.listModels).not.toHaveBeenCalled();
+
+    // After its own first page the new catalog is at the old cursor's revision.
+    const own = await restarted.teamQuery({ limit: 100 });
+    expect(own.revision).toBe(first.revision);
+    expectRefused(await restarted.teamQuery({ cursor: first.nextCursor, limit: 100 }));
+  });
+
+  it('keeps the Leader and a Manager of the same Task on their own listings', async () => {
+    const { teamQuery } = makeRouter(options);
+    const leader = await teamQuery({ limit: 100 });
+    // A Manager in the same Task starts its own listing; the refresh drops the flaky rows.
+    const manager = await teamQuery({ limit: 100 });
+    expect(manager.revision).not.toBe(leader.revision);
+
+    expectRefused(await teamQuery({ cursor: leader.nextCursor, limit: 100 }));
+    const managerNext = await teamQuery({ cursor: manager.nextCursor, limit: 100 });
+    expect(managerNext.revision).toBe(manager.revision);
+    expect(managerNext.items.map(identity)).toEqual(
+      models(teamStable, 150).slice(100).map(identity),
+    );
+  });
+
+  it('refuses a continuation after the Team model restriction changed, then lists every allowed model', async () => {
+    const { teamQuery, getTeamModelRestriction, listModels } = makeRouter(options);
+    const first = await teamQuery({ limit: 1 });
+    // Saving a restriction moves neither the catalog revision nor its identity.
+    getTeamModelRestriction.mockReturnValue({
+      mode: 'selected',
+      allowedModels: models(teamStable, 3).map(identity),
+    });
+
+    expectRefused(await teamQuery({ cursor: first.nextCursor, limit: 100 }));
+    expect(listModels).toHaveBeenCalledTimes(2);
+
+    const restarted = await teamQuery({ cursor: null, limit: 1 });
+    const items = [...restarted.items];
+    let cursor = restarted.nextCursor;
+    for (let pages = 1; cursor !== null && pages < 5; pages += 1) {
+      const page = await teamQuery({ cursor, limit: 1 });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    }
+    expect(cursor).toBeNull();
+    expect(items.map(identity)).toEqual(models(teamStable, 3).map(identity));
+  });
+
+  it('refuses a continuation whose search conditions differ from its first page', async () => {
+    const { teamQuery } = makeRouter(options);
+    const first = await teamQuery({ connectionIds: [teamStable.id], limit: 100 });
+    expect(first.total).toBe(150);
+
+    expectRefused(await teamQuery({ cursor: first.nextCursor, limit: 100 }));
+    expectRefused(
+      await teamQuery({
+        connectionIds: [teamStable.id],
+        text: 'model 1',
+        cursor: first.nextCursor,
+        limit: 100,
+      }),
+    );
+    // The page size is not part of the listing.
+    const next = await teamQuery({
+      connectionIds: [teamStable.id],
+      cursor: first.nextCursor,
+      limit: 25,
+    });
+    expect(next.items.map(identity)).toEqual(models(teamStable, 125).slice(100).map(identity));
+  });
+  it('restarts through the real ToolBroker after a stale page without recording a failed query', async () => {
+    const { brokerQuery: teamQuery, query, markQueried } = makeRouter(options);
+    const first = await teamQuery({ limit: 100 });
+    expect(first.total).toBe(250);
+    expect(markQueried).toHaveBeenCalledTimes(1);
+    const picker = await query({ ...listing, connectionIds: [], cursor: null, limit: 100 });
+    expect(picker.revision).not.toBe(first.revision);
+
+    // A later Turn's audit starts empty even though the Task has an older listing.
+    markQueried.mockClear();
+    const stale = await teamQuery({ cursor: first.nextCursor, limit: 100 });
+    expect(stale).toMatchObject({ ok: false, message: expect.stringContaining('without cursor') });
+    expect(markQueried).not.toHaveBeenCalled();
+
+    const restarted = await teamQuery({ limit: 100 });
+    const second = await teamQuery({ cursor: restarted.nextCursor, limit: 100 });
+    const third = await teamQuery({ cursor: second.nextCursor, limit: 100 });
+    expect(third.nextCursor).toBeNull();
+    expect([...restarted.items, ...second.items, ...third.items].map(identity)).toEqual(
+      [...models(teamFlaky, 100), ...models(teamStable, 150)].map(identity),
+    );
+    expect(markQueried).toHaveBeenCalledTimes(3);
   });
 });
