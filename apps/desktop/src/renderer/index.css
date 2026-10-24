@@ -5100,7 +5100,7 @@ button.composer-permission-chip[aria-expanded='true'] {
   top: 0;
   z-index: 2;
   transform-origin: 0 0;
-  will-change: transform;
+  /* Promoting the whole world creates a huge raster layer that can omit cards in large Teams. */
 }
 .team-world-nodes {
   position: relative;
@@ -5272,6 +5272,19 @@ button.composer-permission-chip[aria-expanded='true'] {
   padding: 2px 9px;
   border-radius: var(--r-xs);
   flex: none;
+}
+.team-status-chip:has(.team-work-counts) {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.team-work-counts {
+  display: block;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+.team-work-count {
+  display: inline-block;
+  white-space: nowrap;
 }
 .team-stop-all-btn {
   margin-left: auto;

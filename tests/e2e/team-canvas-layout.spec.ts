@@ -427,7 +427,7 @@ test.describe('Phase 6 Slice 6.1: Canvas base', () => {
 
 // Phase 6 Slice 6.3: CameraDirector ownership + collision-aware placement.
 test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
-  test('camera ownership starts system, a manual pan claims user, and Fit view returns it to system', async () => {
+  test('camera ownership starts system, and manual pan and Fit view keep user ownership', async () => {
     const userDataDir = createUserDataDir('camera-ownership');
     let app: ElectronApplication | null = null;
     try {
@@ -455,9 +455,44 @@ test.describe('Phase 6 Slice 6.3: Camera director and placement', () => {
       await page.mouse.up();
       await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'user');
 
-      // An explicit user view command (Fit view) always executes and hands ownership back.
-      await page.getByTestId('team-canvas-fit').click();
-      await expect(page.locator('.team-canvas')).toHaveAttribute('data-camera-owner', 'system');
+      // Fit/F execute while keeping the overview protected from later hire-follow. Observe the
+      // whole follow/refit interval, since checking only the final position can miss a brief jump.
+      for (const command of ['button', 'F'] as const) {
+        const canvas = page.locator('.team-canvas');
+        if (command === 'button') await page.getByTestId('team-canvas-fit').click();
+        else {
+          await canvas.focus();
+          await canvas.press('F');
+        }
+        await expect(canvas).toHaveAttribute('data-camera-owner', 'user');
+        await waitForCanvasToSettle(page);
+        const fitted = await page
+          .locator('.team-world')
+          .evaluate((el: HTMLElement) => el.style.transform);
+        await hireWorker(page, `Fit ${command}`, '明示した全体表示を維持する');
+        const observed = await page.evaluate(
+          () =>
+            new Promise<{ frames: number; transforms: string[] }>((resolve) => {
+              const start = performance.now();
+              const transforms = new Set<string>();
+              let frames = 0;
+              const sample = () => {
+                frames++;
+                transforms.add(
+                  (document.querySelector('.team-world') as HTMLElement).style.transform,
+                );
+                if (performance.now() - start >= 1600)
+                  resolve({ frames, transforms: [...transforms] });
+                else requestAnimationFrame(sample);
+              };
+              requestAnimationFrame(sample);
+            }),
+        );
+        expect(observed.frames).toBeGreaterThan(1);
+        expect(observed.transforms).toEqual([fitted]);
+        await expect(canvas).toHaveAttribute('data-camera-owner', 'user');
+      }
+      await expect(page.getByTestId('team-worker')).toHaveCount(2);
     } finally {
       await closeApp(app);
       removeUserDataDir(userDataDir);
@@ -571,7 +606,7 @@ test.describe('Canvas keyboard navigation', () => {
       const canvas = page.locator('.team-canvas');
       const leaderNode = page.locator('.surface--node');
 
-      // --- Manual pan claims 'user' ownership, and keyboard 'f' hands it back to 'system'. ---
+      // --- Manual pan and keyboard 'f' both keep 'user' ownership. ---
       // Done now, before any Worker exists and before Enter camera-focuses a single node. Pan
       // from the bottom-left corner rather than the viewport center: with 0 Workers there is no
       // hire ghost widening the initial fit anymore (FR-TEAM-06/13), so the settled view focuses
@@ -592,7 +627,7 @@ test.describe('Canvas keyboard navigation', () => {
       await canvas.focus();
       await expect(canvas).toBeFocused();
       await canvas.press('f');
-      await expect(canvas).toHaveAttribute('data-camera-owner', 'system');
+      await expect(canvas).toHaveAttribute('data-camera-owner', 'user');
 
       // --- Hire a Worker, then exercise Arrow/Tab selection + Enter/Escape. ---
       await hireWorker(page, '実装', '機能を実装する');

@@ -134,14 +134,14 @@ export function useCamera(onSettle?: () => void) {
   // ANY manual input (pan start, wheel zoom, node drag start) claims 'user' ownership and cancels
   // whatever system animation is in flight — the viewport freezes exactly where it currently is
   // rather than snapping anywhere. Callers of the camera hook (TeamCanvas) call this from their
-  // own node-drag pointerdown handler too; the pan/wheel handlers below call it directly.
+  // own node-drag pointerdown and explicit Fit handlers too; pan/wheel call it directly.
   const claimUserOwnership = useCallback(() => {
     cancelCamAnim();
     ownerRef.current = nextCameraOwner(ownerRef.current, 'manual-input');
     writeOwnerAttribute(ownerRef.current);
   }, [cancelCamAnim, writeOwnerAttribute]);
 
-  // Explicit user view commands (Fit view, Leaderへ, Enter-focus, keyboard f/l) always execute
+  // Explicit focus commands (Leaderへ, Enter-focus, keyboard l) always execute
   // and hand ownership back to 'system' — call this immediately before animating.
   const claimSystemOwnership = useCallback(() => {
     ownerRef.current = nextCameraOwner(ownerRef.current, 'explicit-command');

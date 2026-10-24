@@ -15,7 +15,7 @@ export const EXECUTION_STATE_LABELS: Readonly<Record<TeamExecutionState, string>
   queued: '順番待ち',
   waiting_verification: '接続確認待ち',
   waiting_rate_limit: 'レート制限待ち',
-  running: '実行中',
+  running: '作業中',
   waiting_resume: '再開待ち',
   completed: '完了',
   failed: '失敗',
@@ -141,6 +141,71 @@ export function isTerminalExecutionState(state: string): boolean {
   return TERMINAL_STATES.has(state);
 }
 
+export const WORK_PHASE_LABELS = {
+  working: '作業中',
+  waiting_integration: '統合待ち',
+  integrating: '統合中',
+  integration_unknown: '統合処理中',
+} as const;
+export type WorkerWorkPhase = keyof typeof WORK_PHASE_LABELS;
+
+/** Presentation only: a running execution can have finished its AI work and be awaiting Git. */
+export function executionWorkPhase(execution: TeamExecutionSummary | null): WorkerWorkPhase | null {
+  if (execution === null || isTerminalExecutionState(execution.state)) return null;
+  const isolation = execution.isolation ?? null;
+  // Resume keeps waiting_resume until completion; startup rewrites interrupted integrating
+  // isolations to waiting_resume, so this phase still proves a live Git integration.
+  if (
+    isolation?.phase === 'integrating' &&
+    (execution.state === 'running' || execution.state === 'waiting_resume')
+  )
+    return 'integrating';
+  if (execution.state !== 'running') return null;
+  if (isolation?.phase === 'waiting_integration') return 'waiting_integration';
+  if (isolation === null && execution.worktree?.state === 'ready') return 'integration_unknown';
+  if (
+    isolation?.phase === 'completed' ||
+    isolation?.phase === 'quarantined' ||
+    isolation?.phase === 'waiting_resume'
+  )
+    return null;
+  return 'working';
+}
+
+export function workerWorkPhase(
+  worker: Readonly<{ state: string }>,
+  execution: TeamExecutionSummary | null,
+): WorkerWorkPhase | null {
+  if (worker.state === 'stopped' || worker.state === 'done' || worker.state === 'failed')
+    return null;
+  return execution === null || isTerminalExecutionState(execution.state)
+    ? worker.state === 'busy'
+      ? 'working'
+      : null
+    : executionWorkPhase(execution);
+}
+
+export function workerStatusLabel(
+  worker: Readonly<{ state: string }>,
+  execution: TeamExecutionSummary | null,
+): string {
+  const phase = workerWorkPhase(worker, execution);
+  if (
+    phase === null &&
+    execution !== null &&
+    isWaitingExecutionState(execution.state) &&
+    !['stopped', 'done', 'failed'].includes(worker.state)
+  )
+    return describeExecution(execution).stateLabel;
+  return phase === null
+    ? worker.state === 'stopped'
+      ? '停止済み'
+      : worker.state === 'busy'
+        ? '処理中'
+        : worker.state
+    : WORK_PHASE_LABELS[phase];
+}
+
 export function executionStateLabel(state: string): string {
   return EXECUTION_STATE_LABELS[state as TeamExecutionState] ?? UNKNOWN_STATE_LABEL;
 }
@@ -184,7 +249,11 @@ export function latestExecutionForWorker(
   if (executions == null) return null;
   let latest: TeamExecutionSummary | null = null;
   const priority = (execution: TeamExecutionSummary) =>
-    execution.state === 'running' ? 2 : isTerminalExecutionState(execution.state) ? 0 : 1;
+    execution.state === 'running' || executionWorkPhase(execution) === 'integrating'
+      ? 2
+      : isTerminalExecutionState(execution.state)
+        ? 0
+        : 1;
   for (const execution of executions) {
     if (execution.assigneeAgentId !== workerId) continue;
     if (
@@ -232,10 +301,16 @@ export type TeamExecutionDisplay = {
 };
 
 export function describeExecution(execution: TeamExecutionSummary): TeamExecutionDisplay {
-  const isWaiting = isWaitingExecutionState(execution.state);
+  const phase = executionWorkPhase(execution);
+  const isWaiting = phase === null && isWaitingExecutionState(execution.state);
   const workerWaiting =
     isWaiting && execution.state !== 'waiting_resume' && execution.waitingForWorker === true;
-  const stateLabel = workerWaiting ? '担当Workerの終了待ち' : executionStateLabel(execution.state);
+  const stateLabel =
+    phase !== null
+      ? WORK_PHASE_LABELS[phase]
+      : workerWaiting
+        ? '担当Workerの終了待ち'
+        : executionStateLabel(execution.state);
   const connection = connectionLabel(execution.connectionId);
   const instruction = instructionLabel(execution.instructionPreview);
 

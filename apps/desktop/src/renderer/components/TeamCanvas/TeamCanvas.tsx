@@ -29,7 +29,7 @@ import {
   TeamRetainedWorktreesTrigger,
 } from '../TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
-import { currentTeamWorkerCount } from '../../lib/team-progress';
+import { currentTeamWorkerCount, teamWorkPhaseSummary } from '../../lib/team-progress';
 import { retainedWorktreeCount } from '../../lib/team-retained-worktrees';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
@@ -270,6 +270,7 @@ export function TeamCanvas({
     [resumeTeamExecutionIntegration, taskId],
   );
   const workerCount = detail ? currentTeamWorkerCount(detail) : 0;
+  const phaseSummary = detail ? teamWorkPhaseSummary(detail) : null;
   const leaderAgentId = detail?.team.leaderAgentId;
   // Default (pre-drag, pre-restore) positions for every Worker, from the Team's recorded agent
   // tree — `workers` is already in stable creation order, which is the sibling order the layout
@@ -932,7 +933,7 @@ export function TeamCanvas({
       }
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
-        claimSystemOwnership(); // explicit command: executes, hands ownership back to system
+        claimUserOwnership(); // preserve this overview while new Workers arrive
         void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
         return;
       }
@@ -954,6 +955,7 @@ export function TeamCanvas({
       collectRects,
       isReduced,
       leaderAgentId,
+      claimUserOwnership,
       claimSystemOwnership,
     ],
   );
@@ -966,7 +968,7 @@ export function TeamCanvas({
   // Worker headcount limit, so it must not stand in as one either.
   const selectionText = selectedNodeId ? `選択: ${describeNode(selectedNodeId)}` : '';
   const liveText = detail
-    ? `Team status: ${detail.team.state}, workers ${workerCount}${
+    ? `Team status: ${detail.team.state}, workers ${workerCount}${phaseSummary === null ? '' : `, ${phaseSummary}`}${
         selectionText ? `. ${selectionText}` : ''
       }`
     : '';
@@ -1051,6 +1053,7 @@ export function TeamCanvas({
           </div>
 
           <TeamHeaderOverlay
+            phaseSummary={phaseSummary}
             task={task}
             detail={detail}
             workerCount={workerCount}
@@ -1065,7 +1068,7 @@ export function TeamCanvas({
 
           <CanvasControlsOverlay
             onFit={() => {
-              claimSystemOwnership(); // explicit command
+              claimUserOwnership(); // preserve this overview while new Workers arrive
               void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
             }}
             onFocusLeader={() => {
@@ -1128,6 +1131,7 @@ export function TeamCanvas({
 }
 
 function TeamHeaderOverlay({
+  phaseSummary,
   task,
   detail,
   workerCount,
@@ -1139,6 +1143,7 @@ function TeamHeaderOverlay({
   retainedOpen,
   onOpenRetained,
 }: {
+  phaseSummary: string | null;
   task: TaskSummary;
   detail: TeamDetail;
   workerCount: number;
@@ -1157,7 +1162,18 @@ function TeamHeaderOverlay({
       </button>
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
-      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}人`}</span>
+      <span className="team-status-chip">
+        {`${detail.team.state} · Worker ${workerCount}人`}
+        {phaseSummary !== null && (
+          <span className="team-work-counts" data-testid="team-work-counts">
+            {phaseSummary.split(' · ').map((part, index) => (
+              <span className="team-work-count" key={index}>
+                {index === 0 ? part : ` · ${part}`}
+              </span>
+            ))}
+          </span>
+        )}
+      </span>
       <button
         type="button"
         className="team-view-toggle-btn"

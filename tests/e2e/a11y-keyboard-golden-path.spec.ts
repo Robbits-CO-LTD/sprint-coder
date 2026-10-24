@@ -119,7 +119,9 @@ test.describe('Keyboard-only golden path: Task -> message -> Team -> Canvas nav 
     const workerCards = page.getByTestId('team-worker');
     for (let i = 0; i < 3; i += 1) {
       // eslint-disable-next-line no-await-in-loop
-      await expect(workerCards.nth(i).locator('.team-status')).toHaveText('done', { timeout: 20_000 });
+      await expect(workerCards.nth(i).locator('.team-status')).toHaveText('done', {
+        timeout: 20_000,
+      });
     }
     await assertFocusIsSensible(page, 'after the Leader hires/dispatches/reports (チームテスト)');
 
@@ -145,7 +147,7 @@ test.describe('Keyboard-only golden path: Task -> message -> Team -> Canvas nav 
     info = await activeElementInfo(page);
     expect(info.testId).toBe('team-list');
 
-    // --- 7. 'f' fits the view (camera ownership hands back to 'system' — no assertion needed
+    // --- 7. 'f' fits the view (camera ownership stays with the user — no assertion needed
     // beyond "no crash, focus still sensible": team-canvas-layout.spec.ts already covers the
     // ownership transition itself). ---
     await page.keyboard.press('f');
