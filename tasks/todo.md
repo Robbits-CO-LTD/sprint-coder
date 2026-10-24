@@ -829,3 +829,30 @@ JP-19着手前: 第一仮説PASS（旧FAILを現行不具合と断定しない�
 証跡: ../tasks/grok-remaining-20261007（各Issue live snapshot、添付manifest、ログ）。成果は本worktree、旧署名copy/profile/失敗隔離は保持。
 
 #752 RCA: Root Cause Confirmed。閉じた実OS stderr pipeで、現行SecureLogger→非同期error EPIPE→uncaughtExceptionの再ログが8回連鎖するbounded対照を保存。CLI stdinとは独立で、合成diagnosticのみ。A=YES/B=YES/C=YES/D=YES。最小修正はconsole pipeごとにEPIPE/ERR_STREAM_DESTROYEDを一度だけ記録して停止、他console/persistent sinkとredactionを維持、想定外errorは伝播。修正後の同一再現はuncaught 0、logger/persistent 13 tests PASS。旧697件の全アプリ事象の完全原因とnative終了/Turn回収は別の実機条件として未達。stop/isolation/Team既存preflightは26 PASS/1 platform SKIP、#749の旧FAILを解消したとは扱わない。
+
+
+## サイト トップ刷新「最大100体のAIを 同時に動かす」（2026-10-25、branch site/hundred-ai）
+
+仕様: `tasks/site-hundred-spec.md`。この回の担当は §0〜4・§6〜7 のトップ（§5 ai-team の本文は別の回）。
+
+- [x] §0 の未確認事項を確認（Manager は Worker として上限に数える、Leader は数えない → caption は仕様どおり）。根拠は website/README.md
+- [x] tools/make-swarm.py（インライン3か所＋assets/swarm-v1.svg・swarm-v1-real.svg）
+- [x] index.html を 00〜09 の新構成に組み替え、head / meta / JSON-LD / motion-off の先読み
+- [x] styles.css（群れ・tag-fig・real-tag・章ごとの部品・縦並び・960/640px）
+- [x] film.js（data-count・data-count-intro・is-live・is-full・is-real、fit-off では range を 1）
+- [x] make-font.py に tnum、フォント作り直し（漏れ0。Noto Sans JP に tnum はないが数字は等幅）
+- [x] 全ページ ?v=20261025
+- [x] README（章の構成・新しい仕組み・正直さのルール・確認した事実・性能の逃げ道）
+
+### レビュー
+- 静的確認: HTML の開閉・重複 id・style 属性なし、`node --check website/film.js` 成功、正直さの grep 0件、フォント漏れ0（CSS コメントの「≒」のみ）
+- 簡易表示確認（Claude Browser）: 1440×900・1366×768・1280×720・1920×1080・1024×768・768×1024・375×812 で章が舞台に収まる（fit-off にならない）。00・01・02・03・始動の見た目、再生バーの実演の札、console エラーなし
+- 未実施: README の Computer Use 56画面サイズ検証、スマホ実機の性能計測、PR / ReviewBOT
+
+### §5 ai-team（2026-10-25、続きの回）
+- [x] §0 を再確認（admitAssignment は worker のみ、Manager は Worker として雇う）→ 詳しい話に「Managerも数え、Leaderは含みません」
+- [x] lead・カード02・#scale（swarm-v1-real.svg＋tag-fig＋凡例＋stats 4つ＋注記）・reel の題と lead・6体・詳しい話「同時に動く数の上限」・映像と数字の追記
+- [x] og / twitter / meta / JSON-LD の description、dateModified 2026-10-25
+- [x] 他ページの数え方: about・getting-started の「一人のAI」→「1体のAI」、about の「大人数のTeam」→「大きなTeam」。見出しの「。」は0件
+- [x] sitemap の lastmod（/・about・ai-team・getting-started）を 2026-10-25、フォント作り直し（漏れ0）
+- 確認: HTML の開閉・重複 id・style 属性なし、正直さの grep 0件、?v は全ページ 20261025

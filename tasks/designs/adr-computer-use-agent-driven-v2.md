@@ -7,6 +7,8 @@
 
 ## 改訂履歴
 
+- 2026-10-24 PR-5b の次段階として、Windows addon の任意の `listTargets` と Main 内の独立分類を接続する。closed schema・ruleset・identity digest・factsとの対応を確認し、nativeとMainの厳しいmodeを採用する。呼出前後に署名済みbinding、v2 mode、停止状態を確認する。結果はMain内部専用で、Controllerの公開列挙・grant・token・startにはまだ接続しない。Windows v2 manifestの拒否と有効化前の#940対応・実機受入は維持する。
+
 - 2026-10-24 S5-c-3 PR-5b の準備として、Windows の選択可能な native `list_targets` 行へ、同じ窓の判定に使った `facts`（platform と生成表の28項目）を追加する。未測定は `null` のまま、拒否行は引き続き `kind` だけとする。private な contracts schema は未知キー・型・enum、1024 UTF-8 bytesを超えるfact文字列、不完全なpackage identity、mode/identity束縛の不一致を拒否する。escaped行全体の64 KiB枠は維持する。C++ serializerとTS schemaの往復、window別class、生成表との一致を検証する。この段階ではMainの列挙・二重判定・token・開始経路へ未接続で、V1・有効化・attestationは変えない。
 
 - 2026-10-18 S5-c-3 PR-5a（native の list_targets と v2 の再判定）を反映した。v2 ビルドの native は `list_targets`（v1 ビルドは `unsupported_operation`。最大 64 行、時間の予算 6 秒）で、デスクトップの最上位のアプリケーションウィンドウを、プロセスごとに実行中イメージから測り（facts）、共有コアで判定する。選択可能な行だけが Main 用の identity（path と pid を含む。Main の外には出さない）を持ち、拒否した行は種類（`denied` / `unresolvable`）しか持たない。v2 の根拠のセッションは、start と resume で同じ判定をやり直し（コアの mode、package の digest を含む identity、保持した実行中イメージ、ruleset の版、新しいセッションでは最新の一覧の世代）、入力のたびにもう一度判定する。v2 の経路では mode をコアだけから取り、policy language を mode の根拠にしない（Main 側は PR-5b）。§3.2.5 の「Document の例外が他の判定を隠す」を、origin を確定させた facts でコアを評価し直す形に直し、chain の ProcessId の不一致と `FrameworkId` による web の疑いを takeover の理由にし、`target_not_web` を System32 の notepad の明示表（署名、正規化パス、volume serial と file id。セッションの開始時に記録し、変わったら戻らない）で埋めた。実測で、IL-only の .NET の exe は SECTION_IMAGE_INFORMATION が header と一致したまま変換されず、記録された entry point が MEM_IMAGE の外にあるため W-UR になることを確かめ、AnyCPU の header 項目の除外をやめた。Main の二重判定、token の束縛、Renderer、contracts の package の欄は PR-5b に残す。

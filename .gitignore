@@ -20,3 +20,6 @@ playwright-report/
 .dev-data/
 .sprint-coder-team/tmp/
 .tmp-release-tools/
+
+# Python のキャッシュ（website/tools など）
+__pycache__/

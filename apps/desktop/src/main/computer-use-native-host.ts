@@ -48,6 +48,8 @@ import {
   projectComputerUseAccessibilityTree,
 } from './computer-use-accessibility-tree';
 import { computerUseActionDigest } from './computer-use-action';
+import { parseWindowsComputerUseTargets } from './computer-use-native-targets';
+import { denyRulesetVersion } from './computer-use-target-eligibility';
 
 /** Stable Main-side reason for a native boundary that cannot service the controller seam. */
 export const COMPUTER_USE_NATIVE_PICKER_UNAVAILABLE = 'native_picker_unavailable' as const;
@@ -94,6 +96,7 @@ type RuntimePlatform = 'darwin' | 'win32' | 'linux' | 'other';
 type NativeMethod =
   | 'pickApplication'
   | 'listWindows'
+  | 'listTargets'
   | 'startSession'
   | 'observe'
   | 'preflight'
@@ -238,7 +241,8 @@ export function createComputerUseNativeHost(
       );
     if (
       (!probeReady || inputQuarantined) &&
-      (method === 'startSession' ||
+      (method === 'listTargets' ||
+        method === 'startSession' ||
         method === 'observe' ||
         method === 'preflight' ||
         method === 'approvalApprove' ||
@@ -477,6 +481,26 @@ export function createComputerUseNativeHost(
   };
 
   const host: ComputerUseNativeHost = {
+    listTargets: async () => {
+      const requireDiscovery = (): void => {
+        if (
+          platform !== 'win32' ||
+          binding.manifest.platform !== 'win32' ||
+          binding.manifest.eligibility?.mode !== 'v2-denylist' ||
+          binding.manifest.eligibility.rulesetVersion !== denyRulesetVersion('win32') ||
+          options.effectiveEligibilityMode?.() !== 'v2-denylist'
+        )
+          throw new ComputerUseNativeUnavailableError('native_target_discovery_unavailable');
+        requireMethod('listTargets');
+      };
+      requireDiscovery();
+      const value = await invoke('listTargets', {});
+      requireDiscovery();
+      const result = parseWindowsComputerUseTargets(value);
+      if (result === null)
+        throw new ComputerUseNativeUnavailableError('native_target_list_invalid');
+      return result;
+    },
     availability: (): ComputerUseAvailability => {
       const nativeAvailable =
         binding.probe.available && binding.probe.capabilities.observe && !inputQuarantined;

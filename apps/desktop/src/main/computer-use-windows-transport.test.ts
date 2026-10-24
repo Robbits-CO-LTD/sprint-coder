@@ -448,6 +448,126 @@ describe('Computer Use Windows helper transport', () => {
     onSocket = null;
   });
 
+  it('requests list_targets through the authenticated pipe without caller-supplied metadata', async () => {
+    const value = { generation: 123_456_789, rulesetVersion: 2, truncated: false, targets: [] };
+    const { addon, helper } = createTarget({
+      ...responders(),
+      list_targets: (metadata) => {
+        expect(metadata).toEqual({ operation: 'list_targets' });
+        return ['probe_result', value];
+      },
+    });
+    await expect(Promise.resolve(addon.listTargets!({ pid: 999 }))).resolves.toEqual(value);
+    expect(helper().served).toEqual(['handshake', 'list_targets']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('discards a discovery result when Stop quarantines input while the request is pending', async () => {
+    const value = { generation: 123, rulesetVersion: 2, truncated: false, targets: [] };
+    const target = createTarget({ ...responders(), list_targets: () => ['probe_result', value] });
+    const trusted = binding(target.addon);
+    // Inject only the inactive discovery binding; existing session/Stop receipts use the real host.
+    const host = createComputerUseNativeHost(
+      {
+        ...trusted,
+        manifest: {
+          ...trusted.manifest,
+          eligibility: {
+            mode: 'v2-denylist',
+            rulesetVersion: 2,
+            classifierVersion: 1,
+            lexiconVersion: 1,
+            ticketRequired: true,
+          },
+        },
+      },
+      'win32',
+      {
+        effectiveEligibilityMode: () => 'v2-denylist',
+        windowsPhysicalBoundsToDip: (bounds) => bounds,
+      },
+    );
+    const session = await startSession(host, 'discovery-stop', 'turn-1');
+    target.helper().holdOnly('list_targets');
+    const pending = host.listTargets!().catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    await host.cancel(session, 1);
+    await expect(host.listTargets!()).rejects.toThrow('native_stop_unconfirmed');
+    target.helper().release('list_targets');
+    expect(await pending).toMatchObject({ reasonCode: 'native_stop_unconfirmed' });
+    await host.close(session);
+    await expect(host.listTargets!()).resolves.toEqual(value);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['binding', 'binary', 'error', 'disconnect'] as const)(
+    'rejects list_targets on %s without returning evidence',
+    async (failure) => {
+      const { addon } = createTarget();
+      await addon.listWindows!(profile);
+      const socket = sockets[0]!;
+      socket.onWrite = (encoded) => {
+        const request = decodeComputerUseNativeFrame(encoded);
+        if (failure === 'disconnect') {
+          socket.destroy();
+          return;
+        }
+        socket.emit(
+          'data',
+          encodeComputerUseNativeFrame({
+            ...request,
+            messageType: failure === 'error' ? 'error' : 'probe_result',
+            sessionId: failure === 'binding' ? { hex: 'e'.repeat(32) } : request.sessionId,
+            metadata: Buffer.from(
+              JSON.stringify(
+                failure === 'error'
+                  ? { code: 'target_measurement_unavailable' }
+                  : { generation: 1, rulesetVersion: 2, truncated: false, targets: [] },
+              ),
+            ),
+            binary: failure === 'binary' ? Buffer.from([1]) : Buffer.alloc(0),
+          }),
+        );
+      };
+      await expect(Promise.resolve(addon.listTargets!({}))).rejects.toThrow();
+      expect(vi.getTimerCount()).toBe(0);
+    },
+  );
+
+  it('does not accept another request response and times out an unanswered list', async () => {
+    const { addon } = createTarget();
+    await addon.listWindows!(profile);
+    const socket = sockets[0]!;
+    socket.onWrite = (encoded) => {
+      const request = decodeComputerUseNativeFrame(encoded);
+      socket.emit(
+        'data',
+        encodeComputerUseNativeFrame({
+          ...request,
+          messageType: 'probe_result',
+          requestId: { hex: 'e'.repeat(32) },
+          metadata: Buffer.from('{}'),
+          binary: Buffer.alloc(0),
+        }),
+      );
+    };
+    let settled = false;
+    const outcome = Promise.resolve(addon.listTargets!({})).then(
+      () => {
+        settled = true;
+        return 'resolved';
+      },
+      () => {
+        settled = true;
+        return 'rejected';
+      },
+    );
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await outcome).toBe('rejected');
+  });
+
   it('waits for a valid handshake before parallel calls, including reconnect', async () => {
     const target = createTarget();
     const invoke = () => Promise.resolve(target.addon.listWindows!({ identity: {} }));

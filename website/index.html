@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Sprint Coder | AIの会社が動く — たくさんのAIをチームで動かすアプリ</title>
+    <title>Sprint Coder | 最大100体のAIを同時に動かすアプリ</title>
     <meta
       name="description"
-      content="Sprint Coderは、たくさんのAIを会社のようにチームで動かすオープンソースのデスクトップアプリ。ひとつのお願いで、リーダー・部長・担当のAIが同時に動き、作って確かめて完成まで届けます。実際の画面と実際のAIの動きで紹介します。"
+      content="Sprint Coderは、AIをチームにして最大100体まで同時に動かせる無料のデスクトップアプリ。リーダー・部長・担当のAIが手分けして、作って確かめて完成まで届けます。実演は、6体が同時に動いた回を実際の画面と実際のAIで紹介します。"
     />
     <meta name="author" content="Robbits Inc." />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
@@ -18,10 +18,10 @@
     <meta property="og:type" content="website" />
     <meta property="og:locale" content="ja_JP" />
     <meta property="og:site_name" content="Sprint Coder" />
-    <meta property="og:title" content="Sprint Coder | AIの会社が動く" />
+    <meta property="og:title" content="Sprint Coder | AIを最大100体 同時に動かす" />
     <meta
       property="og:description"
-      content="ひとつのお願いで、リーダー・部長・担当のAIが同時に動く。実際の画面と実際のAIの動きで見る、Sprint Coder。"
+      content="AIを最大100体まで同時に動かせる（100は設定できる上限）。実演では6体が同時に動いた本物の画面を見せます。"
     />
     <meta property="og:url" content="https://sprintcoder.yuseilab.com/" />
     <meta property="og:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
@@ -31,13 +31,14 @@
     <meta property="og:video" content="https://sprintcoder.yuseilab.com/media/promo-720.mp4" />
     <meta property="og:video:type" content="video/mp4" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Sprint Coder | AIの会社が動く" />
-    <meta name="twitter:description" content="ひとつのお願いで、たくさんのAIが会社のように動く。実際の画面で見る、Sprint Coder。" />
+    <meta name="twitter:title" content="Sprint Coder | AIを最大100体 同時に動かす" />
+    <meta name="twitter:description" content="AIを最大100体まで同時に。100は上限、実演は6体の本物の画面。" />
     <meta name="twitter:image" content="https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg" />
-    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261024" as="font" type="font/woff2" crossorigin />
-    <link rel="stylesheet" href="/styles.css?v=20261024" />
-    <link rel="preload" as="image" href="/media/hero.jpg" />
+    <link rel="preload" href="/fonts/noto-sans-jp-sub.woff2?v=20261028" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css?v=20261028" />
     <script>
+      // 「動きを止める」を選んでいたら、序章の演出が始まる前に止める
+      try{if(localStorage.getItem('sc-motion')==='off')document.documentElement.classList.add('motion-off')}catch(e){}
       // 演出は JS が動くときだけ。読み込みに失敗したら 3 秒で普通の表示に戻す
       if (!window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
         document.documentElement.classList.add('js');
@@ -49,8 +50,8 @@
         }, 3000);
       }
     </script>
-    <link rel="preload" as="script" href="/film.js?v=20261022" />
-    <script src="/film.js?v=20261022" defer></script>
+    <link rel="preload" as="script" href="/film.js?v=20261028" />
+    <script src="/film.js?v=20261028" defer></script>
 
     <script type="application/ld+json">
       {
@@ -84,7 +85,7 @@
             "operatingSystem": "Windows, macOS, Linux",
             "applicationCategory": "DeveloperApplication",
             "applicationSubCategory": "AI coding assistant",
-            "description": "たくさんのAIを会社のようにチームで動かす、オープンソースのAIコーディング・デスクトップアプリ。",
+            "description": "AIをチームにして最大100体まで同時に動かせる、オープンソースのAIコーディング・デスクトップアプリ。",
             "image": "https://sprintcoder.yuseilab.com/assets/sprint-coder-og.jpg",
             "license": "https://opensource.org/license/mit",
             "isAccessibleForFree": true,
@@ -96,7 +97,7 @@
           {
             "@type": "VideoObject",
             "name": "Sprint Coder「AIの会社が動く」実演",
-            "description": "ひとつのお願いで、リーダー・部長・担当のAIが同時に動き、作って確かめて完成まで届ける様子を、実際のアプリと実際のAIの実行で見せる動画。",
+            "description": "ひとつのお願いで、リーダー・部長・担当のAIが同時に動き、作って確かめて完成まで届ける様子を、実際のアプリと実際のAIの実行で見せる動画。同時に動いたのは最大6体。",
             "thumbnailUrl": "https://sprintcoder.yuseilab.com/media/promo.jpg",
             "uploadDate": "2026-10-21",
             "duration": "PT4M2S",
@@ -136,6 +137,7 @@
         <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
       </button>
       <div class="p-chapter" aria-live="polite"><small>00</small>序章</div>
+      <span class="p-real"><span class="p-real-full">実演 · 2026年10月20日 · 実際のアプリと実際のAI</span><span class="p-real-short">実演 10/20</span></span>
       <div class="p-track" role="slider" tabindex="0" aria-label="章の位置（左右キーで章を移動）" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
         <div class="p-fill"></div>
       </div>
@@ -151,97 +153,176 @@
       <!-- ============================================================ 00 序章 -->
       <section class="scene hero" id="top" data-style="--len: 190vh" data-no="00" data-title="序章" aria-label="序章">
         <div class="stage">
-          <div class="footage-layer haze" data-style="--fx: 40%; --fy: 40%; --zoom: 0.18">
-            <img src="/media/hero.jpg" alt="" />
-          </div>
-          <div class="scrim"></div>
-          <div class="hero-screen">
-            <div class="screen">
-              <video muted playsinline loop preload="none" poster="/media/hero.jpg" data-src="/media/hero.mp4" aria-hidden="true" data-style="--fx: 35%; --fy: 40%; --sz: 1.25"></video>
-              <span class="rec">実際の画面 <b>▶▶ 早送り ×4</b></span>
-            </div>
-          </div>
+          <div class="ghost-word" aria-hidden="true">×100</div>
           <div class="scanlines"></div>
+          <div class="flash" aria-hidden="true"></div>
+          <span class="tag-fig">図 · 映像ではありません</span>
+          <figure class="swarm-wrap side-swarm">
+            <!-- swarm:hero --><svg class="swarm" viewBox="0 0 600 640" width="600" height="640" role="img" aria-label="図：リーダー1体と、部長と担当あわせて100体。同時に動かせる上限を表すイメージで、映像ではありません。部長と担当の分け方は一例です"><g class="wires"><path class="wire" pathLength="1" d="M300 42 C300 76 39 76 39 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 97 76 97 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 155 76 155 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 213 76 213 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 271 76 271 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 329 76 329 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 387 76 387 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 445 76 445 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 503 76 503 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 561 76 561 99"/></g><g class="collines"><path class="colline" pathLength="1" d="M39 121 V614"/><path class="colline" pathLength="1" d="M97 121 V614"/><path class="colline" pathLength="1" d="M155 121 V614"/><path class="colline" pathLength="1" d="M213 121 V614"/><path class="colline" pathLength="1" d="M271 121 V614"/><path class="colline" pathLength="1" d="M329 121 V614"/><path class="colline" pathLength="1" d="M387 121 V614"/><path class="colline" pathLength="1" d="M445 121 V614"/><path class="colline" pathLength="1" d="M503 121 V614"/><path class="colline" pathLength="1" d="M561 121 V614"/></g><circle class="ld-ring" cx="300" cy="28" r="14"/><circle class="ld" cx="300" cy="28" r="14"/><g class="cols"><g class="col"><circle class="u mg" cx="39" cy="110" r="11"/><circle class="u n" cx="39" cy="166" r="9"/><circle class="u n" cx="39" cy="222" r="9"/><circle class="u n" cx="39" cy="278" r="9"/><circle class="u n" cx="39" cy="334" r="9"/><circle class="u n" cx="39" cy="390" r="9"/><circle class="u n" cx="39" cy="446" r="9"/><circle class="u n" cx="39" cy="502" r="9"/><circle class="u n" cx="39" cy="558" r="9"/><circle class="u n" cx="39" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="97" cy="110" r="11"/><circle class="u n" cx="97" cy="166" r="9"/><circle class="u n lit" cx="97" cy="222" r="9"/><circle class="u n" cx="97" cy="278" r="9"/><circle class="u n" cx="97" cy="334" r="9"/><circle class="u n" cx="97" cy="390" r="9"/><circle class="u n" cx="97" cy="446" r="9"/><circle class="u n" cx="97" cy="502" r="9"/><circle class="u n" cx="97" cy="558" r="9"/><circle class="u n" cx="97" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="155" cy="110" r="11"/><circle class="u n" cx="155" cy="166" r="9"/><circle class="u n" cx="155" cy="222" r="9"/><circle class="u n" cx="155" cy="278" r="9"/><circle class="u n" cx="155" cy="334" r="9"/><circle class="u n" cx="155" cy="390" r="9"/><circle class="u n" cx="155" cy="446" r="9"/><circle class="u n lit" cx="155" cy="502" r="9"/><circle class="u n" cx="155" cy="558" r="9"/><circle class="u n" cx="155" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="213" cy="110" r="11"/><circle class="u n" cx="213" cy="166" r="9"/><circle class="u n" cx="213" cy="222" r="9"/><circle class="u n" cx="213" cy="278" r="9"/><circle class="u n lit" cx="213" cy="334" r="9"/><circle class="u n" cx="213" cy="390" r="9"/><circle class="u n" cx="213" cy="446" r="9"/><circle class="u n" cx="213" cy="502" r="9"/><circle class="u n" cx="213" cy="558" r="9"/><circle class="u n" cx="213" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="271" cy="110" r="11"/><circle class="u n" cx="271" cy="166" r="9"/><circle class="u n" cx="271" cy="222" r="9"/><circle class="u n" cx="271" cy="278" r="9"/><circle class="u n" cx="271" cy="334" r="9"/><circle class="u n" cx="271" cy="390" r="9"/><circle class="u n" cx="271" cy="446" r="9"/><circle class="u n" cx="271" cy="502" r="9"/><circle class="u n" cx="271" cy="558" r="9"/><circle class="u n" cx="271" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="329" cy="110" r="11"/><circle class="u n" cx="329" cy="166" r="9"/><circle class="u n" cx="329" cy="222" r="9"/><circle class="u n lit" cx="329" cy="278" r="9"/><circle class="u n" cx="329" cy="334" r="9"/><circle class="u n" cx="329" cy="390" r="9"/><circle class="u n" cx="329" cy="446" r="9"/><circle class="u n" cx="329" cy="502" r="9"/><circle class="u n" cx="329" cy="558" r="9"/><circle class="u n" cx="329" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="387" cy="110" r="11"/><circle class="u n" cx="387" cy="166" r="9"/><circle class="u n" cx="387" cy="222" r="9"/><circle class="u n" cx="387" cy="278" r="9"/><circle class="u n" cx="387" cy="334" r="9"/><circle class="u n" cx="387" cy="390" r="9"/><circle class="u n lit" cx="387" cy="446" r="9"/><circle class="u n" cx="387" cy="502" r="9"/><circle class="u n" cx="387" cy="558" r="9"/><circle class="u n" cx="387" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="445" cy="110" r="11"/><circle class="u n" cx="445" cy="166" r="9"/><circle class="u n" cx="445" cy="222" r="9"/><circle class="u n" cx="445" cy="278" r="9"/><circle class="u n" cx="445" cy="334" r="9"/><circle class="u n" cx="445" cy="390" r="9"/><circle class="u n" cx="445" cy="446" r="9"/><circle class="u n" cx="445" cy="502" r="9"/><circle class="u n" cx="445" cy="558" r="9"/><circle class="u n" cx="445" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="503" cy="110" r="11"/><circle class="u n" cx="503" cy="166" r="9"/><circle class="u n" cx="503" cy="222" r="9"/><circle class="u n" cx="503" cy="278" r="9"/><circle class="u n" cx="503" cy="334" r="9"/><circle class="u n lit" cx="503" cy="390" r="9"/><circle class="u n" cx="503" cy="446" r="9"/><circle class="u n" cx="503" cy="502" r="9"/><circle class="u n" cx="503" cy="558" r="9"/><circle class="u n" cx="503" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="561" cy="110" r="11"/><circle class="u n" cx="561" cy="166" r="9"/><circle class="u n" cx="561" cy="222" r="9"/><circle class="u n" cx="561" cy="278" r="9"/><circle class="u n" cx="561" cy="334" r="9"/><circle class="u n" cx="561" cy="390" r="9"/><circle class="u n" cx="561" cy="446" r="9"/><circle class="u n" cx="561" cy="502" r="9"/><circle class="u n" cx="561" cy="558" r="9"/><circle class="u n" cx="561" cy="614" r="9"/></g></g></svg><!-- /swarm:hero -->
+            <figcaption class="swarm-cap">リーダー 1 ＋ 部長と担当 最大100</figcaption>
+          </figure>
 
-          <div class="beat">
-            <p class="hero-words" aria-hidden="true"><span>リーダー</span><span>部長</span><span>担当</span></p>
-            <h1 class="display">AIの会社が<br /><span class="em">動く</span></h1>
+          <div class="beat side-copy">
+            <h1 class="display hero-title">
+              <span class="h-kick">AIを 最大</span>
+              <span class="h-num"><b class="count" data-count-intro="100" aria-hidden="true">100</b><span class="visually-hidden">100</span>体</span>
+              <span class="h-line">同時に動かす</span>
+            </h1>
             <div class="hero-after">
-              <p class="definition"><b>Sprint Coder</b>＝たくさんのAIを、会社のようにチームで動かすアプリ</p>
+              <div class="proof-pair">
+                <a class="pp pp-real" href="/media/promo-720.mp4" data-open-promo><small>実演</small><b>6<span>体</span></b><em>本物の画面で見る 4:02 ▶</em></a>
+                <span class="pp-arrow" aria-hidden="true">→</span>
+                <div class="pp pp-cap"><small>上限</small><b>100<span>体</span></b><em>設定で上限を100にした場合</em></div>
+              </div>
+              <p class="definition"><b>Sprint Coder</b>＝AIをチームにして 最大100体まで同時に動かせる無料のアプリ（AIの利用料は別）</p>
               <div class="hero-actions">
-                <a class="btn btn-primary" href="#ch-problem" data-autoplay>
+                <a class="btn btn-primary" href="#ch-solo" data-autoplay>
                   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5l11 7-11 7z" fill="currentColor" stroke="none" /></svg>
                   自動で再生する
                 </a>
                 <a class="btn" href="#start">無料でダウンロード</a>
               </div>
+              <p class="note hero-note">100は同時に動かせる上限です（設定で上限を100にした場合。標準は50）。図はイメージで、実際の画面は03章からです。</p>
               <p class="scroll-cue"><i></i>スクロールで再生</p>
             </div>
           </div>
-
-          <div class="hud" role="group" aria-label="チームの状態">
-            <div class="hud-title">AI TEAM MODE</div>
-            <div>リーダー：準備OK</div>
-            <div>部署：開発・セキュリティ・チェック</div>
-            <div>ネットのAI：つながった</div>
-            <div>このパソコンの中のAI：つながった</div>
-          </div>
         </div>
       </section>
 
-      <!-- ============================================================ 01 課題 -->
-      <section class="scene" id="ch-problem" data-style="--len: 240vh" data-no="01" data-title="課題" data-steps="0.12,0.45,0.7" aria-labelledby="h-problem">
+      <!-- ============================================================ 01 一斉 -->
+      <section class="scene" id="ch-solo" data-style="--len: 240vh" data-no="01" data-title="一斉" data-steps="0.12,0.42,0.7" aria-labelledby="h-solo">
         <div class="stage">
           <div class="colorfield" data-show="2" aria-hidden="true"></div>
-          <div class="ghost-word" aria-hidden="true">ONE AI</div>
+          <div class="ghost-word" aria-hidden="true"><span class="gw-a">ONE</span><span class="gw-b">×100</span></div>
+          <span class="tag-fig" data-show="0-1">図 · 映像ではありません</span>
+          <span class="tag-fig ink" data-show="2" aria-hidden="true">図 · 映像ではありません</span>
 
           <div class="beat" data-show="0-1">
-            <p class="chapter-tag"><b>01</b>課題 PROBLEM</p>
-            <h2 class="headline" id="h-problem">AIは<br />一度に ひとつ</h2>
-            <p class="lead fx-up" data-show="1" data-style="margin-top: 24px; max-width: 640px">
-              調べる、作る、確かめる。ひとりのAIに頼むと、仕事は順番待ちになる。結果を集めて確かめるのも、人の仕事のまま。
-            </p>
+            <p class="chapter-tag"><b>01</b>一斉 AT ONCE</p>
+            <h2 class="headline" id="h-solo">1体は<br />順番待ち</h2>
+            <div class="queue" data-range="0.12,0.42">
+              <span class="q-ai" aria-hidden="true"></span>
+              <span class="q-cards" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+              <p class="q-left"><span aria-hidden="true">残り <b data-count="8" data-from="12">8</b>件</span><span class="visually-hidden">残り8件</span></p>
+            </div>
+            <p class="lead fx-up" data-show="1">1体のAIは ひとつ終えてから次へ</p>
           </div>
 
           <div class="beat on-lime" data-show="2">
-            <p class="chapter-tag" data-style="color: var(--lime-ink)"><b data-style="color: var(--lime-ink)">01</b>答え ANSWER</p>
-            <p class="display fx-slam" data-show="2">AIチームは<br />同時に動く</p>
-            <p class="lead fx-up" data-show="3" data-style="margin-top: 24px; color: #2b3315; max-width: 680px">
-              リーダーのAIが仕事を分け、部長と担当のAIが手分けして進める。ひとつのアプリの、ひとつの画面で。
-            </p>
+            <p class="chapter-tag"><b>01</b>一斉 AT ONCE</p>
+            <p class="display fx-slam" data-show="2">最大100体なら<br />一斉に</p>
+            <div class="bars fx-up" data-show="3" data-range="0.7,0.95" aria-hidden="true"></div>
+            <p class="lead fx-up" data-show="3">調べる 作る 確かめる 全部同時に</p>
+            <p class="note fx-up" data-show="2">設定で上限を100にした場合（標準は50）</p>
           </div>
         </div>
       </section>
 
-      <!-- ============================================================ 02 依頼 -->
-      <section class="scene" id="ch-request" data-style="--len: 300vh" data-no="02" data-title="依頼" data-steps="0.1,0.42,0.62" data-dim="2" aria-labelledby="h-request">
+      <!-- ============================================================ 02 規模 -->
+      <section class="scene" id="ch-scale" data-style="--len: 460vh" data-no="02" data-title="規模" data-steps="0.1,0.4,0.76,0.88" aria-labelledby="h-scale">
+        <div class="stage" data-range="0.12,0.72">
+          <span class="tag-fig">図 · 映像ではありません</span>
+          <figure class="swarm-wrap side-swarm">
+            <!-- swarm:fill --><svg class="swarm fill" viewBox="0 0 600 640" width="600" height="640" role="img" aria-label="図：リーダー1体と、部長と担当あわせて100体。同時に動かせる上限を表すイメージで、映像ではありません。部長と担当の分け方は一例です"><g class="wires"><path class="wire" pathLength="1" d="M300 42 C300 76 39 76 39 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 97 76 97 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 155 76 155 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 213 76 213 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 271 76 271 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 329 76 329 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 387 76 387 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 445 76 445 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 503 76 503 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 561 76 561 99"/></g><g class="collines"><path class="colline" pathLength="1" d="M39 121 V614"/><path class="colline" pathLength="1" d="M97 121 V614"/><path class="colline" pathLength="1" d="M155 121 V614"/><path class="colline" pathLength="1" d="M213 121 V614"/><path class="colline" pathLength="1" d="M271 121 V614"/><path class="colline" pathLength="1" d="M329 121 V614"/><path class="colline" pathLength="1" d="M387 121 V614"/><path class="colline" pathLength="1" d="M445 121 V614"/><path class="colline" pathLength="1" d="M503 121 V614"/><path class="colline" pathLength="1" d="M561 121 V614"/></g><circle class="ld-ring" cx="300" cy="28" r="14"/><circle class="ld" cx="300" cy="28" r="14"/><g class="cols"><g class="col"><circle class="u mg" cx="39" cy="110" r="11"/><circle class="u n" cx="39" cy="166" r="9"/><circle class="u n" cx="39" cy="222" r="9"/><circle class="u n" cx="39" cy="278" r="9"/><circle class="u n" cx="39" cy="334" r="9"/><circle class="u n" cx="39" cy="390" r="9"/><circle class="u n" cx="39" cy="446" r="9"/><circle class="u n" cx="39" cy="502" r="9"/><circle class="u n" cx="39" cy="558" r="9"/><circle class="u n" cx="39" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="97" cy="110" r="11"/><circle class="u n" cx="97" cy="166" r="9"/><circle class="u n lit" cx="97" cy="222" r="9"/><circle class="u n" cx="97" cy="278" r="9"/><circle class="u n" cx="97" cy="334" r="9"/><circle class="u n" cx="97" cy="390" r="9"/><circle class="u n" cx="97" cy="446" r="9"/><circle class="u n" cx="97" cy="502" r="9"/><circle class="u n" cx="97" cy="558" r="9"/><circle class="u n" cx="97" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="155" cy="110" r="11"/><circle class="u n" cx="155" cy="166" r="9"/><circle class="u n" cx="155" cy="222" r="9"/><circle class="u n" cx="155" cy="278" r="9"/><circle class="u n" cx="155" cy="334" r="9"/><circle class="u n" cx="155" cy="390" r="9"/><circle class="u n" cx="155" cy="446" r="9"/><circle class="u n lit" cx="155" cy="502" r="9"/><circle class="u n" cx="155" cy="558" r="9"/><circle class="u n" cx="155" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="213" cy="110" r="11"/><circle class="u n" cx="213" cy="166" r="9"/><circle class="u n" cx="213" cy="222" r="9"/><circle class="u n" cx="213" cy="278" r="9"/><circle class="u n lit" cx="213" cy="334" r="9"/><circle class="u n" cx="213" cy="390" r="9"/><circle class="u n" cx="213" cy="446" r="9"/><circle class="u n" cx="213" cy="502" r="9"/><circle class="u n" cx="213" cy="558" r="9"/><circle class="u n" cx="213" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="271" cy="110" r="11"/><circle class="u n" cx="271" cy="166" r="9"/><circle class="u n" cx="271" cy="222" r="9"/><circle class="u n" cx="271" cy="278" r="9"/><circle class="u n" cx="271" cy="334" r="9"/><circle class="u n" cx="271" cy="390" r="9"/><circle class="u n" cx="271" cy="446" r="9"/><circle class="u n" cx="271" cy="502" r="9"/><circle class="u n" cx="271" cy="558" r="9"/><circle class="u n" cx="271" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="329" cy="110" r="11"/><circle class="u n" cx="329" cy="166" r="9"/><circle class="u n" cx="329" cy="222" r="9"/><circle class="u n lit" cx="329" cy="278" r="9"/><circle class="u n" cx="329" cy="334" r="9"/><circle class="u n" cx="329" cy="390" r="9"/><circle class="u n" cx="329" cy="446" r="9"/><circle class="u n" cx="329" cy="502" r="9"/><circle class="u n" cx="329" cy="558" r="9"/><circle class="u n" cx="329" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="387" cy="110" r="11"/><circle class="u n" cx="387" cy="166" r="9"/><circle class="u n" cx="387" cy="222" r="9"/><circle class="u n" cx="387" cy="278" r="9"/><circle class="u n" cx="387" cy="334" r="9"/><circle class="u n" cx="387" cy="390" r="9"/><circle class="u n lit" cx="387" cy="446" r="9"/><circle class="u n" cx="387" cy="502" r="9"/><circle class="u n" cx="387" cy="558" r="9"/><circle class="u n" cx="387" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="445" cy="110" r="11"/><circle class="u n" cx="445" cy="166" r="9"/><circle class="u n" cx="445" cy="222" r="9"/><circle class="u n" cx="445" cy="278" r="9"/><circle class="u n" cx="445" cy="334" r="9"/><circle class="u n" cx="445" cy="390" r="9"/><circle class="u n" cx="445" cy="446" r="9"/><circle class="u n" cx="445" cy="502" r="9"/><circle class="u n" cx="445" cy="558" r="9"/><circle class="u n" cx="445" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="503" cy="110" r="11"/><circle class="u n" cx="503" cy="166" r="9"/><circle class="u n" cx="503" cy="222" r="9"/><circle class="u n" cx="503" cy="278" r="9"/><circle class="u n" cx="503" cy="334" r="9"/><circle class="u n lit" cx="503" cy="390" r="9"/><circle class="u n" cx="503" cy="446" r="9"/><circle class="u n" cx="503" cy="502" r="9"/><circle class="u n" cx="503" cy="558" r="9"/><circle class="u n" cx="503" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="561" cy="110" r="11"/><circle class="u n" cx="561" cy="166" r="9"/><circle class="u n" cx="561" cy="222" r="9"/><circle class="u n" cx="561" cy="278" r="9"/><circle class="u n" cx="561" cy="334" r="9"/><circle class="u n" cx="561" cy="390" r="9"/><circle class="u n" cx="561" cy="446" r="9"/><circle class="u n" cx="561" cy="502" r="9"/><circle class="u n" cx="561" cy="558" r="9"/><circle class="u n" cx="561" cy="614" r="9"/></g></g></svg><!-- /swarm:fill -->
+            <figcaption class="swarm-cap">リーダー 1 ＋ 部長と担当 最大100 · 分け方は一例</figcaption>
+          </figure>
+
+          <div class="beat side-copy" data-show="0-2">
+            <p class="chapter-tag"><b>02</b>規模 SCALE</p>
+            <h2 class="headline" id="h-scale">1体から<br /><span class="em">最大100体</span></h2>
+            <p class="count-big"><b class="count" data-count="100" data-from="1" data-pad="3" aria-hidden="true">100</b><span aria-hidden="true">体</span><span class="visually-hidden">最大100体</span></p>
+            <p class="count-label">同時に動ける最大の数</p>
+            <ol class="tiers" aria-label="同時に動かせる数の目安">
+              <li data-style="--at: 0"><b>1<small>体</small></b><span>単独</span></li>
+              <li class="t-real" data-style="--at: 0.0505"><b>6<small>体</small></b><span>実演</span><em class="badge real">実演 · 映像あり</em></li>
+              <li data-style="--at: 0.4949"><b>50<small>体</small></b><span>標準の設定</span></li>
+              <li class="t-cap" data-style="--at: 1"><b>100<small>体</small></b><span>最大</span><em class="badge cap">上限 · 映像なし</em></li>
+            </ol>
+            <div class="lead-swap">
+              <p class="lead fx-up" data-show="1-1">リーダーが部長を雇い 部長が担当を雇う</p>
+              <p class="lead fx-up" data-show="2-2">部長と担当 あわせて最大100体が同時に動ける</p>
+            </div>
+            <p class="note">設定で上限を100にした場合（標準は50）</p>
+          </div>
+
+          <div class="beat side-copy" data-show="3-3">
+            <p class="chapter-tag"><b>02</b>規模 SCALE</p>
+            <p class="headline fx-slam" data-show="3-3">上限は<br /><span class="em">自分で決める</span></p>
+            <p class="lead">同時に動かす数は 1から100まで 標準は50</p>
+            <div class="limit-bar" aria-hidden="true">
+              <i class="lb-track"></i><i class="lb-knob"></i>
+              <span class="lb-min">1</span><span class="lb-mid">50 標準</span><span class="lb-max">100 最大</span>
+            </div>
+            <p class="note">設定で上限を100にした場合</p>
+          </div>
+
+          <div class="beat side-copy" data-show="4">
+            <div class="kcard trust fx-up" data-show="4">
+              <p class="label">確かめ方</p>
+              <p class="title">101件目は<br /><span class="em">順番を待つ</span></p>
+              <p>上限を100にした設定（標準は50）で、試験用の仮のAIに101件の仕事を割り当て、100件が終わり、101件目は断られずに順番を待つことを、自動のテストで確かめています（101件目が待つのは、1分あたりに始められる数の決まりによるもの）。100件が同時に動くこと自体は、まだ試験していません。本物のAIで100体を動かした映像も、まだありません。APIキーで使うAIと このパソコンの中のAI（Ollama など）は、1つの接続あたり同時2件までです（Codex・Claude Code・Grok の CLI 経由のAIは、この制限を受けません）。</p>
+              <div class="hero-actions">
+                <a class="btn btn-primary" href="#start">無料でダウンロード</a>
+                <a class="btn" href="/media/promo-720.mp4" data-open-promo>本物の実演を見る 4:02</a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============================================================ 03 実演 -->
+      <section class="scene" id="ch-real" data-real data-real-from="3" data-style="--len: 400vh" data-no="03" data-title="実演" data-steps="0.1,0.3,0.55,0.75" data-dim="4" aria-labelledby="h-real">
         <div class="stage">
-          <div class="footage-layer" data-style="--fx: 62%; --fy: 78%; --zoom: 0.35">
+          <div class="footage-layer" data-show="3" data-style="--fx: 62%; --fy: 78%; --zoom: 0.35">
             <video muted playsinline loop preload="none" data-poster="/media/request.jpg" data-src="/media/request.mp4" aria-hidden="true"></video>
           </div>
-          <div class="scrim"></div>
-          <span class="rec">実際の画面 <b>等速</b></span>
+          <div class="colorfield sky" data-show="1-1" aria-hidden="true"></div>
+          <div class="scrim" data-show="3"></div>
+          <span class="rec" data-show="3">実際の画面 <b>等速</b></span>
+          <span class="tag-fig" data-show="2-2">図 · 映像ではありません · 6は実演の数</span>
 
-          <div class="beat" data-show="0-1">
-            <p class="chapter-tag"><b>02</b>依頼 REQUEST</p>
-            <h2 class="headline" id="h-request">お願いは<br />ひとつだけ</h2>
-            <p class="lead fx-up" data-show="1" data-style="margin-top: 20px; max-width: 520px">実際に送ったお願いを、そのまま入力して送信する。</p>
+          <div class="beat" data-show="0-0">
+            <p class="chapter-tag"><b>03</b>実演 <span class="real-tag">REAL</span></p>
+            <p class="headline">ここまでは<br />イメージ図</p>
           </div>
 
-          <div class="beat" data-show="2">
+          <div class="beat on-sky" data-show="1-1">
+            <p class="chapter-tag"><b>03</b>実演 <span class="real-tag">REAL</span></p>
+            <h2 class="display fx-slam" data-show="1-1" id="h-real">ここから<br />本物</h2>
+            <p class="lead">2026年10月20日 実際のアプリと実際のAIで収録</p>
+          </div>
+
+          <div class="beat split real-split" data-show="2-2">
+            <div class="copy">
+              <p class="bignum fx-slam" data-show="2"><b>6</b><span>体が同時に</span></p>
+              <p class="lead">本物の実演で 同時に動いた最大の数</p>
+              <p class="title fx-up" data-show="2">100は上限 <span class="em">6は実演</span></p>
+              <p class="note">設定で上限を100にした場合（標準は50）</p>
+            </div>
+            <figure class="swarm-wrap real-fig" data-show="2">
+              <!-- swarm:real --><svg class="swarm real" viewBox="0 0 600 640" width="600" height="640" role="img" aria-label="図：100個の点のうち6個だけが光っている。6個は実演で同時に動いたAIの数、残り94個は上限までの数で、映像ではありません"><g class="wires"><path class="wire" pathLength="1" d="M300 42 C300 76 39 76 39 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 97 76 97 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 155 76 155 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 213 76 213 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 271 76 271 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 329 76 329 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 387 76 387 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 445 76 445 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 503 76 503 99"/><path class="wire" pathLength="1" d="M300 42 C300 76 561 76 561 99"/></g><g class="collines"><path class="colline" pathLength="1" d="M39 121 V614"/><path class="colline" pathLength="1" d="M97 121 V614"/><path class="colline" pathLength="1" d="M155 121 V614"/><path class="colline" pathLength="1" d="M213 121 V614"/><path class="colline" pathLength="1" d="M271 121 V614"/><path class="colline" pathLength="1" d="M329 121 V614"/><path class="colline" pathLength="1" d="M387 121 V614"/><path class="colline" pathLength="1" d="M445 121 V614"/><path class="colline" pathLength="1" d="M503 121 V614"/><path class="colline" pathLength="1" d="M561 121 V614"/></g><circle class="ld-ring" cx="300" cy="28" r="14"/><circle class="ld" cx="300" cy="28" r="14"/><g class="cols"><g class="col"><circle class="u mg" cx="39" cy="110" r="11"/><circle class="u n" cx="39" cy="166" r="9"/><circle class="u n" cx="39" cy="222" r="9"/><circle class="u n" cx="39" cy="278" r="9"/><circle class="u n" cx="39" cy="334" r="9"/><circle class="u n" cx="39" cy="390" r="9"/><circle class="u n" cx="39" cy="446" r="9"/><circle class="u n" cx="39" cy="502" r="9"/><circle class="u n" cx="39" cy="558" r="9"/><circle class="u n" cx="39" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="97" cy="110" r="11"/><circle class="u n" cx="97" cy="166" r="9"/><circle class="u n lit" cx="97" cy="222" r="9"/><circle class="u n" cx="97" cy="278" r="9"/><circle class="u n" cx="97" cy="334" r="9"/><circle class="u n" cx="97" cy="390" r="9"/><circle class="u n" cx="97" cy="446" r="9"/><circle class="u n" cx="97" cy="502" r="9"/><circle class="u n" cx="97" cy="558" r="9"/><circle class="u n" cx="97" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="155" cy="110" r="11"/><circle class="u n" cx="155" cy="166" r="9"/><circle class="u n" cx="155" cy="222" r="9"/><circle class="u n" cx="155" cy="278" r="9"/><circle class="u n" cx="155" cy="334" r="9"/><circle class="u n" cx="155" cy="390" r="9"/><circle class="u n" cx="155" cy="446" r="9"/><circle class="u n lit" cx="155" cy="502" r="9"/><circle class="u n" cx="155" cy="558" r="9"/><circle class="u n" cx="155" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="213" cy="110" r="11"/><circle class="u n" cx="213" cy="166" r="9"/><circle class="u n" cx="213" cy="222" r="9"/><circle class="u n" cx="213" cy="278" r="9"/><circle class="u n lit" cx="213" cy="334" r="9"/><circle class="u n" cx="213" cy="390" r="9"/><circle class="u n" cx="213" cy="446" r="9"/><circle class="u n" cx="213" cy="502" r="9"/><circle class="u n" cx="213" cy="558" r="9"/><circle class="u n" cx="213" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="271" cy="110" r="11"/><circle class="u n" cx="271" cy="166" r="9"/><circle class="u n" cx="271" cy="222" r="9"/><circle class="u n" cx="271" cy="278" r="9"/><circle class="u n" cx="271" cy="334" r="9"/><circle class="u n" cx="271" cy="390" r="9"/><circle class="u n" cx="271" cy="446" r="9"/><circle class="u n" cx="271" cy="502" r="9"/><circle class="u n" cx="271" cy="558" r="9"/><circle class="u n" cx="271" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="329" cy="110" r="11"/><circle class="u n" cx="329" cy="166" r="9"/><circle class="u n" cx="329" cy="222" r="9"/><circle class="u n lit" cx="329" cy="278" r="9"/><circle class="u n" cx="329" cy="334" r="9"/><circle class="u n" cx="329" cy="390" r="9"/><circle class="u n" cx="329" cy="446" r="9"/><circle class="u n" cx="329" cy="502" r="9"/><circle class="u n" cx="329" cy="558" r="9"/><circle class="u n" cx="329" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="387" cy="110" r="11"/><circle class="u n" cx="387" cy="166" r="9"/><circle class="u n" cx="387" cy="222" r="9"/><circle class="u n" cx="387" cy="278" r="9"/><circle class="u n" cx="387" cy="334" r="9"/><circle class="u n" cx="387" cy="390" r="9"/><circle class="u n lit" cx="387" cy="446" r="9"/><circle class="u n" cx="387" cy="502" r="9"/><circle class="u n" cx="387" cy="558" r="9"/><circle class="u n" cx="387" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="445" cy="110" r="11"/><circle class="u n" cx="445" cy="166" r="9"/><circle class="u n" cx="445" cy="222" r="9"/><circle class="u n" cx="445" cy="278" r="9"/><circle class="u n" cx="445" cy="334" r="9"/><circle class="u n" cx="445" cy="390" r="9"/><circle class="u n" cx="445" cy="446" r="9"/><circle class="u n" cx="445" cy="502" r="9"/><circle class="u n" cx="445" cy="558" r="9"/><circle class="u n" cx="445" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="503" cy="110" r="11"/><circle class="u n" cx="503" cy="166" r="9"/><circle class="u n" cx="503" cy="222" r="9"/><circle class="u n" cx="503" cy="278" r="9"/><circle class="u n" cx="503" cy="334" r="9"/><circle class="u n lit" cx="503" cy="390" r="9"/><circle class="u n" cx="503" cy="446" r="9"/><circle class="u n" cx="503" cy="502" r="9"/><circle class="u n" cx="503" cy="558" r="9"/><circle class="u n" cx="503" cy="614" r="9"/></g><g class="col"><circle class="u mg" cx="561" cy="110" r="11"/><circle class="u n" cx="561" cy="166" r="9"/><circle class="u n" cx="561" cy="222" r="9"/><circle class="u n" cx="561" cy="278" r="9"/><circle class="u n" cx="561" cy="334" r="9"/><circle class="u n" cx="561" cy="390" r="9"/><circle class="u n" cx="561" cy="446" r="9"/><circle class="u n" cx="561" cy="502" r="9"/><circle class="u n" cx="561" cy="558" r="9"/><circle class="u n" cx="561" cy="614" r="9"/></g></g></svg><!-- /swarm:real -->
+              <ul class="fig-legend"><li class="is-real"><i></i>6体 実演で同時に動いた数</li><li><i></i>残り94体 上限まで · 映像なし</li></ul>
+            </figure>
+          </div>
+
+          <div class="beat" data-show="3-3">
+            <p class="headline">お願いは<br />ひとつだけ</p>
+          </div>
+
+          <div class="beat" data-show="4">
             <div class="kcard">
               <p class="label">実際のお願い（要点）</p>
               <blockquote>
                 アップロードされたファイルが、<span>決められたフォルダの外に保存されない</span>ようにしたい。AIチームを<span>会社のように組織して</span>進めて
               </blockquote>
-              <p class="fx-up" data-show="3">部署の分け方も、部署ごとにどのAIを使うかも、ふつうの文章で頼める。</p>
+              <p>部署の分け方も 使うAIも ふつうの文章で頼める</p>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- ============================================================ 03 組織 -->
-      <section class="scene" id="ch-org" data-style="--len: 380vh" data-no="03" data-title="組織" data-steps="0.08,0.32,0.5,0.82" aria-labelledby="h-org">
+      <!-- ============================================================ 04 チーム -->
+      <section class="scene" id="ch-team" data-real data-style="--len: 420vh" data-no="04" data-title="チーム" data-steps="0.08,0.3,0.5,0.78" aria-labelledby="h-team">
         <div class="stage top-screen">
           <div class="beat split rev">
             <div class="screen-stack">
@@ -250,7 +331,7 @@
                 <span class="rec">実際の画面 <b>等速</b></span>
                 <span class="rec after">実演の直後に収録</span>
               </div>
-              <div class="org" data-show="2-3" data-range="0.32,0.62" role="img" aria-label="組織図。リーダー（GPT-6.1-Sol・ネット）の下に、開発部 部長（GPT-6-Astra・ネット）、セキュリティ部 部長（GPT-5.6-Terra・ネット）、チェック部 部長（Claude Opus 5.5・ネット）。担当は、作る担当（Claude Sonnet 5・ネット）、テスト案の担当・弱点さがし担当・見落とし確認（Gemma 4 12B・このパソコン）、チェック担当・別の目で確認（Claude Opus 5.5・ネット）。実演で実際に採用された組織とAI（記録から）">
+              <div class="org" data-show="2-3" data-range="0.3,0.6" role="img" aria-label="組織図。リーダー（GPT-6.1-Sol・ネット）の下に、開発部 部長（GPT-6-Astra・ネット）、セキュリティ部 部長（GPT-5.6-Terra・ネット）、チェック部 部長（Claude Opus 5.5・ネット）。担当は、作る担当（Claude Sonnet 5・ネット）、テスト案の担当・弱点さがし担当・見落とし確認（Gemma 4 12B・このパソコン）、チェック担当・別の目で確認（Claude Opus 5.5・ネット）。実演で実際に採用された組織とAI（記録から）">
                 <svg viewBox="0 0 900 470" aria-hidden="true">
                   <g>
                     <path class="wire" pathLength="1" d="M450 74 C450 130 150 120 150 176" />
@@ -329,18 +410,30 @@
             </div>
 
             <div class="copy">
-              <p class="chapter-tag"><b>03</b>組織 ORGANIZATION</p>
-              <h2 class="headline" id="h-org">リーダー<br /><span class="sky">部長</span><br /><span class="em">担当</span></h2>
-              <p class="lead fx-up" data-show="1">リーダーのAIが、部署ごとに部長を採用。部長がさらに、手を動かす担当を採用する。</p>
-              <p class="lead fx-up" data-show="3">採用するたびに、どのAIをなぜ選んだかが画面に残る。</p>
-              <p class="lead fx-up" data-show="4">カードが並び、線でつながり、それぞれが動き出す。</p>
+              <p class="chapter-tag"><b>04</b>チーム TEAM <span class="real-tag">実演 REAL</span></p>
+              <h2 class="headline" id="h-team">AIが<br /><span class="em">AIを雇う</span></h2>
+              <div class="lead-swap">
+                <p class="lead fx-up" data-show="1-1">リーダーが部長を雇い 部長が担当を雇う</p>
+                <p class="lead fx-up" data-show="2-2">どのAIを なぜ選んだかが 画面に残る</p>
+                <div class="mix-mini fx-up" data-show="3-3">
+                  <div class="mix-col cloud">
+                    <h3>ネットのAI</h3>
+                    <div class="chips"><span class="chip">GPT-6.1-Sol</span><span class="chip">GPT-6-Astra</span><span class="chip">GPT-5.6-Terra</span><span class="chip">Claude Sonnet 5</span><span class="chip">Claude Opus 5.5</span></div>
+                  </div>
+                  <div class="mix-col local">
+                    <h3>このパソコンの中のAI</h3>
+                    <div class="chips"><span class="chip">Gemma 4 12B</span></div>
+                  </div>
+                </div>
+                <p class="lead fx-up" data-show="4">カードが並び 線でつながり 動き出す</p>
+              </div>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- ============================================================ 04 同時 -->
-      <section class="scene" id="ch-together" data-style="--len: 400vh" data-no="04" data-title="同時" data-steps="0.1,0.36,0.56" data-dim="1" aria-labelledby="h-together">
+      <!-- ============================================================ 05 同時 -->
+      <section class="scene" id="ch-together" data-real data-style="--len: 400vh" data-no="05" data-title="同時" data-steps="0.1,0.36,0.56" data-dim="1" aria-labelledby="h-together">
         <div class="stage">
           <div class="footage-layer" data-style="--fx: 30%; --fy: 55%; --zoom: 0.3">
             <video muted playsinline loop preload="none" data-poster="/media/together.jpg" data-src="/media/together.mp4" aria-hidden="true"></video>
@@ -349,14 +442,14 @@
           <span class="rec">実際の画面 <b>等速</b></span>
 
           <div class="beat" data-show="0-0">
-            <p class="chapter-tag"><b>04</b>同時 TOGETHER</p>
-            <p class="title" data-style="max-width: 520px">やり直しの最中も、別々のAIが同時に作業している</p>
+            <p class="chapter-tag"><b>05</b>同時 TOGETHER <span class="real-tag">実演 REAL</span></p>
+            <p class="headline">別々のAIが<br /><span class="em">同じ時間に</span></p>
           </div>
 
           <div class="beat" data-show="1-2">
-            <h2 class="visually-hidden" id="h-together">同時に6人</h2>
-            <p class="bignum fx-slam" data-show="1" aria-hidden="true"><b>6</b><span>人が同時に</span></p>
-            <p class="lead fx-up" data-show="2" data-style="margin-top: 16px; max-width: 560px">記録から1秒ずつ数えた、同時に動いたAIの最大の数。</p>
+            <h2 class="visually-hidden" id="h-together">同時に6体</h2>
+            <p class="bignum fx-slam" data-show="1" aria-hidden="true"><b>6</b><span>体が同時に</span></p>
+            <p class="lead fx-up" data-show="2" data-style="margin-top: 16px; max-width: 560px">記録から1秒ずつ数えた 同時に動いたAIの最大</p>
           </div>
 
           <div class="beat" data-show="3">
@@ -383,51 +476,14 @@
               <div class="legend">
                 <span><i></i>ネットのAI</span><span><i class="local"></i>このパソコンの中のAI</span><span><i class="failed"></i>途中で止まり、別の部長がやり直し</span>
               </div>
-              <p class="note" data-style="margin: 10px 0 0">
-                実演の記録（アプリに残る開始・終了の時刻）から作図。帯は仕事を受けてから終えるまで。このパソコンの中のAIは2人が同時に仕事を受け、中では1人ずつ順番に処理した。ネットのAIとこのパソコンの中のAIが同時に動いた時間は合計74秒。
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============================================================ 05 使い分け -->
-      <section class="scene" id="ch-mix" data-style="--len: 300vh" data-no="05" data-title="使い分け" data-steps="0.1,0.48" aria-labelledby="h-mix">
-        <div class="stage top-screen">
-          <div class="beat split" data-show="0-1">
-            <div class="copy">
-              <p class="chapter-tag"><b>05</b>使い分け MIX</p>
-              <h2 class="headline" id="h-mix">仕事に合う<br />AIを選ぶ</h2>
-              <p class="lead fx-up" data-show="1">部署ごとにどのAIを使うか、設定に文章で書いておくだけ。リーダーはそれを読んで採用する。</p>
-            </div>
-            <div class="screen">
-              <video muted playsinline loop preload="none" data-poster="/media/settings.jpg" data-src="/media/settings.mp4" aria-hidden="true" data-style="--fx: 55%; --fy: 50%; --sz: 1.35"></video>
-              <span class="rec">実際の画面 <b>等速</b></span>
-              <span class="rec after">実演の直後に収録</span>
-            </div>
-          </div>
-
-          <div class="beat" data-show="2">
-            <p class="chapter-tag"><b>05</b>使い分け MIX</p>
-            <p class="headline" data-style="margin-bottom: 28px">ネットのAIと<br /><span class="em">このパソコンの中のAI</span></p>
-            <div class="mix">
-              <div class="mix-col cloud fx-left" data-show="2">
-                <h3>ネットのAI</h3>
-                <p>インターネット経由で使うAI。今回はリーダー、部長、作る担当、チェック担当、別の目で確認する担当に。</p>
-                <div class="chips"><span class="chip">GPT-6.1-Sol</span><span class="chip">GPT-6-Astra</span><span class="chip">GPT-5.6-Terra</span><span class="chip">Claude Sonnet 5</span><span class="chip">Claude Opus 5.5</span></div>
-              </div>
-              <div class="mix-col local fx-up" data-show="2">
-                <h3>このパソコンの中のAI</h3>
-                <p>このパソコンの中だけで動くAI。今回はテストの案づくり、弱点さがし、見落とし確認に。</p>
-                <div class="chips"><span class="chip">Gemma 4 12B</span></div>
-              </div>
+              <p class="note" data-style="margin: 10px 0 0">実演の記録（アプリに残る開始・終了の時刻）から作図。帯は仕事を受けてから終えるまで。</p>
             </div>
           </div>
         </div>
       </section>
 
       <!-- ============================================================ 06 確認 -->
-      <section class="scene" id="ch-check" data-style="--len: 440vh" data-no="06" data-title="確認" data-steps="0.06,0.3,0.52,0.74" aria-labelledby="h-check">
+      <section class="scene" id="ch-check" data-real data-style="--len: 440vh" data-no="06" data-title="確認" data-steps="0.06,0.3,0.52,0.74" aria-labelledby="h-check">
         <div class="stage">
           <div class="footage-layer dim" data-show="0-1" data-style="--fx: 30%; --fy: 50%; --zoom: 0.25">
             <video muted playsinline loop preload="none" data-poster="/media/code.jpg" data-src="/media/code.mp4" aria-hidden="true"></video>
@@ -446,20 +502,20 @@
           <span class="rec" data-show="4">実際の画面 <b>実演の直後に収録</b></span>
 
           <div class="beat">
-            <p class="chapter-tag"><b>06</b>確認 CHECK</p>
+            <p class="chapter-tag"><b>06</b>確認 CHECK <span class="real-tag">実演 REAL</span></p>
             <h2 class="headline" id="h-check" data-style="margin-bottom: 32px">作る 確かめる<br /><span class="em">やり直す</span></h2>
             <ol class="flow">
-              <li data-show="1-1"><b>作る</b><small>作る担当のAIが、保存のしかたを直す</small></li>
-              <li data-show="2-2"><b>チェック</b><small>チェック部のAIが、別の目で確かめる</small></li>
-              <li class="redo" data-show="3-3"><b>やり直しを頼む</b><small>足りないテストを足すよう、リーダーが1回だけ頼む</small></li>
-              <li data-show="4"><b>もう一度確かめる</b><small>セキュリティ部が、直した後をあらためて調べる</small></li>
+              <li data-show="1-1"><b>作る</b><small>作る担当が保存のしかたを直す</small></li>
+              <li data-show="2-2"><b>チェック</b><small>別のAIが別の目で確かめる</small></li>
+              <li class="redo" data-show="3-3"><b>やり直しを頼む</b><small>足りないテストをリーダーが1回だけ頼む</small></li>
+              <li data-show="4"><b>もう一度確かめる</b><small>直した後をあらためて調べる</small></li>
             </ol>
           </div>
         </div>
       </section>
 
       <!-- ============================================================ 07 完成 -->
-      <section class="scene" id="ch-done" data-style="--len: 360vh" data-no="07" data-title="完成" data-steps="0.08,0.32,0.56" data-dim="1" aria-labelledby="h-done">
+      <section class="scene" id="ch-done" data-real data-style="--len: 360vh" data-no="07" data-title="完成" data-steps="0.08,0.32,0.56" data-dim="1" aria-labelledby="h-done">
         <div class="stage">
           <div class="footage-layer" data-style="--fx: 45%; --fy: 45%; --zoom: 0.2">
             <video muted playsinline loop preload="none" data-poster="/media/final.jpg" data-src="/media/final.mp4" aria-hidden="true"></video>
@@ -468,12 +524,12 @@
           <span class="rec">リーダーの最終報告 · <b>実演の直後に収録</b></span>
 
           <div class="beat" data-show="0-0">
-            <p class="chapter-tag"><b>07</b>完成 RESULT</p>
-            <p class="title" data-style="max-width: 560px">最後にリーダーが、誰が何をしたかをまとめて報告する</p>
+            <p class="chapter-tag"><b>07</b>完成 RESULT <span class="real-tag">実演 REAL</span></p>
+            <p class="headline">最後は<br />リーダーが報告</p>
           </div>
 
           <div class="beat" data-show="1">
-            <p class="chapter-tag"><b>07</b>完成 RESULT</p>
+            <p class="chapter-tag"><b>07</b>完成 RESULT <span class="real-tag">実演 REAL</span></p>
             <h2 class="display fx-slam" data-show="1" id="h-done">完成</h2>
             <p class="lead" data-style="margin-top: 12px">お願いを送ってから最終報告まで <b data-style="color: var(--ink)">36分32秒</b></p>
 
@@ -494,7 +550,7 @@
 
             <div class="stats fx-up" data-show="3" data-style="margin-top: 28px">
               <div class="stat"><b>3<small>部署</small></b><span>開発・セキュリティ・チェック</span></div>
-              <div class="stat"><b>6<small>人</small></b><span>同時に動いたAIの最大</span></div>
+              <div class="stat"><b class="em">6<small>体</small></b><span>同時に動いたAIの最大</span></div>
               <div class="stat"><b>15<small>件</small></b><span>AIが受け持った仕事（1件は途中で止まり、やり直し）</span></div>
               <div class="stat"><b>1<small>回</small></b><span>やり直しを頼んだ回数</span></div>
             </div>
@@ -513,30 +569,30 @@
 
           <div class="beat">
             <p class="chapter-tag"><b>08</b>安心 CONTROL</p>
-            <h2 class="headline" id="h-safe" data-style="margin-bottom: 32px">任せても<br /><span class="em">決めるのは人</span></h2>
+            <h2 class="headline" id="h-safe" data-style="margin-bottom: 32px">何体いても<br /><span class="em">決めるのは人</span></h2>
             <div class="cards">
               <a class="card fx-up" data-show="1" href="/local-first-security/">
                 <span class="num">01</span>
                 <h3>記録はこのパソコンに</h3>
-                <p>やりとりや進み具合は、このパソコンの中に保存。ネットのAIへ送るのは、その回の仕事に必要な内容だけ。</p>
+                <p>送るのは その仕事に必要な分だけ</p>
                 <span class="more">保存と送信のくわしい話 →</span>
               </a>
               <a class="card fx-up" data-show="1" href="/managed-harness/" data-style="transition-delay: 0.08s">
                 <span class="num">02</span>
                 <h3>大事な操作は先に確認</h3>
-                <p>ファイルの書き換えやコマンドの実行を、確認してから進める設定にできる。何をしたかは画面に残る。</p>
+                <p>書き換えや実行は 確かめてから進められる</p>
                 <span class="more">確認と記録のしくみ →</span>
               </a>
               <a class="card fx-up" data-show="1" href="/providers/" data-style="transition-delay: 0.16s">
                 <span class="num">03</span>
                 <h3>AIは選べる 混ぜられる</h3>
-                <p>ネットのAIも、このパソコンの中のAIも。仕事ごと、部署ごとに使い分けられる。</p>
+                <p>ネットのAIも このパソコンの中のAIも</p>
                 <span class="more">使えるAIの一覧 →</span>
               </a>
               <a class="card fx-up" data-show="1" href="https://github.com/Robbits-CO-LTD/sprint-coder" data-style="transition-delay: 0.24s">
                 <span class="num">04</span>
                 <h3>中身はすべて公開</h3>
-                <p>無料で使え、作りもすべて公開（オープンソース・MITライセンス）。株式会社Robbitsが開発・運営。</p>
+                <p>無料 オープンソース（MITライセンス）· 株式会社Robbits</p>
                 <span class="more">GitHubで見る →</span>
               </a>
             </div>
@@ -547,14 +603,15 @@
 
     <!-- ============================================================ 始動 -->
     <section class="finale" id="start" aria-labelledby="h-start">
-      <div class="footage-layer">
-        <video muted playsinline loop preload="none" data-poster="/media/hero.jpg" data-src="/media/hero.mp4" aria-hidden="true"></video>
-      </div>
-      <div class="scrim"></div>
+      <div class="ghost-word" aria-hidden="true">100</div>
       <div class="shell finale-inner">
+        <div class="finale-main">
+        <img class="finale-swarm" src="/assets/swarm-v1.svg" alt="" width="600" height="640" loading="lazy" />
+        <span class="tag-fig" aria-hidden="true">図 · 映像ではありません</span>
         <p class="chapter-tag"><b>09</b>始動 GET STARTED</p>
-        <h2 class="display" id="h-start">今すぐ<br /><span class="em">動かす</span></h2>
-        <p class="lead" data-style="max-width: 640px">無料のデスクトップアプリ。下のボタンから正式版 0.6.0 を入手できます。ネットのAIを使うと、その会社の利用料がかかる場合があります。</p>
+        <h2 class="display" id="h-start">今すぐ<br /><span class="em">始動</span></h2>
+        <p class="title">1体から 最大100体まで</p>
+        <p class="lead" data-style="max-width: 640px">無料のデスクトップアプリ 正式版 0.6.0</p>
 
         <div class="dl" role="group" aria-label="正式版 0.6.0 のダウンロード">
           <a data-os="win" href="https://github.com/Robbits-CO-LTD/sprint-coder/releases/download/v0.6.0/Sprint-Coder-Installer-0.6.0.exe">
@@ -568,7 +625,7 @@
           </a>
         </div>
         <p class="note" data-style="max-width: 760px; margin: -8px 0 0">
-          Windows版は署名がないため、初回に警告が出ることがあります。配布元（GitHub の Robbits-CO-LTD）を確かめてから実行してください。このページの映像は、2026年10月20日時点の開発中buildで収録したもので、正式版 0.6.0 とは画面が異なる場合があります。変更内容と過去の試作版は<a href="/releases/">リリース案内</a>で確認できます。
+          Windows版は署名がないため、初回に警告が出ることがあります。配布元（GitHub の Robbits-CO-LTD）を確かめてから実行してください。映像は2026年10月20日時点の開発中の版で収録したもので、正式版 0.6.0 とは画面が異なる場合があります。ネットのAIを使うと、その会社の利用料がかかる場合があります。100は同時に動かせる上限で、設定で上限を100にした場合です（標準は50）。変更内容と過去の試作版は<a href="/releases/">リリース案内</a>で確認できます。
         </p>
 
         <div class="hero-actions" data-style="margin-top: 0">
@@ -576,10 +633,11 @@
           <a class="btn" href="https://github.com/Robbits-CO-LTD/sprint-coder">GitHubで見る</a>
           <a class="btn" href="/releases/">ほかの形式・過去の試作版</a>
         </div>
+        </div>
 
         <a class="watch" href="/media/promo-720.mp4" data-open-promo>
-          <span class="thumb"><img src="/media/promo.jpg" alt="" loading="lazy" width="1600" height="900" /></span>
-          <span><b>フル版を見る 4:02</b><span>お願いから完成までの実演を、1本の動画で。音が出ます。</span></span>
+          <span class="thumb"><img src="/media/promo.jpg" alt="" loading="lazy" width="1600" height="900" /><span class="rec">本物の実演 <b>4:02</b></span></span>
+          <span><b>フル版を見る 4:02</b><span>本物の実演（6体が同時に動いた回）を1本で。音が出ます。</span></span>
         </a>
       </div>
     </section>
@@ -614,7 +672,7 @@
         <source src="/media/promo-720.mp4" type="video/mp4" />
       </video>
       <div class="modal-bar">
-        <span>実際のアプリと実際のAIの実行を収録。早送りの場面は画面に倍率を表示しています。</span>
+        <span>実際のアプリと実際のAIの実行を収録（同時に動いたのは最大6体）。早送りの場面は画面に倍率を表示しています。</span>
         <button class="btn btn-sm" type="button" data-close>閉じる</button>
       </div>
     </dialog>
