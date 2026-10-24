@@ -709,7 +709,11 @@ import {
   MANAGER_MCP_SYSTEM_PROMPT,
   WORKER_MCP_SYSTEM_PROMPT,
   WORKER_PROVIDER_TOOLS,
+  decodeTeamModelCursor,
+  encodeTeamModelCursor,
   executeTeamTool,
+  teamModelListingDigest,
+  teamToolError,
   type ExecuteTeamToolOptions,
 } from './team-tools';
 import {
@@ -8019,8 +8023,33 @@ export class IpcRouter {
   private async listTeamModelCandidates(
     input: Parameters<NonNullable<ExecuteTeamToolOptions['listModelCandidates']>>[0],
   ): Promise<unknown> {
-    await this.refreshModelCatalog();
-    const result = this.modelCatalog.query(
+    // A continuation page is answered from the catalog the first page was, without re-probing
+    // every Provider (#939, same as #906). The cursor carries that catalog's identity and
+    // revision, so a continuation after any other first page (the model picker, a Team hire, a
+    // Manager in the same Task) or a restart rebuilt it is refused instead of being sliced from
+    // a different catalog at the old offset. The Leader does not compare revisions itself. The
+    // search conditions and the Team model restriction decide which rows the offset counts, so a
+    // change to either (a restriction is saved without a new revision) refuses the cursor too.
+    let catalogCursor: string | null = null;
+    if (input.cursor === null) await this.refreshModelCatalog();
+    const allowedModelKeys = this.teamModelAllowedKeys();
+    const conditionDigest = teamModelListingDigest(input, allowedModelKeys);
+    if (input.cursor !== null) {
+      const decoded = decodeTeamModelCursor(input.cursor);
+      if (
+        decoded === null ||
+        decoded.catalogId !== this.modelCatalog.instanceId ||
+        decoded.revision !== this.modelCatalog.revision ||
+        decoded.conditionDigest !== conditionDigest
+      )
+        return teamToolError(
+          new Error(
+            'This team_list_models cursor is no longer valid: the model catalog, the Team model restriction, or the search conditions changed, or the cursor is malformed. Call team_list_models again without cursor.',
+          ),
+        );
+      catalogCursor = decoded.cursor;
+    }
+    const page = this.modelCatalog.query(
       {
         taskId: input.taskId,
         text: input.text,
@@ -8029,11 +8058,18 @@ export class IpcRouter {
         accessTypes: [],
         capabilities: [...input.capabilities],
         availableOnly: true,
-        cursor: input.cursor,
+        cursor: catalogCursor,
         limit: input.limit,
       },
-      this.teamModelAllowedKeys(),
+      allowedModelKeys,
     );
+    const result = {
+      ...page,
+      nextCursor: encodeTeamModelCursor(
+        { catalogId: this.modelCatalog.instanceId, revision: page.revision, conditionDigest },
+        page.nextCursor,
+      ),
+    };
     return process.env['SPRINT_CODER_TEAM_CODEX_ONLY'] === '1'
       ? {
           ...result,
