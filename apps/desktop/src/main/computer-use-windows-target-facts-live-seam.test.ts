@@ -1256,7 +1256,9 @@ describe.skipIf(!onWindows || (build === null && !ci))(
               )
               .join('\n')
               .slice(0, 8000);
-            throw new Error(`Target facts seam compilation failed\n${diagnostics}`, { cause: error });
+            throw new Error(`Target facts seam compilation failed\n${diagnostics}`, {
+              cause: error,
+            });
           }
         };
         const fixtureExecutable = join(scratch, 'sprint-coder-computer-use-fixture.exe');

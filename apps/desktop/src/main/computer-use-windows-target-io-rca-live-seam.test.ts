@@ -6,14 +6,16 @@ import { describe, expect, it } from 'vitest';
 
 // #940-1: the real ServePipe reader/consumer and real named-pipe framing. Held workers must not
 // delay Stop/Close, publish stale results, or admit another synchronous target operation.
-// Gates are injected only into generated test source; the only enumerated window is our fixture.
+// Gates are injected only into generated test source; only our own fixture windows are enumerated.
 const nativeDirectory = join(__dirname, '../../computer-use-native');
 const host = readFileSync(join(nativeDirectory, 'computer_use_windows_host.cc'), 'utf8');
 const measurement = '  out->measured = MeasureWindowsTargetFacts(pid, nullptr, context);';
 const enumeration = 'EnumWindows(CollectWindowsV2TopLevel, reinterpret_cast<LPARAM>(&windows))';
 const contextFactory =
-  '  WindowsTargetFactsContext context = cached.has_value() ? *cached : CurrentWindowsTargetFactsContext(';
+  '  WindowsTargetFactsContext context = had_cached_context ? *cached : CurrentWindowsTargetFactsContext(';
 const completion = '        // All measured handles and COM objects are gone';
+const adoption =
+  '    // Stop and adoption share this lock; a late result cannot advance the generation.';
 const consumer =
   '    if (!HandlePipeRequest(pipe, probe, request, &handshaken, queued_stop_serial)) {';
 
@@ -31,9 +33,10 @@ function instrumentedHost(): string {
   source = replaceOnce(
     source,
     contextFactory,
-    `  if (!cached.has_value()) Sc940ContextGate();\n${contextFactory}`,
+    `  if (!had_cached_context) Sc940ContextGate();\n${contextFactory}`,
   );
   source = replaceOnce(source, completion, `        Sc940CompletionGate();\n${completion}`);
+  source = replaceOnce(source, adoption, `    Sc940AdoptionGate();\n${adoption}`);
   source = replaceOnce(
     source,
     consumer,
@@ -134,6 +137,7 @@ namespace {
 void Sc940MeasureGate(std::uint32_t pid);
 void Sc940ContextGate();
 void Sc940CompletionGate();
+void Sc940AdoptionGate();
 void Sc940ConsumerGate(std::uint8_t request);
 void Sc940SyncSessionProbe();
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter);
@@ -146,13 +150,19 @@ BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter);
 namespace {
 HANDLE gate_entered = nullptr;
 HANDLE gate_release = nullptr;
-DWORD fixture_pid = 0;
-HWND fixture_window = nullptr;
+HANDLE adoption_entered = nullptr;
+std::array<DWORD, 2> fixture_pids{};
+std::array<HWND, 2> fixture_windows{};
+unsigned fixture_count = 0;
+unsigned enumeration_count = 0;
+DWORD held_measure_pid = 0;
 enum class HoldPoint { kNone, kMeasure, kContext, kCompletion, kConsumer };
 std::atomic<HoldPoint> hold_point{HoldPoint::kNone};
+std::atomic<bool> hold_deadline_adoption{false};
 std::atomic<bool> gate_timed_out{false};
 std::atomic<bool> wrong_measurement{false};
 std::atomic<unsigned> measurement_calls{0};
+std::atomic<unsigned> context_factory_calls{0};
 std::atomic<unsigned> synchronous_session_probes{0};
 
 void Require(bool condition, const char *reason) {
@@ -167,27 +177,41 @@ void Sc940Gate(HoldPoint point) {
 }
 
 void Sc940MeasureGate(std::uint32_t pid) {
-  if (pid != fixture_pid) {
+  if (std::find(fixture_pids.begin(), fixture_pids.begin() + fixture_count, pid) ==
+      fixture_pids.begin() + fixture_count) {
     wrong_measurement.store(true);
     throw std::runtime_error("foreign_measurement");
   }
   measurement_calls.fetch_add(1);
-  Sc940Gate(HoldPoint::kMeasure);
+  if (pid == held_measure_pid) Sc940Gate(HoldPoint::kMeasure);
 }
 
-void Sc940ContextGate() { Sc940Gate(HoldPoint::kContext); }
+void Sc940ContextGate() {
+  context_factory_calls.fetch_add(1);
+  Sc940Gate(HoldPoint::kContext);
+}
 void Sc940CompletionGate() { Sc940Gate(HoldPoint::kCompletion); }
+void Sc940AdoptionGate() {
+  if (!hold_deadline_adoption.load()) return;
+  SetEvent(adoption_entered);
+  if (WaitForSingleObject(gate_release, 20'000) != WAIT_OBJECT_0)
+    gate_timed_out.store(true);
+}
 void Sc940ConsumerGate(std::uint8_t request) {
   if (request == 2) Sc940Gate(HoldPoint::kConsumer);
 }
 void Sc940SyncSessionProbe() { synchronous_session_probes.fetch_add(1); }
 
 BOOL Sc940EnumerateOwnedWindow(WNDENUMPROC callback, LPARAM parameter) {
-  DWORD owner = 0;
-  if (!IsWindow(fixture_window) ||
-      GetWindowThreadProcessId(fixture_window, &owner) == 0 || owner != fixture_pid)
-    return FALSE;
-  return callback(fixture_window, parameter);
+  if (enumeration_count == 0 || enumeration_count > fixture_count) return FALSE;
+  for (unsigned index = 0; index < enumeration_count; ++index) {
+    DWORD owner = 0;
+    if (!IsWindow(fixture_windows[index]) ||
+        GetWindowThreadProcessId(fixture_windows[index], &owner) == 0 || owner != fixture_pids[index] ||
+        callback(fixture_windows[index], parameter) == FALSE)
+      return FALSE;
+  }
+  return TRUE;
 }
 
 struct FixtureReady { DWORD pid; UINT_PTR window; };
@@ -229,9 +253,10 @@ sprint_coder::computer_use::FrameId Id(std::uint8_t byte) {
 struct RcaRun {
   ScopedKernelHandle entered{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   ScopedKernelHandle release{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+  ScopedKernelHandle adopting{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   ScopedKernelHandle finished{CreateEventW(nullptr, TRUE, FALSE, nullptr)};
   ScopedKernelHandle job;
-  ScopedKernelHandle child;
+  std::array<ScopedKernelHandle, 2> children;
   ScopedKernelHandle server{INVALID_HANDLE_VALUE};
   ScopedKernelHandle client{INVALID_HANDLE_VALUE};
   std::thread serving;
@@ -247,9 +272,10 @@ struct RcaRun {
   bool worker_idle = false;
 
   RcaRun() {
-    Require(entered.value && release.value && finished.value, "event_creation");
+    Require(entered.value && release.value && adopting.value && finished.value, "event_creation");
     gate_entered = entered.value;
     gate_release = release.value;
+    adoption_entered = adopting.value;
     job.value = CreateJobObjectW(nullptr, nullptr);
     Require(job.value != nullptr, "job_creation");
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
@@ -269,7 +295,11 @@ struct RcaRun {
   }
 
   void StartFixture() {
-    const std::wstring suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    Require(fixture_count < children.size(), "fixture_limit");
+    const unsigned index = fixture_count;
+    ScopedKernelHandle &child = children[index];
+    const std::wstring suffix = std::to_wstring(GetCurrentProcessId()) + L"-" +
+                                std::to_wstring(GetTickCount64()) + L"-" + std::to_wstring(index);
     const std::wstring mapping_name = L"Local\\sc940-map-" + suffix;
     const std::wstring event_name = L"Local\\sc940-ready-" + suffix;
     ScopedKernelHandle mapping(CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
@@ -296,8 +326,10 @@ struct RcaRun {
     const FixtureReady found = *shared;
     UnmapViewOfFile(shared);
     Require(found.pid == process.dwProcessId && found.window != 0, "fixture_ready_binding");
-    fixture_pid = found.pid;
-    fixture_window = reinterpret_cast<HWND>(found.window);
+    fixture_pids[index] = found.pid;
+    fixture_windows[index] = reinterpret_cast<HWND>(found.window);
+    ++fixture_count;
+    enumeration_count = fixture_count;
     Require(WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT, "fixture_stays_alive");
   }
 
@@ -432,6 +464,25 @@ struct RcaRun {
            ReadOptionalJsonBoolean(body, "accepted", &accepted) && !accepted;
   }
 
+  bool ListTargets(unsigned id, std::uint64_t *generation, std::string *rows, bool *truncated) {
+    std::lock_guard<std::mutex> lock(replies_mutex);
+    const auto found = replies.find(id);
+    if (found == replies.end()) return false;
+    const Frame &frame = found->second;
+    const std::string body(frame.metadata.begin(), frame.metadata.end());
+    const std::string_view prefix = "\"targets\":[";
+    const std::size_t begin = body.find(prefix);
+    if (frame.header.message_type != static_cast<std::uint16_t>(MessageType::kProbeResult) ||
+        frame.header.request_id.bytes != Id(static_cast<std::uint8_t>(id)).bytes ||
+        frame.header.session_id.bytes != Id(7).bytes || !frame.binary.empty() ||
+        body.size() > kMaxMetadataBytes || begin == std::string::npos || !body.ends_with("]}") ||
+        !ReadJsonUint64(body, "generation", generation) ||
+        !ReadOptionalJsonBoolean(body, "truncated", truncated))
+      return false;
+    *rows = body.substr(begin + prefix.size(), body.size() - begin - prefix.size() - 2);
+    return true;
+  }
+
   bool PreflightDenied(unsigned id) {
     std::lock_guard<std::mutex> lock(replies_mutex);
     const auto found = replies.find(id);
@@ -467,10 +518,12 @@ struct RcaRun {
     // The detached production worker must release its slot/resources before our fixture is killed.
     worker_idle = WaitWorkerIdle(15'000);
     if (job.value != nullptr) TerminateJobObject(job.value, 0);
-    if (child.value != nullptr) {
-      if (WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT) TerminateProcess(child.value, 0);
-      child_exited = WaitForSingleObject(child.value, 5000) == WAIT_OBJECT_0;
-    }
+    child_exited = true;
+    for (auto &child : children)
+      if (child.value != nullptr) {
+        if (WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT) TerminateProcess(child.value, 0);
+        child_exited = WaitForSingleObject(child.value, 5000) == WAIT_OBJECT_0 && child_exited;
+      }
     for (auto &entry : sessions) ReleaseWindowsSessionResources(&entry.second);
     sessions.clear();
     SetEvent(finished.value);
@@ -511,32 +564,62 @@ void AssertBusyRefusals(RcaRun &run) {
   Require(WindowsTargetListWorkerRunning().load(), "busy_worker_slot_retained");
 }
 
+bool HasContextCandidate() {
+  auto &control = WindowsTargetListControl();
+  std::lock_guard lock(control.stop_mutex);
+  return control.context_candidate != nullptr;
+}
+
 int Diagnose(std::wstring_view scenario) {
   const bool healthy = scenario == L"healthy";
   const bool deadline = scenario == L"deadline";
-  const bool context = scenario == L"context-cancel";
+  const bool deadline_race = scenario == L"deadline-stop-race";
+  const bool two_fixtures = deadline || deadline_race;
+  const bool cold_deadline = scenario == L"cold-context-deadline";
+  const bool context = scenario == L"context-cancel" || cold_deadline;
   const bool queued = scenario == L"queued-stop";
   const bool completion_race = scenario == L"completion-race";
   const bool same_epoch_close = scenario == L"measure-same-epoch-close";
   const bool close_only = scenario == L"measure-close" || same_epoch_close;
-  const char *label = healthy ? "healthy" : deadline ? "deadline" : context ? "context-cancel" :
-      queued ? "queued-stop" : completion_race ? "completion-race" :
+  const char *label = healthy ? "healthy" : deadline ? "deadline" :
+      deadline_race ? "deadline-stop-race" : cold_deadline ? "cold-context-deadline" :
+      context ? "context-cancel" : queued ? "queued-stop" : completion_race ? "completion-race" :
       same_epoch_close ? "measure-same-epoch-close" : close_only ? "measure-close" : "measure-cancel";
   RcaRun run;
-  hold_point.store(healthy ? HoldPoint::kNone : context ? HoldPoint::kContext :
-                   queued ? HoldPoint::kConsumer : completion_race ? HoldPoint::kCompletion : HoldPoint::kMeasure);
   ULONGLONG stop_ms = 0, list_ms = 0;
   bool busy_checked = false;
   bool generation_unchanged = false;
+  bool partial_preserved = false;
+  bool cold_context_reused = false;
   try {
     run.StartFixture();
+    if (two_fixtures) run.StartFixture();
     run.StartPipe(same_epoch_close);
     run.Send(MessageType::kHandshake, 1, "{\"protocolVersion\":1,\"apiVersion\":2}");
     Require(run.Wait(1, 5000) && run.ProbeReply(1, MessageType::kHandshakeResult), "handshake");
     Require(!WindowsV2FactsContextCache().has_value(), "initial_context_empty");
+    std::string completed_row;
+    if (two_fixtures) {
+      // A's real row is the control. No verdict or eligibility is invented for our own child.
+      enumeration_count = 1;
+      hold_point.store(HoldPoint::kNone);
+      run.Send(MessageType::kProbe, 30, "{\"operation\":\"list_targets\"}");
+      std::uint64_t baseline_generation = 0;
+      bool truncated = true;
+      Require(run.Wait(30, 7000) && run.ListTargets(30, &baseline_generation, &completed_row, &truncated) &&
+                  !truncated && !completed_row.empty(), "completed_fixture_baseline");
+      Require(run.WaitWorkerIdle(1000) && WindowsV2FactsContextCache().has_value() &&
+                  measurement_calls.load() == 1, "baseline_context_committed");
+      enumeration_count = 2;
+    }
+    held_measure_pid = fixture_pids[two_fixtures ? 1 : 0];
+    hold_point.store(healthy ? HoldPoint::kNone : context ? HoldPoint::kContext :
+                     queued ? HoldPoint::kConsumer : completion_race ? HoldPoint::kCompletion : HoldPoint::kMeasure);
+    hold_deadline_adoption.store(deadline_race);
     const std::uint64_t generation_before = windows_v2_list_generation;
     const ULONGLONG list_started = GetTickCount64();
     run.Send(MessageType::kProbe, 2, "{\"operation\":\"list_targets\"}");
+    ULONGLONG gate_started = 0;
     if (healthy) {
       Require(run.Wait(2, 7000) && run.ProbeReply(2, MessageType::kProbeResult), "healthy_list");
       Require(run.WaitWorkerIdle(1000), "healthy_worker_idle");
@@ -544,20 +627,62 @@ int Diagnose(std::wstring_view scenario) {
       Require(windows_v2_list_generation == generation_before + 1, "healthy_generation_committed");
     } else {
       Require(WaitForSingleObject(run.entered.value, 15'000) == WAIT_OBJECT_0, "fault_gate_entered");
+      gate_started = GetTickCount64();
       Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "fault_gate_stays_closed");
       Require(WindowsTargetListWorkerRunning().load() == !queued, "worker_ownership_at_gate");
     }
     if (deadline) {
+      std::uint64_t partial_generation = 0;
+      std::string partial_rows;
+      bool truncated = false;
       Require(run.Wait(2, static_cast<DWORD>(kWindowsListTargetsBudgetMs + 1000)) &&
-                  run.Error(2, "list_targets_unavailable"), "deadline_list_refused");
+                  run.ListTargets(2, &partial_generation, &partial_rows, &truncated), "deadline_partial_list");
       list_ms = GetTickCount64() - list_started;
       Require(list_ms >= kWindowsListTargetsBudgetMs && list_ms <= kWindowsListTargetsBudgetMs + 1500,
               "deadline_bounded");
+      Require(truncated && partial_generation == generation_before + 1 &&
+                  partial_rows == completed_row + "," + std::string(kWindowsV2UnresolvableRow) &&
+                  measurement_calls.load() == 3, "completed_row_preserved_unfinished_anonymous");
+      partial_preserved = true;
       Require(WindowsTargetListWorkerRunning().load(), "deadline_keeps_the_worker_slot");
       AssertBusyRefusals(run);
       busy_checked = true;
+    } else if (deadline_race) {
+      // B remains held. Stop wins after the consumer's deadline but before its adoption lock.
+      Require(WaitForSingleObject(run.adopting.value, static_cast<DWORD>(kWindowsListTargetsBudgetMs + 1000)) ==
+                  WAIT_OBJECT_0, "deadline_adoption_gate_entered");
+      list_ms = GetTickCount64() - list_started;
+      Require(list_ms >= kWindowsListTargetsBudgetMs && !run.Wait(2, 0) &&
+                  WindowsTargetListWorkerRunning().load() &&
+                  WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT, "deadline_adoption_still_held");
+    } else if (cold_deadline) {
+      Require(run.Wait(2, static_cast<DWORD>(kWindowsListTargetsBudgetMs + 1000)) &&
+                  run.Error(2, "list_targets_unavailable"), "cold_context_initial_deadline");
+      list_ms = GetTickCount64() - list_started;
+      Require(list_ms >= kWindowsListTargetsBudgetMs && list_ms <= kWindowsListTargetsBudgetMs + 1500 &&
+                  windows_v2_list_generation == generation_before && !WindowsV2FactsContextCache().has_value() &&
+                  context_factory_calls.load() == 1 && measurement_calls.load() == 0,
+              "cold_context_initial_unadopted");
+      generation_unchanged = true;
+      // The context itself takes more than six seconds, with no Stop and no second worker.
+      while (GetTickCount64() < gate_started + 7000) Sleep(10);
+      Require(WindowsTargetListWorkerRunning().load() && !HasContextCandidate(), "cold_context_keeps_single_worker");
+      hold_point.store(HoldPoint::kNone);
+      SetEvent(run.release.value);
+      Require(run.WaitWorkerIdle(15'000) && !WindowsV2FactsContextCache().has_value() &&
+                  HasContextCandidate() && windows_v2_list_generation == generation_before &&
+                  context_factory_calls.load() == 1 && measurement_calls.load() == 0,
+              "late_context_is_candidate_only");
+      run.Send(MessageType::kProbe, 20, "{\"operation\":\"list_targets\"}");
+      Require(run.Wait(20, 7000) && run.ProbeReply(20, MessageType::kProbeResult) && run.WaitWorkerIdle(1000) &&
+                  WindowsV2FactsContextCache().has_value() && !HasContextCandidate() &&
+                  context_factory_calls.load() == 1 && windows_v2_list_generation == generation_before + 1,
+              "explicit_retry_reuses_late_context");
+      cold_context_reused = true;
     }
-    Require(WaitForSingleObject(run.child.value, 0) == WAIT_TIMEOUT, "fixture_alive_before_stop");
+    for (const auto &child : run.children)
+      if (child.value != nullptr)
+        Require(WaitForSingleObject(child.value, 0) == WAIT_TIMEOUT, "fixture_alive_before_stop");
     const std::uint64_t serial_before = WindowsTargetListControl().stop_serial.load();
     const ULONGLONG stop_started = GetTickCount64();
     const std::uint64_t close_epoch = close_only ? 2 : 3;
@@ -570,40 +695,47 @@ int Diagnose(std::wstring_view scenario) {
       run.Send(MessageType::kProbe, 4, "{\"operation\":\"close_session\",\"cancelEpoch\":3}");
     }
     if (queued) {
-      // The reader consumed Stop while the consumer was held BEFORE entering the queued list.
       Require(!WindowsTargetListWorkerRunning().load() && measurement_calls.load() == 0,
               "queued_stop_has_no_worker");
+    }
+    if (queued || deadline_race) {
       hold_point.store(HoldPoint::kNone);
+      hold_deadline_adoption.store(false);
       SetEvent(run.release.value);
     }
     if (!close_only)
       Require(run.Wait(3, 1000) && run.Receipt(3, MessageType::kDispatchResult, "canceled", 2),
-              "cancel_receipt_while_worker_held");
+              "cancel_receipt_within_budget");
     Require(run.Wait(4, 1000) && run.Receipt(4, MessageType::kProbeResult, "closed", close_epoch),
-            "close_receipt_while_worker_held");
+            "close_receipt_within_budget");
     stop_ms = GetTickCount64() - stop_started;
     Require(stop_ms < 1000, "stop_receipts_within_ack_budget");
     Require(cancellation_epoch.load() >= 2, "stop_reader_epoch_advanced");
     if (same_epoch_close) Require(cancellation_epoch.load() == 2, "same_epoch_close_used_stop_serial");
-    if (!healthy) {
-      Require(run.Wait(2, 1000) && run.Error(2, "list_targets_unavailable"), "stopped_list_refused");
-      generation_unchanged = windows_v2_list_generation == generation_before;
-      Require(generation_unchanged && !WindowsV2FactsContextCache().has_value(), "canceled_candidate_not_adopted");
-      if (!queued) {
+    if (!healthy && !cold_deadline) {
+      if (!deadline)
+        Require(run.Wait(2, 1000) && run.Error(2, "list_targets_unavailable"), "stopped_list_refused");
+      const std::uint64_t expected_generation = generation_before + (deadline ? 1 : 0);
+      generation_unchanged = !deadline && windows_v2_list_generation == generation_before;
+      Require(windows_v2_list_generation == expected_generation &&
+                  WindowsV2FactsContextCache().has_value() == two_fixtures && !HasContextCandidate(),
+              "stop_does_not_adopt_late_result");
+      if (!queued && !deadline_race) {
         Require(WaitForSingleObject(run.release.value, 0) == WAIT_TIMEOUT && WindowsTargetListWorkerRunning().load(),
                 "receipts_precede_worker_release");
       }
       hold_point.store(HoldPoint::kNone);
       SetEvent(run.release.value);
       Require(run.WaitWorkerIdle(15'000), "abandoned_worker_drained");
-      Require(windows_v2_list_generation == generation_before && !WindowsV2FactsContextCache().has_value(),
+      Require(windows_v2_list_generation == expected_generation &&
+                  WindowsV2FactsContextCache().has_value() == two_fixtures && !HasContextCandidate(),
               "late_result_and_context_discarded");
       if (queued || context) Require(measurement_calls.load() == 0, "stopped_before_measurement");
-      // Recovery is a new explicit request after the abandoned worker has completely exited.
       run.Send(MessageType::kProbe, 20, "{\"operation\":\"list_targets\"}");
       Require(run.Wait(20, 7000) && run.ProbeReply(20, MessageType::kProbeResult), "fresh_list_recovers");
       Require(run.WaitWorkerIdle(1000) && WindowsV2FactsContextCache().has_value() &&
-                  windows_v2_list_generation == generation_before + 1, "fresh_candidate_committed_once");
+                  windows_v2_list_generation == expected_generation + 1, "fresh_candidate_committed_once");
+      if (context) Require(context_factory_calls.load() == 2, "canceled_context_is_measured_again");
     }
     Require(!wrong_measurement.load() && !gate_timed_out.load(), "owned_measurement_only");
     run.Cleanup();
@@ -611,6 +743,9 @@ int Diagnose(std::wstring_view scenario) {
     std::cout << "{\"case\":\"" << label << "\",\"stopSerialAdvanced\":true,\"stopMs\":" << stop_ms
               << ",\"listMs\":" << list_ms << ",\"busyChecked\":" << (busy_checked ? "true" : "false")
               << ",\"generationUnchangedOnRefusal\":" << (generation_unchanged ? "true" : "false")
+              << ",\"partialPreserved\":" << (partial_preserved ? "true" : "false")
+              << ",\"coldContextReused\":" << (cold_context_reused ? "true" : "false")
+              << ",\"fixtureCount\":" << fixture_count
               << ",\"recovered\":true,\"inputAttempts\":0,\"childExited\":true,\"threadsJoined\":true"
               << ",\"workerIdle\":true,\"watchdogFired\":false}\n";
     return 0;
@@ -635,8 +770,9 @@ describe('Windows target I/O RCA seam source', () => {
     expect(generated.split('  Sc940MeasureGate(pid);')).toHaveLength(2);
     expect(generated).not.toContain(enumeration);
     expect(generated).toContain(measurement);
-    expect(generated.split('  if (!cached.has_value()) Sc940ContextGate();')).toHaveLength(2);
+    expect(generated.split('  if (!had_cached_context) Sc940ContextGate();')).toHaveLength(2);
     expect(generated.split('        Sc940CompletionGate();')).toHaveLength(2);
+    expect(generated.split('    Sc940AdoptionGate();')).toHaveLength(2);
     expect(
       generated.split('    Sc940ConsumerGate(request.header.request_id.bytes[0]);'),
     ).toHaveLength(2);
@@ -650,7 +786,7 @@ const build = compiler();
 describe.skipIf(
   process.platform !== 'win32' || (build === null && process.env['CI'] === undefined),
 )('Windows target I/O live seam (#940-1, bounded list worker)', () => {
-  it('keeps Stop responsive and rejects stale worker results across eight owned scenarios', async () => {
+  it('bounds Stop and list responses while preserving usable work across ten owned scenarios', async () => {
     expect(build, 'MSVC is required on Windows CI').not.toBeNull();
     const root = mkdtempSync(join(tmpdir(), 'computer-use-target-io-rca-'));
     try {
@@ -719,6 +855,8 @@ describe.skipIf(
         'measure-same-epoch-close',
         'context-cancel',
         'deadline',
+        'cold-context-deadline',
+        'deadline-stop-race',
         'queued-stop',
         'completion-race',
       ]) {
@@ -731,7 +869,10 @@ describe.skipIf(
           case: scenario,
           stopSerialAdvanced: true,
           busyChecked: scenario === 'deadline',
-          generationUnchangedOnRefusal: scenario !== 'healthy',
+          generationUnchangedOnRefusal: scenario !== 'healthy' && scenario !== 'deadline',
+          partialPreserved: scenario === 'deadline',
+          coldContextReused: scenario === 'cold-context-deadline',
+          fixtureCount: scenario === 'deadline' || scenario === 'deadline-stop-race' ? 2 : 1,
           recovered: true,
           inputAttempts: 0,
           childExited: true,

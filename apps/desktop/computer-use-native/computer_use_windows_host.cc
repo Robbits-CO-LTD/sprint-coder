@@ -3821,6 +3821,8 @@ struct WindowsTargetListState {
   std::mutex stop_mutex;
   std::atomic<std::uint64_t> stop_serial{0};
   std::atomic<bool> running{false};
+  std::shared_ptr<const WindowsTargetFactsContext> context_candidate;
+  std::uint64_t context_stop_serial = 0;
 };
 
 WindowsTargetListState &WindowsTargetListControl() {
@@ -4225,19 +4227,63 @@ bool FinishWindowsV2ListResponse(std::string built, std::uint64_t generation,
 // list_targets (ADR v2 section 5.2): every top-level application window, judged per process, at most
 // kWindowsListTargetsRowLimit rows and kWindowsListTargetsRowBytes bytes of rows, within
 // kWindowsListTargetsBudgetMs.
-bool MeasureWindowsV2TargetList(std::uint64_t generation,
+struct WindowsTargetListPending {
+  std::mutex mutex;
+  std::condition_variable ready;
+  std::atomic<bool> abandoned{false};
+  ScopedKernelHandle thread;
+  bool done = false;
+  bool succeeded = false;
+  bool context_ready = false;
+  bool enumerated = false;
+  std::size_t remaining = 0;
+  WindowsV2ListRows progress{kWindowsListTargetsRowBytes};
+  std::string response;
+  std::string reason = "list_targets_unavailable";
+};
+
+// Called only by the consumer, with stop_mutex held. A context that finished after an earlier
+// response deadline is a candidate, not an active cache: only this new explicit request adopts it.
+void AdoptWindowsV2ContextCandidate(std::uint64_t expected_stop) {
+  auto &control = WindowsTargetListControl();
+  if (control.running.load(std::memory_order_acquire) || !control.context_candidate)
+    return;
+  if (control.context_stop_serial == expected_stop &&
+      control.stop_serial.load(std::memory_order_acquire) == expected_stop &&
+      !parent_process_dead.load(std::memory_order_acquire) &&
+      control.context_candidate->lineage_root_pid == windows_v2_main_pid &&
+      !WindowsV2FactsContextCache().has_value())
+    WindowsV2FactsContextCache() = *control.context_candidate;
+  control.context_candidate.reset();
+}
+
+bool MeasureWindowsV2TargetList(std::uint64_t generation, std::uint64_t expected_stop,
                                 const std::function<bool()> &still_valid,
-                                std::optional<WindowsTargetFactsContext> *measured_context,
+                                const std::function<bool()> &context_valid,
+                                WindowsTargetListPending *pending,
                                 std::string *response, std::string *reason) {
   using namespace sprint_coder::computer_use;
   // Without Main's pid there is no lineage root: nothing is enumerated or measured.
-  if (windows_v2_main_pid == 0 || !still_valid()) return false;
+  if (windows_v2_main_pid == 0 || !context_valid()) return false;
   const auto &cached = WindowsV2FactsContextCache();
-  WindowsTargetFactsContext context = cached.has_value() ? *cached : CurrentWindowsTargetFactsContext(
-      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), /*acceptance_mode=*/false, still_valid);
+  const bool had_cached_context = cached.has_value();
+  WindowsTargetFactsContext context = had_cached_context ? *cached : CurrentWindowsTargetFactsContext(
+      windows_v2_main_pid, WindowsV2SelfSignerThumbprint(), /*acceptance_mode=*/false, context_valid);
   if (context.lineage_root_pid == 0) {
     *reason = "list_targets_unavailable";
     return false;
+  }
+  if (!had_cached_context) {
+    auto candidate = std::make_shared<const WindowsTargetFactsContext>(context);
+    auto &control = WindowsTargetListControl();
+    std::lock_guard stop_lock(control.stop_mutex);
+    if (!context_valid()) return false;
+    control.context_candidate = std::move(candidate);
+    control.context_stop_serial = expected_stop;
+  }
+  {
+    std::lock_guard lock(pending->mutex);
+    pending->context_ready = true;
   }
   if (!still_valid()) return false;
   std::vector<HWND> windows;
@@ -4245,12 +4291,23 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation,
     *reason = "process_enumeration_unavailable";
     return false;
   }
-  // One judgement per process; std::nullopt for a process whose measurement ran past the budget.
+  // One judgement per process; a measurement that missed the budget has no selectable row.
   std::unordered_map<std::uint32_t, std::optional<std::shared_ptr<WindowsV2Judgement>>> judged;
   WindowsV2ListRows rows(kWindowsListTargetsRowBytes);
   bool truncated = false;
-  for (const HWND window : windows) {
+  std::size_t remaining = windows.size();
+  const auto publish = [&] {
+    std::lock_guard lock(pending->mutex);
+    if (pending->abandoned.load(std::memory_order_acquire)) return;
+    pending->progress = rows;
+    pending->remaining = remaining;
+    pending->enumerated = true;
+  };
+  for (std::size_t index = 0; index < windows.size(); ++index) {
+    remaining = windows.size() - index;
+    publish();
     if (!still_valid()) return false;
+    const HWND window = windows[index];
     if (rows.Full()) {
       truncated = true;
       break;
@@ -4318,24 +4375,13 @@ bool MeasureWindowsV2TargetList(std::uint64_t generation,
     if (!still_valid()) return false;
     rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));
   }
+  if (!truncated) remaining = 0;
+  publish();
   if (!still_valid()) return false;
   *response = WindowsV2ListResponse(generation, DenyRulesetVersion(TargetPlatform::kWin32),
                                     truncated || rows.Truncated(), rows);
-  if (!cached.has_value()) *measured_context = std::move(context);
   return true;
 }
-
-struct WindowsTargetListPending {
-  std::mutex mutex;
-  std::condition_variable ready;
-  std::atomic<bool> abandoned{false};
-  ScopedKernelHandle thread;
-  bool done = false;
-  bool succeeded = false;
-  std::optional<WindowsTargetFactsContext> measured_context;
-  std::string response;
-  std::string reason = "list_targets_unavailable";
-};
 
 bool ListWindowsTargets(std::string *response, std::string *reason,
                         std::optional<std::uint64_t> queued_stop_serial = std::nullopt) {
@@ -4348,22 +4394,27 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
     auto &control = WindowsTargetListControl();
     const std::uint64_t expected_stop = queued_stop_serial.value_or(
         control.stop_serial.load(std::memory_order_acquire));
+    {
+      std::lock_guard stop_lock(control.stop_mutex);
+      AdoptWindowsV2ContextCandidate(expected_stop);
+    }
     const ULONGLONG deadline = GetTickCount64() + kWindowsListTargetsBudgetMs;
     const std::uint64_t generation = windows_v2_list_generation + 1;
     auto pending = std::make_shared<WindowsTargetListPending>();
-    const auto still_valid = [pending, expected_stop, deadline] {
-      return !pending->abandoned.load(std::memory_order_acquire) &&
-             !parent_process_dead.load(std::memory_order_acquire) &&
-             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == expected_stop &&
+    const auto context_valid = [expected_stop] {
+      return !parent_process_dead.load(std::memory_order_acquire) &&
+             WindowsTargetListControl().stop_serial.load(std::memory_order_acquire) == expected_stop;
+    };
+    const auto still_valid = [pending, context_valid, deadline] {
+      return !pending->abandoned.load(std::memory_order_acquire) && context_valid() &&
              GetTickCount64() < deadline;
     };
     if (!still_valid() || control.running.exchange(true, std::memory_order_acq_rel))
       return false;
     try {
-      std::thread([pending, still_valid, generation] {
+      std::thread([pending, still_valid, context_valid, expected_stop, generation] {
         bool succeeded = false;
         std::string built;
-        std::optional<WindowsTargetFactsContext> measured_context;
         std::string failure = "list_targets_unavailable";
         try {
           struct Apartment {
@@ -4378,9 +4429,9 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
               std::lock_guard lock(pending->mutex);
               pending->thread.value = self;
             }
-            if (still_valid())
-              succeeded = MeasureWindowsV2TargetList(generation, still_valid, &measured_context,
-                                                    &built, &failure);
+            if (context_valid())
+              succeeded = MeasureWindowsV2TargetList(generation, expected_stop, still_valid, context_valid,
+                                                    pending.get(), &built, &failure);
           }
         } catch (...) {
           succeeded = false;
@@ -4390,13 +4441,12 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
           std::lock_guard lock(pending->mutex);
           if (still_valid()) {
             pending->succeeded = succeeded;
-            pending->measured_context = std::move(measured_context);
             pending->response = std::move(built);
             pending->reason = std::move(failure);
           }
           pending->done = true;
+          WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
         }
-        WindowsTargetListWorkerRunning().store(false, std::memory_order_release);
         pending->ready.notify_one();
       }).detach();
     } catch (...) {
@@ -4410,9 +4460,23 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
     std::lock_guard stop_lock(control.stop_mutex);
     if (!still_valid()) {
       pending->abandoned.store(true, std::memory_order_release);
-      if (pending->thread.value != nullptr)
+      // A response deadline does not cancel cold context initialization. It may finish off-lane
+      // and supply one pure candidate to the next explicit request. Stop always cancels it.
+      if (pending->thread.value != nullptr && (!context_valid() || pending->context_ready))
         CancelSynchronousIo(pending->thread.value);
-      return false;
+      if (!context_valid() || !pending->enumerated)
+        return false;
+      // Keep complete rows. The unfinished windows reveal only their anonymous refusal kind.
+      WindowsV2ListRows partial = pending->progress;
+      for (std::size_t index = 0; index < pending->remaining && !partial.Full(); ++index)
+        partial.push_back(WindowsV2RefusedRow(sprint_coder::computer_use::TargetVerdictKind::kUnresolvable));
+      if (!FinishWindowsV2ListResponse(
+          WindowsV2ListResponse(generation,
+              sprint_coder::computer_use::DenyRulesetVersion(sprint_coder::computer_use::TargetPlatform::kWin32),
+              /*truncated=*/true, partial), generation, response, reason))
+        return false;
+      AdoptWindowsV2ContextCandidate(expected_stop);
+      return true;
     }
     if (!pending->succeeded) {
       *reason = pending->reason;
@@ -4420,8 +4484,7 @@ bool ListWindowsTargets(std::string *response, std::string *reason,
     }
     if (!FinishWindowsV2ListResponse(std::move(pending->response), generation, response, reason))
       return false;
-    if (pending->measured_context.has_value())
-      WindowsV2FactsContextCache() = std::move(pending->measured_context);
+    AdoptWindowsV2ContextCandidate(expected_stop);
     return true;
   }
 }
@@ -8857,6 +8920,7 @@ bool ServePipe(HANDLE pipe, const BackendProbe &probe) {
           std::lock_guard stop_lock(control.stop_mutex);
           // A new Close must stop discovery even when its epoch equals the current input epoch.
           control.stop_serial.fetch_add(1, std::memory_order_acq_rel);
+          control.context_candidate.reset();
           std::uint64_t current =
               cancellation_epoch.load(std::memory_order_acquire);
           while (requested_epoch > current &&
