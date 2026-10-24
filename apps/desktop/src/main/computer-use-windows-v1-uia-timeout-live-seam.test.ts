@@ -762,7 +762,7 @@ LRESULT CALLBACK ProviderProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   return DefWindowProcW(window, message, w, l);
 }
 
-// A window of a deep tree that answers, slowly: every request of UI Automation to it takes 15 ms.
+// Each accessibility/text window message takes 15 ms; one UIA call can send several messages.
 LRESULT CALLBACK DeepProc(HWND window, UINT message, WPARAM w, LPARAM l) {
   if (message == WM_GETOBJECT || message == WM_GETTEXT || message == WM_GETTEXTLENGTH) Sleep(15);
   if (message == WM_DESTROY && GetParent(window) == nullptr) {
@@ -796,12 +796,6 @@ void MakeDeepWindow(Win &win, int x, int y) {
                                nullptr, cls.hInstance, nullptr);
     }
     win.deepest = parent;
-    // These live siblings keep each call fast but make a complete observation exceed 500 ms.
-    // They sit outside the point used by the ancestor-classification case above.
-    for (int index = 0; index < 20; ++index)
-      CreateWindowExW(0, L"Sc820Deep", L"", WS_CHILD | WS_VISIBLE,
-                      250 + (index / 10) * 12, 10 + (index % 10) * 8, 10, 6,
-                      win.handle, nullptr, cls.hInstance, nullptr);
     ShowWindow(win.handle, SW_SHOW);
     ready.store(true);
     MSG message;
@@ -1319,14 +1313,27 @@ int RunDriver(bool ci) {
     const bool held = ms >= kHeldUp;
     provider_held_up = provider_held_up || held;
     cases.push_back({"ClassifyWindowsPoint@provider-answers-" + std::to_string(answers), ms, held ? RejectWindowsRisk(risk, &reason) : true, false});
-    g_provider_stall_after.store(-1);
   }
   {
     std::string baseline_tree;
     std::size_t baseline_nodes = 0;
-    g_provider_stall_after.store(-1);
+    DWORD owner = 0;
+    DWORD_PTR reset_result = 0;
+    // The provider lives in the child. Resetting the driver's own atomic does not disarm it.
+    const bool reset = GetWindowThreadProcessId(provider, &owner) != 0 && owner == pid &&
+        SendMessageTimeoutW(provider, WM_APP + 2, static_cast<WPARAM>(-1), 0,
+                            SMTO_ABORTIFHUNG, 5000, &reset_result) != 0;
+    SeamCheck(reset, "owned_provider_reset_acknowledged");
+    if (!reset) {
+      TerminateProcess(child.hProcess, 0);
+      CloseHandle(child.hProcess);
+      CloseHandle(child.hThread);
+      CloseHandle(job);
+      return 1;
+    }
     const bool baseline = ReadUiaObservation(static_cast<std::uint32_t>(pid), provider, &baseline_tree, &baseline_nodes);
     std::cout << "provider_baseline_observation=" << baseline << " nodes=" << baseline_nodes << std::endl;
+    SeamCheck(baseline && baseline_nodes > 0, "disarmed_provider_observation_is_readable");
   }
   for (int answers : {0, 2, 6}) {
     std::string out;
