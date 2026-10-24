@@ -384,7 +384,7 @@ import {
   workerWritesNeedApproval,
 } from './write-scope';
 import { readWorkspaceTextFile } from './workspace-file';
-import { watchWorkspace, type WorkspaceWatcher } from './workspace-watcher';
+import { watchWorkspace } from './workspace-watcher';
 import { openWorkspaceFileForEdit, recoverWorkspaceFileForEdit } from './workspace-edit';
 import { executeUserFileSave } from './user-file-save-saga';
 import {
@@ -664,7 +664,7 @@ import {
   dispatchAfterClaudeProviderEgress,
   dispatchAfterGrokProviderEgress,
 } from './provider-egress';
-import { ReasoningBatcher } from './reasoning-batcher';
+import { TurnStreamingResources } from './turn-streaming-resources';
 import { projectContextProviderMessages } from './project-context-delivery';
 import { RetryableActionRegistry } from './retryable-action';
 import { createStreamingSecretRedactor } from './secret-redactor';
@@ -1200,25 +1200,23 @@ export class IpcRouter {
   private readonly providerAbortByTurn = new Map<string, AbortController>();
   private readonly providerExecutionIdByTurn = new Map<string, string>();
   private readonly providerCancellationByExecution = new Map<string, Promise<void>>();
-  // One reasoning batcher per active turn (issue #17). Keyed by turnId and disposed in
-  // finishAndAdvance, so a turn cannot leave a timer behind.
-  private readonly reasoningByTurn = new Map<string, ReasoningBatcher>();
-  // Streaming redaction state per (turn, path) for live file bodies (issue #39). Bounded at 16
-  // concurrent files and cleared when a body completes or its turn ends.
-  // One recursive watch per sealed root for each writing Turn, stopped in finishAndAdvance.
-  private readonly workspaceWatchByTurn = new Map<string, readonly WorkspaceWatcher[]>();
+  private readonly turnStreamingResources = new TurnStreamingResources(
+    (taskId, turnId, { text, truncated }) => {
+      if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
+      this.window.webContents.send(
+        IPC_CHANNELS.reasoningEvent,
+        reasoningBatchSchema.parse({ taskId, turnId, text, truncated }),
+      );
+    },
+  );
   // The immutable Workspace snapshot and per-root baselines owned by each Turn.
   private readonly turnWorkspaceByTurn = new Map<string, EffectiveWorkspaceSet>();
   private readonly baselinesByTurn = new Map<string, ReadonlyMap<string, EditBaselines>>();
+  // Streaming redaction state per (turn, path) for live file bodies (issue #39). Bounded at 16
+  // concurrent files and cleared when a body completes or its turn ends.
   private readonly fileEditByKey = new Map<
     string,
     { redactor: ReturnType<typeof createStreamingSecretRedactor>; safe: string; consumed: number }
-  >();
-  // Per-turn streaming secret redactor. Streaming (not per-fragment) because a key can straddle a
-  // batch boundary — redacting each fragment in isolation would let a split token through.
-  private readonly reasoningRedactorByTurn = new Map<
-    string,
-    ReturnType<typeof createStreamingSecretRedactor>
   >();
   // Codex's own thread id for a turn, from its `thread.started` event. The only handle used to find
   // generated images — never a path from a model message (issue #11; see
@@ -5089,6 +5087,13 @@ export class IpcRouter {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    let streamingFailure: { cause: unknown } | undefined;
+    try {
+      this.turnStreamingResources.dispose();
+    } catch (error) {
+      // A transient final emit must not prevent the existing Runtime and custody teardown.
+      streamingFailure = { cause: error };
+    }
     this.fullAccessConfirmation.dispose();
     this.taskTitleProviderAborts.abortAll();
     for (const controller of this.providerAbortByTurn.values()) controller.abort();
@@ -5122,11 +5127,6 @@ export class IpcRouter {
     this.policyCleanupsByTask.clear();
     this.approvalCoordinator.dispose();
     await this.managedCodingHarness.dispose();
-    // A watch outlives its Turn only if the app is torn down mid-write; close them here so the
-    // process can actually exit (issue #39).
-    for (const watchers of this.workspaceWatchByTurn.values())
-      for (const watcher of watchers) watcher.stop();
-    this.workspaceWatchByTurn.clear();
     await this.mockRuntime.dispose();
     for (const [executionId, job] of this.cliTaskTitleJobs) {
       clearTimeout(job.timer);
@@ -5152,6 +5152,7 @@ export class IpcRouter {
     this.attachmentCapabilityByTurn.clear();
     await this.teamMcpBridge.dispose();
     this.computerUseCaptureOutput?.close();
+    if (streamingFailure !== undefined) throw streamingFailure.cause;
   }
 
   graphArtifactResponse(url: URL): Response {
@@ -5583,11 +5584,7 @@ export class IpcRouter {
     void this.releaseTurnAttachmentCustody(turnId);
     // Flush the tail and stop the timer before the turn is finalised, so the last thought is not
     // lost to the 120ms window and no timer outlives the turn.
-    this.reasoningByTurn.get(turnId)?.dispose();
-    this.reasoningByTurn.delete(turnId);
-    this.reasoningRedactorByTurn.delete(turnId);
-    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
-    this.workspaceWatchByTurn.delete(turnId);
+    this.turnStreamingResources.release(turnId);
     this.turnWorkspaceByTurn.delete(turnId);
     this.baselinesByTurn.delete(turnId);
     // A turn that ends mid-write leaves its redaction state behind otherwise (issue #39).
@@ -6583,6 +6580,7 @@ export class IpcRouter {
       this.persistence.getActiveTurnId(taskId) !== started.turnId
     )
       return;
+    if (this.turnStreamingResources.begin(taskId, started.turnId) === undefined) return;
     const externalConnectionId =
       builtinRuntimeForModelSelection(started.modelSelection) === null
         ? started.modelSelection.connectionId
@@ -8558,11 +8556,7 @@ export class IpcRouter {
     this.providerAbortByTurn.delete(turnId);
     this.providerExecutionIdByTurn.delete(turnId);
     this.turnMessageIds.delete(turnId);
-    this.reasoningByTurn.get(turnId)?.dispose();
-    this.reasoningByTurn.delete(turnId);
-    this.reasoningRedactorByTurn.delete(turnId);
-    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
-    this.workspaceWatchByTurn.delete(turnId);
+    this.turnStreamingResources.release(turnId);
     this.turnWorkspaceByTurn.delete(turnId);
     this.baselinesByTurn.delete(turnId);
     for (const key of this.fileEditByKey.keys())
@@ -9528,23 +9522,23 @@ export class IpcRouter {
     turnId: string,
     workspace: EffectiveWorkspaceSet,
   ): void {
-    for (const watcher of this.workspaceWatchByTurn.get(turnId) ?? []) watcher.stop();
-    const watchers = workspace.roots.flatMap((root) => {
-      const watcher = watchWorkspace(root.path, (relativePath) => {
-        // Turn already finished: a late filesystem event must not reopen a closed Turn's view.
-        if (!this.workspaceWatchByTurn.has(turnId)) return;
-        const body = readWorkspaceTextFile(root.path, relativePath);
-        if (body === null) return;
-        this.pushFileEdit(taskId, turnId, resolvePath(root.path, relativePath), body, {
-          // Never "complete": on disk there is no such thing as finished, only current. The Turn
-          // ending is what stops the view following.
-          complete: false,
-          source: 'disk',
+    const lease = this.turnStreamingResources.get(taskId, turnId);
+    if (lease === undefined) return;
+    lease.replaceWatchers((isCurrent) =>
+      workspace.roots.flatMap((root) => {
+        const watcher = watchWorkspace(root.path, (relativePath) => {
+          // Check the captured group before reading: a replaced watch can still have queued events.
+          if (!isCurrent()) return;
+          const body = readWorkspaceTextFile(root.path, relativePath);
+          if (body === null) return;
+          this.pushFileEdit(taskId, turnId, resolvePath(root.path, relativePath), body, {
+            complete: false,
+            source: 'disk',
+          });
         });
-      });
-      return watcher === null ? [] : [watcher];
-    });
-    if (watchers.length > 0) this.workspaceWatchByTurn.set(turnId, watchers);
+        return watcher === null ? [] : [watcher];
+      }),
+    );
   }
 
   /**
@@ -9709,24 +9703,7 @@ export class IpcRouter {
    * the model read.
    */
   private pushReasoning(taskId: string, turnId: string, text: string): void {
-    let redactor = this.reasoningRedactorByTurn.get(turnId);
-    if (redactor === undefined) {
-      redactor = createStreamingSecretRedactor();
-      this.reasoningRedactorByTurn.set(turnId, redactor);
-    }
-    const safe = redactor.write(text);
-    let batcher = this.reasoningByTurn.get(turnId);
-    if (batcher === undefined) {
-      batcher = new ReasoningBatcher(({ text: batch, truncated }) => {
-        if (this.window.isDestroyed() || this.window.webContents.isDestroyed()) return;
-        this.window.webContents.send(
-          IPC_CHANNELS.reasoningEvent,
-          reasoningBatchSchema.parse({ taskId, turnId, text: batch, truncated }),
-        );
-      });
-      this.reasoningByTurn.set(turnId, batcher);
-    }
-    if (safe !== '') batcher.push(safe);
+    this.turnStreamingResources.get(taskId, turnId)?.pushReasoning(text);
   }
 
   /**
