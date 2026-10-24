@@ -2805,6 +2805,8 @@ if (runsWithElectronAbi)
           contextInheritancePolicy: 'none',
           writeCapable: false,
         });
+        const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+        const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
         const sending = coordinator.sendToWorker({
           taskId: task.id,
           targetAgentId: worker.id,
@@ -2825,6 +2827,7 @@ if (runsWithElectronAbi)
             expect(
               persistence.getTeamBudgetStatus(worker.teamId).some(({ reserved }) => reserved > 0),
             ).toBe(true);
+            expect(releaseBudget).not.toHaveBeenCalled();
             unsettled = false;
             await coordinator.stopWorker(task.id, worker.id);
           }
@@ -2839,12 +2842,99 @@ if (runsWithElectronAbi)
               .getTeamSnapshot(worker.teamId)
               .deliveries.filter(({ state }) => state === 'acked'),
           ).toHaveLength(0);
+          expect(settleBudget).not.toHaveBeenCalled();
+          expect(releaseBudget).toHaveBeenCalledTimes(1);
         } finally {
           release();
           persistence.close();
         }
       },
     );
+
+    describe.each(['direct', 'scheduled'] as const)('%s execution budget ownership', (mode) => {
+      it.each(['settle', 'after-settle'] as const)(
+        'handles a %s failure without duplicate terminal budget writes',
+        async (phase) => {
+          const persistence = createPersistence();
+          const task = persistence.createTask('Budget terminal failure');
+          const coordinator = new TeamCoordinator(
+            persistence,
+            new DeterministicTeamWorkerRuntime(),
+          );
+          const worker = await coordinator.hireWorker({
+            taskId: task.id,
+            role: 'reader',
+            objective: 'read',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          });
+          const reserve = vi.spyOn(persistence, 'reserveTeamBudget');
+          const settle = vi.spyOn(persistence, 'settleTeamBudget');
+          const release = vi.spyOn(persistence, 'releaseTeamBudget');
+          const injected = new Error(`budget fixture ${phase}`);
+          if (phase === 'settle')
+            settle.mockImplementationOnce(() => {
+              throw injected;
+            });
+          else
+            vi.spyOn(persistence, 'completeTeamTaskWithReport').mockImplementationOnce(() => {
+              throw injected;
+            });
+          try {
+            if (mode === 'direct') {
+              await expect(
+                coordinator.sendToWorker({
+                  taskId: task.id,
+                  targetAgentId: worker.id,
+                  content: 'read',
+                }),
+              ).rejects.toThrow(injected.message);
+            } else {
+              const execution = await coordinator.assignTask({
+                taskId: task.id,
+                targetAgentId: worker.id,
+                content: 'read',
+                doneCriteria: ['read'],
+                accessMode: 'read-only',
+              });
+              await waitFor(
+                () => persistence.getTeamExecution(execution.executionId).state === 'failed',
+              );
+            }
+            // Scheduled read-only failures already get one safe-runtime retry. It owns a new
+            // reservation set; the original acknowledged delivery then rejects redispatch.
+            expect(reserve).toHaveBeenCalledTimes(mode === 'scheduled' ? 2 : 1);
+            expect(settle).toHaveBeenCalledTimes(1);
+            expect(release).toHaveBeenCalledTimes(
+              (phase === 'settle' ? 1 : 0) + (mode === 'scheduled' ? 1 : 0),
+            );
+            const reservationSets = reserve.mock.results.map((result) => {
+              if (result.type !== 'return') throw new Error('Expected successful reservation');
+              return result.value.map(({ id }) => id);
+            });
+            const successfulTerminals = [settle, release].flatMap((operation) =>
+              operation.mock.calls
+                .filter((_, index) => operation.mock.results[index]?.type === 'return')
+                .map(([input]) => [...input.reservationIds]),
+            );
+            for (const ids of reservationSets) {
+              expect(
+                successfulTerminals.filter((terminal) => terminal.some((id) => ids.includes(id))),
+              ).toEqual([ids]);
+            }
+            expect(new Set(reserve.mock.calls.map(([input]) => input.purpose)).size).toBe(1);
+            const allIds = reservationSets.flat();
+            expect(new Set(allIds).size).toBe((mode === 'scheduled' ? 2 : 1) * 8);
+            const status = persistence.getTeamBudgetStatus(worker.teamId);
+            expect(status.every(({ reserved }) => reserved === 0)).toBe(true);
+            expect(status.some(({ committed }) => committed > 0)).toBe(phase === 'after-settle');
+            expect(coordinator.hasBusyWorkers(task.id)).toBe(false);
+          } finally {
+            persistence.close();
+          }
+        },
+      );
+    });
 
     it.each([false, true])(
       'serializes concurrent direct calls and continues after failure=%s',
@@ -3492,7 +3582,9 @@ if (runsWithElectronAbi)
       expect(runtime.workspacePaths).toHaveLength(1);
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
 
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       await coordinator.resumeExecutionIntegration(task.id, submission.executionId);
+      expect(reserveBudget).not.toHaveBeenCalled();
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
       expect(runtime.workspacePaths).toHaveLength(1);
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
@@ -3561,6 +3653,7 @@ if (runsWithElectronAbi)
         runtime,
         new WorkerWorktreeManager({ worktreesRoot }),
       );
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       resumedCoordinator.recoverOnStartup();
 
       await waitFor(
@@ -3580,6 +3673,7 @@ if (runsWithElectronAbi)
         15_000,
       );
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(reserveBudget).not.toHaveBeenCalled();
       persistence.close();
     }, 55_000);
 
@@ -7576,6 +7670,7 @@ if (runsWithElectronAbi)
         contextInheritancePolicy: 'none',
         writeCapable: false,
       });
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       const submission = await coordinator.assignTask({
         taskId: task.id,
         targetAgentId: worker.id,
@@ -7596,6 +7691,7 @@ if (runsWithElectronAbi)
       );
 
       expect(runtime.activeStarts).toBe(0);
+      expect(reserveBudget).not.toHaveBeenCalled();
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
       const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
@@ -7983,6 +8079,8 @@ if (runsWithElectronAbi)
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
+      const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
       const submission = await coordinator.assignTask({
         taskId: task.id,
         targetAgentId: writer.id,
@@ -8013,6 +8111,11 @@ if (runsWithElectronAbi)
           .listReclaimConfirmedTeamExecutionIsolations()
           .map(({ executionId }) => executionId),
       ).not.toContain(submission.executionId);
+      expect(settleBudget).not.toHaveBeenCalled();
+      expect(releaseBudget).toHaveBeenCalledTimes(2);
+      expect(
+        persistence.getTeamBudgetStatus(writer.teamId).every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       persistence.close();
     }, 40_000);
 
@@ -11727,6 +11830,9 @@ if (runsWithElectronAbi)
       const [steeredWorker, canceledWorker] = workers;
       if (steeredWorker === undefined || canceledWorker === undefined)
         throw new Error('Expected two workers');
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
       const [steered, canceled] = await Promise.all([
         coordinator.assignTask({
           taskId: task.id,
@@ -11779,6 +11885,23 @@ if (runsWithElectronAbi)
       expect(messagesByContent.get('initial-steered')?.deliveryState).toBe('acked');
       expect(messagesByContent.get('revised-running')?.deliveryState).toBe('acked');
       expect(messagesByContent.get('initial-canceled')?.deliveryState).toBe('failed');
+      expect(reserveBudget).toHaveBeenCalledTimes(3);
+      expect(
+        reserveBudget.mock.calls.filter(
+          ([input]) => input.purpose === `team-execution:${steered.executionId}`,
+        ),
+      ).toHaveLength(2);
+      const reservedIds = reserveBudget.mock.results.flatMap((result) =>
+        result.value.map(({ id }: { id: string }) => id),
+      );
+      expect(new Set(reservedIds).size).toBe(24);
+      expect(settleBudget).toHaveBeenCalledTimes(1);
+      expect(releaseBudget).toHaveBeenCalledTimes(2);
+      expect(
+        persistence
+          .getTeamBudgetStatus(steeredWorker.teamId)
+          .every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       persistence.close();
     });
 
@@ -11810,10 +11933,18 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       reopened.initializeMutationRecovery('replacement-instance', '2026-07-28T12:00:00.000Z');
+      const reserveBudget = vi.spyOn(reopened, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(reopened, 'settleTeamBudget');
       const secondRuntime = new InterruptibleWorkerRuntime();
       const secondCoordinator = new TeamCoordinator(reopened, secondRuntime);
       secondCoordinator.recoverOnStartup();
       await waitFor(() => secondRuntime.contents.length === 1);
+      expect(reserveBudget).toHaveBeenCalledTimes(1);
+      expect(
+        reopened
+          .getTeamBudgetStatus(worker.teamId)
+          .find((entry) => entry.scope === 'team' && entry.kind === 'tokens')?.reserved,
+      ).toBe(20_000);
 
       expect(reopened.getTeam(worker.teamId).state).toBe('active');
       expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
@@ -11830,6 +11961,10 @@ if (runsWithElectronAbi)
         { ordinal: 1, state: 'interrupted' },
         { ordinal: 2, state: 'completed' },
       ]);
+      expect(settleBudget).toHaveBeenCalledTimes(1);
+      expect(
+        reopened.getTeamBudgetStatus(worker.teamId).every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       reopened.close();
     });
 

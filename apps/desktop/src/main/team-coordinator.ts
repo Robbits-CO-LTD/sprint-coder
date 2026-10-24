@@ -99,6 +99,12 @@ import {
 } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
 import type { ApprovalWaitObserver } from './tool-broker';
+import {
+  TEAM_EXECUTION_ESTIMATE,
+  reserveTeamExecutionBudget,
+  type TeamExecutionBudgetScope,
+  type TeamExecutionUsage,
+} from './team-execution-budget';
 
 /** Host binding and model-selected result, kept separate from the runtime's write workspace. */
 export type TeamResultReadRequest = Readonly<{
@@ -140,12 +146,7 @@ export type WorkerRuntimeResult = Readonly<{
     targetAgentId?: string;
   }>;
   completion: unknown;
-  usage?: Readonly<{
-    costCents?: number;
-    tokens?: number;
-    timeMs?: number;
-    toolCalls?: number;
-  }>;
+  usage?: TeamExecutionUsage;
   resolution?: ExecutionResolution;
   providerUsage?: NormalizedProviderUsage;
   /**
@@ -487,12 +488,6 @@ const WORKER_IDLE_TIMEOUT_MS = 15 * 60_000;
  * once per interval per Team, always ending on the latest state; state changes are never delayed.
  */
 export const TEAM_PROGRESS_PUBLISH_INTERVAL_MS = 250;
-const executionEstimate = Object.freeze({
-  costCents: 100,
-  tokens: 20_000,
-  timeMs: 60_000,
-  toolCalls: 10,
-});
 
 export class TeamCoordinator {
   private readonly graphWorkspaceResumeDigests = new Map<string, string>();
@@ -1819,7 +1814,7 @@ export class TeamCoordinator {
     const storedWorker = snapshot.agents.find((agent) => agent.id === execution.assigneeAgentId)!;
     const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
     let attemptId: string | null = null;
-    let budgets: readonly TeamBudgetReservationRecord[] = [];
+    let budget: TeamExecutionBudgetScope | null = null;
     let worktree: TeamMissionWorktreeRecord | null = null;
     let isolation: TeamExecutionIsolationRecord | null = null;
     let report: ReturnType<typeof workerReportSchema.parse> | null = null;
@@ -1883,23 +1878,11 @@ export class TeamCoordinator {
           reviewedWorkspace
       )
         throw new Error('Preserved workspace changed before dispatch; review it again');
-      budgets = this.persistence.reserveTeamBudget({
+      budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: execution.teamId,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `team-execution:${execution.id}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       if (!this.executionScheduler.tryFinishPreflight(execution.id))
         throw new Error('Graph execution canceled before dispatch');
@@ -1950,8 +1933,7 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(budgets, dispatched.usage);
-      budgets = [];
+      budget.settle(dispatched.usage);
       if (dispatched.resolution || dispatched.providerUsage)
         this.persistence.recordTeamAttemptProviderResult(
           attemptId,
@@ -2186,7 +2168,7 @@ export class TeamCoordinator {
       }
     } finally {
       this.graphWorkspaceResumeDigests.delete(execution.id);
-      this.releaseReservations(budgets);
+      budget?.release();
       this.executionScheduler.notifyReadinessChanged();
       this.emit(graph.taskId, execution.teamId);
     }
@@ -2236,7 +2218,7 @@ export class TeamCoordinator {
             connectionId: connection.id,
             queueOrdinal: execution.queueOrdinal ?? 0,
             queuedAt: execution.queuedAt ?? this.isoNow(),
-            estimatedTokens: executionEstimate.tokens,
+            estimatedTokens: TEAM_EXECUTION_ESTIMATE.tokens,
           }) === 'tokens_per_minute_capacity'
         )
           throw new Error(
@@ -3808,23 +3790,11 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       this.persistence.createTeamDelivery({ messageId: message.id, now: this.isoNow() });
-      const reservations = this.persistence.reserveTeamBudget({
+      const budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: team.id,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `worker-execution:${message.id}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
@@ -3843,7 +3813,7 @@ export class TeamCoordinator {
           if (owner.settled) return;
           owner.settled = true;
           this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
-          this.releaseReservations(reservations);
+          budget.release();
           const delivery = this.persistence.getTeamDelivery(message.id);
           if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
             this.persistence.transitionTeamDelivery({
@@ -3863,21 +3833,12 @@ export class TeamCoordinator {
         workspaceSet,
         message,
         teamTask,
-        reservations,
+        budget,
         owner,
       };
     });
-    const {
-      team,
-      leader,
-      worker,
-      readOnlyWorker,
-      workspaceSet,
-      message,
-      teamTask,
-      reservations,
-      owner,
-    } = context;
+    const { team, leader, worker, readOnlyWorker, workspaceSet, message, teamTask, budget, owner } =
+      context;
     try {
       // A direct message's only criterion is that the Worker reports back, which Main checks
       // itself, so the Worker is not asked to report it (issue #550).
@@ -3911,7 +3872,7 @@ export class TeamCoordinator {
           to: 'acked',
           now: this.isoNow(),
         });
-        this.settleExecution(reservations, completion.usage);
+        budget.settle(completion.usage);
         this.persistWorkerResult(team.id, worker, leader, completion.value);
         const doneEvidence = completion.doneEvidence;
         const report = workerReportSchema.parse({
@@ -3947,7 +3908,7 @@ export class TeamCoordinator {
         if (owner.settled || owner.cancelled || !runtimeStopConfirmed(error)) return;
         owner.settled = true;
         this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
-        this.releaseReservations(reservations);
+        budget.release();
         const current = this.persistence
           .getTeamSnapshot(team.id)
           .agents.find(({ id }) => id === worker.id);
@@ -4010,7 +3971,7 @@ export class TeamCoordinator {
       throw new Error('workspace-write execution requires a write-capable Worker');
     const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
     let attemptId: string | null = null;
-    let reservations: readonly TeamBudgetReservationRecord[] = [];
+    let budget: TeamExecutionBudgetScope | null = null;
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
     let executionIsolation: TeamExecutionIsolationRecord | null = null;
     try {
@@ -4086,23 +4047,11 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       attemptId = attempt.id;
-      reservations = this.persistence.reserveTeamBudget({
+      budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: input.teamId,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `team-execution:${input.executionId}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, content, this.isoNow());
@@ -4132,8 +4081,8 @@ export class TeamCoordinator {
             : this.runtimeWorkspaceForTask(input.taskId),
       );
       if (this.executionInterruptions.has(input.executionId)) {
-        this.releaseReservations(reservations);
-        reservations = [];
+        budget.release();
+        budget = null;
         if (
           this.handleRequestedInterruption({
             ...input,
@@ -4157,8 +4106,7 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(reservations, dispatched.usage);
-      reservations = [];
+      budget?.settle(dispatched.usage);
       if (dispatched.resolution !== undefined || dispatched.providerUsage !== undefined)
         this.persistence.recordTeamAttemptProviderResult(
           attempt.id,
@@ -4437,7 +4385,7 @@ export class TeamCoordinator {
         return;
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
-      this.releaseReservations(reservations);
+      budget?.release();
       this.recordWorkerEgressDenial(
         {
           taskId: input.taskId,
@@ -5324,7 +5272,7 @@ export class TeamCoordinator {
         connectionId: connection.id,
         queueOrdinal: execution.queueOrdinal ?? 0,
         queuedAt: execution.queuedAt ?? this.isoNow(),
-        estimatedTokens: executionEstimate.tokens,
+        estimatedTokens: TEAM_EXECUTION_ESTIMATE.tokens,
       },
       onConnectionWait: (reason: ConnectionWaitReason) =>
         this.markExecutionWaitingForConnection(taskId, teamId, execution.id, reason),
@@ -5874,22 +5822,6 @@ export class TeamCoordinator {
       taskId: snapshot.team.taskId,
       teamId,
       status: 'completed',
-    });
-  }
-
-  private settleExecution(
-    reservations: readonly TeamBudgetReservationRecord[],
-    usage: WorkerRuntimeResult['usage'],
-  ): void {
-    const actuals: Record<string, number> = {};
-    for (const reservation of reservations) {
-      const value = usage?.[reservation.kind as keyof NonNullable<WorkerRuntimeResult['usage']>];
-      if (typeof value === 'number') actuals[reservation.id] = value;
-    }
-    this.persistence.settleTeamBudget({
-      reservationIds: reservations.map(({ id }) => id),
-      actuals,
-      now: this.isoNow(),
     });
   }
 

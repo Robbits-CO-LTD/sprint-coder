@@ -620,6 +620,8 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
  */
 async function unconfirmedExitGraph(limitedConnection = false) {
   const f = fixture();
+  const settleBudget = vi.spyOn(f.persistence, 'settleTeamBudget');
+  const releaseBudget = vi.spyOn(f.persistence, 'releaseTeamBudget');
   const plan = structuredClone(f.plan);
   const connection = limitedConnection ? localProviderTestConnection() : null;
   if (connection !== null) {
@@ -697,6 +699,11 @@ async function unconfirmedExitGraph(limitedConnection = false) {
   );
   await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
   expect(reservations()).toEqual(['quarantined']);
+  expect(f.persistence.getTeamBudgetStatus(f.team.id).every(({ reserved }) => reserved === 0)).toBe(
+    true,
+  );
+  expect(settleBudget).not.toHaveBeenCalled();
+  expect(releaseBudget).toHaveBeenCalledTimes(1);
   return {
     f,
     plan,
@@ -2464,6 +2471,9 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
 
     it('runs every graph step through the real Worker catalog preflight without a chat Turn', async () => {
       const f = fixture(undefined, false, ['a', 'b', 'c']);
+      const reserveBudget = vi.spyOn(f.persistence, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(f.persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(f.persistence, 'releaseTeamBudget');
       const scheduler = new TeamExecutionScheduler(2);
       const runtime = new DeterministicTeamWorkerRuntime();
       const execute = runtime.execute.bind(runtime);
@@ -2509,6 +2519,58 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           f.persistence.getTeamMission(mission.id).steps.map(({ executionId }) => executionId),
         ).toHaveLength(3);
         expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        expect(reserveBudget).toHaveBeenCalledTimes(3);
+        expect(settleBudget).toHaveBeenCalledTimes(3);
+        expect(releaseBudget).not.toHaveBeenCalled();
+        expect(
+          settleBudget.mock.calls.flatMap(([input]) => [...input.reservationIds]).sort(),
+        ).toEqual(
+          reserveBudget.mock.results
+            .flatMap((result) => result.value.map(({ id }: { id: string }) => id))
+            .sort(),
+        );
+        expect(
+          f.persistence.getTeamBudgetStatus(f.team.id).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+        expect(f.workers.every(({ id }) => f.persistence.getWorkerUsageTotals(id).tokens > 0)).toBe(
+          true,
+        );
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
+
+    it('releases Graph budget once after a settlement transaction fails', async () => {
+      const f = fixture();
+      const scheduler = new TeamExecutionScheduler(1);
+      const settle = vi.spyOn(f.persistence, 'settleTeamBudget').mockImplementationOnce(() => {
+        throw new Error('Graph budget settlement rejected');
+      });
+      const release = vi.spyOn(f.persistence, 'releaseTeamBudget');
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        new DeterministicTeamWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        const mission = await coordinator.startGraphMission(f.task.id, async () => f.input);
+        await vi.waitFor(() =>
+          expect(f.persistence.getTeamExecution(mission.steps[0]!.executionId).state).toBe(
+            'waiting_resume',
+          ),
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        expect(settle).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(
+          f.persistence
+            .getTeamBudgetStatus(f.team.id)
+            .every(({ reserved, committed }) => reserved === 0 && committed === 0),
+        ).toBe(true);
       } finally {
         await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
         f.persistence.close();

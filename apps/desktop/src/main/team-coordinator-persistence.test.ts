@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   teamDeliveryId,
   DEFAULT_TEAM_BUDGET_LIMITS,
@@ -11,6 +11,7 @@ import {
 } from '@sprint-coder/domain';
 import { electronTestExecutablePath } from './electron-test-runtime';
 import { SqlitePersistenceClient, TeamConflictError } from './persistence';
+import { reserveTeamExecutionBudget } from './team-execution-budget';
 
 const cleanup: string[] = [];
 const runsWithElectronAbi = process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1';
@@ -674,6 +675,131 @@ if (runsWithElectronAbi)
       expect(persistence.getTeamDelivery(message.id)?.state).toBe('timedOut');
       expect(statusFor(persistence, teamId, 'team', 'tokens').reserved).toBe(0);
       persistence.close();
+    });
+
+    it('execution budget settles both scopes with usage and estimate fallback only once', () => {
+      const { persistence } = createPersistence();
+      const { teamId, workerId } = buildActiveTeam(persistence);
+      const settle = vi.spyOn(persistence, 'settleTeamBudget');
+      const release = vi.spyOn(persistence, 'releaseTeamBudget');
+      try {
+        const budget = reserveTeamExecutionBudget(persistence, {
+          teamId,
+          workerId,
+          purpose: 'execution',
+          now: () => '2026-10-24T00:00:00Z',
+        });
+        budget.settle({ costCents: 0, tokens: 7 });
+        const usage = { costCents: 0, tokens: 7, timeMs: 60_000, toolCalls: 10 };
+        // The existing Team total aggregates both its team and worker reservation rows.
+        expect(persistence.getTeamUsageTotals(teamId)).toEqual({
+          costCents: 0,
+          tokens: 14,
+          timeMs: 120_000,
+          toolCalls: 20,
+        });
+        expect(statusFor(persistence, teamId, 'team', 'tokens').committed).toBe(7);
+        expect(persistence.getWorkerUsageTotals(workerId)).toEqual(usage);
+        budget.release();
+        budget.release();
+        expect(() => budget.settle()).toThrow('already settled');
+        expect(settle).toHaveBeenCalledTimes(1);
+        expect(release).not.toHaveBeenCalled();
+        expect(
+          persistence.getTeamBudgetStatus(teamId).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('execution budget remains pending after an atomic settle rollback and can be released', () => {
+      const { persistence } = createPersistence();
+      const { teamId, workerId } = buildActiveTeam(persistence);
+      try {
+        const budget = reserveTeamExecutionBudget(persistence, {
+          teamId,
+          workerId,
+          purpose: 'execution',
+          now: () => '2026-10-24T00:00:00Z',
+        });
+        // costCents is written before tokens: the later invalid amount must roll back the whole batch.
+        expect(() => budget.settle({ costCents: 2, tokens: 1.5 })).toThrow(
+          'Invalid settled amount',
+        );
+        const statuses = persistence.getTeamBudgetStatus(teamId);
+        expect(statuses.every(({ committed }) => committed === 0)).toBe(true);
+        expect(
+          statuses
+            .filter(({ scope, kind }) => scope !== 'global' && kind !== 'spawnSlots')
+            .every(({ reserved }) => reserved > 0),
+        ).toBe(true);
+        const release = vi.spyOn(persistence, 'releaseTeamBudget');
+        budget.release();
+        budget.release();
+        expect(() => budget.settle()).toThrow('already released');
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(
+          persistence.getTeamBudgetStatus(teamId).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('execution budget can retry a failed release without repeating a successful terminal write', () => {
+      const { persistence } = createPersistence();
+      const { teamId, workerId } = buildActiveTeam(persistence);
+      try {
+        const budget = reserveTeamExecutionBudget(persistence, {
+          teamId,
+          workerId,
+          purpose: 'execution',
+          now: () => '2026-10-24T00:00:00Z',
+        });
+        const settle = vi.spyOn(persistence, 'settleTeamBudget');
+        const release = vi.spyOn(persistence, 'releaseTeamBudget').mockImplementationOnce(() => {
+          throw new Error('release transaction rejected');
+        });
+        expect(() => budget.release()).toThrow('release transaction rejected');
+        expect(statusFor(persistence, teamId, 'team', 'tokens').reserved).toBe(20_000);
+        budget.release();
+        budget.release();
+        expect(() => budget.settle()).toThrow('already released');
+        expect(settle).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(2);
+        expect(
+          persistence.getTeamBudgetStatus(teamId).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('execution budget scopes with the same purpose terminate independently', () => {
+      const { persistence } = createPersistence();
+      const { teamId, workerId } = buildActiveTeam(persistence);
+      try {
+        const input = {
+          teamId,
+          workerId,
+          purpose: 'same execution',
+          now: () => '2026-10-24T00:00:00Z',
+        };
+        const first = reserveTeamExecutionBudget(persistence, input);
+        const second = reserveTeamExecutionBudget(persistence, input);
+        first.settle({ tokens: 3 });
+        expect(statusFor(persistence, teamId, 'team', 'tokens').reserved).toBe(20_000);
+        second.release();
+        expect(persistence.getTeamUsageTotals(teamId).tokens).toBe(6);
+        expect(statusFor(persistence, teamId, 'team', 'tokens').committed).toBe(3);
+        expect(persistence.getWorkerUsageTotals(workerId).tokens).toBe(3);
+        expect(
+          persistence.getTeamBudgetStatus(teamId).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+      } finally {
+        persistence.close();
+      }
     });
 
     it('exposes the delivery conflict guard as a typed error', () => {
