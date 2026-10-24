@@ -63,6 +63,7 @@ export function PermissionChip({ taskId }: { taskId: string }) {
     policyEpoch: 0,
   };
   const setAccessPreset = useAppStore((state) => state.setAccessPreset);
+  const pending = useAppStore((state) => state.permissionChangeByTask[taskId]) !== undefined;
   const commandSandbox = useAppStore((state) => state.commandSandbox);
   const enforcement = accessEnforcement(commandSandbox);
   const [open, setOpen] = useState(false);
@@ -120,16 +121,22 @@ export function PermissionChip({ taskId }: { taskId: string }) {
         className="composer-permission-chip"
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-busy={pending}
+        disabled={pending}
         onClick={() => {
           setOpen((value) => !value);
           setConfirmingFull(false);
         }}
         data-access-preset={permission.preset}
         data-access-enforcement={enforcement}
-        title={accessDescription(permission.preset, commandSandbox)}
+        title={
+          pending
+            ? `権限の変更を確認中です。変更前の権限: ${PRESET_LABEL[permission.preset]}`
+            : accessDescription(permission.preset, commandSandbox)
+        }
       >
         <ShieldAlert size={16} />
-        {PRESET_LABEL[permission.preset]}
+        {pending ? '確認待ち' : PRESET_LABEL[permission.preset]}
       </button>
       {open && (
         <div className="runtime-menu permission-menu" role="menu" aria-label="Access mode選択">

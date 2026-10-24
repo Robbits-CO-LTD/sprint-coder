@@ -327,6 +327,26 @@ export function List(props: IconProps) {
   );
 }
 
+/** Lucide `terminal`: a tool call in a Worker's work log. */
+export function Terminal(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="m4 17 6-6-6-6" />
+      <path d="M12 19h8" />
+    </Icon>
+  );
+}
+
+/** Lucide `panel-left`: the sidebar toggle. */
+export function PanelLeft(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <rect width="18" height="18" x="3" y="3" rx="2" />
+      <path d="M9 3v18" />
+    </Icon>
+  );
+}
+
 export function LayoutGrid(props: IconProps) {
   return (
     <Icon {...props}>

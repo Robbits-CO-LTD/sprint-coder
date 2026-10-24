@@ -142,6 +142,44 @@ async function harness(
 }
 
 describe('Provider workspace read tools', () => {
+  it('authorizes new calls with the current policy after a mid-Turn settings change (issue #885)', async () => {
+    let epoch = 1;
+    const authorizer = vi.fn(() => ({ decision: 'allow' as const, reason: 'test' }));
+    const tools = new ProviderWorkspaceTools({
+      workspaceFor: () => null,
+      rootIdentityFor: () => undefined,
+      policyEpochFor: () => epoch,
+      authorizer,
+      recordPlan: () => ({ revision: 1 }),
+    });
+    const owner = {
+      taskId: 'task-policy',
+      turnId: 'turn-policy',
+      workspaceId: null,
+      policyEpoch: 1,
+    };
+    const snapshot = tools.startTurn(owner, 'codex');
+    epoch = 2;
+    await tools.policyEpochChanged(owner.taskId);
+    try {
+      await expect(
+        tools.broker.dispatch({
+          ...owner,
+          callId: 'after-policy-change',
+          providerName: 'update_plan',
+          input: { items: [{ step: 'verify command execution', status: 'in_progress' }] },
+        }),
+      ).resolves.toMatchObject({ revision: 1 });
+      expect(authorizer).toHaveBeenCalledWith(
+        expect.objectContaining({ context: { ...owner, policyEpoch: 2 } }),
+        undefined,
+      );
+      expect(tools.broker.getTurnSnapshot(owner.taskId, owner.turnId)).toBe(snapshot);
+    } finally {
+      await tools.dispose();
+    }
+  });
+
   it('does not return data from a transient replacement root during a search', async () => {
     const { root, tools, context } = await harness({ project: true });
     const replacement = `${root}.replacement`;

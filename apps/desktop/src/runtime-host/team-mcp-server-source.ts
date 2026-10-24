@@ -111,7 +111,7 @@ const TOOLS = [
   {
     name: 'team_hire_worker',
     description:
-      'Hire one direct report. Use agentKind=worker without managerPolicy for a leaf. Use agentKind=manager with a relative maxDelegationLevels policy for a Manager.',
+      'Hire one direct report. Use agentKind=worker without managerPolicy for a leaf. Use agentKind=manager with a relative maxDelegationLevels policy for a Manager. A Manager delegating child file edits needs writeCapable: true at hire and access: workspace-write assigned to the Manager itself. Research-only Managers can remain read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -172,7 +172,7 @@ const TOOLS = [
   },
   {
     name: 'team_assign_task',
-    description: 'Assign a formal task with explicit completion criteria. Returns an execution ID immediately; queued is not a failure.',
+    description: 'Assign a formal task with explicit completion criteria. Returns an execution ID immediately; queued is not a failure. A Manager delegating child file edits needs writeCapable: true at hire and access: workspace-write assigned to the Manager itself. Research-only Managers can remain read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -188,7 +188,7 @@ const TOOLS = [
   {
     name: 'team_assign_tasks',
     description:
-      'Assign formal tasks to many Workers in one call (1-${TEAM_ASSIGN_TASKS_MAX}). Use this instead of repeated team_assign_task calls when assigning several Workers, so they all start together. Each assignment is checked like team_assign_task and succeeds or fails on its own: read results[].ok, and retry only the failed ones. If many long objectives do not fit in one call, split them into several smaller calls.',
+      'Assign formal tasks to many Workers in one call (1-${TEAM_ASSIGN_TASKS_MAX}). Use this instead of repeated team_assign_task calls when assigning several Workers, so they all start together. Each assignment is checked like team_assign_task and succeeds or fails on its own: read results[].ok, fix the cause, then retry only the failed ones. If many long objectives do not fit in one call, split them into several smaller calls. A Manager delegating child file edits needs writeCapable: true at hire and access: workspace-write assigned to the Manager itself. Research-only Managers can remain read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -216,7 +216,7 @@ const TOOLS = [
   {
     name: 'team_assign_mission',
     description:
-      'Create a durable 2-12 step Mission for longer coding work. Steps run in order and each step has its own Worker, completion criteria, and access mode.',
+      'Create a durable 2-12 step Mission for longer coding work. Steps run in order and each step has its own Worker, completion criteria, and access mode. A Manager delegating child file edits needs writeCapable: true at hire and access: workspace-write assigned to the Manager itself. Research-only Managers can remain read-only.',
     inputSchema: {
       type: 'object',
       properties: {

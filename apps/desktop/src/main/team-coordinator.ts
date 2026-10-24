@@ -1,3 +1,4 @@
+import { assertNotRetiredManagedLocal } from './retired-managed-local';
 import { previewGraphSource } from './graph-source-preview';
 import { reviewGraphWorkspace } from './graph-workspace-review';
 import { assertGraphWriteCoverage, assertGraphWritePathCoverage } from './graph-write-coverage';
@@ -17,6 +18,8 @@ import {
   workerReportSchema,
   workerSummarySchema,
   type AccessPreset,
+  type EffectiveWorkspaceSet,
+  type WorkerActivityEntry,
   type TeamDetail,
   type TeamHireWorkerInput,
   type TeamMessageSummary,
@@ -95,8 +98,36 @@ import {
   type RuntimeWorkspaceSet,
 } from '../runtime-host/protocol';
 import { workspaceMutationBinding } from './path-guard';
-import { MANAGED_LOCAL_CONNECTION_ID } from './managed-local-provider-runtime';
 import type { ApprovalWaitObserver } from './tool-broker';
+import {
+  TEAM_EXECUTION_ESTIMATE,
+  reserveTeamExecutionBudget,
+  type TeamExecutionBudgetScope,
+  type TeamExecutionUsage,
+} from './team-execution-budget';
+
+/** Host binding and model-selected result, kept separate from the runtime's write workspace. */
+export type TeamResultReadRequest = Readonly<{
+  taskId: string;
+  parentTurnId: string;
+  callerExecutionId: string;
+  callerAgentId: string;
+  targetExecutionId: string;
+  rootId?: string;
+  signal?: AbortSignal;
+}>;
+
+export type TeamResultReadSource = Readonly<{
+  workspace: EffectiveWorkspaceSet;
+  rootId: string;
+  rootIdentityDigest: string;
+  mutationKey: string;
+  repositoryPath: string;
+  changedFiles: readonly string[];
+  executionId: string;
+  integratedHead: string;
+}>;
+import { WORKER_ACTIVITY_LOG_LIMIT, workerActivityEntry } from './worker-activity-log';
 import {
   allCriteriaDone,
   confirmWorkerReport,
@@ -115,12 +146,7 @@ export type WorkerRuntimeResult = Readonly<{
     targetAgentId?: string;
   }>;
   completion: unknown;
-  usage?: Readonly<{
-    costCents?: number;
-    tokens?: number;
-    timeMs?: number;
-    toolCalls?: number;
-  }>;
+  usage?: TeamExecutionUsage;
   resolution?: ExecutionResolution;
   providerUsage?: NormalizedProviderUsage;
   /**
@@ -462,12 +488,6 @@ const WORKER_IDLE_TIMEOUT_MS = 15 * 60_000;
  * once per interval per Team, always ending on the latest state; state changes are never delayed.
  */
 export const TEAM_PROGRESS_PUBLISH_INTERVAL_MS = 250;
-const executionEstimate = Object.freeze({
-  costCents: 100,
-  tokens: 20_000,
-  timeMs: 60_000,
-  toolCalls: 10,
-});
 
 export class TeamCoordinator {
   private readonly graphWorkspaceResumeDigests = new Map<string, string>();
@@ -516,6 +536,9 @@ export class TeamCoordinator {
     string,
     { liveOutput: string; reasoningActive: boolean }
   >();
+  /** Per Worker: the newest work-log steps, loaded from persistence once and then kept current as
+   * steps are recorded, so a summary never queries the log on every progress publish. */
+  private readonly workerActivityLogs = new Map<string, WorkerActivityEntry[]>();
   /** Per Team: when it was last published, and the pending progress publish, if any (#863). */
   private readonly progressPublishes = new Map<
     string,
@@ -712,6 +735,12 @@ export class TeamCoordinator {
       payload: event,
       now,
     });
+    const logEntry = workerActivityEntry(event.type, event, now);
+    const cachedLog = this.workerActivityLogs.get(workerId);
+    if (logEntry !== null && cachedLog !== undefined) {
+      cachedLog.push(logEntry);
+      if (cachedLog.length > WORKER_ACTIVITY_LOG_LIMIT) cachedLog.shift();
+    }
     // A finished, failed or canceled Worker is a state change and goes out at once; the rest is
     // progress (issue #863).
     if (terminal) this.emit(taskId, teamId);
@@ -753,6 +782,197 @@ export class TeamCoordinator {
     } catch {
       return undefined;
     }
+  }
+
+  /** Each guarded read holds the integration fence only while it reads, never during approval. */
+  async readTeamResult<T>(
+    request: TeamResultReadRequest,
+    read: (source: TeamResultReadSource) => Promise<T>,
+  ): Promise<T> {
+    request.signal?.throwIfAborted();
+    const initial = await this.teamResultReadSource(request);
+    return this.integrationScheduler.runExclusive(
+      [initial.mutationKey, teamRepositoryMutationKey(initial.repositoryPath)],
+      async () => {
+        request.signal?.throwIfAborted();
+        const source = await this.teamResultReadSource(request);
+        if (JSON.stringify(source) !== JSON.stringify(initial))
+          throw new Error('Team result source changed while waiting for integration');
+        const root = source.workspace.roots.find(({ rootId }) => rootId === source.rootId)!;
+        const binding = await workspaceMutationBinding(root.path);
+        if (
+          binding.canonicalPath !== root.path ||
+          binding.rootIdentityDigest !== source.rootIdentityDigest ||
+          binding.workspaceKey !== source.mutationKey ||
+          (await fsRealpath(source.repositoryPath)) !== source.repositoryPath ||
+          (await this.worktreeManager?.headContains(
+            source.repositoryPath,
+            source.integratedHead,
+          )) !== true
+        )
+          throw new Error('Team result root or integrated HEAD is no longer available');
+        request.signal?.throwIfAborted();
+        this.teamResultReadAuthority(request);
+        const result = await read(source);
+        request.signal?.throwIfAborted();
+        if (JSON.stringify(await this.teamResultReadSource(request)) !== JSON.stringify(source))
+          throw new Error('Team result authority changed during the read');
+        this.teamResultReadAuthority(request);
+        request.signal?.throwIfAborted();
+        return result;
+      },
+    );
+  }
+
+  private teamResultReadAuthority(request: TeamResultReadRequest) {
+    const team = this.persistence.getTeamByTask(request.taskId);
+    if (team === null || team.state !== 'active')
+      throw new Error('Team result requires an active Team');
+    const caller = this.persistence.getTeamExecution(request.callerExecutionId);
+    const target = this.persistence.getTeamExecution(request.targetExecutionId);
+    const agents = this.persistence.getTeamSnapshot(team.id).agents;
+    const manager = agents.find(({ id }) => id === request.callerAgentId);
+    if (
+      caller.teamId !== team.id ||
+      caller.assigneeAgentId !== request.callerAgentId ||
+      caller.state !== 'running' ||
+      this.executionScheduler.isCancellationRequested(caller.id) ||
+      manager?.taskId !== request.taskId ||
+      manager.kind !== 'worker' ||
+      !manager.canDelegate ||
+      ['stopped', 'done', 'failed'].includes(manager.state) ||
+      target.teamId !== team.id ||
+      target.state !== 'completed' ||
+      target.id === caller.id ||
+      target.assigneeAgentId === manager.id
+    )
+      throw new Error('Team result requires a running Manager and a completed descendant');
+    let ancestor = agents.find(({ id }) => id === target.assigneeAgentId);
+    const seen = new Set<string>();
+    while (
+      ancestor !== undefined &&
+      ancestor.parentAgentId !== manager.id &&
+      !seen.has(ancestor.id)
+    ) {
+      seen.add(ancestor.id);
+      ancestor = agents.find(({ id }) => id === ancestor?.parentAgentId);
+    }
+    if (ancestor?.parentAgentId !== manager.id)
+      throw new Error('Team result is outside the Manager subtree');
+
+    return { team, caller, target };
+  }
+
+  private async teamResultReadSource(
+    request: TeamResultReadRequest,
+  ): Promise<TeamResultReadSource> {
+    const { team, caller, target } = this.teamResultReadAuthority(request);
+    const workspace = this.persistence.readTurnWorkspaceSetForTask(
+      request.taskId,
+      request.parentTurnId,
+    );
+    const rootId = request.rootId ?? workspace?.primaryRootId;
+    const root = workspace?.roots.find((candidate) => candidate.rootId === rootId);
+    const binding = this.persistence
+      .getTurnWorkspaceMutationBindings(request.parentTurnId)
+      .get(rootId ?? '');
+    const current = this.persistence.getEffectiveWorkspaceSet(request.taskId);
+    const currentBinding = this.persistence
+      .getEffectiveWorkspaceMutationBindings(request.taskId)
+      .get(rootId ?? '');
+    if (
+      workspace === null ||
+      root === undefined ||
+      binding === undefined ||
+      !current.roots.some(
+        (candidate) => candidate.rootId === root.rootId && candidate.path === root.path,
+      ) ||
+      currentBinding?.rootIdentityDigest !== binding.rootIdentityDigest ||
+      currentBinding.workspaceKey !== binding.workspaceKey
+    )
+      throw new Error('Team result requires the sealed central workspace root');
+
+    const canonicalRoot = await fsRealpath(root.path);
+    const callerIsolation = this.persistence.getTeamExecutionIsolation(caller.id);
+    if (
+      callerIsolation !== null &&
+      !callerIsolation.roots.some(
+        (candidate) =>
+          candidate.rootId === root.rootId &&
+          candidate.sourcePath === canonicalRoot &&
+          candidate.identity === binding.rootIdentityDigest &&
+          candidate.mutationKey === binding.workspaceKey,
+      )
+    )
+      throw new Error('Manager central workspace ceiling changed');
+
+    const isolation = this.persistence.getTeamExecutionIsolation(target.id);
+    let repository:
+      | {
+          repoPath: string;
+          workerHead: string | null;
+          integratedHead: string | null;
+          changedFiles: readonly string[];
+        }
+      | undefined;
+    if (isolation !== null) {
+      const targetRoot = isolation.roots.find((candidate) => candidate.rootId === root.rootId);
+      if (
+        targetRoot?.sourcePath !== canonicalRoot ||
+        targetRoot.identity !== binding.rootIdentityDigest ||
+        targetRoot.mutationKey !== binding.workspaceKey
+      )
+        throw new Error('Team result root is outside the sealed workspace');
+      repository = isolation.repositories.find(
+        ({ ordinal }) => ordinal === targetRoot.repositoryOrdinal,
+      );
+    } else {
+      const legacy = this.persistence.getTeamMissionWorktree(target.id);
+      const mission = this.persistence.getTeamMissionForExecution(target.id);
+      if (
+        legacy === null ||
+        mission === null ||
+        mission.teamId !== team.id ||
+        legacy.agentId !== target.assigneeAgentId
+      )
+        throw new Error('Team result has no sealed integration');
+      // Old Missions may lack a snapshot. Reading must never create one from today's roots.
+      const missionTurn = `${mission.mode === 'graph' ? 'graph-mission' : 'team-mission'}:${mission.id}`;
+      const sealed = this.persistence.readTurnWorkspaceSetForTask(request.taskId, missionTurn);
+      if (
+        !sealed?.roots.some(
+          (candidate) => candidate.rootId === root.rootId && candidate.path === root.path,
+        ) ||
+        this.persistence.getTurnWorkspaceRootIdentities(missionTurn).get(root.rootId) !==
+          binding.rootIdentityDigest
+      )
+        throw new Error('Legacy Team result has no matching sealed root');
+      repository = legacy;
+    }
+    if (repository?.workerHead == null || repository.integratedHead === null)
+      throw new Error('Team result has not been integrated');
+    // Legacy records may name a workspace subdirectory; integration serializes on the Git root.
+    const repositoryPath = await this.worktreeManager?.resolveRepositoryPath(repository.repoPath);
+    if (
+      repositoryPath === undefined ||
+      !isPathInsideOrSame(repositoryPath, canonicalRoot) ||
+      (isolation !== null && repositoryPath !== repository.repoPath)
+    )
+      throw new Error('Team result repository binding changed');
+    const roots = workspace.roots.map((value) =>
+      Object.freeze({ ...value, ...(value.rootId === root.rootId ? { path: canonicalRoot } : {}) }),
+    );
+    Object.freeze(roots);
+    return Object.freeze({
+      workspace: Object.freeze({ ...workspace, roots }),
+      rootId: root.rootId,
+      rootIdentityDigest: binding.rootIdentityDigest,
+      mutationKey: binding.workspaceKey,
+      repositoryPath,
+      changedFiles: Object.freeze([...repository.changedFiles]),
+      executionId: target.id,
+      integratedHead: repository.integratedHead,
+    });
   }
 
   /** Authority-scoped status for Manager/Worker runtimes. A caller may inspect itself, its
@@ -1391,6 +1611,10 @@ export class TeamCoordinator {
           throw error;
         }
       }
+      assertNotRetiredManagedLocal(
+        execution.modelSelection.connectionId,
+        execution.modelSelection.requestedProvider,
+      );
       this.persistence.prepareTeamMissionResume({
         missionId: mission.id,
         executionId: execution.id,
@@ -1590,7 +1814,7 @@ export class TeamCoordinator {
     const storedWorker = snapshot.agents.find((agent) => agent.id === execution.assigneeAgentId)!;
     const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
     let attemptId: string | null = null;
-    let budgets: readonly TeamBudgetReservationRecord[] = [];
+    let budget: TeamExecutionBudgetScope | null = null;
     let worktree: TeamMissionWorktreeRecord | null = null;
     let isolation: TeamExecutionIsolationRecord | null = null;
     let report: ReturnType<typeof workerReportSchema.parse> | null = null;
@@ -1606,6 +1830,10 @@ export class TeamCoordinator {
       );
       if (!leader || !storedWorker || !['ready', 'waiting'].includes(storedWorker.state))
         throw new Error('Graph Worker is not ready');
+      assertNotRetiredManagedLocal(
+        worker.modelSelection.connectionId,
+        worker.modelSelection.requestedProvider,
+      );
       await this.verifyWorkspace?.(graph.taskId);
       const reviewedWorkspace = this.graphWorkspaceResumeDigests.get(execution.id);
       if (reviewedWorkspace !== undefined) {
@@ -1626,8 +1854,7 @@ export class TeamCoordinator {
         await this.requireWorkspaceWriteEligibility(graph.taskId);
         if (
           this.persistence.getTeamMissionWorktree(execution.id) !== null ||
-          (this.persistence.getEffectiveWorkspaceSet(graph.taskId).source === 'task' &&
-            worker.modelSelection.connectionId !== MANAGED_LOCAL_CONNECTION_ID)
+          this.persistence.getEffectiveWorkspaceSet(graph.taskId).source === 'task'
         )
           worktree = await this.prepareMissionWorktree(graph.taskId, execution.id, worker.id);
         else
@@ -1651,23 +1878,11 @@ export class TeamCoordinator {
           reviewedWorkspace
       )
         throw new Error('Preserved workspace changed before dispatch; review it again');
-      budgets = this.persistence.reserveTeamBudget({
+      budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: execution.teamId,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `team-execution:${execution.id}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       if (!this.executionScheduler.tryFinishPreflight(execution.id))
         throw new Error('Graph execution canceled before dispatch');
@@ -1718,8 +1933,7 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(budgets, dispatched.usage);
-      budgets = [];
+      budget.settle(dispatched.usage);
       if (dispatched.resolution || dispatched.providerUsage)
         this.persistence.recordTeamAttemptProviderResult(
           attemptId,
@@ -1954,7 +2168,7 @@ export class TeamCoordinator {
       }
     } finally {
       this.graphWorkspaceResumeDigests.delete(execution.id);
-      this.releaseReservations(budgets);
+      budget?.release();
       this.executionScheduler.notifyReadinessChanged();
       this.emit(graph.taskId, execution.teamId);
     }
@@ -1987,6 +2201,10 @@ export class TeamCoordinator {
       const execution = this.persistence.getTeamExecution(step.executionId);
       if (execution.state !== 'waiting_resume' || this.graphScheduledExecutions.has(execution.id))
         throw new Error('Graph step is not waiting for manual resume');
+      assertNotRetiredManagedLocal(
+        execution.modelSelection.connectionId,
+        execution.modelSelection.requestedProvider,
+      );
       if (execution.modelSelection.connectionId !== null) {
         const connection = this.persistence.getProviderConnection(
           execution.modelSelection.connectionId,
@@ -2000,7 +2218,7 @@ export class TeamCoordinator {
             connectionId: connection.id,
             queueOrdinal: execution.queueOrdinal ?? 0,
             queuedAt: execution.queuedAt ?? this.isoNow(),
-            estimatedTokens: executionEstimate.tokens,
+            estimatedTokens: TEAM_EXECUTION_ESTIMATE.tokens,
           }) === 'tokens_per_minute_capacity'
         )
           throw new Error(
@@ -2356,6 +2574,11 @@ export class TeamCoordinator {
       for (const key of review.affectedKeys) {
         const executionId = graph.steps.find((step) => step.key === key)!.executionId;
         try {
+          const execution = this.persistence.getTeamExecution(executionId);
+          assertNotRetiredManagedLocal(
+            execution.modelSelection.connectionId,
+            execution.modelSelection.requestedProvider,
+          );
           const preserved = Boolean(
             this.persistence.getTeamMissionWorktree(executionId) ||
             this.persistence.getTeamExecutionIsolation(executionId),
@@ -3543,7 +3766,7 @@ export class TeamCoordinator {
       // A direct message has no execution whose access could let it write, so it runs as a
       // read-only assignment does: on the Task Workspace, by a Worker that may not write whatever
       // it was hired able to do. A runtime that reads only the root set and the Worker's
-      // capability (Managed Local) otherwise has no Workspace to read, or is asked to write
+      // capability otherwise has no Workspace to read, or is asked to write
       // without one (issue #570). The stored Worker keeps its capability for later assignments.
       const workspaceSet = this.runtimeWorkspaceForTask(input.taskId);
       const readOnlyWorker = { ...worker, writeCapable: false };
@@ -3567,23 +3790,11 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       this.persistence.createTeamDelivery({ messageId: message.id, now: this.isoNow() });
-      const reservations = this.persistence.reserveTeamBudget({
+      const budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: team.id,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `worker-execution:${message.id}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, input.content, this.isoNow());
@@ -3602,7 +3813,7 @@ export class TeamCoordinator {
           if (owner.settled) return;
           owner.settled = true;
           this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
-          this.releaseReservations(reservations);
+          budget.release();
           const delivery = this.persistence.getTeamDelivery(message.id);
           if (delivery !== null && !['failed', 'acked'].includes(delivery.state))
             this.persistence.transitionTeamDelivery({
@@ -3622,21 +3833,12 @@ export class TeamCoordinator {
         workspaceSet,
         message,
         teamTask,
-        reservations,
+        budget,
         owner,
       };
     });
-    const {
-      team,
-      leader,
-      worker,
-      readOnlyWorker,
-      workspaceSet,
-      message,
-      teamTask,
-      reservations,
-      owner,
-    } = context;
+    const { team, leader, worker, readOnlyWorker, workspaceSet, message, teamTask, budget, owner } =
+      context;
     try {
       // A direct message's only criterion is that the Worker reports back, which Main checks
       // itself, so the Worker is not asked to report it (issue #550).
@@ -3670,7 +3872,7 @@ export class TeamCoordinator {
           to: 'acked',
           now: this.isoNow(),
         });
-        this.settleExecution(reservations, completion.usage);
+        budget.settle(completion.usage);
         this.persistWorkerResult(team.id, worker, leader, completion.value);
         const doneEvidence = completion.doneEvidence;
         const report = workerReportSchema.parse({
@@ -3706,7 +3908,7 @@ export class TeamCoordinator {
         if (owner.settled || owner.cancelled || !runtimeStopConfirmed(error)) return;
         owner.settled = true;
         this.persistence.transitionTeamTask(teamTask.id, 'failed', this.isoNow());
-        this.releaseReservations(reservations);
+        budget.release();
         const current = this.persistence
           .getTeamSnapshot(team.id)
           .agents.find(({ id }) => id === worker.id);
@@ -3769,10 +3971,14 @@ export class TeamCoordinator {
       throw new Error('workspace-write execution requires a write-capable Worker');
     const worker = { ...storedWorker, writeCapable: execution.accessMode === 'workspace-write' };
     let attemptId: string | null = null;
-    let reservations: readonly TeamBudgetReservationRecord[] = [];
+    let budget: TeamExecutionBudgetScope | null = null;
     let missionWorktree: TeamMissionWorktreeRecord | null = null;
     let executionIsolation: TeamExecutionIsolationRecord | null = null;
     try {
+      assertNotRetiredManagedLocal(
+        worker.modelSelection.connectionId,
+        worker.modelSelection.requestedProvider,
+      );
       this.persistence.sealTeamExecutionContext({
         taskId: input.taskId,
         executionId: input.executionId,
@@ -3790,14 +3996,8 @@ export class TeamCoordinator {
       if (execution.accessMode === 'workspace-write') {
         const legacyWorktree = this.persistence.getTeamMissionWorktree(input.executionId);
         const workspace = this.persistence.getEffectiveWorkspaceSet(input.taskId);
-        // Managed Local writes use Main's Edit Saga, whose lease and post-image verification need
-        // the durable isolation binding. Preserve an existing legacy worktree on resume.
-        if (
-          legacyWorktree !== null ||
-          (workspace.source === 'task' &&
-            missionStep !== null &&
-            worker.modelSelection.connectionId !== MANAGED_LOCAL_CONNECTION_ID)
-        )
+        // Preserve an existing legacy worktree on resume.
+        if (legacyWorktree !== null || (workspace.source === 'task' && missionStep !== null))
           missionWorktree = await this.prepareMissionWorktree(
             input.taskId,
             input.executionId,
@@ -3847,23 +4047,11 @@ export class TeamCoordinator {
         now: this.isoNow(),
       });
       attemptId = attempt.id;
-      reservations = this.persistence.reserveTeamBudget({
+      budget = reserveTeamExecutionBudget(this.persistence, {
         teamId: input.teamId,
-        entries: [
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'team' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-          })),
-          ...Object.entries(executionEstimate).map(([kind, amount]) => ({
-            scope: 'worker' as const,
-            kind: kind as keyof typeof executionEstimate,
-            amount,
-            agentId: worker.id,
-          })),
-        ],
+        workerId: worker.id,
         purpose: `team-execution:${input.executionId}`,
-        now: this.isoNow(),
+        now: () => this.isoNow(),
       });
       this.persistence.transitionWorkerState(worker.id, 'busy');
       this.persistence.setWorkerCurrentActivity(worker.id, content, this.isoNow());
@@ -3887,14 +4075,14 @@ export class TeamCoordinator {
           ? this.runtimeWorkspaceForIsolation(executionIsolation)
           : missionWorktree !== null
             ? // The one-root set the CLI runtime already derives from the worktree path, so a
-              // runtime that reads only the root set (Managed Local) works in the same worktree
+              // runtime that reads only the root set works in the same worktree
               // instead of having no Workspace at all (issue #570).
               runtimeWorkspaceSetFromLegacyPath(missionWorktree.path)
             : this.runtimeWorkspaceForTask(input.taskId),
       );
       if (this.executionInterruptions.has(input.executionId)) {
-        this.releaseReservations(reservations);
-        reservations = [];
+        budget.release();
+        budget = null;
         if (
           this.handleRequestedInterruption({
             ...input,
@@ -3918,8 +4106,7 @@ export class TeamCoordinator {
         to: 'acked',
         now: this.isoNow(),
       });
-      this.settleExecution(reservations, dispatched.usage);
-      reservations = [];
+      budget?.settle(dispatched.usage);
       if (dispatched.resolution !== undefined || dispatched.providerUsage !== undefined)
         this.persistence.recordTeamAttemptProviderResult(
           attempt.id,
@@ -4198,7 +4385,7 @@ export class TeamCoordinator {
         return;
       }
       const integrationResume = error instanceof TeamIntegrationResumeRequiredError;
-      this.releaseReservations(reservations);
+      budget?.release();
       this.recordWorkerEgressDenial(
         {
           taskId: input.taskId,
@@ -4449,7 +4636,7 @@ export class TeamCoordinator {
             now: this.isoNow(),
           });
         } else this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
-      } catch (error) {
+      } catch {
         this.quarantineMissionWorktree(missionWorktree.executionId, canceled);
       }
     }
@@ -5085,7 +5272,7 @@ export class TeamCoordinator {
         connectionId: connection.id,
         queueOrdinal: execution.queueOrdinal ?? 0,
         queuedAt: execution.queuedAt ?? this.isoNow(),
-        estimatedTokens: executionEstimate.tokens,
+        estimatedTokens: TEAM_EXECUTION_ESTIMATE.tokens,
       },
       onConnectionWait: (reason: ConnectionWaitReason) =>
         this.markExecutionWaitingForConnection(taskId, teamId, execution.id, reason),
@@ -5635,22 +5822,6 @@ export class TeamCoordinator {
       taskId: snapshot.team.taskId,
       teamId,
       status: 'completed',
-    });
-  }
-
-  private settleExecution(
-    reservations: readonly TeamBudgetReservationRecord[],
-    usage: WorkerRuntimeResult['usage'],
-  ): void {
-    const actuals: Record<string, number> = {};
-    for (const reservation of reservations) {
-      const value = usage?.[reservation.kind as keyof NonNullable<WorkerRuntimeResult['usage']>];
-      if (typeof value === 'number') actuals[reservation.id] = value;
-    }
-    this.persistence.settleTeamBudget({
-      reservationIds: reservations.map(({ id }) => id),
-      actuals,
-      now: this.isoNow(),
     });
   }
 
@@ -7103,6 +7274,15 @@ export class TeamCoordinator {
     });
   }
 
+  private workerActivityLog(agentId: string): WorkerActivityEntry[] {
+    let log = this.workerActivityLogs.get(agentId);
+    if (log === undefined) {
+      log = this.persistence.listRecentWorkerActivity(agentId, WORKER_ACTIVITY_LOG_LIMIT);
+      this.workerActivityLogs.set(agentId, log);
+    }
+    return log;
+  }
+
   private workerSummary(agent: AgentRecord): WorkerSummary {
     return workerSummarySchema.parse({
       id: agent.id,
@@ -7125,6 +7305,7 @@ export class TeamCoordinator {
       managerPolicy: agent.managerPolicy,
       liveOutput: this.transientWorkerActivity.get(agent.id)?.liveOutput ?? '',
       reasoningActive: this.transientWorkerActivity.get(agent.id)?.reasoningActive ?? false,
+      ...(agent.kind === 'worker' ? { activityLog: [...this.workerActivityLog(agent.id)] } : {}),
       createdAt: agent.createdAt,
       updatedAt: agent.updatedAt,
       usage:

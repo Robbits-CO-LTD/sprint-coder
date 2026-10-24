@@ -1,15 +1,17 @@
 import { useEffect, useId, useState } from 'react';
 import { STAGE_LABEL, useAppStore, type TurnRuntimeState } from '../store/appStore';
-import { formatElapsed } from '../lib/format';
+import { formatWorkElapsed } from '../lib/format';
 import { teamRunProgress } from '../lib/team-progress';
-import { turnProgress } from '../lib/turn-progress';
-import { GenerationIndicator } from './GenerationIndicator';
+import { ChevronDown } from './icons';
 import { ReasoningPanel } from './ReasoningPanel';
 
-// Active turns use a Generation Canvas: the indicator communicates motion and the text communicates
-// state, while the five-segment rail reports only stages the Runtime has actually reached. Terminal
-// turns keep the same DOM and settle into one compact history row, so streaming content can begin
-// below without replacing the status surface.
+// A single quiet status line above the answer, read left to right the way Codex prints it:
+// `思考中  方針を組み立て中 · 12s · 停止`. The status word carries the motion (a light band sweeping
+// through grey while the model works); everything after it is muted. Once the Turn settles the line
+// becomes a fold — `完了 · 12s ›` followed by a hairline that runs to the edge of the column — so a
+// finished Turn reads as a closed section rather than as a header. No icon or progress rail — the
+// words already say what is happening. Terminal turns keep the same DOM, so streaming content can
+// begin below without replacing the status line.
 //
 // `data-testid="run-card"`, `data-run-status` (same six values) and
 // `data-testid="run-card-stop-button"` are preserved exactly: eight existing E2E specs key off them,
@@ -58,12 +60,6 @@ export function RunCard({
       : turn.status === 'failed'
         ? 'blocked'
         : 'done';
-  const progress = turnProgress({
-    reachedIndex: turn.reachedStageIndex,
-    stage: turn.stage,
-    status: turn.status,
-  });
-
   // Degraded path as a first-class case: plenty of turns produce no reasoning at all (verified —
   // Claude emits thinking blocks at `--effort max` on a demanding prompt, and not at `--effort high`
   // on a trivial one). With nothing to show, the pill becomes a plain label rather than a disclosure
@@ -82,7 +78,7 @@ export function RunCard({
       (isActive
         ? STAGE_LABEL[turn.stage]
         : turn.status === 'completed'
-          ? '回答完了'
+          ? null
           : turn.streamingContent.trim() === ''
             ? '未完了'
             : '部分回答'));
@@ -98,7 +94,6 @@ export function RunCard({
       data-expanded={expanded ? 'true' : 'false'}
     >
       <div className="run-head">
-        <GenerationIndicator stage={turn.stage} status={turn.status} />
         <div className="run-copy">
           {hasReasoning ? (
             <button
@@ -110,9 +105,7 @@ export function RunCard({
               onClick={() => setExpanded((value) => !value)}
             >
               <span className={`run-title${isWorking ? ' sheen' : ''}`}>{label}</span>
-              <span className="think-chevron" aria-hidden="true">
-                {expanded ? '⌃' : '⌄'}
-              </span>
+              <ChevronDown className="think-chevron" size={13} aria-hidden="true" />
             </button>
           ) : (
             // Non-interactive span, not a disabled button: there is nothing to disclose, and a
@@ -121,13 +114,11 @@ export function RunCard({
               <span className={`run-title${isWorking ? ' sheen' : ''}`}>{label}</span>
             </span>
           )}
-          <span className="run-stage-inline">{stageLabel}</span>
-        </div>
-        <div className="run-meta">
+          {stageLabel !== null && <span className="run-stage-inline">{stageLabel}</span>}
           {/* aria-hidden: this ticks every 500ms and would otherwise be announced each time
               (NFR-A11Y-03). Stage changes are announced by ChatSurface's own live region. */}
           <span className="run-elapsed" aria-hidden="true">
-            {formatElapsed((turn.finishedAt ?? now) - turn.startedAt)}
+            {formatWorkElapsed((turn.finishedAt ?? now) - turn.startedAt)}
           </span>
           {isActive && (
             // Sibling of the disclosure, never nested inside it: a button inside a button is invalid
@@ -143,15 +134,7 @@ export function RunCard({
             </button>
           )}
         </div>
-      </div>
-      <div className="run-canvas-shell" aria-hidden={!isActive}>
-        <div className="run-canvas-clip">
-          <div className="run-stage-progress" role="presentation" data-testid="run-stage-progress">
-            {progress.segments.map((segment, index) => (
-              <span key={index} className={`run-stage-seg ${segment}`} />
-            ))}
-          </div>
-        </div>
+        {!isActive && <span className="run-rule" aria-hidden="true" />}
       </div>
       {expanded && hasReasoning && (
         <div className="run-reasoning">

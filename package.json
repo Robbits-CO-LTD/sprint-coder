@@ -21,16 +21,13 @@
     "generate:computer-use-final-gate-evidence": "node generate-computer-use-final-gate-evidence.mjs",
     "verify:computer-use-final-gate": "node verify-computer-use-final-gate.mjs",
     "build:sandbox-runner": "node build-sandbox-runner.mjs",
-    "build:managed-local-sidecar": "node build-managed-local-sidecar.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "test:provider-smoke": "vitest run apps/desktop/src/main/provider-release-smoke.test.ts",
     "lint": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\"",
     "lint:fix": "eslint \"apps/*/src/**/*.{ts,tsx}\" \"packages/*/src/**/*.ts\" --fix",
     "format": "prettier --write \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
-    "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\"",
-    "e2e": "playwright test",
-    "e2e:dev": "playwright test --config playwright.dev.config.ts"
+    "format:check": "prettier --check \"apps/*/src/**/*.{ts,tsx,css}\" \"packages/*/src/**/*.ts\" \"*.mjs\" \"*.json\""
   },
   "dependencies": {
     "react": "^19.1.1",
@@ -39,18 +36,26 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.61.1",
     "@types/node": "^24.3.0",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
-    "axe-core": "^4.12.1",
     "eslint": "^10.7.0",
     "eslint-plugin-react-hooks": "^7.1.1",
-    "playwright": "^1.61.1",
     "prettier": "^3.9.6",
     "typescript": "^5.9.2",
     "typescript-eslint": "^8.65.0",
     "vitest": "^3.2.4"
+  },
+  "overrides": {
+    "@electron/rebuild@3.7.2": {
+      "tar": "7.5.22"
+    },
+    "@electron/node-gyp@10.2.0-electron.1": {
+      "tar": "7.5.22"
+    },
+    "cacache@16.1.3": {
+      "tar": "7.5.22"
+    }
   }
 }

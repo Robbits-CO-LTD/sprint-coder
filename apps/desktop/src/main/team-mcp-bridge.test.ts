@@ -1224,7 +1224,7 @@ socket.once('error', (error) => {
   });
 
   it('binds Manager authority to the registered token rather than request arguments', async () => {
-    const coordinator = fakeCoordinator();
+    const coordinator = fakeCoordinator({ workspaceWriteLimits: null });
     const bridge = new TeamMcpBridge(coordinator, testSocketPath());
     bridges.push(bridge);
     const socketPath = await bridge.ensureStarted();
@@ -1277,9 +1277,70 @@ socket.once('error', (error) => {
     );
     expect(JSON.parse(blockedWrite.lines[0] as string)).toMatchObject({
       ok: true,
-      result: { ok: false, message: expect.stringContaining('read-only') },
+      result: {
+        ok: false,
+        code: 'execution_access_ceiling',
+        message: expect.stringContaining('親Agent'),
+        details: {
+          accessCeiling: 'read-only',
+          requestedAccess: 'workspace-write',
+          requiredManagerWriteCapable: true,
+          requiredManagerAccess: 'workspace-write',
+          recovery: 'notify_parent',
+        },
+      },
     });
     expect(coordinator.assignTaskAs).toHaveBeenCalledTimes(1);
+
+    const forgedWrite = await roundTrip(
+      socketPath as string,
+      {
+        token,
+        tool: 'team_assign_task',
+        args: {
+          workerId: 'worker-1',
+          objective: '書き込む',
+          doneCriteria: ['完了'],
+          access: 'workspace-write',
+          accessCeiling: 'workspace-write',
+        },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
+    expect(JSON.parse(forgedWrite.lines[0] as string)).toMatchObject({ ok: false });
+    expect(coordinator.assignTaskAs).toHaveBeenCalledTimes(1);
+
+    const writeToken = TeamMcpBridge.generateToken();
+    bridge.register('turn-write-manager', {
+      taskId: 'task-1',
+      token: writeToken,
+      requesterAgentId: 'manager-1',
+      accessCeiling: 'workspace-write',
+      contextOwner: { type: 'team_execution', id: 'write-parent-execution' },
+    });
+    const allowedWrite = await roundTrip(
+      socketPath as string,
+      {
+        token: writeToken,
+        tool: 'team_assign_task',
+        args: {
+          workerId: 'worker-1',
+          objective: '書き込む',
+          doneCriteria: ['完了'],
+          access: 'workspace-write',
+        },
+      },
+      RESPONSE_TIMEOUT_MS,
+    );
+    expect(JSON.parse(allowedWrite.lines[0] as string)).toMatchObject({
+      ok: true,
+      result: { ok: true, executionId: 'execution-1' },
+    });
+    expect(coordinator.assignTaskAs).toHaveBeenLastCalledWith(
+      expect.objectContaining({ accessMode: 'workspace-write' }),
+      'manager-1',
+      { type: 'team_execution', id: 'write-parent-execution' },
+    );
   });
 
   it('routes a native Leader team_assign_tasks call as one batch bound to the token (issue #864)', async () => {

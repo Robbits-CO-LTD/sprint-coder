@@ -7,7 +7,7 @@ import type {
   ModelSelection,
   ProviderModel,
 } from '@sprint-coder/contracts';
-import { requestOpenLocalAiSettings } from '../lib/settings-navigation';
+import { requestOpenProviderSettings } from '../lib/settings-navigation';
 import { useAppStore } from '../store/appStore';
 import {
   chosenFromCatalog,
@@ -612,9 +612,13 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
   // Runtime/Model write, a Main answer that normalised the request, a rejected write rolled back —
   // takes the local name with it instead of leaving the trigger asserting the old choice.
   const triggerLabel = resolveTriggerLabel(selection, listed ?? chosen);
+  // The first page of a search (typing, or switching API/サブスク/ローカル) has nothing to show
+  // yet, so the wait is drawn as a spinner in the middle of the empty list. The count line keeps
+  // saying 検索中 for screen readers only — on screen the spinner already says it.
+  const searching = !failed && loading && page.items.length === 0;
   const countMessage = failed
     ? 'モデル一覧を取得できませんでした'
-    : loading && page.items.length === 0
+    : searching
       ? '検索中'
       : `${page.total}件中${page.items.length}件を読み込み済み`;
 
@@ -661,7 +665,7 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
             aria-live="polite"
             data-testid="model-picker-v2-count"
           >
-            {countMessage}
+            {searching ? <span className="sr-only">{countMessage}</span> : countMessage}
           </div>
           {/* The current band, named above the list. `aria-hidden` because it states nothing new:
               it repeats the rail of a row that is already in the listbox, and the count line
@@ -677,77 +681,91 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
               {topGroup.label}
             </div>
           )}
-          <div
-            ref={listRef}
-            id={listboxId}
-            role="listbox"
-            aria-label="モデル候補"
-            className="mpv2-list"
-            style={{ height: `${MODEL_LIST_VIEWPORT_PX}px` }}
-            onScroll={(e) => {
-              const top = e.currentTarget.scrollTop;
-              setScrollTop(top);
-              maybeLoadNextPage(top, activeIndex);
-            }}
-          >
-            <div style={{ height: `${range.topPadPx}px` }} aria-hidden="true" />
-            {page.items.slice(range.startIndex, range.endIndex).map((model, offset) => {
-              const index = range.startIndex + offset;
-              const selected = isSelected(model, selection);
-              const author = model.modelAuthor?.value;
-              // Grouping is drawn *inside* the row — a rail column that names its band where the
-              // band starts, and a hairline above that row. No header entry, because a header would
-              // be a list item of a different height and the window arithmetic rests on every row
-              // being exactly MODEL_ROW_HEIGHT_PX; it would also be a non-option child of the
-              // listbox for the keyboard and `aria-activedescendant` to step around.
-              const opensGroup = startsGroup(page.items, index, accessType);
-              return (
-                <div
-                  key={modelKey(model)}
-                  id={optionId(index)}
-                  role="option"
-                  aria-selected={selected}
-                  aria-label={`${modelAuthorDisplayName(author)} ${model.displayName}、${providerLabel(model)}経由、接続 ${connectionLabel(model)}`}
-                  data-testid={`model-picker-v2-option-${model.modelId}`}
-                  className={`mpv2-row${selected ? ' selected' : ''}${
-                    index === activeIndex ? ' active' : ''
-                  }${opensGroup && index > 0 ? ' group-break' : ''}`}
-                  onMouseDown={(e) => e.preventDefault()}
-                  onMouseEnter={() => setActiveIndex(index)}
-                  onClick={() => choose(model)}
-                >
-                  {/* The rail runs down every row so a band reads as one block; only the row that
+          <div className="mpv2-list-wrap">
+            <div
+              ref={listRef}
+              id={listboxId}
+              role="listbox"
+              aria-label="モデル候補"
+              className="mpv2-list"
+              style={{ height: `${MODEL_LIST_VIEWPORT_PX}px` }}
+              onScroll={(e) => {
+                const top = e.currentTarget.scrollTop;
+                setScrollTop(top);
+                maybeLoadNextPage(top, activeIndex);
+              }}
+            >
+              <div style={{ height: `${range.topPadPx}px` }} aria-hidden="true" />
+              {page.items.slice(range.startIndex, range.endIndex).map((model, offset) => {
+                const index = range.startIndex + offset;
+                const selected = isSelected(model, selection);
+                const author = model.modelAuthor?.value;
+                // Grouping is drawn *inside* the row — a rail column that names its band where the
+                // band starts, and a hairline above that row. No header entry, because a header would
+                // be a list item of a different height and the window arithmetic rests on every row
+                // being exactly MODEL_ROW_HEIGHT_PX; it would also be a non-option child of the
+                // listbox for the keyboard and `aria-activedescendant` to step around.
+                const opensGroup = startsGroup(page.items, index, accessType);
+                return (
+                  <div
+                    key={modelKey(model)}
+                    id={optionId(index)}
+                    role="option"
+                    aria-selected={selected}
+                    aria-label={`${modelAuthorDisplayName(author)} ${model.displayName}、${providerLabel(model)}経由、接続 ${connectionLabel(model)}`}
+                    data-testid={`model-picker-v2-option-${model.modelId}`}
+                    className={`mpv2-row${selected ? ' selected' : ''}${
+                      index === activeIndex ? ' active' : ''
+                    }${opensGroup && index > 0 ? ' group-break' : ''}`}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onMouseEnter={() => setActiveIndex(index)}
+                    onClick={() => choose(model)}
+                  >
+                    {/* The rail runs down every row so a band reads as one block; only the row that
                       opens the band prints its name, so the same word is not repeated six times
                       down the list. */}
-                  <span className="mpv2-rail">
-                    {opensGroup && (
-                      <span className="mpv2-rail-label">{modelGroup(model, accessType).label}</span>
-                    )}
-                  </span>
-                  <span className="mpv2-body">
-                    <span className="mpv2-head">
-                      <ModelAuthorIcon
-                        author={author}
-                        width={16}
-                        height={16}
-                        className="mpv2-author-icon"
-                      />
-                      <span className="mpv2-title">{model.displayName}</span>
-                      {/* The stable provider/gateway badge cannot be renamed by the user, so the
+                    <span className="mpv2-rail">
+                      {opensGroup && (
+                        <span className="mpv2-rail-label">
+                          {modelGroup(model, accessType).label}
+                        </span>
+                      )}
+                    </span>
+                    <span className="mpv2-body">
+                      <span className="mpv2-head">
+                        <ModelAuthorIcon
+                          author={author}
+                          width={16}
+                          height={16}
+                          className="mpv2-author-icon"
+                        />
+                        <span className="mpv2-title">{model.displayName}</span>
+                        {/* The stable provider/gateway badge cannot be renamed by the user, so the
                           same Claude model stays distinguishable as OpenRouter or OrcaRouter. */}
-                      <span className="mpv2-provider-badge">{providerLabel(model)}</span>
-                    </span>
-                    <span className="mpv2-meta-line">
-                      {/* Keep the user-editable account name too: two keys for one gateway are
+                        <span className="mpv2-provider-badge">{providerLabel(model)}</span>
+                      </span>
+                      <span className="mpv2-meta-line">
+                        {/* Keep the user-editable account name too: two keys for one gateway are
                           distinct selections even when they expose the same model id. */}
-                      <span className="mpv2-conn">接続: {connectionLabel(model)}</span>
-                      <span className="mpv2-meta">{describeModel(model)}</span>
+                        <span className="mpv2-conn">接続: {connectionLabel(model)}</span>
+                        <span className="mpv2-meta">{describeModel(model)}</span>
+                      </span>
                     </span>
-                  </span>
-                </div>
-              );
-            })}
-            <div style={{ height: `${range.bottomPadPx}px` }} aria-hidden="true" />
+                  </div>
+                );
+              })}
+              <div style={{ height: `${range.bottomPadPx}px` }} aria-hidden="true" />
+            </div>
+            {searching && (
+              <div
+                className="mpv2-loading"
+                data-testid="model-picker-v2-loading"
+                aria-hidden="true"
+              >
+                <span className="mpv2-spinner" />
+                <span>検索中</span>
+              </div>
+            )}
           </div>
           {page.items.length === 0 && !loading && (
             <div className="mpv2-empty">
@@ -758,11 +776,11 @@ export function ModelPickerV2({ taskId }: { taskId: string }) {
                   type="button"
                   className="settings-secondary-button"
                   onClick={() => {
-                    close(false);
-                    requestOpenLocalAiSettings();
+                    close(true);
+                    requestOpenProviderSettings();
                   }}
                 >
-                  Local AI Selectorでモデルを追加
+                  プロバイダー接続を追加
                 </button>
               ) : (
                 '一致するモデルがありません'

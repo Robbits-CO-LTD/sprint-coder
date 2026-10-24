@@ -262,13 +262,25 @@ export class ManagedCommandSessions {
   }
 
   async terminateTask(taskId: string): Promise<void> {
+    await this.beginTaskTermination(taskId)();
+  }
+
+  beginTaskTermination(taskId: string): () => Promise<void> {
     const owned = [...this.sessions.values()].filter(
       (session) =>
-        session.taskId === taskId && (session.state === 'starting' || session.state === 'running'),
+        session.taskId === taskId &&
+        (session.state === 'starting' ||
+          session.state === 'running' ||
+          session.terminationUnconfirmed),
     );
     for (const session of owned)
-      session.controller.abort(new Error('Managed command permission epoch changed'));
-    await Promise.allSettled(owned.map(({ completion }) => completion));
+      if (session.state === 'starting' || session.state === 'running')
+        session.controller.abort(new Error('Managed command permission epoch changed'));
+    return async () => {
+      await Promise.allSettled(owned.map(({ completion }) => completion));
+      if (owned.some(({ terminationUnconfirmed }) => terminationUnconfirmed))
+        throw new Error('Managed command Task cancellation could not be confirmed');
+    };
   }
 
   private snapshot(session: Session, afterSeq: number): ManagedCommandSnapshot {

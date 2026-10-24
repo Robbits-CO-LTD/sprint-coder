@@ -878,6 +878,63 @@ describe('Main ToolBroker', () => {
     ).rejects.toThrow('policy epoch changed');
   });
 
+  it('keeps the resource gate shared while invalidating old queued calls on policy refresh (issue #885)', async () => {
+    const { registry, echo } = createRegistry();
+    let epoch = 3;
+    let releaseHolder!: () => void;
+    const hold = new Promise<void>((resolve) => {
+      releaseHolder = resolve;
+    });
+    const executed: string[] = [];
+    const events: ManagedToolLifecycleEvent[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => epoch,
+      authorizePure,
+      (event) => events.push(event),
+    );
+    broker.registerImplementation({
+      toolId: echo.toolId,
+      implementationKind: 'built-in',
+      resourceClaims: () => [{ key: 'shared-command-root', mode: 'write' }],
+      execute: async (input) => {
+        const value = input as { text: string };
+        executed.push(value.text);
+        if (value.text === 'holder') await hold;
+        return value;
+      },
+    });
+    broker.startTurn(context, 'mock');
+    const call = (callId: string) =>
+      broker.dispatch({ ...context, callId, providerName: 'mock_echo', input: { text: callId } });
+    const holder = call('holder');
+    await vi.waitFor(() => expect(executed).toEqual(['holder']));
+    const stale = call('old-queued');
+    const staleRejected = expect(stale).rejects.toThrow('waiting for its resource claim');
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({ callId: 'old-queued', state: 'queued' }),
+      ),
+    );
+    epoch = 4;
+    broker.refreshTaskPolicyEpoch(context.taskId);
+    const fresh = call('new-queued');
+    await vi.waitFor(() =>
+      expect(events).toContainEqual(
+        expect.objectContaining({ callId: 'new-queued', state: 'queued' }),
+      ),
+    );
+    expect(executed).toEqual(['holder']);
+    releaseHolder();
+    await expect(holder).resolves.toEqual({ text: 'holder' });
+    await staleRejected;
+    await expect(fresh).resolves.toEqual({ text: 'new-queued' });
+    expect(executed).toEqual(['holder', 'new-queued']);
+    expect(
+      events.filter(({ state }) => state === 'requested').map(({ ordinal }) => ordinal),
+    ).toEqual([1, 2, 3]);
+  });
+
   it('rechecks policy epoch after asynchronous authorization before execution', async () => {
     const { registry, echo } = createRegistry();
     let currentEpoch = 3;
@@ -920,6 +977,72 @@ describe('Main ToolBroker', () => {
     await expect(dispatch).rejects.toThrow('policy epoch changed');
     expect(executed).toBe(false);
     expect(terminalized).toBe(true);
+  });
+
+  it('refreshes future command calls without reviving old approvals or losing call identity (issue #885)', async () => {
+    const { registry, command } = createRegistry();
+    let epoch = 3;
+    let releaseApproval!: () => void;
+    let approvalStarted!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      approvalStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseApproval = resolve;
+    });
+    let allow = false;
+    const authorize = vi.fn<ToolAuthorizer>(async ({ context: owner, callId }) => {
+      if (callId === 'old-command') {
+        approvalStarted();
+        await pending;
+        return { decision: 'allow', reason: 'old_approval' };
+      }
+      expect(owner.policyEpoch).toBe(4);
+      return { decision: allow ? 'allow' : 'deny', reason: 'current_policy' };
+    });
+    const events: ManagedToolLifecycleEvent[] = [];
+    const broker = new ToolBroker(
+      registry,
+      () => epoch,
+      authorize,
+      (event) => events.push(event),
+    );
+    const execute = vi.fn(() => ({ exitCode: 0 }));
+    const authorizationDenied = vi.fn();
+    broker.registerImplementation({
+      toolId: command.toolId,
+      implementationKind: 'command-runner',
+      execute,
+      authorizationDenied,
+    });
+    const snapshot = broker.startTurn(context, 'mock');
+    const call = (callId: string) =>
+      broker.dispatch({
+        ...context,
+        callId,
+        providerName: 'run_command',
+        input: { executable: '/bin/echo', argv: [] },
+      });
+    const oldCall = call('old-command');
+    const oldRejected = expect(oldCall).rejects.toThrow('Turn ended during authorization');
+    await waiting;
+    epoch = 4;
+    broker.refreshTaskPolicyEpoch(context.taskId);
+    broker.refreshTaskPolicyEpoch(context.taskId);
+    releaseApproval();
+    await oldRejected;
+    expect(authorizationDenied).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    await expect(call('denied-new-command')).rejects.toThrow('Tool authorization deny');
+    expect(execute).not.toHaveBeenCalled();
+    allow = true;
+    await expect(call('allowed-new-command')).resolves.toEqual({ exitCode: 0 });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(broker.getTurnSnapshot(context.taskId, context.turnId)).toBe(snapshot);
+    expect(
+      events.filter(({ state }) => state === 'requested').map(({ ordinal }) => ordinal),
+    ).toEqual([1, 2, 3]);
+    await expect(call('old-command')).rejects.toThrow('Duplicate tool call id');
   });
 
   it('pins and freezes tool input before asynchronous authorization', async () => {

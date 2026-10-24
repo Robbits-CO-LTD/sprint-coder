@@ -1,5 +1,7 @@
 # Accessibility Audit — Team MVP gate (Phase 7)
 
+> これは下記日付の監査記録です。旧テストのパスと結果は当時の証拠を示します。現在の検証手順は [Computer Use検証チェックリスト](testing/computer-use/README.md)を参照してください。axeのserious / critical 0などの受入要件は維持し、目視だけで監査済みとは判定しません。
+
 - Date: 2026-07-24
 - Scope: blocking subset item「keyboard-only golden path、Canvasと同等のList View、contrast、reduced motion」+ §10.3
 - 対象OS: macOS (この監査環境)。Windows/NVDAは未実施(下記Limitations)。

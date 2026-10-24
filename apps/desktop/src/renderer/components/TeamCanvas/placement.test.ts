@@ -12,7 +12,7 @@ import {
   rectsOverlap,
 } from './placement';
 import type { HierarchyAgent } from './placement';
-import type { Rect } from './useCamera';
+import { MIN_SCALE, type Rect } from './useCamera';
 
 const SIZE = { w: 480, h: 260 };
 const LEADER = 'leader-1';
@@ -213,7 +213,6 @@ describe('computeHierarchyLayout — department blocks', () => {
   // Mirrors persistence's CANVAS_WORLD_BOUND / CANVAS_MIN_SCALE: a default slot outside the world
   // bound, or a Fit view below the minimum zoom, can be neither shown nor saved.
   const WORLD_BOUND = 20_000;
-  const MIN_SCALE = 0.18;
 
   it('lays a Manager’s nine Workers out as a wide 5-column block right of the Manager', () => {
     const layout = computeHierarchyLayout(LEADER, organisation(1, 9));

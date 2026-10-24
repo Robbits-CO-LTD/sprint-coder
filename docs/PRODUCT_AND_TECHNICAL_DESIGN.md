@@ -315,7 +315,7 @@ spawn開始から約120ms後にCameraを対象へ移動し、nodeがviewportの6
 | Validation | Zod | IPC、Runtime adapter、永続event境界のruntime validation |
 | DB | SQLite + better-sqlite3 + PersistenceClient | connectionの物理配置はMainまたはDB Utility ProcessをPhase 0で比較決定。transaction、WAL、native rebuildをCIで検証 |
 | Tests | Vitest + Testing Library | domain、component、IPC contract |
-| E2E | Playwright Electron | experimental APIのためgolden-path中心。OS dialogはMain側stub |
+| E2E | Computer Use | 開発エージェントが実アプリを操作し、OS dialogを含む期待結果と証拠を記録する |
 | Logging | Pino-compatible structured JSON | secret redaction、correlation ID、support bundle |
 
 依存versionは実装開始時にlockfileへ固定する。本文に将来陳腐化する具体versionを埋め込まず、RenovateまたはDependabotの週次PRとElectron support policy gateで更新する。
@@ -802,6 +802,8 @@ UIは分類に応じて「修正」「再試行」「Runtime再起動」「安�
 
 ### 15.5 E2E golden paths
 
+[Computer Use検証チェックリスト](testing/computer-use/README.md)を正本とし、開発エージェントのComputer Useで実画面を操作する。製品自身のComputer Use機能とは区別する。各ケースを `PASS` / `FAIL` / `SKIP` / `BLOCKED` で記録し、CI成功では代用しない。実Providerは明示された場合のみ実施する。
+
 1. 新規Task → message → streaming answer → restart →復元。
 2. command approval → live output → completed。
 3. command拒否 → Runtime代替回答。
@@ -921,7 +923,7 @@ Team v2では[ADR-001](plan/team-v2/adrs/ADR-001-team-hierarchy-messaging-steeri
 4. 同一ChatSurface instanceを通常layoutからCanvasへ移すportal/FLIP方式でfocusとselectionが維持されるか。
 5. UtilityProcessとruntime CLIのstream/cancel/exit behaviorが各OSで一致するか。
 6. providerがBroker方式のtool executionを許すか。許さない場合のCapabilityReportと警告表現。
-7. Playwright Electron experimental APIをrelease E2E gateに使える安定性があるか。
+7. 対象OSでComputer Useによる実アプリ操作と証拠取得が可能か。利用できなければreleaseのUI検証はBLOCKEDとする。
 8. DB Main直置きとDB Utility Processを比較し、event append中のIPC latency p95/p99を測る。
 9. production runtimeがTool Brokerを迂回できないこと、またはmanaged modeで起動拒否されること。Managed候補はMainが外部観測するOS sandbox probeでworkspace外filesystem、direct process spawn、無許可の直接outbound networkを拒否し、許可されたprovider通信だけが`provider.egress` policyと監査を通ることを実証する。
 10. ThreadActor mailboxでqueue/steer/interrupt/approvalの順序とbackpressureが成立すること。
@@ -974,7 +976,6 @@ UtilityProcessとchild processは同一OS user権限を持ち、単独ではsecu
 - Electron Forge Vite Plugin: https://www.electronforge.io/config/plugins/vite
 - Electron Forge Plugins: https://www.electronforge.io/config/plugins
 - better-sqlite3: https://github.com/WiseLibs/better-sqlite3
-- Playwright Electron: https://playwright.dev/docs/api/class-electron
 - OpenAI Codex source: https://github.com/openai/codex/tree/fd3c1dc13d0a0941af406e1bc1f697c9d14110ea
 - xAI Grok Build source: https://github.com/xai-org/grok-build/tree/a881e6703f46b01d8c7d4a5437683546df30449d
 

@@ -95,12 +95,16 @@ describe('Leader guidance describes the real assign-task arguments', () => {
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('追加フィールドにせず');
   });
 
-  it('keeps workspace-write for work whose completion is a file change (issue #550)', () => {
-    // Main fails a write execution that changed no file, so a check-and-fix-if-needed task has to
-    // be checked read-only first.
+  it('requires a leaf or delegated child file change for workspace-write (issues #550, #910)', () => {
+    // A Manager may satisfy its write assignment through its completed write child. Pure
+    // inspection still starts read-only; neither path may report a write with no file change.
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
-      'workspace-writeはファイルを変えることが完了条件の作業だけに付ける',
+      'workspace-writeはファイルを変えることが完了条件の作業に付ける',
     );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
+      'leafは自身の変更が必要だが、Managerはその実行で割り当てた子のworkspace-write作業がcompletedなら、自身の変更なしでもこの条件を満たせる',
+    );
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('自身も子もファイルを変えなければ失敗になる');
     expect(BUILTIN_TEAM_SKILL_CONTENT).toContain(
       'まずread-onlyで確認し、変更が必要と分かってからworkspace-writeで割り当て直す',
     );

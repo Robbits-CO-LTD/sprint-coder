@@ -1,8 +1,5 @@
 import { create } from 'zustand';
-import {
-  applyTeamDetailPatch,
-  type TeamDetail as ContractTeamDetail,
-} from '@sprint-coder/contracts';
+import { applyTeamDetailPatch } from '@sprint-coder/contracts';
 import type {
   GraphView,
   ModelSelection,
@@ -40,10 +37,8 @@ import type {
   TeamDetail,
   TurnDiff,
   TurnEvent,
-  TurnStage,
 } from '../types/sprint-coder';
 import { STAGE_LABEL } from '../lib/stages';
-import { advanceStageIndex } from '../lib/turn-progress';
 import { appendReasoning, pruneReasoning } from '../lib/reasoning-buffer';
 import { applyFileEditFrame, clearFileEdits } from '../lib/file-edit-buffer';
 import {
@@ -59,27 +54,15 @@ import {
 } from './command-projection';
 import { accessPresetForNewTask, rememberAccessPreset } from '../lib/access-preset-preference';
 import { playSoundForEvent } from '../lib/ui-sound';
+import {
+  applyTaskTurnEvent,
+  hydrateTaskTurn,
+  type TaskTurnEvent,
+  type TurnRuntimeState,
+  type TurnStatus,
+} from './task-turn-projection';
 
-export type TurnStatus =
-  'running' | 'canceling' | 'completed' | 'canceled' | 'failed' | 'interrupted';
-
-export type TurnRuntimeState = {
-  turnId: string;
-  stage: TurnStage;
-  /** Transient only: true after Main accepts the Turn and before the Runtime emits its first stage. */
-  runtimeStarting: boolean;
-  /** Highest stage index reached, clamped so it never decreases (issue #16). `stage` alone is not
-   * enough: `waiting_approval` sits between `executing` and `synthesizing` in STAGE_ORDER, so a turn
-   * that returns to `executing` for a later tool would make a stage-derived gauge walk backwards. */
-  reachedStageIndex: number;
-  status: TurnStatus;
-  startedAt: number;
-  /** Set when the terminal event arrives so completed-work duration freezes truthfully. Historical
-   * snapshots do not currently carry this timestamp; restored turns omit it instead of guessing. */
-  finishedAt?: number;
-  streamingMessageId: string | null;
-  streamingContent: string;
-};
+export type { TurnStatus, TurnRuntimeState } from './task-turn-projection';
 
 export type StopAndSendResult = Readonly<{
   completed: boolean;
@@ -213,9 +196,11 @@ type AppState = {
   >;
   workspaceByTask: Record<string, WorkspaceInfo | null | undefined>;
   permissionByTask: Record<string, PermissionSettings | undefined>;
+  permissionChangeByTask: Record<string, AccessPreset | undefined>;
   approvalsByTask: Record<string, ApprovalSummary[]>;
   approvalHistoryByTask: Record<string, ApprovalSummary[]>;
   autoDecisionsByTask: Record<string, AutoPermissionDecision[]>;
+  autoDecisionCountsByTask: Record<string, AutoDecisionCountState>;
   commandsByTask: Record<string, CommandCardState[]>;
   turnDiffByTask: Record<string, TurnDiff | undefined>;
   /** Turns a restart closed as interrupted, from the task snapshot (issue #842). */
@@ -363,12 +348,13 @@ type AppState = {
   setSkillSelection(taskId: string, skills: TurnSkillSelection[]): Promise<void>;
   installSkillDraft(taskId: string, draft: SkillDraft): Promise<void>;
   discardSkillDraft(taskId: string, draftId: string): Promise<void>;
+  /** Failure text for this request, or null when no separate error alert is needed. */
   startTurn(
     taskId: string,
     text: string,
     skills?: readonly TurnSkillSelection[],
     attachmentIds?: readonly string[],
-  ): Promise<void>;
+  ): Promise<string | null>;
   queueMessage(
     taskId: string,
     text: string,
@@ -403,6 +389,15 @@ let taskSwitchGeneration = 0;
 let projectRefreshToken = 0;
 let currentSubscribedTaskId: string | null = null;
 const draftSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+export const PERMISSION_CHANGE_PENDING_MESSAGE =
+  '権限の変更が完了するまで送信できません。確認ダイアログが開いている場合は回答してください。';
+
+function notifyPendingPermissionChange(state: AppState, taskId: string): boolean {
+  if (state.permissionChangeByTask[taskId] === undefined) return false;
+  state.showToast(PERMISSION_CHANGE_PENDING_MESSAGE);
+  return true;
+}
 
 function persistDraftDebounced(taskId: string, text: string) {
   if (!window.sprintCoder || typeof window.sprintCoder.tasks.setDraft !== 'function') return;
@@ -606,13 +601,165 @@ function upsertApprovalHistory(
   );
 }
 
-function upsertAutoDecision(
+/** How many Auto decision rows a Task keeps in memory, per kind (issue #863): the newest 200
+ * denials and the newest 200 other decisions — the same sets a reload reads back
+ * (`listAutoPermissionDecisions`). Denials are kept apart so a stream of allows cannot push them
+ * out of the audit. How many decisions a Turn had is counted separately, so a row that falls out
+ * of this window still counts in the Turn's summary. */
+export const AUTO_DECISION_RETAIN_LIMIT = 200;
+
+export type AutoDecisionTally = { allow: number; allowOnce: number; deny: number };
+/** Every Auto decision of a Task counted per Turn. `throughSeq` is the newest decision event
+ * counted, so a replayed or already-loaded event is not counted twice. */
+export type AutoDecisionCountState = {
+  throughSeq: number;
+  byTurn: Record<string, AutoDecisionTally>;
+};
+
+/**
+ * Appends live Auto decisions in arrival order (issue #863). They arrive as turn events in `seq`
+ * order, so no sort is needed; a decision already held (same id) is replaced in place, and the
+ * oldest rows beyond {@link AUTO_DECISION_RETAIN_LIMIT} of their kind (denial, or anything else)
+ * are dropped. A long Team run records thousands, and the old filter-and-sort over an unbounded
+ * list on every event was the renderer's main cost.
+ */
+export function appendAutoDecisions(
   decisions: readonly AutoPermissionDecision[],
-  decision: AutoPermissionDecision,
+  incoming: readonly AutoPermissionDecision[],
 ): AutoPermissionDecision[] {
-  return [...decisions.filter(({ id }) => id !== decision.id), decision].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
-  );
+  const next = [...decisions];
+  const indexById = new Map(next.map(({ id }, index) => [id, index]));
+  for (const decision of incoming) {
+    const index = indexById.get(decision.id);
+    if (index === undefined) {
+      indexById.set(decision.id, next.length);
+      next.push(decision);
+    } else next[index] = decision;
+  }
+  const denials = next.filter(({ decision }) => decision === 'deny').length;
+  let dropDenials = Math.max(0, denials - AUTO_DECISION_RETAIN_LIMIT);
+  let dropOthers = Math.max(0, next.length - denials - AUTO_DECISION_RETAIN_LIMIT);
+  if (dropDenials === 0 && dropOthers === 0) return next;
+  return next.filter(({ decision }) => {
+    if (decision === 'deny') return dropDenials-- <= 0;
+    return dropOthers-- <= 0;
+  });
+}
+
+function tallyDecision(tally: AutoDecisionTally | undefined, decision: AutoPermissionDecision) {
+  const next = { ...(tally ?? { allow: 0, allowOnce: 0, deny: 0 }) };
+  if (decision.decision === 'allow') next.allow += 1;
+  else if (decision.decision === 'allow_once') next.allowOnce += 1;
+  else next.deny += 1;
+  return next;
+}
+
+/** Counts the live decisions newer than what `counts` already holds (O(1) per decision). */
+export function countAutoDecisions(
+  counts: AutoDecisionCountState | undefined,
+  incoming: readonly { seq: number; decision: AutoPermissionDecision }[],
+): AutoDecisionCountState {
+  let throughSeq = counts?.throughSeq ?? 0;
+  let byTurn = counts?.byTurn ?? {};
+  let copied = false;
+  for (const { seq, decision } of incoming) {
+    if (seq <= throughSeq) continue;
+    if (!copied) {
+      byTurn = { ...byTurn };
+      copied = true;
+    }
+    byTurn[decision.turnId] = tallyDecision(byTurn[decision.turnId], decision);
+    throughSeq = seq;
+  }
+  return copied ? { throughSeq, byTurn } : (counts ?? { throughSeq, byTurn });
+}
+
+type QueuedAutoDecision = { seq: number; decision: AutoPermissionDecision };
+
+// Live Auto decisions waiting for the next frame (issue #863). Main records about 17 per second
+// during a long Team run; folding each frame's worth into one store update keeps the Timeline from
+// re-rendering once per decision. The fallback timer still delivers them while the window is
+// hidden and animation frames are paused.
+const pendingAutoDecisions = new Map<string, QueuedAutoDecision[]>();
+let pendingAutoDecisionApply: ((fn: (state: AppState) => Partial<AppState>) => void) | null = null;
+let pendingAutoDecisionFrame: number | null = null;
+let pendingAutoDecisionTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushAutoDecisions(): void {
+  if (pendingAutoDecisionFrame !== null && typeof cancelAnimationFrame === 'function')
+    cancelAnimationFrame(pendingAutoDecisionFrame);
+  if (pendingAutoDecisionTimer !== null) clearTimeout(pendingAutoDecisionTimer);
+  pendingAutoDecisionFrame = null;
+  pendingAutoDecisionTimer = null;
+  const apply = pendingAutoDecisionApply;
+  const batches = [...pendingAutoDecisions];
+  pendingAutoDecisions.clear();
+  if (apply === null || batches.length === 0) return;
+  apply((state) => {
+    const autoDecisionsByTask = { ...state.autoDecisionsByTask };
+    const autoDecisionCountsByTask = { ...state.autoDecisionCountsByTask };
+    for (const [taskId, queued] of batches) {
+      // Rows and counts take only decisions newer than what the Task already holds: a snapshot
+      // applied while this batch waited already restored everything up to its lastSeq, and adding
+      // those older rows again would push the newest ones out of the kept window.
+      const boundary = autoDecisionCountsByTask[taskId]?.throughSeq ?? 0;
+      const fresh = queued.filter(({ seq }) => seq > boundary);
+      if (fresh.length === 0) continue;
+      autoDecisionsByTask[taskId] = appendAutoDecisions(
+        autoDecisionsByTask[taskId] ?? [],
+        fresh.map(({ decision }) => decision),
+      );
+      autoDecisionCountsByTask[taskId] = countAutoDecisions(
+        autoDecisionCountsByTask[taskId],
+        fresh,
+      );
+    }
+    return { autoDecisionsByTask, autoDecisionCountsByTask };
+  });
+}
+
+/** Drops a Task's queued decisions that a snapshot up to `lastSeq` already holds (issue #863). */
+function discardQueuedAutoDecisionsThrough(taskId: string, lastSeq: number): void {
+  const queued = pendingAutoDecisions.get(taskId);
+  if (queued === undefined) return;
+  const newer = queued.filter(({ seq }) => seq > lastSeq);
+  if (newer.length === 0) pendingAutoDecisions.delete(taskId);
+  else pendingAutoDecisions.set(taskId, newer);
+}
+
+function queueAutoDecision(
+  taskId: string,
+  seq: number,
+  decision: AutoPermissionDecision,
+  apply: (fn: (state: AppState) => Partial<AppState>) => void,
+): void {
+  const entry = { seq, decision };
+  const queued = pendingAutoDecisions.get(taskId);
+  if (queued === undefined) pendingAutoDecisions.set(taskId, [entry]);
+  else queued.push(entry);
+  pendingAutoDecisionApply = apply;
+  if (pendingAutoDecisionTimer !== null) return;
+  pendingAutoDecisionTimer = setTimeout(flushAutoDecisions, 100);
+  if (typeof requestAnimationFrame === 'function')
+    pendingAutoDecisionFrame = requestAnimationFrame(flushAutoDecisions);
+}
+
+function taskTurnEventUpdate(
+  state: AppState,
+  taskId: string,
+  event: TaskTurnEvent,
+  receivedAt: number,
+): Pick<AppState, 'turnByTask' | 'queuedByTask'> {
+  const current = { turn: state.turnByTask[taskId], queued: state.queuedByTask[taskId] ?? [] };
+  const next = applyTaskTurnEvent(current, event, receivedAt);
+  return {
+    turnByTask:
+      next.turn === current.turn ? state.turnByTask : { ...state.turnByTask, [taskId]: next.turn },
+    queuedByTask:
+      next.queued === current.queued
+        ? state.queuedByTask
+        : { ...state.queuedByTask, [taskId]: next.queued },
+  };
 }
 
 export function handleTurnEvent(
@@ -647,19 +794,7 @@ export function handleTurnEvent(
               ev.userMessage.attachments,
             ),
           },
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              turnId: ev.turnId,
-              stage: 'understanding',
-              runtimeStarting: true,
-              reachedStageIndex: 0,
-              status: 'running',
-              startedAt: Date.now(),
-              streamingMessageId: null,
-              streamingContent: '',
-            },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           stageAnnouncement: 'Runtime起動待ち',
         };
       });
@@ -670,15 +805,7 @@ export function handleTurnEvent(
         const turn = state.turnByTask[taskId];
         if (!turn || turn.turnId !== ev.turnId) return {};
         return {
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              ...turn,
-              stage: ev.stage,
-              runtimeStarting: false,
-              reachedStageIndex: advanceStageIndex(turn.reachedStageIndex, ev.stage),
-            },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           stageAnnouncement: STAGE_LABEL[ev.stage],
         };
       });
@@ -693,12 +820,7 @@ export function handleTurnEvent(
             ev.approval,
           ],
         },
-        turnByTask: state.turnByTask[taskId]
-          ? {
-              ...state.turnByTask,
-              [taskId]: { ...state.turnByTask[taskId]!, stage: 'waiting_approval' },
-            }
-          : state.turnByTask,
+        ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
         stageAnnouncement: STAGE_LABEL.waiting_approval,
       }));
       break;
@@ -765,29 +887,11 @@ export function handleTurnEvent(
       break;
     }
     case 'permission.auto_decided': {
-      apply((state) => ({
-        autoDecisionsByTask: {
-          ...state.autoDecisionsByTask,
-          [taskId]: upsertAutoDecision(state.autoDecisionsByTask[taskId] ?? [], ev.autoDecision),
-        },
-      }));
+      queueAutoDecision(taskId, ev.seq, ev.autoDecision, apply);
       break;
     }
     case 'message.delta': {
-      apply((state) => {
-        const turn = state.turnByTask[taskId];
-        if (!turn || turn.turnId !== ev.turnId) return {};
-        return {
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: {
-              ...turn,
-              streamingMessageId: turn.streamingMessageId ?? ev.messageId,
-              streamingContent: turn.streamingContent + ev.delta,
-            },
-          },
-        };
-      });
+      apply((state) => taskTurnEventUpdate(state, taskId, ev, Date.now()));
       break;
     }
     case 'skill.draft.created': {
@@ -847,10 +951,7 @@ export function handleTurnEvent(
         }
         return {
           messagesByTask: { ...state.messagesByTask, [taskId]: nextMessages },
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: { ...turn, status: ev.state, finishedAt: Date.now() },
-          },
+          ...taskTurnEventUpdate(state, taskId, ev, Date.now()),
           turnDiffByTask: {
             ...state.turnDiffByTask,
             [taskId]: { turnId: ev.turnId, entries: ev.diff },
@@ -879,9 +980,7 @@ export function handleTurnEvent(
       break;
     }
     case 'queue.changed': {
-      apply((state) => ({
-        queuedByTask: { ...state.queuedByTask, [taskId]: ev.queued },
-      }));
+      apply((state) => taskTurnEventUpdate(state, taskId, ev, Date.now()));
       break;
     }
     case 'context.usage': {
@@ -1046,12 +1145,7 @@ export const useAppStore = create<AppState>((set, get) => {
           try {
             // Unchanged Workers, messages and executions keep their identity, so only what
             // changed re-renders.
-            // The Renderer types mirror the contracts by hand (Preload hands the contracts payload
-            // over as is), so the shared patch function is called across that mirror.
-            detail = applyTeamDetailPatch(
-              streamDetail as unknown as ContractTeamDetail,
-              event.patch,
-            ) as unknown as TeamDetail;
+            detail = applyTeamDetailPatch(streamDetail, event.patch);
           } catch {
             resynchronize();
             return;
@@ -1124,9 +1218,11 @@ export const useAppStore = create<AppState>((set, get) => {
     activatedSkillsByTask: {},
     workspaceByTask: {},
     permissionByTask: {},
+    permissionChangeByTask: {},
     approvalsByTask: {},
     approvalHistoryByTask: {},
     autoDecisionsByTask: {},
+    autoDecisionCountsByTask: {},
     commandsByTask: {},
     turnDiffByTask: {},
     interruptedTurnIdsByTask: {},
@@ -1506,13 +1602,11 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async setAccessPreset(taskId: string, preset: AccessPreset) {
       if (!window.sprintCoder || typeof window.sprintCoder.permissions?.set !== 'function') return;
+      if (get().permissionChangeByTask[taskId] !== undefined) return;
       const previous = get().permissionByTask[taskId] ?? { preset: 'ask', policyEpoch: 0 };
       if (previous.preset === preset) return;
       set((state) => ({
-        permissionByTask: {
-          ...state.permissionByTask,
-          [taskId]: { ...previous, preset },
-        },
+        permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: preset },
       }));
       try {
         const permission = await window.sprintCoder.permissions.set(
@@ -1520,11 +1614,11 @@ export const useAppStore = create<AppState>((set, get) => {
           preset,
           previous.policyEpoch,
         );
-        rememberAccessPreset(preset);
+        if ((get().permissionByTask[taskId]?.policyEpoch ?? 0) > permission.policyEpoch) return;
+        rememberAccessPreset(permission.preset);
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= permission.policyEpoch
               ? { ...state.permissionByTask, [taskId]: permission }
               : state.permissionByTask,
         }));
@@ -1538,11 +1632,14 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         set((state) => ({
           permissionByTask:
-            state.permissionByTask[taskId]?.preset === preset &&
-            state.permissionByTask[taskId]?.policyEpoch === previous.policyEpoch
+            (state.permissionByTask[taskId]?.policyEpoch ?? 0) <= restored.policyEpoch
               ? { ...state.permissionByTask, [taskId]: restored }
               : state.permissionByTask,
           ...(userCanceled ? {} : { error: describeError(err) }),
+        }));
+      } finally {
+        set((state) => ({
+          permissionChangeByTask: { ...state.permissionChangeByTask, [taskId]: undefined },
         }));
       }
     },
@@ -1632,19 +1729,21 @@ export const useAppStore = create<AppState>((set, get) => {
       if (typeof window.sprintCoder?.files?.list === 'function')
         void window.sprintCoder.files
           .list(taskId)
-          .then((records) =>
+          .then((records) => {
+            if (!isCurrentSelection()) return;
             apply((state) => ({
               fileChangesByTask: { ...state.fileChangesByTask, [taskId]: records },
-            })),
-          )
+            }));
+          })
           .catch(() => undefined);
 
       if (typeof window.sprintCoder?.images?.list === 'function')
         void window.sprintCoder.images
           .list(taskId)
-          .then((images) =>
-            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } })),
-          )
+          .then((images) => {
+            if (!isCurrentSelection()) return;
+            apply((state) => ({ imagesByTask: { ...state.imagesByTask, [taskId]: images } }));
+          })
           .catch(() => undefined);
 
       void get().loadGraphVersions(taskId);
@@ -1655,46 +1754,43 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       const sprintCoder = window.sprintCoder;
 
-      const [messagesResult, snapshot, commandsResult, approvalHistoryResult, autoDecisionsResult] =
-        await Promise.all([
-          sprintCoder.tasks
-            .messages(taskId)
-            .then((v) => ({ ok: true as const, v }))
-            .catch((err: unknown) => ({ ok: false as const, err })),
-          typeof sprintCoder.turns.snapshot === 'function'
-            ? sprintCoder.turns.snapshot(taskId).catch(() => null)
-            : Promise.resolve(null),
-          typeof sprintCoder.commands?.list === 'function'
-            ? sprintCoder.commands
-                .list(taskId)
-                .then(async (commands) => {
-                  const cards = await Promise.all(
-                    commands.map(async (command): Promise<CommandCardState> => {
-                      const output = await sprintCoder.commands
-                        .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
-                        .catch(() => ({ items: [] as CommandOutputRecord[] }));
-                      return { command, tail: projectCommandTail(output.items) };
-                    }),
-                  );
-                  return { ok: true as const, cards };
-                })
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
-          typeof sprintCoder.approvals?.listRecent === 'function'
-            ? sprintCoder.approvals
-                .listRecent(taskId)
-                .then((approvals) => ({ ok: true as const, approvals }))
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
-          typeof sprintCoder.permissions?.listAutoDecisions === 'function'
-            ? sprintCoder.permissions
-                .listAutoDecisions(taskId)
-                .then((decisions) => ({ ok: true as const, decisions }))
-                .catch((err: unknown) => ({ ok: false as const, err }))
-            : Promise.resolve({ ok: true as const, decisions: [] as AutoPermissionDecision[] }),
-        ]);
+      const [messagesResult, snapshot, commandsResult, approvalHistoryResult] = await Promise.all([
+        sprintCoder.tasks
+          .messages(taskId)
+          .then((v) => ({ ok: true as const, v }))
+          .catch((err: unknown) => ({ ok: false as const, err })),
+        typeof sprintCoder.turns.snapshot === 'function'
+          ? sprintCoder.turns.snapshot(taskId).catch(() => null)
+          : Promise.resolve(null),
+        typeof sprintCoder.commands?.list === 'function'
+          ? sprintCoder.commands
+              .list(taskId)
+              .then(async (commands) => {
+                const cards = await Promise.all(
+                  commands.map(async (command): Promise<CommandCardState> => {
+                    const output = await sprintCoder.commands
+                      .outputTail({ taskId, commandId: command.id, maxBytes: 131_072 })
+                      .catch(() => ({ items: [] as CommandOutputRecord[] }));
+                    return { command, tail: projectCommandTail(output.items) };
+                  }),
+                );
+                return { ok: true as const, cards };
+              })
+              .catch((err: unknown) => ({ ok: false as const, err }))
+          : Promise.resolve({ ok: true as const, cards: [] as CommandCardState[] }),
+        typeof sprintCoder.approvals?.listRecent === 'function'
+          ? sprintCoder.approvals
+              .listRecent(taskId)
+              .then((approvals) => ({ ok: true as const, approvals }))
+              .catch((err: unknown) => ({ ok: false as const, err }))
+          : Promise.resolve({ ok: true as const, approvals: [] as ApprovalSummary[] }),
+      ]);
 
-      if (get().selectedTaskId !== taskId) return; // user switched away while these were in flight
+      // Nothing from these reads lands unless this is still the newest selection (issue #863): a
+      // reselection of the same Task (A→B→A, or clicking the selected Task again) starts newer
+      // reads, and an older snapshot arriving after them would roll the rows, counts and lastSeq
+      // back while the newer selection's subscription has already resumed after its own lastSeq.
+      if (!isCurrentSelection()) return;
 
       if (messagesResult.ok) {
         set((state) => ({
@@ -1728,38 +1824,39 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       }
 
-      if (autoDecisionsResult.ok) {
+      // The kept Auto decision rows come in the snapshot, read with its lastSeq and counts
+      // (issue #863): a decision recorded while the snapshot waited for the Task's mailbox is in
+      // the rows and the counts together, or in neither and replayed after lastSeq.
+      // Decisions still queued from the previous subscription are in this snapshot already.
+      if (snapshot) discardQueuedAutoDecisionsThrough(taskId, snapshot.lastSeq);
+      const snapshotAutoDecisions = snapshot?.autoDecisions;
+      if (snapshotAutoDecisions !== undefined) {
         apply((state) => ({
           autoDecisionsByTask: {
             ...state.autoDecisionsByTask,
-            [taskId]: autoDecisionsResult.decisions,
+            [taskId]: snapshotAutoDecisions,
           },
+        }));
+      }
+      // The snapshot counts every Auto decision up to its lastSeq, read in the same call, and the
+      // subscription below resumes after lastSeq, so each decision is counted exactly once.
+      if (snapshot?.autoDecisionCounts !== undefined) {
+        const byTurn: Record<string, AutoDecisionTally> = {};
+        for (const { turnId, allow, allowOnce, deny } of snapshot.autoDecisionCounts)
+          byTurn[turnId] = { allow, allowOnce, deny };
+        const loaded: AutoDecisionCountState = { throughSeq: snapshot.lastSeq, byTurn };
+        apply((state) => ({
+          autoDecisionCountsByTask: { ...state.autoDecisionCountsByTask, [taskId]: loaded },
         }));
       }
 
       let afterSeq: number | undefined;
       if (snapshot) {
         afterSeq = snapshot.lastSeq;
-        const activeTurn = snapshot.activeTurn;
+        const projection = hydrateTaskTurn(snapshot);
         apply((state) => ({
-          turnByTask: {
-            ...state.turnByTask,
-            [taskId]: activeTurn
-              ? {
-                  turnId: activeTurn.turnId,
-                  stage: activeTurn.stage,
-                  runtimeStarting: false,
-                  // Restored from the snapshot's stage, which is the furthest this turn is known to
-                  // have reached — earlier stage events are not replayed for a resumed turn.
-                  reachedStageIndex: advanceStageIndex(0, activeTurn.stage),
-                  status: 'running',
-                  startedAt: activeTurn.startedAtEpochMs,
-                  streamingMessageId: activeTurn.messageId,
-                  streamingContent: activeTurn.streamedText,
-                }
-              : undefined,
-          },
-          queuedByTask: { ...state.queuedByTask, [taskId]: snapshot.queued },
+          turnByTask: { ...state.turnByTask, [taskId]: projection.turn },
+          queuedByTask: { ...state.queuedByTask, [taskId]: projection.queued },
           lastSeqByTask: { ...state.lastSeqByTask, [taskId]: snapshot.lastSeq },
           contextUsageByTask: snapshot.contextUsage
             ? { ...state.contextUsageByTask, [taskId]: snapshot.contextUsage }
@@ -2032,6 +2129,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async startGoal(taskId: string, objective: string) {
       if (!window.sprintCoder?.goals) return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.start({
@@ -2065,6 +2163,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
     async resumeGoal(taskId: string) {
       if (!window.sprintCoder?.goals) return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       const selectedSkills = [...(get().skillSelectionByTask[taskId] ?? [])];
       try {
         const result = await window.sprintCoder.goals.resume(taskId, selectedSkills);
@@ -2546,8 +2645,8 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async startTurn(taskId: string, text: string, skills, attachmentIds = []) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder) return;
+      if (!text.trim() || !window.sprintCoder) return null;
+      if (notifyPendingPermissionChange(get(), taskId)) return null;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const selectedAttachmentIds = [...attachmentIds];
       const draftsById = new Map(
@@ -2561,7 +2660,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return attachment === undefined ? [] : [attachment];
       });
       const turn = get().turnByTask[taskId];
-      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return;
+      if (turn && (turn.status === 'running' || turn.status === 'canceling')) return null;
 
       const optimisticId = `pending-msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const optimisticMessage: ChatMessage = {
@@ -2569,7 +2668,7 @@ export const useAppStore = create<AppState>((set, get) => {
         taskId,
         turnId: null,
         author: 'user',
-        content: trimmed,
+        content: text,
         attachments: selectedAttachments,
         createdAt: new Date().toISOString(),
       };
@@ -2589,7 +2688,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         const result = await window.sprintCoder.turns.start({
           taskId,
-          text: trimmed,
+          text,
           skills: selectedSkills,
           attachmentIds: selectedAttachmentIds,
           attachmentSelectionIdentity:
@@ -2619,6 +2718,7 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
       } catch (err) {
         const code = errorCode(err);
+        const message = code === 'TURN_ACTIVE' ? null : describeError(err);
         let restoredDraft = false;
         set((state) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
@@ -2630,28 +2730,34 @@ export const useAppStore = create<AppState>((set, get) => {
             pendingOptimisticIdByTask: { ...state.pendingOptimisticIdByTask, [taskId]: undefined },
             sendingByTask: { ...state.sendingByTask, [taskId]: false },
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             skillSelectionByTask: {
               ...state.skillSelectionByTask,
               [taskId]: selectedSkills,
             },
-            error: code === 'TURN_ACTIVE' ? null : describeError(err),
+            error: message,
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         persistSkillDraftSelection(taskId, selectedSkills);
         if (selectedAttachmentIds.length > 0) void get().refreshDraftAttachments(taskId);
         if (code === 'TURN_ACTIVE') {
           get().showToast('すでに実行中です。もう一度送信するとキューに追加されます');
         }
+        return message;
       }
+      return null;
     },
 
     async queueMessage(taskId: string, text: string, skills) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.queue !== 'function')
+      if (
+        !text.trim() ||
+        !window.sprintCoder ||
+        typeof window.sprintCoder.turns.queue !== 'function'
+      )
         return false;
+      if (notifyPendingPermissionChange(get(), taskId)) return false;
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       let selectionRevision = 0;
       let draftRevision = 0;
@@ -2671,7 +2777,7 @@ export const useAppStore = create<AppState>((set, get) => {
       persistDraftDebounced(taskId, '');
       persistSkillDraftSelection(taskId, []);
       try {
-        await window.sprintCoder.turns.queue({ taskId, text: trimmed, skills: selectedSkills });
+        await window.sprintCoder.turns.queue({ taskId, text, skills: selectedSkills });
         // queue.changed (delivered via subscription) reconciles the compact queued list.
         return true;
       } catch (err) {
@@ -2682,7 +2788,7 @@ export const useAppStore = create<AppState>((set, get) => {
           restoredSkills = state.skillSelectionRevisionByTask[taskId] === selectionRevision;
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             draftRevisionByTask: restoredDraft
               ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
@@ -2700,20 +2806,24 @@ export const useAppStore = create<AppState>((set, get) => {
             error: describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
         return false;
       }
     },
 
     async steerMessage(taskId: string, text: string, expectedTurnId: string) {
-      const trimmed = text.trim();
-      if (!trimmed || !window.sprintCoder || typeof window.sprintCoder.turns.steer !== 'function')
+      if (
+        !text.trim() ||
+        !window.sprintCoder ||
+        typeof window.sprintCoder.turns.steer !== 'function'
+      )
         return;
+      if (notifyPendingPermissionChange(get(), taskId)) return;
       set((state) => ({ draftByTask: { ...state.draftByTask, [taskId]: '' } }));
       persistDraftDebounced(taskId, '');
       try {
-        await window.sprintCoder.turns.steer({ taskId, text: trimmed, expectedTurnId });
+        await window.sprintCoder.turns.steer({ taskId, text, expectedTurnId });
       } catch (err) {
         const code = errorCode(err);
         let restoredDraft = false;
@@ -2721,7 +2831,7 @@ export const useAppStore = create<AppState>((set, get) => {
           restoredDraft = (state.draftByTask[taskId] ?? '') === '';
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             error:
               code === 'STEER_STALE' || code === 'STEER_UNSUPPORTED'
@@ -2729,7 +2839,7 @@ export const useAppStore = create<AppState>((set, get) => {
                 : describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (code === 'STEER_STALE') {
           get().showToast('Turnが切り替わったため送信し直してください');
         } else if (code === 'STEER_UNSUPPORTED') {
@@ -2741,12 +2851,13 @@ export const useAppStore = create<AppState>((set, get) => {
     },
 
     async stopAndSend(taskId: string, text: string, skills) {
-      const trimmed = text.trim();
       if (
-        !trimmed ||
+        !text.trim() ||
         !window.sprintCoder ||
         typeof window.sprintCoder.turns.stopAndSend !== 'function'
       )
+        return { completed: false, draftRestored: false };
+      if (notifyPendingPermissionChange(get(), taskId))
         return { completed: false, draftRestored: false };
       const selectedSkills = [...(skills ?? get().skillSelectionByTask[taskId] ?? [])];
       const activeTurn = get().turnByTask[taskId];
@@ -2777,7 +2888,7 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         await window.sprintCoder.turns.stopAndSend({
           taskId,
-          text: trimmed,
+          text,
           skills: selectedSkills,
         });
         return { completed: true, draftRestored: false };
@@ -2794,7 +2905,7 @@ export const useAppStore = create<AppState>((set, get) => {
             currentTurn.status === 'canceling';
           return {
             draftByTask: restoredDraft
-              ? { ...state.draftByTask, [taskId]: trimmed }
+              ? { ...state.draftByTask, [taskId]: text }
               : state.draftByTask,
             draftRevisionByTask: restoredDraft
               ? { ...state.draftRevisionByTask, [taskId]: draftRevision + 1 }
@@ -2818,7 +2929,7 @@ export const useAppStore = create<AppState>((set, get) => {
             error: describeError(err),
           };
         });
-        if (restoredDraft) persistDraftDebounced(taskId, trimmed);
+        if (restoredDraft) persistDraftDebounced(taskId, text);
         if (restoredSkills) persistSkillDraftSelection(taskId, selectedSkills);
         return { completed: false, draftRestored: restoredDraft };
       }

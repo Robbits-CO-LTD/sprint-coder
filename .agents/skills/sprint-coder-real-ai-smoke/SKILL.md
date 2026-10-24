@@ -16,7 +16,7 @@ description: >-
 
 ## 必須境界
 
-- macOSのUI操作は、現在の`computer-use` Skillを読み、Computer Useで行う。
+- macOSのUI操作は、現在利用可能なComputer Useツールのドキュメントを読み、Computer Useで行う。
 - 対象は`/Users/yusei/sprint-coder`の現在checkoutから起動した開発buildとする。
   `/Applications/Sprint Coder.app`や古いpackaged buildで代替しない。
 - UI操作をshell、Playwright、AppleScriptで代替しない。起動、process照合、fixture作成、
@@ -38,7 +38,9 @@ description: >-
 
 ## 先に読むもの
 
-1. 現在の`computer-use` Skill全文
+共通ケースと記録方針は [Computer Use検証チェックリスト](../../../docs/testing/computer-use/README.md)。操作するのは開発エージェントのComputer Useであり、Sprint Coder自身の機能とは別である。
+
+1. 現在利用可能なComputer Useツールのドキュメント全文
 2. `.claude/skills/sprint-coder-e2e/SKILL.md`の起動対象・dev build識別・process保護の契約
 3. [受入マトリクスと報告契約](references/acceptance-matrix.md)
 
@@ -48,7 +50,7 @@ description: >-
 
 - ユーザーに見える成果: Chat UI、設定画面、2系統の実AI応答、各AIのfile editとcommand
 - 必要な変更: repo外の一時workspaceと、その中の使い捨てfixtureだけ
-- 非対象: source修正、Issue起票、全Playwright E2E、モデルdownload、credential設定
+- 非対象: source修正、Issue起票、全チェックリストの回帰検証、モデルdownload、credential設定
 - 最小証明: Providerごとに別TaskでTurn完了、期待byteの実ファイル、marker付きcommand exit 0
 
 ## 実行手順

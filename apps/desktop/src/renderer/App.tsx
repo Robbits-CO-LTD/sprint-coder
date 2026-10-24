@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CSSProperties } from 'react';
 import './index.css';
 import { useAppStore } from './store/appStore';
 import { Sidebar } from './components/Sidebar';
@@ -10,16 +11,23 @@ import { TeamCanvas } from './components/TeamCanvas/TeamCanvas';
 import type { TeamCanvasHandle } from './components/TeamCanvas/TeamCanvas';
 import { TeamListView } from './components/TeamListView';
 import { SettingsDialog } from './components/SettingsDialog';
-import { OPEN_LOCAL_AI_SETTINGS_EVENT } from './lib/settings-navigation';
+import { OPEN_PROVIDER_SETTINGS_EVENT } from './lib/settings-navigation';
 import { TaskBoundaryProvider } from './components/TaskBoundary';
 import { AppTitlebar } from './components/AppTitlebar';
+import { SidebarResizer } from './components/SidebarResizer';
 import { List, Plus } from './components/icons';
 import { useMediaQuery } from './lib/useMediaQuery';
 import {
   NARROW_VIEWPORT_QUERY,
+  clampSidebarWidth,
   defaultSidebarCollapsed,
+  isMacPlatform,
   readStoredSidebarCollapsed,
+  readStoredSidebarWidth,
+  SIDEBAR_DEFAULT_WIDTH,
+  sidebarAvailableWidth,
   writeStoredSidebarCollapsed,
+  writeStoredSidebarWidth,
 } from './lib/sidebar-preference';
 import {
   readStoredTeamViewPreference,
@@ -97,6 +105,7 @@ export default function App() {
     readStoredTeamViewPreference,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [focusProviderSettings, setFocusProviderSettings] = useState(false);
   const graphOpenRequest = useAppStore((s) => s.graphOpenRequest);
   // The graph panel has no button. It opens when a graph is rendered for the selected Task (Main's
   // `graphsUpdated` push) or when the inline card in the transcript asks for it again, and closing
@@ -118,13 +127,20 @@ export default function App() {
   const [setupComplete] = useState(readSetupComplete);
   const [setupReveal, setSetupReveal] = useState(false);
   const setupWasVisibleRef = useRef(false);
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    setFocusProviderSettings(false);
+    setSettingsOpen(true);
+  }, []);
+  const openProviderSettings = useCallback(() => {
+    setFocusProviderSettings(true);
+    setSettingsOpen(true);
+  }, []);
   const closeSettings = useCallback(() => setSettingsOpen(false), []);
 
   useEffect(() => {
-    window.addEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
-    return () => window.removeEventListener(OPEN_LOCAL_AI_SETTINGS_EVENT, openSettings);
-  }, [openSettings]);
+    window.addEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openProviderSettings);
+    return () => window.removeEventListener(OPEN_PROVIDER_SETTINGS_EVENT, openProviderSettings);
+  }, [openProviderSettings]);
 
   const selectTaskFromUi = useCallback(
     async (taskId: string): Promise<boolean> => {
@@ -175,6 +191,29 @@ export default function App() {
     });
   }, []);
 
+  // --- Sidebar width ---
+  //
+  // The stored width is the user's intent; the painted width is that intent clamped to the window
+  // so a narrower window never squeezes the conversation below its minimum. It is published as the
+  // `--sidebar-width` custom property on the frame, which the sidebar, its overlay form and the
+  // titlebar's two-tone background all read, so they move together while dragging.
+  const [sidebarWidth, setSidebarWidth] = useState(
+    () => readStoredSidebarWidth() ?? SIDEBAR_DEFAULT_WIDTH,
+  );
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  useEffect(() => {
+    const onResize = () => setViewportWidth(window.innerWidth);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  const commitSidebarWidth = useCallback((width: number) => {
+    setSidebarWidth(width);
+    writeStoredSidebarWidth(width);
+  }, []);
+  const resetSidebarWidth = useCallback(() => {
+    commitSidebarWidth(SIDEBAR_DEFAULT_WIDTH);
+  }, [commitSidebarWidth]);
+
   // Focus restoration on full Team-mode exit (a11y fix, Phase 7 / NFR-A11Y-02): both exit paths
   // ("Chatに戻る" from the Canvas — after its reverse-FLIP tail — and from the List view) end by
   // unmounting whichever Team surface was showing. If focus was on that surface's own "戻る"
@@ -216,6 +255,13 @@ export default function App() {
   // must not make this component and TeamCanvas (still finishing its own exit) render at once.
   const teamListActive =
     teamViewOpen && teamViewPreference === 'list' && !exiting && selectedTask !== null;
+  // A docked right panel takes its width before the conversation does, so the sidebar's limit is
+  // measured against what is left. Overlay forms (narrow window, compact graph) take nothing.
+  const sidebarRoom = sidebarAvailableWidth(viewportWidth, {
+    graph: graphOpen && selectedTask !== null && !teamViewOpen && !sidebarOverlay,
+    teamList: teamListActive && !narrowViewport,
+  });
+  const paintedSidebarWidth = clampSidebarWidth(sidebarWidth, sidebarRoom);
   // Render-time sync (not an effect — react-hooks/set-state-in-effect convention, see
   // TaskHeader/GoalChip): keep `surfaceMode` following `teamCanvasActive`, except during
   // the tail of `requestExitTeam`, which explicitly forces 'main' one commit *before* the store
@@ -304,6 +350,27 @@ export default function App() {
     [setTeamViewPreference],
   );
 
+  // ⌘B (Ctrl+B elsewhere) toggles the Task history, the shortcut VS Code, Cursor and T3 Code share.
+  // Not Ctrl+B on macOS: that is "move back one character" in every text field there.
+  const sidebarShortcutEnabled = !showSetupWizard && !teamCanvasActive && !exiting;
+  useEffect(() => {
+    if (!sidebarShortcutEnabled) return;
+    const mac = isMacPlatform();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== 'b') return;
+      if (mac ? !event.metaKey || event.ctrlKey : !event.ctrlKey || event.metaKey) return;
+      // Never while a modal dialog is open: several (project editor, archive confirmation) live
+      // inside the sidebar, and collapsing it would hide a still-open modal and leave the window
+      // blocked behind it. The shortcut belongs to the workspace, not to whatever is on top.
+      if (document.querySelector(':modal') !== null) return;
+      event.preventDefault();
+      toggleSidebar();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [sidebarShortcutEnabled, toggleSidebar]);
+
   if (initialized && !sprintCoderAvailable) {
     return (
       <div className="app-shell app-shell--unavailable">
@@ -325,9 +392,13 @@ export default function App() {
   // who could otherwise still Tab into chrome that looks gone. List mode never sets this class, so
   // the sidebar/header stay fully interactive there.
   const chromeInert = teamCanvasActive || exiting;
+
   return (
     <TaskBoundaryProvider value={{ selectTask: selectTaskFromUi, createTask: createTaskFromUi }}>
-      <div className="app-frame">
+      <div
+        className="app-frame"
+        style={{ '--sidebar-width': `${paintedSidebarWidth}px` } as CSSProperties}
+      >
         <AppTitlebar />
         <div
           data-app-initialized={initialized}
@@ -346,6 +417,15 @@ export default function App() {
               inert={chromeInert || sidebarCollapsed}
               collapsed={sidebarCollapsed}
               onOpenSettings={openSettings}
+            />
+          )}
+          {!showSetupWizard && !chromeInert && !sidebarCollapsed && !sidebarOverlay && (
+            <SidebarResizer
+              width={paintedSidebarWidth}
+              availableWidth={sidebarRoom}
+              onResize={setSidebarWidth}
+              onResizeEnd={commitSidebarWidth}
+              onReset={resetSidebarWidth}
             />
           )}
           {/* Tapping outside an overlaid sidebar closes it, the usual expectation for a panel that
@@ -447,7 +527,11 @@ export default function App() {
           {/* Outside `.main` and every Team surface: <dialog showModal> renders in the browser's top
           layer, so it is never clipped by `.team-canvas`'s `overflow: clip`, and it stays mounted
           across the Chat<->Team morph. */}
-          <SettingsDialog open={settingsOpen} onClose={closeSettings} />
+          <SettingsDialog
+            open={settingsOpen}
+            onClose={closeSettings}
+            focusProviders={focusProviderSettings}
+          />
           {selectedTask && (
             <SurfaceLayer
               task={selectedTask}

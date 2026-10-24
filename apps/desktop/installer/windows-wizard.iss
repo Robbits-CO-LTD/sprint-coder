@@ -30,7 +30,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesAllowed=x64
 #endif
 OutputDir={#OutputDir}
-OutputBaseFilename=Sprint-Coder-Installer
+OutputBaseFilename=Sprint-Coder-Installer-{#AppVersion}
 SetupIconFile={#SetupIcon}
 Compression=lzma2/ultra64
 SolidCompression=yes

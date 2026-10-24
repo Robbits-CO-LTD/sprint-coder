@@ -8,13 +8,17 @@ import type {
   TurnDiff,
   TurnDiffEntry,
 } from '../../types/sprint-coder';
+import { useShallow } from 'zustand/react/shallow';
 import { useAppStore } from '../../store/appStore';
-import { isPinnedToBottom } from '../../lib/scroll-follow';
+import { createTailFollower, isPinnedToBottom } from '../../lib/scroll-follow';
 import { groupActivitiesByMessage } from '../../lib/team-activity-display';
 import {
   executionStateLabel,
   latestExecutionForWorker,
   stoppedExecutionReason,
+  workerWorkPhase,
+  workerStatusLabel,
+  WORK_PHASE_LABELS,
 } from '../../lib/team-execution-display';
 import { TeamActivityCard, TeamActivityGroup } from '../TeamActivityCard';
 import { ArrowDown, ArrowUp } from '../icons';
@@ -25,7 +29,7 @@ import { ComputerUseAppGrantCard } from '../ComputerUseAppGrantCard';
 import { useComputerUseAppGrant } from '../../hooks/useComputerUseAppGrant';
 import { CommandCard } from '../CommandCard';
 import { ApprovalAuditRow } from '../ApprovalAuditRow';
-import { AutoDecisionAuditRow } from '../AutoDecisionAuditRow';
+import { AutoDecisionAuditGroup } from '../AutoDecisionAuditRow';
 import { TurnDiffCard } from '../TurnDiffCard';
 import { GeneratedImageCard, MissingGeneratedImageNotice } from '../GeneratedImageCard';
 import { FileChangeCard } from '../FileChangeCard';
@@ -68,6 +72,7 @@ export function Timeline({
   const commands = useAppStore((s) => s.commandsByTask[taskId]) ?? NO_COMMANDS;
   const approvalHistory = useAppStore((s) => s.approvalHistoryByTask[taskId]) ?? NO_APPROVALS;
   const autoDecisions = useAppStore((s) => s.autoDecisionsByTask[taskId]) ?? NO_AUTO_DECISIONS;
+  const autoDecisionTallies = useAppStore((s) => s.autoDecisionCountsByTask[taskId]?.byTurn);
   const turnDiff = useAppStore((s) => s.turnDiffByTask[taskId]);
   const interruptedTurnIds =
     useAppStore((s) => s.interruptedTurnIdsByTask[taskId]) ?? NO_INTERRUPTED_TURNS;
@@ -118,8 +123,30 @@ export function Timeline({
   // "誰を雇い、誰に任せたか" reads in the same column as the conversation. Message order and every
   // per-message card association below stay exactly as they were; a task with no Team activity
   // gets the shared empty grouping and renders the timeline it rendered before.
-  const teamDetail = useAppStore((s) => s.teamByTask[taskId]);
-  const activities = teamDetail?.activities ?? NO_ACTIVITIES;
+  // Only the parts the Timeline shows are selected (issue #863): a Team update that changes a
+  // Worker's live output or a message no longer re-renders the whole Timeline.
+  const activities = useAppStore((s) => s.teamByTask[taskId]?.activities) ?? NO_ACTIVITIES;
+  const workerBreakdownCells = useAppStore(
+    useShallow((s) => workerBreakdownCellsFor(s.teamByTask[taskId])),
+  );
+  const workerBreakdownAll = useMemo(() => {
+    const rows: { role: string; status: string }[] = [];
+    for (let index = 0; index + 1 < workerBreakdownCells.length; index += 2)
+      rows.push({ role: workerBreakdownCells[index]!, status: workerBreakdownCells[index + 1]! });
+    return rows;
+  }, [workerBreakdownCells]);
+  // One group per Turn, built once per change instead of filtering every decision for every
+  // message. Each group's counts come from the per-Turn tally, which keeps counting decisions
+  // whose rows left the in-memory window.
+  const autoDecisionsByTurn = useMemo(() => {
+    const byTurn = new Map<string, AutoPermissionDecision[]>();
+    for (const decision of autoDecisions) {
+      const group = byTurn.get(decision.turnId);
+      if (group === undefined) byTurn.set(decision.turnId, [decision]);
+      else group.push(decision);
+    }
+    return byTurn;
+  }, [autoDecisions]);
   const activityGroups = useMemo(
     () => groupActivitiesByMessage(messages, activities),
     [messages, activities],
@@ -199,33 +226,46 @@ export function Timeline({
   const [followState, setFollowState] = useState({ taskId, following: true });
   const following = followState.taskId === taskId ? followState.following : true;
 
+  // Following the tail reads scrollHeight, which forces a layout of the whole Timeline. Several
+  // store updates can land in one frame (issue #863), so they share one scroll on the next frame.
+  // The scroll handler asks the follower synchronously whether the reader left the tail, so a
+  // scroll already scheduled for this frame does not pull a reader who scrolled up back down.
+  const [tailFollower] = useState(() => createTailFollower());
+  useEffect(() => () => tailFollower.cancel(), [tailFollower]);
+
   const handleScroll = useCallback(() => {
     const node = scrollRef.current;
     if (!node) return;
-    const next = isPinnedToBottom(node);
+    const next = tailFollower.observeScroll(node, isPinnedToBottom(node));
     setFollowState((prev) =>
       prev.taskId === taskId && prev.following === next ? prev : { taskId, following: next },
     );
-  }, [taskId]);
+  }, [taskId, tailFollower]);
+
+  // Opening an Auto decision group grows the content above the tail without a scroll event, so
+  // the follower and the jump button have to be told the reader is reading (issue #863).
+  const leaveTail = useCallback(() => {
+    tailFollower.stopFollowing();
+    setFollowState((prev) =>
+      prev.taskId === taskId && !prev.following ? prev : { taskId, following: false },
+    );
+  }, [taskId, tailFollower]);
 
   const jumpToLatest = useCallback(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    tailFollower.scrollNow(scrollRef.current);
     setFollowState({ taskId, following: true });
-  }, [taskId]);
+  }, [taskId, tailFollower]);
 
   // Switching tasks starts the reader at the newest message. Timeline is not keyed by taskId, so
   // the DOM scroll position carries over from the task we just left.
   useEffect(() => {
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
-  }, [taskId]);
+    tailFollower.scrollNow(scrollRef.current);
+  }, [taskId, tailFollower]);
 
   useEffect(() => {
-    if (!following) return;
-    const node = scrollRef.current;
-    if (node) node.scrollTop = node.scrollHeight;
+    if (following) tailFollower.schedule(scrollRef.current);
   }, [
+    tailFollower,
     following,
     messages,
     approvals,
@@ -327,8 +367,8 @@ export function Timeline({
                 : [];
             const autoDecisionRows =
               message.author === 'user' && message.turnId !== null
-                ? autoDecisions.filter((decision) => decision.turnId === message.turnId)
-                : [];
+                ? (autoDecisionsByTurn.get(message.turnId) ?? NO_AUTO_DECISIONS)
+                : NO_AUTO_DECISIONS;
             const turnImages =
               message.author === 'user' && message.turnId !== null
                 ? images.filter((image) => image.turnId === message.turnId)
@@ -356,12 +396,7 @@ export function Timeline({
                 : undefined;
             const workspaceDiff = mergeWorkspaceDiffs(persistedDiff, runtimeSummary?.diff);
             const workerBreakdown =
-              message.id === latestAssistantMessageId
-                ? (teamDetail?.workers ?? []).map((worker) => ({
-                    role: worker.role,
-                    status: workerBreakdownStatus(worker, teamDetail),
-                  }))
-                : [];
+              message.id === latestAssistantMessageId ? workerBreakdownAll : [];
             // A request that produced nothing must not read as success (issue #11). Detected from the
             // stored message, which is exactly why the directive is kept in the message text rather
             // than injected invisibly in the adapter.
@@ -442,9 +477,15 @@ export function Timeline({
                 {approvalRows.map((approval) => (
                   <ApprovalAuditRow key={approval.id} approval={approval} />
                 ))}
-                {autoDecisionRows.map((decision) => (
-                  <AutoDecisionAuditRow key={decision.id} decision={decision} />
-                ))}
+                <AutoDecisionAuditGroup
+                  decisions={autoDecisionRows}
+                  onExpand={leaveTail}
+                  tally={
+                    message.author === 'user' && message.turnId !== null
+                      ? (autoDecisionTallies?.[message.turnId] ?? null)
+                      : null
+                  }
+                />
                 {commandCards.map((card) => (
                   <CommandCard key={card.command.id} taskId={taskId} card={card} />
                 ))}
@@ -591,6 +632,23 @@ function sameRootedWorkspaceEntry(persisted: TurnDiffEntry, runtime: TurnDiffEnt
   );
 }
 
+const NO_BREAKDOWN_CELLS: readonly string[] = [];
+const breakdownCellsByTeam = new WeakMap<TeamDetail, readonly string[]>();
+
+/** The Turn summary's Worker breakdown as flat [role, status, ...] cells, so a shallow compare of
+ * the selection skips a re-render when a Team update did not change what the summary shows. */
+function workerBreakdownCellsFor(team: TeamDetail | null | undefined): readonly string[] {
+  if (team === null || team === undefined) return NO_BREAKDOWN_CELLS;
+  const cached = breakdownCellsByTeam.get(team);
+  if (cached !== undefined) return cached;
+  const cells = team.workers.flatMap((worker) => [
+    worker.role,
+    workerBreakdownStatus(worker, team),
+  ]);
+  breakdownCellsByTeam.set(team, cells);
+  return cells;
+}
+
 /**
  * A Worker whose step failed and now waits for a resume reads as idle ("待機中") from its own state,
  * so the breakdown says it stopped and why (issue #842), from its latest persisted execution. Only a
@@ -602,8 +660,12 @@ function workerBreakdownStatus(
   team: Pick<TeamDetail, 'executions' | 'missions'> | null | undefined,
 ): string {
   const execution = latestExecutionForWorker(team?.executions, worker.id);
+  const phase = workerWorkPhase(worker, execution);
+  if (phase !== null) return WORK_PHASE_LABELS[phase];
   if (execution === null || execution.state !== 'waiting_resume')
-    return workerStateLabel(worker.state);
+    return worker.state === 'busy'
+      ? workerStatusLabel(worker, execution)
+      : workerStateLabel(worker.state);
   // A graph step resumed by hand stays waiting_resume, with its old failure, until the scheduler
   // admits it; the old reason would read as the step still being stopped.
   const resumePending = (team?.missions ?? []).some((mission) =>

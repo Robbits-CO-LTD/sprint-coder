@@ -54,6 +54,7 @@ import {
   teamMissionCheckpointSchema,
   type GraphDocument,
   type GraphGeneration,
+  type WorkerActivityEntry,
 } from '@sprint-coder/contracts';
 import {
   parseStoredGraphDocument,
@@ -355,6 +356,7 @@ import {
 } from './assurance';
 import type { SaveOutcome } from './workspace-edit';
 import type { UserFileSaveIntent } from './user-file-save-saga';
+import { workerActivityEntry } from './worker-activity-log';
 
 class SqliteEditSagaLeaseHandle {
   timer: ReturnType<typeof setTimeout> | null = null;
@@ -4812,7 +4814,76 @@ const migrations = [
     // below, the trigger exactly as v100 left it.
     sql: COMPUTER_USE_AUDIT_ACTION_KIND_COPY_SQL,
   },
+  {
+    version: 103,
+    checksum: 'auto-permission-decision-tallies-v103',
+    // Issue #863: a long Team run records thousands of Auto decisions on one Task. The Timeline
+    // shows each Turn's counts and keeps the newest denials apart from the newest other decisions;
+    // reading those from turn_events meant parsing every decision of the Task on each selection,
+    // inside Main's synchronous database. Two tables written with each decision, in the same
+    // transaction, answer both by key instead: a count per (Task, Turn, kind) and a
+    // (Task, denied, seq) key per decision. Existing decisions are backfilled once from their
+    // events; json_extract runs here only, over the decisions recorded before this version.
+    sql: `
+      CREATE TABLE auto_permission_decision_tallies (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        turn_id TEXT NOT NULL,
+        decision TEXT NOT NULL CHECK (decision IN ('allow', 'allow_once', 'deny')),
+        count INTEGER NOT NULL CHECK (count > 0),
+        through_seq INTEGER NOT NULL,
+        PRIMARY KEY (task_id, turn_id, decision)
+      );
+      CREATE TABLE auto_permission_decision_events (
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        denied INTEGER NOT NULL CHECK (denied IN (0, 1)),
+        seq INTEGER NOT NULL,
+        PRIMARY KEY (task_id, denied, seq)
+      );
+      INSERT OR IGNORE INTO auto_permission_decision_events(task_id, denied, seq)
+        SELECT task_id,
+               CASE WHEN json_extract(payload_json, '$.autoDecision.decision') = 'deny'
+                    THEN 1 ELSE 0 END,
+               seq
+        FROM turn_events
+        WHERE type = 'permission.auto_decided' AND task_id IN (SELECT id FROM tasks);
+      INSERT OR IGNORE INTO auto_permission_decision_tallies(
+        task_id, turn_id, decision, count, through_seq
+      )
+        SELECT task_id,
+               json_extract(payload_json, '$.autoDecision.turnId'),
+               json_extract(payload_json, '$.autoDecision.decision'),
+               COUNT(*),
+               MAX(seq)
+        FROM turn_events
+        WHERE type = 'permission.auto_decided' AND task_id IN (SELECT id FROM tasks)
+          AND json_extract(payload_json, '$.autoDecision.turnId') IS NOT NULL
+          AND json_extract(payload_json, '$.autoDecision.decision') IN ('allow', 'allow_once', 'deny')
+        GROUP BY 1, 2, 3;
+    `,
+  },
 ];
+
+/** The newest 200 denials and the newest 200 other Auto decisions of a Task, oldest first
+ * (issue #863). Exported so a test can pin its query plan to keyed reads. */
+export const AUTO_DECISION_LIST_SQL = `SELECT event.payload_json FROM (
+   SELECT seq FROM (
+     SELECT seq FROM auto_permission_decision_events
+     WHERE task_id = ? AND denied = 0 ORDER BY seq DESC LIMIT 200
+   )
+   UNION ALL
+   SELECT seq FROM (
+     SELECT seq FROM auto_permission_decision_events
+     WHERE task_id = ? AND denied = 1 ORDER BY seq DESC LIMIT 200
+   )
+ ) AS picked
+ JOIN turn_events AS event
+   ON event.task_id = ? AND event.seq = picked.seq
+  AND event.type = 'permission.auto_decided'
+ ORDER BY picked.seq`;
+
+/** Every Auto decision of a Task counted per Turn and kind (issue #863). */
+export const AUTO_DECISION_TALLY_SQL =
+  'SELECT turn_id, decision, count FROM auto_permission_decision_tallies WHERE task_id = ?';
 
 // Canvas view persistence (Slice 6.1, FR-CAN-02/06): per-Task camera + Worker node layout.
 // Bounds mirror packages/contracts's canvasCameraSchema/canvasNodePositionSchema (kept as literal
@@ -4821,7 +4892,7 @@ const migrations = [
 /** Placeholder a Task is born with. Auto-naming replaces it on the first message (issue #4). */
 export const DEFAULT_TASK_TITLE = '新しいタスク';
 
-export const CANVAS_MIN_SCALE = 0.18;
+export const CANVAS_MIN_SCALE = 0.04;
 export const CANVAS_MAX_SCALE = 1.6;
 export const CANVAS_WORLD_BOUND = 20_000;
 // A sanity bound on the payload, not a domain limit — a Team has no headcount cap and the Canvas
@@ -5778,6 +5849,8 @@ export interface PersistenceClient {
     payload: unknown;
     now: string;
   }): void;
+  /** A Worker's newest tool-call / file-change steps across all its Team Tasks, oldest first. */
+  listRecentWorkerActivity(agentId: string, limit: number): WorkerActivityEntry[];
   completeTeamTaskWithReport(input: {
     teamTaskId: string;
     agentId: string;
@@ -6184,6 +6257,9 @@ export interface PersistenceClient {
     maxBytes: number;
   }): CommandOutputPage;
   listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[];
+  countAutoPermissionDecisions(
+    taskId: string,
+  ): { turnId: string; allow: number; allowOnce: number; deny: number }[];
   getBackgroundEpochs(taskId: string): BackgroundEpochs;
   createBackgroundActivity(input: {
     id: string;
@@ -13457,6 +13533,38 @@ export class SqlitePersistenceClient implements PersistenceClient {
       );
   }
 
+  listRecentWorkerActivity(agentId: string, limit: number): WorkerActivityEntry[] {
+    // Reached through the assignee index on team_tasks; team_activity_events has no agent index.
+    const rows = this.db
+      .prepare(
+        `SELECT e.type, e.payload_json, e.recorded_at
+           FROM team_activity_events e
+           JOIN team_tasks t ON t.id = e.team_task_id
+          WHERE t.assignee_agent_id = ?
+            AND e.agent_id = ?
+            AND e.type IN ('activity', 'fileChange')
+          ORDER BY e.recorded_at DESC, e.rowid DESC
+          LIMIT ?`,
+      )
+      .all(agentId, agentId, limit) as {
+      type: string;
+      payload_json: string;
+      recorded_at: string;
+    }[];
+    const entries: WorkerActivityEntry[] = [];
+    for (const row of rows.reverse()) {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(row.payload_json);
+      } catch {
+        continue;
+      }
+      const entry = workerActivityEntry(row.type, payload, row.recorded_at);
+      if (entry !== null) entries.push(entry);
+    }
+    return entries;
+  }
+
   completeTeamTaskWithReport(input: {
     teamTaskId: string;
     agentId: string;
@@ -14140,11 +14248,10 @@ export class SqlitePersistenceClient implements PersistenceClient {
   startGoal(taskId: string, objective: string): TaskSummary {
     return this.db.transaction(() => {
       const current = this.getTaskRow(taskId);
-      const parsedObjective = objective.trim();
-      if (parsedObjective.length === 0 || parsedObjective.length > 4000)
+      if (objective.trim().length === 0 || objective.length > 4000)
         throw new Error('Goal must be between 1 and 4000 characters');
       const now = new Date().toISOString();
-      const preservingUsage = current.goal === parsedObjective && current.goal_status !== null;
+      const preservingUsage = current.goal === objective && current.goal_status !== null;
       const activeSeconds =
         preservingUsage && current.goal_status === 'active' && current.goal_updated_at !== null
           ? Math.max(
@@ -14164,13 +14271,13 @@ export class SqlitePersistenceClient implements PersistenceClient {
            WHERE id = ?`,
         )
         .run(
-          parsedObjective,
+          objective,
           null,
           preservingUsage ? current.goal_tokens_used : 0,
           preservingUsage ? current.goal_time_used_seconds + activeSeconds : 0,
           preservingUsage ? current.goal_started_at : now,
           now,
-          current.goal === parsedObjective ? 0 : 1,
+          current.goal === objective ? 0 : 1,
           now,
           taskId,
         );
@@ -14241,7 +14348,8 @@ export class SqlitePersistenceClient implements PersistenceClient {
       if (current.goal === null || current.goal_status === null)
         throw new Error('Task does not have a Goal');
       this.transitionGoal(taskId, 'active');
-      const text = `Goalを続けてください: ${current.goal}`;
+      // Keep the stored Goal's first Markdown block separate from the continuation directive.
+      const text = `Goalを続けてください:\n\n${current.goal}`;
       const started = this.startTurnInTransaction(taskId, text, skills, includeBuiltinTeamSkill);
       return { task: this.getTask(taskId), started };
     })();
@@ -20419,6 +20527,11 @@ export class SqlitePersistenceClient implements PersistenceClient {
               entries: this.getDisplayTurnDiff(taskId, latestCompletedTurn.id),
             },
       interruptedTurnIds: interruptedTurns.map(({ id }) => id),
+      // Read in the same call as lastSeq, so the rows and counts cover exactly the decisions up
+      // to it and a subscription that resumes after lastSeq neither misses nor repeats one
+      // (issue #863).
+      autoDecisions: this.listAutoPermissionDecisions(taskId),
+      autoDecisionCounts: this.countAutoPermissionDecisions(taskId),
     });
   }
 
@@ -20610,12 +20723,26 @@ export class SqlitePersistenceClient implements PersistenceClient {
 
   private recordAutoPermissionDecision(decision: AutoPermissionDecision): TurnEvent {
     this.assertTask(decision.taskId);
-    return this.appendEvent({
+    const event = this.appendEvent({
       type: 'permission.auto_decided',
       taskId: decision.taskId,
       turnId: decision.turnId,
       autoDecision: decision,
     });
+    // Kept with the event in the same transaction (issue #863), so a Task's Auto decisions can be
+    // counted and its newest denials found without reading its whole history.
+    this.db
+      .prepare('INSERT INTO auto_permission_decision_events(task_id, denied, seq) VALUES (?, ?, ?)')
+      .run(decision.taskId, decision.decision === 'deny' ? 1 : 0, event.seq);
+    this.db
+      .prepare(
+        `INSERT INTO auto_permission_decision_tallies(task_id, turn_id, decision, count, through_seq)
+         VALUES (?, ?, ?, 1, ?)
+         ON CONFLICT(task_id, turn_id, decision)
+         DO UPDATE SET count = count + 1, through_seq = excluded.through_seq`,
+      )
+      .run(decision.taskId, decision.turnId, decision.decision, event.seq);
+    return event;
   }
 
   listAutoPermissionDecisions(taskId: string): AutoPermissionDecision[] {
@@ -20623,15 +20750,45 @@ export class SqlitePersistenceClient implements PersistenceClient {
     return (
       this.db
         .prepare(
-          `SELECT payload_json FROM turn_events
-           WHERE task_id = ? AND type = 'permission.auto_decided'
-           ORDER BY seq DESC LIMIT 200`,
+          // The newest 200 denials and the newest 200 other decisions (issue #863): a stream of
+          // allows must not push the rarer denials out of the audit the Timeline restores. Both
+          // sets come from the (task_id, denied, seq) key, so only the rows returned are read.
+          AUTO_DECISION_LIST_SQL,
         )
-        .all(taskId) as { payload_json: string }[]
+        .all(taskId, taskId, taskId) as { payload_json: string }[]
     )
       .map((row) => turnEventSchema.parse(JSON.parse(row.payload_json)))
-      .flatMap((event) => (event.type === 'permission.auto_decided' ? [event.autoDecision] : []))
-      .reverse();
+      .flatMap((event) => (event.type === 'permission.auto_decided' ? [event.autoDecision] : []));
+  }
+
+  /** Every Auto decision of a Task counted per Turn and kind (issue #863), read from the tallies
+   * kept as each decision is recorded. */
+  countAutoPermissionDecisions(
+    taskId: string,
+  ): { turnId: string; allow: number; allowOnce: number; deny: number }[] {
+    this.assertTask(taskId);
+    const rows = this.db.prepare(AUTO_DECISION_TALLY_SQL).all(taskId) as {
+      turn_id: string;
+      decision: string;
+      count: number;
+    }[];
+    const turns = new Map<
+      string,
+      { turnId: string; allow: number; allowOnce: number; deny: number }
+    >();
+    for (const row of rows) {
+      const turn = turns.get(row.turn_id) ?? {
+        turnId: row.turn_id,
+        allow: 0,
+        allowOnce: 0,
+        deny: 0,
+      };
+      if (row.decision === 'allow') turn.allow += row.count;
+      else if (row.decision === 'allow_once') turn.allowOnce += row.count;
+      else if (row.decision === 'deny') turn.deny += row.count;
+      turns.set(row.turn_id, turn);
+    }
+    return [...turns.values()];
   }
 
   executeOperation<T>(

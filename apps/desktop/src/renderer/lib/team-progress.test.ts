@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { TeamDetail, TeamMessageSummary, WorkerSummary } from '../types/sprint-coder';
-import { currentTeamWorkerCount, teamRunProgress } from './team-progress';
+import type {
+  TeamDetail,
+  TeamMessageSummary,
+  WorkerSummary,
+  TeamExecutionSummary,
+  TeamExecutionIsolation,
+} from '../types/sprint-coder';
+import {
+  currentTeamWorkerCount,
+  teamRunProgress,
+  teamWorkPhaseCounts,
+  teamWorkPhaseSummary,
+} from './team-progress';
 import {
   EXTERNAL_API_RUNTIME_LABEL,
   LEADER_MESSAGE_PEER_LABEL,
@@ -84,6 +95,79 @@ function detail(
 }
 
 describe('teamRunProgress', () => {
+  it('counts each Worker once and separates work from queued/current/legacy integration (issue #913)', () => {
+    const active = detail([
+      worker('w1', 'work', 'busy'),
+      worker('w2', 'wait', 'busy'),
+      worker('w3', 'integrate', 'busy'),
+      worker('w4', 'legacy', 'busy'),
+      worker('w5', 'done', 'done'),
+      worker('w6', 'stopped', 'stopped'),
+    ]);
+    const row = (
+      id: string,
+      phase: TeamExecutionIsolation['phase'] | null,
+    ): TeamExecutionSummary => ({
+      id: `execution-${id}`,
+      teamId: 'team-1',
+      assigneeAgentId: id,
+      createdByAgentId: 'leader-1',
+      accessMode: 'workspace-write',
+      state: 'running',
+      instructionPreview: 'synthetic',
+      instructionRevision: 1,
+      queueOrdinal: null,
+      queueReason: null,
+      connectionId: 'builtin:codex-cli',
+      requestedModel: null,
+      attemptStartReason: 'initial',
+      lastProgressAt: null,
+      terminalReason: null,
+      missionId: null,
+      missionStepOrdinal: null,
+      missionStepCount: null,
+      worktree: null,
+      isolation:
+        phase === null
+          ? null
+          : { phase, resumeKind: null, repositories: [], roots: [], reason: null },
+      assignedAt: '2026-10-24T00:00:00Z',
+      queuedAt: null,
+      startedAt: '2026-10-24T00:00:00Z',
+      completedAt: null,
+      updatedAt: '2026-10-24T00:01:00Z',
+    });
+    const legacy = row('w4', null);
+    legacy.worktree = {
+      path: '/worktree',
+      baseHead: 'a'.repeat(40),
+      state: 'ready',
+      workerHead: 'b'.repeat(40),
+      integratedHead: null,
+      changedFiles: ['result.txt'],
+      reason: null,
+    };
+    active.executions = [
+      row('w1', 'running'),
+      row('w2', 'waiting_integration'),
+      row('w3', 'integrating'),
+      legacy,
+      { ...row('w2', 'running'), id: 'earlier', updatedAt: '2026-10-24T00:00:00Z' },
+      { ...row('w2', null), id: 'queued-next', state: 'queued', updatedAt: '2026-10-24T00:02:00Z' },
+      { ...row('w5', 'waiting_integration'), state: 'completed' },
+      row('w6', 'running'),
+    ];
+    expect(teamWorkPhaseCounts(active)).toEqual({
+      working: 1,
+      waiting_integration: 1,
+      integrating: 1,
+      integration_unknown: 1,
+    });
+    const summary = '作業中 1人 · 統合待ち 1人 · 統合中 1人 · 統合処理中 1人';
+    expect(teamWorkPhaseSummary(active)).toBe(summary);
+    expect(teamRunProgress(active)?.detail).toBe(summary);
+    expect(active.executions[1]?.state).toBe('running');
+  });
   it('keeps ordinary non-Team turns on the generic Run Card status', () => {
     expect(teamRunProgress(null)).toBeNull();
   });

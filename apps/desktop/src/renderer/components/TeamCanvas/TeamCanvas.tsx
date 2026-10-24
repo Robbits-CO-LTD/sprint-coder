@@ -29,7 +29,7 @@ import {
   TeamRetainedWorktreesTrigger,
 } from '../TeamRetainedWorktrees';
 import { latestExecutionForWorker } from '../../lib/team-execution-display';
-import { currentTeamWorkerCount } from '../../lib/team-progress';
+import { currentTeamWorkerCount, teamWorkPhaseSummary } from '../../lib/team-progress';
 import { retainedWorktreeCount } from '../../lib/team-retained-worktrees';
 import type { TaskSummary, TeamDetail, TeamMessageSummary } from '../../types/sprint-coder';
 
@@ -64,6 +64,8 @@ function seedCamState(): CamState {
   };
   return { x: rectA.left, y: rectA.top, s: rectA.width / 720 };
 }
+
+const NO_WORKER_MESSAGES: readonly TeamMessageSummary[] = [];
 
 // Imperative surface exposed to App's morph orchestration (requestExitTeam/requestEnterTeam) —
 // the camera lives inside this component's `useCamera()` instance, so the reverse FLIP has to be
@@ -229,7 +231,46 @@ export function TeamCanvas({
   // longer part of the working surface. Keeping it in allWorkers prevents a dismissed Manager's
   // visible children from being incorrectly described as direct reports of the Leader.
   const workers = useMemo(() => allWorkers.filter((w) => w.state !== 'stopped'), [allWorkers]);
+  // What a Worker card needs from the rest of the Team (issue #863), kept stable across updates
+  // that do not change it so a memoized card can skip its render: every agent's id and role (to
+  // name a message's peer), and the card's own messages, split once per update in seq order.
+  const peerRoleKey = useMemo(
+    () => JSON.stringify(allWorkers.map(({ id, role }) => [id, role])),
+    [allWorkers],
+  );
+  const peerAgents = useMemo(
+    () => (JSON.parse(peerRoleKey) as [string, string][]).map(([id, role]) => ({ id, role })),
+    [peerRoleKey],
+  );
+  const teamMessages = detail?.messages;
+  const messagesByWorker = useMemo(() => {
+    const byWorker = new Map<string, TeamMessageSummary[]>();
+    const add = (agentId: string, message: TeamMessageSummary): void => {
+      const list = byWorker.get(agentId);
+      if (list === undefined) byWorker.set(agentId, [message]);
+      else list.push(message);
+    };
+    for (const message of [...(teamMessages ?? [])].sort((a, b) => a.seq - b.seq)) {
+      add(message.targetAgentId, message);
+      if (message.sourceAgentId !== message.targetAgentId) add(message.sourceAgentId, message);
+    }
+    return byWorker;
+  }, [teamMessages]);
+  const taskId = task.id;
+  const stopWorker = useCallback(
+    (workerId: string) => void stopTeamWorker(taskId, workerId),
+    [stopTeamWorker, taskId],
+  );
+  const resumeMission = useCallback(
+    (missionId: string) => void resumeTeamMission(taskId, missionId),
+    [resumeTeamMission, taskId],
+  );
+  const resumeIntegration = useCallback(
+    (executionId: string) => void resumeTeamExecutionIntegration(taskId, executionId),
+    [resumeTeamExecutionIntegration, taskId],
+  );
   const workerCount = detail ? currentTeamWorkerCount(detail) : 0;
+  const phaseSummary = detail ? teamWorkPhaseSummary(detail) : null;
   const leaderAgentId = detail?.team.leaderAgentId;
   // Default (pre-drag, pre-restore) positions for every Worker, from the Team's recorded agent
   // tree — `workers` is already in stable creation order, which is the sibling order the layout
@@ -470,7 +511,8 @@ export function TeamCanvas({
         const reduced = isReduced();
         // Silent: this flies to the seed rect purely as a visual trick for the exit choreography —
         // persisting it as "the" canvas view would overwrite the user's real last-viewed camera.
-        await animateCamTo(seedCamState(), reduced ? 0 : 560, { silent: true });
+        const completed = await animateCamTo(seedCamState(), reduced ? 0 : 560, { silent: true });
+        if (!completed) return; // A replacement camera move must not inherit this exit's fade.
         setExitingFade(true);
         if (!reduced) await sleep(220); // matches `.team-canvas.exiting`'s teamCanvasOut duration
       },
@@ -892,7 +934,7 @@ export function TeamCanvas({
       }
       if (e.key === 'f' || e.key === 'F') {
         e.preventDefault();
-        claimSystemOwnership(); // explicit command: executes, hands ownership back to system
+        claimUserOwnership(); // preserve this overview while new Workers arrive
         void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
         return;
       }
@@ -914,19 +956,17 @@ export function TeamCanvas({
       collectRects,
       isReduced,
       leaderAgentId,
+      claimUserOwnership,
       claimSystemOwnership,
     ],
   );
 
-  // Deliberately worded differently from the visible `.team-status-chip` text below: Playwright's
-  // getByText() is a substring match, so an aria-live region carrying the *exact same* string
-  // would make `getByText('<state> · Worker N人')` resolve to two elements (chip + live region).
   // No denominator on either side (Team v2 B1b): a Team's Worker count is dynamic, so any fixed
   // "/N" would be wrong — and the Team Policy's execution cap of 8 is a concurrency limit, not a
   // Worker headcount limit, so it must not stand in as one either.
   const selectionText = selectedNodeId ? `選択: ${describeNode(selectedNodeId)}` : '';
   const liveText = detail
-    ? `Team status: ${detail.team.state}, workers ${workerCount}${
+    ? `Team status: ${detail.team.state}, workers ${workerCount}${phaseSummary === null ? '' : `, ${phaseSummary}`}${
         selectionText ? `. ${selectionText}` : ''
       }`
     : '';
@@ -993,25 +1033,17 @@ export function TeamCanvas({
                     // by `leaderAgentId`, a sibling Worker by its own role. TeamListView resolves
                     // against the exact same two facts, so both views tag a message identically.
                     leaderAgentId={detail.team.leaderAgentId}
-                    agents={allWorkers}
+                    agents={peerAgents}
                     x={pos.x}
                     y={pos.y}
-                    messages={detail.messages}
+                    messages={messagesByWorker.get(worker.id) ?? NO_WORKER_MESSAGES}
                     execution={execution}
                     teamBusy={teamBusy}
                     selected={selectedNodeId === worker.id}
-                    onStop={() => void stopTeamWorker(task.id, worker.id)}
-                    onResumeMission={
-                      execution?.missionId == null
-                        ? undefined
-                        : () => void resumeTeamMission(task.id, execution.missionId!)
-                    }
-                    onResumeIntegration={
-                      execution === null
-                        ? undefined
-                        : () => void resumeTeamExecutionIntegration(task.id, execution.id)
-                    }
-                    ref={(el) => handleWorkerRef(worker.id, el)}
+                    onStop={stopWorker}
+                    onResumeMission={resumeMission}
+                    onResumeIntegration={resumeIntegration}
+                    onElement={handleWorkerRef}
                   />
                 );
               })}
@@ -1019,6 +1051,7 @@ export function TeamCanvas({
           </div>
 
           <TeamHeaderOverlay
+            phaseSummary={phaseSummary}
             task={task}
             detail={detail}
             workerCount={workerCount}
@@ -1033,7 +1066,7 @@ export function TeamCanvas({
 
           <CanvasControlsOverlay
             onFit={() => {
-              claimSystemOwnership(); // explicit command
+              claimUserOwnership(); // preserve this overview while new Workers arrive
               void animateCamTo(camToFit(collectRects()), isReduced() ? 0 : 500);
             }}
             onFocusLeader={() => {
@@ -1096,6 +1129,7 @@ export function TeamCanvas({
 }
 
 function TeamHeaderOverlay({
+  phaseSummary,
   task,
   detail,
   workerCount,
@@ -1107,6 +1141,7 @@ function TeamHeaderOverlay({
   retainedOpen,
   onOpenRetained,
 }: {
+  phaseSummary: string | null;
   task: TaskSummary;
   detail: TeamDetail;
   workerCount: number;
@@ -1125,7 +1160,18 @@ function TeamHeaderOverlay({
       </button>
       <span className="team-title">{task.title}</span>
       <span className="team-badge">Team · {workerCount} workers</span>
-      <span className="team-status-chip">{`${detail.team.state} · Worker ${workerCount}人`}</span>
+      <span className="team-status-chip">
+        {`${detail.team.state} · Worker ${workerCount}人`}
+        {phaseSummary !== null && (
+          <span className="team-work-counts" data-testid="team-work-counts">
+            {phaseSummary.split(' · ').map((part, index) => (
+              <span className="team-work-count" key={index}>
+                {index === 0 ? part : ` · ${part}`}
+              </span>
+            ))}
+          </span>
+        )}
+      </span>
       <button
         type="button"
         className="team-view-toggle-btn"

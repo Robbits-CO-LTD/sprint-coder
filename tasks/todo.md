@@ -1,3 +1,51 @@
+## Computer Useへの画面テスト移行（2026-10-24）
+
+承認済み方針: Playwrightのテスト・設定・依存・CI実行を撤去し、UI検証を開発エージェントのComputer Useへ統一する。Vitest、native、各OSのpackage/installer、サイト静的検証は維持する。元checkoutの未コミット変更は保持する。
+
+- [x] 最新main `384ecd51` から独立worktree/branchを作成
+- [x] Playwrightコード・依存撤去と再利用可能な観測処理の保持
+- [x] CIの整合と失敗・欠落を拒否するgateの確認
+- [x] 両ガイド・関連Skillと元ケース対応チェックリストの整備
+- [x] 型検査・lint・関連VitestとComputer Use代表操作の検証
+- [x] 独立差分レビューと検証結果の記録（test-results/computer-use/plan.json）
+
+公開API、IPC、DB契約、実Providerの課金検証、Computer Use自動CI基盤の新設は対象外。元ケースと移行後の対応は `docs/testing/computer-use/README.md` を正本とする。未計測の性能基準やaxe監査を目視でPASS扱いにしない。
+
+
+提出後のCI・ReviewBOTはPRの最新headで確認する。全ケース・実Provider・他OS GUI・数値性能/axe再監査・PowerShell self-testは今回のローカル実施結果には含めない。
+---
+
+## 公式サイトの自動デプロイ — Issue #904（2026-10-22）
+
+main の website/ が変わったら本番（サーバー yusei の nginx）へ自動で反映する。GitHub からは LAN 内のサーバーへ入れないので、サーバー側の systemd ユーザータイマーで main を取りに行く pull 型にした。ブランチ `feat/website-autodeploy-904`。
+
+- [x] deploy.sh / rollback.sh / install.sh / service / timer / README を deploy/website/ に作る
+- [x] 試験 test-deploy.sh（一時フォルダのみ）29 件 PASS、実際の main の website/ も検査を通る、shellcheck 警告 0
+- [ ] PR → ReviewBOT → 承認後 squash merge
+- [x] サーバーへ導入（install.sh）→ 初回の反映で #902 の新サイトを公開 → 本番を撮影して確認（2026-10-22、エラー 0）
+- [ ] ReviewBOT 指摘（リンク公開・連続 rollback・手順・直前の版）の修正をマージ後に install.sh を再実行
+- [ ] website/ の小さな変更で自動反映を確かめる、rollback.sh で戻せることを確かめる
+
+---
+
+## 公式サイト全面刷新 — 実画面で進む「見るプロモ」型（2026-10-21）
+
+目的は、静止画と文字中心の公式サイトを、プロモ v2 で収録した最新版アプリの実画面録画を使い、スクロールが再生になる体験型サイトへ全 8 ページ作り替えること。URL は維持。文言はプロモと同じ（専門用語なし・短く硬い見出し・見出しに「。」なし）、技術の詳細は下層の本文に残す。ブランチ `feat/website-cinematic`（worktree `F:\scg-website`）。
+
+- [x] 素材: 録画から短いクリップとポスターを切り出す（`website/tools/make-media.ps1`）、フル版 4:02 を 25MiB 未満に再圧縮、BGM 軽量化
+- [x] 土台: `styles.css` 作り直し、`film.js`（スクロール連動・再生バー・自動再生・音）
+- [x] トップ `/` を章立てのフィルムとして作る
+- [x] 下層 7 ページを同じ型で作り直す、releases を v0.5.0（最新の正式版）＋試作版の案内に
+- [x] OGP・sitemap・README、旧 story.js の整理
+- [x] 検証: デスクトップ/スマホ撮影、コンソール 0、リンク、reduced-motion、転送量、文言検査、数字の照合
+- [x] 独立レビュー（多観点）→ 修正
+- [ ] PR → ReviewBOT → 承認後 squash merge
+
+レビュー: 実画面録画13本（各0.1〜1.2MB）と、フル版4:02（webm 19.0MiB / mp4 17.5MiB）で全8ページを作り直した。トップはスクロールで再生が進む9章立てで、再生バー・自動再生・音・動きを止めるボタンを付けた。本番のCSP（style-src/font-src 'self'）に合わせ、style属性はdata-style経由のCSSOMに、書体は自前のサブセット（171KB）にした。本番と同じCSPを付けたローカル配信で、全ページのデスクトップ／スマホ撮影、操作の自動テスト17項目、リンク・JSON-LD・見出し・専門用語の機械検査を通した。5観点の独立レビューで62件の指摘が出て、反証役の確認を通った52件を直した。最初の読み込みは0.69MB。残りはPRのReviewBOTと本番デプロイ後の表示確認。
+
+
+---
+
 ## Issue #754 — Task切替とTeam取得失敗からの復帰（2026-10-07）
 
 目的は新TaskがTeam準備表示に残る競合を解消し、Teamなし・失敗・読込中から通常会話へ戻れること。対象は公開計画のstate/preload/contracts/UI境界。DB、Worker拒否設計、provider、認可、配布は非対象。baseはmain `3662aecc22e28f8f6027402319bd263649cedd79`、別worktreeでcanonicalの未追跡データを保持する。

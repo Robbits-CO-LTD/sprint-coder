@@ -32,9 +32,7 @@ import config, {
   DMG_BACKGROUND_PATH,
   DMG_ICON_SIZE,
   DMG_WINDOW_SIZE,
-  isManagedLocalPackagedPath,
   isComputerUseNativeArtifactPath,
-  MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT,
   COMPUTER_USE_NATIVE_MANIFEST_PATH,
   COMPUTER_USE_NATIVE_RESOURCE_ROOT,
   resolveWindowsSignOptions,
@@ -46,18 +44,13 @@ import config, {
   verifyPackagedComputerUseNativeBundle,
   verifyBundledNodeResources,
 } from './forge.config';
-import {
+import viteMainConfig, {
   macAutoUpdateEligibleForIdentity,
   computerUseAcceptanceBuildForBuild,
   computerUseNativePinForBuild,
-  managedLocalSidecarPinsForBuild,
 } from './vite.main.config';
 import { computerUseNativeCompiledPin } from './src/main/computer-use-native-provenance';
-import {
-  planWindowsWizardInstaller,
-  SQUIRREL_SETUP_EXE,
-  WINDOWS_WIZARD_INSTALLER_EXE,
-} from './windows-wizard-installer';
+import { planWindowsWizardInstaller, SQUIRREL_SETUP_EXE } from './windows-wizard-installer';
 import {
   probeSandboxRunner,
   sandboxRunnerPath,
@@ -113,21 +106,13 @@ describe('native package target', () => {
     );
   });
 
-  it('prepares and packages only the native Managed Local resource tree', () => {
-    expect(config.packagerConfig?.extraResource).toContain(MANAGED_LOCAL_PACKAGED_RESOURCE_ROOT);
+  it('excludes the retired model runtime while retaining native packaging hooks', () => {
+    expect(config.packagerConfig?.extraResource).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('managed-local')]),
+    );
+    expect(shouldIgnoreFromPackage('/managed-local/build/legacy-runtime')).toBe(true);
     expect(typeof config.hooks?.generateAssets).toBe('function');
     expect(typeof config.hooks?.postPackage).toBe('function');
-    expect(
-      isManagedLocalPackagedPath(
-        '/Applications/Sprint Coder.app/Contents/Resources/managed-local/darwin-arm64/bin/llama-server',
-      ),
-    ).toBe(true);
-    expect(
-      isManagedLocalPackagedPath(
-        'C:\\Sprint Coder\\resources\\managed-local\\win32-x64\\bin\\llama-server.exe',
-      ),
-    ).toBe(true);
-    expect(isManagedLocalPackagedPath('C:\\Sprint Coder\\Sprint Coder.exe')).toBe(false);
     expect(
       isComputerUseNativeArtifactPath(
         'C:\\Sprint Coder\\resources\\sprint-coder-computer-use-host.exe',
@@ -338,25 +323,9 @@ describe('Computer Use native Vite provenance pin', () => {
   });
 });
 
-describe('Managed Local Vite pin injection', () => {
-  it('defaults to no supported target and reads only the generated build pin', () => {
-    expect(managedLocalSidecarPinsForBuild('/definitely/missing/pins.json')).toEqual({});
-    const root = mkdtempSync(resolve(tmpdir(), 'sprint-coder-managed-local-pins-'));
-    try {
-      const path = resolve(root, 'pins.json');
-      const pin = {
-        'darwin-arm64': {
-          target: 'darwin-arm64',
-          runtimeVersion: 'b10516',
-          upstreamRevision: 'a'.repeat(40),
-          manifestSha256: 'b'.repeat(64),
-        },
-      };
-      writeFileSync(path, JSON.stringify(pin));
-      expect(managedLocalSidecarPinsForBuild(path)).toEqual(pin);
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+describe('retired model runtime package boundary', () => {
+  it('does not compile a sidecar pin into Main', () => {
+    expect(viteMainConfig.define).not.toHaveProperty('__SPRINT_CODER_MANAGED_LOCAL_SIDECAR_PINS__');
   });
 });
 
@@ -500,12 +469,9 @@ describe('release artifacts', () => {
     const ciWorkflow = readFileSync(resolve(__dirname, '../../.github/workflows/ci.yml'), 'utf8');
     const macPackageJob = ciWorkflow.slice(
       ciWorkflow.indexOf('\n  package-macos:'),
-      ciWorkflow.indexOf('\n  windows-smoke:'),
+      ciWorkflow.indexOf('\n  platform-tests:'),
     );
-    const macResultJob = ciWorkflow.slice(
-      ciWorkflow.indexOf('\n  macos-result:'),
-      ciWorkflow.indexOf('\n  windows-result:'),
-    );
+    const requiredJob = ciWorkflow.slice(ciWorkflow.indexOf('\n  required:'));
     const provisioner = readFileSync(resolve(__dirname, 'scripts/ensure-inno-setup.ps1'), 'utf8');
     const unsignedVerifier = readFileSync(
       resolve(__dirname, 'scripts/verify-unsigned-windows-release.ps1'),
@@ -529,17 +495,18 @@ describe('release artifacts', () => {
     expect(workflow).toMatch(
       /release:\n[\s\S]*?- name: Checkout\n\s+uses: actions\/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0/u,
     );
+    expect(ciWorkflow).toContain('npx electron-forge package --platform=win32 --arch=x64');
     expect(ciWorkflow).toContain('npx electron-forge make --platform=win32 --arch=x64');
     expect(macPackageJob).not.toContain('if: github.event_name');
-    expect(macResultJob).toContain('test "${MACOS_PACKAGE_RESULT}" = \'success\'');
-    expect(ciWorkflow).toContain('Require full platform coverage');
-    expect(ciWorkflow).not.toContain('full_matrix=false');
-    expect(ciWorkflow.match(/Managed Local transport smoke/gu)).toHaveLength(2);
-    expect(macPackageJob).toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE=1');
-    expect(macPackageJob).toContain('src/main/managed-local-runtime-supervisor.test.ts');
-    expect(ciWorkflow.match(/SPRINT_CODER_MANAGED_LOCAL_LIVE/gu)).toHaveLength(3);
+    expect(macPackageJob).toContain("if: needs.classify.outputs.full_matrix == 'true'");
+    expect(requiredJob).toContain('package-macos,');
+    expect(requiredJob).toContain('CI_JOB_RESULTS_JSON: ${{ toJSON(needs) }}');
+    expect(requiredJob).toContain('run: node ci-scope.mjs gate');
+    expect(ciWorkflow).toContain('Select checks from the complete pull request');
+    expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_LIVE');
+    expect(ciWorkflow).not.toContain('SPRINT_CODER_MANAGED_LOCAL_CODING_LIVE');
     expect(ciWorkflow).toContain('./apps/desktop/scripts/verify-unsigned-windows-release.ps1');
-    expect(unsignedVerifier).toContain('Sprint-Coder-Installer.exe');
+    expect(unsignedVerifier).toContain('Sprint-Coder-Installer-$version.exe');
     expect(unsignedVerifier).toContain('Sprint-Coder-Setup.exe');
     expect(unsignedVerifier).toContain("$installerSignature.Status -ne 'NotSigned'");
     expect(unsignedVerifier).toContain("$appSignature.Status -ne 'NotSigned'");
@@ -551,40 +518,47 @@ describe('release artifacts', () => {
     );
   });
 
-  it('wraps the Squirrel bootstrapper in a localized Windows setup wizard', () => {
-    const script = readFileSync(resolve(__dirname, 'installer/windows-wizard.iss'), 'utf8');
-    const sourceSetupPath = resolve('out/make/squirrel.windows/x64', SQUIRREL_SETUP_EXE);
-    const plan = planWindowsWizardInstaller([
-      {
-        platform: 'win32',
-        arch: 'x64',
-        packageJSON: { version: '0.0.1-beta.5' },
-        artifacts: [sourceSetupPath, resolve('out/make/squirrel.windows/x64/RELEASES')],
-      },
-    ]);
+  it.each(['0.7.0', '0.7.0-beta.15'])(
+    'wraps the Squirrel bootstrapper in a versioned Windows setup wizard for %s',
+    (version) => {
+      const script = readFileSync(resolve(__dirname, 'installer/windows-wizard.iss'), 'utf8');
+      const sourceSetupPath = resolve('out/make/squirrel.windows/x64', SQUIRREL_SETUP_EXE);
+      const plan = planWindowsWizardInstaller([
+        {
+          platform: 'win32',
+          arch: 'x64',
+          packageJSON: { version },
+          artifacts: [sourceSetupPath, resolve('out/make/squirrel.windows/x64/RELEASES')],
+        },
+      ]);
 
-    expect(plan).toMatchObject({
-      sourceSetupPath,
-      outputPath: resolve('out/make/squirrel.windows/x64', WINDOWS_WIZARD_INSTALLER_EXE),
-      version: '0.0.1-beta.5',
-    });
-    expect(script).toContain('WizardStyle=modern');
-    expect(script).toContain('DisableWelcomePage=no');
-    expect(script).toContain('DisableReadyPage=no');
-    expect(script).toContain('DisableFinishedPage=no');
-    expect(script).toContain('compiler:Languages\\Japanese.isl');
-    expect(script).toContain('#if VER >= EncodeVer(6,3,0)');
-    expect(script).toContain('ArchitecturesAllowed=x64compatible');
-    expect(script).toContain('#else\nArchitecturesAllowed=x64');
-    expect(script).toContain('AfterInstall: InstallSprintCoder');
-    expect(script).toContain(
-      "Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)",
-    );
-    expect(script).toContain('if ResultCode <> 0 then');
-    expect(script).toContain('RaiseException');
-    expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
-    expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
-  });
+      expect(plan).toMatchObject({
+        sourceSetupPath,
+        outputPath: resolve(
+          'out/make/squirrel.windows/x64',
+          `Sprint-Coder-Installer-${version}.exe`,
+        ),
+        version,
+      });
+      expect(script).toContain('OutputBaseFilename=Sprint-Coder-Installer-{#AppVersion}');
+      expect(script).toContain('WizardStyle=modern');
+      expect(script).toContain('DisableWelcomePage=no');
+      expect(script).toContain('DisableReadyPage=no');
+      expect(script).toContain('DisableFinishedPage=no');
+      expect(script).toContain('compiler:Languages\\Japanese.isl');
+      expect(script).toContain('#if VER >= EncodeVer(6,3,0)');
+      expect(script).toContain('ArchitecturesAllowed=x64compatible');
+      expect(script).toContain('#else\nArchitecturesAllowed=x64');
+      expect(script).toContain('AfterInstall: InstallSprintCoder');
+      expect(script).toContain(
+        "Exec(Bootstrapper, '--silent', ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ResultCode)",
+      );
+      expect(script).toContain('if ResultCode <> 0 then');
+      expect(script).toContain('RaiseException');
+      expect(script).toContain('Parameters: "--processStart ""Sprint Coder.exe"""; Description:');
+      expect(script).toContain('Flags: nowait postinstall skipifsilent skipifdoesntexist');
+    },
+  );
 
   it('generates a Squirrel.Mac manifest that targets the release ZIP', () => {
     const directory = mkdtempSync(resolve(tmpdir(), 'sprint-coder-update-'));

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { Eye, List, MoreHorizontal } from './icons';
+import { Eye, MoreHorizontal, PanelLeft } from './icons';
+import { SIDEBAR_SHORTCUT_ARIA, SIDEBAR_SHORTCUT_LABEL } from '../lib/sidebar-preference';
 import type { TaskSummary } from '../types/sprint-coder';
 
 export function TaskHeader({
@@ -70,10 +71,11 @@ export function TaskHeader({
           data-testid="sidebar-toggle"
           aria-expanded={!sidebarCollapsed}
           aria-label={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
-          title={sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'}
+          aria-keyshortcuts={SIDEBAR_SHORTCUT_ARIA}
+          title={`${sidebarCollapsed ? 'Task履歴を開く' : 'Task履歴を閉じる'} (${SIDEBAR_SHORTCUT_LABEL})`}
           onClick={onToggleSidebar}
         >
-          <List size={16} />
+          <PanelLeft size={16} />
         </button>
       )}
       {editing ? (

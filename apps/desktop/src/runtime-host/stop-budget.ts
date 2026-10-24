@@ -1,6 +1,7 @@
 import type { RuntimeKind } from './protocol';
 
 export const RUNTIME_PROCESS_TREE_GRACE_MS = 2_000;
+export const WINDOWS_CLI_JOB_STOP_TIMEOUT_MS = 2_000;
 export const RUNTIME_TASKKILL_TIMEOUT_MS = 10_000;
 export const RUNTIME_PROCESS_SNAPSHOT_TIMEOUT_MS = 2_000;
 export const POSIX_RUNTIME_PROCESS_TREE_STOP_BUDGET_MS =

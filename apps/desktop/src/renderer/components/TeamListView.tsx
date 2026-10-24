@@ -2,11 +2,17 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { ArrowLeft, LayoutGrid } from './icons';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { WorkStep } from './WorkStep';
+import { executionNeedsAttention } from '../lib/worker-thread';
 import { TeamMessageMarkdown } from './TeamMessageMarkdown';
 import { TeamPolicyDialog, TeamPolicyTrigger } from './TeamPolicyDialog';
 import { TeamRetainedWorktreesDialog, TeamRetainedWorktreesTrigger } from './TeamRetainedWorktrees';
-import { latestExecutionForWorker } from '../lib/team-execution-display';
-import { currentTeamWorkerCount } from '../lib/team-progress';
+import {
+  latestExecutionForWorker,
+  workerStatusLabel,
+  workerWorkPhase,
+} from '../lib/team-execution-display';
+import { currentTeamWorkerCount, teamWorkPhaseSummary } from '../lib/team-progress';
 import { retainedWorktreeCount } from '../lib/team-retained-worktrees';
 import {
   describeMessagePeer,
@@ -107,6 +113,7 @@ export function TeamListView({
   const allWorkers = detail.workers.filter((w) => w.kind === 'worker');
   const workers = allWorkers.filter((w) => w.state !== 'stopped');
   const currentWorkerCount = currentTeamWorkerCount(detail);
+  const phaseSummary = teamWorkPhaseSummary(detail);
 
   return (
     <section
@@ -136,7 +143,18 @@ export function TeamListView({
           {/* Same wording as TeamCanvas's chip (the a11y list/canvas parity spec compares the two
               verbatim) and, like it, no denominator: the Worker count is dynamic — see the note on
               TeamCanvas's `liveText`. */}
-          <span className="team-status-chip">{`${detail.team.state} · Worker ${currentWorkerCount}人`}</span>
+          <span className="team-status-chip">
+            {`${detail.team.state} · Worker ${currentWorkerCount}人`}
+            {phaseSummary !== null && (
+              <span className="team-work-counts" data-testid="team-work-counts">
+                {phaseSummary.split(' · ').map((part, index) => (
+                  <span className="team-work-count" key={index}>
+                    {index === 0 ? part : ` · ${part}`}
+                  </span>
+                ))}
+              </span>
+            )}
+          </span>
           <button
             type="button"
             className="team-view-toggle-btn"
@@ -169,7 +187,7 @@ export function TeamListView({
         </p>
       )}
       <div aria-live="polite" className="visually-hidden">
-        {`Team status: ${detail.team.state}, workers ${currentWorkerCount}`}
+        {`Team status: ${detail.team.state}, workers ${currentWorkerCount}${phaseSummary === null ? '' : `, ${phaseSummary}`}`}
       </div>
 
       <div className="tlv-body">
@@ -185,6 +203,11 @@ export function TeamListView({
               .sort((a, b) => a.seq - b.seq)
               .slice(-4);
             const execution = latestExecutionForWorker(detail.executions, worker.id);
+            const phase = workerWorkPhase(worker, execution);
+            const statusLabel = workerStatusLabel(worker, execution);
+            const attention = executionNeedsAttention(execution);
+            // The newest steps only: the Canvas card scrolls its whole log, the List row stays short.
+            const steps = (worker.activityLog ?? []).slice(-6);
             return (
               <li
                 key={worker.id}
@@ -194,14 +217,16 @@ export function TeamListView({
                 data-parent-agent-id={parentAgentOf(worker, allWorkers)?.id ?? ''}
                 id={`team-agent-${worker.id}`}
                 tabIndex={-1}
-                aria-label={`Worker ${worker.role} · ${worker.state}`}
+                aria-label={`Worker ${worker.role} · ${statusLabel}`}
               >
                 <div className="tlv-worker-heading">
                   <div>
                     <span className="role-name">{worker.role}</span>
-                    <span className={`w-status team-status ${statusDotClass(worker.state)}`}>
+                    <span
+                      className={`w-status team-status ${phase === 'waiting_integration' ? 'ready' : phase !== null ? 'busy' : statusDotClass(worker.state)}`}
+                    >
                       <span className="dot" aria-hidden="true" />
-                      {worker.state === 'stopped' ? '停止済み' : worker.state}
+                      {statusLabel}
                     </span>
                   </div>
                   <button
@@ -223,52 +248,84 @@ export function TeamListView({
                 </p>
                 <p className="tlv-activity">
                   現在:{' '}
-                  {worker.currentActivity ??
-                    (worker.state === 'done'
-                      ? '完了'
-                      : worker.state === 'stopped'
-                        ? '停止済み'
-                        : '待機')}
+                  {(phase !== null && phase !== 'working') || execution?.state === 'waiting_resume'
+                    ? statusLabel
+                    : (worker.currentActivity ??
+                      (worker.state === 'done'
+                        ? '完了'
+                        : worker.state === 'stopped'
+                          ? '停止済み'
+                          : '待機'))}
                 </p>
-                {/* Same helper, same wording, same testids as the Canvas's Worker card — only the
-                    variant class differs (see WorkerNode.tsx), so the two views never disagree
-                    about which model a Worker got. */}
-                <div className="team-exec team-exec-list" data-testid="team-worker-model">
-                  {/* Same helper, same wording, same testid as the Canvas's Worker card — the
-                      depth/parent/kind facts must read identically in both views. */}
-                  <p className="team-exec-row" data-testid="team-worker-hierarchy">
-                    <span className="team-exec-key">階層</span>
-                    <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
-                  </p>
-                  <p className="team-exec-row" data-testid="team-worker-model-name">
-                    <span className="team-exec-key">モデル</span>
-                    <span className="team-exec-value team-exec-instruction">
-                      {model.modelLabel}
-                    </span>
-                  </p>
-                  <p className="team-exec-row" data-testid="team-worker-model-connection">
-                    <span className="team-exec-key">Connection</span>
-                    <span className="team-exec-value team-exec-instruction">
-                      {model.connectionLabel}
-                    </span>
-                  </p>
-                </div>
-                {/* Same component, same helper, same facts as the Canvas's Worker card. */}
-                <TeamExecutionStatus
-                  execution={execution}
-                  variant="list"
-                  resumeDisabled={teamBusy}
-                  onResume={(() => {
-                    return execution?.missionId == null
-                      ? undefined
-                      : () => void resumeTeamMission(task.id, execution.missionId!);
-                  })()}
-                  onResumeIntegration={
-                    execution === null
-                      ? undefined
-                      : () => void resumeTeamExecutionIntegration(task.id, execution.id)
-                  }
-                />
+                {/* An execution that needs the user stays in view; everything else about how
+                    the Worker runs is behind 詳細, exactly as on the Canvas card. */}
+                {attention && (
+                  <TeamExecutionStatus
+                    execution={execution}
+                    variant="list"
+                    resumeDisabled={teamBusy}
+                    onResume={(() => {
+                      return execution?.missionId == null
+                        ? undefined
+                        : () => void resumeTeamMission(task.id, execution.missionId!);
+                    })()}
+                    onResumeIntegration={
+                      execution === null
+                        ? undefined
+                        : () => void resumeTeamExecutionIntegration(task.id, execution.id)
+                    }
+                  />
+                )}
+                {steps.length > 0 && (
+                  <ol className="tlv-steps" aria-label={`${worker.role}の作業`}>
+                    {steps.map((step, index) => (
+                      <WorkStep key={index} step={step} as="li" />
+                    ))}
+                  </ol>
+                )}
+                <details className="tlv-details">
+                  <summary>詳細</summary>
+                  {/* Same helper, same wording, same testids as the Canvas's Worker card — only the
+                      variant class differs (see WorkerNode.tsx), so the two views never disagree
+                      about which model a Worker got. */}
+                  <div className="team-exec team-exec-list" data-testid="team-worker-model">
+                    {/* Same helper, same wording, same testid as the Canvas's Worker card — the
+                        depth/parent/kind facts must read identically in both views. */}
+                    <p className="team-exec-row" data-testid="team-worker-hierarchy">
+                      <span className="team-exec-key">階層</span>
+                      <span className="team-exec-value team-exec-instruction">{hierarchy}</span>
+                    </p>
+                    <p className="team-exec-row" data-testid="team-worker-model-name">
+                      <span className="team-exec-key">モデル</span>
+                      <span className="team-exec-value team-exec-instruction">
+                        {model.modelLabel}
+                      </span>
+                    </p>
+                    <p className="team-exec-row" data-testid="team-worker-model-connection">
+                      <span className="team-exec-key">Connection</span>
+                      <span className="team-exec-value team-exec-instruction">
+                        {model.connectionLabel}
+                      </span>
+                    </p>
+                  </div>
+                  {!attention && (
+                    <TeamExecutionStatus
+                      execution={execution}
+                      variant="list"
+                      resumeDisabled={teamBusy}
+                      onResume={(() => {
+                        return execution?.missionId == null
+                          ? undefined
+                          : () => void resumeTeamMission(task.id, execution.missionId!);
+                      })()}
+                      onResumeIntegration={
+                        execution === null
+                          ? undefined
+                          : () => void resumeTeamExecutionIntegration(task.id, execution.id)
+                      }
+                    />
+                  )}
+                </details>
                 <dl className="tlv-usage">
                   <div>
                     <dt>Tokens</dt>

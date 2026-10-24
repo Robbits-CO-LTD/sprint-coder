@@ -56,7 +56,7 @@ jobs:
 
       # `npm ci` skips install scripts here, exactly as in the CI and release packaging jobs.
       - name: Install Electron binary
-        run: node node_modules/electron/install.js
+        uses: ./.github/actions/install-electron
 
       - name: Make unsigned Windows acceptance artifacts
         working-directory: apps/desktop
@@ -99,6 +99,6 @@ jobs:
           name: computer-use-acceptance-windows-x64
           path: |
             apps/desktop/out/make/zip/win32/x64/*.zip
-            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe
+            apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer-*.exe
           if-no-files-found: error
           retention-days: 3

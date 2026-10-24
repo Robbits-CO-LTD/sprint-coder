@@ -1,4 +1,3 @@
-import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -13,7 +12,8 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { safeGitExec } from './safe-git';
+import { gitExecFile, safeGitExec } from './safe-git';
+import { parseGitCommitMetadata, parseGitMergeTrees } from './git-merge-batch';
 
 // Independent git-worktree isolation manager for write-capable Workers. Each agent gets
 // its own worktree under `worktreesRoot`, checked out --detach from a base ref, so a
@@ -65,6 +65,7 @@ export type ExecFileOptions = Readonly<{
   env: NodeJS.ProcessEnv;
   timeout?: number;
   maxBuffer?: number;
+  input?: string;
 }>;
 
 export type ExecFileImpl = (
@@ -307,7 +308,7 @@ export class WorkerWorktreeManager {
 
   /**
    * A root's repository, HEAD, and in-progress operation markers from one `git rev-parse`
-   * (issue #864). Each Git call costs two processes (the config probe and the command), and the
+   * (issue #864). Each Git call costs config probes plus the command, and the
    * write-eligibility check runs for every workspace-write assignment and Worker start, so asking
    * for these one at a time made each assignment wait on about twenty processes.
    */
@@ -1537,6 +1538,15 @@ export class WorkerWorktreeManager {
     currentHead: string,
     workerHead: string,
   ): Promise<string | null> {
+    const batch = await this.findEquivalentIntegratedCommitBatch(
+      repoPath,
+      baseHead,
+      currentHead,
+      workerHead,
+    );
+    if (batch !== null) return batch.equivalentCommit;
+    // Unsupported Git, bounded I/O failure or an incomplete batch must retain the old
+    // whole-history scan, including empty commits and changes that were later reverted.
     const history = await this.runGit(
       repoPath,
       ['rev-list', '--reverse', `${baseHead}..${currentHead}`],
@@ -1546,6 +1556,42 @@ export class WorkerWorktreeManager {
       if (await this.commitTreeMatchesWorker(repoPath, baseHead, candidate, workerHead))
         return candidate;
     return null;
+  }
+
+  private async findEquivalentIntegratedCommitBatch(
+    repoPath: string,
+    baseHead: string,
+    currentHead: string,
+    workerHead: string,
+  ): Promise<{ equivalentCommit: string | null } | null> {
+    const metadata = await this.tryRunGit(repoPath, [
+      'rev-list',
+      '--reverse',
+      '--format=%H%x00%P%x00%T',
+      '--no-commit-header',
+      `${baseHead}..${currentHead}`,
+    ]);
+    if (metadata === null) return null;
+    const history = parseGitCommitMetadata(metadata.stdout);
+    if (history === null) return null;
+    const candidates = history.filter((commit) => commit.firstParent !== null);
+    if (candidates.length === 0) return { equivalentCommit: null };
+    const input = candidates
+      .map(({ firstParent }) => `${baseHead} -- ${firstParent} ${workerHead}\n`)
+      .join('');
+    const merged = await this.tryRunGit(
+      repoPath,
+      ['merge-tree', '--write-tree', '--stdin', '--name-only', '--no-messages'],
+      input,
+    );
+    if (merged === null) return null;
+    const trees = parseGitMergeTrees(merged.stdout, candidates.length);
+    if (trees === null) return null;
+    // Validate every record before choosing the first match in the original history order.
+    return {
+      equivalentCommit:
+        candidates.find((candidate, index) => candidate.tree === trees[index])?.head ?? null,
+    };
   }
 
   private async commitTreeMatchesWorker(
@@ -1576,12 +1622,14 @@ export class WorkerWorktreeManager {
     subArgs: readonly string[],
     failureCode: Exclude<WorktreeErrorCode, 'git_unavailable' | 'invalid_input'>,
     maxBuffer?: number,
+    input?: string,
   ): Promise<ExecFileResult> {
     try {
       return await safeGitExec(this.execFileImpl, dirArg, subArgs, {
         env: process.env,
         timeout: GIT_TIMEOUT_MS,
         ...(maxBuffer === undefined ? {} : { maxBuffer }),
+        ...(input === undefined ? {} : { input }),
       });
     } catch (error) {
       if (error instanceof WorktreeError) throw error;
@@ -1596,9 +1644,10 @@ export class WorkerWorktreeManager {
   private async tryRunGit(
     dirArg: string,
     subArgs: readonly string[],
+    input?: string,
   ): Promise<ExecFileResult | null> {
     try {
-      return await this.runGit(dirArg, subArgs, 'integration_failed');
+      return await this.runGit(dirArg, subArgs, 'integration_failed', undefined, input);
     } catch {
       return null;
     }
@@ -1945,22 +1994,4 @@ function isPermissionDenied(error: unknown): boolean {
   return 'cause' in error && isPermissionDenied((error as Error & { cause?: unknown }).cause);
 }
 
-const defaultExecFile: ExecFileImpl = (file, args, options) =>
-  new Promise((resolve, reject) => {
-    execFile(
-      file,
-      args as string[],
-      {
-        env: options.env,
-        timeout: options.timeout,
-        ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve({ stdout: stdout.toString(), stderr: stderr.toString() });
-      },
-    );
-  });
+const defaultExecFile: ExecFileImpl = gitExecFile;

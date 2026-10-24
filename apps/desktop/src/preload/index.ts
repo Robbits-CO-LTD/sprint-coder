@@ -35,7 +35,6 @@ import {
   appInfoSchema,
   approvalResolveInputSchema,
   approvalSummarySchema,
-  autoPermissionDecisionSchema,
   canvasViewSchema,
   canvasViewSaveInputSchema,
   canvasViewSaveResultSchema,
@@ -72,29 +71,6 @@ import {
   modelCatalogQueryResultSchema,
   modelCatalogSelectionSetInputSchema,
   modelSelectionSchema,
-  installedLocalModelInputSchema,
-  installedLocalModelSchema,
-  managedLocalLaunchSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsGetInputSchema,
-  managedLocalSpeculativeSettingsSetInputSchema,
-  managedLocalSpeculativeSettingsViewSchema,
-  managedLocalLaunchSettingsSetInputSchema,
-  managedLocalLaunchSettingsViewSchema,
-  managedLocalInferenceSettingsGetInputSchema,
-  managedLocalInferenceSettingsSetInputSchema,
-  managedLocalInferenceSettingsViewSchema,
-  localDownloadCancelInputSchema,
-  localDownloadJobInputSchema,
-  localDownloadJobSchema,
-  localFitAssessmentSchema,
-  localHardwareSnapshotSchema,
-  localModelInstallInputSchema,
-  localModelFitInputSchema,
-  managedLocalRuntimeSnapshotSchema,
-  publicModelCatalogDetailInputSchema,
-  publicModelCatalogDetailSchema,
-  publicModelCatalogPageSchema,
-  publicModelCatalogQuerySchema,
   openAIConnectionCreateInputSchema,
   openRouterConnectionCreateInputSchema,
   orcaRouterConnectionCreateInputSchema,
@@ -1344,124 +1320,11 @@ const api: SprintCoderApi = {
         input,
       ),
   },
-  localAI: {
-    hardware: () =>
-      invoke(IPC_CHANNELS.localAIHardware, emptyPayloadSchema, localHardwareSnapshotSchema, {}),
-    runtime: () =>
-      invoke(
-        IPC_CHANNELS.localAIRuntime,
-        emptyPayloadSchema,
-        managedLocalRuntimeSnapshotSchema,
-        {},
-      ),
-    launchSettings: (modelId) =>
-      invoke(
-        IPC_CHANNELS.localAILaunchSettings,
-        managedLocalLaunchSettingsGetInputSchema,
-        managedLocalLaunchSettingsViewSchema,
-        { modelId },
-      ),
-    setLaunchSettings: (input) =>
-      invoke(
-        IPC_CHANNELS.localAISetLaunchSettings,
-        managedLocalLaunchSettingsSetInputSchema,
-        managedLocalLaunchSettingsViewSchema,
-        input,
-      ),
-    speculativeSettings: (modelId) =>
-      invoke(
-        IPC_CHANNELS.localAISpeculativeSettings,
-        managedLocalSpeculativeSettingsGetInputSchema,
-        managedLocalSpeculativeSettingsViewSchema,
-        { modelId },
-      ),
-    setSpeculativeSettings: (input) =>
-      invoke(
-        IPC_CHANNELS.localAISetSpeculativeSettings,
-        managedLocalSpeculativeSettingsSetInputSchema,
-        managedLocalSpeculativeSettingsViewSchema,
-        input,
-      ),
-    inferenceSettings: (modelId) =>
-      invoke(
-        IPC_CHANNELS.localAIInferenceSettings,
-        managedLocalInferenceSettingsGetInputSchema,
-        managedLocalInferenceSettingsViewSchema,
-        { modelId },
-      ),
-    setInferenceSettings: (input) =>
-      invoke(
-        IPC_CHANNELS.localAISetInferenceSettings,
-        managedLocalInferenceSettingsSetInputSchema,
-        managedLocalInferenceSettingsViewSchema,
-        input,
-      ),
-    query: (input) =>
-      invoke(
-        IPC_CHANNELS.localAICatalogQuery,
-        publicModelCatalogQuerySchema,
-        publicModelCatalogPageSchema,
-        input,
-      ),
-    detail: (input) =>
-      invoke(
-        IPC_CHANNELS.localAICatalogDetail,
-        publicModelCatalogDetailInputSchema,
-        publicModelCatalogDetailSchema,
-        input,
-      ),
-    listJobs: () =>
-      invoke(IPC_CHANNELS.localAIListJobs, emptyPayloadSchema, z.array(localDownloadJobSchema), {}),
-    listInstalled: () =>
-      invoke(
-        IPC_CHANNELS.localAIListInstalled,
-        emptyPayloadSchema,
-        z.array(installedLocalModelSchema),
-        {},
-      ),
-    install: (input) =>
-      invoke(
-        IPC_CHANNELS.localAIInstall,
-        localModelInstallInputSchema,
-        localDownloadJobSchema,
-        input,
-      ),
-    fit: (input) =>
-      invoke(IPC_CHANNELS.localAIFit, localModelFitInputSchema, localFitAssessmentSchema, input),
-    pause: (jobId) =>
-      invoke(IPC_CHANNELS.localAIPause, localDownloadJobInputSchema, localDownloadJobSchema, {
-        jobId,
-      }),
-    resume: (jobId) =>
-      invoke(IPC_CHANNELS.localAIResume, localDownloadJobInputSchema, localDownloadJobSchema, {
-        jobId,
-      }),
-    cancel: (jobId, confirmed) =>
-      invoke(IPC_CHANNELS.localAICancel, localDownloadCancelInputSchema, localDownloadJobSchema, {
-        jobId,
-        confirmed,
-      }),
-    verify: (modelId) =>
-      invoke(IPC_CHANNELS.localAIVerify, installedLocalModelInputSchema, localFitAssessmentSchema, {
-        modelId,
-      }),
-    delete: (modelId) =>
-      invoke(IPC_CHANNELS.localAIDelete, installedLocalModelInputSchema, z.undefined(), {
-        modelId,
-      }),
-  },
   permissions: {
     get: (taskId) =>
       invoke(IPC_CHANNELS.permissionsGet, taskIdPayloadSchema, permissionSettingsSchema, {
         taskId,
       }),
-    listAutoDecisions: (taskId) =>
-      invoke(
-        IPC_CHANNELS.permissionsListAutoDecisions,
-        taskIdPayloadSchema,
-        z.array(autoPermissionDecisionSchema),
-        { taskId },
-      ),
     set: (taskId, preset, expectedPolicyEpoch) =>
       invoke(IPC_CHANNELS.permissionsSet, permissionSetInputSchema, permissionSettingsSchema, {
         taskId,

@@ -16,7 +16,7 @@ param(
     [Parameter(Mandatory = $true)][ValidatePattern('^[0-9a-fA-F]{40,64}$')][string]$SourceSha,
     [Parameter(Mandatory = $true)][string]$RunId,
     [Parameter(Mandatory = $true)][string]$FailureClass,
-    [Parameter(Mandatory = $true)][ValidateSet('browser-use', 'computer-use')][string]$Driver,
+    [Parameter(Mandatory = $true)][ValidateSet('computer-use')][string]$Driver,
     [string[]]$EvidenceNames = @(),
     [Parameter(Mandatory = $true)][string]$OutputPath
 )

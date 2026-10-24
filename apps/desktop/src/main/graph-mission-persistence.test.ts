@@ -21,7 +21,12 @@ import Database from 'better-sqlite3';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GraphMissionPlan, TeamDetail } from '@sprint-coder/contracts';
 import { ToolRegistry, createToolDefinition, createToolId } from '@sprint-coder/domain';
-import { SqlitePersistenceClient, type ApprovalRequestInput } from './persistence';
+import {
+  SqlitePersistenceClient,
+  type ApprovalRequestInput,
+  type TeamExecutionIsolationRecord,
+} from './persistence';
+import { RetiredManagedLocalError } from './retired-managed-local';
 import { ApprovalCoordinator } from './approval-coordinator';
 import { ToolBroker } from './tool-broker';
 import { nextGraphDocument } from './graph-document';
@@ -53,12 +58,10 @@ import {
 import { authorizationTurnIsActive, workerManagedCatalogOwner } from './ipc';
 import { assertGraphWriteCoverage } from './graph-write-coverage';
 import { loadNativeSafeFs, prepareNativeSafeFsLockDirectory } from './native-safe-fs';
-import { managedLocalConnection } from './managed-local-provider-runtime';
 import {
-  MANAGED_LOCAL_FIXTURE_SELECTION,
-  managedLocalTeamWorkerRuntime,
-} from './managed-local-team-worker-fixture';
-import type { RuntimeWorkspaceSet } from '../runtime-host/protocol';
+  LOCAL_PROVIDER_TEST_SELECTION,
+  localProviderTestConnection,
+} from './provider-connection-test-fixture';
 import {
   createGraphBridgeProgressTracker,
   GRAPH_BRIDGE_PROGRESS_MAX_BYTES,
@@ -118,6 +121,15 @@ const gitScenarioTimeout = process.platform === 'win32' ? 120_000 : 60_000;
 // exact wall first and answered it with 180 s for every platform; a suite of the same measured
 // cost gets the same allowance. Windows keeps its own larger measured budget.
 const graphBridgeTimeout = process.platform === 'win32' ? 300_000 : 180_000;
+// These Graph persistence fixtures assert LF bytes after checkout and integration. Give each
+// repository (including secondary Project roots) that policy without changing the host config.
+function initLfRepository(workspace: string): void {
+  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  expect(
+    spawnSync('git', ['-C', workspace, 'config', '--local', 'core.autocrlf', 'false']).status,
+  ).toBe(0);
+}
+
 function fixture(
   existing?: { persistence: SqlitePersistenceClient; path: string },
   writeCapable = false,
@@ -357,6 +369,167 @@ async function writeMission(
   return { mission, acquisition, review, workspace: binding.canonicalPath };
 }
 
+async function retiredWorkspaceFixture(mode: 'graph' | 'sequential') {
+  const f = fixture(undefined, true);
+  const workerId = f.workers[0]!.id;
+  f.persistence.createProviderConnection({
+    ...localProviderTestConnection(),
+    id: 'managed-local:runtime',
+    providerId: 'sprint-managed-local',
+  });
+  // A pre-upgrade Worker and its thread already carry this selection; no retired runtime is started.
+  const raw = new Database(f.path);
+  for (const table of ['agents', 'agent_threads'])
+    raw
+      .prepare(
+        `UPDATE ${table} SET connection_id = 'managed-local:runtime', requested_provider = 'sprint-managed-local', requested_model = ? WHERE id = ?`,
+      )
+      .run('a'.repeat(64), table === 'agents' ? workerId : f.workers[0]!.threadId);
+  raw.close();
+  const workspace = join(dirname(f.path), 'workspace');
+  mkdirSync(workspace);
+  writeFileSync(join(workspace, 'shared.ts'), 'base\n');
+  initLfRepository(workspace);
+  for (const args of [
+    ['-C', workspace, 'add', 'shared.ts'],
+    [
+      '-C',
+      workspace,
+      '-c',
+      'user.name=Test',
+      '-c',
+      'user.email=test@example.com',
+      'commit',
+      '-qm',
+      'base',
+    ],
+  ])
+    expect(spawnSync('git', args).status).toBe(0);
+  const binding = await workspaceMutationBinding(workspace);
+  f.persistence.setWorkspaceBinding(f.task.id, {
+    path: binding.canonicalPath,
+    workspaceKey: binding.workspaceKey,
+    rootIdentityDigest: binding.rootIdentityDigest,
+  });
+  const graphWrite = mode === 'graph' ? await writeMission(f, workspace) : null;
+  const mission =
+    graphWrite?.mission ??
+    f.persistence.createTeamMission({
+      teamId: f.team.id,
+      createdByAgentId: f.team.leaderAgentId,
+      objective: 'saved write',
+      doneCriteria: ['saved'],
+      steps: [
+        { workerId, objective: 'write', doneCriteria: ['saved'], access: 'workspace-write' },
+        {
+          workerId: f.workers[1]!.id,
+          objective: 'read',
+          doneCriteria: ['read'],
+          access: 'read-only',
+        },
+      ],
+      now,
+    });
+  const executionId = mission.steps[0]!.executionId;
+  let previousAttemptId: string;
+  if (graphWrite !== null)
+    previousAttemptId = begin(f, mission.id, 'a', graphWrite.acquisition.writeFootprints).attempt
+      .id;
+  else {
+    f.persistence.transitionTeamMission(mission.id, 'running', now);
+    f.persistence.transitionTeamExecution({
+      executionId,
+      to: 'queued',
+      queueReason: 'recovery',
+      now,
+    });
+    f.persistence.transitionTeamExecution({ executionId, to: 'running', now });
+    previousAttemptId = f.persistence.createTeamAttempt(executionId, now, 'initial').id;
+    f.persistence.transitionTeamAttempt({ attemptId: previousAttemptId, to: 'running', now });
+    f.persistence.transitionTeamTask(
+      f.persistence.getTeamExecutionDispatch(executionId).teamTaskId,
+      'running',
+      now,
+    );
+  }
+  const runtime = new DeterministicTeamWorkerRuntime();
+  const execute = vi.spyOn(runtime, 'execute').mockRejectedValue(new RetiredManagedLocalError());
+  const scheduler = new TeamExecutionScheduler(1);
+  const manager = new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') });
+  const coordinator = new TeamCoordinator(
+    f.persistence,
+    runtime,
+    undefined,
+    undefined,
+    undefined,
+    scheduler,
+    undefined,
+    undefined,
+    manager,
+  );
+  const prepare = Reflect.get(TeamCoordinator.prototype, 'prepareExecutionIsolation') as (
+    this: TeamCoordinator,
+    taskId: string,
+    executionId: string,
+    agentId: string,
+  ) => Promise<TeamExecutionIsolationRecord>;
+  const isolation = await prepare.call(coordinator, f.task.id, executionId, workerId);
+  const preservedFile = join(isolation.roots[0]!.isolatedPath, 'shared.ts');
+  writeFileSync(preservedFile, 'saved user changes\n');
+  if (mode === 'graph') {
+    const owner = f.persistence
+      .listGraphResourceReservations(mission.id)
+      .find(({ executionId: id }) => id === executionId)!;
+    f.persistence.interruptGraphStep({
+      missionId: mission.id,
+      stepKey: 'a',
+      generation: 1,
+      reservationId: owner.id,
+      attemptId: previousAttemptId,
+      outcome: 'failed',
+      reason: 'saved before upgrade',
+      confirmation: { kind: 'attempt-stopped', attemptId: previousAttemptId },
+      now,
+    });
+  } else {
+    f.persistence.transitionTeamAttempt({
+      attemptId: previousAttemptId,
+      to: 'failed',
+      terminalReason: 'runtime_failure',
+      now,
+    });
+    f.persistence.transitionTeamExecution({ executionId, to: 'waiting_resume', now });
+    f.persistence.transitionTeamMission(mission.id, 'waiting_resume', now);
+  }
+  f.persistence.updateTeamExecutionIsolation({
+    executionId,
+    phase: 'quarantined',
+    resumeKind: null,
+    reason: 'saved before upgrade',
+    repositories: isolation.repositories.map((repository) => ({
+      ...repository,
+      state: 'quarantined',
+    })),
+    now,
+  });
+  await installNativeGraphObserver(f.persistence, dirname(f.path));
+  return {
+    f,
+    mission,
+    graphWrite,
+    executionId,
+    workerId,
+    coordinator,
+    scheduler,
+    execute,
+    preservedFile,
+    before: f.persistence.getTeamExecutionIsolation(executionId),
+    create: vi.spyOn(manager, 'create'),
+    cleanup: vi.spyOn(manager, 'cleanup'),
+    seal: vi.spyOn(f.persistence, 'sealTeamExecutionContext'),
+  };
+}
+
 async function retainedWriteFixture(independent = false) {
   const f = fixture(undefined, true);
   if (independent) {
@@ -365,7 +538,7 @@ async function retainedWriteFixture(independent = false) {
   }
   const workspace = join(dirname(f.path), 'workspace');
   mkdirSync(workspace);
-  expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+  initLfRepository(workspace);
   writeFileSync(join(workspace, 'shared.ts'), 'base\n');
   expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
   expect(
@@ -447,8 +620,10 @@ async function installNativeGraphObserver(persistence: SqlitePersistenceClient, 
  */
 async function unconfirmedExitGraph(limitedConnection = false) {
   const f = fixture();
+  const settleBudget = vi.spyOn(f.persistence, 'settleTeamBudget');
+  const releaseBudget = vi.spyOn(f.persistence, 'releaseTeamBudget');
   const plan = structuredClone(f.plan);
-  const connection = limitedConnection ? managedLocalConnection() : null;
+  const connection = limitedConnection ? localProviderTestConnection() : null;
   if (connection !== null) {
     connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
     f.persistence.createProviderConnection(connection);
@@ -459,7 +634,7 @@ async function unconfirmedExitGraph(limitedConnection = false) {
       contextInheritancePolicy: 'summary',
       parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
       writeCapable: false,
-      modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+      modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
     });
     f.persistence.transitionWorkerState(worker.id, 'spawning');
     f.persistence.transitionWorkerState(worker.id, 'ready');
@@ -524,6 +699,11 @@ async function unconfirmedExitGraph(limitedConnection = false) {
   );
   await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
   expect(reservations()).toEqual(['quarantined']);
+  expect(f.persistence.getTeamBudgetStatus(f.team.id).every(({ reserved }) => reserved === 0)).toBe(
+    true,
+  );
+  expect(settleBudget).not.toHaveBeenCalled();
+  expect(releaseBudget).toHaveBeenCalledTimes(1);
   return {
     f,
     plan,
@@ -556,9 +736,173 @@ async function unconfirmedExitGraph(limitedConnection = false) {
 
 if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
   describe('durable graph Mission definitions', () => {
+    it.each(['manual', 'admission', 're-agreement'] as const)(
+      'preserves retired Managed Local graph workspace before %s admission',
+      async (route) => {
+        const run = await retiredWorkspaceFixture('graph');
+        const { f, coordinator, executionId, mission } = run;
+        try {
+          const reviewed = await coordinator.reviewGraphPreservedWorkspace(
+            f.task.id,
+            mission.id,
+            'a',
+          );
+          expect(reviewed.files).toEqual([{ repository: 1, path: 'shared.ts' }]);
+          let failure: unknown;
+          if (route === 'manual') {
+            failure = await coordinator
+              .resumeGraphStep(f.task.id, mission.id, 'a', reviewed.digest)
+              .catch((error: unknown) => error);
+          } else if (route === 'admission') {
+            const owner = reserve(
+              f,
+              mission.id,
+              'a',
+              1,
+              run.graphWrite!.acquisition.writeFootprints,
+            );
+            const dispatch = Reflect.get(TeamCoordinator.prototype, 'runGraphExecution') as (
+              this: TeamCoordinator,
+              graph: NonNullable<ReturnType<SqlitePersistenceClient['getGraphTeamMission']>>,
+              stepKey: string,
+              reservation: typeof owner,
+              reason: 'manual_resume',
+            ) => Promise<void>;
+            await dispatch.call(
+              coordinator,
+              f.persistence.getGraphTeamMission(mission.id)!,
+              'a',
+              owner,
+              'manual_resume',
+            );
+          } else {
+            const current = f.persistence.getGraphDocument(f.task.id)!;
+            const plan = structuredClone(current.missionPlan!);
+            plan.steps[0]!.writeClaims.push({
+              ...plan.steps[0]!.writeClaims[0]!,
+              path: 'added.ts',
+            });
+            const proposed = nextGraphDocument(f.task.id, f.diagram, current, [], [], plan);
+            f.persistence.saveGraphDocument(proposed, current.renderRevision);
+            const input = {
+              taskId: f.task.id,
+              missionId: mission.id,
+              instanceId: randomUUID(),
+              renderRevision: proposed.renderRevision,
+              expectedSemanticRevision: current.semanticRevision,
+            };
+            const review = await coordinator.requestGraphConstraintUpdate(
+              input,
+              randomUUID(),
+              () => undefined,
+            );
+            failure = await coordinator
+              .agreeGraphConstraintUpdate(
+                { ...input, requestId: review.requestId, contextDigest: review.contextDigest },
+                randomUUID(),
+                () => undefined,
+              )
+              .catch((error: unknown) => error);
+          }
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          expect(run.create).not.toHaveBeenCalled();
+          expect(run.cleanup).not.toHaveBeenCalled();
+          expect(run.seal).not.toHaveBeenCalled();
+          expect(run.execute).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
+          expect(f.persistence.getTeamExecutionIsolation(executionId)).toEqual(run.before);
+          expect(f.persistence.listTeamAttempts(executionId)).toHaveLength(1);
+          expect(readFileSync(run.preservedFile, 'utf8')).toBe('saved user changes\n');
+          expect(
+            (await coordinator.reviewGraphPreservedWorkspace(f.task.id, mission.id, 'a')).files,
+          ).toEqual(reviewed.files);
+          expect((await coordinator.listRetainedWorktrees(f.task.id)).total).toBe(1);
+          const activity = f.persistence
+            .getTeamSnapshot(f.team.id)
+            .agents.find(({ id }) => id === run.workerId)?.currentActivity;
+          expect([failure instanceof Error ? failure.message : '', activity].join(' ')).toContain(
+            new RetiredManagedLocalError().message,
+          );
+        } finally {
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          f.persistence.close();
+        }
+      },
+      gitScenarioTimeout,
+    );
+
+    it.each(['manual', 'scheduled'] as const)(
+      'preserves retired Managed Local sequential workspace before %s admission',
+      async (route) => {
+        const run = await retiredWorkspaceFixture('sequential');
+        const { f, coordinator, executionId, mission } = run;
+        try {
+          const originalDispatch = f.persistence.getTeamExecutionDispatch(executionId);
+          let failure: unknown;
+          if (route === 'manual')
+            failure = await coordinator
+              .resumeMission(f.task.id, mission.id)
+              .catch((error: unknown) => error);
+          else {
+            f.persistence.prepareTeamMissionResume({ missionId: mission.id, executionId, now });
+            const dispatch = f.persistence.getTeamExecutionDispatch(executionId);
+            const execute = Reflect.get(TeamCoordinator.prototype, 'runScheduledExecution') as (
+              this: TeamCoordinator,
+              input: {
+                taskId: string;
+                teamId: string;
+                leaderId: string;
+                workerId: string;
+                messageId: string;
+                messageSeq: number;
+                teamTaskId: string;
+                executionId: string;
+                doneCriteria: readonly string[];
+              },
+            ) => Promise<void>;
+            failure = await execute
+              .call(coordinator, {
+                taskId: f.task.id,
+                teamId: f.team.id,
+                leaderId: f.team.leaderAgentId,
+                workerId: run.workerId,
+                executionId,
+                ...dispatch,
+              })
+              .catch((error: unknown) => error);
+          }
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          expect(run.create).not.toHaveBeenCalled();
+          expect(failure).toBeInstanceOf(RetiredManagedLocalError);
+          expect(run.cleanup).not.toHaveBeenCalled();
+          expect(run.seal).not.toHaveBeenCalled();
+          expect(run.execute).not.toHaveBeenCalled();
+          expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
+          expect(f.persistence.getTeamExecutionIsolation(executionId)).toEqual(run.before);
+          expect(f.persistence.listTeamAttempts(executionId)).toHaveLength(1);
+          expect(readFileSync(run.preservedFile, 'utf8')).toBe('saved user changes\n');
+          expect((await coordinator.listRetainedWorktrees(f.task.id)).total).toBe(1);
+          if (route === 'manual')
+            expect(f.persistence.getTeamExecutionDispatch(executionId)).toEqual(originalDispatch);
+        } finally {
+          await vi.waitFor(() => expect(run.scheduler.snapshot().activeCount).toBe(0), {
+            timeout: gitPreflightTimeout,
+          });
+          f.persistence.close();
+        }
+      },
+      gitScenarioTimeout,
+    );
+
     it('parks impossible connection capacity before Graph dependencies without creating attempts', async () => {
       const f = fixture();
-      const connection = managedLocalConnection();
+      const connection = localProviderTestConnection();
       connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 19_999 };
       f.persistence.createProviderConnection(connection);
       const plan = structuredClone(f.plan);
@@ -570,7 +914,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           contextInheritancePolicy: 'summary',
           parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
           writeCapable: false,
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+          modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
         });
         f.persistence.transitionWorkerState(worker.id, 'spawning');
         f.persistence.transitionWorkerState(worker.id, 'ready');
@@ -702,8 +1046,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         const workspace = join(dirname(f.path), 'workspace');
         mkdirSync(workspace);
         writeFileSync(join(workspace, 'a.ts'), 'before\n');
+        initLfRepository(workspace);
         for (const args of [
-          ['init', '-q', workspace],
           ['-C', workspace, 'add', 'a.ts'],
           [
             '-C',
@@ -922,8 +1266,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       mkdirSync(workspace);
       writeFileSync(join(workspace, 'a.ts'), 'before\n');
       writeFileSync(join(workspace, 'b.ts'), 'before\n');
+      initLfRepository(workspace);
       for (const args of [
-        ['init', '-q', workspace],
         ['-C', workspace, 'add', 'a.ts', 'b.ts'],
         [
           '-C',
@@ -1178,167 +1522,6 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       },
       gitScenarioTimeout,
     );
-    it.each([false, true])(
-      'runs a task-Workspace WRITE step of a Managed Local Worker in a durable isolation and integrates it, resume=%s (issue #570)',
-      async (resume) => {
-        const f = fixture(undefined, true);
-        f.persistence.createProviderConnection(managedLocalConnection());
-        const workspace = join(dirname(f.path), 'workspace');
-        mkdirSync(workspace);
-        writeFileSync(join(workspace, 'a.ts'), 'before\n');
-        for (const args of [
-          ['init', '-q', workspace],
-          ['-C', workspace, 'add', 'a.ts'],
-          [
-            '-C',
-            workspace,
-            '-c',
-            'user.name=Test',
-            '-c',
-            'user.email=test@example.com',
-            'commit',
-            '-qm',
-            'base',
-          ],
-        ])
-          expect(spawnSync('git', args).status).toBe(0);
-        const binding = await workspaceMutationBinding(workspace);
-        f.persistence.setWorkspaceBinding(f.task.id, {
-          path: binding.canonicalPath,
-          workspaceKey: binding.workspaceKey,
-          rootIdentityDigest: binding.rootIdentityDigest,
-        });
-        if (resume) await installNativeGraphObserver(f.persistence, dirname(f.path));
-        const writer = f.persistence.registerTeamWorker({
-          teamId: f.team.id,
-          role: 'managed-local',
-          objective: 'managed-local',
-          contextInheritancePolicy: 'summary',
-          parentCapabilityCeiling: { entries: [], maxWorkerDepth: 0, maxConcurrentWorkers: 0 },
-          writeCapable: true,
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-        });
-        f.persistence.transitionWorkerState(writer.id, 'spawning');
-        f.persistence.transitionWorkerState(writer.id, 'ready');
-        const plan = structuredClone(f.plan);
-        plan.steps[0]!.workerId = writer.id;
-        const context = graphMissionContextFor(f.persistence, f.task.id);
-        plan.steps[0]!.access = 'workspace-write';
-        plan.steps[0]!.writeClaims = [
-          { rootId: context.workspace.primaryRootId!, path: 'managed.ts', semanticKeys: [] },
-        ];
-        const initial = nextGraphDocument(f.task.id, f.diagram, f.document, [], [], plan);
-        f.persistence.saveGraphDocument(initial, 1);
-        // Step b is read-only and has no Connection, so it runs on the fallback.
-        const managedLocal = managedLocalTeamWorkerRuntime({
-          fallback: new DeterministicTeamWorkerRuntime(),
-          writePath: 'managed.ts',
-        });
-        let firstWorkspaceSet: RuntimeWorkspaceSet | undefined;
-        if (resume) {
-          const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-          vi.spyOn(managedLocal.runtime, 'execute')
-            .mockImplementationOnce(async (input) => {
-              firstWorkspaceSet = input.workspaceSet;
-              throw new Error('Controlled failure after Graph isolation preparation');
-            })
-            .mockImplementation((input) => execute(input));
-        }
-        const scheduler = new TeamExecutionScheduler(1);
-        const coordinator = new TeamCoordinator(
-          f.persistence,
-          managedLocal.runtime,
-          undefined,
-          undefined,
-          undefined,
-          scheduler,
-          undefined,
-          undefined,
-          new WorkerWorktreeManager({ worktreesRoot: join(dirname(f.path), 'worktrees') }),
-        );
-        const mission = await coordinator.startGraphMission(f.task.id, async () => ({
-          ...f.input,
-          renderRevision: initial.renderRevision,
-          semanticRevision: initial.semanticRevision,
-          semanticDigest: initial.semanticDigest,
-          workspaceDigest: context.workspace.digest,
-          policyEpoch: context.policyEpoch,
-          contextDigest: graphMissionContextDigest(
-            context,
-            new Set(plan.steps.map(({ workerId }) => workerId)),
-          ),
-        }));
-        const executionId = mission.steps[0]!.executionId;
-        if (resume) {
-          await vi.waitFor(
-            () => expect(f.persistence.getTeamExecution(executionId).state).toBe('waiting_resume'),
-            { timeout: gitCheckpointTimeout },
-          );
-          await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
-          const preserved = f.persistence.getTeamExecutionIsolation(executionId)!;
-          expect(preserved.phase).toBe('quarantined');
-          expect(firstWorkspaceSet?.roots[0]?.path).toBe(preserved.roots[0]!.isolatedPath);
-          expect(existsSync(join(workspace, 'managed.ts'))).toBe(false);
-          const review = await coordinator.reviewGraphPreservedWorkspace(
-            f.task.id,
-            mission.id,
-            'a',
-          );
-          await coordinator.resumeGraphStep(f.task.id, mission.id, 'a', review.digest);
-          expect(f.persistence.getTeamExecutionIsolation(executionId)?.roots).toEqual(
-            preserved.roots,
-          );
-        }
-        await vi.waitFor(
-          () =>
-            expect(f.persistence.listTeamAttempts(executionId).map(({ state }) => state)).toEqual(
-              resume ? ['failed', 'completed'] : ['completed'],
-            ),
-          { timeout: gitCheckpointTimeout },
-        );
-        expect(
-          f.persistence.listTeamAttempts(executionId).map(({ state }) => state),
-          JSON.stringify(
-            f.persistence.getTeamSnapshot(f.team.id).agents.find(({ id }) => id === writer.id)
-              ?.currentActivity,
-          ),
-        ).toEqual(resume ? ['failed', 'completed'] : ['completed']);
-        await vi.waitFor(
-          () => expect(f.persistence.getTeamMission(mission.id).state).toBe('completed'),
-          { timeout: gitCheckpointTimeout },
-        );
-        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
-
-        // The step received its durable isolated root with the Managed Local writing tool.
-        const isolation = f.persistence.getTeamExecutionIsolation(executionId)!;
-        expect(f.persistence.getTeamMissionWorktree(executionId)).toBeNull();
-        expect(managedLocal.sessions).toHaveLength(1);
-        const [session] = managedLocal.sessions;
-        expect(session).toMatchObject({
-          workerId: writer.id,
-          writeCapable: true,
-          tools: ['read_file', 'create_file'],
-        });
-        const [root] = session!.workspaceSet.roots;
-        expect(session!.workspaceSet.roots).toHaveLength(1);
-        expect(root).toMatchObject({ role: 'primary', rootId: context.workspace.primaryRootId });
-        expect(root!.path).toBe(isolation.roots[0]!.isolatedPath);
-        if (resume) expect(session!.workspaceSet).toEqual(firstWorkspaceSet);
-        expect(managedLocal.toolCalls).toEqual([
-          { workerId: writer.id, name: 'create_file', file: join(root!.path, 'managed.ts') },
-        ]);
-        // The write reached the Workspace through integration only.
-        expect(isolation.repositories[0]).toMatchObject({ changedFiles: ['managed.ts'] });
-        expect(readFileSync(join(workspace, 'managed.ts'), 'utf8')).toBe(
-          'written by the Managed Local Worker\n',
-        );
-        expect(
-          spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-        ).toBe('');
-        f.persistence.close();
-      },
-      gitScenarioTimeout,
-    );
     it(
       'keeps a running independent WRITE branch on its original owner consent through sealed integration after re-agreement',
       async () => {
@@ -1346,8 +1529,8 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         const workspace = join(dirname(f.path), 'workspace');
         mkdirSync(workspace);
         writeFileSync(join(workspace, 'b.ts'), 'before\n');
+        initLfRepository(workspace);
         for (const args of [
-          ['init', '-q', workspace],
           ['-C', workspace, 'add', 'b.ts'],
           [
             '-C',
@@ -2288,6 +2471,9 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
 
     it('runs every graph step through the real Worker catalog preflight without a chat Turn', async () => {
       const f = fixture(undefined, false, ['a', 'b', 'c']);
+      const reserveBudget = vi.spyOn(f.persistence, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(f.persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(f.persistence, 'releaseTeamBudget');
       const scheduler = new TeamExecutionScheduler(2);
       const runtime = new DeterministicTeamWorkerRuntime();
       const execute = runtime.execute.bind(runtime);
@@ -2333,6 +2519,58 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           f.persistence.getTeamMission(mission.id).steps.map(({ executionId }) => executionId),
         ).toHaveLength(3);
         expect(f.persistence.checkTeamIntegrity().inconsistencies).toEqual([]);
+        expect(reserveBudget).toHaveBeenCalledTimes(3);
+        expect(settleBudget).toHaveBeenCalledTimes(3);
+        expect(releaseBudget).not.toHaveBeenCalled();
+        expect(
+          settleBudget.mock.calls.flatMap(([input]) => [...input.reservationIds]).sort(),
+        ).toEqual(
+          reserveBudget.mock.results
+            .flatMap((result) => result.value.map(({ id }: { id: string }) => id))
+            .sort(),
+        );
+        expect(
+          f.persistence.getTeamBudgetStatus(f.team.id).every(({ reserved }) => reserved === 0),
+        ).toBe(true);
+        expect(f.workers.every(({ id }) => f.persistence.getWorkerUsageTotals(id).tokens > 0)).toBe(
+          true,
+        );
+      } finally {
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        f.persistence.close();
+      }
+    });
+
+    it('releases Graph budget once after a settlement transaction fails', async () => {
+      const f = fixture();
+      const scheduler = new TeamExecutionScheduler(1);
+      const settle = vi.spyOn(f.persistence, 'settleTeamBudget').mockImplementationOnce(() => {
+        throw new Error('Graph budget settlement rejected');
+      });
+      const release = vi.spyOn(f.persistence, 'releaseTeamBudget');
+      const coordinator = new TeamCoordinator(
+        f.persistence,
+        new DeterministicTeamWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        scheduler,
+      );
+      try {
+        const mission = await coordinator.startGraphMission(f.task.id, async () => f.input);
+        await vi.waitFor(() =>
+          expect(f.persistence.getTeamExecution(mission.steps[0]!.executionId).state).toBe(
+            'waiting_resume',
+          ),
+        );
+        await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
+        expect(settle).toHaveBeenCalledTimes(1);
+        expect(release).toHaveBeenCalledTimes(1);
+        expect(
+          f.persistence
+            .getTeamBudgetStatus(f.team.id)
+            .every(({ reserved, committed }) => reserved === 0 && committed === 0),
+        ).toBe(true);
       } finally {
         await vi.waitFor(() => expect(scheduler.snapshot().activeCount).toBe(0));
         f.persistence.close();
@@ -3466,7 +3704,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
         mkdirSync(join(workspace, 'allowed'), { recursive: true });
         writeFileSync(join(workspace, 'outside.ts'), 'outside\n');
         writeFileSync(join(workspace, 'allowed/original.ts'), 'inside\n');
-        expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+        initLfRepository(workspace);
         expect(spawnSync('git', ['-C', workspace, 'add', '.']).status).toBe(0);
         expect(
           spawnSync('git', [
@@ -3566,7 +3804,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
           mkdirSync(join(root, 'allowed'), { recursive: true });
           writeFileSync(join(root, 'allowed/file.ts'), 'base\n');
           writeFileSync(join(root, 'outside.ts'), 'outside\n');
-          expect(spawnSync('git', ['init', '-q', root]).status).toBe(0);
+          initLfRepository(root);
           expect(spawnSync('git', ['-C', root, 'add', '.']).status).toBe(0);
           expect(
             spawnSync('git', [
@@ -3961,7 +4199,7 @@ if (process.env.SPRINT_CODER_ELECTRON_DB_TEST === '1')
       const f = fixture(undefined, true);
       const workspace = join(dirname(f.path), 'workspace');
       mkdirSync(workspace);
-      expect(spawnSync('git', ['init', '-q', workspace]).status).toBe(0);
+      initLfRepository(workspace);
       writeFileSync(join(workspace, 'shared.ts'), 'base\n');
       expect(spawnSync('git', ['-C', workspace, 'add', 'shared.ts']).status).toBe(0);
       expect(

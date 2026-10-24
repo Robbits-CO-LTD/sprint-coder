@@ -257,11 +257,22 @@ describe('team-mcp-server-source (MCP stdio handshake)', () => {
     const listReply = await harness.nextMessage();
     const tools = (
       listReply['result'] as {
-        tools: { name: string; inputSchema: Record<string, unknown> }[];
+        tools: { name: string; description: string; inputSchema: Record<string, unknown> }[];
       }
     ).tools;
     expect(tools.map((tool) => tool.name).sort()).toEqual([...TEAM_MCP_TOOL_NAMES].sort());
     for (const tool of tools) expect(tool).toHaveProperty('inputSchema');
+    for (const name of [
+      'team_hire_worker',
+      'team_assign_task',
+      'team_assign_tasks',
+      'team_assign_mission',
+    ]) {
+      const description = tools.find((tool) => tool.name === name)?.description;
+      expect(description).toContain('writeCapable: true');
+      expect(description).toContain('access: workspace-write');
+      expect(description).toContain('Manager itself');
+    }
     expect(tools.find(({ name }) => name === 'skill_draft_create')?.inputSchema).toEqual(
       SKILL_DRAFT_CREATE_INPUT_JSON_SCHEMA,
     );

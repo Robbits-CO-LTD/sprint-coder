@@ -41,7 +41,7 @@ case "$node_v" in
      fi ;;
 esac
 
-# 3. native prerequisites (same checks as tests/e2e/helpers.ts warnAboutUnbuiltDevNativePrerequisites)
+# 3. native prerequisites for the actual dev Electron runtime
 fix='npm run prepare:desktop --workspace @sprint-coder/desktop'
 addon="$DESKTOP_ROOT/native-safe-fs/build/Release/sprint_coder_native_safe_fs.node"
 runner="$DESKTOP_ROOT/sandbox-runner/build/Release/sprint-coder-sandbox-runner"
@@ -65,7 +65,7 @@ if [ -f "$sqlite" ]; then
   if [ -f "$gypi" ]; then
     tgt="$(grep -o '"target": *"[^"]*"' "$gypi" | head -1 | sed -E 's/.*"([^"]*)"$/\1/')"
     if [ -n "$tgt" ] && [ -n "$ev" ] && [ "$tgt" = "$ev" ]; then ok "better-sqlite3 built for Electron $ev"
-    else block "better-sqlite3 target='$tgt' but Electron='$ev' (main-process init aborts; every spec times out in firstWindow) — fix: $fix"; fi
+    else block "better-sqlite3 target='$tgt' but Electron='$ev' (main-process init aborts; the application cannot initialize) — fix: $fix"; fi
   else ok "better-sqlite3 present (prebuilt; ABI not verifiable from config.gypi)"; fi
 else
   block "better-sqlite3 addon missing — fix: $fix"
@@ -78,10 +78,10 @@ if [ -n "$rel" ] && [ -x "$bin" ]; then ok "dev Electron binary: node_modules/el
 else block "dev Electron binary missing — run: node node_modules/electron/install.js"; fi
 mb="$DESKTOP_ROOT/.vite/build/index.js"
 if [ -f "$mb" ]; then ok "dev main bundle present (built $(date -r "$mb" '+%Y-%m-%d %H:%M'))"
-else warn "dev main bundle apps/desktop/.vite/build/index.js missing; npm start (or E2E globalSetup) builds it"; fi
+else warn "dev main bundle apps/desktop/.vite/build/index.js missing; npm start builds it"; fi
 
 # 4b. Vite optimize cache vs workspace packages, PER PACKAGE (stale cache => black renderer, every
-#     spec times out). One @sprint-coder_<pkg>.js can be days old while another was just rebuilt, so
+#     the renderer cannot initialize). One @sprint-coder_<pkg>.js can be days old while another was just rebuilt, so
 #     each package is compared with its own bundle. Only RUNTIME sources count: a checkout where just
 #     a *.test.ts / *.spec.ts / *.d.ts / __tests__ file moved must not block the whole sweep.
 deps_dir="$DESKTOP_ROOT/node_modules/.vite/deps"
@@ -97,14 +97,14 @@ for src_dir in "$REPO_ROOT"/packages/*/src; do
     \( -name '*.ts' -o -name '*.tsx' \) -newer "$vcache" -print 2>/dev/null | head -1)"
   [ -n "$newer_src" ] && stale_pkgs="$stale_pkgs $pkg(${newer_src#$REPO_ROOT/})"
 done
-if [ -n "$stale_pkgs" ]; then block "Vite optimize cache in apps/desktop/node_modules/.vite/deps is OLDER than the runtime sources of:$stale_pkgs — the dev renderer will throw 'does not provide an export named …' and every spec times out. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
+if [ -n "$stale_pkgs" ]; then block "Vite optimize cache in apps/desktop/node_modules/.vite/deps is OLDER than the runtime sources of:$stale_pkgs — the dev renderer will throw 'does not provide an export named …' and the renderer cannot initialize. Fix: rm -rf apps/desktop/node_modules/.vite node_modules/.vite, then (re)start the dev server"
 elif [ -n "$checked_pkgs" ]; then ok "Vite optimize cache is newer than the runtime sources of:$checked_pkgs"
 else ok "no Vite optimize cache yet (first dev server start will build it)"; fi
 
 # 5. dev server on :5173 — must belong to THIS checkout
 pid="$(lsof -nP -iTCP:5173 -sTCP:LISTEN -Fp 2>/dev/null | sed -n 's/^p//p' | head -1)"
 if [ -z "$pid" ]; then
-  ok "port 5173 is free — E2E globalSetup / ensure-dev-server.sh will start npm start and own it"
+  ok "port 5173 is free — ensure-dev-server.sh will start npm start and own it"
 else
   cwd="$(lsof -p "$pid" -a -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)"
   want="$(cd "$DESKTOP_ROOT" 2>/dev/null && pwd -P)"
@@ -114,7 +114,7 @@ else
 fi
 
 # 6. CLIs (read-only probes; no billing). A missing/unauthenticated CLI blocks only ITS lane
-#    (Phase 1 mock E2E and the other lane still run) — recorded as [LANE], not [BLOCK].
+#    (Phase 1 Computer Use cases and the other lane still run) — recorded as [LANE], not [BLOCK].
 if command -v claude >/dev/null 2>&1; then
   cv="$(claude --version 2>/dev/null | head -1)"
   cauth="$(claude auth status 2>/dev/null || true)"
@@ -143,11 +143,7 @@ else
   block "gh is not authenticated (gh auth login)"
 fi
 
-# 8. Playwright inventory (does not launch the app)
-total="$(cd "$REPO_ROOT" && SPRINT_CODER_E2E_MODE=dev npx playwright test --list 2>/dev/null | tail -1)"
-if [ -n "$total" ]; then ok "playwright: $total"; else warn "playwright --list failed (npm ci?)"; fi
-
-# 9. optional Ollama lane
+# 8. optional Ollama lane
 if curl -s --max-time 2 http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
   n="$(curl -s --max-time 2 http://127.0.0.1:11434/api/tags | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).models.length))" 2>/dev/null || echo '?')"
   ok "ollama reachable ($n models) — optional lane available"

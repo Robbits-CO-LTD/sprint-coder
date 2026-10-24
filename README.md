@@ -27,7 +27,7 @@ Sprint Coder（スプリントコーダー）は、**AIコーディングアシ�
 Sprint Coder is an open-source, local-first desktop AI coding workspace that brings Codex CLI, Claude Code, Gemini, cloud APIs, local LLMs, and multi-agent software development into one Task.
 
 > [!WARNING]
-> 現在はearly betaです。機能、データ形式、配布方法は今後変更される可能性があります。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
+> 最新の正式版は[GitHub Releases](https://github.com/Robbits-CO-LTD/sprint-coder/releases/latest)から入手できます。機能ごとの対応状況と既知の制約はReleaseの説明をご確認ください。重要なリポジトリでは、差分と承認内容を確認しながら利用してください。
 
 ## なぜSprint Coderなのか
 
@@ -136,7 +136,7 @@ Local Workspace + SQLite state
 apps/desktop/       Electron Main / Preload / React Renderer / Runtime Host
 packages/contracts/ IPC・永続化・Provider間で共有するschemaと型
 packages/domain/    権限、Tool、Turnなどのpure domain logic
-tests/e2e/          packaged appを対象にしたPlaywright E2E
+docs/testing/computer-use/  UI・E2EのComputer Use検証チェックリスト
 docs/               プロダクト、設計、セキュリティ、計画
 tasks/              実装計画と設計レビュー記録
 ```
@@ -172,18 +172,11 @@ npm start
 | `npm run lint`                | ESLintを実行                                     |
 | `npm run format:check`        | Prettierによる形式チェック                       |
 | `npm test`                    | Vitestのunit / integration testを実行            |
-| `npm run e2e`                 | production packageを作成し、Playwright E2Eを実行 |
 | `npm run test:provider-smoke` | opt-inの実Provider smoke testを実行              |
 
-E2Eはpackage作成とnative module検証を含みます。通常の変更では対象test、typecheck、lintから先に実行してください。CIはmacOS、Windows、Linuxで検証します。
+UI・E2E・ユーザー操作は、開発エージェントのComputer Useで実アプリ・ブラウザを操作して確認します。[検証チェックリストと記録方法](docs/testing/computer-use/README.md)から変更に関係するケースを選びます。単体・結合テストはVitestを維持します。
 
-作業中のデスクトップにウィンドウを表示せず開発版E2Eを実行する場合は、非表示モードを明示します。
-
-```bash
-SPRINT_CODER_E2E_MODE=dev SPRINT_CODER_E2E_HIDDEN=1 npm run e2e -- --grep-invert 'macOS window lifecycle'
-```
-
-このモードでは描画とDOM操作を維持し、起動・再表示によるウィンドウ表示を抑止します。macOSではアプリのactivationも禁止します。既存の開発用ウィンドウには適用しません。実ウィンドウの再表示を確認する`macOS window lifecycle`は上記コマンドの対象外です。Computer Useによる実画面操作、OSのフォーカス挙動、可視ウィンドウの性能受入れは非表示E2Eでは証明できません。
+通常の変更では対象test、typecheck、lintから実行します。CIのmacOS、Windows、Linuxでの型・単体・native・package検証と、Computer Useでの画面検証は別の証拠です。対象build・環境・操作・証拠と `PASS` / `FAIL` / `SKIP` / `BLOCKED` を記録し、Computer Useを利用できない場合は `BLOCKED` とします。shellは起動、fixture準備、ログ・ファイル照合に使えます。実Providerへの課金を伴う送信は明示された場合のみ実施します。
 
 <details>
 <summary><strong>Windowsインストーラーをローカルで作る</strong></summary>
@@ -197,7 +190,7 @@ powershell -ExecutionPolicy Bypass -File apps/desktop/scripts/ensure-inno-setup.
 npm run make:windows
 ```
 
-ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer.exe`、portable ZIPは`apps/desktop/out/make/zip/win32/x64/`へ出力されます。手元のbuildは未署名のため、Windowsから警告が表示される場合があります。正式配布の署名要件は[release workflow](.github/workflows/release-beta.yml)と[設計資料](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)を確認してください。
+ウィザード付きインストーラーは`apps/desktop/out/make/squirrel.windows/x64/Sprint-Coder-Installer-<version>.exe`、portable ZIPは`apps/desktop/out/make/zip/win32/x64/`へ出力されます。手元のbuildは未署名のため、Windowsから警告が表示される場合があります。正式配布の署名要件は[release workflow](.github/workflows/release-beta.yml)と[設計資料](docs/PRODUCT_AND_TECHNICAL_DESIGN.md)を確認してください。
 
 </details>
 

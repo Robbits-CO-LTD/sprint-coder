@@ -897,10 +897,6 @@ function assertExpectedStats(stats: BigIntStats, expected: SealedExecutableIdent
     throw new Error('Executable identity changed');
 }
 
-function sameStats(first: BigIntStats, second: BigIntStats): boolean {
-  return sameIdentityStats(first, second, false);
-}
-
 function sameUnlinkedStats(first: BigIntStats, second: BigIntStats): boolean {
   return (
     first.isFile() &&

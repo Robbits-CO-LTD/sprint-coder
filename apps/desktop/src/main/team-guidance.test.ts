@@ -9,7 +9,9 @@ import {
   isTeamScenarioInput,
   requiresTeamWorkersInput,
   LEADER_MCP_SYSTEM_PROMPT,
+  MANAGER_MCP_SYSTEM_PROMPT,
   LEADER_PROVIDER_TOOLS,
+  MANAGER_PROVIDER_TOOLS,
   TEAM_HIRE_WORKER_TOOL,
 } from './team-tools';
 import { teamGuidance } from './ipc';
@@ -77,6 +79,27 @@ describe('builtin Team skill', () => {
     expect(guidance).toContain('<team-model-selection-guidance>');
     expect(guidance).toContain('APIを使う前にユーザーへ確認する');
     expect(guidance).toContain('必ず従ってください');
+  });
+
+  it('explains both Manager write conditions on the skill, tool catalogs and Manager prompt', () => {
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('子に編集を委譲するManager');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('Manager自身への割当も');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('調査だけのManager');
+    expect(BUILTIN_TEAM_SKILL_CONTENT).toContain('自身の変更なしでも');
+    expect(MANAGER_MCP_SYSTEM_PROMPT).toContain('現在の実行からは昇格できません');
+    expect(MANAGER_MCP_SYSTEM_PROMPT).toContain('親Agentへ報告');
+    for (const catalog of [LEADER_PROVIDER_TOOLS, MANAGER_PROVIDER_TOOLS]) {
+      for (const name of [
+        'team_hire_worker',
+        'team_assign_task',
+        'team_assign_tasks',
+        'team_assign_mission',
+      ]) {
+        const description = catalog.find((tool) => tool.name === name)?.description;
+        expect(description).toContain('writeCapable: true');
+        expect(description).toContain('workspace-write');
+      }
+    }
   });
 
   it('recognizes explicit Team and worker-count intent without activating ordinary turns', () => {
@@ -208,6 +231,298 @@ describe('builtin Team skill', () => {
     expect(requiresTeamWorkersInput('/team リポジトリを並列調査して')).toBe(true);
     expect(requiresTeamWorkersInput('チームで何ができますか？')).toBe(false);
     expect(requiresTeamWorkersInput('チームの使い方を説明して')).toBe(false);
+  });
+
+  it.each([
+    '部長が担当を雇って絵を描かせます。',
+    '担当を雇って1人1件ずつ資料（TXT）と説明を docs/ に書かせます。',
+    '担当を雇って資料を docs/ に書かせます。',
+    '担当を雇って1人1件ずつ資料を作成してください。',
+    '担当を雇って1人ずつ2件を調査して。',
+    '担当を雇って2名ずつ3枚（PNG）を作成させます。',
+    '担当を雇って3人ずつ4件と報告を outputs/ に書かせます。',
+    '担当を雇って2件を調査して。',
+    'ワーカーを雇って２人三枚ずつ画像（SVG）と報告を outputs/ に作成させます。',
+    '担当を雇って3名2本ずつ図（PNG）や報告を artifacts/images/ に書かせます。',
+    '担当を雇って資料(CSV)と概要をreports/に書かせます。',
+    '担当を雇って`README.md`を書かせます。',
+    '担当を雇って「設計書」を作成させます。',
+    '担当を雇ってIssue#12を修正させます。',
+    '担当を雇ってＡＰＩを実装させます。',
+    '担当を雇ってください。',
+    '担当を雇って資料を作成してください。',
+    '担当を雇用して絵を描かせます。',
+    'ワーカーを雇って。',
+    'Worker を雇ってください。',
+    'Agent　を　雇用してください。',
+    '担当者を雇ってください。',
+    'メンバーを雇ってください。',
+    'リーダーを雇ってください。',
+    '担当 ２ 名を雇って絵を描かせます。',
+    'Workerを三人雇って資料を作成してください。',
+    '「作業のきまり」に従い、担当を雇って絵を描かせます。',
+    '担当を雇って絵を描かせ、結果を教えて。',
+    '担当を雇って絵を描かせます。依存関係は変更しないでください。',
+    '依存関係は変更しないで、担当を雇って資料を作成してください。',
+    '担当を雇ってもらえますか？',
+    '担当を雇っていただけますか？',
+    '担当を雇ってくれませんか？',
+    '担当を雇ってもらえないでしょうか。',
+    '担当を雇っていただけませんでしょうか。',
+    '担当を雇ってくれない？',
+    '担当を雇っていただくようお願いします。',
+    '担当を雇っていただいて、資料を作成してください。',
+    '担当を雇ってもらえますか？とても助かります。',
+    '担当を雇って資料を作成して、実装方法を教えて。',
+    "Don't change dependencies. 担当を雇ってください。",
+    '「担当を雇ってはいけません」は引用です。担当を雇ってください。',
+    '担当を雇ってはいけません。ワーカーを雇ってください。',
+  ])('recognizes explicit member hiring without another sentence-final action: %s', (input) => {
+    expect(isTeamScenarioInput(input)).toBe(true);
+    expect(requiresTeamWorkersInput(input)).toBe(true);
+  });
+
+  it.each([
+    '「担当を雇って絵を描かせます」という文を添削して。',
+    '『担当を雇ってください。』を訳して。',
+    '“担当を雇ってください。”を訳して。',
+    '"担当を雇ってください。"を訳して。',
+    "'担当を雇ってください。'を訳して。",
+    '`担当を雇ってください` をREADMEに追記して。',
+    '``担当を雇ってください`` をREADMEに追記して。',
+    '```text\n担当を雇ってください。\n```\nこの例を添削して。',
+    '~~~text\n担当を雇ってください。\n~~~\nこの例を添削して。',
+    '次の引用を添削して。「担当を雇ってください。',
+    '次のコードを説明して。`担当を雇ってください。',
+    '担当「を雇ってください」という例です。',
+    '担当を雇ってはいけません。',
+    '担当を雇ってはならない。',
+    '担当を雇ってはなりません。',
+    'まだ担当を雇ってない。',
+    '担当を雇ってるので、追加は不要です。',
+    '担当を雇ってあります。',
+    '担当を雇ってもいいですが、今回は自分で進めてください。',
+    'ワーカーを雇ってもエラーになる原因を調べて。',
+    '担当を雇ってはだめです。',
+    '担当を雇ってほしくありません。',
+    '担当を雇って欲しくない。',
+    '担当を雇ってはほしくない。',
+    '担当を雇ってほしいわけではありません。',
+    '担当を雇ってほしいわけじゃないです。',
+    '担当を雇ってもらわないでください。',
+    '担当を雇ってもらえません。',
+    '担当を雇ってもらいたくありません。',
+    '担当を雇っていただきたくない。',
+    '担当を雇ってくれなくて構いません。',
+    '担当を雇ってなどいません。',
+    '担当を雇っていいですか？',
+    '担当を雇って進める方法を教えて。',
+    '担当を雇って進める手順を説明してください。',
+    '担当を雇って絵を描かせることはできますか？',
+    '担当を雇って何ができますか？',
+    '担当を雇って進められますか？',
+    '担当を雇って、何ができますか？',
+    '担当を雇ってからエラーが出ます。原因を調べて。',
+    '勝手に担当を雇って作業させないでください。',
+    '勝手に担当を雇って作業させないで自分で実装してください。',
+    '担当を雇って2人3件ずつ作業させないで自分で実装してください。',
+    '担当を雇って資料と作業させないで自分で実装してください。',
+    '担当を雇って資料を docs/ に置かないで実装して。',
+    '担当を雇って資料（作業させないで）を実装して。',
+    '担当を雇って「資料」を書かせないで自分で実装して。',
+    '担当を雇って`x`と作業させないで自分で実装してください。',
+    '担当を雇って資料を自分で実装して。',
+    '担当を雇って1人ずつ2件を調査しないでください。',
+    '担当を雇ってほしいのではなく自分で実装してください。',
+    '担当を雇って進めるのはやめて自分で実装して。',
+    '担当を雇っている理由を調査して。',
+    'ワーカーを雇って進める必要はありません。',
+    '担当を雇ってほしいとは思いません。',
+    '担当を雇っては困ります。',
+    '担当を雇ってはいかがですか？',
+    '担当を雇ってもらっているので、追加は不要です。',
+    '担当を雇ってくれてるので、追加は不要です。',
+    '担当を雇っていただいたので、資料はできています。',
+    '担当を雇ってはどうですか？',
+    '担当を雇ってもらうにはどうすればいいですか？',
+    '担当を雇っている理由を説明して。',
+    '担当を雇っていました。',
+    '担当を雇っておりません。',
+    '担当を雇ってもらいました。',
+    '担当を雇って資料を作りました。',
+    '担当を雇って絵を描かせた。',
+    '担当を雇って、絵を描かせました。',
+    '担当を雇ってください、と伝えました。',
+    '担当を雇ってください、と言われましたが、今回は雇わず説明だけしてください。',
+    '担当を雇ってください、と伝えられました。',
+    '担当を雇ってください、と頼まれました。',
+    '担当を雇ってください、と指示されました。',
+    '担当を雇ってください、と依頼されました。',
+    '担当を雇ってもらえますか、と伝えました。',
+    '担当を雇ってもらえますか？と伝えました。',
+    'ワーカーを雇ってくださいと送ったら、エラーになりました。',
+    '担当を雇ってください、と頼んだら断られました。',
+    'リーダーの案を採用してください。',
+    'Web Workerを採用して実装して。',
+    '担当者に確認し、新しいライブラリを採用して。',
+    '担当の案を雇用してください。',
+    '担当を決めてからライブラリを雇用して。',
+  ])('does not infer member hiring from quoted, prohibited or descriptive text: %s', (input) => {
+    expect(isTeamScenarioInput(input)).toBe(false);
+    expect(requiresTeamWorkersInput(input)).toBe(false);
+  });
+
+  it.each([
+    ['担当を雇って\nはいけません。自分で実装してください。', false],
+    ['ワーカーを雇用して\r\nはなりません。', false],
+    ['担当を雇って\rいました。', false],
+    ['担当を雇って\nほしいわけではありません。', false],
+    ['担当を雇ってください\nと伝えました。', false],
+    ['担当を雇ってもらえますか？\nと伝えました。', false],
+    ['担当を雇って\n資料を作成してください。', true],
+    ['担当を雇って\r\nください。', true],
+    ['担当を雇って資料を\n作成してください。', true],
+    ['担当を雇ってください。\n依存関係は変更しないでください。', true],
+    ['担当を雇ってください\n- 調査\n- 実装', true],
+    ['担当を雇ってください\nREADMEを更新して', true],
+    ['担当を雇ってください\nよろしくお願いします。', true],
+    ['担当を雇ってください\nあと、READMEを更新して', true],
+    ['担当を雇って資料を作成して\nください。', true],
+    ['担当を雇ってください\nとは言っていません。', false],
+    ['担当を雇ってほしい\n訳ではありません。', false],
+    ['Web\nWorkerを雇ってください。', true],
+    ['Work\nerを雇ってください。', false],
+  ])('keeps a hiring clause connected across line breaks: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it.each([
+    ['担当を雇ってほしい、というわけではありません。自分で実装してください。', false],
+    ['担当を雇って欲しい,という意味ではありません。', false],
+    ['担当を雇ってください、というのは例文です。', false],
+    ['担当を雇って絵を描かせ、という話を読んだだけです。', false],
+    ['担当を雇って資料を作成して、結果を教えて、という意味ではありません。', false],
+    ['担当を雇ってほしい、まだ決めていません。', false],
+    ['担当を雇って、方法を教えて。', false],
+    ['担当を雇って絵を描かせ、結果を教えて。', true],
+    ['担当を雇って資料を作成して、実装方法を教えて。', true],
+    ['担当を雇っていただいて、資料を作成してください。', true],
+    ['担当を雇っていただいて、資料を作成してください、結果を教えて。', true],
+    ['担当を雇って、資料を作成してください、結果を報告してください。', true],
+  ])('requires affirmative continuations after every hiring comma: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it.each([
+    ['担当を雇ってもらえますか？と聞かれました。返答文を考えてください。', false],
+    ['担当を雇ってもらえますか？ と尋ねられました。', false],
+    ['担当を雇ってください！って聞かれました。', false],
+    ['担当を雇ってください。という文を添削してください。', false],
+    ['担当を雇ってください？！。　と尋ねられました。', false],
+    ['担当を雇ってもらえますか!? と聞かれました。', false],
+    ['担当を雇ってください。 、 と聞かれました。', false],
+    ['担当を雇ってもらえますか？とても助かります。', true],
+    ['担当を雇ってください！　とても助かります。', true],
+    ['担当を雇ってください。という例です。ワーカーを雇ってください。', true],
+  ])('keeps quoted continuations attached across punctuation runs: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it.each([
+    ['担当を雇ってもらえますか？なんて聞かれました。', false],
+    ['担当を雇ってください！みたいな依頼が来ました。', false],
+    ['担当を雇ってください！みたいに言われました。', false],
+    ['担当を雇ってください。などと書かれていました。', false],
+    ['担当を雇ってもらえますか？\nなんて言われました。', false],
+    ['担当を雇ってください！のような文を添削して。', false],
+    ['担当を雇ってください。のように書かれていました。', false],
+    ['担当を雇ってもらえますか？とても助かります！って言われました。', false],
+    ['担当を雇ってください。とても助かります。なんて聞かれました。', false],
+    ['”担当を雇ってください。”を訳して。', false],
+    ['＂担当を雇ってください。＂を訳して。', false],
+    ['〝担当を雇ってください。〟という文を添削して。', false],
+    ['〝担当を雇ってください。〞という文を添削して。', false],
+    ['担当を雇っていただいて！本当に助かりました。', false],
+    ['担当を雇っていただいて、資料を作成してください。', true],
+    ['担当を雇ってもらえますか？とても助かります。', true],
+    ['担当を雇ってください。とても助かります！とても助かります。', true],
+    ['”担当を雇ってはいけません。”は例です。担当を雇ってください。', true],
+    ['Don’t change dependencies. 担当を雇ってください。', true],
+    ['担当を雇って、担当を雇って、資料を作成してください。', true],
+    ['担当を雇ってメンバーを雇ってください。', true],
+    ['担当を雇ってメンバーを雇ってはいけません。', false],
+  ])('keeps quotation syntax and trailing courtesy distinct from hiring: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it('keeps bounded punctuation runs and grouped quotation segments inert', () => {
+    const prefix = '担当を雇ってもらえますか';
+    const suffix = 'と聞かれました。';
+    const inputs = [
+      '？'.repeat(100_000),
+      prefix + '？！。'.repeat(Math.floor((100_000 - prefix.length - suffix.length) / 3)) + suffix,
+      (prefix + '？' + suffix).repeat(4_000),
+      prefix + '？' + 'と補足します。'.repeat(10_000),
+    ];
+    for (const input of inputs) {
+      expect(isTeamScenarioInput(input)).toBe(false);
+      expect(requiresTeamWorkersInput(input)).toBe(false);
+    }
+  });
+
+  it('does not infer work from many hiring matches before an unknown continuation', () => {
+    for (const input of [
+      '担当を雇って、'.repeat(14_000) + '結果を見ました。',
+      '担当を雇って\n'.repeat(14_000) + 'あ',
+      '担当を雇って'.repeat(14_000) + 'あ',
+    ]) {
+      expect(input.length).toBeLessThanOrEqual(100_000);
+      expect(isTeamScenarioInput(input)).toBe(false);
+      expect(requiresTeamWorkersInput(input)).toBe(false);
+    }
+  });
+
+  it.each([
+    ['次の引用文を添削してください。\n> 担当を雇ってください。', false],
+    ['> 引用文です。\n担当を雇ってください。', false],
+    ['> > 担当を雇ってください。', false],
+    ['- > 担当を雇ってください。', false],
+    ['例を説明してください。\n\n    担当を雇ってください。', false],
+    ['\t担当を雇ってください。', false],
+    ['- 例:\n\n      担当を雇ってください。', false],
+    ['```text\n担当を雇ってください。\n```', false],
+    ['~~~text\n担当を雇ってください。\n~~~', false],
+    ['次のHTML例を説明してください。\n\n<!-- 担当を雇ってください。 -->', false],
+    ['次のHTML例を説明してください。\n\n<pre>担当を雇ってください。</pre>', false],
+    ['<!-- 担当を雇ってはいけません。 -->\n\n担当を雇ってください。', true],
+    ['> 引用文です。\n\n担当を雇ってください。', true],
+    ['> 担当を雇ってはいけません。\n\n担当を雇ってください。', true],
+    ['    担当を雇ってはいけません。\n\n担当を雇ってください。', true],
+    ['```text\n担当を雇ってはいけません。\n```\n担当を雇ってください。', true],
+    ['前置きです。\n    担当を雇ってください。', true],
+    ['   担当を雇ってください。', true],
+    ['🌊 例です。\n\n> 担当を雇ってください。', false],
+  ])('distinguishes Markdown examples from member hiring instructions: %s', (input, expected) => {
+    expect(isTeamScenarioInput(input)).toBe(expected);
+    expect(requiresTeamWorkersInput(input)).toBe(expected);
+  });
+
+  it('masks an unclosed escaped quotation through a trailing backslash', () => {
+    for (const quote of ['"', "'"]) {
+      const input = quote + `\\${quote}`.repeat(4_000) + '担当を雇ってください\\';
+      expect(isTeamScenarioInput(input)).toBe(false);
+      expect(requiresTeamWorkersInput(input)).toBe(false);
+    }
+  });
+
+  it('does not infer hiring work from a long quantity prefix without an object or action', () => {
+    const input = '担当を雇って' + '1人'.repeat(10_000) + 'あ';
+    expect(isTeamScenarioInput(input)).toBe(false);
+    expect(requiresTeamWorkersInput(input)).toBe(false);
   });
 
   it('routes Team diagnostics without requiring a Worker', () => {

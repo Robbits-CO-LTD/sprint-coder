@@ -506,6 +506,37 @@ describe('TeamExecutionScheduler', () => {
     await settleScheduler();
   });
 
+  it('paces by the clock it is given, not wall time (issue #854)', async () => {
+    let nowMs = 1_000_000;
+    const scheduler = new TeamExecutionScheduler(
+      10,
+      undefined,
+      { limit: 1, windowMs: 60_000 },
+      () => nowMs,
+    );
+    const started: string[] = [];
+    const paced = (executionId: string) => ({
+      executionId,
+      workerId: `worker-${executionId}`,
+      teamId: 'team-1',
+      teamLimit: 10,
+      paceKey: 'team-1',
+      run: async () => void started.push(executionId),
+    });
+    scheduler.submit(paced('first'));
+    scheduler.submit(paced('second'));
+    await settleScheduler();
+    expect(started).toEqual(['first']);
+    // However long the run takes in wall time, the window has not passed on this clock.
+    scheduler.notifyReadinessChanged();
+    await settleScheduler();
+    expect(started).toEqual(['first']);
+    nowMs += 60_000;
+    scheduler.notifyReadinessChanged();
+    await settleScheduler();
+    expect(started).toEqual(['first', 'second']);
+  });
+
   describe('with fake timers', () => {
     afterEach(() => {
       vi.useRealTimers();

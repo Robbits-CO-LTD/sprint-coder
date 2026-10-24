@@ -17,6 +17,7 @@ import { delimiter, dirname, join, parse, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import type { PublicError, RuntimeWriteScope } from '@sprint-coder/contracts';
 import type { CodexModelOption } from '@sprint-coder/contracts';
+import { codexModelOptionSchema } from '@sprint-coder/contracts';
 import type { ToolCatalogSnapshot } from '@sprint-coder/domain';
 import desktopPackage from '../../package.json';
 import {
@@ -52,6 +53,7 @@ import { spawnOwnedCliProcess, stopOwnedCliProcess } from './owned-cli-process';
 import { removeTreeWithoutFollowingLinksSync } from './link-safe-tree-removal';
 import { serializeCliExecutionPayload } from './execution-payload';
 import { probeCliAuthentication } from './authentication-probe';
+import { modelRecord, probeCliModels } from './cli-model-probe';
 import {
   RUNTIME_FIRST_EVENT_TIMEOUT_MS,
   RUNTIME_IDLE_TIMEOUT_MS,
@@ -98,21 +100,26 @@ const CLAUDE_CODE_CAPABILITIES: NonNullable<CodexModelOption['capabilities']> = 
   reasoning: claudeCapability(CLAUDE_MODEL_CONFIG_SOURCE),
 };
 
-// Claude has no model-list endpoint in the CLI, so this catalog uses official model IDs.
-// Pin Opus and Fable versions: older CLI aliases have silently resolved to a different model.
-// Fable 5.1 requires Claude Code 2.1.255+:
-// https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan
-const CLAUDE_MODELS: CodexModelOption[] = [
-  {
-    id: 'auto',
-    displayName: 'Auto',
-    description: 'Claude Codeの既定モデルを使用（現在: Sonnet 5 / claude-sonnet-5）',
-    capabilities: CLAUDE_CODE_CAPABILITIES,
-  },
+const CLAUDE_AUTO_MODEL: CodexModelOption = {
+  id: 'auto',
+  displayName: 'Auto',
+  description: 'Claude Codeの既定モデルを使用',
+  capabilities: CLAUDE_CODE_CAPABILITIES,
+};
+
+// Deterministic UI fixtures only; production always asks the selected CLI.
+const E2E_CLAUDE_MODELS: CodexModelOption[] = [
+  CLAUDE_AUTO_MODEL,
   {
     id: 'sonnet',
     displayName: 'Sonnet 5',
     description: 'バランス型モデル（claude-sonnet-5）',
+    capabilities: CLAUDE_CODE_CAPABILITIES,
+  },
+  {
+    id: 'claude-opus-5-5',
+    displayName: 'Opus 5.5',
+    description: '複雑な推論・コーディング・レビュー向け（claude-opus-5-5）',
     capabilities: CLAUDE_CODE_CAPABILITIES,
   },
   {
@@ -141,6 +148,34 @@ const CLAUDE_MODELS: CodexModelOption[] = [
   },
 ];
 
+export function parseClaudeModels(models: readonly unknown[]): CodexModelOption[] {
+  const result = [CLAUDE_AUTO_MODEL];
+  const seen = new Set(['auto']);
+  for (const raw of models) {
+    const model = modelRecord(raw);
+    if (model['value'] === 'default') continue;
+    // Keep aliases and explicitly advertised canonical IDs: both can be saved selections.
+    for (const id of new Set([model['value'], model['resolvedModel']])) {
+      if (typeof id !== 'string' || id === 'default' || seen.has(id)) continue;
+      const displayName = model['displayName'];
+      const description = model['description'];
+      if (typeof displayName !== 'string' || typeof description !== 'string') continue;
+      const parsed = codexModelOptionSchema.safeParse({
+        id,
+        displayName: (id === model['value'] ? displayName : `${displayName} (${id})`).slice(0, 128),
+        description: description.slice(0, 300),
+        capabilities: CLAUDE_CODE_CAPABILITIES,
+      });
+      if (!parsed.success) continue;
+      seen.add(id);
+      result.push(parsed.data);
+      // Keep saved selections intact when the CLI exceeds the wire catalog limit.
+      if (result.length > 32) return [CLAUDE_AUTO_MODEL];
+    }
+  }
+  return result;
+}
+
 export async function probeClaude(
   command = 'claude',
   environment: Readonly<NodeJS.ProcessEnv> = process.env,
@@ -148,7 +183,12 @@ export async function probeClaude(
   // These E2E cases validate settings/catalog behavior and never execute Claude. Keep that UI
   // deterministic on credential-free CI runners without changing production discovery.
   if (environment['SPRINT_CODER_E2E_CLI_FIXTURES'] === '1') {
-    return { available: true, readiness: 'ready', version: 'e2e-fixture', models: CLAUDE_MODELS };
+    return {
+      available: true,
+      readiness: 'ready',
+      version: 'e2e-fixture',
+      models: E2E_CLAUDE_MODELS,
+    };
   }
   const selectionDeadline = Date.now() + RUNTIME_CLI_SELECTION_BUDGET_MS;
   const cli = await probeCliCommandCandidates({
@@ -176,7 +216,13 @@ export async function probeClaude(
       : authentication === 'unauthenticated'
         ? 'authentication_required'
         : 'ready',
-    models: availability.available ? CLAUDE_MODELS : [],
+    models: availability.available
+      ? parseClaudeModels(
+          await probeCliModels('claude', cli!.executable, minimalEnvironment(environment)).catch(
+            () => [],
+          ),
+        )
+      : [],
   };
 }
 
@@ -890,6 +936,7 @@ function minimalEnvironment(source: Readonly<NodeJS.ProcessEnv> = process.env): 
   const allowlist = [
     'PATH',
     'HOME',
+    'CLAUDE_CONFIG_DIR',
     'USER',
     'LOGNAME',
     'TMPDIR',

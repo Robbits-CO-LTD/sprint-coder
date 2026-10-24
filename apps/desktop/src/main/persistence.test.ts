@@ -22,6 +22,12 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  goalStartInputSchema,
+  turnQueueInputSchema,
+  turnStartInputSchema,
+} from '@sprint-coder/contracts';
+import { requiresTeamWorkersInput } from './team-tools';
+import {
   ToolRegistry,
   createExecutionSpec,
   createSessionGrant,
@@ -49,6 +55,8 @@ import { electronTestExecutablePath } from './electron-test-runtime';
 import { parseGapSnapshot, startEventLoopGapSampler } from './persistence-bridge-gap-sampler';
 import { ToolBroker } from './tool-broker';
 import {
+  AUTO_DECISION_LIST_SQL,
+  AUTO_DECISION_TALLY_SQL,
   AcceptanceEvidenceMissingError,
   MAX_VERIFIABLE_POST_IMAGE_BYTES,
   readVerifiablePostImage,
@@ -1498,6 +1506,90 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    it.each([
+      ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['担当を雇ってください。', true],
+    ] as const)(
+      'preserves Goal Markdown across start, storage and resumed Turn acceptance',
+      (objective, hiring) => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask('Goal input boundary');
+        try {
+          const input = goalStartInputSchema.parse({ taskId: task.id, objective });
+          const first = persistence.startGoalTurn(task.id, input.objective);
+          expect(first.task.goal).toBe(objective);
+          expect(first.started.text).toBe(objective);
+          expect(first.started.teamTurn).toBe(hiring);
+          expect(requiresTeamWorkersInput(first.started.text)).toBe(hiring);
+          persistence.pauseGoalAndCancelTurn(task.id, first.started.turnId);
+        } finally {
+          persistence.close();
+        }
+        const reopened = new SqlitePersistenceClient(path);
+        try {
+          expect(reopened.getTask(task.id).goal).toBe(objective);
+          const resumed = reopened.resumeGoalTurn(task.id);
+          expect(resumed.started.text).toBe(`Goalを続けてください:\n\n${objective}`);
+          expect(resumed.started.teamTurn).toBe(hiring);
+          expect(requiresTeamWorkersInput(resumed.started.text)).toBe(hiring);
+          expect(
+            reopened
+              .prepareContext(task.id, resumed.started.turnId)
+              .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+          ).toHaveLength(hiring ? 1 : 0);
+        } finally {
+          reopened.close();
+        }
+      },
+    );
+
+    it('enforces the untrimmed Goal length bound and rejects blank-only objectives', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Goal length boundary');
+      try {
+        expect(() => persistence.startGoal(task.id, ' \t\r\n　')).toThrow();
+        expect(() => persistence.startGoal(task.id, ` ${'x'.repeat(4000)}`)).toThrow();
+        const objective = ` ${'x'.repeat(3999)}`;
+        expect(persistence.startGoal(task.id, objective).goal).toBe(objective);
+      } finally {
+        persistence.close();
+      }
+    });
+
+    it('preserves Goal usage and epoch only for the identical raw objective', () => {
+      const { persistence } = createPersistence();
+      const task = persistence.createTask('Goal raw identity');
+      const objective = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
+      try {
+        const first = persistence.startGoalTurn(task.id, objective);
+        persistence.recordTurnProviderUsage(task.id, first.started.turnId, {
+          inputTokens: 12,
+          outputTokens: 8,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
+          reasoningTokens: null,
+          providerCost: null,
+          source: 'provider_api',
+        });
+        for (const stage of ['understanding', 'planning', 'executing', 'synthesizing'] as const)
+          persistence.changeStage(task.id, first.started.turnId, stage);
+        persistence.completeTurnAndFinishGoal(task.id, first.started.turnId, 'completed');
+        const epochs = persistence.getBackgroundEpochs(task.id);
+        expect(persistence.startGoal(task.id, objective).goalState).toMatchObject({
+          objective,
+          tokensUsed: 20,
+        });
+        expect(persistence.getBackgroundEpochs(task.id)).toEqual(epochs);
+        expect(persistence.startGoal(task.id, objective.trim()).goalState).toMatchObject({
+          objective: objective.trim(),
+          tokensUsed: 0,
+        });
+        expect(persistence.getBackgroundEpochs(task.id).contextEpoch).toBe(epochs.contextEpoch + 1);
+      } finally {
+        persistence.close();
+      }
+    });
+
     it('binds Goal lifecycle controls to its Turn and records terminal usage', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask('goal lifecycle');
@@ -2001,6 +2093,74 @@ if (runsWithElectronAbi)
           .fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
       ).toHaveLength(1);
       persistence.close();
+    });
+
+    it.each([
+      ['部長が担当を雇って絵を描かせます。', true],
+      ['担当を雇って2人3件ずつ資料（CSV）と説明を reports/ に書かせます。', true],
+      ['担当を雇ってください。', true],
+      ['担当を雇ってはいけません。', false],
+      ['「担当を雇ってください」という文を添削して。', false],
+      ['> 引用文です。\n担当を雇ってください。', false],
+      ['    担当を雇ってください。', false],
+      ['    担当を雇ってください。\n\nこの例文を添削してください。\n', false],
+      ['> 引用文です。\n\n担当を雇ってください。', true],
+      ['担当を雇って進める方法を教えて。', false],
+    ] as const)(
+      'seals Team guidance only for an actual member hiring request: %s',
+      (input, teamTurn) => {
+        const { persistence } = createPersistence();
+        try {
+          const task = persistence.createTask('member hiring classification');
+          const parsed = turnStartInputSchema.parse({
+            taskId: task.id,
+            text: input,
+            attachmentIds: [],
+            attachmentSelectionIdentity: null,
+          });
+          const started = persistence.startTurn(task.id, parsed.text);
+          expect(started.text).toBe(input);
+          expect(started.event).toMatchObject({ userMessage: { content: input } });
+          expect(persistence.listMessages(task.id)[0]?.content).toBe(input);
+          expect(started.teamTurn).toBe(teamTurn);
+          const prepared = persistence.prepareContext(task.id, started.turnId);
+          expect(prepared.fragments.some(({ content }) => content === input)).toBe(true);
+          expect(
+            prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+          ).toHaveLength(teamTurn ? 1 : 0);
+          expect(persistence.prepareContext(task.id, started.turnId)).toEqual(prepared);
+        } finally {
+          persistence.close();
+        }
+      },
+    );
+
+    it('keeps indented queued input intact through IPC parsing, restart and acceptance', () => {
+      const { persistence, path } = createPersistence();
+      const task = persistence.createTask('queued example');
+      const text = '    担当を雇ってください。\n\nこの例文を添削してください。\n';
+      const parsed = turnQueueInputSchema.parse({ taskId: task.id, text });
+      persistence.queueInput(task.id, parsed.text, 'queued-example');
+      persistence.close();
+      const reopened = new SqlitePersistenceClient(path);
+      try {
+        expect(reopened.snapshot(task.id).queued).toEqual([{ ordinal: 1, text }]);
+        const started = reopened.startNextQueued(task.id)?.started;
+        expect(started).toMatchObject({
+          text,
+          teamTurn: false,
+          event: { userMessage: { content: text } },
+        });
+        if (started === undefined) throw new Error('Queued turn was not accepted');
+        const prepared = reopened.prepareContext(task.id, started.turnId);
+        expect(prepared.fragments.some(({ content }) => content === text)).toBe(true);
+        expect(
+          prepared.fragments.filter(({ id }) => id === BUILTIN_TEAM_SKILL_FRAGMENT_ID),
+        ).toHaveLength(0);
+        expect(reopened.listMessages(task.id)[0]?.content).toBe(text);
+      } finally {
+        reopened.close();
+      }
     });
 
     it('keeps Team guidance on a short continuation after a failed Team turn', () => {
@@ -9127,6 +9287,147 @@ if (runsWithElectronAbi)
       reopened.close();
     });
 
+    describe('Auto decision counts and kept rows (issue #863)', () => {
+      function recordAutoDecisions(persistence: SqlitePersistenceClient, taskId: string) {
+        const request = {
+          taskId,
+          subjectId: 'tool:builtin:read',
+          capability: 'workspace.read' as const,
+          resource: { kind: 'external' as const, target: 'fixture' },
+          operation: 'read' as const,
+          providerEgress: 'none' as const,
+          sandboxProfile: 'read-only' as const,
+          executionSpecDigest: 'd'.repeat(64),
+          reviewerInputDigest: 'e'.repeat(64),
+          risk: 'low' as const,
+        };
+        return (index: number, turnId: string, decision: 'allow' | 'allow_once' | 'deny') =>
+          persistence.commitPermissionEvaluation(
+            taskId,
+            request,
+            { decision, reason: 'fixture', policyEpoch: 0, evaluationTrace: ['approval-policy'] },
+            {
+              id: `auto-count-${index}`,
+              taskId,
+              turnId,
+              callId: `call-count-${index}`,
+              reviewRequestId: `review-count-${index}`,
+              capability: request.capability,
+              source: 'policy',
+              decision,
+              outcome: decision,
+              reason: 'fixture',
+              risk: 'low',
+              model: 'fixture',
+              templateVersion: '1',
+              requestFingerprint: 'f'.repeat(64),
+              executionSpecDigest: request.executionSpecDigest,
+              inputDigest: request.reviewerInputDigest,
+              policyEpoch: 0,
+              createdAt: '2026-10-18T00:00:00.000Z',
+            },
+          )!;
+      }
+
+      it('restores denials past a stream of allows and counts every decision per Turn', () => {
+        const { persistence } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const record = recordAutoDecisions(persistence, task.id);
+        for (let index = 0; index < 2; index += 1) record(index, turn.turnId, 'deny');
+        record(2, turn.turnId, 'allow_once');
+        let lastSeq = 0;
+        for (let index = 3; index < 253; index += 1)
+          lastSeq = record(index, turn.turnId, 'allow').seq;
+
+        const restored = persistence.listAutoPermissionDecisions(task.id);
+        expect(restored.filter(({ decision }) => decision === 'deny').map(({ id }) => id)).toEqual([
+          'auto-count-0',
+          'auto-count-1',
+        ]);
+        expect(restored.filter(({ decision }) => decision !== 'deny')).toHaveLength(200);
+        expect(restored.map(({ id }) => id)).toEqual(
+          [...restored]
+            .sort((a, b) => a.id.localeCompare(b.id, 'en', { numeric: true }))
+            .map(({ id }) => id),
+        );
+        expect(restored.at(-1)?.id).toBe('auto-count-252');
+        const counts = [{ turnId: turn.turnId, allow: 250, allowOnce: 1, deny: 2 }];
+        expect(persistence.countAutoPermissionDecisions(task.id)).toEqual(counts);
+        // The snapshot carries the same counts, read together with the lastSeq they cover.
+        const snapshot = persistence.snapshot(task.id);
+        expect(snapshot.autoDecisionCounts).toEqual(counts);
+        // ...and the kept rows, so a denial recorded before the snapshot is in its rows too.
+        expect(snapshot.autoDecisions).toEqual(restored);
+        expect(snapshot.autoDecisions.filter(({ decision }) => decision === 'deny')).toHaveLength(
+          2,
+        );
+        expect(snapshot.lastSeq).toBeGreaterThanOrEqual(lastSeq);
+        persistence.close();
+      });
+
+      it('reads counts and kept rows by key, never by scanning the history', () => {
+        const { persistence, path } = createPersistence();
+        const task = persistence.createTask();
+        const turn = startExecutingTurn(persistence, task.id);
+        const record = recordAutoDecisions(persistence, task.id);
+        for (let index = 0; index < 30; index += 1)
+          record(index, turn.turnId, index % 10 === 0 ? 'deny' : 'allow');
+        persistence.close();
+
+        const raw = new Database(path, { readonly: true });
+        try {
+          const plan = (sql: string, ...args: string[]) =>
+            (raw.prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args) as { detail: string }[]).map(
+              ({ detail }) => detail,
+            );
+          const listPlan = plan(AUTO_DECISION_LIST_SQL, task.id, task.id, task.id);
+          const tallyPlan = plan(AUTO_DECISION_TALLY_SQL, task.id);
+          const tableScan =
+            /^SCAN (auto_permission_decision_events|auto_permission_decision_tallies|turn_events|event)\b/u;
+          expect(listPlan.filter((detail) => tableScan.test(detail))).toEqual([]);
+          expect(tallyPlan.filter((detail) => tableScan.test(detail))).toEqual([]);
+          expect(listPlan.join('\n')).toMatch(/SEARCH auto_permission_decision_events/u);
+          expect(listPlan.join('\n')).toMatch(/SEARCH event USING INDEX/u);
+          expect(tallyPlan.join('\n')).toMatch(/SEARCH auto_permission_decision_tallies/u);
+        } finally {
+          raw.close();
+        }
+      });
+
+      it('backfills the counts and keys of decisions recorded before v103', () => {
+        const fixture = createPersistence();
+        const task = fixture.persistence.createTask();
+        const first = startExecutingTurn(fixture.persistence, task.id);
+        const record = recordAutoDecisions(fixture.persistence, task.id);
+        record(0, first.turnId, 'deny');
+        for (let index = 1; index < 205; index += 1) record(index, first.turnId, 'allow');
+        const counts = fixture.persistence.countAutoPermissionDecisions(task.id);
+        const kept = fixture.persistence.listAutoPermissionDecisions(task.id);
+        fixture.persistence.close();
+
+        const old = new Database(fixture.path);
+        old.exec(`
+          DROP TABLE auto_permission_decision_tallies;
+          DROP TABLE auto_permission_decision_events;
+          DELETE FROM schema_migrations WHERE version = 103;
+        `);
+        old.close();
+
+        const migrated = new SqlitePersistenceClient(fixture.path, verifyTestNativeSession);
+        expect(migrated.countAutoPermissionDecisions(task.id)).toEqual(counts);
+        expect(counts).toEqual([{ turnId: first.turnId, allow: 204, allowOnce: 0, deny: 1 }]);
+        expect(migrated.listAutoPermissionDecisions(task.id)).toEqual(kept);
+        expect(kept[0]?.id).toBe('auto-count-0');
+        // New decisions after the upgrade keep counting from the backfilled values.
+        recordAutoDecisions(migrated, task.id)(999, first.turnId, 'deny');
+        expect(migrated.countAutoPermissionDecisions(task.id)).toEqual([
+          { turnId: first.turnId, allow: 204, allowOnce: 0, deny: 2 },
+        ]);
+        migrated.close();
+      });
+    });
+
     it('publishes context usage around audit-only compaction without changing displayed history', () => {
       const { persistence, path } = createPersistence();
       const task = persistence.createTask();
@@ -10422,6 +10723,7 @@ if (runsWithElectronAbi)
         { version: 100 },
         { version: 101 },
         { version: 102 },
+        { version: 103 },
       ]);
       for (const [table, columns] of [
         ['team_graph_resource_reservations', ['write_claims_json', 'write_claims_digest']],
@@ -10604,7 +10906,9 @@ if (runsWithElectronAbi)
         expect(() => validateCanvasCamera({ x: Number.NaN, y: 0, scale: 1 })).toThrow(
           InvalidCanvasViewError,
         );
-        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.1 })).toThrow(
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.04 })).not.toThrow();
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.173333 })).not.toThrow();
+        expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 0.039 })).toThrow(
           InvalidCanvasViewError,
         );
         expect(() => validateCanvasCamera({ x: 0, y: 0, scale: 2 })).toThrow(
@@ -10647,12 +10951,12 @@ if (runsWithElectronAbi)
 
         const created = persistence.saveCanvasView({
           taskId: task.id,
-          camera: { x: 10, y: 20, scale: 0.8 },
+          camera: { x: 10, y: 20, scale: 0.103 },
           nodePositions: {},
           revision: 0,
         });
         expect(created.revision).toBe(1);
-        expect(created.camera).toEqual({ x: 10, y: 20, scale: 0.8 });
+        expect(created.camera).toEqual({ x: 10, y: 20, scale: 0.103 });
 
         const updated = persistence.saveCanvasView({
           taskId: task.id,

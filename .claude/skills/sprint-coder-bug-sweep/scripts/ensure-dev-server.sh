@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Make sure a Vite dev server for THIS checkout is listening on :5173 (same contract as the E2E
-# globalSetup): reuse one that belongs to this checkout, refuse one from another checkout, otherwise
+# Make sure a Vite dev server for THIS checkout is listening on :5173 (bound to the intended checkout): reuse one that belongs to this checkout, refuse one from another checkout, otherwise
 # start `npm start` and record it as owned in $RUN_DIR/dev-server.json (pid + start time + command).
 # Note: `npm start` (electron-forge start) also opens its own app window with the developer's default
 # profile — that window is NOT a test target. Take the Computer Use window inventory AFTER this script.

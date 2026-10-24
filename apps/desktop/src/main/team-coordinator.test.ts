@@ -9,13 +9,14 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { chmod, lstat, readdir, realpath, rmdir, unlink } from 'node:fs/promises';
+import { chmod, lstat, readdir, realpath, rename, rmdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { pathToFileURL } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { electronTestExecutablePath } from './electron-test-runtime';
+import { gitExecFile } from './safe-git';
 import {
   assertShardReport,
   electronBridgeShardIndices,
@@ -46,6 +47,8 @@ import {
   runtimeStopConfirmed,
   teamRepositoryMutationKey,
   type TeamDiagnosticEvent,
+  type TeamResultReadRequest,
+  type TeamResultReadSource,
   type TeamRuntimeConversationItem,
   type TeamWorkerRuntime,
   type WorkerRuntimeResult,
@@ -68,15 +71,12 @@ import {
   type TreeRemovalFs,
 } from './worker-worktree';
 import type { ApprovalWaitObserver } from './tool-broker';
-import { managedLocalConnection } from './managed-local-provider-runtime';
-import { ProviderWorkspaceTools } from './provider-workspace-tools';
-import { stageEditSagaRequest, type EditSagaSnapshot } from './edit-saga';
-import { FileRevisionRegistry } from './file-revision';
+import { ManagedCodingHarness } from './provider-workspace-tools';
 import { workspaceMutationBinding } from './path-guard';
 import {
-  MANAGED_LOCAL_FIXTURE_SELECTION,
-  managedLocalTeamWorkerRuntime,
-} from './managed-local-team-worker-fixture';
+  LOCAL_PROVIDER_TEST_SELECTION,
+  localProviderTestConnection,
+} from './provider-connection-test-fixture';
 import {
   runtimeWorkspaceSetFromLegacyPath,
   type RuntimeFailureDiagnostic,
@@ -106,6 +106,14 @@ function removeTemporaryDirectory(
     throw error;
   }
 }
+
+beforeEach(() => {
+  const home = mkdtempSync(join(tmpdir(), 'sprint-coder-team-git-home-'));
+  cleanup.push(home);
+  writeFileSync(join(home, '.gitconfig'), '[core]\n autocrlf = false\n');
+  vi.stubEnv('HOME', home);
+  vi.stubEnv('XDG_CONFIG_HOME', join(home, 'xdg'));
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -445,6 +453,11 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
   childWrites = true;
   readonly delegations: Array<'read-only' | 'workspace-write' | null> = [];
   readonly childExecutionIds: string[] = [];
+  afterDelegation?: (input: {
+    executionId: string;
+    workspacePath: string;
+    childExecutionId: string;
+  }) => Promise<void>;
 
   override async execute(input: {
     worker: AgentRecord;
@@ -476,6 +489,11 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
             ),
           15_000,
         );
+        await this.afterDelegation?.({
+          executionId: input.executionId!,
+          workspacePath: input.workspacePath!,
+          childExecutionId: child.executionId,
+        });
       }
     } else if (input.worker.writeCapable && this.childWrites) {
       if (input.workspacePath === undefined || input.workspacePath === null)
@@ -487,12 +505,12 @@ class DelegatingManagerRuntime extends TestWorkerRuntime {
 }
 
 /** A write-capable Manager with one write-capable Worker under it, run by a DelegatingManagerRuntime. */
-async function delegatingManagerTeam(title: string) {
+async function delegatingManagerTeam(title: string, scheduler?: TeamIntegrationScheduler) {
   const persistence = createPersistence();
   const task = persistence.createTask(title);
   const { workspace, manager: worktrees } = configureGitWorkspace(persistence, task.id);
   const runtime = new DelegatingManagerRuntime();
-  const coordinator = coordinatorWithWorktrees(persistence, runtime, worktrees);
+  const coordinator = coordinatorWithWorktrees(persistence, runtime, worktrees, scheduler);
   const team = persistence.promoteTaskToTeam(task.id);
   const manager = await coordinator.hireWorkerAs(
     {
@@ -517,6 +535,63 @@ async function delegatingManagerTeam(title: string) {
   );
   Object.assign(runtime, { coordinator, persistence, taskId: task.id, childId: worker.id });
   return { persistence, task, workspace, runtime, coordinator, manager };
+}
+
+async function withIntegratedManagerResult(
+  check: (
+    fixture: Awaited<ReturnType<typeof delegatingManagerTeam>> & {
+      request: TeamResultReadRequest;
+      workspacePath: string;
+    },
+  ) => Promise<void>,
+  scheduler?: TeamIntegrationScheduler,
+): Promise<void> {
+  const fixture = await delegatingManagerTeam('Manager result authority', scheduler);
+  const { persistence, task, workspace, runtime, coordinator, manager } = fixture;
+  const binding = await workspaceMutationBinding(workspace);
+  persistence.setWorkspaceBinding(task.id, { path: binding.canonicalPath, ...binding });
+  const turn = persistence.startTurn(task.id, 'Verify a delegated result');
+  let checked = false;
+  let failure: unknown;
+  runtime.delegations.push('workspace-write');
+  runtime.afterDelegation = async ({ executionId, childExecutionId, workspacePath }) => {
+    try {
+      await check({
+        ...fixture,
+        workspacePath,
+        request: {
+          taskId: task.id,
+          parentTurnId: turn.turnId,
+          callerExecutionId: executionId,
+          callerAgentId: manager.id,
+          targetExecutionId: childExecutionId,
+        },
+      });
+      checked = true;
+    } catch (error) {
+      failure = error;
+    }
+  };
+  try {
+    const submission = await coordinator.assignTask({
+      taskId: task.id,
+      targetAgentId: manager.id,
+      content: 'Delegate and check',
+      doneCriteria: ['result checked'],
+      accessMode: 'workspace-write',
+    });
+    await waitFor(
+      () =>
+        ['completed', 'failed'].includes(
+          persistence.getTeamExecution(submission.executionId).state,
+        ),
+      30_000,
+    );
+    expect(failure).toBeUndefined();
+    expect(checked).toBe(true);
+  } finally {
+    persistence.close();
+  }
 }
 
 class MultiRootWritingRuntime extends TestWorkerRuntime {
@@ -1118,6 +1193,30 @@ function failedShardTests(report: string): string {
   } catch (error) {
     return `The shard report could not be read: ${String(error)}`;
   }
+}
+
+/** A Scheduler whose assignment pace reads a clock the test moves, not wall time (Issue #854). */
+function pacedSchedulerWithClock(persistence: SqlitePersistenceClient) {
+  let nowMs = Date.now();
+  const scheduler = new TeamExecutionScheduler(
+    () => persistence.getTeamMaxConcurrentExecutions(),
+    undefined,
+    TEAM_ASSIGNMENT_RATE_LIMIT,
+    () => nowMs,
+  );
+  /** Has admission look at the queue again, as a finished run or a retry timer would. */
+  const settle = async () => {
+    scheduler.notifyReadinessChanged();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  };
+  return {
+    scheduler,
+    settle,
+    async advance(ms: number) {
+      nowMs += ms;
+      await settle();
+    },
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -1890,7 +1989,17 @@ if (runsWithElectronAbi)
     it('paces a batch that crosses the per-minute limit by queueing, not refusing, the excess (issue #864)', async () => {
       const persistence = createPersistence();
       const task = persistence.createTask('Paced batch Team');
-      const coordinator = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      // The pace clock holds still, so a runner slower than the one-minute window cannot let the
+      // 101st start before the check below (as with the recovered backlog further down).
+      const pace = pacedSchedulerWithClock(persistence);
+      const coordinator = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        pace.scheduler,
+      );
       const workers: Awaited<ReturnType<TeamCoordinator['hireWorker']>>[] = [];
       for (let index = 0; index <= TEAM_ASSIGNMENT_RATE_LIMIT.limit; index += 1)
         workers.push(
@@ -1932,7 +2041,7 @@ if (runsWithElectronAbi)
             .length === TEAM_ASSIGNMENT_RATE_LIMIT.limit,
         60_000,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await pace.settle();
       // The pace counts starts: 100 ran, and the one beyond it waits instead of failing.
       expect(
         persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
@@ -1983,7 +2092,18 @@ if (runsWithElectronAbi)
           doneCriteria: ['return a result'],
         });
 
-      const after = new TeamCoordinator(persistence, new TestWorkerRuntime());
+      // The pace window is a minute of wall time, and a loaded CI macOS runner can spend longer than
+      // that running the 100, after which the 101st may rightly start. The pace reads this clock
+      // instead, held still until the test moves it, so only the pace decides what starts.
+      const pace = pacedSchedulerWithClock(persistence);
+      const after = new TeamCoordinator(
+        persistence,
+        new TestWorkerRuntime(),
+        undefined,
+        undefined,
+        undefined,
+        pace.scheduler,
+      );
       after.recoverOnStartup();
       await waitFor(
         () =>
@@ -1992,11 +2112,21 @@ if (runsWithElectronAbi)
         // Hiring and running 101 Workers takes about 23 s locally and several times that on CI macOS.
         90_000,
       );
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      // 100 recovered assignments start; the one beyond the pace still waits, not fails.
+      // 100 recovered assignments start; the one beyond the pace still waits, not fails, even when
+      // admission looks at it again.
+      await pace.settle();
       expect(
         persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'queued'),
       ).toHaveLength(1);
+      // Once the window has passed, the waiting one starts like any other.
+      await pace.advance(TEAM_ASSIGNMENT_RATE_LIMIT.windowMs);
+      await waitFor(
+        () =>
+          persistence.listTeamExecutions(teamId).filter(({ state }) => state === 'completed')
+            .length ===
+          TEAM_ASSIGNMENT_RATE_LIMIT.limit + 1,
+        20_000,
+      );
       await after.stopAll(task.id).catch(() => undefined);
       persistence.close();
     }, 180_000);
@@ -2328,7 +2458,7 @@ if (runsWithElectronAbi)
       async (mode) => {
         const live = mode !== 'initial';
         const persistence = createPersistence();
-        const connection = managedLocalConnection();
+        const connection = localProviderTestConnection();
         connection.rateLimit = {
           ...connection.rateLimit,
           mode: 'auto',
@@ -2364,7 +2494,7 @@ if (runsWithElectronAbi)
           role: 'reader',
           objective: 'read',
           contextInheritancePolicy: 'none',
-          modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+          modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
           writeCapable: false,
         });
         const submission = await coordinator.assignTask({
@@ -2402,7 +2532,7 @@ if (runsWithElectronAbi)
 
     it('parks an automatic retry on capacity lowering without changing its retained Attempt', async () => {
       const persistence = createPersistence();
-      const connection = managedLocalConnection();
+      const connection = localProviderTestConnection();
       connection.rateLimit = { ...connection.rateLimit, mode: 'auto', tokensPerMinute: 20_000 };
       persistence.createProviderConnection(connection);
       const task = persistence.createTask('Retry token capacity');
@@ -2425,7 +2555,7 @@ if (runsWithElectronAbi)
         objective: 'read',
         contextInheritancePolicy: 'none',
         writeCapable: false,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
+        modelSelection: LOCAL_PROVIDER_TEST_SELECTION,
       });
       const submission = await coordinator.assignTask({
         taskId: task.id,
@@ -2451,22 +2581,13 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('runs a direct message to a write-capable Managed Local or CLI Worker read-only over the Task Workspace (issue #570)', async () => {
+    it('runs a direct message to a write-capable CLI Worker read-only over the Task Workspace (issue #570)', async () => {
       const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local direct message');
+      persistence.createProviderConnection(localProviderTestConnection());
+      const task = persistence.createTask('CLI direct message');
       const { workspace } = configureGitWorkspace(persistence, task.id);
       const cli = new HandedWorkspaceRecordingRuntime();
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-      const coordinator = new TeamCoordinator(persistence, managedLocal.runtime);
-      const managedWorker = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local reader',
-        objective: 'read the Workspace',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
+      const coordinator = new TeamCoordinator(persistence, cli);
       const cliWorker = await coordinator.hireWorker({
         taskId: task.id,
         role: 'CLI reader',
@@ -2477,33 +2598,6 @@ if (runsWithElectronAbi)
       const taskRoots = persistence
         .getEffectiveWorkspaceSet(task.id)
         .roots.map(({ rootId, path, role }) => ({ rootId, path, role }));
-
-      const managedReply = await coordinator.sendToWorker({
-        taskId: task.id,
-        targetAgentId: managedWorker.id,
-        content: 'README.mdを読んで内容を報告してください',
-      });
-      // Main's catalog handed the Managed Local Worker the Task Workspace, reading tools only.
-      expect(managedLocal.sessions).toEqual([
-        expect.objectContaining({
-          workerId: managedWorker.id,
-          writeCapable: false,
-          workspaceSet: expect.objectContaining({
-            roots: taskRoots.map((root) => expect.objectContaining(root)),
-          }),
-          tools: ['read_file'],
-        }),
-      ]);
-      expect(managedLocal.toolCalls).toEqual([
-        {
-          workerId: managedWorker.id,
-          name: 'read_file',
-          file: join(taskRoots[0]!.path, 'README.md'),
-        },
-      ]);
-      expect(
-        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-      ).toBe('');
 
       const cliReply = await coordinator.sendToWorker({
         taskId: task.id,
@@ -2522,25 +2616,18 @@ if (runsWithElectronAbi)
           }),
         }),
       ]);
-      expect([managedReply.state, cliReply.state]).toEqual(['delivered', 'delivered']);
-      const snapshot = persistence.getTeamSnapshot(managedWorker.teamId);
+      expect(cliReply.state).toBe('delivered');
+      const snapshot = persistence.getTeamSnapshot(cliWorker.teamId);
       // Each Worker finished its read, and keeps the capability it was hired with.
-      for (const worker of [managedWorker, cliWorker])
+      for (const worker of [cliWorker])
         expect(snapshot.agents.find(({ id }) => id === worker.id)).toMatchObject({
           state: 'done',
           writeCapable: true,
         });
-      for (const reply of [managedReply, cliReply])
+      for (const reply of [cliReply])
         expect(snapshot.deliveries.find(({ messageId }) => messageId === reply.id)?.state).toBe(
           'acked',
         );
-      expect(
-        snapshot.messages.some(
-          ({ sourceAgentId, content }) =>
-            sourceAgentId === managedWorker.id &&
-            content.includes('Managed Localの作業を終えました'),
-        ),
-      ).toBe(true);
       expect(
         spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
       ).toBe('');
@@ -2719,6 +2806,8 @@ if (runsWithElectronAbi)
           contextInheritancePolicy: 'none',
           writeCapable: false,
         });
+        const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+        const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
         const sending = coordinator.sendToWorker({
           taskId: task.id,
           targetAgentId: worker.id,
@@ -2739,6 +2828,7 @@ if (runsWithElectronAbi)
             expect(
               persistence.getTeamBudgetStatus(worker.teamId).some(({ reserved }) => reserved > 0),
             ).toBe(true);
+            expect(releaseBudget).not.toHaveBeenCalled();
             unsettled = false;
             await coordinator.stopWorker(task.id, worker.id);
           }
@@ -2753,12 +2843,99 @@ if (runsWithElectronAbi)
               .getTeamSnapshot(worker.teamId)
               .deliveries.filter(({ state }) => state === 'acked'),
           ).toHaveLength(0);
+          expect(settleBudget).not.toHaveBeenCalled();
+          expect(releaseBudget).toHaveBeenCalledTimes(1);
         } finally {
           release();
           persistence.close();
         }
       },
     );
+
+    describe.each(['direct', 'scheduled'] as const)('%s execution budget ownership', (mode) => {
+      it.each(['settle', 'after-settle'] as const)(
+        'handles a %s failure without duplicate terminal budget writes',
+        async (phase) => {
+          const persistence = createPersistence();
+          const task = persistence.createTask('Budget terminal failure');
+          const coordinator = new TeamCoordinator(
+            persistence,
+            new DeterministicTeamWorkerRuntime(),
+          );
+          const worker = await coordinator.hireWorker({
+            taskId: task.id,
+            role: 'reader',
+            objective: 'read',
+            contextInheritancePolicy: 'none',
+            writeCapable: false,
+          });
+          const reserve = vi.spyOn(persistence, 'reserveTeamBudget');
+          const settle = vi.spyOn(persistence, 'settleTeamBudget');
+          const release = vi.spyOn(persistence, 'releaseTeamBudget');
+          const injected = new Error(`budget fixture ${phase}`);
+          if (phase === 'settle')
+            settle.mockImplementationOnce(() => {
+              throw injected;
+            });
+          else
+            vi.spyOn(persistence, 'completeTeamTaskWithReport').mockImplementationOnce(() => {
+              throw injected;
+            });
+          try {
+            if (mode === 'direct') {
+              await expect(
+                coordinator.sendToWorker({
+                  taskId: task.id,
+                  targetAgentId: worker.id,
+                  content: 'read',
+                }),
+              ).rejects.toThrow(injected.message);
+            } else {
+              const execution = await coordinator.assignTask({
+                taskId: task.id,
+                targetAgentId: worker.id,
+                content: 'read',
+                doneCriteria: ['read'],
+                accessMode: 'read-only',
+              });
+              await waitFor(
+                () => persistence.getTeamExecution(execution.executionId).state === 'failed',
+              );
+            }
+            // Scheduled read-only failures already get one safe-runtime retry. It owns a new
+            // reservation set; the original acknowledged delivery then rejects redispatch.
+            expect(reserve).toHaveBeenCalledTimes(mode === 'scheduled' ? 2 : 1);
+            expect(settle).toHaveBeenCalledTimes(1);
+            expect(release).toHaveBeenCalledTimes(
+              (phase === 'settle' ? 1 : 0) + (mode === 'scheduled' ? 1 : 0),
+            );
+            const reservationSets = reserve.mock.results.map((result) => {
+              if (result.type !== 'return') throw new Error('Expected successful reservation');
+              return result.value.map(({ id }) => id);
+            });
+            const successfulTerminals = [settle, release].flatMap((operation) =>
+              operation.mock.calls
+                .filter((_, index) => operation.mock.results[index]?.type === 'return')
+                .map(([input]) => [...input.reservationIds]),
+            );
+            for (const ids of reservationSets) {
+              expect(
+                successfulTerminals.filter((terminal) => terminal.some((id) => ids.includes(id))),
+              ).toEqual([ids]);
+            }
+            expect(new Set(reserve.mock.calls.map(([input]) => input.purpose)).size).toBe(1);
+            const allIds = reservationSets.flat();
+            expect(new Set(allIds).size).toBe((mode === 'scheduled' ? 2 : 1) * 8);
+            const status = persistence.getTeamBudgetStatus(worker.teamId);
+            expect(status.every(({ reserved }) => reserved === 0)).toBe(true);
+            expect(status.some(({ committed }) => committed > 0)).toBe(phase === 'after-settle');
+            expect(coordinator.hasBusyWorkers(task.id)).toBe(false);
+          } finally {
+            persistence.close();
+          }
+        },
+      );
+    });
 
     it.each([false, true])(
       'serializes concurrent direct calls and continues after failure=%s',
@@ -2928,371 +3105,11 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
-    it('admits the real managed create_file Saga from a Task Mission isolation (issue #570)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local durable write binding');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const turn = persistence.startTurn(task.id, 'Task Mission write');
-      const parentWorkspace = persistence.sealTurnWorkspaceSet(task.id, turn.turnId);
-      let prepared: EditSagaSnapshot | undefined;
-      let failure: unknown;
-      const managedLocal = managedLocalTeamWorkerRuntime({
-        fallback: new TestWorkerRuntime(),
-        executeTool: async ({ name, input, workspaceSet }) => {
-          const root = workspaceSet.roots[0]!;
-          const binding = await workspaceMutationBinding(root.path);
-          const workerWorkspace = {
-            ...parentWorkspace,
-            primaryRootId: workspaceSet.primaryRootId,
-            roots: workspaceSet.roots.map((entry) => ({ ...entry, status: 'available' as const })),
-            digest: workspaceSet.digest,
-          };
-          const tools = new ProviderWorkspaceTools({
-            workspaceFor: () => workerWorkspace,
-            rootIdentityFor: () => binding.rootIdentityDigest,
-            mutationBindingFor: () => binding,
-            policyEpochFor: () => 0,
-            authorizer: () => ({ decision: 'allow', reason: 'test approval' }),
-            workspaceEdit: {
-              turnWorkspaceSetFor: () => parentWorkspace,
-              turnRootMutationBindingsFor: () =>
-                persistence.getTurnWorkspaceMutationBindings(turn.turnId),
-              revisions: new FileRevisionRegistry(),
-              policyEpochFor: () => 0,
-              apply: async (request) => {
-                const staged = await stageEditSagaRequest(request);
-                // This test stops before file effects: it exercises the real admission and lease
-                // that the old fixture's direct write skipped, not native file publication.
-                prepared = persistence.prepareEditSaga(staged);
-                const lease = persistence.acquireMutationLease({
-                  rootId: prepared.rootId,
-                  workspaceKey: binding.workspaceKey,
-                  rootIdentityDigest: binding.rootIdentityDigest,
-                  holderInstanceId: 'task-mission-binding-test',
-                  taskId: task.id,
-                  turnId: turn.turnId,
-                  sagaId: prepared.id,
-                  purpose: 'forward',
-                  policyEpoch: 0,
-                  intentDigest: prepared.planDigest,
-                  now: staged.createdAt,
-                  expiresAt: new Date(Date.parse(staged.createdAt) + 60_000).toISOString(),
-                });
-                persistence.releaseMutationLease(lease, staged.createdAt);
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    rootId: 'unowned-root',
-                  }),
-                ).toThrow('not in the Turn Workspace snapshot');
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    rootIdentityDigest: 'f'.repeat(64),
-                  }),
-                ).toThrow('workspace binding changed');
-                const otherTask = persistence.createTask('Unrelated Task');
-                const otherTurn = persistence.startTurn(otherTask.id, 'Unrelated Turn');
-                persistence.sealTurnWorkspaceSet(otherTask.id, otherTurn.turnId);
-                expect(() =>
-                  persistence.prepareEditSaga({
-                    ...staged,
-                    id: randomUUID(),
-                    operationId: randomUUID(),
-                    taskId: otherTask.id,
-                    turnId: otherTurn.turnId,
-                  }),
-                ).toThrow('not in the Turn Workspace snapshot');
-                return prepared;
-              },
-            },
-          });
-          const context = {
-            taskId: task.id,
-            turnId: turn.turnId,
-            workspaceId: workerWorkspace.digest,
-            policyEpoch: 0,
-          };
-          tools.startTurn(context, 'provider');
-          try {
-            const args = input as { path: string; text: string };
-            return await tools.broker.dispatch({
-              ...context,
-              callId: randomUUID(),
-              providerName: name,
-              input: { path: args.path, content: args.text },
-            });
-          } catch (error) {
-            failure = error;
-            throw error;
-          } finally {
-            tools.finishTurn(task.id, turn.turnId);
-            await tools.dispose();
-          }
-        },
-      });
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const worker = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-      const mission = await coordinator.assignMission({
-        taskId: task.id,
-        objective: 'check durable write binding',
-        doneCriteria: ['write'],
-        steps: [
-          {
-            workerId: worker.id,
-            objective: 'create managed-output.txt',
-            doneCriteria: ['write'],
-            access: 'workspace-write',
-          },
-          {
-            workerId: worker.id,
-            objective: 'read README.md',
-            doneCriteria: ['read'],
-            access: 'read-only',
-          },
-        ],
-      });
-      await waitFor(
-        () =>
-          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
-            persistence.getTeamMission(mission.id).state,
-          ),
-        30_000,
-      );
-      try {
-        expect(failure).toBeUndefined();
-        expect(prepared).toMatchObject({
-          rootId: parentWorkspace.primaryRootId,
-          state: 'prepared',
-        });
-        expect(persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)).toEqual(
-          parentWorkspace,
-        );
-        expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
-      } finally {
-        persistence.close();
-      }
-    }, 45_000);
-
-    it('runs a legacy Mission write step of a Managed Local Worker in its worktree and integrates it, as it does a CLI Worker (issue #570)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local legacy Mission');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const cli = new HandedWorkspaceRecordingRuntime();
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const managedWriter = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-      const cliWriter = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'CLI writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-      });
-
-      const assigned = await coordinator.assignMission({
-        taskId: task.id,
-        objective: 'write through both runtimes',
-        doneCriteria: ['both outputs are integrated'],
-        steps: [
-          {
-            workerId: managedWriter.id,
-            objective: 'create managed-output.txt',
-            doneCriteria: ['managed-output.txt exists'],
-            access: 'workspace-write',
-          },
-          {
-            workerId: cliWriter.id,
-            objective: 'create worker-output.txt',
-            doneCriteria: ['worker-output.txt exists'],
-            access: 'workspace-write',
-          },
-        ],
-      });
-      // Two write steps, each through a real Git worktree and integration. A timeout falls through to
-      // the state dump below rather than hiding where the Mission stopped.
-      await waitFor(
-        () =>
-          ['completed', 'waiting_resume', 'failed', 'canceled'].includes(
-            persistence.getTeamMission(assigned.id).state,
-          ),
-        60_000,
-      ).catch(() => undefined);
-
-      const mission = persistence.getTeamMission(assigned.id);
-      const managedIsolation = persistence.getTeamExecutionIsolation(mission.steps[0]!.executionId);
-      const worktrees = mission.steps.map(({ executionId }) =>
-        persistence.getTeamMissionWorktree(executionId),
-      );
-      const state = {
-        missionState: mission.state,
-        executions: mission.steps.map(({ executionId }) =>
-          persistence.getTeamExecution(executionId),
-        ),
-        worktrees,
-        agents: persistence.getTeamSnapshot(managedWriter.teamId).agents,
-      };
-      expect(mission.state, JSON.stringify(state, null, 2)).toBe('completed');
-      // Managed Local needs a durable isolation that Main's Edit Saga can resolve. CLI keeps its
-      // legacy worktree contract; neither runtime writes to the original before integration.
-      expect(worktrees[0]).toBeNull();
-      expect(managedIsolation).not.toBeNull();
-      expect(managedLocal.sessions).toHaveLength(1);
-      const [session] = managedLocal.sessions;
-      expect(session).toMatchObject({
-        workerId: managedWriter.id,
-        writeCapable: true,
-        tools: ['read_file', 'create_file'],
-      });
-      const [root] = session!.workspaceSet.roots;
-      expect(session!.workspaceSet.roots).toHaveLength(1);
-      expect(root).toMatchObject({ role: 'primary', rootId: task.id });
-      expect(root!.path).toBe(managedIsolation!.roots[0]!.isolatedPath);
-      expect(managedLocal.toolCalls).toEqual([
-        {
-          workerId: managedWriter.id,
-          name: 'create_file',
-          file: join(root!.path, 'managed-output.txt'),
-        },
-      ]);
-      // The CLI Worker is still handed its worktree path, now with the very set it derives from it.
-      expect(cli.handed).toHaveLength(1);
-      expect(cli.handed[0]).toMatchObject({
-        workerId: cliWriter.id,
-        writeCapable: true,
-        accessMode: 'workspace-write',
-        workspacePath: worktrees[1]!.path,
-      });
-      expect(cli.handed[0]!.workspaceSet).toEqual(cli.handed[0]!.derivedFromPath);
-      // Both writes reached the Workspace only through integration.
-      expect(readFileSync(join(workspace, 'managed-output.txt'), 'utf8')).toBe(
-        'written by the Managed Local Worker\n',
-      );
-      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe('isolated\n');
-      expect(
-        spawnSync('git', ['-C', workspace, 'status', '--porcelain'], { encoding: 'utf8' }).stdout,
-      ).toBe('');
-      expect(
-        spawnSync('git', ['-C', workspace, 'log', '-2', '--pretty=%s'], { encoding: 'utf8' })
-          .stdout,
-      ).toBe(
-        `Sprint Coder Mission ${assigned.id} step 2\nSprint Coder Mission ${assigned.id} step 1 repository 1\n`,
-      );
-      // The last worktree is cleaned up after the Mission completes.
-      await waitFor(
-        () =>
-          persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)?.state === 'cleaned' &&
-          persistence
-            .getTeamExecutionIsolation(mission.steps[0]!.executionId)
-            ?.repositories.every(({ state }) => state === 'cleaned') === true,
-        15_000,
-      );
-      expect(managedIsolation!.repositories[0]).toMatchObject({
-        changedFiles: ['managed-output.txt'],
-      });
-      expect(persistence.getTeamMissionWorktree(mission.steps[1]!.executionId)).toMatchObject({
-        changedFiles: ['worker-output.txt'],
-      });
-      persistence.close();
-    }, 120_000);
-
-    it('shows the file a Managed Local Worker committed on its card and keeps it in the report of a run that then failed (issue #575)', async () => {
-      const persistence = createPersistence();
-      persistence.createProviderConnection(managedLocalConnection());
-      const task = persistence.createTask('Managed Local failed write report');
-      const { workspace, manager } = configureGitWorkspace(persistence, task.id);
-      const managedLocal = managedLocalTeamWorkerRuntime({ fallback: new TestWorkerRuntime() });
-      // The Worker writes through the real runtime and managed tool, then reports that it could not
-      // finish: only its completion is turned failed here.
-      const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-      vi.spyOn(managedLocal.runtime, 'execute').mockImplementation(async (input) => {
-        const result = await execute(input);
-        return {
-          ...result,
-          completion: {
-            ...(result.completion as Record<string, unknown>),
-            status: 'failed',
-            summary: 'managed-output.txtを書いた後で作業を終えられませんでした',
-          },
-        };
-      });
-      const activity = vi.spyOn(persistence, 'setWorkerCurrentActivity');
-      const complete = vi.spyOn(persistence, 'completeTeamTaskWithReport');
-      const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
-      const writer = await coordinator.hireWorker({
-        taskId: task.id,
-        role: 'Managed Local writer',
-        objective: 'write in isolation',
-        contextInheritancePolicy: 'none',
-        writeCapable: true,
-        modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION,
-      });
-
-      const submission = await coordinator.assignTask({
-        taskId: task.id,
-        targetAgentId: writer.id,
-        content: 'managed-output.txtを作ってください',
-        doneCriteria: ['managed-output.txt exists'],
-        accessMode: 'workspace-write',
-      });
-      await waitFor(
-        () =>
-          persistence.getTeamExecution(submission.executionId).state === 'failed' &&
-          persistence.getTeamExecutionIsolation(submission.executionId)?.phase === 'quarantined',
-        30_000,
-      );
-
-      expect(managedLocal.toolCalls).toEqual([
-        expect.objectContaining({ workerId: writer.id, name: 'create_file' }),
-      ]);
-      // The card shows the change right after the call's completed activity, as for a CLI Worker.
-      const labels = activity.mock.calls
-        .filter(([agentId]) => agentId === writer.id)
-        .map(([, label]) => label);
-      const completed = labels.indexOf('create_fileの実行完了');
-      expect(completed).toBeGreaterThanOrEqual(0);
-      expect(labels[completed + 1]).toBe('ファイル変更 1件');
-      // The failed run is quarantined, not integrated, and its report still lists the file.
-      const reports = complete.mock.calls
-        .map(([input]) => input)
-        .filter(({ agentId }) => agentId === writer.id);
-      expect(reports).toHaveLength(1);
-      expect(reports[0]!.report).toMatchObject({
-        status: 'failed',
-        changedFiles: ['managed-output.txt'],
-      });
-      expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
-        { state: 'failed', terminalReason: 'worker_reported_failure' },
-      ]);
-      expect(existsSync(join(workspace, 'managed-output.txt'))).toBe(false);
-      persistence.close();
-    }, 60_000);
-
-    it.each(['Managed Local', 'CLI'] as const)(
+    it.each(['CLI'] as const)(
       'keeps the file a %s Worker committed in the report of a run whose runtime then threw (issue #575)',
       async (kind) => {
         const persistence = createPersistence();
-        persistence.createProviderConnection(managedLocalConnection());
+        persistence.createProviderConnection(localProviderTestConnection());
         const task = persistence.createTask(`${kind} write then runtime failure`);
         const { workspace, manager } = configureGitWorkspace(persistence, task.id);
         const runtimeFailure = new Error('the runtime failed after the write committed');
@@ -3310,23 +3127,14 @@ if (runsWithElectronAbi)
             throw runtimeFailure;
           }
         })();
-        const managedLocal = managedLocalTeamWorkerRuntime({ fallback: cli });
-        // The Managed Local Worker writes through the real runtime and managed tool; only then
-        // does its runtime call fail. (The CLI fallback throws by itself.)
-        const execute = managedLocal.runtime.execute.bind(managedLocal.runtime);
-        vi.spyOn(managedLocal.runtime, 'execute').mockImplementation(async (input) => {
-          await execute(input);
-          throw runtimeFailure;
-        });
         const complete = vi.spyOn(persistence, 'completeTeamTaskWithReport');
-        const coordinator = coordinatorWithWorktrees(persistence, managedLocal.runtime, manager);
+        const coordinator = coordinatorWithWorktrees(persistence, cli, manager);
         const writer = await coordinator.hireWorker({
           taskId: task.id,
           role: `${kind} writer`,
           objective: 'write in isolation',
           contextInheritancePolicy: 'none',
           writeCapable: true,
-          ...(kind === 'Managed Local' ? { modelSelection: MANAGED_LOCAL_FIXTURE_SELECTION } : {}),
         });
 
         const submission = await coordinator.assignTask({
@@ -3343,7 +3151,6 @@ if (runsWithElectronAbi)
           30_000,
         );
 
-        expect(managedLocal.toolCalls).toHaveLength(kind === 'Managed Local' ? 1 : 0);
         // A write Worker's failed run is not requeued; its report lists the committed file.
         expect(persistence.listTeamAttempts(submission.executionId)).toMatchObject([
           { state: 'failed', terminalReason: 'runtime_failure' },
@@ -3776,7 +3583,9 @@ if (runsWithElectronAbi)
       expect(runtime.workspacePaths).toHaveLength(1);
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
 
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       await coordinator.resumeExecutionIntegration(task.id, submission.executionId);
+      expect(reserveBudget).not.toHaveBeenCalled();
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('completed');
       expect(runtime.workspacePaths).toHaveLength(1);
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(1);
@@ -3845,6 +3654,7 @@ if (runsWithElectronAbi)
         runtime,
         new WorkerWorktreeManager({ worktreesRoot }),
       );
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       resumedCoordinator.recoverOnStartup();
 
       await waitFor(
@@ -3864,6 +3674,7 @@ if (runsWithElectronAbi)
         15_000,
       );
       expect(persistence.getTeamExecutionIsolationCompletion(submission.executionId)).toBeNull();
+      expect(reserveBudget).not.toHaveBeenCalled();
       persistence.close();
     }, 55_000);
 
@@ -4971,15 +4782,10 @@ if (runsWithElectronAbi)
       const manager = new WorkerWorktreeManager({
         worktreesRoot,
         execFileImpl: async (file, args, options) => {
-          // The config probe that runs before each command is not counted.
-          if (counting && !args.includes('--list'))
+          // Configuration probes that run before each command are not counted.
+          if (counting && args[args.indexOf('-C') + 2] !== 'config')
             commands.push(args[args.indexOf('-C') + 2] ?? '');
-          const result = await promisify(execFile)(file, [...args], {
-            env: options.env,
-            timeout: options.timeout,
-            windowsHide: true,
-          });
-          return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+          return gitExecFile(file, args, options);
         },
       });
       // One execution runs and the others stay queued, so only the assignments call Git.
@@ -7860,6 +7666,7 @@ if (runsWithElectronAbi)
         contextInheritancePolicy: 'none',
         writeCapable: false,
       });
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
       const submission = await coordinator.assignTask({
         taskId: task.id,
         targetAgentId: worker.id,
@@ -7880,6 +7687,7 @@ if (runsWithElectronAbi)
       );
 
       expect(runtime.activeStarts).toBe(0);
+      expect(reserveBudget).not.toHaveBeenCalled();
       expect(persistence.listTeamAttempts(submission.executionId)).toHaveLength(0);
       expect(persistence.getTeamExecution(submission.executionId).state).toBe('canceled');
       const dispatch = persistence.getTeamExecutionDispatch(submission.executionId);
@@ -8267,6 +8075,8 @@ if (runsWithElectronAbi)
         contextInheritancePolicy: 'none',
         writeCapable: true,
       });
+      const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
       const submission = await coordinator.assignTask({
         taskId: task.id,
         targetAgentId: writer.id,
@@ -8297,6 +8107,11 @@ if (runsWithElectronAbi)
           .listReclaimConfirmedTeamExecutionIsolations()
           .map(({ executionId }) => executionId),
       ).not.toContain(submission.executionId);
+      expect(settleBudget).not.toHaveBeenCalled();
+      expect(releaseBudget).toHaveBeenCalledTimes(2);
+      expect(
+        persistence.getTeamBudgetStatus(writer.teamId).every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       persistence.close();
     }, 40_000);
 
@@ -10407,6 +10222,493 @@ if (runsWithElectronAbi)
       persistence.close();
     });
 
+    it('limits integrated result authority to a live Manager and its completed subtree', async () => {
+      await withIntegratedManagerResult(async ({ persistence, coordinator, request, manager }) => {
+        const read = vi.fn(async (source: TeamResultReadSource) => source.executionId);
+        await expect(coordinator.readTeamResult(request, read)).resolves.toBe(
+          request.targetExecutionId,
+        );
+        read.mockClear();
+        await expect(
+          coordinator.readTeamResult(
+            { ...request, targetExecutionId: request.callerExecutionId },
+            read,
+          ),
+        ).rejects.toThrow();
+        await expect(
+          coordinator.readTeamResult({ ...request, callerAgentId: 'spoofed' }, read),
+        ).rejects.toThrow();
+        await expect(
+          coordinator.readTeamResult({ ...request, rootId: 'foreign-root' }, read),
+        ).rejects.toThrow();
+        const getExecution = persistence.getTeamExecution.bind(persistence);
+        for (const replacement of [
+          { ...getExecution(request.targetExecutionId), state: 'running' as const },
+          { ...getExecution(request.targetExecutionId), teamId: 'another-team' },
+          { ...getExecution(request.callerExecutionId), state: 'completed' as const },
+        ]) {
+          const spy = vi
+            .spyOn(persistence, 'getTeamExecution')
+            .mockImplementation((id) => (id === replacement.id ? replacement : getExecution(id)));
+          try {
+            await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+          } finally {
+            spy.mockRestore();
+          }
+        }
+        const team = persistence.getTeamSnapshot(manager.teamId!);
+        const child = getExecution(request.targetExecutionId).assigneeAgentId;
+        const snapshot = vi.spyOn(persistence, 'getTeamSnapshot');
+        try {
+          snapshot.mockReturnValue({
+            ...team,
+            agents: team.agents.map((agent) =>
+              agent.id === child ? { ...agent, parentAgentId: team.team.leaderAgentId } : agent,
+            ),
+          });
+          await expect(coordinator.readTeamResult(request, read)).rejects.toThrow('subtree');
+          snapshot.mockReturnValue({
+            ...team,
+            agents: team.agents.map((agent) =>
+              agent.id === manager.id ? { ...agent, canDelegate: false } : agent,
+            ),
+          });
+          await expect(coordinator.readTeamResult(request, read)).rejects.toThrow(
+            'running Manager',
+          );
+          expect(read).not.toHaveBeenCalled();
+          // A grandchild is in the same authority subtree; an intermediate Manager does not cut it off.
+          snapshot.mockReturnValue({
+            ...team,
+            agents: [
+              ...team.agents.map((agent) =>
+                agent.id === child ? { ...agent, parentAgentId: 'nested-manager' } : agent,
+              ),
+              {
+                ...team.agents.find((agent) => agent.id === manager.id)!,
+                id: 'nested-manager',
+                parentAgentId: manager.id,
+              },
+            ],
+          });
+          await expect(coordinator.readTeamResult(request, read)).resolves.toBe(
+            request.targetExecutionId,
+          );
+        } finally {
+          snapshot.mockRestore();
+        }
+      });
+    }, 60_000);
+
+    it('requires sealed integration heads and roots while permitting cleanup quarantine', async () => {
+      await withIntegratedManagerResult(
+        async ({ persistence, coordinator, request, workspace }) => {
+          const getIsolation = persistence.getTeamExecutionIsolation.bind(persistence);
+          const isolation = getIsolation(request.targetExecutionId)!;
+          const repository = isolation.repositories[0]!;
+          const read = vi.fn(async () => 'read');
+          const spy = vi.spyOn(persistence, 'getTeamExecutionIsolation');
+          try {
+            for (const replacement of [
+              { ...isolation, repositories: [{ ...repository, integratedHead: null }] },
+              { ...isolation, repositories: [{ ...repository, integratedHead: 'f'.repeat(40) }] },
+              {
+                ...isolation,
+                roots: isolation.roots.map((root) => ({ ...root, identity: 'f'.repeat(64) })),
+              },
+              {
+                ...isolation,
+                roots: isolation.roots.map((root) => ({
+                  ...root,
+                  sourcePath: `${root.sourcePath}-other`,
+                })),
+              },
+            ]) {
+              spy.mockImplementation((id) =>
+                id === request.targetExecutionId ? replacement : getIsolation(id),
+              );
+              await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+            }
+            expect(read).not.toHaveBeenCalled();
+            spy.mockImplementation((id) =>
+              id === request.targetExecutionId
+                ? {
+                    ...isolation,
+                    phase: 'quarantined',
+                    repositories: [{ ...repository, state: 'quarantined' }],
+                  }
+                : getIsolation(id),
+            );
+            await expect(coordinator.readTeamResult(request, read)).resolves.toBe('read');
+          } finally {
+            spy.mockRestore();
+          }
+          // Windows may keep the live workspace unrenamable; either outcome must preserve authority.
+          const renamed = `${workspace}-saved`;
+          const originalBinding = await workspaceMutationBinding(workspace);
+          const originalHead = (
+            await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])
+          ).stdout.trim();
+          read.mockClear();
+          try {
+            await rename(workspace, renamed);
+          } catch (error) {
+            if (
+              process.platform !== 'win32' ||
+              !(error instanceof Error) ||
+              !('code' in error) ||
+              error.code !== 'EBUSY'
+            )
+              throw error;
+            expect(await workspaceMutationBinding(workspace)).toEqual(originalBinding);
+            expect(existsSync(renamed)).toBe(false);
+            expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+              'written by the Worker\n',
+            );
+            expect(
+              (await execFileAsync('git', ['-C', workspace, 'rev-parse', 'HEAD'])).stdout.trim(),
+            ).toBe(originalHead);
+            await expect(coordinator.readTeamResult(request, read)).resolves.toBe('read');
+            expect(read).toHaveBeenCalledTimes(1);
+            return;
+          }
+          // The integration still exists in Git, but a replacement root has no authority to expose it.
+          mkdirSync(workspace);
+          try {
+            await expect(coordinator.readTeamResult(request, read)).rejects.toThrow();
+            expect(read).not.toHaveBeenCalled();
+          } finally {
+            rmSync(workspace, { recursive: true });
+            await rename(renamed, workspace);
+          }
+        },
+      );
+    }, 60_000);
+
+    it('reads legacy Mission results only from an existing matching sealed snapshot', async () => {
+      await withIntegratedManagerResult(async ({ persistence, coordinator, request, manager }) => {
+        const getIsolation = persistence.getTeamExecutionIsolation.bind(persistence);
+        const isolation = getIsolation(request.targetExecutionId)!;
+        const repository = isolation.repositories[0]!;
+        const readWorkspace = persistence.readTurnWorkspaceSetForTask.bind(persistence);
+        const identities = persistence.getTurnWorkspaceRootIdentities.bind(persistence);
+        const isolationSpy = vi
+          .spyOn(persistence, 'getTeamExecutionIsolation')
+          .mockImplementation((id) => (id === request.targetExecutionId ? null : getIsolation(id)));
+        const legacySpy = vi.spyOn(persistence, 'getTeamMissionWorktree').mockReturnValue({
+          executionId: request.targetExecutionId,
+          agentId: persistence.getTeamExecution(request.targetExecutionId).assigneeAgentId,
+          repoPath: repository.repoPath,
+          path: repository.worktreePath,
+          baseHead: repository.baseHead,
+          workerHead: repository.workerHead,
+          integratedHead: repository.integratedHead,
+          changedFiles: repository.changedFiles,
+          state: 'cleaned',
+          reason: null,
+          createdAt: isolation.createdAt,
+          updatedAt: isolation.updatedAt,
+        });
+        const missionSpy = vi.spyOn(persistence, 'getTeamMissionForExecution').mockReturnValue({
+          mode: 'sequential',
+          id: 'legacy',
+          teamId: manager.teamId!,
+          createdByAgentId: manager.id,
+          state: 'completed',
+          objective: 'legacy',
+          doneCriteria: [],
+          currentStepOrdinal: 1,
+          steps: [],
+          revision: 1,
+          createdAt: isolation.createdAt,
+          updatedAt: isolation.updatedAt,
+          completedAt: isolation.updatedAt,
+        });
+        const snapshotSpy = vi
+          .spyOn(persistence, 'readTurnWorkspaceSetForTask')
+          .mockImplementation((taskId, turnId) =>
+            turnId === 'team-mission:legacy' ? null : readWorkspace(taskId, turnId),
+          );
+        const identitySpy = vi
+          .spyOn(persistence, 'getTurnWorkspaceRootIdentities')
+          .mockImplementation((turnId) =>
+            identities(turnId === 'team-mission:legacy' ? request.parentTurnId : turnId),
+          );
+        const ensure = vi.spyOn(persistence, 'ensureSequentialMissionSessionTurn');
+        try {
+          await expect(coordinator.readTeamResult(request, async () => 'read')).rejects.toThrow(
+            'sealed root',
+          );
+          snapshotSpy.mockImplementation((taskId, turnId) =>
+            readWorkspace(taskId, turnId === 'team-mission:legacy' ? request.parentTurnId : turnId),
+          );
+          await expect(coordinator.readTeamResult(request, async () => 'read')).resolves.toBe(
+            'read',
+          );
+          expect(ensure).not.toHaveBeenCalled();
+        } finally {
+          for (const spy of [isolationSpy, legacySpy, missionSpy, snapshotSpy, identitySpy, ensure])
+            spy.mockRestore();
+        }
+      });
+    }, 60_000);
+
+    it('fences each result read against integration and releases the fence during approval', async () => {
+      const scheduler = new TeamIntegrationScheduler();
+      await withIntegratedManagerResult(
+        async ({ persistence, coordinator, request, workspacePath }) => {
+          const isolation = persistence.getTeamExecutionIsolation(request.targetExecutionId)!;
+          const keys = [
+            isolation.roots[0]!.mutationKey,
+            teamRepositoryMutationKey(isolation.repositories[0]!.repoPath),
+          ];
+          let releaseIntegration!: () => void;
+          let integrationStarted!: () => void;
+          const started = new Promise<void>((resolve) => {
+            integrationStarted = resolve;
+          });
+          const integration = scheduler.submit({
+            executionId: 'synthetic-integration',
+            mutationKeys: keys,
+            run: async () => {
+              integrationStarted();
+              await new Promise<void>((resolve) => {
+                releaseIntegration = resolve;
+              });
+            },
+          });
+          await started;
+          const read = vi.fn(async () => 'read');
+          const controller = new AbortController();
+          const canceled = coordinator.readTeamResult(
+            { ...request, signal: controller.signal },
+            read,
+          );
+          const rejected = expect(canceled).rejects.toThrow();
+          await waitFor(() =>
+            scheduler.snapshot().queuedExecutionIds.some((id) => id.startsWith('exclusive:')),
+          );
+          expect(read).not.toHaveBeenCalled();
+          controller.abort();
+          releaseIntegration();
+          await integration;
+          await rejected;
+          expect(read).not.toHaveBeenCalled();
+
+          let releaseRead!: () => void;
+          let readStarted!: () => void;
+          const reading = new Promise<void>((resolve) => {
+            readStarted = resolve;
+          });
+          const heldRead = coordinator.readTeamResult(request, async () => {
+            readStarted();
+            await new Promise<void>((resolve) => {
+              releaseRead = resolve;
+            });
+          });
+          await reading;
+          let followingIntegration = false;
+          const following = scheduler.submit({
+            executionId: 'after-read',
+            mutationKeys: keys,
+            run: async () => {
+              followingIntegration = true;
+            },
+          });
+          await Promise.resolve();
+          expect(scheduler.snapshot().queuedExecutionIds).toContain('after-read');
+          expect(
+            scheduler.snapshot().activeExecutionIds.some((id) => id.startsWith('exclusive:')),
+          ).toBe(true);
+          expect(followingIntegration).toBe(false);
+          releaseRead();
+          await heldRead;
+          await following;
+          expect(followingIntegration).toBe(true);
+          const midReadStop = new AbortController();
+          await expect(
+            coordinator.readTeamResult({ ...request, signal: midReadStop.signal }, async () => {
+              midReadStop.abort();
+              return 'must not return';
+            }),
+          ).rejects.toThrow();
+
+          const lateStop = new AbortController();
+          const worktrees = Reflect.get(coordinator, 'worktreeManager') as WorkerWorktreeManager;
+          const resolveRepository = worktrees.resolveRepositoryPath.bind(worktrees);
+          let returnedBytes = false;
+          const late = vi
+            .spyOn(worktrees, 'resolveRepositoryPath')
+            .mockImplementation(async (path) => {
+              const result = await resolveRepository(path);
+              if (returnedBytes) lateStop.abort();
+              return result;
+            });
+          try {
+            await expect(
+              coordinator.readTeamResult({ ...request, signal: lateStop.signal }, async () => {
+                returnedBytes = true;
+                return 'must not return';
+              }),
+            ).rejects.toThrow();
+          } finally {
+            late.mockRestore();
+          }
+
+          let allow!: () => void;
+          let awaiting!: () => void;
+          const awaitingApproval = new Promise<void>((resolve) => {
+            awaiting = resolve;
+          });
+          const workspace = persistence.readTurnWorkspaceSetForTask(
+            request.taskId,
+            request.parentTurnId,
+          )!;
+          const harness = new ManagedCodingHarness({
+            workspaceFor: () => ({
+              ...workspace,
+              roots: workspace.roots.map((root) => ({ ...root, path: workspacePath })),
+            }),
+            rootIdentityFor: () => undefined,
+            policyEpochFor: () => 1,
+            readTeamResult: (selection, run) =>
+              coordinator.readTeamResult(
+                { ...request, targetExecutionId: selection.executionId },
+                run,
+              ),
+            authorizer: async () => {
+              awaiting();
+              await new Promise<void>((resolve) => {
+                allow = resolve;
+              });
+              return { decision: 'allow', reason: 'test' };
+            },
+          });
+          harness.startTurn(
+            {
+              taskId: request.taskId,
+              turnId: request.parentTurnId,
+              workspaceId: workspace.digest,
+              policyEpoch: 1,
+            },
+            'codex',
+          );
+          const pending = harness.broker.dispatch({
+            taskId: request.taskId,
+            turnId: request.parentTurnId,
+            callId: 'approval',
+            providerName: 'read_file',
+            input: { path: 'worker-output.txt', teamResultExecutionId: request.targetExecutionId },
+          });
+          await awaitingApproval;
+          expect(scheduler.snapshot().activeExecutionIds).toEqual([]);
+          let integrated = false;
+          await scheduler.submit({
+            executionId: 'during-approval',
+            mutationKeys: keys,
+            run: async () => {
+              integrated = true;
+            },
+          });
+          expect(integrated).toBe(true);
+          allow();
+          try {
+            await expect(pending).resolves.toMatchObject({ content: 'written by the Worker\n' });
+          } finally {
+            await harness.dispose();
+          }
+        },
+        scheduler,
+      );
+    }, 60_000);
+
+    it('reads a completed descendant result from the central workspace while the Manager stays isolated', async () => {
+      const { persistence, task, workspace, runtime, coordinator, manager } =
+        await delegatingManagerTeam('Manager result read');
+      const binding = await workspaceMutationBinding(workspace);
+      persistence.setWorkspaceBinding(task.id, { path: binding.canonicalPath, ...binding });
+      const turn = persistence.startTurn(task.id, 'Read the delegated result');
+      const central = persistence.readTurnWorkspaceSetForTask(task.id, turn.turnId)!;
+      let observed: unknown;
+      let readFailure: unknown;
+      runtime.delegations.push('workspace-write');
+      runtime.afterDelegation = async ({ executionId, workspacePath, childExecutionId }) => {
+        expect(existsSync(join(workspacePath, 'worker-output.txt'))).toBe(false);
+        const isolated = {
+          ...central,
+          roots: central.roots.map((root) => ({ ...root, path: workspacePath })),
+        };
+        const harness = new ManagedCodingHarness({
+          workspaceFor: () => isolated,
+          rootIdentityFor: () => undefined,
+          policyEpochFor: () => 1,
+          authorizer: () => ({ decision: 'allow', reason: 'test' }),
+          readTeamResult: (request, read) =>
+            coordinator.readTeamResult(
+              {
+                taskId: task.id,
+                parentTurnId: turn.turnId,
+                callerExecutionId: executionId,
+                callerAgentId: manager.id,
+                targetExecutionId: request.executionId,
+                ...(request.rootId === undefined ? {} : { rootId: request.rootId }),
+              },
+              read,
+            ),
+        });
+        harness.startTurn(
+          { taskId: task.id, turnId: turn.turnId, workspaceId: central.digest, policyEpoch: 1 },
+          'codex',
+        );
+        try {
+          await expect(
+            harness.broker.dispatch({
+              taskId: task.id,
+              turnId: turn.turnId,
+              callId: 'normal',
+              providerName: 'read_file',
+              input: { path: 'worker-output.txt' },
+            }),
+          ).rejects.toThrow();
+          observed = await harness.broker.dispatch({
+            taskId: task.id,
+            turnId: turn.turnId,
+            callId: 'result',
+            providerName: 'read_file',
+            input: { path: 'worker-output.txt', teamResultExecutionId: childExecutionId },
+          });
+        } catch (error) {
+          readFailure = error;
+        } finally {
+          await harness.dispose();
+        }
+        expect(existsSync(join(workspacePath, 'worker-output.txt'))).toBe(false);
+      };
+      const submission = await coordinator.assignTask({
+        taskId: task.id,
+        targetAgentId: manager.id,
+        content: 'write and verify the result',
+        doneCriteria: ['read the delegated output'],
+        accessMode: 'workspace-write',
+      });
+      await waitFor(
+        () =>
+          ['completed', 'failed'].includes(
+            persistence.getTeamExecution(submission.executionId).state,
+          ),
+        30_000,
+      );
+      expect(readFailure).toBeUndefined();
+      expect(observed).toMatchObject({
+        content: 'written by the Worker\n',
+        source: { kind: 'team-result', executionId: runtime.childExecutionIds[0] },
+      });
+      expect(readFileSync(join(workspace, 'worker-output.txt'), 'utf8')).toBe(
+        'written by the Worker\n',
+      );
+      persistence.close();
+    }, 60_000);
+
     it('lets a Manager meet a write request through the write its Worker completed, without writing itself', async () => {
       const { persistence, task, workspace, runtime, coordinator, manager } =
         await delegatingManagerTeam('Delegating Manager');
@@ -11524,6 +11826,9 @@ if (runsWithElectronAbi)
       const [steeredWorker, canceledWorker] = workers;
       if (steeredWorker === undefined || canceledWorker === undefined)
         throw new Error('Expected two workers');
+      const reserveBudget = vi.spyOn(persistence, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(persistence, 'settleTeamBudget');
+      const releaseBudget = vi.spyOn(persistence, 'releaseTeamBudget');
       const [steered, canceled] = await Promise.all([
         coordinator.assignTask({
           taskId: task.id,
@@ -11576,6 +11881,23 @@ if (runsWithElectronAbi)
       expect(messagesByContent.get('initial-steered')?.deliveryState).toBe('acked');
       expect(messagesByContent.get('revised-running')?.deliveryState).toBe('acked');
       expect(messagesByContent.get('initial-canceled')?.deliveryState).toBe('failed');
+      expect(reserveBudget).toHaveBeenCalledTimes(3);
+      expect(
+        reserveBudget.mock.calls.filter(
+          ([input]) => input.purpose === `team-execution:${steered.executionId}`,
+        ),
+      ).toHaveLength(2);
+      const reservedIds = reserveBudget.mock.results.flatMap((result) =>
+        result.value.map(({ id }: { id: string }) => id),
+      );
+      expect(new Set(reservedIds).size).toBe(24);
+      expect(settleBudget).toHaveBeenCalledTimes(1);
+      expect(releaseBudget).toHaveBeenCalledTimes(2);
+      expect(
+        persistence
+          .getTeamBudgetStatus(steeredWorker.teamId)
+          .every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       persistence.close();
     });
 
@@ -11607,10 +11929,18 @@ if (runsWithElectronAbi)
 
       const reopened = new SqlitePersistenceClient(path);
       reopened.initializeMutationRecovery('replacement-instance', '2026-07-28T12:00:00.000Z');
+      const reserveBudget = vi.spyOn(reopened, 'reserveTeamBudget');
+      const settleBudget = vi.spyOn(reopened, 'settleTeamBudget');
       const secondRuntime = new InterruptibleWorkerRuntime();
       const secondCoordinator = new TeamCoordinator(reopened, secondRuntime);
       secondCoordinator.recoverOnStartup();
       await waitFor(() => secondRuntime.contents.length === 1);
+      expect(reserveBudget).toHaveBeenCalledTimes(1);
+      expect(
+        reopened
+          .getTeamBudgetStatus(worker.teamId)
+          .find((entry) => entry.scope === 'team' && entry.kind === 'tokens')?.reserved,
+      ).toBe(20_000);
 
       expect(reopened.getTeam(worker.teamId).state).toBe('active');
       expect(reopened.listTeamAttempts(submission.executionId)).toMatchObject([
@@ -11627,6 +11957,10 @@ if (runsWithElectronAbi)
         { ordinal: 1, state: 'interrupted' },
         { ordinal: 2, state: 'completed' },
       ]);
+      expect(settleBudget).toHaveBeenCalledTimes(1);
+      expect(
+        reopened.getTeamBudgetStatus(worker.teamId).every(({ reserved }) => reserved === 0),
+      ).toBe(true);
       reopened.close();
     });
 
