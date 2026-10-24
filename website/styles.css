@@ -8,7 +8,7 @@
 
 @font-face {
   font-family: 'Noto Sans JP Sub';
-  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261026') format('woff2');
+  src: url('/fonts/noto-sans-jp-sub.woff2?v=20261027') format('woff2');
   font-weight: 100 900;
   font-display: swap;
 }
@@ -2131,7 +2131,7 @@ html:not(.js) .swarm.real .u:not(.lit),
 
 /* ------------------------------------------------------------ 00 序章 */
 .hero-title {
-  font-size: clamp(40px, min(8.6vw, 11svh), 132px);
+  font-size: clamp(40px, min(8.6vw, 10svh), 132px);
 }
 .hero-title > span {
   display: block;
@@ -2149,7 +2149,7 @@ html:not(.js) .swarm.real .u:not(.lit),
   color: var(--ink);
 }
 .hero-title .count {
-  font-size: clamp(120px, min(26vw, 25svh), 360px);
+  font-size: clamp(120px, min(26vw, 22svh), 360px);
   color: var(--lime);
   line-height: 0.82;
   letter-spacing: -0.04em;

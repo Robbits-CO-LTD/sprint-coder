@@ -181,11 +181,13 @@ Honesty rules for 「最大100体」:
   concurrent runs; the card says 100 running at once is not tested yet, and there
   is no video of 100 real AIs yet. (Earlier title 「上限100体は 試験で確認」 was
   dropped in review: it read as if the 100 cap itself had been tested.)
-- API-key connections are limited to 2 requests at a time per connection by
-  default (`provider-connection-service.ts` `maxConcurrentRequests: 2`; the
-  settings screen can only lower it, `persistence.ts`). Built-in CLIs (Codex,
-  Claude Code) and `bypass` skip that limit (`connection-admission.ts`). The hero
-  note, the 02 trust card and `/ai-team/` say so wherever 100 is the headline.
+- API-key and on-PC (Ollama etc., `openai_compatible`) connections run at most
+  2 requests at a time per connection (`provider-connection-service.ts`
+  `maxConcurrentRequests: 2`; the settings screen can only lower it,
+  `persistence.ts`), so say 「まで」, never 「標準」. Built-in CLIs (Codex, Claude
+  Code, Grok) and `bypass` skip that limit (`connection-admission.ts`). The 02
+  trust card and `/ai-team/` say so (kept out of the hero note: it pushed the
+  00 beat past the stage height at 1920x1080 and turned the whole page fit-off).
 - The timeline chart, the stats and the full-video copy never mix in 100.
 - **Real demo numbers (6, 15, 1, 9, 36:32) appear only in 03–07**, whose chapter
   tags carry `実演 REAL` and whose player label says 実演. 03 marks the border
