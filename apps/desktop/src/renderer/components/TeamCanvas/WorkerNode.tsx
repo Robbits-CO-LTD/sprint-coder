@@ -20,6 +20,7 @@ import {
   workerThread,
   workStepLabel,
 } from '../../lib/worker-thread';
+import { workerStatusLabel, workerWorkPhase } from '../../lib/team-execution-display';
 
 const TERMINAL_STATES = new Set<WorkerSummary['state']>(['done', 'failed', 'stopped']);
 
@@ -106,7 +107,14 @@ function WorkerNodeCard({
   onElement: (workerId: string, element: HTMLDivElement | null) => void;
 }) {
   const canStop = !teamBusy && !TERMINAL_STATES.has(worker.state);
-  const dotClass = statusDotClass(worker.state);
+  const phase = workerWorkPhase(worker, execution);
+  const statusLabel = workerStatusLabel(worker, execution);
+  const dotClass =
+    phase === 'waiting_integration'
+      ? 'ready'
+      : phase !== null
+        ? 'busy'
+        : statusDotClass(worker.state);
   const model = describeWorkerModel(worker);
   const runtime = workerRuntimeLabel(worker);
   const hierarchy = describeHierarchy(worker, parent);
@@ -115,7 +123,7 @@ function WorkerNodeCard({
 
   const thread = workerThread(messages, worker.activityLog ?? []);
   const attention = executionNeedsAttention(execution);
-  const glance = workerGlance(worker, thread);
+  const glance = workerGlance(worker, thread, execution);
   const newestStep = worker.activityLog?.at(-1);
   const newestStepAt = newestStep?.at;
   const newestStepLabel = newestStep?.label;
@@ -157,7 +165,7 @@ function WorkerNodeCard({
       data-depth={worker.depth}
       data-parent-agent-id={parent?.id ?? ''}
       tabIndex={-1}
-      aria-label={`Worker ${worker.role} · ${worker.state}`}
+      aria-label={`Worker ${worker.role} · ${statusLabel}`}
       style={{ left: x, top: y }}
     >
       {/* Drag handle (Slice 6.1 layout persistence): TeamCanvas attaches a pointerdown listener
@@ -180,9 +188,7 @@ function WorkerNodeCard({
         </div>
         <span className={`w-status ${dotClass}`}>
           <span className="dot" aria-hidden="true" />
-          <span className="w-status-label team-status">
-            {worker.state === 'stopped' ? '停止済み' : worker.state}
-          </span>
+          <span className="w-status-label team-status">{statusLabel}</span>
         </span>
         <button
           type="button"
@@ -247,13 +253,14 @@ function WorkerNodeCard({
           // The Worker's own text as it streams — the answer forming, not a log panel.
           <div className="w-stream">{liveOutputTail(worker.liveOutput)}</div>
         )}
-        {worker.state === 'busy' && (
+        {worker.state === 'busy' && phase !== null && (
           <div className="w-run">
-            <span className="w-run-title run-title sheen">
-              {worker.reasoningActive ? '思考中' : '作業中'}
+            <span className={phase === 'working' ? 'w-run-title run-title sheen' : 'w-run-title'}>
+              {phase !== 'working' ? statusLabel : worker.reasoningActive ? '思考中' : '作業中'}
             </span>
             {/* The current step, unless the log just above already ends with it. */}
-            {worker.currentActivity !== null &&
+            {phase === 'working' &&
+              worker.currentActivity !== null &&
               worker.currentActivity !== worker.activityLog?.at(-1)?.label && (
                 <span className="w-run-detail">{workStepLabel(worker.currentActivity)}</span>
               )}

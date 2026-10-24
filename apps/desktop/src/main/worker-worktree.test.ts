@@ -20,7 +20,13 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, parse, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
-import { safeGitEnvironment, safeGitInvocationArgs } from './safe-git';
+import {
+  gitExecFile,
+  safeGitEnvironment,
+  safeGitInvocationArgs,
+  safeGitSpawnSync,
+} from './safe-git';
+import { parseGitMergeTrees } from './git-merge-batch';
 import {
   WorkerWorktreeManager,
   removeTreeWithoutFollowingLinks,
@@ -73,16 +79,13 @@ function failingRemovalFs(
 function interceptWorktreeRemove(beforeRemove: () => void): ExecFileImpl {
   return async (file, args, options) => {
     if (args.includes('worktree') && args.includes('remove')) beforeRemove();
-    const result = await execFileAsync(file, [...args], {
-      env: options.env,
-      timeout: options.timeout,
-    });
-    return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+    return gitExecFile(file, args, options);
   };
 }
 
 describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
   const cleanupRoots: string[] = [];
+  let nativeBatchSupported: boolean | undefined;
 
   beforeEach(async () => {
     const home = await mkdtemp(join(tmpdir(), 'sprint-coder-worktree-git-home-'));
@@ -396,11 +399,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         const directory = args.indexOf('-C');
         // Configuration probes run before each command; count the commands themselves.
         if (args[directory + 2] !== 'config') commands.push(args[directory + 2] ?? '');
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     await expect(manager.requireCleanRepositorySet([repoPath, secondary])).resolves.toEqual([
@@ -523,11 +522,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
         worktreesRoot,
         execFileImpl: async (file, args, options) => {
           commands.push([...args]);
-          const result = await execFileAsync(file, [...args], {
-            env: options.env,
-            timeout: options.timeout,
-          });
-          return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+          return gitExecFile(file, args, options);
         },
       });
       const created = await manager.create({ agentId: 'agent-gone', repoPath });
@@ -580,12 +575,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       execFileImpl: async (file, args, options) => {
         if (args.includes('worktree') && args.includes('list')) listCalls += 1;
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-          maxBuffer: options.maxBuffer,
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     const inputs = [
@@ -857,11 +847,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       execFileImpl: async (file, args, options) => {
         commands.push([...args]);
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     const branchesBefore = await git(['-C', repoPath, 'branch', '--list']);
@@ -920,11 +906,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       execFileImpl: async (file, args, options) => {
         commands.push([...args]);
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     const created = await manager.create({ agentId: 'agent-discard-gone', repoPath });
@@ -1696,11 +1678,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       worktreesRoot,
       execFileImpl: async (file, args, options) => {
         commands.push([...args]);
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     await expect(
@@ -1837,12 +1815,7 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
           throw Object.assign(new Error('stdout maxBuffer length exceeded'), {
             code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER',
           });
-        const result = await execFileAsync(file, [...args], {
-          env: options.env,
-          timeout: options.timeout,
-          ...(options.maxBuffer === undefined ? {} : { maxBuffer: options.maxBuffer }),
-        });
-        return { stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+        return gitExecFile(file, args, options);
       },
     });
     const input = {
@@ -1956,6 +1929,119 @@ describe.skipIf(!gitAvailable)('WorkerWorktreeManager', () => {
       }),
     ).resolves.toMatchObject({ outcome: 'already_integrated' });
   });
+
+  it.each(['modified', 'deleted', 'reverted'] as const)(
+    'finds an empty equivalent commit before later %s content without reapplying it (issue #913)',
+    async (variant) => {
+      const { repoPath, head, manager, worktreesRoot } = await fixture();
+      const isolated = await manager.create({ agentId: 'batch-worker', repoPath });
+      await writeFile(join(isolated.path, 'README.md'), 'worker result\n');
+      const worker = await manager.finalizeChanges({
+        agentId: 'batch-worker',
+        repoPath,
+        baseHead: head,
+        commitMessage: 'Worker result',
+      });
+      if (nativeBatchSupported === undefined) {
+        const tree = (
+          await git(['-C', repoPath, 'rev-parse', `${worker.workerHead}^{tree}`])
+        ).trim();
+        const metadata = safeGitSpawnSync(
+          repoPath,
+          [
+            'rev-list',
+            '--reverse',
+            '--format=%H%x00%P%x00%T',
+            '--no-commit-header',
+            `${head}..${worker.workerHead}`,
+          ],
+          { timeout: 5_000 },
+        );
+        const merge = safeGitSpawnSync(
+          repoPath,
+          ['merge-tree', '--write-tree', '--stdin', '--name-only', '--no-messages'],
+          { timeout: 5_000, input: `${head} -- ${head} ${worker.workerHead}\n` },
+        );
+        nativeBatchSupported =
+          metadata?.status === 0 &&
+          metadata.stdout === `${worker.workerHead}\0${head}\0${tree}\n` &&
+          merge?.status === 0 &&
+          merge.stdout === `1\0${tree}\0\0`;
+        if (!nativeBatchSupported)
+          console.info(
+            'Git batch protocol unavailable; checking the sequential compatibility path',
+          );
+      }
+      // This commit contains the Worker patch AND another change, so its complete tree is
+      // not the same as applying only the Worker. The next empty commit is the first proof.
+      await writeFile(join(repoPath, 'README.md'), 'worker result\n');
+      await writeFile(join(repoPath, 'other.txt'), 'unrelated\n');
+      await git(['-C', repoPath, 'add', '.']);
+      await git(['-C', repoPath, ...TEST_IDENTITY, 'commit', '-qm', 'combined']);
+      const combined = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+      await git([
+        '-C',
+        repoPath,
+        ...TEST_IDENTITY,
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'empty proof',
+      ]);
+      const proof = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+      if (variant === 'reverted')
+        await git(['-C', repoPath, ...TEST_IDENTITY, 'revert', '--no-edit', combined]);
+      else {
+        if (variant === 'modified') await writeFile(join(repoPath, 'README.md'), 'later change\n');
+        else await unlink(join(repoPath, 'README.md'));
+        await git(['-C', repoPath, 'add', '.']);
+        await git(['-C', repoPath, ...TEST_IDENTITY, 'commit', '-qm', 'later']);
+      }
+      // Its parent now differs from the Worker on the same file for modified/deleted cases.
+      // This produces a real conflict record after the earlier equivalent empty commit.
+      await git([
+        '-C',
+        repoPath,
+        ...TEST_IDENTITY,
+        'commit',
+        '--allow-empty',
+        '-qm',
+        'conflict record',
+      ]);
+      const current = (await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim();
+      for (const response of ['native', 'unsupported', 'malformed'] as const) {
+        let batchCalls = 0;
+        let sequentialScans = 0;
+        let nativeConflict = false;
+        const checked = new WorkerWorktreeManager({
+          worktreesRoot,
+          execFileImpl: async (file, args, options) => {
+            if (args.includes('rev-list') && !args.some((arg) => arg.startsWith('--format=')))
+              sequentialScans += 1;
+            if (args.includes('merge-tree') && args.includes('--stdin')) {
+              batchCalls += 1;
+              if (response === 'unsupported') throw new Error('unsupported batch mode');
+              if (response === 'malformed')
+                return { stdout: `1\0${'a'.repeat(40)}\0\0extra`, stderr: '' };
+            }
+            const result = await gitExecFile(file, args, options);
+            if (args.includes('merge-tree') && args.includes('--stdin'))
+              nativeConflict = parseGitMergeTrees(result.stdout, 4)?.includes(null) ?? false;
+            return result;
+          },
+        });
+        await expect(
+          checked.integrate({ repoPath, baseHead: head, workerHead: worker.workerHead }),
+        ).resolves.toEqual({ integratedHead: proof, outcome: 'already_integrated' });
+        if (nativeBatchSupported) expect(batchCalls).toBe(1);
+        expect(sequentialScans).toBe(response === 'native' && nativeBatchSupported ? 0 : 1);
+        if (nativeBatchSupported && response === 'native' && variant !== 'reverted')
+          expect(nativeConflict).toBe(true);
+        expect((await git(['-C', repoPath, 'rev-parse', 'HEAD'])).trim()).toBe(current);
+        expect((await git(['-C', repoPath, 'status', '--porcelain'])).trim()).toBe('');
+      }
+    },
+  );
 
   it('revalidates a recorded integration without discarding later parent commits', async () => {
     const { repoPath, head, manager } = await fixture();

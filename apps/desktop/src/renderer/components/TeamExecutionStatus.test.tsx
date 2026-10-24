@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { TeamExecutionStatus } from './TeamExecutionStatus';
+import { executionNeedsAttention } from '../lib/worker-thread';
 import { retainedWorktreeStateLabel } from './TeamRetainedWorktrees';
 import {
   EXECUTION_STATE_LABELS,
@@ -12,6 +13,8 @@ import {
   describeExecution,
   formatClockTime,
   latestExecutionForWorker,
+  executionWorkPhase,
+  workerWorkPhase,
 } from '../lib/team-execution-display';
 import type { TeamExecutionIsolation, TeamExecutionSummary } from '../types/sprint-coder';
 
@@ -107,6 +110,97 @@ describe('connection labels', () => {
 });
 
 describe('describeExecution', () => {
+  it.each([
+    ['running', '作業中'],
+    ['waiting_integration', '統合待ち'],
+    ['integrating', '統合中'],
+  ] as const)('projects running lifecycle with isolation phase %s (issue #913)', (phase, label) => {
+    const row = execution({
+      isolation: { phase, resumeKind: null, repositories: [], roots: [], reason: null },
+    });
+    expect(describeExecution(row).stateLabel).toBe(label);
+    expect(describeExecution(row).state).toBe('running');
+    expect(describeExecution(row).ariaSummary).toContain(label);
+  });
+
+  it('keeps a manual integration resume distinct from the ambiguous queue (issue #913)', () => {
+    const isolation: TeamExecutionIsolation = {
+      phase: 'waiting_integration',
+      resumeKind: null,
+      repositories: [],
+      roots: [],
+      reason: null,
+    };
+    const resumed = execution({ state: 'waiting_resume', isolation });
+    expect(describeExecution(resumed).stateLabel).toBe('再開待ち');
+    expect(describeExecution(resumed).waitReasonLabel).toBe('既存変更を確認してから再開');
+    expect(executionWorkPhase(resumed)).toBeNull();
+    expect(executionNeedsAttention(resumed)).toBe(true);
+    expect(resumed.state).toBe('waiting_resume');
+    expect(executionWorkPhase(execution({ state: 'completed', isolation }))).toBeNull();
+    expect(workerWorkPhase({ state: 'stopped' }, execution({ isolation }))).toBeNull();
+  });
+
+  it('shows a resumed integration that is actively integrating without a manual-resume action', () => {
+    const active = execution({
+      state: 'waiting_resume',
+      isolation: {
+        phase: 'integrating',
+        resumeKind: null,
+        repositories: [],
+        roots: [],
+        reason: null,
+      },
+    });
+    expect(describeExecution(active).stateLabel).toBe('統合中');
+    expect(describeExecution(active).waitReasonLabel).toBeNull();
+    expect(executionNeedsAttention(active)).toBe(false);
+    expect(
+      executionNeedsAttention({
+        ...active,
+        isolation: { ...active.isolation!, reason: 'integration_conflict' },
+      }),
+    ).toBe(true);
+    expect(executionNeedsAttention({ ...active, state: 'failed' })).toBe(true);
+    for (const missionId of [null, 'mission-resume']) {
+      const html = renderToStaticMarkup(
+        <TeamExecutionStatus
+          execution={{ ...active, missionId }}
+          variant="canvas"
+          onResume={() => {}}
+          onResumeIntegration={() => {}}
+        />,
+      );
+      expect(html).not.toContain('data-testid="team-integration-resume"');
+      expect(html).not.toContain('data-testid="team-worker-resume"');
+    }
+    const queued = execution({ id: 'next', state: 'queued', updatedAt: '2026-07-29T00:00:00Z' });
+    expect(latestExecutionForWorker([active, queued], active.assigneeAgentId)?.id).toBe(active.id);
+  });
+
+  it('counts a direct busy Worker after terminal execution history as work, without reviving a stopped Worker', () => {
+    const history = execution({ state: 'completed' });
+    expect(workerWorkPhase({ state: 'busy' }, history)).toBe('working');
+    expect(workerWorkPhase({ state: 'stopped' }, history)).toBeNull();
+    expect(workerWorkPhase({ state: 'busy' }, execution({ state: 'queued' }))).toBeNull();
+  });
+
+  it('uses the uncertain integration label only for a ready legacy worktree (issue #913)', () => {
+    const legacy = execution({
+      worktree: {
+        path: '/worktree',
+        baseHead: 'a'.repeat(40),
+        state: 'ready',
+        workerHead: 'b'.repeat(40),
+        integratedHead: null,
+        changedFiles: ['result.txt'],
+        reason: null,
+      },
+    });
+    expect(describeExecution(legacy).stateLabel).toBe('統合処理中');
+    expect(describeExecution(execution()).stateLabel).toBe('作業中');
+  });
+
   it('falls back to assignedAt when queuedAt is not recorded', () => {
     const display = describeExecution(
       execution({ state: 'queued', queuedAt: null, assignedAt: '2026-07-28T01:00:00.000Z' }),

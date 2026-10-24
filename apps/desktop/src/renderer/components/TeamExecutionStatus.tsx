@@ -3,7 +3,7 @@ import type {
   TeamExecutionSummary,
   TeamMissionWorktreeSummary,
 } from '../types/sprint-coder';
-import { describeExecution } from '../lib/team-execution-display';
+import { describeExecution, executionWorkPhase } from '../lib/team-execution-display';
 import { RETAINED_WORKTREE_INTEGRATION_LABELS } from '../lib/team-retained-worktrees';
 
 /**
@@ -179,7 +179,8 @@ function isolationResumeAction(
   // Only a Worker actually waiting to resume gets a manual action at all — a running execution
   // whose isolation is separately queued for integration (`phase === 'waiting_integration'`) shows
   // that fact as a state label only (issue #571), never a button.
-  if (execution.state !== 'waiting_resume') return null;
+  if (execution.state !== 'waiting_resume' || executionWorkPhase(execution) === 'integrating')
+    return null;
   const isolation = execution.isolation;
   // `waiting_integration` covers an execution that resumed (e.g. after an app restart) while its
   // isolation was still queued for integration; the schema's own invariant only ever sets
