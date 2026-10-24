@@ -522,7 +522,13 @@ describe.skipIf(
       ]);
       const compiled = await run(build!.file, command, 500_000, build!.verbatim);
       expect(compiled.timedOut, 'RCA seam compilation deadline').toBe(false);
-      expect(compiled.status, 'RCA seam must compile with MSVC').toBe(0);
+      const compileErrors = `${compiled.stdout}\n${compiled.stderr}`
+        .split(/\r?\n/u)
+        .filter((line) => /\berror (?:C|LNK)\d+:/u.test(line))
+        .map((line) => line.replaceAll(root, '<fixture>').replaceAll(nativeDirectory, '<native>'))
+        .join('\n')
+        .slice(0, 8_000);
+      expect(compiled.status, `RCA seam must compile with MSVC\n${compileErrors}`).toBe(0);
       for (const scenario of ['healthy', 'held']) {
         const result = await run(binary, [scenario], 70_000);
         expect(result.timedOut, `${scenario}: outer watchdog`).toBe(false);
