@@ -1,3 +1,4 @@
+import { TurnStreamingResources } from './turn-streaming-resources';
 import { RetryableActionRegistry } from './retryable-action';
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
@@ -8630,9 +8631,7 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       attachmentCapabilityByTurn: new Map(),
       attachmentCustodyByTurn: new Map(),
       attachmentCustodyStore: { release: vi.fn() },
-      reasoningByTurn: new Map(),
-      reasoningRedactorByTurn: new Map(),
-      workspaceWatchByTurn: new Map(),
+      turnStreamingResources: new TurnStreamingResources(vi.fn()),
       turnWorkspaceByTurn: new Map(),
       baselinesByTurn: new Map(),
       fileEditByKey: new Map(),
@@ -8871,6 +8870,31 @@ describe('Turn completion when Edit Saga verification evidence is missing', () =
       }
     },
   );
+
+  it('flushes the safe reasoning tail and stops previews before generated images and completion', async () => {
+    const harness = createCompletionHarness([], false, false);
+    const order: string[] = [];
+    const resources = new TurnStreamingResources((_task, _turn, flush) => {
+      expect(flush.text).toBe('safe tail\n');
+      expect(resources.get('task-466', 'turn-466')).toBeUndefined();
+      order.push('reasoning');
+    });
+    const lease = resources.begin('task-466', 'turn-466')!;
+    lease.pushReasoning('safe tail\npassword=raw-carry');
+    lease.replaceWatchers(() => [{ stop: () => order.push('watch-stop') }]);
+    Object.assign(harness.router, {
+      turnStreamingResources: resources,
+      ingestGeneratedImages: () => order.push('image.generated'),
+    });
+    harness.publish.mockImplementation((event: { type: string }) => order.push(event.type));
+    try {
+      await settleCompletedEvent(harness);
+      expect(order).toEqual(['reasoning', 'watch-stop', 'image.generated', 'turn.completed']);
+      expect(resources.size).toBe(0);
+    } finally {
+      resources.dispose();
+    }
+  });
 
   it('refuses to complete a Turn that still owns a running command, and leaves it running', async () => {
     const harness = createCompletionHarness([], true);

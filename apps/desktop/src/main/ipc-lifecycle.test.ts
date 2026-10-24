@@ -1,3 +1,4 @@
+import { TurnStreamingResources } from './turn-streaming-resources';
 import { randomUUID } from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -66,72 +67,109 @@ it('broadcasts terminal activity to the window even without a Task event port', 
   expect(invalidate).toHaveBeenCalledWith('task-1');
 });
 
-it('finishes resource disposal after the BrowserWindow has been destroyed', async () => {
-  const router = Object.create(IpcRouter.prototype) as IpcRouter;
-  const dispose = vi.fn();
-  const policyCleanups = new Map([['task-1', { epoch: 3, confirm: vi.fn() }]]);
-  const disposeGraphSources = vi.fn();
-  const fullAccessConfirmation = new FullAccessConfirmation();
-  let confirmationSignal: AbortSignal | undefined;
-  const pendingConfirmation = fullAccessConfirmation.confirm((signal) => {
-    confirmationSignal = signal;
-    return new Promise<boolean>(() => undefined);
-  });
-  const state: Record<string, unknown> = {
-    window: {
-      isDestroyed: () => true,
-      get webContents() {
-        throw new Error('Object has been destroyed');
+it.each([false, true])(
+  'finishes resource disposal after a destroyed window (tail failure: %s)',
+  async (tailFails) => {
+    const router = Object.create(IpcRouter.prototype) as IpcRouter;
+    let resumeDisposal!: () => void;
+    const heldDisposal = new Promise<void>((resolve) => {
+      resumeDisposal = resolve;
+    });
+    const dispose = vi.fn<() => void | Promise<void>>().mockImplementationOnce(() => heldDisposal);
+    const streamFailure = new Error('reasoning sink unavailable');
+    const emit = vi.fn(() => {
+      if (tailFails) throw streamFailure;
+    });
+    const resources = new TurnStreamingResources(emit);
+    const lease = resources.begin('task-stream', 'turn-stream')!;
+    const stop = vi.fn();
+    lease.pushReasoning('safe tail\nraw carry');
+    lease.replaceWatchers(() => [{ stop }]);
+    const providerAbort = new AbortController();
+    providerAbort.signal.addEventListener('abort', () => {
+      expect(resources.size).toBe(0);
+      lease.pushReasoning('too late\n');
+      expect(resources.begin('new-task', 'new-turn')).toBeUndefined();
+    });
+    const policyCleanups = new Map([['task-1', { epoch: 3, confirm: vi.fn() }]]);
+    const disposeGraphSources = vi.fn();
+    const fullAccessConfirmation = new FullAccessConfirmation();
+    let confirmationSignal: AbortSignal | undefined;
+    const pendingConfirmation = fullAccessConfirmation.confirm((signal) => {
+      confirmationSignal = signal;
+      return new Promise<boolean>(() => undefined);
+    });
+    const state: Record<string, unknown> = {
+      window: {
+        isDestroyed: () => true,
+        get webContents() {
+          throw new Error('Object has been destroyed');
+        },
       },
-    },
-    policyCleanupsByTask: policyCleanups,
-    taskTitleProviderAborts: { abortAll: vi.fn() },
-    fullAccessConfirmation,
-    closeAllPorts: vi.fn(),
-    graphSourceMonitor: { dispose: disposeGraphSources },
-  };
-  for (const key of [
-    'providerAbortByTurn',
-    'computerUseSessionByTask',
-    'computerUsePendingApprovalBySession',
-    'computerUseApprovalSessionById',
-    'computerUseStatusBySession',
-    'computerUseQuickStartLatches',
-    'teamDetailStream',
-    'workspaceWatchByTurn',
-    'cliTaskTitleJobs',
-    'pendingTaskTitles',
-    'attachmentCustodyByTurn',
-    'attachmentCapabilityByTurn',
-  ])
-    state[key] = new Map();
-  state['computerUsePendingGrantRequestIds'] = new Set();
-  for (const key of [
-    'computerUseController',
-    'computerUseActivationGate',
-    'computerUseEmergencyStop',
-    'approvalCoordinator',
-    'managedCodingHarness',
-    'mockRuntime',
-    'taskTitleRuntimes',
-    'codexRuntime',
-    'teamWorkerRuntime',
-    'compatibleRuntime',
-    'claudeRuntime',
-    'grokRuntime',
-    'attachmentCustodyStore',
-    'teamMcpBridge',
-  ])
-    state[key] = { dispose };
-  Object.assign(router, state);
-  await expect(router.dispose()).resolves.toBeUndefined();
-  expect(confirmationSignal?.aborted).toBe(true);
-  await expect(pendingConfirmation).resolves.toBe(false);
-  await expect(fullAccessConfirmation.confirm(async () => true)).resolves.toBe(false);
-  expect(dispose).toHaveBeenCalledTimes(14);
-  expect(disposeGraphSources).toHaveBeenCalledTimes(1);
-  expect(policyCleanups.size).toBe(0);
-});
+      turnStreamingResources: resources,
+      policyCleanupsByTask: policyCleanups,
+      taskTitleProviderAborts: { abortAll: vi.fn() },
+      fullAccessConfirmation,
+      closeAllPorts: vi.fn(),
+      graphSourceMonitor: { dispose: disposeGraphSources },
+    };
+    for (const key of [
+      'providerAbortByTurn',
+      'computerUseSessionByTask',
+      'computerUsePendingApprovalBySession',
+      'computerUseApprovalSessionById',
+      'computerUseStatusBySession',
+      'computerUseQuickStartLatches',
+      'teamDetailStream',
+      'cliTaskTitleJobs',
+      'pendingTaskTitles',
+      'attachmentCustodyByTurn',
+      'attachmentCapabilityByTurn',
+    ])
+      state[key] = new Map();
+    state['providerAbortByTurn'] = new Map([['turn-stream', providerAbort]]);
+    state['computerUsePendingGrantRequestIds'] = new Set();
+    for (const key of [
+      'computerUseController',
+      'computerUseActivationGate',
+      'computerUseEmergencyStop',
+      'approvalCoordinator',
+      'managedCodingHarness',
+      'mockRuntime',
+      'taskTitleRuntimes',
+      'codexRuntime',
+      'teamWorkerRuntime',
+      'compatibleRuntime',
+      'claudeRuntime',
+      'grokRuntime',
+      'attachmentCustodyStore',
+      'teamMcpBridge',
+    ])
+      state[key] = { dispose };
+    Object.assign(router, state);
+    const pendingDisposal = router.dispose();
+    const disposalOutcome = pendingDisposal.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    // The fence and safe-tail cleanup precede abort callbacks and the first awaited subsystem.
+    expect(resources.size).toBe(0);
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledExactlyOnceWith('task-stream', 'turn-stream', {
+      text: 'safe tail\n',
+      truncated: false,
+    });
+    resumeDisposal();
+    expect(await disposalOutcome).toBe(tailFails ? streamFailure : null);
+    expect(providerAbort.signal.aborted).toBe(true);
+    expect(confirmationSignal?.aborted).toBe(true);
+    await expect(pendingConfirmation).resolves.toBe(false);
+    await expect(fullAccessConfirmation.confirm(async () => true)).resolves.toBe(false);
+    expect(dispose).toHaveBeenCalledTimes(14);
+    expect(disposeGraphSources).toHaveBeenCalledTimes(1);
+    expect(policyCleanups.size).toBe(0);
+  },
+);
 
 it('reports invalid handler output as an internal failure without exposing schema contents', async () => {
   const router = Object.create(IpcRouter.prototype) as {
