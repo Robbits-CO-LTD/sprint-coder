@@ -80,6 +80,15 @@ function envelope(targets: unknown[] = [row()]) {
 }
 
 describe('private native Windows target list', () => {
+  it.each(['   ', '\t', '\u3000', ' native title '])(
+    'preserves a nonempty native title without display normalization: %j',
+    (title) => {
+      expect(
+        computerWindowsNativeTargetListSchema.parse(envelope([row({ title })])).targets,
+      ).toEqual([row({ title })]);
+    },
+  );
+
   it('preserves explicit unknown facts without defaults or a classification claim', () => {
     expect(computerWindowsTargetFactsSchema.parse(facts())).toEqual(facts());
     expect(computerWindowsNativeTargetListSchema.parse(envelope())).toEqual(envelope());
@@ -114,6 +123,17 @@ describe('private native Windows target list', () => {
       expect(computerWindowsTargetFactsSchema.safeParse(facts({ imageLeaf: value })).success).toBe(
         false,
       );
+  });
+
+  it('uses the native title byte limit without trimming its content', () => {
+    for (const title of ['a'.repeat(256), 'あ'.repeat(85) + 'a'])
+      expect(
+        computerWindowsNativeTargetListSchema.safeParse(envelope([row({ title })])).success,
+      ).toBe(true);
+    for (const title of ['', 'a'.repeat(257), 'あ'.repeat(86)])
+      expect(
+        computerWindowsNativeTargetListSchema.safeParse(envelope([row({ title })])).success,
+      ).toBe(false);
   });
 
   it('accepts only the kind for refused rows', () => {

@@ -4709,7 +4709,12 @@ const computerWindowsNativeTargetSchema = z
     appIdentityDigest: computerUseDigestSchema,
     windowIdentityDigest: computerUseDigestSchema,
     executableDigest: computerUseDigestSchema,
-    title: computerUseLabelSchema,
+    // Native permits whitespace-only titles; display normalization is a later projection.
+    title: z
+      .string()
+      .min(1)
+      .max(256)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 256),
     bounds: computerUseBoundsSchema,
     screenBounds: computerUseBoundsSchema,
     boundsUnit: z.literal('physical_px'),
