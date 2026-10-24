@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   COMPUTER_NATIVE_TARGET_FACT_MAX_BYTES,
+  computerWindowsNativeTargetListSchema,
   computerWindowsTargetFactsSchema,
 } from '@sprint-coder/contracts';
 import { TARGET_FACT_MAX_BYTES } from './computer-use-target-eligibility';
@@ -88,10 +89,17 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(list).toMatch(
       /WindowsV2VerdictForWindowClass\(&judgement, WindowsTargetWindowClass\(window, owner\),\s+&window_facts\);/u,
     );
-    expect(list).toContain('WindowsV2TargetFactsJson(window_facts)');
-    // Each row carries its own window's mode; no row is refused for another window's mode.
+    // Each row carries its own window's mode and facts; no row is refused for another window's.
     expect(list).not.toContain('judgement.verdict');
-    expect(list).toContain('WindowsV2IdentityJson(judgement, verdict.maximum_mode)');
+    expect(list).toContain(
+      'rows.push_back(WindowsV2SelectableRow(judgement, verdict, window_facts, row_window));',
+    );
+    const builder = cut(
+      'std::string WindowsV2SelectableRow(',
+      '// The refused rows: the kind only.',
+    );
+    expect(builder).toContain('WindowsV2IdentityJson(judgement, verdict.maximum_mode)');
+    expect(builder).toContain('WindowsV2TargetFactsJson(facts)');
     const measure = cut('void MeasureWindowsV2Process(', 'bool EnsureWindowsV2Identity(');
     expect(measure).toContain('MeasureWindowsTargetFacts(pid, nullptr, context);');
   });
@@ -185,15 +193,18 @@ describe('Windows v2 targets source (#500 S5-c-3 PR-5)', () => {
     expect(core).toContain(
       `inline constexpr std::size_t kTargetFactMaxBytes = ${TARGET_FACT_MAX_BYTES};`,
     );
-    // A fact over it is checked where the row is written: that window is unresolvable, before its
-    // facts or identity are built.
-    const list = cut(
-      'bool ListWindowsTargets(std::string *response, std::string *reason) {',
-      'bool RejudgeWindowsV2Session(',
+    // A fact or an identity string over the bound is checked by the row builder ListWindowsTargets
+    // calls: that window is unresolvable, before its facts or identity are built.
+    const builder = cut(
+      'std::string WindowsV2SelectableRow(',
+      '// The refused rows: the kind only.',
     );
-    const checked = list.indexOf('if (!WindowsV2FactsWithinContract(window_facts)) {');
+    const checked = builder.indexOf(
+      'if (!WindowsV2FactsWithinContract(facts) || !WindowsV2IdentityWithinContract(judgement) ||',
+    );
     expect(checked).toBeGreaterThan(0);
-    expect(list.indexOf('WindowsV2TargetFactsJson(window_facts)')).toBeGreaterThan(checked);
+    expect(builder.indexOf('WindowsV2TargetFactsJson(facts)')).toBeGreaterThan(checked);
+    expect(builder.indexOf('WindowsV2IdentityJson(')).toBeGreaterThan(checked);
     const facts = {
       ...Object.fromEntries(
         Object.keys(computerWindowsTargetFactsSchema.shape).map((key) => [key, null]),
@@ -685,14 +696,55 @@ int wmain(int argc, wchar_t **argv) {
     Check(ClassifyTarget(over_bound).kind == TargetVerdictKind::kUnresolvable &&
               ClassifyTarget(over_in_utf8).kind == TargetVerdictKind::kUnresolvable,
           "v2_fact_over_the_bound_is_unresolvable_in_the_core");
+    // Through the row builder ListWindowsTargets itself calls: the middle window alone is
+    // unresolvable, the windows around it keep their rows.
+    WindowsV2RowWindow row_window;
+    row_window.handle = static_cast<std::uint64_t>(reinterpret_cast<UINT_PTR>(app_window));
+    row_window.pid = app.dwProcessId;
+    row_window.title = "Fixture";
+    row_window.client = RECT{0, 0, 640, 480};
+    row_window.screen = RECT{0, 0, 640, 480};
+    const std::string kept = WindowsV2SelectableRow(judged, judged.verdict, facts, row_window);
     WindowsV2ListRows around(kWindowsListTargetsRowBytes);
     for (const TargetFacts *row_facts : {&facts, &over_in_utf8, &facts})
-      around.push_back(WindowsV2FactsWithinContract(*row_facts)
-                           ? "{\"kind\":\"upper\",\"facts\":" + WindowsV2TargetFactsJson(*row_facts) + "}"
-                           : WindowsV2RefusedRow(TargetVerdictKind::kUnresolvable));
-    const std::string kept = "{\"kind\":\"upper\",\"facts\":" + WindowsV2TargetFactsJson(facts) + "}";
-    Check(around.size() == 3 && around.Joined() == kept + ",{\"kind\":\"unresolvable\"}," + kept,
+      around.push_back(WindowsV2SelectableRow(judged, judged.verdict, *row_facts, row_window));
+    Check(kept.rfind("{\"kind\":\"upper\",", 0) == 0 && kept.find("\"facts\":{") != std::string::npos &&
+              around.size() == 3 && around.Joined() == kept + ",{\"kind\":\"unresolvable\"}," + kept,
           "v2_only_the_window_over_the_bound_is_unresolvable");
+    // An identity string Main would refuse: an executable path past 4096 bytes. That row alone.
+    // The judgement itself is changed and put back (it holds the locked image: it is not copied).
+    const std::string kept_path = judged.executable.identity.path_utf8;
+    judged.executable.identity.path_utf8 = std::string(4097, 'x');
+    Check(WindowsV2SelectableRow(judged, judged.verdict, facts, row_window) ==
+              "{\"kind\":\"unresolvable\"}",
+          "v2_identity_over_the_bound_is_unresolvable");
+    judged.executable.identity.path_utf8 = kept_path;
+    // The display name, trimmed as Main trims a label (U+3000, U+FEFF, a no-break space, line ends
+    // and ASCII blanks), "Application" when nothing is left; what is inside stays.
+    Check(WindowsV2LabelTrimmed("\xe3\x80\x80") == "" &&
+              WindowsV2LabelTrimmed(" \t\xef\xbb\xbf\xc2\xa0name \xe3\x80\x80 x\xe2\x80\xa8\r\n") ==
+                  "name \xe3\x80\x80 x" &&
+              WindowsV2DisplayName("\xe3\x80\x80") == "Application" &&
+              WindowsV2DisplayName(" ") == "Application" &&
+              WindowsV2DisplayName(" leading") == "leading" &&
+              WindowsV2LabelTrimmed("\xff ") == "\xff",
+          "v2_display_name_is_trimmed_as_main_trims_it");
+    WindowsV2ListRows named_rows(kWindowsListTargetsRowBytes);
+    const std::string kept_name = judged.executable.identity.display_name;
+    for (const auto &[name, shown] :
+         {std::pair<std::string, std::string>{"\xe3\x80\x80", "Application"},
+          std::pair<std::string, std::string>{"  leading", "leading"}}) {
+      judged.executable.identity.display_name = name;
+      const std::string row = WindowsV2SelectableRow(judged, judged.verdict, facts, row_window);
+      Check(row.find("\"displayName\":\"" + shown + "\"") != std::string::npos,
+            "v2_row_carries_the_trimmed_display_name");
+      named_rows.push_back(row);
+    }
+    judged.executable.identity.display_name = kept_name;
+    // The whole answer, for the test to parse with Main's schema.
+    std::cout << "LIST_JSON:"
+              << WindowsV2ListResponse(1, DenyRulesetVersion(TargetPlatform::kWin32), false, named_rows)
+              << "\n";
     // The size of a facts row, measured on the fixture (for the ADR's count of rows per list).
     const std::string facts_json = WindowsV2TargetFactsJson(facts);
     const std::string identity_json = WindowsV2IdentityJson(judged, judged.verdict.maximum_mode);
@@ -1048,6 +1100,18 @@ ${fixtureBuild.stdout}`,
           console.log(executed.stdout);
           expect(executed.status, `${executed.stdout}\n${executed.stderr}`).toBe(0);
           expect(executed.stdout).toContain('OK');
+          // A v2 build also prints rows written by the production row builder (with display names
+          // that are white space at an end): Main's own schema must take the whole answer.
+          const listed = executed.stdout
+            .split(/\r?\n/u)
+            .find((line) => line.startsWith('LIST_JSON:'));
+          if (v2 === 1) {
+            expect(listed, 'the v2 build prints its rows').toBeDefined();
+            const parsed = computerWindowsNativeTargetListSchema.safeParse(
+              JSON.parse(listed!.slice('LIST_JSON:'.length)),
+            );
+            expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+          }
           if (v2 === 1) {
             const encoded = executed.stdout
               .split(/\r?\n/u)
